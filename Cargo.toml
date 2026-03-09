@@ -1,0 +1,17 @@
+[package]
+name = "anamnesis"
+version = "0.1.0"
+edition = "2024"
+description = "Cognitive graph engine for LLMs — knowledge with attraction, gravity, perception, and forgetting"
+license = "MIT"
+repository = "https://github.com/INONONO66/anamnesis"
+
+[lib]
+name = "anamnesis"
+crate-type = ["lib", "cdylib"]
+
+[dependencies]
+# Zero external deps for core — add only as needed
+
+[dev-dependencies]
+# Testing
