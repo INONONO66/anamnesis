@@ -38,11 +38,11 @@ impl Gravity {
 
                 // Sum contributions from incoming edges
                 for &(source, target, weight) in edges {
-                    if target == node_id {
-                        if let Some(source_score) = scores.get(&source) {
-                            let out_count = outgoing.get(&source).map(|v| v.len()).unwrap_or(1);
-                            score += damping * source_score * weight / out_count as f64;
-                        }
+                    if target == node_id
+                        && let Some(source_score) = scores.get(&source)
+                    {
+                        let out_count = outgoing.get(&source).map(|v| v.len()).unwrap_or(1);
+                        score += damping * source_score * weight / out_count as f64;
                     }
                 }
 

@@ -44,7 +44,7 @@ impl Edge {
             source,
             target,
             edge_type,
-            weight: weight.max(0.0).min(1.0),
+            weight: weight.clamp(0.0, 1.0),
             created_at: now,
             metadata: HashMap::new(),
         }
@@ -52,7 +52,7 @@ impl Edge {
 
     /// Update the weight
     pub fn set_weight(&mut self, weight: f64) {
-        self.weight = weight.max(0.0).min(1.0);
+        self.weight = weight.clamp(0.0, 1.0);
     }
 
     /// Add metadata

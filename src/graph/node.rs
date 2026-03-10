@@ -39,7 +39,7 @@ impl Node {
 
     /// Update the salience score
     pub fn set_salience(&mut self, salience: f64) {
-        self.salience = salience.max(0.0).min(1.0);
+        self.salience = salience.clamp(0.0, 1.0);
     }
 
     /// Touch the node (reinforce on access)
