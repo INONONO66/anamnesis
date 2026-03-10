@@ -35,7 +35,8 @@ impl Forgetting {
         decay_rate: f64,
         use_exponential: bool,
     ) {
-        let access_map: std::collections::HashMap<u64, u64> = last_accessed.iter().copied().collect();
+        let access_map: std::collections::HashMap<u64, u64> =
+            last_accessed.iter().copied().collect();
 
         for (node_id, salience) in saliences.iter_mut() {
             let last_access = access_map.get(node_id).copied().unwrap_or(current_time);

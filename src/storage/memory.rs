@@ -43,7 +43,9 @@ impl StorageAdapter for InMemoryStorage {
     }
 
     fn delete_node(&mut self, id: NodeId) -> StorageResult<()> {
-        self.nodes.remove(&id).ok_or(StorageError::NodeNotFound(id))?;
+        self.nodes
+            .remove(&id)
+            .ok_or(StorageError::NodeNotFound(id))?;
         Ok(())
     }
 
@@ -60,7 +62,9 @@ impl StorageAdapter for InMemoryStorage {
     }
 
     fn delete_edge(&mut self, id: u64) -> StorageResult<()> {
-        self.edges.remove(&id).ok_or(StorageError::EdgeNotFound(id))?;
+        self.edges
+            .remove(&id)
+            .ok_or(StorageError::EdgeNotFound(id))?;
         Ok(())
     }
 

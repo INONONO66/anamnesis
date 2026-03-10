@@ -14,7 +14,10 @@ impl Gravity {
         iterations: usize,
         damping: f64,
     ) -> HashMap<u64, f64> {
-        let mut scores: HashMap<u64, f64> = nodes.iter().map(|&id| (id, 1.0 / nodes.len() as f64)).collect();
+        let mut scores: HashMap<u64, f64> = nodes
+            .iter()
+            .map(|&id| (id, 1.0 / nodes.len() as f64))
+            .collect();
 
         let mut outgoing: HashMap<u64, Vec<(u64, f64)>> = HashMap::new();
         for &node_id in nodes {
@@ -54,12 +57,18 @@ impl Gravity {
 
     /// Compute in-degree centrality
     pub fn in_degree(node_id: u64, edges: &[(u64, u64, f64)]) -> usize {
-        edges.iter().filter(|(_, target, _)| *target == node_id).count()
+        edges
+            .iter()
+            .filter(|(_, target, _)| *target == node_id)
+            .count()
     }
 
     /// Compute out-degree centrality
     pub fn out_degree(node_id: u64, edges: &[(u64, u64, f64)]) -> usize {
-        edges.iter().filter(|(source, _, _)| *source == node_id).count()
+        edges
+            .iter()
+            .filter(|(source, _, _)| *source == node_id)
+            .count()
     }
 }
 

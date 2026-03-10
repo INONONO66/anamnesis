@@ -43,7 +43,11 @@ impl Perception {
         confidence_threshold: f64,
         max_nodes: usize,
     ) -> bool {
-        let novelty = Self::novelty_score(observation_embedding, existing_embeddings, novelty_threshold);
+        let novelty = Self::novelty_score(
+            observation_embedding,
+            existing_embeddings,
+            novelty_threshold,
+        );
         let passes_novelty = novelty >= novelty_threshold;
         let passes_conf = Self::passes_confidence(confidence, confidence_threshold);
         let passes_bud = Self::passes_budget(current_nodes, max_nodes);
