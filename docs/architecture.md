@@ -14,10 +14,11 @@ Core data structures representing the knowledge graph:
   - Salience (importance/recency score)
   - Timestamp of creation and last access
   - Metadata (type, tags, etc.)
+  - **Origin** (planned): agent_id, session_id, confidence — tracks which agent produced this knowledge and with what certainty
 
 - **Edge**: Represents relationships between nodes with:
   - Source and target node IDs
-  - Edge type (semantic, causal, temporal, etc.)
+  - Edge type (semantic, causal, temporal, entity, reasoning types, etc.)
   - Weight (strength of relationship)
   - Metadata
 
@@ -33,6 +34,7 @@ Implements cognitive dynamics as pure scoring and propagation functions:
 - **Gravity**: Centrality-based importance
   - PageRank-like algorithm to identify hub nodes
   - Influences which nodes attract new knowledge
+  - Social reinforcement bonus (planned): logarithmic boost for nodes independently confirmed by multiple distinct agents
 - **Perception**: Input gating
   - Novelty scoring (how different from existing knowledge)
   - Confidence filtering (only high-confidence observations enter)
@@ -81,6 +83,9 @@ impl Engine {
     pub fn touch(&mut self, node_id: NodeId) -> Result<(), Error>;
     pub fn merge_candidates(&self, threshold: f64) -> Result<Vec<MergePair>, Error>;
     pub fn auto_merge(&mut self, threshold: f64) -> Result<MergeLog, Error>;
+
+    // Planned: Multi-agent support
+    pub fn reflect_batch(&mut self, sessions: &[SessionSummary]) -> Result<ReflectReport, Error>;
 }
 ```
 
@@ -91,6 +96,7 @@ impl Engine {
 3. **Decay**: Periodic `tick()` applies forgetting mechanics to all nodes
 4. **Query**: Spreading activation from seed nodes returns relevant subgraph
 5. **Reinforcement**: `touch()` strengthens accessed nodes
+6. **Batch Reflect** (planned): After parallel agent execution, `reflect_batch()` creates cross-agent `Entity` edges by matching shared entities across sessions — no LLM calls, metadata matching only
 
 ## Design Principles
 
@@ -116,3 +122,50 @@ impl Engine {
 - Session management
 - Network/HTTP server
 - Serialization format opinions
+
+## Multi-Agent Support (Planned)
+
+When multiple agents share the same Anamnesis graph, three features extend the single-agent model:
+
+### Origin Attribution
+
+Every node carries an `Origin` struct identifying which agent produced it:
+
+```rust
+struct Origin {
+    agent_id: String,
+    session_id: String,
+    confidence: f64,
+}
+```
+
+Origin enables the consumer-side Reflector to resolve contradictions (same agent correcting itself vs. different agents disagreeing) and weight expertise by source.
+
+### Social Reinforcement
+
+Gravity's centrality scoring gains a social bonus when a node is independently reinforced by multiple distinct agents:
+
+```
+social_bonus = 1.0 + ln(distinct_agent_count)   // only if > 1 agent
+```
+
+This composes with existing decay/reinforcement mechanics. Logarithmic scaling prevents popularity cascades.
+
+### Batch Reflect
+
+A round-boundary operation that links cross-agent knowledge:
+
+```rust
+pub fn reflect_batch(&mut self, sessions: &[SessionSummary]) -> Result<ReflectReport, Error>;
+```
+
+Collects nodes from completed sessions, groups by shared entities, and creates `Entity` edges between nodes from different agents that reference the same concept. No merging, no salience changes — only edge creation for discoverability via spreading activation.
+
+### Dependency
+
+```
+Origin → Social Reinforcement (needs agent_id to count distinct agents)
+Origin → Batch Reflect (needs agent_id to identify cross-agent nodes)
+```
+
+All three features are design-level plans. See [ADR-003](./design-decisions/003-multi-agent-memory.md) for rationale.

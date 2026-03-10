@@ -5,3 +5,5 @@ This directory contains Architecture Decision Records (ADRs) for Anamnesis.
 ## Index
 
 - [ADR-001: Cognitive Graph as Application-Layer Engine](./001-cognitive-graph-architecture.md)
+- [ADR-002: Fragment Memory with Natural Decay](./002-fragment-memory-with-natural-decay.md)
+- [ADR-003: Multi-Agent Memory Support](./003-multi-agent-memory.md)

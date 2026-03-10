@@ -31,6 +31,9 @@ src/
 - **Pure functions for mechanics** — all scoring/decay functions are pure (no side effects)
 - **Builder pattern for configuration** — GraphConfig, QueryConfig
 - **No async in core** — synchronous API, async wrapper can be added externally
+- **Salience as universal currency** — all mechanics read/write salience; memory tiers emerge naturally from salience ranges
+- **Fragments over summaries** — preserve individual conversation turns as nodes; summaries are emergent via consolidation, not lossy rewrites
+- **Origin on every node** (planned) — multi-agent graphs require tracking which agent produced each fragment (`agent_id`, `session_id`, `confidence`)
 
 ## COMMANDS
 
@@ -81,6 +84,11 @@ impl Engine {
 
     /// Execute auto-merge with undo log
     pub fn auto_merge(&mut self, threshold: f64) -> Result<MergeLog, Error>;
+
+    /// (Planned) Cross-agent entity linking after parallel execution round
+    /// Creates Entity edges between nodes from different agents that share entities
+    /// No LLM calls — metadata matching only
+    pub fn reflect_batch(&mut self, sessions: &[SessionSummary]) -> Result<ReflectReport, Error>;
 }
 ```
 
@@ -94,3 +102,37 @@ impl Engine {
 - ✅ Cognitive mechanics (scoring, decay, attraction, gating)
 - ✅ Query engine (spreading activation, subgraph extraction)
 - ✅ Pluggable storage adapters
+- ✅ Origin attribution (planned — tracks agent provenance per node)
+- ✅ Social reinforcement scoring (planned — multi-agent salience bonus)
+- ✅ Cross-agent entity linking via `reflect_batch()` (planned)
+
+## Key Types (Planned)
+
+```rust
+/// Tracks which agent produced a knowledge fragment
+struct Origin {
+    agent_id: String,
+    session_id: String,
+    confidence: f64,
+}
+
+/// Input to reflect_batch()
+struct SessionSummary {
+    agent_id: String,
+    session_id: String,
+    node_ids: Vec<NodeId>,
+}
+
+/// Additional edge types for reasoning preservation
+enum EdgeType {
+    // existing
+    Semantic, Causal, Temporal, Custom(String),
+    // planned
+    Reason,               // why a decision was made
+    RejectedAlternative,  // option considered and discarded
+    Supersedes,           // replaces outdated knowledge
+    ReinforcedBy,         // confirmed by repeated experience
+    ConsolidatedFrom,     // derived from multiple fragments
+    Entity,               // cross-agent shared entity link (created by reflect_batch)
+}
+```
