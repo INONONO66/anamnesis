@@ -32,6 +32,8 @@ Existing systems summarize conversations into compact facts. This is lossy — t
 
 Anamnesis preserves **individual conversation turns as nodes**. Each retains the original information, temporal position, entity references, and origin metadata. Summaries are emergent — they arise when the Curator consolidates repeated patterns into higher-level semantic nodes. The raw fragments remain accessible.
 
+**Clarification on tiered resolution:** A future planned feature (tiered content with L0 abstracts) may attach short summaries to nodes for efficient scanning. These are **non-destructive previews** — indexes into the original content, not replacements. The full fragment is always preserved. L0 abstracts serve the same role as a book's table of contents: they help locate relevant knowledge without reading everything, but the original text remains the source of truth.
+
 ### 3. Thinking Expands From Cues
 
 When an agent encounters "auth module," Anamnesis activates the auth node and traverses outward:
@@ -45,11 +47,11 @@ When an agent encounters "auth module," Anamnesis activates the auth node and tr
   -> "auth refactored to DI" (supersedes factory node)
 ```
 
-Each hop weakens the activation signal. Traversal stops when the token budget is exhausted or activation drops below threshold. This is spreading activation — the same mechanism Anamnesis already implements in `src/query/spread.rs`.
+Each hop weakens the activation signal. Traversal stops when the token budget is exhausted or activation drops below threshold. This is spreading activation — implemented as standalone functions in `src/query/spread.rs`, pending integration into the Engine's `query()` method.
 
 ### 4. Forgetting Is a Feature
 
-This is already a first-class concept in Anamnesis (`src/mechanics/forgetting.rs`). Natural decay makes irrelevant nodes invisible without human intervention. Knowledge that matters gets reinforced through access; knowledge that doesn't fades naturally. No manual cleanup.
+Forgetting is a first-class concept in Anamnesis. The mechanics exist in `src/mechanics/forgetting.rs` as pure scoring functions; integration into the Engine's `tick()` loop is planned. Natural decay makes irrelevant nodes invisible without human intervention. Knowledge that matters gets reinforced through access; knowledge that doesn't fades naturally. No manual cleanup.
 
 ### 5. Forgotten Is Not Gone — Reactivation
 
@@ -81,19 +83,97 @@ Node: "Use namespace pattern over classes"
 
 When a new agent session starts, it inherits not rules but _judgment_.
 
+### 7. Universal Knowledge Memory, Not Just Conversation
+
+Anamnesis is not a conversation logger. It is a **universal knowledge substrate** — any structured knowledge the consumer extracts can live in the same graph with the same physics.
+
+Knowledge types that belong in the graph:
+
+| Type | Example | How It Enters |
+|:--|:--|:--|
+| **Episodic** | Raw conversation turn | Consumer feeds session text directly |
+| **Semantic** | Extracted fact ("auth uses factory pattern") | Consumer extracts via LLM, links to source episode |
+| **Procedural** | "How to deploy this service" | Consumer extracts from agent execution logs |
+| **Entity** | "auth module", "session service" | Consumer identifies entities, Anamnesis auto-links by tag |
+| **Identity** | Agent persona traits, values, preferences | Consumer or user defines; engine applies physics |
+
+All types are graph nodes. All receive the same mechanics: attraction clusters related nodes, gravity surfaces important ones, forgetting decays unused ones, touch reinforces accessed ones.
+
+**The consumer (e.g., OpenOmni, OpenClaw) is responsible for extraction.** Anamnesis does not call LLMs. But Anamnesis must provide a graph structure rich enough to represent all these knowledge types naturally.
+
+### 8. Episodic Preservation — Original Text as Source of Truth
+
+When the consumer extracts facts from a conversation, the original conversation turn must also be stored as an episodic node. Extracted knowledge links back via `EXTRACTED_FROM` edges:
+
+```
+Episode (original turn)
+  ├── EXTRACTED_FROM ← Fact: "auth uses factory pattern"
+  ├── EXTRACTED_FROM ← Entity: "auth module"
+  └── EXTRACTED_FROM ← Reason: "tree-shaking + no DI"
+```
+
+This enables:
+- **Provenance tracing**: Any fact can be traced to the exact conversation that produced it
+- **Hallucination verification**: "Did I really say that?" → follow EXTRACTED_FROM → read original
+- **Context reconstruction**: When a fact is retrieved, its source episode provides full context
+
+Without episodic preservation, extracted facts become orphans — no way to verify or contextualize them.
+
+### 9. Identity as Graph Nodes — The Multi-Persona Brain
+
+Agent identities are not static system prompts. They are **graph nodes subject to the same physics as knowledge**.
+
+Inspired by MetaGPT Stanford Town's three-layer identity and agentic-cognition's ConvictionGravity:
+
+**Identity Hierarchy (L0/L1/L2):**
+
+| Layer | Name | Decay | Example |
+|:--|:--|:--|:--|
+| L0 | IdentityCore | None (salience fixed at 1.0) | "I am a code architect", "Accuracy is paramount" |
+| L1 | IdentityLearned | Very slow | "This project prefers factory pattern" |
+| L2 | IdentityState | Normal | "Currently refactoring auth module" |
+
+L0 nodes are immutable anchors. L1 nodes evolve slowly through experience (reinforced by `touch()`, decayed by `tick()`). L2 nodes change freely with context.
+
+**Multi-Agent Identity:**
+
+When multiple agents share a graph, each agent's identity nodes carry `Origin` metadata. The graph becomes a **multi-persona brain** — like dissociative identity, each persona has its own knowledge and traits, but they share a common substrate:
+
+- **Spreading activation respects persona scope**: Query with `Origin.agent_id` filter to get one agent's perspective
+- **Social reinforcement across personas**: When multiple agents independently confirm the same knowledge, it gains extra salience
+- **Contradiction detection**: `Contradicts` edges between nodes from different agents surface disagreements
+
+This is not agent orchestration (that's the consumer's job). This is providing a **cognitive substrate where identities and knowledge coexist and interact through physics**.
+
+### 10. Repulsion — Not All Connections Are Attraction
+
+Current mechanics model only attraction (similar things cluster). Real cognition also has **repulsion** — contradictory ideas push each other apart.
+
+New edge types for repulsion:
+
+| Edge Type | Meaning | Effect on Spreading Activation |
+|:--|:--|:--|
+| `Contradicts` | Two nodes assert opposite things | Activation is **dampened** when crossing |
+| `Supersedes` | One node replaces another | Old node's salience decays faster |
+| `RejectedAlternative` | Option considered and discarded | Activation flows but is marked as "rejected" |
+
+When spreading activation encounters a `Contradicts` edge, the target node receives **negative** or **reduced** activation. This naturally surfaces conflicts: "You said X here, but Y there."
+
+Combined with Origin metadata, this enables **inter-agent conflict detection**: two agents' contradictory observations are linked, flagged, and surfaced for resolution (by the consumer's LLM, not the engine).
+
 ---
 
 ## How This Maps to Anamnesis Architecture
 
-The existing codebase already implements the foundation. The vision clarifies _what these mechanics are for_:
+The existing codebase contains the building blocks as standalone modules. They are not yet wired into the Engine. The vision clarifies _what these mechanics are for_:
 
-| Mechanic                 | Implementation                | Purpose in Vision                                                  |
-| ------------------------ | ----------------------------- | ------------------------------------------------------------------ |
-| **Attraction**           | `src/mechanics/attraction.rs` | Similar/related fragments cluster — enables associative retrieval  |
-| **Gravity**              | `src/mechanics/gravity.rs`    | Important nodes attract new knowledge — hub nodes emerge naturally |
-| **Perception**           | `src/mechanics/perception.rs` | Input gating — not every conversation turn becomes a node          |
-| **Forgetting**           | `src/mechanics/forgetting.rs` | Natural decay + reinforcement on access = self-maintaining graph   |
-| **Spreading Activation** | `src/query/spread.rs`         | Cue-based retrieval — "think outward from a fragment"              |
+| Mechanic                 | Implementation                | Purpose in Vision                                                  | Integration |
+| ------------------------ | ----------------------------- | ------------------------------------------------------------------ | ----------- |
+| **Attraction**           | `src/mechanics/attraction.rs` | Similar/related fragments cluster — enables associative retrieval  | Standalone |
+| **Gravity**              | `src/mechanics/gravity.rs`    | Important nodes attract new knowledge — hub nodes emerge naturally | Standalone |
+| **Perception**           | `src/mechanics/perception.rs` | Input gating — not every conversation turn becomes a node          | Standalone |
+| **Forgetting**           | `src/mechanics/forgetting.rs` | Natural decay + reinforcement on access = self-maintaining graph   | Standalone |
+| **Spreading Activation** | `src/query/spread.rs`         | Cue-based retrieval — "think outward from a fragment"              | Standalone |
 
 ### What Needs to Be Added
 
@@ -115,12 +195,27 @@ The existing codebase already implements the foundation. The vision clarifies _w
 
 Note: These roles are **consumer-side** (e.g., OpenOmni orchestrates them). Anamnesis engine provides the primitives (`ingest`, `link`, `tick`, `query`, `touch`, `auto_merge`). The engine does not call LLMs.
 
+### Consumer vs. Engine Boundary (What Needs LLM)
+
+| Operation | Who | Why |
+|:--|:--|:--|
+| Entity extraction ("auth module" from text) | **Consumer** (LLM) | Requires language understanding |
+| Relationship judgment ("A depends on B") | **Consumer** (LLM) | Requires semantic reasoning |
+| Embedding generation | **Consumer** (LLM/model) | Requires ML model |
+| Similarity-based auto-linking | **Engine** (math) | Cosine similarity on provided embeddings |
+| Entity tag matching | **Engine** (rules) | Same tag → auto-link |
+| Temporal adjacency linking | **Engine** (rules) | Same session, consecutive → auto-link |
+| Cluster detection | **Engine** (graph algorithm) | Pure structure, no content understanding |
+| Bridge node detection | **Engine** (graph algorithm) | Structural analysis |
+| Contradiction flagging | **Engine** (edge type) | Consumer creates Contradicts edges; engine surfaces them |
+| Conflict resolution ("which is right?") | **Consumer** (LLM) | Requires judgment |
+
 **Selective injection (token-budget aware):**
 
 - Query graph with scope (entities relevant to next task)
 - Rank by `salience * activation_strength`
 - Return top nodes within token budget
-- This is already the shape of `Engine::query(seed, budget)` — budget-constrained subgraph extraction
+- This is the intended shape of `Engine::query(seed, budget)` — budget-constrained subgraph extraction (not yet wired)
 
 **Memory tiers:**
 
@@ -160,6 +255,8 @@ Tiers are not separate stores — they are **salience ranges** within the same g
 | **Stanford ACE** | Monolithic playbook        | Full load           | Curator rewrites            | Strategy evolution              |
 | **Anamnesis**    | **Conversation fragments** | **Graph traversal** | **Natural decay + revival** | **Reasoning chains + judgment** |
 
+> **Relationship to GraphRAG:** Anamnesis and GraphRAG solve different problems. GraphRAG optimizes document corpus QA via community detection and LLM summarization. Anamnesis models agent memory with temporal dynamics. Anamnesis's spreading activation covers GraphRAG's local search; planned cluster detection and structural queries will cover the "global view" need — without LLM dependency. See [ADR-004](./design-decisions/004-universal-knowledge-memory.md) for details.
+
 What Anamnesis does that others cannot:
 
 1. **Cross-session associative retrieval** — one cue activates related knowledge across sessions and domains, because the graph connects them through shared entities
@@ -167,7 +264,7 @@ What Anamnesis does that others cannot:
 3. **Reasoning preservation** — not just "use Zod" but why, what was rejected, and how the decision was validated
 4. **Compounding accuracy** — more data makes it more precise (decay filters noise), unlike vector stores where more data increases noise
 
-### 7. Origin Attribution — Who Knows What
+### 11. Origin Attribution — Who Knows What
 
 When multiple agents share the same knowledge graph, a fragment's meaning changes depending on who produced it. "Use factory pattern" from an architect agent carries different weight than the same fragment from a junior code assistant.
 
@@ -189,7 +286,7 @@ Origin is not an access-control mechanism — it's an epistemic marker. The Refl
 
 Origin is the foundation for both Social Reinforcement and Batch Reflect — without it, multi-agent signals are indistinguishable from single-agent repetition.
 
-### 8. Social Reinforcement — Independent Corroboration
+### 12. Social Reinforcement — Independent Corroboration
 
 In human communities, knowledge gains credibility when multiple independent sources confirm it. The same principle applies to multi-agent systems.
 
@@ -210,9 +307,9 @@ Key properties:
 - **Independence requirement**: Multiple reinforcements from the *same* agent in different sessions do not trigger social bonus — only distinct `agent_id` values count.
 - **Composable with existing mechanics**: Social bonus multiplies with the existing salience reinforcement in `forgetting.rs`. It does not replace any current mechanic.
 
-This leverages the Origin struct (Section 7) to distinguish agents. Without origin attribution, there is no way to tell whether five reinforcements came from five agents or one agent in five sessions.
+This leverages the Origin struct (Section 11) to distinguish agents. Without origin attribution, there is no way to tell whether five reinforcements came from five agents or one agent in five sessions.
 
-### 9. Batch Reflect — Cross-Agent Entity Linking
+### 13. Batch Reflect — Cross-Agent Entity Linking
 
 After a round of parallel agent execution, each agent has ingested its own fragments. These fragments may reference overlapping entities (the same function, module, or concept) without knowing about each other.
 
@@ -242,16 +339,16 @@ The algorithm:
 
 Batch Reflect does **not** merge nodes or alter salience. It only creates edges that make cross-agent knowledge discoverable via spreading activation. The Reflector or Curator can later evaluate these edges for contradiction or consolidation.
 
-This requires Origin (Section 7) to identify which nodes belong to which agents, and creates the graph topology that Social Reinforcement (Section 8) operates on.
+This requires Origin (Section 11) to identify which nodes belong to which agents, and creates the graph topology that Social Reinforcement (Section 12) operates on.
 ---
 
 ## Dependency Chain (Multi-Agent Features)
 
 ```
-Origin Attribution (Section 7)
-  ├── Social Reinforcement (Section 8)
+Origin Attribution (Section 11)
+  ├── Social Reinforcement (Section 12)
   │     Uses origin to count distinct agents
-  └── Batch Reflect (Section 9)
+  └── Batch Reflect (Section 13)
         Uses origin to identify cross-agent nodes
 ```
 
