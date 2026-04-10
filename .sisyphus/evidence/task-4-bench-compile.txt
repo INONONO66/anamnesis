@@ -1,0 +1,11 @@
+$ cargo bench --no-run
+   Compiling anamnesis v0.1.0 (/Users/ino/Develop/anamnesis-ci-infra)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 0.84s
+  Executable benches src/lib.rs (target/release/deps/anamnesis-3340c1a3291ce1e3)
+  Executable benches/engine_ops.rs (target/release/deps/engine_ops-150343ed945a2120)
+  Executable benches/graph_crud.rs (target/release/deps/graph_crud-26adf35793bdcba0)
+  Executable benches/ingestion.rs (target/release/deps/ingestion-d92df01888a93385)
+  Executable benches/memory_usage.rs (target/release/deps/memory_usage-f10d786ecd03876a)
+  Executable benches/storage.rs (target/release/deps/storage-b6b25221226ad4f9)
+
+All 5 bench targets compiled successfully.
