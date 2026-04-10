@@ -1,8 +1,8 @@
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use std::collections::HashMap;
 
-use anamnesis::graph::node::Origin;
 use anamnesis::graph::Graph;
+use anamnesis::graph::node::Origin;
 use anamnesis::{Edge, EdgeId, EdgeType, KnowledgeType, Node, NodeId, Timestamp};
 
 fn make_node(id: NodeId) -> Node {
