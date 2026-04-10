@@ -8,7 +8,7 @@ repository = "https://github.com/INONONO66/anamnesis"
 
 [lib]
 name = "anamnesis"
-crate-type = ["lib", "cdylib"]
+crate-type = ["lib"]
 
 [dependencies]
 # Zero external deps for core — add only as needed
