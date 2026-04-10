@@ -1,9 +1,7 @@
 [graph]
-targets = []
 all-features = true
 
 [advisories]
-vulnerability = "deny"
 ignore = []
 
 [licenses]
@@ -17,8 +15,6 @@ allow = [
     "Unicode-DFS-2016",
     "Unicode-3.0",
 ]
-unlicensed = "deny"
-confidence-threshold = 0.8
 
 [bans]
 multiple-versions = "warn"

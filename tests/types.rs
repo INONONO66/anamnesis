@@ -46,7 +46,7 @@ fn all_edge_types() {
 
 #[test]
 fn all_query_variants() {
-    let queries = vec![
+    let queries = [
         Query::Associative {
             seed: NodeId(1),
             budget: 100,

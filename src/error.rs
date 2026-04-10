@@ -41,7 +41,7 @@ mod tests {
 
     #[test]
     fn all_error_variants_constructable() {
-        let errors = vec![
+        let errors = [
             Error::NodeNotFound(NodeId(1)),
             Error::EdgeNotFound(EdgeId(2)),
             Error::StorageError("disk full".to_string()),
