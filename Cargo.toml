@@ -2,6 +2,7 @@
 name = "anamnesis"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 description = "Cognitive graph engine for LLMs — knowledge with attraction, gravity, perception, and forgetting"
 license = "MIT"
 repository = "https://github.com/INONONO66/anamnesis"
@@ -14,4 +15,28 @@ crate-type = ["lib"]
 # Zero external deps for core — add only as needed
 
 [dev-dependencies]
-# Testing
+proptest = "1.6"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "ingestion"
+harness = false
+
+[[bench]]
+name = "graph_crud"
+harness = false
+
+[[bench]]
+name = "storage"
+harness = false
+
+[[bench]]
+name = "memory_usage"
+harness = false
+
+[[bench]]
+name = "engine_ops"
+harness = false
+
+[profile.bench]
+debug = true
