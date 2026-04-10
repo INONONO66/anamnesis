@@ -13,9 +13,14 @@ pub struct EdgeId(pub u64);
 pub struct Timestamp(pub u64);
 
 impl Timestamp {
+    /// Returns the current system time as milliseconds since Unix epoch.
     pub fn now() -> Self {
-        // Returns 0 in Phase 1 — consumer provides real timestamps
-        Timestamp(0)
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let millis = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        Timestamp(millis)
     }
 }
 

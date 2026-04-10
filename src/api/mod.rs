@@ -214,7 +214,7 @@ impl<S: StorageAdapter> Engine<S> {
             target: to,
             edge_type,
             weight,
-            created_at: Timestamp(0),
+            created_at: Timestamp::now(),
             metadata: HashMap::new(),
         };
         self.graph.add_edge(edge)?;
@@ -226,8 +226,9 @@ impl<S: StorageAdapter> Engine<S> {
     /// Phase 1: Updates accessed_at and increments access_count.
     /// Phase 2 will add: lazy decay application + salience reinforcement (eq. 5).
     pub fn touch(&mut self, node_id: NodeId) -> Result<(), Error> {
+        let now = Timestamp::now();
+        self.graph.storage_mut().set_accessed_at(node_id, now)?;
         let node = self.graph.get_node_mut(node_id)?;
-        node.accessed_at = Timestamp(0); // Phase 2: use real timestamp
         node.access_count += 1;
         Ok(())
     }
@@ -388,6 +389,27 @@ mod tests {
         let mut engine = Engine::new();
         let report = engine.reflect_batch(&[]).unwrap();
         assert_eq!(report.entity_edges_created, 0);
+    }
+
+    #[test]
+    fn link_has_nonzero_timestamp() {
+        let mut engine = Engine::new();
+        let ids1 = engine.ingest(make_observation("A")).unwrap();
+        let ids2 = engine.ingest(make_observation("B")).unwrap();
+        let eid = engine
+            .link(ids1[0], ids2[0], EdgeType::Semantic, 0.5)
+            .unwrap();
+        let edge = engine.graph().get_edge(eid).unwrap();
+        assert!(edge.created_at.0 > 0);
+    }
+
+    #[test]
+    fn touch_updates_accessed_at_to_nonzero() {
+        let mut engine = Engine::new();
+        let ids = engine.ingest(make_observation("node")).unwrap();
+        engine.touch(ids[0]).unwrap();
+        let node = engine.graph().get_node(ids[0]).unwrap();
+        assert!(node.accessed_at.0 > 0);
     }
 
     #[test]

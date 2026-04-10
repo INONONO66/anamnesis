@@ -29,6 +29,12 @@ pub trait StorageAdapter: Send + Sync {
     /// Retrieve a node by ID.
     fn get_node(&self, id: NodeId) -> Result<&Node, Error>;
     /// Retrieve a mutable reference to a node.
+    ///
+    /// # SoA Invariant
+    /// Mutations to `salience`, `accessed_at`, or `node_type` through this reference
+    /// will NOT be reflected in the SoA hot-field arrays. Use `set_salience()`,
+    /// `set_accessed_at()` instead for those fields. Only use `get_node_mut()` for
+    /// non-hot fields like `name`, `content`, `access_count`, `metadata`, etc.
     fn get_node_mut(&mut self, id: NodeId) -> Result<&mut Node, Error>;
     /// Delete a node. Frees the ID for reuse. Caller must remove edges first.
     fn delete_node(&mut self, id: NodeId) -> Result<(), Error>;

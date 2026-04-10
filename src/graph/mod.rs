@@ -72,12 +72,14 @@ impl<S: StorageAdapter> Graph<S> {
 
     /// Remove a node from the graph. Also removes all edges connected to it.
     pub fn remove_node(&mut self, id: NodeId) -> Result<(), Error> {
-        // Collect edges to remove first (avoid borrow conflict)
         let out_edges: Vec<EdgeId> = self.storage.edges_from(id).to_vec();
         let in_edges: Vec<EdgeId> = self.storage.edges_to(id).to_vec();
 
+        let mut seen = std::collections::HashSet::new();
         for eid in out_edges.iter().chain(in_edges.iter()) {
-            self.storage.delete_edge(*eid)?;
+            if seen.insert(*eid) {
+                self.storage.delete_edge(*eid)?;
+            }
         }
         self.storage.delete_node(id)
     }
@@ -245,6 +247,18 @@ mod tests {
         g.remove_edge(eid).unwrap();
         assert_eq!(g.edge_count(), 0);
         assert_eq!(g.edges_from(id1).len(), 0);
+    }
+
+    #[test]
+    fn remove_node_with_self_loop() {
+        let mut g = Graph::new();
+        let id = g.next_node_id();
+        g.add_node(make_node(id.0, "self-ref")).unwrap();
+        let eid = g.next_edge_id();
+        g.add_edge(make_edge(eid.0, id.0, id.0)).unwrap();
+        g.remove_node(id).unwrap();
+        assert_eq!(g.node_count(), 0);
+        assert_eq!(g.edge_count(), 0);
     }
 
     #[test]

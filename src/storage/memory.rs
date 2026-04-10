@@ -131,6 +131,12 @@ impl StorageAdapter for InMemoryStorage {
         self.salience[idx] = 0.0;
         self.accessed_at[idx] = Timestamp(0);
         self.node_types[idx] = None;
+        if idx < self.adjacency_out.len() {
+            self.adjacency_out[idx].clear();
+        }
+        if idx < self.adjacency_in.len() {
+            self.adjacency_in[idx].clear();
+        }
         self.live_node_count -= 1;
         self.free_node_ids.push(id);
         Ok(())
@@ -145,7 +151,16 @@ impl StorageAdapter for InMemoryStorage {
         self.ensure_node_capacity(source_idx);
         self.ensure_node_capacity(target_idx);
 
-        if self.edges[idx].is_none() {
+        if let Some(ref old_edge) = self.edges[idx] {
+            let old_source = old_edge.source.0 as usize;
+            let old_target = old_edge.target.0 as usize;
+            if old_source < self.adjacency_out.len() {
+                self.adjacency_out[old_source].retain(|e| *e != edge.id);
+            }
+            if old_target < self.adjacency_in.len() {
+                self.adjacency_in[old_target].retain(|e| *e != edge.id);
+            }
+        } else {
             self.live_edge_count += 1;
         }
 
@@ -510,6 +525,39 @@ mod tests {
     fn edges_from_nonexistent_node_returns_empty() {
         let s = InMemoryStorage::new();
         assert!(s.edges_from(NodeId(99)).is_empty());
+    }
+
+    #[test]
+    fn set_edge_twice_no_duplicate_adjacency() {
+        let mut s = InMemoryStorage::new();
+        let n0 = s.next_node_id();
+        let n1 = s.next_node_id();
+        s.set_node(make_node(n0, 0.5)).unwrap();
+        s.set_node(make_node(n1, 0.5)).unwrap();
+        let eid = s.next_edge_id();
+        s.set_edge(make_edge(eid, n0, n1)).unwrap();
+        s.set_edge(make_edge(eid, n0, n1)).unwrap();
+        assert_eq!(s.edges_from(n0).len(), 1);
+        assert_eq!(s.edges_to(n1).len(), 1);
+        assert_eq!(s.edge_count(), 1);
+    }
+
+    #[test]
+    fn delete_node_clears_adjacency() {
+        let mut s = InMemoryStorage::new();
+        let n0 = s.next_node_id();
+        let n1 = s.next_node_id();
+        s.set_node(make_node(n0, 0.5)).unwrap();
+        s.set_node(make_node(n1, 0.5)).unwrap();
+        let eid = s.next_edge_id();
+        s.set_edge(make_edge(eid, n0, n1)).unwrap();
+        s.delete_edge(eid).unwrap();
+        s.delete_node(n0).unwrap();
+        let reused = s.next_node_id();
+        assert_eq!(reused, n0);
+        s.set_node(make_node(reused, 0.8)).unwrap();
+        assert!(s.edges_from(reused).is_empty());
+        assert!(s.edges_to(reused).is_empty());
     }
 
     #[test]
