@@ -99,6 +99,35 @@ pub enum EdgeType {
     Custom(String),
 }
 
+impl EdgeType {
+    /// Returns the propagation multiplier (kappa) for this edge type during spreading activation.
+    ///
+    /// `is_forward`: true when traversing source→target, false when traversing target→source.
+    /// Only `Supersedes` has different kappa values by direction.
+    pub fn kappa(&self, is_forward: bool) -> f64 {
+        match self {
+            EdgeType::Supersedes => {
+                if is_forward {
+                    1.20
+                } else {
+                    0.40
+                }
+            }
+            EdgeType::Reason => 1.15,
+            EdgeType::ReinforcedBy => 1.10,
+            EdgeType::Semantic => 1.00,
+            EdgeType::Causal => 1.00,
+            EdgeType::ConsolidatedFrom => 1.00,
+            EdgeType::ExtractedFrom => 1.00,
+            EdgeType::Entity => 0.95,
+            EdgeType::Temporal => 0.85,
+            EdgeType::RejectedAlternative => 0.60,
+            EdgeType::Contradicts => 0.00,
+            EdgeType::Custom(_) => 1.00,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -141,6 +170,17 @@ mod tests {
             KnowledgeType::Custom("my-type".to_string()),
         ];
         assert_eq!(types.len(), 12);
+    }
+
+    #[test]
+    fn kappa_values_match_architecture() {
+        assert_eq!(EdgeType::Reason.kappa(true), 1.15);
+        assert_eq!(EdgeType::Supersedes.kappa(true), 1.20);
+        assert_eq!(EdgeType::Supersedes.kappa(false), 0.40);
+        assert_eq!(EdgeType::Contradicts.kappa(true), 0.00);
+        assert_eq!(EdgeType::Semantic.kappa(true), 1.00);
+        assert_eq!(EdgeType::Temporal.kappa(true), 0.85);
+        assert_eq!(EdgeType::RejectedAlternative.kappa(true), 0.60);
     }
 
     #[test]
