@@ -97,7 +97,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Run benchmarks
-        run: cargo bench --bench ingestion --bench graph_crud --bench storage --bench memory_usage --bench engine_ops -- --output-format bencher 2>&1 | tee output.txt
+        run: |
+          set -o pipefail
+          cargo bench --bench ingestion --bench graph_crud --bench storage --bench memory_usage --bench engine_ops -- --output-format bencher 2>&1 | tee output.txt
       - name: Store benchmark result
         uses: benchmark-action/github-action-benchmark@v1
         continue-on-error: true
