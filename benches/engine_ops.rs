@@ -28,7 +28,7 @@ fn bench_touch(c: &mut Criterion) {
         let mut engine = Engine::new();
         let ids = engine.ingest(make_observation(0)).unwrap();
         let node_id = ids[0];
-        b.iter(|| engine.touch(black_box(node_id)).unwrap())
+        b.iter(|| engine.touch(black_box(node_id), Timestamp::now()).unwrap())
     });
 }
 
@@ -41,7 +41,7 @@ fn bench_touch_repeated(c: &mut Criterion) {
             let node_id = ids[0];
             b.iter(|| {
                 for _ in 0..count {
-                    engine.touch(black_box(node_id)).unwrap();
+                    engine.touch(black_box(node_id), Timestamp::now()).unwrap();
                 }
             })
         });
@@ -70,8 +70,8 @@ fn bench_ingest_link_workflow(c: &mut Criterion) {
                             .link(all_ids[i], all_ids[i + 1], EdgeType::Semantic, 0.75)
                             .unwrap();
                     }
-                    engine.touch(all_ids[0]).unwrap();
-                    engine.touch(all_ids[size - 1]).unwrap();
+                    engine.touch(all_ids[0], Timestamp::now()).unwrap();
+                    engine.touch(all_ids[size - 1], Timestamp::now()).unwrap();
                 })
             },
         );

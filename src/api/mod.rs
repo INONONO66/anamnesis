@@ -651,7 +651,11 @@ impl<S: StorageAdapter> Engine<S> {
                         | KnowledgeType::IdentityLearned
                         | KnowledgeType::IdentityState
                 );
-                if is_identity {
+                let is_agent = match &config.agent_id {
+                    Some(aid) => node.origin.agent_id == *aid,
+                    None => false,
+                };
+                if is_identity && is_agent {
                     Some((nid, node.node_type.clone(), act))
                 } else {
                     None
