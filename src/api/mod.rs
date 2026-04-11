@@ -221,23 +221,85 @@ impl<S: StorageAdapter> Engine<S> {
         Ok(id)
     }
 
-    /// Touch a node — reinforce on access.
+    /// Touch a node — apply lazy decay then reinforce on access.
     ///
-    /// Phase 1: Updates accessed_at and increments access_count.
-    /// Phase 2 will add: lazy decay application + salience reinforcement (eq. 5).
+    /// Phase 2: Applies decay (eq 4) BEFORE reinforcement (eq 5).
+    /// Decay is lazy: computed based on elapsed time since last access.
     pub fn touch(&mut self, node_id: NodeId, now: Timestamp) -> Result<(), Error> {
+        use crate::mechanics::forgetting::{decay_salience, reinforce_salience};
+
+        let current_salience = self.graph.storage().get_salience(node_id)?;
+        let last_accessed = self.graph.storage().get_accessed_at(node_id)?;
+        let node_type = self.graph.storage().get_node_type(node_id)?.clone();
+
+        let dt_ms = now.0.saturating_sub(last_accessed.0);
+        let dt_days = dt_ms as f64 / 86_400_000.0;
+
+        // Decay BEFORE reinforcement — ordering invariant (eq 4 then eq 5)
+        let decayed = decay_salience(current_salience, dt_days, &node_type);
+        let reinforced = reinforce_salience(decayed);
+
+        self.graph.storage_mut().set_salience(node_id, reinforced)?;
         self.graph.storage_mut().set_accessed_at(node_id, now)?;
+
         let node = self.graph.get_node_mut(node_id)?;
         node.access_count += 1;
+
         Ok(())
     }
 
-    /// Advance time — apply decay to all nodes.
-    ///
-    /// Phase 1: No-op, returns empty report.
-    /// Phase 2 will implement: equation (4) decay for all nodes.
-    pub fn tick(&mut self, _now: Timestamp) -> Result<TickReport, Error> {
-        Ok(TickReport::default())
+    /// Advance time — apply batch decay (eq 4) to all nodes.
+    pub fn tick(&mut self, now: Timestamp) -> Result<TickReport, Error> {
+        use crate::mechanics::forgetting::{decay_salience, floor_for_type};
+
+        let node_ids = self.graph.storage().all_node_ids();
+        let mut nodes_decayed = 0usize;
+        let mut nodes_pruned = 0usize;
+
+        for id in node_ids {
+            let current_salience = match self.graph.storage().get_salience(id) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let last_accessed = match self.graph.storage().get_accessed_at(id) {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            let node_type = match self.graph.storage().get_node_type(id) {
+                Ok(kt) => kt.clone(),
+                Err(_) => continue,
+            };
+
+            let dt_ms = now.0.saturating_sub(last_accessed.0);
+            let dt_days = dt_ms as f64 / 86_400_000.0;
+
+            let new_salience = decay_salience(current_salience, dt_days, &node_type);
+
+            if (new_salience - current_salience).abs() > 1e-10 {
+                if self
+                    .graph
+                    .storage_mut()
+                    .set_salience(id, new_salience)
+                    .is_err()
+                {
+                    continue;
+                }
+                if self.graph.storage_mut().set_accessed_at(id, now).is_err() {
+                    continue;
+                }
+                nodes_decayed += 1;
+
+                let floor = floor_for_type(&node_type);
+                if new_salience <= floor + 1e-6 {
+                    nodes_pruned += 1;
+                }
+            }
+        }
+
+        Ok(TickReport {
+            nodes_decayed,
+            nodes_pruned,
+        })
     }
 
     /// Query the graph — returns structured context for LLM consumption.
@@ -409,6 +471,127 @@ mod tests {
         engine.touch(ids[0], Timestamp::now()).unwrap();
         let node = engine.graph().get_node(ids[0]).unwrap();
         assert!(node.accessed_at.0 > 0);
+    }
+
+    #[test]
+    fn touch_applies_decay_before_reinforcement() {
+        let mut engine = Engine::new();
+        let ids = engine.ingest(make_observation("node")).unwrap();
+        let id = ids[0];
+
+        let future = Timestamp(1000 + 30 * 86_400_000);
+        engine.touch(id, future).unwrap();
+
+        let node = engine.graph().get_node(id).unwrap();
+        assert!(
+            node.salience < 1.0,
+            "salience should have decayed: {}",
+            node.salience
+        );
+        assert!(
+            node.salience > 0.0,
+            "salience should not be zero: {}",
+            node.salience
+        );
+        assert_eq!(node.access_count, 1);
+    }
+
+    #[test]
+    fn touch_immediate_reinforces_without_decay() {
+        let mut engine = Engine::new();
+        let ids = engine.ingest(make_observation("node")).unwrap();
+        let id = ids[0];
+
+        let now = Timestamp(1000);
+        engine.touch(id, now).unwrap();
+
+        let node = engine.graph().get_node(id).unwrap();
+        // dt=0, no decay. reinforce(1.0) = 1.0 + 0.20*(1-1.0) = 1.0
+        assert_eq!(node.salience, 1.0);
+        assert_eq!(node.access_count, 1);
+    }
+
+    #[test]
+    fn tick_decays_episodic_faster_than_semantic() {
+        let mut engine = Engine::new();
+
+        let episodic_obs = Observation {
+            node_type: KnowledgeType::Episodic,
+            timestamp: Timestamp(0),
+            ..make_observation("episodic")
+        };
+        let semantic_obs = Observation {
+            node_type: KnowledgeType::Semantic,
+            timestamp: Timestamp(0),
+            ..make_observation("semantic")
+        };
+
+        let episodic_ids = engine.ingest(episodic_obs).unwrap();
+        let semantic_ids = engine.ingest(semantic_obs).unwrap();
+
+        let future = Timestamp(30 * 86_400_000);
+        let report = engine.tick(future).unwrap();
+
+        assert!(
+            report.nodes_decayed >= 1,
+            "at least one node should have decayed"
+        );
+
+        let episodic_s = engine
+            .graph()
+            .storage()
+            .get_salience(episodic_ids[0])
+            .unwrap();
+        let semantic_s = engine
+            .graph()
+            .storage()
+            .get_salience(semantic_ids[0])
+            .unwrap();
+
+        assert!(
+            episodic_s < semantic_s,
+            "episodic ({episodic_s}) should decay faster than semantic ({semantic_s})"
+        );
+    }
+
+    #[test]
+    fn tick_identity_core_unchanged() {
+        let mut engine = Engine::new();
+
+        let identity_obs = Observation {
+            node_type: KnowledgeType::IdentityCore,
+            timestamp: Timestamp(0),
+            ..make_observation("identity")
+        };
+        let id = engine.ingest(identity_obs).unwrap()[0];
+
+        let future = Timestamp(365 * 86_400_000);
+        engine.tick(future).unwrap();
+
+        let salience = engine.graph().storage().get_salience(id).unwrap();
+        assert_eq!(salience, 1.0, "IdentityCore should not decay");
+    }
+
+    #[test]
+    fn tick_report_counts_correctly() {
+        let mut engine = Engine::new();
+
+        for i in 0..3 {
+            let obs = Observation {
+                node_type: KnowledgeType::Episodic,
+                timestamp: Timestamp(0),
+                ..make_observation(&format!("episodic-{i}"))
+            };
+            engine.ingest(obs).unwrap();
+        }
+
+        let future = Timestamp(30 * 86_400_000);
+        let report = engine.tick(future).unwrap();
+
+        assert_eq!(
+            report.nodes_decayed, 3,
+            "all 3 episodic nodes should have decayed"
+        );
     }
 
     #[test]

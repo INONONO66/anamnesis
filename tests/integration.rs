@@ -63,9 +63,9 @@ fn engine_full_lifecycle() {
     let node = engine.graph().get_node(ids1[0]).unwrap();
     assert_eq!(node.access_count, 2);
 
-    // 4. Tick (placeholder — no-op in Phase 1)
+    // 4. Tick — ids2[0] has dt=1s from ingest, ids1[0] was just touched so dt=0
     let report = engine.tick(Timestamp(2000)).unwrap();
-    assert_eq!(report.nodes_decayed, 0);
+    assert_eq!(report.nodes_decayed, 1);
 
     // 5. Query (placeholder — returns empty in Phase 1)
     let q = Query::Associative {
