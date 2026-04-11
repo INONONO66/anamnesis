@@ -191,7 +191,7 @@ mod tests {
 
     #[test]
     fn all_query_variants_constructable() {
-        let queries = vec![
+        let queries = [
             Query::Associative {
                 seed: NodeId(1),
                 budget: 100,

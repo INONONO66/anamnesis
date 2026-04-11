@@ -1,0 +1,99 @@
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+
+use anamnesis::api::Observation;
+use anamnesis::graph::node::Origin;
+use anamnesis::{EdgeType, Engine, KnowledgeType, Timestamp};
+
+fn make_observation(i: u64) -> Observation {
+    Observation {
+        name: format!("node-{i}"),
+        summary: None,
+        content: format!("Content for observation {i}"),
+        embedding: Some(vec![0.1, 0.2, 0.3]),
+        confidence: 0.9,
+        node_type: KnowledgeType::Semantic,
+        entity_tags: vec!["bench".to_string()],
+        origin: Origin {
+            agent_id: "bench-agent".to_string(),
+            session_id: "bench-session".to_string(),
+            project_id: None,
+            confidence: 0.9,
+        },
+        timestamp: Timestamp(1000 + i),
+    }
+}
+
+fn bench_ingest_single(c: &mut Criterion) {
+    c.bench_function("ingest_single", |b| {
+        let mut counter = 0u64;
+        b.iter(|| {
+            let mut engine = Engine::new();
+            counter += 1;
+            engine.ingest(black_box(make_observation(counter))).unwrap()
+        })
+    });
+}
+
+fn bench_ingest_batch(c: &mut Criterion) {
+    let mut group = c.benchmark_group("ingest_batch");
+    for size in [10usize, 100, 500] {
+        group.bench_with_input(BenchmarkId::new("nodes", size), &size, |b, &size| {
+            b.iter(|| {
+                let mut engine = Engine::new();
+                for i in 0..size {
+                    engine
+                        .ingest(black_box(make_observation(i as u64)))
+                        .unwrap();
+                }
+            })
+        });
+    }
+    group.finish();
+}
+
+fn bench_link(c: &mut Criterion) {
+    c.bench_function("link_two_nodes", |b| {
+        b.iter(|| {
+            let mut engine = Engine::new();
+            let ids1 = engine.ingest(make_observation(0)).unwrap();
+            let ids2 = engine.ingest(make_observation(1)).unwrap();
+            engine
+                .link(
+                    black_box(ids1[0]),
+                    black_box(ids2[0]),
+                    EdgeType::Semantic,
+                    0.8,
+                )
+                .unwrap()
+        })
+    });
+}
+
+fn bench_link_chain(c: &mut Criterion) {
+    let mut group = c.benchmark_group("link_chain");
+    for size in [10usize, 100, 500] {
+        group.bench_with_input(BenchmarkId::new("edges", size), &size, |b, &size| {
+            b.iter(|| {
+                let mut engine = Engine::new();
+                let mut prev = engine.ingest(make_observation(0)).unwrap();
+                for i in 1..size {
+                    let curr = engine.ingest(make_observation(i as u64)).unwrap();
+                    engine
+                        .link(prev[0], curr[0], EdgeType::Temporal, 0.7)
+                        .unwrap();
+                    prev = curr;
+                }
+            })
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_ingest_single,
+    bench_ingest_batch,
+    bench_link,
+    bench_link_chain
+);
+criterion_main!(benches);
