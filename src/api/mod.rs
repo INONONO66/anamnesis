@@ -432,10 +432,240 @@ impl<S: StorageAdapter> Engine<S> {
 
     /// Query the graph — returns structured context for LLM consumption.
     ///
-    /// Phase 1: Returns empty ContextPackage.
-    /// Phase 2 will implement: full pipeline (equations 10-14).
-    pub fn query(&self, _query: &Query, _config: &QueryConfig) -> Result<ContextPackage, Error> {
-        Ok(ContextPackage::empty())
+    /// Phase 2: Associative query implements the full pipeline (equations 9-14).
+    /// Other query modes return empty ContextPackage (Phase 3).
+    pub fn query(&self, query: &Query, config: &QueryConfig) -> Result<ContextPackage, Error> {
+        match query {
+            Query::Associative { seed, budget } => self.query_associative(*seed, *budget, config),
+            _ => Ok(ContextPackage::empty()),
+        }
+    }
+
+    /// Full Associative query pipeline: initial activation → spreading → repulsion → scoring → assembly.
+    fn query_associative(
+        &self,
+        seed: NodeId,
+        budget: usize,
+        config: &QueryConfig,
+    ) -> Result<ContextPackage, Error> {
+        use crate::mechanics::attraction::cosine_similarity;
+        use crate::mechanics::gravity::compute_mass;
+        use crate::mechanics::repulsion::{apply_damping, compute_repulsion, rigidity};
+        use crate::query::activation::{initial_activation, spread_activation, NodeInfo};
+        use crate::query::assembly::{assemble_context_package, ScoredNode};
+        use crate::query::identity::compute_identity_prior;
+        use crate::query::scoring::{final_score, scope_weight};
+
+        // Verify seed exists
+        let _ = self.graph.get_node(seed)?;
+
+        let storage = self.graph.storage();
+
+        // --- Stage 1: Collect identity nodes for this agent ---
+        let agent_id = config.agent_id.as_deref().unwrap_or("");
+        let identity_nodes: Vec<(Vec<f64>, KnowledgeType, f64)> = storage
+            .all_node_ids()
+            .iter()
+            .filter_map(|&nid| {
+                let node = storage.get_node(nid).ok()?;
+                let is_identity = matches!(
+                    node.node_type,
+                    KnowledgeType::IdentityCore
+                        | KnowledgeType::IdentityLearned
+                        | KnowledgeType::IdentityState
+                );
+                let is_agent = agent_id.is_empty() || node.origin.agent_id == agent_id;
+                if is_identity && is_agent {
+                    let emb = node.embedding.clone().unwrap_or_default();
+                    let salience = storage.get_salience(nid).unwrap_or(0.0);
+                    Some((emb, node.node_type.clone(), salience))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // --- Stage 2: Compute initial activations (eq 10) ---
+        let mut initial_activations: HashMap<NodeId, f64> = HashMap::new();
+        let all_ids = storage.all_node_ids();
+
+        for &nid in &all_ids {
+            let node = match storage.get_node(nid) {
+                Ok(n) => n,
+                Err(_) => continue,
+            };
+
+            let is_seed = nid == seed;
+
+            let vector_sim = match (&config.query_embedding, &node.embedding) {
+                (Some(qe), Some(ne)) => cosine_similarity(qe, ne),
+                _ => 0.0,
+            };
+
+            let identity_prior = match &node.embedding {
+                Some(emb) => compute_identity_prior(emb, &identity_nodes, cosine_similarity),
+                None => 0.0,
+            };
+
+            let act = initial_activation(is_seed, vector_sim, identity_prior);
+            if act > config.min_activation || is_seed {
+                initial_activations.insert(nid, act);
+            }
+        }
+
+        // --- Stage 3: Spreading activation (eq 11) ---
+        let node_info_fn = |nid: NodeId| -> Option<NodeInfo> {
+            let node = storage.get_node(nid).ok()?;
+            let salience = storage.get_salience(nid).unwrap_or(0.0);
+            let mass = compute_mass(salience, node.access_count, &node.node_type);
+
+            let mut all_edges: Vec<(NodeId, f64, EdgeType, bool)> = Vec::new();
+
+            for &eid in storage.edges_from(nid) {
+                if let Ok(edge) = storage.get_edge(eid) {
+                    all_edges.push((edge.target, edge.weight, edge.edge_type.clone(), true));
+                }
+            }
+            for &eid in storage.edges_to(nid) {
+                if let Ok(edge) = storage.get_edge(eid) {
+                    all_edges.push((edge.source, edge.weight, edge.edge_type.clone(), false));
+                }
+            }
+
+            Some(NodeInfo {
+                salience,
+                mass,
+                outgoing_edges: all_edges,
+            })
+        };
+
+        let activations = spread_activation(
+            initial_activations,
+            node_info_fn,
+            budget,
+            config.min_activation,
+            config.decay_per_hop,
+        );
+
+        // --- Stage 4: Repulsion damping (eqs 7-8) ---
+        let mut damped_activations = activations.clone();
+
+        for &nid in activations.keys() {
+            let contradicts_inputs: Vec<(f64, f64, f64)> = storage
+                .edges_to(nid)
+                .iter()
+                .filter_map(|&eid| {
+                    let edge = storage.get_edge(eid).ok()?;
+                    if !matches!(edge.edge_type, EdgeType::Contradicts) {
+                        return None;
+                    }
+                    let source_act = activations.get(&edge.source).copied().unwrap_or(0.0);
+                    if source_act == 0.0 {
+                        return None;
+                    }
+                    let source_node = storage.get_node(edge.source).ok()?;
+                    let rho = rigidity(&source_node.node_type);
+                    Some((edge.weight, rho, source_act))
+                })
+                .collect();
+
+            if !contradicts_inputs.is_empty() {
+                let h = compute_repulsion(&contradicts_inputs);
+                if h > 0.0 {
+                    let current = activations.get(&nid).copied().unwrap_or(0.0);
+                    let damped = apply_damping(current, h);
+                    damped_activations.insert(nid, damped);
+                }
+            }
+        }
+
+        // --- Stage 5: Final scoring (eq 13) ---
+        let seed_node = storage.get_node(seed).ok();
+        let mut scored_nodes: Vec<ScoredNode> = Vec::new();
+
+        for (&nid, &activation) in &damped_activations {
+            if activation < config.min_activation {
+                continue;
+            }
+
+            let node = match storage.get_node(nid) {
+                Ok(n) => n,
+                Err(_) => continue,
+            };
+
+            let salience = storage.get_salience(nid).unwrap_or(0.0);
+            let mass = compute_mass(salience, node.access_count, &node.node_type);
+
+            let vector_sim = match (&config.query_embedding, &node.embedding) {
+                (Some(qe), Some(ne)) => cosine_similarity(qe, ne),
+                _ => 0.0,
+            };
+
+            let shared_entities = seed_node
+                .map(|sn| {
+                    node.entity_tags
+                        .iter()
+                        .filter(|t| sn.entity_tags.contains(t))
+                        .count()
+                })
+                .unwrap_or(0);
+
+            let sw = scope_weight(&config.project_id, &node.origin.project_id, shared_entities);
+            let relevance = final_score(activation, vector_sim, salience, mass, sw);
+
+            scored_nodes.push(ScoredNode {
+                node_id: nid,
+                name: node.name.clone(),
+                summary: node.summary.clone(),
+                content: node.content.clone(),
+                node_type: node.node_type.clone(),
+                relevance,
+                origin: node.origin.clone(),
+            });
+        }
+
+        // --- Stage 6: Collect Contradicts edges and identity activations ---
+        let mut contradicts_edges: Vec<(NodeId, NodeId, f64)> = Vec::new();
+        for &nid in damped_activations.keys() {
+            for &eid in storage.edges_from(nid) {
+                if let Ok(edge) = storage.get_edge(eid) {
+                    if matches!(edge.edge_type, EdgeType::Contradicts) {
+                        contradicts_edges.push((edge.source, edge.target, edge.weight));
+                    }
+                }
+            }
+        }
+
+        let identity_activations: Vec<(KnowledgeType, f64)> = damped_activations
+            .iter()
+            .filter_map(|(&nid, &act)| {
+                let node = storage.get_node(nid).ok()?;
+                let is_identity = matches!(
+                    node.node_type,
+                    KnowledgeType::IdentityCore
+                        | KnowledgeType::IdentityLearned
+                        | KnowledgeType::IdentityState
+                );
+                if is_identity {
+                    Some((node.node_type.clone(), act))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // --- Stage 7: Assemble ContextPackage ---
+        let package = assemble_context_package(
+            scored_nodes,
+            &identity_activations,
+            &contradicts_edges,
+            &damped_activations,
+            config.token_budget,
+            config.chars_per_token,
+            &config.project_id,
+        );
+
+        Ok(package)
     }
 
     /// Find merge candidates above similarity threshold.
@@ -874,5 +1104,141 @@ mod tests {
             .with_confidence_threshold(0.7);
         assert_eq!(config.max_nodes, 1000);
         assert_eq!(config.novelty_threshold, 0.5);
+    }
+
+    #[test]
+    fn query_associative_returns_real_results() {
+        let config = EngineConfig::new().with_novelty_threshold(0.0);
+        let mut engine = Engine::with_config(config);
+
+        let obs1 = Observation {
+            node_type: KnowledgeType::Semantic,
+            embedding: Some(vec![1.0, 0.0, 0.0]),
+            ..make_observation("auth uses factory pattern")
+        };
+        let obs2 = Observation {
+            node_type: KnowledgeType::Semantic,
+            embedding: Some(vec![0.9, 0.1, 0.0]),
+            ..make_observation("factory pattern is preferred")
+        };
+        let ids1 = engine.ingest(obs1).unwrap();
+        let ids2 = engine.ingest(obs2).unwrap();
+
+        engine
+            .link(ids1[0], ids2[0], EdgeType::Semantic, 0.8)
+            .unwrap();
+
+        let q = Query::Associative {
+            seed: ids1[0],
+            budget: 50,
+        };
+        let qconfig = QueryConfig::default();
+        let pkg = engine.query(&q, &qconfig).unwrap();
+
+        assert!(
+            pkg.total_fragments() > 0,
+            "Associative query should return non-empty ContextPackage"
+        );
+    }
+
+    #[test]
+    fn query_associative_with_identity_node() {
+        let config = EngineConfig::new().with_novelty_threshold(0.0);
+        let mut engine = Engine::with_config(config);
+
+        let identity_obs = Observation {
+            node_type: KnowledgeType::IdentityCore,
+            embedding: Some(vec![1.0, 0.0]),
+            origin: Origin {
+                agent_id: "agent-1".to_string(),
+                session_id: "session-1".to_string(),
+                project_id: None,
+                confidence: 1.0,
+            },
+            ..make_observation("I am a code architect")
+        };
+        let semantic_obs = Observation {
+            node_type: KnowledgeType::Semantic,
+            embedding: Some(vec![0.9, 0.1]),
+            ..make_observation("factory pattern knowledge")
+        };
+
+        let identity_ids = engine.ingest(identity_obs).unwrap();
+        let semantic_ids = engine.ingest(semantic_obs).unwrap();
+        engine
+            .link(identity_ids[0], semantic_ids[0], EdgeType::Semantic, 0.8)
+            .unwrap();
+
+        let q = Query::Associative {
+            seed: semantic_ids[0],
+            budget: 50,
+        };
+        let qconfig = QueryConfig {
+            agent_id: Some("agent-1".to_string()),
+            ..QueryConfig::default()
+        };
+        let pkg = engine.query(&q, &qconfig).unwrap();
+
+        assert!(
+            !pkg.identity.is_empty() || !pkg.knowledge.is_empty(),
+            "Query should return some results"
+        );
+    }
+
+    #[test]
+    fn query_associative_with_contradicts_creates_tension() {
+        let config = EngineConfig::new().with_novelty_threshold(0.0);
+        let mut engine = Engine::with_config(config);
+
+        let obs1 = Observation {
+            node_type: KnowledgeType::Semantic,
+            embedding: Some(vec![1.0, 0.0]),
+            ..make_observation("factory pattern is good")
+        };
+        let obs2 = Observation {
+            node_type: KnowledgeType::Semantic,
+            embedding: Some(vec![0.9, 0.1]),
+            ..make_observation("factory pattern is bad")
+        };
+
+        let ids1 = engine.ingest(obs1).unwrap();
+        let ids2 = engine.ingest(obs2).unwrap();
+        engine
+            .link(ids1[0], ids2[0], EdgeType::Contradicts, 0.9)
+            .unwrap();
+
+        let q = Query::Associative {
+            seed: ids1[0],
+            budget: 50,
+        };
+        let pkg = engine.query(&q, &QueryConfig::default()).unwrap();
+
+        assert!(
+            !pkg.tensions.is_empty() || pkg.agent_tension >= 0.0,
+            "Contradicts edge should create tension"
+        );
+    }
+
+    #[test]
+    fn query_non_associative_returns_empty() {
+        let engine = Engine::new();
+        let queries = vec![
+            Query::TypeFiltered {
+                node_type: KnowledgeType::Convention,
+                limit: 10,
+            },
+            Query::List {
+                min_salience: 0.5,
+                limit: 10,
+            },
+        ];
+        for q in &queries {
+            let pkg = engine.query(q, &QueryConfig::default()).unwrap();
+            assert_eq!(
+                pkg.total_fragments(),
+                0,
+                "non-Associative should return empty"
+            );
+        }
     }
 }

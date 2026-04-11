@@ -67,14 +67,16 @@ fn engine_full_lifecycle() {
     let report = engine.tick(Timestamp(2000)).unwrap();
     assert_eq!(report.nodes_decayed, 1);
 
-    // 5. Query (placeholder — returns empty in Phase 1)
+    // 5. Query — Associative returns real results in Phase 2
     let q = Query::Associative {
         seed: ids1[0],
         budget: 100,
     };
     let pkg = engine.query(&q, &QueryConfig::default()).unwrap();
-    assert_eq!(pkg.total_fragments(), 0);
-    assert_eq!(pkg.agent_tension, 0.0);
+    assert!(
+        pkg.total_fragments() > 0,
+        "Associative query should return results"
+    );
 
     // 6. Merge candidates (placeholder)
     let candidates = engine.merge_candidates(0.9).unwrap();
@@ -171,12 +173,8 @@ fn query_all_modes_compile() {
     let engine = Engine::new();
     let config = QueryConfig::default();
 
-    // All 5 query modes should compile and return Ok
+    // Non-Associative modes return Ok(empty). Associative needs a real seed.
     let queries = vec![
-        Query::Associative {
-            seed: anamnesis::NodeId(0),
-            budget: 10,
-        },
         Query::TypeFiltered {
             node_type: KnowledgeType::Convention,
             limit: 5,
