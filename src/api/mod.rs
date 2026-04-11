@@ -169,20 +169,25 @@ impl<S: StorageAdapter> Engine<S> {
 
     /// Ingest a new observation into the graph.
     ///
-    /// Phase 1: Creates a Node directly without perception gating.
-    /// Phase 2 will add: novelty scoring, confidence filtering, budget check,
-    /// and attraction-based auto-linking.
+    /// Creates a Node, then applies attraction mechanics: finds candidate nodes
+    /// (last 256 + entity-tag matches), scores them, and creates/strengthens
+    /// up to 4 edges to the most similar candidates.
     pub fn ingest(&mut self, observation: Observation) -> Result<Vec<NodeId>, Error> {
+        use crate::mechanics::attraction::{
+            attraction_score, cosine_similarity, should_create_edge, strengthen_edge, tau_type,
+        };
+        use crate::mechanics::gravity::compute_mass;
+
         let id = self.graph.next_node_id();
         let now = observation.timestamp;
 
         let node = Node {
             id,
-            node_type: observation.node_type,
+            node_type: observation.node_type.clone(),
             name: observation.name,
             summary: observation.summary,
             content: observation.content,
-            embedding: observation.embedding,
+            embedding: observation.embedding.clone(),
             created_at: now,
             updated_at: now,
             accessed_at: now,
@@ -191,11 +196,107 @@ impl<S: StorageAdapter> Engine<S> {
             salience: 1.0,
             access_count: 0,
             origin: observation.origin,
-            entity_tags: observation.entity_tags,
+            entity_tags: observation.entity_tags.clone(),
             metadata: HashMap::new(),
         };
 
         self.graph.add_node(node)?;
+
+        if let Some(ref new_embedding) = observation.embedding {
+            let new_type = &observation.node_type;
+            let new_tags = &observation.entity_tags;
+
+            // Candidate pool: last 256 nodes by ID + entity-tag matches
+            let mut candidate_ids: Vec<NodeId> = {
+                let mut all = self.graph.storage().all_node_ids();
+                all.retain(|&nid| nid != id);
+                all.sort_by(|a, b| b.0.cmp(&a.0));
+                all.truncate(256);
+                all
+            };
+
+            if !new_tags.is_empty() {
+                let all_ids = self.graph.storage().all_node_ids();
+                for nid in all_ids {
+                    if nid == id {
+                        continue;
+                    }
+                    if let Ok(node) = self.graph.storage().get_node(nid) {
+                        let has_shared_tag = node.entity_tags.iter().any(|t| new_tags.contains(t));
+                        if has_shared_tag && !candidate_ids.contains(&nid) {
+                            candidate_ids.push(nid);
+                        }
+                    }
+                }
+            }
+
+            // Score candidates by attraction (eq 3)
+            let mut scored: Vec<(NodeId, f64)> = Vec::new();
+            for cid in &candidate_ids {
+                let candidate = match self.graph.storage().get_node(*cid) {
+                    Ok(n) => n,
+                    Err(_) => continue,
+                };
+
+                let Some(ref cand_embedding) = candidate.embedding else {
+                    continue;
+                };
+
+                let sim = cosine_similarity(new_embedding, cand_embedding);
+                if sim == 0.0 {
+                    continue;
+                }
+
+                let tau = tau_type(new_type, &candidate.node_type);
+                let cand_salience = self.graph.storage().get_salience(*cid).unwrap_or(0.0);
+                let cand_mass =
+                    compute_mass(cand_salience, candidate.access_count, &candidate.node_type);
+                let score = attraction_score(sim, tau, cand_mass);
+
+                if should_create_edge(score, new_type, &candidate.node_type) {
+                    scored.push((*cid, score));
+                }
+            }
+
+            // Top 4 by score
+            scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            scored.truncate(4);
+
+            for (cid, score) in scored {
+                // Check existing edge in either direction
+                let existing_edge = self
+                    .graph
+                    .edges_from(id)
+                    .iter()
+                    .find_map(|&eid| self.graph.get_edge(eid).ok().filter(|e| e.target == cid))
+                    .or_else(|| {
+                        self.graph.edges_from(cid).iter().find_map(|&eid| {
+                            self.graph.get_edge(eid).ok().filter(|e| e.target == id)
+                        })
+                    });
+
+                if let Some(existing) = existing_edge {
+                    let new_weight = strengthen_edge(existing.weight, score);
+                    let eid = existing.id;
+                    if let Ok(edge) = self.graph.get_edge_mut(eid) {
+                        edge.weight = new_weight;
+                    }
+                } else {
+                    let eid = self.graph.next_edge_id();
+                    let edge = Edge {
+                        id: eid,
+                        source: id,
+                        target: cid,
+                        edge_type: EdgeType::Semantic,
+                        weight: score.clamp(0.0, 1.0),
+                        created_at: now,
+                        metadata: HashMap::new(),
+                    };
+                    self.graph.add_edge(edge)?;
+                }
+            }
+        }
+
         Ok(vec![id])
     }
 
@@ -359,7 +460,7 @@ mod tests {
             name: name.to_string(),
             summary: None,
             content: format!("Content for {}", name),
-            embedding: Some(vec![0.1, 0.2, 0.3]),
+            embedding: None,
             confidence: 0.9,
             node_type: KnowledgeType::Semantic,
             entity_tags: vec!["test".to_string()],
@@ -592,6 +693,97 @@ mod tests {
             report.nodes_decayed, 3,
             "all 3 episodic nodes should have decayed"
         );
+    }
+
+    #[test]
+    fn ingest_auto_links_similar_nodes() {
+        let mut engine = Engine::new();
+
+        let obs1 = Observation {
+            embedding: Some(vec![1.0, 0.0, 0.0]),
+            ..make_observation("node A")
+        };
+        let ids1 = engine.ingest(obs1).unwrap();
+
+        let obs2 = Observation {
+            embedding: Some(vec![0.95, 0.1, 0.0]),
+            ..make_observation("node B")
+        };
+        let ids2 = engine.ingest(obs2).unwrap();
+
+        assert_eq!(
+            engine.graph().edge_count(),
+            1,
+            "similar nodes should be auto-linked"
+        );
+        let edges = engine.graph().edges_from(ids2[0]);
+        assert_eq!(edges.len(), 1);
+        let edge = engine.graph().get_edge(edges[0]).unwrap();
+        assert_eq!(edge.target, ids1[0]);
+    }
+
+    #[test]
+    fn ingest_no_link_for_dissimilar_nodes() {
+        let mut engine = Engine::new();
+
+        let obs1 = Observation {
+            embedding: Some(vec![1.0, 0.0, 0.0]),
+            ..make_observation("node A")
+        };
+        engine.ingest(obs1).unwrap();
+
+        let obs2 = Observation {
+            embedding: Some(vec![0.0, 1.0, 0.0]),
+            ..make_observation("node B")
+        };
+        engine.ingest(obs2).unwrap();
+
+        assert_eq!(
+            engine.graph().edge_count(),
+            0,
+            "orthogonal nodes should not be linked"
+        );
+    }
+
+    #[test]
+    fn ingest_no_embedding_skips_attraction() {
+        let mut engine = Engine::new();
+
+        let obs1 = Observation {
+            embedding: Some(vec![1.0, 0.0, 0.0]),
+            ..make_observation("node A")
+        };
+        engine.ingest(obs1).unwrap();
+
+        let obs2 = Observation {
+            embedding: None,
+            ..make_observation("node B")
+        };
+        engine.ingest(obs2).unwrap();
+
+        assert_eq!(
+            engine.graph().edge_count(),
+            0,
+            "node without embedding should not trigger attraction"
+        );
+    }
+
+    #[test]
+    fn ingest_max_four_edges() {
+        let mut engine = Engine::new();
+
+        for i in 0..10 {
+            let obs = Observation {
+                embedding: Some(vec![1.0, 0.01 * i as f64, 0.0]),
+                ..make_observation(&format!("node-{i}"))
+            };
+            engine.ingest(obs).unwrap();
+        }
+
+        let all_ids = engine.graph().all_node_ids();
+        let last_id = *all_ids.iter().max_by_key(|id| id.0).unwrap();
+        let edge_count = engine.graph().edges_from(last_id).len();
+        assert!(edge_count <= 4, "max 4 edges per ingest, got {edge_count}");
     }
 
     #[test]

@@ -14,7 +14,7 @@ fn make_observation(name: &str, node_type: KnowledgeType) -> Observation {
         name: name.to_string(),
         summary: Some(format!("Summary of {}", name)),
         content: format!("Full content of {}", name),
-        embedding: Some(vec![0.1, 0.2, 0.3, 0.4]),
+        embedding: None,
         confidence: 0.9,
         node_type,
         entity_tags: vec!["test-entity".to_string()],

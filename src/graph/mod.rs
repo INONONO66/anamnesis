@@ -96,6 +96,11 @@ impl<S: StorageAdapter> Graph<S> {
         self.storage.get_edge(id)
     }
 
+    /// Retrieve a mutable reference to an edge.
+    pub fn get_edge_mut(&mut self, id: EdgeId) -> Result<&mut Edge, Error> {
+        self.storage.get_edge_mut(id)
+    }
+
     /// Remove an edge from the graph.
     pub fn remove_edge(&mut self, id: EdgeId) -> Result<(), Error> {
         self.storage.delete_edge(id)
