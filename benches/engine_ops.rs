@@ -2,14 +2,25 @@ use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_ma
 
 use anamnesis::api::Observation;
 use anamnesis::graph::node::Origin;
-use anamnesis::{EdgeType, Engine, KnowledgeType, Timestamp};
+use anamnesis::{EdgeType, Engine, EngineConfig, KnowledgeType, Timestamp};
+
+fn make_bench_engine() -> Engine {
+    // Disable perception gate for benchmarks (novelty_threshold=0)
+    Engine::with_config(
+        EngineConfig::new()
+            .with_novelty_threshold(0.0)
+            .with_confidence_threshold(0.0),
+    )
+}
 
 fn make_observation(i: u64) -> Observation {
+    // Distinct embeddings per node to avoid trivial deduplication
+    let angle = i as f64 * 0.1;
     Observation {
         name: format!("obs-{i}"),
         summary: None,
         content: format!("Observation content {i}"),
-        embedding: Some(vec![0.1, 0.2, 0.3]),
+        embedding: Some(vec![angle.cos(), angle.sin(), 0.1 * i as f64]),
         confidence: 0.9,
         node_type: KnowledgeType::Semantic,
         entity_tags: vec!["bench".to_string()],
@@ -25,7 +36,7 @@ fn make_observation(i: u64) -> Observation {
 
 fn bench_touch(c: &mut Criterion) {
     c.bench_function("touch_single", |b| {
-        let mut engine = Engine::new();
+        let mut engine = make_bench_engine();
         let ids = engine.ingest(make_observation(0)).unwrap();
         let node_id = ids[0];
         b.iter(|| engine.touch(black_box(node_id), Timestamp::now()).unwrap())
@@ -36,7 +47,7 @@ fn bench_touch_repeated(c: &mut Criterion) {
     let mut group = c.benchmark_group("touch_repeated");
     for count in [10usize, 100, 1_000] {
         group.bench_with_input(BenchmarkId::new("touches", count), &count, |b, &count| {
-            let mut engine = Engine::new();
+            let mut engine = make_bench_engine();
             let ids = engine.ingest(make_observation(0)).unwrap();
             let node_id = ids[0];
             b.iter(|| {
@@ -57,7 +68,7 @@ fn bench_ingest_link_workflow(c: &mut Criterion) {
             &size,
             |b, &size| {
                 b.iter(|| {
-                    let mut engine = Engine::new();
+                    let mut engine = make_bench_engine();
                     let mut all_ids = Vec::with_capacity(size);
                     for i in 0..size {
                         let ids = engine

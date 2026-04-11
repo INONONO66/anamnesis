@@ -2,14 +2,23 @@ use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_ma
 
 use anamnesis::api::Observation;
 use anamnesis::graph::node::Origin;
-use anamnesis::{EdgeType, Engine, KnowledgeType, Timestamp};
+use anamnesis::{EdgeType, Engine, EngineConfig, KnowledgeType, Timestamp};
+
+fn make_bench_engine() -> Engine {
+    Engine::with_config(
+        EngineConfig::new()
+            .with_novelty_threshold(0.0)
+            .with_confidence_threshold(0.0),
+    )
+}
 
 fn make_observation(i: u64) -> Observation {
+    let angle = i as f64 * 0.1;
     Observation {
         name: format!("node-{i}"),
         summary: None,
         content: format!("Content for observation {i}"),
-        embedding: Some(vec![0.1, 0.2, 0.3]),
+        embedding: Some(vec![angle.cos(), angle.sin(), 0.1 * i as f64]),
         confidence: 0.9,
         node_type: KnowledgeType::Semantic,
         entity_tags: vec!["bench".to_string()],
@@ -27,7 +36,7 @@ fn bench_ingest_single(c: &mut Criterion) {
     c.bench_function("ingest_single", |b| {
         let mut counter = 0u64;
         b.iter(|| {
-            let mut engine = Engine::new();
+            let mut engine = make_bench_engine();
             counter += 1;
             engine.ingest(black_box(make_observation(counter))).unwrap()
         })
@@ -39,7 +48,7 @@ fn bench_ingest_batch(c: &mut Criterion) {
     for size in [10usize, 100, 500] {
         group.bench_with_input(BenchmarkId::new("nodes", size), &size, |b, &size| {
             b.iter(|| {
-                let mut engine = Engine::new();
+                let mut engine = make_bench_engine();
                 for i in 0..size {
                     engine
                         .ingest(black_box(make_observation(i as u64)))
@@ -54,7 +63,7 @@ fn bench_ingest_batch(c: &mut Criterion) {
 fn bench_link(c: &mut Criterion) {
     c.bench_function("link_two_nodes", |b| {
         b.iter(|| {
-            let mut engine = Engine::new();
+            let mut engine = make_bench_engine();
             let ids1 = engine.ingest(make_observation(0)).unwrap();
             let ids2 = engine.ingest(make_observation(1)).unwrap();
             engine
@@ -74,7 +83,7 @@ fn bench_link_chain(c: &mut Criterion) {
     for size in [10usize, 100, 500] {
         group.bench_with_input(BenchmarkId::new("edges", size), &size, |b, &size| {
             b.iter(|| {
-                let mut engine = Engine::new();
+                let mut engine = make_bench_engine();
                 let mut prev = engine.ingest(make_observation(0)).unwrap();
                 for i in 1..size {
                     let curr = engine.ingest(make_observation(i as u64)).unwrap();
