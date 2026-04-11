@@ -93,11 +93,7 @@ pub fn edge_threshold(a: &KnowledgeType, b: &KnowledgeType) -> f64 {
         KnowledgeType::IdentityCore | KnowledgeType::IdentityLearned | KnowledgeType::IdentityState
     );
 
-    if either_is_identity {
-        0.65
-    } else {
-        0.72
-    }
+    if either_is_identity { 0.65 } else { 0.72 }
 }
 
 /// Returns true if an edge should be created between two nodes.

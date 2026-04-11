@@ -451,8 +451,8 @@ impl<S: StorageAdapter> Engine<S> {
         use crate::mechanics::attraction::cosine_similarity;
         use crate::mechanics::gravity::compute_mass;
         use crate::mechanics::repulsion::{apply_damping, compute_repulsion, rigidity};
-        use crate::query::activation::{initial_activation, spread_activation, NodeInfo};
-        use crate::query::assembly::{assemble_context_package, ScoredNode};
+        use crate::query::activation::{NodeInfo, initial_activation, spread_activation};
+        use crate::query::assembly::{ScoredNode, assemble_context_package};
         use crate::query::identity::compute_identity_prior;
         use crate::query::scoring::{final_score, scope_weight};
 
