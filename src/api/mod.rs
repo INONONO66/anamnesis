@@ -636,7 +636,7 @@ impl<S: StorageAdapter> Engine<S> {
             }
         }
 
-        let identity_activations: Vec<(KnowledgeType, f64)> = damped_activations
+        let identity_activations: Vec<(NodeId, KnowledgeType, f64)> = damped_activations
             .iter()
             .filter_map(|(&nid, &act)| {
                 let node = storage.get_node(nid).ok()?;
@@ -647,7 +647,7 @@ impl<S: StorageAdapter> Engine<S> {
                         | KnowledgeType::IdentityState
                 );
                 if is_identity {
-                    Some((node.node_type.clone(), act))
+                    Some((nid, node.node_type.clone(), act))
                 } else {
                     None
                 }

@@ -197,6 +197,7 @@ where
         }
     }
 
+    activations.retain(|id, _| visited.contains(id));
     activations
 }
 
@@ -403,6 +404,21 @@ mod tests {
             visited_with_activation.len() <= 6,
             "budget=2 should limit visited nodes, got {} entries",
             visited_with_activation.len()
+        );
+    }
+
+    #[test]
+    fn only_visited_nodes_returned() {
+        let (initial, info_fn) = make_linear_chain();
+        let result = spread_activation(initial, info_fn, 1, 0.01, 0.65);
+
+        assert!(
+            result.contains_key(&NodeId(0)),
+            "seed (visited) should be in results"
+        );
+        assert!(
+            !result.contains_key(&NodeId(1)),
+            "unvisited neighbor should not be in results"
         );
     }
 

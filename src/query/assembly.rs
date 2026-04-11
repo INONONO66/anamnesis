@@ -93,24 +93,32 @@ pub struct ScoredNode {
 ///
 /// Equation (14): T_agent = sum_{k in Identity(a)} rho_k * sum_{Contradicts(k)} w_neg * X_j
 ///
-/// # Parameters
-/// - `identity_activations`: `(node_type, activation)` for activated identity nodes
-/// - `contradicts_edges`: `(source_id, target_id, edge_weight)` for all Contradicts edges
-/// - `activations`: activation map for all nodes
+/// Only counts contradictions where the identity node is actually an endpoint
+/// (source or target). The "other" endpoint's activation is used as X_j.
 pub fn compute_agent_tension(
-    identity_activations: &[(KnowledgeType, f64)],
+    identity_activations: &[(NodeId, KnowledgeType, f64)],
     contradicts_edges: &[(NodeId, NodeId, f64)],
     activations: &HashMap<NodeId, f64>,
 ) -> f64 {
     let mut tension = 0.0;
 
-    for (kt, _identity_activation) in identity_activations {
+    for (identity_id, kt, _identity_activation) in identity_activations {
         let rho = rigidity(kt);
 
-        for (_source, target, w_neg) in contradicts_edges {
-            let target_activation = activations.get(target).copied().unwrap_or(0.0);
-            if target_activation > 0.0 {
-                tension += rho * w_neg * target_activation;
+        for (source, target, w_neg) in contradicts_edges {
+            let other = if source == identity_id {
+                Some(target)
+            } else if target == identity_id {
+                Some(source)
+            } else {
+                None
+            };
+
+            if let Some(other_id) = other {
+                let other_activation = activations.get(other_id).copied().unwrap_or(0.0);
+                if other_activation > 0.0 {
+                    tension += rho * w_neg * other_activation;
+                }
             }
         }
     }
@@ -128,7 +136,7 @@ pub fn compute_agent_tension(
 /// 6. Computes `agent_tension` via equation (14).
 pub fn assemble_context_package(
     mut scored_nodes: Vec<ScoredNode>,
-    identity_activations: &[(KnowledgeType, f64)],
+    identity_activations: &[(NodeId, KnowledgeType, f64)],
     contradicts_edges: &[(NodeId, NodeId, f64)],
     activations: &HashMap<NodeId, f64>,
     token_budget: usize,
@@ -330,17 +338,39 @@ mod tests {
 
     #[test]
     fn agent_tension_nonzero_with_identity_contradiction() {
+        let identity_id = NodeId(0);
         let contradicted = NodeId(1);
         let mut activations = HashMap::new();
+        activations.insert(identity_id, 0.9);
         activations.insert(contradicted, 0.8);
 
-        let identity_acts = vec![(KnowledgeType::IdentityCore, 0.9)];
-        let contradicts = vec![(NodeId(0), contradicted, 0.8)];
+        let identity_acts = vec![(identity_id, KnowledgeType::IdentityCore, 0.9)];
+        let contradicts = vec![(identity_id, contradicted, 0.8)];
 
         let tension = compute_agent_tension(&identity_acts, &contradicts, &activations);
         assert!(
             tension > 0.0,
             "tension should be > 0 with active contradiction"
+        );
+    }
+
+    #[test]
+    fn agent_tension_ignores_unrelated_contradictions() {
+        let identity_id = NodeId(0);
+        let unrelated_a = NodeId(5);
+        let unrelated_b = NodeId(6);
+        let mut activations = HashMap::new();
+        activations.insert(identity_id, 0.9);
+        activations.insert(unrelated_a, 0.8);
+        activations.insert(unrelated_b, 0.7);
+
+        let identity_acts = vec![(identity_id, KnowledgeType::IdentityCore, 0.9)];
+        let contradicts = vec![(unrelated_a, unrelated_b, 0.9)];
+
+        let tension = compute_agent_tension(&identity_acts, &contradicts, &activations);
+        assert_eq!(
+            tension, 0.0,
+            "unrelated contradictions should not affect identity tension"
         );
     }
 
