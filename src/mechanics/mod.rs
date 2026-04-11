@@ -10,5 +10,6 @@
 
 pub mod attraction;
 pub mod forgetting;
-// pub mod gravity;
+pub mod gravity;
+pub mod repulsion;
 // pub mod perception;
