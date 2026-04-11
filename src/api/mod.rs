@@ -130,7 +130,6 @@ pub struct ReflectReport {
 /// perform real operations. Other methods return placeholder results.
 pub struct Engine<S: StorageAdapter = InMemoryStorage> {
     graph: Graph<S>,
-    #[allow(dead_code)] // Used in Phase 2 for perception gating
     config: EngineConfig,
 }
 
@@ -177,6 +176,34 @@ impl<S: StorageAdapter> Engine<S> {
             attraction_score, cosine_similarity, should_create_edge, strengthen_edge, tau_type,
         };
         use crate::mechanics::gravity::compute_mass;
+        use crate::mechanics::perception::gate_observation;
+
+        let max_similarity = if let Some(ref new_embedding) = observation.embedding {
+            self.graph
+                .storage()
+                .all_node_ids()
+                .iter()
+                .filter_map(|&nid| {
+                    self.graph.storage().get_node(nid).ok().and_then(|n| {
+                        n.embedding
+                            .as_ref()
+                            .map(|emb| cosine_similarity(new_embedding, emb))
+                    })
+                })
+                .fold(0.0_f64, f64::max)
+        } else {
+            0.0
+        };
+
+        gate_observation(
+            observation.confidence,
+            self.config.confidence_threshold,
+            self.graph.node_count(),
+            self.config.max_nodes,
+            max_similarity,
+            self.config.novelty_threshold,
+        )
+        .map_err(Error::Rejected)?;
 
         let id = self.graph.next_node_id();
         let now = observation.timestamp;
@@ -697,7 +724,8 @@ mod tests {
 
     #[test]
     fn ingest_auto_links_similar_nodes() {
-        let mut engine = Engine::new();
+        let config = EngineConfig::new().with_novelty_threshold(0.0);
+        let mut engine = Engine::with_config(config);
 
         let obs1 = Observation {
             embedding: Some(vec![1.0, 0.0, 0.0]),
@@ -770,7 +798,8 @@ mod tests {
 
     #[test]
     fn ingest_max_four_edges() {
-        let mut engine = Engine::new();
+        let config = EngineConfig::new().with_novelty_threshold(0.0);
+        let mut engine = Engine::with_config(config);
 
         for i in 0..10 {
             let obs = Observation {
@@ -784,6 +813,57 @@ mod tests {
         let last_id = *all_ids.iter().max_by_key(|id| id.0).unwrap();
         let edge_count = engine.graph().edges_from(last_id).len();
         assert!(edge_count <= 4, "max 4 edges per ingest, got {edge_count}");
+    }
+
+    #[test]
+    fn ingest_rejects_low_confidence() {
+        let config = EngineConfig::new().with_confidence_threshold(0.8);
+        let mut engine = Engine::with_config(config);
+
+        let obs = Observation {
+            confidence: 0.5,
+            ..make_observation("low confidence")
+        };
+        let result = engine.ingest(obs);
+        assert!(matches!(result, Err(Error::Rejected(_))));
+    }
+
+    #[test]
+    fn ingest_rejects_over_budget() {
+        let config = EngineConfig::new().with_max_nodes(2);
+        let mut engine = Engine::with_config(config);
+
+        engine.ingest(make_observation("node 1")).unwrap();
+        engine.ingest(make_observation("node 2")).unwrap();
+
+        let result = engine.ingest(make_observation("node 3"));
+        assert!(matches!(result, Err(Error::Rejected(_))));
+    }
+
+    #[test]
+    fn ingest_rejects_duplicate_embedding() {
+        let config = EngineConfig::new().with_novelty_threshold(0.3);
+        let mut engine = Engine::with_config(config);
+
+        let obs1 = Observation {
+            embedding: Some(vec![1.0, 0.0, 0.0]),
+            ..make_observation("original")
+        };
+        engine.ingest(obs1).unwrap();
+
+        let obs2 = Observation {
+            embedding: Some(vec![1.0, 0.001, 0.0]),
+            ..make_observation("duplicate")
+        };
+        let result = engine.ingest(obs2);
+        assert!(matches!(result, Err(Error::Rejected(_))));
+    }
+
+    #[test]
+    fn ingest_accepts_valid_observation() {
+        let mut engine = Engine::new();
+        let result = engine.ingest(make_observation("valid"));
+        assert!(result.is_ok());
     }
 
     #[test]
