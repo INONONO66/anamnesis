@@ -80,9 +80,10 @@ pub struct Observation {
 /// Report returned by Engine::tick().
 #[derive(Debug, Clone, Default)]
 pub struct TickReport {
-    /// Number of nodes whose salience was updated.
+    /// Number of nodes whose salience changed during this tick.
     pub nodes_decayed: usize,
-    /// Number of nodes pruned (salience reached 0).
+    /// Number of nodes whose salience reached their type-specific floor during this tick.
+    /// These nodes are dormant (near-zero activity) but remain in the graph.
     pub nodes_pruned: usize,
 }
 
@@ -462,28 +463,31 @@ impl<S: StorageAdapter> Engine<S> {
         let storage = self.graph.storage();
 
         // --- Stage 1: Collect identity nodes for this agent ---
-        let agent_id = config.agent_id.as_deref().unwrap_or("");
-        let identity_nodes: Vec<(Vec<f64>, KnowledgeType, f64)> = storage
-            .all_node_ids()
-            .iter()
-            .filter_map(|&nid| {
-                let node = storage.get_node(nid).ok()?;
-                let is_identity = matches!(
-                    node.node_type,
-                    KnowledgeType::IdentityCore
-                        | KnowledgeType::IdentityLearned
-                        | KnowledgeType::IdentityState
-                );
-                let is_agent = agent_id.is_empty() || node.origin.agent_id == agent_id;
-                if is_identity && is_agent {
-                    let emb = node.embedding.clone().unwrap_or_default();
-                    let salience = storage.get_salience(nid).unwrap_or(0.0);
-                    Some((emb, node.node_type.clone(), salience))
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let identity_nodes: Vec<(Vec<f64>, KnowledgeType, f64)> =
+            if let Some(ref agent_id) = config.agent_id {
+                storage
+                    .all_node_ids()
+                    .iter()
+                    .filter_map(|&nid| {
+                        let node = storage.get_node(nid).ok()?;
+                        let is_identity = matches!(
+                            node.node_type,
+                            KnowledgeType::IdentityCore
+                                | KnowledgeType::IdentityLearned
+                                | KnowledgeType::IdentityState
+                        );
+                        if is_identity && node.origin.agent_id == *agent_id {
+                            let emb = node.embedding.clone().unwrap_or_default();
+                            let salience = storage.get_salience(nid).unwrap_or(0.0);
+                            Some((emb, node.node_type.clone(), salience))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            } else {
+                vec![]
+            };
 
         // --- Stage 2: Compute initial activations (eq 10) ---
         let mut initial_activations: HashMap<NodeId, f64> = HashMap::new();
@@ -545,6 +549,7 @@ impl<S: StorageAdapter> Engine<S> {
             budget,
             config.min_activation,
             config.decay_per_hop,
+            config.max_hops,
         );
 
         // --- Stage 4: Repulsion damping (eqs 7-8) ---

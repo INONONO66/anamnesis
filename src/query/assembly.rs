@@ -41,10 +41,8 @@ pub fn is_memory_type(kt: &KnowledgeType) -> bool {
 ///
 /// Uses a simple character-based heuristic: `len / chars_per_token` (ceiling).
 pub fn estimate_tokens(text: &str, chars_per_token: usize) -> usize {
-    if chars_per_token == 0 {
-        return 0;
-    }
-    text.len().div_ceil(chars_per_token)
+    let cpt = chars_per_token.max(1);
+    text.chars().count().div_ceil(cpt)
 }
 
 /// Resolution level for fragment content.

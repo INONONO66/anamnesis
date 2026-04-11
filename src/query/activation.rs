@@ -58,11 +58,11 @@ pub fn propagation_strength(
         .clamp(0.0, 1.0)
 }
 
-/// A node with its activation score, for use in the priority queue.
 #[derive(Debug, Clone, PartialEq)]
 struct ActivationEntry {
     activation: f64,
     node_id: NodeId,
+    depth: usize,
 }
 
 impl Eq for ActivationEntry {}
@@ -112,6 +112,7 @@ pub fn spread_activation<F>(
     budget: usize,
     min_activation: f64,
     hop_decay: f64,
+    max_hops: usize,
 ) -> HashMap<NodeId, f64>
 where
     F: Fn(NodeId) -> Option<NodeInfo>,
@@ -120,12 +121,12 @@ where
     let mut visited: HashSet<NodeId> = HashSet::new();
     let mut queue: BinaryHeap<ActivationEntry> = BinaryHeap::new();
 
-    // Initialize queue with seed nodes
     for (node_id, activation) in &initial_activations {
         if *activation > min_activation {
             queue.push(ActivationEntry {
                 activation: *activation,
                 node_id: *node_id,
+                depth: 0,
             });
         }
     }
@@ -151,47 +152,49 @@ where
             None => continue,
         };
 
-        for (target_id, edge_weight, edge_type, is_forward) in &info.outgoing_edges {
-            // Skip Contradicts edges — they apply repulsion, not propagation
-            if matches!(edge_type, EdgeType::Contradicts) {
-                continue;
-            }
+        if entry.depth < max_hops {
+            for (target_id, edge_weight, edge_type, is_forward) in &info.outgoing_edges {
+                if matches!(edge_type, EdgeType::Contradicts) {
+                    continue;
+                }
 
-            let kappa = edge_type.kappa(*is_forward);
-            if kappa == 0.0 {
-                continue;
-            }
+                let kappa = edge_type.kappa(*is_forward);
+                if kappa == 0.0 {
+                    continue;
+                }
 
-            let target_info = match node_info_fn(*target_id) {
-                Some(info) => info,
-                None => continue,
-            };
+                let target_info = match node_info_fn(*target_id) {
+                    Some(info) => info,
+                    None => continue,
+                };
 
-            let target_gate = salience_gate(target_info.salience);
-            let target_boost = 1.0 + 0.20 * target_info.mass;
+                let target_gate = salience_gate(target_info.salience);
+                let target_boost = 1.0 + 0.20 * target_info.mass;
 
-            let new_activation = propagation_strength(
-                entry.activation,
-                *edge_weight,
-                kappa,
-                hop_decay,
-                target_gate,
-                target_boost,
-            );
+                let new_activation = propagation_strength(
+                    entry.activation,
+                    *edge_weight,
+                    kappa,
+                    hop_decay,
+                    target_gate,
+                    target_boost,
+                );
 
-            if new_activation < min_activation {
-                continue;
-            }
+                if new_activation < min_activation {
+                    continue;
+                }
 
-            let current = activations.get(target_id).copied().unwrap_or(0.0);
-            if new_activation > current {
-                activations.insert(*target_id, new_activation);
+                let current = activations.get(target_id).copied().unwrap_or(0.0);
+                if new_activation > current {
+                    activations.insert(*target_id, new_activation);
 
-                if !visited.contains(target_id) {
-                    queue.push(ActivationEntry {
-                        activation: new_activation,
-                        node_id: *target_id,
-                    });
+                    if !visited.contains(target_id) {
+                        queue.push(ActivationEntry {
+                            activation: new_activation,
+                            node_id: *target_id,
+                            depth: entry.depth + 1,
+                        });
+                    }
                 }
             }
         }
@@ -281,7 +284,7 @@ mod tests {
     #[test]
     fn linear_chain_activation_decays() {
         let (initial, info_fn) = make_linear_chain();
-        let result = spread_activation(initial, info_fn, 100, 0.01, 0.65);
+        let result = spread_activation(initial, info_fn, 100, 0.01, 0.65, 10);
 
         let a_act = result[&NodeId(0)];
         let b_act = result[&NodeId(1)];
@@ -329,7 +332,7 @@ mod tests {
         };
 
         // Should terminate without panic
-        let result = spread_activation(initial, info_fn, 100, 0.01, 0.65);
+        let result = spread_activation(initial, info_fn, 100, 0.01, 0.65, 10);
         assert!(result.len() <= 3, "should visit at most 3 nodes in cycle");
     }
 
@@ -357,7 +360,7 @@ mod tests {
             }
         };
 
-        let result = spread_activation(initial, info_fn, 100, 0.01, 0.65);
+        let result = spread_activation(initial, info_fn, 100, 0.01, 0.65, 10);
         // B should NOT be activated (Contradicts edge skipped)
         assert!(
             !result.contains_key(&b) || result[&b] == 0.0,
@@ -395,22 +398,18 @@ mod tests {
             }
         };
 
-        // Budget = 2: should visit A + at most 1 neighbor
-        let result = spread_activation(initial, info_fn, 2, 0.01, 0.65);
-        // activations map includes seeds + propagated, but only 2 nodes visited
-        // All 5 neighbors get activation from A (added to map), but only 1 gets visited
-        let visited_with_activation: Vec<_> = result.iter().collect();
+        let result = spread_activation(initial, info_fn, 2, 0.01, 0.65, 10);
         assert!(
-            visited_with_activation.len() <= 6,
-            "budget=2 should limit visited nodes, got {} entries",
-            visited_with_activation.len()
+            result.len() <= 2,
+            "budget=2 should visit at most 2 nodes, got {} entries",
+            result.len()
         );
     }
 
     #[test]
     fn only_visited_nodes_returned() {
         let (initial, info_fn) = make_linear_chain();
-        let result = spread_activation(initial, info_fn, 1, 0.01, 0.65);
+        let result = spread_activation(initial, info_fn, 1, 0.01, 0.65, 10);
 
         assert!(
             result.contains_key(&NodeId(0)),
@@ -419,6 +418,25 @@ mod tests {
         assert!(
             !result.contains_key(&NodeId(1)),
             "unvisited neighbor should not be in results"
+        );
+    }
+
+    #[test]
+    fn max_hops_limits_depth() {
+        let (initial, info_fn) = make_linear_chain();
+        let result = spread_activation(initial, info_fn, 100, 0.001, 0.65, 1);
+
+        assert!(
+            result.contains_key(&NodeId(0)),
+            "seed at depth 0 should be visited"
+        );
+        assert!(
+            result.contains_key(&NodeId(1)),
+            "node at depth 1 should be visited"
+        );
+        assert!(
+            !result.contains_key(&NodeId(2)),
+            "node at depth 2 should NOT be visited with max_hops=1"
         );
     }
 
@@ -440,7 +458,7 @@ mod tests {
             }
         };
 
-        let result = spread_activation(initial, info_fn, 100, 0.02, 0.65);
+        let result = spread_activation(initial, info_fn, 100, 0.02, 0.65, 10);
         // With 0.05 initial and 0.65 decay, should stop quickly
         assert!(
             result.len() < 10,

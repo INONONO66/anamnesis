@@ -41,8 +41,10 @@ pub fn compute_identity_prior(
         return 0.0;
     }
 
-    // Sort by salience descending, take top 3
-    let mut sorted: Vec<&(Vec<f64>, KnowledgeType, f64)> = identity_nodes.iter().collect();
+    let mut sorted: Vec<&(Vec<f64>, KnowledgeType, f64)> = identity_nodes
+        .iter()
+        .filter(|(emb, _, _)| !emb.is_empty())
+        .collect();
     sorted.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
     sorted.truncate(3);
 
@@ -110,6 +112,19 @@ mod tests {
         let result = compute_identity_prior(node_emb, &identity, cosine_similarity);
         // Top-3 are the last 3 (salience 0.9, 0.8, 0.7), all match → result = 1.0
         assert!((result - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn empty_embedding_identity_nodes_filtered() {
+        let identity = vec![
+            (vec![], KnowledgeType::IdentityCore, 0.9),
+            (vec![1.0, 0.0], KnowledgeType::IdentityLearned, 0.8),
+        ];
+        let result = compute_identity_prior(&[1.0, 0.0], &identity, cosine_similarity);
+        assert!(
+            (result - 0.6).abs() < 1e-10,
+            "should use IdentityLearned (0.6 weight), got {result}"
+        );
     }
 
     #[test]

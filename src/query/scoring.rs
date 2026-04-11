@@ -14,20 +14,18 @@ pub fn scope_weight(
     node_project: &Option<String>,
     shared_entity_count: usize,
 ) -> f64 {
-    let base = match (query_project, node_project) {
+    match (query_project, node_project) {
         (Some(q), Some(n)) if q == n => 1.0,
-        (_, None) => 0.85,
-        (None, Some(_)) => 0.85,
-        _ => 0.30,
-    };
-
-    let bonus = match shared_entity_count {
-        0 => 0.0,
-        1 => 0.15,
-        _ => 0.25,
-    };
-
-    f64::min(base + bonus, 1.0)
+        (_, None) | (None, Some(_)) => 0.85,
+        _ => {
+            let bonus = match shared_entity_count {
+                0 => 0.0,
+                1 => 0.15,
+                _ => 0.25,
+            };
+            f64::min(0.30 + bonus, 1.0)
+        }
+    }
 }
 
 /// Computes the final relevance score for a node.
@@ -89,6 +87,18 @@ mod tests {
     fn scope_weight_capped_at_one() {
         let w = scope_weight(&Some("proj-a".to_string()), &Some("proj-a".to_string()), 5);
         assert_eq!(w, 1.0);
+    }
+
+    #[test]
+    fn entity_bonus_not_applied_to_same_project() {
+        let w = scope_weight(&Some("proj-a".to_string()), &Some("proj-a".to_string()), 3);
+        assert_eq!(w, 1.0);
+    }
+
+    #[test]
+    fn entity_bonus_not_applied_to_universal() {
+        let w = scope_weight(&Some("proj-a".to_string()), &None, 3);
+        assert_eq!(w, 0.85);
     }
 
     #[test]

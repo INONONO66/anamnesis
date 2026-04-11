@@ -27,6 +27,10 @@ pub fn gate_observation(
     max_similarity: f64,
     novelty_threshold: f64,
 ) -> Result<(), String> {
+    if !confidence.is_finite() || !novelty_threshold.is_finite() || !max_similarity.is_finite() {
+        return Err("non-finite input value".to_string());
+    }
+
     if confidence < confidence_threshold {
         return Err(format!(
             "confidence {:.2} below threshold {:.2}",
@@ -90,6 +94,25 @@ mod tests {
         assert!(gate_observation(0.5, 0.5, 10, 100, 0.0, 0.3).is_ok());
         // novelty exactly at threshold (max_sim = 0.7 → novelty = 0.3)
         assert!(gate_observation(0.9, 0.5, 10, 100, 0.7, 0.3).is_ok());
+    }
+
+    #[test]
+    fn nan_confidence_rejected() {
+        let result = gate_observation(f64::NAN, 0.5, 10, 100, 0.0, 0.3);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("non-finite"));
+    }
+
+    #[test]
+    fn nan_similarity_rejected() {
+        let result = gate_observation(0.9, 0.5, 10, 100, f64::NAN, 0.3);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn infinity_rejected() {
+        let result = gate_observation(f64::INFINITY, 0.5, 10, 100, 0.0, 0.3);
+        assert!(result.is_err());
     }
 
     #[test]
