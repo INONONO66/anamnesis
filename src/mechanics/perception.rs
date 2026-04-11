@@ -55,6 +55,7 @@ pub fn gate_observation(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn valid_observation_passes() {
@@ -95,5 +96,33 @@ mod tests {
     fn no_existing_nodes_always_novel() {
         // max_similarity = 0.0 when no existing nodes → novelty = 1.0
         assert!(gate_observation(0.9, 0.5, 0, 100, 0.0, 0.3).is_ok());
+    }
+
+    proptest! {
+        #[test]
+        fn valid_observation_always_passes_with_extreme_budget(
+            confidence in 0.5f64..=1.0,
+            count in 0usize..=999,
+            max_sim in 0.0f64..=0.69,
+        ) {
+            let result = gate_observation(confidence, 0.5, count, 1000, max_sim, 0.3);
+            prop_assert!(result.is_ok(), "valid observation should pass: {:?}", result);
+        }
+
+        #[test]
+        fn low_confidence_always_rejected(
+            confidence in 0.0f64..0.5,
+        ) {
+            let result = gate_observation(confidence, 0.5, 0, 1000, 0.0, 0.3);
+            prop_assert!(result.is_err(), "low confidence should be rejected");
+        }
+
+        #[test]
+        fn over_budget_always_rejected(
+            count in 100usize..=200,
+        ) {
+            let result = gate_observation(0.9, 0.5, count, 100, 0.0, 0.3);
+            prop_assert!(result.is_err(), "over-budget should be rejected");
+        }
     }
 }
