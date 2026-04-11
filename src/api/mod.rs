@@ -225,8 +225,7 @@ impl<S: StorageAdapter> Engine<S> {
     ///
     /// Phase 1: Updates accessed_at and increments access_count.
     /// Phase 2 will add: lazy decay application + salience reinforcement (eq. 5).
-    pub fn touch(&mut self, node_id: NodeId) -> Result<(), Error> {
-        let now = Timestamp::now();
+    pub fn touch(&mut self, node_id: NodeId, now: Timestamp) -> Result<(), Error> {
         self.graph.storage_mut().set_accessed_at(node_id, now)?;
         let node = self.graph.get_node_mut(node_id)?;
         node.access_count += 1;
@@ -352,8 +351,8 @@ mod tests {
     fn touch_increments_access_count() {
         let mut engine = Engine::new();
         let ids = engine.ingest(make_observation("node")).unwrap();
-        engine.touch(ids[0]).unwrap();
-        engine.touch(ids[0]).unwrap();
+        engine.touch(ids[0], Timestamp::now()).unwrap();
+        engine.touch(ids[0], Timestamp::now()).unwrap();
         let node = engine.graph().get_node(ids[0]).unwrap();
         assert_eq!(node.access_count, 2);
     }
@@ -407,7 +406,7 @@ mod tests {
     fn touch_updates_accessed_at_to_nonzero() {
         let mut engine = Engine::new();
         let ids = engine.ingest(make_observation("node")).unwrap();
-        engine.touch(ids[0]).unwrap();
+        engine.touch(ids[0], Timestamp::now()).unwrap();
         let node = engine.graph().get_node(ids[0]).unwrap();
         assert!(node.accessed_at.0 > 0);
     }

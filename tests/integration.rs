@@ -58,8 +58,8 @@ fn engine_full_lifecycle() {
     assert_eq!(edge.weight, 0.78);
 
     // 3. Touch a node
-    engine.touch(ids1[0]).unwrap();
-    engine.touch(ids1[0]).unwrap();
+    engine.touch(ids1[0], Timestamp(2000)).unwrap();
+    engine.touch(ids1[0], Timestamp(2000)).unwrap();
     let node = engine.graph().get_node(ids1[0]).unwrap();
     assert_eq!(node.access_count, 2);
 
