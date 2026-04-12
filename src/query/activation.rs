@@ -128,7 +128,6 @@ where
                 node_id: *node_id,
                 depth: 0,
             });
-            best_depth.insert(*node_id, 0);
         }
     }
 
@@ -141,9 +140,8 @@ where
         if entry.activation < min_activation {
             break;
         }
-        // Skip if already processed at same or shorter depth
         if let Some(&prev_depth) = best_depth.get(&entry.node_id) {
-            if entry.depth > prev_depth {
+            if entry.depth >= prev_depth {
                 continue;
             }
         }
