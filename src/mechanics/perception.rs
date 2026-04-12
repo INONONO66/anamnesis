@@ -27,7 +27,11 @@ pub fn gate_observation(
     max_similarity: f64,
     novelty_threshold: f64,
 ) -> Result<(), String> {
-    if !confidence.is_finite() || !novelty_threshold.is_finite() || !max_similarity.is_finite() {
+    if !confidence.is_finite()
+        || !confidence_threshold.is_finite()
+        || !novelty_threshold.is_finite()
+        || !max_similarity.is_finite()
+    {
         return Err("non-finite input value".to_string());
     }
 

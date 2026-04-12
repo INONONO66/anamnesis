@@ -7,7 +7,7 @@
 //! - (11) Spreading: y_j^(h+1) = y_i^(h) * w_eff * delta * psi(s) * (1 + 0.20*m)
 
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::{BinaryHeap, HashMap};
 
 use crate::graph::{EdgeType, NodeId};
 
@@ -118,7 +118,7 @@ where
     F: Fn(NodeId) -> Option<NodeInfo>,
 {
     let mut activations: HashMap<NodeId, f64> = initial_activations.clone();
-    let mut visited: HashSet<NodeId> = HashSet::new();
+    let mut best_depth: HashMap<NodeId, usize> = HashMap::new();
     let mut queue: BinaryHeap<ActivationEntry> = BinaryHeap::new();
 
     for (node_id, activation) in &initial_activations {
@@ -128,6 +128,7 @@ where
                 node_id: *node_id,
                 depth: 0,
             });
+            best_depth.insert(*node_id, 0);
         }
     }
 
@@ -140,11 +141,14 @@ where
         if entry.activation < min_activation {
             break;
         }
-        if visited.contains(&entry.node_id) {
-            continue;
+        // Skip if already processed at same or shorter depth
+        if let Some(&prev_depth) = best_depth.get(&entry.node_id) {
+            if entry.depth > prev_depth {
+                continue;
+            }
         }
 
-        visited.insert(entry.node_id);
+        best_depth.insert(entry.node_id, entry.depth);
         nodes_visited += 1;
 
         let info = match node_info_fn(entry.node_id) {
@@ -188,7 +192,7 @@ where
                 if new_activation > current {
                     activations.insert(*target_id, new_activation);
 
-                    if !visited.contains(target_id) {
+                    if !best_depth.contains_key(target_id) {
                         queue.push(ActivationEntry {
                             activation: new_activation,
                             node_id: *target_id,
@@ -200,7 +204,7 @@ where
         }
     }
 
-    activations.retain(|id, _| visited.contains(id));
+    activations.retain(|id, _| best_depth.contains_key(id));
     activations
 }
 
