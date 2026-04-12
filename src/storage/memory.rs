@@ -178,6 +178,14 @@ impl StorageAdapter for InMemoryStorage {
             .ok_or(Error::EdgeNotFound(id))
     }
 
+    fn get_edge_mut(&mut self, id: EdgeId) -> Result<&mut Edge, Error> {
+        let idx = id.0 as usize;
+        self.edges
+            .get_mut(idx)
+            .and_then(|slot| slot.as_mut())
+            .ok_or(Error::EdgeNotFound(id))
+    }
+
     fn delete_edge(&mut self, id: EdgeId) -> Result<(), Error> {
         let idx = id.0 as usize;
         let edge = self

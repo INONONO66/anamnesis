@@ -3,6 +3,19 @@
 use crate::graph::Origin;
 use crate::graph::{KnowledgeType, NodeId, Timestamp};
 
+/// Scope of a knowledge fragment relative to the current query context.
+///
+/// Derived from `Origin.project_id` at query assembly time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Scope {
+    /// Node belongs to the same project as the query.
+    SameProject,
+    /// Node has no project (universal knowledge).
+    Universal,
+    /// Node belongs to a different project.
+    OtherProject(String),
+}
+
 /// Query modes for different retrieval patterns.
 ///
 /// Each mode corresponds to a different agent retrieval need.
@@ -52,6 +65,12 @@ pub struct QueryConfig {
     pub agent_id: Option<String>,
     /// Token budget for ContextPackage assembly.
     pub token_budget: usize,
+    /// Embedding vector for the query. Used for vector similarity in initial activation (eq 10).
+    pub query_embedding: Option<Vec<f64>>,
+    /// Project context for scope weighting (eq 13). None = universal query.
+    pub project_id: Option<String>,
+    /// Characters per token for budget estimation. Default: 4.
+    pub chars_per_token: usize,
 }
 
 impl Default for QueryConfig {
@@ -63,6 +82,9 @@ impl Default for QueryConfig {
             max_hops: 6,
             agent_id: None,
             token_budget: 4000,
+            query_embedding: None,
+            project_id: None,
+            chars_per_token: 4,
         }
     }
 }
@@ -86,6 +108,8 @@ pub struct Fragment {
     pub relevance: f64,
     /// Provenance of the source node.
     pub origin: Origin,
+    /// Scope of this fragment relative to the query context.
+    pub scope: Scope,
 }
 
 /// An active contradiction between two nodes.
@@ -218,12 +242,29 @@ mod tests {
     }
 
     #[test]
+    fn scope_variants() {
+        let s1 = Scope::SameProject;
+        let s2 = Scope::Universal;
+        let s3 = Scope::OtherProject("other".to_string());
+        assert_ne!(s1, s2);
+        assert_ne!(s2, s3);
+    }
+
+    #[test]
     fn query_config_default() {
         let config = QueryConfig::default();
         assert_eq!(config.budget, 500);
         assert_eq!(config.decay_per_hop, 0.65);
         assert_eq!(config.min_activation, 0.02);
         assert!(config.agent_id.is_none());
+    }
+
+    #[test]
+    fn query_config_new_fields() {
+        let config = QueryConfig::default();
+        assert!(config.query_embedding.is_none());
+        assert!(config.project_id.is_none());
+        assert_eq!(config.chars_per_token, 4);
     }
 
     #[test]
@@ -259,6 +300,7 @@ mod tests {
             node_type: KnowledgeType::Convention,
             relevance: 0.85,
             origin: make_origin(),
+            scope: Scope::Universal,
         };
         assert_eq!(frag.relevance, 0.85);
         assert!(frag.content.is_none());

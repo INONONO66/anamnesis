@@ -14,7 +14,7 @@ fn make_observation(name: &str, node_type: KnowledgeType) -> Observation {
         name: name.to_string(),
         summary: Some(format!("Summary of {}", name)),
         content: format!("Full content of {}", name),
-        embedding: Some(vec![0.1, 0.2, 0.3, 0.4]),
+        embedding: None,
         confidence: 0.9,
         node_type,
         entity_tags: vec!["test-entity".to_string()],
@@ -58,23 +58,25 @@ fn engine_full_lifecycle() {
     assert_eq!(edge.weight, 0.78);
 
     // 3. Touch a node
-    engine.touch(ids1[0]).unwrap();
-    engine.touch(ids1[0]).unwrap();
+    engine.touch(ids1[0], Timestamp(2000)).unwrap();
+    engine.touch(ids1[0], Timestamp(2000)).unwrap();
     let node = engine.graph().get_node(ids1[0]).unwrap();
     assert_eq!(node.access_count, 2);
 
-    // 4. Tick (placeholder — no-op in Phase 1)
+    // 4. Tick — ids2[0] has dt=1s from ingest, ids1[0] was just touched so dt=0
     let report = engine.tick(Timestamp(2000)).unwrap();
-    assert_eq!(report.nodes_decayed, 0);
+    assert_eq!(report.nodes_decayed, 1);
 
-    // 5. Query (placeholder — returns empty in Phase 1)
+    // 5. Query — Associative returns real results in Phase 2
     let q = Query::Associative {
         seed: ids1[0],
         budget: 100,
     };
     let pkg = engine.query(&q, &QueryConfig::default()).unwrap();
-    assert_eq!(pkg.total_fragments(), 0);
-    assert_eq!(pkg.agent_tension, 0.0);
+    assert!(
+        pkg.total_fragments() > 0,
+        "Associative query should return results"
+    );
 
     // 6. Merge candidates (placeholder)
     let candidates = engine.merge_candidates(0.9).unwrap();
@@ -171,12 +173,8 @@ fn query_all_modes_compile() {
     let engine = Engine::new();
     let config = QueryConfig::default();
 
-    // All 5 query modes should compile and return Ok
+    // Non-Associative modes return Ok(empty). Associative needs a real seed.
     let queries = vec![
-        Query::Associative {
-            seed: anamnesis::NodeId(0),
-            budget: 10,
-        },
         Query::TypeFiltered {
             node_type: KnowledgeType::Convention,
             limit: 5,

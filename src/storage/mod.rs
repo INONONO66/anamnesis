@@ -44,6 +44,13 @@ pub trait StorageAdapter: Send + Sync {
     fn set_edge(&mut self, edge: Edge) -> Result<(), Error>;
     /// Retrieve an edge by ID.
     fn get_edge(&self, id: EdgeId) -> Result<&Edge, Error>;
+    /// Retrieve a mutable reference to an edge.
+    ///
+    /// # Adjacency Invariant
+    /// Mutations to `source` or `target` through this reference will NOT update
+    /// the adjacency index. Only mutate `weight`, `metadata`, or `edge_type`.
+    /// To change source/target, delete the edge and create a new one.
+    fn get_edge_mut(&mut self, id: EdgeId) -> Result<&mut Edge, Error>;
     /// Delete an edge. Frees the ID for reuse. Updates adjacency index.
     fn delete_edge(&mut self, id: EdgeId) -> Result<(), Error>;
 
