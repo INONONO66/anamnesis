@@ -65,20 +65,20 @@ impl Engine {
     /// Create a new engine with configuration
     pub fn new(config: EngineConfig) -> Self;
 
-    /// Ingest a new observation into the graph (⬚ perception gating not yet applied)
+    /// Ingest a new observation — applies perception gating and attraction auto-linking
     pub fn ingest(&mut self, observation: Observation) -> Result<Vec<NodeId>, Error>;
 
     /// Create/strengthen a link between two nodes
     pub fn link(&mut self, from: NodeId, to: NodeId, edge_type: EdgeType, weight: f64) -> Result<EdgeId, Error>;
 
-    /// ⬚ Advance time — apply decay to all nodes (currently no-op)
+    /// Advance time — apply decay to all nodes, returns TickReport
     pub fn tick(&mut self, now: Timestamp) -> Result<TickReport, Error>;
 
-    /// ⬚ Query the graph — find relevant subgraph from seed (currently returns seed only)
-    pub fn query(&self, seed: &Query, budget: usize) -> Result<SubGraph, Error>;
+    /// Query the graph — Associative mode returns structured ContextPackage (other modes Phase 3)
+    pub fn query(&self, query: &Query, config: &QueryConfig) -> Result<ContextPackage, Error>;
 
-    /// Touch a node — reinforce on access (memory strengthening)
-    pub fn touch(&mut self, node_id: NodeId) -> Result<(), Error>;
+    /// Touch a node — apply lazy decay then reinforce on access
+    pub fn touch(&mut self, node_id: NodeId, now: Timestamp) -> Result<(), Error>;
 
     /// ⬚ Get merge candidates (currently returns empty)
     pub fn merge_candidates(&self, threshold: f64) -> Result<Vec<MergePair>, Error>;
@@ -101,16 +101,20 @@ impl Engine {
 - ❌ Serialization format opinions (consumer decides)
 - ✅ Graph storage and traversal
 - ✅ Cognitive mechanics (scoring, decay, attraction, gating)
+- ✅ Physics-based dynamics (attraction, repulsion, gravity, decay)
 - ✅ Query engine (spreading activation, subgraph extraction)
 - ✅ Pluggable storage adapters
-- ✅ Origin attribution (planned — tracks agent provenance per node)
+- ✅ Origin attribution (tracks agent provenance per node)
+- ✅ Scoped knowledge (session/project/universal via Origin.project_id)
+- ✅ Structured query output (ContextPackage with identity/knowledge/memory/tensions)
+- ✅ Multi-resolution content (L0 name / L1 summary / L2 full content)
 - ✅ Social reinforcement scoring (planned — multi-agent salience bonus)
 - ✅ Cross-agent entity linking via `reflect_batch()` (planned)
 - ✅ Identity management (agent personas as graph nodes with physics)
 - ✅ Episodic preservation (original text + extracted knowledge linked)
 - ✅ Contradiction detection (Contradicts edges surfaced during queries)
 - ✅ Pure graph algorithms (clustering, bridge detection, entity matching)
-- ✅ Multiple query modes (associative, type-filtered, neighborhood, temporal, list)
+- ✅ Multiple query modes (associative implemented; type-filtered, neighborhood, temporal, list planned)
 
 ## Key Types (Planned)
 
