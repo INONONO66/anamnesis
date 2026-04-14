@@ -254,7 +254,7 @@ impl Engine {
     // Construction
     pub fn new() -> Self;
     pub fn with_config(config: EngineConfig) -> Self;
-    pub fn with_storage(config: EngineConfig, storage: S) -> Self;
+    pub fn with_storage<S: StorageAdapter>(config: EngineConfig, storage: S) -> Self;
 
     // Core operations
     pub fn ingest(&mut self, observation: Observation) -> Result<Vec<NodeId>, Error>;
