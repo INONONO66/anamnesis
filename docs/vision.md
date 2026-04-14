@@ -10,7 +10,7 @@ Every agent session starts from zero. Agents repeat mistakes, rediscover convent
 
 **Memory Layers** (Mem0, Letta/MemGPT) store facts or conversations and retrieve by similarity. They answer "what was said" but not "why it was decided" or "how things connect." Noise grows linearly with data.
 
-**Context Evolution** (Stanford ACE, OmO Wisdom) evolve a monolithic playbook from execution feedback. They improve over time but lose granularity — brevity bias erodes detail, and there's no way to access the original fragment that led to a conclusion.
+**Context Evolution** (Stanford ACE, agent wisdom systems) evolve a monolithic playbook from execution feedback. They improve over time but lose granularity — brevity bias erodes detail, and there's no way to access the original fragment that led to a conclusion.
 
 Neither provides what a long-running coding agent actually needs: **fragment-level knowledge with associative retrieval, natural decay, and reasoning preservation.**
 
@@ -251,7 +251,7 @@ Tiers are not separate stores — they are **salience ranges** within the same g
 | ---------------- | -------------------------- | ------------------- | --------------------------- | ------------------------------- |
 | **Mem0**         | Extracted facts            | Vector similarity   | None                        | Facts only                      |
 | **Letta/MemGPT** | Conversation history       | Text search         | None                        | Session recall                  |
-| **OmO Wisdom**   | Category text blobs        | Full load           | None                        | Pattern notes                   |
+| **Agent Wisdom**  | Category text blobs        | Full load           | None                        | Pattern notes                   |
 | **Stanford ACE** | Monolithic playbook        | Full load           | Curator rewrites            | Strategy evolution              |
 | **Anamnesis**    | **Conversation fragments** | **Graph traversal** | **Natural decay + revival** | **Reasoning chains + judgment** |
 
@@ -365,4 +365,4 @@ All three features are **design-level** — they describe future capabilities to
 - MiroFish: Multi-agent social simulation with shared memory (GitHub: 666ghj/MiroFish) — inspiration for Origin Attribution, Social Reinforcement, and Batch Reflect patterns
 - Collins & Loftus: "A Spreading-Activation Theory of Semantic Processing" (1975)
 - Tulving: "Episodic and Semantic Memory" (1972)
-- oh-my-openagent: Wisdom Accumulation pattern (Atlas notepad system)
+- Agent wisdom accumulation patterns (notepad-based knowledge persistence)
