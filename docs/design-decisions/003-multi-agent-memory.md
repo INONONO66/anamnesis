@@ -4,7 +4,7 @@
 
 ## Context
 
-Anamnesis was originally designed as a single-agent cognitive graph — one agent ingests, one agent queries. In practice, orchestration systems like OpenOmni run multiple specialized agents (architect, coder, reviewer, etc.) that operate on the same codebase and would benefit from sharing a knowledge graph.
+Anamnesis was originally designed as a single-agent cognitive graph — one agent ingests, one agent queries. In practice, orchestration systems run multiple specialized agents (architect, coder, reviewer, etc.) that operate on the same codebase and would benefit from sharing a knowledge graph.
 
 Analysis of MiroFish (a multi-agent social simulation platform with shared memory) revealed three patterns relevant to Anamnesis:
 
@@ -83,7 +83,7 @@ Origin → Batch Reflect (needs agent_id to identify cross-agent nodes)
 - Gravity scoring function accepts an optional social reinforcement multiplier.
 - `Engine` gains `reflect_batch()` method.
 - All changes are additive — no existing API breaks.
-- Consumer (e.g., OpenOmni) is responsible for populating `Origin` when ingesting and calling `reflect_batch()` at round boundaries.
+- The consumer is responsible for populating `Origin` when ingesting and calling `reflect_batch()` at round boundaries.
 
 ## References
 

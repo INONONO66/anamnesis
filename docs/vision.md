@@ -99,7 +99,7 @@ Knowledge types that belong in the graph:
 
 All types are graph nodes. All receive the same mechanics: attraction clusters related nodes, gravity surfaces important ones, forgetting decays unused ones, touch reinforces accessed ones.
 
-**The consumer (e.g., OpenOmni, OpenClaw) is responsible for extraction.** Anamnesis does not call LLMs. But Anamnesis must provide a graph structure rich enough to represent all these knowledge types naturally.
+**The consumer (e.g., an orchestration layer) is responsible for extraction.** Anamnesis does not call LLMs. But Anamnesis must provide a graph structure rich enough to represent all these knowledge types naturally.
 
 ### 8. Episodic Preservation — Original Text as Source of Truth
 
@@ -193,7 +193,7 @@ The existing codebase contains the building blocks as standalone modules. They a
 | Reflector | On session completion | Reviews nodes, assigns importance, creates cross-session edges        |
 | Curator   | Periodic batch        | Applies decay, detects contradictions, consolidates patterns          |
 
-Note: These roles are **consumer-side** (e.g., OpenOmni orchestrates them). Anamnesis engine provides the primitives (`ingest`, `link`, `tick`, `query`, `touch`, `auto_merge`). The engine does not call LLMs.
+Note: These roles are **consumer-side** (the orchestration layer manages them). Anamnesis engine provides the primitives (`ingest`, `link`, `tick`, `query`, `touch`, `auto_merge`). The engine does not call LLMs.
 
 ### Consumer vs. Engine Boundary (What Needs LLM)
 
