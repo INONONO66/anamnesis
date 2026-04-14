@@ -174,78 +174,49 @@ Bridge nodes — nodes whose removal would disconnect parts of the graph — rec
 
 ## Current State
 
+> Last updated after Phase 2 completion. The cognitive engine is functional for Associative queries.
+
 ### What Works
 
-- **Graph CRUD**: Node/Edge creation, lookup, iteration
-- **In-memory storage**: `InMemoryStorage` implements `StorageAdapter`
-- **Engine scaffolding**: `ingest()`, `link()`, `touch()` perform basic operations
-- **Standalone mechanics**: `Attraction`, `Gravity`, `Perception`, `Forgetting` modules contain pure scoring functions with unit tests
-- **Standalone query**: `SpreadingActivation` module contains BFS-based activation and k-hop traversal
+**Graph Layer:**
+- Node/Edge CRUD with arena-based `InMemoryStorage` (Vec + SoA hot fields + adjacency index)
+- Generic `Graph<S: StorageAdapter = InMemoryStorage>` with static dispatch
+- 12 KnowledgeType variants (Identity Star / Knowledge Planet / Memory Dust)
+- 12 EdgeType variants with directional kappa multipliers
+- Node schema: name (L0), summary (L1), content (L2), embedding, origin, entity_tags, valid_from/until
 
-### What's Scaffolded but Not Wired
+**Mechanics (all pure functions, wired into Engine):**
+- Forgetting: lazy decay in `touch()` (eq 4), batch decay in `tick()`, reinforcement (eq 5)
+- Attraction: cosine similarity + type affinity + auto-linking in `ingest()` (eqs 2, 3)
+- Gravity: mass computation (eq 1) + gravity boost (eq 6)
+- Perception: novelty/confidence/budget gating in `ingest()`
+- Repulsion: contradiction damping in `query()` (eqs 7, 8)
 
-| Engine Method | Current Behavior | Intended Behavior |
-|:---|:---|:---|
-| `ingest()` | Stores node directly, ignores Perception | Apply perception gating before storage |
-| `tick()` | No-op | Apply `Forgetting::apply_decay()` to all nodes |
-| `query()` | Returns `vec![seed]` | Run `SpreadingActivation::activate()` with budget |
-| `merge_candidates()` | Returns empty Vec | Use `Attraction::find_merge_candidates()` |
-| `auto_merge()` | Returns 0 | Merge candidates with undo log |
+**Query Pipeline (Associative mode -- full pipeline):**
+- Initial activation: seed + vector similarity + identity prior (eqs 9, 10)
+- Spreading activation: priority-queue BFS, depth-aware, cycle-safe (eq 11)
+- Repulsion: Contradicts edge damping (eq 12)
+- Final scoring: activation + vector + salience + mass, scope-weighted (eq 13)
+- Agent tension: identity contradiction measurement (eq 14)
+- ContextPackage assembly: identity/knowledge/memories/tensions with L0/L1/L2 token budget
 
-### Known Architecture Issues
+**Scoping:**
+- Origin.project_id: session/project/universal knowledge scoping
+- Query-time scope weights: same project 1.0, universal 0.85, other project 0.30 + entity overlap bonus
 
-- **Dual storage**: `Engine` stores nodes in both `Graph` (in-memory HashMap) and `StorageAdapter` (also in-memory by default). Source of truth is ambiguous. This needs resolution before adding complexity.
-- **Embeddings not persisted on Node**: `Observation.embedding` is consumed during `ingest()` but not stored on the `Node`. Attraction and perception mechanics require embeddings to be available on nodes for post-ingestion operations.
-- **Linear edge scan**: `Graph::edges_from()` / `edges_to()` iterate all edges. This is adequate for small graphs but will not scale.
-- **Cosine similarity duplication**: Identical implementation exists in both `attraction.rs` and `perception.rs`.
-- **Single query mode**: Only spreading activation is designed. TypeFiltered, Neighborhood, Temporal, and List query modes are needed for real agent usage patterns.
-- **No episodic preservation**: Observation embedding is discarded after ingestion. No `source_ref` to link extracted facts to original episodes.
+### Placeholder (Phase 3)
 
----
+| Engine Method | Current Behavior | Planned |
+|:-------------|:-----------------|:--------|
+| `query()` -- non-Associative modes | Returns `ContextPackage::empty()` | TypeFiltered, Neighborhood, Temporal, List |
+| `merge_candidates()` | Returns empty Vec | Attraction-based candidate detection |
+| `auto_merge()` | Returns empty MergeLog | Merge with undo log |
+| `reflect_batch()` | Returns empty ReflectReport | Cross-agent entity linking |
 
-## Multi-Agent Support (Planned)
+### Remaining Architecture Items
 
-When multiple agents share the same Anamnesis graph, three features extend the single-agent model:
-
-### Origin Attribution
-
-Every node carries an `Origin` struct identifying which agent produced it:
-
-```rust
-struct Origin {
-    agent_id: String,
-    session_id: String,
-    confidence: f64,
-}
-```
-
-Origin enables the consumer-side Reflector to resolve contradictions (same agent correcting itself vs. different agents disagreeing) and weight expertise by source.
-
-### Social Reinforcement
-
-Gravity's centrality scoring gains a social bonus when a node is independently reinforced by multiple distinct agents:
-
-```
-social_bonus = 1.0 + ln(distinct_agent_count)   // only if > 1 agent
-```
-
-This composes with existing decay/reinforcement mechanics. Logarithmic scaling prevents popularity cascades.
-
-### Batch Reflect
-
-A round-boundary operation that links cross-agent knowledge:
-
-```rust
-pub fn reflect_batch(&mut self, sessions: &[SessionSummary]) -> Result<ReflectReport, Error>;
-```
-
-Collects nodes from completed sessions, groups by shared entities, and creates `Entity` edges between nodes from different agents that reference the same concept. No merging, no salience changes — only edge creation for discoverability via spreading activation.
-
-### Dependency
-
-```
-Origin → Social Reinforcement (needs agent_id to count distinct agents)
-Origin → Batch Reflect (needs agent_id to identify cross-agent nodes)
-```
-
-All three features are design-level plans. See [ADR-003](./design-decisions/003-multi-agent-memory.md) for rationale.
+- **Non-Associative query modes**: TypeFiltered, Neighborhood, Temporal, List are defined in the Query enum but return empty results
+- **Cosine similarity location**: Identical implementation exists in `mechanics/attraction.rs` -- consider deduplication if perception also needs it
+- **Cognitive engine benchmarks**: CRUD/storage benchmarks exist; spreading activation, decay, and query pipeline benchmarks are needed
+- **Social reinforcement**: Multi-agent salience bonus not yet implemented
+- **Convergence-based termination**: Spreading activation uses fixed conditions (budget, min_activation, diminishing returns); convergence detection is a future optimization

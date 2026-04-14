@@ -30,5 +30,5 @@ Core cognitive mechanics (attraction, gravity, perception, forgetting) are imple
 
 - Storage implementations must satisfy the `StorageAdapter` trait
 - Performance-critical paths (similarity search, graph traversal) run in Rust
-- LLM integration (embedding generation, knowledge extraction) is NOT in this engine — that's the consumer's job (e.g., OpenOmni)
+- LLM integration (embedding generation, knowledge extraction) is NOT in this engine — that's the consumer's job (e.g., an orchestration layer)
 - Initial implementation uses in-memory storage; SQLite adapter is the first external storage target

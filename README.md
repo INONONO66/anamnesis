@@ -71,36 +71,57 @@ anamnesis = "0.2"
 ```
 
 ```rust
-use anamnesis::Engine;
+use anamnesis::{Engine, EngineConfig};
 use anamnesis::api::Observation;
-use anamnesis::graph::edge::EdgeType;
+use anamnesis::graph::{KnowledgeType, EdgeType, Timestamp};
+use anamnesis::graph::node::Origin;
 
 let mut engine = Engine::new();
 
-// Ingest knowledge fragments (creates graph nodes)
+// Ingest knowledge fragments
 let ids = engine.ingest(Observation {
-    content: "auth module uses factory pattern".into(),
-    embedding: vec![0.8, 0.2, 0.1],
+    name: "auth uses factory pattern".into(),
+    summary: Some("Confirmed across multiple sessions".into()),
+    content: "The auth module uses factory pattern for handler creation".into(),
+    embedding: Some(vec![0.8, 0.2, 0.1]),
     confidence: 0.9,
-    node_type: "semantic".into(),
+    node_type: KnowledgeType::Semantic,
+    entity_tags: vec!["auth".into(), "factory-pattern".into()],
+    origin: Origin {
+        agent_id: "agent-1".into(),
+        session_id: "session-1".into(),
+        project_id: Some("my-project".into()),
+        confidence: 0.9,
+    },
+    timestamp: Timestamp::now(),
 }).unwrap();
 
 let ids2 = engine.ingest(Observation {
-    content: "race condition in auth middleware".into(),
-    embedding: vec![0.75, 0.3, 0.15],
+    name: "race condition in auth middleware".into(),
+    summary: None,
+    content: "Found a race condition in the auth middleware during session #5".into(),
+    embedding: Some(vec![0.75, 0.3, 0.15]),
     confidence: 0.85,
-    node_type: "episodic".into(),
+    node_type: KnowledgeType::Episodic,
+    entity_tags: vec!["auth".into()],
+    origin: Origin {
+        agent_id: "agent-1".into(),
+        session_id: "session-5".into(),
+        project_id: Some("my-project".into()),
+        confidence: 0.85,
+    },
+    timestamp: Timestamp::now(),
 }).unwrap();
 
 // Connect related knowledge
 engine.link(ids[0], ids2[0], EdgeType::Semantic, 0.78).unwrap();
 
-// Reinforce on access (salience +0.1)
-engine.touch(ids[0]).unwrap();
+// Reinforce on access (lazy decay + salience boost)
+engine.touch(ids[0], Timestamp::now()).unwrap();
 ```
 
-> **What works today:** `ingest`, `link`, `touch`, and basic graph CRUD.
-> **What's scaffolded but not yet wired:** `query()` does not perform spreading activation, `tick()` does not apply decay, `ingest()` does not apply perception gating, `merge_candidates()`/`auto_merge()` return empty results. The mechanics modules (`attraction`, `gravity`, `perception`, `forgetting`) and the query module (`spreading activation`) exist as standalone pure functions but are not yet integrated into the Engine.
+> **Working:** `ingest` (with perception gating + auto-linking), `link`, `touch` (lazy decay + reinforcement), `tick` (batch decay), `query` (Associative mode with spreading activation, repulsion, identity prior, scope weighting, ContextPackage assembly).
+> **Placeholder:** `merge_candidates()`/`auto_merge()` return empty results, `reflect_batch()` returns empty report. Non-Associative query modes (TypeFiltered, Neighborhood, Temporal, List) return empty ContextPackage.
 
 ## Core Concepts
 
@@ -184,36 +205,39 @@ src/
 ```
 
 <details>
-<summary><strong>Data Flow (Target Architecture)</strong></summary>
+<summary><strong>Data Flow</strong></summary>
 
 <br>
-
-> This is the intended data flow. Steps marked with ⬚ are not yet wired in the Engine.
 
 ```
 Observation
   │
   ▼
-⬚ Perception ── novelty / confidence / budget ──► reject or accept
+Perception ── novelty / confidence / budget ──► reject or accept
   │
   ▼
 Ingestion ── create node ──► Graph
   │
   ▼
-⬚ Attraction ── similarity scoring ──► edge creation / merge candidates
+Attraction ── similarity scoring ──► edge creation / merge candidates
   │
   ▼
-⬚ Gravity ── centrality scoring ──► hub node identification
+Gravity ── centrality scoring ──► hub node identification
 
          ┌────────────────────────────────────┐
-         │  ⬚ tick() — periodic                │
+         │  tick() — periodic                  │
          │  decay saliences, prune if needed   │
          └────────────────────────────────────┘
 
-⬚ Query ── spreading activation ──► budget-constrained subgraph
+Query ── spreading activation ──► budget-constrained ContextPackage
   │
   ▼
 Touch ── reinforce on access ──► salience spike + reactivation
+
+         ┌────────────────────────────────────┐
+         │  ⬚ merge_candidates() / auto_merge()│
+         │  consolidate near-duplicate nodes   │
+         └────────────────────────────────────┘
 ```
 
 </details>
@@ -230,18 +254,21 @@ impl Engine {
     // Construction
     pub fn new() -> Self;
     pub fn with_config(config: EngineConfig) -> Self;
-    pub fn with_storage(config: EngineConfig, storage: Box<dyn StorageAdapter>) -> Self;
+    pub fn with_storage<S: StorageAdapter>(config: EngineConfig, storage: S) -> Self;
 
-    // Working
-    pub fn ingest(&mut self, observation: Observation) -> Result<Vec<NodeId>, String>;  // stores node, no gating yet
-    pub fn link(&mut self, from: NodeId, to: NodeId, t: EdgeType, w: f64) -> Result<EdgeId, String>;
-    pub fn touch(&mut self, node_id: NodeId) -> Result<(), String>;
+    // Core operations
+    pub fn ingest(&mut self, observation: Observation) -> Result<Vec<NodeId>, Error>;
+    pub fn link(&mut self, from: NodeId, to: NodeId, t: EdgeType, w: f64) -> Result<EdgeId, Error>;
+    pub fn touch(&mut self, node_id: NodeId, now: Timestamp) -> Result<(), Error>;
+    pub fn tick(&mut self, now: Timestamp) -> Result<TickReport, Error>;
 
-    // Scaffolded (placeholder implementations)
-    pub fn tick(&mut self, now: u64) -> Result<(), String>;                             // ⬚ no-op
-    pub fn query(&self, seed: NodeId, budget: usize) -> Result<Vec<NodeId>, String>;    // ⬚ returns seed only
-    pub fn merge_candidates(&self, threshold: f64) -> Result<Vec<(NodeId, NodeId)>, String>;  // ⬚ returns empty
-    pub fn auto_merge(&mut self, threshold: f64) -> Result<usize, String>;              // ⬚ returns 0
+    // Query — returns structured context for LLM consumption
+    pub fn query(&self, query: &Query, config: &QueryConfig) -> Result<ContextPackage, Error>;
+
+    // Placeholder (Phase 3)
+    pub fn merge_candidates(&self, threshold: f64) -> Result<Vec<MergePair>, Error>;  // ⬚ returns empty
+    pub fn auto_merge(&mut self, threshold: f64) -> Result<MergeLog, Error>;          // ⬚ returns 0
+    pub fn reflect_batch(&mut self, sessions: &[SessionSummary]) -> Result<ReflectReport, Error>;  // ⬚ returns empty
 }
 ```
 
@@ -308,27 +335,32 @@ cargo doc --open     # Docs
 
 ## Status
 
-**v0.2.0** — Scaffolding phase. Core types and standalone mechanics exist; Engine integration is next.
+**v0.2.0** — Cognitive engine complete. All core mechanics wired; query pipeline fully operational.
 
 | Layer | Status | Notes |
 |:------|:-------|:------|
-| Graph (Node, Edge, CRUD) | ✅ | Working |
-| In-memory storage | ✅ | Working |
-| Engine API (signatures) | ✅ | Methods defined; most return placeholders |
-| Attraction (cosine similarity, merge detection) | ⚙️ | Standalone functions, not wired to Engine |
-| Gravity (PageRank, degree centrality) | ⚙️ | Standalone functions, not wired to Engine |
-| Perception (novelty, confidence, budget gating) | ⚙️ | Standalone functions, not wired to Engine |
-| Forgetting (exponential + polynomial decay) | ⚙️ | Standalone functions, not wired to Engine |
-| Spreading activation (k-hop, budget-constrained) | ⚙️ | Standalone functions, not wired to Engine |
-| `ingest()` ↔ perception gating | 🔜 | ingest() currently skips gating |
-| `tick()` ↔ forgetting integration | 🔜 | tick() is a no-op |
-| `query()` ↔ spreading activation integration | 🔜 | query() returns seed only |
-| `merge_candidates()` / `auto_merge()` | 🔜 | Return empty results |
-| Reasoning edge types | 🔜 | Only Semantic/Causal/Temporal/Custom exist |
-| Embedding persistence on Node | 🔜 | Embeddings live only in Observation, not Node |
-| Origin attribution | 🔜 | Multi-agent support |
+| Graph (Node, Edge, CRUD) | ✅ | Arena-based storage with SoA hot fields |
+| In-memory storage | ✅ | `InMemoryStorage` with adjacency index, ID recycling |
+| Engine API | ✅ | All method signatures finalized |
+| Attraction | ✅ | Wired into `ingest()` — auto-linking with type affinity |
+| Gravity | ✅ | Mass computation wired into `ingest()` and `query()` |
+| Perception | ✅ | Gating wired into `ingest()` — novelty, confidence, budget |
+| Forgetting | ✅ | Lazy decay in `touch()`, batch decay in `tick()` |
+| Spreading activation | ✅ | Priority-queue BFS with hop decay, salience gate, gravity boost |
+| Repulsion | ✅ | Contradicts edges apply damping during query |
+| Identity prior | ✅ | Top-3 identity nodes bias query activation |
+| Scope weighting | ✅ | Project-aware scoring with entity overlap bonus |
+| ContextPackage | ✅ | Structured output: identity/knowledge/memories/tensions |
+| Agent tension | ✅ | Contradiction tension measurement in query results |
+| Multi-resolution content (L0/L1/L2) | ✅ | Token budget controls fragment detail level |
+| Reasoning edge types | ✅ | 12 edge types with directional kappa multipliers |
+| Embedding persistence | ✅ | Stored on Node, used for similarity operations |
+| Origin attribution | ✅ | agent_id, session_id, project_id, confidence |
+| Non-Associative query modes | 🔜 | TypeFiltered, Neighborhood, Temporal, List |
+| `merge_candidates()` / `auto_merge()` | 🔜 | |
+| `reflect_batch()` | 🔜 | Cross-agent entity linking |
 | SQLite storage adapter | 🔜 | |
-| Benchmarks | 🔜 | |
+| Benchmarks (cognitive engine) | 🔜 | CRUD benchmarks exist; mechanics benchmarks needed |
 
 ## References
 

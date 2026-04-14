@@ -10,7 +10,7 @@ Every agent session starts from zero. Agents repeat mistakes, rediscover convent
 
 **Memory Layers** (Mem0, Letta/MemGPT) store facts or conversations and retrieve by similarity. They answer "what was said" but not "why it was decided" or "how things connect." Noise grows linearly with data.
 
-**Context Evolution** (Stanford ACE, OmO Wisdom) evolve a monolithic playbook from execution feedback. They improve over time but lose granularity — brevity bias erodes detail, and there's no way to access the original fragment that led to a conclusion.
+**Context Evolution** (Stanford ACE, agent wisdom systems) evolve a monolithic playbook from execution feedback. They improve over time but lose granularity — brevity bias erodes detail, and there's no way to access the original fragment that led to a conclusion.
 
 Neither provides what a long-running coding agent actually needs: **fragment-level knowledge with associative retrieval, natural decay, and reasoning preservation.**
 
@@ -99,7 +99,7 @@ Knowledge types that belong in the graph:
 
 All types are graph nodes. All receive the same mechanics: attraction clusters related nodes, gravity surfaces important ones, forgetting decays unused ones, touch reinforces accessed ones.
 
-**The consumer (e.g., OpenOmni, OpenClaw) is responsible for extraction.** Anamnesis does not call LLMs. But Anamnesis must provide a graph structure rich enough to represent all these knowledge types naturally.
+**The consumer (e.g., an orchestration layer) is responsible for extraction.** Anamnesis does not call LLMs. But Anamnesis must provide a graph structure rich enough to represent all these knowledge types naturally.
 
 ### 8. Episodic Preservation — Original Text as Source of Truth
 
@@ -193,7 +193,7 @@ The existing codebase contains the building blocks as standalone modules. They a
 | Reflector | On session completion | Reviews nodes, assigns importance, creates cross-session edges        |
 | Curator   | Periodic batch        | Applies decay, detects contradictions, consolidates patterns          |
 
-Note: These roles are **consumer-side** (e.g., OpenOmni orchestrates them). Anamnesis engine provides the primitives (`ingest`, `link`, `tick`, `query`, `touch`, `auto_merge`). The engine does not call LLMs.
+Note: These roles are **consumer-side** (the orchestration layer manages them). Anamnesis engine provides the primitives (`ingest`, `link`, `tick`, `query`, `touch`, `auto_merge`). The engine does not call LLMs.
 
 ### Consumer vs. Engine Boundary (What Needs LLM)
 
@@ -251,7 +251,7 @@ Tiers are not separate stores — they are **salience ranges** within the same g
 | ---------------- | -------------------------- | ------------------- | --------------------------- | ------------------------------- |
 | **Mem0**         | Extracted facts            | Vector similarity   | None                        | Facts only                      |
 | **Letta/MemGPT** | Conversation history       | Text search         | None                        | Session recall                  |
-| **OmO Wisdom**   | Category text blobs        | Full load           | None                        | Pattern notes                   |
+| **Agent Wisdom**  | Category text blobs        | Full load           | None                        | Pattern notes                   |
 | **Stanford ACE** | Monolithic playbook        | Full load           | Curator rewrites            | Strategy evolution              |
 | **Anamnesis**    | **Conversation fragments** | **Graph traversal** | **Natural decay + revival** | **Reasoning chains + judgment** |
 
@@ -365,4 +365,4 @@ All three features are **design-level** — they describe future capabilities to
 - MiroFish: Multi-agent social simulation with shared memory (GitHub: 666ghj/MiroFish) — inspiration for Origin Attribution, Social Reinforcement, and Batch Reflect patterns
 - Collins & Loftus: "A Spreading-Activation Theory of Semantic Processing" (1975)
 - Tulving: "Episodic and Semantic Memory" (1972)
-- oh-my-openagent: Wisdom Accumulation pattern (Atlas notepad system)
+- Agent wisdom accumulation patterns (notepad-based knowledge persistence)
