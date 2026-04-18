@@ -1,6 +1,6 @@
 # ADR-003: Multi-Agent Memory Support
 
-**Status**: Proposed
+**Status**: Partially Accepted
 
 ## Context
 
@@ -18,21 +18,24 @@ These patterns address a gap: without them, a shared Anamnesis graph cannot dist
 
 Extend the Anamnesis design with three planned features:
 
-### 1. Origin Attribution
+### 1. Origin Attribution ✅
 
 Add an `Origin` struct to every node:
 
 ```rust
 struct Origin {
-    agent_id: String,     // which agent produced this
-    session_id: String,   // from which session
-    confidence: f64,      // certainty at creation time
+    agent_id: String,           // which agent produced this
+    session_id: String,         // from which session
+    project_id: Option<String>, // scope: None = universal, Some = project-scoped
+    confidence: f64,            // certainty at creation time
 }
 ```
 
 Origin is metadata, not access control. It enables the consumer-side Reflector to resolve contradictions and weight expertise by source.
 
-### 2. Social Reinforcement
+**Implementation Status**: ✅ Fully implemented. Origin struct is defined in `src/graph/node.rs` with all four fields. Every Node carries an Origin. Project scoping enables multi-project graphs with scope-aware queries.
+
+### 2. Social Reinforcement ⬚
 
 Extend gravity scoring with a logarithmic bonus for multi-agent corroboration:
 
@@ -44,7 +47,9 @@ social_bonus(node) = 1.0 + ln(distinct_agent_count)   // only if > 1
 - Logarithmic scaling prevents popularity cascades.
 - Composes with existing decay and reinforcement mechanics — does not replace them.
 
-### 3. Batch Reflect
+**Implementation Status**: ⬚ Planned. Not yet wired into gravity scoring. Consumer can implement via post-query weighting.
+
+### 3. Batch Reflect ⬚
 
 Add a round-boundary API for cross-agent entity linking:
 
@@ -55,6 +60,8 @@ pub fn reflect_batch(&mut self, sessions: &[SessionSummary]) -> Result<ReflectRe
 - Groups nodes from completed sessions by shared entities (metadata matching, no LLM).
 - Creates `Entity` edges between nodes from different agents referencing the same concept.
 - Does not merge nodes or alter salience — only creates edges for discoverability.
+
+**Implementation Status**: ⬚ Placeholder. Method signature exists in Engine API; returns empty ReflectReport. Consumer can implement entity linking via `link()` API.
 
 ### Dependency Chain
 
@@ -76,12 +83,22 @@ Origin → Batch Reflect (needs agent_id to identify cross-agent nodes)
 2. **Shared vector store**: Multiple agents write to the same embedding store. Rejected — loses all graph structure, typed relationships, and reasoning preservation that Anamnesis provides.
 3. **Separate graphs per agent with merge**: Each agent maintains its own graph; periodic merge combines them. Rejected — complex merge semantics, loses real-time cross-agent activation, and contradicts the single-graph architecture.
 
+## Implementation Summary
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Origin struct (agent_id, session_id, project_id, confidence) | ✅ | Fully implemented in `src/graph/node.rs`. Every Node carries Origin. |
+| Project scoping via Origin.project_id | ✅ | Enables multi-project graphs with scope-aware queries. |
+| Social reinforcement scoring | ⬚ | Planned. Consumer can implement via post-query weighting using Origin metadata. |
+| Batch reflect API | ⬚ | Method signature exists; returns empty ReflectReport. Consumer implements via `link()` API. |
+| Entity edge type | ✅ | Defined in `src/graph/types.rs` with kappa=0.95. |
+
 ## Consequences
 
-- Node struct gains an optional `Origin` field (backward-compatible — `None` for legacy nodes).
-- `EdgeType` enum gains `Entity` variant for cross-agent links.
-- Gravity scoring function accepts an optional social reinforcement multiplier.
-- `Engine` gains `reflect_batch()` method.
+- Node struct carries an `Origin` field (required, not optional — all nodes have provenance).
+- `EdgeType` enum includes `Entity` variant for cross-agent links.
+- Gravity scoring function can accept an optional social reinforcement multiplier (not yet wired).
+- `Engine` has `reflect_batch()` method (placeholder implementation).
 - All changes are additive — no existing API breaks.
 - The consumer is responsible for populating `Origin` when ingesting and calling `reflect_batch()` at round boundaries.
 

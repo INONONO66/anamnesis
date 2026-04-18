@@ -1,6 +1,6 @@
 # ADR-004: Universal Knowledge Memory with Identity
 
-**Status**: Proposed
+**Status**: Partially Accepted
 
 ## Context
 
@@ -21,7 +21,7 @@ Separately, analysis of agent persona systems (MetaGPT Stanford Town, agentic-co
 
 Expand Anamnesis from "conversation fragment memory" to "universal knowledge memory with identity":
 
-### 1. Knowledge Type Taxonomy
+### 1. Knowledge Type Taxonomy ✅
 
 Add a `KnowledgeType` enum to distinguish node types. Each type can have different decay rates, query behavior, and mechanics:
 
@@ -30,29 +30,45 @@ Add a `KnowledgeType` enum to distinguish node types. Each type can have differe
 - `Procedural` — agent execution patterns
 - `Entity` — named concepts
 - `Event` — time-bound occurrences
+- `Convention` — project rules and conventions
+- `Decision` — decisions with rationale
+- `Gotcha` — pitfalls and warnings
 - `IdentityCore` (L0) — immutable agent traits (no decay)
 - `IdentityLearned` (L1) — experience-formed traits (slow decay)
 - `IdentityState` (L2) — current state (normal decay)
+- `Custom(String)` — consumer-defined types
 
-### 2. Episodic Preservation
+**Implementation Status**: ✅ Fully implemented in `src/graph/types.rs`. All 12 types defined with decay rate semantics (Identity = no/low decay, Knowledge = moderate decay, Memory = fast decay).
+
+### 2. Episodic Preservation ✅
 
 Original session text is stored as `Episodic` nodes. Extracted knowledge links back via `ExtractedFrom` edges. This enables provenance tracing and hallucination verification.
 
-### 3. Identity as Graph Nodes
+**Implementation Status**: ✅ Fully implemented. `ExtractedFrom` edge type defined in `src/graph/types.rs` with kappa=1.00. Nodes carry `content` (L2 full text) and optional `summary` (L1) and `name` (L0).
+
+### 3. Identity as Graph Nodes ✅
 
 Agent identities are graph nodes, not external strings. L0 nodes (IdentityCore) have fixed salience and zero decay. L1 nodes evolve slowly. L2 nodes change freely. Multi-agent identity works through Origin metadata — each agent's identity nodes are scoped but share the graph substrate.
 
-### 4. Repulsion Mechanics
+**Implementation Status**: ✅ Fully implemented. Three identity types (IdentityCore, IdentityLearned, IdentityState) defined in `src/graph/types.rs`. Decay exemption for L0 nodes wired into `tick()` mechanics.
+
+### 4. Repulsion Mechanics ✅
 
 Add `Contradicts` edge type. When spreading activation crosses a Contradicts edge, activation is dampened or negated. This surfaces conflicts between agents or between old and new knowledge.
 
-### 5. Multiple Query Modes
+**Implementation Status**: ✅ Fully implemented. `Contradicts` edge type defined with kappa=0.00 (inhibitory). Spreading activation excludes Contradicts edges from propagation and applies repulsion damping in `src/query/spreading_activation.rs`.
+
+### 5. Multiple Query Modes ⬚
 
 Add Associative (existing), TypeFiltered, Neighborhood, Temporal, and List query modes to cover the five real-world agent query patterns.
 
-### 6. Pure Graph Algorithms
+**Implementation Status**: ⬚ Partially implemented. Associative mode fully wired with spreading activation, identity prior, scope weighting, and ContextPackage assembly. TypeFiltered, Neighborhood, Temporal, and List modes have stub implementations (return empty ContextPackage). Consumer can implement via post-query filtering.
+
+### 6. Pure Graph Algorithms ⬚
 
 Add engine-level algorithms that require no LLM: Union-Find for connected components, bridge detection for decay protection, Label Propagation for clustering, metadata-based entity matching.
+
+**Implementation Status**: ⬚ Planned. Not yet implemented. Consumer can implement via graph traversal using existing `query()` and `link()` APIs.
 
 ## Rationale
 
@@ -70,14 +86,26 @@ Add engine-level algorithms that require no LLM: Union-Find for connected compon
 3. **Separate identity system**: Rejected — defeats the purpose of unified physics. Identity should be subject to the same mechanics.
 4. **Import GraphRAG wholesale**: Rejected — GraphRAG is optimized for document corpus QA with batch indexing and LLM summarization. Anamnesis needs streaming updates and LLM independence. Spreading activation is a better fit for agent memory than community-based map-reduce.
 
+## Implementation Summary
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| KnowledgeType taxonomy (12 types) | ✅ | Fully implemented in `src/graph/types.rs`. Includes Identity (L0/L1/L2), Knowledge, and Memory tiers. |
+| Episodic preservation | ✅ | Nodes carry L0/L1/L2 content. ExtractedFrom edge type defined. |
+| Identity as graph nodes | ✅ | Three identity types (IdentityCore, IdentityLearned, IdentityState) with decay exemption for L0. |
+| Repulsion mechanics (Contradicts) | ✅ | Contradicts edge type defined with kappa=0.00. Spreading activation applies repulsion damping. |
+| Multiple query modes | ⬚ | Associative mode fully implemented. TypeFiltered, Neighborhood, Temporal, List modes are stubs. |
+| Pure graph algorithms | ⬚ | Planned. Consumer can implement via existing query and link APIs. |
+| Contradiction detection in queries | ✅ | Contradicts edges surfaced in ContextPackage tensions. |
+| Scope weighting | ✅ | Project-aware scoring with entity overlap bonus in spreading activation. |
+
 ## Consequences
 
 - `KnowledgeType` enum replaces `node_type: String` on Node
-- `ExtractedFrom` and `Contradicts` added to EdgeType enum
-- `Observation` struct gains `source_ref`, `entities`, `valid_at` fields
-- `Edge` struct gains `fact`, `valid_at`, `invalid_at`, `source_episodes` fields
-- `Query` becomes an enum with five variants
+- `ExtractedFrom`, `Contradicts`, and other reasoning edge types added to EdgeType enum
+- Node struct gains temporal fields: `valid_from`, `valid_until`
+- `Query` is an enum with five variants (Associative fully wired; others are stubs)
 - L0 identity nodes are exempt from decay in `tick()`
 - `Contradicts` edges produce negative/dampened activation in spreading activation
-- Consumer API contract expands: consumers should provide `KnowledgeType` and optionally `source_ref` when ingesting
+- Consumer API contract expands: consumers should provide `KnowledgeType` when ingesting
 - All changes are additive — existing API methods continue to work
