@@ -56,7 +56,7 @@ Agent identities are graph nodes, not external strings. L0 nodes (IdentityCore) 
 
 Add `Contradicts` edge type. When spreading activation crosses a Contradicts edge, activation is dampened or negated. This surfaces conflicts between agents or between old and new knowledge.
 
-**Implementation Status**: ✅ Fully implemented. `Contradicts` edge type defined with kappa=0.00 (inhibitory). Spreading activation excludes Contradicts edges from propagation and applies repulsion damping in `src/query/spreading_activation.rs`.
+**Implementation Status**: ✅ Fully implemented. `Contradicts` edge type defined with kappa=0.00 (inhibitory). Spreading activation excludes Contradicts edges from propagation and applies repulsion damping in `src/query/activation.rs`.
 
 ### 5. Multiple Query Modes ⬚
 

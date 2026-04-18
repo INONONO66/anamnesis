@@ -177,13 +177,14 @@ The codebase implements the full cognitive dynamics pipeline. All mechanics are 
 
 ### What Needs to Be Added
 
-**Edge types for reasoning preservation:**
+**Edge types for reasoning preservation:** ✅ Implemented
 
-- `REASON` — why a decision was made
-- `REJECTED_ALTERNATIVE` — option considered and discarded
-- `SUPERSEDES` — replaces outdated knowledge
-- `REINFORCED_BY` — confirmed by repeated experience
-- `CONSOLIDATED_FROM` — semantic node derived from multiple episodic nodes
+All reasoning edge types are now defined in `src/graph/types.rs`:
+- `Reason` — why a decision was made
+- `RejectedAlternative` — option considered and discarded
+- `Supersedes` — replaces outdated knowledge
+- `ReinforcedBy` — confirmed by repeated experience
+- `ConsolidatedFrom` — semantic node derived from multiple episodic nodes
 
 **Three-role processing (adapted from Stanford ACE):**
 

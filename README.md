@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <strong>Cognitive graph engine for LLMs</strong><br>
+  <strong>Cognitive dynamics engine for LLMs</strong><br>
   Knowledge with attraction, gravity, perception, and forgetting.
 </p>
 

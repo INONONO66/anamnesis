@@ -4,7 +4,7 @@
 
 ## High-Level Design
 
-Anamnesis is a cognitive graph engine that models knowledge as a directed graph with cognitive dynamics. The architecture consists of five main layers:
+Anamnesis is a cognitive dynamics engine that models knowledge as a directed graph with cognitive dynamics. The architecture consists of five main layers:
 
 ### 1. Graph Layer (`src/graph/`)
 
