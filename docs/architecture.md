@@ -212,6 +212,28 @@ Bridge nodes — nodes whose removal would disconnect parts of the graph — rec
 | `merge_candidates()` | Returns empty Vec | Attraction-based candidate detection |
 | `auto_merge()` | Returns empty MergeLog | Merge with undo log |
 | `reflect_batch()` | Returns empty ReflectReport | Cross-agent entity linking |
+| `crystallize()` | Not yet added | Query result re-ingestion with provenance ([ADR-005](design-decisions/005-query-crystallization.md)) |
+
+### Equation Index
+
+| Eq | Module | Formula | Purpose |
+|:---|:-------|:--------|:--------|
+| (1) | gravity | `m = 0.55s + 0.30c + 0.15μ` | Node mass (salience + access + type prior) |
+| (2) | attraction | `σ = cosine(e_i, e_j)` | Embedding similarity |
+| (3) | attraction | `A = σ × τ × (1 + 0.20m)` | Attraction score |
+| (4) | forgetting | `s(t+dt) = b + (s-b)·exp(-λ·dt)` | Exponential decay with floor |
+| (5) | forgetting | `s ← s + 0.20·(1-s)` | Reinforcement on access |
+| (6) | gravity | `boost = 1 + 0.20·m` | Gravity boost in spreading activation |
+| (7) | repulsion | `H = Σ w·ρ·X` | Repulsion accumulation |
+| (8) | repulsion | `X' = X·exp(-1.5·H)` | Activation damping |
+| (9) | identity | `I(a) = max[π·σ]` over top-3 | Identity prior |
+| (10) | activation | `y⁰ = 0.60·seed + 0.30·vsim + 0.10·I` | Initial activation |
+| (11) | activation | `y_j = y_i·w·δ·ψ·boost` | Spreading propagation |
+| (12) | repulsion | (applied in stage 4) | Contradicts damping |
+| (13) | scoring | `R = (0.50X' + 0.20q + 0.15s + 0.15m)·scope` | Final relevance |
+| (14) | assembly | `T = Σ ρ·Σ w·X` | Agent tension |
+| (15) | crystallize | `s_c = 0.60·s̄ + 0.25·conf + 0.15·β` | Crystallization initial salience (ADR-005) |
+| (16) | crystallize | `dup = max cosine(e_c, e_j)` | Crystallization dedup gate (ADR-005) |
 
 ### Remaining Architecture Items
 
@@ -220,3 +242,4 @@ Bridge nodes — nodes whose removal would disconnect parts of the graph — rec
 - **Cognitive engine benchmarks**: CRUD/storage benchmarks exist; spreading activation, decay, and query pipeline benchmarks are needed
 - **Social reinforcement**: Multi-agent salience bonus not yet implemented
 - **Convergence-based termination**: Spreading activation uses fixed conditions (budget, min_activation, diminishing returns); convergence detection is a future optimization
+- **Query crystallization**: `crystallize()` method for re-ingesting query-derived insights (ADR-005, eqs 15-16)
