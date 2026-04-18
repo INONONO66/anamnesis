@@ -11,3 +11,4 @@ This directory contains Architecture Decision Records (ADRs) for Anamnesis.
 | ADR | Title | Status |
 | --- | --- | --- |
 | [ADR-004](004-universal-knowledge-memory.md) | Universal Knowledge Memory with Identity | Proposed |
+| [ADR-005](005-query-crystallization.md) | Query Crystallization | Proposed |

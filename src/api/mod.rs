@@ -238,7 +238,7 @@ impl<S: StorageAdapter> Engine<S> {
             let mut candidate_ids: Vec<NodeId> = {
                 let mut all = self.graph.storage().all_node_ids();
                 all.retain(|&nid| nid != id);
-                all.sort_by(|a, b| b.0.cmp(&a.0));
+                all.sort_by_key(|a| std::cmp::Reverse(a.0));
                 all.truncate(256);
                 all
             };

@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <strong>Cognitive graph engine for LLMs</strong><br>
+  <strong>Cognitive dynamics engine for LLMs</strong><br>
   Knowledge with attraction, gravity, perception, and forgetting.
 </p>
 
@@ -38,7 +38,7 @@ None provide what a long-running agent actually needs: **fragment-level knowledg
 
 Anamnesis gives LLM agents **associative memory**. It builds a graph of knowledge fragments connected by typed relationships — not summaries, not embeddings, not flat text.
 
-**Not a database.** A cognitive engine with physics-like dynamics:
+**Not a database.** A graph engine with cognitive dynamics:
 
 | Mechanic | What It Does |
 |:---------|:-------------|
@@ -59,9 +59,17 @@ One cue activates related fragments, which activate further fragments — recons
 | Stanford ACE | Monolithic playbook | Full load | Curator rewrite | None | Strategy-level |
 | **Anamnesis** | **Fragments** | **Graph traversal** | **Decay + revival** | **Typed edges** | **Full chains** |
 
+### Positioning
+
+**vs RAG pipelines** — Anamnesis makes zero LLM calls in its core. Retrieval is deterministic graph traversal, not embedding similarity lookup. No embedding drift, no inference cost on every query.
+
+**vs LLM context documents** — Context docs require manual compilation, suffer brevity bias on every rewrite, and have no mechanism for forgetting or contradiction detection. Anamnesis handles all three automatically: salience decay removes stale knowledge, spreading activation surfaces relevant fragments, and `Contradicts` edges flag tensions in query results.
+
+**vs vector-only stores** — Embedding similarity finds *similar* fragments. Spreading activation finds *related* fragments — following typed reasoning chains (causes, contradictions, decisions, confirmations) that embed alone cannot represent.
+
 ## Quick Start
 
-> **Anamnesis is in early development.** The types, traits, and mechanics modules exist as building blocks, but the Engine does not yet wire them into a working cognitive loop. See [Status](#status) for what's implemented vs. planned.
+> **Anamnesis is in early development.** The core engine is functional — mechanics are wired and the associative query pipeline is operational. Several features are stubs that return placeholder results. See [Status](#status) for the full breakdown.
 
 Add to your `Cargo.toml`:
 
@@ -265,9 +273,9 @@ impl Engine {
     // Query — returns structured context for LLM consumption
     pub fn query(&self, query: &Query, config: &QueryConfig) -> Result<ContextPackage, Error>;
 
-    // Placeholder (Phase 3)
+    // Stubs — return placeholder results
     pub fn merge_candidates(&self, threshold: f64) -> Result<Vec<MergePair>, Error>;  // ⬚ returns empty
-    pub fn auto_merge(&mut self, threshold: f64) -> Result<MergeLog, Error>;          // ⬚ returns 0
+    pub fn auto_merge(&mut self, threshold: f64) -> Result<MergeLog, Error>;          // ⬚ returns empty
     pub fn reflect_batch(&mut self, sessions: &[SessionSummary]) -> Result<ReflectReport, Error>;  // ⬚ returns empty
 }
 ```
@@ -281,18 +289,42 @@ impl Engine {
 
 ```rust
 pub trait StorageAdapter: Send + Sync {
-    fn get_node(&self, id: NodeId) -> StorageResult<Node>;
-    fn set_node(&mut self, id: NodeId, node: Node) -> StorageResult<()>;
-    fn delete_node(&mut self, id: NodeId) -> StorageResult<()>;
-    fn get_edge(&self, id: u64) -> StorageResult<Edge>;
-    fn set_edge(&mut self, id: u64, edge: Edge) -> StorageResult<()>;
-    fn delete_edge(&mut self, id: u64) -> StorageResult<()>;
-    fn list_nodes(&self) -> StorageResult<Vec<NodeId>>;
-    fn list_edges(&self) -> StorageResult<Vec<u64>>;
+    // ID allocation (reuses freed IDs)
+    fn next_node_id(&mut self) -> NodeId;
+    fn next_edge_id(&mut self) -> EdgeId;
+
+    // Node CRUD
+    fn set_node(&mut self, node: Node) -> Result<(), Error>;
+    fn get_node(&self, id: NodeId) -> Result<&Node, Error>;
+    fn get_node_mut(&mut self, id: NodeId) -> Result<&mut Node, Error>;
+    fn delete_node(&mut self, id: NodeId) -> Result<(), Error>;
+
+    // Edge CRUD
+    fn set_edge(&mut self, edge: Edge) -> Result<(), Error>;
+    fn get_edge(&self, id: EdgeId) -> Result<&Edge, Error>;
+    fn get_edge_mut(&mut self, id: EdgeId) -> Result<&mut Edge, Error>;
+    fn delete_edge(&mut self, id: EdgeId) -> Result<(), Error>;
+
+    // Adjacency index (O(degree))
+    fn edges_from(&self, id: NodeId) -> &[EdgeId];
+    fn edges_to(&self, id: NodeId) -> &[EdgeId];
+
+    // Hot fields — SoA arrays, cache-friendly for dynamics iteration
+    fn get_salience(&self, id: NodeId) -> Result<f64, Error>;
+    fn set_salience(&mut self, id: NodeId, salience: f64) -> Result<(), Error>;
+    fn get_accessed_at(&self, id: NodeId) -> Result<Timestamp, Error>;
+    fn set_accessed_at(&mut self, id: NodeId, ts: Timestamp) -> Result<(), Error>;
+    fn get_node_type(&self, id: NodeId) -> Result<&KnowledgeType, Error>;
+
+    // Counts and iteration
+    fn node_count(&self) -> usize;
+    fn edge_count(&self) -> usize;
+    fn all_node_ids(&self) -> Vec<NodeId>;
+    fn all_edge_ids(&self) -> Vec<EdgeId>;
 }
 ```
 
-Ships with `InMemoryStorage`. Implement the trait for SQLite, PostgreSQL, Neo4j, or anything else.
+Ships with `InMemoryStorage` (arena-based Vec, adjacency index, ID recycling). Implement the trait for SQLite, PostgreSQL, Neo4j, or any other backend.
 
 </details>
 
@@ -356,10 +388,12 @@ cargo doc --open     # Docs
 | Reasoning edge types | ✅ | 12 edge types with directional kappa multipliers |
 | Embedding persistence | ✅ | Stored on Node, used for similarity operations |
 | Origin attribution | ✅ | agent_id, session_id, project_id, confidence |
-| Non-Associative query modes | 🔜 | TypeFiltered, Neighborhood, Temporal, List |
-| `merge_candidates()` / `auto_merge()` | 🔜 | |
-| `reflect_batch()` | 🔜 | Cross-agent entity linking |
-| SQLite storage adapter | 🔜 | |
+| Non-Associative query modes | ⬚ | TypeFiltered, Neighborhood, Temporal, List — return empty ContextPackage |
+| `merge_candidates()` / `auto_merge()` | ⬚ | Defined; return empty results |
+| `reflect_batch()` | ⬚ | Defined; returns empty report |
+| `search()` unified text + graph | 🔜 | FTS + salience combined retrieval |
+| `crystallize()` post-session consolidation | 🔜 | Pattern detection, ConsolidatedFrom edges |
+| SQLite storage adapter | 🔜 | Persistent storage with FTS5 support |
 | Benchmarks (cognitive engine) | 🔜 | CRUD benchmarks exist; mechanics benchmarks needed |
 
 ## References

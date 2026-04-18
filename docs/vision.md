@@ -24,7 +24,7 @@ The dominant framing treats agent memory as a database problem. This misses the 
 
 Human memory is an associative network. One cue activates related memories, which activate further memories, reconstructing understanding from fragments. The value is not in what is stored but in **how fragments connect and activate each other**.
 
-Anamnesis models this directly: knowledge exists as a graph of fragments connected by typed relationships. Retrieval is graph traversal (spreading activation), not keyword search.
+Anamnesis models this directly — grounded in the ACT-R cognitive architecture (Anderson, 1993), which treats memory as activation-based retrieval where each memory element has a strength that decays over time and is restored by use. Knowledge exists as a graph of fragments connected by typed relationships. Retrieval is graph traversal (spreading activation), not keyword search.
 
 ### 2. Fragments, Not Summaries
 
@@ -47,11 +47,11 @@ When an agent encounters "auth module," Anamnesis activates the auth node and tr
   -> "auth refactored to DI" (supersedes factory node)
 ```
 
-Each hop weakens the activation signal. Traversal stops when the token budget is exhausted or activation drops below threshold. This is spreading activation — implemented as standalone functions in `src/query/spread.rs`, pending integration into the Engine's `query()` method.
+Each hop weakens the activation signal. Traversal stops when the token budget is exhausted or activation drops below threshold. This is spreading activation — grounded in Collins & Loftus (1975), who demonstrated that semantic memory is a network where activation spreads from concepts to related concepts with decreasing strength. Implemented in `src/query/activation.rs` and wired into the Engine's `query()` method.
 
 ### 4. Forgetting Is a Feature
 
-Forgetting is a first-class concept in Anamnesis. The mechanics exist in `src/mechanics/forgetting.rs` as pure scoring functions; integration into the Engine's `tick()` loop is planned. Natural decay makes irrelevant nodes invisible without human intervention. Knowledge that matters gets reinforced through access; knowledge that doesn't fades naturally. No manual cleanup.
+Forgetting is a first-class concept in Anamnesis, grounded in Ebbinghaus's forgetting curve (1885): memory retention decays exponentially over time without reinforcement. Natural decay makes irrelevant nodes invisible without human intervention. Knowledge that matters gets reinforced through access; knowledge that doesn't fades naturally. No manual cleanup. The mechanics in `src/mechanics/forgetting.rs` are wired into both `touch()` (lazy decay + reinforcement on access) and `tick()` (batch decay).
 
 ### 5. Forgotten Is Not Gone — Reactivation
 
@@ -85,7 +85,7 @@ When a new agent session starts, it inherits not rules but _judgment_.
 
 ### 7. Universal Knowledge Memory, Not Just Conversation
 
-Anamnesis is not a conversation logger. It is a **universal knowledge substrate** — any structured knowledge the consumer extracts can live in the same graph with the same physics.
+Anamnesis is not a conversation logger. It is a **universal knowledge substrate** — any structured knowledge the consumer extracts can live in the same graph with the same cognitive dynamics.
 
 Knowledge types that belong in the graph:
 
@@ -95,9 +95,9 @@ Knowledge types that belong in the graph:
 | **Semantic** | Extracted fact ("auth uses factory pattern") | Consumer extracts via LLM, links to source episode |
 | **Procedural** | "How to deploy this service" | Consumer extracts from agent execution logs |
 | **Entity** | "auth module", "session service" | Consumer identifies entities, Anamnesis auto-links by tag |
-| **Identity** | Agent persona traits, values, preferences | Consumer or user defines; engine applies physics |
+| **Identity** | Agent persona traits, values, preferences | Consumer or user defines; engine applies cognitive dynamics |
 
-All types are graph nodes. All receive the same mechanics: attraction clusters related nodes, gravity surfaces important ones, forgetting decays unused ones, touch reinforces accessed ones.
+All types are graph nodes. All receive the same cognitive dynamics: attraction clusters related nodes, gravity surfaces important ones, forgetting decays unused ones, touch reinforces accessed ones.
 
 **The consumer (e.g., an orchestration layer) is responsible for extraction.** Anamnesis does not call LLMs. But Anamnesis must provide a graph structure rich enough to represent all these knowledge types naturally.
 
@@ -121,7 +121,7 @@ Without episodic preservation, extracted facts become orphans — no way to veri
 
 ### 9. Identity as Graph Nodes — The Multi-Persona Brain
 
-Agent identities are not static system prompts. They are **graph nodes subject to the same physics as knowledge**.
+Agent identities are not static system prompts. They are **graph nodes subject to the same cognitive dynamics as knowledge**.
 
 Inspired by MetaGPT Stanford Town's three-layer identity and agentic-cognition's ConvictionGravity:
 
@@ -143,7 +143,7 @@ When multiple agents share a graph, each agent's identity nodes carry `Origin` m
 - **Social reinforcement across personas**: When multiple agents independently confirm the same knowledge, it gains extra salience
 - **Contradiction detection**: `Contradicts` edges between nodes from different agents surface disagreements
 
-This is not agent orchestration (that's the consumer's job). This is providing a **cognitive substrate where identities and knowledge coexist and interact through physics**.
+This is not agent orchestration (that's the consumer's job). This is providing a **cognitive substrate where identities and knowledge coexist and interact through cognitive dynamics**.
 
 ### 10. Repulsion — Not All Connections Are Attraction
 
@@ -165,25 +165,26 @@ Combined with Origin metadata, this enables **inter-agent conflict detection**: 
 
 ## How This Maps to Anamnesis Architecture
 
-The existing codebase contains the building blocks as standalone modules. They are not yet wired into the Engine. The vision clarifies _what these mechanics are for_:
+The codebase implements the full cognitive dynamics pipeline. All mechanics are wired into the Engine:
 
-| Mechanic                 | Implementation                | Purpose in Vision                                                  | Integration |
-| ------------------------ | ----------------------------- | ------------------------------------------------------------------ | ----------- |
-| **Attraction**           | `src/mechanics/attraction.rs` | Similar/related fragments cluster — enables associative retrieval  | Standalone |
-| **Gravity**              | `src/mechanics/gravity.rs`    | Important nodes attract new knowledge — hub nodes emerge naturally | Standalone |
-| **Perception**           | `src/mechanics/perception.rs` | Input gating — not every conversation turn becomes a node          | Standalone |
-| **Forgetting**           | `src/mechanics/forgetting.rs` | Natural decay + reinforcement on access = self-maintaining graph   | Standalone |
-| **Spreading Activation** | `src/query/spread.rs`         | Cue-based retrieval — "think outward from a fragment"              | Standalone |
+| Mechanic                 | Implementation                  | Purpose in Vision                                                  | Status |
+| ------------------------ | ------------------------------- | ------------------------------------------------------------------ | ------ |
+| **Attraction**           | `src/mechanics/attraction.rs`   | Similar/related fragments cluster — enables associative retrieval  | Wired  |
+| **Gravity**              | `src/mechanics/gravity.rs`      | Important nodes attract new knowledge — hub nodes emerge naturally | Wired  |
+| **Perception**           | `src/mechanics/perception.rs`   | Input gating — not every conversation turn becomes a node          | Wired  |
+| **Forgetting**           | `src/mechanics/forgetting.rs`   | Natural decay + reinforcement on access = self-maintaining graph   | Wired  |
+| **Spreading Activation** | `src/query/activation.rs`       | Cue-based retrieval — "think outward from a fragment"              | Wired  |
 
 ### What Needs to Be Added
 
-**Edge types for reasoning preservation:**
+**Edge types for reasoning preservation:** ✅ Implemented
 
-- `REASON` — why a decision was made
-- `REJECTED_ALTERNATIVE` — option considered and discarded
-- `SUPERSEDES` — replaces outdated knowledge
-- `REINFORCED_BY` — confirmed by repeated experience
-- `CONSOLIDATED_FROM` — semantic node derived from multiple episodic nodes
+All reasoning edge types are now defined in `src/graph/types.rs`:
+- `Reason` — why a decision was made
+- `RejectedAlternative` — option considered and discarded
+- `Supersedes` — replaces outdated knowledge
+- `ReinforcedBy` — confirmed by repeated experience
+- `ConsolidatedFrom` — semantic node derived from multiple episodic nodes
 
 **Three-role processing (adapted from Stanford ACE):**
 
@@ -215,7 +216,7 @@ Note: These roles are **consumer-side** (the orchestration layer manages them). 
 - Query graph with scope (entities relevant to next task)
 - Rank by `salience * activation_strength`
 - Return top nodes within token budget
-- This is the intended shape of `Engine::query(seed, budget)` — budget-constrained subgraph extraction (not yet wired)
+- This is the intended shape of `Engine::query(seed, budget)` — budget-constrained subgraph extraction via spreading activation
 
 **Memory tiers:**
 
@@ -263,6 +264,14 @@ What Anamnesis does that others cannot:
 2. **Natural pruning without data loss** — salience decay makes irrelevant nodes invisible; precise mention revives them. No manual cleanup, no permanent deletion
 3. **Reasoning preservation** — not just "use Zod" but why, what was rejected, and how the decision was validated
 4. **Compounding accuracy** — more data makes it more precise (decay filters noise), unlike vector stores where more data increases noise
+
+### Positioning
+
+**vs. RAG:** Anamnesis requires 0 LLM calls in core — all dynamics are deterministic math. No embedding generation at query time (embeddings are stored once on ingest), no LLM reranking, no summarization. Cheaper per query, fully deterministic, auditable.
+
+**vs. manual knowledge bases:** A manually maintained wiki requires human compilation and has no forgetting or contradiction detection. Anamnesis is automated — the consumer feeds fragments, the engine maintains coherence. Stale knowledge decays naturally; contradictions are surfaced automatically.
+
+**vs. vector-only retrieval:** Spreading activation substantially outperforms nearest-neighbor vector search for multi-hop reasoning. The SYNAPSE paper (2024) reported +99% F1 over vector-only retrieval on tasks requiring cross-document reasoning — the graph topology captures relationships that embedding space cannot represent.
 
 ### 11. Origin Attribution — Who Knows What
 
@@ -354,8 +363,36 @@ Origin Attribution (Section 11)
 
 All three features are **design-level** — they describe future capabilities to be implemented. The existing engine already has the primitives (`link()`, `touch()`, metadata on nodes) that these features will build on.
 
+---
+
+## Direction
+
+These are planned features for future releases — none are implemented yet.
+
+### Unified search()
+
+Today the consumer must choose a query mode (Associative, TypeFiltered, etc.) and seed a node ID. The planned `search(query: &str, limit: usize)` method accepts a text query and decides strategy internally: full-text match → seed node(s) → spreading activation. One call, engine decides. Reduces consumer complexity and handles cases where the right seed node isn't known in advance.
+
+### 3-Equal Structure: Session / Knowledge / Persona
+
+Sessions, knowledge fragments, and agent personas are currently treated differently in practice. The goal is to make them **equal first-class objects** — same storage, same dynamics, same query interface. A session is just a node with children. A persona is a cluster of identity nodes. The graph topology encodes the relationships; the engine doesn't need special cases.
+
+### Ingest Dedup → Touch
+
+Currently, ingesting a near-duplicate observation creates a new node and the duplicate pair accumulates. The planned behavior: when `ingest()` detects a sufficiently similar existing node (via attraction scoring), it calls `touch()` on the existing node and creates a session link rather than inserting a duplicate. The fragment is preserved; the salience of the existing knowledge is reinforced. Deduplication becomes automatic without LLM comparison.
+
+### crystallize()
+
+After a session, the consumer can call `crystallize(session_id)` to consolidate patterns. The engine scans the session's nodes, detects repeated fragments (by entity overlap and embedding similarity), creates `ConsolidatedFrom` edges, and promotes salience on the higher-level semantic node. This automates what a manual knowledge base requires an LLM to do explicitly — filing session observations into longer-term knowledge. Query results from one session can be re-ingested as higher-level knowledge, compounding over time.
+
+---
+
 ## References
 
+- Collins & Loftus: "A Spreading-Activation Theory of Semantic Processing" (1975)
+- Ebbinghaus: "Über das Gedächtnis" (1885) — forgetting curve, exponential decay
+- Anderson: "Rules of the Mind" (1993) — ACT-R cognitive architecture, activation-based retrieval
+- Tulving: "Episodic and Semantic Memory" (1972)
 - Stanford ACE: "Agentic Context Engineering" (ICLR 2026, arXiv:2510.04618)
 - Anthropic: "Effective Context Engineering for AI Agents" (Sep 2025)
 - OpenAI: "Harness Engineering" (Feb 2026)
@@ -363,6 +400,5 @@ All three features are **design-level** — they describe future capabilities to
 - Mem0: Graph Memory for AI Agents (Jan 2026)
 - Animesis: "Memory as Ontology" (Mar 2026, arXiv:2603.04740)
 - MiroFish: Multi-agent social simulation with shared memory (GitHub: 666ghj/MiroFish) — inspiration for Origin Attribution, Social Reinforcement, and Batch Reflect patterns
-- Collins & Loftus: "A Spreading-Activation Theory of Semantic Processing" (1975)
-- Tulving: "Episodic and Semantic Memory" (1972)
+- SYNAPSE: Spreading activation for multi-hop retrieval (2024) — +99% F1 vs. vector-only on cross-document reasoning
 - Agent wisdom accumulation patterns (notepad-based knowledge persistence)
