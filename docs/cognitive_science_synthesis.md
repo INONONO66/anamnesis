@@ -177,7 +177,9 @@ Semantics:
 - Cross-agent **entity linking** creates shared knowledge
 - `reflect_batch()` creates Entity edges between agents' representations
 
-**Implementation**: `api/engine.rs::reflect_batch()`
+> **Note**: `reflect_batch()` is a placeholder in v0.2.0 — it returns an empty `ReflectReport` without performing entity linking.
+
+**Implementation**: `api/mod.rs::reflect_batch()`
 
 ---
 
@@ -205,7 +207,7 @@ Where:
 - Queries should **start from identity nodes** for self-relevant retrieval
 - Emotional significance = salience in your model
 
-**Implementation**: `query/spreading_activation.rs::query_identity_constrained()`
+**Implementation**: `query/activation.rs::query_identity_constrained()`
 
 ---
 
@@ -285,7 +287,7 @@ Where:
 - [ ] Extend `mechanics/forgetting.rs` — CLS decay by tier
 
 ### Phase 3: Query Integration (Week 3)
-- [ ] Extend `query/spreading_activation.rs` — identity-constrained retrieval
+- [ ] Extend `query/activation.rs` — identity-constrained retrieval
 - [ ] Add personality-biased ranking
 
 ### Phase 4: Engine Integration (Week 4)

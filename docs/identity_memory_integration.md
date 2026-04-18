@@ -338,7 +338,7 @@ pub fn reinforcement_on_access(
 
 ---
 
-## 5. EXTEND `query/spreading_activation.rs`
+## 5. EXTEND `query/activation.rs`
 
 ### 5.1 Identity-Constrained Retrieval
 
@@ -431,12 +431,12 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
 
 ---
 
-## 6. EXTEND `api/engine.rs`
+## 6. EXTEND `api/mod.rs`
 
 ### 6.1 Integrate Dissonance-Aware Ingestion
 
 ```rust
-// In src/api/engine.rs - MODIFY ingest() method
+// In src/api/mod.rs - MODIFY ingest() method
 
 pub fn ingest_with_dissonance_awareness(
     &mut self,
@@ -567,7 +567,7 @@ pub fn query_personality_biased(
     budget: usize,
 ) -> Result<Vec<NodeId>, String> {
     // Standard query
-    let results = self.query(seed_node_id, budget)?;
+    let results = self.query(&Query::Associative { seed: seed_node_id, budget }, &QueryConfig::default())?;
     
     // Re-rank by personality congruence
     query::spreading_activation::rerank_by_personality(
@@ -580,12 +580,12 @@ pub fn query_personality_biased(
 
 ---
 
-## 7. NEW TYPES: `api/types.rs`
+## 7. NEW TYPES: `api/mod.rs`
 
 ### 7.1 Multi-Agent & Personality Types
 
 ```rust
-// In src/api/types.rs - ADD
+// In src/api/mod.rs - ADD
 
 #[derive(Clone, Debug)]
 pub struct SessionSummary {
@@ -630,17 +630,37 @@ mod tests {
         
         // Create conflicting observations
         let obs1 = Observation {
+            name: "auth uses factory pattern".into(),
+            summary: Some("Confirmed across multiple sessions".into()),
             content: "auth uses factory pattern".into(),
-            embedding: vec![0.8, 0.2, 0.1],
+            embedding: Some(vec![0.8, 0.2, 0.1]),
             confidence: 0.9,
-            node_type: "semantic".into(),
+            node_type: KnowledgeType::Semantic,
+            entity_tags: vec!["auth".into(), "factory-pattern".into()],
+            origin: Origin {
+                agent_id: "agent-1".into(),
+                session_id: "session-1".into(),
+                project_id: Some("my-project".into()),
+                confidence: 0.9,
+            },
+            timestamp: Timestamp::now(),
         };
         
         let obs2 = Observation {
+            name: "auth does not use factory pattern".into(),
+            summary: None,
             content: "auth does not use factory pattern".into(),
-            embedding: vec![0.75, 0.25, 0.15],
+            embedding: Some(vec![0.75, 0.25, 0.15]),
             confidence: 0.85,
-            node_type: "semantic".into(),
+            node_type: KnowledgeType::Semantic,
+            entity_tags: vec!["auth".into(), "factory-pattern".into()],
+            origin: Origin {
+                agent_id: "agent-1".into(),
+                session_id: "session-2".into(),
+                project_id: Some("my-project".into()),
+                confidence: 0.85,
+            },
+            timestamp: Timestamp::now(),
         };
         
         // Compute dissonance

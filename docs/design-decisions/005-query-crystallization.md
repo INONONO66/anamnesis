@@ -57,6 +57,9 @@ pub struct CrystallizeRequest {
     /// Source fragment node IDs (from ContextPackage)
     pub source_ids: Vec<NodeId>,
 
+    /// Relevance scores for each source fragment [0, 1] (optional; from spreading activation)
+    pub source_relevances: Option<Vec<f64>>,
+
     /// Type of the crystallized node
     pub node_type: KnowledgeType,            // typically Semantic or Decision
 
@@ -154,7 +157,7 @@ impl<S: StorageAdapter> Engine<S> {
     /// # Errors
     ///
     /// - `Error::InvalidNodeId` — source_id does not exist
-    /// - `Error::Rejected` — dedup gate failed (too similar to existing crystallized node)
+    /// - `Error::DuplicateCrystallization` — dedup gate failed (too similar to existing crystallized node)
     /// - `Error::InvalidInput` — fewer than 2 source_ids
     pub fn crystallize(
         &mut self,

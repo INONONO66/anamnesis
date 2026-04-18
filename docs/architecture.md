@@ -80,7 +80,7 @@ Implements graph traversal and structured output assembly:
 
 Abstracts the storage backend behind a trait:
 
-- **StorageAdapter**: Interface for node/edge persistence — 21 methods across 5 groups:
+- **StorageAdapter**: Interface for node/edge persistence — 21 methods across 6 groups:
   - ID allocation: `next_node_id()`, `next_edge_id()` (reuse freed IDs from free-list stacks)
   - Node CRUD: `set_node()`, `get_node()`, `get_node_mut()`, `delete_node()`
   - Edge CRUD: `set_edge()`, `get_edge()`, `get_edge_mut()`, `delete_edge()`
