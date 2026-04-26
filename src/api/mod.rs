@@ -476,18 +476,28 @@ impl<S: StorageAdapter> Engine<S> {
         weight: f64,
     ) -> Result<EdgeId, Error> {
         let id = self.graph.next_edge_id();
+        let now = Timestamp::now();
+        let is_supersedes = edge_type == EdgeType::Supersedes;
         let edge = Edge {
             id,
             source: from,
             target: to,
             edge_type,
             weight,
-            created_at: Timestamp::now(),
+            created_at: now,
             valid_from: None,
             valid_until: None,
             metadata: HashMap::new(),
         };
         self.graph.add_edge(edge)?;
+        if is_supersedes {
+            if let Ok(target_node) = self.graph.get_node_mut(to) {
+                target_node.valid_until = Some(now);
+            }
+            if let Ok(source_node) = self.graph.get_node_mut(from) {
+                source_node.valid_from = Some(now);
+            }
+        }
         Ok(id)
     }
 
@@ -629,6 +639,44 @@ impl<S: StorageAdapter> Engine<S> {
                 self.query_neighborhood(*entity, *depth, config)
             }
         }
+    }
+
+    /// Query the graph for facts valid at a specific point in time.
+    ///
+    /// Returns a `ContextPackage` containing only nodes that were valid at `as_of`:
+    /// - nodes with `valid_from <= as_of`, or no `valid_from` bound
+    /// - nodes with `valid_until > as_of`, or no `valid_until` bound
+    ///
+    /// This currently runs the standard query pipeline with default configuration,
+    /// then filters retrieved fragments by their bitemporal validity window.
+    pub fn fact_at(&self, query: &Query, as_of: Timestamp) -> Result<ContextPackage, Error> {
+        let mut package = self.query(query, &QueryConfig::default())?;
+
+        package
+            .identity
+            .retain(|fragment| self.node_is_valid_at(fragment.node_id, as_of));
+        package
+            .knowledge
+            .retain(|fragment| self.node_is_valid_at(fragment.node_id, as_of));
+        package
+            .memories
+            .retain(|fragment| self.node_is_valid_at(fragment.node_id, as_of));
+        package.tensions.retain(|tension| {
+            self.node_is_valid_at(tension.node_a, as_of)
+                && self.node_is_valid_at(tension.node_b, as_of)
+        });
+
+        Ok(package)
+    }
+
+    fn node_is_valid_at(&self, node_id: NodeId, as_of: Timestamp) -> bool {
+        self.graph.get_node(node_id).is_ok_and(|node| {
+            let from_ok = node.valid_from.is_none_or(|valid_from| valid_from <= as_of);
+            let until_ok = node
+                .valid_until
+                .is_none_or(|valid_until| valid_until > as_of);
+            from_ok && until_ok
+        })
     }
 
     fn query_type_filtered(
