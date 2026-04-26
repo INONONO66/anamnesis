@@ -8,7 +8,7 @@ Measures Anamnesis accuracy on the LongMemEval benchmark.
 # Download dataset (requires Python + datasets package)
 bash benches/longmemeval/download.sh
 
-# Or: pip install datasets && python3 benches/longmemeval/download.py
+# Or: pip install datasets && bash benches/longmemeval/download.sh
 ```
 
 ## Running
@@ -24,7 +24,7 @@ cargo bench --bench longmemeval-baseline -- --output results.json --limit 50 --j
 ## Dataset
 
 - Source: https://github.com/xiaowu0162/LongMemEval
-- License: Apache 2.0
+- License: MIT
 - Paper: "LongMemEval: Benchmarking LLM long-term memory agents"
 
 ## Results

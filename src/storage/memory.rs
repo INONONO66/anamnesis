@@ -137,11 +137,14 @@ impl StorageAdapter for InMemoryStorage {
         self.node_types[idx] = Some(node.node_type.clone());
 
         let new_id = node.id;
+        let mut seen_tags: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for tag in &node.entity_tags {
-            self.entity_tag_index
-                .entry(tag.clone())
-                .or_default()
-                .push(new_id);
+            if seen_tags.insert(tag.as_str()) {
+                self.entity_tag_index
+                    .entry(tag.clone())
+                    .or_default()
+                    .push(new_id);
+            }
         }
         self.type_index
             .entry(node.node_type.clone())

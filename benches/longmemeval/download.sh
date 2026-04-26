@@ -18,7 +18,7 @@ fi
 
 PYTHON=$(command -v python3 || command -v python)
 
-$PYTHON - <<'PYEOF'
+DATA_DIR="$DATA_DIR" $PYTHON - <<'PYEOF'
 import sys
 try:
     from datasets import load_dataset
@@ -29,7 +29,7 @@ except ImportError:
 import json
 import os
 
-data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+data_dir = os.environ["DATA_DIR"]
 os.makedirs(data_dir, exist_ok=True)
 
 print("Loading LongMemEval dataset from HuggingFace...")

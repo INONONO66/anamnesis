@@ -33,8 +33,15 @@ pub trait StorageAdapter: Send + Sync {
     /// # SoA Invariant
     /// Mutations to `salience`, `accessed_at`, or `node_type` through this reference
     /// will NOT be reflected in the SoA hot-field arrays. Use `set_salience()`,
-    /// `set_accessed_at()` instead for those fields. Only use `get_node_mut()` for
-    /// non-hot fields like `name`, `content`, `access_count`, `metadata`, etc.
+    /// `set_accessed_at()` instead for those fields.
+    ///
+    /// # Index Invariant
+    /// Mutations to `entity_tags`, `node_type`, `origin.agent_id`, or
+    /// `origin.project_id` will NOT update secondary indexes. To change these
+    /// fields, call `set_node()` with the modified node so indexes are rebuilt.
+    ///
+    /// Safe to mutate: `name`, `summary`, `content`, `embedding`, `access_count`,
+    /// `access_history`, `metadata`, `valid_from`, `valid_until`.
     fn get_node_mut(&mut self, id: NodeId) -> Result<&mut Node, Error>;
     /// Delete a node. Frees the ID for reuse. Caller must remove edges first.
     fn delete_node(&mut self, id: NodeId) -> Result<(), Error>;

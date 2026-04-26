@@ -163,6 +163,7 @@ fn write_baseline_report(output_path: &str, total: usize, correct: usize, decay:
     } else {
         0.0
     };
+    let accuracy_pct = accuracy * 100.0;
     let report = format!(
         "# Cycle 1 Baseline Measurement\n\n\
          ## Results\n\n\
@@ -170,7 +171,7 @@ fn write_baseline_report(output_path: &str, total: usize, correct: usize, decay:
          |--------|-------|\n\
          | Total Questions | {total} |\n\
          | Correct | {correct} |\n\
-         | Accuracy | {accuracy:.2}% |\n\
+         | Accuracy | {accuracy_pct:.2}% |\n\
          | Decay Mode | {decay} |\n\
          | Output | {output_path} |\n",
     );

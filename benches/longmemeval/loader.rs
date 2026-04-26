@@ -31,12 +31,14 @@ pub struct EvalQuestion {
 
 /// Attempt to load sessions from the data directory.
 ///
-/// Returns Ok(sessions) if data is present, Err(msg) if dataset not downloaded.
+/// Returns Ok(sessions) if data files are present, Err(msg) if dataset not downloaded.
+/// Checks for actual `.jsonl` files, not just the directory existing.
 pub fn load_sessions(data_dir: &Path) -> Result<Vec<Session>, String> {
-    if !data_dir.exists() {
+    let dataset_file = data_dir.join("longmemeval_test.jsonl");
+    if !dataset_file.exists() {
         return Err(format!(
-            "Data directory not found: {}. Run download.sh first.",
-            data_dir.display()
+            "Dataset file not found: {}. Run download.sh first.",
+            dataset_file.display()
         ));
     }
     // TODO: implement JSON parsing when dataset is downloaded
@@ -44,12 +46,12 @@ pub fn load_sessions(data_dir: &Path) -> Result<Vec<Session>, String> {
     Ok(vec![])
 }
 
-/// Attempt to load evaluation questions from the data directory.
 pub fn load_questions(data_dir: &Path) -> Result<Vec<EvalQuestion>, String> {
-    if !data_dir.exists() {
+    let dataset_file = data_dir.join("longmemeval_test.jsonl");
+    if !dataset_file.exists() {
         return Err(format!(
-            "Data directory not found: {}. Run download.sh first.",
-            data_dir.display()
+            "Dataset file not found: {}. Run download.sh first.",
+            dataset_file.display()
         ));
     }
     Ok(vec![])
