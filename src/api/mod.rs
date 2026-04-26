@@ -6,7 +6,7 @@ use crate::error::Error;
 use crate::graph::node::Origin;
 use crate::graph::{Edge, Graph, Node};
 use crate::graph::{EdgeId, EdgeType, KnowledgeType, MemoryTier, NodeId, Timestamp};
-use crate::query::{ContextPackage, Query, QueryConfig};
+use crate::query::{ContextPackage, Query, QueryConfig, SearchInput, SearchResult};
 use crate::storage::{InMemoryStorage, StorageAdapter};
 
 /// Decay model for salience computation.
@@ -663,6 +663,100 @@ impl<S: StorageAdapter> Engine<S> {
                 self.query_neighborhood(*entity, *depth, config)
             }
         }
+    }
+
+    /// Unified search entry point — combines text search, vector similarity, and graph traversal.
+    ///
+    /// Automatically derives a `SearchPlan` from the input and executes the appropriate
+    /// retrieval strategies. Returns a `SearchResult` with a `ContextPackage` and trace.
+    ///
+    /// Returns `Err(Error::InvalidInput)` if both `text` is empty and `query_embedding` is `None`.
+    pub fn search(&self, input: SearchInput) -> Result<SearchResult, Error> {
+        use crate::mechanics::attraction::cosine_similarity;
+        use crate::query::{PackagingMode, SearchPlan, SearchTrace};
+
+        if input.text.is_empty() && input.query_embedding.is_none() {
+            return Err(Error::InvalidInput(
+                "search requires text or query_embedding".to_string(),
+            ));
+        }
+
+        let packaging_mode = PackagingMode::KnowledgeOnly;
+        let plan = SearchPlan {
+            use_text: !input.text.is_empty(),
+            use_vector: input.query_embedding.is_some(),
+            use_graph: true,
+            use_temporal: false,
+            use_persona_bias: input.agent_id.is_some(),
+            packaging_mode: packaging_mode.clone(),
+        };
+
+        let mut trace = SearchTrace {
+            strategies_used: Vec::new(),
+            seed_count: 0,
+            spread_iterations: 0,
+            packaging_mode: Some(plan.packaging_mode.clone()),
+        };
+
+        let mut seed_ids: Vec<NodeId> = Vec::new();
+        let storage = self.graph.storage();
+
+        if plan.use_text {
+            let text_results = storage.text_search(&input.text, input.limit.max(10));
+            seed_ids.extend(text_results.into_iter().map(|(id, _)| id));
+            trace.strategies_used.push("text_search".to_string());
+        }
+
+        if plan.use_vector
+            && let Some(ref query_embedding) = input.query_embedding
+        {
+            let vector_scores: Vec<(NodeId, f64)> = storage
+                .all_node_ids()
+                .into_iter()
+                .filter_map(|node_id| {
+                    let node = storage.get_node(node_id).ok()?;
+                    let embedding = node.embedding.as_ref()?;
+                    Some((node_id, cosine_similarity(query_embedding, embedding)))
+                })
+                .filter(|(_, score)| *score > 0.0)
+                .collect();
+
+            for (node_id, _) in top_n_by_score(&vector_scores, input.limit.max(10)) {
+                if !seed_ids.contains(&node_id) {
+                    seed_ids.push(node_id);
+                }
+            }
+            trace.strategies_used.push("vector_similarity".to_string());
+        }
+
+        trace.seed_count = seed_ids.len();
+
+        let mut package = if plan.use_graph {
+            if let Some(&seed) = seed_ids.first() {
+                let config = QueryConfig {
+                    budget: input.limit.saturating_mul(10),
+                    agent_id: input.agent_id.clone(),
+                    project_id: input.project_id.clone(),
+                    query_embedding: input.query_embedding.clone(),
+                    context: input.context.clone(),
+                    ..QueryConfig::default()
+                };
+                trace
+                    .strategies_used
+                    .push("spreading_activation".to_string());
+                trace.spread_iterations = 1;
+                self.query_associative(seed, config.budget, &config)?
+            } else {
+                ContextPackage::empty()
+            }
+        } else {
+            ContextPackage::empty()
+        };
+
+        package.knowledge.truncate(input.limit);
+        package.memories.truncate(input.limit);
+
+        Ok(SearchResult { package, trace })
     }
 
     /// Query the graph for facts valid at a specific point in time.
