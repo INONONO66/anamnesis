@@ -5,11 +5,12 @@ use anamnesis::graph::node::Origin;
 use anamnesis::{EdgeType, Engine, EngineConfig, IngestResult, KnowledgeType, Timestamp};
 
 fn make_bench_engine() -> Engine {
-    // Disable perception gate for benchmarks (novelty_threshold=0)
+    // Disable novelty/dedup gating so benchmarks can focus on operation cost.
     Engine::with_config(
         EngineConfig::new()
-            .with_novelty_threshold(0.0)
-            .with_confidence_threshold(0.0),
+            .with_novelty_threshold(-1.0)
+            .with_confidence_threshold(0.0)
+            .with_dedup_enabled(false),
     )
 }
 

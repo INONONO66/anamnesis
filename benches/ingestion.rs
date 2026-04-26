@@ -7,7 +7,7 @@ use anamnesis::{EdgeType, Engine, EngineConfig, IngestResult, KnowledgeType, Tim
 fn make_bench_engine() -> Engine {
     Engine::with_config(
         EngineConfig::new()
-            .with_novelty_threshold(0.0)
+            .with_novelty_threshold(-1.0)
             .with_confidence_threshold(0.0)
             .with_dedup_enabled(false),
     )

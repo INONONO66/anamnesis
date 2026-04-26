@@ -414,6 +414,120 @@ impl StorageAdapter for InMemoryStorage {
         ids.sort_by_key(|a| std::cmp::Reverse(a.0));
         ids
     }
+
+    fn text_search(&self, query: &str, limit: usize) -> Vec<(NodeId, f64)> {
+        if limit == 0 {
+            return Vec::new();
+        }
+
+        let query_lower = query.to_lowercase();
+        let all_ids = self.all_node_ids();
+        let mut results: Vec<(NodeId, f64)> = Vec::new();
+
+        for &id in &all_ids {
+            if let Ok(node) = self.get_node(id) {
+                if node.name.to_lowercase() == query_lower
+                    || node.content.to_lowercase() == query_lower
+                {
+                    results.push((id, 1.0));
+                }
+            }
+        }
+
+        if results.len() >= limit {
+            results.truncate(limit);
+            return results;
+        }
+
+        let mut found_ids: std::collections::HashSet<NodeId> =
+            results.iter().map(|(id, _)| *id).collect();
+        let query_words: Vec<&str> = query_lower.split_whitespace().collect();
+
+        if !query_words.is_empty() && !all_ids.is_empty() {
+            let mut idf_by_word = HashMap::new();
+            let node_count = all_ids.len() as f64;
+
+            for word in &query_words {
+                idf_by_word.entry(*word).or_insert_with(|| {
+                    let df = all_ids
+                        .iter()
+                        .filter(|&&id| {
+                            self.get_node(id).ok().is_some_and(|node| {
+                                let text = format!(
+                                    "{} {}",
+                                    node.name.to_lowercase(),
+                                    node.content.to_lowercase()
+                                );
+                                text.contains(*word)
+                            })
+                        })
+                        .count() as f64;
+
+                    if df > 0.0 {
+                        (node_count / df).ln()
+                    } else {
+                        0.0
+                    }
+                });
+            }
+
+            for &id in &all_ids {
+                if found_ids.contains(&id) {
+                    continue;
+                }
+
+                if let Ok(node) = self.get_node(id) {
+                    let text = format!(
+                        "{} {}",
+                        node.name.to_lowercase(),
+                        node.content.to_lowercase()
+                    );
+                    let mut total_idf = 0.0;
+                    let mut matched = 0;
+
+                    for word in &query_words {
+                        if text.contains(*word) {
+                            total_idf += idf_by_word.get(word).copied().unwrap_or(0.0);
+                            matched += 1;
+                        }
+                    }
+
+                    if matched > 0 {
+                        let score = (total_idf / matched as f64).clamp(0.5, 1.0);
+                        results.push((id, score));
+                    }
+                }
+            }
+
+            if results.len() >= limit {
+                results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                results.truncate(limit);
+                return results;
+            }
+        }
+
+        found_ids = results.iter().map(|(id, _)| *id).collect();
+        for &id in &all_ids {
+            if found_ids.contains(&id) {
+                continue;
+            }
+
+            if let Ok(node) = self.get_node(id) {
+                let text = format!(
+                    "{} {}",
+                    node.name.to_lowercase(),
+                    node.content.to_lowercase()
+                );
+                if text.contains(&query_lower) {
+                    results.push((id, 0.5));
+                }
+            }
+        }
+
+        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        results.truncate(limit);
+        results
+    }
 }
 
 #[cfg(test)]

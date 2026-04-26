@@ -101,10 +101,10 @@ fn text_search_matches_content_field() {
 }
 
 #[test]
-fn text_search_score_is_one() {
+fn text_search_substring_score_is_fuzzy() {
     let mut s = InMemoryStorage::new();
     insert_node_with_content(&mut s, "factory pattern");
     let results = s.text_search("factory", 10);
     assert!(!results.is_empty());
-    assert_eq!(results[0].1, 1.0);
+    assert_eq!(results[0].1, 0.5);
 }
