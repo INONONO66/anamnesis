@@ -386,6 +386,31 @@ impl StorageAdapter for InMemoryStorage {
             .filter_map(|(i, slot)| slot.as_ref().map(|_| EdgeId(i as u64)))
             .collect()
     }
+
+    fn nodes_by_entity_tag(&self, tag: &str) -> Vec<NodeId> {
+        self.entity_tag_index.get(tag).cloned().unwrap_or_default()
+    }
+
+    fn nodes_by_type(&self, kt: &KnowledgeType) -> Vec<NodeId> {
+        self.type_index.get(kt).cloned().unwrap_or_default()
+    }
+
+    fn nodes_by_agent(&self, agent_id: &str) -> Vec<NodeId> {
+        self.agent_index.get(agent_id).cloned().unwrap_or_default()
+    }
+
+    fn nodes_by_project(&self, project_id: &str) -> Vec<NodeId> {
+        self.project_index
+            .get(project_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn node_ids_descending(&self) -> Vec<NodeId> {
+        let mut ids = self.all_node_ids();
+        ids.sort_by_key(|a| std::cmp::Reverse(a.0));
+        ids
+    }
 }
 
 #[cfg(test)]
@@ -800,6 +825,129 @@ mod tests {
         s.set_node(make_node(reused, 0.8)).unwrap();
         assert!(s.edges_from(reused).is_empty());
         assert!(s.edges_to(reused).is_empty());
+    }
+
+    #[test]
+    fn nodes_by_entity_tag_returns_correct_set() {
+        let mut s = InMemoryStorage::new();
+        let id1 = s.next_node_id();
+        let id2 = s.next_node_id();
+        let id3 = s.next_node_id();
+        s.set_node(make_node_indexed(
+            id1,
+            vec!["auth"],
+            KnowledgeType::Semantic,
+            "A",
+            None,
+        ))
+        .unwrap();
+        s.set_node(make_node_indexed(
+            id2,
+            vec!["auth", "db"],
+            KnowledgeType::Semantic,
+            "A",
+            None,
+        ))
+        .unwrap();
+        s.set_node(make_node_indexed(
+            id3,
+            vec!["db"],
+            KnowledgeType::Convention,
+            "B",
+            None,
+        ))
+        .unwrap();
+        let auth_set: std::collections::HashSet<_> =
+            s.nodes_by_entity_tag("auth").into_iter().collect();
+        assert_eq!(auth_set, [id1, id2].iter().copied().collect());
+    }
+
+    #[test]
+    fn nodes_by_type_returns_correct_set() {
+        let mut s = InMemoryStorage::new();
+        let id1 = s.next_node_id();
+        let id2 = s.next_node_id();
+        s.set_node(make_node_indexed(
+            id1,
+            vec![],
+            KnowledgeType::Semantic,
+            "A",
+            None,
+        ))
+        .unwrap();
+        s.set_node(make_node_indexed(
+            id2,
+            vec![],
+            KnowledgeType::Convention,
+            "A",
+            None,
+        ))
+        .unwrap();
+        let semantic = s.nodes_by_type(&KnowledgeType::Semantic);
+        assert_eq!(semantic, vec![id1]);
+    }
+
+    #[test]
+    fn nodes_by_agent_returns_correct_set() {
+        let mut s = InMemoryStorage::new();
+        let id1 = s.next_node_id();
+        let id2 = s.next_node_id();
+        s.set_node(make_node_indexed(
+            id1,
+            vec![],
+            KnowledgeType::Semantic,
+            "agent-A",
+            None,
+        ))
+        .unwrap();
+        s.set_node(make_node_indexed(
+            id2,
+            vec![],
+            KnowledgeType::Semantic,
+            "agent-B",
+            None,
+        ))
+        .unwrap();
+        let a_nodes = s.nodes_by_agent("agent-A");
+        assert_eq!(a_nodes, vec![id1]);
+    }
+
+    #[test]
+    fn nodes_by_project_returns_correct_set() {
+        let mut s = InMemoryStorage::new();
+        let id1 = s.next_node_id();
+        let id2 = s.next_node_id();
+        s.set_node(make_node_indexed(
+            id1,
+            vec![],
+            KnowledgeType::Semantic,
+            "A",
+            Some("proj-X"),
+        ))
+        .unwrap();
+        s.set_node(make_node_indexed(
+            id2,
+            vec![],
+            KnowledgeType::Semantic,
+            "A",
+            None,
+        ))
+        .unwrap();
+        let proj_nodes = s.nodes_by_project("proj-X");
+        assert_eq!(proj_nodes, vec![id1]);
+    }
+
+    #[test]
+    fn node_ids_descending_returns_sorted() {
+        let mut s = InMemoryStorage::new();
+        let id0 = s.next_node_id();
+        let id1 = s.next_node_id();
+        let id2 = s.next_node_id();
+        s.set_node(make_node(id0, 0.5)).unwrap();
+        s.set_node(make_node(id1, 0.5)).unwrap();
+        s.set_node(make_node(id2, 0.5)).unwrap();
+        let desc = s.node_ids_descending();
+        assert_eq!(desc, vec![id2, id1, id0]);
     }
 
     #[test]
