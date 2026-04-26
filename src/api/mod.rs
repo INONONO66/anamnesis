@@ -372,20 +372,40 @@ impl<S: StorageAdapter> Engine<S> {
     /// Phase 2: Applies decay (eq 4) BEFORE reinforcement (eq 5).
     /// Decay is lazy: computed based on elapsed time since last access.
     pub fn touch(&mut self, node_id: NodeId, now: Timestamp) -> Result<(), Error> {
-        use crate::mechanics::forgetting::{decay_salience, reinforce_salience};
+        use crate::mechanics::forgetting::{
+            base_level_to_salience, compute_base_level, decay_salience, reinforce_salience,
+        };
 
         let current_salience = self.graph.storage().get_salience(node_id)?;
         let last_accessed = self.graph.storage().get_accessed_at(node_id)?;
         let node_type = self.graph.storage().get_node_type(node_id)?.clone();
 
-        let dt_ms = now.0.saturating_sub(last_accessed.0);
-        let dt_days = dt_ms as f64 / 86_400_000.0;
+        match self.config.decay_model {
+            DecayModel::Exponential => {
+                let dt_ms = now.0.saturating_sub(last_accessed.0);
+                let dt_days = dt_ms as f64 / 86_400_000.0;
 
-        // Decay BEFORE reinforcement — ordering invariant (eq 4 then eq 5)
-        let decayed = decay_salience(current_salience, dt_days, &node_type);
-        let reinforced = reinforce_salience(decayed);
+                // Decay BEFORE reinforcement — ordering invariant (eq 4 then eq 5)
+                let decayed = decay_salience(current_salience, dt_days, &node_type);
+                let reinforced = reinforce_salience(decayed);
 
-        self.graph.storage_mut().set_salience(node_id, reinforced)?;
+                self.graph.storage_mut().set_salience(node_id, reinforced)?;
+            }
+            DecayModel::PowerLaw => {
+                let history_snapshot = {
+                    let node = self.graph.get_node_mut(node_id)?;
+                    node.record_access(now);
+                    node.access_history.clone()
+                };
+                let new_salience =
+                    base_level_to_salience(compute_base_level(&history_snapshot, now, 0.5));
+
+                self.graph
+                    .storage_mut()
+                    .set_salience(node_id, new_salience)?;
+            }
+        }
+
         self.graph.storage_mut().set_accessed_at(node_id, now)?;
 
         let node = self.graph.get_node_mut(node_id)?;
@@ -396,7 +416,9 @@ impl<S: StorageAdapter> Engine<S> {
 
     /// Advance time — apply batch decay (eq 4) to all nodes.
     pub fn tick(&mut self, now: Timestamp) -> Result<TickReport, Error> {
-        use crate::mechanics::forgetting::{decay_salience, floor_for_type};
+        use crate::mechanics::forgetting::{
+            base_level_to_salience, compute_base_level, decay_salience, floor_for_type,
+        };
 
         let node_ids = self.graph.storage().all_node_ids();
         let mut nodes_decayed = 0usize;
@@ -416,10 +438,22 @@ impl<S: StorageAdapter> Engine<S> {
                 Err(_) => continue,
             };
 
-            let dt_ms = now.0.saturating_sub(last_accessed.0);
-            let dt_days = dt_ms as f64 / 86_400_000.0;
+            let new_salience = match self.config.decay_model {
+                DecayModel::Exponential => {
+                    let dt_ms = now.0.saturating_sub(last_accessed.0);
+                    let dt_days = dt_ms as f64 / 86_400_000.0;
 
-            let new_salience = decay_salience(current_salience, dt_days, &node_type);
+                    decay_salience(current_salience, dt_days, &node_type)
+                }
+                DecayModel::PowerLaw => {
+                    let history = match self.graph.get_node(id) {
+                        Ok(node) => node.access_history.clone(),
+                        Err(_) => continue,
+                    };
+
+                    base_level_to_salience(compute_base_level(&history, now, 0.5))
+                }
+            };
 
             if (new_salience - current_salience).abs() > 1e-10 {
                 if self
