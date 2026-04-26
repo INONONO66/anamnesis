@@ -138,6 +138,22 @@ pub struct ReflectReport {
     pub clusters_found: usize,
 }
 
+/// Result of an ingest operation.
+///
+/// Indicates whether a new node was created or an existing node was reinforced.
+#[derive(Debug, Clone)]
+pub enum IngestResult {
+    /// A new node was created with the given IDs.
+    Created(Vec<NodeId>),
+    /// An existing node was reinforced due to similarity.
+    Reinforced {
+        /// The ID of the existing node that was reinforced.
+        existing_id: NodeId,
+        /// Similarity score [0, 1] between the new observation and the existing node.
+        similarity: f64,
+    },
+}
+
 /// Return the top-N `(NodeId, score)` pairs by score descending.
 ///
 /// Uses a min-heap of size `n` for O(M log N) complexity instead of sorting
@@ -244,7 +260,7 @@ impl<S: StorageAdapter> Engine<S> {
     /// Creates a Node, then applies attraction mechanics: finds candidate nodes
     /// (last 256 + entity-tag matches), scores them, and creates/strengthens
     /// up to 4 edges to the most similar candidates.
-    pub fn ingest(&mut self, observation: Observation) -> Result<Vec<NodeId>, Error> {
+    pub fn ingest(&mut self, observation: Observation) -> Result<IngestResult, Error> {
         use crate::mechanics::attraction::{
             attraction_score, cosine_similarity, should_create_edge, strengthen_edge, tau_type,
         };
@@ -416,7 +432,7 @@ impl<S: StorageAdapter> Engine<S> {
             }
         }
 
-        Ok(vec![id])
+        Ok(IngestResult::Created(vec![id]))
     }
 
     /// Create or strengthen a link between two nodes.
@@ -918,7 +934,10 @@ mod tests {
     #[test]
     fn ingest_creates_node() {
         let mut engine = Engine::new();
-        let ids = engine.ingest(make_observation("test node")).unwrap();
+        let result = engine.ingest(make_observation("test node")).unwrap();
+        let IngestResult::Created(ids) = result else {
+            panic!("expected Created variant");
+        };
         assert_eq!(ids.len(), 1);
         assert_eq!(engine.graph().node_count(), 1);
         let node = engine.graph().get_node(ids[0]).unwrap();
@@ -929,8 +948,12 @@ mod tests {
     #[test]
     fn link_creates_edge() {
         let mut engine = Engine::new();
-        let ids1 = engine.ingest(make_observation("node A")).unwrap();
-        let ids2 = engine.ingest(make_observation("node B")).unwrap();
+        let IngestResult::Created(ids1) = engine.ingest(make_observation("node A")).unwrap() else {
+            panic!("expected Created");
+        };
+        let IngestResult::Created(ids2) = engine.ingest(make_observation("node B")).unwrap() else {
+            panic!("expected Created");
+        };
         let eid = engine
             .link(ids1[0], ids2[0], EdgeType::Semantic, 0.8)
             .unwrap();
@@ -942,7 +965,9 @@ mod tests {
     #[test]
     fn touch_increments_access_count() {
         let mut engine = Engine::new();
-        let ids = engine.ingest(make_observation("node")).unwrap();
+        let IngestResult::Created(ids) = engine.ingest(make_observation("node")).unwrap() else {
+            panic!("expected Created");
+        };
         engine.touch(ids[0], Timestamp::now()).unwrap();
         engine.touch(ids[0], Timestamp::now()).unwrap();
         let node = engine.graph().get_node(ids[0]).unwrap();
@@ -985,8 +1010,12 @@ mod tests {
     #[test]
     fn link_has_nonzero_timestamp() {
         let mut engine = Engine::new();
-        let ids1 = engine.ingest(make_observation("A")).unwrap();
-        let ids2 = engine.ingest(make_observation("B")).unwrap();
+        let IngestResult::Created(ids1) = engine.ingest(make_observation("A")).unwrap() else {
+            panic!("expected Created");
+        };
+        let IngestResult::Created(ids2) = engine.ingest(make_observation("B")).unwrap() else {
+            panic!("expected Created");
+        };
         let eid = engine
             .link(ids1[0], ids2[0], EdgeType::Semantic, 0.5)
             .unwrap();
@@ -997,7 +1026,9 @@ mod tests {
     #[test]
     fn touch_updates_accessed_at_to_nonzero() {
         let mut engine = Engine::new();
-        let ids = engine.ingest(make_observation("node")).unwrap();
+        let IngestResult::Created(ids) = engine.ingest(make_observation("node")).unwrap() else {
+            panic!("expected Created");
+        };
         engine.touch(ids[0], Timestamp::now()).unwrap();
         let node = engine.graph().get_node(ids[0]).unwrap();
         assert!(node.accessed_at.0 > 0);
@@ -1006,7 +1037,9 @@ mod tests {
     #[test]
     fn touch_applies_decay_before_reinforcement() {
         let mut engine = Engine::new();
-        let ids = engine.ingest(make_observation("node")).unwrap();
+        let IngestResult::Created(ids) = engine.ingest(make_observation("node")).unwrap() else {
+            panic!("expected Created");
+        };
         let id = ids[0];
 
         let future = Timestamp(1000 + 30 * 86_400_000);
@@ -1029,7 +1062,9 @@ mod tests {
     #[test]
     fn touch_immediate_reinforces_without_decay() {
         let mut engine = Engine::new();
-        let ids = engine.ingest(make_observation("node")).unwrap();
+        let IngestResult::Created(ids) = engine.ingest(make_observation("node")).unwrap() else {
+            panic!("expected Created");
+        };
         let id = ids[0];
 
         let now = Timestamp(1000);
@@ -1056,8 +1091,12 @@ mod tests {
             ..make_observation("semantic")
         };
 
-        let episodic_ids = engine.ingest(episodic_obs).unwrap();
-        let semantic_ids = engine.ingest(semantic_obs).unwrap();
+        let IngestResult::Created(episodic_ids) = engine.ingest(episodic_obs).unwrap() else {
+            panic!("expected Created");
+        };
+        let IngestResult::Created(semantic_ids) = engine.ingest(semantic_obs).unwrap() else {
+            panic!("expected Created");
+        };
 
         let future = Timestamp(30 * 86_400_000);
         let report = engine.tick(future).unwrap();
@@ -1093,7 +1132,10 @@ mod tests {
             timestamp: Timestamp(0),
             ..make_observation("identity")
         };
-        let id = engine.ingest(identity_obs).unwrap()[0];
+        let IngestResult::Created(ids) = engine.ingest(identity_obs).unwrap() else {
+            panic!("expected Created");
+        };
+        let id = ids[0];
 
         let future = Timestamp(365 * 86_400_000);
         engine.tick(future).unwrap();
@@ -1112,7 +1154,7 @@ mod tests {
                 timestamp: Timestamp(0),
                 ..make_observation(&format!("episodic-{i}"))
             };
-            engine.ingest(obs).unwrap();
+            let _ = engine.ingest(obs).unwrap();
         }
 
         let future = Timestamp(30 * 86_400_000);
@@ -1133,13 +1175,17 @@ mod tests {
             embedding: Some(vec![1.0, 0.0, 0.0]),
             ..make_observation("node A")
         };
-        let ids1 = engine.ingest(obs1).unwrap();
+        let IngestResult::Created(ids1) = engine.ingest(obs1).unwrap() else {
+            panic!("expected Created");
+        };
 
         let obs2 = Observation {
             embedding: Some(vec![0.95, 0.1, 0.0]),
             ..make_observation("node B")
         };
-        let ids2 = engine.ingest(obs2).unwrap();
+        let IngestResult::Created(ids2) = engine.ingest(obs2).unwrap() else {
+            panic!("expected Created");
+        };
 
         assert_eq!(
             engine.graph().edge_count(),
@@ -1160,13 +1206,13 @@ mod tests {
             embedding: Some(vec![1.0, 0.0, 0.0]),
             ..make_observation("node A")
         };
-        engine.ingest(obs1).unwrap();
+        let _ = engine.ingest(obs1).unwrap();
 
         let obs2 = Observation {
             embedding: Some(vec![0.0, 1.0, 0.0]),
             ..make_observation("node B")
         };
-        engine.ingest(obs2).unwrap();
+        let _ = engine.ingest(obs2).unwrap();
 
         assert_eq!(
             engine.graph().edge_count(),
@@ -1183,13 +1229,13 @@ mod tests {
             embedding: Some(vec![1.0, 0.0, 0.0]),
             ..make_observation("node A")
         };
-        engine.ingest(obs1).unwrap();
+        let _ = engine.ingest(obs1).unwrap();
 
         let obs2 = Observation {
             embedding: None,
             ..make_observation("node B")
         };
-        engine.ingest(obs2).unwrap();
+        let _ = engine.ingest(obs2).unwrap();
 
         assert_eq!(
             engine.graph().edge_count(),
@@ -1208,7 +1254,7 @@ mod tests {
                 embedding: Some(vec![1.0, 0.01 * i as f64, 0.0]),
                 ..make_observation(&format!("node-{i}"))
             };
-            engine.ingest(obs).unwrap();
+            let _ = engine.ingest(obs).unwrap();
         }
 
         let all_ids = engine.graph().all_node_ids();
@@ -1235,8 +1281,8 @@ mod tests {
         let config = EngineConfig::new().with_max_nodes(2);
         let mut engine = Engine::with_config(config);
 
-        engine.ingest(make_observation("node 1")).unwrap();
-        engine.ingest(make_observation("node 2")).unwrap();
+        let _ = engine.ingest(make_observation("node 1")).unwrap();
+        let _ = engine.ingest(make_observation("node 2")).unwrap();
 
         let result = engine.ingest(make_observation("node 3"));
         assert!(matches!(result, Err(Error::Rejected(_))));
@@ -1251,7 +1297,7 @@ mod tests {
             embedding: Some(vec![1.0, 0.0, 0.0]),
             ..make_observation("original")
         };
-        engine.ingest(obs1).unwrap();
+        let _ = engine.ingest(obs1).unwrap();
 
         let obs2 = Observation {
             embedding: Some(vec![1.0, 0.001, 0.0]),
@@ -1293,8 +1339,12 @@ mod tests {
             embedding: Some(vec![0.9, 0.1, 0.0]),
             ..make_observation("factory pattern is preferred")
         };
-        let ids1 = engine.ingest(obs1).unwrap();
-        let ids2 = engine.ingest(obs2).unwrap();
+        let IngestResult::Created(ids1) = engine.ingest(obs1).unwrap() else {
+            panic!("expected Created");
+        };
+        let IngestResult::Created(ids2) = engine.ingest(obs2).unwrap() else {
+            panic!("expected Created");
+        };
 
         engine
             .link(ids1[0], ids2[0], EdgeType::Semantic, 0.8)
@@ -1335,8 +1385,12 @@ mod tests {
             ..make_observation("factory pattern knowledge")
         };
 
-        let identity_ids = engine.ingest(identity_obs).unwrap();
-        let semantic_ids = engine.ingest(semantic_obs).unwrap();
+        let IngestResult::Created(identity_ids) = engine.ingest(identity_obs).unwrap() else {
+            panic!("expected Created");
+        };
+        let IngestResult::Created(semantic_ids) = engine.ingest(semantic_obs).unwrap() else {
+            panic!("expected Created");
+        };
         engine
             .link(identity_ids[0], semantic_ids[0], EdgeType::Semantic, 0.8)
             .unwrap();
@@ -1373,8 +1427,12 @@ mod tests {
             ..make_observation("factory pattern is bad")
         };
 
-        let ids1 = engine.ingest(obs1).unwrap();
-        let ids2 = engine.ingest(obs2).unwrap();
+        let IngestResult::Created(ids1) = engine.ingest(obs1).unwrap() else {
+            panic!("expected Created");
+        };
+        let IngestResult::Created(ids2) = engine.ingest(obs2).unwrap() else {
+            panic!("expected Created");
+        };
         engine
             .link(ids1[0], ids2[0], EdgeType::Contradicts, 0.9)
             .unwrap();

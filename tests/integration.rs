@@ -7,7 +7,7 @@ use anamnesis::api::{Observation, SessionSummary};
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{EdgeType, KnowledgeType, Timestamp};
 use anamnesis::query::{Query, QueryConfig};
-use anamnesis::{Engine, EngineConfig};
+use anamnesis::{Engine, EngineConfig, IngestResult};
 
 fn make_observation(name: &str, node_type: KnowledgeType) -> Observation {
     Observation {
@@ -33,18 +33,24 @@ fn engine_full_lifecycle() {
     let mut engine = Engine::new();
 
     // 1. Ingest two observations
-    let ids1 = engine
+    let IngestResult::Created(ids1) = engine
         .ingest(make_observation(
             "auth uses factory pattern",
             KnowledgeType::Convention,
         ))
-        .unwrap();
-    let ids2 = engine
+        .unwrap()
+    else {
+        panic!("expected Created");
+    };
+    let IngestResult::Created(ids2) = engine
         .ingest(make_observation(
             "race condition in auth middleware",
             KnowledgeType::Episodic,
         ))
-        .unwrap();
+        .unwrap()
+    else {
+        panic!("expected Created");
+    };
     assert_eq!(ids1.len(), 1);
     assert_eq!(ids2.len(), 1);
     assert_eq!(engine.graph().node_count(), 2);
@@ -104,9 +110,12 @@ fn engine_with_config() {
         .with_confidence_threshold(0.6);
     let mut engine = Engine::with_config(config);
 
-    let ids = engine
+    let IngestResult::Created(ids) = engine
         .ingest(make_observation("test", KnowledgeType::Semantic))
-        .unwrap();
+        .unwrap()
+    else {
+        panic!("expected Created");
+    };
     assert_eq!(ids.len(), 1);
 }
 
@@ -130,7 +139,9 @@ fn node_fields_preserved_after_ingest() {
         timestamp: Timestamp(5000),
     };
 
-    let ids = engine.ingest(obs).unwrap();
+    let IngestResult::Created(ids) = engine.ingest(obs).unwrap() else {
+        panic!("expected Created");
+    };
     let node = engine.graph().get_node(ids[0]).unwrap();
 
     assert_eq!(node.name, "physics = edge weight dynamics");
@@ -149,15 +160,27 @@ fn node_fields_preserved_after_ingest() {
 #[test]
 fn multiple_edge_types() {
     let mut engine = Engine::new();
-    let id1 = engine
+    let IngestResult::Created(ids1) = engine
         .ingest(make_observation("decision", KnowledgeType::Decision))
-        .unwrap()[0];
-    let id2 = engine
+        .unwrap()
+    else {
+        panic!("expected Created");
+    };
+    let IngestResult::Created(ids2) = engine
         .ingest(make_observation("reason", KnowledgeType::Semantic))
-        .unwrap()[0];
-    let id3 = engine
+        .unwrap()
+    else {
+        panic!("expected Created");
+    };
+    let IngestResult::Created(ids3) = engine
         .ingest(make_observation("rejected", KnowledgeType::Semantic))
-        .unwrap()[0];
+        .unwrap()
+    else {
+        panic!("expected Created");
+    };
+    let id1 = ids1[0];
+    let id2 = ids2[0];
+    let id3 = ids3[0];
 
     engine.link(id1, id2, EdgeType::Reason, 1.0).unwrap();
     engine
