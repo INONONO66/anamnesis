@@ -48,6 +48,11 @@ name = "longmemeval-baseline"
 path = "benches/longmemeval/baseline.rs"
 harness = false
 
+[[bench]]
+name = "longmemeval-indexed"
+path = "benches/longmemeval/indexed.rs"
+harness = false
+
 [[test]]
 name = "longmemeval-judge"
 path = "benches/longmemeval/judge.rs"
