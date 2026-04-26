@@ -43,29 +43,27 @@ fn rerank_changes_order_for_different_contexts() {
     // Decay so salience < 0.8 — the +0.2 boost becomes visible
     e.tick(Timestamp(1000 + 30 * 86_400_000)).unwrap();
 
+    let mut auth_config = QueryConfig::default();
+    auth_config.context = Some("auth security".into());
     let pkg_auth = e
         .query(
             &Query::List {
                 min_salience: 0.0,
                 limit: 10,
             },
-            &QueryConfig {
-                context: Some("auth security".into()),
-                ..Default::default()
-            },
+            &auth_config,
         )
         .unwrap();
 
+    let mut db_config = QueryConfig::default();
+    db_config.context = Some("db migration".into());
     let pkg_db = e
         .query(
             &Query::List {
                 min_salience: 0.0,
                 limit: 10,
             },
-            &QueryConfig {
-                context: Some("db migration".into()),
-                ..Default::default()
-            },
+            &db_config,
         )
         .unwrap();
 
@@ -123,16 +121,15 @@ fn rerank_works_with_type_filtered() {
 
     e.tick(Timestamp(1000 + 30 * 86_400_000)).unwrap();
 
+    let mut config = QueryConfig::default();
+    config.context = Some("auth".into());
     let pkg = e
         .query(
             &Query::TypeFiltered {
                 node_type: KnowledgeType::Convention,
                 limit: 10,
             },
-            &QueryConfig {
-                context: Some("auth".into()),
-                ..Default::default()
-            },
+            &config,
         )
         .unwrap();
 
@@ -164,16 +161,15 @@ fn rerank_boosts_by_content_match() {
 
     e.tick(Timestamp(1000 + 30 * 86_400_000)).unwrap();
 
+    let mut config = QueryConfig::default();
+    config.context = Some("database".into());
     let pkg = e
         .query(
             &Query::List {
                 min_salience: 0.0,
                 limit: 10,
             },
-            &QueryConfig {
-                context: Some("database".into()),
-                ..Default::default()
-            },
+            &config,
         )
         .unwrap();
 

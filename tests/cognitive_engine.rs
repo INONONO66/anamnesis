@@ -132,11 +132,9 @@ fn full_cognitive_lifecycle() {
         seed: semantic1_id,
         budget: 100,
     };
-    let qconfig = QueryConfig {
-        project_id: Some("proj-a".to_string()),
-        agent_id: Some("agent-1".to_string()),
-        ..QueryConfig::default()
-    };
+    let mut qconfig = QueryConfig::default();
+    qconfig.project_id = Some("proj-a".to_string());
+    qconfig.agent_id = Some("agent-1".to_string());
     let pkg = engine.query(&q, &qconfig).unwrap();
 
     assert!(
@@ -322,10 +320,8 @@ fn scope_same_project_preferred() {
         seed: same_id,
         budget: 50,
     };
-    let qconfig = QueryConfig {
-        project_id: Some("proj-a".to_string()),
-        ..QueryConfig::default()
-    };
+    let mut qconfig = QueryConfig::default();
+    qconfig.project_id = Some("proj-a".to_string());
     let pkg = engine.query(&q, &qconfig).unwrap();
 
     let all_frags: Vec<_> = pkg

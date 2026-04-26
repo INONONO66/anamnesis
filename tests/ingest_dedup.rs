@@ -24,11 +24,9 @@ fn make_obs(name: &str, embedding: Vec<f64>) -> Observation {
 
 #[test]
 fn duplicate_ingest_reinforces_instead_of_creating() {
-    let config = EngineConfig {
-        dedup_threshold: 0.92,
-        dedup_enabled: true,
-        ..EngineConfig::default()
-    };
+    let config = EngineConfig::new()
+        .with_dedup_threshold(0.92)
+        .with_dedup_enabled(true);
     let mut e = Engine::with_config(config);
     let r1 = e.ingest(make_obs("a", vec![1.0, 0.0])).unwrap();
     let id1 = match r1 {
@@ -67,11 +65,9 @@ fn different_embedding_creates_new_node() {
 
 #[test]
 fn dedup_disabled_creates_new_node() {
-    let config = EngineConfig {
-        dedup_enabled: false,
-        novelty_threshold: 0.0,
-        ..EngineConfig::default()
-    };
+    let config = EngineConfig::new()
+        .with_dedup_enabled(false)
+        .with_novelty_threshold(0.0);
     let mut e = Engine::with_config(config);
     e.ingest(make_obs("a", vec![1.0, 0.0])).unwrap();
     let r = e.ingest(make_obs("a-dup", vec![1.0, 0.0])).unwrap();

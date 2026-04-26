@@ -139,16 +139,15 @@ fn agent_session_simulation_retrieves_relevant_conventions() {
         ))
         .unwrap();
 
+    let mut auth_config = QueryConfig::default();
+    auth_config.context = Some("auth".to_string());
     let auth_conventions = engine
         .query(
             &Query::TypeFiltered {
                 node_type: KnowledgeType::Convention,
                 limit: 1,
             },
-            &QueryConfig {
-                context: Some("auth".to_string()),
-                ..QueryConfig::default()
-            },
+            &auth_config,
         )
         .unwrap();
 
@@ -353,16 +352,15 @@ fn goal_weighted_rerank_prioritizes_contextual_memory() {
         ))
         .unwrap();
 
+    let mut auth_config = QueryConfig::default();
+    auth_config.context = Some("auth security".to_string());
     let auth_ranked = auth_engine
         .query(
             &Query::List {
                 min_salience: 0.0,
                 limit: 10,
             },
-            &QueryConfig {
-                context: Some("auth security".to_string()),
-                ..QueryConfig::default()
-            },
+            &auth_config,
         )
         .unwrap();
     assert_eq!(
@@ -392,16 +390,15 @@ fn goal_weighted_rerank_prioritizes_contextual_memory() {
         ))
         .unwrap();
 
+    let mut database_config = QueryConfig::default();
+    database_config.context = Some("database migration".to_string());
     let database_ranked = database_engine
         .query(
             &Query::List {
                 min_salience: 0.0,
                 limit: 10,
             },
-            &QueryConfig {
-                context: Some("database migration".to_string()),
-                ..QueryConfig::default()
-            },
+            &database_config,
         )
         .unwrap();
     assert_eq!(
@@ -697,18 +694,17 @@ fn end_to_end_agent_memory_pipeline_surfaces_identity_and_relevant_context() {
         "similar auth-refactoring episode should auto-link into the existing graph"
     );
 
+    let mut associative_config = QueryConfig::default();
+    associative_config.agent_id = Some("agent-1".to_string());
+    associative_config.project_id = Some("agent-memory-project".to_string());
+    associative_config.query_embedding = Some(vec![0.86, 0.14, 0.04]);
     let associative = engine
         .query(
             &Query::Associative {
                 seed: auth_refactoring,
                 budget: 50,
             },
-            &QueryConfig {
-                agent_id: Some("agent-1".to_string()),
-                project_id: Some("agent-memory-project".to_string()),
-                query_embedding: Some(vec![0.86, 0.14, 0.04]),
-                ..QueryConfig::default()
-            },
+            &associative_config,
         )
         .unwrap();
     assert!(
@@ -721,16 +717,15 @@ fn end_to_end_agent_memory_pipeline_surfaces_identity_and_relevant_context() {
         "associative query with agent_id should include the agent identity prior",
     );
 
+    let mut auth_config = QueryConfig::default();
+    auth_config.context = Some("auth refactoring".to_string());
     let auth_ranked = engine
         .query(
             &Query::List {
                 min_salience: 0.0,
                 limit: 10,
             },
-            &QueryConfig {
-                context: Some("auth refactoring".to_string()),
-                ..QueryConfig::default()
-            },
+            &auth_config,
         )
         .unwrap();
     assert!(

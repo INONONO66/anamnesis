@@ -52,6 +52,7 @@ pub enum Query {
 
 /// Configuration for a query execution.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct QueryConfig {
     /// Maximum number of nodes to visit during spreading activation.
     pub budget: usize,

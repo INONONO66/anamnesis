@@ -79,10 +79,9 @@ fn make_engine(decay: &str) -> Engine {
         "power-law" | "powerlaw" => DecayModel::PowerLaw,
         _ => DecayModel::Exponential,
     };
-    Engine::with_config(EngineConfig {
-        decay_model,
-        ..EngineConfig::default()
-    })
+    let mut config = EngineConfig::default();
+    config.decay_model = decay_model;
+    Engine::with_config(config)
 }
 
 fn ingest_session(engine: &mut Engine, session: &Session) {

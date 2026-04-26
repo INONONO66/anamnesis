@@ -36,7 +36,7 @@ struct Args {
 
 fn parse_args() -> Args {
     let args: Vec<String> = std::env::args().collect();
-    let mut output = "longmemeval-baseline.json".to_string();
+    let mut output = "longmemeval-indexed.json".to_string();
     let mut limit = 50usize;
     let mut judge = "mock".to_string();
     let mut decay = "exponential".to_string();
@@ -79,10 +79,9 @@ fn make_engine(decay: &str) -> Engine {
         "power-law" | "powerlaw" => DecayModel::PowerLaw,
         _ => DecayModel::Exponential,
     };
-    Engine::with_config(EngineConfig {
-        decay_model,
-        ..EngineConfig::default()
-    })
+    let mut config = EngineConfig::default();
+    config.decay_model = decay_model;
+    Engine::with_config(config)
 }
 
 fn ingest_session(engine: &mut Engine, session: &Session) {
@@ -165,7 +164,7 @@ fn write_baseline_report(output_path: &str, total: usize, correct: usize, decay:
     };
     let accuracy_pct = accuracy * 100.0;
     let report = format!(
-        "# Cycle 1 Baseline Measurement\n\n\
+        "# Cycle 2 Post-Index Measurement\n\n\
          ## Results\n\n\
          | Metric | Value |\n\
          |--------|-------|\n\
@@ -176,9 +175,8 @@ fn write_baseline_report(output_path: &str, total: usize, correct: usize, decay:
          | Output | {output_path} |\n",
     );
     let _ = std::fs::create_dir_all("docs");
-    std::fs::write("docs/cycle-1-baseline.local.md", &report)
-        .expect("failed to write baseline report");
-    eprintln!("Baseline report: docs/cycle-1-baseline.local.md");
+    std::fs::write("docs/cycle-2-post.local.md", &report).expect("failed to write indexed report");
+    eprintln!("Indexed report: docs/cycle-2-post.local.md");
 }
 
 fn mock_sessions() -> Vec<Session> {
@@ -209,7 +207,7 @@ fn mock_questions() -> Vec<EvalQuestion> {
 
 fn main() {
     let args = parse_args();
-    eprintln!("LongMemEval Baseline Measurement");
+    eprintln!("LongMemEval Indexed Measurement");
     eprintln!("  Output: {}", args.output);
     eprintln!("  Limit: {}", args.limit);
     eprintln!("  Judge: {}", args.judge);

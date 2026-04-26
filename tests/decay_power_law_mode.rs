@@ -24,10 +24,8 @@ fn make_obs(name: &str) -> Observation {
 
 #[test]
 fn power_law_mode_updates_access_history_on_touch() {
-    let cfg = EngineConfig {
-        decay_model: DecayModel::PowerLaw,
-        ..EngineConfig::default()
-    };
+    let mut cfg = EngineConfig::default();
+    cfg.decay_model = DecayModel::PowerLaw;
     let mut e = Engine::with_config(cfg);
     let IngestResult::Created(ids) = e.ingest(make_obs("a")).unwrap() else {
         panic!("expected Created");

@@ -24,6 +24,7 @@ pub enum DecayModel {
 
 /// Configuration for the Anamnesis engine.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct EngineConfig {
     /// Maximum number of nodes before perception gate rejects new observations.
     pub max_nodes: usize,
@@ -816,6 +817,8 @@ impl<S: StorageAdapter> Engine<S> {
         config: &QueryConfig,
     ) -> Result<ContextPackage, Error> {
         use crate::query::assembly::{ScoredNode, assemble_context_package};
+
+        let _ = self.graph.get_node(entity)?;
 
         let storage = self.graph.storage();
         let mut queue = VecDeque::new();
@@ -1762,17 +1765,11 @@ mod tests {
     #[test]
     fn query_unimplemented_modes_return_empty() {
         let engine = Engine::new();
-        let queries = vec![
-            Query::Neighborhood {
-                entity: NodeId(0),
-                depth: 1,
-            },
-            Query::Temporal {
-                since: Timestamp(0),
-                node_types: None,
-                limit: 10,
-            },
-        ];
+        let queries = vec![Query::Temporal {
+            since: Timestamp(0),
+            node_types: None,
+            limit: 10,
+        }];
         for q in &queries {
             let pkg = engine.query(q, &QueryConfig::default()).unwrap();
             assert_eq!(
@@ -1781,5 +1778,18 @@ mod tests {
                 "unimplemented query modes should return empty"
             );
         }
+    }
+
+    #[test]
+    fn query_neighborhood_rejects_missing_entity() {
+        let engine = Engine::new();
+        let q = Query::Neighborhood {
+            entity: NodeId(0),
+            depth: 1,
+        };
+
+        let result = engine.query(&q, &QueryConfig::default());
+
+        assert!(matches!(result, Err(Error::NodeNotFound(NodeId(0)))));
     }
 }

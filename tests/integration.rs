@@ -193,7 +193,13 @@ fn multiple_edge_types() {
 
 #[test]
 fn query_all_modes_compile() {
-    let engine = Engine::new();
+    let mut engine = Engine::new();
+    let IngestResult::Created(ids) = engine
+        .ingest(make_observation("entity", KnowledgeType::Entity))
+        .unwrap()
+    else {
+        panic!("expected Created");
+    };
     let config = QueryConfig::default();
 
     // Non-Associative modes return Ok(empty). Associative needs a real seed.
@@ -203,7 +209,7 @@ fn query_all_modes_compile() {
             limit: 5,
         },
         Query::Neighborhood {
-            entity: anamnesis::NodeId(0),
+            entity: ids[0],
             depth: 2,
         },
         Query::Temporal {
