@@ -227,6 +227,20 @@ pub fn top_n_by_score(scores: &[(NodeId, f64)], n: usize) -> Vec<(NodeId, f64)> 
     result
 }
 
+fn merge_highest_relevance(
+    fragments: &mut HashMap<NodeId, crate::query::Fragment>,
+    fragment: crate::query::Fragment,
+) {
+    fragments
+        .entry(fragment.node_id)
+        .and_modify(|existing| {
+            if fragment.relevance > existing.relevance {
+                *existing = fragment.clone();
+            }
+        })
+        .or_insert(fragment);
+}
+
 /// The Anamnesis cognitive graph engine.
 ///
 /// `Engine<S>` is generic over the storage backend. The default is
@@ -673,7 +687,7 @@ impl<S: StorageAdapter> Engine<S> {
     /// Returns `Err(Error::InvalidInput)` if both `text` is empty and `query_embedding` is `None`.
     pub fn search(&self, input: SearchInput) -> Result<SearchResult, Error> {
         use crate::mechanics::attraction::cosine_similarity;
-        use crate::query::{PackagingMode, SearchPlan, SearchTrace};
+        use crate::query::{Fragment, PackagingMode, SearchPlan, SearchTrace, TokenBudget};
 
         if input.text.is_empty() && input.query_embedding.is_none() {
             return Err(Error::InvalidInput(
@@ -691,20 +705,31 @@ impl<S: StorageAdapter> Engine<S> {
             packaging_mode: packaging_mode.clone(),
         };
 
-        let mut trace = SearchTrace {
-            strategies_used: Vec::new(),
-            seed_count: 0,
-            spread_iterations: 0,
-            packaging_mode: Some(plan.packaging_mode.clone()),
-        };
-
-        let mut seed_ids: Vec<NodeId> = Vec::new();
+        let mut all_seed_ids: Vec<NodeId> = Vec::new();
+        let mut strategies_used: Vec<String> = Vec::new();
+        let mut spread_iterations = 0usize;
         let storage = self.graph.storage();
 
+        let sub_queries = if plan.use_text {
+            crate::query::decompose_query(&input.text)
+        } else {
+            Vec::new()
+        };
+
         if plan.use_text {
-            let text_results = storage.text_search(&input.text, input.limit.max(10));
-            seed_ids.extend(text_results.into_iter().map(|(id, _)| id));
-            trace.strategies_used.push("text_search".to_string());
+            for sub_query in &sub_queries {
+                let text_results = storage.text_search(sub_query, input.limit.max(10));
+                let new_seeds: Vec<NodeId> = text_results.iter().map(|(id, _)| *id).collect();
+                if !new_seeds.is_empty() {
+                    all_seed_ids.extend(new_seeds);
+                    if !strategies_used
+                        .iter()
+                        .any(|strategy| strategy == "text_search")
+                    {
+                        strategies_used.push("text_search".to_string());
+                    }
+                }
+            }
         }
 
         if plan.use_vector
@@ -722,39 +747,85 @@ impl<S: StorageAdapter> Engine<S> {
                 .collect();
 
             for (node_id, _) in top_n_by_score(&vector_scores, input.limit.max(10)) {
-                if !seed_ids.contains(&node_id) {
-                    seed_ids.push(node_id);
+                if !all_seed_ids.contains(&node_id) {
+                    all_seed_ids.push(node_id);
                 }
             }
-            trace.strategies_used.push("vector_similarity".to_string());
+            strategies_used.push("vector_similarity".to_string());
         }
 
-        trace.seed_count = seed_ids.len();
+        all_seed_ids.sort();
+        all_seed_ids.dedup();
 
-        let mut package = if plan.use_graph {
-            if let Some(&seed) = seed_ids.first() {
+        let mut merged_knowledge: HashMap<NodeId, Fragment> = HashMap::new();
+        let mut merged_memories: HashMap<NodeId, Fragment> = HashMap::new();
+        let mut merged_identity: HashMap<NodeId, Fragment> = HashMap::new();
+        let mut merged_tensions = Vec::new();
+
+        if plan.use_graph {
+            for seed in all_seed_ids.iter().take(3) {
                 let config = QueryConfig {
-                    budget: input.limit.saturating_mul(10),
+                    budget: input.limit.saturating_mul(5),
                     agent_id: input.agent_id.clone(),
                     project_id: input.project_id.clone(),
                     query_embedding: input.query_embedding.clone(),
                     context: input.context.clone(),
                     ..QueryConfig::default()
                 };
-                trace
-                    .strategies_used
-                    .push("spreading_activation".to_string());
-                trace.spread_iterations = 1;
-                self.query_associative(seed, config.budget, &config)?
-            } else {
-                ContextPackage::empty()
+
+                if let Ok(pkg) = self.query_associative(*seed, config.budget, &config) {
+                    for fragment in pkg.knowledge {
+                        merge_highest_relevance(&mut merged_knowledge, fragment);
+                    }
+                    for fragment in pkg.memories {
+                        merge_highest_relevance(&mut merged_memories, fragment);
+                    }
+                    for fragment in pkg.identity {
+                        merge_highest_relevance(&mut merged_identity, fragment);
+                    }
+                    merged_tensions.extend(pkg.tensions);
+                    spread_iterations += 1;
+                }
             }
-        } else {
-            ContextPackage::empty()
+        }
+
+        if spread_iterations > 0 {
+            strategies_used.push("spreading_activation".to_string());
+        }
+
+        let mut knowledge: Vec<_> = merged_knowledge.into_values().collect();
+        let mut memories: Vec<_> = merged_memories.into_values().collect();
+        let identity: Vec<_> = merged_identity.into_values().collect();
+
+        knowledge.sort_by(|a, b| {
+            b.relevance
+                .partial_cmp(&a.relevance)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        memories.sort_by(|a, b| {
+            b.relevance
+                .partial_cmp(&a.relevance)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        knowledge.truncate(input.limit);
+        memories.truncate(input.limit);
+
+        let package = ContextPackage {
+            identity,
+            knowledge,
+            memories,
+            tensions: merged_tensions,
+            token_usage: TokenBudget::default(),
+            agent_tension: 0.0,
         };
 
-        package.knowledge.truncate(input.limit);
-        package.memories.truncate(input.limit);
+        let trace = SearchTrace {
+            strategies_used,
+            seed_count: all_seed_ids.len(),
+            spread_iterations,
+            packaging_mode: Some(plan.packaging_mode),
+        };
 
         Ok(SearchResult { package, trace })
     }
