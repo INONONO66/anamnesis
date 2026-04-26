@@ -11,7 +11,7 @@
   <a href="https://github.com/INONONO66/anamnesis/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/INONONO66/anamnesis/ci.yml?style=flat-square&label=CI" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="License: MIT"></a>
   <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/rust-2024_edition-orange?style=flat-square&logo=rust" alt="Rust 2024"></a>
-  <a href="https://crates.io/crates/anamnesis"><img src="https://img.shields.io/badge/crates.io-v0.1.0-e6b44c?style=flat-square" alt="crates.io"></a>
+  <a href="https://crates.io/crates/anamnesis"><img src="https://img.shields.io/badge/crates.io-v0.2.0-e6b44c?style=flat-square" alt="crates.io"></a>
   <a href="https://codecov.io/gh/INONONO66/anamnesis"><img src="https://img.shields.io/codecov/c/github/INONONO66/anamnesis?style=flat-square&label=coverage" alt="Coverage"></a>
   <a href="https://docs.rs/anamnesis"><img src="https://img.shields.io/docsrs/anamnesis?style=flat-square" alt="docs.rs"></a>
 </p>
