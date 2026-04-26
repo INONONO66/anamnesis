@@ -26,13 +26,9 @@ pub struct InMemoryStorage {
     live_node_count: usize,
     live_edge_count: usize,
 
-    #[allow(dead_code)]
     pub(crate) entity_tag_index: HashMap<String, Vec<NodeId>>,
-    #[allow(dead_code)]
     pub(crate) type_index: HashMap<KnowledgeType, Vec<NodeId>>,
-    #[allow(dead_code)]
     pub(crate) agent_index: HashMap<String, Vec<NodeId>>,
-    #[allow(dead_code)]
     pub(crate) project_index: HashMap<String, Vec<NodeId>>,
 }
 
@@ -109,13 +105,59 @@ impl StorageAdapter for InMemoryStorage {
         let idx = node.id.0 as usize;
         self.ensure_node_capacity(idx);
 
+        if let Some(old_node) = self.nodes[idx].as_ref() {
+            let old_tags = old_node.entity_tags.clone();
+            let old_type = old_node.node_type.clone();
+            let old_agent = old_node.origin.agent_id.clone();
+            let old_project = old_node.origin.project_id.clone();
+            let old_id = old_node.id;
+
+            for tag in &old_tags {
+                if let Some(v) = self.entity_tag_index.get_mut(tag) {
+                    v.retain(|&id| id != old_id);
+                }
+            }
+            if let Some(v) = self.type_index.get_mut(&old_type) {
+                v.retain(|&id| id != old_id);
+            }
+            if let Some(v) = self.agent_index.get_mut(&old_agent) {
+                v.retain(|&id| id != old_id);
+            }
+            if let Some(proj) = old_project {
+                if let Some(v) = self.project_index.get_mut(&proj) {
+                    v.retain(|&id| id != old_id);
+                }
+            }
+        } else {
+            self.live_node_count += 1;
+        }
+
         self.salience[idx] = node.salience;
         self.accessed_at[idx] = node.accessed_at;
         self.node_types[idx] = Some(node.node_type.clone());
 
-        if self.nodes[idx].is_none() {
-            self.live_node_count += 1;
+        let new_id = node.id;
+        for tag in &node.entity_tags {
+            self.entity_tag_index
+                .entry(tag.clone())
+                .or_default()
+                .push(new_id);
         }
+        self.type_index
+            .entry(node.node_type.clone())
+            .or_default()
+            .push(new_id);
+        self.agent_index
+            .entry(node.origin.agent_id.clone())
+            .or_default()
+            .push(new_id);
+        if let Some(ref proj) = node.origin.project_id {
+            self.project_index
+                .entry(proj.clone())
+                .or_default()
+                .push(new_id);
+        }
+
         self.nodes[idx] = Some(node);
         Ok(())
     }
@@ -141,6 +183,39 @@ impl StorageAdapter for InMemoryStorage {
         if idx >= self.nodes.len() || self.nodes[idx].is_none() {
             return Err(Error::NodeNotFound(id));
         }
+
+        let tags: Vec<String> = self.nodes[idx]
+            .as_ref()
+            .map(|n| n.entity_tags.clone())
+            .unwrap_or_default();
+        let node_type: Option<KnowledgeType> =
+            self.nodes[idx].as_ref().map(|n| n.node_type.clone());
+        let agent_id: Option<String> = self.nodes[idx].as_ref().map(|n| n.origin.agent_id.clone());
+        let project_id: Option<String> = self.nodes[idx]
+            .as_ref()
+            .and_then(|n| n.origin.project_id.clone());
+
+        for tag in &tags {
+            if let Some(v) = self.entity_tag_index.get_mut(tag) {
+                v.retain(|&nid| nid != id);
+            }
+        }
+        if let Some(kt) = node_type {
+            if let Some(v) = self.type_index.get_mut(&kt) {
+                v.retain(|&nid| nid != id);
+            }
+        }
+        if let Some(agent) = agent_id {
+            if let Some(v) = self.agent_index.get_mut(&agent) {
+                v.retain(|&nid| nid != id);
+            }
+        }
+        if let Some(proj) = project_id {
+            if let Some(v) = self.project_index.get_mut(&proj) {
+                v.retain(|&nid| nid != id);
+            }
+        }
+
         self.nodes[idx] = None;
         self.salience[idx] = 0.0;
         self.accessed_at[idx] = Timestamp(0);
@@ -358,6 +433,39 @@ mod tests {
         }
     }
 
+    fn make_node_indexed(
+        id: NodeId,
+        entity_tags: Vec<&str>,
+        node_type: KnowledgeType,
+        agent_id: &str,
+        project_id: Option<&str>,
+    ) -> Node {
+        Node {
+            id,
+            node_type,
+            name: format!("node-{}", id.0),
+            summary: None,
+            content: "test".to_string(),
+            embedding: None,
+            created_at: Timestamp(1000),
+            updated_at: Timestamp(1000),
+            accessed_at: Timestamp(1000),
+            valid_from: None,
+            valid_until: None,
+            salience: 0.5,
+            access_count: 0,
+            access_history: VecDeque::new(),
+            origin: Origin {
+                agent_id: agent_id.to_string(),
+                session_id: "session".to_string(),
+                project_id: project_id.map(|s| s.to_string()),
+                confidence: 0.9,
+            },
+            entity_tags: entity_tags.iter().map(|s| s.to_string()).collect(),
+            metadata: HashMap::new(),
+        }
+    }
+
     #[test]
     fn new_storage_is_empty() {
         let s = InMemoryStorage::new();
@@ -374,6 +482,108 @@ mod tests {
         assert_eq!(s.type_index.len(), 0);
         assert_eq!(s.agent_index.len(), 0);
         assert_eq!(s.project_index.len(), 0);
+    }
+
+    #[test]
+    fn set_node_populates_indexes() {
+        let mut s = InMemoryStorage::new();
+        let id = s.next_node_id();
+        let node = make_node_indexed(
+            id,
+            vec!["auth"],
+            KnowledgeType::Convention,
+            "agent-A",
+            Some("proj-P"),
+        );
+
+        s.set_node(node).unwrap();
+
+        assert!(
+            s.entity_tag_index
+                .get("auth")
+                .is_some_and(|v| v.contains(&id))
+        );
+        assert!(
+            s.type_index
+                .get(&KnowledgeType::Convention)
+                .is_some_and(|v| v.contains(&id))
+        );
+        assert!(
+            s.agent_index
+                .get("agent-A")
+                .is_some_and(|v| v.contains(&id))
+        );
+        assert!(
+            s.project_index
+                .get("proj-P")
+                .is_some_and(|v| v.contains(&id))
+        );
+    }
+
+    #[test]
+    fn delete_node_removes_from_indexes() {
+        let mut s = InMemoryStorage::new();
+        let id = s.next_node_id();
+        s.set_node(make_node_indexed(
+            id,
+            vec!["auth"],
+            KnowledgeType::Convention,
+            "A",
+            Some("P"),
+        ))
+        .unwrap();
+
+        s.delete_node(id).unwrap();
+
+        assert!(
+            !s.entity_tag_index
+                .get("auth")
+                .is_some_and(|v| v.contains(&id))
+        );
+        assert!(
+            !s.type_index
+                .get(&KnowledgeType::Convention)
+                .is_some_and(|v| v.contains(&id))
+        );
+    }
+
+    #[test]
+    fn set_node_update_refreshes_indexes() {
+        let mut s = InMemoryStorage::new();
+        let id = s.next_node_id();
+        s.set_node(make_node_indexed(
+            id,
+            vec!["old-tag"],
+            KnowledgeType::Semantic,
+            "agent",
+            None,
+        ))
+        .unwrap();
+        assert!(
+            s.entity_tag_index
+                .get("old-tag")
+                .is_some_and(|v| v.contains(&id))
+        );
+
+        s.set_node(make_node_indexed(
+            id,
+            vec!["new-tag"],
+            KnowledgeType::Semantic,
+            "agent",
+            None,
+        ))
+        .unwrap();
+
+        assert!(
+            !s.entity_tag_index
+                .get("old-tag")
+                .is_some_and(|v| v.contains(&id))
+        );
+        assert!(
+            s.entity_tag_index
+                .get("new-tag")
+                .is_some_and(|v| v.contains(&id))
+        );
     }
 
     #[test]
