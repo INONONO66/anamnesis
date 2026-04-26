@@ -1,6 +1,6 @@
 [package]
 name = "anamnesis"
-version = "0.3.0"
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Cognitive graph engine for LLMs — knowledge with attraction, gravity, perception, and forgetting"
@@ -46,6 +46,11 @@ harness = false
 [[bench]]
 name = "longmemeval-baseline"
 path = "benches/longmemeval/baseline.rs"
+harness = false
+
+[[bench]]
+name = "longmemeval-indexed"
+path = "benches/longmemeval/indexed.rs"
 harness = false
 
 [[test]]

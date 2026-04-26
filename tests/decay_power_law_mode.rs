@@ -1,5 +1,5 @@
 use anamnesis::Engine;
-use anamnesis::api::{DecayModel, EngineConfig, Observation};
+use anamnesis::api::{DecayModel, EngineConfig, IngestResult, Observation};
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{KnowledgeType, Timestamp};
 
@@ -24,12 +24,13 @@ fn make_obs(name: &str) -> Observation {
 
 #[test]
 fn power_law_mode_updates_access_history_on_touch() {
-    let cfg = EngineConfig {
-        decay_model: DecayModel::PowerLaw,
-        ..EngineConfig::default()
-    };
+    let mut cfg = EngineConfig::default();
+    cfg.decay_model = DecayModel::PowerLaw;
     let mut e = Engine::with_config(cfg);
-    let id = e.ingest(make_obs("a")).unwrap()[0];
+    let IngestResult::Created(ids) = e.ingest(make_obs("a")).unwrap() else {
+        panic!("expected Created");
+    };
+    let id = ids[0];
 
     let history_before = e.graph().get_node(id).unwrap().access_history.len();
     e.touch(id, Timestamp(2000)).unwrap();
@@ -44,7 +45,10 @@ fn power_law_mode_updates_access_history_on_touch() {
 #[test]
 fn exponential_mode_unchanged() {
     let mut e = Engine::new();
-    let id = e.ingest(make_obs("b")).unwrap()[0];
+    let IngestResult::Created(ids) = e.ingest(make_obs("b")).unwrap() else {
+        panic!("expected Created");
+    };
+    let id = ids[0];
     let future = Timestamp(1000 + 30 * 86_400_000);
 
     e.touch(id, future).unwrap();

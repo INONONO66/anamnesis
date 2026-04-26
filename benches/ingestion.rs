@@ -2,13 +2,14 @@ use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_ma
 
 use anamnesis::api::Observation;
 use anamnesis::graph::node::Origin;
-use anamnesis::{EdgeType, Engine, EngineConfig, KnowledgeType, Timestamp};
+use anamnesis::{EdgeType, Engine, EngineConfig, IngestResult, KnowledgeType, Timestamp};
 
 fn make_bench_engine() -> Engine {
     Engine::with_config(
         EngineConfig::new()
-            .with_novelty_threshold(0.0)
-            .with_confidence_threshold(0.0),
+            .with_novelty_threshold(-1.0)
+            .with_confidence_threshold(0.0)
+            .with_dedup_enabled(false),
     )
 }
 
@@ -64,8 +65,12 @@ fn bench_link(c: &mut Criterion) {
     c.bench_function("link_two_nodes", |b| {
         b.iter(|| {
             let mut engine = make_bench_engine();
-            let ids1 = engine.ingest(make_observation(0)).unwrap();
-            let ids2 = engine.ingest(make_observation(1)).unwrap();
+            let IngestResult::Created(ids1) = engine.ingest(make_observation(0)).unwrap() else {
+                panic!("expected Created");
+            };
+            let IngestResult::Created(ids2) = engine.ingest(make_observation(1)).unwrap() else {
+                panic!("expected Created");
+            };
             engine
                 .link(
                     black_box(ids1[0]),
@@ -84,13 +89,21 @@ fn bench_link_chain(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("edges", size), &size, |b, &size| {
             b.iter(|| {
                 let mut engine = make_bench_engine();
-                let mut prev = engine.ingest(make_observation(0)).unwrap();
+                let IngestResult::Created(prev_ids) = engine.ingest(make_observation(0)).unwrap()
+                else {
+                    panic!("expected Created");
+                };
+                let mut prev = prev_ids;
                 for i in 1..size {
-                    let curr = engine.ingest(make_observation(i as u64)).unwrap();
+                    let IngestResult::Created(curr_ids) =
+                        engine.ingest(make_observation(i as u64)).unwrap()
+                    else {
+                        panic!("expected Created");
+                    };
                     engine
-                        .link(prev[0], curr[0], EdgeType::Temporal, 0.7)
+                        .link(prev[0], curr_ids[0], EdgeType::Temporal, 0.7)
                         .unwrap();
-                    prev = curr;
+                    prev = curr_ids;
                 }
             })
         });

@@ -10,7 +10,7 @@ use anamnesis::api::Observation;
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{EdgeType, KnowledgeType, Timestamp};
 use anamnesis::query::{Query, QueryConfig};
-use anamnesis::{Engine, EngineConfig, Error, StorageAdapter};
+use anamnesis::{Engine, EngineConfig, IngestResult, StorageAdapter};
 
 fn make_origin(agent: &str, project: Option<&str>) -> Origin {
     Origin {
@@ -47,7 +47,8 @@ fn make_obs(
 fn full_cognitive_lifecycle() {
     let config = EngineConfig::new()
         .with_novelty_threshold(0.0)
-        .with_confidence_threshold(0.5);
+        .with_confidence_threshold(0.5)
+        .with_dedup_enabled(false);
     let mut engine = Engine::with_config(config);
 
     let identity_obs = make_obs(
@@ -81,11 +82,26 @@ fn full_cognitive_lifecycle() {
         Some("proj-a"),
     );
 
-    let _identity_id = engine.ingest(identity_obs).unwrap()[0];
-    let semantic1_id = engine.ingest(semantic1_obs).unwrap()[0];
-    let semantic2_id = engine.ingest(semantic2_obs).unwrap()[0];
-    let decision_id = engine.ingest(decision_obs).unwrap()[0];
-    let episodic_id = engine.ingest(episodic_obs).unwrap()[0];
+    let IngestResult::Created(identity_ids) = engine.ingest(identity_obs).unwrap() else {
+        panic!("expected Created");
+    };
+    let IngestResult::Created(semantic1_ids) = engine.ingest(semantic1_obs).unwrap() else {
+        panic!("expected Created");
+    };
+    let IngestResult::Created(semantic2_ids) = engine.ingest(semantic2_obs).unwrap() else {
+        panic!("expected Created");
+    };
+    let IngestResult::Created(decision_ids) = engine.ingest(decision_obs).unwrap() else {
+        panic!("expected Created");
+    };
+    let IngestResult::Created(episodic_ids) = engine.ingest(episodic_obs).unwrap() else {
+        panic!("expected Created");
+    };
+    let _identity_id = identity_ids[0];
+    let semantic1_id = semantic1_ids[0];
+    let semantic2_id = semantic2_ids[0];
+    let decision_id = decision_ids[0];
+    let episodic_id = episodic_ids[0];
 
     assert_eq!(
         engine.graph().node_count(),
@@ -116,11 +132,9 @@ fn full_cognitive_lifecycle() {
         seed: semantic1_id,
         budget: 100,
     };
-    let qconfig = QueryConfig {
-        project_id: Some("proj-a".to_string()),
-        agent_id: Some("agent-1".to_string()),
-        ..QueryConfig::default()
-    };
+    let mut qconfig = QueryConfig::default();
+    qconfig.project_id = Some("proj-a".to_string());
+    qconfig.agent_id = Some("agent-1".to_string());
     let pkg = engine.query(&q, &qconfig).unwrap();
 
     assert!(
@@ -176,8 +190,14 @@ fn decay_episodic_faster_than_semantic() {
         None,
     );
 
-    let episodic_id = engine.ingest(episodic).unwrap()[0];
-    let semantic_id = engine.ingest(semantic).unwrap()[0];
+    let IngestResult::Created(episodic_ids) = engine.ingest(episodic).unwrap() else {
+        panic!("expected Created");
+    };
+    let IngestResult::Created(semantic_ids) = engine.ingest(semantic).unwrap() else {
+        panic!("expected Created");
+    };
+    let episodic_id = episodic_ids[0];
+    let semantic_id = semantic_ids[0];
 
     let month_later = Timestamp(30 * 86_400_000);
     engine.tick(month_later).unwrap();
@@ -195,9 +215,10 @@ fn decay_episodic_faster_than_semantic() {
     );
 }
 
-/// Perception gate test: duplicate observation rejected.
+/// Duplicate ingest reinforces the existing node before perception gating.
 ///
-/// When novelty threshold is set, near-identical embeddings should be rejected.
+/// When dedup is enabled, near-identical embeddings should touch the prior node
+/// instead of creating a duplicate or falling through to novelty rejection.
 #[test]
 fn perception_gate_rejects_duplicate() {
     let config = EngineConfig::new()
@@ -211,7 +232,7 @@ fn perception_gate_rejects_duplicate() {
         vec![1.0, 0.0, 0.0],
         None,
     );
-    engine.ingest(original).unwrap();
+    let _ = engine.ingest(original).unwrap();
 
     let duplicate = make_obs(
         "factory pattern duplicate",
@@ -221,11 +242,7 @@ fn perception_gate_rejects_duplicate() {
     );
     let result = engine.ingest(duplicate);
 
-    assert!(
-        result.is_err(),
-        "duplicate should be rejected by perception gate"
-    );
-    assert!(matches!(result, Err(Error::Rejected(_))));
+    assert!(matches!(result, Ok(IngestResult::Reinforced { .. })));
 }
 
 /// Attraction test: similar nodes auto-linked on ingest.
@@ -234,7 +251,9 @@ fn perception_gate_rejects_duplicate() {
 /// mechanic should automatically create edges between them.
 #[test]
 fn attraction_auto_links_similar_nodes() {
-    let config = EngineConfig::new().with_novelty_threshold(0.0);
+    let config = EngineConfig::new()
+        .with_novelty_threshold(0.0)
+        .with_dedup_enabled(false);
     let mut engine = Engine::with_config(config);
 
     let obs1 = make_obs(
@@ -250,8 +269,8 @@ fn attraction_auto_links_similar_nodes() {
         None,
     );
 
-    engine.ingest(obs1).unwrap();
-    engine.ingest(obs2).unwrap();
+    let _ = engine.ingest(obs1).unwrap();
+    let _ = engine.ingest(obs2).unwrap();
 
     assert!(
         engine.graph().edge_count() >= 1,
@@ -266,7 +285,9 @@ fn attraction_auto_links_similar_nodes() {
 /// should receive higher relevance scores via scope weighting (eq 13).
 #[test]
 fn scope_same_project_preferred() {
-    let config = EngineConfig::new().with_novelty_threshold(0.0);
+    let config = EngineConfig::new()
+        .with_novelty_threshold(0.0)
+        .with_dedup_enabled(false);
     let mut engine = Engine::with_config(config);
 
     let same_proj = make_obs(
@@ -282,8 +303,14 @@ fn scope_same_project_preferred() {
         Some("proj-b"),
     );
 
-    let same_id = engine.ingest(same_proj).unwrap()[0];
-    let other_id = engine.ingest(other_proj).unwrap()[0];
+    let IngestResult::Created(same_ids) = engine.ingest(same_proj).unwrap() else {
+        panic!("expected Created");
+    };
+    let IngestResult::Created(other_ids) = engine.ingest(other_proj).unwrap() else {
+        panic!("expected Created");
+    };
+    let same_id = same_ids[0];
+    let other_id = other_ids[0];
 
     engine
         .link(same_id, other_id, EdgeType::Semantic, 0.8)
@@ -293,10 +320,8 @@ fn scope_same_project_preferred() {
         seed: same_id,
         budget: 50,
     };
-    let qconfig = QueryConfig {
-        project_id: Some("proj-a".to_string()),
-        ..QueryConfig::default()
-    };
+    let mut qconfig = QueryConfig::default();
+    qconfig.project_id = Some("proj-a".to_string());
     let pkg = engine.query(&q, &qconfig).unwrap();
 
     let all_frags: Vec<_> = pkg
@@ -329,7 +354,9 @@ fn scope_same_project_preferred() {
 /// the query pipeline should surface this as a Tension.
 #[test]
 fn contradicts_creates_tension() {
-    let config = EngineConfig::new().with_novelty_threshold(0.0);
+    let config = EngineConfig::new()
+        .with_novelty_threshold(0.0)
+        .with_dedup_enabled(false);
     let mut engine = Engine::with_config(config);
 
     let obs1 = make_obs(
@@ -345,8 +372,14 @@ fn contradicts_creates_tension() {
         None,
     );
 
-    let id1 = engine.ingest(obs1).unwrap()[0];
-    let id2 = engine.ingest(obs2).unwrap()[0];
+    let IngestResult::Created(ids1) = engine.ingest(obs1).unwrap() else {
+        panic!("expected Created");
+    };
+    let IngestResult::Created(ids2) = engine.ingest(obs2).unwrap() else {
+        panic!("expected Created");
+    };
+    let id1 = ids1[0];
+    let id2 = ids2[0];
     engine.link(id1, id2, EdgeType::Contradicts, 0.9).unwrap();
 
     let q = Query::Associative {
@@ -376,7 +409,10 @@ fn touch_revives_decayed_node() {
         vec![1.0, 0.0],
         None,
     );
-    let id = engine.ingest(obs).unwrap()[0];
+    let IngestResult::Created(ids) = engine.ingest(obs).unwrap() else {
+        panic!("expected Created");
+    };
+    let id = ids[0];
 
     let month_later = Timestamp(30 * 86_400_000);
     engine.tick(month_later).unwrap();

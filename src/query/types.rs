@@ -52,6 +52,7 @@ pub enum Query {
 
 /// Configuration for a query execution.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct QueryConfig {
     /// Maximum number of nodes to visit during spreading activation.
     pub budget: usize,
@@ -71,6 +72,8 @@ pub struct QueryConfig {
     pub project_id: Option<String>,
     /// Characters per token for budget estimation. Default: 4.
     pub chars_per_token: usize,
+    /// Goal context for reranking results. None = no goal weighting.
+    pub context: Option<String>,
 }
 
 impl Default for QueryConfig {
@@ -85,6 +88,7 @@ impl Default for QueryConfig {
             query_embedding: None,
             project_id: None,
             chars_per_token: 4,
+            context: None,
         }
     }
 }
@@ -257,6 +261,7 @@ mod tests {
         assert_eq!(config.decay_per_hop, 0.65);
         assert_eq!(config.min_activation, 0.02);
         assert!(config.agent_id.is_none());
+        assert!(config.context.is_none());
     }
 
     #[test]

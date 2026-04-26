@@ -2,14 +2,15 @@ use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_ma
 
 use anamnesis::api::Observation;
 use anamnesis::graph::node::Origin;
-use anamnesis::{EdgeType, Engine, EngineConfig, KnowledgeType, Timestamp};
+use anamnesis::{EdgeType, Engine, EngineConfig, IngestResult, KnowledgeType, Timestamp};
 
 fn make_bench_engine() -> Engine {
-    // Disable perception gate for benchmarks (novelty_threshold=0)
+    // Disable novelty/dedup gating so benchmarks can focus on operation cost.
     Engine::with_config(
         EngineConfig::new()
-            .with_novelty_threshold(0.0)
-            .with_confidence_threshold(0.0),
+            .with_novelty_threshold(-1.0)
+            .with_confidence_threshold(0.0)
+            .with_dedup_enabled(false),
     )
 }
 
@@ -37,7 +38,9 @@ fn make_observation(i: u64) -> Observation {
 fn bench_touch(c: &mut Criterion) {
     c.bench_function("touch_single", |b| {
         let mut engine = make_bench_engine();
-        let ids = engine.ingest(make_observation(0)).unwrap();
+        let IngestResult::Created(ids) = engine.ingest(make_observation(0)).unwrap() else {
+            panic!("expected Created");
+        };
         let node_id = ids[0];
         b.iter(|| engine.touch(black_box(node_id), Timestamp::now()).unwrap())
     });
@@ -48,7 +51,9 @@ fn bench_touch_repeated(c: &mut Criterion) {
     for count in [10usize, 100, 1_000] {
         group.bench_with_input(BenchmarkId::new("touches", count), &count, |b, &count| {
             let mut engine = make_bench_engine();
-            let ids = engine.ingest(make_observation(0)).unwrap();
+            let IngestResult::Created(ids) = engine.ingest(make_observation(0)).unwrap() else {
+                panic!("expected Created");
+            };
             let node_id = ids[0];
             b.iter(|| {
                 for _ in 0..count {
@@ -71,9 +76,12 @@ fn bench_ingest_link_workflow(c: &mut Criterion) {
                     let mut engine = make_bench_engine();
                     let mut all_ids = Vec::with_capacity(size);
                     for i in 0..size {
-                        let ids = engine
+                        let IngestResult::Created(ids) = engine
                             .ingest(black_box(make_observation(i as u64)))
-                            .unwrap();
+                            .unwrap()
+                        else {
+                            panic!("expected Created");
+                        };
                         all_ids.push(ids[0]);
                     }
                     for i in 0..(size - 1) {

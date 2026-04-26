@@ -3,6 +3,7 @@
 pub mod activation;
 pub mod assembly;
 pub mod identity;
+pub mod rerank;
 pub mod scoring;
 pub mod types;
 

@@ -1,6 +1,6 @@
 //! Public API surface for the Anamnesis cognitive graph engine.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::error::Error;
 use crate::graph::node::Origin;
@@ -24,6 +24,7 @@ pub enum DecayModel {
 
 /// Configuration for the Anamnesis engine.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct EngineConfig {
     /// Maximum number of nodes before perception gate rejects new observations.
     pub max_nodes: usize,
@@ -31,6 +32,10 @@ pub struct EngineConfig {
     pub novelty_threshold: f64,
     /// Minimum confidence [0, 1] for an observation to enter the graph.
     pub confidence_threshold: f64,
+    /// Similarity threshold above which ingest reinforces an existing node instead of creating one.
+    pub dedup_threshold: f64,
+    /// Whether ingest should detect duplicate embeddings and reinforce existing nodes.
+    pub dedup_enabled: bool,
     /// Decay model to use for salience computation. Default: Exponential (backwards-compatible).
     pub decay_model: DecayModel,
 }
@@ -41,6 +46,8 @@ impl Default for EngineConfig {
             max_nodes: 100_000,
             novelty_threshold: 0.30,
             confidence_threshold: 0.50,
+            dedup_threshold: 0.92,
+            dedup_enabled: true,
             decay_model: DecayModel::Exponential,
         }
     }
@@ -63,6 +70,16 @@ impl EngineConfig {
 
     pub fn with_confidence_threshold(mut self, threshold: f64) -> Self {
         self.confidence_threshold = threshold;
+        self
+    }
+
+    pub fn with_dedup_threshold(mut self, threshold: f64) -> Self {
+        self.dedup_threshold = threshold;
+        self
+    }
+
+    pub fn with_dedup_enabled(mut self, enabled: bool) -> Self {
+        self.dedup_enabled = enabled;
         self
     }
 }
@@ -136,6 +153,22 @@ pub struct ReflectReport {
     pub entity_edges_created: usize,
     /// Number of entity clusters found.
     pub clusters_found: usize,
+}
+
+/// Result of an ingest operation.
+///
+/// Indicates whether a new node was created or an existing node was reinforced.
+#[derive(Debug, Clone)]
+pub enum IngestResult {
+    /// A new node was created with the given IDs.
+    Created(Vec<NodeId>),
+    /// An existing node was reinforced due to similarity.
+    Reinforced {
+        /// The ID of the existing node that was reinforced.
+        existing_id: NodeId,
+        /// Similarity score [0, 1] between the new observation and the existing node.
+        similarity: f64,
+    },
 }
 
 /// Return the top-N `(NodeId, score)` pairs by score descending.
@@ -244,44 +277,56 @@ impl<S: StorageAdapter> Engine<S> {
     /// Creates a Node, then applies attraction mechanics: finds candidate nodes
     /// (last 256 + entity-tag matches), scores them, and creates/strengthens
     /// up to 4 edges to the most similar candidates.
-    pub fn ingest(&mut self, observation: Observation) -> Result<Vec<NodeId>, Error> {
+    pub fn ingest(&mut self, observation: Observation) -> Result<IngestResult, Error> {
         use crate::mechanics::attraction::{
             attraction_score, cosine_similarity, should_create_edge, strengthen_edge, tau_type,
         };
         use crate::mechanics::gravity::compute_mass;
         use crate::mechanics::perception::gate_observation;
 
-        let max_similarity = if let Some(ref new_embedding) = observation.embedding {
-            // Build candidate set: recent 256 nodes + entity-tag matches
-            let mut candidates: std::collections::HashSet<NodeId> =
-                std::collections::HashSet::new();
-            for nid in self
-                .graph
-                .storage()
-                .node_ids_descending()
-                .into_iter()
-                .take(256)
-            {
-                candidates.insert(nid);
-            }
-            for tag in &observation.entity_tags {
-                for nid in self.graph.storage().nodes_by_entity_tag(tag) {
+        let (max_similarity, most_similar_id) =
+            if let Some(ref new_embedding) = observation.embedding {
+                // Build candidate set: recent 256 nodes + entity-tag matches
+                let mut candidates: std::collections::HashSet<NodeId> =
+                    std::collections::HashSet::new();
+                for nid in self
+                    .graph
+                    .storage()
+                    .node_ids_descending()
+                    .into_iter()
+                    .take(256)
+                {
                     candidates.insert(nid);
                 }
-            }
-            candidates
-                .into_iter()
-                .filter_map(|nid| {
-                    self.graph.storage().get_node(nid).ok().and_then(|n| {
-                        n.embedding
-                            .as_ref()
-                            .map(|emb| cosine_similarity(new_embedding, emb))
+                for tag in &observation.entity_tags {
+                    for nid in self.graph.storage().nodes_by_entity_tag(tag) {
+                        candidates.insert(nid);
+                    }
+                }
+                candidates
+                    .into_iter()
+                    .filter_map(|nid| {
+                        self.graph.storage().get_node(nid).ok().and_then(|n| {
+                            n.embedding
+                                .as_ref()
+                                .map(|emb| (nid, cosine_similarity(new_embedding, emb)))
+                        })
                     })
-                })
-                .fold(0.0_f64, f64::max)
-        } else {
-            0.0
-        };
+                    .fold((0.0_f64, NodeId(0)), |(max_s, max_id), (nid, s)| {
+                        if s > max_s { (s, nid) } else { (max_s, max_id) }
+                    })
+            } else {
+                (0.0, NodeId(0))
+            };
+
+        // Dedup check: if similarity exceeds the threshold, reinforce the existing node.
+        if self.config.dedup_enabled && max_similarity > self.config.dedup_threshold {
+            self.touch(most_similar_id, observation.timestamp)?;
+            return Ok(IngestResult::Reinforced {
+                existing_id: most_similar_id,
+                similarity: max_similarity,
+            });
+        }
 
         gate_observation(
             observation.confidence,
@@ -416,7 +461,7 @@ impl<S: StorageAdapter> Engine<S> {
             }
         }
 
-        Ok(vec![id])
+        Ok(IngestResult::Created(vec![id]))
     }
 
     /// Create or strengthen a link between two nodes.
@@ -558,13 +603,285 @@ impl<S: StorageAdapter> Engine<S> {
 
     /// Query the graph — returns structured context for LLM consumption.
     ///
-    /// Phase 2: Associative query implements the full pipeline (equations 9-14).
-    /// Other query modes return empty ContextPackage (Phase 3).
+    /// Associative queries use the full spreading activation pipeline.
+    /// Non-associative queries retrieve nodes directly by their structural criteria.
     pub fn query(&self, query: &Query, config: &QueryConfig) -> Result<ContextPackage, Error> {
         match query {
             Query::Associative { seed, budget } => self.query_associative(*seed, *budget, config),
-            _ => Ok(ContextPackage::empty()),
+            Query::TypeFiltered { node_type, limit } => {
+                self.query_type_filtered(node_type, *limit, config)
+            }
+            Query::List {
+                min_salience,
+                limit,
+            } => self.query_list(*min_salience, *limit, config),
+            Query::Temporal {
+                since,
+                node_types,
+                limit,
+            } => self.query_temporal(*since, node_types.as_deref(), *limit, config),
+            Query::Neighborhood { entity, depth } => {
+                self.query_neighborhood(*entity, *depth, config)
+            }
         }
+    }
+
+    fn query_type_filtered(
+        &self,
+        node_type: &KnowledgeType,
+        limit: usize,
+        config: &QueryConfig,
+    ) -> Result<ContextPackage, Error> {
+        use std::cmp::Ordering;
+
+        use crate::query::assembly::{ScoredNode, assemble_context_package};
+
+        let storage = self.graph.storage();
+        let mut node_ids = storage.nodes_by_type(node_type);
+        node_ids.sort_by(|a, b| {
+            let sa = storage.get_salience(*a).unwrap_or(0.0);
+            let sb = storage.get_salience(*b).unwrap_or(0.0);
+            sb.partial_cmp(&sa).unwrap_or(Ordering::Equal)
+        });
+        node_ids.truncate(limit);
+
+        let scored_nodes: Vec<ScoredNode> = node_ids
+            .into_iter()
+            .filter_map(|nid| {
+                let node = storage.get_node(nid).ok()?;
+                let salience = storage.get_salience(nid).unwrap_or(0.0);
+                Some(ScoredNode {
+                    node_id: nid,
+                    name: node.name.clone(),
+                    summary: node.summary.clone(),
+                    content: node.content.clone(),
+                    node_type: node.node_type.clone(),
+                    relevance: salience,
+                    origin: node.origin.clone(),
+                })
+            })
+            .collect();
+
+        let scored_nodes = if let Some(ref ctx) = config.context {
+            crate::query::rerank::rerank_with_context(scored_nodes, ctx)
+        } else {
+            scored_nodes
+        };
+
+        Ok(assemble_context_package(
+            scored_nodes,
+            &[],
+            &[],
+            &HashMap::new(),
+            config.token_budget,
+            config.chars_per_token,
+            &config.project_id,
+        ))
+    }
+
+    fn query_list(
+        &self,
+        min_salience: f64,
+        limit: usize,
+        config: &QueryConfig,
+    ) -> Result<ContextPackage, Error> {
+        use std::cmp::Ordering;
+
+        use crate::query::assembly::{ScoredNode, assemble_context_package};
+
+        let storage = self.graph.storage();
+        let mut node_ids: Vec<NodeId> = storage
+            .all_node_ids()
+            .into_iter()
+            .filter(|&nid| {
+                storage
+                    .get_salience(nid)
+                    .is_ok_and(|salience| salience >= min_salience)
+            })
+            .collect();
+        node_ids.sort_by(|a, b| {
+            let sa = storage.get_salience(*a).unwrap_or(0.0);
+            let sb = storage.get_salience(*b).unwrap_or(0.0);
+            sb.partial_cmp(&sa).unwrap_or(Ordering::Equal)
+        });
+        node_ids.truncate(limit);
+
+        let scored_nodes: Vec<ScoredNode> = node_ids
+            .into_iter()
+            .filter_map(|nid| {
+                let node = storage.get_node(nid).ok()?;
+                let salience = storage.get_salience(nid).unwrap_or(0.0);
+                Some(ScoredNode {
+                    node_id: nid,
+                    name: node.name.clone(),
+                    summary: node.summary.clone(),
+                    content: node.content.clone(),
+                    node_type: node.node_type.clone(),
+                    relevance: salience,
+                    origin: node.origin.clone(),
+                })
+            })
+            .collect();
+
+        let scored_nodes = if let Some(ref ctx) = config.context {
+            crate::query::rerank::rerank_with_context(scored_nodes, ctx)
+        } else {
+            scored_nodes
+        };
+
+        Ok(assemble_context_package(
+            scored_nodes,
+            &[],
+            &[],
+            &HashMap::new(),
+            config.token_budget,
+            config.chars_per_token,
+            &config.project_id,
+        ))
+    }
+
+    fn query_temporal(
+        &self,
+        since: Timestamp,
+        node_types: Option<&[KnowledgeType]>,
+        limit: usize,
+        config: &QueryConfig,
+    ) -> Result<ContextPackage, Error> {
+        use std::cmp::Ordering;
+
+        use crate::query::assembly::{ScoredNode, assemble_context_package};
+
+        let storage = self.graph.storage();
+        let mut scored_nodes: Vec<(Timestamp, ScoredNode)> = storage
+            .all_node_ids()
+            .into_iter()
+            .filter_map(|nid| {
+                let node = storage.get_node(nid).ok()?;
+                if node.created_at < since {
+                    return None;
+                }
+                if let Some(types) = node_types
+                    && !types.iter().any(|node_type| node_type == &node.node_type)
+                {
+                    return None;
+                }
+                let salience = storage.get_salience(nid).unwrap_or(0.0);
+                Some((
+                    node.created_at,
+                    ScoredNode {
+                        node_id: nid,
+                        name: node.name.clone(),
+                        summary: node.summary.clone(),
+                        content: node.content.clone(),
+                        node_type: node.node_type.clone(),
+                        relevance: salience,
+                        origin: node.origin.clone(),
+                    },
+                ))
+            })
+            .collect();
+
+        scored_nodes.sort_by(|(created_a, node_a), (created_b, node_b)| {
+            created_b
+                .cmp(created_a)
+                .then_with(|| {
+                    node_b
+                        .relevance
+                        .partial_cmp(&node_a.relevance)
+                        .unwrap_or(Ordering::Equal)
+                })
+                .then_with(|| node_a.node_id.cmp(&node_b.node_id))
+        });
+        scored_nodes.truncate(limit);
+
+        let scored_nodes = scored_nodes
+            .into_iter()
+            .map(|(_, scored_node)| scored_node)
+            .collect();
+
+        Ok(assemble_context_package(
+            scored_nodes,
+            &[],
+            &[],
+            &HashMap::new(),
+            config.token_budget,
+            config.chars_per_token,
+            &config.project_id,
+        ))
+    }
+
+    fn query_neighborhood(
+        &self,
+        entity: NodeId,
+        max_depth: usize,
+        config: &QueryConfig,
+    ) -> Result<ContextPackage, Error> {
+        use crate::query::assembly::{ScoredNode, assemble_context_package};
+
+        let _ = self.graph.get_node(entity)?;
+
+        let storage = self.graph.storage();
+        let mut queue = VecDeque::new();
+        let mut visited = HashSet::new();
+        let mut depths = HashMap::new();
+
+        queue.push_back((entity, 0));
+        visited.insert(entity);
+        depths.insert(entity, 0usize);
+
+        while let Some((nid, depth)) = queue.pop_front() {
+            if depth >= max_depth {
+                continue;
+            }
+
+            for &eid in storage.edges_from(nid) {
+                if let Ok(edge) = storage.get_edge(eid)
+                    && visited.insert(edge.target)
+                {
+                    let next_depth = depth + 1;
+                    depths.insert(edge.target, next_depth);
+                    queue.push_back((edge.target, next_depth));
+                }
+            }
+
+            for &eid in storage.edges_to(nid) {
+                if let Ok(edge) = storage.get_edge(eid)
+                    && visited.insert(edge.source)
+                {
+                    let next_depth = depth + 1;
+                    depths.insert(edge.source, next_depth);
+                    queue.push_back((edge.source, next_depth));
+                }
+            }
+        }
+
+        let scored_nodes: Vec<ScoredNode> = depths
+            .into_iter()
+            .filter_map(|(nid, depth)| {
+                let node = storage.get_node(nid).ok()?;
+                let salience = storage.get_salience(nid).unwrap_or(0.0);
+                let depth_multiplier = 0.8_f64.powf(depth as f64);
+                Some(ScoredNode {
+                    node_id: nid,
+                    name: node.name.clone(),
+                    summary: node.summary.clone(),
+                    content: node.content.clone(),
+                    node_type: node.node_type.clone(),
+                    relevance: salience * depth_multiplier,
+                    origin: node.origin.clone(),
+                })
+            })
+            .collect();
+
+        Ok(assemble_context_package(
+            scored_nodes,
+            &[],
+            &[],
+            &HashMap::new(),
+            config.token_budget,
+            config.chars_per_token,
+            &config.project_id,
+        ))
     }
 
     /// Full Associative query pipeline: initial activation → spreading → repulsion → scoring → assembly.
@@ -918,7 +1235,10 @@ mod tests {
     #[test]
     fn ingest_creates_node() {
         let mut engine = Engine::new();
-        let ids = engine.ingest(make_observation("test node")).unwrap();
+        let result = engine.ingest(make_observation("test node")).unwrap();
+        let IngestResult::Created(ids) = result else {
+            panic!("expected Created variant");
+        };
         assert_eq!(ids.len(), 1);
         assert_eq!(engine.graph().node_count(), 1);
         let node = engine.graph().get_node(ids[0]).unwrap();
@@ -929,8 +1249,12 @@ mod tests {
     #[test]
     fn link_creates_edge() {
         let mut engine = Engine::new();
-        let ids1 = engine.ingest(make_observation("node A")).unwrap();
-        let ids2 = engine.ingest(make_observation("node B")).unwrap();
+        let IngestResult::Created(ids1) = engine.ingest(make_observation("node A")).unwrap() else {
+            panic!("expected Created");
+        };
+        let IngestResult::Created(ids2) = engine.ingest(make_observation("node B")).unwrap() else {
+            panic!("expected Created");
+        };
         let eid = engine
             .link(ids1[0], ids2[0], EdgeType::Semantic, 0.8)
             .unwrap();
@@ -942,7 +1266,9 @@ mod tests {
     #[test]
     fn touch_increments_access_count() {
         let mut engine = Engine::new();
-        let ids = engine.ingest(make_observation("node")).unwrap();
+        let IngestResult::Created(ids) = engine.ingest(make_observation("node")).unwrap() else {
+            panic!("expected Created");
+        };
         engine.touch(ids[0], Timestamp::now()).unwrap();
         engine.touch(ids[0], Timestamp::now()).unwrap();
         let node = engine.graph().get_node(ids[0]).unwrap();
@@ -985,8 +1311,12 @@ mod tests {
     #[test]
     fn link_has_nonzero_timestamp() {
         let mut engine = Engine::new();
-        let ids1 = engine.ingest(make_observation("A")).unwrap();
-        let ids2 = engine.ingest(make_observation("B")).unwrap();
+        let IngestResult::Created(ids1) = engine.ingest(make_observation("A")).unwrap() else {
+            panic!("expected Created");
+        };
+        let IngestResult::Created(ids2) = engine.ingest(make_observation("B")).unwrap() else {
+            panic!("expected Created");
+        };
         let eid = engine
             .link(ids1[0], ids2[0], EdgeType::Semantic, 0.5)
             .unwrap();
@@ -997,7 +1327,9 @@ mod tests {
     #[test]
     fn touch_updates_accessed_at_to_nonzero() {
         let mut engine = Engine::new();
-        let ids = engine.ingest(make_observation("node")).unwrap();
+        let IngestResult::Created(ids) = engine.ingest(make_observation("node")).unwrap() else {
+            panic!("expected Created");
+        };
         engine.touch(ids[0], Timestamp::now()).unwrap();
         let node = engine.graph().get_node(ids[0]).unwrap();
         assert!(node.accessed_at.0 > 0);
@@ -1006,7 +1338,9 @@ mod tests {
     #[test]
     fn touch_applies_decay_before_reinforcement() {
         let mut engine = Engine::new();
-        let ids = engine.ingest(make_observation("node")).unwrap();
+        let IngestResult::Created(ids) = engine.ingest(make_observation("node")).unwrap() else {
+            panic!("expected Created");
+        };
         let id = ids[0];
 
         let future = Timestamp(1000 + 30 * 86_400_000);
@@ -1029,7 +1363,9 @@ mod tests {
     #[test]
     fn touch_immediate_reinforces_without_decay() {
         let mut engine = Engine::new();
-        let ids = engine.ingest(make_observation("node")).unwrap();
+        let IngestResult::Created(ids) = engine.ingest(make_observation("node")).unwrap() else {
+            panic!("expected Created");
+        };
         let id = ids[0];
 
         let now = Timestamp(1000);
@@ -1056,8 +1392,12 @@ mod tests {
             ..make_observation("semantic")
         };
 
-        let episodic_ids = engine.ingest(episodic_obs).unwrap();
-        let semantic_ids = engine.ingest(semantic_obs).unwrap();
+        let IngestResult::Created(episodic_ids) = engine.ingest(episodic_obs).unwrap() else {
+            panic!("expected Created");
+        };
+        let IngestResult::Created(semantic_ids) = engine.ingest(semantic_obs).unwrap() else {
+            panic!("expected Created");
+        };
 
         let future = Timestamp(30 * 86_400_000);
         let report = engine.tick(future).unwrap();
@@ -1093,7 +1433,10 @@ mod tests {
             timestamp: Timestamp(0),
             ..make_observation("identity")
         };
-        let id = engine.ingest(identity_obs).unwrap()[0];
+        let IngestResult::Created(ids) = engine.ingest(identity_obs).unwrap() else {
+            panic!("expected Created");
+        };
+        let id = ids[0];
 
         let future = Timestamp(365 * 86_400_000);
         engine.tick(future).unwrap();
@@ -1112,7 +1455,7 @@ mod tests {
                 timestamp: Timestamp(0),
                 ..make_observation(&format!("episodic-{i}"))
             };
-            engine.ingest(obs).unwrap();
+            let _ = engine.ingest(obs).unwrap();
         }
 
         let future = Timestamp(30 * 86_400_000);
@@ -1126,20 +1469,26 @@ mod tests {
 
     #[test]
     fn ingest_auto_links_similar_nodes() {
-        let config = EngineConfig::new().with_novelty_threshold(0.0);
+        let config = EngineConfig::new()
+            .with_novelty_threshold(0.0)
+            .with_dedup_enabled(false);
         let mut engine = Engine::with_config(config);
 
         let obs1 = Observation {
             embedding: Some(vec![1.0, 0.0, 0.0]),
             ..make_observation("node A")
         };
-        let ids1 = engine.ingest(obs1).unwrap();
+        let IngestResult::Created(ids1) = engine.ingest(obs1).unwrap() else {
+            panic!("expected Created");
+        };
 
         let obs2 = Observation {
             embedding: Some(vec![0.95, 0.1, 0.0]),
             ..make_observation("node B")
         };
-        let ids2 = engine.ingest(obs2).unwrap();
+        let IngestResult::Created(ids2) = engine.ingest(obs2).unwrap() else {
+            panic!("expected Created");
+        };
 
         assert_eq!(
             engine.graph().edge_count(),
@@ -1160,13 +1509,13 @@ mod tests {
             embedding: Some(vec![1.0, 0.0, 0.0]),
             ..make_observation("node A")
         };
-        engine.ingest(obs1).unwrap();
+        let _ = engine.ingest(obs1).unwrap();
 
         let obs2 = Observation {
             embedding: Some(vec![0.0, 1.0, 0.0]),
             ..make_observation("node B")
         };
-        engine.ingest(obs2).unwrap();
+        let _ = engine.ingest(obs2).unwrap();
 
         assert_eq!(
             engine.graph().edge_count(),
@@ -1183,13 +1532,13 @@ mod tests {
             embedding: Some(vec![1.0, 0.0, 0.0]),
             ..make_observation("node A")
         };
-        engine.ingest(obs1).unwrap();
+        let _ = engine.ingest(obs1).unwrap();
 
         let obs2 = Observation {
             embedding: None,
             ..make_observation("node B")
         };
-        engine.ingest(obs2).unwrap();
+        let _ = engine.ingest(obs2).unwrap();
 
         assert_eq!(
             engine.graph().edge_count(),
@@ -1208,7 +1557,7 @@ mod tests {
                 embedding: Some(vec![1.0, 0.01 * i as f64, 0.0]),
                 ..make_observation(&format!("node-{i}"))
             };
-            engine.ingest(obs).unwrap();
+            let _ = engine.ingest(obs).unwrap();
         }
 
         let all_ids = engine.graph().all_node_ids();
@@ -1235,8 +1584,8 @@ mod tests {
         let config = EngineConfig::new().with_max_nodes(2);
         let mut engine = Engine::with_config(config);
 
-        engine.ingest(make_observation("node 1")).unwrap();
-        engine.ingest(make_observation("node 2")).unwrap();
+        let _ = engine.ingest(make_observation("node 1")).unwrap();
+        let _ = engine.ingest(make_observation("node 2")).unwrap();
 
         let result = engine.ingest(make_observation("node 3"));
         assert!(matches!(result, Err(Error::Rejected(_))));
@@ -1251,14 +1600,14 @@ mod tests {
             embedding: Some(vec![1.0, 0.0, 0.0]),
             ..make_observation("original")
         };
-        engine.ingest(obs1).unwrap();
+        let _ = engine.ingest(obs1).unwrap();
 
         let obs2 = Observation {
             embedding: Some(vec![1.0, 0.001, 0.0]),
             ..make_observation("duplicate")
         };
         let result = engine.ingest(obs2);
-        assert!(matches!(result, Err(Error::Rejected(_))));
+        assert!(matches!(result, Ok(IngestResult::Reinforced { .. })));
     }
 
     #[test]
@@ -1273,14 +1622,20 @@ mod tests {
         let config = EngineConfig::new()
             .with_max_nodes(1000)
             .with_novelty_threshold(0.5)
-            .with_confidence_threshold(0.7);
+            .with_confidence_threshold(0.7)
+            .with_dedup_threshold(0.95)
+            .with_dedup_enabled(false);
         assert_eq!(config.max_nodes, 1000);
         assert_eq!(config.novelty_threshold, 0.5);
+        assert_eq!(config.dedup_threshold, 0.95);
+        assert!(!config.dedup_enabled);
     }
 
     #[test]
     fn query_associative_returns_real_results() {
-        let config = EngineConfig::new().with_novelty_threshold(0.0);
+        let config = EngineConfig::new()
+            .with_novelty_threshold(0.0)
+            .with_dedup_enabled(false);
         let mut engine = Engine::with_config(config);
 
         let obs1 = Observation {
@@ -1293,8 +1648,12 @@ mod tests {
             embedding: Some(vec![0.9, 0.1, 0.0]),
             ..make_observation("factory pattern is preferred")
         };
-        let ids1 = engine.ingest(obs1).unwrap();
-        let ids2 = engine.ingest(obs2).unwrap();
+        let IngestResult::Created(ids1) = engine.ingest(obs1).unwrap() else {
+            panic!("expected Created");
+        };
+        let IngestResult::Created(ids2) = engine.ingest(obs2).unwrap() else {
+            panic!("expected Created");
+        };
 
         engine
             .link(ids1[0], ids2[0], EdgeType::Semantic, 0.8)
@@ -1315,7 +1674,9 @@ mod tests {
 
     #[test]
     fn query_associative_with_identity_node() {
-        let config = EngineConfig::new().with_novelty_threshold(0.0);
+        let config = EngineConfig::new()
+            .with_novelty_threshold(0.0)
+            .with_dedup_enabled(false);
         let mut engine = Engine::with_config(config);
 
         let identity_obs = Observation {
@@ -1335,8 +1696,12 @@ mod tests {
             ..make_observation("factory pattern knowledge")
         };
 
-        let identity_ids = engine.ingest(identity_obs).unwrap();
-        let semantic_ids = engine.ingest(semantic_obs).unwrap();
+        let IngestResult::Created(identity_ids) = engine.ingest(identity_obs).unwrap() else {
+            panic!("expected Created");
+        };
+        let IngestResult::Created(semantic_ids) = engine.ingest(semantic_obs).unwrap() else {
+            panic!("expected Created");
+        };
         engine
             .link(identity_ids[0], semantic_ids[0], EdgeType::Semantic, 0.8)
             .unwrap();
@@ -1359,7 +1724,9 @@ mod tests {
 
     #[test]
     fn query_associative_with_contradicts_creates_tension() {
-        let config = EngineConfig::new().with_novelty_threshold(0.0);
+        let config = EngineConfig::new()
+            .with_novelty_threshold(0.0)
+            .with_dedup_enabled(false);
         let mut engine = Engine::with_config(config);
 
         let obs1 = Observation {
@@ -1373,8 +1740,12 @@ mod tests {
             ..make_observation("factory pattern is bad")
         };
 
-        let ids1 = engine.ingest(obs1).unwrap();
-        let ids2 = engine.ingest(obs2).unwrap();
+        let IngestResult::Created(ids1) = engine.ingest(obs1).unwrap() else {
+            panic!("expected Created");
+        };
+        let IngestResult::Created(ids2) = engine.ingest(obs2).unwrap() else {
+            panic!("expected Created");
+        };
         engine
             .link(ids1[0], ids2[0], EdgeType::Contradicts, 0.9)
             .unwrap();
@@ -1392,25 +1763,33 @@ mod tests {
     }
 
     #[test]
-    fn query_non_associative_returns_empty() {
+    fn query_unimplemented_modes_return_empty() {
         let engine = Engine::new();
-        let queries = vec![
-            Query::TypeFiltered {
-                node_type: KnowledgeType::Convention,
-                limit: 10,
-            },
-            Query::List {
-                min_salience: 0.5,
-                limit: 10,
-            },
-        ];
+        let queries = vec![Query::Temporal {
+            since: Timestamp(0),
+            node_types: None,
+            limit: 10,
+        }];
         for q in &queries {
             let pkg = engine.query(q, &QueryConfig::default()).unwrap();
             assert_eq!(
                 pkg.total_fragments(),
                 0,
-                "non-Associative should return empty"
+                "unimplemented query modes should return empty"
             );
         }
+    }
+
+    #[test]
+    fn query_neighborhood_rejects_missing_entity() {
+        let engine = Engine::new();
+        let q = Query::Neighborhood {
+            entity: NodeId(0),
+            depth: 1,
+        };
+
+        let result = engine.query(&q, &QueryConfig::default());
+
+        assert!(matches!(result, Err(Error::NodeNotFound(NodeId(0)))));
     }
 }
