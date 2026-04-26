@@ -532,13 +532,14 @@ impl<S: StorageAdapter> Engine<S> {
 
         let storage = self.graph.storage();
 
-        // --- Stage 1: Collect identity nodes for this agent ---
+        // --- Stage 1: Collect identity nodes for this agent (indexed lookup) ---
         let identity_nodes: Vec<(Vec<f64>, KnowledgeType, f64)> =
             if let Some(ref agent_id) = config.agent_id {
+                // Use agent index to get only this agent's nodes, then filter for identity types
                 storage
-                    .all_node_ids()
-                    .iter()
-                    .filter_map(|&nid| {
+                    .nodes_by_agent(agent_id)
+                    .into_iter()
+                    .filter_map(|nid| {
                         let node = storage.get_node(nid).ok()?;
                         let is_identity = matches!(
                             node.node_type,
@@ -546,7 +547,7 @@ impl<S: StorageAdapter> Engine<S> {
                                 | KnowledgeType::IdentityLearned
                                 | KnowledgeType::IdentityState
                         );
-                        if is_identity && node.origin.agent_id == *agent_id {
+                        if is_identity {
                             let emb = node.embedding.clone().unwrap_or_default();
                             let salience = storage.get_salience(nid).unwrap_or(0.0);
                             Some((emb, node.node_type.clone(), salience))
