@@ -48,5 +48,9 @@ name = "longmemeval-baseline"
 path = "benches/longmemeval/baseline.rs"
 harness = false
 
+[[test]]
+name = "longmemeval-judge"
+path = "benches/longmemeval/judge.rs"
+
 [profile.bench]
 debug = true
