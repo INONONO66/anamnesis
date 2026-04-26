@@ -3,6 +3,7 @@
 use crate::error::Error;
 use crate::graph::{Edge, EdgeId, KnowledgeType, Node, NodeId, Timestamp};
 use crate::storage::StorageAdapter;
+use std::collections::HashMap;
 
 const EMPTY_EDGE_SLICE: &[EdgeId] = &[];
 
@@ -24,6 +25,15 @@ pub struct InMemoryStorage {
 
     live_node_count: usize,
     live_edge_count: usize,
+
+    #[allow(dead_code)]
+    pub(crate) entity_tag_index: HashMap<String, Vec<NodeId>>,
+    #[allow(dead_code)]
+    pub(crate) type_index: HashMap<KnowledgeType, Vec<NodeId>>,
+    #[allow(dead_code)]
+    pub(crate) agent_index: HashMap<String, Vec<NodeId>>,
+    #[allow(dead_code)]
+    pub(crate) project_index: HashMap<String, Vec<NodeId>>,
 }
 
 impl InMemoryStorage {
@@ -42,6 +52,10 @@ impl InMemoryStorage {
             free_edge_ids: Vec::new(),
             live_node_count: 0,
             live_edge_count: 0,
+            entity_tag_index: HashMap::new(),
+            type_index: HashMap::new(),
+            agent_index: HashMap::new(),
+            project_index: HashMap::new(),
         }
     }
 
@@ -350,6 +364,15 @@ mod tests {
         assert_eq!(s.edge_count(), 0);
         assert!(s.all_node_ids().is_empty());
         assert!(s.all_edge_ids().is_empty());
+    }
+
+    #[test]
+    fn new_storage_has_empty_indexes() {
+        let s = InMemoryStorage::new();
+        assert_eq!(s.entity_tag_index.len(), 0);
+        assert_eq!(s.type_index.len(), 0);
+        assert_eq!(s.agent_index.len(), 0);
+        assert_eq!(s.project_index.len(), 0);
     }
 
     #[test]
