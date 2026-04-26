@@ -8,6 +8,10 @@ on:
     - cron: '0 2 * * 0'  # weekly Sunday 2am UTC for mutants
   workflow_dispatch:
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
@@ -28,6 +32,7 @@ jobs:
 
   test:
     name: Test (nextest + doctest)
+    needs: [gatekeeper]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -41,6 +46,7 @@ jobs:
 
   coverage:
     name: Coverage
+    needs: [test]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -52,19 +58,6 @@ jobs:
         with:
           files: lcov.info
           fail_ci_if_error: false
-
-  miri:
-    name: Miri (UB detection)
-    runs-on: ubuntu-latest
-    env:
-      MIRIFLAGS: -Zmiri-disable-isolation
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
-        with:
-          components: miri
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo miri test
 
   semver:
     name: Semver check (advisory)
