@@ -615,31 +615,68 @@ impl<S: StorageAdapter> Engine<S> {
                 vec![]
             };
 
-        // --- Stage 2: Compute initial activations (eq 10) ---
+        // --- Stage 2: Compute initial activations (eq 10) — sparse, seed-driven ---
         let mut initial_activations: HashMap<NodeId, f64> = HashMap::new();
-        let all_ids = storage.all_node_ids();
 
-        for &nid in &all_ids {
-            let node = match storage.get_node(nid) {
-                Ok(n) => n,
-                Err(_) => continue,
+        // Seed always gets full activation.
+        {
+            let (seed_vector_sim, seed_identity_prior) = {
+                let seed_node = storage.get_node(seed).ok();
+                let vs = match (
+                    &config.query_embedding,
+                    seed_node.and_then(|n| n.embedding.as_ref()),
+                ) {
+                    (Some(qe), Some(ne)) => cosine_similarity(qe, ne),
+                    _ => 0.0,
+                };
+                let ip = match seed_node.and_then(|n| n.embedding.as_ref()) {
+                    Some(emb) => compute_identity_prior(emb, &identity_nodes, cosine_similarity),
+                    None => 0.0,
+                };
+                (vs, ip)
             };
+            let act = initial_activation(true, seed_vector_sim, seed_identity_prior);
+            initial_activations.insert(seed, act);
+        }
 
-            let is_seed = nid == seed;
+        // Identity nodes get prior activation.
+        if let Some(ref agent_id) = config.agent_id {
+            for nid in storage.nodes_by_agent(agent_id) {
+                if nid == seed {
+                    continue;
+                }
 
-            let vector_sim = match (&config.query_embedding, &node.embedding) {
-                (Some(qe), Some(ne)) => cosine_similarity(qe, ne),
-                _ => 0.0,
-            };
+                let (is_identity, vector_sim, identity_prior) = {
+                    let node = match storage.get_node(nid) {
+                        Ok(n) => n,
+                        Err(_) => continue,
+                    };
+                    let is_id = matches!(
+                        node.node_type,
+                        KnowledgeType::IdentityCore
+                            | KnowledgeType::IdentityLearned
+                            | KnowledgeType::IdentityState
+                    );
+                    let vs = match (&config.query_embedding, &node.embedding) {
+                        (Some(qe), Some(ne)) => cosine_similarity(qe, ne),
+                        _ => 0.0,
+                    };
+                    let ip = match &node.embedding {
+                        Some(emb) => {
+                            compute_identity_prior(emb, &identity_nodes, cosine_similarity)
+                        }
+                        None => 0.0,
+                    };
+                    (is_id, vs, ip)
+                };
+                if !is_identity {
+                    continue;
+                }
 
-            let identity_prior = match &node.embedding {
-                Some(emb) => compute_identity_prior(emb, &identity_nodes, cosine_similarity),
-                None => 0.0,
-            };
-
-            let act = initial_activation(is_seed, vector_sim, identity_prior);
-            if act > config.min_activation || is_seed {
-                initial_activations.insert(nid, act);
+                let act = initial_activation(false, vector_sim, identity_prior);
+                if act > config.min_activation {
+                    initial_activations.insert(nid, act);
+                }
             }
         }
 
