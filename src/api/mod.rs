@@ -196,11 +196,26 @@ impl<S: StorageAdapter> Engine<S> {
         use crate::mechanics::perception::gate_observation;
 
         let max_similarity = if let Some(ref new_embedding) = observation.embedding {
-            self.graph
+            // Build candidate set: recent 256 nodes + entity-tag matches
+            let mut candidates: std::collections::HashSet<NodeId> =
+                std::collections::HashSet::new();
+            for nid in self
+                .graph
                 .storage()
-                .all_node_ids()
-                .iter()
-                .filter_map(|&nid| {
+                .node_ids_descending()
+                .into_iter()
+                .take(256)
+            {
+                candidates.insert(nid);
+            }
+            for tag in &observation.entity_tags {
+                for nid in self.graph.storage().nodes_by_entity_tag(tag) {
+                    candidates.insert(nid);
+                }
+            }
+            candidates
+                .into_iter()
+                .filter_map(|nid| {
                     self.graph.storage().get_node(nid).ok().and_then(|n| {
                         n.embedding
                             .as_ref()
