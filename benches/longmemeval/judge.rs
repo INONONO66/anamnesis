@@ -78,21 +78,21 @@ mod tests {
 
     #[test]
     fn mock_judge_marks_match_as_correct() {
-        let j = MockJudge::default();
+        let j = MockJudge;
         let r = j.evaluate("Q?", "Hello", "Hello");
         assert!(r.correct);
     }
 
     #[test]
     fn mock_judge_marks_mismatch_as_incorrect() {
-        let j = MockJudge::default();
+        let j = MockJudge;
         let r = j.evaluate("Q?", "Hello", "World");
         assert!(!r.correct);
     }
 
     #[test]
     fn mock_judge_case_insensitive() {
-        let j = MockJudge::default();
+        let j = MockJudge;
         let r = j.evaluate("Q?", "Hello", "hello");
         assert!(r.correct, "should match case-insensitively");
     }

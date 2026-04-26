@@ -235,7 +235,7 @@ fn main() {
         _ => mock_questions(),
     };
 
-    let judge = MockJudge::default();
+    let judge = MockJudge;
     let mut engine = make_engine(&args.decay);
 
     let session_limit = args.limit.min(sessions.len());
