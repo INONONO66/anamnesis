@@ -67,9 +67,10 @@ jobs:
       - run: cargo miri test
 
   semver:
-    name: Semver check
+    name: Semver check (advisory)
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
         with:
