@@ -1,0 +1,6 @@
+# Dataset files (download with download.sh)
+*.json
+*.jsonl
+*.csv
+*.parquet
+!.gitignore

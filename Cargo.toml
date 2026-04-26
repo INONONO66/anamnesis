@@ -38,5 +38,15 @@ harness = false
 name = "engine_ops"
 harness = false
 
+[[bench]]
+name = "longmemeval-loader"
+path = "benches/longmemeval/loader.rs"
+harness = false
+
+[[bench]]
+name = "longmemeval-baseline"
+path = "benches/longmemeval/baseline.rs"
+harness = false
+
 [profile.bench]
 debug = true
