@@ -9,6 +9,19 @@ use crate::graph::{EdgeId, EdgeType, KnowledgeType, NodeId, Timestamp};
 use crate::query::{ContextPackage, Query, QueryConfig};
 use crate::storage::{InMemoryStorage, StorageAdapter};
 
+/// Decay model for salience computation.
+///
+/// `Exponential` (default) uses the existing formula: s(t+dt) = b + (s(t) - b) * exp(-lambda * dt).
+/// `PowerLaw` uses ACT-R base-level activation (Anderson & Schooler 1991).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum DecayModel {
+    /// Exponential decay — backwards-compatible default.
+    #[default]
+    Exponential,
+    /// ACT-R power-law decay: B = ln(Σⱼ tⱼ⁻⁰·⁵), salience = sigmoid(B).
+    PowerLaw,
+}
+
 /// Configuration for the Anamnesis engine.
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
@@ -18,6 +31,8 @@ pub struct EngineConfig {
     pub novelty_threshold: f64,
     /// Minimum confidence [0, 1] for an observation to enter the graph.
     pub confidence_threshold: f64,
+    /// Decay model to use for salience computation. Default: Exponential (backwards-compatible).
+    pub decay_model: DecayModel,
 }
 
 impl Default for EngineConfig {
@@ -26,6 +41,7 @@ impl Default for EngineConfig {
             max_nodes: 100_000,
             novelty_threshold: 0.30,
             confidence_threshold: 0.50,
+            decay_model: DecayModel::Exponential,
         }
     }
 }
