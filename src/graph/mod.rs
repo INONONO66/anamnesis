@@ -188,6 +188,8 @@ mod tests {
             edge_type: EdgeType::Semantic,
             weight: 0.8,
             created_at: Timestamp(0),
+            valid_from: None,
+            valid_until: None,
             metadata: HashMap::new(),
         }
     }

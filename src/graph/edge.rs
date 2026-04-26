@@ -21,6 +21,10 @@ pub struct Edge {
     pub weight: f64,
     /// When this edge was created.
     pub created_at: Timestamp,
+    /// When this relationship becomes valid in domain time.
+    pub valid_from: Option<Timestamp>,
+    /// When this relationship stops being valid in domain time.
+    pub valid_until: Option<Timestamp>,
     /// Consumer-defined metadata.
     pub metadata: HashMap<String, String>,
 }
@@ -39,6 +43,8 @@ mod tests {
             edge_type: EdgeType::Reason,
             weight: 0.8,
             created_at: Timestamp(1000),
+            valid_from: None,
+            valid_until: None,
             metadata: HashMap::new(),
         };
         assert_eq!(edge.source, NodeId(10));
@@ -55,6 +61,8 @@ mod tests {
             edge_type: EdgeType::Contradicts,
             weight: 0.9,
             created_at: Timestamp(500),
+            valid_from: None,
+            valid_until: None,
             metadata: HashMap::new(),
         };
         assert_eq!(edge.edge_type, EdgeType::Contradicts);

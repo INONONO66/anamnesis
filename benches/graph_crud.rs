@@ -40,6 +40,8 @@ fn make_edge(id: EdgeId, source: NodeId, target: NodeId) -> Edge {
         edge_type: EdgeType::Semantic,
         weight: 0.8,
         created_at: Timestamp(1000),
+        valid_from: None,
+        valid_until: None,
         metadata: HashMap::new(),
     }
 }

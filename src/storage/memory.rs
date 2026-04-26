@@ -571,6 +571,8 @@ mod tests {
             edge_type: crate::graph::EdgeType::Semantic,
             weight: 0.8,
             created_at: Timestamp(1000),
+            valid_from: None,
+            valid_until: None,
             metadata: HashMap::new(),
         }
     }

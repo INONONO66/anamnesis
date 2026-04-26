@@ -454,6 +454,8 @@ impl<S: StorageAdapter> Engine<S> {
                         edge_type: EdgeType::Semantic,
                         weight: score.clamp(0.0, 1.0),
                         created_at: now,
+                        valid_from: None,
+                        valid_until: None,
                         metadata: HashMap::new(),
                     };
                     self.graph.add_edge(edge)?;
@@ -480,6 +482,8 @@ impl<S: StorageAdapter> Engine<S> {
             edge_type,
             weight,
             created_at: Timestamp::now(),
+            valid_from: None,
+            valid_until: None,
             metadata: HashMap::new(),
         };
         self.graph.add_edge(edge)?;
