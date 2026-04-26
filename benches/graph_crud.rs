@@ -1,5 +1,5 @@
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use anamnesis::graph::Graph;
 use anamnesis::graph::node::Origin;
@@ -20,6 +20,7 @@ fn make_node(id: NodeId) -> Node {
         valid_until: None,
         salience: 0.8,
         access_count: 0,
+        access_history: VecDeque::new(),
         origin: Origin {
             agent_id: "bench-agent".to_string(),
             session_id: "bench-session".to_string(),

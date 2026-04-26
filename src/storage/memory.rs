@@ -317,7 +317,7 @@ impl StorageAdapter for InMemoryStorage {
 mod tests {
     use super::*;
     use crate::graph::node::Origin;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, VecDeque};
 
     fn make_node(id: NodeId, salience: f64) -> Node {
         Node {
@@ -334,6 +334,7 @@ mod tests {
             valid_until: None,
             salience,
             access_count: 0,
+            access_history: VecDeque::new(),
             origin: Origin {
                 agent_id: "test-agent".to_string(),
                 session_id: "test-session".to_string(),

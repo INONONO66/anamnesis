@@ -151,7 +151,7 @@ impl<S: StorageAdapter> Graph<S> {
 mod tests {
     use super::*;
     use crate::graph::node::Origin;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, VecDeque};
 
     fn make_node(id: u64, name: &str) -> Node {
         Node {
@@ -168,6 +168,7 @@ mod tests {
             valid_until: None,
             salience: 0.8,
             access_count: 0,
+            access_history: VecDeque::new(),
             origin: Origin {
                 agent_id: "agent-1".to_string(),
                 session_id: "session-1".to_string(),

@@ -1,6 +1,6 @@
 //! Public API surface for the Anamnesis cognitive graph engine.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use crate::error::Error;
 use crate::graph::node::Origin;
@@ -239,6 +239,7 @@ impl<S: StorageAdapter> Engine<S> {
             valid_until: None,
             salience: 1.0,
             access_count: 0,
+            access_history: VecDeque::new(),
             origin: observation.origin,
             entity_tags: observation.entity_tags.clone(),
             metadata: HashMap::new(),
