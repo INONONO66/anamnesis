@@ -1,6 +1,6 @@
 //! Public API surface for the Anamnesis cognitive graph engine.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 
 use crate::error::Error;
 use crate::graph::node::Origin;
@@ -575,7 +575,7 @@ impl<S: StorageAdapter> Engine<S> {
     /// Query the graph — returns structured context for LLM consumption.
     ///
     /// Associative queries use the full spreading activation pipeline.
-    /// Non-associative queries retrieve nodes directly by their structural criteria.
+    /// Type-filtered and list queries retrieve nodes directly by salience.
     pub fn query(&self, query: &Query, config: &QueryConfig) -> Result<ContextPackage, Error> {
         match query {
             Query::Associative { seed, budget } => self.query_associative(*seed, *budget, config),
@@ -586,14 +586,7 @@ impl<S: StorageAdapter> Engine<S> {
                 min_salience,
                 limit,
             } => self.query_list(*min_salience, *limit, config),
-            Query::Temporal {
-                since,
-                node_types,
-                limit,
-            } => self.query_temporal(*since, node_types.as_deref(), *limit, config),
-            Query::Neighborhood { entity, depth } => {
-                self.query_neighborhood(*entity, *depth, config)
-            }
+            _ => Ok(ContextPackage::empty()),
         }
     }
 
@@ -683,148 +676,6 @@ impl<S: StorageAdapter> Engine<S> {
                     content: node.content.clone(),
                     node_type: node.node_type.clone(),
                     relevance: salience,
-                    origin: node.origin.clone(),
-                })
-            })
-            .collect();
-
-        Ok(assemble_context_package(
-            scored_nodes,
-            &[],
-            &[],
-            &HashMap::new(),
-            config.token_budget,
-            config.chars_per_token,
-            &config.project_id,
-        ))
-    }
-
-    fn query_temporal(
-        &self,
-        since: Timestamp,
-        node_types: Option<&[KnowledgeType]>,
-        limit: usize,
-        config: &QueryConfig,
-    ) -> Result<ContextPackage, Error> {
-        use std::cmp::Ordering;
-
-        use crate::query::assembly::{ScoredNode, assemble_context_package};
-
-        let storage = self.graph.storage();
-        let mut scored_nodes: Vec<(Timestamp, ScoredNode)> = storage
-            .all_node_ids()
-            .into_iter()
-            .filter_map(|nid| {
-                let node = storage.get_node(nid).ok()?;
-                if node.created_at < since {
-                    return None;
-                }
-                if let Some(types) = node_types
-                    && !types.iter().any(|node_type| node_type == &node.node_type)
-                {
-                    return None;
-                }
-                let salience = storage.get_salience(nid).unwrap_or(0.0);
-                Some((
-                    node.created_at,
-                    ScoredNode {
-                        node_id: nid,
-                        name: node.name.clone(),
-                        summary: node.summary.clone(),
-                        content: node.content.clone(),
-                        node_type: node.node_type.clone(),
-                        relevance: salience,
-                        origin: node.origin.clone(),
-                    },
-                ))
-            })
-            .collect();
-
-        scored_nodes.sort_by(|(created_a, node_a), (created_b, node_b)| {
-            created_b
-                .cmp(created_a)
-                .then_with(|| {
-                    node_b
-                        .relevance
-                        .partial_cmp(&node_a.relevance)
-                        .unwrap_or(Ordering::Equal)
-                })
-                .then_with(|| node_a.node_id.cmp(&node_b.node_id))
-        });
-        scored_nodes.truncate(limit);
-
-        let scored_nodes = scored_nodes
-            .into_iter()
-            .map(|(_, scored_node)| scored_node)
-            .collect();
-
-        Ok(assemble_context_package(
-            scored_nodes,
-            &[],
-            &[],
-            &HashMap::new(),
-            config.token_budget,
-            config.chars_per_token,
-            &config.project_id,
-        ))
-    }
-
-    fn query_neighborhood(
-        &self,
-        entity: NodeId,
-        max_depth: usize,
-        config: &QueryConfig,
-    ) -> Result<ContextPackage, Error> {
-        use crate::query::assembly::{ScoredNode, assemble_context_package};
-
-        let storage = self.graph.storage();
-        let mut queue = VecDeque::new();
-        let mut visited = HashSet::new();
-        let mut depths = HashMap::new();
-
-        queue.push_back((entity, 0));
-        visited.insert(entity);
-        depths.insert(entity, 0usize);
-
-        while let Some((nid, depth)) = queue.pop_front() {
-            if depth >= max_depth {
-                continue;
-            }
-
-            for &eid in storage.edges_from(nid) {
-                if let Ok(edge) = storage.get_edge(eid)
-                    && visited.insert(edge.target)
-                {
-                    let next_depth = depth + 1;
-                    depths.insert(edge.target, next_depth);
-                    queue.push_back((edge.target, next_depth));
-                }
-            }
-
-            for &eid in storage.edges_to(nid) {
-                if let Ok(edge) = storage.get_edge(eid)
-                    && visited.insert(edge.source)
-                {
-                    let next_depth = depth + 1;
-                    depths.insert(edge.source, next_depth);
-                    queue.push_back((edge.source, next_depth));
-                }
-            }
-        }
-
-        let scored_nodes: Vec<ScoredNode> = depths
-            .into_iter()
-            .filter_map(|(nid, depth)| {
-                let node = storage.get_node(nid).ok()?;
-                let salience = storage.get_salience(nid).unwrap_or(0.0);
-                let depth_multiplier = 0.8_f64.powf(depth as f64);
-                Some(ScoredNode {
-                    node_id: nid,
-                    name: node.name.clone(),
-                    summary: node.summary.clone(),
-                    content: node.content.clone(),
-                    node_type: node.node_type.clone(),
-                    relevance: salience * depth_multiplier,
                     origin: node.origin.clone(),
                 })
             })
