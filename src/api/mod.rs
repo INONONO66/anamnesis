@@ -356,6 +356,7 @@ impl<S: StorageAdapter> Engine<S> {
             salience: 1.0,
             access_count: 0,
             access_history: VecDeque::new(),
+            tier: crate::graph::MemoryTier::Auto,
             origin: observation.origin,
             entity_tags: observation.entity_tags.clone(),
             metadata: HashMap::new(),

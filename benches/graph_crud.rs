@@ -21,6 +21,7 @@ fn make_node(id: NodeId) -> Node {
         salience: 0.8,
         access_count: 0,
         access_history: VecDeque::new(),
+        tier: anamnesis::graph::MemoryTier::Auto,
         origin: Origin {
             agent_id: "bench-agent".to_string(),
             session_id: "bench-session".to_string(),

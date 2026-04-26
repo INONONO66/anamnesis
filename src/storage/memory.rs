@@ -552,6 +552,7 @@ mod tests {
             salience,
             access_count: 0,
             access_history: VecDeque::new(),
+            tier: crate::graph::MemoryTier::Auto,
             origin: Origin {
                 agent_id: "test-agent".to_string(),
                 session_id: "test-session".to_string(),
@@ -599,6 +600,7 @@ mod tests {
             salience: 0.5,
             access_count: 0,
             access_history: VecDeque::new(),
+            tier: crate::graph::MemoryTier::Auto,
             origin: Origin {
                 agent_id: agent_id.to_string(),
                 session_id: "session".to_string(),

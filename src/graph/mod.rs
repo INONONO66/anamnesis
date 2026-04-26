@@ -6,7 +6,7 @@ pub mod types;
 
 pub use edge::Edge;
 pub use node::{Node, Origin};
-pub use types::{EdgeId, EdgeType, KnowledgeType, NodeId, Timestamp};
+pub use types::{EdgeId, EdgeType, KnowledgeType, MemoryTier, NodeId, Timestamp};
 
 use crate::error::Error;
 use crate::storage::{InMemoryStorage, StorageAdapter};
@@ -169,6 +169,7 @@ mod tests {
             salience: 0.8,
             access_count: 0,
             access_history: VecDeque::new(),
+            tier: MemoryTier::Auto,
             origin: Origin {
                 agent_id: "agent-1".to_string(),
                 session_id: "session-1".to_string(),
