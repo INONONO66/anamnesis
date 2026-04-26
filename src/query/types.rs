@@ -202,6 +202,91 @@ impl ContextPackage {
     }
 }
 
+/// Unified search input for the cognitive graph engine.
+#[derive(Debug, Clone)]
+pub struct SearchInput {
+    /// Natural language query text.
+    pub text: String,
+    /// Agent ID for identity-biased retrieval. None = no identity bias.
+    pub agent_id: Option<String>,
+    /// Project scope filter. None = universal.
+    pub project_id: Option<String>,
+    /// Current timestamp for temporal filtering.
+    pub now: Timestamp,
+    /// Optional query embedding for vector similarity.
+    pub query_embedding: Option<Vec<f64>>,
+    /// Maximum number of results to return.
+    pub limit: usize,
+    /// Optional goal context for reranking.
+    pub context: Option<String>,
+}
+
+impl Default for SearchInput {
+    fn default() -> Self {
+        SearchInput {
+            text: String::new(),
+            agent_id: None,
+            project_id: None,
+            now: Timestamp(0),
+            query_embedding: None,
+            limit: 10,
+            context: None,
+        }
+    }
+}
+
+/// Packaging mode for ContextPackage assembly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PackagingMode {
+    /// Knowledge fragments only (default).
+    KnowledgeOnly,
+    /// Knowledge + provenance (source episodes).
+    KnowledgeWithProvenance,
+    /// Persona-weighted (identity nodes boosted).
+    PersonaWeighted,
+    /// Timeline-ordered (temporal emphasis).
+    Timeline,
+}
+
+/// Trace of strategies used during a search operation.
+#[derive(Debug, Clone, Default)]
+pub struct SearchTrace {
+    /// Names of retrieval strategies used (e.g., "text_search", "spreading_activation").
+    pub strategies_used: Vec<String>,
+    /// Number of seed nodes found.
+    pub seed_count: usize,
+    /// Number of spreading activation iterations performed.
+    pub spread_iterations: usize,
+    /// Packaging mode selected.
+    pub packaging_mode: Option<PackagingMode>,
+}
+
+/// Internal search plan — auto-derived from SearchInput.
+#[derive(Debug, Clone)]
+pub struct SearchPlan {
+    /// Use text search for seed retrieval.
+    pub use_text: bool,
+    /// Use vector similarity for seed retrieval.
+    pub use_vector: bool,
+    /// Use graph spreading activation.
+    pub use_graph: bool,
+    /// Apply temporal filtering.
+    pub use_temporal: bool,
+    /// Apply persona/identity bias.
+    pub use_persona_bias: bool,
+    /// Packaging mode for result assembly.
+    pub packaging_mode: PackagingMode,
+}
+
+/// Result of a unified search operation.
+#[derive(Debug, Clone)]
+pub struct SearchResult {
+    /// Structured context package ready for LLM injection.
+    pub package: ContextPackage,
+    /// Trace of strategies used.
+    pub trace: SearchTrace,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
