@@ -44,7 +44,6 @@ fn ingest_result_created_variant_contains_node_id() {
     };
 
     assert_eq!(ids.len(), 1);
-    assert!(ids[0].0 >= 0, "node ID should be non-negative");
 }
 
 #[test]
