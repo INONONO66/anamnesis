@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use crate::error::Error;
 use crate::graph::node::Origin;
 use crate::graph::{Edge, Graph, Node};
-use crate::graph::{EdgeId, EdgeType, KnowledgeType, NodeId, Timestamp};
+use crate::graph::{EdgeId, EdgeType, KnowledgeType, MemoryTier, NodeId, Timestamp};
 use crate::query::{ContextPackage, Query, QueryConfig};
 use crate::storage::{InMemoryStorage, StorageAdapter};
 
@@ -548,6 +548,22 @@ impl<S: StorageAdapter> Engine<S> {
         Ok(())
     }
 
+    /// Set the explicit memory tier for a node.
+    ///
+    /// `Core` tier nodes are protected from decay in `tick()`.
+    /// `Auto` restores natural salience-based tier assignment.
+    pub fn set_tier(&mut self, node_id: NodeId, tier: MemoryTier) -> Result<(), Error> {
+        let node = self.graph.get_node_mut(node_id)?;
+        node.tier = tier;
+        Ok(())
+    }
+
+    /// Get the current memory tier of a node.
+    pub fn get_tier(&self, node_id: NodeId) -> Result<MemoryTier, Error> {
+        let node = self.graph.get_node(node_id)?;
+        Ok(node.tier.clone())
+    }
+
     /// Advance time — apply batch decay (eq 4) to all nodes.
     pub fn tick(&mut self, now: Timestamp) -> Result<TickReport, Error> {
         use crate::mechanics::forgetting::{
@@ -559,6 +575,14 @@ impl<S: StorageAdapter> Engine<S> {
         let mut nodes_pruned = 0usize;
 
         for id in node_ids {
+            let node_tier = match self.graph.get_node(id) {
+                Ok(node) => node.tier.clone(),
+                Err(_) => continue,
+            };
+            if node_tier == MemoryTier::Core {
+                continue;
+            }
+
             let current_salience = match self.graph.storage().get_salience(id) {
                 Ok(s) => s,
                 Err(_) => continue,
