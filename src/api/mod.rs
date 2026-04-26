@@ -661,6 +661,12 @@ impl<S: StorageAdapter> Engine<S> {
             })
             .collect();
 
+        let scored_nodes = if let Some(ref ctx) = config.context {
+            crate::query::rerank::rerank_with_context(scored_nodes, ctx)
+        } else {
+            scored_nodes
+        };
+
         Ok(assemble_context_package(
             scored_nodes,
             &[],
@@ -715,6 +721,12 @@ impl<S: StorageAdapter> Engine<S> {
                 })
             })
             .collect();
+
+        let scored_nodes = if let Some(ref ctx) = config.context {
+            crate::query::rerank::rerank_with_context(scored_nodes, ctx)
+        } else {
+            scored_nodes
+        };
 
         Ok(assemble_context_package(
             scored_nodes,
