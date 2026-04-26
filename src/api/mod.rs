@@ -1,6 +1,6 @@
 //! Public API surface for the Anamnesis cognitive graph engine.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use crate::error::Error;
 use crate::graph::node::Origin;
@@ -8,6 +8,19 @@ use crate::graph::{Edge, Graph, Node};
 use crate::graph::{EdgeId, EdgeType, KnowledgeType, NodeId, Timestamp};
 use crate::query::{ContextPackage, Query, QueryConfig};
 use crate::storage::{InMemoryStorage, StorageAdapter};
+
+/// Decay model for salience computation.
+///
+/// `Exponential` (default) uses the existing formula: s(t+dt) = b + (s(t) - b) * exp(-lambda * dt).
+/// `PowerLaw` uses ACT-R base-level activation (Anderson & Schooler 1991).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum DecayModel {
+    /// Exponential decay — backwards-compatible default.
+    #[default]
+    Exponential,
+    /// ACT-R power-law decay: B = ln(Σⱼ tⱼ⁻⁰·⁵), salience = sigmoid(B).
+    PowerLaw,
+}
 
 /// Configuration for the Anamnesis engine.
 #[derive(Debug, Clone)]
@@ -18,6 +31,8 @@ pub struct EngineConfig {
     pub novelty_threshold: f64,
     /// Minimum confidence [0, 1] for an observation to enter the graph.
     pub confidence_threshold: f64,
+    /// Decay model to use for salience computation. Default: Exponential (backwards-compatible).
+    pub decay_model: DecayModel,
 }
 
 impl Default for EngineConfig {
@@ -26,6 +41,7 @@ impl Default for EngineConfig {
             max_nodes: 100_000,
             novelty_threshold: 0.30,
             confidence_threshold: 0.50,
+            decay_model: DecayModel::Exponential,
         }
     }
 }
@@ -122,6 +138,62 @@ pub struct ReflectReport {
     pub clusters_found: usize,
 }
 
+/// Return the top-N `(NodeId, score)` pairs by score descending.
+///
+/// Uses a min-heap of size `n` for O(M log N) complexity instead of sorting
+/// all candidates with O(M log M) complexity.
+pub fn top_n_by_score(scores: &[(NodeId, f64)], n: usize) -> Vec<(NodeId, f64)> {
+    use std::cmp::Ordering;
+    use std::collections::BinaryHeap;
+
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    struct Entry {
+        node_id: NodeId,
+        score: f64,
+    }
+
+    impl Eq for Entry {}
+
+    impl PartialOrd for Entry {
+        fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+
+    impl Ord for Entry {
+        fn cmp(&self, other: &Self) -> Ordering {
+            other
+                .score
+                .partial_cmp(&self.score)
+                .unwrap_or(Ordering::Equal)
+                .then_with(|| other.node_id.cmp(&self.node_id))
+        }
+    }
+
+    if n == 0 {
+        return Vec::new();
+    }
+
+    let mut heap = BinaryHeap::with_capacity(n);
+    for &(node_id, score) in scores {
+        let entry = Entry { node_id, score };
+
+        if heap.len() < n {
+            heap.push(entry);
+        } else if heap.peek().is_some_and(|lowest| entry.score > lowest.score) {
+            heap.pop();
+            heap.push(entry);
+        }
+    }
+
+    let mut result: Vec<_> = heap
+        .into_iter()
+        .map(|entry| (entry.node_id, entry.score))
+        .collect();
+    result.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
+    result
+}
+
 /// The Anamnesis cognitive graph engine.
 ///
 /// `Engine<S>` is generic over the storage backend. The default is
@@ -180,11 +252,26 @@ impl<S: StorageAdapter> Engine<S> {
         use crate::mechanics::perception::gate_observation;
 
         let max_similarity = if let Some(ref new_embedding) = observation.embedding {
-            self.graph
+            // Build candidate set: recent 256 nodes + entity-tag matches
+            let mut candidates: std::collections::HashSet<NodeId> =
+                std::collections::HashSet::new();
+            for nid in self
+                .graph
                 .storage()
-                .all_node_ids()
-                .iter()
-                .filter_map(|&nid| {
+                .node_ids_descending()
+                .into_iter()
+                .take(256)
+            {
+                candidates.insert(nid);
+            }
+            for tag in &observation.entity_tags {
+                for nid in self.graph.storage().nodes_by_entity_tag(tag) {
+                    candidates.insert(nid);
+                }
+            }
+            candidates
+                .into_iter()
+                .filter_map(|nid| {
                     self.graph.storage().get_node(nid).ok().and_then(|n| {
                         n.embedding
                             .as_ref()
@@ -223,6 +310,7 @@ impl<S: StorageAdapter> Engine<S> {
             valid_until: None,
             salience: 1.0,
             access_count: 0,
+            access_history: VecDeque::new(),
             origin: observation.origin,
             entity_tags: observation.entity_tags.clone(),
             metadata: HashMap::new(),
@@ -234,29 +322,33 @@ impl<S: StorageAdapter> Engine<S> {
             let new_type = &observation.node_type;
             let new_tags = &observation.entity_tags;
 
-            // Candidate pool: last 256 nodes by ID + entity-tag matches
-            let mut candidate_ids: Vec<NodeId> = {
-                let mut all = self.graph.storage().all_node_ids();
-                all.retain(|&nid| nid != id);
-                all.sort_by_key(|a| std::cmp::Reverse(a.0));
-                all.truncate(256);
-                all
-            };
+            // Candidate pool: last 256 nodes by ID + entity-tag matches (indexed, O(1) dedup)
+            let mut candidate_set: std::collections::HashSet<NodeId> =
+                std::collections::HashSet::new();
+
+            for nid in self
+                .graph
+                .storage()
+                .node_ids_descending()
+                .into_iter()
+                .take(256)
+            {
+                if nid != id {
+                    candidate_set.insert(nid);
+                }
+            }
 
             if !new_tags.is_empty() {
-                let all_ids = self.graph.storage().all_node_ids();
-                for nid in all_ids {
-                    if nid == id {
-                        continue;
-                    }
-                    if let Ok(node) = self.graph.storage().get_node(nid) {
-                        let has_shared_tag = node.entity_tags.iter().any(|t| new_tags.contains(t));
-                        if has_shared_tag && !candidate_ids.contains(&nid) {
-                            candidate_ids.push(nid);
+                for tag in new_tags {
+                    for nid in self.graph.storage().nodes_by_entity_tag(tag) {
+                        if nid != id {
+                            candidate_set.insert(nid);
                         }
                     }
                 }
             }
+
+            let candidate_ids: Vec<NodeId> = candidate_set.into_iter().collect();
 
             // Score candidates by attraction (eq 3)
             let mut scored: Vec<(NodeId, f64)> = Vec::new();
@@ -286,11 +378,10 @@ impl<S: StorageAdapter> Engine<S> {
                 }
             }
 
-            // Top 4 by score
-            scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-            scored.truncate(4);
+            // Top 4 by score using BinaryHeap
+            let top_scored = top_n_by_score(&scored, 4);
 
-            for (cid, score) in scored {
+            for (cid, score) in top_scored {
                 // Check existing edge in either direction
                 let existing_edge = self
                     .graph
@@ -355,20 +446,40 @@ impl<S: StorageAdapter> Engine<S> {
     /// Phase 2: Applies decay (eq 4) BEFORE reinforcement (eq 5).
     /// Decay is lazy: computed based on elapsed time since last access.
     pub fn touch(&mut self, node_id: NodeId, now: Timestamp) -> Result<(), Error> {
-        use crate::mechanics::forgetting::{decay_salience, reinforce_salience};
+        use crate::mechanics::forgetting::{
+            base_level_to_salience, compute_base_level, decay_salience, reinforce_salience,
+        };
 
         let current_salience = self.graph.storage().get_salience(node_id)?;
         let last_accessed = self.graph.storage().get_accessed_at(node_id)?;
         let node_type = self.graph.storage().get_node_type(node_id)?.clone();
 
-        let dt_ms = now.0.saturating_sub(last_accessed.0);
-        let dt_days = dt_ms as f64 / 86_400_000.0;
+        match self.config.decay_model {
+            DecayModel::Exponential => {
+                let dt_ms = now.0.saturating_sub(last_accessed.0);
+                let dt_days = dt_ms as f64 / 86_400_000.0;
 
-        // Decay BEFORE reinforcement — ordering invariant (eq 4 then eq 5)
-        let decayed = decay_salience(current_salience, dt_days, &node_type);
-        let reinforced = reinforce_salience(decayed);
+                // Decay BEFORE reinforcement — ordering invariant (eq 4 then eq 5)
+                let decayed = decay_salience(current_salience, dt_days, &node_type);
+                let reinforced = reinforce_salience(decayed);
 
-        self.graph.storage_mut().set_salience(node_id, reinforced)?;
+                self.graph.storage_mut().set_salience(node_id, reinforced)?;
+            }
+            DecayModel::PowerLaw => {
+                let history_snapshot = {
+                    let node = self.graph.get_node_mut(node_id)?;
+                    node.record_access(now);
+                    node.access_history.clone()
+                };
+                let new_salience =
+                    base_level_to_salience(compute_base_level(&history_snapshot, now, 0.5));
+
+                self.graph
+                    .storage_mut()
+                    .set_salience(node_id, new_salience)?;
+            }
+        }
+
         self.graph.storage_mut().set_accessed_at(node_id, now)?;
 
         let node = self.graph.get_node_mut(node_id)?;
@@ -379,7 +490,9 @@ impl<S: StorageAdapter> Engine<S> {
 
     /// Advance time — apply batch decay (eq 4) to all nodes.
     pub fn tick(&mut self, now: Timestamp) -> Result<TickReport, Error> {
-        use crate::mechanics::forgetting::{decay_salience, floor_for_type};
+        use crate::mechanics::forgetting::{
+            base_level_to_salience, compute_base_level, decay_salience, floor_for_type,
+        };
 
         let node_ids = self.graph.storage().all_node_ids();
         let mut nodes_decayed = 0usize;
@@ -399,10 +512,22 @@ impl<S: StorageAdapter> Engine<S> {
                 Err(_) => continue,
             };
 
-            let dt_ms = now.0.saturating_sub(last_accessed.0);
-            let dt_days = dt_ms as f64 / 86_400_000.0;
+            let new_salience = match self.config.decay_model {
+                DecayModel::Exponential => {
+                    let dt_ms = now.0.saturating_sub(last_accessed.0);
+                    let dt_days = dt_ms as f64 / 86_400_000.0;
 
-            let new_salience = decay_salience(current_salience, dt_days, &node_type);
+                    decay_salience(current_salience, dt_days, &node_type)
+                }
+                DecayModel::PowerLaw => {
+                    let history = match self.graph.get_node(id) {
+                        Ok(node) => node.access_history.clone(),
+                        Err(_) => continue,
+                    };
+
+                    base_level_to_salience(compute_base_level(&history, now, 0.5))
+                }
+            };
 
             if (new_salience - current_salience).abs() > 1e-10 {
                 if self
@@ -462,13 +587,14 @@ impl<S: StorageAdapter> Engine<S> {
 
         let storage = self.graph.storage();
 
-        // --- Stage 1: Collect identity nodes for this agent ---
+        // --- Stage 1: Collect identity nodes for this agent (indexed lookup) ---
         let identity_nodes: Vec<(Vec<f64>, KnowledgeType, f64)> =
             if let Some(ref agent_id) = config.agent_id {
+                // Use agent index to get only this agent's nodes, then filter for identity types
                 storage
-                    .all_node_ids()
-                    .iter()
-                    .filter_map(|&nid| {
+                    .nodes_by_agent(agent_id)
+                    .into_iter()
+                    .filter_map(|nid| {
                         let node = storage.get_node(nid).ok()?;
                         let is_identity = matches!(
                             node.node_type,
@@ -476,7 +602,7 @@ impl<S: StorageAdapter> Engine<S> {
                                 | KnowledgeType::IdentityLearned
                                 | KnowledgeType::IdentityState
                         );
-                        if is_identity && node.origin.agent_id == *agent_id {
+                        if is_identity {
                             let emb = node.embedding.clone().unwrap_or_default();
                             let salience = storage.get_salience(nid).unwrap_or(0.0);
                             Some((emb, node.node_type.clone(), salience))
@@ -489,31 +615,68 @@ impl<S: StorageAdapter> Engine<S> {
                 vec![]
             };
 
-        // --- Stage 2: Compute initial activations (eq 10) ---
+        // --- Stage 2: Compute initial activations (eq 10) — sparse, seed-driven ---
         let mut initial_activations: HashMap<NodeId, f64> = HashMap::new();
-        let all_ids = storage.all_node_ids();
 
-        for &nid in &all_ids {
-            let node = match storage.get_node(nid) {
-                Ok(n) => n,
-                Err(_) => continue,
+        // Seed always gets full activation.
+        {
+            let (seed_vector_sim, seed_identity_prior) = {
+                let seed_node = storage.get_node(seed).ok();
+                let vs = match (
+                    &config.query_embedding,
+                    seed_node.and_then(|n| n.embedding.as_ref()),
+                ) {
+                    (Some(qe), Some(ne)) => cosine_similarity(qe, ne),
+                    _ => 0.0,
+                };
+                let ip = match seed_node.and_then(|n| n.embedding.as_ref()) {
+                    Some(emb) => compute_identity_prior(emb, &identity_nodes, cosine_similarity),
+                    None => 0.0,
+                };
+                (vs, ip)
             };
+            let act = initial_activation(true, seed_vector_sim, seed_identity_prior);
+            initial_activations.insert(seed, act);
+        }
 
-            let is_seed = nid == seed;
+        // Identity nodes get prior activation.
+        if let Some(ref agent_id) = config.agent_id {
+            for nid in storage.nodes_by_agent(agent_id) {
+                if nid == seed {
+                    continue;
+                }
 
-            let vector_sim = match (&config.query_embedding, &node.embedding) {
-                (Some(qe), Some(ne)) => cosine_similarity(qe, ne),
-                _ => 0.0,
-            };
+                let (is_identity, vector_sim, identity_prior) = {
+                    let node = match storage.get_node(nid) {
+                        Ok(n) => n,
+                        Err(_) => continue,
+                    };
+                    let is_id = matches!(
+                        node.node_type,
+                        KnowledgeType::IdentityCore
+                            | KnowledgeType::IdentityLearned
+                            | KnowledgeType::IdentityState
+                    );
+                    let vs = match (&config.query_embedding, &node.embedding) {
+                        (Some(qe), Some(ne)) => cosine_similarity(qe, ne),
+                        _ => 0.0,
+                    };
+                    let ip = match &node.embedding {
+                        Some(emb) => {
+                            compute_identity_prior(emb, &identity_nodes, cosine_similarity)
+                        }
+                        None => 0.0,
+                    };
+                    (is_id, vs, ip)
+                };
+                if !is_identity {
+                    continue;
+                }
 
-            let identity_prior = match &node.embedding {
-                Some(emb) => compute_identity_prior(emb, &identity_nodes, cosine_similarity),
-                None => 0.0,
-            };
-
-            let act = initial_activation(is_seed, vector_sim, identity_prior);
-            if act > config.min_activation || is_seed {
-                initial_activations.insert(nid, act);
+                let act = initial_activation(false, vector_sim, identity_prior);
+                if act > config.min_activation {
+                    initial_activations.insert(nid, act);
+                }
             }
         }
 

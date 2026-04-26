@@ -7,6 +7,8 @@
 //! - (5) Reinforcement: s <- clamp(s + 0.20 * (1 - s), 0, 1)
 
 use crate::graph::KnowledgeType;
+use crate::graph::Timestamp;
+use std::collections::VecDeque;
 
 /// Returns the per-day decay rate (lambda) for a knowledge type.
 ///
@@ -85,6 +87,44 @@ pub fn decay_salience(current: f64, dt_days: f64, kt: &KnowledgeType) -> f64 {
 /// the smaller the boost. At s=1.0, the boost is 0.
 pub fn reinforce_salience(current: f64) -> f64 {
     (current + 0.20 * (1.0 - current)).clamp(0.0, 1.0)
+}
+
+/// ACT-R base-level activation (Anderson & Schooler 1991).
+///
+/// B = ln(Σⱼ tⱼ⁻ᵈ) where d is the decay parameter (typically 0.5).
+///
+/// Each tⱼ is the elapsed time in milliseconds since the j-th access.
+/// Returns negative infinity when access_history is empty (no activation).
+/// Result is not clamped — can be any real number including negative.
+pub fn compute_base_level(
+    access_history: &VecDeque<Timestamp>,
+    now: Timestamp,
+    decay_d: f64,
+) -> f64 {
+    if access_history.is_empty() {
+        return f64::NEG_INFINITY;
+    }
+    let sum: f64 = access_history
+        .iter()
+        .map(|&t| {
+            let dt = now.0.saturating_sub(t.0).max(1) as f64;
+            dt.powf(-decay_d)
+        })
+        .sum();
+    sum.ln()
+}
+
+/// Map ACT-R base-level activation to salience in [0, 1].
+///
+/// Uses sigmoid: σ(b) = 1 / (1 + exp(-b)).
+/// - B = −∞ → 0.0  (no activation)
+/// - B = 0  → 0.5  (neutral)
+/// - B → +∞ → 1.0  (fully active)
+pub fn base_level_to_salience(b: f64) -> f64 {
+    if b.is_infinite() && b < 0.0 {
+        return 0.0;
+    }
+    1.0 / (1.0 + (-b).exp())
 }
 
 #[cfg(test)]

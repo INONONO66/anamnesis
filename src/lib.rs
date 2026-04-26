@@ -23,8 +23,8 @@ pub mod storage;
 
 // Core re-exports
 pub use api::{
-    Engine, EngineConfig, MergeLog, MergePair, Observation, ReflectReport, SessionSummary,
-    TickReport,
+    DecayModel, Engine, EngineConfig, MergeLog, MergePair, Observation, ReflectReport,
+    SessionSummary, TickReport,
 };
 pub use error::Error;
 pub use graph::{Edge, Node, Origin};

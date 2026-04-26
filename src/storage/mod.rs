@@ -33,8 +33,15 @@ pub trait StorageAdapter: Send + Sync {
     /// # SoA Invariant
     /// Mutations to `salience`, `accessed_at`, or `node_type` through this reference
     /// will NOT be reflected in the SoA hot-field arrays. Use `set_salience()`,
-    /// `set_accessed_at()` instead for those fields. Only use `get_node_mut()` for
-    /// non-hot fields like `name`, `content`, `access_count`, `metadata`, etc.
+    /// `set_accessed_at()` instead for those fields.
+    ///
+    /// # Index Invariant
+    /// Mutations to `entity_tags`, `node_type`, `origin.agent_id`, or
+    /// `origin.project_id` will NOT update secondary indexes. To change these
+    /// fields, call `set_node()` with the modified node so indexes are rebuilt.
+    ///
+    /// Safe to mutate: `name`, `summary`, `content`, `embedding`, `access_count`,
+    /// `access_history`, `metadata`, `valid_from`, `valid_until`.
     fn get_node_mut(&mut self, id: NodeId) -> Result<&mut Node, Error>;
     /// Delete a node. Frees the ID for reuse. Caller must remove edges first.
     fn delete_node(&mut self, id: NodeId) -> Result<(), Error>;
@@ -81,4 +88,68 @@ pub trait StorageAdapter: Send + Sync {
     fn all_node_ids(&self) -> Vec<NodeId>;
     /// All live edge IDs.
     fn all_edge_ids(&self) -> Vec<EdgeId>;
+
+    /// Return all node IDs that have the given entity tag.
+    ///
+    /// Default implementation scans all nodes: O(N). Override for O(1) index lookup.
+    fn nodes_by_entity_tag(&self, tag: &str) -> Vec<NodeId> {
+        self.all_node_ids()
+            .into_iter()
+            .filter(|&id| {
+                self.get_node(id)
+                    .ok()
+                    .is_some_and(|n| n.entity_tags.iter().any(|t| t == tag))
+            })
+            .collect()
+    }
+
+    /// Return all node IDs of the given knowledge type.
+    ///
+    /// Default implementation scans all nodes: O(N). Override for O(1) index lookup.
+    fn nodes_by_type(&self, kt: &KnowledgeType) -> Vec<NodeId> {
+        self.all_node_ids()
+            .into_iter()
+            .filter(|&id| self.get_node_type(id).ok().is_some_and(|t| t == kt))
+            .collect()
+    }
+
+    /// Return all node IDs created by the given agent.
+    ///
+    /// Default implementation scans all nodes: O(N). Override for O(1) index lookup.
+    fn nodes_by_agent(&self, agent_id: &str) -> Vec<NodeId> {
+        self.all_node_ids()
+            .into_iter()
+            .filter(|&id| {
+                self.get_node(id)
+                    .ok()
+                    .is_some_and(|n| n.origin.agent_id == agent_id)
+            })
+            .collect()
+    }
+
+    /// Return all node IDs belonging to the given project.
+    ///
+    /// Default implementation scans all nodes: O(N). Override for O(1) index lookup.
+    fn nodes_by_project(&self, project_id: &str) -> Vec<NodeId> {
+        self.all_node_ids()
+            .into_iter()
+            .filter(|&id| {
+                self.get_node(id).ok().is_some_and(|n| {
+                    n.origin
+                        .project_id
+                        .as_deref()
+                        .is_some_and(|p| p == project_id)
+                })
+            })
+            .collect()
+    }
+
+    /// Return all live node IDs sorted by ID descending (most recently allocated first).
+    ///
+    /// Default implementation sorts the result of all_node_ids(): O(N log N). Override for O(1).
+    fn node_ids_descending(&self) -> Vec<NodeId> {
+        let mut ids = self.all_node_ids();
+        ids.sort_by_key(|a| std::cmp::Reverse(a.0));
+        ids
+    }
 }
