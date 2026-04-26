@@ -4,6 +4,7 @@ pub mod activation;
 pub mod assembly;
 pub mod decomposition;
 pub mod identity;
+pub mod packaging;
 pub mod rerank;
 pub mod scoring;
 pub mod types;
@@ -12,6 +13,7 @@ pub use activation::{NodeInfo, initial_activation, salience_gate, spread_activat
 pub use assembly::{ScoredNode, assemble_context_package, compute_agent_tension, determine_scope};
 pub use decomposition::decompose_query;
 pub use identity::compute_identity_prior;
+pub use packaging::decide_packaging;
 pub use scoring::{final_score, scope_weight};
 pub use types::{
     ContextPackage, Fragment, PackagingMode, Query, QueryConfig, SearchInput, SearchPlan,

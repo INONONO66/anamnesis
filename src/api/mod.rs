@@ -695,14 +695,13 @@ impl<S: StorageAdapter> Engine<S> {
             ));
         }
 
-        let packaging_mode = PackagingMode::KnowledgeOnly;
         let plan = SearchPlan {
             use_text: !input.text.is_empty(),
             use_vector: input.query_embedding.is_some(),
             use_graph: true,
             use_temporal: false,
             use_persona_bias: input.agent_id.is_some(),
-            packaging_mode: packaging_mode.clone(),
+            packaging_mode: PackagingMode::KnowledgeOnly,
         };
 
         let mut all_seed_ids: Vec<NodeId> = Vec::new();
@@ -811,6 +810,8 @@ impl<S: StorageAdapter> Engine<S> {
         knowledge.truncate(input.limit);
         memories.truncate(input.limit);
 
+        let packaging_mode = crate::query::decide_packaging(&merged_tensions, &plan, &input.text);
+
         let package = ContextPackage {
             identity,
             knowledge,
@@ -824,7 +825,7 @@ impl<S: StorageAdapter> Engine<S> {
             strategies_used,
             seed_count: all_seed_ids.len(),
             spread_iterations,
-            packaging_mode: Some(plan.packaging_mode),
+            packaging_mode: Some(packaging_mode),
         };
 
         Ok(SearchResult { package, trace })
