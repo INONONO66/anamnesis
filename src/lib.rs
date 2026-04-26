@@ -31,6 +31,6 @@ pub use graph::{Edge, Node, Origin};
 pub use graph::{EdgeId, EdgeType, KnowledgeType, NodeId, Timestamp};
 pub use query::{
     ContextPackage, Fragment, PackagingMode, Query, QueryConfig, SearchInput, SearchPlan,
-    SearchResult, SearchTrace, Tension, TokenBudget,
+    SearchResult, SearchTrace, Tension, TokenBudget, decompose_query,
 };
 pub use storage::{InMemoryStorage, StorageAdapter};
