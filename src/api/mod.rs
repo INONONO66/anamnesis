@@ -138,6 +138,62 @@ pub struct ReflectReport {
     pub clusters_found: usize,
 }
 
+/// Return the top-N `(NodeId, score)` pairs by score descending.
+///
+/// Uses a min-heap of size `n` for O(M log N) complexity instead of sorting
+/// all candidates with O(M log M) complexity.
+pub fn top_n_by_score(scores: &[(NodeId, f64)], n: usize) -> Vec<(NodeId, f64)> {
+    use std::cmp::Ordering;
+    use std::collections::BinaryHeap;
+
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    struct Entry {
+        node_id: NodeId,
+        score: f64,
+    }
+
+    impl Eq for Entry {}
+
+    impl PartialOrd for Entry {
+        fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+
+    impl Ord for Entry {
+        fn cmp(&self, other: &Self) -> Ordering {
+            other
+                .score
+                .partial_cmp(&self.score)
+                .unwrap_or(Ordering::Equal)
+                .then_with(|| other.node_id.cmp(&self.node_id))
+        }
+    }
+
+    if n == 0 {
+        return Vec::new();
+    }
+
+    let mut heap = BinaryHeap::with_capacity(n);
+    for &(node_id, score) in scores {
+        let entry = Entry { node_id, score };
+
+        if heap.len() < n {
+            heap.push(entry);
+        } else if heap.peek().is_some_and(|lowest| entry.score > lowest.score) {
+            heap.pop();
+            heap.push(entry);
+        }
+    }
+
+    let mut result: Vec<_> = heap
+        .into_iter()
+        .map(|entry| (entry.node_id, entry.score))
+        .collect();
+    result.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
+    result
+}
+
 /// The Anamnesis cognitive graph engine.
 ///
 /// `Engine<S>` is generic over the storage backend. The default is
@@ -322,11 +378,10 @@ impl<S: StorageAdapter> Engine<S> {
                 }
             }
 
-            // Top 4 by score
-            scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-            scored.truncate(4);
+            // Top 4 by score using BinaryHeap
+            let top_scored = top_n_by_score(&scored, 4);
 
-            for (cid, score) in scored {
+            for (cid, score) in top_scored {
                 // Check existing edge in either direction
                 let existing_edge = self
                     .graph
