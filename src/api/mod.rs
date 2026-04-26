@@ -31,6 +31,10 @@ pub struct EngineConfig {
     pub novelty_threshold: f64,
     /// Minimum confidence [0, 1] for an observation to enter the graph.
     pub confidence_threshold: f64,
+    /// Similarity threshold above which ingest reinforces an existing node instead of creating one.
+    pub dedup_threshold: f64,
+    /// Whether ingest should detect duplicate embeddings and reinforce existing nodes.
+    pub dedup_enabled: bool,
     /// Decay model to use for salience computation. Default: Exponential (backwards-compatible).
     pub decay_model: DecayModel,
 }
@@ -41,6 +45,8 @@ impl Default for EngineConfig {
             max_nodes: 100_000,
             novelty_threshold: 0.30,
             confidence_threshold: 0.50,
+            dedup_threshold: 0.92,
+            dedup_enabled: true,
             decay_model: DecayModel::Exponential,
         }
     }
@@ -63,6 +69,16 @@ impl EngineConfig {
 
     pub fn with_confidence_threshold(mut self, threshold: f64) -> Self {
         self.confidence_threshold = threshold;
+        self
+    }
+
+    pub fn with_dedup_threshold(mut self, threshold: f64) -> Self {
+        self.dedup_threshold = threshold;
+        self
+    }
+
+    pub fn with_dedup_enabled(mut self, enabled: bool) -> Self {
+        self.dedup_enabled = enabled;
         self
     }
 }
@@ -267,37 +283,49 @@ impl<S: StorageAdapter> Engine<S> {
         use crate::mechanics::gravity::compute_mass;
         use crate::mechanics::perception::gate_observation;
 
-        let max_similarity = if let Some(ref new_embedding) = observation.embedding {
-            // Build candidate set: recent 256 nodes + entity-tag matches
-            let mut candidates: std::collections::HashSet<NodeId> =
-                std::collections::HashSet::new();
-            for nid in self
-                .graph
-                .storage()
-                .node_ids_descending()
-                .into_iter()
-                .take(256)
-            {
-                candidates.insert(nid);
-            }
-            for tag in &observation.entity_tags {
-                for nid in self.graph.storage().nodes_by_entity_tag(tag) {
+        let (max_similarity, most_similar_id) =
+            if let Some(ref new_embedding) = observation.embedding {
+                // Build candidate set: recent 256 nodes + entity-tag matches
+                let mut candidates: std::collections::HashSet<NodeId> =
+                    std::collections::HashSet::new();
+                for nid in self
+                    .graph
+                    .storage()
+                    .node_ids_descending()
+                    .into_iter()
+                    .take(256)
+                {
                     candidates.insert(nid);
                 }
-            }
-            candidates
-                .into_iter()
-                .filter_map(|nid| {
-                    self.graph.storage().get_node(nid).ok().and_then(|n| {
-                        n.embedding
-                            .as_ref()
-                            .map(|emb| cosine_similarity(new_embedding, emb))
+                for tag in &observation.entity_tags {
+                    for nid in self.graph.storage().nodes_by_entity_tag(tag) {
+                        candidates.insert(nid);
+                    }
+                }
+                candidates
+                    .into_iter()
+                    .filter_map(|nid| {
+                        self.graph.storage().get_node(nid).ok().and_then(|n| {
+                            n.embedding
+                                .as_ref()
+                                .map(|emb| (nid, cosine_similarity(new_embedding, emb)))
+                        })
                     })
-                })
-                .fold(0.0_f64, f64::max)
-        } else {
-            0.0
-        };
+                    .fold((0.0_f64, NodeId(0)), |(max_s, max_id), (nid, s)| {
+                        if s > max_s { (s, nid) } else { (max_s, max_id) }
+                    })
+            } else {
+                (0.0, NodeId(0))
+            };
+
+        // Dedup check: if similarity exceeds the threshold, reinforce the existing node.
+        if self.config.dedup_enabled && max_similarity > self.config.dedup_threshold {
+            self.touch(most_similar_id, observation.timestamp)?;
+            return Ok(IngestResult::Reinforced {
+                existing_id: most_similar_id,
+                similarity: max_similarity,
+            });
+        }
 
         gate_observation(
             observation.confidence,
@@ -1426,7 +1454,9 @@ mod tests {
 
     #[test]
     fn ingest_auto_links_similar_nodes() {
-        let config = EngineConfig::new().with_novelty_threshold(0.0);
+        let config = EngineConfig::new()
+            .with_novelty_threshold(0.0)
+            .with_dedup_enabled(false);
         let mut engine = Engine::with_config(config);
 
         let obs1 = Observation {
@@ -1562,7 +1592,7 @@ mod tests {
             ..make_observation("duplicate")
         };
         let result = engine.ingest(obs2);
-        assert!(matches!(result, Err(Error::Rejected(_))));
+        assert!(matches!(result, Ok(IngestResult::Reinforced { .. })));
     }
 
     #[test]
@@ -1577,14 +1607,20 @@ mod tests {
         let config = EngineConfig::new()
             .with_max_nodes(1000)
             .with_novelty_threshold(0.5)
-            .with_confidence_threshold(0.7);
+            .with_confidence_threshold(0.7)
+            .with_dedup_threshold(0.95)
+            .with_dedup_enabled(false);
         assert_eq!(config.max_nodes, 1000);
         assert_eq!(config.novelty_threshold, 0.5);
+        assert_eq!(config.dedup_threshold, 0.95);
+        assert!(!config.dedup_enabled);
     }
 
     #[test]
     fn query_associative_returns_real_results() {
-        let config = EngineConfig::new().with_novelty_threshold(0.0);
+        let config = EngineConfig::new()
+            .with_novelty_threshold(0.0)
+            .with_dedup_enabled(false);
         let mut engine = Engine::with_config(config);
 
         let obs1 = Observation {
@@ -1623,7 +1659,9 @@ mod tests {
 
     #[test]
     fn query_associative_with_identity_node() {
-        let config = EngineConfig::new().with_novelty_threshold(0.0);
+        let config = EngineConfig::new()
+            .with_novelty_threshold(0.0)
+            .with_dedup_enabled(false);
         let mut engine = Engine::with_config(config);
 
         let identity_obs = Observation {
@@ -1671,7 +1709,9 @@ mod tests {
 
     #[test]
     fn query_associative_with_contradicts_creates_tension() {
-        let config = EngineConfig::new().with_novelty_threshold(0.0);
+        let config = EngineConfig::new()
+            .with_novelty_threshold(0.0)
+            .with_dedup_enabled(false);
         let mut engine = Engine::with_config(config);
 
         let obs1 = Observation {

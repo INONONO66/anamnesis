@@ -10,7 +10,7 @@ use anamnesis::api::Observation;
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{EdgeType, KnowledgeType, Timestamp};
 use anamnesis::query::{Query, QueryConfig};
-use anamnesis::{Engine, EngineConfig, Error, IngestResult, StorageAdapter};
+use anamnesis::{Engine, EngineConfig, IngestResult, StorageAdapter};
 
 fn make_origin(agent: &str, project: Option<&str>) -> Origin {
     Origin {
@@ -47,7 +47,8 @@ fn make_obs(
 fn full_cognitive_lifecycle() {
     let config = EngineConfig::new()
         .with_novelty_threshold(0.0)
-        .with_confidence_threshold(0.5);
+        .with_confidence_threshold(0.5)
+        .with_dedup_enabled(false);
     let mut engine = Engine::with_config(config);
 
     let identity_obs = make_obs(
@@ -216,9 +217,10 @@ fn decay_episodic_faster_than_semantic() {
     );
 }
 
-/// Perception gate test: duplicate observation rejected.
+/// Duplicate ingest reinforces the existing node before perception gating.
 ///
-/// When novelty threshold is set, near-identical embeddings should be rejected.
+/// When dedup is enabled, near-identical embeddings should touch the prior node
+/// instead of creating a duplicate or falling through to novelty rejection.
 #[test]
 fn perception_gate_rejects_duplicate() {
     let config = EngineConfig::new()
@@ -242,11 +244,7 @@ fn perception_gate_rejects_duplicate() {
     );
     let result = engine.ingest(duplicate);
 
-    assert!(
-        result.is_err(),
-        "duplicate should be rejected by perception gate"
-    );
-    assert!(matches!(result, Err(Error::Rejected(_))));
+    assert!(matches!(result, Ok(IngestResult::Reinforced { .. })));
 }
 
 /// Attraction test: similar nodes auto-linked on ingest.
@@ -255,7 +253,9 @@ fn perception_gate_rejects_duplicate() {
 /// mechanic should automatically create edges between them.
 #[test]
 fn attraction_auto_links_similar_nodes() {
-    let config = EngineConfig::new().with_novelty_threshold(0.0);
+    let config = EngineConfig::new()
+        .with_novelty_threshold(0.0)
+        .with_dedup_enabled(false);
     let mut engine = Engine::with_config(config);
 
     let obs1 = make_obs(
@@ -287,7 +287,9 @@ fn attraction_auto_links_similar_nodes() {
 /// should receive higher relevance scores via scope weighting (eq 13).
 #[test]
 fn scope_same_project_preferred() {
-    let config = EngineConfig::new().with_novelty_threshold(0.0);
+    let config = EngineConfig::new()
+        .with_novelty_threshold(0.0)
+        .with_dedup_enabled(false);
     let mut engine = Engine::with_config(config);
 
     let same_proj = make_obs(
@@ -356,7 +358,9 @@ fn scope_same_project_preferred() {
 /// the query pipeline should surface this as a Tension.
 #[test]
 fn contradicts_creates_tension() {
-    let config = EngineConfig::new().with_novelty_threshold(0.0);
+    let config = EngineConfig::new()
+        .with_novelty_threshold(0.0)
+        .with_dedup_enabled(false);
     let mut engine = Engine::with_config(config);
 
     let obs1 = make_obs(
