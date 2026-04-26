@@ -266,29 +266,33 @@ impl<S: StorageAdapter> Engine<S> {
             let new_type = &observation.node_type;
             let new_tags = &observation.entity_tags;
 
-            // Candidate pool: last 256 nodes by ID + entity-tag matches
-            let mut candidate_ids: Vec<NodeId> = {
-                let mut all = self.graph.storage().all_node_ids();
-                all.retain(|&nid| nid != id);
-                all.sort_by_key(|a| std::cmp::Reverse(a.0));
-                all.truncate(256);
-                all
-            };
+            // Candidate pool: last 256 nodes by ID + entity-tag matches (indexed, O(1) dedup)
+            let mut candidate_set: std::collections::HashSet<NodeId> =
+                std::collections::HashSet::new();
+
+            for nid in self
+                .graph
+                .storage()
+                .node_ids_descending()
+                .into_iter()
+                .take(256)
+            {
+                if nid != id {
+                    candidate_set.insert(nid);
+                }
+            }
 
             if !new_tags.is_empty() {
-                let all_ids = self.graph.storage().all_node_ids();
-                for nid in all_ids {
-                    if nid == id {
-                        continue;
-                    }
-                    if let Ok(node) = self.graph.storage().get_node(nid) {
-                        let has_shared_tag = node.entity_tags.iter().any(|t| new_tags.contains(t));
-                        if has_shared_tag && !candidate_ids.contains(&nid) {
-                            candidate_ids.push(nid);
+                for tag in new_tags {
+                    for nid in self.graph.storage().nodes_by_entity_tag(tag) {
+                        if nid != id {
+                            candidate_set.insert(nid);
                         }
                     }
                 }
             }
+
+            let candidate_ids: Vec<NodeId> = candidate_set.into_iter().collect();
 
             // Score candidates by attraction (eq 3)
             let mut scored: Vec<(NodeId, f64)> = Vec::new();
