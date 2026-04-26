@@ -152,4 +152,34 @@ pub trait StorageAdapter: Send + Sync {
         ids.sort_by_key(|a| std::cmp::Reverse(a.0));
         ids
     }
+
+    /// Search nodes by text query (case-insensitive substring match on name and content).
+    ///
+    /// Returns up to `limit` node IDs with their match scores.
+    /// Default implementation scans all nodes: O(N). Override for full-text search index.
+    ///
+    /// # Arguments
+    /// * `query` - Search string (case-insensitive)
+    /// * `limit` - Maximum number of results to return
+    ///
+    /// # Returns
+    /// Vector of (NodeId, score) tuples. Score is 1.0 for default impl (simple match).
+    fn text_search(&self, query: &str, limit: usize) -> Vec<(NodeId, f64)> {
+        let query_lower = query.to_lowercase();
+        self.all_node_ids()
+            .into_iter()
+            .filter_map(|id| {
+                self.get_node(id).ok().and_then(|node| {
+                    let name_match = node.name.to_lowercase().contains(&query_lower);
+                    let content_match = node.content.to_lowercase().contains(&query_lower);
+                    if name_match || content_match {
+                        Some((id, 1.0))
+                    } else {
+                        None
+                    }
+                })
+            })
+            .take(limit)
+            .collect()
+    }
 }
