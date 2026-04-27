@@ -13,13 +13,50 @@ use crate::storage::{InMemoryStorage, StorageAdapter};
 ///
 /// `Exponential` (default) uses the existing formula: s(t+dt) = b + (s(t) - b) * exp(-lambda * dt).
 /// `PowerLaw` uses ACT-R base-level activation (Anderson & Schooler 1991).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum DecayModel {
     /// Exponential decay — backwards-compatible default.
     #[default]
     Exponential,
     /// ACT-R power-law decay: B = ln(Σⱼ tⱼ⁻⁰·⁵), salience = sigmoid(B).
     PowerLaw,
+}
+
+/// Energy model for final score computation in spreading activation.
+///
+/// `WeightedSum` (default) uses the existing weighted final-score formula (equation 13):
+/// 0.50 * activation + 0.20 * vector_similarity + 0.15 * salience + 0.15 * mass, multiplied by scope weight.
+/// `Hopfield` uses local pattern completion to adjust embedding similarity when query
+/// and candidate embeddings are available.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum EnergyModel {
+    /// Weighted sum — backwards-compatible default.
+    #[default]
+    WeightedSum,
+    /// Hopfield pattern completion for embedding-aware scoring.
+    Hopfield,
+}
+
+/// Spreading activation model for query traversal.
+///
+/// `PriorityQueueBfs` (default) uses priority-queue BFS with hop decay and salience gating.
+/// `RandomWalkRestart` uses matrix-free random walk with restart from the seed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SpreadingModel {
+    /// Priority-queue BFS — backwards-compatible default.
+    #[default]
+    PriorityQueueBfs,
+    /// Random walk with restart.
+    RandomWalkRestart,
+}
+
+const RWR_RESTART_PROBABILITY: f64 = 0.15;
+const RWR_MAX_ITERATIONS: usize = 128;
+const HOPFIELD_RETRIEVAL_ITERATIONS: usize = 3;
+
+struct HopfieldScoringContext {
+    retrieved: Vec<f64>,
+    energy_gain: f64,
 }
 
 /// Configuration for the Anamnesis engine.
@@ -38,6 +75,10 @@ pub struct EngineConfig {
     pub dedup_enabled: bool,
     /// Decay model to use for salience computation. Default: Exponential (backwards-compatible).
     pub decay_model: DecayModel,
+    /// Energy model for final score computation in spreading activation. Default: WeightedSum (backwards-compatible).
+    pub energy_model: EnergyModel,
+    /// Spreading activation model for query traversal. Default: PriorityQueueBfs (backwards-compatible).
+    pub spreading_model: SpreadingModel,
 }
 
 impl Default for EngineConfig {
@@ -49,6 +90,8 @@ impl Default for EngineConfig {
             dedup_threshold: 0.92,
             dedup_enabled: true,
             decay_model: DecayModel::Exponential,
+            energy_model: EnergyModel::WeightedSum,
+            spreading_model: SpreadingModel::PriorityQueueBfs,
         }
     }
 }
@@ -82,6 +125,157 @@ impl EngineConfig {
         self.dedup_enabled = enabled;
         self
     }
+}
+
+fn finite_vector(values: &[f64]) -> bool {
+    values.iter().all(|value| value.is_finite())
+}
+
+fn rwr_activations<S: StorageAdapter>(
+    seed: NodeId,
+    budget: usize,
+    min_activation: f64,
+    storage: &S,
+) -> HashMap<NodeId, f64> {
+    let scores = crate::query::random_walk_restart(
+        seed,
+        RWR_RESTART_PROBABILITY,
+        RWR_MAX_ITERATIONS,
+        storage,
+    );
+
+    let max_score = scores
+        .values()
+        .copied()
+        .filter(|score| score.is_finite() && *score > 0.0)
+        .fold(0.0_f64, f64::max);
+
+    if max_score <= f64::EPSILON {
+        return HashMap::from([(seed, 1.0)]);
+    }
+
+    let mut normalized: Vec<(NodeId, f64)> = scores
+        .into_iter()
+        .filter_map(|(node_id, score)| {
+            if !score.is_finite() || score < 0.0 || storage.get_node(node_id).is_err() {
+                return None;
+            }
+
+            let activation = (score / max_score).clamp(0.0, 1.0);
+            if activation >= min_activation || node_id == seed {
+                Some((node_id, activation))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if !normalized.iter().any(|(node_id, _)| *node_id == seed) {
+        normalized.push((seed, 1.0));
+    }
+
+    normalized.sort_by(|(a_id, a_score), (b_id, b_score)| {
+        b_score
+            .partial_cmp(a_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a_id.0.cmp(&b_id.0))
+    });
+
+    let limit = budget.max(1);
+    if normalized.len() > limit {
+        normalized.truncate(limit);
+        if !normalized.iter().any(|(node_id, _)| *node_id == seed) {
+            normalized.pop();
+            let seed_activation = normalized
+                .iter()
+                .find_map(|(node_id, activation)| (*node_id == seed).then_some(*activation))
+                .unwrap_or(1.0);
+            normalized.push((seed, seed_activation));
+        }
+    }
+
+    normalized.into_iter().collect()
+}
+
+fn build_hopfield_scoring_context<S: StorageAdapter>(
+    query_embedding: &Option<Vec<f64>>,
+    activations: &HashMap<NodeId, f64>,
+    storage: &S,
+) -> Option<HopfieldScoringContext> {
+    let query_embedding = query_embedding.as_ref()?;
+    if query_embedding.is_empty() || !finite_vector(query_embedding) {
+        return None;
+    }
+
+    let mut candidates: Vec<(NodeId, Vec<f64>)> = activations
+        .iter()
+        .filter(|(_, activation)| activation.is_finite() && **activation > 0.0)
+        .filter_map(|(node_id, _)| {
+            let embedding = storage.get_node(*node_id).ok()?.embedding.as_ref()?;
+            if embedding.len() == query_embedding.len() && finite_vector(embedding) {
+                Some((*node_id, embedding.clone()))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if candidates.is_empty() {
+        return None;
+    }
+
+    candidates.sort_by_key(|(node_id, _)| node_id.0);
+    let patterns: Vec<Vec<f64>> = candidates
+        .into_iter()
+        .map(|(_, embedding)| embedding)
+        .collect();
+
+    let retrieved = crate::mechanics::hopfield::retrieve(
+        query_embedding,
+        &patterns,
+        HOPFIELD_RETRIEVAL_ITERATIONS,
+    );
+    if retrieved.len() != query_embedding.len() || !finite_vector(&retrieved) {
+        return None;
+    }
+
+    let initial_energy = crate::mechanics::hopfield::energy(query_embedding, &patterns);
+    let retrieved_energy = crate::mechanics::hopfield::energy(&retrieved, &patterns);
+    let energy_gain = if initial_energy.is_finite() && retrieved_energy.is_finite() {
+        (initial_energy - retrieved_energy).max(0.0).tanh()
+    } else {
+        0.0
+    };
+
+    Some(HopfieldScoringContext {
+        retrieved,
+        energy_gain,
+    })
+}
+
+fn hopfield_adjusted_similarity(
+    context: Option<&HopfieldScoringContext>,
+    fallback_similarity: f64,
+    candidate_embedding: Option<&Vec<f64>>,
+) -> f64 {
+    let Some(context) = context else {
+        return fallback_similarity;
+    };
+    let Some(candidate_embedding) = candidate_embedding else {
+        return fallback_similarity;
+    };
+    if candidate_embedding.len() != context.retrieved.len() || !finite_vector(candidate_embedding) {
+        return fallback_similarity;
+    }
+
+    let completed_similarity =
+        crate::mechanics::attraction::cosine_similarity(&context.retrieved, candidate_embedding);
+    if !completed_similarity.is_finite() {
+        return fallback_similarity;
+    }
+
+    (0.90 * completed_similarity + 0.10 * fallback_similarity + 0.05 * context.energy_gain)
+        .clamp(0.0, 1.0)
 }
 
 /// An observation to be ingested into the graph.
@@ -1382,14 +1576,19 @@ impl<S: StorageAdapter> Engine<S> {
             })
         };
 
-        let activations = spread_activation(
-            initial_activations,
-            node_info_fn,
-            budget,
-            config.min_activation,
-            config.decay_per_hop,
-            config.max_hops,
-        );
+        let activations = match self.config.spreading_model {
+            SpreadingModel::PriorityQueueBfs => spread_activation(
+                initial_activations,
+                node_info_fn,
+                budget,
+                config.min_activation,
+                config.decay_per_hop,
+                config.max_hops,
+            ),
+            SpreadingModel::RandomWalkRestart => {
+                rwr_activations(seed, budget, config.min_activation, storage)
+            }
+        };
 
         // --- Stage 4: Repulsion damping (eqs 7-8) ---
         let mut damped_activations = activations.clone();
@@ -1425,6 +1624,14 @@ impl<S: StorageAdapter> Engine<S> {
 
         // --- Stage 5: Final scoring (eq 13) ---
         let seed_node = storage.get_node(seed).ok();
+        let hopfield_context = match self.config.energy_model {
+            EnergyModel::WeightedSum => None,
+            EnergyModel::Hopfield => build_hopfield_scoring_context(
+                &config.query_embedding,
+                &damped_activations,
+                storage,
+            ),
+        };
         let mut scored_nodes: Vec<ScoredNode> = Vec::new();
 
         for (&nid, &activation) in &damped_activations {
@@ -1455,7 +1662,15 @@ impl<S: StorageAdapter> Engine<S> {
                 .unwrap_or(0);
 
             let sw = scope_weight(&config.project_id, &node.origin.project_id, shared_entities);
-            let relevance = final_score(activation, vector_sim, salience, mass, sw);
+            let scoring_similarity = match self.config.energy_model {
+                EnergyModel::WeightedSum => vector_sim,
+                EnergyModel::Hopfield => hopfield_adjusted_similarity(
+                    hopfield_context.as_ref(),
+                    vector_sim,
+                    node.embedding.as_ref(),
+                ),
+            };
+            let relevance = final_score(activation, scoring_similarity, salience, mass, sw);
 
             scored_nodes.push(ScoredNode {
                 node_id: nid,
