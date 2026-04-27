@@ -107,7 +107,10 @@ let result = engine.ingest(Observation {
     timestamp: Timestamp::now(),
 }).unwrap();
 
-let anamnesis::api::IngestResult::Created(ids) = result else { panic!() };
+let ids = match result {
+    anamnesis::api::IngestResult::Created(ids) => ids,
+    anamnesis::api::IngestResult::Reinforced { node_id, .. } => vec![node_id],
+};
 
 let result2 = engine.ingest(Observation {
     name: "race condition in auth middleware".into(),
@@ -126,7 +129,10 @@ let result2 = engine.ingest(Observation {
     timestamp: Timestamp::now(),
 }).unwrap();
 
-let anamnesis::api::IngestResult::Created(ids2) = result2 else { panic!() };
+let ids2 = match result2 {
+    anamnesis::api::IngestResult::Created(ids) => ids,
+    anamnesis::api::IngestResult::Reinforced { node_id, .. } => vec![node_id],
+};
 
 // Connect related knowledge
 engine.link(ids[0], ids2[0], EdgeType::Semantic, 0.78).unwrap();
