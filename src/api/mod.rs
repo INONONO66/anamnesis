@@ -7,6 +7,7 @@ use crate::graph::node::Origin;
 use crate::graph::{Edge, Graph, Node};
 use crate::graph::{EdgeId, EdgeType, KnowledgeType, MemoryTier, NodeId, Timestamp};
 use crate::query::{ContextPackage, Query, QueryConfig, SearchInput, SearchResult};
+use crate::snapshot::{SnapshotId, SnapshotStore};
 use crate::storage::{InMemoryStorage, StorageAdapter};
 
 /// Decay model for salience computation.
@@ -524,12 +525,10 @@ fn merge_highest_relevance(
 ///
 /// `Engine<S>` is generic over the storage backend. The default is
 /// `InMemoryStorage` (arena-based, sub-millisecond access).
-///
-/// Phase 1: All methods have correct signatures. `ingest`, `link`, and `touch`
-/// perform real operations. Other methods return placeholder results.
-pub struct Engine<S: StorageAdapter = InMemoryStorage> {
+pub struct Engine<S: StorageAdapter + Clone = InMemoryStorage> {
     graph: Graph<S>,
     config: EngineConfig,
+    snapshots: SnapshotStore<S>,
 }
 
 impl Engine<InMemoryStorage> {
@@ -538,6 +537,7 @@ impl Engine<InMemoryStorage> {
         Engine {
             graph: Graph::new(),
             config: EngineConfig::default(),
+            snapshots: SnapshotStore::new(),
         }
     }
 
@@ -546,6 +546,7 @@ impl Engine<InMemoryStorage> {
         Engine {
             graph: Graph::new(),
             config,
+            snapshots: SnapshotStore::new(),
         }
     }
 }
@@ -556,13 +557,32 @@ impl Default for Engine<InMemoryStorage> {
     }
 }
 
-impl<S: StorageAdapter> Engine<S> {
+impl<S: StorageAdapter + Clone> Engine<S> {
     /// Create an engine with a custom storage backend.
     pub fn with_storage(config: EngineConfig, storage: S) -> Self {
         Engine {
             graph: Graph::with_storage(storage),
             config,
+            snapshots: SnapshotStore::new(),
         }
+    }
+
+    /// Store a clone of the current storage state under a label.
+    pub fn snapshot(&mut self, label: &str) -> SnapshotId {
+        self.snapshots
+            .take(label, self.graph.storage(), Timestamp::now())
+    }
+
+    /// Restore the graph storage from a previously captured snapshot.
+    pub fn restore(&mut self, id: &SnapshotId) -> Result<(), Error> {
+        let storage = self.snapshots.restore(id)?;
+        self.graph.replace_storage(storage);
+        Ok(())
+    }
+
+    /// List stored snapshot metadata in insertion order.
+    pub fn list_snapshots(&self) -> Vec<(SnapshotId, String, Timestamp)> {
+        self.snapshots.list()
     }
 
     /// Ingest a new observation into the graph.

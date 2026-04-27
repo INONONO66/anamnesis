@@ -145,6 +145,11 @@ impl<S: StorageAdapter> Graph<S> {
     pub fn storage_mut(&mut self) -> &mut S {
         &mut self.storage
     }
+
+    /// Replace the storage backend wholesale.
+    pub fn replace_storage(&mut self, storage: S) {
+        self.storage = storage;
+    }
 }
 
 #[cfg(test)]

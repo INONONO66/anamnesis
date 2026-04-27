@@ -20,6 +20,7 @@ pub mod error;
 pub mod graph;
 pub mod mechanics;
 pub mod query;
+pub mod snapshot;
 pub mod storage;
 
 // Core re-exports
@@ -36,4 +37,5 @@ pub use query::{
     ContextPackage, Fragment, PackagingMode, Query, QueryConfig, SearchInput, SearchPlan,
     SearchResult, SearchTrace, Tension, TokenBudget, decompose_query,
 };
+pub use snapshot::{InMemorySnapshot, SnapshotBackend, SnapshotEntry, SnapshotId, SnapshotStore};
 pub use storage::{InMemoryStorage, StorageAdapter};
