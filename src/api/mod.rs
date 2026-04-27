@@ -1,6 +1,6 @@
 //! Public API surface for the Anamnesis cognitive graph engine.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 use crate::error::Error;
 use crate::graph::node::Origin;
@@ -2085,15 +2085,101 @@ impl<S: StorageAdapter> Engine<S> {
         Ok(MergeLog::default())
     }
 
+    fn has_entity_edge_between(&self, a: NodeId, b: NodeId) -> bool {
+        self.graph.edges_from(a).iter().any(|&edge_id| {
+            self.graph
+                .get_edge(edge_id)
+                .is_ok_and(|edge| edge.target == b && edge.edge_type == EdgeType::Entity)
+        }) || self.graph.edges_from(b).iter().any(|&edge_id| {
+            self.graph
+                .get_edge(edge_id)
+                .is_ok_and(|edge| edge.target == a && edge.edge_type == EdgeType::Entity)
+        })
+    }
+
     /// Cross-agent entity linking after parallel execution round.
     ///
     /// Creates Entity edges between nodes from different agents sharing entity tags.
     /// No LLM calls — metadata matching only.
-    ///
-    /// Phase 1: Returns empty report.
-    /// Phase 2 will implement: entity tag matching + Entity edge creation.
-    pub fn reflect_batch(&mut self, _sessions: &[SessionSummary]) -> Result<ReflectReport, Error> {
-        Ok(ReflectReport::default())
+    pub fn reflect_batch(&mut self, sessions: &[SessionSummary]) -> Result<ReflectReport, Error> {
+        let mut input_node_ids = BTreeSet::new();
+        for session in sessions {
+            for &node_id in &session.node_ids {
+                input_node_ids.insert(node_id);
+            }
+        }
+
+        let mut nodes_by_tag: BTreeMap<String, Vec<(NodeId, String)>> = BTreeMap::new();
+        for node_id in input_node_ids {
+            let Ok(node) = self.graph.get_node(node_id) else {
+                continue;
+            };
+
+            let mut seen_tags = BTreeSet::new();
+            for tag in &node.entity_tags {
+                if seen_tags.insert(tag.as_str()) {
+                    nodes_by_tag
+                        .entry(tag.clone())
+                        .or_default()
+                        .push((node_id, node.origin.agent_id.clone()));
+                }
+            }
+        }
+
+        let mut candidate_pairs = BTreeSet::new();
+        let mut clusters_found = 0usize;
+        for nodes in nodes_by_tag.values() {
+            let mut has_cross_agent_pair = false;
+            for i in 0..nodes.len() {
+                for j in (i + 1)..nodes.len() {
+                    let (left_id, left_agent) = &nodes[i];
+                    let (right_id, right_agent) = &nodes[j];
+                    if left_agent == right_agent {
+                        continue;
+                    }
+
+                    has_cross_agent_pair = true;
+                    let pair = if left_id < right_id {
+                        (*left_id, *right_id)
+                    } else {
+                        (*right_id, *left_id)
+                    };
+                    candidate_pairs.insert(pair);
+                }
+            }
+
+            if has_cross_agent_pair {
+                clusters_found += 1;
+            }
+        }
+
+        let mut entity_edges_created = 0usize;
+        let now = Timestamp::now();
+        for (source, target) in candidate_pairs {
+            if self.has_entity_edge_between(source, target) {
+                continue;
+            }
+
+            let edge_id = self.graph.next_edge_id();
+            let edge = Edge {
+                id: edge_id,
+                source,
+                target,
+                edge_type: EdgeType::Entity,
+                weight: 1.0,
+                created_at: now,
+                valid_from: None,
+                valid_until: None,
+                metadata: HashMap::new(),
+            };
+            self.graph.add_edge(edge)?;
+            entity_edges_created += 1;
+        }
+
+        Ok(ReflectReport {
+            entity_edges_created,
+            clusters_found,
+        })
     }
 
     /// Read-only access to the underlying graph.
