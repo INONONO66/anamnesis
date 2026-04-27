@@ -14,7 +14,7 @@ pub use assembly::{ScoredNode, assemble_context_package, compute_agent_tension, 
 pub use decomposition::decompose_query;
 pub use identity::compute_identity_prior;
 pub use packaging::decide_packaging;
-pub use scoring::{final_score, scope_weight};
+pub use scoring::{all_forces, compute_with_forces, final_score, scope_weight};
 pub use types::{
     ContextPackage, Fragment, PackagingMode, Query, QueryConfig, SearchInput, SearchPlan,
     SearchResult, SearchTrace, Tension, TokenBudget,

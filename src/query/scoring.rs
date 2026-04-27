@@ -5,6 +5,16 @@
 //! ## Equation
 //! (13) R_i = (0.50 * X'_i + 0.20 * q_i + 0.15 * s_i + 0.15 * m_i) * scope_w(i)
 
+use crate::mechanics::forces::{
+    ActivationForce, Force, MassForce, NodeContext, QueryContext, SalienceForce, SimilarityForce,
+    weighted_contribution,
+};
+
+static ACTIVATION_FORCE: ActivationForce = ActivationForce;
+static SIMILARITY_FORCE: SimilarityForce = SimilarityForce;
+static SALIENCE_FORCE: SalienceForce = SalienceForce;
+static MASS_FORCE: MassForce = MassForce;
+
 /// Computes the scope weight for a node relative to the query context.
 ///
 /// Nodes in the same project get full weight. Universal nodes get 0.85.
@@ -38,8 +48,42 @@ pub fn final_score(
     mass: f64,
     scope_w: f64,
 ) -> f64 {
-    let raw = 0.50 * activation + 0.20 * vector_sim + 0.15 * salience + 0.15 * mass;
-    (raw * scope_w).clamp(0.0, 1.0)
+    let node = NodeContext::scoring(activation, vector_sim, salience, mass);
+    let query = QueryContext {
+        scope_weight: scope_w,
+    };
+    let forces = all_forces();
+
+    compute_with_forces(&node, &query, &forces)
+}
+
+/// Return the default final-score force set.
+///
+/// This intentionally includes only the four force components from equation (13).
+/// Repulsion and identity forces remain available for explicit ablation, but are not
+/// part of the default final score because query routing already applies them in
+/// earlier stages.
+pub fn all_forces() -> [&'static dyn Force; 4] {
+    [
+        &ACTIVATION_FORCE,
+        &SIMILARITY_FORCE,
+        &SALIENCE_FORCE,
+        &MASS_FORCE,
+    ]
+}
+
+/// Compose a final relevance score from an explicit force list.
+///
+/// The weighted sum is multiplied by `query.scope_weight` and clamped to `[0, 1]`,
+/// matching `final_score` for `all_forces()`.
+pub fn compute_with_forces(node: &NodeContext, query: &QueryContext, forces: &[&dyn Force]) -> f64 {
+    let mut raw = 0.0;
+
+    for force in forces {
+        raw += weighted_contribution(*force, node, query);
+    }
+
+    (raw * query.scope_weight).clamp(0.0, 1.0)
 }
 
 #[cfg(test)]
