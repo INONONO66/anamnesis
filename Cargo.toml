@@ -58,6 +58,11 @@ name = "longmemeval-unified-search"
 path = "benches/longmemeval/unified-search.rs"
 harness = false
 
+[[bench]]
+name = "longmemeval-ablation"
+path = "benches/longmemeval/ablation.rs"
+harness = false
+
 [[test]]
 name = "longmemeval-judge"
 path = "benches/longmemeval/judge.rs"
