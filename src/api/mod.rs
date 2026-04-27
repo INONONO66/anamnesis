@@ -1,6 +1,6 @@
 //! Public API surface for the Anamnesis cognitive graph engine.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 use crate::error::Error;
 use crate::graph::node::Origin;
@@ -13,13 +13,50 @@ use crate::storage::{InMemoryStorage, StorageAdapter};
 ///
 /// `Exponential` (default) uses the existing formula: s(t+dt) = b + (s(t) - b) * exp(-lambda * dt).
 /// `PowerLaw` uses ACT-R base-level activation (Anderson & Schooler 1991).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum DecayModel {
     /// Exponential decay — backwards-compatible default.
     #[default]
     Exponential,
     /// ACT-R power-law decay: B = ln(Σⱼ tⱼ⁻⁰·⁵), salience = sigmoid(B).
     PowerLaw,
+}
+
+/// Energy model for final score computation in spreading activation.
+///
+/// `WeightedSum` (default) uses the existing weighted final-score formula (equation 13):
+/// 0.50 * activation + 0.20 * vector_similarity + 0.15 * salience + 0.15 * mass, multiplied by scope weight.
+/// `Hopfield` uses local pattern completion to adjust embedding similarity when query
+/// and candidate embeddings are available.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum EnergyModel {
+    /// Weighted sum — backwards-compatible default.
+    #[default]
+    WeightedSum,
+    /// Hopfield pattern completion for embedding-aware scoring.
+    Hopfield,
+}
+
+/// Spreading activation model for query traversal.
+///
+/// `PriorityQueueBfs` (default) uses priority-queue BFS with hop decay and salience gating.
+/// `RandomWalkRestart` uses matrix-free random walk with restart from the seed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SpreadingModel {
+    /// Priority-queue BFS — backwards-compatible default.
+    #[default]
+    PriorityQueueBfs,
+    /// Random walk with restart.
+    RandomWalkRestart,
+}
+
+const RWR_RESTART_PROBABILITY: f64 = 0.15;
+const RWR_MAX_ITERATIONS: usize = 128;
+const HOPFIELD_RETRIEVAL_ITERATIONS: usize = 3;
+
+struct HopfieldScoringContext {
+    retrieved: Vec<f64>,
+    energy_gain: f64,
 }
 
 /// Configuration for the Anamnesis engine.
@@ -38,6 +75,10 @@ pub struct EngineConfig {
     pub dedup_enabled: bool,
     /// Decay model to use for salience computation. Default: Exponential (backwards-compatible).
     pub decay_model: DecayModel,
+    /// Energy model for final score computation in spreading activation. Default: WeightedSum (backwards-compatible).
+    pub energy_model: EnergyModel,
+    /// Spreading activation model for query traversal. Default: PriorityQueueBfs (backwards-compatible).
+    pub spreading_model: SpreadingModel,
 }
 
 impl Default for EngineConfig {
@@ -49,6 +90,8 @@ impl Default for EngineConfig {
             dedup_threshold: 0.92,
             dedup_enabled: true,
             decay_model: DecayModel::Exponential,
+            energy_model: EnergyModel::WeightedSum,
+            spreading_model: SpreadingModel::PriorityQueueBfs,
         }
     }
 }
@@ -84,6 +127,157 @@ impl EngineConfig {
     }
 }
 
+fn finite_vector(values: &[f64]) -> bool {
+    values.iter().all(|value| value.is_finite())
+}
+
+fn rwr_activations<S: StorageAdapter>(
+    seed: NodeId,
+    budget: usize,
+    min_activation: f64,
+    storage: &S,
+) -> HashMap<NodeId, f64> {
+    let scores = crate::query::random_walk_restart(
+        seed,
+        RWR_RESTART_PROBABILITY,
+        RWR_MAX_ITERATIONS,
+        storage,
+    );
+
+    let max_score = scores
+        .values()
+        .copied()
+        .filter(|score| score.is_finite() && *score > 0.0)
+        .fold(0.0_f64, f64::max);
+
+    if max_score <= f64::EPSILON {
+        return HashMap::from([(seed, 1.0)]);
+    }
+
+    let mut normalized: Vec<(NodeId, f64)> = scores
+        .into_iter()
+        .filter_map(|(node_id, score)| {
+            if !score.is_finite() || score < 0.0 || storage.get_node(node_id).is_err() {
+                return None;
+            }
+
+            let activation = (score / max_score).clamp(0.0, 1.0);
+            if activation >= min_activation || node_id == seed {
+                Some((node_id, activation))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if !normalized.iter().any(|(node_id, _)| *node_id == seed) {
+        normalized.push((seed, 1.0));
+    }
+
+    normalized.sort_by(|(a_id, a_score), (b_id, b_score)| {
+        b_score
+            .partial_cmp(a_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a_id.0.cmp(&b_id.0))
+    });
+
+    let limit = budget.max(1);
+    if normalized.len() > limit {
+        normalized.truncate(limit);
+        if !normalized.iter().any(|(node_id, _)| *node_id == seed) {
+            normalized.pop();
+            let seed_activation = normalized
+                .iter()
+                .find_map(|(node_id, activation)| (*node_id == seed).then_some(*activation))
+                .unwrap_or(1.0);
+            normalized.push((seed, seed_activation));
+        }
+    }
+
+    normalized.into_iter().collect()
+}
+
+fn build_hopfield_scoring_context<S: StorageAdapter>(
+    query_embedding: &Option<Vec<f64>>,
+    activations: &HashMap<NodeId, f64>,
+    storage: &S,
+) -> Option<HopfieldScoringContext> {
+    let query_embedding = query_embedding.as_ref()?;
+    if query_embedding.is_empty() || !finite_vector(query_embedding) {
+        return None;
+    }
+
+    let mut candidates: Vec<(NodeId, Vec<f64>)> = activations
+        .iter()
+        .filter(|(_, activation)| activation.is_finite() && **activation > 0.0)
+        .filter_map(|(node_id, _)| {
+            let embedding = storage.get_node(*node_id).ok()?.embedding.as_ref()?;
+            if embedding.len() == query_embedding.len() && finite_vector(embedding) {
+                Some((*node_id, embedding.clone()))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if candidates.is_empty() {
+        return None;
+    }
+
+    candidates.sort_by_key(|(node_id, _)| node_id.0);
+    let patterns: Vec<Vec<f64>> = candidates
+        .into_iter()
+        .map(|(_, embedding)| embedding)
+        .collect();
+
+    let retrieved = crate::mechanics::hopfield::retrieve(
+        query_embedding,
+        &patterns,
+        HOPFIELD_RETRIEVAL_ITERATIONS,
+    );
+    if retrieved.len() != query_embedding.len() || !finite_vector(&retrieved) {
+        return None;
+    }
+
+    let initial_energy = crate::mechanics::hopfield::energy(query_embedding, &patterns);
+    let retrieved_energy = crate::mechanics::hopfield::energy(&retrieved, &patterns);
+    let energy_gain = if initial_energy.is_finite() && retrieved_energy.is_finite() {
+        (initial_energy - retrieved_energy).max(0.0).tanh()
+    } else {
+        0.0
+    };
+
+    Some(HopfieldScoringContext {
+        retrieved,
+        energy_gain,
+    })
+}
+
+fn hopfield_adjusted_similarity(
+    context: Option<&HopfieldScoringContext>,
+    fallback_similarity: f64,
+    candidate_embedding: Option<&Vec<f64>>,
+) -> f64 {
+    let Some(context) = context else {
+        return fallback_similarity;
+    };
+    let Some(candidate_embedding) = candidate_embedding else {
+        return fallback_similarity;
+    };
+    if candidate_embedding.len() != context.retrieved.len() || !finite_vector(candidate_embedding) {
+        return fallback_similarity;
+    }
+
+    let completed_similarity =
+        crate::mechanics::attraction::cosine_similarity(&context.retrieved, candidate_embedding);
+    if !completed_similarity.is_finite() {
+        return fallback_similarity;
+    }
+
+    (0.90 * completed_similarity + 0.10 * fallback_similarity + 0.05 * context.energy_gain)
+        .clamp(0.0, 1.0)
+}
+
 /// An observation to be ingested into the graph.
 ///
 /// The consumer is responsible for providing embeddings and extracting
@@ -108,6 +302,53 @@ pub struct Observation {
     pub origin: Origin,
     /// When this observation occurred. Defaults to Timestamp(0) if not provided.
     pub timestamp: Timestamp,
+}
+
+/// Request to crystallize query results into a higher-level knowledge node.
+///
+/// The consumer supplies synthesized content and source provenance; the engine
+/// computes initial salience, creates provenance edges, and reinforces sources.
+#[derive(Debug, Clone)]
+pub struct CrystallizeRequest {
+    /// L0: One-liner label for the synthesis.
+    pub name: String,
+    /// L1: Optional structural overview.
+    pub summary: Option<String>,
+    /// L2: Full synthesis content.
+    pub content: String,
+    /// Embedding vector for deduplication and attraction.
+    pub embedding: Option<Vec<f64>>,
+    /// Source fragment node IDs used to create this synthesis.
+    pub source_ids: Vec<NodeId>,
+    /// Optional source relevance scores aligned with `source_ids`.
+    pub source_relevances: Option<Vec<f64>>,
+    /// Knowledge type for the crystallized node.
+    pub node_type: KnowledgeType,
+    /// Confidence in the synthesis [0, 1].
+    pub confidence: f64,
+    /// Provenance of the synthesis.
+    pub origin: Origin,
+    /// Entity tags for future linking.
+    pub entity_tags: Vec<String>,
+    /// Timestamp of crystallization.
+    pub timestamp: Timestamp,
+}
+
+/// Result of a crystallization operation.
+#[derive(Debug, Clone)]
+pub struct CrystallizeResult {
+    /// The newly created synthesis node.
+    pub node_id: NodeId,
+    /// `ConsolidatedFrom` edges created from the crystal to each source.
+    pub consolidation_edges: Vec<EdgeId>,
+    /// Maximum duplicate similarity observed against existing crystallized nodes.
+    pub dedup_score: f64,
+    /// Attraction edges created from the crystal to similar non-source nodes.
+    pub attraction_edges: Vec<EdgeId>,
+    /// Number of source nodes reinforced via `touch()`.
+    pub nodes_reinforced: usize,
+    /// Initial salience assigned to the crystal.
+    pub initial_salience: f64,
 }
 
 /// Report returned by Engine::tick().
@@ -225,6 +466,44 @@ pub fn top_n_by_score(scores: &[(NodeId, f64)], n: usize) -> Vec<(NodeId, f64)> 
         .collect();
     result.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
     result
+}
+
+fn clamp_unit_finite(value: f64) -> f64 {
+    if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+fn positive_edge_weight(value: f64) -> f64 {
+    if value.is_finite() {
+        value.clamp(0.1, 1.0)
+    } else {
+        0.1
+    }
+}
+
+fn crystallized_salience(
+    source_saliences: &[f64],
+    relevance_weights: &[f64],
+    confidence: f64,
+) -> f64 {
+    let weight_sum: f64 = relevance_weights.iter().sum();
+    let source_average = if weight_sum > f64::EPSILON {
+        source_saliences
+            .iter()
+            .zip(relevance_weights.iter())
+            .map(|(salience, relevance)| salience * relevance)
+            .sum::<f64>()
+            / weight_sum
+    } else if source_saliences.is_empty() {
+        0.0
+    } else {
+        source_saliences.iter().sum::<f64>() / source_saliences.len() as f64
+    };
+
+    (0.60 * source_average + 0.25 * confidence + 0.15 * 0.10).clamp(0.0, 1.0)
 }
 
 fn merge_highest_relevance(
@@ -479,6 +758,259 @@ impl<S: StorageAdapter> Engine<S> {
         }
 
         Ok(IngestResult::Created(vec![id]))
+    }
+
+    /// Crystallize query results into a higher-level knowledge node.
+    ///
+    /// Creates a synthesis node, links it to its sources with `ConsolidatedFrom`
+    /// edges, and reinforces each source using the same `touch()` ordering as
+    /// ordinary access.
+    pub fn crystallize(&mut self, request: CrystallizeRequest) -> Result<CrystallizeResult, Error> {
+        use crate::mechanics::attraction::{
+            attraction_score, cosine_similarity, should_create_edge, strengthen_edge, tau_type,
+        };
+        use crate::mechanics::gravity::compute_mass;
+
+        if request.source_ids.len() < 2 {
+            return Err(Error::InvalidInput(
+                "crystallize requires at least 2 source IDs".to_string(),
+            ));
+        }
+
+        let relevance_weights: Vec<f64> = match &request.source_relevances {
+            Some(relevances) => {
+                if relevances.len() != request.source_ids.len() {
+                    return Err(Error::InvalidInput(
+                        "source_relevances length must match source_ids length".to_string(),
+                    ));
+                }
+                relevances
+                    .iter()
+                    .map(|value| clamp_unit_finite(*value))
+                    .collect()
+            }
+            None => vec![1.0; request.source_ids.len()],
+        };
+        let has_source_relevances = request.source_relevances.is_some();
+
+        let source_ids = request.source_ids.clone();
+        let source_set: HashSet<NodeId> = source_ids.iter().copied().collect();
+        let mut source_saliences = Vec::with_capacity(source_ids.len());
+
+        for source_id in &source_ids {
+            let _ = self.graph.get_node(*source_id)?;
+            let salience = self.graph.storage().get_salience(*source_id)?;
+            source_saliences.push(clamp_unit_finite(salience));
+        }
+
+        let mut dedup_score = 0.0_f64;
+        if let Some(ref crystal_embedding) = request.embedding {
+            let storage = self.graph.storage();
+            for node_id in storage.all_node_ids() {
+                let is_crystallized = storage.edges_from(node_id).iter().any(|edge_id| {
+                    storage
+                        .get_edge(*edge_id)
+                        .is_ok_and(|edge| edge.edge_type == EdgeType::ConsolidatedFrom)
+                });
+                if !is_crystallized {
+                    continue;
+                }
+
+                let Some(existing_embedding) = storage
+                    .get_node(node_id)
+                    .ok()
+                    .and_then(|node| node.embedding.as_ref())
+                else {
+                    continue;
+                };
+
+                let similarity = cosine_similarity(crystal_embedding, existing_embedding);
+                dedup_score = dedup_score.max(similarity);
+                if similarity > self.config.dedup_threshold {
+                    return Err(Error::Rejected(format!(
+                        "duplicate crystallization: node {} similarity {:.6}",
+                        node_id.0, similarity
+                    )));
+                }
+            }
+        }
+
+        let confidence = clamp_unit_finite(request.confidence);
+        let initial_salience =
+            crystallized_salience(&source_saliences, &relevance_weights, confidence);
+
+        let id = self.graph.next_node_id();
+        let now = request.timestamp;
+        let crystal_embedding = request.embedding.clone();
+        let crystal_type = request.node_type.clone();
+        let crystal_tags = request.entity_tags.clone();
+
+        let node = Node {
+            id,
+            node_type: request.node_type,
+            name: request.name,
+            summary: request.summary,
+            content: request.content,
+            embedding: request.embedding,
+            created_at: now,
+            updated_at: now,
+            accessed_at: now,
+            valid_from: None,
+            valid_until: None,
+            salience: initial_salience,
+            access_count: 0,
+            access_history: VecDeque::new(),
+            tier: crate::graph::MemoryTier::Auto,
+            origin: request.origin,
+            entity_tags: request.entity_tags,
+            metadata: HashMap::new(),
+        };
+
+        self.graph.add_node(node)?;
+
+        let mut consolidation_edges = Vec::with_capacity(source_ids.len());
+        for index in 0..source_ids.len() {
+            let source_id = source_ids[index];
+            let source_salience = source_saliences[index];
+            let relevance = relevance_weights[index];
+            let edge_id = self.graph.next_edge_id();
+            let weight = if has_source_relevances {
+                positive_edge_weight(relevance)
+            } else {
+                positive_edge_weight(source_salience)
+            };
+            let edge = Edge {
+                id: edge_id,
+                source: id,
+                target: source_id,
+                edge_type: EdgeType::ConsolidatedFrom,
+                weight,
+                created_at: now,
+                valid_from: None,
+                valid_until: None,
+                metadata: HashMap::new(),
+            };
+            self.graph.add_edge(edge)?;
+            consolidation_edges.push(edge_id);
+        }
+
+        let mut attraction_edges = Vec::new();
+        if let Some(ref embedding) = crystal_embedding {
+            let mut candidate_set = HashSet::new();
+            for node_id in self
+                .graph
+                .storage()
+                .node_ids_descending()
+                .into_iter()
+                .take(256)
+            {
+                if node_id != id && !source_set.contains(&node_id) {
+                    candidate_set.insert(node_id);
+                }
+            }
+
+            for tag in &crystal_tags {
+                for node_id in self.graph.storage().nodes_by_entity_tag(tag) {
+                    if node_id != id && !source_set.contains(&node_id) {
+                        candidate_set.insert(node_id);
+                    }
+                }
+            }
+
+            let mut scored = Vec::new();
+            for candidate_id in candidate_set {
+                let candidate = match self.graph.storage().get_node(candidate_id) {
+                    Ok(node) => node,
+                    Err(_) => continue,
+                };
+
+                let Some(ref candidate_embedding) = candidate.embedding else {
+                    continue;
+                };
+
+                let similarity = cosine_similarity(embedding, candidate_embedding);
+                if similarity == 0.0 {
+                    continue;
+                }
+
+                let tau = tau_type(&crystal_type, &candidate.node_type);
+                let candidate_salience = self
+                    .graph
+                    .storage()
+                    .get_salience(candidate_id)
+                    .unwrap_or(0.0);
+                let candidate_mass = compute_mass(
+                    clamp_unit_finite(candidate_salience),
+                    candidate.access_count,
+                    &candidate.node_type,
+                );
+                let score = attraction_score(similarity, tau, candidate_mass);
+
+                if should_create_edge(score, &crystal_type, &candidate.node_type) {
+                    scored.push((candidate_id, score));
+                }
+            }
+
+            for (candidate_id, score) in top_n_by_score(&scored, 4) {
+                let existing_edge = self
+                    .graph
+                    .edges_from(id)
+                    .iter()
+                    .find_map(|&edge_id| {
+                        self.graph
+                            .get_edge(edge_id)
+                            .ok()
+                            .filter(|edge| edge.target == candidate_id)
+                    })
+                    .or_else(|| {
+                        self.graph
+                            .edges_from(candidate_id)
+                            .iter()
+                            .find_map(|&edge_id| {
+                                self.graph
+                                    .get_edge(edge_id)
+                                    .ok()
+                                    .filter(|edge| edge.target == id)
+                            })
+                    });
+
+                if let Some(existing) = existing_edge {
+                    let new_weight = strengthen_edge(existing.weight, score);
+                    let edge_id = existing.id;
+                    if let Ok(edge) = self.graph.get_edge_mut(edge_id) {
+                        edge.weight = new_weight;
+                    }
+                } else {
+                    let edge_id = self.graph.next_edge_id();
+                    let edge = Edge {
+                        id: edge_id,
+                        source: id,
+                        target: candidate_id,
+                        edge_type: EdgeType::Semantic,
+                        weight: clamp_unit_finite(score),
+                        created_at: now,
+                        valid_from: None,
+                        valid_until: None,
+                        metadata: HashMap::new(),
+                    };
+                    self.graph.add_edge(edge)?;
+                    attraction_edges.push(edge_id);
+                }
+            }
+        }
+
+        for source_id in &source_ids {
+            self.touch(*source_id, now)?;
+        }
+
+        Ok(CrystallizeResult {
+            node_id: id,
+            consolidation_edges,
+            dedup_score,
+            attraction_edges,
+            nodes_reinforced: source_ids.len(),
+            initial_salience,
+        })
     }
 
     /// Create or strengthen a link between two nodes.
@@ -1382,14 +1914,19 @@ impl<S: StorageAdapter> Engine<S> {
             })
         };
 
-        let activations = spread_activation(
-            initial_activations,
-            node_info_fn,
-            budget,
-            config.min_activation,
-            config.decay_per_hop,
-            config.max_hops,
-        );
+        let activations = match self.config.spreading_model {
+            SpreadingModel::PriorityQueueBfs => spread_activation(
+                initial_activations,
+                node_info_fn,
+                budget,
+                config.min_activation,
+                config.decay_per_hop,
+                config.max_hops,
+            ),
+            SpreadingModel::RandomWalkRestart => {
+                rwr_activations(seed, budget, config.min_activation, storage)
+            }
+        };
 
         // --- Stage 4: Repulsion damping (eqs 7-8) ---
         let mut damped_activations = activations.clone();
@@ -1425,6 +1962,14 @@ impl<S: StorageAdapter> Engine<S> {
 
         // --- Stage 5: Final scoring (eq 13) ---
         let seed_node = storage.get_node(seed).ok();
+        let hopfield_context = match self.config.energy_model {
+            EnergyModel::WeightedSum => None,
+            EnergyModel::Hopfield => build_hopfield_scoring_context(
+                &config.query_embedding,
+                &damped_activations,
+                storage,
+            ),
+        };
         let mut scored_nodes: Vec<ScoredNode> = Vec::new();
 
         for (&nid, &activation) in &damped_activations {
@@ -1455,7 +2000,15 @@ impl<S: StorageAdapter> Engine<S> {
                 .unwrap_or(0);
 
             let sw = scope_weight(&config.project_id, &node.origin.project_id, shared_entities);
-            let relevance = final_score(activation, vector_sim, salience, mass, sw);
+            let scoring_similarity = match self.config.energy_model {
+                EnergyModel::WeightedSum => vector_sim,
+                EnergyModel::Hopfield => hopfield_adjusted_similarity(
+                    hopfield_context.as_ref(),
+                    vector_sim,
+                    node.embedding.as_ref(),
+                ),
+            };
+            let relevance = final_score(activation, scoring_similarity, salience, mass, sw);
 
             scored_nodes.push(ScoredNode {
                 node_id: nid,
@@ -1532,15 +2085,101 @@ impl<S: StorageAdapter> Engine<S> {
         Ok(MergeLog::default())
     }
 
+    fn has_entity_edge_between(&self, a: NodeId, b: NodeId) -> bool {
+        self.graph.edges_from(a).iter().any(|&edge_id| {
+            self.graph
+                .get_edge(edge_id)
+                .is_ok_and(|edge| edge.target == b && edge.edge_type == EdgeType::Entity)
+        }) || self.graph.edges_from(b).iter().any(|&edge_id| {
+            self.graph
+                .get_edge(edge_id)
+                .is_ok_and(|edge| edge.target == a && edge.edge_type == EdgeType::Entity)
+        })
+    }
+
     /// Cross-agent entity linking after parallel execution round.
     ///
     /// Creates Entity edges between nodes from different agents sharing entity tags.
     /// No LLM calls — metadata matching only.
-    ///
-    /// Phase 1: Returns empty report.
-    /// Phase 2 will implement: entity tag matching + Entity edge creation.
-    pub fn reflect_batch(&mut self, _sessions: &[SessionSummary]) -> Result<ReflectReport, Error> {
-        Ok(ReflectReport::default())
+    pub fn reflect_batch(&mut self, sessions: &[SessionSummary]) -> Result<ReflectReport, Error> {
+        let mut input_node_ids = BTreeSet::new();
+        for session in sessions {
+            for &node_id in &session.node_ids {
+                input_node_ids.insert(node_id);
+            }
+        }
+
+        let mut nodes_by_tag: BTreeMap<String, Vec<(NodeId, String)>> = BTreeMap::new();
+        for node_id in input_node_ids {
+            let Ok(node) = self.graph.get_node(node_id) else {
+                continue;
+            };
+
+            let mut seen_tags = BTreeSet::new();
+            for tag in &node.entity_tags {
+                if seen_tags.insert(tag.as_str()) {
+                    nodes_by_tag
+                        .entry(tag.clone())
+                        .or_default()
+                        .push((node_id, node.origin.agent_id.clone()));
+                }
+            }
+        }
+
+        let mut candidate_pairs = BTreeSet::new();
+        let mut clusters_found = 0usize;
+        for nodes in nodes_by_tag.values() {
+            let mut has_cross_agent_pair = false;
+            for i in 0..nodes.len() {
+                for j in (i + 1)..nodes.len() {
+                    let (left_id, left_agent) = &nodes[i];
+                    let (right_id, right_agent) = &nodes[j];
+                    if left_agent == right_agent {
+                        continue;
+                    }
+
+                    has_cross_agent_pair = true;
+                    let pair = if left_id < right_id {
+                        (*left_id, *right_id)
+                    } else {
+                        (*right_id, *left_id)
+                    };
+                    candidate_pairs.insert(pair);
+                }
+            }
+
+            if has_cross_agent_pair {
+                clusters_found += 1;
+            }
+        }
+
+        let mut entity_edges_created = 0usize;
+        let now = Timestamp::now();
+        for (source, target) in candidate_pairs {
+            if self.has_entity_edge_between(source, target) {
+                continue;
+            }
+
+            let edge_id = self.graph.next_edge_id();
+            let edge = Edge {
+                id: edge_id,
+                source,
+                target,
+                edge_type: EdgeType::Entity,
+                weight: 1.0,
+                created_at: now,
+                valid_from: None,
+                valid_until: None,
+                metadata: HashMap::new(),
+            };
+            self.graph.add_edge(edge)?;
+            entity_edges_created += 1;
+        }
+
+        Ok(ReflectReport {
+            entity_edges_created,
+            clusters_found,
+        })
     }
 
     /// Read-only access to the underlying graph.
