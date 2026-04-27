@@ -18,11 +18,14 @@ fn all_knowledge_types() {
         KnowledgeType::Convention,
         KnowledgeType::Decision,
         KnowledgeType::Gotcha,
+        KnowledgeType::Hypothesis,
+        KnowledgeType::Evidence,
+        KnowledgeType::DebugSession,
         KnowledgeType::Episodic,
         KnowledgeType::Event,
         KnowledgeType::Custom("my-type".to_string()),
     ];
-    assert_eq!(types.len(), 12);
+    assert_eq!(types.len(), 15);
 }
 
 #[test]
@@ -38,10 +41,13 @@ fn all_edge_types() {
         EdgeType::Entity,
         EdgeType::Supersedes,
         EdgeType::RejectedAlternative,
+        EdgeType::Supports,
+        EdgeType::Refutes,
+        EdgeType::BelongsTo,
         EdgeType::Contradicts,
         EdgeType::Custom("my-edge".to_string()),
     ];
-    assert_eq!(types.len(), 12);
+    assert_eq!(types.len(), 15);
 }
 
 #[test]
