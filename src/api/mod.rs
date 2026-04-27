@@ -352,6 +352,30 @@ pub struct CrystallizeResult {
     pub initial_salience: f64,
 }
 
+/// Classification for evidence logged against a debugging hypothesis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvidenceResult {
+    /// Evidence supports the hypothesis.
+    Supports,
+    /// Evidence contradicts the hypothesis.
+    Contradicts,
+    /// Evidence is relevant but does not clearly support or refute.
+    Neutral,
+    /// Evidence could not be interpreted conclusively.
+    Inconclusive,
+}
+
+/// Final state recorded for a debugging session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DebugOutcome {
+    /// The investigation resolved with the given conclusion.
+    Resolved(String),
+    /// The investigation ended unresolved with the given reason.
+    Unresolved(String),
+    /// The investigation was abandoned without a conclusion.
+    Abandoned,
+}
+
 /// Report returned by Engine::tick().
 #[derive(Debug, Clone, Default)]
 pub struct TickReport {
@@ -583,6 +607,307 @@ impl<S: StorageAdapter + Clone> Engine<S> {
     /// List stored snapshot metadata in insertion order.
     pub fn list_snapshots(&self) -> Vec<(SnapshotId, String, Timestamp)> {
         self.snapshots.list()
+    }
+
+    /// Start a debugging session for a problem statement.
+    pub fn start_debug(
+        &mut self,
+        problem: &str,
+        origin: Origin,
+        timestamp: Timestamp,
+    ) -> Result<NodeId, Error> {
+        if problem.trim().is_empty() {
+            return Err(Error::InvalidInput(
+                "debug problem must not be empty".to_string(),
+            ));
+        }
+
+        let id = self.graph.next_node_id();
+        let mut metadata = HashMap::new();
+        metadata.insert("debug_kind".to_string(), "session".to_string());
+        metadata.insert("debug_started_at".to_string(), timestamp.0.to_string());
+        metadata.insert("debug_problem".to_string(), problem.to_string());
+
+        let node = Node {
+            id,
+            node_type: KnowledgeType::DebugSession,
+            name: problem.to_string(),
+            summary: None,
+            content: problem.to_string(),
+            embedding: None,
+            created_at: timestamp,
+            updated_at: timestamp,
+            accessed_at: timestamp,
+            valid_from: None,
+            valid_until: None,
+            salience: 1.0,
+            access_count: 0,
+            access_history: VecDeque::new(),
+            tier: MemoryTier::Auto,
+            origin,
+            entity_tags: Vec::new(),
+            metadata,
+        };
+
+        self.graph.add_node(node)
+    }
+
+    /// Log a hypothesis inside an existing debugging session.
+    pub fn log_hypothesis(
+        &mut self,
+        session: NodeId,
+        text: &str,
+        origin: Origin,
+        timestamp: Timestamp,
+    ) -> Result<NodeId, Error> {
+        if text.trim().is_empty() {
+            return Err(Error::InvalidInput(
+                "hypothesis text must not be empty".to_string(),
+            ));
+        }
+        let session_node = self.graph.get_node(session)?;
+        if session_node.node_type != KnowledgeType::DebugSession {
+            return Err(Error::InvalidInput(
+                "log_hypothesis requires a DebugSession node".to_string(),
+            ));
+        }
+
+        let id = self.graph.next_node_id();
+        let mut metadata = HashMap::new();
+        metadata.insert("debug_kind".to_string(), "hypothesis".to_string());
+        metadata.insert("debug_session_id".to_string(), session.0.to_string());
+        metadata.insert("hypothesis_status".to_string(), "open".to_string());
+        metadata.insert("hypothesis_logged_at".to_string(), timestamp.0.to_string());
+
+        let node = Node {
+            id,
+            node_type: KnowledgeType::Hypothesis,
+            name: text.to_string(),
+            summary: None,
+            content: text.to_string(),
+            embedding: None,
+            created_at: timestamp,
+            updated_at: timestamp,
+            accessed_at: timestamp,
+            valid_from: None,
+            valid_until: None,
+            salience: 1.0,
+            access_count: 0,
+            access_history: VecDeque::new(),
+            tier: MemoryTier::Auto,
+            origin,
+            entity_tags: Vec::new(),
+            metadata,
+        };
+        self.graph.add_node(node)?;
+
+        let edge_id = self.graph.next_edge_id();
+        let mut edge_metadata = HashMap::new();
+        edge_metadata.insert(
+            "debug_relation".to_string(),
+            "hypothesis_session".to_string(),
+        );
+        let edge = Edge {
+            id: edge_id,
+            source: id,
+            target: session,
+            edge_type: EdgeType::BelongsTo,
+            weight: 1.0,
+            created_at: timestamp,
+            valid_from: None,
+            valid_until: None,
+            metadata: edge_metadata,
+        };
+        self.graph.add_edge(edge)?;
+
+        Ok(id)
+    }
+
+    /// Log evidence against an existing hypothesis.
+    pub fn log_evidence(
+        &mut self,
+        hypothesis: NodeId,
+        text: &str,
+        result: EvidenceResult,
+        origin: Origin,
+        timestamp: Timestamp,
+    ) -> Result<NodeId, Error> {
+        if text.trim().is_empty() {
+            return Err(Error::InvalidInput(
+                "evidence text must not be empty".to_string(),
+            ));
+        }
+        let hypothesis_node = self.graph.get_node(hypothesis)?;
+        if hypothesis_node.node_type != KnowledgeType::Hypothesis {
+            return Err(Error::InvalidInput(
+                "log_evidence requires a Hypothesis node".to_string(),
+            ));
+        }
+
+        let id = self.graph.next_node_id();
+        let result_label = match result {
+            EvidenceResult::Supports => "supports",
+            EvidenceResult::Contradicts => "contradicts",
+            EvidenceResult::Neutral => "neutral",
+            EvidenceResult::Inconclusive => "inconclusive",
+        };
+        let mut metadata = HashMap::new();
+        metadata.insert("debug_kind".to_string(), "evidence".to_string());
+        metadata.insert("debug_hypothesis_id".to_string(), hypothesis.0.to_string());
+        metadata.insert("evidence_result".to_string(), result_label.to_string());
+        metadata.insert("evidence_logged_at".to_string(), timestamp.0.to_string());
+        if matches!(
+            result,
+            EvidenceResult::Neutral | EvidenceResult::Inconclusive
+        ) {
+            metadata.insert(
+                "automatic_hypothesis_action".to_string(),
+                "none".to_string(),
+            );
+        }
+
+        let node = Node {
+            id,
+            node_type: KnowledgeType::Evidence,
+            name: text.to_string(),
+            summary: None,
+            content: text.to_string(),
+            embedding: None,
+            created_at: timestamp,
+            updated_at: timestamp,
+            accessed_at: timestamp,
+            valid_from: None,
+            valid_until: None,
+            salience: 1.0,
+            access_count: 0,
+            access_history: VecDeque::new(),
+            tier: MemoryTier::Auto,
+            origin,
+            entity_tags: Vec::new(),
+            metadata,
+        };
+        self.graph.add_node(node)?;
+
+        let edge_type = match result {
+            EvidenceResult::Supports => Some(EdgeType::Supports),
+            EvidenceResult::Contradicts => Some(EdgeType::Refutes),
+            EvidenceResult::Neutral | EvidenceResult::Inconclusive => None,
+        };
+
+        if let Some(edge_type) = edge_type {
+            let edge_id = self.graph.next_edge_id();
+            let mut edge_metadata = HashMap::new();
+            edge_metadata.insert(
+                "debug_relation".to_string(),
+                "evidence_hypothesis".to_string(),
+            );
+            edge_metadata.insert("evidence_result".to_string(), result_label.to_string());
+            let edge = Edge {
+                id: edge_id,
+                source: id,
+                target: hypothesis,
+                edge_type,
+                weight: 1.0,
+                created_at: timestamp,
+                valid_from: None,
+                valid_until: None,
+                metadata: edge_metadata,
+            };
+            self.graph.add_edge(edge)?;
+        }
+
+        Ok(id)
+    }
+
+    /// Mark a hypothesis as rejected with a reason.
+    pub fn reject_hypothesis(
+        &mut self,
+        hypothesis: NodeId,
+        reason: &str,
+        timestamp: Timestamp,
+    ) -> Result<(), Error> {
+        let node = self.graph.get_node_mut(hypothesis)?;
+        if node.node_type != KnowledgeType::Hypothesis {
+            return Err(Error::InvalidInput(
+                "reject_hypothesis requires a Hypothesis node".to_string(),
+            ));
+        }
+
+        node.metadata
+            .insert("hypothesis_status".to_string(), "rejected".to_string());
+        node.metadata
+            .insert("rejection_reason".to_string(), reason.to_string());
+        node.metadata
+            .insert("rejected_at".to_string(), timestamp.0.to_string());
+        node.updated_at = timestamp;
+
+        Ok(())
+    }
+
+    /// Mark a hypothesis as confirmed with a conclusion.
+    pub fn confirm_hypothesis(
+        &mut self,
+        hypothesis: NodeId,
+        conclusion: &str,
+        timestamp: Timestamp,
+    ) -> Result<(), Error> {
+        let node = self.graph.get_node_mut(hypothesis)?;
+        if node.node_type != KnowledgeType::Hypothesis {
+            return Err(Error::InvalidInput(
+                "confirm_hypothesis requires a Hypothesis node".to_string(),
+            ));
+        }
+
+        node.metadata
+            .insert("hypothesis_status".to_string(), "confirmed".to_string());
+        node.metadata.insert(
+            "confirmation_conclusion".to_string(),
+            conclusion.to_string(),
+        );
+        node.metadata
+            .insert("confirmed_at".to_string(), timestamp.0.to_string());
+        node.updated_at = timestamp;
+
+        Ok(())
+    }
+
+    /// End a debugging session and record its final outcome.
+    pub fn end_debug(
+        &mut self,
+        session: NodeId,
+        outcome: DebugOutcome,
+        timestamp: Timestamp,
+    ) -> Result<(), Error> {
+        let node = self.graph.get_node_mut(session)?;
+        if node.node_type != KnowledgeType::DebugSession {
+            return Err(Error::InvalidInput(
+                "end_debug requires a DebugSession node".to_string(),
+            ));
+        }
+
+        match outcome {
+            DebugOutcome::Resolved(conclusion) => {
+                node.metadata
+                    .insert("debug_outcome".to_string(), "resolved".to_string());
+                node.metadata
+                    .insert("debug_resolution".to_string(), conclusion);
+            }
+            DebugOutcome::Unresolved(reason) => {
+                node.metadata
+                    .insert("debug_outcome".to_string(), "unresolved".to_string());
+                node.metadata
+                    .insert("debug_unresolved_reason".to_string(), reason);
+            }
+            DebugOutcome::Abandoned => {
+                node.metadata
+                    .insert("debug_outcome".to_string(), "abandoned".to_string());
+            }
+        }
+        node.metadata
+            .insert("debug_ended_at".to_string(), timestamp.0.to_string());
+        node.updated_at = timestamp;
+
+        Ok(())
     }
 
     /// Ingest a new observation into the graph.
@@ -2091,16 +2416,24 @@ impl<S: StorageAdapter + Clone> Engine<S> {
 
     /// Find merge candidates above similarity threshold.
     ///
-    /// Phase 1: Returns empty list.
-    /// Phase 2 will implement: attraction-based merge candidate detection.
+    /// Deprecated: Use `EngineConfig::dedup_threshold` in `ingest()` instead.
+    /// The dedup gate in ingest() replaces this need.
+    #[deprecated(
+        since = "0.3.0",
+        note = "Dedup gate in ingest() replaces this need. See EngineConfig::dedup_threshold."
+    )]
     pub fn merge_candidates(&self, _threshold: f64) -> Result<Vec<MergePair>, Error> {
         Ok(vec![])
     }
 
     /// Execute auto-merge with undo log.
     ///
-    /// Phase 1: Returns empty log.
-    /// Phase 2 will implement: merge logic with undo support.
+    /// Deprecated: Use `EngineConfig::dedup_threshold` in `ingest()` instead.
+    /// The dedup gate in ingest() replaces this need.
+    #[deprecated(
+        since = "0.3.0",
+        note = "Dedup gate in ingest() replaces this need. See EngineConfig::dedup_threshold."
+    )]
     pub fn auto_merge(&mut self, _threshold: f64) -> Result<MergeLog, Error> {
         Ok(MergeLog::default())
     }
@@ -2200,6 +2533,60 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             entity_edges_created,
             clusters_found,
         })
+    }
+
+    /// Search for rejected hypotheses matching a query string.
+    ///
+    /// Returns `NodeId`s of `KnowledgeType::Hypothesis` nodes whose metadata contains
+    /// `hypothesis_status = "rejected"` and whose name, content, or `rejection_reason`
+    /// contains the query substring (case-insensitive). If `limit` is 0 an empty vector
+    /// is returned immediately.
+    pub fn search_rejected_hypotheses(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<NodeId>, Error> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let storage = self.graph.storage();
+        let hypothesis_ids = storage.nodes_by_type(&KnowledgeType::Hypothesis);
+        let query_lower = query.to_lowercase();
+
+        let mut results = Vec::new();
+        for nid in hypothesis_ids {
+            let node = storage.get_node(nid)?;
+
+            let is_rejected = node
+                .metadata
+                .get("hypothesis_status")
+                .is_some_and(|status| status == "rejected");
+            if !is_rejected {
+                continue;
+            }
+
+            if query_lower.is_empty() {
+                results.push(nid);
+            } else {
+                let name_match = node.name.to_lowercase().contains(&query_lower);
+                let content_match = node.content.to_lowercase().contains(&query_lower);
+                let reason_match = node
+                    .metadata
+                    .get("rejection_reason")
+                    .is_some_and(|reason| reason.to_lowercase().contains(&query_lower));
+
+                if name_match || content_match || reason_match {
+                    results.push(nid);
+                }
+            }
+
+            if results.len() >= limit {
+                break;
+            }
+        }
+
+        Ok(results)
     }
 
     /// Read-only access to the underlying graph.
@@ -2315,6 +2702,7 @@ mod tests {
     #[test]
     fn merge_candidates_returns_empty() {
         let engine = Engine::new();
+        #[allow(deprecated)]
         let candidates = engine.merge_candidates(0.9).unwrap();
         assert!(candidates.is_empty());
     }
