@@ -69,13 +69,16 @@ One cue activates related fragments, which activate further fragments — recons
 
 ## Quick Start
 
-> **Anamnesis is in early development.** The core engine is functional — mechanics are wired and the associative query pipeline is operational. Several features are stubs that return placeholder results. See [Status](#status) for the full breakdown.
+> **Anamnesis is in active development.** The core engine is functional — mechanics, query pipeline, debug lifecycle, snapshots, and unified search are all operational. See [Status](#status) for the full breakdown.
 
 Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-anamnesis = "0.2"
+anamnesis = "0.3"
+
+# Optional: local embedding provider (downloads model on first use, ~100-500 MB)
+# anamnesis = { version = "0.3", features = ["embed"] }
 ```
 
 ```rust
@@ -87,7 +90,7 @@ use anamnesis::graph::node::Origin;
 let mut engine = Engine::new();
 
 // Ingest knowledge fragments
-let ids = engine.ingest(Observation {
+let result = engine.ingest(Observation {
     name: "auth uses factory pattern".into(),
     summary: Some("Confirmed across multiple sessions".into()),
     content: "The auth module uses factory pattern for handler creation".into(),
@@ -104,7 +107,9 @@ let ids = engine.ingest(Observation {
     timestamp: Timestamp::now(),
 }).unwrap();
 
-let ids2 = engine.ingest(Observation {
+let anamnesis::api::IngestResult::Created(ids) = result else { panic!() };
+
+let result2 = engine.ingest(Observation {
     name: "race condition in auth middleware".into(),
     summary: None,
     content: "Found a race condition in the auth middleware during session #5".into(),
@@ -121,15 +126,14 @@ let ids2 = engine.ingest(Observation {
     timestamp: Timestamp::now(),
 }).unwrap();
 
+let anamnesis::api::IngestResult::Created(ids2) = result2 else { panic!() };
+
 // Connect related knowledge
 engine.link(ids[0], ids2[0], EdgeType::Semantic, 0.78).unwrap();
 
 // Reinforce on access (lazy decay + salience boost)
 engine.touch(ids[0], Timestamp::now()).unwrap();
 ```
-
-> **Working:** `ingest` (with perception gating + auto-linking), `link`, `touch` (lazy decay + reinforcement), `tick` (batch decay), `query` (Associative mode with spreading activation, repulsion, identity prior, scope weighting, ContextPackage assembly).
-> **Placeholder:** `merge_candidates()`/`auto_merge()` return empty results, `reflect_batch()` returns empty report. Non-Associative query modes (TypeFiltered, Neighborhood, Temporal, List) return empty ContextPackage.
 
 ## Core Concepts
 
@@ -203,12 +207,14 @@ When a new agent session starts, it inherits not rules but *judgment*.
 src/
 ├── graph/          Node, Edge, Graph — core data structures
 ├── mechanics/      Pure scoring functions, no side effects
-│   ├── attraction     Cosine similarity, merge candidate detection
+│   ├── attraction     Cosine similarity, auto-linking
 │   ├── gravity        PageRank-like centrality scoring
 │   ├── perception     Novelty, confidence, and budget gating
-│   └── forgetting     Exponential/polynomial decay + reinforcement
-├── query/          Spreading activation, k-hop neighborhood
+│   └── forgetting     Exponential/ACT-R decay + reinforcement
+├── query/          Spreading activation, k-hop neighborhood, unified search
 ├── storage/        StorageAdapter trait + InMemoryStorage
+├── embedding/      EmbeddingProvider trait + optional FastEmbedProvider
+├── snapshot/       Clone-based snapshot storage
 └── api/            Engine — public interface
 ```
 
@@ -227,7 +233,7 @@ Perception ── novelty / confidence / budget ──► reject or accept
 Ingestion ── create node ──► Graph
   │
   ▼
-Attraction ── similarity scoring ──► edge creation / merge candidates
+Attraction ── similarity scoring ──► edge creation / dedup reinforcement
   │
   ▼
 Gravity ── centrality scoring ──► hub node identification
@@ -243,8 +249,14 @@ Query ── spreading activation ──► budget-constrained ContextPackage
 Touch ── reinforce on access ──► salience spike + reactivation
 
          ┌────────────────────────────────────┐
-         │  ⬚ merge_candidates() / auto_merge()│
-         │  consolidate near-duplicate nodes   │
+         │  crystallize() — post-session       │
+         │  ConsolidatedFrom edges, salience   │
+         │  promotion from source fragments    │
+         └────────────────────────────────────┘
+
+         ┌────────────────────────────────────┐
+         │  reflect_batch() — cross-agent      │
+         │  Entity edges via entity tag match  │
          └────────────────────────────────────┘
 ```
 
@@ -255,28 +267,49 @@ Touch ── reinforce on access ──► salience spike + reactivation
 
 <br>
 
-> Methods marked with ⬚ are defined but return placeholder results.
-
 ```rust
 impl Engine {
     // Construction
     pub fn new() -> Self;
     pub fn with_config(config: EngineConfig) -> Self;
-    pub fn with_storage<S: StorageAdapter>(config: EngineConfig, storage: S) -> Self;
+    pub fn with_storage<S: StorageAdapter + Clone>(config: EngineConfig, storage: S) -> Self;
+
+    // Snapshots
+    pub fn snapshot(&mut self, label: &str) -> SnapshotId;
+    pub fn restore(&mut self, id: &SnapshotId) -> Result<(), Error>;
+    pub fn list_snapshots(&self) -> Vec<(SnapshotId, String, Timestamp)>;
 
     // Core operations
-    pub fn ingest(&mut self, observation: Observation) -> Result<Vec<NodeId>, Error>;
+    pub fn ingest(&mut self, observation: Observation) -> Result<IngestResult, Error>;
+    pub fn crystallize(&mut self, request: CrystallizeRequest) -> Result<CrystallizeResult, Error>;
     pub fn link(&mut self, from: NodeId, to: NodeId, t: EdgeType, w: f64) -> Result<EdgeId, Error>;
     pub fn touch(&mut self, node_id: NodeId, now: Timestamp) -> Result<(), Error>;
+    pub fn set_tier(&mut self, node_id: NodeId, tier: MemoryTier) -> Result<(), Error>;
+    pub fn get_tier(&self, node_id: NodeId) -> Result<MemoryTier, Error>;
     pub fn tick(&mut self, now: Timestamp) -> Result<TickReport, Error>;
 
     // Query — returns structured context for LLM consumption
     pub fn query(&self, query: &Query, config: &QueryConfig) -> Result<ContextPackage, Error>;
+    pub fn search(&self, input: SearchInput) -> Result<SearchResult, Error>;
+    pub fn fact_at(&self, query: &Query, as_of: Timestamp) -> Result<ContextPackage, Error>;
 
-    // Stubs — return placeholder results
-    pub fn merge_candidates(&self, threshold: f64) -> Result<Vec<MergePair>, Error>;  // ⬚ returns empty
-    pub fn auto_merge(&mut self, threshold: f64) -> Result<MergeLog, Error>;          // ⬚ returns empty
-    pub fn reflect_batch(&mut self, sessions: &[SessionSummary]) -> Result<ReflectReport, Error>;  // ⬚ returns empty
+    // Debug lifecycle
+    pub fn start_debug(&mut self, problem: &str, origin: Origin, timestamp: Timestamp) -> Result<NodeId, Error>;
+    pub fn log_hypothesis(&mut self, session: NodeId, text: &str, origin: Origin, timestamp: Timestamp) -> Result<NodeId, Error>;
+    pub fn log_evidence(&mut self, hypothesis: NodeId, text: &str, result: EvidenceResult, origin: Origin, timestamp: Timestamp) -> Result<NodeId, Error>;
+    pub fn reject_hypothesis(&mut self, hypothesis: NodeId, reason: &str, timestamp: Timestamp) -> Result<(), Error>;
+    pub fn confirm_hypothesis(&mut self, hypothesis: NodeId, conclusion: &str, timestamp: Timestamp) -> Result<(), Error>;
+    pub fn end_debug(&mut self, session: NodeId, outcome: DebugOutcome, timestamp: Timestamp) -> Result<(), Error>;
+    pub fn search_rejected_hypotheses(&self, query: &str, limit: usize) -> Result<Vec<NodeId>, Error>;
+
+    // Cross-agent
+    pub fn reflect_batch(&mut self, sessions: &[SessionSummary]) -> Result<ReflectReport, Error>;
+
+    // Deprecated — use EngineConfig::dedup_threshold in ingest() instead
+    #[deprecated(since = "0.3.0")]
+    pub fn merge_candidates(&self, threshold: f64) -> Result<Vec<MergePair>, Error>;
+    #[deprecated(since = "0.3.0")]
+    pub fn auto_merge(&mut self, threshold: f64) -> Result<MergeLog, Error>;
 }
 ```
 
@@ -321,16 +354,24 @@ pub trait StorageAdapter: Send + Sync {
     fn edge_count(&self) -> usize;
     fn all_node_ids(&self) -> Vec<NodeId>;
     fn all_edge_ids(&self) -> Vec<EdgeId>;
+
+    // Default helpers (O(N) scan; override for O(1) index lookup)
+    fn nodes_by_entity_tag(&self, tag: &str) -> Vec<NodeId>;
+    fn nodes_by_type(&self, kt: &KnowledgeType) -> Vec<NodeId>;
+    fn nodes_by_agent(&self, agent_id: &str) -> Vec<NodeId>;
+    fn nodes_by_project(&self, project_id: &str) -> Vec<NodeId>;
+    fn node_ids_descending(&self) -> Vec<NodeId>;
+    fn text_search(&self, query: &str, limit: usize) -> Vec<(NodeId, f64)>;
 }
 ```
 
-Ships with `InMemoryStorage` (arena-based Vec, adjacency index, ID recycling). Implement the trait for SQLite, PostgreSQL, Neo4j, or any other backend.
+Ships with `InMemoryStorage` (arena-based Vec, adjacency index, ID recycling, secondary indexes for entity tags, types, agents, and projects). Implement the trait for SQLite, PostgreSQL, Neo4j, or any other backend.
 
 </details>
 
 ## Design Principles
 
-- **Zero external dependencies** — core uses only `std`
+- **Zero external dependencies** — core uses only `std`; optional `feature = "embed"` adds FastEmbed
 - **Pure functions** for all mechanics — testable, benchmarkable, no side effects
 - **Pluggable storage** via `StorageAdapter` trait
 - **No async in core** — consumers wrap with async if needed
@@ -349,7 +390,7 @@ A recommended — but not enforced — processing pattern adapted from Stanford 
 |:-----|:-----|:------------------|
 | **Generator** | During ingestion | `ingest()`, `link()` |
 | **Reflector** | Session completion | `link()`, `touch()` |
-| **Curator** | Periodic batch | `tick()`, `auto_merge()` |
+| **Curator** | Periodic batch | `tick()`, `crystallize()` |
 
 The Generator extracts nodes from conversation turns. The Reflector reviews and creates cross-session reasoning edges. The Curator applies decay and consolidates patterns. These roles run **in the consumer** — the engine provides graph primitives only.
 
@@ -358,43 +399,53 @@ The Generator extracts nodes from conversation turns. The Reflector reviews and 
 ## Development
 
 ```bash
-cargo build          # Build
-cargo test           # Run tests
-cargo clippy         # Lint
-cargo fmt --check    # Formatting
-cargo doc --open     # Docs
+cargo build                    # Build (default features, no FastEmbed)
+cargo build --features embed   # Build with optional FastEmbed provider
+cargo test                     # Run tests
+cargo clippy -- -D warnings    # Lint (zero warnings required)
+cargo fmt --check              # Formatting
+cargo doc --open               # Docs
+cargo bench                    # Run benchmarks
 ```
 
 ## Status
 
-**v0.2.0** — Cognitive engine complete. All core mechanics wired; query pipeline fully operational.
+**v0.3.0** — Full cognitive engine with debug lifecycle, snapshots, embedding provider, and unified search.
 
 | Layer | Status | Notes |
 |:------|:-------|:------|
 | Graph (Node, Edge, CRUD) | ✅ | Arena-based storage with SoA hot fields |
-| In-memory storage | ✅ | `InMemoryStorage` with adjacency index, ID recycling |
+| In-memory storage | ✅ | `InMemoryStorage` with adjacency index, ID recycling, secondary indexes |
 | Engine API | ✅ | All method signatures finalized |
 | Attraction | ✅ | Wired into `ingest()` — auto-linking with type affinity |
 | Gravity | ✅ | Mass computation wired into `ingest()` and `query()` |
 | Perception | ✅ | Gating wired into `ingest()` — novelty, confidence, budget |
-| Forgetting | ✅ | Lazy decay in `touch()`, batch decay in `tick()` |
-| Spreading activation | ✅ | Priority-queue BFS with hop decay, salience gate, gravity boost |
+| Forgetting | ✅ | Lazy decay in `touch()`, batch decay in `tick()` — Exponential and ACT-R PowerLaw |
+| Spreading activation | ✅ | Priority-queue BFS and Random Walk with Restart |
 | Repulsion | ✅ | Contradicts edges apply damping during query |
 | Identity prior | ✅ | Top-3 identity nodes bias query activation |
 | Scope weighting | ✅ | Project-aware scoring with entity overlap bonus |
 | ContextPackage | ✅ | Structured output: identity/knowledge/memories/tensions |
 | Agent tension | ✅ | Contradiction tension measurement in query results |
 | Multi-resolution content (L0/L1/L2) | ✅ | Token budget controls fragment detail level |
-| Reasoning edge types | ✅ | 12 edge types with directional kappa multipliers |
+| Reasoning edge types | ✅ | 15 edge types with directional kappa multipliers |
 | Embedding persistence | ✅ | Stored on Node, used for similarity operations |
 | Origin attribution | ✅ | agent_id, session_id, project_id, confidence |
-| Non-Associative query modes | ⬚ | TypeFiltered, Neighborhood, Temporal, List — return empty ContextPackage |
-| `merge_candidates()` / `auto_merge()` | ⬚ | Defined; return empty results |
-| `reflect_batch()` | ⬚ | Defined; returns empty report |
-| `search()` unified text + graph | 🔜 | FTS + salience combined retrieval |
-| `crystallize()` post-session consolidation | 🔜 | Pattern detection, ConsolidatedFrom edges |
+| Non-Associative query modes | ✅ | TypeFiltered, Neighborhood, Temporal, List — all implemented |
+| `search()` unified text + graph | ✅ | Text search + vector similarity + spreading activation |
+| `crystallize()` post-session consolidation | ✅ | ConsolidatedFrom edges, salience promotion from sources |
+| `reflect_batch()` cross-agent linking | ✅ | Entity edges via entity tag matching, no LLM calls |
+| Debug lifecycle | ✅ | DebugSession, Hypothesis, Evidence nodes; start/log/reject/confirm/end APIs |
+| `search_rejected_hypotheses()` | ✅ | Case-insensitive search across rejected hypothesis nodes |
+| Clone-based snapshots | ✅ | `snapshot()`, `restore()`, `list_snapshots()` |
+| Bitemporal queries | ✅ | `fact_at()` — valid_from/valid_until filtering |
+| EmbeddingProvider trait | ✅ | Synchronous, Send + Sync; `embed()`, `dimensions()`, `model_name()`, `widen()` |
+| FastEmbedProvider | ✅ | Behind `feature = "embed"`; BAAI/bge-base-en-v1.5, 768 dims |
+| Memory tier control | ✅ | `set_tier()` / `get_tier()` — Core tier protected from decay |
+| Hopfield energy model | ✅ | Pattern-completion scoring behind `EnergyModel::Hopfield` |
+| `merge_candidates()` / `auto_merge()` | ⚠️ | Deprecated since 0.3.0; use `EngineConfig::dedup_threshold` |
 | SQLite storage adapter | 🔜 | Persistent storage with FTS5 support |
-| Benchmarks (cognitive engine) | 🔜 | CRUD benchmarks exist; mechanics benchmarks needed |
+| Social reinforcement scoring | 🔜 | Multi-agent salience bonus for independently observed fragments |
 
 ## References
 
