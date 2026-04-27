@@ -824,6 +824,10 @@ impl<S: StorageAdapter> Engine<S> {
             knowledge.retain(|fragment| self.node_is_valid_at(fragment.node_id, now));
             memories.retain(|fragment| self.node_is_valid_at(fragment.node_id, now));
             identity.retain(|fragment| self.node_is_valid_at(fragment.node_id, now));
+            merged_tensions.retain(|tension| {
+                self.node_is_valid_at(tension.node_a, now)
+                    && self.node_is_valid_at(tension.node_b, now)
+            });
         }
 
         let package = ContextPackage {
@@ -891,7 +895,9 @@ impl<S: StorageAdapter> Engine<S> {
         memories: &mut Vec<crate::query::Fragment>,
     ) {
         match packaging_mode {
-            crate::query::PackagingMode::KnowledgeOnly => {}
+            crate::query::PackagingMode::KnowledgeOnly => {
+                memories.clear();
+            }
             crate::query::PackagingMode::KnowledgeWithProvenance => {
                 self.include_source_memories(knowledge, memories);
             }
