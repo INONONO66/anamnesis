@@ -1,6 +1,6 @@
 //! Node and Origin types for the Anamnesis graph.
 
-use crate::graph::types::{KnowledgeType, NodeId, Timestamp};
+use crate::graph::types::{KnowledgeType, MemoryTier, NodeId, Timestamp};
 use std::collections::{HashMap, VecDeque};
 
 /// Provenance and scope of a knowledge fragment.
@@ -61,6 +61,8 @@ pub struct Node {
     /// Ring buffer of recent access timestamps for power-law decay computation.
     /// Capped at 32 entries — oldest are dropped when full.
     pub access_history: VecDeque<Timestamp>,
+    /// Explicit memory tier override for salience-based tiering.
+    pub tier: MemoryTier,
 
     // Provenance
     /// Who created this node, from which session, and with what confidence.
@@ -133,6 +135,7 @@ mod tests {
             salience: 0.85,
             access_count: 0,
             access_history: VecDeque::new(),
+            tier: MemoryTier::Auto,
             origin: make_origin(),
             entity_tags: vec!["physics".to_string(), "anamnesis".to_string()],
             metadata: HashMap::new(),
@@ -160,6 +163,7 @@ mod tests {
             salience: 1.0,
             access_count: 0,
             access_history: VecDeque::new(),
+            tier: MemoryTier::Auto,
             origin: Origin {
                 agent_id: "agent-1".to_string(),
                 session_id: "session-2".to_string(),

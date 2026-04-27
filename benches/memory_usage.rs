@@ -21,6 +21,7 @@ fn make_node(id: NodeId) -> Node {
         salience: 1.0,
         access_count: 0,
         access_history: VecDeque::new(),
+        tier: anamnesis::graph::MemoryTier::Auto,
         origin: Origin {
             agent_id: "bench-agent".to_string(),
             session_id: "bench-session".to_string(),
@@ -40,6 +41,8 @@ fn make_edge(id: EdgeId, source: NodeId, target: NodeId) -> Edge {
         edge_type: EdgeType::Causal,
         weight: 0.75,
         created_at: Timestamp(1000),
+        valid_from: None,
+        valid_until: None,
         metadata: HashMap::new(),
     }
 }

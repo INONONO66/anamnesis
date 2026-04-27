@@ -16,6 +16,8 @@ pub enum Error {
     Rejected(String),
     /// Invalid configuration value.
     InvalidConfig(String),
+    /// Invalid input value.
+    InvalidInput(String),
     /// Query budget exhausted before completion.
     BudgetExhausted,
 }
@@ -28,6 +30,7 @@ impl fmt::Display for Error {
             Error::StorageError(msg) => write!(f, "storage error: {}", msg),
             Error::Rejected(reason) => write!(f, "observation rejected: {}", reason),
             Error::InvalidConfig(msg) => write!(f, "invalid config: {}", msg),
+            Error::InvalidInput(msg) => write!(f, "invalid input: {}", msg),
             Error::BudgetExhausted => write!(f, "query budget exhausted"),
         }
     }
@@ -47,9 +50,10 @@ mod tests {
             Error::StorageError("disk full".to_string()),
             Error::Rejected("low novelty".to_string()),
             Error::InvalidConfig("max_nodes must be > 0".to_string()),
+            Error::InvalidInput("search requires text or query_embedding".to_string()),
             Error::BudgetExhausted,
         ];
-        assert_eq!(errors.len(), 6);
+        assert_eq!(errors.len(), 7);
     }
 
     #[test]

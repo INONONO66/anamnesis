@@ -1,5 +1,5 @@
 use anamnesis::graph::node::Origin;
-use anamnesis::graph::{KnowledgeType, Node, NodeId, Timestamp};
+use anamnesis::graph::{KnowledgeType, MemoryTier, Node, NodeId, Timestamp};
 use anamnesis::storage::{InMemoryStorage, StorageAdapter};
 use std::collections::{HashMap, VecDeque};
 
@@ -20,6 +20,7 @@ fn insert_node_with_name(s: &mut InMemoryStorage, name: &str) -> NodeId {
         salience: 1.0,
         access_count: 0,
         access_history: VecDeque::new(),
+        tier: MemoryTier::Auto,
         origin: Origin {
             agent_id: "agent-1".to_string(),
             session_id: "session-1".to_string(),

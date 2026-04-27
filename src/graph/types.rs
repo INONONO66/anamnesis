@@ -64,6 +64,23 @@ pub enum KnowledgeType {
     Custom(String),
 }
 
+/// Explicit memory tier override for a node.
+///
+/// When set to anything other than `Auto`, the tier overrides the natural
+/// salience-based tier assignment. `Core` nodes are protected from decay.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub enum MemoryTier {
+    /// No override — tier is determined by salience range (default).
+    #[default]
+    Auto,
+    /// Pinned to core memory — protected from decay.
+    Core,
+    /// Pinned to recall tier — moderate decay.
+    Recall,
+    /// Pinned to archival tier — fast decay.
+    Archival,
+}
+
 /// Edge type — determines propagation multiplier (kappa) during spreading activation.
 ///
 /// Supportive edges propagate activation. Contradicts is inhibitory (applies repulsion).

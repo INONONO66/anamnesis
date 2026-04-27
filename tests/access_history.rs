@@ -1,6 +1,6 @@
 use anamnesis::Node;
 use anamnesis::graph::node::Origin;
-use anamnesis::graph::{KnowledgeType, NodeId, Timestamp};
+use anamnesis::graph::{KnowledgeType, MemoryTier, NodeId, Timestamp};
 use std::collections::{HashMap, VecDeque};
 
 fn make_test_node() -> Node {
@@ -19,6 +19,7 @@ fn make_test_node() -> Node {
         salience: 1.0,
         access_count: 0,
         access_history: VecDeque::new(),
+        tier: MemoryTier::Auto,
         origin: Origin {
             agent_id: "a".to_string(),
             session_id: "s".to_string(),
