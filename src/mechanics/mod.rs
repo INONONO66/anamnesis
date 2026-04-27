@@ -12,5 +12,6 @@ pub mod attraction;
 pub mod forces;
 pub mod forgetting;
 pub mod gravity;
+pub mod hopfield;
 pub mod perception;
 pub mod repulsion;
