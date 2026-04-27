@@ -30,6 +30,8 @@ pub use api::{
     TickReport,
 };
 pub use embedding::EmbeddingProvider;
+#[cfg(feature = "embed")]
+pub use embedding::fastembed::FastEmbedProvider;
 pub use error::Error;
 pub use graph::{Edge, Node, Origin};
 pub use graph::{EdgeId, EdgeType, KnowledgeType, NodeId, Timestamp};
