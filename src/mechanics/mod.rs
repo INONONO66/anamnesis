@@ -9,6 +9,7 @@
 //! - `forgetting`: Exponential decay + reinforcement on access
 
 pub mod attraction;
+pub mod forces;
 pub mod forgetting;
 pub mod gravity;
 pub mod perception;
