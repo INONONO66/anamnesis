@@ -7,6 +7,7 @@ use std::collections::HashMap;
 
 const EMPTY_EDGE_SLICE: &[EdgeId] = &[];
 
+#[derive(Clone)]
 pub struct InMemoryStorage {
     nodes: Vec<Option<Node>>,
     edges: Vec<Option<Edge>>,
