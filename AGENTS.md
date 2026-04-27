@@ -21,12 +21,14 @@ src/
 ├── mechanics/   # Cognitive dynamics: attraction, gravity, perception, forgetting
 ├── query/       # Query engine: spreading activation, subgraph extraction
 ├── storage/     # StorageAdapter trait + implementations
+├── embedding/   # EmbeddingProvider trait + optional FastEmbedProvider
+├── snapshot/    # Clone-based snapshot storage
 └── api/         # Public API surface
 ```
 
 ## CONVENTIONS
 
-- **Zero external dependencies for core** — only std library
+- **Zero external dependencies for core** — only std library; `feature = "embed"` adds optional FastEmbed
 - **Trait-based storage** — `StorageAdapter` trait, swappable implementations
 - **Pure functions for mechanics** — all scoring/decay functions are pure (no side effects)
 - **Builder pattern for configuration** — EngineConfig, QueryConfig
@@ -38,10 +40,11 @@ src/
 ## COMMANDS
 
 ```bash
-cargo build          # Build
-cargo test           # Run tests
-cargo doc --open     # Generate docs
-cargo bench          # Run benchmarks (when added)
+cargo build                    # Build (default features, no FastEmbed)
+cargo build --features embed   # Build with optional FastEmbed provider
+cargo test                     # Run tests
+cargo doc --open               # Generate docs
+cargo bench                    # Run benchmarks
 ```
 
 ## ANTI-PATTERNS
@@ -52,15 +55,15 @@ cargo bench          # Run benchmarks (when added)
 
 ## Core API Design
 
-> Methods marked ⬚ are defined but currently return placeholder results.
-
 ```rust
-/// The Anamnesis cognitive dynamics engine.
+/// The Anamnesis cognitive graph engine.
 ///
 /// Generic over storage backend. Default: InMemoryStorage (arena-based, sub-millisecond access).
-pub struct Engine<S: StorageAdapter = InMemoryStorage> {
+/// Requires `S: Clone` for snapshot support.
+pub struct Engine<S: StorageAdapter + Clone = InMemoryStorage> {
     graph: Graph<S>,
     config: EngineConfig,
+    snapshots: SnapshotStore<S>,
 }
 
 impl Engine<InMemoryStorage> {
@@ -71,39 +74,124 @@ impl Engine<InMemoryStorage> {
     pub fn with_config(config: EngineConfig) -> Self;
 }
 
-impl<S: StorageAdapter> Engine<S> {
+impl<S: StorageAdapter + Clone> Engine<S> {
     /// Create an engine with a custom storage backend.
     pub fn with_storage(config: EngineConfig, storage: S) -> Self;
 
-    /// Ingest a new observation — applies perception gating and attraction auto-linking.
-    /// Returns the IDs of created nodes (typically one).
-    pub fn ingest(&mut self, observation: Observation) -> Result<Vec<NodeId>, Error>;
+    // --- Snapshot ---
 
-    /// Create a link between two nodes.
+    /// Store a clone of the current storage state under a label.
+    pub fn snapshot(&mut self, label: &str) -> SnapshotId;
+
+    /// Restore the graph storage from a previously captured snapshot.
+    pub fn restore(&mut self, id: &SnapshotId) -> Result<(), Error>;
+
+    /// List stored snapshot metadata in insertion order.
+    pub fn list_snapshots(&self) -> Vec<(SnapshotId, String, Timestamp)>;
+
+    // --- Core operations ---
+
+    /// Ingest a new observation — applies perception gating and attraction auto-linking.
+    /// Returns IngestResult::Created (new node) or IngestResult::Reinforced (dedup hit).
+    pub fn ingest(&mut self, observation: Observation) -> Result<IngestResult, Error>;
+
+    /// Crystallize query results into a higher-level knowledge node.
+    /// Creates a synthesis node, links it to sources with ConsolidatedFrom edges,
+    /// and reinforces each source via touch().
+    pub fn crystallize(&mut self, request: CrystallizeRequest) -> Result<CrystallizeResult, Error>;
+
+    /// Create or strengthen a link between two nodes.
     pub fn link(&mut self, from: NodeId, to: NodeId, edge_type: EdgeType, weight: f64) -> Result<EdgeId, Error>;
 
     /// Touch a node — apply lazy decay then reinforce on access.
     /// Ordering invariant: decay (eq 4) BEFORE reinforcement (eq 5).
     pub fn touch(&mut self, node_id: NodeId, now: Timestamp) -> Result<(), Error>;
 
+    /// Set the explicit memory tier for a node (Core tier is protected from decay).
+    pub fn set_tier(&mut self, node_id: NodeId, tier: MemoryTier) -> Result<(), Error>;
+
+    /// Get the current memory tier of a node.
+    pub fn get_tier(&self, node_id: NodeId) -> Result<MemoryTier, Error>;
+
     /// Advance time — apply batch decay (eq 4) to all nodes, returns TickReport.
     pub fn tick(&mut self, now: Timestamp) -> Result<TickReport, Error>;
 
+    // --- Query ---
+
     /// Query the graph — returns structured ContextPackage for LLM consumption.
     /// Associative mode: full spreading activation pipeline (eqs 9-14).
-    /// Other modes (TypeFiltered, Neighborhood, Temporal, List): return empty ContextPackage.
+    /// TypeFiltered, Neighborhood, Temporal, List: retrieve nodes by structural criteria.
     pub fn query(&self, query: &Query, config: &QueryConfig) -> Result<ContextPackage, Error>;
 
-    /// ⬚ Get merge candidates above similarity threshold (currently returns empty).
+    /// Unified search — combines text search, vector similarity, and graph traversal.
+    /// Requires text or query_embedding; returns SearchResult with ContextPackage and trace.
+    pub fn search(&self, input: SearchInput) -> Result<SearchResult, Error>;
+
+    /// Query for facts valid at a specific point in time (bitemporal filtering).
+    pub fn fact_at(&self, query: &Query, as_of: Timestamp) -> Result<ContextPackage, Error>;
+
+    // --- Debug lifecycle ---
+
+    /// Start a debugging session for a problem statement.
+    pub fn start_debug(&mut self, problem: &str, origin: Origin, timestamp: Timestamp) -> Result<NodeId, Error>;
+
+    /// Log a hypothesis inside an existing debugging session.
+    pub fn log_hypothesis(&mut self, session: NodeId, text: &str, origin: Origin, timestamp: Timestamp) -> Result<NodeId, Error>;
+
+    /// Log evidence against an existing hypothesis.
+    pub fn log_evidence(&mut self, hypothesis: NodeId, text: &str, result: EvidenceResult, origin: Origin, timestamp: Timestamp) -> Result<NodeId, Error>;
+
+    /// Mark a hypothesis as rejected with a reason.
+    pub fn reject_hypothesis(&mut self, hypothesis: NodeId, reason: &str, timestamp: Timestamp) -> Result<(), Error>;
+
+    /// Mark a hypothesis as confirmed with a conclusion.
+    pub fn confirm_hypothesis(&mut self, hypothesis: NodeId, conclusion: &str, timestamp: Timestamp) -> Result<(), Error>;
+
+    /// End a debugging session and record its final outcome.
+    pub fn end_debug(&mut self, session: NodeId, outcome: DebugOutcome, timestamp: Timestamp) -> Result<(), Error>;
+
+    /// Search for rejected hypotheses matching a query string (case-insensitive).
+    pub fn search_rejected_hypotheses(&self, query: &str, limit: usize) -> Result<Vec<NodeId>, Error>;
+
+    // --- Cross-agent ---
+
+    /// Cross-agent entity linking after parallel execution round.
+    /// Creates Entity edges between nodes from different agents sharing entity tags.
+    /// No LLM calls — metadata matching only.
+    pub fn reflect_batch(&mut self, sessions: &[SessionSummary]) -> Result<ReflectReport, Error>;
+
+    // --- Deprecated ---
+
+    /// Deprecated since 0.3.0: use EngineConfig::dedup_threshold in ingest() instead.
+    #[deprecated(since = "0.3.0", note = "Dedup gate in ingest() replaces this need. See EngineConfig::dedup_threshold.")]
     pub fn merge_candidates(&self, threshold: f64) -> Result<Vec<MergePair>, Error>;
 
-    /// ⬚ Execute auto-merge with undo log (currently returns empty log).
+    /// Deprecated since 0.3.0: use EngineConfig::dedup_threshold in ingest() instead.
+    #[deprecated(since = "0.3.0", note = "Dedup gate in ingest() replaces this need. See EngineConfig::dedup_threshold.")]
     pub fn auto_merge(&mut self, threshold: f64) -> Result<MergeLog, Error>;
+}
+```
 
-    /// ⬚ Cross-agent entity linking after parallel execution round.
-    /// Creates Entity edges between nodes from different agents sharing entity tags.
-    /// No LLM calls — metadata matching only. Currently returns empty report.
-    pub fn reflect_batch(&mut self, sessions: &[SessionSummary]) -> Result<ReflectReport, Error>;
+## EngineConfig Fields
+
+```rust
+pub struct EngineConfig {
+    /// Maximum number of nodes before perception gate rejects new observations.
+    pub max_nodes: usize,                  // default: 100_000
+    /// Minimum novelty score [0, 1] for an observation to enter the graph.
+    pub novelty_threshold: f64,            // default: 0.30
+    /// Minimum confidence [0, 1] for an observation to enter the graph.
+    pub confidence_threshold: f64,         // default: 0.50
+    /// Similarity threshold above which ingest reinforces an existing node instead of creating one.
+    pub dedup_threshold: f64,              // default: 0.92
+    /// Whether ingest should detect duplicate embeddings and reinforce existing nodes.
+    pub dedup_enabled: bool,               // default: true
+    /// Decay model for salience computation. Exponential (default) or PowerLaw (ACT-R).
+    pub decay_model: DecayModel,           // default: Exponential
+    /// Energy model for final score computation in spreading activation.
+    pub energy_model: EnergyModel,         // default: WeightedSum
+    /// Spreading activation model for query traversal.
+    pub spreading_model: SpreadingModel,   // default: PriorityQueueBfs
 }
 ```
 
@@ -124,9 +212,15 @@ impl<S: StorageAdapter> Engine<S> {
 - ✅ Identity management (agent personas as graph nodes with dynamics)
 - ✅ Episodic preservation (original text + extracted knowledge linked)
 - ✅ Contradiction detection (Contradicts edges surfaced during queries)
-- ✅ Multiple query modes (associative implemented; type-filtered, neighborhood, temporal, list planned)
-- ⬚ Cross-agent entity linking via `reflect_batch()` (placeholder)
-- ⬚ Node consolidation via `merge_candidates()` / `auto_merge()` (placeholder)
+- ✅ All query modes (Associative, TypeFiltered, Neighborhood, Temporal, List)
+- ✅ Unified search (`search()` — text + vector + graph traversal)
+- ✅ Post-session consolidation (`crystallize()` — ConsolidatedFrom edges, salience promotion)
+- ✅ Cross-agent entity linking (`reflect_batch()` — entity tag matching, Entity edges)
+- ✅ Debug lifecycle (DebugSession, Hypothesis, Evidence nodes with typed edges)
+- ✅ Clone-based snapshots (`snapshot()`, `restore()`, `list_snapshots()`)
+- ✅ Bitemporal queries (`fact_at()` — valid_from/valid_until filtering)
+- ✅ Optional embedding provider (`EmbeddingProvider` trait; `FastEmbedProvider` behind `feature = "embed"`)
+- ⚠️ `merge_candidates()` / `auto_merge()` — deprecated; use `EngineConfig::dedup_threshold` instead
 
 ## Key Types
 
@@ -139,9 +233,9 @@ impl<S: StorageAdapter> Engine<S> {
 /// - Memory (Dust): low mass, fast decay
 enum KnowledgeType {
     // Identity (Star — high mass, low/no decay)
-    IdentityCore,    // L0: Immutable core trait, no decay ("I am a code architect")
-    IdentityLearned, // L1: Experience-formed trait, very slow decay ("prefers factory pattern")
-    IdentityState,   // L2: Current state, normal decay ("refactoring auth module")
+    IdentityCore,    // Immutable core trait, no decay ("I am a code architect")
+    IdentityLearned, // Experience-formed trait, very slow decay ("prefers factory pattern")
+    IdentityState,   // Current state, normal decay ("refactoring auth module")
 
     // Knowledge (Planet — medium mass, moderate decay)
     Semantic,        // Extracted fact from conversation or document
@@ -150,6 +244,9 @@ enum KnowledgeType {
     Convention,      // Project rule or convention
     Decision,        // Decision with rationale
     Gotcha,          // Pitfall or warning
+    Hypothesis,      // Debugging hypothesis (inert: lambda=0, floor=1.0)
+    Evidence,        // Evidence logged against a hypothesis (inert: lambda=0, floor=1.0)
+    DebugSession,    // Root node for a debugging session (inert: lambda=0, floor=1.0)
 
     // Memory (Dust — low mass, fast decay)
     Episodic,        // Raw conversation turn or session text
@@ -172,6 +269,9 @@ enum EdgeType {
     Entity,              // Shared entity link across agents. kappa = 0.95
     Supersedes,          // Replaces outdated knowledge. kappa = 1.20 (forward) / 0.40 (backward)
     RejectedAlternative, // Considered and discarded option. kappa = 0.60
+    Supports,            // Evidence supports a hypothesis. kappa = 1.10
+    Refutes,             // Evidence refutes a hypothesis. kappa = 0.30
+    BelongsTo,           // Hypothesis belongs to a debug session. kappa = 0.95
 
     // Inhibitory
     Contradicts,         // Conflicting assertions. Excluded from propagation; applies repulsion.
@@ -196,17 +296,48 @@ struct SessionSummary {
 
 /// Query modes for different retrieval patterns.
 enum Query {
-    Associative { seed: NodeId, budget: usize },             // ✅ full pipeline implemented
-    TypeFiltered { node_type: KnowledgeType, limit: usize }, // ⬚ returns empty
-    Neighborhood { entity: NodeId, depth: usize },            // ⬚ returns empty
-    Temporal { since: Timestamp, node_types: Option<Vec<KnowledgeType>>, limit: usize }, // ⬚ returns empty
-    List { min_salience: f64, limit: usize },                 // ⬚ returns empty
+    Associative { seed: NodeId, budget: usize },             // Full spreading activation pipeline
+    TypeFiltered { node_type: KnowledgeType, limit: usize }, // Nodes of a type, ordered by salience
+    Neighborhood { entity: NodeId, depth: usize },            // k-hop BFS subgraph
+    Temporal { since: Timestamp, node_types: Option<Vec<KnowledgeType>>, limit: usize }, // Recent nodes
+    List { min_salience: f64, limit: usize },                 // All nodes above salience threshold
 }
 ```
 
+## EmbeddingProvider
+
+```rust
+/// Trait for embedding text into vectors.
+///
+/// Implementations must be synchronous and thread-safe (Send + Sync).
+/// The core engine uses f64 embeddings; providers typically return f32.
+/// Use embed_f64() or widen() to convert.
+pub trait EmbeddingProvider: Send + Sync {
+    fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, Error>;
+    fn dimensions(&self) -> usize;
+    fn model_name(&self) -> &str;
+
+    // Default convenience methods
+    fn embed_single(&self, text: &str) -> Result<Vec<f32>, Error>;
+    fn embed_f64(&self, texts: &[&str]) -> Result<Vec<Vec<f64>>, Error>;
+}
+
+/// Convert f32 embedding slice to Vec<f64>.
+pub fn widen(v: &[f32]) -> Vec<f64>;
+```
+
+The optional `FastEmbedProvider` (BAAI/bge-base-en-v1.5, 768 dims) is available behind `feature = "embed"`:
+
+```toml
+[dependencies]
+anamnesis = { version = "0.3", features = ["embed"] }
+```
+
+Note: `FastEmbedProvider::new()` downloads the model on first call (~100-500 MB). This is a runtime side effect, not a core behavior. The default build has zero additional dependencies.
+
 ## StorageAdapter Interface
 
-21 methods across five groups:
+21 required methods across five groups, plus 6 default helper methods:
 
 ```rust
 pub trait StorageAdapter: Send + Sync {
@@ -242,20 +373,23 @@ pub trait StorageAdapter: Send + Sync {
     fn edge_count(&self) -> usize;
     fn all_node_ids(&self) -> Vec<NodeId>;
     fn all_edge_ids(&self) -> Vec<EdgeId>;
+
+    // Default helpers (O(N) scan; override for O(1) index lookup)
+    fn nodes_by_entity_tag(&self, tag: &str) -> Vec<NodeId>;
+    fn nodes_by_type(&self, kt: &KnowledgeType) -> Vec<NodeId>;
+    fn nodes_by_agent(&self, agent_id: &str) -> Vec<NodeId>;
+    fn nodes_by_project(&self, project_id: &str) -> Vec<NodeId>;
+    fn node_ids_descending(&self) -> Vec<NodeId>;
+    fn text_search(&self, query: &str, limit: usize) -> Vec<(NodeId, f64)>;
 }
 ```
 
-Ships with `InMemoryStorage` (arena-based Vec, adjacency index, ID recycling). Implement the trait for SQLite, PostgreSQL, Neo4j, or any other backend.
+Ships with `InMemoryStorage` (arena-based Vec, adjacency index, ID recycling, secondary indexes for entity tags, types, agents, and projects). Implement the trait for SQLite, PostgreSQL, Neo4j, or any other backend.
 
 ## Direction
 
 Planned features for future releases — none of these are implemented yet:
 
-- **Non-Associative query modes** (`TypeFiltered`, `Neighborhood`, `Temporal`, `List`) — currently return empty `ContextPackage`
-- **`search(query: &str, limit: usize) -> Result<Vec<NodeId>, Error>`** — unified text + salience search combining FTS and graph traversal
-- **`crystallize(session_id: &str) -> Result<Vec<NodeId>, Error>`** — post-session consolidation: detect patterns, create `ConsolidatedFrom` edges, promote salience on repeated fragments
-- **`text_search(query: &str) -> Result<Vec<NodeId>, Error>`** on `StorageAdapter` — optional full-text search capability for storage backends that support it (e.g., SQLite FTS5)
-- **`merge_candidates()` / `auto_merge()`** — attraction-based near-duplicate detection and merge with undo log
-- **`reflect_batch()`** — cross-agent entity linking via entity tag matching, creating `Entity` edges between nodes from different agents sharing the same concepts
 - **SQLite storage adapter** — persistent storage with FTS5 support
 - **Social reinforcement scoring** — multi-agent salience bonus when multiple agents independently observe the same fragment
+- **`crystallize(session_id: &str)`** — session-level auto-consolidation (current `crystallize()` is consumer-driven; session-level auto-detection is not yet implemented)

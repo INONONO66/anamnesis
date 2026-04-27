@@ -53,6 +53,12 @@ pub enum KnowledgeType {
     Decision,
     /// Pitfall or warning.
     Gotcha,
+    /// Unverified claim or proposed explanation awaiting evidence.
+    Hypothesis,
+    /// Supporting or refuting observation gathered during investigation.
+    Evidence,
+    /// Debugging session or investigation trace that should remain inert.
+    DebugSession,
 
     // Memory (Dust — low mass, fast decay)
     /// Raw conversation turn or session text.
@@ -107,6 +113,12 @@ pub enum EdgeType {
     Supersedes,
     /// Considered and discarded option. kappa = 0.60
     RejectedAlternative,
+    /// Positive evidential support. kappa = 1.10
+    Supports,
+    /// Refuting evidence. Supportive low-kappa propagation, not inhibitory. kappa = 0.30
+    Refutes,
+    /// Hierarchical or containment relationship. kappa = 0.95
+    BelongsTo,
 
     // Inhibitory
     /// Conflicting assertions. Excluded from propagation; applies repulsion instead.
@@ -132,13 +144,16 @@ impl EdgeType {
             }
             EdgeType::Reason => 1.15,
             EdgeType::ReinforcedBy => 1.10,
+            EdgeType::Supports => 1.10,
             EdgeType::Semantic => 1.00,
             EdgeType::Causal => 1.00,
             EdgeType::ConsolidatedFrom => 1.00,
             EdgeType::ExtractedFrom => 1.00,
             EdgeType::Entity => 0.95,
+            EdgeType::BelongsTo => 0.95,
             EdgeType::Temporal => 0.85,
             EdgeType::RejectedAlternative => 0.60,
+            EdgeType::Refutes => 0.30,
             EdgeType::Contradicts => 0.00,
             EdgeType::Custom(_) => 1.00,
         }
@@ -182,11 +197,14 @@ mod tests {
             KnowledgeType::Convention,
             KnowledgeType::Decision,
             KnowledgeType::Gotcha,
+            KnowledgeType::Hypothesis,
+            KnowledgeType::Evidence,
+            KnowledgeType::DebugSession,
             KnowledgeType::Episodic,
             KnowledgeType::Event,
             KnowledgeType::Custom("my-type".to_string()),
         ];
-        assert_eq!(types.len(), 12);
+        assert_eq!(types.len(), 15);
     }
 
     #[test]
@@ -198,6 +216,9 @@ mod tests {
         assert_eq!(EdgeType::Semantic.kappa(true), 1.00);
         assert_eq!(EdgeType::Temporal.kappa(true), 0.85);
         assert_eq!(EdgeType::RejectedAlternative.kappa(true), 0.60);
+        assert_eq!(EdgeType::Supports.kappa(true), 1.10);
+        assert_eq!(EdgeType::Refutes.kappa(true), 0.30);
+        assert_eq!(EdgeType::BelongsTo.kappa(true), 0.95);
     }
 
     #[test]
@@ -213,9 +234,12 @@ mod tests {
             EdgeType::Entity,
             EdgeType::Supersedes,
             EdgeType::RejectedAlternative,
+            EdgeType::Supports,
+            EdgeType::Refutes,
+            EdgeType::BelongsTo,
             EdgeType::Contradicts,
             EdgeType::Custom("my-edge".to_string()),
         ];
-        assert_eq!(types.len(), 12);
+        assert_eq!(types.len(), 15);
     }
 }

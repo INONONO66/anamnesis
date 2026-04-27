@@ -23,6 +23,7 @@ pub fn lambda_for_type(kt: &KnowledgeType) -> f64 {
         KnowledgeType::Episodic => 0.050,
         KnowledgeType::Event => 0.030,
         KnowledgeType::Gotcha => 0.020,
+        KnowledgeType::Hypothesis | KnowledgeType::Evidence | KnowledgeType::DebugSession => 0.0,
         KnowledgeType::Custom(_) => 0.020,
     }
 }
@@ -41,6 +42,7 @@ pub fn floor_for_type(kt: &KnowledgeType) -> f64 {
         KnowledgeType::Episodic => 0.00,
         KnowledgeType::Event => 0.02,
         KnowledgeType::Gotcha => 0.02,
+        KnowledgeType::Hypothesis | KnowledgeType::Evidence | KnowledgeType::DebugSession => 1.0,
         KnowledgeType::Custom(_) => 0.02,
     }
 }

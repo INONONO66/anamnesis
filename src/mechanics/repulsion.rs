@@ -19,6 +19,7 @@ pub fn rigidity(kt: &KnowledgeType) -> f64 {
         KnowledgeType::IdentityLearned | KnowledgeType::IdentityState => 0.50,
         KnowledgeType::Semantic | KnowledgeType::Procedural | KnowledgeType::Entity => 0.25,
         KnowledgeType::Gotcha => 0.25,
+        KnowledgeType::Hypothesis | KnowledgeType::Evidence | KnowledgeType::DebugSession => 0.10,
         KnowledgeType::Episodic | KnowledgeType::Event => 0.10,
         KnowledgeType::Custom(_) => 0.25,
     }

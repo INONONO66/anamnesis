@@ -15,18 +15,23 @@
 //! ```
 
 pub mod api;
+pub mod embedding;
 pub mod error;
 pub mod graph;
 pub mod mechanics;
 pub mod query;
+pub mod snapshot;
 pub mod storage;
 
 // Core re-exports
 pub use api::{
-    CrystallizeRequest, CrystallizeResult, DecayModel, EnergyModel, Engine, EngineConfig,
-    IngestResult, MergeLog, MergePair, Observation, ReflectReport, SessionSummary, SpreadingModel,
-    TickReport,
+    CrystallizeRequest, CrystallizeResult, DebugOutcome, DecayModel, EnergyModel, Engine,
+    EngineConfig, EvidenceResult, IngestResult, MergeLog, MergePair, Observation, ReflectReport,
+    SessionSummary, SpreadingModel, TickReport,
 };
+pub use embedding::EmbeddingProvider;
+#[cfg(feature = "embed")]
+pub use embedding::fastembed::FastEmbedProvider;
 pub use error::Error;
 pub use graph::{Edge, Node, Origin};
 pub use graph::{EdgeId, EdgeType, KnowledgeType, NodeId, Timestamp};
@@ -34,4 +39,5 @@ pub use query::{
     ContextPackage, Fragment, PackagingMode, Query, QueryConfig, SearchInput, SearchPlan,
     SearchResult, SearchTrace, Tension, TokenBudget, decompose_query,
 };
+pub use snapshot::{InMemorySnapshot, SnapshotBackend, SnapshotEntry, SnapshotId, SnapshotStore};
 pub use storage::{InMemoryStorage, StorageAdapter};

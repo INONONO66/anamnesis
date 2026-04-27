@@ -20,6 +20,7 @@ pub fn mass_prior(kt: &KnowledgeType) -> f64 {
         KnowledgeType::Semantic | KnowledgeType::Procedural => 0.50,
         KnowledgeType::Entity => 0.50,
         KnowledgeType::Gotcha => 0.50,
+        KnowledgeType::Hypothesis | KnowledgeType::Evidence | KnowledgeType::DebugSession => 0.10,
         KnowledgeType::Episodic => 0.20,
         KnowledgeType::Event => 0.30,
         KnowledgeType::Custom(_) => 0.50,
