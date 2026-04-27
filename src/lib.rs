@@ -23,8 +23,9 @@ pub mod storage;
 
 // Core re-exports
 pub use api::{
-    DecayModel, EnergyModel, Engine, EngineConfig, IngestResult, MergeLog, MergePair, Observation,
-    ReflectReport, SessionSummary, SpreadingModel, TickReport,
+    CrystallizeRequest, CrystallizeResult, DecayModel, EnergyModel, Engine, EngineConfig,
+    IngestResult, MergeLog, MergePair, Observation, ReflectReport, SessionSummary, SpreadingModel,
+    TickReport,
 };
 pub use error::Error;
 pub use graph::{Edge, Node, Origin};

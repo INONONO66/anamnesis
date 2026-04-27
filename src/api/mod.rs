@@ -304,6 +304,53 @@ pub struct Observation {
     pub timestamp: Timestamp,
 }
 
+/// Request to crystallize query results into a higher-level knowledge node.
+///
+/// The consumer supplies synthesized content and source provenance; the engine
+/// computes initial salience, creates provenance edges, and reinforces sources.
+#[derive(Debug, Clone)]
+pub struct CrystallizeRequest {
+    /// L0: One-liner label for the synthesis.
+    pub name: String,
+    /// L1: Optional structural overview.
+    pub summary: Option<String>,
+    /// L2: Full synthesis content.
+    pub content: String,
+    /// Embedding vector for deduplication and attraction.
+    pub embedding: Option<Vec<f64>>,
+    /// Source fragment node IDs used to create this synthesis.
+    pub source_ids: Vec<NodeId>,
+    /// Optional source relevance scores aligned with `source_ids`.
+    pub source_relevances: Option<Vec<f64>>,
+    /// Knowledge type for the crystallized node.
+    pub node_type: KnowledgeType,
+    /// Confidence in the synthesis [0, 1].
+    pub confidence: f64,
+    /// Provenance of the synthesis.
+    pub origin: Origin,
+    /// Entity tags for future linking.
+    pub entity_tags: Vec<String>,
+    /// Timestamp of crystallization.
+    pub timestamp: Timestamp,
+}
+
+/// Result of a crystallization operation.
+#[derive(Debug, Clone)]
+pub struct CrystallizeResult {
+    /// The newly created synthesis node.
+    pub node_id: NodeId,
+    /// `ConsolidatedFrom` edges created from the crystal to each source.
+    pub consolidation_edges: Vec<EdgeId>,
+    /// Maximum duplicate similarity observed against existing crystallized nodes.
+    pub dedup_score: f64,
+    /// Attraction edges created from the crystal to similar non-source nodes.
+    pub attraction_edges: Vec<EdgeId>,
+    /// Number of source nodes reinforced via `touch()`.
+    pub nodes_reinforced: usize,
+    /// Initial salience assigned to the crystal.
+    pub initial_salience: f64,
+}
+
 /// Report returned by Engine::tick().
 #[derive(Debug, Clone, Default)]
 pub struct TickReport {
@@ -419,6 +466,44 @@ pub fn top_n_by_score(scores: &[(NodeId, f64)], n: usize) -> Vec<(NodeId, f64)> 
         .collect();
     result.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
     result
+}
+
+fn clamp_unit_finite(value: f64) -> f64 {
+    if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+fn positive_edge_weight(value: f64) -> f64 {
+    if value.is_finite() {
+        value.clamp(0.1, 1.0)
+    } else {
+        0.1
+    }
+}
+
+fn crystallized_salience(
+    source_saliences: &[f64],
+    relevance_weights: &[f64],
+    confidence: f64,
+) -> f64 {
+    let weight_sum: f64 = relevance_weights.iter().sum();
+    let source_average = if weight_sum > f64::EPSILON {
+        source_saliences
+            .iter()
+            .zip(relevance_weights.iter())
+            .map(|(salience, relevance)| salience * relevance)
+            .sum::<f64>()
+            / weight_sum
+    } else if source_saliences.is_empty() {
+        0.0
+    } else {
+        source_saliences.iter().sum::<f64>() / source_saliences.len() as f64
+    };
+
+    (0.60 * source_average + 0.25 * confidence + 0.15 * 0.10).clamp(0.0, 1.0)
 }
 
 fn merge_highest_relevance(
@@ -673,6 +758,259 @@ impl<S: StorageAdapter> Engine<S> {
         }
 
         Ok(IngestResult::Created(vec![id]))
+    }
+
+    /// Crystallize query results into a higher-level knowledge node.
+    ///
+    /// Creates a synthesis node, links it to its sources with `ConsolidatedFrom`
+    /// edges, and reinforces each source using the same `touch()` ordering as
+    /// ordinary access.
+    pub fn crystallize(&mut self, request: CrystallizeRequest) -> Result<CrystallizeResult, Error> {
+        use crate::mechanics::attraction::{
+            attraction_score, cosine_similarity, should_create_edge, strengthen_edge, tau_type,
+        };
+        use crate::mechanics::gravity::compute_mass;
+
+        if request.source_ids.len() < 2 {
+            return Err(Error::InvalidInput(
+                "crystallize requires at least 2 source IDs".to_string(),
+            ));
+        }
+
+        let relevance_weights: Vec<f64> = match &request.source_relevances {
+            Some(relevances) => {
+                if relevances.len() != request.source_ids.len() {
+                    return Err(Error::InvalidInput(
+                        "source_relevances length must match source_ids length".to_string(),
+                    ));
+                }
+                relevances
+                    .iter()
+                    .map(|value| clamp_unit_finite(*value))
+                    .collect()
+            }
+            None => vec![1.0; request.source_ids.len()],
+        };
+        let has_source_relevances = request.source_relevances.is_some();
+
+        let source_ids = request.source_ids.clone();
+        let source_set: HashSet<NodeId> = source_ids.iter().copied().collect();
+        let mut source_saliences = Vec::with_capacity(source_ids.len());
+
+        for source_id in &source_ids {
+            let _ = self.graph.get_node(*source_id)?;
+            let salience = self.graph.storage().get_salience(*source_id)?;
+            source_saliences.push(clamp_unit_finite(salience));
+        }
+
+        let mut dedup_score = 0.0_f64;
+        if let Some(ref crystal_embedding) = request.embedding {
+            let storage = self.graph.storage();
+            for node_id in storage.all_node_ids() {
+                let is_crystallized = storage.edges_from(node_id).iter().any(|edge_id| {
+                    storage
+                        .get_edge(*edge_id)
+                        .is_ok_and(|edge| edge.edge_type == EdgeType::ConsolidatedFrom)
+                });
+                if !is_crystallized {
+                    continue;
+                }
+
+                let Some(existing_embedding) = storage
+                    .get_node(node_id)
+                    .ok()
+                    .and_then(|node| node.embedding.as_ref())
+                else {
+                    continue;
+                };
+
+                let similarity = cosine_similarity(crystal_embedding, existing_embedding);
+                dedup_score = dedup_score.max(similarity);
+                if similarity > 0.92 {
+                    return Err(Error::Rejected(format!(
+                        "duplicate crystallization: node {} similarity {:.6}",
+                        node_id.0, similarity
+                    )));
+                }
+            }
+        }
+
+        let confidence = clamp_unit_finite(request.confidence);
+        let initial_salience =
+            crystallized_salience(&source_saliences, &relevance_weights, confidence);
+
+        let id = self.graph.next_node_id();
+        let now = request.timestamp;
+        let crystal_embedding = request.embedding.clone();
+        let crystal_type = request.node_type.clone();
+        let crystal_tags = request.entity_tags.clone();
+
+        let node = Node {
+            id,
+            node_type: request.node_type,
+            name: request.name,
+            summary: request.summary,
+            content: request.content,
+            embedding: request.embedding,
+            created_at: now,
+            updated_at: now,
+            accessed_at: now,
+            valid_from: None,
+            valid_until: None,
+            salience: initial_salience,
+            access_count: 0,
+            access_history: VecDeque::new(),
+            tier: crate::graph::MemoryTier::Auto,
+            origin: request.origin,
+            entity_tags: request.entity_tags,
+            metadata: HashMap::new(),
+        };
+
+        self.graph.add_node(node)?;
+
+        let mut consolidation_edges = Vec::with_capacity(source_ids.len());
+        for index in 0..source_ids.len() {
+            let source_id = source_ids[index];
+            let source_salience = source_saliences[index];
+            let relevance = relevance_weights[index];
+            let edge_id = self.graph.next_edge_id();
+            let weight = if has_source_relevances {
+                positive_edge_weight(relevance)
+            } else {
+                positive_edge_weight(source_salience)
+            };
+            let edge = Edge {
+                id: edge_id,
+                source: id,
+                target: source_id,
+                edge_type: EdgeType::ConsolidatedFrom,
+                weight,
+                created_at: now,
+                valid_from: None,
+                valid_until: None,
+                metadata: HashMap::new(),
+            };
+            self.graph.add_edge(edge)?;
+            consolidation_edges.push(edge_id);
+        }
+
+        let mut attraction_edges = Vec::new();
+        if let Some(ref embedding) = crystal_embedding {
+            let mut candidate_set = HashSet::new();
+            for node_id in self
+                .graph
+                .storage()
+                .node_ids_descending()
+                .into_iter()
+                .take(256)
+            {
+                if node_id != id && !source_set.contains(&node_id) {
+                    candidate_set.insert(node_id);
+                }
+            }
+
+            for tag in &crystal_tags {
+                for node_id in self.graph.storage().nodes_by_entity_tag(tag) {
+                    if node_id != id && !source_set.contains(&node_id) {
+                        candidate_set.insert(node_id);
+                    }
+                }
+            }
+
+            let mut scored = Vec::new();
+            for candidate_id in candidate_set {
+                let candidate = match self.graph.storage().get_node(candidate_id) {
+                    Ok(node) => node,
+                    Err(_) => continue,
+                };
+
+                let Some(ref candidate_embedding) = candidate.embedding else {
+                    continue;
+                };
+
+                let similarity = cosine_similarity(embedding, candidate_embedding);
+                if similarity == 0.0 {
+                    continue;
+                }
+
+                let tau = tau_type(&crystal_type, &candidate.node_type);
+                let candidate_salience = self
+                    .graph
+                    .storage()
+                    .get_salience(candidate_id)
+                    .unwrap_or(0.0);
+                let candidate_mass = compute_mass(
+                    clamp_unit_finite(candidate_salience),
+                    candidate.access_count,
+                    &candidate.node_type,
+                );
+                let score = attraction_score(similarity, tau, candidate_mass);
+
+                if should_create_edge(score, &crystal_type, &candidate.node_type) {
+                    scored.push((candidate_id, score));
+                }
+            }
+
+            for (candidate_id, score) in top_n_by_score(&scored, 4) {
+                let existing_edge = self
+                    .graph
+                    .edges_from(id)
+                    .iter()
+                    .find_map(|&edge_id| {
+                        self.graph
+                            .get_edge(edge_id)
+                            .ok()
+                            .filter(|edge| edge.target == candidate_id)
+                    })
+                    .or_else(|| {
+                        self.graph
+                            .edges_from(candidate_id)
+                            .iter()
+                            .find_map(|&edge_id| {
+                                self.graph
+                                    .get_edge(edge_id)
+                                    .ok()
+                                    .filter(|edge| edge.target == id)
+                            })
+                    });
+
+                if let Some(existing) = existing_edge {
+                    let new_weight = strengthen_edge(existing.weight, score);
+                    let edge_id = existing.id;
+                    if let Ok(edge) = self.graph.get_edge_mut(edge_id) {
+                        edge.weight = new_weight;
+                    }
+                } else {
+                    let edge_id = self.graph.next_edge_id();
+                    let edge = Edge {
+                        id: edge_id,
+                        source: id,
+                        target: candidate_id,
+                        edge_type: EdgeType::Semantic,
+                        weight: clamp_unit_finite(score),
+                        created_at: now,
+                        valid_from: None,
+                        valid_until: None,
+                        metadata: HashMap::new(),
+                    };
+                    self.graph.add_edge(edge)?;
+                    attraction_edges.push(edge_id);
+                }
+            }
+        }
+
+        for source_id in &source_ids {
+            self.touch(*source_id, now)?;
+        }
+
+        Ok(CrystallizeResult {
+            node_id: id,
+            consolidation_edges,
+            dedup_score,
+            attraction_edges,
+            nodes_reinforced: source_ids.len(),
+            initial_salience,
+        })
     }
 
     /// Create or strengthen a link between two nodes.
