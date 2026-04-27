@@ -6,6 +6,7 @@ pub mod decomposition;
 pub mod identity;
 pub mod packaging;
 pub mod rerank;
+pub mod rwr;
 pub mod scoring;
 pub mod types;
 
@@ -14,6 +15,7 @@ pub use assembly::{ScoredNode, assemble_context_package, compute_agent_tension, 
 pub use decomposition::decompose_query;
 pub use identity::compute_identity_prior;
 pub use packaging::decide_packaging;
+pub use rwr::random_walk_restart;
 pub use scoring::{all_forces, compute_with_forces, final_score, scope_weight};
 pub use types::{
     ContextPackage, Fragment, PackagingMode, Query, QueryConfig, SearchInput, SearchPlan,
