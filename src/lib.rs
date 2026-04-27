@@ -15,6 +15,7 @@
 //! ```
 
 pub mod api;
+pub mod embedding;
 pub mod error;
 pub mod graph;
 pub mod mechanics;
@@ -27,6 +28,7 @@ pub use api::{
     IngestResult, MergeLog, MergePair, Observation, ReflectReport, SessionSummary, SpreadingModel,
     TickReport,
 };
+pub use embedding::EmbeddingProvider;
 pub use error::Error;
 pub use graph::{Edge, Node, Origin};
 pub use graph::{EdgeId, EdgeType, KnowledgeType, NodeId, Timestamp};
