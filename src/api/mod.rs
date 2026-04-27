@@ -794,7 +794,7 @@ impl<S: StorageAdapter> Engine<S> {
 
         let mut knowledge: Vec<_> = merged_knowledge.into_values().collect();
         let mut memories: Vec<_> = merged_memories.into_values().collect();
-        let identity: Vec<_> = merged_identity.into_values().collect();
+        let mut identity: Vec<_> = merged_identity.into_values().collect();
 
         knowledge.sort_by(|a, b| {
             b.relevance
@@ -811,6 +811,20 @@ impl<S: StorageAdapter> Engine<S> {
         memories.truncate(input.limit);
 
         let packaging_mode = crate::query::decide_packaging(&merged_tensions, &plan, &input.text);
+
+        self.apply_packaging_mode(
+            packaging_mode.clone(),
+            &mut identity,
+            &mut knowledge,
+            &mut memories,
+        );
+
+        if input.now.0 > 0 {
+            let now = input.now;
+            knowledge.retain(|fragment| self.node_is_valid_at(fragment.node_id, now));
+            memories.retain(|fragment| self.node_is_valid_at(fragment.node_id, now));
+            identity.retain(|fragment| self.node_is_valid_at(fragment.node_id, now));
+        }
 
         let package = ContextPackage {
             identity,
@@ -867,6 +881,102 @@ impl<S: StorageAdapter> Engine<S> {
                 .is_none_or(|valid_until| valid_until > as_of);
             from_ok && until_ok
         })
+    }
+
+    fn apply_packaging_mode(
+        &self,
+        packaging_mode: crate::query::PackagingMode,
+        identity: &mut [crate::query::Fragment],
+        knowledge: &mut [crate::query::Fragment],
+        memories: &mut Vec<crate::query::Fragment>,
+    ) {
+        match packaging_mode {
+            crate::query::PackagingMode::KnowledgeOnly => {}
+            crate::query::PackagingMode::KnowledgeWithProvenance => {
+                self.include_source_memories(knowledge, memories);
+            }
+            crate::query::PackagingMode::PersonaWeighted => {
+                identity.sort_by(|a, b| {
+                    b.relevance
+                        .partial_cmp(&a.relevance)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| a.node_id.cmp(&b.node_id))
+                });
+            }
+            crate::query::PackagingMode::Timeline => {
+                self.sort_fragments_by_created_at(identity);
+                self.sort_fragments_by_created_at(knowledge);
+                self.sort_fragments_by_created_at(memories);
+            }
+        }
+    }
+
+    fn include_source_memories(
+        &self,
+        knowledge: &[crate::query::Fragment],
+        memories: &mut Vec<crate::query::Fragment>,
+    ) {
+        let mut existing: HashSet<NodeId> =
+            memories.iter().map(|fragment| fragment.node_id).collect();
+
+        for fragment in knowledge {
+            for source_fragment in self.source_memory_fragments(fragment) {
+                if existing.insert(source_fragment.node_id) {
+                    memories.push(source_fragment);
+                }
+            }
+        }
+    }
+
+    fn source_memory_fragments(
+        &self,
+        fragment: &crate::query::Fragment,
+    ) -> Vec<crate::query::Fragment> {
+        let storage = self.graph.storage();
+        storage
+            .edges_from(fragment.node_id)
+            .iter()
+            .filter_map(|edge_id| storage.get_edge(*edge_id).ok())
+            .filter(|edge| edge.edge_type == EdgeType::ExtractedFrom)
+            .filter_map(|edge| {
+                let node = storage.get_node(edge.target).ok()?;
+                if !matches!(
+                    node.node_type,
+                    KnowledgeType::Episodic | KnowledgeType::Event
+                ) {
+                    return None;
+                }
+                Some(crate::query::Fragment {
+                    node_id: edge.target,
+                    name: node.name.clone(),
+                    summary: node.summary.clone(),
+                    content: Some(node.content.clone()),
+                    node_type: node.node_type.clone(),
+                    relevance: (fragment.relevance * edge.weight).clamp(0.0, 1.0),
+                    origin: node.origin.clone(),
+                    scope: fragment.scope.clone(),
+                })
+            })
+            .collect()
+    }
+
+    fn sort_fragments_by_created_at(&self, fragments: &mut [crate::query::Fragment]) {
+        fragments.sort_by(|a, b| {
+            let a_created_at = self
+                .graph
+                .get_node(a.node_id)
+                .map(|node| node.created_at)
+                .unwrap_or(Timestamp(u64::MAX));
+            let b_created_at = self
+                .graph
+                .get_node(b.node_id)
+                .map(|node| node.created_at)
+                .unwrap_or(Timestamp(u64::MAX));
+
+            a_created_at
+                .cmp(&b_created_at)
+                .then_with(|| a.node_id.cmp(&b.node_id))
+        });
     }
 
     fn query_type_filtered(

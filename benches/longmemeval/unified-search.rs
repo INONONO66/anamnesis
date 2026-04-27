@@ -29,7 +29,6 @@ use anamnesis::query::SearchInput;
 struct Args {
     output: String,
     limit: usize,
-    #[allow(dead_code)]
     judge: String,
     decay: String,
 }
@@ -206,6 +205,12 @@ fn main() {
         _ => mock_questions(),
     };
 
+    if args.judge != "mock" {
+        eprintln!(
+            "Warning: only 'mock' judge is supported in Rust benchmark, got '{}'",
+            args.judge
+        );
+    }
     let judge = MockJudge;
     let mut engine = make_engine(&args.decay);
 
