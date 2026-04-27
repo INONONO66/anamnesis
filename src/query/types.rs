@@ -184,7 +184,10 @@ pub struct ContextPackage {
 }
 
 impl ContextPackage {
-    /// Create an empty ContextPackage (placeholder for unimplemented query).
+    /// Create an empty ContextPackage with no fragments or tensions.
+    ///
+    /// Used by non-Associative query modes (TypeFiltered, Neighborhood, Temporal, List)
+    /// which currently return empty results, and by callers with no assembled fragments.
     pub fn empty() -> Self {
         ContextPackage {
             identity: vec![],

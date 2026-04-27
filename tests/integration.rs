@@ -84,11 +84,13 @@ fn engine_full_lifecycle() {
         "Associative query should return results"
     );
 
-    // 6. Merge candidates (placeholder)
+    // 6. Merge candidates (deprecated)
+    #[allow(deprecated)]
     let candidates = engine.merge_candidates(0.9).unwrap();
     assert!(candidates.is_empty());
 
-    // 7. Auto merge (placeholder)
+    // 7. Auto merge (deprecated)
+    #[allow(deprecated)]
     let log = engine.auto_merge(0.9).unwrap();
     assert_eq!(log.merges_performed, 0);
 

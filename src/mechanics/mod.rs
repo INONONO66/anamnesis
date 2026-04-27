@@ -1,6 +1,5 @@
 //! Cognitive dynamics — pure scoring and propagation functions.
 //!
-//! All mechanics will be implemented in Phase 2.
 //! Each submodule contains pure functions with no side effects.
 //!
 //! - `attraction`: Cosine similarity, merge candidate detection
