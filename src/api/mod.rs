@@ -826,7 +826,7 @@ impl<S: StorageAdapter> Engine<S> {
 
                 let similarity = cosine_similarity(crystal_embedding, existing_embedding);
                 dedup_score = dedup_score.max(similarity);
-                if similarity > 0.92 {
+                if similarity > self.config.dedup_threshold {
                     return Err(Error::Rejected(format!(
                         "duplicate crystallization: node {} similarity {:.6}",
                         node_id.0, similarity
