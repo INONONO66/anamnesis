@@ -101,6 +101,8 @@ All types are graph nodes. All receive the same cognitive dynamics: attraction c
 
 **The consumer (e.g., an orchestration layer) is responsible for extraction.** Anamnesis does not call LLMs. But Anamnesis must provide a graph structure rich enough to represent all these knowledge types naturally.
 
+Universal, domain-scoped, and project-scoped knowledge live in the same graph. `Origin.project_id = Some(...)` currently acts as a stable scope path, such as `work/company-a`, `personal/daily-life`, or `personal-projects/anamnesis`; `Origin.project_id = None` marks universal knowledge. Local memories can move upward only through additive crystallization: a new abstract node is created at the broader scope and linked back to scoped evidence with `ConsolidatedFrom` edges. The original memories remain intact so the broader principle can still be audited and contradicted.
+
 ### 8. Episodic Preservation — Original Text as Source of Truth
 
 When the consumer extracts facts from a conversation, the original conversation turn must also be stored as an episodic node. Extracted knowledge links back via `EXTRACTED_FROM` edges:
@@ -118,6 +120,20 @@ This enables:
 - **Context reconstruction**: When a fact is retrieved, its source episode provides full context
 
 Without episodic preservation, extracted facts become orphans — no way to verify or contextualize them.
+
+### 8.5 Trigger Indexes Are Not Memory
+
+Keyword search, BM25-style full-text search, entity tags, temporal filters, and optional embeddings are access paths into the graph. They answer “where should recall start?” They do not answer “what does the agent remember?”
+
+The memory is the graph: fragments, typed edges, salience, origin, validity windows, and identity priors. Once a trigger finds a seed, spreading activation reconstructs the surrounding context: who produced it, when it was true, which decisions it supports, what it contradicts, and why it matters.
+
+This preserves the core boundary:
+
+```text
+trigger indexes -> candidate seeds -> graph recall -> contextual package
+```
+
+Changing an embedding model, tokenizer, or storage backend should rebuild indexes, not rewrite memory.
 
 ### 9. Identity as Graph Nodes — The Multi-Persona Brain
 
@@ -367,23 +383,23 @@ All three features are **design-level** — they describe future capabilities to
 
 ## Direction
 
-These are planned features for future releases — none are implemented yet.
+These directions describe the ongoing shape of the engine. Some are implemented; others remain design targets.
 
-### Unified search()
+### Unified search() ✅
 
-Today the consumer must choose a query mode (Associative, TypeFiltered, etc.) and seed a node ID. The planned `search(query: &str, limit: usize)` method accepts a text query and decides strategy internally: full-text match → seed node(s) → spreading activation. One call, engine decides. Reduces consumer complexity and handles cases where the right seed node isn't known in advance.
+The `search()` entry point accepts text, optional embeddings, scope filters, and a limit. Its role is trigger-to-graph recall: lexical and semantic cues find seed node(s), then spreading activation reconstructs context. The next evolution is to preserve raw candidates and per-source ranks before packaging.
 
 ### 3-Equal Structure: Session / Knowledge / Persona
 
 Sessions, knowledge fragments, and agent personas are currently treated differently in practice. The goal is to make them **equal first-class objects** — same storage, same dynamics, same query interface. A session is just a node with children. A persona is a cluster of identity nodes. The graph topology encodes the relationships; the engine doesn't need special cases.
 
-### Ingest Dedup → Touch
+### Ingest Dedup → Touch ✅
 
-Currently, ingesting a near-duplicate observation creates a new node and the duplicate pair accumulates. The planned behavior: when `ingest()` detects a sufficiently similar existing node (via attraction scoring), it calls `touch()` on the existing node and creates a session link rather than inserting a duplicate. The fragment is preserved; the salience of the existing knowledge is reinforced. Deduplication becomes automatic without LLM comparison.
+When `ingest()` detects a sufficiently similar existing node, it reinforces the existing node rather than blindly inserting a duplicate. The fragment can still be preserved through source links, while salience reflects repeated observation.
 
-### crystallize()
+### crystallize() ✅
 
-After a session, the consumer can call `crystallize(session_id)` to consolidate patterns. The engine scans the session's nodes, detects repeated fragments (by entity overlap and embedding similarity), creates `ConsolidatedFrom` edges, and promotes salience on the higher-level semantic node. This automates what a manual knowledge base requires an LLM to do explicitly — filing session observations into longer-term knowledge. Query results from one session can be re-ingested as higher-level knowledge, compounding over time.
+The consumer can call `crystallize()` with synthesized content and source node IDs. The engine creates a higher-level node, links it to evidence with `ConsolidatedFrom` edges, reinforces the sources, and lets the new node participate in all graph physics. This is how project-scoped evidence can become broader knowledge without deleting the evidence that justified it.
 
 ---
 

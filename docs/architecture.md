@@ -1,10 +1,10 @@
 # Architecture Overview
 
-> **Implementation status:** v0.2.0 — Cognitive engine operational. All core mechanics wired; Associative query pipeline fully implemented. See [Implementation Status](#implementation-status) for method-level detail.
+> **Implementation status:** v0.3.0 — Cognitive engine operational. Core mechanics, scoped graph recall, unified search, crystallization, snapshots, debug lifecycle, and bitemporal queries are implemented. See [Implementation Status](#implementation-status) for method-level detail.
 
 ## High-Level Design
 
-Anamnesis is a cognitive dynamics engine that models knowledge as a directed graph with cognitive dynamics. The architecture consists of five main layers:
+Anamnesis is a cognitive dynamics engine that models knowledge as a directed graph with cognitive dynamics. The architecture consists of six main layers:
 
 ### 1. Graph Layer (`src/graph/`)
 
@@ -64,6 +64,12 @@ Implements cognitive dynamics as pure scoring and propagation functions (no side
 
 Implements graph traversal and structured output assembly:
 
+- **Trigger-based Search** ✅: Text, keyword, and optional vector similarity locate candidate seed nodes
+  - Trigger indexes are access paths, not memory stores
+  - `StorageAdapter::text_search()` provides the lexical seam; richer backends may override it with BM25/FTS
+  - `SearchInput::query_embedding` provides semantic cues when the consumer supplies an embedding
+  - Candidate seeds enter graph recall through spreading activation
+
 - **Spreading Activation** ✅: Priority-queue BFS from initially activated nodes
   - Activation spreads through edges with per-hop decay δ, salience gate ψ(s), gravity boost
   - Budget-constrained, cycle-safe (visited set), max-hops limit
@@ -74,9 +80,9 @@ Implements graph traversal and structured output assembly:
   - Resolution (L0/L1/L2) assigned per token budget; top-3 knowledge fragments upgraded to L2 if budget allows
   - Agent tension computed via eq 14
 
-- **Non-Associative modes** 🔜: TypeFiltered, Neighborhood, Temporal, List — defined in `Query` enum, return `ContextPackage::empty()`
+- **Non-Associative modes** ✅: TypeFiltered, Neighborhood, Temporal, List — structural retrieval modes for typed, local, time-bounded, and salience-filtered access
 
-### 4. Storage Layer (`src/storage/`)
+### 4. Storage and Index Layer (`src/storage/`)
 
 Abstracts the storage backend behind a trait:
 
@@ -95,9 +101,28 @@ Abstracts the storage backend behind a trait:
   - ID recycling: `free_node_ids: Vec<NodeId>`, `free_edge_ids: Vec<EdgeId>` stacks
   - SoA mutation invariant: `get_node_mut()` does not update SoA arrays; callers must use `set_salience()` / `set_accessed_at()` for hot fields
 
+- **Trigger indexes** ✅/🔜: Rebuildable projections from graph nodes to candidate `NodeId`s
+  - Text/keyword search returns `(NodeId, score)` and never becomes the source of truth
+  - Embeddings stored on nodes are semantic cues, not standalone memories
+  - BM25, FTS, ANN, or other optimized indexes belong in storage adapters or optional features
+  - Every index hit must resolve back to graph nodes and edges before packaging
+
 - **Future Implementations**: SQLite, PostgreSQL adapters (implement `StorageAdapter` trait)
 
-### 5. API Layer (`src/api/`)
+### 5. Cognitive Physics Layer (`src/mechanics/` + query scoring)
+
+The graph behaves like a memory field rather than a passive record store:
+
+- **Attraction** links similar or co-mentioned fragments so future cues can cross between them.
+- **Gravity** gives high-salience, high-centrality, high-prior nodes more pull during ingestion and recall.
+- **Forgetting** decays unused salience while preserving the node for precise reactivation.
+- **Reinforcement** via `touch()` revives accessed nodes after applying lazy decay.
+- **Spreading activation** reconstructs context from a seed through typed edges.
+- **Repulsion** damps contradictory paths and surfaces tensions instead of silently merging conflicts.
+
+Indexes answer “where should recall start?” The cognitive graph answers “what else comes back with it, why, from whom, and when?”
+
+### 6. API Layer (`src/api/`)
 
 Public interface for consumers:
 
@@ -147,9 +172,39 @@ impl<S: StorageAdapter> Engine<S> {
 1. **Ingestion**: Observation → Perception gate (novelty/confidence/budget) → Node creation → Attraction auto-linking → Graph
 2. **Linking**: Manual `link()` call or automatic during `ingest()` via attraction scoring
 3. **Decay**: Periodic `tick()` applies batch forgetting to all nodes; lazy decay computed in `touch()` before reinforcement
-4. **Query**: `query()` — Associative mode runs 7-stage pipeline → `ContextPackage`
+4. **Search / Query**: trigger indexes find seeds → Associative mode runs 7-stage graph recall pipeline → `ContextPackage`
 5. **Reinforcement**: `touch()` strengthens accessed nodes (lazy decay first, then salience boost)
 6. **Batch Reflect** 🔜: `reflect_batch()` will create cross-agent Entity edges by matching shared `entity_tags` — no LLM calls, metadata matching only
+
+## Recall Architecture: Triggers vs. Memory
+
+Anamnesis separates access paths from memory representation:
+
+| Layer | Examples | Responsibility |
+|:------|:---------|:---------------|
+| Trigger indexes | keyword search, BM25/FTS, optional embeddings, entity tags, temporal filters | Find candidate `NodeId`s that may start recall |
+| Cognitive graph | nodes, typed edges, salience, origin, validity windows, access counts | Store memory and its relationships |
+| Physics | attraction, gravity, forgetting, reinforcement, spreading activation, repulsion | Decide how memories connect, fade, revive, and activate |
+| Packaging | identity/knowledge/memories/tensions with L0/L1/L2 resolution | Shape activated memory for the consumer’s context budget |
+
+The intended search flow is:
+
+```text
+SearchInput
+  ├─ lexical triggers: text_search / BM25 / exact keywords
+  ├─ semantic triggers: query embedding vs. node embeddings
+  ├─ structural triggers: entity tags, type filters, temporal windows
+  ▼
+Candidate NodeIds + per-source ranks/scores
+  ▼
+Seed fusion (for example, reciprocal rank fusion)
+  ▼
+Spreading activation over the graph
+  ▼
+ContextPackage with provenance, time, reasoning edges, and tensions
+```
+
+This boundary is intentional: changing an embedding model, tokenizer, BM25 parameters, or storage adapter must not rewrite the memory itself. Indexes are rebuildable projections. The graph is the source of truth.
 
 ## Associative Query Pipeline (7 Stages)
 
@@ -183,6 +238,68 @@ Three classes of cognitive matter with different decay rates and mass priors:
 | **Custom** | `Custom(String)` | Default | Consumer-defined |
 
 Identity nodes bias initial activation (stage 2) and contribute to agent tension (stage 7).
+
+### Scope Model: Universal, Domain, Project, Session, Agent
+
+Every node carries an `Origin`:
+
+| Origin field | Meaning | Query role |
+|:-------------|:--------|:-----------|
+| `agent_id` | Which agent or persona produced the node | Identity prior, provenance, disagreement analysis |
+| `session_id` | Which run or interaction produced the node | Episodic reconstruction and temporal grouping |
+| `project_id: Some(path)` | Scoped memory path such as `work/company-a` or `personal-projects/anamnesis` | Domain/project/workspace recall weighting |
+| `project_id: None` | Universal memory | Available across scopes with lower but persistent scope weight |
+| `confidence` | Source confidence at creation | Used by consumers and future ranking/reinforcement policies |
+
+Conceptually, `project_id` is a hierarchical scope path:
+
+```text
+universal
+  -> domain/category        (work, personal, personal-projects)
+    -> project/workspace    (company-a, anamnesis)
+      -> session
+        -> event/fragment
+```
+
+Scope weighting prevents unrelated domains from contaminating recall while still allowing same-domain habits and universal principles to participate. Same-project nodes receive the strongest weight, same-domain nodes receive a medium boost, universal nodes remain broadly available, and other-domain nodes are downweighted unless entity overlap or explicit consumer filters justify them.
+
+### Identity as High-Mass Memory
+
+Persona is represented by identity nodes, not by a separate prompt string. Identity nodes create a high-mass prior that biases recall and packaging:
+
+| Identity type | Role | Dynamics |
+|:--------------|:-----|:---------|
+| `IdentityCore` | Stable traits and operating principles | No decay; fixed high salience |
+| `IdentityLearned` | Experience-formed preferences and habits | Very slow decay; reinforced by repeated success |
+| `IdentityState` | Current task, local focus, temporary stance | Normal decay; project/session-sensitive |
+
+This lets the engine retrieve not only “what happened,” but “what matters for this agent, in this domain, project, and session right now.”
+
+### Promotion Across Scope Levels
+
+Scoped memories may move upward only through additive consolidation. The source nodes remain intact; a broader node is created and linked back to supporting evidence with `ConsolidatedFrom` edges. Promotion may be session → project, project → domain, or domain → universal.
+
+Promotion is appropriate when a pattern has:
+
+- support from multiple projects, domains, or sessions,
+- high average confidence,
+- low contradiction or exception rate,
+- sustained salience after repeated use,
+- an abstraction that removes project-specific names, paths, and tools.
+
+Example:
+
+```text
+Scoped memories:
+  “This Rust crate requires checking public API before refactors.”
+  “This Python service breaks if refactors ignore existing tests.”
+  “This frontend repo relies on established test fixtures.”
+
+Broader crystallization:
+  “Before refactoring unfamiliar code, inspect public boundaries and existing tests first.”
+```
+
+This is a crystallization step, not a destructive merge. Exceptions should stay attached as scoped `Gotcha`, `Contradicts`, or `RejectedAlternative` nodes so broader recall can surface caveats.
 
 ### EdgeType (12 variants) with Propagation Multipliers (κ)
 
@@ -232,6 +349,7 @@ Only `Supersedes` has asymmetric kappa (new knowledge → old gets 1.20; old →
 - **No global state** — all state in `Engine` instances
 - **Salience as shared signal** — all mechanics read/write salience; memory tiers emerge naturally from salience ranges
 - **Fragments over summaries** — original content preserved; consolidation is emergent via `ConsolidatedFrom` edges
+- **Indexes trigger; graph remembers** — keyword, BM25, embedding, and temporal indexes find entry points, while graph nodes and edges remain the source of truth
 
 ## Boundaries
 
@@ -240,7 +358,7 @@ Only `Supersedes` has asymmetric kappa (new knowledge → old gets 1.20; old →
 - Cognitive dynamics (scoring, decay, attraction, gating)
 - Query engine (spreading activation, ContextPackage assembly)
 - Pluggable storage adapters
-- Origin attribution and scoped knowledge (session/project/universal)
+- Origin attribution and scoped knowledge (session/project/domain/universal)
 - Contradiction detection and agent tension measurement
 - Multi-resolution content (L0/L1/L2 token budget)
 
@@ -252,7 +370,7 @@ Only `Supersedes` has asymmetric kappa (new knowledge → old gets 1.20; old →
 
 ## Implementation Status
 
-> v0.2.0 — Cognitive engine operational.
+> v0.3.0 — Cognitive engine operational.
 
 ### Implemented ✅
 
@@ -279,22 +397,20 @@ Only `Supersedes` has asymmetric kappa (new knowledge → old gets 1.20; old →
 - ContextPackage assembly: identity/knowledge/memories/tensions with L0/L1/L2 token budget
 
 **Scoping:**
-- `Origin.project_id`: session/project/universal knowledge scoping
-- Query-time scope weights: same project 1.0, universal 0.85, other project 0.30 + entity overlap bonus
+- `Origin.project_id`: hierarchical scope path for project/domain/universal knowledge scoping
+- Query-time scope weights: same project strongest, same domain medium, universal broad, other domain low + entity overlap bonus
 
-### Placeholder ⬚ (returns empty results)
+### Deprecated / compatibility APIs
 
 | Engine Method | Current Behavior | Planned |
 |:-------------|:-----------------|:--------|
-| `query()` — non-Associative modes | Returns `ContextPackage::empty()` | TypeFiltered, Neighborhood, Temporal, List |
-| `merge_candidates()` | Returns empty Vec | Attraction-based candidate detection |
-| `auto_merge()` | Returns empty MergeLog | Merge with undo log |
-| `reflect_batch()` | Returns empty ReflectReport | Cross-agent entity linking |
+| `merge_candidates()` | Deprecated | Use `EngineConfig::dedup_threshold` in `ingest()` |
+| `auto_merge()` | Deprecated | Use dedup/reinforcement during ingest |
 
 ### Planned 🔜
 
-- **Non-Associative query modes**: TypeFiltered, Neighborhood, Temporal, List — defined in `Query` enum, not yet implemented
-- **`crystallize()`**: Re-ingest query-derived insights with provenance links (`ConsolidatedFrom`, `ExtractedFrom`) — see [ADR-005](design-decisions/005-query-crystallization.md)
+- **Search v2 diagnostics**: Raw candidate trace, trigger recall metrics, graph reconstruction metrics, and packaging loss analysis
+- **Hybrid trigger fusion**: Preserve lexical/vector/entity/temporal candidate ranks before graph recall
 - **Social reinforcement**: Multi-agent salience bonus — logarithmic boost for nodes independently confirmed by multiple agents
 - **Cognitive engine benchmarks**: CRUD/storage benchmarks exist; spreading activation and query pipeline benchmarks needed
 - **SQLite storage adapter**: Persist graph across processes
@@ -303,9 +419,9 @@ Only `Supersedes` has asymmetric kappa (new knowledge → old gets 1.20; old →
 
 The next evolution targets a more ergonomic API and deeper automation:
 
-- **Unified `search()` method**: Single entry point accepting text and optional filters, dispatching to the appropriate `Query` mode internally. Current `query()` requires explicit mode selection and a `NodeId` seed.
+- **Unified `search()` method**: Single entry point accepting text, optional embeddings, and scope/time filters. Search should preserve raw candidates, fuse trigger ranks, then run graph recall before packaging.
 - **`crystallize()`**: Re-ingest insights derived from query results back into the graph with provenance links. Salience initialized from source node average (eq 15). Enables the graph to grow from its own reasoning, not just external observations.
-- **Text search integration**: Full-text search over node content to enable `search("auth bug")` without requiring a pre-computed embedding vector.
+- **Hybrid trigger integration**: Keyword/BM25-style lexical search plus optional vector similarity should feed seed discovery. Scores from trigger indexes should be traceable, but not treated as memory truth.
 - **Three-equal structure**: Principled token budget allocation across identity / knowledge / memories in `ContextPackage`. Current assembly prioritizes knowledge fragments; a balanced three-way split respects all partitions.
 - **Non-Associative query modes**: TypeFiltered for "all conventions", Neighborhood for "everything about auth module", Temporal for "what changed recently?", List for "what do I know?" at session start.
 
