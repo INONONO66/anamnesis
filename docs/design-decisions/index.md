@@ -10,5 +10,7 @@ This directory contains Architecture Decision Records (ADRs) for Anamnesis.
 
 | ADR | Title | Status |
 | --- | --- | --- |
-| [ADR-004](004-universal-knowledge-memory.md) | Universal Knowledge Memory with Identity | Proposed |
+| [ADR-004](004-universal-knowledge-memory.md) | Universal Knowledge Memory with Identity | Partially Accepted |
 | [ADR-005](005-query-crystallization.md) | Query Crystallization | Proposed |
+| [ADR-006](006-knowledge-scoping-and-promotion.md) | Knowledge Scoping and Promotion | Accepted |
+| [ADR-007](007-trigger-indexes-vs-graph-memory.md) | Trigger Indexes vs. Graph Memory | Accepted |
