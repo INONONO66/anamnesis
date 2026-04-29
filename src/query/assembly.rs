@@ -127,11 +127,10 @@ pub fn compute_agent_tension(
 /// Assembles a [`ContextPackage`] from scored nodes.
 ///
 /// 1. Sorts nodes by relevance (descending).
-/// 2. Partitions into identity / knowledge / memories by [`KnowledgeType`].
-/// 3. Assigns resolution (L0/L1/L2) respecting the token budget.
-/// 4. Upgrades the top-3 knowledge fragments to L2 if budget remains.
-/// 5. Collects [`Tension`] entries for activated contradiction pairs.
-/// 6. Computes `agent_tension` via equation (14).
+/// 2. Assigns resolution (L0/L1/L2) by relevance and remaining token budget.
+/// 3. Partitions into identity / knowledge / memories by [`KnowledgeType`].
+/// 4. Collects [`Tension`] entries for activated contradiction pairs.
+/// 5. Computes `agent_tension` via equation (14).
 pub fn assemble_context_package(
     mut scored_nodes: Vec<ScoredNode>,
     identity_activations: &[(NodeId, KnowledgeType, f64)],
@@ -156,60 +155,42 @@ pub fn assemble_context_package(
 
     for node in &scored_nodes {
         let name_tokens = estimate_tokens(&node.name, chars_per_token);
+        let summary_tokens = node
+            .summary
+            .as_ref()
+            .map(|s| estimate_tokens(s, chars_per_token))
+            .unwrap_or(0);
+        let content_tokens = estimate_tokens(&node.content, chars_per_token);
+        let l1_tokens = name_tokens.saturating_add(summary_tokens);
+        let l2_tokens = l1_tokens.saturating_add(content_tokens);
+        let remaining = budget.remaining();
 
-        if budget.remaining() < name_tokens {
+        if remaining < name_tokens {
             break; // No budget left even for L0
         }
 
         let scope = determine_scope(query_project, &node.origin.project_id);
+        let (resolution, tokens_used) = if remaining >= l2_tokens {
+            (Resolution::L2, l2_tokens)
+        } else if remaining >= l1_tokens {
+            (Resolution::L1, l1_tokens)
+        } else {
+            (Resolution::L0, name_tokens)
+        };
+        let frag = build_fragment(node, scope, resolution);
 
         if is_identity_type(&node.node_type) {
-            // Identity: always L0 (names only)
-            let frag = build_fragment(node, scope, Resolution::L0);
-            budget.used += name_tokens;
-            budget.identity_used += name_tokens;
+            budget.used += tokens_used;
+            budget.identity_used += tokens_used;
             identity_frags.push(frag);
         } else if is_memory_type(&node.node_type) {
-            // Memories: L0 by default
-            let frag = build_fragment(node, scope, Resolution::L0);
-            budget.used += name_tokens;
-            budget.memories_used += name_tokens;
+            budget.used += tokens_used;
+            budget.memories_used += tokens_used;
             memory_frags.push(frag);
         } else {
-            // Knowledge: L1 if budget allows, L0 otherwise
-            let summary_tokens = node
-                .summary
-                .as_ref()
-                .map(|s| estimate_tokens(s, chars_per_token))
-                .unwrap_or(0);
-
-            let resolution = if budget.remaining() >= name_tokens + summary_tokens {
-                Resolution::L1
-            } else {
-                Resolution::L0
-            };
-
-            let tokens_used = match resolution {
-                Resolution::L1 => name_tokens + summary_tokens,
-                _ => name_tokens,
-            };
-
-            let frag = build_fragment(node, scope, resolution);
             budget.used += tokens_used;
             budget.knowledge_used += tokens_used;
             knowledge_frags.push(frag);
-        }
-    }
-
-    // Upgrade top-3 knowledge fragments to L2 if budget allows
-    for frag in knowledge_frags.iter_mut().take(3) {
-        if let Some(node) = scored_nodes.iter().find(|n| n.node_id == frag.node_id) {
-            let content_tokens = estimate_tokens(&node.content, chars_per_token);
-            if budget.remaining() >= content_tokens {
-                frag.content = Some(node.content.clone());
-                budget.used += content_tokens;
-                budget.knowledge_used += content_tokens;
-            }
         }
     }
 

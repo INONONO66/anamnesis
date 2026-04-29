@@ -1563,6 +1563,8 @@ impl<S: StorageAdapter + Clone> Engine<S> {
     ///
     /// Returns `Err(Error::InvalidInput)` if both `text` is empty and `query_embedding` is `None`.
     pub fn search(&self, input: SearchInput) -> Result<SearchResult, Error> {
+        use std::cmp::Ordering;
+
         use crate::mechanics::attraction::cosine_similarity;
         use crate::query::{Fragment, PackagingMode, SearchPlan, SearchTrace, TokenBudget};
 
@@ -1581,7 +1583,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             packaging_mode: PackagingMode::KnowledgeOnly,
         };
 
-        let mut all_seed_ids: Vec<NodeId> = Vec::new();
+        let mut seed_scores: HashMap<NodeId, f64> = HashMap::new();
         let mut strategies_used: Vec<String> = Vec::new();
         let mut spread_iterations = 0usize;
         let storage = self.graph.storage();
@@ -1595,9 +1597,14 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         if plan.use_text {
             for sub_query in &sub_queries {
                 let text_results = storage.text_search(sub_query, input.limit.max(10));
-                let new_seeds: Vec<NodeId> = text_results.iter().map(|(id, _)| *id).collect();
-                if !new_seeds.is_empty() {
-                    all_seed_ids.extend(new_seeds);
+                if !text_results.is_empty() {
+                    for (node_id, score) in text_results {
+                        let current = seed_scores.entry(node_id).or_insert(score);
+                        if score > *current {
+                            *current = score;
+                        }
+                    }
+
                     if !strategies_used
                         .iter()
                         .any(|strategy| strategy == "text_search")
@@ -1622,16 +1629,22 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                 .filter(|(_, score)| *score > 0.0)
                 .collect();
 
-            for (node_id, _) in top_n_by_score(&vector_scores, input.limit.max(10)) {
-                if !all_seed_ids.contains(&node_id) {
-                    all_seed_ids.push(node_id);
+            for (node_id, score) in top_n_by_score(&vector_scores, input.limit.max(10)) {
+                let current = seed_scores.entry(node_id).or_insert(score);
+                if score > *current {
+                    *current = score;
                 }
             }
             strategies_used.push("vector_similarity".to_string());
         }
 
-        all_seed_ids.sort();
-        all_seed_ids.dedup();
+        let mut all_seeds: Vec<(NodeId, f64)> = seed_scores.into_iter().collect();
+        all_seeds.sort_by(|(a_id, a_score), (b_id, b_score)| {
+            b_score
+                .partial_cmp(a_score)
+                .unwrap_or(Ordering::Equal)
+                .then_with(|| a_id.cmp(b_id))
+        });
 
         let mut merged_knowledge: HashMap<NodeId, Fragment> = HashMap::new();
         let mut merged_memories: HashMap<NodeId, Fragment> = HashMap::new();
@@ -1639,7 +1652,8 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         let mut merged_tensions = Vec::new();
 
         if plan.use_graph {
-            for seed in all_seed_ids.iter().take(3) {
+            let max_seeds = input.limit.clamp(3, 10);
+            for (seed, _) in all_seeds.iter().take(max_seeds) {
                 let config = QueryConfig {
                     budget: input.limit.saturating_mul(5),
                     agent_id: input.agent_id.clone(),
@@ -1718,7 +1732,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
 
         let trace = SearchTrace {
             strategies_used,
-            seed_count: all_seed_ids.len(),
+            seed_count: all_seeds.len(),
             spread_iterations,
             packaging_mode: Some(packaging_mode),
         };
@@ -1773,7 +1787,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
     ) {
         match packaging_mode {
             crate::query::PackagingMode::KnowledgeOnly => {
-                memories.clear();
+                // No-op: preserve memories as-is
             }
             crate::query::PackagingMode::KnowledgeWithProvenance => {
                 self.include_source_memories(knowledge, memories);
