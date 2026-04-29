@@ -48,7 +48,7 @@ Anamnesis gives LLM agents **associative memory**. It builds a graph of knowledg
 | **Forgetting** | Salience decays over time; access reinforces. Unused knowledge fades |
 | **Spreading Activation** | Query from a seed, activation spreads through edges with decay, returns subgraph within token budget |
 
-One cue activates related fragments, which activate further fragments — reconstructing understanding from partial cues the way human recall works.
+One cue activates related fragments, which activate further fragments — reconstructing understanding from partial cues the way human recall works. Keyword and embedding search help find the first cue; graph physics decides what comes back with it.
 
 ### How It Compares
 
@@ -65,7 +65,7 @@ One cue activates related fragments, which activate further fragments — recons
 
 **vs LLM context documents** — Context docs require manual compilation, suffer brevity bias on every rewrite, and have no mechanism for forgetting or contradiction detection. Anamnesis handles all three automatically: salience decay removes stale knowledge, spreading activation surfaces relevant fragments, and `Contradicts` edges flag tensions in query results.
 
-**vs vector-only stores** — Embedding similarity finds *similar* fragments. Spreading activation finds *related* fragments — following typed reasoning chains (causes, contradictions, decisions, confirmations) that embed alone cannot represent.
+**vs vector-only stores** — Embedding similarity finds *similar* fragments. Spreading activation finds *related* fragments — following typed reasoning chains (causes, contradictions, decisions, confirmations) that embed alone cannot represent. Embeddings are useful cues, but they are not the memory itself.
 
 ## Quick Start
 
@@ -144,6 +144,27 @@ engine.touch(ids[0], Timestamp::now()).unwrap();
 ## Core Concepts
 
 <details>
+<summary><strong>Indexes Trigger; Graph Remembers</strong></summary>
+
+<br>
+
+Anamnesis separates retrieval cues from memory representation. Keyword search, BM25-style full-text search, entity tags, temporal filters, and optional embeddings are **trigger indexes**: they find candidate `NodeId`s that may start recall.
+
+The actual memory is the graph: nodes, typed edges, salience, timestamps, validity windows, and origin metadata. Once a cue finds a seed, spreading activation reconstructs the surrounding context: what happened, who produced it, when it was valid, what it supports or contradicts, and why a decision was made.
+
+```text
+query
+  -> keyword / BM25 / embedding / entity / time triggers
+  -> candidate seed nodes
+  -> graph spreading activation
+  -> identity + knowledge + memories + tensions
+```
+
+This means indexes can be rebuilt or replaced without changing memory. The graph remains the source of truth.
+
+</details>
+
+<details>
 <summary><strong>Fragments, Not Summaries</strong></summary>
 
 <br>
@@ -151,6 +172,43 @@ engine.touch(ids[0], Timestamp::now()).unwrap();
 Existing systems summarize conversations into compact facts — lossy by design. The reasoning, context, and rejected alternatives are discarded.
 
 Anamnesis preserves **individual conversation turns as nodes**. Each retains original content, temporal position, entity references, and origin metadata. Summaries are emergent — they arise when repeated patterns consolidate into higher-level semantic nodes. The raw fragments remain.
+
+</details>
+
+<details>
+<summary><strong>Persona as High-Mass Memory</strong></summary>
+
+<br>
+
+Persona is not prompt decoration. It is represented by identity nodes inside the same graph:
+
+| Type | Role | Dynamics |
+|:-----|:-----|:---------|
+| `IdentityCore` | Stable traits and operating principles | No decay; high salience |
+| `IdentityLearned` | Experience-formed preferences | Very slow decay; reinforced by repeated success |
+| `IdentityState` | Current task or stance | Normal decay; session/project-sensitive |
+
+Identity nodes bias recall. A query does not only retrieve matching facts; it retrieves facts through the lens of the current agent, project, and state.
+
+</details>
+
+<details>
+<summary><strong>Scoped Knowledge</strong></summary>
+
+<br>
+
+Every node carries `Origin` metadata: `agent_id`, `session_id`, `project_id`, and `confidence`. Although the field is named `project_id`, it can act as a stable scope path.
+
+- `project_id: Some("work/company-a")` means the memory is scoped to a work domain or workspace.
+- `project_id: Some("personal/daily-life")` means the memory is scoped to a personal domain.
+- `project_id: Some("personal-projects/anamnesis")` means the memory is scoped to a specific personal project.
+- `project_id: None` means the memory is universal and can apply across projects.
+- Same-project memories receive the strongest query weight.
+- Same-domain memories receive a medium boost.
+- Universal memories remain available across projects.
+- Other-domain memories are downweighted unless explicitly requested or strongly connected by entities.
+
+Scoped memories can be crystallized upward: session evidence can become project knowledge, project knowledge can become domain knowledge, and domain knowledge can become universal principles. The original scoped memories remain as evidence via `ConsolidatedFrom` edges; promotion is additive, not destructive.
 
 </details>
 
@@ -384,6 +442,7 @@ Ships with `InMemoryStorage` (arena-based Vec, adjacency index, ID recycling, se
 - **No LLM calls** — engine provides primitives; extraction is the consumer's job
 - **No global state** — all state in `Engine` instances
 - **Salience as shared signal** — all mechanics read/write salience; tiers emerge naturally from salience ranges
+- **Indexes trigger; graph remembers** — keyword, BM25, embedding, and temporal indexes find entry points; graph nodes and edges remain the source of truth
 
 <details>
 <summary><strong>Three-Role Processing (Consumer Pattern)</strong></summary>
