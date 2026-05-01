@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use crate::api::{EngineConfig, SpreadingModel};
 use crate::graph::{EdgeType, NodeId};
 use crate::mechanics::gravity::compute_mass;
-use crate::query::{FusedCandidate, GraphRecallTrace, NodeInfo, QueryConfig};
+use crate::query::{FusedCandidate, GraphRecallTrace, NodeInfo, QueryConfig, initial_activation};
 use crate::query::{random_walk_restart_from_distribution, spread_activation};
 use crate::storage::StorageAdapter;
 
@@ -16,13 +16,21 @@ pub(crate) fn run_graph_recalls<S: StorageAdapter>(
     query_config: &QueryConfig,
     identity_prior: Option<&HashMap<NodeId, f64>>,
 ) -> (HashMap<NodeId, f64>, GraphRecallTrace) {
-    let initial_map: HashMap<NodeId, f64> = fused_seeds
+    let mut initial_map: HashMap<NodeId, f64> = fused_seeds
         .iter()
         .map(|seed| (seed.node_id, seed.fused_score))
         .collect();
 
     let activated = match engine_config.spreading_model {
         SpreadingModel::PriorityQueueBfs => {
+            if let Some(identity_prior) = identity_prior {
+                for (&node_id, &prior) in identity_prior {
+                    initial_map
+                        .entry(node_id)
+                        .or_insert_with(|| initial_activation(false, 0.0, prior));
+                }
+            }
+
             let node_info_fn = |nid: NodeId| -> Option<NodeInfo> {
                 let node = storage.get_node(nid).ok()?;
                 let salience = storage.get_salience(nid).unwrap_or(0.0);

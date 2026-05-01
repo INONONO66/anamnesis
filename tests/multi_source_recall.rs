@@ -14,13 +14,17 @@ fn origin() -> Origin {
 }
 
 fn observation(name: &str) -> Observation {
+    observation_with_type(name, KnowledgeType::Semantic)
+}
+
+fn observation_with_type(name: &str, node_type: KnowledgeType) -> Observation {
     Observation {
         name: name.to_string(),
         summary: Some(format!("summary {name}")),
         content: name.to_string(),
         embedding: None,
         confidence: 1.0,
-        node_type: KnowledgeType::Semantic,
+        node_type,
         entity_tags: Vec::new(),
         origin: origin(),
         timestamp: Timestamp(0),
@@ -134,6 +138,49 @@ fn recall_uses_rwr_when_configured() {
             .knowledge
             .iter()
             .any(|fragment| fragment.node_id == neighbor)
+    );
+}
+
+#[test]
+fn priority_queue_bfs_uses_identity_prior_without_dropping_seed() {
+    let mut engine = Engine::with_config(engine_config());
+    let seed = ingest(&mut engine, "priority-prior-seed fact");
+    let identity = match engine
+        .ingest(observation_with_type(
+            "persona anchor only",
+            KnowledgeType::IdentityCore,
+        ))
+        .expect("ingest should succeed")
+    {
+        IngestResult::Created(ids) => ids[0],
+        IngestResult::Reinforced { .. } => panic!("dedup is disabled"),
+    };
+
+    let result = engine
+        .search(SearchInput {
+            text: "priority-prior-seed".to_string(),
+            agent_id: Some("agent-1".to_string()),
+            limit: 10,
+            seed_limit: Some(1),
+            ..Default::default()
+        })
+        .expect("search should succeed");
+
+    assert!(
+        result
+            .package
+            .knowledge
+            .iter()
+            .any(|fragment| fragment.node_id == seed),
+        "text seed should remain activated"
+    );
+    assert!(
+        result
+            .package
+            .identity
+            .iter()
+            .any(|fragment| fragment.node_id == identity),
+        "identity prior node should be activated by PriorityQueue BFS"
     );
 }
 
