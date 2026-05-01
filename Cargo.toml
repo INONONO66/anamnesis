@@ -67,9 +67,18 @@ name = "longmemeval-ablation"
 path = "benches/longmemeval/ablation.rs"
 harness = false
 
+[[bench]]
+name = "search_latency"
+path = "benches/eval/search_latency.rs"
+harness = false
+
 [[test]]
 name = "longmemeval-judge"
 path = "benches/longmemeval/judge.rs"
+
+[[test]]
+name = "eval_golden"
+path = "benches/eval/golden.rs"
 
 [profile.bench]
 debug = true
