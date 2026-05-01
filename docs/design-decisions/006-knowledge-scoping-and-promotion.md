@@ -19,6 +19,10 @@ The engine needs a deterministic scope model that supports domain separation, pr
 Use `Origin.scope` as the scope key for knowledge:
 
 ```rust
+/// A validated hierarchical scope path stored as a single slash-delimited string.
+/// Construct via `ScopePath::new("work/company-a")` or `ScopePath::universal()`.
+pub struct ScopePath(String);
+
 pub struct Origin {
     pub agent_id: String,
     pub session_id: String,
@@ -72,7 +76,7 @@ Queries may provide a current scoped path. During ranking, scope influences rele
 | Universal | `universal` | Always available with broad weight |
 | Other domain | `work/*` when querying `personal/*` | Downweighted unless explicitly requested or entity-linked |
 
-This keeps local conventions local while allowing same-domain habits and universal principles to participate in recall.
+This keeps local conventions local while allowing related-domain habits and universal principles to participate in recall.
 
 ### 3. Promotion is additive crystallization
 
@@ -141,8 +145,8 @@ The consumer decides when a pattern is universal and provides the crystallized c
 
 ## Consequences
 
-- Consumers should populate `Origin.project_id` consistently, preferably as a stable scope path when domain hierarchy matters.
-- Universal knowledge should use `project_id: None`.
+- Consumers should populate `Origin.scope` consistently as a stable path.
+- Universal knowledge should use the `universal` scope.
 - Domain-scoped knowledge should use broad paths such as `work`, `personal`, or `personal-projects`.
 - Project-specific exceptions should remain attached as scoped `Gotcha`, `Contradicts`, `RejectedAlternative`, or `Supersedes` nodes.
 - `crystallize()` is the natural API for promotion because it creates source provenance and reinforces contributing memories.

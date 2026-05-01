@@ -26,14 +26,14 @@ Add an `Origin` struct to every node:
 struct Origin {
     agent_id: String,           // which agent produced this
     session_id: String,         // from which session
-    project_id: Option<String>, // scope: None = universal, Some = project-scoped
+    scope: Option<String>,      // hierarchical scope path; None = universal
     confidence: f64,            // certainty at creation time
 }
 ```
 
 Origin is metadata, not access control. It enables the consumer-side Reflector to resolve contradictions and weight expertise by source.
 
-**Implementation Status**: ✅ Fully implemented. Origin struct is defined in `src/graph/node.rs` with all four fields. Every Node carries an Origin. Project scoping enables multi-project graphs with scope-aware queries.
+**Implementation Status**: ✅ Accepted direction. Origin carries provenance for every node. Scope-aware recall should use a hierarchical scope path rather than a project-only identifier.
 
 ### 2. Social Reinforcement ⬚
 
@@ -87,8 +87,8 @@ Origin → Batch Reflect (needs agent_id to identify cross-agent nodes)
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| Origin struct (agent_id, session_id, project_id, confidence) | ✅ | Fully implemented in `src/graph/node.rs`. Every Node carries Origin. |
-| Project scoping via Origin.project_id | ✅ | Enables multi-project graphs with scope-aware queries. |
+| Origin struct (agent_id, session_id, scope, confidence) | ✅ | Every Node carries provenance. |
+| Hierarchical scoping via Origin.scope | ✅ | Enables multi-domain, multi-project graphs with scope-aware queries. |
 | Social reinforcement scoring | ⬚ | Planned. Consumer can implement via post-query weighting using Origin metadata. |
 | Batch reflect API | ⬚ | Method signature exists; returns empty ReflectReport. Consumer implements via `link()` API. |
 | Entity edge type | ✅ | Defined in `src/graph/types.rs` with kappa=0.95. |

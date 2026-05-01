@@ -95,13 +95,13 @@ Knowledge types that belong in the graph:
 | **Semantic** | Extracted fact ("auth uses factory pattern") | Consumer extracts via LLM, links to source episode |
 | **Procedural** | "How to deploy this service" | Consumer extracts from agent execution logs |
 | **Entity** | "auth module", "session service" | Consumer identifies entities, Anamnesis auto-links by tag |
-| **Identity** | Agent persona traits, values, preferences | Consumer or user defines; engine applies cognitive dynamics |
+| **Identity** | Retrieval priors, learned preferences, current stance | Consumer or user defines; engine applies cognitive dynamics |
 
 All types are graph nodes. All receive the same cognitive dynamics: attraction clusters related nodes, gravity surfaces important ones, forgetting decays unused ones, touch reinforces accessed ones.
 
 **The consumer (e.g., an orchestration layer) is responsible for extraction.** Anamnesis does not call LLMs. But Anamnesis must provide a graph structure rich enough to represent all these knowledge types naturally.
 
-Universal, domain-scoped, and project-scoped knowledge live in the same graph. `Origin.project_id = Some(...)` currently acts as a stable scope path, such as `work/company-a`, `personal/daily-life`, or `personal-projects/anamnesis`; `Origin.project_id = None` marks universal knowledge. Local memories can move upward only through additive crystallization: a new abstract node is created at the broader scope and linked back to scoped evidence with `ConsolidatedFrom` edges. The original memories remain intact so the broader principle can still be audited and contradicted.
+Universal, domain-scoped, project-scoped, and personal knowledge live in the same graph. Scope is a hierarchical path such as `work/company-a`, `personal/daily-life`, or `personal-projects/anamnesis`; universal knowledge is the root scope. Local memories can move upward only through additive crystallization: a new abstract node is created at the broader scope and linked back to scoped evidence with `ConsolidatedFrom` edges. The original memories remain intact so the broader principle can still be audited and contradicted.
 
 ### 8. Episodic Preservation — Original Text as Source of Truth
 
@@ -135,9 +135,9 @@ trigger indexes -> candidate seeds -> graph recall -> contextual package
 
 Changing an embedding model, tokenizer, or storage backend should rebuild indexes, not rewrite memory.
 
-### 9. Identity as Graph Nodes — The Multi-Persona Brain
+### 9. Identity-Conditioned Recall
 
-Agent identities are not static system prompts. They are **graph nodes subject to the same cognitive dynamics as knowledge**.
+Identity nodes are not runtime behavior instructions. They are **graph nodes subject to the same cognitive dynamics as knowledge** and act as retrieval priors during recall.
 
 Inspired by MetaGPT Stanford Town's three-layer identity and agentic-cognition's ConvictionGravity:
 
@@ -151,15 +151,15 @@ Inspired by MetaGPT Stanford Town's three-layer identity and agentic-cognition's
 
 L0 nodes are immutable anchors. L1 nodes evolve slowly through experience (reinforced by `touch()`, decayed by `tick()`). L2 nodes change freely with context.
 
-**Multi-Agent Identity:**
+**Multi-agent identity:**
 
-When multiple agents share a graph, each agent's identity nodes carry `Origin` metadata. The graph becomes a **multi-persona brain** — like dissociative identity, each persona has its own knowledge and traits, but they share a common substrate:
+When multiple agents share a graph, each agent's identity nodes carry `Origin` metadata. The graph becomes a shared substrate where identity, knowledge, and evidence coexist:
 
-- **Spreading activation respects persona scope**: Query with `Origin.agent_id` filter to get one agent's perspective
-- **Social reinforcement across personas**: When multiple agents independently confirm the same knowledge, it gains extra salience
+- **Spreading activation respects identity context**: Query with an active `agent_id` to bias recall toward that agent's identity nodes
+- **Social reinforcement across agents**: When multiple agents independently confirm the same knowledge, it gains extra salience
 - **Contradiction detection**: `Contradicts` edges between nodes from different agents surface disagreements
 
-This is not agent orchestration (that's the consumer's job). This is providing a **cognitive substrate where identities and knowledge coexist and interact through cognitive dynamics**.
+This is not agent orchestration and not a replacement for system prompts. Identity conditions recall; it does not define the agent's runtime instructions. Consumers decide whether retrieved identity fragments are exposed to an LLM.
 
 ### 10. Repulsion — Not All Connections Are Attraction
 
@@ -385,13 +385,13 @@ All three features are **design-level** — they describe future capabilities to
 
 These directions describe the ongoing shape of the engine. Some are implemented; others remain design targets.
 
-### Unified search() ✅
+### Unified search()
 
-The `search()` entry point accepts text, optional embeddings, scope filters, and a limit. Its role is trigger-to-graph recall: lexical and semantic cues find seed node(s), then spreading activation reconstructs context. The next evolution is to preserve raw candidates and per-source ranks before packaging.
+The `search()` entry point should accept text, optional embeddings, scope filters, temporal filters, and a limit. Its role is trigger-to-graph recall: lexical, semantic, entity, temporal, and scope cues find candidate nodes, rank fusion selects seeds, and spreading activation reconstructs context before packaging.
 
-### 3-Equal Structure: Session / Knowledge / Persona
+### Equal Graph Objects: Session / Knowledge / Identity
 
-Sessions, knowledge fragments, and agent personas are currently treated differently in practice. The goal is to make them **equal first-class objects** — same storage, same dynamics, same query interface. A session is just a node with children. A persona is a cluster of identity nodes. The graph topology encodes the relationships; the engine doesn't need special cases.
+Sessions, knowledge fragments, and identity cues should be **equal graph objects** — same storage, same dynamics, same query interface. A session is a node with children. Identity is a cluster of identity nodes. The graph topology encodes the relationships; the engine does not need prompt-specific special cases.
 
 ### Ingest Dedup → Touch ✅
 

@@ -39,8 +39,8 @@ ingest, so feeding 100,000 embedded observations would make the build
 itself O(N²) and dominate runtime. The latency we want to baseline is
 `Engine::search()` end-to-end, not embedding-driven attraction during
 ingest, so the fixture intentionally omits embeddings. Vector candidate
-collection is therefore inactive in this baseline; text + entity + scope
-+ graph recall paths are exercised.
+collection is therefore inactive in this baseline; text, entity, scope,
+and graph recall paths are exercised.
 
 ## Search input shape
 

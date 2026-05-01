@@ -14,10 +14,10 @@ Core data structures representing the knowledge graph:
   - Unique ID
   - Multi-resolution content: `name` (L0 label), `summary` (L1 optional), `content` (L2 full text)
   - Salience (importance/recency score, written by all mechanics)
-  - Timestamps: created_at, updated_at, accessed_at
+  - Temporal metadata: ingested_at, updated_at, accessed_at, valid_from, valid_until
   - Embedding: persisted vector for similarity operations (consumer-provided)
   - **KnowledgeType**: 12 variants — 3 Identity tiers + 6 Knowledge types + 2 Memory types + Custom
-  - **Origin**: agent_id, session_id, project_id, confidence — provenance on every node
+  - **Origin**: agent_id, session_id, scope, confidence — provenance and recall scope on every node
   - **entity_tags**: List of entity identifiers for automatic cross-node linking
   - **valid_from / valid_until**: Temporal validity for time-bounded facts
 
@@ -154,15 +154,15 @@ impl<S: StorageAdapter> Engine<S> {
     pub fn tick(&mut self, now: Timestamp) -> Result<TickReport, Error>;
 
     /// Query — returns structured ContextPackage for LLM consumption
-    /// Associative mode: full 7-stage pipeline ✅
-    /// Other modes: return ContextPackage::empty() ⬚
+    /// Associative mode: full graph recall pipeline ✅
+    /// Other modes: TypeFiltered, Neighborhood, Temporal, and List structural retrieval ✅
     pub fn query(&self, query: &Query, config: &QueryConfig) -> Result<ContextPackage, Error>;
 
-    /// ⬚ Returns empty Vec (planned: attraction-based candidate detection)
+    /// Deprecated since 0.3.0: use EngineConfig::dedup_threshold in ingest() instead
     pub fn merge_candidates(&self, threshold: f64) -> Result<Vec<MergePair>, Error>;
-    /// ⬚ Returns empty MergeLog (planned: merge with undo log)
+    /// Deprecated since 0.3.0: use EngineConfig::dedup_threshold in ingest() instead
     pub fn auto_merge(&mut self, threshold: f64) -> Result<MergeLog, Error>;
-    /// ⬚ Returns empty ReflectReport (planned: cross-agent entity linking)
+    /// Cross-agent entity linking by shared entity tags, no LLM calls
     pub fn reflect_batch(&mut self, sessions: &[SessionSummary]) -> Result<ReflectReport, Error>;
 }
 ```
@@ -174,7 +174,7 @@ impl<S: StorageAdapter> Engine<S> {
 3. **Decay**: Periodic `tick()` applies batch forgetting to all nodes; lazy decay computed in `touch()` before reinforcement
 4. **Search / Query**: trigger indexes find seeds → Associative mode runs 7-stage graph recall pipeline → `ContextPackage`
 5. **Reinforcement**: `touch()` strengthens accessed nodes (lazy decay first, then salience boost)
-6. **Batch Reflect** 🔜: `reflect_batch()` will create cross-agent Entity edges by matching shared `entity_tags` — no LLM calls, metadata matching only
+6. **Batch Reflect**: `reflect_batch()` creates cross-agent Entity edges by matching shared `entity_tags` — no LLM calls, metadata matching only
 
 ## Recall Architecture: Triggers vs. Memory
 
@@ -212,8 +212,8 @@ This boundary is intentional: changing an embedding model, tokenizer, BM25 param
 
 | Stage | Description | Key Equation |
 |:------|:------------|:-------------|
-| 1 | **Identity collection** — gather IdentityCore/Learned/State nodes for `config.agent_id` | — |
-| 2 | **Initial activation** — seed gets 0.60, all nodes scored by vector sim + identity prior | eq 10: y⁰ = clamp(0.60·seed + 0.30·q_sim + 0.10·I_prior, 0, 1) |
+| 1 | **Identity collection** — gather IdentityCore/Learned/State nodes for the active agent | — |
+| 2 | **Initial activation** — seeds receive activation from trigger fusion, vector similarity, and identity prior | eq 10: y⁰ = clamp(0.60·seed + 0.30·q_sim + 0.10·I_prior, 0, 1) |
 | 3 | **Spreading activation** — priority-queue BFS, depth-aware, cycle-safe | eq 11: y_j = y_i · w · κ · δ · ψ(s_j) · (1 + 0.20m_j) |
 | 4 | **Repulsion damping** — Contradicts edges reduce activation of contradicted nodes | eqs 7-8: H = Σ w·ρ·X; X' = X·exp(−1.5·H) |
 | 5 | **Final scoring** — weighted combination of activation, vector sim, salience, mass, scope weight | eq 13: R = (0.50X' + 0.20q + 0.15s + 0.15m) · scope_w |
@@ -222,7 +222,7 @@ This boundary is intentional: changing an embedding model, tokenizer, BM25 param
 
 The salience gate ψ(s) = 0.2 + 0.8s ensures low-salience nodes receive some activation (floor 0.2 instead of 0).
 
-Scope weights in stage 5: same project → 1.0, universal node → 0.85, other project → 0.30 (+ entity overlap bonus: 1 shared tag → +0.15, 2+ → +0.25, capped at 1.0).
+Scope weights in stage 5 compare hierarchical scope paths: exact scope is strongest, ancestor/domain scopes are medium-strength, universal remains broadly available, and unrelated scopes are downweighted unless entity overlap justifies a bonus.
 
 ## Type System
 
@@ -232,20 +232,20 @@ Three classes of cognitive matter with different decay rates and mass priors:
 
 | Class | Variants | Decay | Role |
 |:------|:---------|:------|:-----|
-| **Identity (Star)** | `IdentityCore`, `IdentityLearned`, `IdentityState` | None / Very slow / Normal | Agent persona, traits, current state |
+| **Identity (Star)** | `IdentityCore`, `IdentityLearned`, `IdentityState` | None / Very slow / Normal | Retrieval anchors, learned preferences, current state |
 | **Knowledge (Planet)** | `Semantic`, `Procedural`, `Entity`, `Convention`, `Decision`, `Gotcha` | Moderate | Facts, patterns, rules, warnings |
 | **Memory (Dust)** | `Episodic`, `Event` | Fast | Raw conversation turns, time-bound events |
 | **Custom** | `Custom(String)` | Default | Consumer-defined |
 
 Identity nodes bias initial activation (stage 2) and contribute to agent tension (stage 7).
 
-### Scope Model: Universal, Domain, Project, Session, Agent
+### Scope Model: Universal, Domain, Workspace, Project, Session
 
 Every node carries an `Origin`:
 
 | Origin field | Meaning | Query role |
 |:-------------|:--------|:-----------|
-| `agent_id` | Which agent or persona produced the node | Identity prior, provenance, disagreement analysis |
+| `agent_id` | Which agent produced the node | Identity prior, provenance, disagreement analysis |
 | `session_id` | Which run or interaction produced the node | Episodic reconstruction and temporal grouping |
 | `scope: ScopePath` | Scoped memory path such as `work/company-a`, `personal-projects/anamnesis`, or `universal` | Domain/project/workspace recall weighting; `universal` remains available across scopes with lower but persistent weight |
 | `confidence` | Source confidence at creation | Used by consumers and future ranking/reinforcement policies |
@@ -260,19 +260,19 @@ universal
         -> event/fragment
 ```
 
-Scope weighting prevents unrelated domains from contaminating recall while still allowing same-domain habits and universal principles to participate. Same-project nodes receive the strongest weight, same-domain nodes receive a medium boost, universal nodes remain broadly available, and other-domain nodes are downweighted unless entity overlap or explicit consumer filters justify them.
+Scope weighting prevents unrelated domains from contaminating recall while still allowing related domain habits and universal principles to participate. Exact-scope nodes receive the strongest weight, ancestor/domain nodes receive a medium boost, universal nodes remain broadly available, and unrelated-domain nodes are downweighted unless entity overlap or explicit consumer filters justify them.
 
-### Identity as High-Mass Memory
+### Identity as Retrieval Prior
 
-Persona is represented by identity nodes, not by a separate prompt string. Identity nodes create a high-mass prior that biases recall and packaging:
+Identity is represented by identity nodes, not by a runtime behavior prompt. Identity nodes create a high-mass prior that biases recall, ranking, packaging, and tension detection:
 
 | Identity type | Role | Dynamics |
 |:--------------|:-----|:---------|
-| `IdentityCore` | Stable traits and operating principles | No decay; fixed high salience |
+| `IdentityCore` | Stable retrieval anchors and operating principles | No decay; fixed high salience |
 | `IdentityLearned` | Experience-formed preferences and habits | Very slow decay; reinforced by repeated success |
-| `IdentityState` | Current task, local focus, temporary stance | Normal decay; project/session-sensitive |
+| `IdentityState` | Current task, local focus, temporary stance | Normal decay; scope/session-sensitive |
 
-This lets the engine retrieve not only “what happened,” but “what matters for this agent, in this domain, project, and session right now.”
+This lets the engine retrieve not only “what happened,” but “what matters for this agent, in this scope and time window right now.” Identity conditions recall; it does not define the agent's runtime instructions.
 
 ### Promotion Across Scope Levels
 
@@ -396,8 +396,8 @@ Only `Supersedes` has asymmetric kappa (new knowledge → old gets 1.20; old →
 - ContextPackage assembly: identity/knowledge/memories/tensions with L0/L1/L2 token budget
 
 **Scoping:**
-- `Origin.project_id`: hierarchical scope path for project/domain/universal knowledge scoping
-- Query-time scope weights: same project strongest, same domain medium, universal broad, other domain low + entity overlap bonus
+- `Origin.scope`: hierarchical scope path for domain/workspace/project/session knowledge scoping
+- Query-time scope weights: exact scope strongest, ancestor/domain medium, universal broad, unrelated low + entity overlap bonus
 
 ### Deprecated / compatibility APIs
 
@@ -406,9 +406,9 @@ Only `Supersedes` has asymmetric kappa (new knowledge → old gets 1.20; old →
 | `merge_candidates()` | Deprecated | Use `EngineConfig::dedup_threshold` in `ingest()` |
 | `auto_merge()` | Deprecated | Use dedup/reinforcement during ingest |
 
-### Planned 🔜
+### Planned / Next Implementation Targets 🔜
 
-- **Search v2 diagnostics**: Raw candidate trace, trigger recall metrics, graph reconstruction metrics, and packaging loss analysis
+- **Search pipeline rewrite**: Raw candidate trace, trigger recall metrics, rank fusion, graph reconstruction metrics, and packaging loss analysis
 - **Hybrid trigger fusion**: Preserve lexical/vector/entity/temporal candidate ranks before graph recall
 - **Social reinforcement**: Multi-agent salience bonus — logarithmic boost for nodes independently confirmed by multiple agents
 - **Cognitive engine benchmarks**: CRUD/storage benchmarks exist; spreading activation and query pipeline benchmarks needed
@@ -416,9 +416,9 @@ Only `Supersedes` has asymmetric kappa (new knowledge → old gets 1.20; old →
 
 ## Direction
 
-The next evolution targets a more ergonomic API and deeper automation:
+The next evolution targets the final public API, not a compatibility layer:
 
-- **Unified `search()` method**: Single entry point accepting text, optional embeddings, and scope/time filters. Search should preserve raw candidates, fuse trigger ranks, then run graph recall before packaging.
+- **Unified `search()` method**: Single entry point accepting text, optional embeddings, scope paths, and temporal filters. Search should preserve raw candidates, fuse trigger ranks, then run graph recall before packaging.
 - **`crystallize()`**: Re-ingest insights derived from query results back into the graph with provenance links. Salience initialized from source node average (eq 15). Enables the graph to grow from its own reasoning, not just external observations.
 - **Hybrid trigger integration**: Keyword/BM25-style lexical search plus optional vector similarity should feed seed discovery. Scores from trigger indexes should be traceable, but not treated as memory truth.
 - **Three-equal structure**: Principled token budget allocation across identity / knowledge / memories in `ContextPackage`. Current assembly prioritizes knowledge fragments; a balanced three-way split respects all partitions.

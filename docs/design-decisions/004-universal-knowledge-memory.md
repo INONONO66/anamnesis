@@ -11,11 +11,11 @@ Anamnesis was originally designed around conversation fragments — individual c
 - Agent execution patterns (procedural)
 - Named entities (modules, people, services)
 - Time-bound events
-- Agent persona traits and values (identity)
+- Agent identity traits and values
 
 Analysis of production memory systems (Mem0, Zep/Graphiti, Cognee, CrewAI) revealed that all handle multiple knowledge types — not just conversations. Agents also need multiple query patterns beyond spreading activation: type-filtered, entity-centric, temporal, and listing queries.
 
-Separately, analysis of agent persona systems (MetaGPT Stanford Town, agentic-cognition) revealed that no existing system places agent identity inside the knowledge graph. Identity is always a separate text string. Treating identity as graph nodes subject to the same physics (attraction, gravity, decay) is a novel approach.
+Separately, analysis of agent identity systems (MetaGPT Stanford Town, agentic-cognition) revealed that no existing system places agent identity inside the knowledge graph. Identity is always a separate text string. Treating identity as graph nodes subject to the same physics (attraction, gravity, decay) is a novel approach.
 
 ## Decision
 

@@ -14,3 +14,6 @@ This directory contains Architecture Decision Records (ADRs) for Anamnesis.
 | [ADR-005](005-query-crystallization.md) | Query Crystallization | Proposed |
 | [ADR-006](006-knowledge-scoping-and-promotion.md) | Knowledge Scoping and Promotion | Accepted |
 | [ADR-007](007-trigger-indexes-vs-graph-memory.md) | Trigger Indexes vs. Graph Memory | Accepted |
+| [ADR-008](008-temporal-memory-model.md) | Temporal Memory Model | Accepted |
+| [ADR-009](009-identity-conditioned-recall.md) | Identity-Conditioned Recall | Accepted |
+| [ADR-010](010-search-pipeline.md) | Unified Search Pipeline | Accepted |
