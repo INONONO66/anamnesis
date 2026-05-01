@@ -1,9 +1,9 @@
 //! Arena-based in-memory storage with SoA hot fields.
 
 use crate::error::Error;
-use crate::graph::{Edge, EdgeId, KnowledgeType, Node, NodeId, Timestamp};
+use crate::graph::{Edge, EdgeId, KnowledgeType, Node, NodeId, ScopePath, Timestamp};
 use crate::storage::StorageAdapter;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 const EMPTY_EDGE_SLICE: &[EdgeId] = &[];
 
@@ -14,6 +14,7 @@ pub struct InMemoryStorage {
 
     salience: Vec<f64>,
     accessed_at: Vec<Timestamp>,
+    decay_checkpoint: Vec<Timestamp>,
     node_types: Vec<Option<KnowledgeType>>,
 
     adjacency_out: Vec<Vec<EdgeId>>,
@@ -30,7 +31,7 @@ pub struct InMemoryStorage {
     pub(crate) entity_tag_index: HashMap<String, Vec<NodeId>>,
     pub(crate) type_index: HashMap<KnowledgeType, Vec<NodeId>>,
     pub(crate) agent_index: HashMap<String, Vec<NodeId>>,
-    pub(crate) project_index: HashMap<String, Vec<NodeId>>,
+    pub(crate) scope_index: BTreeMap<ScopePath, Vec<NodeId>>,
 }
 
 impl InMemoryStorage {
@@ -40,6 +41,7 @@ impl InMemoryStorage {
             edges: Vec::new(),
             salience: Vec::new(),
             accessed_at: Vec::new(),
+            decay_checkpoint: Vec::new(),
             node_types: Vec::new(),
             adjacency_out: Vec::new(),
             adjacency_in: Vec::new(),
@@ -52,7 +54,7 @@ impl InMemoryStorage {
             entity_tag_index: HashMap::new(),
             type_index: HashMap::new(),
             agent_index: HashMap::new(),
-            project_index: HashMap::new(),
+            scope_index: BTreeMap::new(),
         }
     }
 
@@ -62,6 +64,7 @@ impl InMemoryStorage {
             self.nodes.resize_with(new_len, || None);
             self.salience.resize(new_len, 0.0);
             self.accessed_at.resize(new_len, Timestamp(0));
+            self.decay_checkpoint.resize(new_len, Timestamp(0));
             self.node_types.resize_with(new_len, || None);
             self.adjacency_out.resize_with(new_len, Vec::new);
             self.adjacency_in.resize_with(new_len, Vec::new);
@@ -110,7 +113,7 @@ impl StorageAdapter for InMemoryStorage {
             let old_tags = old_node.entity_tags.clone();
             let old_type = old_node.node_type.clone();
             let old_agent = old_node.origin.agent_id.clone();
-            let old_project = old_node.origin.project_id.clone();
+            let old_scope = old_node.origin.scope.clone();
             let old_id = old_node.id;
 
             for tag in &old_tags {
@@ -124,10 +127,8 @@ impl StorageAdapter for InMemoryStorage {
             if let Some(v) = self.agent_index.get_mut(&old_agent) {
                 v.retain(|&id| id != old_id);
             }
-            if let Some(proj) = old_project {
-                if let Some(v) = self.project_index.get_mut(&proj) {
-                    v.retain(|&id| id != old_id);
-                }
+            if let Some(v) = self.scope_index.get_mut(&old_scope) {
+                v.retain(|&id| id != old_id);
             }
         } else {
             self.live_node_count += 1;
@@ -135,6 +136,7 @@ impl StorageAdapter for InMemoryStorage {
 
         self.salience[idx] = node.salience;
         self.accessed_at[idx] = node.accessed_at;
+        self.decay_checkpoint[idx] = node.accessed_at;
         self.node_types[idx] = Some(node.node_type.clone());
 
         let new_id = node.id;
@@ -155,12 +157,10 @@ impl StorageAdapter for InMemoryStorage {
             .entry(node.origin.agent_id.clone())
             .or_default()
             .push(new_id);
-        if let Some(ref proj) = node.origin.project_id {
-            self.project_index
-                .entry(proj.clone())
-                .or_default()
-                .push(new_id);
-        }
+        self.scope_index
+            .entry(node.origin.scope.clone())
+            .or_default()
+            .push(new_id);
 
         self.nodes[idx] = Some(node);
         Ok(())
@@ -195,9 +195,7 @@ impl StorageAdapter for InMemoryStorage {
         let node_type: Option<KnowledgeType> =
             self.nodes[idx].as_ref().map(|n| n.node_type.clone());
         let agent_id: Option<String> = self.nodes[idx].as_ref().map(|n| n.origin.agent_id.clone());
-        let project_id: Option<String> = self.nodes[idx]
-            .as_ref()
-            .and_then(|n| n.origin.project_id.clone());
+        let scope: Option<ScopePath> = self.nodes[idx].as_ref().map(|n| n.origin.scope.clone());
 
         for tag in &tags {
             if let Some(v) = self.entity_tag_index.get_mut(tag) {
@@ -214,8 +212,8 @@ impl StorageAdapter for InMemoryStorage {
                 v.retain(|&nid| nid != id);
             }
         }
-        if let Some(proj) = project_id {
-            if let Some(v) = self.project_index.get_mut(&proj) {
+        if let Some(s) = scope {
+            if let Some(v) = self.scope_index.get_mut(&s) {
                 v.retain(|&nid| nid != id);
             }
         }
@@ -223,6 +221,7 @@ impl StorageAdapter for InMemoryStorage {
         self.nodes[idx] = None;
         self.salience[idx] = 0.0;
         self.accessed_at[idx] = Timestamp(0);
+        self.decay_checkpoint[idx] = Timestamp(0);
         self.node_types[idx] = None;
         if idx < self.adjacency_out.len() {
             self.adjacency_out[idx].clear();
@@ -359,6 +358,23 @@ impl StorageAdapter for InMemoryStorage {
         Ok(())
     }
 
+    fn get_decay_checkpoint(&self, id: NodeId) -> Result<Timestamp, Error> {
+        let idx = id.0 as usize;
+        if idx >= self.nodes.len() || self.nodes[idx].is_none() {
+            return Err(Error::NodeNotFound(id));
+        }
+        Ok(self.decay_checkpoint[idx])
+    }
+
+    fn set_decay_checkpoint(&mut self, id: NodeId, ts: Timestamp) -> Result<(), Error> {
+        let idx = id.0 as usize;
+        if idx >= self.nodes.len() || self.nodes[idx].is_none() {
+            return Err(Error::NodeNotFound(id));
+        }
+        self.decay_checkpoint[idx] = ts;
+        Ok(())
+    }
+
     fn get_node_type(&self, id: NodeId) -> Result<&KnowledgeType, Error> {
         let idx = id.0 as usize;
         if idx >= self.node_types.len() {
@@ -403,11 +419,8 @@ impl StorageAdapter for InMemoryStorage {
         self.agent_index.get(agent_id).cloned().unwrap_or_default()
     }
 
-    fn nodes_by_project(&self, project_id: &str) -> Vec<NodeId> {
-        self.project_index
-            .get(project_id)
-            .cloned()
-            .unwrap_or_default()
+    fn nodes_by_scope(&self, scope: &ScopePath) -> Vec<NodeId> {
+        self.scope_index.get(scope).cloned().unwrap_or_default()
     }
 
     fn node_ids_descending(&self) -> Vec<NodeId> {
@@ -534,6 +547,7 @@ impl StorageAdapter for InMemoryStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph::ScopePath;
     use crate::graph::node::Origin;
     use std::collections::{HashMap, VecDeque};
 
@@ -557,7 +571,7 @@ mod tests {
             origin: Origin {
                 agent_id: "test-agent".to_string(),
                 session_id: "test-session".to_string(),
-                project_id: None,
+                scope: ScopePath::universal(),
                 confidence: 0.9,
             },
             entity_tags: vec![],
@@ -584,8 +598,12 @@ mod tests {
         entity_tags: Vec<&str>,
         node_type: KnowledgeType,
         agent_id: &str,
-        project_id: Option<&str>,
+        scope: Option<&str>,
     ) -> Node {
+        let scope = match scope {
+            Some(path) => ScopePath::new(path).expect("valid scope"),
+            None => ScopePath::universal(),
+        };
         Node {
             id,
             node_type,
@@ -605,7 +623,7 @@ mod tests {
             origin: Origin {
                 agent_id: agent_id.to_string(),
                 session_id: "session".to_string(),
-                project_id: project_id.map(|s| s.to_string()),
+                scope,
                 confidence: 0.9,
             },
             entity_tags: entity_tags.iter().map(|s| s.to_string()).collect(),
@@ -628,7 +646,6 @@ mod tests {
         assert_eq!(s.entity_tag_index.len(), 0);
         assert_eq!(s.type_index.len(), 0);
         assert_eq!(s.agent_index.len(), 0);
-        assert_eq!(s.project_index.len(), 0);
     }
 
     #[test]
@@ -658,11 +675,6 @@ mod tests {
         assert!(
             s.agent_index
                 .get("agent-A")
-                .is_some_and(|v| v.contains(&id))
-        );
-        assert!(
-            s.project_index
-                .get("proj-P")
                 .is_some_and(|v| v.contains(&id))
         );
     }
@@ -1035,7 +1047,7 @@ mod tests {
     }
 
     #[test]
-    fn nodes_by_project_returns_correct_set() {
+    fn nodes_by_scope_returns_correct_set() {
         let mut s = InMemoryStorage::new();
         let id1 = s.next_node_id();
         let id2 = s.next_node_id();
@@ -1055,8 +1067,9 @@ mod tests {
             None,
         ))
         .unwrap();
-        let proj_nodes = s.nodes_by_project("proj-X");
-        assert_eq!(proj_nodes, vec![id1]);
+        let scope = ScopePath::new("proj-X").expect("valid scope");
+        let scope_nodes = s.nodes_by_scope(&scope);
+        assert_eq!(scope_nodes, vec![id1]);
     }
 
     #[test]

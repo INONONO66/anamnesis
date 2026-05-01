@@ -9,13 +9,23 @@ pub mod memory;
 pub use memory::InMemoryStorage;
 
 use crate::error::Error;
-use crate::graph::{Edge, EdgeId, KnowledgeType, Node, NodeId, Timestamp};
+use crate::graph::{Edge, EdgeId, KnowledgeType, Node, NodeId, ScopePath, Timestamp};
 
 /// Storage backend interface for the Anamnesis graph engine.
 ///
 /// Implementations must provide O(1) amortized node/edge access.
 /// The `InMemoryStorage` implementation uses arena-based Vec storage
 /// with SoA hot fields for sub-millisecond spreading activation.
+///
+/// # Decay Checkpoint Invariant
+///
+/// `decay_checkpoint` is an internal SoA hot field separate from `accessed_at`.
+/// It records the last time decay was applied to a node and is the source of
+/// truth for elapsed-time computation in lazy/batch decay.
+///
+/// After `set_node()` and `Engine::touch()`, `decay_checkpoint == accessed_at`.
+/// Only `Engine::tick()` may diverge them: tick advances `decay_checkpoint`
+/// while leaving `accessed_at` untouched (preserving last-access semantics).
 pub trait StorageAdapter: Send + Sync {
     // ID allocation
     /// Allocate the next available NodeId (reuses freed IDs when available).
@@ -37,7 +47,7 @@ pub trait StorageAdapter: Send + Sync {
     ///
     /// # Index Invariant
     /// Mutations to `entity_tags`, `node_type`, `origin.agent_id`, or
-    /// `origin.project_id` will NOT update secondary indexes. To change these
+    /// `origin.scope` will NOT update secondary indexes. To change these
     /// fields, call `set_node()` with the modified node so indexes are rebuilt.
     ///
     /// Safe to mutate: `name`, `summary`, `content`, `embedding`, `access_count`,
@@ -76,6 +86,17 @@ pub trait StorageAdapter: Send + Sync {
     fn get_accessed_at(&self, id: NodeId) -> Result<Timestamp, Error>;
     /// Set accessed_at for a node. Keeps SoA in sync with Node.accessed_at.
     fn set_accessed_at(&mut self, id: NodeId, ts: Timestamp) -> Result<(), Error>;
+    /// Get the decay checkpoint timestamp for a node. O(1) direct array access.
+    ///
+    /// The decay checkpoint records the last time decay was applied; it is the
+    /// baseline for elapsed-time computation in lazy/batch decay. See trait-level
+    /// "Decay Checkpoint Invariant" docs for ordering rules vs `accessed_at`.
+    fn get_decay_checkpoint(&self, id: NodeId) -> Result<Timestamp, Error>;
+    /// Set the decay checkpoint timestamp for a node.
+    ///
+    /// `Engine::touch()` and `set_node()` keep this equal to `accessed_at`;
+    /// `Engine::tick()` advances it independently.
+    fn set_decay_checkpoint(&mut self, id: NodeId, ts: Timestamp) -> Result<(), Error>;
     /// Get node type for a node. O(1) direct array access.
     fn get_node_type(&self, id: NodeId) -> Result<&KnowledgeType, Error>;
 
@@ -127,19 +148,16 @@ pub trait StorageAdapter: Send + Sync {
             .collect()
     }
 
-    /// Return all node IDs belonging to the given project.
+    /// Return all node IDs whose origin scope equals the given scope path.
     ///
     /// Default implementation scans all nodes: O(N). Override for O(1) index lookup.
-    fn nodes_by_project(&self, project_id: &str) -> Vec<NodeId> {
+    fn nodes_by_scope(&self, scope: &ScopePath) -> Vec<NodeId> {
         self.all_node_ids()
             .into_iter()
             .filter(|&id| {
-                self.get_node(id).ok().is_some_and(|n| {
-                    n.origin
-                        .project_id
-                        .as_deref()
-                        .is_some_and(|p| p == project_id)
-                })
+                self.get_node(id)
+                    .ok()
+                    .is_some_and(|n| n.origin.scope == *scope)
             })
             .collect()
     }

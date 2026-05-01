@@ -16,13 +16,13 @@ The engine needs a deterministic scope model that supports domain separation, pr
 
 ## Decision
 
-Use `Origin.project_id` as the current scope key for knowledge:
+Use `Origin.scope` as the scope key for knowledge:
 
 ```rust
 pub struct Origin {
     pub agent_id: String,
     pub session_id: String,
-    pub project_id: Option<String>,
+    pub scope: ScopePath,
     pub confidence: f64,
 }
 ```
@@ -50,26 +50,26 @@ personal-projects/anamnesis
 personal-projects/game-prototype
 ```
 
-The current API stores this hierarchy in `project_id: Option<String>`. A scoped identifier may encode a domain path such as `work/company-a` or `personal-projects/anamnesis`. A future API may split this into an explicit `Scope` type, but the design intent is already hierarchical.
+The API stores this hierarchy in `ScopePath`. A scoped identifier may encode a domain path such as `work/company-a` or `personal-projects/anamnesis`; the root `universal` scope represents knowledge that applies across domains.
 
 | Scope | Representation | Meaning |
 |:------|:---------------|:--------|
-| Session evidence | `session_id` plus `project_id: Some(id)` | A specific event, observation, or turn from one run |
-| Domain-scoped knowledge | `project_id: Some("work")`, `Some("personal")`, or path prefix | Valid for a broad category of life/work |
-| Project-scoped knowledge | `project_id: Some("domain/project")` | Valid for one project or workspace |
-| Universal knowledge | `project_id: None` | Applies across domains unless contradicted by local context |
+| Session evidence | `session_id` plus a concrete `scope` | A specific event, observation, or turn from one run |
+| Domain-scoped knowledge | `work`, `personal`, or another scope prefix | Valid for a broad category of life/work |
+| Project-scoped knowledge | `domain/project` | Valid for one project or workspace |
+| Universal knowledge | `universal` | Applies across domains unless contradicted by local context |
 
 The scope model is not access control. It is a recall and ranking signal.
 
 ### 2. Scope-aware recall
 
-Queries may provide a current `project_id` or scoped path. During ranking, scope influences relevance:
+Queries may provide a current scoped path. During ranking, scope influences relevance:
 
 | Node scope | Example | Query role |
 |:-----------|:--------|:-----------|
 | Same project/workspace | `personal-projects/anamnesis` | Strongest boost |
 | Same domain/category | `personal-projects/*` | Medium boost |
-| Universal | `None` | Always available with broad weight |
+| Universal | `universal` | Always available with broad weight |
 | Other domain | `work/*` when querying `personal/*` | Downweighted unless explicitly requested or entity-linked |
 
 This keeps local conventions local while allowing same-domain habits and universal principles to participate in recall.
@@ -86,7 +86,7 @@ Promotion can happen at multiple levels:
 | Project knowledge | Domain knowledge | Several personal projects reveal the same development habit |
 | Domain knowledge | Universal knowledge | Work and personal projects both support a general principle |
 
-Universal promotion uses `project_id: None`. Domain-level promotion uses a broader scoped path, such as `personal-projects` rather than `personal-projects/anamnesis`.
+Universal promotion uses `ScopePath::universal()`. Domain-level promotion uses a broader scoped path, such as `personal-projects` rather than `personal-projects/anamnesis`.
 
 Promotion must not mutate or delete the original scoped memories.
 

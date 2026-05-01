@@ -51,13 +51,14 @@ pub fn rerank_with_context(mut scored_nodes: Vec<ScoredNode>, context: &str) -> 
 mod tests {
     use super::*;
     use crate::graph::node::Origin;
+    use crate::graph::scope::ScopePath;
     use crate::graph::{KnowledgeType, NodeId};
 
     fn make_origin() -> Origin {
         Origin {
             agent_id: "agent-1".to_string(),
             session_id: "session-1".to_string(),
-            project_id: None,
+            scope: ScopePath::universal(),
             confidence: 0.9,
         }
     }

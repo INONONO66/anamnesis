@@ -1,4 +1,10 @@
 //! Clone-based snapshot storage for reversible engine state.
+//!
+//! Snapshots are in-process only. They include the full storage state via
+//! `Storage: Clone`, which captures all SoA hot fields (including the internal
+//! `decay_checkpoint`). Cross-version snapshot serialization is not supported:
+//! consumers requiring durable persistence must implement an external
+//! serialization layer over a `StorageAdapter` that supports it.
 
 use crate::error::Error;
 use crate::graph::Timestamp;

@@ -1,21 +1,21 @@
 //! Node and Origin types for the Anamnesis graph.
 
+use crate::graph::scope::ScopePath;
 use crate::graph::types::{KnowledgeType, MemoryTier, NodeId, Timestamp};
 use std::collections::{HashMap, VecDeque};
 
 /// Provenance and scope of a knowledge fragment.
 ///
 /// Tracks which agent produced this node, from which session,
-/// and whether it belongs to a specific project or is universal.
+/// and the hierarchical scope path it belongs to.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Origin {
     /// The agent that produced this knowledge fragment.
     pub agent_id: String,
     /// The session in which this fragment was created.
     pub session_id: String,
-    /// Project scope. None = universal knowledge (applies everywhere).
-    /// Some("project-id") = scoped to a specific project.
-    pub project_id: Option<String>,
+    /// Hierarchical scope path. `ScopePath::universal()` = applies across all scopes.
+    pub scope: ScopePath,
     /// Creation-time certainty [0, 1].
     pub confidence: f64,
 }
@@ -94,7 +94,7 @@ mod tests {
         Origin {
             agent_id: "agent-1".to_string(),
             session_id: "session-1".to_string(),
-            project_id: Some("anamnesis".to_string()),
+            scope: ScopePath::new("anamnesis").expect("valid scope"),
             confidence: 0.9,
         }
     }
@@ -104,16 +104,16 @@ mod tests {
         let o = Origin {
             agent_id: "agent-1".to_string(),
             session_id: "session-1".to_string(),
-            project_id: None, // universal
+            scope: ScopePath::universal(),
             confidence: 0.8,
         };
-        assert!(o.project_id.is_none());
+        assert!(o.scope.is_universal());
     }
 
     #[test]
     fn origin_project_scoped() {
         let o = make_origin();
-        assert_eq!(o.project_id.as_deref(), Some("anamnesis"));
+        assert_eq!(o.scope.as_str(), "anamnesis");
     }
 
     #[test]
@@ -167,7 +167,7 @@ mod tests {
             origin: Origin {
                 agent_id: "agent-1".to_string(),
                 session_id: "session-2".to_string(),
-                project_id: None,
+                scope: ScopePath::universal(),
                 confidence: 0.7,
             },
             entity_tags: vec![],

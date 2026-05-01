@@ -82,9 +82,9 @@ anamnesis = "0.3"
 ```
 
 ```rust
-use anamnesis::{Engine, EngineConfig};
+use anamnesis::Engine;
 use anamnesis::api::Observation;
-use anamnesis::graph::{KnowledgeType, EdgeType, Timestamp};
+use anamnesis::graph::{EdgeType, KnowledgeType, ScopePath, Timestamp};
 use anamnesis::graph::node::Origin;
 
 let mut engine = Engine::new();
@@ -101,7 +101,7 @@ let result = engine.ingest(Observation {
     origin: Origin {
         agent_id: "agent-1".into(),
         session_id: "session-1".into(),
-        project_id: Some("my-project".into()),
+        scope: ScopePath::new("my-project").expect("valid scope"),
         confidence: 0.9,
     },
     timestamp: Timestamp::now(),
@@ -109,7 +109,7 @@ let result = engine.ingest(Observation {
 
 let ids = match result {
     anamnesis::api::IngestResult::Created(ids) => ids,
-    anamnesis::api::IngestResult::Reinforced { node_id, .. } => vec![node_id],
+    anamnesis::api::IngestResult::Reinforced { existing_id, .. } => vec![existing_id],
 };
 
 let result2 = engine.ingest(Observation {
@@ -123,7 +123,7 @@ let result2 = engine.ingest(Observation {
     origin: Origin {
         agent_id: "agent-1".into(),
         session_id: "session-5".into(),
-        project_id: Some("my-project".into()),
+        scope: ScopePath::new("my-project").expect("valid scope"),
         confidence: 0.85,
     },
     timestamp: Timestamp::now(),
@@ -131,7 +131,7 @@ let result2 = engine.ingest(Observation {
 
 let ids2 = match result2 {
     anamnesis::api::IngestResult::Created(ids) => ids,
-    anamnesis::api::IngestResult::Reinforced { node_id, .. } => vec![node_id],
+    anamnesis::api::IngestResult::Reinforced { existing_id, .. } => vec![existing_id],
 };
 
 // Connect related knowledge

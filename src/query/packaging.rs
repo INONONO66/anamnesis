@@ -15,7 +15,7 @@ use crate::query::types::{PackagingMode, SearchPlan, Tension};
 /// 2. If persona bias is requested → `PersonaWeighted`
 /// 3. If query contains temporal keywords → `Timeline`
 /// 4. Default → `KnowledgeOnly`
-pub fn decide_packaging(
+pub(crate) fn decide_packaging(
     tensions: &[Tension],
     plan: &SearchPlan,
     query_text: &str,

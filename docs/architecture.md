@@ -247,11 +247,10 @@ Every node carries an `Origin`:
 |:-------------|:--------|:-----------|
 | `agent_id` | Which agent or persona produced the node | Identity prior, provenance, disagreement analysis |
 | `session_id` | Which run or interaction produced the node | Episodic reconstruction and temporal grouping |
-| `project_id: Some(path)` | Scoped memory path such as `work/company-a` or `personal-projects/anamnesis` | Domain/project/workspace recall weighting |
-| `project_id: None` | Universal memory | Available across scopes with lower but persistent scope weight |
+| `scope: ScopePath` | Scoped memory path such as `work/company-a`, `personal-projects/anamnesis`, or `universal` | Domain/project/workspace recall weighting; `universal` remains available across scopes with lower but persistent weight |
 | `confidence` | Source confidence at creation | Used by consumers and future ranking/reinforcement policies |
 
-Conceptually, `project_id` is a hierarchical scope path:
+Conceptually, `scope` is a hierarchical scope path whose root value is `universal`:
 
 ```text
 universal
