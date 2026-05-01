@@ -110,7 +110,7 @@ fn identity_tension_preserved() {
 }
 
 #[test]
-fn knowledge_only_keeps_extracted_from_episodic() {
+fn knowledge_only_omits_source_memories_and_memory_tokens() {
     let mut engine = engine();
     let source = ingest(
         &mut engine,
@@ -140,7 +140,15 @@ fn knowledge_only_keeps_extracted_from_episodic() {
             .iter()
             .any(|f| f.node_id == knowledge)
     );
-    assert!(result.package.memories.iter().any(|f| f.node_id == source));
+    assert!(!result.package.memories.iter().any(|f| f.node_id == source));
+    assert!(result.package.memories.is_empty());
+    assert_eq!(result.package.token_usage.memories_used, 0);
+    assert_eq!(
+        result.package.token_usage.used,
+        result.package.token_usage.identity_used
+            + result.package.token_usage.knowledge_used
+            + result.package.token_usage.memories_used
+    );
 }
 
 #[test]
@@ -181,7 +189,7 @@ fn knowledge_only_drops_unlinked_episodic() {
         })
         .expect("search should succeed");
 
-    assert!(result.package.memories.iter().any(|f| f.node_id == source));
+    assert!(!result.package.memories.iter().any(|f| f.node_id == source));
     assert!(
         !result
             .package
@@ -197,7 +205,7 @@ fn source_fragment_carries_source_scope() {
     let source = ingest(
         &mut engine,
         observation(
-            "scope-source episode",
+            "origin episode",
             KnowledgeType::Episodic,
             Some("source-project"),
             0,
@@ -212,8 +220,20 @@ fn source_fragment_carries_source_scope() {
             1,
         ),
     );
+    let contrary = ingest(
+        &mut engine,
+        observation(
+            "scope-source contrary",
+            KnowledgeType::Semantic,
+            Some("knowledge-project"),
+            2,
+        ),
+    );
     engine
         .link(source, knowledge, EdgeType::ExtractedFrom, 0.8)
+        .expect("link should succeed");
+    engine
+        .link(knowledge, contrary, EdgeType::Contradicts, 0.8)
         .expect("link should succeed");
 
     let result = engine

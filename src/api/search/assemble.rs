@@ -223,13 +223,12 @@ fn apply_packaging_mode<S: StorageAdapter + Clone>(
 ) {
     match packaging_mode {
         PackagingMode::KnowledgeOnly => {
+            package.token_usage.used = package
+                .token_usage
+                .used
+                .saturating_sub(package.token_usage.memories_used);
+            package.token_usage.memories_used = 0;
             package.memories.clear();
-            include_source_memories(
-                engine,
-                query_scope,
-                &package.knowledge,
-                &mut package.memories,
-            );
         }
         PackagingMode::KnowledgeWithProvenance => {
             include_source_memories(

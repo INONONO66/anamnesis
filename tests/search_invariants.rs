@@ -373,25 +373,36 @@ fn rrf_tie_break_node_id_ascending() {
 #[test]
 fn source_fragment_carries_source_scope() {
     let mut engine = engine();
+    let source = ingest(
+        &mut engine,
+        "scope source",
+        KnowledgeType::Episodic,
+        "project/main",
+    );
     let knowledge = ingest(
         &mut engine,
         "scope knowledge",
         KnowledgeType::Semantic,
         "project/main",
     );
-    let source = ingest(
+    let tension = ingest(
         &mut engine,
-        "scope source",
-        KnowledgeType::Episodic,
-        "project/main/source",
+        "scope tension",
+        KnowledgeType::Semantic,
+        "project/main",
     );
     engine
         .link(knowledge, source, EdgeType::ExtractedFrom, 1.0)
+        .unwrap();
+    // Create a Contradicts edge to trigger KnowledgeWithProvenance packaging mode
+    engine
+        .link(knowledge, tension, EdgeType::Contradicts, 0.8)
         .unwrap();
 
     let result = engine
         .search(SearchInput {
             text: "scope knowledge".to_string(),
+            scope: ScopePath::new("project/main").expect("valid scope"),
             limit: 10,
             seed_limit: Some(1),
             ..Default::default()
@@ -404,8 +415,8 @@ fn source_fragment_carries_source_scope() {
         .find(|f| f.node_id == source)
         .unwrap();
 
-    assert_eq!(source_fragment.origin.scope.as_str(), "project/main/source");
-    assert_eq!(source_fragment.scope, ScopeRelation::Universal);
+    assert_eq!(source_fragment.origin.scope.as_str(), "project/main");
+    assert_eq!(source_fragment.scope, ScopeRelation::Exact);
 }
 
 /// Protects empty-candidate search from panicking or fabricating fragments.

@@ -216,6 +216,33 @@ fn test_search_episodic_content_preserved() {
         }
     }
 
+    // Ingest a contradicting fact to trigger KnowledgeWithProvenance packaging mode
+    let contradiction_id = match engine
+        .ingest(Observation {
+            name: "auth bug contradiction".into(),
+            summary: Some("Contradicting fact".into()),
+            content: "Auth module is secure and has no bugs.".into(),
+            embedding: None,
+            confidence: 0.9,
+            node_type: KnowledgeType::Semantic,
+            entity_tags: vec!["auth".to_string()],
+            origin: Origin {
+                agent_id: "agent-1".to_string(),
+                session_id: "session-contradiction".to_string(),
+                scope: anamnesis::graph::ScopePath::universal(),
+                confidence: 0.9,
+            },
+            timestamp: Timestamp(100),
+        })
+        .unwrap()
+    {
+        IngestResult::Created(ids) => ids[0],
+        _ => panic!("expected Created"),
+    };
+    engine
+        .link(semantic_id, contradiction_id, EdgeType::Contradicts, 0.8)
+        .unwrap();
+
     // Search for matching text
     let result = engine
         .search(SearchInput {
@@ -292,12 +319,12 @@ fn test_search_seeds_ordered_by_relevance() {
     );
 }
 
-/// Test that KnowledgeOnly packaging mode preserves memories.
+/// Test that KnowledgeOnly packaging mode excludes memories.
 ///
-/// Issue #14: KnowledgeOnly mode should not clear memories partition.
-/// Memories should be retained even when packaging mode is KnowledgeOnly.
+/// KnowledgeOnly mode should return only knowledge fragments and keep token
+/// accounting consistent with the returned package.
 #[test]
-fn test_knowledge_only_preserves_memories() {
+fn test_knowledge_only_excludes_memories() {
     let config = EngineConfig::default().with_novelty_threshold(0.0);
     let mut engine = Engine::with_config(config);
 
@@ -326,21 +353,20 @@ fn test_knowledge_only_preserves_memories() {
         })
         .unwrap();
 
-    // Assert memories are not cleared
-    // Current bug: apply_packaging_mode() clears memories in KnowledgeOnly mode
     assert!(
-        !result.package.memories.is_empty(),
-        "Memories should not be cleared in KnowledgeOnly mode"
+        result
+            .package
+            .memories
+            .iter()
+            .all(|m| m.node_id != episodic_id),
+        "Episodic node should not be in memories partition"
     );
-
-    // Assert at least one memory is the episodic node we ingested
-    let has_episodic = result
-        .package
-        .memories
-        .iter()
-        .any(|m| m.node_id == episodic_id);
-    assert!(
-        has_episodic,
-        "Episodic node should be in memories partition"
+    assert!(result.package.memories.is_empty());
+    assert_eq!(result.package.token_usage.memories_used, 0);
+    assert_eq!(
+        result.package.token_usage.used,
+        result.package.token_usage.identity_used
+            + result.package.token_usage.knowledge_used
+            + result.package.token_usage.memories_used
     );
 }
