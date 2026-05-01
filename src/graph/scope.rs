@@ -54,6 +54,14 @@ impl ScopePath {
     pub fn new(s: impl Into<String>) -> Result<Self, Error> {
         let mut path = s.into();
 
+        // Reject consecutive slashes before normalization can hide malformed
+        // trailing empty segments (for example, `a//` must not become `a`).
+        if path.contains("//") {
+            return Err(Error::InvalidInput(
+                "scope path cannot contain consecutive slashes".to_string(),
+            ));
+        }
+
         // Trim trailing slashes
         path = path.trim_end_matches('/').to_string();
 
@@ -62,13 +70,6 @@ impl ScopePath {
             return Err(Error::InvalidInput(
                 "scope path cannot be empty; use ScopePath::universal() for universal scope"
                     .to_string(),
-            ));
-        }
-
-        // Reject consecutive slashes
-        if path.contains("//") {
-            return Err(Error::InvalidInput(
-                "scope path cannot contain consecutive slashes".to_string(),
             ));
         }
 
@@ -235,6 +236,18 @@ mod tests {
     #[test]
     fn path_consecutive_slashes_rejected() {
         let result = ScopePath::new("a//b");
+        assert!(result.is_err());
+        match result {
+            Err(Error::InvalidInput(msg)) => {
+                assert!(msg.contains("consecutive slashes"));
+            }
+            _ => panic!("expected InvalidInput error"),
+        }
+    }
+
+    #[test]
+    fn path_consecutive_trailing_slashes_rejected() {
+        let result = ScopePath::new("a//");
         assert!(result.is_err());
         match result {
             Err(Error::InvalidInput(msg)) => {

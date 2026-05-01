@@ -137,8 +137,6 @@ fn path_deeply_nested_accepted() {
 fn path_trailing_slash_trimmed() {
     let p = ScopePath::new("personal/foo/").unwrap();
     assert_eq!(p.as_str(), "personal/foo");
-    let p2 = ScopePath::new("personal/foo///").unwrap();
-    assert_eq!(p2.as_str(), "personal/foo");
 }
 
 #[test]
@@ -152,6 +150,20 @@ fn path_double_slash_rejected() {
             );
         }
         other => panic!("expected InvalidInput for double slash, got {other:?}"),
+    }
+}
+
+#[test]
+fn path_trailing_double_slash_rejected() {
+    let r = ScopePath::new("a//");
+    match r {
+        Err(Error::InvalidInput(msg)) => {
+            assert!(
+                msg.contains("consecutive slashes"),
+                "error message must mention consecutive slashes, got {msg}"
+            );
+        }
+        other => panic!("expected InvalidInput for trailing double slash, got {other:?}"),
     }
 }
 
