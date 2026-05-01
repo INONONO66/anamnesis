@@ -10,6 +10,8 @@ use crate::query::{ContextPackage, Query, QueryConfig, SearchInput, SearchResult
 use crate::snapshot::{SnapshotId, SnapshotStore};
 use crate::storage::{InMemoryStorage, StorageAdapter};
 
+mod search;
+
 /// Decay model for salience computation.
 ///
 /// `Exponential` (default) uses the existing formula: s(t+dt) = b + (s(t) - b) * exp(-lambda * dt).
@@ -529,20 +531,6 @@ fn crystallized_salience(
     };
 
     (0.60 * source_average + 0.25 * confidence + 0.15 * 0.10).clamp(0.0, 1.0)
-}
-
-fn merge_highest_relevance(
-    fragments: &mut HashMap<NodeId, crate::query::Fragment>,
-    fragment: crate::query::Fragment,
-) {
-    fragments
-        .entry(fragment.node_id)
-        .and_modify(|existing| {
-            if fragment.relevance > existing.relevance {
-                *existing = fragment.clone();
-            }
-        })
-        .or_insert(fragment);
 }
 
 /// The Anamnesis cognitive graph engine.
@@ -1366,6 +1354,15 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         edge_type: EdgeType,
         weight: f64,
     ) -> Result<EdgeId, Error> {
+        self.graph.get_node(from)?;
+        self.graph.get_node(to)?;
+
+        if !weight.is_finite() {
+            return Err(Error::InvalidInput("weight must be finite".to_string()));
+        }
+
+        let clamped_weight = weight.clamp(0.0, 1.0);
+
         let id = self.graph.next_edge_id();
         let now = Timestamp::now();
         let is_supersedes = edge_type == EdgeType::Supersedes;
@@ -1374,7 +1371,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             source: from,
             target: to,
             edge_type,
-            weight,
+            weight: clamped_weight,
             created_at: now,
             valid_from: None,
             valid_until: None,
@@ -1395,19 +1392,21 @@ impl<S: StorageAdapter + Clone> Engine<S> {
     /// Touch a node — apply lazy decay then reinforce on access.
     ///
     /// Phase 2: Applies decay (eq 4) BEFORE reinforcement (eq 5).
-    /// Decay is lazy: computed based on elapsed time since last access.
+    /// Decay is lazy: computed based on elapsed time since the last decay
+    /// checkpoint (NOT `accessed_at`). Updates BOTH `accessed_at` and
+    /// `decay_checkpoint` to `now`.
     pub fn touch(&mut self, node_id: NodeId, now: Timestamp) -> Result<(), Error> {
         use crate::mechanics::forgetting::{
             base_level_to_salience, compute_base_level, decay_salience, reinforce_salience,
         };
 
         let current_salience = self.graph.storage().get_salience(node_id)?;
-        let last_accessed = self.graph.storage().get_accessed_at(node_id)?;
+        let last_checkpoint = self.graph.storage().get_decay_checkpoint(node_id)?;
         let node_type = self.graph.storage().get_node_type(node_id)?.clone();
 
         match self.config.decay_model {
             DecayModel::Exponential => {
-                let dt_ms = now.0.saturating_sub(last_accessed.0);
+                let dt_ms = now.0.saturating_sub(last_checkpoint.0);
                 let dt_days = dt_ms as f64 / 86_400_000.0;
 
                 // Decay BEFORE reinforcement — ordering invariant (eq 4 then eq 5)
@@ -1432,6 +1431,9 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         }
 
         self.graph.storage_mut().set_accessed_at(node_id, now)?;
+        self.graph
+            .storage_mut()
+            .set_decay_checkpoint(node_id, now)?;
 
         let node = self.graph.get_node_mut(node_id)?;
         node.access_count += 1;
@@ -1456,6 +1458,10 @@ impl<S: StorageAdapter + Clone> Engine<S> {
     }
 
     /// Advance time — apply batch decay (eq 4) to all nodes.
+    ///
+    /// Reads `decay_checkpoint` (NOT `accessed_at`) as the elapsed-time baseline,
+    /// updates salience, and advances `decay_checkpoint` to `now`. `accessed_at`
+    /// is left untouched, preserving last user-access semantics.
     pub fn tick(&mut self, now: Timestamp) -> Result<TickReport, Error> {
         use crate::mechanics::forgetting::{
             base_level_to_salience, compute_base_level, decay_salience, floor_for_type,
@@ -1478,7 +1484,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                 Ok(s) => s,
                 Err(_) => continue,
             };
-            let last_accessed = match self.graph.storage().get_accessed_at(id) {
+            let last_checkpoint = match self.graph.storage().get_decay_checkpoint(id) {
                 Ok(t) => t,
                 Err(_) => continue,
             };
@@ -1489,7 +1495,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
 
             let new_salience = match self.config.decay_model {
                 DecayModel::Exponential => {
-                    let dt_ms = now.0.saturating_sub(last_accessed.0);
+                    let dt_ms = now.0.saturating_sub(last_checkpoint.0);
                     let dt_days = dt_ms as f64 / 86_400_000.0;
 
                     decay_salience(current_salience, dt_days, &node_type)
@@ -1513,7 +1519,12 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                 {
                     continue;
                 }
-                if self.graph.storage_mut().set_accessed_at(id, now).is_err() {
+                if self
+                    .graph
+                    .storage_mut()
+                    .set_decay_checkpoint(id, now)
+                    .is_err()
+                {
                     continue;
                 }
                 nodes_decayed += 1;
@@ -1563,181 +1574,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
     ///
     /// Returns `Err(Error::InvalidInput)` if both `text` is empty and `query_embedding` is `None`.
     pub fn search(&self, input: SearchInput) -> Result<SearchResult, Error> {
-        use std::cmp::Ordering;
-
-        use crate::mechanics::attraction::cosine_similarity;
-        use crate::query::{Fragment, PackagingMode, SearchPlan, SearchTrace, TokenBudget};
-
-        if input.text.is_empty() && input.query_embedding.is_none() {
-            return Err(Error::InvalidInput(
-                "search requires text or query_embedding".to_string(),
-            ));
-        }
-
-        let plan = SearchPlan {
-            use_text: !input.text.is_empty(),
-            use_vector: input.query_embedding.is_some(),
-            use_graph: true,
-            use_temporal: false,
-            use_persona_bias: input.agent_id.is_some(),
-            packaging_mode: PackagingMode::KnowledgeOnly,
-        };
-
-        let mut seed_scores: HashMap<NodeId, f64> = HashMap::new();
-        let mut strategies_used: Vec<String> = Vec::new();
-        let mut spread_iterations = 0usize;
-        let storage = self.graph.storage();
-
-        let sub_queries = if plan.use_text {
-            crate::query::decompose_query(&input.text)
-        } else {
-            Vec::new()
-        };
-
-        if plan.use_text {
-            for sub_query in &sub_queries {
-                let text_results = storage.text_search(sub_query, input.limit.max(10));
-                if !text_results.is_empty() {
-                    for (node_id, score) in text_results {
-                        let current = seed_scores.entry(node_id).or_insert(score);
-                        if score > *current {
-                            *current = score;
-                        }
-                    }
-
-                    if !strategies_used
-                        .iter()
-                        .any(|strategy| strategy == "text_search")
-                    {
-                        strategies_used.push("text_search".to_string());
-                    }
-                }
-            }
-        }
-
-        if plan.use_vector
-            && let Some(ref query_embedding) = input.query_embedding
-        {
-            let vector_scores: Vec<(NodeId, f64)> = storage
-                .all_node_ids()
-                .into_iter()
-                .filter_map(|node_id| {
-                    let node = storage.get_node(node_id).ok()?;
-                    let embedding = node.embedding.as_ref()?;
-                    Some((node_id, cosine_similarity(query_embedding, embedding)))
-                })
-                .filter(|(_, score)| *score > 0.0)
-                .collect();
-
-            for (node_id, score) in top_n_by_score(&vector_scores, input.limit.max(10)) {
-                let current = seed_scores.entry(node_id).or_insert(score);
-                if score > *current {
-                    *current = score;
-                }
-            }
-            strategies_used.push("vector_similarity".to_string());
-        }
-
-        let mut all_seeds: Vec<(NodeId, f64)> = seed_scores.into_iter().collect();
-        all_seeds.sort_by(|(a_id, a_score), (b_id, b_score)| {
-            b_score
-                .partial_cmp(a_score)
-                .unwrap_or(Ordering::Equal)
-                .then_with(|| a_id.cmp(b_id))
-        });
-
-        let mut merged_knowledge: HashMap<NodeId, Fragment> = HashMap::new();
-        let mut merged_memories: HashMap<NodeId, Fragment> = HashMap::new();
-        let mut merged_identity: HashMap<NodeId, Fragment> = HashMap::new();
-        let mut merged_tensions = Vec::new();
-
-        if plan.use_graph {
-            let max_seeds = input.limit.clamp(3, 10);
-            for (seed, _) in all_seeds.iter().take(max_seeds) {
-                let config = QueryConfig {
-                    budget: input.limit.saturating_mul(5),
-                    agent_id: input.agent_id.clone(),
-                    project_id: input.project_id.clone(),
-                    query_embedding: input.query_embedding.clone(),
-                    context: input.context.clone(),
-                    ..QueryConfig::default()
-                };
-
-                if let Ok(pkg) = self.query_associative(*seed, config.budget, &config) {
-                    for fragment in pkg.knowledge {
-                        merge_highest_relevance(&mut merged_knowledge, fragment);
-                    }
-                    for fragment in pkg.memories {
-                        merge_highest_relevance(&mut merged_memories, fragment);
-                    }
-                    for fragment in pkg.identity {
-                        merge_highest_relevance(&mut merged_identity, fragment);
-                    }
-                    merged_tensions.extend(pkg.tensions);
-                    spread_iterations += 1;
-                }
-            }
-        }
-
-        if spread_iterations > 0 {
-            strategies_used.push("spreading_activation".to_string());
-        }
-
-        let mut knowledge: Vec<_> = merged_knowledge.into_values().collect();
-        let mut memories: Vec<_> = merged_memories.into_values().collect();
-        let mut identity: Vec<_> = merged_identity.into_values().collect();
-
-        knowledge.sort_by(|a, b| {
-            b.relevance
-                .partial_cmp(&a.relevance)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        memories.sort_by(|a, b| {
-            b.relevance
-                .partial_cmp(&a.relevance)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-
-        knowledge.truncate(input.limit);
-        memories.truncate(input.limit);
-
-        let packaging_mode = crate::query::decide_packaging(&merged_tensions, &plan, &input.text);
-
-        self.apply_packaging_mode(
-            packaging_mode.clone(),
-            &mut identity,
-            &mut knowledge,
-            &mut memories,
-        );
-
-        if input.now.0 > 0 {
-            let now = input.now;
-            knowledge.retain(|fragment| self.node_is_valid_at(fragment.node_id, now));
-            memories.retain(|fragment| self.node_is_valid_at(fragment.node_id, now));
-            identity.retain(|fragment| self.node_is_valid_at(fragment.node_id, now));
-            merged_tensions.retain(|tension| {
-                self.node_is_valid_at(tension.node_a, now)
-                    && self.node_is_valid_at(tension.node_b, now)
-            });
-        }
-
-        let package = ContextPackage {
-            identity,
-            knowledge,
-            memories,
-            tensions: merged_tensions,
-            token_usage: TokenBudget::default(),
-            agent_tension: 0.0,
-        };
-
-        let trace = SearchTrace {
-            strategies_used,
-            seed_count: all_seeds.len(),
-            spread_iterations,
-            packaging_mode: Some(packaging_mode),
-        };
-
-        Ok(SearchResult { package, trace })
+        search::search(self, input)
     }
 
     /// Query the graph for facts valid at a specific point in time.
@@ -1776,104 +1613,6 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                 .is_none_or(|valid_until| valid_until > as_of);
             from_ok && until_ok
         })
-    }
-
-    fn apply_packaging_mode(
-        &self,
-        packaging_mode: crate::query::PackagingMode,
-        identity: &mut [crate::query::Fragment],
-        knowledge: &mut [crate::query::Fragment],
-        memories: &mut Vec<crate::query::Fragment>,
-    ) {
-        match packaging_mode {
-            crate::query::PackagingMode::KnowledgeOnly => {
-                // No-op: preserve memories as-is
-            }
-            crate::query::PackagingMode::KnowledgeWithProvenance => {
-                self.include_source_memories(knowledge, memories);
-            }
-            crate::query::PackagingMode::PersonaWeighted => {
-                identity.sort_by(|a, b| {
-                    b.relevance
-                        .partial_cmp(&a.relevance)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                        .then_with(|| a.node_id.cmp(&b.node_id))
-                });
-            }
-            crate::query::PackagingMode::Timeline => {
-                self.sort_fragments_by_created_at(identity);
-                self.sort_fragments_by_created_at(knowledge);
-                self.sort_fragments_by_created_at(memories);
-            }
-        }
-    }
-
-    fn include_source_memories(
-        &self,
-        knowledge: &[crate::query::Fragment],
-        memories: &mut Vec<crate::query::Fragment>,
-    ) {
-        let mut existing: HashSet<NodeId> =
-            memories.iter().map(|fragment| fragment.node_id).collect();
-
-        for fragment in knowledge {
-            for source_fragment in self.source_memory_fragments(fragment) {
-                if existing.insert(source_fragment.node_id) {
-                    memories.push(source_fragment);
-                }
-            }
-        }
-    }
-
-    fn source_memory_fragments(
-        &self,
-        fragment: &crate::query::Fragment,
-    ) -> Vec<crate::query::Fragment> {
-        let storage = self.graph.storage();
-        storage
-            .edges_from(fragment.node_id)
-            .iter()
-            .filter_map(|edge_id| storage.get_edge(*edge_id).ok())
-            .filter(|edge| edge.edge_type == EdgeType::ExtractedFrom)
-            .filter_map(|edge| {
-                let node = storage.get_node(edge.target).ok()?;
-                if !matches!(
-                    node.node_type,
-                    KnowledgeType::Episodic | KnowledgeType::Event
-                ) {
-                    return None;
-                }
-                Some(crate::query::Fragment {
-                    node_id: edge.target,
-                    name: node.name.clone(),
-                    summary: node.summary.clone(),
-                    content: Some(node.content.clone()),
-                    node_type: node.node_type.clone(),
-                    relevance: (fragment.relevance * edge.weight).clamp(0.0, 1.0),
-                    origin: node.origin.clone(),
-                    scope: fragment.scope.clone(),
-                })
-            })
-            .collect()
-    }
-
-    fn sort_fragments_by_created_at(&self, fragments: &mut [crate::query::Fragment]) {
-        fragments.sort_by(|a, b| {
-            let a_created_at = self
-                .graph
-                .get_node(a.node_id)
-                .map(|node| node.created_at)
-                .unwrap_or(Timestamp(u64::MAX));
-            let b_created_at = self
-                .graph
-                .get_node(b.node_id)
-                .map(|node| node.created_at)
-                .unwrap_or(Timestamp(u64::MAX));
-
-            a_created_at
-                .cmp(&b_created_at)
-                .then_with(|| a.node_id.cmp(&b.node_id))
-        });
     }
 
     fn query_type_filtered(
@@ -1925,7 +1664,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             &HashMap::new(),
             config.token_budget,
             config.chars_per_token,
-            &config.project_id,
+            &config.scope,
         ))
     }
 
@@ -1986,7 +1725,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             &HashMap::new(),
             config.token_budget,
             config.chars_per_token,
-            &config.project_id,
+            &config.scope,
         ))
     }
 
@@ -2056,7 +1795,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             &HashMap::new(),
             config.token_budget,
             config.chars_per_token,
-            &config.project_id,
+            &config.scope,
         ))
     }
 
@@ -2130,7 +1869,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             &HashMap::new(),
             config.token_budget,
             config.chars_per_token,
-            &config.project_id,
+            &config.scope,
         ))
     }
 
@@ -2358,7 +2097,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                 })
                 .unwrap_or(0);
 
-            let sw = scope_weight(&config.project_id, &node.origin.project_id, shared_entities);
+            let sw = scope_weight(&config.scope, &node.origin.scope, shared_entities);
             let scoring_similarity = match self.config.energy_model {
                 EnergyModel::WeightedSum => vector_sim,
                 EnergyModel::Hopfield => hopfield_adjusted_similarity(
@@ -2422,7 +2161,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             &damped_activations,
             config.token_budget,
             config.chars_per_token,
-            &config.project_id,
+            &config.scope,
         );
 
         Ok(package)
@@ -2632,7 +2371,7 @@ mod tests {
             origin: Origin {
                 agent_id: "agent-1".to_string(),
                 session_id: "session-1".to_string(),
-                project_id: None,
+                scope: crate::graph::ScopePath::universal(),
                 confidence: 0.9,
             },
             timestamp: Timestamp(1000),
@@ -3105,7 +2844,7 @@ mod tests {
             origin: Origin {
                 agent_id: "agent-1".to_string(),
                 session_id: "session-1".to_string(),
-                project_id: None,
+                scope: crate::graph::ScopePath::universal(),
                 confidence: 1.0,
             },
             ..make_observation("I am a code architect")

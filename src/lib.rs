@@ -36,8 +36,8 @@ pub use error::Error;
 pub use graph::{Edge, Node, Origin};
 pub use graph::{EdgeId, EdgeType, KnowledgeType, NodeId, Timestamp};
 pub use query::{
-    ContextPackage, Fragment, PackagingMode, Query, QueryConfig, SearchInput, SearchPlan,
-    SearchResult, SearchTrace, Tension, TokenBudget, decompose_query,
+    ContextPackage, Fragment, PackagingMode, Query, QueryConfig, SearchInput, SearchResult,
+    SearchTrace, Tension, TokenBudget,
 };
 pub use snapshot::{InMemorySnapshot, SnapshotBackend, SnapshotEntry, SnapshotId, SnapshotStore};
 pub use storage::{InMemoryStorage, StorageAdapter};

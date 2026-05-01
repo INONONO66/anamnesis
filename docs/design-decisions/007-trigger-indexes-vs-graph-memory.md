@@ -38,11 +38,17 @@ Candidate sources may include:
 | Entity tags | Structured names and known concepts |
 | Temporal filters | Time windows and validity constraints |
 
-Each source returns `NodeId`, source-specific rank or score, and a match reason.
+Each source returns `NodeId`, source-specific rank or score, and a match reason. Search keeps these raw candidates in its trace so retrieval can be diagnosed separately from graph recall.
 
 ### 2. Seed fusion
 
 Candidate scores from different retrieval systems are not directly comparable. BM25 scores, cosine similarity, exact-match bonuses, and temporal filters have different scales. Rank-based fusion, such as reciprocal rank fusion, is the preferred starting point because it combines agreement across sources without brittle score normalization.
+
+The unified `search()` pipeline should therefore preserve:
+
+```text
+raw candidates -> per-source ranks -> fused seeds -> graph paths -> packaging drops
+```
 
 ### 3. Graph recall
 
@@ -85,7 +91,7 @@ Embeddings are stored on nodes and may be used for query-time similarity, but th
 
 - Search traces should record per-source candidates, fused seeds, graph paths, and packaging drops.
 - Low-salience memories should still be seedable by precise lexical triggers; exact recall can revive archived nodes via `touch()`.
-- Future search improvements should add a raw candidate layer before `ContextPackage` assembly.
+- `search()` should expose a raw candidate layer before `ContextPackage` assembly.
 - The public API should keep `search()` as a user-facing entry point and `query()` as structured graph retrieval.
 
 ## Related Decisions

@@ -31,7 +31,7 @@ fn make_node(id: NodeId, node_type: KnowledgeType, name: &str) -> Node {
         origin: Origin {
             agent_id: "agent-1".to_string(),
             session_id: "session-1".to_string(),
-            project_id: Some("project-1".to_string()),
+            scope: anamnesis::graph::ScopePath::new("project-1").expect("valid scope"),
             confidence: 0.9,
         },
         metadata: HashMap::new(),
@@ -231,17 +231,17 @@ fn clone_secondary_indexes_preservation() {
     let mut node1 = make_node(NodeId(0), KnowledgeType::Semantic, "node1");
     node1.entity_tags = vec!["auth".to_string(), "security".to_string()];
     node1.origin.agent_id = "agent-1".to_string();
-    node1.origin.project_id = Some("project-1".to_string());
+    node1.origin.scope = anamnesis::graph::ScopePath::new("project-1").expect("valid scope");
 
     let mut node2 = make_node(NodeId(1), KnowledgeType::Decision, "node2");
     node2.entity_tags = vec!["auth".to_string()];
     node2.origin.agent_id = "agent-2".to_string();
-    node2.origin.project_id = Some("project-1".to_string());
+    node2.origin.scope = anamnesis::graph::ScopePath::new("project-1").expect("valid scope");
 
     let mut node3 = make_node(NodeId(2), KnowledgeType::Semantic, "node3");
     node3.entity_tags = vec!["database".to_string()];
     node3.origin.agent_id = "agent-1".to_string();
-    node3.origin.project_id = Some("project-2".to_string());
+    node3.origin.scope = anamnesis::graph::ScopePath::new("project-2").expect("valid scope");
 
     original.set_node(node1).unwrap();
     original.set_node(node2).unwrap();
@@ -277,12 +277,14 @@ fn clone_secondary_indexes_preservation() {
     assert!(agent1_nodes.contains(&NodeId(2)));
 
     // Verify project_index
-    let proj1_nodes = cloned.nodes_by_project("project-1");
+    let proj1_nodes =
+        cloned.nodes_by_scope(&anamnesis::graph::ScopePath::new("project-1").expect("valid scope"));
     assert_eq!(proj1_nodes.len(), 2);
     assert!(proj1_nodes.contains(&NodeId(0)));
     assert!(proj1_nodes.contains(&NodeId(1)));
 
-    let proj2_nodes = cloned.nodes_by_project("project-2");
+    let proj2_nodes =
+        cloned.nodes_by_scope(&anamnesis::graph::ScopePath::new("project-2").expect("valid scope"));
     assert_eq!(proj2_nodes.len(), 1);
     assert!(proj2_nodes.contains(&NodeId(2)));
 }

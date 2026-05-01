@@ -82,9 +82,9 @@ anamnesis = "0.3"
 ```
 
 ```rust
-use anamnesis::{Engine, EngineConfig};
+use anamnesis::Engine;
 use anamnesis::api::Observation;
-use anamnesis::graph::{KnowledgeType, EdgeType, Timestamp};
+use anamnesis::graph::{EdgeType, KnowledgeType, ScopePath, Timestamp};
 use anamnesis::graph::node::Origin;
 
 let mut engine = Engine::new();
@@ -101,7 +101,7 @@ let result = engine.ingest(Observation {
     origin: Origin {
         agent_id: "agent-1".into(),
         session_id: "session-1".into(),
-        project_id: Some("my-project".into()),
+        scope: ScopePath::new("my-project").expect("valid scope"),
         confidence: 0.9,
     },
     timestamp: Timestamp::now(),
@@ -109,7 +109,7 @@ let result = engine.ingest(Observation {
 
 let ids = match result {
     anamnesis::api::IngestResult::Created(ids) => ids,
-    anamnesis::api::IngestResult::Reinforced { node_id, .. } => vec![node_id],
+    anamnesis::api::IngestResult::Reinforced { existing_id, .. } => vec![existing_id],
 };
 
 let result2 = engine.ingest(Observation {
@@ -123,7 +123,7 @@ let result2 = engine.ingest(Observation {
     origin: Origin {
         agent_id: "agent-1".into(),
         session_id: "session-5".into(),
-        project_id: Some("my-project".into()),
+        scope: ScopePath::new("my-project").expect("valid scope"),
         confidence: 0.85,
     },
     timestamp: Timestamp::now(),
@@ -131,7 +131,7 @@ let result2 = engine.ingest(Observation {
 
 let ids2 = match result2 {
     anamnesis::api::IngestResult::Created(ids) => ids,
-    anamnesis::api::IngestResult::Reinforced { node_id, .. } => vec![node_id],
+    anamnesis::api::IngestResult::Reinforced { existing_id, .. } => vec![existing_id],
 };
 
 // Connect related knowledge
@@ -176,19 +176,19 @@ Anamnesis preserves **individual conversation turns as nodes**. Each retains ori
 </details>
 
 <details>
-<summary><strong>Persona as High-Mass Memory</strong></summary>
+<summary><strong>Identity-Conditioned Recall</strong></summary>
 
 <br>
 
-Persona is not prompt decoration. It is represented by identity nodes inside the same graph:
+Identity is not a runtime behavior prompt. It is represented by high-mass identity nodes inside the same graph and acts as a retrieval prior:
 
 | Type | Role | Dynamics |
 |:-----|:-----|:---------|
-| `IdentityCore` | Stable traits and operating principles | No decay; high salience |
-| `IdentityLearned` | Experience-formed preferences | Very slow decay; reinforced by repeated success |
-| `IdentityState` | Current task or stance | Normal decay; session/project-sensitive |
+| `IdentityCore` | Stable retrieval anchors and operating principles | No decay; high salience |
+| `IdentityLearned` | Experience-formed preferences and conventions | Very slow decay; reinforced by repeated success |
+| `IdentityState` | Current task or stance | Normal decay; scope-sensitive |
 
-Identity nodes bias recall. A query does not only retrieve matching facts; it retrieves facts through the lens of the current agent, project, and state.
+Identity nodes bias recall, ranking, and tension detection. They do **not** hide contradictory facts, enforce behavior, or replace a system prompt; the consumer decides how retrieved identity fragments are exposed to an LLM.
 
 </details>
 
@@ -197,18 +197,27 @@ Identity nodes bias recall. A query does not only retrieve matching facts; it re
 
 <br>
 
-Every node carries `Origin` metadata: `agent_id`, `session_id`, `project_id`, and `confidence`. Although the field is named `project_id`, it can act as a stable scope path.
+Every node carries `Origin` metadata: `agent_id`, `session_id`, a hierarchical scope path, and `confidence`.
 
-- `project_id: Some("work/company-a")` means the memory is scoped to a work domain or workspace.
-- `project_id: Some("personal/daily-life")` means the memory is scoped to a personal domain.
-- `project_id: Some("personal-projects/anamnesis")` means the memory is scoped to a specific personal project.
-- `project_id: None` means the memory is universal and can apply across projects.
-- Same-project memories receive the strongest query weight.
-- Same-domain memories receive a medium boost.
-- Universal memories remain available across projects.
-- Other-domain memories are downweighted unless explicitly requested or strongly connected by entities.
+- `work/company-a` means the memory is scoped to a work domain or workspace.
+- `personal/daily-life` means the memory is scoped to a personal domain.
+- `personal-projects/anamnesis` means the memory is scoped to a specific personal project.
+- `universal` means the memory can participate across scopes.
+- Exact-scope memories receive the strongest query weight.
+- Ancestor/domain memories receive a medium boost.
+- Universal memories remain available across scopes.
+- Sibling or unrelated scopes are downweighted unless explicitly requested or strongly connected by entities.
 
 Scoped memories can be crystallized upward: session evidence can become project knowledge, project knowledge can become domain knowledge, and domain knowledge can become universal principles. The original scoped memories remain as evidence via `ConsolidatedFrom` edges; promotion is additive, not destructive.
+
+Examples of scope paths:
+
+```text
+universal
+work/company-a/backend-platform
+personal/daily-life
+personal-projects/anamnesis/search
+```
 
 </details>
 
@@ -423,13 +432,13 @@ pub trait StorageAdapter: Send + Sync {
     fn nodes_by_entity_tag(&self, tag: &str) -> Vec<NodeId>;
     fn nodes_by_type(&self, kt: &KnowledgeType) -> Vec<NodeId>;
     fn nodes_by_agent(&self, agent_id: &str) -> Vec<NodeId>;
-    fn nodes_by_project(&self, project_id: &str) -> Vec<NodeId>;
+    fn nodes_by_scope(&self, scope: &ScopePath) -> Vec<NodeId>;
     fn node_ids_descending(&self) -> Vec<NodeId>;
     fn text_search(&self, query: &str, limit: usize) -> Vec<(NodeId, f64)>;
 }
 ```
 
-Ships with `InMemoryStorage` (arena-based Vec, adjacency index, ID recycling, secondary indexes for entity tags, types, agents, and projects). Implement the trait for SQLite, PostgreSQL, Neo4j, or any other backend.
+Ships with `InMemoryStorage` (arena-based Vec, adjacency index, ID recycling, secondary indexes for entity tags, types, agents, and scopes). Implement the trait for SQLite, PostgreSQL, Neo4j, or any other backend.
 
 </details>
 
@@ -489,13 +498,13 @@ cargo bench                    # Run benchmarks
 | Spreading activation | ✅ | Priority-queue BFS and Random Walk with Restart |
 | Repulsion | ✅ | Contradicts edges apply damping during query |
 | Identity prior | ✅ | Top-3 identity nodes bias query activation |
-| Scope weighting | ✅ | Project-aware scoring with entity overlap bonus |
+| Scope weighting | ✅ | Hierarchical scope-path scoring with entity overlap bonus |
 | ContextPackage | ✅ | Structured output: identity/knowledge/memories/tensions |
 | Agent tension | ✅ | Contradiction tension measurement in query results |
 | Multi-resolution content (L0/L1/L2) | ✅ | Token budget controls fragment detail level |
 | Reasoning edge types | ✅ | 15 edge types with directional kappa multipliers |
 | Embedding persistence | ✅ | Stored on Node, used for similarity operations |
-| Origin attribution | ✅ | agent_id, session_id, project_id, confidence |
+| Origin attribution | ✅ | agent_id, session_id, scope, confidence |
 | Non-Associative query modes | ✅ | TypeFiltered, Neighborhood, Temporal, List — all implemented |
 | `search()` unified text + graph | ✅ | Text search + vector similarity + spreading activation |
 | `crystallize()` post-session consolidation | ✅ | ConsolidatedFrom edges, salience promotion from sources |

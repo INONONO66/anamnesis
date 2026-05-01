@@ -11,17 +11,14 @@
 use std::collections::HashMap;
 
 use crate::graph::node::Origin;
+use crate::graph::scope::{ScopePath, ScopeRelation};
 use crate::graph::{KnowledgeType, NodeId};
 use crate::mechanics::repulsion::rigidity;
-use crate::query::types::{ContextPackage, Fragment, Scope, Tension, TokenBudget};
+use crate::query::types::{ContextPackage, Fragment, Tension, TokenBudget};
 
 /// Determines the scope of a node relative to the query context.
-pub fn determine_scope(query_project: &Option<String>, node_project: &Option<String>) -> Scope {
-    match (query_project, node_project) {
-        (Some(q), Some(n)) if q == n => Scope::SameProject,
-        (_, None) | (None, _) => Scope::Universal,
-        (_, Some(n)) => Scope::OtherProject(n.clone()),
-    }
+pub fn determine_scope(query_scope: &ScopePath, node_scope: &ScopePath) -> ScopeRelation {
+    query_scope.relation_to(node_scope)
 }
 
 /// Determines whether a node type belongs to the identity partition.
@@ -57,7 +54,7 @@ pub enum Resolution {
 }
 
 /// Builds a [`Fragment`] from a scored node at the specified resolution.
-pub fn build_fragment(node: &ScoredNode, scope: Scope, resolution: Resolution) -> Fragment {
+pub fn build_fragment(node: &ScoredNode, scope: ScopeRelation, resolution: Resolution) -> Fragment {
     Fragment {
         node_id: node.node_id,
         name: node.name.clone(),
@@ -74,6 +71,35 @@ pub fn build_fragment(node: &ScoredNode, scope: Scope, resolution: Resolution) -
         origin: node.origin.clone(),
         scope,
     }
+}
+
+fn upgrade_fragment_to_l2(
+    fragment: &mut Fragment,
+    node: &ScoredNode,
+    budget: &mut TokenBudget,
+    chars_per_token: usize,
+) -> usize {
+    if fragment.content.is_some() {
+        return 0;
+    }
+
+    let missing_summary_tokens = match (&node.summary, &fragment.summary) {
+        (Some(summary), None) => estimate_tokens(summary, chars_per_token),
+        _ => 0,
+    };
+    let content_tokens = estimate_tokens(&node.content, chars_per_token);
+    let tokens_needed = missing_summary_tokens.saturating_add(content_tokens);
+
+    if budget.remaining() < tokens_needed {
+        return 0;
+    }
+
+    if fragment.summary.is_none() {
+        fragment.summary = node.summary.clone();
+    }
+    fragment.content = Some(node.content.clone());
+    budget.used += tokens_needed;
+    tokens_needed
 }
 
 /// Input for assembling a [`ContextPackage`].
@@ -138,7 +164,7 @@ pub fn assemble_context_package(
     activations: &HashMap<NodeId, f64>,
     token_budget: usize,
     chars_per_token: usize,
-    query_project: &Option<String>,
+    query_scope: &ScopePath,
 ) -> ContextPackage {
     scored_nodes.sort_by(|a, b| {
         b.relevance
@@ -169,7 +195,7 @@ pub fn assemble_context_package(
             break; // No budget left even for L0
         }
 
-        let scope = determine_scope(query_project, &node.origin.project_id);
+        let scope = determine_scope(query_scope, &node.origin.scope);
         let (resolution, tokens_used) = if remaining >= l2_tokens {
             (Resolution::L2, l2_tokens)
         } else if remaining >= l1_tokens {
@@ -177,20 +203,49 @@ pub fn assemble_context_package(
         } else {
             (Resolution::L0, name_tokens)
         };
-        let frag = build_fragment(node, scope, resolution);
 
         if is_identity_type(&node.node_type) {
+            let frag = build_fragment(node, scope, resolution);
             budget.used += tokens_used;
             budget.identity_used += tokens_used;
             identity_frags.push(frag);
         } else if is_memory_type(&node.node_type) {
+            let resolution = if budget.remaining() >= name_tokens + summary_tokens {
+                Resolution::L1
+            } else {
+                Resolution::L0
+            };
+
+            let tokens_used = match resolution {
+                Resolution::L1 => name_tokens + summary_tokens,
+                _ => name_tokens,
+            };
+
+            let frag = build_fragment(node, scope, resolution);
             budget.used += tokens_used;
             budget.memories_used += tokens_used;
             memory_frags.push(frag);
         } else {
+            let frag = build_fragment(node, scope, resolution);
             budget.used += tokens_used;
             budget.knowledge_used += tokens_used;
             knowledge_frags.push(frag);
+        }
+    }
+
+    // Upgrade knowledge fragments to L2 while budget allows.
+    for frag in &mut knowledge_frags {
+        if let Some(node) = scored_nodes.iter().find(|n| n.node_id == frag.node_id) {
+            budget.knowledge_used +=
+                upgrade_fragment_to_l2(frag, node, &mut budget, chars_per_token);
+        }
+    }
+
+    // Upgrade memory fragments to L2 while budget allows.
+    for frag in &mut memory_frags {
+        if let Some(node) = scored_nodes.iter().find(|n| n.node_id == frag.node_id) {
+            budget.memories_used +=
+                upgrade_fragment_to_l2(frag, node, &mut budget, chars_per_token);
         }
     }
 
@@ -228,7 +283,7 @@ mod tests {
         Origin {
             agent_id: "agent-1".to_string(),
             session_id: "session-1".to_string(),
-            project_id: Some("proj-a".to_string()),
+            scope: ScopePath::new("proj-a").expect("valid scope"),
             confidence: 0.9,
         }
     }
@@ -258,7 +313,7 @@ mod tests {
             &HashMap::new(),
             10000,
             4,
-            &Some("proj-a".to_string()),
+            &ScopePath::new("proj-a").expect("valid scope"),
         );
         assert_eq!(pkg.identity.len(), 1);
         assert_eq!(pkg.knowledge.len(), 1);
@@ -271,7 +326,15 @@ mod tests {
             make_node(0, KnowledgeType::Episodic, "session note", 0.7),
             make_node(1, KnowledgeType::Event, "deployment event", 0.6),
         ];
-        let pkg = assemble_context_package(nodes, &[], &[], &HashMap::new(), 10000, 4, &None);
+        let pkg = assemble_context_package(
+            nodes,
+            &[],
+            &[],
+            &HashMap::new(),
+            10000,
+            4,
+            &ScopePath::universal(),
+        );
         assert_eq!(pkg.memories.len(), 2);
         assert_eq!(pkg.identity.len(), 0);
         assert_eq!(pkg.knowledge.len(), 0);
@@ -284,13 +347,66 @@ mod tests {
             make_node(1, KnowledgeType::Semantic, &"b".repeat(100), 0.8),
             make_node(2, KnowledgeType::Semantic, &"c".repeat(100), 0.7),
         ];
-        // Budget of 10 tokens (40 chars) — only first node's name fits
-        let pkg = assemble_context_package(nodes, &[], &[], &HashMap::new(), 10, 4, &None);
+        let pkg = assemble_context_package(
+            nodes,
+            &[],
+            &[],
+            &HashMap::new(),
+            10,
+            4,
+            &ScopePath::universal(),
+        );
         assert!(
-            pkg.token_usage.used <= 10 + 1, // allow 1 token rounding
+            pkg.token_usage.used <= 10 + 1,
             "used {} tokens, budget was 10",
             pkg.token_usage.used
         );
+    }
+
+    #[test]
+    fn memory_l2_upgrade_requires_summary_budget_when_summary_exists() {
+        let mut node = make_node(0, KnowledgeType::Episodic, "n", 0.9);
+        node.summary = Some("summary".to_string());
+        node.content = "c".to_string();
+
+        let pkg = assemble_context_package(
+            vec![node],
+            &[],
+            &[],
+            &HashMap::new(),
+            2,
+            1,
+            &ScopePath::universal(),
+        );
+
+        assert_eq!(pkg.memories.len(), 1);
+        assert_eq!(pkg.memories[0].summary, None);
+        assert_eq!(pkg.memories[0].content, None);
+        assert_eq!(pkg.token_usage.used, 1);
+        assert_eq!(pkg.token_usage.memories_used, 1);
+    }
+
+    #[test]
+    fn memory_l2_upgrade_accounts_content_when_no_summary_exists() {
+        let mut node = make_node(0, KnowledgeType::Episodic, "n", 0.9);
+        node.summary = None;
+        node.content = "cc".to_string();
+
+        let pkg = assemble_context_package(
+            vec![node],
+            &[],
+            &[],
+            &HashMap::new(),
+            3,
+            1,
+            &ScopePath::universal(),
+        );
+
+        assert_eq!(pkg.memories.len(), 1);
+        assert_eq!(pkg.memories[0].summary, None);
+        assert_eq!(pkg.memories[0].content, Some("cc".to_string()));
+        assert_eq!(pkg.token_usage.used, 3);
+        assert_eq!(pkg.token_usage.memories_used, 3);
     }
 
     #[test]
@@ -302,8 +418,15 @@ mod tests {
         activations.insert(b, 0.6);
 
         let contradicts = vec![(a, b, 0.9)];
-        let pkg =
-            assemble_context_package(vec![], &[], &contradicts, &activations, 10000, 4, &None);
+        let pkg = assemble_context_package(
+            vec![],
+            &[],
+            &contradicts,
+            &activations,
+            10000,
+            4,
+            &ScopePath::universal(),
+        );
         assert_eq!(pkg.tensions.len(), 1);
         assert_eq!(pkg.tensions[0].node_a, a);
         assert_eq!(pkg.tensions[0].node_b, b);
@@ -311,7 +434,15 @@ mod tests {
 
     #[test]
     fn agent_tension_zero_without_contradictions() {
-        let pkg = assemble_context_package(vec![], &[], &[], &HashMap::new(), 10000, 4, &None);
+        let pkg = assemble_context_package(
+            vec![],
+            &[],
+            &[],
+            &HashMap::new(),
+            10000,
+            4,
+            &ScopePath::universal(),
+        );
         assert_eq!(pkg.agent_tension, 0.0);
     }
 
@@ -360,7 +491,15 @@ mod tests {
             make_node(1, KnowledgeType::Semantic, "high relevance", 0.9),
             make_node(2, KnowledgeType::Semantic, "medium relevance", 0.6),
         ];
-        let pkg = assemble_context_package(nodes, &[], &[], &HashMap::new(), 10000, 4, &None);
+        let pkg = assemble_context_package(
+            nodes,
+            &[],
+            &[],
+            &HashMap::new(),
+            10000,
+            4,
+            &ScopePath::universal(),
+        );
         assert_eq!(pkg.knowledge.len(), 3);
         assert!(pkg.knowledge[0].relevance >= pkg.knowledge[1].relevance);
         assert!(pkg.knowledge[1].relevance >= pkg.knowledge[2].relevance);
@@ -368,19 +507,24 @@ mod tests {
 
     #[test]
     fn determine_scope_same_project() {
-        let scope = determine_scope(&Some("proj-a".to_string()), &Some("proj-a".to_string()));
-        assert_eq!(scope, Scope::SameProject);
+        let query_scope = ScopePath::new("proj-a").expect("valid scope");
+        let node_scope = ScopePath::new("proj-a").expect("valid scope");
+        let scope = determine_scope(&query_scope, &node_scope);
+        assert_eq!(scope, ScopeRelation::Exact);
     }
 
     #[test]
     fn determine_scope_universal() {
-        let scope = determine_scope(&Some("proj-a".to_string()), &None);
-        assert_eq!(scope, Scope::Universal);
+        let query_scope = ScopePath::new("proj-a").expect("valid scope");
+        let scope = determine_scope(&query_scope, &ScopePath::universal());
+        assert_eq!(scope, ScopeRelation::Universal);
     }
 
     #[test]
     fn determine_scope_other_project() {
-        let scope = determine_scope(&Some("proj-a".to_string()), &Some("proj-b".to_string()));
-        assert_eq!(scope, Scope::OtherProject("proj-b".to_string()));
+        let query_scope = ScopePath::new("proj-a").expect("valid scope");
+        let node_scope = ScopePath::new("proj-b").expect("valid scope");
+        let scope = determine_scope(&query_scope, &node_scope);
+        assert_eq!(scope, ScopeRelation::Unrelated);
     }
 }

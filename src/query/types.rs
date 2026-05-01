@@ -1,20 +1,8 @@
 //! Query types for the Anamnesis cognitive graph engine.
 
 use crate::graph::Origin;
+use crate::graph::scope::{ScopePath, ScopeRelation};
 use crate::graph::{KnowledgeType, NodeId, Timestamp};
-
-/// Scope of a knowledge fragment relative to the current query context.
-///
-/// Derived from `Origin.project_id` at query assembly time.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Scope {
-    /// Node belongs to the same project as the query.
-    SameProject,
-    /// Node has no project (universal knowledge).
-    Universal,
-    /// Node belongs to a different project.
-    OtherProject(String),
-}
 
 /// Query modes for different retrieval patterns.
 ///
@@ -68,8 +56,8 @@ pub struct QueryConfig {
     pub token_budget: usize,
     /// Embedding vector for the query. Used for vector similarity in initial activation (eq 10).
     pub query_embedding: Option<Vec<f64>>,
-    /// Project context for scope weighting (eq 13). None = universal query.
-    pub project_id: Option<String>,
+    /// Scope context for scope weighting (eq 13). `ScopePath::universal()` = universal query.
+    pub scope: ScopePath,
     /// Characters per token for budget estimation. Default: 4.
     pub chars_per_token: usize,
     /// Goal context for reranking results. None = no goal weighting.
@@ -86,7 +74,7 @@ impl Default for QueryConfig {
             agent_id: None,
             token_budget: 4000,
             query_embedding: None,
-            project_id: None,
+            scope: ScopePath::universal(),
             chars_per_token: 4,
             context: None,
         }
@@ -113,7 +101,7 @@ pub struct Fragment {
     /// Provenance of the source node.
     pub origin: Origin,
     /// Scope of this fragment relative to the query context.
-    pub scope: Scope,
+    pub scope: ScopeRelation,
 }
 
 /// An active contradiction between two nodes.
@@ -212,8 +200,8 @@ pub struct SearchInput {
     pub text: String,
     /// Agent ID for identity-biased retrieval. None = no identity bias.
     pub agent_id: Option<String>,
-    /// Project scope filter. None = universal.
-    pub project_id: Option<String>,
+    /// Scope filter. `ScopePath::universal()` = universal.
+    pub scope: ScopePath,
     /// Current timestamp for temporal filtering.
     pub now: Timestamp,
     /// Optional query embedding for vector similarity.
@@ -222,6 +210,11 @@ pub struct SearchInput {
     pub limit: usize,
     /// Optional goal context for reranking.
     pub context: Option<String>,
+    /// Optional entity tags to seed retrieval from. Empty = no entity-tag retrieval.
+    pub entity_tags: Vec<String>,
+    /// Optional override for the number of seeds to expand with graph recall.
+    /// `None` falls back to the engine default (3).
+    pub seed_limit: Option<usize>,
 }
 
 impl Default for SearchInput {
@@ -229,11 +222,13 @@ impl Default for SearchInput {
         SearchInput {
             text: String::new(),
             agent_id: None,
-            project_id: None,
+            scope: ScopePath::universal(),
             now: Timestamp(0),
             query_embedding: None,
             limit: 10,
             context: None,
+            entity_tags: Vec::new(),
+            seed_limit: None,
         }
     }
 }
@@ -266,17 +261,22 @@ pub struct SearchTrace {
 
 /// Internal search plan — auto-derived from SearchInput.
 #[derive(Debug, Clone)]
-pub struct SearchPlan {
+#[allow(dead_code)]
+pub(crate) struct SearchPlan {
+    /// Trimmed query text (raw `SearchInput.text` with leading/trailing whitespace removed).
+    pub text: String,
     /// Use text search for seed retrieval.
     pub use_text: bool,
     /// Use vector similarity for seed retrieval.
     pub use_vector: bool,
+    /// Use entity-tag retrieval for seed nodes.
+    pub use_entity: bool,
     /// Use graph spreading activation.
     pub use_graph: bool,
-    /// Apply temporal filtering.
-    pub use_temporal: bool,
     /// Apply persona/identity bias.
     pub use_persona_bias: bool,
+    /// Resolved number of seeds to expand with graph recall.
+    pub seed_limit: usize,
     /// Packaging mode for result assembly.
     pub packaging_mode: PackagingMode,
 }
@@ -300,7 +300,7 @@ mod tests {
         Origin {
             agent_id: "agent-1".to_string(),
             session_id: "session-1".to_string(),
-            project_id: None,
+            scope: ScopePath::universal(),
             confidence: 0.9,
         }
     }
@@ -335,9 +335,9 @@ mod tests {
 
     #[test]
     fn scope_variants() {
-        let s1 = Scope::SameProject;
-        let s2 = Scope::Universal;
-        let s3 = Scope::OtherProject("other".to_string());
+        let s1 = ScopeRelation::Exact;
+        let s2 = ScopeRelation::Universal;
+        let s3 = ScopeRelation::Unrelated;
         assert_ne!(s1, s2);
         assert_ne!(s2, s3);
     }
@@ -356,7 +356,7 @@ mod tests {
     fn query_config_new_fields() {
         let config = QueryConfig::default();
         assert!(config.query_embedding.is_none());
-        assert!(config.project_id.is_none());
+        assert!(config.scope.is_universal());
         assert_eq!(config.chars_per_token, 4);
     }
 
@@ -393,7 +393,7 @@ mod tests {
             node_type: KnowledgeType::Convention,
             relevance: 0.85,
             origin: make_origin(),
-            scope: Scope::Universal,
+            scope: ScopeRelation::Universal,
         };
         assert_eq!(frag.relevance, 0.85);
         assert!(frag.content.is_none());

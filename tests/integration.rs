@@ -21,7 +21,7 @@ fn make_observation(name: &str, node_type: KnowledgeType) -> Observation {
         origin: Origin {
             agent_id: "agent-1".to_string(),
             session_id: "session-1".to_string(),
-            project_id: Some("anamnesis".to_string()),
+            scope: anamnesis::graph::ScopePath::new("anamnesis").expect("valid scope"),
             confidence: 0.9,
         },
         timestamp: Timestamp(1000),
@@ -135,7 +135,7 @@ fn node_fields_preserved_after_ingest() {
         origin: Origin {
             agent_id: "user".to_string(),
             session_id: "design-session".to_string(),
-            project_id: Some("anamnesis".to_string()),
+            scope: anamnesis::graph::ScopePath::new("anamnesis").expect("valid scope"),
             confidence: 0.95,
         },
         timestamp: Timestamp(5000),
@@ -153,7 +153,7 @@ fn node_fields_preserved_after_ingest() {
     );
     assert_eq!(node.node_type, KnowledgeType::Decision);
     assert_eq!(node.entity_tags, vec!["physics", "anamnesis"]);
-    assert_eq!(node.origin.project_id.as_deref(), Some("anamnesis"));
+    assert_eq!(node.origin.scope.as_str(), "anamnesis");
     assert_eq!(node.salience, 1.0);
     assert_eq!(node.access_count, 0);
     assert!(node.embedding.is_some());

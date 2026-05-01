@@ -1,16 +1,10 @@
-use anamnesis::graph::Timestamp;
-use anamnesis::query::{PackagingMode, SearchInput, SearchPlan, SearchResult, SearchTrace};
+use anamnesis::query::{PackagingMode, SearchInput, SearchResult, SearchTrace};
 
 #[test]
 fn search_input_can_be_constructed() {
     let input = SearchInput {
         text: "auth".into(),
-        agent_id: None,
-        project_id: None,
-        now: Timestamp(0),
-        query_embedding: None,
-        limit: 10,
-        context: None,
+        ..Default::default()
     };
     assert_eq!(input.text, "auth");
 }
@@ -20,6 +14,8 @@ fn search_input_default() {
     let input = SearchInput::default();
     assert_eq!(input.limit, 10);
     assert!(input.text.is_empty());
+    assert!(input.entity_tags.is_empty());
+    assert!(input.seed_limit.is_none());
 }
 
 #[test]
@@ -40,20 +36,6 @@ fn search_trace_default() {
     assert_eq!(trace.seed_count, 0);
     assert_eq!(trace.spread_iterations, 0);
     assert!(trace.packaging_mode.is_none());
-}
-
-#[test]
-fn search_plan_construction() {
-    let plan = SearchPlan {
-        use_text: true,
-        use_vector: false,
-        use_graph: true,
-        use_temporal: false,
-        use_persona_bias: true,
-        packaging_mode: PackagingMode::KnowledgeOnly,
-    };
-    assert!(plan.use_text);
-    assert!(!plan.use_vector);
 }
 
 #[test]

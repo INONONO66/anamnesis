@@ -23,7 +23,7 @@ fn make_test_node() -> Node {
         origin: Origin {
             agent_id: "a".to_string(),
             session_id: "s".to_string(),
-            project_id: None,
+            scope: anamnesis::graph::ScopePath::universal(),
             confidence: 1.0,
         },
         entity_tags: vec![],

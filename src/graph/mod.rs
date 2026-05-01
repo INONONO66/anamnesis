@@ -2,10 +2,12 @@
 
 pub mod edge;
 pub mod node;
+pub mod scope;
 pub mod types;
 
 pub use edge::Edge;
 pub use node::{Node, Origin};
+pub use scope::{ScopePath, ScopeRelation};
 pub use types::{EdgeId, EdgeType, KnowledgeType, MemoryTier, NodeId, Timestamp};
 
 use crate::error::Error;
@@ -178,7 +180,7 @@ mod tests {
             origin: Origin {
                 agent_id: "agent-1".to_string(),
                 session_id: "session-1".to_string(),
-                project_id: None,
+                scope: crate::graph::ScopePath::universal(),
                 confidence: 0.9,
             },
             entity_tags: vec![],

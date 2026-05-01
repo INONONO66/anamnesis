@@ -12,7 +12,7 @@ fn origin() -> Origin {
     Origin {
         agent_id: "debugger-agent".into(),
         session_id: "debug-session-1".into(),
-        project_id: Some("webapp".into()),
+        scope: anamnesis::graph::ScopePath::new("webapp").expect("valid scope"),
         confidence: 0.9,
     }
 }

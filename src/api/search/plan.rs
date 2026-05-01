@@ -1,7 +1,43 @@
-//! Query decomposition — breaks complex queries into simpler sub-queries.
-//!
-//! Uses std-only string operations (no regex crate) to extract sub-queries
-//! from natural language input. Supports English and Korean patterns.
+//! Search plan derivation stage.
+
+use crate::api::EngineConfig;
+use crate::error::Error;
+use crate::query::types::SearchPlan;
+use crate::query::{PackagingMode, SearchInput};
+
+/// Derive a `SearchPlan` from a `SearchInput`, normalising the query text and
+/// rejecting inputs that have neither a non-empty trimmed text nor an embedding.
+///
+/// The default seed limit is 3 when `SearchInput.seed_limit` is `None`.
+pub(crate) fn derive_search_plan(
+    input: &SearchInput,
+    _config: &EngineConfig,
+) -> Result<SearchPlan, Error> {
+    let text = input.text.trim().to_string();
+
+    if text.is_empty() && input.query_embedding.is_none() {
+        return Err(Error::InvalidInput(
+            "search input requires non-empty text or query_embedding".to_string(),
+        ));
+    }
+
+    let use_text = !text.is_empty();
+    let use_vector = input.query_embedding.is_some();
+    let use_entity = !input.entity_tags.is_empty();
+    let use_persona_bias = input.agent_id.is_some();
+    let seed_limit = input.seed_limit.unwrap_or(3);
+
+    Ok(SearchPlan {
+        text,
+        use_text,
+        use_vector,
+        use_entity,
+        use_graph: true,
+        use_persona_bias,
+        seed_limit,
+        packaging_mode: PackagingMode::KnowledgeOnly,
+    })
+}
 
 /// Decompose a natural language query into sub-queries.
 ///
@@ -10,7 +46,7 @@
 /// - Korean: "X의 Y", "X이/가 누구"
 ///
 /// Returns the original query as a single-element vec if no pattern matches.
-pub fn decompose_query(query: &str) -> Vec<String> {
+pub(crate) fn decompose_query(query: &str) -> Vec<String> {
     let q = query.trim();
     if q.is_empty() {
         return vec![q.to_string()];

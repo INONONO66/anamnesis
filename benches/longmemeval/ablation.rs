@@ -173,7 +173,7 @@ fn ingest_session(engine: &mut Engine, session: &Session) -> Vec<NodeId> {
             origin: Origin {
                 agent_id: turn.speaker.clone(),
                 session_id: session.session_id.clone(),
-                project_id: None,
+                scope: anamnesis::graph::ScopePath::universal(),
                 confidence: 0.9,
             },
             timestamp: Timestamp(i as u64 * 1000),
@@ -205,7 +205,7 @@ fn try_crystallize(engine: &mut Engine, node_ids: &[NodeId]) {
         origin: Origin {
             agent_id: "ablation-bench".to_string(),
             session_id: "ablation-session".to_string(),
-            project_id: None,
+            scope: anamnesis::graph::ScopePath::universal(),
             confidence: 0.85,
         },
         entity_tags: vec![],

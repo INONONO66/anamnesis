@@ -15,7 +15,7 @@ fn observation(name: &str, agent_id: &str, session_id: &str, tags: &[&str]) -> O
         origin: Origin {
             agent_id: agent_id.to_string(),
             session_id: session_id.to_string(),
-            project_id: Some("project-1".to_string()),
+            scope: anamnesis::graph::ScopePath::new("project-1").expect("valid scope"),
             confidence: 0.9,
         },
         timestamp: Timestamp(1000),

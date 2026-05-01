@@ -1,6 +1,6 @@
 use anamnesis::api::{Engine, EngineConfig, IngestResult, Observation};
 use anamnesis::graph::node::Origin;
-use anamnesis::graph::{KnowledgeType, Timestamp};
+use anamnesis::graph::{EdgeType, KnowledgeType, Timestamp};
 use anamnesis::query::{Query, QueryConfig, SearchInput};
 
 fn make_obs(name: &str, node_type: KnowledgeType) -> Observation {
@@ -18,7 +18,7 @@ fn make_obs(name: &str, node_type: KnowledgeType) -> Observation {
         origin: Origin {
             agent_id: "agent-1".to_string(),
             session_id: "session-1".to_string(),
-            project_id: None,
+            scope: anamnesis::graph::ScopePath::universal(),
             confidence: 0.9,
         },
         timestamp: Timestamp(0),
@@ -114,7 +114,7 @@ fn test_l2_budget_exhaustion_degrades_gracefully() {
             origin: Origin {
                 agent_id: "agent-1".to_string(),
                 session_id: "session-1".to_string(),
-                project_id: None,
+                scope: anamnesis::graph::ScopePath::universal(),
                 confidence: 0.9,
             },
             timestamp: Timestamp(0),
@@ -160,6 +160,29 @@ fn test_search_episodic_content_preserved() {
     let config = EngineConfig::default().with_novelty_threshold(0.0);
     let mut engine = Engine::with_config(config);
 
+    let semantic_id = match engine
+        .ingest(Observation {
+            name: "auth bug session semantic fact".into(),
+            summary: Some("Auth bug source fact".into()),
+            content: "Knowledge extracted from auth bug session notes.".into(),
+            embedding: None,
+            confidence: 0.9,
+            node_type: KnowledgeType::Semantic,
+            entity_tags: vec!["auth".to_string()],
+            origin: Origin {
+                agent_id: "agent-1".to_string(),
+                session_id: "session-knowledge".to_string(),
+                scope: anamnesis::graph::ScopePath::universal(),
+                confidence: 0.9,
+            },
+            timestamp: Timestamp(0),
+        })
+        .unwrap()
+    {
+        IngestResult::Created(ids) => ids[0],
+        _ => panic!("expected Created"),
+    };
+
     // Ingest 5 Episodic observations with searchable text and content
     let mut episodic_ids = Vec::new();
     for i in 0..5 {
@@ -177,22 +200,55 @@ fn test_search_episodic_content_preserved() {
             origin: Origin {
                 agent_id: "agent-1".to_string(),
                 session_id: format!("session-{}", i),
-                project_id: None,
+                scope: anamnesis::graph::ScopePath::universal(),
                 confidence: 0.9,
             },
             timestamp: Timestamp(i as u64),
         };
         match engine.ingest(obs).unwrap() {
-            IngestResult::Created(ids) => episodic_ids.push(ids[0]),
+            IngestResult::Created(ids) => {
+                episodic_ids.push(ids[0]);
+                engine
+                    .link(ids[0], semantic_id, EdgeType::ExtractedFrom, 0.9)
+                    .unwrap();
+            }
             _ => panic!("expected Created"),
         }
     }
+
+    // Ingest a contradicting fact to trigger KnowledgeWithProvenance packaging mode
+    let contradiction_id = match engine
+        .ingest(Observation {
+            name: "auth bug contradiction".into(),
+            summary: Some("Contradicting fact".into()),
+            content: "Auth module is secure and has no bugs.".into(),
+            embedding: None,
+            confidence: 0.9,
+            node_type: KnowledgeType::Semantic,
+            entity_tags: vec!["auth".to_string()],
+            origin: Origin {
+                agent_id: "agent-1".to_string(),
+                session_id: "session-contradiction".to_string(),
+                scope: anamnesis::graph::ScopePath::universal(),
+                confidence: 0.9,
+            },
+            timestamp: Timestamp(100),
+        })
+        .unwrap()
+    {
+        IngestResult::Created(ids) => ids[0],
+        _ => panic!("expected Created"),
+    };
+    engine
+        .link(semantic_id, contradiction_id, EdgeType::Contradicts, 0.8)
+        .unwrap();
 
     // Search for matching text
     let result = engine
         .search(SearchInput {
             text: "auth bug session".into(),
             limit: 10,
+            seed_limit: Some(10),
             ..Default::default()
         })
         .unwrap();
@@ -236,6 +292,7 @@ fn test_search_seeds_ordered_by_relevance() {
         .search(SearchInput {
             text: "searchable".into(),
             limit: 10,
+            seed_limit: Some(5),
             ..Default::default()
         })
         .unwrap();
@@ -248,13 +305,8 @@ fn test_search_seeds_ordered_by_relevance() {
         result.trace.seed_count
     );
 
-    // Assert spreading activation occurred with multiple iterations
-    // Current bug: only 3 seeds means fewer iterations
-    assert!(
-        result.trace.spread_iterations > 3,
-        "Should have spread_iterations > 3, got {}",
-        result.trace.spread_iterations
-    );
+    // Assert spreading activation occurred as one multi-source invocation.
+    assert_eq!(result.trace.spread_iterations, 1);
 
     // Assert strategies include spreading activation
     assert!(
@@ -267,18 +319,18 @@ fn test_search_seeds_ordered_by_relevance() {
     );
 }
 
-/// Test that KnowledgeOnly packaging mode preserves memories.
+/// Test that KnowledgeOnly packaging mode excludes memories.
 ///
-/// Issue #14: KnowledgeOnly mode should not clear memories partition.
-/// Memories should be retained even when packaging mode is KnowledgeOnly.
+/// KnowledgeOnly mode should return only knowledge fragments and keep token
+/// accounting consistent with the returned package.
 #[test]
-fn test_knowledge_only_preserves_memories() {
+fn test_knowledge_only_excludes_memories() {
     let config = EngineConfig::default().with_novelty_threshold(0.0);
     let mut engine = Engine::with_config(config);
 
     // Ingest both semantic and episodic nodes
     let semantic_obs = make_obs("semantic-fact", KnowledgeType::Semantic);
-    let _semantic_id = match engine.ingest(semantic_obs).unwrap() {
+    let semantic_id = match engine.ingest(semantic_obs).unwrap() {
         IngestResult::Created(ids) => ids[0],
         _ => panic!("expected Created"),
     };
@@ -288,6 +340,9 @@ fn test_knowledge_only_preserves_memories() {
         IngestResult::Created(ids) => ids[0],
         _ => panic!("expected Created"),
     };
+    engine
+        .link(episodic_id, semantic_id, EdgeType::ExtractedFrom, 0.9)
+        .unwrap();
 
     // Search with ordinary text (triggers KnowledgeOnly packaging mode)
     let result = engine
@@ -298,21 +353,20 @@ fn test_knowledge_only_preserves_memories() {
         })
         .unwrap();
 
-    // Assert memories are not cleared
-    // Current bug: apply_packaging_mode() clears memories in KnowledgeOnly mode
     assert!(
-        !result.package.memories.is_empty(),
-        "Memories should not be cleared in KnowledgeOnly mode"
+        result
+            .package
+            .memories
+            .iter()
+            .all(|m| m.node_id != episodic_id),
+        "Episodic node should not be in memories partition"
     );
-
-    // Assert at least one memory is the episodic node we ingested
-    let has_episodic = result
-        .package
-        .memories
-        .iter()
-        .any(|m| m.node_id == episodic_id);
-    assert!(
-        has_episodic,
-        "Episodic node should be in memories partition"
+    assert!(result.package.memories.is_empty());
+    assert_eq!(result.package.token_usage.memories_used, 0);
+    assert_eq!(
+        result.package.token_usage.used,
+        result.package.token_usage.identity_used
+            + result.package.token_usage.knowledge_used
+            + result.package.token_usage.memories_used
     );
 }

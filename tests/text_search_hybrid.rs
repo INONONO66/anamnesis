@@ -24,7 +24,7 @@ fn insert_node_with_name(s: &mut InMemoryStorage, name: &str) -> NodeId {
         origin: Origin {
             agent_id: "agent-1".to_string(),
             session_id: "session-1".to_string(),
-            project_id: None,
+            scope: anamnesis::graph::ScopePath::universal(),
             confidence: 0.9,
         },
         entity_tags: vec![],

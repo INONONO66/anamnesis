@@ -5,6 +5,8 @@
 //! ## Equation
 //! (13) R_i = (0.50 * X'_i + 0.20 * q_i + 0.15 * s_i + 0.15 * m_i) * scope_w(i)
 
+use crate::graph::ScopePath;
+use crate::graph::scope::ScopeRelation;
 use crate::mechanics::forces::{
     ActivationForce, Force, MassForce, NodeContext, QueryContext, SalienceForce, SimilarityForce,
     weighted_contribution,
@@ -15,25 +17,34 @@ static SIMILARITY_FORCE: SimilarityForce = SimilarityForce;
 static SALIENCE_FORCE: SalienceForce = SalienceForce;
 static MASS_FORCE: MassForce = MassForce;
 
+/// Maximum shared-entity bonus added to the Unrelated base weight.
+const UNRELATED_BONUS_CAP: f64 = 0.20;
+
 /// Computes the scope weight for a node relative to the query context.
 ///
-/// Nodes in the same project get full weight. Universal nodes get 0.85.
-/// Different-project nodes get 0.30, with entity overlap bonus up to 0.25.
+/// Hierarchical weighting based on `ScopeRelation` (locked):
+/// - Exact: 1.0
+/// - Universal: 0.95
+/// - Ancestor / Descendant: 0.85
+/// - Sibling: 0.50
+/// - Unrelated: 0.05 + shared-entity bonus capped at +0.20
 pub fn scope_weight(
-    query_project: &Option<String>,
-    node_project: &Option<String>,
+    query_scope: &ScopePath,
+    node_scope: &ScopePath,
     shared_entity_count: usize,
 ) -> f64 {
-    match (query_project, node_project) {
-        (Some(q), Some(n)) if q == n => 1.0,
-        (_, None) | (None, Some(_)) => 0.85,
-        _ => {
+    match query_scope.relation_to(node_scope) {
+        ScopeRelation::Exact => 1.0,
+        ScopeRelation::Universal => 0.95,
+        ScopeRelation::Ancestor | ScopeRelation::Descendant => 0.85,
+        ScopeRelation::Sibling => 0.50,
+        ScopeRelation::Unrelated => {
             let bonus = match shared_entity_count {
                 0 => 0.0,
-                1 => 0.15,
-                _ => 0.25,
+                1 => 0.10,
+                _ => UNRELATED_BONUS_CAP,
             };
-            f64::min(0.30 + bonus, 1.0)
+            0.05 + bonus.min(UNRELATED_BONUS_CAP)
         }
     }
 }
@@ -91,58 +102,80 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
+    fn proj(s: &str) -> ScopePath {
+        ScopePath::new(s).expect("valid scope")
+    }
+
     #[test]
     fn same_project_full_weight() {
-        let w = scope_weight(&Some("proj-a".to_string()), &Some("proj-a".to_string()), 0);
+        let w = scope_weight(&proj("proj-a"), &proj("proj-a"), 0);
         assert_eq!(w, 1.0);
     }
 
     #[test]
     fn universal_node_weight() {
-        let w = scope_weight(&Some("proj-a".to_string()), &None, 0);
-        assert_eq!(w, 0.85);
+        let w = scope_weight(&proj("proj-a"), &ScopePath::universal(), 0);
+        assert_eq!(w, 0.95);
     }
 
     #[test]
     fn universal_query_weight() {
-        let w = scope_weight(&None, &Some("proj-b".to_string()), 0);
+        let w = scope_weight(&ScopePath::universal(), &proj("proj-b"), 0);
+        assert_eq!(w, 0.95);
+    }
+
+    #[test]
+    fn ancestor_weight() {
+        let w = scope_weight(&proj("proj-a"), &proj("proj-a/feature"), 0);
         assert_eq!(w, 0.85);
     }
 
     #[test]
-    fn different_project_base_weight() {
-        let w = scope_weight(&Some("proj-a".to_string()), &Some("proj-b".to_string()), 0);
-        assert_eq!(w, 0.30);
+    fn descendant_weight() {
+        let w = scope_weight(&proj("proj-a/feature"), &proj("proj-a"), 0);
+        assert_eq!(w, 0.85);
+    }
+
+    #[test]
+    fn sibling_weight() {
+        let w = scope_weight(&proj("proj-a/x"), &proj("proj-a/y"), 0);
+        assert_eq!(w, 0.50);
+    }
+
+    #[test]
+    fn unrelated_base_weight() {
+        let w = scope_weight(&proj("proj-a"), &proj("proj-b"), 0);
+        assert_eq!(w, 0.05);
     }
 
     #[test]
     fn entity_overlap_bonus_one() {
-        let w = scope_weight(&Some("proj-a".to_string()), &Some("proj-b".to_string()), 1);
-        assert!((w - 0.45).abs() < 1e-10, "expected 0.45, got {w}");
+        let w = scope_weight(&proj("proj-a"), &proj("proj-b"), 1);
+        assert!((w - 0.15).abs() < 1e-10, "expected 0.15, got {w}");
     }
 
     #[test]
     fn entity_overlap_bonus_two_plus() {
-        let w = scope_weight(&Some("proj-a".to_string()), &Some("proj-b".to_string()), 2);
-        assert!((w - 0.55).abs() < 1e-10, "expected 0.55, got {w}");
+        let w = scope_weight(&proj("proj-a"), &proj("proj-b"), 2);
+        assert!((w - 0.25).abs() < 1e-10, "expected 0.25, got {w}");
     }
 
     #[test]
-    fn scope_weight_capped_at_one() {
-        let w = scope_weight(&Some("proj-a".to_string()), &Some("proj-a".to_string()), 5);
-        assert_eq!(w, 1.0);
+    fn unrelated_bonus_capped_at_twenty_percent() {
+        let w = scope_weight(&proj("proj-a"), &proj("proj-b"), 100);
+        assert!((w - 0.25).abs() < 1e-10, "expected 0.25 (cap), got {w}");
     }
 
     #[test]
     fn entity_bonus_not_applied_to_same_project() {
-        let w = scope_weight(&Some("proj-a".to_string()), &Some("proj-a".to_string()), 3);
+        let w = scope_weight(&proj("proj-a"), &proj("proj-a"), 3);
         assert_eq!(w, 1.0);
     }
 
     #[test]
     fn entity_bonus_not_applied_to_universal() {
-        let w = scope_weight(&Some("proj-a".to_string()), &None, 3);
-        assert_eq!(w, 0.85);
+        let w = scope_weight(&proj("proj-a"), &ScopePath::universal(), 3);
+        assert_eq!(w, 0.95);
     }
 
     #[test]

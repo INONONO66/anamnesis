@@ -35,7 +35,7 @@ src/
 - **No async in core** — synchronous API, async wrapper can be added externally
 - **Salience as shared signal** — all mechanics read/write salience; memory tiers emerge naturally from salience ranges
 - **Fragments over summaries** — preserve individual conversation turns as nodes; summaries are emergent via consolidation, not lossy rewrites
-- **Origin on every node** — multi-agent graphs track which agent produced each fragment (`agent_id`, `session_id`, `project_id`, `confidence`)
+- **Origin on every node** — multi-agent graphs track which agent produced each fragment (`agent_id`, `session_id`, `scope`, `confidence`)
 
 ## COMMANDS
 
@@ -206,7 +206,7 @@ pub struct EngineConfig {
 - ✅ Query engine (spreading activation, subgraph extraction)
 - ✅ Pluggable storage adapters
 - ✅ Origin attribution (tracks agent provenance per node)
-- ✅ Scoped knowledge (session/project/universal via Origin.project_id)
+- ✅ Scoped knowledge (session/project/universal via Origin.scope)
 - ✅ Structured query output (ContextPackage with identity/knowledge/memories/tensions)
 - ✅ Multi-resolution content (L0 name / L1 summary / L2 full content)
 - ✅ Identity management (agent personas as graph nodes with dynamics)
@@ -283,7 +283,7 @@ enum EdgeType {
 struct Origin {
     agent_id: String,
     session_id: String,
-    project_id: Option<String>, // None = universal; Some = project-scoped
+    scope: ScopePath, // ScopePath::universal() = universal
     confidence: f64,
 }
 
@@ -378,7 +378,7 @@ pub trait StorageAdapter: Send + Sync {
     fn nodes_by_entity_tag(&self, tag: &str) -> Vec<NodeId>;
     fn nodes_by_type(&self, kt: &KnowledgeType) -> Vec<NodeId>;
     fn nodes_by_agent(&self, agent_id: &str) -> Vec<NodeId>;
-    fn nodes_by_project(&self, project_id: &str) -> Vec<NodeId>;
+    fn nodes_by_scope(&self, scope: &ScopePath) -> Vec<NodeId>;
     fn node_ids_descending(&self) -> Vec<NodeId>;
     fn text_search(&self, query: &str, limit: usize) -> Vec<(NodeId, f64)>;
 }

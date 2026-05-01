@@ -7,7 +7,7 @@ fn origin() -> Origin {
     Origin {
         agent_id: "test-agent".to_string(),
         session_id: "test-session".to_string(),
-        project_id: Some("test-project".to_string()),
+        scope: anamnesis::graph::ScopePath::new("test-project").expect("valid scope"),
         confidence: 0.9,
     }
 }
