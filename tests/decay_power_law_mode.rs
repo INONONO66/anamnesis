@@ -15,7 +15,7 @@ fn make_obs(name: &str) -> Observation {
         origin: Origin {
             agent_id: "agent-1".to_string(),
             session_id: "session-1".to_string(),
-            project_id: None,
+            scope: anamnesis::graph::ScopePath::universal(),
             confidence: 0.9,
         },
         timestamp: Timestamp(1000),

@@ -10,7 +10,7 @@ fn origin(agent_id: &str, session_id: &str) -> Origin {
     Origin {
         agent_id: agent_id.to_string(),
         session_id: session_id.to_string(),
-        project_id: Some("agent-memory-project".to_string()),
+        scope: anamnesis::graph::ScopePath::new("agent-memory-project").expect("valid scope"),
         confidence: 0.95,
     }
 }
@@ -696,7 +696,8 @@ fn end_to_end_agent_memory_pipeline_surfaces_identity_and_relevant_context() {
 
     let mut associative_config = QueryConfig::default();
     associative_config.agent_id = Some("agent-1".to_string());
-    associative_config.project_id = Some("agent-memory-project".to_string());
+    associative_config.scope =
+        anamnesis::graph::ScopePath::new("agent-memory-project").expect("valid scope");
     associative_config.query_embedding = Some(vec![0.86, 0.14, 0.04]);
     let associative = engine
         .query(

@@ -8,15 +8,18 @@
 
 use anamnesis::api::Observation;
 use anamnesis::graph::node::Origin;
-use anamnesis::graph::{EdgeType, KnowledgeType, Timestamp};
+use anamnesis::graph::{EdgeType, KnowledgeType, ScopePath, Timestamp};
 use anamnesis::query::{Query, QueryConfig};
 use anamnesis::{Engine, EngineConfig, IngestResult, StorageAdapter};
 
 fn make_origin(agent: &str, project: Option<&str>) -> Origin {
+    let scope = project
+        .map(|s| ScopePath::new(s).expect("valid scope"))
+        .unwrap_or_else(ScopePath::universal);
     Origin {
         agent_id: agent.to_string(),
         session_id: "session-1".to_string(),
-        project_id: project.map(|s| s.to_string()),
+        scope,
         confidence: 0.9,
     }
 }
@@ -133,7 +136,7 @@ fn full_cognitive_lifecycle() {
         budget: 100,
     };
     let mut qconfig = QueryConfig::default();
-    qconfig.project_id = Some("proj-a".to_string());
+    qconfig.scope = anamnesis::graph::ScopePath::new("proj-a").expect("valid scope");
     qconfig.agent_id = Some("agent-1".to_string());
     let pkg = engine.query(&q, &qconfig).unwrap();
 
@@ -321,7 +324,7 @@ fn scope_same_project_preferred() {
         budget: 50,
     };
     let mut qconfig = QueryConfig::default();
-    qconfig.project_id = Some("proj-a".to_string());
+    qconfig.scope = anamnesis::graph::ScopePath::new("proj-a").expect("valid scope");
     let pkg = engine.query(&q, &qconfig).unwrap();
 
     let all_frags: Vec<_> = pkg

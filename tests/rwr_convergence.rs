@@ -16,7 +16,7 @@ fn make_observation(name: &str) -> Observation {
         origin: Origin {
             agent_id: "agent-1".to_string(),
             session_id: "session-1".to_string(),
-            project_id: None,
+            scope: anamnesis::graph::ScopePath::universal(),
             confidence: 1.0,
         },
         timestamp: Timestamp(0),
@@ -45,8 +45,8 @@ fn rwr_converges_on_small_graph() {
     let light = ingest_node(&mut engine, "light");
     let heavy = ingest_node(&mut engine, "heavy");
 
-    engine.link(seed, light, EdgeType::Semantic, 1.0).unwrap();
-    engine.link(seed, heavy, EdgeType::Semantic, 3.0).unwrap();
+    engine.link(seed, light, EdgeType::Semantic, 0.25).unwrap();
+    engine.link(seed, heavy, EdgeType::Semantic, 1.0).unwrap();
     engine.link(light, heavy, EdgeType::Semantic, 1.0).unwrap();
 
     let scores = random_walk_restart(seed, 0.15, 128, engine.graph().storage());
