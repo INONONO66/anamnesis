@@ -97,7 +97,7 @@ fn ingest_session(engine: &mut Engine, session: &Session) {
             origin: Origin {
                 agent_id: turn.speaker.clone(),
                 session_id: session.session_id.clone(),
-                project_id: None,
+                scope: anamnesis::graph::ScopePath::universal(),
                 confidence: 0.9,
             },
             timestamp: Timestamp(i as u64 * 1000),

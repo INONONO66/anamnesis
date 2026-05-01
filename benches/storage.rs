@@ -26,7 +26,7 @@ fn make_node(id: NodeId) -> Node {
         origin: Origin {
             agent_id: "bench-agent".to_string(),
             session_id: "bench-session".to_string(),
-            project_id: None,
+            scope: anamnesis::graph::ScopePath::universal(),
             confidence: 0.9,
         },
         entity_tags: vec![],

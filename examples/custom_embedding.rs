@@ -45,7 +45,7 @@ fn origin() -> Origin {
     Origin {
         agent_id: "example-agent".into(),
         session_id: "session-1".into(),
-        project_id: Some("demo".into()),
+        scope: anamnesis::graph::ScopePath::new("demo").expect("valid scope"),
         confidence: 0.9,
     }
 }
@@ -127,7 +127,7 @@ fn main() -> Result<(), Error> {
     };
     let mut qconfig = QueryConfig::default();
     qconfig.query_embedding = Some(embeddings[0].clone());
-    qconfig.project_id = Some("demo".into());
+    qconfig.scope = anamnesis::graph::ScopePath::new("demo").expect("valid scope");
     let package = engine.query(&query, &qconfig)?;
     println!(
         "Query returned {} knowledge + {} memory fragments, {} tensions",

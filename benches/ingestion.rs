@@ -26,7 +26,7 @@ fn make_observation(i: u64) -> Observation {
         origin: Origin {
             agent_id: "bench-agent".to_string(),
             session_id: "bench-session".to_string(),
-            project_id: None,
+            scope: anamnesis::graph::ScopePath::universal(),
             confidence: 0.9,
         },
         timestamp: Timestamp(1000 + i),
