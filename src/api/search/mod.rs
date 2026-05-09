@@ -90,9 +90,11 @@ pub(crate) fn search<S: StorageAdapter + Clone>(
         scope: input.scope.clone(),
         query_embedding: input.query_embedding.clone(),
         context: input.context.clone(),
+        now: (input.now.0 > 0).then_some(input.now),
         ..QueryConfig::default()
     };
     let mut activations = HashMap::new();
+    let mut edge_count_skipped_invalid = 0usize;
 
     if plan.use_graph {
         let identity_prior = identity_prior_for_search(storage, &config);
@@ -106,6 +108,7 @@ pub(crate) fn search<S: StorageAdapter + Clone>(
         );
 
         spread_iterations = recall_trace.invocation_count as usize;
+        edge_count_skipped_invalid = recall_trace.edge_count_skipped_invalid;
         activations = graph_activations;
     }
 
@@ -123,6 +126,7 @@ pub(crate) fn search<S: StorageAdapter + Clone>(
             plan: &plan,
             strategies_used,
             spread_iterations,
+            edge_count_skipped_invalid,
         },
     )
 }

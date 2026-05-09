@@ -139,12 +139,14 @@ fn rwr_activations<S: StorageAdapter>(
     budget: usize,
     min_activation: f64,
     storage: &S,
+    now: Timestamp,
 ) -> HashMap<NodeId, f64> {
-    let scores = crate::query::random_walk_restart(
+    let scores = crate::query::random_walk_restart_at(
         seed,
         RWR_RESTART_PROBABILITY,
         RWR_MAX_ITERATIONS,
         storage,
+        now,
     );
 
     let max_score = scores
@@ -1586,7 +1588,11 @@ impl<S: StorageAdapter + Clone> Engine<S> {
     /// This currently runs the standard query pipeline with default configuration,
     /// then filters retrieved fragments by their bitemporal validity window.
     pub fn fact_at(&self, query: &Query, as_of: Timestamp) -> Result<ContextPackage, Error> {
-        let mut package = self.query(query, &QueryConfig::default())?;
+        let config = QueryConfig {
+            now: Some(as_of),
+            ..QueryConfig::default()
+        };
+        let mut package = self.query(query, &config)?;
 
         package
             .identity
@@ -1883,7 +1889,9 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         use crate::mechanics::attraction::cosine_similarity;
         use crate::mechanics::gravity::compute_mass;
         use crate::mechanics::repulsion::{apply_damping, compute_repulsion, rigidity};
-        use crate::query::activation::{NodeInfo, initial_activation, spread_activation};
+        use crate::query::activation::{
+            ActivationEdge, NodeInfo, edge_valid_at, initial_activation, spread_activation_at,
+        };
         use crate::query::assembly::{ScoredNode, assemble_context_package};
         use crate::query::identity::compute_identity_prior;
         use crate::query::scoring::{final_score, scope_weight};
@@ -1892,6 +1900,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         let _ = self.graph.get_node(seed)?;
 
         let storage = self.graph.storage();
+        let now = config.now.unwrap_or_else(Timestamp::now);
 
         // --- Stage 1: Collect identity nodes for this agent (indexed lookup) ---
         let identity_nodes: Vec<(Vec<f64>, KnowledgeType, f64)> =
@@ -1992,16 +2001,30 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             let salience = storage.get_salience(nid).unwrap_or(0.0);
             let mass = compute_mass(salience, node.access_count, &node.node_type);
 
-            let mut all_edges: Vec<(NodeId, f64, EdgeType, bool)> = Vec::new();
+            let mut all_edges: Vec<ActivationEdge> = Vec::new();
 
             for &eid in storage.edges_from(nid) {
                 if let Ok(edge) = storage.get_edge(eid) {
-                    all_edges.push((edge.target, edge.weight, edge.edge_type.clone(), true));
+                    if !edge_valid_at(edge, now) {
+                        continue;
+                    }
+                    all_edges.push(ActivationEdge {
+                        target_id: edge.target,
+                        edge: edge.clone(),
+                        is_forward: true,
+                    });
                 }
             }
             for &eid in storage.edges_to(nid) {
                 if let Ok(edge) = storage.get_edge(eid) {
-                    all_edges.push((edge.source, edge.weight, edge.edge_type.clone(), false));
+                    if !edge_valid_at(edge, now) {
+                        continue;
+                    }
+                    all_edges.push(ActivationEdge {
+                        target_id: edge.source,
+                        edge: edge.clone(),
+                        is_forward: false,
+                    });
                 }
             }
 
@@ -2013,16 +2036,20 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         };
 
         let activations = match self.config.spreading_model {
-            SpreadingModel::PriorityQueueBfs => spread_activation(
-                initial_activations,
-                node_info_fn,
-                budget,
-                config.min_activation,
-                config.decay_per_hop,
-                config.max_hops,
-            ),
+            SpreadingModel::PriorityQueueBfs => {
+                spread_activation_at(
+                    initial_activations,
+                    node_info_fn,
+                    budget,
+                    config.min_activation,
+                    config.decay_per_hop,
+                    config.max_hops,
+                    now,
+                )
+                .activations
+            }
             SpreadingModel::RandomWalkRestart => {
-                rwr_activations(seed, budget, config.min_activation, storage)
+                rwr_activations(seed, budget, config.min_activation, storage, now)
             }
         };
 
@@ -2036,6 +2063,9 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                 .filter_map(|&eid| {
                     let edge = storage.get_edge(eid).ok()?;
                     if !matches!(edge.edge_type, EdgeType::Contradicts) {
+                        return None;
+                    }
+                    if !edge_valid_at(edge, now) {
                         return None;
                     }
                     let source_act = activations.get(&edge.source).copied().unwrap_or(0.0);
@@ -2124,7 +2154,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         for &nid in damped_activations.keys() {
             for &eid in storage.edges_from(nid) {
                 if let Ok(edge) = storage.get_edge(eid) {
-                    if matches!(edge.edge_type, EdgeType::Contradicts) {
+                    if matches!(edge.edge_type, EdgeType::Contradicts) && edge_valid_at(edge, now) {
                         contradicts_edges.push((edge.source, edge.target, edge.weight));
                     }
                 }

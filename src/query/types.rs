@@ -62,6 +62,8 @@ pub struct QueryConfig {
     pub chars_per_token: usize,
     /// Goal context for reranking results. None = no goal weighting.
     pub context: Option<String>,
+    /// Domain timestamp for edge validity filtering. None = current system time.
+    pub now: Option<Timestamp>,
 }
 
 impl Default for QueryConfig {
@@ -77,6 +79,7 @@ impl Default for QueryConfig {
             scope: ScopePath::universal(),
             chars_per_token: 4,
             context: None,
+            now: None,
         }
     }
 }
@@ -257,6 +260,8 @@ pub struct SearchTrace {
     pub spread_iterations: usize,
     /// Packaging mode selected.
     pub packaging_mode: Option<PackagingMode>,
+    /// Number of invalid temporal edges skipped during graph recall.
+    pub edge_count_skipped_invalid: usize,
 }
 
 /// Internal search plan — auto-derived from SearchInput.
@@ -350,6 +355,7 @@ mod tests {
         assert_eq!(config.min_activation, 0.02);
         assert!(config.agent_id.is_none());
         assert!(config.context.is_none());
+        assert!(config.now.is_none());
     }
 
     #[test]

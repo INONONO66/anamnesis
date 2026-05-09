@@ -9,7 +9,7 @@
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
 
-use crate::graph::{EdgeType, NodeId};
+use crate::graph::{Edge, EdgeType, NodeId, Timestamp};
 
 /// Computes the initial activation for a node.
 ///
@@ -58,6 +58,17 @@ pub fn propagation_strength(
         .clamp(0.0, 1.0)
 }
 
+/// Returns whether an edge is valid at a domain timestamp.
+///
+/// Edges without validity bounds are always valid for backward compatibility.
+pub fn edge_valid_at(edge: &Edge, as_of: Timestamp) -> bool {
+    let from_ok = edge.valid_from.is_none_or(|valid_from| as_of >= valid_from);
+    let until_ok = edge
+        .valid_until
+        .is_none_or(|valid_until| as_of <= valid_until);
+    from_ok && until_ok
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct ActivationEntry {
     activation: f64,
@@ -89,8 +100,26 @@ pub struct NodeInfo {
     pub salience: f64,
     /// Node mass (from gravity computation) [0, 1].
     pub mass: f64,
-    /// Outgoing edges: (target_node_id, edge_weight, edge_type, is_forward).
-    pub outgoing_edges: Vec<(NodeId, f64, EdgeType, bool)>,
+    /// Edges traversable from this node.
+    pub outgoing_edges: Vec<ActivationEdge>,
+}
+
+/// Edge input for spreading activation.
+pub struct ActivationEdge {
+    /// Node reached by traversing this edge from the current node.
+    pub target_id: NodeId,
+    /// Full graph edge, including validity bounds.
+    pub edge: Edge,
+    /// Whether traversal follows the edge source→target direction.
+    pub is_forward: bool,
+}
+
+/// Result of spreading activation with trace counters.
+pub struct SpreadingActivationResult {
+    /// Final activation score by visited node.
+    pub activations: HashMap<NodeId, f64>,
+    /// Number of invalid temporal edges skipped during traversal.
+    pub edge_count_skipped_invalid: usize,
 }
 
 /// Runs spreading activation from a set of initially activated nodes.
@@ -117,6 +146,31 @@ pub fn spread_activation<F>(
 where
     F: Fn(NodeId) -> Option<NodeInfo>,
 {
+    spread_activation_at(
+        initial_activations,
+        node_info_fn,
+        budget,
+        min_activation,
+        hop_decay,
+        max_hops,
+        Timestamp::now(),
+    )
+    .activations
+}
+
+/// Runs spreading activation at a given domain timestamp and returns trace counters.
+pub fn spread_activation_at<F>(
+    initial_activations: HashMap<NodeId, f64>,
+    node_info_fn: F,
+    budget: usize,
+    min_activation: f64,
+    hop_decay: f64,
+    max_hops: usize,
+    now: Timestamp,
+) -> SpreadingActivationResult
+where
+    F: Fn(NodeId) -> Option<NodeInfo>,
+{
     let mut activations: HashMap<NodeId, f64> = initial_activations.clone();
     let mut best_depth: HashMap<NodeId, usize> = HashMap::new();
     let mut queue: BinaryHeap<ActivationEntry> = BinaryHeap::new();
@@ -132,6 +186,7 @@ where
     }
 
     let mut nodes_visited = 0usize;
+    let mut edge_count_skipped_invalid = 0usize;
 
     while let Some(entry) = queue.pop() {
         if nodes_visited >= budget {
@@ -155,17 +210,25 @@ where
         };
 
         if entry.depth < max_hops {
-            for (target_id, edge_weight, edge_type, is_forward) in &info.outgoing_edges {
-                if matches!(edge_type, EdgeType::Contradicts) {
+            for activation_edge in &info.outgoing_edges {
+                if matches!(activation_edge.edge.edge_type, EdgeType::Contradicts) {
                     continue;
                 }
 
-                let kappa = edge_type.kappa(*is_forward);
+                if !edge_valid_at(&activation_edge.edge, now) {
+                    edge_count_skipped_invalid += 1;
+                    continue;
+                }
+
+                let kappa = activation_edge
+                    .edge
+                    .edge_type
+                    .kappa(activation_edge.is_forward);
                 if kappa == 0.0 {
                     continue;
                 }
 
-                let target_info = match node_info_fn(*target_id) {
+                let target_info = match node_info_fn(activation_edge.target_id) {
                     Some(info) => info,
                     None => continue,
                 };
@@ -175,7 +238,7 @@ where
 
                 let new_activation = propagation_strength(
                     entry.activation,
-                    *edge_weight,
+                    activation_edge.edge.weight,
                     kappa,
                     hop_decay,
                     target_gate,
@@ -186,14 +249,17 @@ where
                     continue;
                 }
 
-                let current = activations.get(target_id).copied().unwrap_or(0.0);
+                let current = activations
+                    .get(&activation_edge.target_id)
+                    .copied()
+                    .unwrap_or(0.0);
                 if new_activation > current {
-                    activations.insert(*target_id, new_activation);
+                    activations.insert(activation_edge.target_id, new_activation);
 
-                    if !best_depth.contains_key(target_id) {
+                    if !best_depth.contains_key(&activation_edge.target_id) {
                         queue.push(ActivationEntry {
                             activation: new_activation,
-                            node_id: *target_id,
+                            node_id: activation_edge.target_id,
                             depth: entry.depth + 1,
                         });
                     }
@@ -203,12 +269,16 @@ where
     }
 
     activations.retain(|id, _| best_depth.contains_key(id));
-    activations
+    SpreadingActivationResult {
+        activations,
+        edge_count_skipped_invalid,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph::EdgeId;
 
     // ── Initial activation ───────────────────────────────────────────────────
 
@@ -250,6 +320,24 @@ mod tests {
 
     // ── Spreading activation ─────────────────────────────────────────────────
 
+    fn activation_edge(target_id: NodeId, weight: f64, edge_type: EdgeType) -> ActivationEdge {
+        ActivationEdge {
+            target_id,
+            edge: Edge {
+                id: EdgeId(target_id.0),
+                source: NodeId(0),
+                target: target_id,
+                edge_type,
+                weight,
+                created_at: Timestamp(0),
+                valid_from: None,
+                valid_until: None,
+                metadata: HashMap::new(),
+            },
+            is_forward: true,
+        }
+    }
+
     fn make_linear_chain() -> (HashMap<NodeId, f64>, impl Fn(NodeId) -> Option<NodeInfo>) {
         // A → B → C (linear chain)
         let a = NodeId(0);
@@ -264,12 +352,12 @@ mod tests {
                 0 => Some(NodeInfo {
                     salience: 0.8,
                     mass: 0.5,
-                    outgoing_edges: vec![(b, 0.9, EdgeType::Semantic, true)],
+                    outgoing_edges: vec![activation_edge(b, 0.9, EdgeType::Semantic)],
                 }),
                 1 => Some(NodeInfo {
                     salience: 0.7,
                     mass: 0.4,
-                    outgoing_edges: vec![(c, 0.8, EdgeType::Semantic, true)],
+                    outgoing_edges: vec![activation_edge(c, 0.8, EdgeType::Semantic)],
                 }),
                 2 => Some(NodeInfo {
                     salience: 0.6,
@@ -317,17 +405,17 @@ mod tests {
                 0 => Some(NodeInfo {
                     salience: 0.8,
                     mass: 0.5,
-                    outgoing_edges: vec![(b, 0.9, EdgeType::Semantic, true)],
+                    outgoing_edges: vec![activation_edge(b, 0.9, EdgeType::Semantic)],
                 }),
                 1 => Some(NodeInfo {
                     salience: 0.7,
                     mass: 0.4,
-                    outgoing_edges: vec![(c, 0.8, EdgeType::Semantic, true)],
+                    outgoing_edges: vec![activation_edge(c, 0.8, EdgeType::Semantic)],
                 }),
                 2 => Some(NodeInfo {
                     salience: 0.6,
                     mass: 0.3,
-                    outgoing_edges: vec![(a, 0.7, EdgeType::Semantic, true)], // back to A
+                    outgoing_edges: vec![activation_edge(a, 0.7, EdgeType::Semantic)], // back to A
                 }),
                 _ => None,
             }
@@ -351,7 +439,7 @@ mod tests {
                 0 => Some(NodeInfo {
                     salience: 0.8,
                     mass: 0.5,
-                    outgoing_edges: vec![(b, 0.9, EdgeType::Contradicts, true)],
+                    outgoing_edges: vec![activation_edge(b, 0.9, EdgeType::Contradicts)],
                 }),
                 1 => Some(NodeInfo {
                     salience: 0.7,
@@ -386,7 +474,7 @@ mod tests {
                     mass: 0.5,
                     outgoing_edges: neighbors
                         .iter()
-                        .map(|&n| (n, 0.9, EdgeType::Semantic, true))
+                        .map(|&n| activation_edge(n, 0.9, EdgeType::Semantic))
                         .collect(),
                 })
             } else if id.0 >= 1 && id.0 <= 5 {
@@ -453,7 +541,11 @@ mod tests {
                 Some(NodeInfo {
                     salience: 0.5,
                     mass: 0.3,
-                    outgoing_edges: vec![(NodeId(id.0 + 1), 0.5, EdgeType::Semantic, true)],
+                    outgoing_edges: vec![activation_edge(
+                        NodeId(id.0 + 1),
+                        0.5,
+                        EdgeType::Semantic,
+                    )],
                 })
             } else {
                 None

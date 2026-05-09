@@ -8,6 +8,7 @@ use crate::graph::{EdgeType, KnowledgeType, NodeId, ScopePath, Timestamp};
 use crate::mechanics::attraction::cosine_similarity;
 use crate::mechanics::gravity::compute_mass;
 use crate::mechanics::repulsion::{apply_damping, compute_repulsion, rigidity};
+use crate::query::activation::edge_valid_at;
 use crate::query::assembly::{ScoredNode, assemble_context_package, determine_scope};
 use crate::query::scoring::{final_score, scope_weight};
 use crate::query::types::SearchPlan;
@@ -24,6 +25,7 @@ pub(crate) struct SearchAssemblyRequest<'a> {
     pub(crate) plan: &'a SearchPlan,
     pub(crate) strategies_used: Vec<String>,
     pub(crate) spread_iterations: usize,
+    pub(crate) edge_count_skipped_invalid: usize,
 }
 
 pub(crate) fn assemble_search_result<S: StorageAdapter + Clone>(
@@ -38,6 +40,7 @@ pub(crate) fn assemble_search_result<S: StorageAdapter + Clone>(
                 seed_count: request.seed_ids.len(),
                 spread_iterations: request.spread_iterations,
                 packaging_mode: None,
+                edge_count_skipped_invalid: request.edge_count_skipped_invalid,
             },
         });
     }
@@ -67,6 +70,7 @@ pub(crate) fn assemble_search_result<S: StorageAdapter + Clone>(
         seed_count: request.seed_ids.len(),
         spread_iterations: request.spread_iterations,
         packaging_mode: Some(packaging_mode),
+        edge_count_skipped_invalid: request.edge_count_skipped_invalid,
     };
 
     Ok(SearchResult { package, trace })
@@ -80,6 +84,7 @@ fn assemble_graph_recall_package<S: StorageAdapter + Clone>(
 ) -> ContextPackage {
     let storage = engine.graph.storage();
     let mut damped_activations = activations.clone();
+    let now = config.now.unwrap_or_else(Timestamp::now);
 
     for &node_id in activations.keys() {
         let contradicts_inputs: Vec<(f64, f64, f64)> = storage
@@ -88,6 +93,9 @@ fn assemble_graph_recall_package<S: StorageAdapter + Clone>(
             .filter_map(|&edge_id| {
                 let edge = storage.get_edge(edge_id).ok()?;
                 if !matches!(edge.edge_type, EdgeType::Contradicts) {
+                    return None;
+                }
+                if !edge_valid_at(edge, now) {
                     return None;
                 }
                 let source_activation = activations.get(&edge.source).copied().unwrap_or(0.0);
@@ -183,6 +191,7 @@ fn assemble_graph_recall_package<S: StorageAdapter + Clone>(
         for &edge_id in storage.edges_from(node_id) {
             if let Ok(edge) = storage.get_edge(edge_id)
                 && matches!(edge.edge_type, EdgeType::Contradicts)
+                && edge_valid_at(edge, now)
             {
                 contradicts_edges.push((edge.source, edge.target, edge.weight));
             }

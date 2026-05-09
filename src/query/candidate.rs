@@ -67,6 +67,8 @@ pub struct GraphRecallTrace {
     pub activated_count: usize,
     /// Spreading activation model used.
     pub model_used: SpreadingModel,
+    /// Number of invalid temporal edges skipped during graph recall.
+    pub edge_count_skipped_invalid: usize,
 }
 
 /// Verbosity level for search trace output.
