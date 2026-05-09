@@ -354,6 +354,17 @@ pub struct CrystallizeResult {
     pub nodes_reinforced: usize,
     /// Initial salience assigned to the crystal.
     pub initial_salience: f64,
+    /// Source consistency score: `clamp(support_density - contradiction_rate, 0.0, 1.0)`.
+    pub consistency_score: f64,
+    /// Fraction of edges between sources that are `Contradicts`.
+    pub contradiction_rate: f64,
+    /// Fraction of edges between sources that are supportive
+    /// (`Supports`, `ReinforcedBy`, `ConsolidatedFrom`, `ExtractedFrom`, `Entity`, `Reason`).
+    pub support_density: f64,
+    /// True if any source is already a `ConsolidatedFrom` target of another crystal node.
+    pub circular_evidence_warning: bool,
+    /// True if all sources share the same `(agent_id, session_id)` pair.
+    pub single_source_warning: bool,
 }
 
 /// Classification for evidence logged against a debugging hypothesis.
@@ -1138,6 +1149,62 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             source_saliences.push(clamp_unit_finite(salience));
         }
 
+        let mut edges_between = 0_usize;
+        let mut contradicts_count = 0_usize;
+        let mut supportive_count = 0_usize;
+
+        {
+            let storage = self.graph.storage();
+            for &src in &source_ids {
+                for &eid in storage.edges_from(src) {
+                    if let Ok(edge) = storage.get_edge(eid) {
+                        if source_set.contains(&edge.target) {
+                            edges_between += 1;
+                            match edge.edge_type {
+                                EdgeType::Contradicts => contradicts_count += 1,
+                                EdgeType::Supports
+                                | EdgeType::ReinforcedBy
+                                | EdgeType::ConsolidatedFrom
+                                | EdgeType::ExtractedFrom
+                                | EdgeType::Entity
+                                | EdgeType::Reason => supportive_count += 1,
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let denominator = edges_between.max(1) as f64;
+        let contradiction_rate = contradicts_count as f64 / denominator;
+        let support_density = supportive_count as f64 / denominator;
+        let consistency_score = (support_density - contradiction_rate).clamp(0.0, 1.0);
+
+        let circular_evidence_warning = {
+            let storage = self.graph.storage();
+            source_ids.iter().any(|&sid| {
+                storage.edges_to(sid).iter().any(|&eid| {
+                    storage
+                        .get_edge(eid)
+                        .is_ok_and(|e| e.edge_type == EdgeType::ConsolidatedFrom)
+                })
+            })
+        };
+
+        let single_source_warning = {
+            let storage = self.graph.storage();
+            storage.get_node(source_ids[0]).ok().is_some_and(|first| {
+                let agent = &first.origin.agent_id;
+                let session = &first.origin.session_id;
+                source_ids[1..].iter().all(|&sid| {
+                    storage.get_node(sid).is_ok_and(|n| {
+                        n.origin.agent_id == *agent && n.origin.session_id == *session
+                    })
+                })
+            })
+        };
+
         let mut dedup_score = 0.0_f64;
         if let Some(ref crystal_embedding) = request.embedding {
             let storage = self.graph.storage();
@@ -1345,6 +1412,11 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             attraction_edges,
             nodes_reinforced: source_ids.len(),
             initial_salience,
+            consistency_score,
+            contradiction_rate,
+            support_density,
+            circular_evidence_warning,
+            single_source_warning,
         })
     }
 
