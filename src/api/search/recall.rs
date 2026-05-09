@@ -8,7 +8,7 @@ use crate::mechanics::gravity::compute_mass;
 use crate::query::{
     ActivationEdge, FusedCandidate, GraphRecallTrace, NodeInfo, QueryConfig, initial_activation,
 };
-use crate::query::{random_walk_restart_from_distribution_at, spread_activation_at};
+use crate::query::{random_walk_restart_from_distribution_at, spread_activation_with_convergence};
 use crate::storage::StorageAdapter;
 
 pub(crate) fn run_graph_recalls<S: StorageAdapter>(
@@ -27,6 +27,8 @@ pub(crate) fn run_graph_recalls<S: StorageAdapter>(
         .now
         .unwrap_or_else(crate::graph::Timestamp::now);
     let mut edge_count_skipped_invalid = 0usize;
+    let mut convergence_rounds = 0usize;
+    let mut converged = false;
 
     let activated = match engine_config.spreading_model {
         SpreadingModel::PriorityQueueBfs => {
@@ -72,7 +74,7 @@ pub(crate) fn run_graph_recalls<S: StorageAdapter>(
                 })
             };
 
-            let result = spread_activation_at(
+            let result = spread_activation_with_convergence(
                 initial_map,
                 node_info_fn,
                 query_config.budget,
@@ -80,8 +82,11 @@ pub(crate) fn run_graph_recalls<S: StorageAdapter>(
                 query_config.decay_per_hop,
                 query_config.max_hops,
                 now,
+                query_config.convergence.clone(),
             );
             edge_count_skipped_invalid = result.edge_count_skipped_invalid;
+            convergence_rounds = result.convergence_rounds;
+            converged = result.converged;
             result.activations
         }
         SpreadingModel::RandomWalkRestart => {
@@ -107,6 +112,8 @@ pub(crate) fn run_graph_recalls<S: StorageAdapter>(
         activated_count: activated.len(),
         model_used: engine_config.spreading_model,
         edge_count_skipped_invalid,
+        convergence_rounds,
+        converged,
     };
 
     (activated, trace)

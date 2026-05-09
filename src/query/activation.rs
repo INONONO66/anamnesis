@@ -120,6 +120,10 @@ pub struct SpreadingActivationResult {
     pub activations: HashMap<NodeId, f64>,
     /// Number of invalid temporal edges skipped during traversal.
     pub edge_count_skipped_invalid: usize,
+    /// Number of convergence check rounds performed.
+    pub convergence_rounds: usize,
+    /// Whether spreading activation converged early.
+    pub converged: bool,
 }
 
 /// Runs spreading activation from a set of initially activated nodes.
@@ -146,7 +150,7 @@ pub fn spread_activation<F>(
 where
     F: Fn(NodeId) -> Option<NodeInfo>,
 {
-    spread_activation_at(
+    spread_activation_with_convergence(
         initial_activations,
         node_info_fn,
         budget,
@@ -154,6 +158,7 @@ where
         hop_decay,
         max_hops,
         Timestamp::now(),
+        None,
     )
     .activations
 }
@@ -167,6 +172,33 @@ pub fn spread_activation_at<F>(
     hop_decay: f64,
     max_hops: usize,
     now: Timestamp,
+) -> SpreadingActivationResult
+where
+    F: Fn(NodeId) -> Option<NodeInfo>,
+{
+    spread_activation_with_convergence(
+        initial_activations,
+        node_info_fn,
+        budget,
+        min_activation,
+        hop_decay,
+        max_hops,
+        now,
+        None,
+    )
+}
+
+/// Runs spreading activation with optional convergence termination.
+#[allow(clippy::too_many_arguments)]
+pub fn spread_activation_with_convergence<F>(
+    initial_activations: HashMap<NodeId, f64>,
+    node_info_fn: F,
+    budget: usize,
+    min_activation: f64,
+    hop_decay: f64,
+    max_hops: usize,
+    now: Timestamp,
+    convergence_config: Option<crate::query::types::ConvergenceConfig>,
 ) -> SpreadingActivationResult
 where
     F: Fn(NodeId) -> Option<NodeInfo>,
@@ -187,6 +219,10 @@ where
 
     let mut nodes_visited = 0usize;
     let mut edge_count_skipped_invalid = 0usize;
+    let mut convergence_rounds = 0usize;
+    let mut converged = false;
+    let mut stable_count = 0usize;
+    let mut prev_top_k: Vec<NodeId> = Vec::new();
 
     while let Some(entry) = queue.pop() {
         if nodes_visited >= budget {
@@ -266,12 +302,37 @@ where
                 }
             }
         }
+
+        if let Some(ref config) = convergence_config {
+            if nodes_visited % 10 == 0 {
+                convergence_rounds += 1;
+                let mut current_top_k: Vec<_> =
+                    activations.iter().map(|(id, &act)| (*id, act)).collect();
+                current_top_k.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
+                current_top_k.truncate(config.compare_top_k);
+                let current_top_k_ids: Vec<NodeId> =
+                    current_top_k.iter().map(|(id, _)| *id).collect();
+
+                if current_top_k_ids == prev_top_k {
+                    stable_count += 1;
+                    if stable_count >= config.stable_rounds {
+                        converged = true;
+                        break;
+                    }
+                } else {
+                    stable_count = 0;
+                    prev_top_k = current_top_k_ids;
+                }
+            }
+        }
     }
 
     activations.retain(|id, _| best_depth.contains_key(id));
     SpreadingActivationResult {
         activations,
         edge_count_skipped_invalid,
+        convergence_rounds,
+        converged,
     }
 }
 

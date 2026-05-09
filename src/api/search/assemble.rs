@@ -26,6 +26,8 @@ pub(crate) struct SearchAssemblyRequest<'a> {
     pub(crate) strategies_used: Vec<String>,
     pub(crate) spread_iterations: usize,
     pub(crate) edge_count_skipped_invalid: usize,
+    pub(crate) convergence_rounds: usize,
+    pub(crate) converged: bool,
 }
 
 pub(crate) fn assemble_search_result<S: StorageAdapter + Clone>(
@@ -41,6 +43,8 @@ pub(crate) fn assemble_search_result<S: StorageAdapter + Clone>(
                 spread_iterations: request.spread_iterations,
                 packaging_mode: None,
                 edge_count_skipped_invalid: request.edge_count_skipped_invalid,
+                convergence_rounds: request.convergence_rounds,
+                converged: request.converged,
             },
         });
     }
@@ -71,6 +75,8 @@ pub(crate) fn assemble_search_result<S: StorageAdapter + Clone>(
         spread_iterations: request.spread_iterations,
         packaging_mode: Some(packaging_mode),
         edge_count_skipped_invalid: request.edge_count_skipped_invalid,
+        convergence_rounds: request.convergence_rounds,
+        converged: request.converged,
     };
 
     Ok(SearchResult { package, trace })

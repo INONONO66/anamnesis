@@ -12,7 +12,7 @@ pub mod types;
 
 pub use activation::{
     ActivationEdge, NodeInfo, SpreadingActivationResult, edge_valid_at, initial_activation,
-    salience_gate, spread_activation, spread_activation_at,
+    salience_gate, spread_activation, spread_activation_at, spread_activation_with_convergence,
 };
 pub use assembly::{ScoredNode, assemble_context_package, compute_agent_tension, determine_scope};
 pub use candidate::{
@@ -27,6 +27,6 @@ pub use rwr::{
 };
 pub use scoring::{all_forces, compute_with_forces, final_score, scope_weight};
 pub use types::{
-    ContextPackage, Fragment, PackagingMode, Query, QueryConfig, SearchInput, SearchResult,
-    SearchTrace, Tension, TokenBudget,
+    ContextPackage, ConvergenceConfig, Fragment, PackagingMode, Query, QueryConfig, SearchInput,
+    SearchResult, SearchTrace, Tension, TokenBudget,
 };
