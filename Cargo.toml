@@ -13,10 +13,12 @@ crate-type = ["lib"]
 
 [features]
 embed = ["dep:fastembed"]
+sqlite = ["dep:rusqlite"]
 
 [dependencies]
 # Zero external deps for core — add only as needed
 fastembed = { version = "4", optional = true }
+rusqlite = { version = "0.32", features = ["bundled"], optional = true }
 
 [dev-dependencies]
 proptest = "1.6"

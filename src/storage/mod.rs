@@ -5,8 +5,12 @@
 //! with Struct of Arrays (SoA) hot fields for cache-friendly physics operations.
 
 pub mod memory;
+#[cfg(feature = "sqlite")]
+pub mod sqlite;
 
 pub use memory::InMemoryStorage;
+#[cfg(feature = "sqlite")]
+pub use sqlite::SqliteStorage;
 
 use crate::error::Error;
 use crate::graph::{Edge, EdgeId, KnowledgeType, Node, NodeId, ScopePath, Timestamp};
