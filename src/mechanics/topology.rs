@@ -302,9 +302,9 @@ mod tests {
         let mut storage = InMemoryStorage::new();
 
         // Create nodes in different scopes
-        let mut node1 = make_node(1, "agent-1", "session-1", "project-a");
-        let mut node2 = make_node(2, "agent-1", "session-1", "project-a");
-        let mut node3 = make_node(3, "agent-1", "session-1", "project-b");
+        let node1 = make_node(1, "agent-1", "session-1", "project-a");
+        let node2 = make_node(2, "agent-1", "session-1", "project-a");
+        let node3 = make_node(3, "agent-1", "session-1", "project-b");
 
         storage.set_node(node1).expect("set node1");
         storage.set_node(node2).expect("set node2");
