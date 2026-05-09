@@ -38,6 +38,30 @@ pub enum Query {
     List { min_salience: f64, limit: usize },
 }
 
+/// Configuration for top-k convergence termination in spreading activation.
+///
+/// When enabled, spreading activation stops early if the top-k node rankings
+/// stabilize for N consecutive rounds.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConvergenceConfig {
+    /// Number of consecutive rounds where top-k must remain stable to trigger convergence.
+    pub stable_rounds: usize,
+    /// Number of top nodes to compare for stability.
+    pub compare_top_k: usize,
+    /// Minimum change in activation score to consider a node "different" (prevents noise).
+    pub min_delta: f64,
+}
+
+impl Default for ConvergenceConfig {
+    fn default() -> Self {
+        ConvergenceConfig {
+            stable_rounds: 3,
+            compare_top_k: 10,
+            min_delta: 0.01,
+        }
+    }
+}
+
 /// Configuration for a query execution.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
@@ -64,6 +88,8 @@ pub struct QueryConfig {
     pub context: Option<String>,
     /// Domain timestamp for edge validity filtering. None = current system time.
     pub now: Option<Timestamp>,
+    /// Optional convergence termination config. None = no early stopping.
+    pub convergence: Option<ConvergenceConfig>,
 }
 
 impl Default for QueryConfig {
@@ -80,6 +106,7 @@ impl Default for QueryConfig {
             chars_per_token: 4,
             context: None,
             now: None,
+            convergence: None,
         }
     }
 }
@@ -262,6 +289,10 @@ pub struct SearchTrace {
     pub packaging_mode: Option<PackagingMode>,
     /// Number of invalid temporal edges skipped during graph recall.
     pub edge_count_skipped_invalid: usize,
+    /// Number of convergence check rounds performed (0 if convergence disabled).
+    pub convergence_rounds: usize,
+    /// Whether spreading activation converged early (true if top-k stabilized).
+    pub converged: bool,
 }
 
 /// Internal search plan — auto-derived from SearchInput.

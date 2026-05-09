@@ -1962,7 +1962,8 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         use crate::mechanics::gravity::compute_mass;
         use crate::mechanics::repulsion::{apply_damping, compute_repulsion, rigidity};
         use crate::query::activation::{
-            ActivationEdge, NodeInfo, edge_valid_at, initial_activation, spread_activation_at,
+            ActivationEdge, NodeInfo, edge_valid_at, initial_activation,
+            spread_activation_with_convergence,
         };
         use crate::query::assembly::{ScoredNode, assemble_context_package};
         use crate::query::identity::compute_identity_prior;
@@ -2109,7 +2110,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
 
         let activations = match self.config.spreading_model {
             SpreadingModel::PriorityQueueBfs => {
-                spread_activation_at(
+                spread_activation_with_convergence(
                     initial_activations,
                     node_info_fn,
                     budget,
@@ -2117,6 +2118,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                     config.decay_per_hop,
                     config.max_hops,
                     now,
+                    config.convergence.clone(),
                 )
                 .activations
             }

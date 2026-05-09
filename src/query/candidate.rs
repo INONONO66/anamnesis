@@ -69,6 +69,10 @@ pub struct GraphRecallTrace {
     pub model_used: SpreadingModel,
     /// Number of invalid temporal edges skipped during graph recall.
     pub edge_count_skipped_invalid: usize,
+    /// Number of convergence check rounds performed.
+    pub convergence_rounds: usize,
+    /// Whether spreading activation converged early.
+    pub converged: bool,
 }
 
 /// Verbosity level for search trace output.
