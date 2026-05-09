@@ -6,6 +6,7 @@
 //! - `gravity`: PageRank-like centrality scoring
 //! - `perception`: Novelty, confidence, and budget gating
 //! - `forgetting`: Exponential decay + reinforcement on access
+//! - `topology`: Graph structure analysis (degree, bridge score, support score)
 
 pub mod attraction;
 pub mod forces;
@@ -14,3 +15,4 @@ pub mod gravity;
 pub mod hopfield;
 pub mod perception;
 pub mod repulsion;
+pub mod topology;
