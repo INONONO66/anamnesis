@@ -3,10 +3,12 @@
 use std::collections::HashMap;
 
 use crate::api::{EngineConfig, SpreadingModel};
-use crate::graph::{EdgeType, NodeId};
+use crate::graph::NodeId;
 use crate::mechanics::gravity::compute_mass;
-use crate::query::{FusedCandidate, GraphRecallTrace, NodeInfo, QueryConfig, initial_activation};
-use crate::query::{random_walk_restart_from_distribution, spread_activation};
+use crate::query::{
+    ActivationEdge, FusedCandidate, GraphRecallTrace, NodeInfo, QueryConfig, initial_activation,
+};
+use crate::query::{random_walk_restart_from_distribution_at, spread_activation_at};
 use crate::storage::StorageAdapter;
 
 pub(crate) fn run_graph_recalls<S: StorageAdapter>(
@@ -20,6 +22,11 @@ pub(crate) fn run_graph_recalls<S: StorageAdapter>(
         .iter()
         .map(|seed| (seed.node_id, seed.fused_score))
         .collect();
+
+    let now = query_config
+        .now
+        .unwrap_or_else(crate::graph::Timestamp::now);
+    let mut edge_count_skipped_invalid = 0usize;
 
     let activated = match engine_config.spreading_model {
         SpreadingModel::PriorityQueueBfs => {
@@ -36,27 +43,25 @@ pub(crate) fn run_graph_recalls<S: StorageAdapter>(
                 let salience = storage.get_salience(nid).unwrap_or(0.0);
                 let mass = compute_mass(salience, node.access_count, &node.node_type);
 
-                let mut outgoing_edges: Vec<(NodeId, f64, EdgeType, bool)> = Vec::new();
+                let mut outgoing_edges: Vec<ActivationEdge> = Vec::new();
 
                 for &edge_id in storage.edges_from(nid) {
                     if let Ok(edge) = storage.get_edge(edge_id) {
-                        outgoing_edges.push((
-                            edge.target,
-                            edge.weight,
-                            edge.edge_type.clone(),
-                            true,
-                        ));
+                        outgoing_edges.push(ActivationEdge {
+                            target_id: edge.target,
+                            edge: edge.clone(),
+                            is_forward: true,
+                        });
                     }
                 }
 
                 for &edge_id in storage.edges_to(nid) {
                     if let Ok(edge) = storage.get_edge(edge_id) {
-                        outgoing_edges.push((
-                            edge.source,
-                            edge.weight,
-                            edge.edge_type.clone(),
-                            false,
-                        ));
+                        outgoing_edges.push(ActivationEdge {
+                            target_id: edge.source,
+                            edge: edge.clone(),
+                            is_forward: false,
+                        });
                     }
                 }
 
@@ -67,22 +72,26 @@ pub(crate) fn run_graph_recalls<S: StorageAdapter>(
                 })
             };
 
-            spread_activation(
+            let result = spread_activation_at(
                 initial_map,
                 node_info_fn,
                 query_config.budget,
                 query_config.min_activation,
                 query_config.decay_per_hop,
                 query_config.max_hops,
-            )
+                now,
+            );
+            edge_count_skipped_invalid = result.edge_count_skipped_invalid;
+            result.activations
         }
         SpreadingModel::RandomWalkRestart => {
-            let scores = random_walk_restart_from_distribution(
+            let scores = random_walk_restart_from_distribution_at(
                 &initial_map,
                 identity_prior,
                 super::super::RWR_RESTART_PROBABILITY,
                 super::super::RWR_MAX_ITERATIONS,
                 storage,
+                now,
             );
             limit_activations(
                 scores,
@@ -97,6 +106,7 @@ pub(crate) fn run_graph_recalls<S: StorageAdapter>(
         invocation_count: 1,
         activated_count: activated.len(),
         model_used: engine_config.spreading_model,
+        edge_count_skipped_invalid,
     };
 
     (activated, trace)

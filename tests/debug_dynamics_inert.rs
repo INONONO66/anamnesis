@@ -1,11 +1,12 @@
 use std::collections::HashMap;
 
+use anamnesis::graph::{Edge, EdgeId, Timestamp};
 use anamnesis::mechanics::forgetting::{decay_salience, floor_for_type, lambda_for_type};
 use anamnesis::mechanics::gravity::{compute_mass, mass_prior};
 use anamnesis::mechanics::repulsion::rigidity;
 use anamnesis::query::assembly::{is_identity_type, is_memory_type};
 use anamnesis::query::identity::pi_tier;
-use anamnesis::query::{NodeInfo, spread_activation};
+use anamnesis::query::{ActivationEdge, NodeInfo, spread_activation};
 use anamnesis::{EdgeType, KnowledgeType, NodeId};
 
 fn debug_node_types() -> [KnowledgeType; 3] {
@@ -68,7 +69,21 @@ fn refutes_is_supportive_and_propagates_activation() {
             Some(NodeInfo {
                 salience: 1.0,
                 mass: 0.0,
-                outgoing_edges: vec![(target, 1.0, EdgeType::Refutes, true)],
+                outgoing_edges: vec![ActivationEdge {
+                    target_id: target,
+                    edge: Edge {
+                        id: EdgeId(1),
+                        source,
+                        target,
+                        edge_type: EdgeType::Refutes,
+                        weight: 1.0,
+                        created_at: Timestamp(0),
+                        valid_from: None,
+                        valid_until: None,
+                        metadata: HashMap::new(),
+                    },
+                    is_forward: true,
+                }],
             })
         } else if node_id == target {
             Some(NodeInfo {

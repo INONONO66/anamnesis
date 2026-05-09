@@ -6,7 +6,8 @@
 
 use std::collections::HashMap;
 
-use crate::graph::{EdgeType, NodeId};
+use crate::graph::{EdgeType, NodeId, Timestamp};
+use crate::query::activation::edge_valid_at;
 use crate::storage::StorageAdapter;
 
 const DEFAULT_RESTART_PROBABILITY: f64 = 0.15;
@@ -28,16 +29,28 @@ pub fn random_walk_restart(
     max_iter: usize,
     storage: &impl StorageAdapter,
 ) -> HashMap<NodeId, f64> {
+    random_walk_restart_at(seed, alpha, max_iter, storage, Timestamp::now())
+}
+
+/// Computes random-walk-with-restart affinities at a domain timestamp.
+pub fn random_walk_restart_at(
+    seed: NodeId,
+    alpha: f64,
+    max_iter: usize,
+    storage: &impl StorageAdapter,
+    now: Timestamp,
+) -> HashMap<NodeId, f64> {
     if storage.get_node(seed).is_err() {
         return HashMap::new();
     }
 
-    random_walk_restart_from_distribution(
+    random_walk_restart_from_distribution_at(
         &HashMap::from([(seed, 1.0)]),
         None,
         alpha,
         max_iter,
         storage,
+        now,
     )
 }
 
@@ -58,6 +71,25 @@ pub fn random_walk_restart_from_distribution(
     max_iter: usize,
     storage: &impl StorageAdapter,
 ) -> HashMap<NodeId, f64> {
+    random_walk_restart_from_distribution_at(
+        restart_distribution,
+        identity_prior,
+        alpha,
+        max_iter,
+        storage,
+        Timestamp::now(),
+    )
+}
+
+/// Computes random-walk-with-restart affinities at a domain timestamp.
+pub fn random_walk_restart_from_distribution_at(
+    restart_distribution: &HashMap<NodeId, f64>,
+    identity_prior: Option<&HashMap<NodeId, f64>>,
+    alpha: f64,
+    max_iter: usize,
+    storage: &impl StorageAdapter,
+    now: Timestamp,
+) -> HashMap<NodeId, f64> {
     random_walk_restart_from_distribution_with_kappa(
         restart_distribution,
         identity_prior,
@@ -65,6 +97,7 @@ pub fn random_walk_restart_from_distribution(
         max_iter,
         storage,
         true,
+        now,
     )
 }
 
@@ -75,6 +108,7 @@ fn random_walk_restart_from_distribution_with_kappa(
     max_iter: usize,
     storage: &impl StorageAdapter,
     apply_kappa: bool,
+    now: Timestamp,
 ) -> HashMap<NodeId, f64> {
     let node_ids: Vec<NodeId> = storage
         .all_node_ids()
@@ -111,7 +145,7 @@ fn random_walk_restart_from_distribution_with_kappa(
                 continue;
             }
 
-            let transitions = valid_transition_edges(*source, storage, apply_kappa);
+            let transitions = valid_transition_edges(*source, storage, apply_kappa, now);
             let total_weight: f64 = transitions.iter().map(|(_, weight)| *weight).sum();
 
             if !total_weight.is_finite() || total_weight <= 0.0 {
@@ -185,11 +219,15 @@ fn valid_transition_edges(
     source: NodeId,
     storage: &impl StorageAdapter,
     apply_kappa: bool,
+    now: Timestamp,
 ) -> Vec<(NodeId, f64)> {
     let mut transitions = Vec::new();
 
     transitions.extend(storage.edges_from(source).iter().filter_map(|edge_id| {
         let edge = storage.get_edge(*edge_id).ok()?;
+        if !edge_valid_at(edge, now) {
+            return None;
+        }
         weighted_transition(
             edge.target,
             edge.weight,
@@ -202,6 +240,9 @@ fn valid_transition_edges(
 
     transitions.extend(storage.edges_to(source).iter().filter_map(|edge_id| {
         let edge = storage.get_edge(*edge_id).ok()?;
+        if !edge_valid_at(edge, now) {
+            return None;
+        }
         weighted_transition(
             edge.source,
             edge.weight,
