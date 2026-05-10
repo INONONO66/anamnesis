@@ -9,6 +9,7 @@
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
 
+use crate::api::SpreadingModel;
 use crate::graph::{Edge, EdgeType, NodeId, Timestamp};
 
 /// Computes the initial activation for a node.
@@ -56,6 +57,13 @@ pub fn propagation_strength(
         * target_salience_gate
         * target_gravity_boost)
         .clamp(0.0, 1.0)
+}
+
+/// Computes the fan-out normalization factor for a source node.
+///
+/// F(i) = 1 / sqrt(max(1, valid_fan_out(i)))
+pub fn fan_out_normalization_factor(valid_fan_out: usize) -> f64 {
+    1.0 / (valid_fan_out.max(1) as f64).sqrt()
 }
 
 /// Returns whether an edge is valid at a domain timestamp.
@@ -188,6 +196,13 @@ where
     )
 }
 
+fn valid_fan_out(info: &NodeInfo, now: Timestamp) -> usize {
+    info.outgoing_edges
+        .iter()
+        .filter(|activation_edge| edge_valid_at(&activation_edge.edge, now))
+        .count()
+}
+
 /// Runs spreading activation with optional convergence termination.
 #[allow(clippy::too_many_arguments)]
 pub fn spread_activation_with_convergence<F>(
@@ -198,6 +213,35 @@ pub fn spread_activation_with_convergence<F>(
     hop_decay: f64,
     max_hops: usize,
     now: Timestamp,
+    convergence_config: Option<crate::query::types::ConvergenceConfig>,
+) -> SpreadingActivationResult
+where
+    F: Fn(NodeId) -> Option<NodeInfo>,
+{
+    spread_activation_with_model_and_convergence(
+        initial_activations,
+        node_info_fn,
+        budget,
+        min_activation,
+        hop_decay,
+        max_hops,
+        now,
+        SpreadingModel::PriorityQueueBfs,
+        convergence_config,
+    )
+}
+
+/// Runs spreading activation with a selected spreading model and optional convergence termination.
+#[allow(clippy::too_many_arguments)]
+pub fn spread_activation_with_model_and_convergence<F>(
+    initial_activations: HashMap<NodeId, f64>,
+    node_info_fn: F,
+    budget: usize,
+    min_activation: f64,
+    hop_decay: f64,
+    max_hops: usize,
+    now: Timestamp,
+    spreading_model: SpreadingModel,
     convergence_config: Option<crate::query::types::ConvergenceConfig>,
 ) -> SpreadingActivationResult
 where
@@ -246,6 +290,13 @@ where
         };
 
         if entry.depth < max_hops {
+            let source_fan_out_normalization = match spreading_model {
+                SpreadingModel::NormalizedPriorityQueueBfs => {
+                    fan_out_normalization_factor(valid_fan_out(&info, now))
+                }
+                SpreadingModel::PriorityQueueBfs | SpreadingModel::RandomWalkRestart => 1.0,
+            };
+
             for activation_edge in &info.outgoing_edges {
                 if matches!(activation_edge.edge.edge_type, EdgeType::Contradicts) {
                     continue;
@@ -272,14 +323,15 @@ where
                 let target_gate = salience_gate(target_info.salience);
                 let target_boost = 1.0 + 0.20 * target_info.mass;
 
-                let new_activation = propagation_strength(
+                let new_activation = (propagation_strength(
                     entry.activation,
                     activation_edge.edge.weight,
                     kappa,
                     hop_decay,
                     target_gate,
                     target_boost,
-                );
+                ) * source_fan_out_normalization)
+                    .clamp(0.0, 1.0);
 
                 if new_activation < min_activation {
                     continue;

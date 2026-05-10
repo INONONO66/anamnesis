@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::api::Engine;
+use crate::api::{Engine, SpreadingModel};
 use crate::error::Error;
 use crate::graph::{EdgeType, KnowledgeType, NodeId, ScopePath, Timestamp};
 use crate::mechanics::attraction::cosine_similarity;
@@ -25,6 +25,7 @@ pub(crate) struct SearchAssemblyRequest<'a> {
     pub(crate) plan: &'a SearchPlan,
     pub(crate) strategies_used: Vec<String>,
     pub(crate) spread_iterations: usize,
+    pub(crate) spreading_model: Option<SpreadingModel>,
     pub(crate) edge_count_skipped_invalid: usize,
     pub(crate) convergence_rounds: usize,
     pub(crate) converged: bool,
@@ -41,6 +42,7 @@ pub(crate) fn assemble_search_result<S: StorageAdapter + Clone>(
                 strategies_used: request.strategies_used,
                 seed_count: request.seed_ids.len(),
                 spread_iterations: request.spread_iterations,
+                spreading_model: request.spreading_model,
                 packaging_mode: None,
                 edge_count_skipped_invalid: request.edge_count_skipped_invalid,
                 convergence_rounds: request.convergence_rounds,
@@ -73,6 +75,7 @@ pub(crate) fn assemble_search_result<S: StorageAdapter + Clone>(
         strategies_used: request.strategies_used,
         seed_count: request.seed_ids.len(),
         spread_iterations: request.spread_iterations,
+        spreading_model: request.spreading_model,
         packaging_mode: Some(packaging_mode),
         edge_count_skipped_invalid: request.edge_count_skipped_invalid,
         convergence_rounds: request.convergence_rounds,

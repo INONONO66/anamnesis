@@ -97,6 +97,7 @@ pub(crate) fn search<S: StorageAdapter + Clone>(
     let mut edge_count_skipped_invalid = 0usize;
     let mut convergence_rounds = 0usize;
     let mut converged = false;
+    let mut spreading_model = None;
 
     if plan.use_graph {
         let identity_prior = identity_prior_for_search(storage, &config);
@@ -113,6 +114,7 @@ pub(crate) fn search<S: StorageAdapter + Clone>(
         edge_count_skipped_invalid = recall_trace.edge_count_skipped_invalid;
         convergence_rounds = recall_trace.convergence_rounds;
         converged = recall_trace.converged;
+        spreading_model = Some(recall_trace.model_used);
         activations = graph_activations;
     }
 
@@ -130,6 +132,7 @@ pub(crate) fn search<S: StorageAdapter + Clone>(
             plan: &plan,
             strategies_used,
             spread_iterations,
+            spreading_model,
             edge_count_skipped_invalid,
             convergence_rounds,
             converged,

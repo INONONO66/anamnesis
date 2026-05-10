@@ -1,5 +1,6 @@
 //! Query types for the Anamnesis cognitive graph engine.
 
+use crate::api::SpreadingModel;
 use crate::graph::Origin;
 use crate::graph::scope::{ScopePath, ScopeRelation};
 use crate::graph::{KnowledgeType, NodeId, Timestamp};
@@ -285,6 +286,8 @@ pub struct SearchTrace {
     pub seed_count: usize,
     /// Number of spreading activation iterations performed.
     pub spread_iterations: usize,
+    /// Spreading activation model used for graph recall, when graph recall ran.
+    pub spreading_model: Option<SpreadingModel>,
     /// Packaging mode selected.
     pub packaging_mode: Option<PackagingMode>,
     /// Number of invalid temporal edges skipped during graph recall.

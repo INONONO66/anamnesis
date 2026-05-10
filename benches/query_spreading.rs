@@ -141,6 +141,7 @@ fn bench_pqbfs_vs_rwr(c: &mut Criterion) {
     ] {
         let model_name = match model {
             SpreadingModel::PriorityQueueBfs => "pqbfs",
+            SpreadingModel::NormalizedPriorityQueueBfs => "normalized-pqbfs",
             SpreadingModel::RandomWalkRestart => "rwr",
         };
 

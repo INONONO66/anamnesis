@@ -13,6 +13,7 @@ pub mod types;
 pub use activation::{
     ActivationEdge, NodeInfo, SpreadingActivationResult, edge_valid_at, initial_activation,
     salience_gate, spread_activation, spread_activation_at, spread_activation_with_convergence,
+    spread_activation_with_model_and_convergence,
 };
 pub use assembly::{ScoredNode, assemble_context_package, compute_agent_tension, determine_scope};
 pub use candidate::{
