@@ -28,6 +28,24 @@ pub fn lambda_for_type(kt: &KnowledgeType) -> f64 {
     }
 }
 
+/// Adjusts a base decay rate using local graph topology signals.
+///
+/// Isolated nodes decay faster, while bridge nodes receive decay protection:
+/// `lambda_eff = lambda_base * (1 + isolation_factor * is_orphan) * (1 - bridge_factor * bridge_score)`.
+pub fn effective_lambda(
+    lambda_base: f64,
+    is_orphan: bool,
+    bridge_score: f64,
+    isolation_factor: f64,
+    bridge_factor: f64,
+) -> f64 {
+    let orphan_indicator = if is_orphan { 1.0 } else { 0.0 };
+    let isolation_multiplier = 1.0 + isolation_factor * orphan_indicator;
+    let bridge_protection = 1.0 - bridge_factor * bridge_score;
+
+    lambda_base * isolation_multiplier * bridge_protection
+}
+
 /// Returns the salience floor (minimum value) for a knowledge type.
 ///
 /// Salience never decays below this floor. IdentityCore floor equals
@@ -58,12 +76,24 @@ pub fn floor_for_type(kt: &KnowledgeType) -> f64 {
 /// Returns the new salience, clamped to [floor, current].
 /// IdentityCore nodes are never decayed (returns `current` unchanged).
 pub fn decay_salience(current: f64, dt_days: f64, kt: &KnowledgeType) -> f64 {
+    decay_salience_with_lambda(current, dt_days, kt, lambda_for_type(kt))
+}
+
+/// Applies exponential decay using an explicit decay rate.
+///
+/// This keeps [`decay_salience`] backwards-compatible while allowing callers to
+/// supply topology-adjusted decay rates.
+pub(crate) fn decay_salience_with_lambda(
+    current: f64,
+    dt_days: f64,
+    kt: &KnowledgeType,
+    lambda: f64,
+) -> f64 {
     // IdentityCore never decays
     if matches!(kt, KnowledgeType::IdentityCore) {
         return current;
     }
 
-    let lambda = lambda_for_type(kt);
     let floor = floor_for_type(kt);
 
     // No decay if lambda is zero or no time has passed

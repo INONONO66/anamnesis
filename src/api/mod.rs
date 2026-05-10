@@ -94,6 +94,12 @@ pub struct EngineConfig {
     pub dedup_enabled: bool,
     /// Decay model to use for salience computation. Default: Exponential (backwards-compatible).
     pub decay_model: DecayModel,
+    /// Whether decay rates should be adjusted using local graph topology. Default: false.
+    pub topology_decay_enabled: bool,
+    /// Extra decay multiplier applied to orphan nodes when topology decay is enabled. Default: 0.0.
+    pub isolation_decay_factor: f64,
+    /// Decay protection multiplier applied from bridge score when topology decay is enabled. Default: 0.0.
+    pub bridge_protection_factor: f64,
     /// Energy model for final score computation in spreading activation. Default: WeightedSum (backwards-compatible).
     pub energy_model: EnergyModel,
     /// Spreading activation model for query traversal. Default: PriorityQueueBfs (backwards-compatible).
@@ -114,6 +120,9 @@ impl Default for EngineConfig {
             dedup_threshold: 0.92,
             dedup_enabled: true,
             decay_model: DecayModel::Exponential,
+            topology_decay_enabled: false,
+            isolation_decay_factor: 0.0,
+            bridge_protection_factor: 0.0,
             energy_model: EnergyModel::WeightedSum,
             spreading_model: SpreadingModel::PriorityQueueBfs,
             mass_model: MassModel::Legacy,
@@ -152,6 +161,21 @@ impl EngineConfig {
         self
     }
 
+    pub fn with_topology_decay(mut self, enabled: bool) -> Self {
+        self.topology_decay_enabled = enabled;
+        self
+    }
+
+    pub fn with_isolation_decay_factor(mut self, factor: f64) -> Self {
+        self.isolation_decay_factor = factor;
+        self
+    }
+
+    pub fn with_bridge_protection_factor(mut self, factor: f64) -> Self {
+        self.bridge_protection_factor = factor;
+        self
+    }
+
     pub fn with_mass_model(mut self, model: MassModel) -> Self {
         self.mass_model = model;
         self
@@ -165,6 +189,39 @@ impl EngineConfig {
 
 fn finite_vector(values: &[f64]) -> bool {
     values.iter().all(|value| value.is_finite())
+}
+
+fn topology_decay_reference_degree<S: StorageAdapter>(storage: &S, node_ids: &[NodeId]) -> usize {
+    if node_ids.is_empty() {
+        return 1;
+    }
+
+    let total_degree: usize = node_ids
+        .iter()
+        .map(|&id| crate::mechanics::topology::degree(storage, id))
+        .sum();
+    (total_degree / node_ids.len()).max(1)
+}
+
+fn topology_adjusted_decay_parameter<S: StorageAdapter>(
+    storage: &S,
+    node_ids: &[NodeId],
+    node_id: NodeId,
+    lambda_base: f64,
+    isolation_decay_factor: f64,
+    bridge_protection_factor: f64,
+) -> Result<f64, Error> {
+    let d_ref = topology_decay_reference_degree(storage, node_ids);
+    let is_orphan = crate::mechanics::topology::is_orphan(storage, node_id);
+    let bridge_score = crate::mechanics::topology::bridge_score(storage, node_id, d_ref)?;
+
+    Ok(crate::mechanics::forgetting::effective_lambda(
+        lambda_base,
+        is_orphan,
+        bridge_score,
+        isolation_decay_factor,
+        bridge_protection_factor,
+    ))
 }
 
 fn rwr_activations<S: StorageAdapter>(
@@ -1521,12 +1578,16 @@ impl<S: StorageAdapter + Clone> Engine<S> {
     /// `decay_checkpoint` to `now`.
     pub fn touch(&mut self, node_id: NodeId, now: Timestamp) -> Result<(), Error> {
         use crate::mechanics::forgetting::{
-            base_level_to_salience, compute_base_level, decay_salience, reinforce_salience,
+            base_level_to_salience, compute_base_level, decay_salience, decay_salience_with_lambda,
+            lambda_for_type, reinforce_salience,
         };
 
         let current_salience = self.graph.storage().get_salience(node_id)?;
         let last_checkpoint = self.graph.storage().get_decay_checkpoint(node_id)?;
         let node_type = self.graph.storage().get_node_type(node_id)?.clone();
+        let node_tier = self.graph.get_node(node_id)?.tier.clone();
+        let decay_protected =
+            node_tier == MemoryTier::Core || node_type == KnowledgeType::IdentityCore;
 
         match self.config.decay_model {
             DecayModel::Exponential => {
@@ -1534,7 +1595,22 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                 let dt_days = dt_ms as f64 / 86_400_000.0;
 
                 // Decay BEFORE reinforcement — ordering invariant (eq 4 then eq 5)
-                let decayed = decay_salience(current_salience, dt_days, &node_type);
+                let decayed = if decay_protected {
+                    current_salience
+                } else if self.config.topology_decay_enabled {
+                    let node_ids = self.graph.storage().all_node_ids();
+                    let lambda = topology_adjusted_decay_parameter(
+                        self.graph.storage(),
+                        &node_ids,
+                        node_id,
+                        lambda_for_type(&node_type),
+                        self.config.isolation_decay_factor,
+                        self.config.bridge_protection_factor,
+                    )?;
+                    decay_salience_with_lambda(current_salience, dt_days, &node_type, lambda)
+                } else {
+                    decay_salience(current_salience, dt_days, &node_type)
+                };
                 let reinforced = reinforce_salience(decayed);
 
                 self.graph.storage_mut().set_salience(node_id, reinforced)?;
@@ -1545,8 +1621,24 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                     node.record_access(now);
                     node.access_history.clone()
                 };
-                let new_salience =
-                    base_level_to_salience(compute_base_level(&history_snapshot, now, 0.5));
+                let new_salience = if decay_protected {
+                    current_salience
+                } else {
+                    let decay_d = if self.config.topology_decay_enabled {
+                        let node_ids = self.graph.storage().all_node_ids();
+                        topology_adjusted_decay_parameter(
+                            self.graph.storage(),
+                            &node_ids,
+                            node_id,
+                            0.5,
+                            self.config.isolation_decay_factor,
+                            self.config.bridge_protection_factor,
+                        )?
+                    } else {
+                        0.5
+                    };
+                    base_level_to_salience(compute_base_level(&history_snapshot, now, decay_d))
+                };
 
                 self.graph
                     .storage_mut()
@@ -1610,10 +1702,12 @@ impl<S: StorageAdapter + Clone> Engine<S> {
     /// is left untouched, preserving last user-access semantics.
     pub fn tick(&mut self, now: Timestamp) -> Result<TickReport, Error> {
         use crate::mechanics::forgetting::{
-            base_level_to_salience, compute_base_level, decay_salience, floor_for_type,
+            base_level_to_salience, compute_base_level, decay_salience, decay_salience_with_lambda,
+            floor_for_type, lambda_for_type,
         };
 
         let node_ids = self.graph.storage().all_node_ids();
+        let topology_d_ref = topology_decay_reference_degree(self.graph.storage(), &node_ids);
         let mut nodes_decayed = 0usize;
         let mut nodes_pruned = 0usize;
 
@@ -1638,13 +1732,37 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                 Ok(kt) => kt.clone(),
                 Err(_) => continue,
             };
+            if node_type == KnowledgeType::IdentityCore {
+                continue;
+            }
 
             let new_salience = match self.config.decay_model {
                 DecayModel::Exponential => {
                     let dt_ms = now.0.saturating_sub(last_checkpoint.0);
                     let dt_days = dt_ms as f64 / 86_400_000.0;
 
-                    decay_salience(current_salience, dt_days, &node_type)
+                    if self.config.topology_decay_enabled {
+                        let is_orphan =
+                            crate::mechanics::topology::is_orphan(self.graph.storage(), id);
+                        let bridge_score = match crate::mechanics::topology::bridge_score(
+                            self.graph.storage(),
+                            id,
+                            topology_d_ref,
+                        ) {
+                            Ok(score) => score,
+                            Err(_) => continue,
+                        };
+                        let lambda = crate::mechanics::forgetting::effective_lambda(
+                            lambda_for_type(&node_type),
+                            is_orphan,
+                            bridge_score,
+                            self.config.isolation_decay_factor,
+                            self.config.bridge_protection_factor,
+                        );
+                        decay_salience_with_lambda(current_salience, dt_days, &node_type, lambda)
+                    } else {
+                        decay_salience(current_salience, dt_days, &node_type)
+                    }
                 }
                 DecayModel::PowerLaw => {
                     let history = match self.graph.get_node(id) {
@@ -1652,7 +1770,29 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                         Err(_) => continue,
                     };
 
-                    base_level_to_salience(compute_base_level(&history, now, 0.5))
+                    let decay_d = if self.config.topology_decay_enabled {
+                        let is_orphan =
+                            crate::mechanics::topology::is_orphan(self.graph.storage(), id);
+                        let bridge_score = match crate::mechanics::topology::bridge_score(
+                            self.graph.storage(),
+                            id,
+                            topology_d_ref,
+                        ) {
+                            Ok(score) => score,
+                            Err(_) => continue,
+                        };
+                        crate::mechanics::forgetting::effective_lambda(
+                            0.5,
+                            is_orphan,
+                            bridge_score,
+                            self.config.isolation_decay_factor,
+                            self.config.bridge_protection_factor,
+                        )
+                    } else {
+                        0.5
+                    };
+
+                    base_level_to_salience(compute_base_level(&history, now, decay_d))
                 }
             };
 
@@ -2616,6 +2756,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
     pub fn health(&self) -> crate::mechanics::health::GraphHealth {
         crate::mechanics::health::compute_health(self.graph.storage())
     }
+
     /// Read-only access to the underlying graph.
     pub fn graph(&self) -> &Graph<S> {
         &self.graph
