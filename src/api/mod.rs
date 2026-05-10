@@ -2577,6 +2577,10 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         })
     }
 
+    /// Compute read-only structural health diagnostics for the graph.
+    pub fn health(&self) -> crate::mechanics::health::GraphHealth {
+        crate::mechanics::health::compute_health(self.graph.storage())
+    }
     /// Read-only access to the underlying graph.
     pub fn graph(&self) -> &Graph<S> {
         &self.graph
