@@ -2064,7 +2064,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
     ) -> Result<ContextPackage, Error> {
         use std::cmp::Ordering;
 
-        use crate::query::assembly::{ScoredNode, assemble_context_package};
+        use crate::query::assembly::{ModeContext, ScoredNode, assemble_context_package_for_mode};
 
         let storage = self.graph.storage();
         let mut node_ids = storage.nodes_by_type(node_type);
@@ -2098,14 +2098,21 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             scored_nodes
         };
 
-        Ok(assemble_context_package(
+        let query = Query::TypeFiltered {
+            node_type: node_type.clone(),
+            limit,
+        };
+
+        Ok(assemble_context_package_for_mode(
             scored_nodes,
+            &query,
             &[],
             &[],
             &HashMap::new(),
             config.token_budget,
             config.chars_per_token,
             &config.scope,
+            &ModeContext::default(),
         ))
     }
 
@@ -2117,7 +2124,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
     ) -> Result<ContextPackage, Error> {
         use std::cmp::Ordering;
 
-        use crate::query::assembly::{ScoredNode, assemble_context_package};
+        use crate::query::assembly::{ModeContext, ScoredNode, assemble_context_package_for_mode};
 
         let storage = self.graph.storage();
         let mut node_ids: Vec<NodeId> = storage
@@ -2159,14 +2166,21 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             scored_nodes
         };
 
-        Ok(assemble_context_package(
+        let query = Query::List {
+            min_salience,
+            limit,
+        };
+
+        Ok(assemble_context_package_for_mode(
             scored_nodes,
+            &query,
             &[],
             &[],
             &HashMap::new(),
             config.token_budget,
             config.chars_per_token,
             &config.scope,
+            &ModeContext::default(),
         ))
     }
 
@@ -2179,7 +2193,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
     ) -> Result<ContextPackage, Error> {
         use std::cmp::Ordering;
 
-        use crate::query::assembly::{ScoredNode, assemble_context_package};
+        use crate::query::assembly::{ModeContext, ScoredNode, assemble_context_package_for_mode};
 
         let storage = self.graph.storage();
         let mut scored_nodes: Vec<(Timestamp, ScoredNode)> = storage
@@ -2229,14 +2243,22 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             .map(|(_, scored_node)| scored_node)
             .collect();
 
-        Ok(assemble_context_package(
+        let query = Query::Temporal {
+            since,
+            node_types: node_types.map(|t| t.to_vec()),
+            limit,
+        };
+
+        Ok(assemble_context_package_for_mode(
             scored_nodes,
+            &query,
             &[],
             &[],
             &HashMap::new(),
             config.token_budget,
             config.chars_per_token,
             &config.scope,
+            &ModeContext::default(),
         ))
     }
 
@@ -2246,7 +2268,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         max_depth: usize,
         config: &QueryConfig,
     ) -> Result<ContextPackage, Error> {
-        use crate::query::assembly::{ScoredNode, assemble_context_package};
+        use crate::query::assembly::{ModeContext, ScoredNode, assemble_context_package_for_mode};
 
         let _ = self.graph.get_node(entity)?;
 
@@ -2285,6 +2307,11 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             }
         }
 
+        let adjacent_ids: HashSet<NodeId> = depths
+            .iter()
+            .filter_map(|(&nid, &depth)| if depth == 1 { Some(nid) } else { None })
+            .collect();
+
         let scored_nodes: Vec<ScoredNode> = depths
             .into_iter()
             .filter_map(|(nid, depth)| {
@@ -2303,14 +2330,21 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             })
             .collect();
 
-        Ok(assemble_context_package(
+        let query = Query::Neighborhood {
+            entity,
+            depth: max_depth,
+        };
+
+        Ok(assemble_context_package_for_mode(
             scored_nodes,
+            &query,
             &[],
             &[],
             &HashMap::new(),
             config.token_budget,
             config.chars_per_token,
             &config.scope,
+            &ModeContext { adjacent_ids },
         ))
     }
 
@@ -2328,7 +2362,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             ActivationEdge, NodeInfo, edge_valid_at, initial_activation,
             spread_activation_with_model_and_convergence,
         };
-        use crate::query::assembly::{ScoredNode, assemble_context_package};
+        use crate::query::assembly::ScoredNode;
         use crate::query::identity::compute_identity_prior;
         use crate::query::scoring::{final_score, scope_weight};
 
@@ -2621,15 +2655,17 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             })
             .collect();
 
-        // --- Stage 7: Assemble ContextPackage ---
-        let package = assemble_context_package(
+        let query_ref = Query::Associative { seed, budget };
+        let package = crate::query::assembly::assemble_context_package_for_mode(
             scored_nodes,
+            &query_ref,
             &identity_activations,
             &contradicts_edges,
             &damped_activations,
             config.token_budget,
             config.chars_per_token,
             &config.scope,
+            &crate::query::assembly::ModeContext::default(),
         );
 
         Ok(package)
