@@ -27,7 +27,7 @@ pub mod storage;
 pub use api::{
     CrystallizeRequest, CrystallizeResult, DebugOutcome, DecayModel, EnergyModel, Engine,
     EngineConfig, EvidenceResult, IngestResult, MassModel, MergeLog, MergePair, Observation,
-    ReflectReport, SessionSummary, SpreadingModel, TickReport,
+    ObservedRef, PerspectiveKey, ReflectReport, SessionSummary, SpreadingModel, TickReport,
 };
 pub use embedding::EmbeddingProvider;
 #[cfg(feature = "embed")]

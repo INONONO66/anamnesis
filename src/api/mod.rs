@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use crate::error::Error;
 use crate::graph::node::Origin;
 use crate::graph::{Edge, Graph, Node};
-use crate::graph::{EdgeId, EdgeType, KnowledgeType, MemoryTier, NodeId, Timestamp};
+use crate::graph::{EdgeId, EdgeType, KnowledgeType, MemoryTier, NodeId, ScopePath, Timestamp};
 use crate::query::{ContextPackage, Query, QueryConfig, SearchInput, SearchResult};
 use crate::snapshot::{SnapshotId, SnapshotStore};
 use crate::storage::{InMemoryStorage, StorageAdapter};
@@ -704,6 +704,38 @@ pub enum IngestResult {
         /// Similarity score [0, 1] between the new observation and the existing node.
         similarity: f64,
     },
+}
+
+/// Reference to what is being observed in a perspective query.
+///
+/// Determines how candidate nodes (owned by the observer) are filtered
+/// before spreading activation.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ObservedRef {
+    /// Observe knowledge related to another agent's contributions.
+    /// Filters to observer nodes that are connected (via edges) to nodes produced by this agent.
+    Agent(String),
+    /// Observe knowledge about an entity tag.
+    /// Filters to observer nodes that carry this entity tag.
+    EntityTag(String),
+    /// Observe knowledge about a specific node.
+    /// Filters to observer nodes that are connected (via edges) to this node.
+    Node(NodeId),
+}
+
+/// Perspective query key — retrieves what one agent knows about a subject.
+///
+/// Combines observer identity, observed target, and scope to produce a
+/// perspective-filtered view of the graph. Non-retroactive: the observer
+/// cannot recall events created before their first contribution.
+#[derive(Debug, Clone)]
+pub struct PerspectiveKey {
+    /// The agent whose perspective we are querying from.
+    pub observer_agent_id: String,
+    /// What the observer is looking at.
+    pub observed: ObservedRef,
+    /// Scope filter — only nodes matching this scope (or universal) are included.
+    pub scope: ScopePath,
 }
 
 /// Return the top-N `(NodeId, score)` pairs by score descending.
@@ -2044,6 +2076,233 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         });
 
         Ok(package)
+    }
+
+    /// Query the graph from a specific agent's perspective about a subject.
+    ///
+    /// Returns a `ContextPackage` containing only what the observer agent knows
+    /// about the observed reference, filtered by scope and temporal validity.
+    /// Non-retroactive: excludes nodes created before the observer's first contribution.
+    pub fn query_perspective(
+        &self,
+        perspective: PerspectiveKey,
+        config: &QueryConfig,
+    ) -> Result<ContextPackage, Error> {
+        use std::cmp::Ordering;
+
+        use crate::mechanics::gravity::compute_mass;
+        use crate::query::activation::{
+            ActivationEdge, NodeInfo, edge_valid_at, spread_activation_with_model_and_convergence,
+        };
+        use crate::query::assembly::{ModeContext, ScoredNode, assemble_context_package_for_mode};
+        use crate::query::scoring::{final_score, scope_weight};
+
+        let storage = self.graph.storage();
+        let now = config.now.unwrap_or_else(Timestamp::now);
+
+        // Stage 1: Collect all observer nodes and find observer's earliest timestamp
+        let observer_node_ids = storage.nodes_by_agent(&perspective.observer_agent_id);
+        if observer_node_ids.is_empty() {
+            return Ok(ContextPackage::empty());
+        }
+
+        let observer_earliest = observer_node_ids
+            .iter()
+            .filter_map(|&nid| storage.get_node(nid).ok())
+            .map(|node| node.created_at)
+            .min()
+            .unwrap_or(Timestamp(0));
+
+        // Stage 2: Filter by observed reference
+        let observer_set: HashSet<NodeId> = observer_node_ids.iter().copied().collect();
+        let filtered_ids: Vec<NodeId> =
+            match &perspective.observed {
+                ObservedRef::EntityTag(tag) => {
+                    let tagged = storage.nodes_by_entity_tag(tag);
+                    tagged
+                        .into_iter()
+                        .filter(|nid| observer_set.contains(nid))
+                        .collect()
+                }
+                ObservedRef::Agent(target_agent_id) => {
+                    let target_nodes: HashSet<NodeId> = storage
+                        .nodes_by_agent(target_agent_id)
+                        .into_iter()
+                        .collect();
+                    observer_node_ids
+                        .iter()
+                        .copied()
+                        .filter(|&nid| {
+                            storage.edges_from(nid).iter().any(|&eid| {
+                                storage
+                                    .get_edge(eid)
+                                    .is_ok_and(|e| target_nodes.contains(&e.target))
+                            }) || storage.edges_to(nid).iter().any(|&eid| {
+                                storage
+                                    .get_edge(eid)
+                                    .is_ok_and(|e| target_nodes.contains(&e.source))
+                            })
+                        })
+                        .collect()
+                }
+                ObservedRef::Node(target_nid) => observer_node_ids
+                    .iter()
+                    .copied()
+                    .filter(|&nid| {
+                        if nid == *target_nid {
+                            return true;
+                        }
+                        storage.edges_from(nid).iter().any(|&eid| {
+                            storage.get_edge(eid).is_ok_and(|e| e.target == *target_nid)
+                        }) || storage.edges_to(nid).iter().any(|&eid| {
+                            storage.get_edge(eid).is_ok_and(|e| e.source == *target_nid)
+                        })
+                    })
+                    .collect(),
+            };
+
+        if filtered_ids.is_empty() {
+            return Ok(ContextPackage::empty());
+        }
+
+        // Stage 3: Apply scope filtering
+        let scope_filtered: Vec<NodeId> = if perspective.scope.is_universal() {
+            filtered_ids
+        } else {
+            filtered_ids
+                .into_iter()
+                .filter(|&nid| {
+                    storage.get_node(nid).is_ok_and(|node| {
+                        let rel = perspective.scope.relation_to(&node.origin.scope);
+                        matches!(
+                            rel,
+                            crate::graph::ScopeRelation::Exact
+                                | crate::graph::ScopeRelation::Ancestor
+                                | crate::graph::ScopeRelation::Universal
+                        )
+                    })
+                })
+                .collect()
+        };
+
+        if scope_filtered.is_empty() {
+            return Ok(ContextPackage::empty());
+        }
+
+        // Stage 4: Build initial activations from filtered candidates (salience-weighted)
+        let mut initial_activations: HashMap<NodeId, f64> = HashMap::new();
+        for &nid in &scope_filtered {
+            let salience = storage.get_salience(nid).unwrap_or(0.0);
+            let activation = (0.60 + 0.40 * salience).clamp(0.0, 1.0);
+            initial_activations.insert(nid, activation);
+        }
+
+        // Stage 5: Spreading activation
+        let node_info_fn = |nid: NodeId| -> Option<NodeInfo> {
+            let node = storage.get_node(nid).ok()?;
+            let salience = storage.get_salience(nid).unwrap_or(0.0);
+            let mass = compute_mass(salience, node.access_count, &node.node_type);
+
+            let mut all_edges: Vec<ActivationEdge> = Vec::new();
+            for &eid in storage.edges_from(nid) {
+                if let Ok(edge) = storage.get_edge(eid) {
+                    if !edge_valid_at(edge, now) {
+                        continue;
+                    }
+                    all_edges.push(ActivationEdge {
+                        target_id: edge.target,
+                        edge: edge.clone(),
+                        is_forward: true,
+                    });
+                }
+            }
+            for &eid in storage.edges_to(nid) {
+                if let Ok(edge) = storage.get_edge(eid) {
+                    if !edge_valid_at(edge, now) {
+                        continue;
+                    }
+                    all_edges.push(ActivationEdge {
+                        target_id: edge.source,
+                        edge: edge.clone(),
+                        is_forward: false,
+                    });
+                }
+            }
+
+            Some(NodeInfo {
+                salience,
+                mass,
+                outgoing_edges: all_edges,
+            })
+        };
+
+        let activations = spread_activation_with_model_and_convergence(
+            initial_activations,
+            node_info_fn,
+            config.budget,
+            config.min_activation,
+            config.decay_per_hop,
+            config.max_hops,
+            now,
+            self.config.spreading_model,
+            config.convergence.clone(),
+        )
+        .activations;
+
+        // Stage 6: Score results with non-retroactive filter
+        let mut scored_nodes: Vec<ScoredNode> = Vec::new();
+        for (&nid, &activation) in &activations {
+            if activation < config.min_activation {
+                continue;
+            }
+            let node = match storage.get_node(nid) {
+                Ok(n) => n,
+                Err(_) => continue,
+            };
+            // Non-retroactive: skip nodes created before observer's first contribution
+            if node.created_at < observer_earliest {
+                continue;
+            }
+
+            let salience = storage.get_salience(nid).unwrap_or(0.0);
+            let mass = compute_mass(salience, node.access_count, &node.node_type);
+            let sw = scope_weight(&perspective.scope, &node.origin.scope, 0);
+            let relevance = final_score(activation, 0.0, salience, mass, sw);
+
+            scored_nodes.push(ScoredNode {
+                node_id: nid,
+                name: node.name.clone(),
+                summary: node.summary.clone(),
+                content: node.content.clone(),
+                node_type: node.node_type.clone(),
+                relevance,
+                origin: node.origin.clone(),
+            });
+        }
+
+        scored_nodes.sort_by(|a, b| {
+            b.relevance
+                .partial_cmp(&a.relevance)
+                .unwrap_or(Ordering::Equal)
+        });
+
+        // Stage 7: Assemble context package
+        let query_ref = Query::List {
+            min_salience: 0.0,
+            limit: scored_nodes.len(),
+        };
+
+        Ok(assemble_context_package_for_mode(
+            scored_nodes,
+            &query_ref,
+            &[],
+            &[],
+            &activations,
+            config.token_budget,
+            config.chars_per_token,
+            &perspective.scope,
+            &ModeContext::default(),
+        ))
     }
 
     fn node_is_valid_at(&self, node_id: NodeId, as_of: Timestamp) -> bool {
