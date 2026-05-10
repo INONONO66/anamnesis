@@ -1,7 +1,7 @@
 use anamnesis::api::Observation;
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{EdgeType, KnowledgeType, NodeId, Timestamp};
-use anamnesis::{Engine, Error, IngestResult, StorageAdapter};
+use anamnesis::{Engine, IngestResult, StorageAdapter};
 
 fn origin(agent_id: &str, session_id: &str) -> Origin {
     Origin {
