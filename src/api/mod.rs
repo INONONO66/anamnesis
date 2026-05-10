@@ -72,6 +72,12 @@ pub enum MassModel {
 const RWR_RESTART_PROBABILITY: f64 = 0.15;
 const RWR_MAX_ITERATIONS: usize = 128;
 const HOPFIELD_RETRIEVAL_ITERATIONS: usize = 3;
+const TOPOLOGY_INGEST_MAX_DEPTH: usize = 2;
+const TOPOLOGY_INGEST_ALPHA: f64 = 0.50;
+const TOPOLOGY_INGEST_BETA: f64 = 0.15;
+const TOPOLOGY_INGEST_GAMMA: f64 = 0.10;
+const TOPOLOGY_INGEST_DELTA: f64 = 0.15;
+const TOPOLOGY_INGEST_EPSILON: f64 = 0.10;
 
 struct HopfieldScoringContext {
     retrieved: Vec<f64>,
@@ -92,6 +98,8 @@ pub struct EngineConfig {
     pub dedup_threshold: f64,
     /// Whether ingest should detect duplicate embeddings and reinforce existing nodes.
     pub dedup_enabled: bool,
+    /// Whether ingest expands trigger candidates through nearby graph topology.
+    pub topology_ingest_enabled: bool,
     /// Decay model to use for salience computation. Default: Exponential (backwards-compatible).
     pub decay_model: DecayModel,
     /// Whether decay rates should be adjusted using local graph topology. Default: false.
@@ -119,6 +127,7 @@ impl Default for EngineConfig {
             confidence_threshold: 0.50,
             dedup_threshold: 0.92,
             dedup_enabled: true,
+            topology_ingest_enabled: false,
             decay_model: DecayModel::Exponential,
             topology_decay_enabled: false,
             isolation_decay_factor: 0.0,
@@ -158,6 +167,11 @@ impl EngineConfig {
 
     pub fn with_dedup_enabled(mut self, enabled: bool) -> Self {
         self.dedup_enabled = enabled;
+        self
+    }
+
+    pub fn with_topology_ingest(mut self, enabled: bool) -> Self {
+        self.topology_ingest_enabled = enabled;
         self
     }
 
@@ -222,6 +236,139 @@ fn topology_adjusted_decay_parameter<S: StorageAdapter>(
         isolation_decay_factor,
         bridge_protection_factor,
     ))
+}
+
+fn ingest_trigger_candidates<S: StorageAdapter>(
+    storage: &S,
+    entity_tags: &[String],
+    exclude: Option<NodeId>,
+) -> HashSet<NodeId> {
+    let mut candidates = HashSet::new();
+    for nid in storage.node_ids_descending().into_iter().take(256) {
+        if Some(nid) != exclude {
+            candidates.insert(nid);
+        }
+    }
+    for tag in entity_tags {
+        for nid in storage.nodes_by_entity_tag(tag) {
+            if Some(nid) != exclude {
+                candidates.insert(nid);
+            }
+        }
+    }
+    candidates
+}
+
+fn topology_expanded_candidates<S: StorageAdapter>(
+    storage: &S,
+    trigger_candidates: &HashSet<NodeId>,
+    exclude: Option<NodeId>,
+) -> (HashSet<NodeId>, HashMap<NodeId, usize>) {
+    let mut expanded = trigger_candidates.clone();
+    let mut distances = HashMap::new();
+    let mut queue = VecDeque::new();
+
+    for &nid in trigger_candidates {
+        if Some(nid) == exclude {
+            continue;
+        }
+        distances.insert(nid, 0);
+        queue.push_back((nid, 0));
+    }
+
+    while let Some((current, depth)) = queue.pop_front() {
+        if depth >= TOPOLOGY_INGEST_MAX_DEPTH {
+            continue;
+        }
+
+        for edge_id in storage.edges_from(current) {
+            if let Ok(edge) = storage.get_edge(*edge_id) {
+                insert_topology_neighbor(
+                    edge.target,
+                    depth + 1,
+                    exclude,
+                    &mut expanded,
+                    &mut distances,
+                    &mut queue,
+                );
+            }
+        }
+        for edge_id in storage.edges_to(current) {
+            if let Ok(edge) = storage.get_edge(*edge_id) {
+                insert_topology_neighbor(
+                    edge.source,
+                    depth + 1,
+                    exclude,
+                    &mut expanded,
+                    &mut distances,
+                    &mut queue,
+                );
+            }
+        }
+    }
+
+    (expanded, distances)
+}
+
+fn insert_topology_neighbor(
+    neighbor: NodeId,
+    depth: usize,
+    exclude: Option<NodeId>,
+    expanded: &mut HashSet<NodeId>,
+    distances: &mut HashMap<NodeId, usize>,
+    queue: &mut VecDeque<(NodeId, usize)>,
+) {
+    if Some(neighbor) == exclude || depth > TOPOLOGY_INGEST_MAX_DEPTH {
+        return;
+    }
+
+    let should_visit = distances
+        .get(&neighbor)
+        .is_none_or(|existing_depth| depth < *existing_depth);
+    if should_visit {
+        distances.insert(neighbor, depth);
+        queue.push_back((neighbor, depth));
+    }
+    expanded.insert(neighbor);
+}
+
+fn entity_overlap_score(new_tags: &[String], candidate_tags: &[String]) -> f64 {
+    if new_tags.is_empty() || candidate_tags.is_empty() {
+        return 0.0;
+    }
+
+    let new_set: BTreeSet<&str> = new_tags.iter().map(String::as_str).collect();
+    let candidate_set: BTreeSet<&str> = candidate_tags.iter().map(String::as_str).collect();
+    let union = new_set.union(&candidate_set).count();
+    if union == 0 {
+        return 0.0;
+    }
+
+    new_set.intersection(&candidate_set).count() as f64 / union as f64
+}
+
+fn graph_proximity_score(depth: Option<usize>) -> f64 {
+    match depth {
+        Some(0) => 1.0,
+        Some(1) => 2.0 / 3.0,
+        Some(2) => 1.0 / 3.0,
+        _ => 0.0,
+    }
+}
+
+fn topology_ingest_score(
+    cosine: f64,
+    entity_overlap: f64,
+    salience: f64,
+    graph_proximity: f64,
+    bridge: f64,
+) -> f64 {
+    (TOPOLOGY_INGEST_ALPHA * cosine.clamp(0.0, 1.0)
+        + TOPOLOGY_INGEST_BETA * entity_overlap.clamp(0.0, 1.0)
+        + TOPOLOGY_INGEST_GAMMA * salience.clamp(0.0, 1.0)
+        + TOPOLOGY_INGEST_DELTA * graph_proximity.clamp(0.0, 1.0)
+        + TOPOLOGY_INGEST_EPSILON * bridge.clamp(0.0, 1.0))
+    .clamp(0.0, 1.0)
 }
 
 fn rwr_activations<S: StorageAdapter>(
@@ -1032,23 +1179,14 @@ impl<S: StorageAdapter + Clone> Engine<S> {
 
         let (max_similarity, most_similar_id) =
             if let Some(ref new_embedding) = observation.embedding {
-                // Build candidate set: recent 256 nodes + entity-tag matches
-                let mut candidates: std::collections::HashSet<NodeId> =
-                    std::collections::HashSet::new();
-                for nid in self
-                    .graph
-                    .storage()
-                    .node_ids_descending()
-                    .into_iter()
-                    .take(256)
-                {
-                    candidates.insert(nid);
-                }
-                for tag in &observation.entity_tags {
-                    for nid in self.graph.storage().nodes_by_entity_tag(tag) {
-                        candidates.insert(nid);
-                    }
-                }
+                let trigger_candidates =
+                    ingest_trigger_candidates(self.graph.storage(), &observation.entity_tags, None);
+                let candidates = if self.config.topology_ingest_enabled {
+                    topology_expanded_candidates(self.graph.storage(), &trigger_candidates, None).0
+                } else {
+                    trigger_candidates
+                };
+
                 candidates
                     .into_iter()
                     .filter_map(|nid| {
@@ -1114,36 +1252,30 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             let new_type = &observation.node_type;
             let new_tags = &observation.entity_tags;
 
-            // Candidate pool: last 256 nodes by ID + entity-tag matches (indexed, O(1) dedup)
-            let mut candidate_set: std::collections::HashSet<NodeId> =
-                std::collections::HashSet::new();
-
-            for nid in self
-                .graph
-                .storage()
-                .node_ids_descending()
-                .into_iter()
-                .take(256)
-            {
-                if nid != id {
-                    candidate_set.insert(nid);
-                }
-            }
-
-            if !new_tags.is_empty() {
-                for tag in new_tags {
-                    for nid in self.graph.storage().nodes_by_entity_tag(tag) {
-                        if nid != id {
-                            candidate_set.insert(nid);
-                        }
-                    }
-                }
-            }
+            // Trigger pool: last 256 nodes by ID + entity-tag matches (indexed, O(1) dedup).
+            let trigger_candidates =
+                ingest_trigger_candidates(self.graph.storage(), new_tags, Some(id));
+            let (candidate_set, graph_distances) = if self.config.topology_ingest_enabled {
+                topology_expanded_candidates(self.graph.storage(), &trigger_candidates, Some(id))
+            } else {
+                (trigger_candidates, HashMap::new())
+            };
 
             let candidate_ids: Vec<NodeId> = candidate_set.into_iter().collect();
+            let topology_reference_degree = if self.config.topology_ingest_enabled {
+                candidate_ids
+                    .iter()
+                    .map(|cid| crate::mechanics::topology::degree(self.graph.storage(), *cid))
+                    .max()
+                    .unwrap_or(1)
+                    .max(1)
+            } else {
+                1
+            };
 
             // Score candidates by attraction (eq 3)
             let mut scored: Vec<(NodeId, f64)> = Vec::new();
+            let mut attraction_scores: HashMap<NodeId, f64> = HashMap::new();
             for cid in &candidate_ids {
                 let candidate = match self.graph.storage().get_node(*cid) {
                     Ok(n) => n,
@@ -1163,10 +1295,28 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                 let cand_salience = self.graph.storage().get_salience(*cid).unwrap_or(0.0);
                 let cand_mass =
                     compute_mass(cand_salience, candidate.access_count, &candidate.node_type);
-                let score = attraction_score(sim, tau, cand_mass);
+                let attraction = attraction_score(sim, tau, cand_mass);
 
-                if should_create_edge(score, new_type, &candidate.node_type) {
-                    scored.push((*cid, score));
+                if should_create_edge(attraction, new_type, &candidate.node_type) {
+                    let ranking_score = if self.config.topology_ingest_enabled {
+                        let bridge = crate::mechanics::topology::bridge_score(
+                            self.graph.storage(),
+                            *cid,
+                            topology_reference_degree,
+                        )
+                        .unwrap_or(0.0);
+                        topology_ingest_score(
+                            sim,
+                            entity_overlap_score(new_tags, &candidate.entity_tags),
+                            cand_salience,
+                            graph_proximity_score(graph_distances.get(cid).copied()),
+                            bridge,
+                        )
+                    } else {
+                        attraction
+                    };
+                    scored.push((*cid, ranking_score));
+                    attraction_scores.insert(*cid, attraction);
                 }
             }
 
@@ -1174,6 +1324,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             let top_scored = top_n_by_score(&scored, 4);
 
             for (cid, score) in top_scored {
+                let edge_score = attraction_scores.get(&cid).copied().unwrap_or(score);
                 // Check existing edge in either direction
                 let existing_edge = self
                     .graph
@@ -1187,7 +1338,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                     });
 
                 if let Some(existing) = existing_edge {
-                    let new_weight = strengthen_edge(existing.weight, score);
+                    let new_weight = strengthen_edge(existing.weight, edge_score);
                     let eid = existing.id;
                     if let Ok(edge) = self.graph.get_edge_mut(eid) {
                         edge.weight = new_weight;
@@ -1199,7 +1350,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                         source: id,
                         target: cid,
                         edge_type: EdgeType::Semantic,
-                        weight: score.clamp(0.0, 1.0),
+                        weight: edge_score.clamp(0.0, 1.0),
                         created_at: now,
                         valid_from: None,
                         valid_until: None,
