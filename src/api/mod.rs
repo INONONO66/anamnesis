@@ -97,6 +97,9 @@ pub struct EngineConfig {
     pub spreading_model: SpreadingModel,
     /// Mass model for node importance computation. Default: Legacy (backwards-compatible).
     pub mass_model: MassModel,
+    /// Learning rate η for social feedback signals. Controls how strongly feedback
+    /// adjusts salience via `s += η * strength * (1 - s)`. Default: 0.15.
+    pub social_learning_rate: f64,
 }
 
 impl Default for EngineConfig {
@@ -111,6 +114,7 @@ impl Default for EngineConfig {
             energy_model: EnergyModel::WeightedSum,
             spreading_model: SpreadingModel::PriorityQueueBfs,
             mass_model: MassModel::Legacy,
+            social_learning_rate: 0.15,
         }
     }
 }
@@ -147,6 +151,11 @@ impl EngineConfig {
 
     pub fn with_mass_model(mut self, model: MassModel) -> Self {
         self.mass_model = model;
+        self
+    }
+
+    pub fn with_social_learning_rate(mut self, rate: f64) -> Self {
+        self.social_learning_rate = rate;
         self
     }
 }
@@ -1567,6 +1576,28 @@ impl<S: StorageAdapter + Clone> Engine<S> {
     pub fn get_tier(&self, node_id: NodeId) -> Result<MemoryTier, Error> {
         let node = self.graph.get_node(node_id)?;
         Ok(node.tier.clone())
+    }
+
+    /// Apply a consumer feedback signal to a node's salience.
+    ///
+    /// Updates salience using diminishing returns: `s += η * strength * (1 - s)` for
+    /// positive signals, `s -= η * |strength| * s` for negative signals.
+    /// Only modifies salience — no content or structural changes.
+    pub fn apply_feedback(
+        &mut self,
+        node_id: NodeId,
+        signal: crate::mechanics::social::FeedbackSignal,
+    ) -> Result<(), Error> {
+        let current = self.graph.storage().get_salience(node_id)?;
+        let new_salience = crate::mechanics::social::apply_feedback_to_salience(
+            current,
+            &signal,
+            self.config.social_learning_rate,
+        );
+        self.graph
+            .storage_mut()
+            .set_salience(node_id, new_salience)?;
+        Ok(())
     }
 
     /// Advance time — apply batch decay (eq 4) to all nodes.
