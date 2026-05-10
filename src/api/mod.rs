@@ -78,6 +78,8 @@ const TOPOLOGY_INGEST_BETA: f64 = 0.15;
 const TOPOLOGY_INGEST_GAMMA: f64 = 0.10;
 const TOPOLOGY_INGEST_DELTA: f64 = 0.15;
 const TOPOLOGY_INGEST_EPSILON: f64 = 0.10;
+const ARCHIVE_SALIENCE_THRESHOLD: f64 = 0.10;
+const SALIENCE_CHANGE_EPSILON: f64 = 1e-10;
 
 struct HopfieldScoringContext {
     retrieved: Vec<f64>,
@@ -117,6 +119,8 @@ pub struct EngineConfig {
     /// Learning rate η for social feedback signals. Controls how strongly feedback
     /// adjusts salience via `s += η * strength * (1 - s)`. Default: 0.15.
     pub social_learning_rate: f64,
+    /// Maximum number of mutation events retained for draining. Default: 10,000.
+    pub max_events: usize,
 }
 
 impl Default for EngineConfig {
@@ -136,6 +140,7 @@ impl Default for EngineConfig {
             spreading_model: SpreadingModel::PriorityQueueBfs,
             mass_model: MassModel::Legacy,
             social_learning_rate: 0.15,
+            max_events: 10_000,
         }
     }
 }
@@ -197,6 +202,11 @@ impl EngineConfig {
 
     pub fn with_social_learning_rate(mut self, rate: f64) -> Self {
         self.social_learning_rate = rate;
+        self
+    }
+
+    pub fn with_max_events(mut self, max_events: usize) -> Self {
+        self.max_events = max_events;
         self
     }
 }
@@ -673,6 +683,38 @@ pub struct ReflectReport {
     pub clusters_found: usize,
 }
 
+/// Event emitted by graph mutation methods.
+#[derive(Debug, Clone, PartialEq)]
+pub enum GraphEvent {
+    NodeCreated {
+        node_id: NodeId,
+        node_type: KnowledgeType,
+    },
+    SalienceChanged {
+        node_id: NodeId,
+        old: f64,
+        new: f64,
+    },
+    TierTransition {
+        node_id: NodeId,
+        from_tier: MemoryTier,
+        to_tier: MemoryTier,
+    },
+    EdgeCreated {
+        edge_id: EdgeId,
+        source: NodeId,
+        target: NodeId,
+        edge_type: EdgeType,
+    },
+    NodeArchived {
+        node_id: NodeId,
+    },
+    NodeRevived {
+        node_id: NodeId,
+        new_salience: f64,
+    },
+}
+
 /// Report of supporting and contradicting evidence for a node.
 ///
 /// Returned by `Engine::support_report()`. Traverses only direct edges (1-hop)
@@ -832,6 +874,16 @@ fn crystallized_salience(
     (0.60 * source_average + 0.25 * confidence + 0.15 * 0.10).clamp(0.0, 1.0)
 }
 
+fn salience_tier(salience: f64) -> MemoryTier {
+    if salience < ARCHIVE_SALIENCE_THRESHOLD {
+        MemoryTier::Archival
+    } else if salience > 0.80 {
+        MemoryTier::Core
+    } else {
+        MemoryTier::Recall
+    }
+}
+
 /// The Anamnesis cognitive graph engine.
 ///
 /// `Engine<S>` is generic over the storage backend. The default is
@@ -840,6 +892,7 @@ pub struct Engine<S: StorageAdapter + Clone = InMemoryStorage> {
     graph: Graph<S>,
     config: EngineConfig,
     snapshots: SnapshotStore<S>,
+    events: Vec<GraphEvent>,
 }
 
 impl Engine<InMemoryStorage> {
@@ -849,6 +902,7 @@ impl Engine<InMemoryStorage> {
             graph: Graph::new(),
             config: EngineConfig::default(),
             snapshots: SnapshotStore::new(),
+            events: Vec::new(),
         }
     }
 
@@ -858,6 +912,7 @@ impl Engine<InMemoryStorage> {
             graph: Graph::new(),
             config,
             snapshots: SnapshotStore::new(),
+            events: Vec::new(),
         }
     }
 }
@@ -875,7 +930,30 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             graph: Graph::with_storage(storage),
             config,
             snapshots: SnapshotStore::new(),
+            events: Vec::new(),
         }
+    }
+
+    fn emit_event(&mut self, event: GraphEvent) {
+        let max_events = self.config.max_events;
+        if max_events == 0 {
+            return;
+        }
+        if self.events.len() >= max_events {
+            let drop_count = self.events.len() + 1 - max_events;
+            self.events.drain(0..drop_count);
+        }
+        self.events.push(event);
+    }
+
+    /// Return whether the engine has buffered graph mutation events.
+    pub fn has_events(&self) -> bool {
+        !self.events.is_empty()
+    }
+
+    /// Drain buffered graph mutation events in chronological order.
+    pub fn drain_events(&mut self) -> Vec<GraphEvent> {
+        std::mem::take(&mut self.events)
     }
 
     /// Store a clone of the current storage state under a label.
@@ -936,7 +1014,13 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             metadata,
         };
 
-        self.graph.add_node(node)
+        self.graph.add_node(node)?;
+        self.emit_event(GraphEvent::NodeCreated {
+            node_id: id,
+            node_type: KnowledgeType::DebugSession,
+        });
+
+        Ok(id)
     }
 
     /// Log a hypothesis inside an existing debugging session.
@@ -987,6 +1071,10 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             metadata,
         };
         self.graph.add_node(node)?;
+        self.emit_event(GraphEvent::NodeCreated {
+            node_id: id,
+            node_type: KnowledgeType::Hypothesis,
+        });
 
         let edge_id = self.graph.next_edge_id();
         let mut edge_metadata = HashMap::new();
@@ -1006,6 +1094,12 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             metadata: edge_metadata,
         };
         self.graph.add_edge(edge)?;
+        self.emit_event(GraphEvent::EdgeCreated {
+            edge_id,
+            source: id,
+            target: session,
+            edge_type: EdgeType::BelongsTo,
+        });
 
         Ok(id)
     }
@@ -1074,6 +1168,10 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             metadata,
         };
         self.graph.add_node(node)?;
+        self.emit_event(GraphEvent::NodeCreated {
+            node_id: id,
+            node_type: KnowledgeType::Evidence,
+        });
 
         let edge_type = match result {
             EvidenceResult::Supports => Some(EdgeType::Supports),
@@ -1083,6 +1181,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
 
         if let Some(edge_type) = edge_type {
             let edge_id = self.graph.next_edge_id();
+            let event_edge_type = edge_type.clone();
             let mut edge_metadata = HashMap::new();
             edge_metadata.insert(
                 "debug_relation".to_string(),
@@ -1101,6 +1200,12 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                 metadata: edge_metadata,
             };
             self.graph.add_edge(edge)?;
+            self.emit_event(GraphEvent::EdgeCreated {
+                edge_id,
+                source: id,
+                target: hypothesis,
+                edge_type: event_edge_type,
+            });
         }
 
         Ok(id)
@@ -1279,6 +1384,10 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         };
 
         self.graph.add_node(node)?;
+        self.emit_event(GraphEvent::NodeCreated {
+            node_id: id,
+            node_type: observation.node_type.clone(),
+        });
 
         if let Some(ref new_embedding) = observation.embedding {
             let new_type = &observation.node_type;
@@ -1389,6 +1498,12 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                         metadata: HashMap::new(),
                     };
                     self.graph.add_edge(edge)?;
+                    self.emit_event(GraphEvent::EdgeCreated {
+                        edge_id: eid,
+                        source: id,
+                        target: cid,
+                        edge_type: EdgeType::Semantic,
+                    });
                 }
             }
         }
@@ -1559,6 +1674,10 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         };
 
         self.graph.add_node(node)?;
+        self.emit_event(GraphEvent::NodeCreated {
+            node_id: id,
+            node_type: crystal_type.clone(),
+        });
 
         let mut consolidation_edges = Vec::with_capacity(source_ids.len());
         for index in 0..source_ids.len() {
@@ -1583,6 +1702,12 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                 metadata: HashMap::new(),
             };
             self.graph.add_edge(edge)?;
+            self.emit_event(GraphEvent::EdgeCreated {
+                edge_id,
+                source: id,
+                target: source_id,
+                edge_type: EdgeType::ConsolidatedFrom,
+            });
             consolidation_edges.push(edge_id);
         }
 
@@ -1686,6 +1811,12 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                         metadata: HashMap::new(),
                     };
                     self.graph.add_edge(edge)?;
+                    self.emit_event(GraphEvent::EdgeCreated {
+                        edge_id,
+                        source: id,
+                        target: candidate_id,
+                        edge_type: EdgeType::Semantic,
+                    });
                     attraction_edges.push(edge_id);
                 }
             }
@@ -1730,6 +1861,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         let id = self.graph.next_edge_id();
         let now = Timestamp::now();
         let is_supersedes = edge_type == EdgeType::Supersedes;
+        let event_edge_type = edge_type.clone();
         let edge = Edge {
             id,
             source: from,
@@ -1750,6 +1882,12 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                 source_node.valid_from = Some(now);
             }
         }
+        self.emit_event(GraphEvent::EdgeCreated {
+            edge_id: id,
+            source: from,
+            target: to,
+            edge_type: event_edge_type,
+        });
         Ok(id)
     }
 
@@ -1772,7 +1910,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         let decay_protected =
             node_tier == MemoryTier::Core || node_type == KnowledgeType::IdentityCore;
 
-        match self.config.decay_model {
+        let new_salience = match self.config.decay_model {
             DecayModel::Exponential => {
                 let dt_ms = now.0.saturating_sub(last_checkpoint.0);
                 let dt_days = dt_ms as f64 / 86_400_000.0;
@@ -1794,9 +1932,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                 } else {
                     decay_salience(current_salience, dt_days, &node_type)
                 };
-                let reinforced = reinforce_salience(decayed);
-
-                self.graph.storage_mut().set_salience(node_id, reinforced)?;
+                reinforce_salience(decayed)
             }
             DecayModel::PowerLaw => {
                 let history_snapshot = {
@@ -1804,7 +1940,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                     node.record_access(now);
                     node.access_history.clone()
                 };
-                let new_salience = if decay_protected {
+                if decay_protected {
                     current_salience
                 } else {
                     let decay_d = if self.config.topology_decay_enabled {
@@ -1821,11 +1957,26 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                         0.5
                     };
                     base_level_to_salience(compute_base_level(&history_snapshot, now, decay_d))
-                };
+                }
+            }
+        };
 
-                self.graph
-                    .storage_mut()
-                    .set_salience(node_id, new_salience)?;
+        self.graph
+            .storage_mut()
+            .set_salience(node_id, new_salience)?;
+        if (new_salience - current_salience).abs() > SALIENCE_CHANGE_EPSILON {
+            self.emit_event(GraphEvent::SalienceChanged {
+                node_id,
+                old: current_salience,
+                new: new_salience,
+            });
+            if current_salience < ARCHIVE_SALIENCE_THRESHOLD
+                && new_salience >= ARCHIVE_SALIENCE_THRESHOLD
+            {
+                self.emit_event(GraphEvent::NodeRevived {
+                    node_id,
+                    new_salience,
+                });
             }
         }
 
@@ -1846,7 +1997,16 @@ impl<S: StorageAdapter + Clone> Engine<S> {
     /// `Auto` restores natural salience-based tier assignment.
     pub fn set_tier(&mut self, node_id: NodeId, tier: MemoryTier) -> Result<(), Error> {
         let node = self.graph.get_node_mut(node_id)?;
+        let old_tier = node.tier.clone();
         node.tier = tier;
+        let new_tier = node.tier.clone();
+        if old_tier != new_tier {
+            self.emit_event(GraphEvent::TierTransition {
+                node_id,
+                from_tier: old_tier,
+                to_tier: new_tier,
+            });
+        }
         Ok(())
     }
 
@@ -1875,6 +2035,19 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         self.graph
             .storage_mut()
             .set_salience(node_id, new_salience)?;
+        if (new_salience - current).abs() > SALIENCE_CHANGE_EPSILON {
+            self.emit_event(GraphEvent::SalienceChanged {
+                node_id,
+                old: current,
+                new: new_salience,
+            });
+            if current < ARCHIVE_SALIENCE_THRESHOLD && new_salience >= ARCHIVE_SALIENCE_THRESHOLD {
+                self.emit_event(GraphEvent::NodeRevived {
+                    node_id,
+                    new_salience,
+                });
+            }
+        }
         Ok(())
     }
 
@@ -1997,6 +2170,27 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                     continue;
                 }
                 nodes_decayed += 1;
+                self.emit_event(GraphEvent::SalienceChanged {
+                    node_id: id,
+                    old: current_salience,
+                    new: new_salience,
+                });
+
+                if current_salience >= ARCHIVE_SALIENCE_THRESHOLD
+                    && new_salience < ARCHIVE_SALIENCE_THRESHOLD
+                {
+                    self.emit_event(GraphEvent::NodeArchived { node_id: id });
+                }
+
+                let old_tier = salience_tier(current_salience);
+                let new_tier = salience_tier(new_salience);
+                if old_tier != new_tier {
+                    self.emit_event(GraphEvent::TierTransition {
+                        node_id: id,
+                        from_tier: old_tier,
+                        to_tier: new_tier,
+                    });
+                }
 
                 let floor = floor_for_type(&node_type);
                 if new_salience <= floor + 1e-6 {
@@ -3042,6 +3236,12 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                 metadata: HashMap::new(),
             };
             self.graph.add_edge(edge)?;
+            self.emit_event(GraphEvent::EdgeCreated {
+                edge_id,
+                source,
+                target,
+                edge_type: EdgeType::Entity,
+            });
             entity_edges_created += 1;
         }
 
