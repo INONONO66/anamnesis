@@ -35,6 +35,7 @@ pub use embedding::fastembed::FastEmbedProvider;
 pub use error::Error;
 pub use graph::{Edge, Node, Origin};
 pub use graph::{EdgeId, EdgeType, KnowledgeType, NodeId, Timestamp};
+pub use mechanics::health::GraphHealth;
 pub use query::{
     ContextPackage, Fragment, PackagingMode, Query, QueryConfig, SearchInput, SearchResult,
     SearchTrace, Tension, TokenBudget,
