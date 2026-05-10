@@ -52,6 +52,29 @@ pub fn compute_mass(salience: f64, access_count: u32, kt: &KnowledgeType) -> f64
     (0.55 * salience + 0.30 * c + 0.15 * mu).clamp(0.0, 1.0)
 }
 
+/// Computes the topological mass of a node incorporating graph structure.
+///
+/// Topological mass extends the legacy formula with bridge and support scores:
+/// m_topo = clamp(0.40 * s_i + 0.20 * c_i + 0.15 * mu_i + 0.15 * bridge + 0.10 * support, 0, 1)
+///
+/// - `salience`: current salience [0, 1]
+/// - `access_count`: number of times the node has been accessed
+/// - `kt`: knowledge type (determines mass prior)
+/// - `bridge_score`: graph bridging score [0, 1]
+/// - `support_score`: incoming supportive edge fraction [0, 1]
+pub fn compute_topological_mass(
+    salience: f64,
+    access_count: u32,
+    kt: &KnowledgeType,
+    bridge_score: f64,
+    support_score: f64,
+) -> f64 {
+    let c = normalize_access_count(access_count);
+    let mu = mass_prior(kt);
+    (0.40 * salience + 0.20 * c + 0.15 * mu + 0.15 * bridge_score + 0.10 * support_score)
+        .clamp(0.0, 1.0)
+}
+
 /// Computes the gravity boost multiplier for a node.
 ///
 /// Equation (6): gravity_boost = 1 + 0.20 * m_i

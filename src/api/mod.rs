@@ -53,6 +53,19 @@ pub enum SpreadingModel {
     RandomWalkRestart,
 }
 
+/// Mass model for node importance computation.
+///
+/// `Legacy` (default) uses the existing formula: m_i = clamp(0.55 * s_i + 0.30 * c_i + 0.15 * mu_i, 0, 1).
+/// `Topological` incorporates graph structure: m_i = clamp(0.40 * s_i + 0.20 * c_i + 0.15 * mu_i + 0.15 * bridge + 0.10 * support, 0, 1).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MassModel {
+    /// Legacy mass computation — backwards-compatible default.
+    #[default]
+    Legacy,
+    /// Topological mass incorporating bridge and support scores.
+    Topological,
+}
+
 const RWR_RESTART_PROBABILITY: f64 = 0.15;
 const RWR_MAX_ITERATIONS: usize = 128;
 const HOPFIELD_RETRIEVAL_ITERATIONS: usize = 3;
@@ -82,6 +95,8 @@ pub struct EngineConfig {
     pub energy_model: EnergyModel,
     /// Spreading activation model for query traversal. Default: PriorityQueueBfs (backwards-compatible).
     pub spreading_model: SpreadingModel,
+    /// Mass model for node importance computation. Default: Legacy (backwards-compatible).
+    pub mass_model: MassModel,
 }
 
 impl Default for EngineConfig {
@@ -95,6 +110,7 @@ impl Default for EngineConfig {
             decay_model: DecayModel::Exponential,
             energy_model: EnergyModel::WeightedSum,
             spreading_model: SpreadingModel::PriorityQueueBfs,
+            mass_model: MassModel::Legacy,
         }
     }
 }
@@ -126,6 +142,11 @@ impl EngineConfig {
 
     pub fn with_dedup_enabled(mut self, enabled: bool) -> Self {
         self.dedup_enabled = enabled;
+        self
+    }
+
+    pub fn with_mass_model(mut self, model: MassModel) -> Self {
+        self.mass_model = model;
         self
     }
 }
@@ -434,6 +455,23 @@ pub struct ReflectReport {
     pub entity_edges_created: usize,
     /// Number of entity clusters found.
     pub clusters_found: usize,
+}
+
+/// Report of supporting and contradicting evidence for a node.
+///
+/// Returned by `Engine::support_report()`. Traverses only direct edges (1-hop)
+/// from the target node to assess evidence quality and independence.
+#[derive(Debug, Clone, Default)]
+pub struct SupportReport {
+    /// Number of nodes connected via supporting edges (ConsolidatedFrom, ReinforcedBy, Supports).
+    pub supporting_sources: usize,
+    /// Number of nodes connected via contradicting edges (Contradicts).
+    pub contradicting_sources: usize,
+    /// Number of distinct (agent_id, session_id) pairs among all source nodes.
+    /// Same-agent repetitions in different sessions count as independent.
+    pub independent_origins: usize,
+    /// Sum of salience values of all supporting source nodes.
+    pub total_support_salience: f64,
 }
 
 /// Result of an ingest operation.
@@ -2444,6 +2482,99 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         }
 
         Ok(results)
+    }
+
+    /// Generate a support report for a node.
+    ///
+    /// Traverses only direct edges (1-hop) from the target node to count supporting
+    /// and contradicting sources, measure evidence independence, and sum support salience.
+    ///
+    /// Supporting edges: `ConsolidatedFrom`, `ReinforcedBy`, `Supports`.
+    /// Contradicting edges: `Contradicts`.
+    ///
+    /// Returns an error if the node does not exist.
+    pub fn support_report(&self, node_id: NodeId) -> Result<SupportReport, Error> {
+        let storage = self.graph.storage();
+        let _node = storage.get_node(node_id)?; // Verify node exists
+
+        let mut supporting_sources = 0;
+        let mut contradicting_sources = 0;
+        let mut origins = std::collections::HashSet::new();
+        let mut total_support_salience = 0.0;
+        let mut visited = std::collections::HashSet::new();
+
+        // Traverse outgoing edges (node_id -> target)
+        for &edge_id in storage.edges_from(node_id) {
+            let edge = storage.get_edge(edge_id)?;
+            let target_id = edge.target;
+
+            // Skip if already visited (prevent circular evidence inflation)
+            if visited.contains(&target_id) {
+                continue;
+            }
+            visited.insert(target_id);
+
+            match edge.edge_type {
+                EdgeType::ConsolidatedFrom | EdgeType::ReinforcedBy | EdgeType::Supports => {
+                    supporting_sources += 1;
+                    let target_node = storage.get_node(target_id)?;
+                    total_support_salience += target_node.salience;
+                    origins.insert((
+                        target_node.origin.agent_id.clone(),
+                        target_node.origin.session_id.clone(),
+                    ));
+                }
+                EdgeType::Contradicts => {
+                    contradicting_sources += 1;
+                    let target_node = storage.get_node(target_id)?;
+                    origins.insert((
+                        target_node.origin.agent_id.clone(),
+                        target_node.origin.session_id.clone(),
+                    ));
+                }
+                _ => {}
+            }
+        }
+
+        // Traverse incoming edges (source -> node_id)
+        for &edge_id in storage.edges_to(node_id) {
+            let edge = storage.get_edge(edge_id)?;
+            let source_id = edge.source;
+
+            // Skip if already visited (prevent circular evidence inflation)
+            if visited.contains(&source_id) {
+                continue;
+            }
+            visited.insert(source_id);
+
+            match edge.edge_type {
+                EdgeType::ConsolidatedFrom | EdgeType::ReinforcedBy | EdgeType::Supports => {
+                    supporting_sources += 1;
+                    let source_node = storage.get_node(source_id)?;
+                    total_support_salience += source_node.salience;
+                    origins.insert((
+                        source_node.origin.agent_id.clone(),
+                        source_node.origin.session_id.clone(),
+                    ));
+                }
+                EdgeType::Contradicts => {
+                    contradicting_sources += 1;
+                    let source_node = storage.get_node(source_id)?;
+                    origins.insert((
+                        source_node.origin.agent_id.clone(),
+                        source_node.origin.session_id.clone(),
+                    ));
+                }
+                _ => {}
+            }
+        }
+
+        Ok(SupportReport {
+            supporting_sources,
+            contradicting_sources,
+            independent_origins: origins.len(),
+            total_support_salience,
+        })
     }
 
     /// Read-only access to the underlying graph.
