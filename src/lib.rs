@@ -26,8 +26,8 @@ pub mod storage;
 // Core re-exports
 pub use api::{
     CrystallizeRequest, CrystallizeResult, DebugOutcome, DecayModel, EnergyModel, Engine,
-    EngineConfig, EvidenceResult, IngestResult, MergeLog, MergePair, Observation, ReflectReport,
-    SessionSummary, SpreadingModel, TickReport,
+    EngineConfig, EvidenceResult, IngestResult, MassModel, MergeLog, MergePair, Observation,
+    ReflectReport, SessionSummary, SpreadingModel, TickReport,
 };
 pub use embedding::EmbeddingProvider;
 #[cfg(feature = "embed")]
@@ -36,6 +36,7 @@ pub use error::Error;
 pub use graph::{Edge, Node, Origin};
 pub use graph::{EdgeId, EdgeType, KnowledgeType, NodeId, Timestamp};
 pub use mechanics::health::GraphHealth;
+pub use mechanics::social::FeedbackSignal;
 pub use query::{
     ContextPackage, Fragment, PackagingMode, Query, QueryConfig, SearchInput, SearchResult,
     SearchTrace, Tension, TokenBudget,
