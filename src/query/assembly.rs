@@ -8,13 +8,13 @@
 //! ## Equation
 //! (14) T_agent = sum_{k in Identity(a)} rho_k * sum_{Contradicts(k)} w_neg * X_j
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::graph::node::Origin;
 use crate::graph::scope::{ScopePath, ScopeRelation};
 use crate::graph::{KnowledgeType, NodeId};
 use crate::mechanics::repulsion::rigidity;
-use crate::query::types::{ContextPackage, Fragment, Tension, TokenBudget};
+use crate::query::types::{ContextPackage, Fragment, Query, Tension, TokenBudget};
 
 /// Determines the scope of a node relative to the query context.
 pub fn determine_scope(query_scope: &ScopePath, node_scope: &ScopePath) -> ScopeRelation {
@@ -272,6 +272,363 @@ pub fn assemble_context_package(
         tensions,
         token_usage: budget,
         agent_tension,
+    }
+}
+
+/// Hints for mode-specific assembly that cannot be derived from scored nodes alone.
+#[derive(Debug, Clone, Default)]
+pub struct ModeContext {
+    /// Node IDs at depth 1 for Neighborhood queries.
+    pub adjacent_ids: HashSet<NodeId>,
+}
+
+const BUDGET_IDENTITY_PCT: f64 = 0.10;
+const BUDGET_KNOWLEDGE_PCT: f64 = 0.65;
+const BUDGET_MEMORY_PCT: f64 = 0.20;
+
+const ELEVATION_SALIENCE_THRESHOLD: f64 = 0.7;
+const ELEVATION_ACTIVATION_THRESHOLD: f64 = 0.5;
+
+/// Assembles a [`ContextPackage`] with query-mode-aware resolution policy.
+///
+/// Delegates to [`assemble_context_package`] for base assembly, then applies
+/// mode-specific resolution adjustments and budget partitioning.
+///
+/// # Resolution Policy by Mode
+///
+/// | Query Mode | Knowledge Default | Memory Default | Top-k L2 |
+/// |------------|------------------|----------------|----------|
+/// | Associative | L1 | L0 | top-3 knowledge |
+/// | Neighborhood | L2 (adjacent), L1 (others) | L1 (adjacent), L0 (others) | all adjacent |
+/// | Temporal | L0 | L1 (all visible) | top-3 memories |
+/// | TypeFiltered | L2 (target type), L0 (others) | L0 | all target type |
+/// | List | L0 (all) | L0 (all) | none (index mode) |
+///
+/// # Elevation Rules
+///
+/// - **Salience-conditional memory elevation**: memory fragments with salience > 0.7
+///   and activation > 0.5 are promoted to L1.
+/// - **Tension-triggered provenance elevation**: fragments involved in Contradicts edges
+///   are promoted to at least L1 to surface provenance context.
+///
+/// # Budget Allocation
+///
+/// 10% identity, 65% knowledge, 20% memory, 5% overhead.
+#[allow(clippy::too_many_arguments)]
+pub fn assemble_context_package_for_mode(
+    scored_nodes: Vec<ScoredNode>,
+    query: &Query,
+    identity_activations: &[(NodeId, KnowledgeType, f64)],
+    contradicts_edges: &[(NodeId, NodeId, f64)],
+    activations: &HashMap<NodeId, f64>,
+    token_budget: usize,
+    chars_per_token: usize,
+    query_scope: &ScopePath,
+    mode_context: &ModeContext,
+) -> ContextPackage {
+    let upgrade_data: HashMap<NodeId, NodeUpgradeData> = scored_nodes
+        .iter()
+        .map(|n| {
+            let target_res = target_resolution_for_node(
+                n,
+                query,
+                &mode_context.adjacent_ids,
+                activations,
+                contradicts_edges,
+            );
+            (
+                n.node_id,
+                NodeUpgradeData {
+                    summary: n.summary.clone(),
+                    content: n.content.clone(),
+                    target_resolution: target_res,
+                },
+            )
+        })
+        .collect();
+
+    let mut package = assemble_context_package(
+        scored_nodes,
+        identity_activations,
+        contradicts_edges,
+        activations,
+        token_budget,
+        chars_per_token,
+        query_scope,
+    );
+
+    if matches!(query, Query::Associative { .. } | Query::List { .. }) {
+        return package;
+    }
+
+    let identity_budget = (token_budget as f64 * BUDGET_IDENTITY_PCT) as usize;
+    let knowledge_budget = (token_budget as f64 * BUDGET_KNOWLEDGE_PCT) as usize;
+    let memory_budget = (token_budget as f64 * BUDGET_MEMORY_PCT) as usize;
+
+    apply_mode_resolution(
+        &mut package.identity,
+        &upgrade_data,
+        identity_budget,
+        chars_per_token,
+    );
+    apply_mode_resolution(
+        &mut package.knowledge,
+        &upgrade_data,
+        knowledge_budget,
+        chars_per_token,
+    );
+    apply_mode_resolution(
+        &mut package.memories,
+        &upgrade_data,
+        memory_budget,
+        chars_per_token,
+    );
+
+    recalculate_token_usage(&mut package, chars_per_token);
+
+    package
+}
+
+struct NodeUpgradeData {
+    summary: Option<String>,
+    content: String,
+    target_resolution: Resolution,
+}
+
+fn target_resolution_for_node(
+    node: &ScoredNode,
+    query: &Query,
+    adjacent_ids: &HashSet<NodeId>,
+    activations: &HashMap<NodeId, f64>,
+    contradicts_edges: &[(NodeId, NodeId, f64)],
+) -> Resolution {
+    let is_adjacent = adjacent_ids.contains(&node.node_id);
+    let is_identity = is_identity_type(&node.node_type);
+    let is_memory = is_memory_type(&node.node_type);
+
+    let in_tension = contradicts_edges
+        .iter()
+        .any(|(a, b, _)| *a == node.node_id || *b == node.node_id);
+
+    let activation = activations.get(&node.node_id).copied().unwrap_or(0.0);
+    let elevated_memory = is_memory
+        && node.relevance > ELEVATION_SALIENCE_THRESHOLD
+        && activation > ELEVATION_ACTIVATION_THRESHOLD;
+
+    if is_identity {
+        return if in_tension {
+            Resolution::L2
+        } else {
+            Resolution::L1
+        };
+    }
+
+    match query {
+        Query::Associative { .. } => {
+            if is_memory {
+                Resolution::L0
+            } else {
+                Resolution::L1
+            }
+        }
+        Query::Neighborhood { entity, .. } => {
+            let is_entity_root = node.node_id == *entity;
+            if is_memory {
+                if is_adjacent || is_entity_root || elevated_memory {
+                    Resolution::L1
+                } else {
+                    Resolution::L0
+                }
+            } else if is_adjacent || is_entity_root {
+                Resolution::L2
+            } else {
+                Resolution::L1
+            }
+        }
+        Query::Temporal { .. } => {
+            if is_memory {
+                if in_tension || elevated_memory {
+                    Resolution::L2
+                } else {
+                    Resolution::L1
+                }
+            } else if in_tension {
+                Resolution::L1
+            } else {
+                Resolution::L0
+            }
+        }
+        Query::TypeFiltered { node_type, .. } => {
+            let is_target_type = node.node_type == *node_type;
+            if is_memory {
+                if elevated_memory {
+                    Resolution::L1
+                } else {
+                    Resolution::L0
+                }
+            } else if is_target_type {
+                Resolution::L2
+            } else if in_tension {
+                Resolution::L1
+            } else {
+                Resolution::L0
+            }
+        }
+        Query::List { .. } => Resolution::L0,
+    }
+}
+
+fn apply_mode_resolution(
+    fragments: &mut [Fragment],
+    upgrade_data: &HashMap<NodeId, NodeUpgradeData>,
+    partition_budget: usize,
+    chars_per_token: usize,
+) {
+    let mut used = 0usize;
+
+    for frag in fragments.iter_mut() {
+        let Some(data) = upgrade_data.get(&frag.node_id) else {
+            continue;
+        };
+
+        let target_res = data.target_resolution;
+        let current_res = current_resolution(frag);
+
+        match target_res.cmp(&current_res) {
+            std::cmp::Ordering::Less => {
+                downgrade_fragment(frag, target_res);
+            }
+            std::cmp::Ordering::Greater => {
+                let cost = upgrade_cost_from_data(frag, data, target_res, chars_per_token);
+                if used.saturating_add(cost) <= partition_budget {
+                    upgrade_fragment_from_data(frag, data, target_res);
+                    used += cost;
+                } else {
+                    used += fragment_tokens(frag, chars_per_token);
+                }
+            }
+            std::cmp::Ordering::Equal => {
+                used += fragment_tokens(frag, chars_per_token);
+            }
+        }
+    }
+}
+
+fn current_resolution(frag: &Fragment) -> Resolution {
+    if frag.content.is_some() {
+        Resolution::L2
+    } else if frag.summary.is_some() {
+        Resolution::L1
+    } else {
+        Resolution::L0
+    }
+}
+
+fn downgrade_fragment(frag: &mut Fragment, target: Resolution) {
+    match target {
+        Resolution::L0 => {
+            frag.summary = None;
+            frag.content = None;
+        }
+        Resolution::L1 => {
+            frag.content = None;
+        }
+        Resolution::L2 => {}
+    }
+}
+
+fn upgrade_fragment_from_data(frag: &mut Fragment, data: &NodeUpgradeData, target: Resolution) {
+    match target {
+        Resolution::L1 => {
+            if frag.summary.is_none() {
+                frag.summary = data.summary.clone();
+            }
+        }
+        Resolution::L2 => {
+            if frag.summary.is_none() {
+                frag.summary = data.summary.clone();
+            }
+            if frag.content.is_none() {
+                frag.content = Some(data.content.clone());
+            }
+        }
+        Resolution::L0 => {}
+    }
+}
+
+fn upgrade_cost_from_data(
+    frag: &Fragment,
+    data: &NodeUpgradeData,
+    target: Resolution,
+    chars_per_token: usize,
+) -> usize {
+    let current = current_resolution(frag);
+    if target <= current {
+        return fragment_tokens(frag, chars_per_token);
+    }
+
+    let mut cost = estimate_tokens(&frag.name, chars_per_token);
+    if matches!(target, Resolution::L1 | Resolution::L2) {
+        if let Some(ref summary) = data.summary {
+            cost += estimate_tokens(summary, chars_per_token);
+        }
+    }
+    if matches!(target, Resolution::L2) {
+        cost += estimate_tokens(&data.content, chars_per_token);
+    }
+    cost
+}
+
+fn fragment_tokens(frag: &Fragment, chars_per_token: usize) -> usize {
+    let mut tokens = estimate_tokens(&frag.name, chars_per_token);
+    if let Some(ref summary) = frag.summary {
+        tokens += estimate_tokens(summary, chars_per_token);
+    }
+    if let Some(ref content) = frag.content {
+        tokens += estimate_tokens(content, chars_per_token);
+    }
+    tokens
+}
+
+fn recalculate_token_usage(package: &mut ContextPackage, chars_per_token: usize) {
+    let identity_used: usize = package
+        .identity
+        .iter()
+        .map(|f| fragment_tokens(f, chars_per_token))
+        .sum();
+    let knowledge_used: usize = package
+        .knowledge
+        .iter()
+        .map(|f| fragment_tokens(f, chars_per_token))
+        .sum();
+    let memories_used: usize = package
+        .memories
+        .iter()
+        .map(|f| fragment_tokens(f, chars_per_token))
+        .sum();
+
+    package.token_usage.identity_used = identity_used;
+    package.token_usage.knowledge_used = knowledge_used;
+    package.token_usage.memories_used = memories_used;
+    package.token_usage.used = identity_used + knowledge_used + memories_used;
+}
+
+impl PartialOrd for Resolution {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Resolution {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        fn rank(r: &Resolution) -> u8 {
+            match r {
+                Resolution::L0 => 0,
+                Resolution::L1 => 1,
+                Resolution::L2 => 2,
+            }
+        }
+        rank(self).cmp(&rank(other))
     }
 }
 

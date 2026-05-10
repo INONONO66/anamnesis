@@ -15,7 +15,10 @@ pub use activation::{
     salience_gate, spread_activation, spread_activation_at, spread_activation_with_convergence,
     spread_activation_with_model_and_convergence,
 };
-pub use assembly::{ScoredNode, assemble_context_package, compute_agent_tension, determine_scope};
+pub use assembly::{
+    ModeContext, ScoredNode, assemble_context_package, assemble_context_package_for_mode,
+    compute_agent_tension, determine_scope,
+};
 pub use candidate::{
     CandidateSource, CandidateTrace, FusedCandidate, GraphRecallTrace, SearchCandidate,
     SearchTraceLevel,
