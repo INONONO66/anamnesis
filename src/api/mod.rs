@@ -43,12 +43,15 @@ pub enum EnergyModel {
 /// Spreading activation model for query traversal.
 ///
 /// `PriorityQueueBfs` (default) uses priority-queue BFS with hop decay and salience gating.
+/// `NormalizedPriorityQueueBfs` reduces per-edge activation from high-fan-out nodes.
 /// `RandomWalkRestart` uses matrix-free random walk with restart from the seed.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum SpreadingModel {
     /// Priority-queue BFS — backwards-compatible default.
     #[default]
     PriorityQueueBfs,
+    /// Priority-queue BFS with fan-out-normalized propagation.
+    NormalizedPriorityQueueBfs,
     /// Random walk with restart.
     RandomWalkRestart,
 }
@@ -2032,7 +2035,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         use crate::mechanics::repulsion::{apply_damping, compute_repulsion, rigidity};
         use crate::query::activation::{
             ActivationEdge, NodeInfo, edge_valid_at, initial_activation,
-            spread_activation_with_convergence,
+            spread_activation_with_model_and_convergence,
         };
         use crate::query::assembly::{ScoredNode, assemble_context_package};
         use crate::query::identity::compute_identity_prior;
@@ -2178,8 +2181,8 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         };
 
         let activations = match self.config.spreading_model {
-            SpreadingModel::PriorityQueueBfs => {
-                spread_activation_with_convergence(
+            SpreadingModel::PriorityQueueBfs | SpreadingModel::NormalizedPriorityQueueBfs => {
+                spread_activation_with_model_and_convergence(
                     initial_activations,
                     node_info_fn,
                     budget,
@@ -2187,6 +2190,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                     config.decay_per_hop,
                     config.max_hops,
                     now,
+                    self.config.spreading_model,
                     config.convergence.clone(),
                 )
                 .activations

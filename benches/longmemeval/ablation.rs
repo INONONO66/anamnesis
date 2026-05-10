@@ -304,6 +304,7 @@ fn energy_model_str(m: EnergyModel) -> &'static str {
 fn spreading_model_str(m: SpreadingModel) -> &'static str {
     match m {
         SpreadingModel::PriorityQueueBfs => "priority-queue-bfs",
+        SpreadingModel::NormalizedPriorityQueueBfs => "normalized-priority-queue-bfs",
         SpreadingModel::RandomWalkRestart => "random-walk-restart",
     }
 }
