@@ -16,6 +16,9 @@
 //!
 //! Run: `cargo run --features demo --bin anamnesis-demo -- --model llama2`
 
+#[allow(dead_code)]
+mod ollama;
+
 use clap::Parser;
 use std::path::PathBuf;
 
