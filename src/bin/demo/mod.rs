@@ -1,5 +1,6 @@
-pub mod extract;
 pub mod display;
+pub mod extract;
 pub mod ingest;
-pub mod ollama;
+pub mod llm;
+pub mod prompts;
 pub mod repl;

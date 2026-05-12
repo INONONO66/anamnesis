@@ -14,16 +14,15 @@ crate-type = ["lib"]
 [features]
 embed = ["dep:fastembed"]
 sqlite = ["dep:rusqlite"]
-demo = ["tokio", "reqwest", "clap", "rustyline", "serde", "serde_json", "sqlite", "embed"]
+demo = ["tokio", "reqwest", "clap", "serde", "serde_json", "sqlite", "embed"]
 
 [dependencies]
 # Zero external deps for core — add only as needed
 fastembed = { version = "4", optional = true }
 rusqlite = { version = "0.32", features = ["bundled"], optional = true }
-tokio = { version = "1", features = ["full"], optional = true }
-reqwest = { version = "0.11", features = ["json"], optional = true }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"], optional = true }
+reqwest = { version = "0.12", features = ["json"], optional = true }
 clap = { version = "4", features = ["derive"], optional = true }
-rustyline = { version = "14", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
 

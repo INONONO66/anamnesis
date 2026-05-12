@@ -2,8 +2,8 @@
 //!
 //! Provides simple text-based formatting for stdout output without ANSI colors or TUI frameworks.
 
-use anamnesis::api::{IngestResult, TickReport};
-use anamnesis::graph::{Edge, Node, NodeId};
+use anamnesis::api::TickReport;
+use anamnesis::graph::Node;
 use anamnesis::query::{ContextPackage, Fragment, SearchResult, Tension};
 
 /// Display a ContextPackage with all its sections.
@@ -153,29 +153,6 @@ pub fn display_node(node: &Node) {
     }
 }
 
-/// Display neighbors of a node with edge information.
-///
-/// Takes a slice of (NodeId, Node reference, Edge reference) tuples.
-pub fn display_neighbors(neighbors: &[(NodeId, &Node, &Edge)]) {
-    if neighbors.is_empty() {
-        println!("No neighbors.");
-        return;
-    }
-
-    println!("Neighbors:");
-    for (neighbor_id, neighbor_node, edge) in neighbors {
-        let direction = if edge.source == *neighbor_id {
-            "→"
-        } else {
-            "←"
-        };
-        println!(
-            "  {} {}: {} [{:?}] weight={:.2}",
-            direction, neighbor_id.0, neighbor_node.name, edge.edge_type, edge.weight
-        );
-    }
-}
-
 /// Display graph statistics.
 pub fn display_stats(
     node_count: usize,
@@ -188,26 +165,6 @@ pub fn display_stats(
     println!("  Edges: {}", edge_count);
     println!("  Snapshots: {}", snapshot_count);
     println!("  Average salience: {:.3}", avg_salience);
-}
-
-/// Display an ingest result.
-pub fn display_ingest_result(result: &IngestResult) {
-    match result {
-        IngestResult::Created(ids) => {
-            println!("Ingest complete: Created {} new node(s)", ids.len());
-            for id in ids {
-                println!("  - Node {}", id.0);
-            }
-        }
-        IngestResult::Reinforced {
-            existing_id,
-            similarity,
-        } => {
-            println!("Ingest complete: Reinforced existing node");
-            println!("  Node: {}", existing_id.0);
-            println!("  Similarity: {:.3}", similarity);
-        }
-    }
 }
 
 /// Display a tick report.

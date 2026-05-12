@@ -1,29 +1,14 @@
-//! Anamnesis demo REPL with Ollama integration.
+//! Anamnesis demo REPL with local LLM integration.
 //!
 //! Demonstrates the cognitive graph engine with a local LLM backend.
 //!
-//! Run: `cargo run --features demo --bin anamnesis-demo -- --model llama2`
+//! Run: `cargo run --features demo --bin anamnesis-demo -- --model glm-4.7-flash:latest`
 
-//! Anamnesis demo REPL with Ollama integration.
-//!
-//! Demonstrates the cognitive graph engine with a local LLM backend.
-//!
-//! Run: `cargo run --features demo --bin anamnesis-demo -- --model llama2`
-
-//! Anamnesis demo REPL with Ollama integration.
-//!
-//! Demonstrates the cognitive graph engine with a local LLM backend.
-//!
-//! Run: `cargo run --features demo --bin anamnesis-demo -- --model llama2`
-
-#[allow(dead_code)]
 mod display;
-#[allow(dead_code)]
 mod extract;
-#[allow(dead_code)]
 mod ingest;
-#[allow(dead_code)]
-mod ollama;
+mod llm;
+mod prompts;
 mod repl;
 
 use anamnesis::{
@@ -31,19 +16,19 @@ use anamnesis::{
     storage::SqliteStorage,
 };
 use clap::Parser;
-use ollama::OllamaClient;
+use llm::LocalLlmClient;
 use repl::{Repl, ReplConfig};
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 #[command(name = "anamnesis-demo")]
-#[command(about = "Cognitive graph engine with Ollama integration", long_about = None)]
+#[command(about = "Cognitive graph engine with local LLM integration", long_about = None)]
 struct Args {
-    /// Ollama API URL
+    /// Local LLM API URL (Ollama-compatible /api/chat and /api/tags)
     #[arg(long, default_value = "http://localhost:11434")]
-    ollama_url: String,
+    llm_url: String,
 
-    /// Model name to use with Ollama
+    /// Model name to use with the local LLM backend
     #[arg(long)]
     model: String,
 
@@ -73,35 +58,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::fs::create_dir_all(parent)?;
     }
 
-    // Health check: verify Ollama is running
-    println!("Checking Ollama health at {}...", args.ollama_url);
-    let health_url = format!("{}/api/tags", args.ollama_url);
-    match reqwest::Client::new().get(&health_url).send().await {
-        Ok(response) => {
-            if response.status().is_success() {
-                println!("✓ Ollama is running and healthy");
-            } else {
-                eprintln!(
-                    "✗ Ollama health check failed with status: {}",
-                    response.status()
-                );
-                eprintln!("Make sure Ollama is running: ollama serve");
-                std::process::exit(1);
-            }
-        }
-        Err(e) => {
-            eprintln!("✗ Failed to connect to Ollama at {}", args.ollama_url);
-            eprintln!("Error: {}", e);
-            eprintln!("\nMake sure Ollama is running:");
-            eprintln!("  1. Install Ollama from https://ollama.ai");
-            eprintln!("  2. Run: ollama serve");
-            eprintln!(
-                "  3. In another terminal, pull a model: ollama pull {}",
-                args.model
-            );
-            std::process::exit(1);
-        }
+    let llm = LocalLlmClient::new(args.llm_url.clone(), args.model.clone());
+    println!("Checking local LLM health at {}...", args.llm_url);
+    if let Err(e) = llm.health_check().await {
+        eprintln!("✗ Failed to connect to local LLM backend");
+        eprintln!("Error: {e}");
+        eprintln!("\nExpected an Ollama-compatible server exposing /api/tags and /api/chat.");
+        eprintln!("Example: ollama serve && ollama pull {}", args.model);
+        std::process::exit(1);
     }
+    println!("✓ Local LLM backend is running and healthy");
 
     // Initialize embedding provider
     println!("Initializing embedding provider (may download model on first run)...");
@@ -125,8 +91,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let engine = Engine::with_storage(config, storage);
     println!("✓ Engine initialized");
 
-    let ollama = OllamaClient::new(args.ollama_url, args.model.clone());
-
     let node_count = engine.graph().storage().node_count();
 
     println!("\nAnamnesis Demo v{}", env!("CARGO_PKG_VERSION"));
@@ -146,6 +110,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         session_id: format!("session-{}", std::process::id()),
     };
 
-    let mut repl = Repl::new(engine, ollama, provider, repl_config);
+    let mut repl = Repl::new(engine, llm, provider, repl_config);
     repl.run().map_err(|e| e.into())
 }

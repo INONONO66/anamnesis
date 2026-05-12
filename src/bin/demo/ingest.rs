@@ -26,7 +26,6 @@ pub struct Chunk {
     pub content: String,
     pub source_file: String,
     pub chunk_index: usize,
-    pub total_chunks: usize,
 }
 
 pub struct IngestReport {
@@ -74,7 +73,6 @@ fn chunk_text_file(
         .map(|s| truncate_chunk(s, config.max_chunk_chars))
         .collect();
 
-    let total = filtered.len();
     Ok(filtered
         .into_iter()
         .enumerate()
@@ -82,7 +80,6 @@ fn chunk_text_file(
             content,
             source_file: source_file.to_string(),
             chunk_index: i,
-            total_chunks: total,
         })
         .collect())
 }
@@ -116,7 +113,6 @@ fn chunk_json_file(
         .map(|s| truncate_chunk(s, config.max_chunk_chars))
         .collect();
 
-    let total = filtered.len();
     Ok(filtered
         .into_iter()
         .enumerate()
@@ -124,7 +120,6 @@ fn chunk_json_file(
             content,
             source_file: source_file.to_string(),
             chunk_index: i,
-            total_chunks: total,
         })
         .collect())
 }

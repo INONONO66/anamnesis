@@ -1,5 +1,6 @@
 //! REPL loop with command dispatch for the Anamnesis demo.
 
+use std::io::{self, Write};
 use std::path::Path;
 
 use anamnesis::embedding::EmbeddingProvider;
@@ -17,9 +18,9 @@ use super::display::{
 };
 use super::extract::{ExtractedFact, extract_knowledge, map_node_type};
 use super::ingest::{IngestConfig, ingest_directory, ingest_file};
-use super::ollama::{ChatMessage, OllamaClient};
+use super::llm::{ChatMessage, LocalLlmClient};
+use super::prompts::SYNTHESIS_SYSTEM_PROMPT;
 
-#[allow(dead_code)]
 pub struct ReplConfig {
     pub scope: String,
     pub agent_id: String,
@@ -27,28 +28,23 @@ pub struct ReplConfig {
 }
 
 pub struct Repl {
-    #[allow(dead_code)]
     engine: Engine<SqliteStorage>,
-    #[allow(dead_code)]
-    ollama: OllamaClient,
-    #[allow(dead_code)]
+    llm: LocalLlmClient,
     embedder: FastEmbedProvider,
-    #[allow(dead_code)]
     config: ReplConfig,
-    #[allow(dead_code)]
     chat_history: Vec<ChatMessage>,
 }
 
 impl Repl {
     pub fn new(
         engine: Engine<SqliteStorage>,
-        ollama: OllamaClient,
+        llm: LocalLlmClient,
         embedder: FastEmbedProvider,
         config: ReplConfig,
     ) -> Self {
         Self {
             engine,
-            ollama,
+            llm,
             embedder,
             config,
             chat_history: Vec::new(),
@@ -56,30 +52,26 @@ impl Repl {
     }
 
     pub fn run(&mut self) -> Result<(), String> {
-        let mut editor =
-            rustyline::DefaultEditor::new().map_err(|e| format!("failed to init editor: {e}"))?;
-
         println!("Type /help for available commands, /quit to exit.\n");
 
         loop {
-            let line = match editor.readline("anamnesis> ") {
-                Ok(line) => line,
-                Err(
-                    rustyline::error::ReadlineError::Interrupted
-                    | rustyline::error::ReadlineError::Eof,
-                ) => {
-                    break;
-                }
-                Err(e) => return Err(format!("readline error: {e}")),
-            };
+            print!("anamnesis> ");
+            io::stdout()
+                .flush()
+                .map_err(|e| format!("failed to flush prompt: {e}"))?;
+
+            let mut line = String::new();
+            let bytes_read = io::stdin()
+                .read_line(&mut line)
+                .map_err(|e| format!("failed to read input: {e}"))?;
+            if bytes_read == 0 {
+                break;
+            }
 
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 continue;
             }
-
-            let _ = editor.add_history_entry(trimmed);
-
             if trimmed.starts_with('/') {
                 let parts: Vec<&str> = trimmed.splitn(2, ' ').collect();
                 let cmd = parts[0];
@@ -172,11 +164,11 @@ impl Repl {
         });
 
         let response = match tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(self.ollama.chat(&self.chat_history))
+            tokio::runtime::Handle::current().block_on(self.llm.chat(&self.chat_history))
         }) {
             Ok(response) => response,
             Err(e) => {
-                eprintln!("Error: Failed to connect to LLM. Is Ollama running?");
+                eprintln!("Error: Failed to connect to local LLM backend.");
                 eprintln!("Details: {e}");
                 let _ = self.chat_history.pop();
                 return;
@@ -199,11 +191,8 @@ impl Repl {
         }
 
         let extraction = match tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(extract_knowledge(
-                &self.ollama,
-                &user_msg,
-                &response,
-            ))
+            tokio::runtime::Handle::current()
+                .block_on(extract_knowledge(&self.llm, &user_msg, &response))
         }) {
             Ok(result) => result,
             Err(e) => {
@@ -677,10 +666,6 @@ impl Repl {
             return;
         }
 
-        let system_prompt = "You are a knowledge synthesizer. Given a set of conversation \
-            fragments, produce a concise synthesis that captures the key insights, decisions, \
-            and patterns. Output only the synthesis text, no preamble.";
-
         let user_content = content_parts.join("\n---\n");
         let messages = vec![ChatMessage {
             role: "user".to_string(),
@@ -688,12 +673,14 @@ impl Repl {
         }];
 
         let synthesis = match tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current()
-                .block_on(self.ollama.chat_with_system(system_prompt, &messages))
+            tokio::runtime::Handle::current().block_on(
+                self.llm
+                    .chat_with_system(SYNTHESIS_SYSTEM_PROMPT, &messages),
+            )
         }) {
             Ok(text) => text,
             Err(e) => {
-                eprintln!("Error: LLM synthesis failed. Is Ollama running? Details: {e}");
+                eprintln!("Error: LLM synthesis failed. Details: {e}");
                 return;
             }
         };
