@@ -21,6 +21,8 @@ mod display;
 #[allow(dead_code)]
 mod extract;
 #[allow(dead_code)]
+mod ingest;
+#[allow(dead_code)]
 mod ollama;
 
 use clap::Parser;
