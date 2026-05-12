@@ -24,8 +24,15 @@ mod extract;
 mod ingest;
 #[allow(dead_code)]
 mod ollama;
+mod repl;
 
+use anamnesis::{
+    Engine, EngineConfig, FastEmbedProvider, StorageAdapter, embedding::EmbeddingProvider,
+    storage::SqliteStorage,
+};
 use clap::Parser;
+use ollama::OllamaClient;
+use repl::{Repl, ReplConfig};
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
@@ -96,15 +103,49 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Initialize embedding provider
+    println!("Initializing embedding provider (may download model on first run)...");
+    let provider = FastEmbedProvider::new()?;
+    println!(
+        "✓ Embedding provider ready: {} ({}-d)",
+        provider.model_name(),
+        provider.dimensions()
+    );
+
+    // Initialize storage
+    println!("Initializing SQLite storage at {}...", db_path);
+    let storage = SqliteStorage::open(&db_path)?;
+    println!("✓ Storage initialized");
+
+    // Initialize engine with demo-friendly config (more permissive gating)
+    println!("Initializing Anamnesis engine...");
+    let config = EngineConfig::new()
+        .with_novelty_threshold(0.10)
+        .with_confidence_threshold(0.30);
+    let engine = Engine::with_storage(config, storage);
+    println!("✓ Engine initialized");
+
+    let ollama = OllamaClient::new(args.ollama_url, args.model.clone());
+
+    let node_count = engine.graph().storage().node_count();
+
     println!("\nAnamnesis Demo v{}", env!("CARGO_PKG_VERSION"));
     println!("Cognitive dynamics engine for LLMs\n");
     println!();
     println!("  Model:    {}", args.model);
     println!("  Database: {}", db_path);
     println!("  Scope:    {}", args.scope);
+    println!("  Nodes:    {}", node_count);
     println!();
     println!("Type /help for available commands");
     println!();
 
-    Ok(())
+    let repl_config = ReplConfig {
+        scope: args.scope,
+        agent_id: "demo-agent".to_string(),
+        session_id: format!("session-{}", std::process::id()),
+    };
+
+    let mut repl = Repl::new(engine, ollama, provider, repl_config);
+    repl.run().map_err(|e| e.into())
 }
