@@ -16,8 +16,9 @@ const EMPTY_EDGE_SLICE: &[EdgeId] = &[];
 /// SQLite-backed storage adapter.
 ///
 /// The adapter keeps graph objects and hot SoA fields cached in memory so the
-/// `StorageAdapter` reference-returning API remains fast, while every explicit
-/// setter persists the same state to SQLite. Full-text search is backed by FTS5.
+/// `StorageAdapter` reference-returning API remains fast. Node and edge writes
+/// remain write-through for FTS5/index maintenance; hot-field setters use
+/// dirty flags for write-behind persistence. Full-text search is backed by FTS5.
 pub struct SqliteStorage {
     conn: Mutex<Connection>,
 
@@ -26,6 +27,9 @@ pub struct SqliteStorage {
     salience: Vec<f64>,
     accessed_at: Vec<Timestamp>,
     decay_checkpoint: Vec<Timestamp>,
+    dirty_salience: Vec<bool>,
+    dirty_accessed_at: Vec<bool>,
+    dirty_decay_checkpoint: Vec<bool>,
     node_types: Vec<Option<KnowledgeType>>,
     adjacency_out: Vec<Vec<EdgeId>>,
     adjacency_in: Vec<Vec<EdgeId>>,
@@ -57,6 +61,7 @@ impl SqliteStorage {
     fn from_connection(conn: Connection) -> Result<Self, Error> {
         create_schema(&conn)?;
 
+        let capacity = 0;
         let mut storage = Self {
             conn: Mutex::new(conn),
             nodes: Vec::new(),
@@ -64,6 +69,9 @@ impl SqliteStorage {
             salience: Vec::new(),
             accessed_at: Vec::new(),
             decay_checkpoint: Vec::new(),
+            dirty_salience: vec![false; capacity],
+            dirty_accessed_at: vec![false; capacity],
+            dirty_decay_checkpoint: vec![false; capacity],
             node_types: Vec::new(),
             adjacency_out: Vec::new(),
             adjacency_in: Vec::new(),
@@ -91,6 +99,9 @@ impl SqliteStorage {
             self.salience.resize(new_len, 0.0);
             self.accessed_at.resize(new_len, Timestamp(0));
             self.decay_checkpoint.resize(new_len, Timestamp(0));
+            self.dirty_salience.resize(new_len, false);
+            self.dirty_accessed_at.resize(new_len, false);
+            self.dirty_decay_checkpoint.resize(new_len, false);
             self.node_types.resize_with(new_len, || None);
             self.adjacency_out.resize_with(new_len, Vec::new);
             self.adjacency_in.resize_with(new_len, Vec::new);
@@ -157,17 +168,10 @@ impl SqliteStorage {
             .rev()
             .find_map(|(idx, slot)| slot.as_ref().map(|_| idx as u64 + 1))
             .unwrap_or(0);
+        self.dirty_salience = vec![false; self.nodes.len()];
+        self.dirty_accessed_at = vec![false; self.nodes.len()];
+        self.dirty_decay_checkpoint = vec![false; self.nodes.len()];
         Ok(())
-    }
-
-    fn insert_node_row(&self, node: &Node, decay_checkpoint: Timestamp) -> Result<(), Error> {
-        let conn = self.lock_conn()?;
-        insert_node_row(&conn, node, decay_checkpoint)
-    }
-
-    fn insert_edge_row(&self, edge: &Edge) -> Result<(), Error> {
-        let conn = self.lock_conn()?;
-        insert_edge_row(&conn, edge)
     }
 
     fn query_node_ids(&self, sql: &str, value: &str) -> Vec<NodeId> {
@@ -194,55 +198,158 @@ impl Clone for SqliteStorage {
     fn clone(&self) -> Self {
         let cloned = Self::in_memory()
             .unwrap_or_else(|e| panic!("failed to clone sqlite storage into memory: {e}"));
-        for id in self.all_node_ids() {
-            let node = self
-                .get_node(id)
-                .unwrap_or_else(|e| panic!("failed to read node during sqlite clone: {e}"))
-                .clone();
-            cloned
-                .insert_node_row(
-                    &node,
-                    self.get_decay_checkpoint(id).unwrap_or_else(|e| {
-                        panic!("failed to read decay checkpoint during sqlite clone: {e}")
-                    }),
-                )
-                .unwrap_or_else(|e| panic!("failed to write node during sqlite clone: {e}"));
-        }
-        for id in self.all_edge_ids() {
-            let edge = self
-                .get_edge(id)
-                .unwrap_or_else(|e| panic!("failed to read edge during sqlite clone: {e}"))
-                .clone();
-            cloned
-                .insert_edge_row(&edge)
-                .unwrap_or_else(|e| panic!("failed to write edge during sqlite clone: {e}"));
-        }
+
         {
             let conn = cloned
                 .lock_conn()
                 .unwrap_or_else(|e| panic!("failed to lock sqlite clone: {e}"));
-            for id in &self.free_node_ids {
-                conn.execute(
-                    "INSERT INTO free_ids (id_type, id_value) VALUES ('node', ?1)",
-                    [id.0],
-                )
-                .unwrap_or_else(|e| panic!("failed to clone free node id: {e}"));
+
+            conn.execute_batch("BEGIN IMMEDIATE;")
+                .unwrap_or_else(|e| panic!("failed to begin transaction during sqlite clone: {e}"));
+
+            let write_result = (|| -> Result<(), Box<dyn std::error::Error>> {
+                for id in self.all_node_ids() {
+                    let node = self
+                        .get_node(id)
+                        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?
+                        .clone();
+                    let decay_checkpoint = self
+                        .get_decay_checkpoint(id)
+                        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+
+                    conn.execute(
+                        "INSERT OR REPLACE INTO nodes (
+                            id, name, summary, content, embedding_json, node_type, agent_id, session_id,
+                            scope, confidence, valid_from, valid_until, created_at, updated_at,
+                            access_count, access_history, tier, metadata
+                        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+                        params![
+                            node.id.0,
+                            node.name,
+                            node.summary,
+                            node.content,
+                            encode_embedding(node.embedding.as_deref()),
+                            encode_knowledge_type(&node.node_type),
+                            node.origin.agent_id,
+                            node.origin.session_id,
+                            node.origin.scope.as_str(),
+                            node.origin.confidence,
+                            node.valid_from.map(|ts| ts.0),
+                            node.valid_until.map(|ts| ts.0),
+                            node.created_at.0,
+                            node.updated_at.0,
+                            node.access_count,
+                            encode_timestamp_deque(&node.access_history),
+                            encode_memory_tier(&node.tier),
+                            encode_map(&node.metadata),
+                        ],
+                    )
+                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+
+                    conn.execute(
+                        "INSERT OR REPLACE INTO salience (node_id, salience) VALUES (?1, ?2)",
+                        params![node.id.0, node.salience],
+                    )
+                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+
+                    conn.execute(
+                        "INSERT OR REPLACE INTO accessed_at (node_id, accessed_at) VALUES (?1, ?2)",
+                        params![node.id.0, node.accessed_at.0],
+                    )
+                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+
+                    conn.execute(
+                        "INSERT OR REPLACE INTO decay_checkpoint (node_id, decay_checkpoint) VALUES (?1, ?2)",
+                        params![node.id.0, decay_checkpoint.0],
+                    )
+                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+
+                    conn.execute("DELETE FROM node_fts WHERE id = ?1", [node.id.0])
+                        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+
+                    conn.execute(
+                        "INSERT INTO node_fts (id, name, content) VALUES (?1, ?2, ?3)",
+                        params![node.id.0, node.name, node.content],
+                    )
+                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+
+                    conn.execute("DELETE FROM entity_tags WHERE node_id = ?1", [node.id.0])
+                        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+
+                    for tag in unique_strings(&node.entity_tags) {
+                        conn.execute(
+                            "INSERT OR IGNORE INTO entity_tags (node_id, tag) VALUES (?1, ?2)",
+                            params![node.id.0, tag],
+                        )
+                        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+                    }
+                }
+
+                for id in self.all_edge_ids() {
+                    let edge = self
+                        .get_edge(id)
+                        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?
+                        .clone();
+
+                    conn.execute(
+                        "INSERT OR REPLACE INTO edges (
+                            id, from_node, to_node, edge_type, weight, created_at, valid_from, valid_until, metadata
+                        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                        params![
+                            edge.id.0,
+                            edge.source.0,
+                            edge.target.0,
+                            encode_edge_type(&edge.edge_type),
+                            edge.weight,
+                            edge.created_at.0,
+                            edge.valid_from.map(|ts| ts.0),
+                            edge.valid_until.map(|ts| ts.0),
+                            encode_map(&edge.metadata),
+                        ],
+                    )
+                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+                }
+
+                for id in &self.free_node_ids {
+                    conn.execute(
+                        "INSERT INTO free_ids (id_type, id_value) VALUES ('node', ?1)",
+                        [id.0],
+                    )
+                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+                }
+
+                for id in &self.free_edge_ids {
+                    conn.execute(
+                        "INSERT INTO free_ids (id_type, id_value) VALUES ('edge', ?1)",
+                        [id.0],
+                    )
+                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+                }
+
+                Ok(())
+            })();
+
+            if let Err(error) = write_result {
+                let _ = conn.execute_batch("ROLLBACK;");
+                panic!("failed during sqlite clone transaction: {error}");
             }
-            for id in &self.free_edge_ids {
-                conn.execute(
-                    "INSERT INTO free_ids (id_type, id_value) VALUES ('edge', ?1)",
-                    [id.0],
-                )
-                .unwrap_or_else(|e| panic!("failed to clone free edge id: {e}"));
+
+            if let Err(e) = conn.execute_batch("COMMIT;") {
+                let _ = conn.execute_batch("ROLLBACK;");
+                panic!("failed to commit sqlite clone transaction: {e}");
             }
         }
-        Self::from_connection(
+
+        let mut result = Self::from_connection(
             cloned
                 .conn
                 .into_inner()
                 .unwrap_or_else(|_| panic!("failed to unwrap cloned sqlite connection")),
         )
-        .unwrap_or_else(|e| panic!("failed to load cloned sqlite storage: {e}"))
+        .unwrap_or_else(|e| panic!("failed to load cloned sqlite storage: {e}"));
+        result.next_node_counter = result.next_node_counter.max(self.next_node_counter);
+        result.next_edge_counter = result.next_edge_counter.max(self.next_edge_counter);
+        result
     }
 }
 
@@ -291,6 +398,9 @@ impl StorageAdapter for SqliteStorage {
         self.salience[idx] = node.salience;
         self.accessed_at[idx] = node.accessed_at;
         self.decay_checkpoint[idx] = node.accessed_at;
+        self.dirty_salience[idx] = false;
+        self.dirty_accessed_at[idx] = false;
+        self.dirty_decay_checkpoint[idx] = false;
         self.node_types[idx] = Some(node.node_type.clone());
         self.nodes[idx] = Some(node);
         if was_empty {
@@ -346,6 +456,9 @@ impl StorageAdapter for SqliteStorage {
         self.salience[idx] = 0.0;
         self.accessed_at[idx] = Timestamp(0);
         self.decay_checkpoint[idx] = Timestamp(0);
+        self.dirty_salience[idx] = false;
+        self.dirty_accessed_at[idx] = false;
+        self.dirty_decay_checkpoint[idx] = false;
         self.node_types[idx] = None;
         self.adjacency_out[idx].clear();
         self.adjacency_in[idx].clear();
@@ -449,13 +562,8 @@ impl StorageAdapter for SqliteStorage {
         if idx >= self.nodes.len() || self.nodes[idx].is_none() {
             return Err(Error::NodeNotFound(id));
         }
-        self.lock_conn()?
-            .execute(
-                "INSERT OR REPLACE INTO salience (node_id, salience) VALUES (?1, ?2)",
-                params![id.0, salience],
-            )
-            .map_err(sqlite_error)?;
         self.salience[idx] = salience;
+        self.dirty_salience[idx] = true;
         if let Some(node) = self.nodes[idx].as_mut() {
             node.salience = salience;
         }
@@ -475,13 +583,8 @@ impl StorageAdapter for SqliteStorage {
         if idx >= self.nodes.len() || self.nodes[idx].is_none() {
             return Err(Error::NodeNotFound(id));
         }
-        self.lock_conn()?
-            .execute(
-                "INSERT OR REPLACE INTO accessed_at (node_id, accessed_at) VALUES (?1, ?2)",
-                params![id.0, ts.0],
-            )
-            .map_err(sqlite_error)?;
         self.accessed_at[idx] = ts;
+        self.dirty_accessed_at[idx] = true;
         if let Some(node) = self.nodes[idx].as_mut() {
             node.accessed_at = ts;
         }
@@ -501,13 +604,65 @@ impl StorageAdapter for SqliteStorage {
         if idx >= self.nodes.len() || self.nodes[idx].is_none() {
             return Err(Error::NodeNotFound(id));
         }
-        self.lock_conn()?
-            .execute(
-                "INSERT OR REPLACE INTO decay_checkpoint (node_id, decay_checkpoint) VALUES (?1, ?2)",
-                params![id.0, ts.0],
-            )
-            .map_err(sqlite_error)?;
         self.decay_checkpoint[idx] = ts;
+        self.dirty_decay_checkpoint[idx] = true;
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<(), Error> {
+        {
+            let conn = self.lock_conn()?;
+            conn.execute_batch("BEGIN IMMEDIATE;")
+                .map_err(sqlite_error)?;
+
+            let write_result = (|| -> Result<(), Error> {
+                for (idx, dirty) in self.dirty_salience.iter().enumerate() {
+                    if *dirty {
+                        conn.execute(
+                            "INSERT OR REPLACE INTO salience (node_id, salience) VALUES (?1, ?2)",
+                            params![idx as u64, self.salience[idx]],
+                        )
+                        .map_err(sqlite_error)?;
+                    }
+                }
+
+                for (idx, dirty) in self.dirty_accessed_at.iter().enumerate() {
+                    if *dirty {
+                        conn.execute(
+                            "INSERT OR REPLACE INTO accessed_at (node_id, accessed_at) VALUES (?1, ?2)",
+                            params![idx as u64, self.accessed_at[idx].0],
+                        )
+                        .map_err(sqlite_error)?;
+                    }
+                }
+
+                for (idx, dirty) in self.dirty_decay_checkpoint.iter().enumerate() {
+                    if *dirty {
+                        conn.execute(
+                            "INSERT OR REPLACE INTO decay_checkpoint (node_id, decay_checkpoint) VALUES (?1, ?2)",
+                            params![idx as u64, self.decay_checkpoint[idx].0],
+                        )
+                        .map_err(sqlite_error)?;
+                    }
+                }
+
+                Ok(())
+            })();
+
+            if let Err(error) = write_result {
+                let _ = conn.execute_batch("ROLLBACK;");
+                return Err(error);
+            }
+
+            if let Err(error) = conn.execute_batch("COMMIT;").map_err(sqlite_error) {
+                let _ = conn.execute_batch("ROLLBACK;");
+                return Err(error);
+            }
+        }
+
+        self.dirty_salience.fill(false);
+        self.dirty_accessed_at.fill(false);
+        self.dirty_decay_checkpoint.fill(false);
         Ok(())
     }
 
@@ -646,6 +801,130 @@ impl SqliteStorage {
     }
 }
 
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)]
+mod tests {
+    use super::*;
+    use crate::graph::MemoryTier;
+    use std::collections::{HashMap, VecDeque};
+    use std::path::PathBuf;
+
+    fn make_node(id: NodeId, salience: f64) -> Node {
+        Node {
+            id,
+            node_type: KnowledgeType::Semantic,
+            name: format!("node-{}", id.0),
+            summary: None,
+            content: format!("content for node {}", id.0),
+            embedding: None,
+            created_at: Timestamp(1000),
+            updated_at: Timestamp(1000),
+            accessed_at: Timestamp(1000),
+            valid_from: None,
+            valid_until: None,
+            salience,
+            access_count: 0,
+            access_history: VecDeque::new(),
+            tier: MemoryTier::Auto,
+            origin: Origin {
+                agent_id: "test-agent".to_string(),
+                session_id: "test-session".to_string(),
+                scope: ScopePath::universal(),
+                confidence: 0.9,
+            },
+            entity_tags: Vec::new(),
+            metadata: HashMap::new(),
+        }
+    }
+
+    fn temp_db_path(name: &str) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "anamnesis-{name}-{}-{}.sqlite",
+            std::process::id(),
+            Timestamp::now().0
+        ));
+        path
+    }
+
+    #[test]
+    fn hot_field_setters_update_memory_and_mark_dirty() {
+        let mut storage = SqliteStorage::new().expect("sqlite storage initializes");
+        let id = storage.next_node_id();
+        storage.set_node(make_node(id, 0.5)).expect("node stored");
+        let idx = id.0 as usize;
+
+        storage.set_salience(id, 0.42).expect("salience updated");
+        assert_eq!(storage.get_salience(id).expect("salience exists"), 0.42);
+        assert!(storage.dirty_salience[idx]);
+
+        storage
+            .set_accessed_at(id, Timestamp(2000))
+            .expect("accessed_at updated");
+        assert_eq!(
+            storage.get_accessed_at(id).expect("accessed_at exists"),
+            Timestamp(2000)
+        );
+        assert!(storage.dirty_accessed_at[idx]);
+
+        storage
+            .set_decay_checkpoint(id, Timestamp(3000))
+            .expect("decay checkpoint updated");
+        assert_eq!(
+            storage
+                .get_decay_checkpoint(id)
+                .expect("decay checkpoint exists"),
+            Timestamp(3000)
+        );
+        assert!(storage.dirty_decay_checkpoint[idx]);
+    }
+
+    #[test]
+    fn flush_persists_dirty_hot_fields_and_clears_flags() {
+        let path = temp_db_path("flush-hot-fields");
+        let id = {
+            let mut storage = SqliteStorage::open(&path).expect("sqlite storage opens");
+            let id = storage.next_node_id();
+            storage.set_node(make_node(id, 0.5)).expect("node stored");
+
+            storage.set_salience(id, 0.42).expect("salience updated");
+            storage
+                .set_accessed_at(id, Timestamp(2000))
+                .expect("accessed_at updated");
+            storage
+                .set_decay_checkpoint(id, Timestamp(3000))
+                .expect("decay checkpoint updated");
+
+            let idx = id.0 as usize;
+            assert!(storage.dirty_salience[idx]);
+            assert!(storage.dirty_accessed_at[idx]);
+            assert!(storage.dirty_decay_checkpoint[idx]);
+
+            storage.flush().expect("dirty hot fields flush");
+
+            assert!(!storage.dirty_salience[idx]);
+            assert!(!storage.dirty_accessed_at[idx]);
+            assert!(!storage.dirty_decay_checkpoint[idx]);
+            id
+        };
+
+        let reopened = SqliteStorage::open(&path).expect("sqlite storage reopens");
+        assert_eq!(reopened.get_salience(id).expect("salience exists"), 0.42);
+        assert_eq!(
+            reopened.get_accessed_at(id).expect("accessed_at exists"),
+            Timestamp(2000)
+        );
+        assert_eq!(
+            reopened
+                .get_decay_checkpoint(id)
+                .expect("decay checkpoint exists"),
+            Timestamp(3000)
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 fn create_schema(conn: &Connection) -> Result<(), Error> {
     conn.execute_batch(
         "
@@ -733,86 +1012,120 @@ fn insert_node_row(
     node: &Node,
     decay_checkpoint: Timestamp,
 ) -> Result<(), Error> {
-    conn.execute(
-        "INSERT OR REPLACE INTO nodes (
-            id, name, summary, content, embedding_json, node_type, agent_id, session_id,
-            scope, confidence, valid_from, valid_until, created_at, updated_at,
-            access_count, access_history, tier, metadata
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
-        params![
-            node.id.0,
-            node.name,
-            node.summary,
-            node.content,
-            encode_embedding(node.embedding.as_deref()),
-            encode_knowledge_type(&node.node_type),
-            node.origin.agent_id,
-            node.origin.session_id,
-            node.origin.scope.as_str(),
-            node.origin.confidence,
-            node.valid_from.map(|ts| ts.0),
-            node.valid_until.map(|ts| ts.0),
-            node.created_at.0,
-            node.updated_at.0,
-            node.access_count,
-            encode_timestamp_deque(&node.access_history),
-            encode_memory_tier(&node.tier),
-            encode_map(&node.metadata),
-        ],
-    )
-    .map_err(sqlite_error)?;
-    conn.execute(
-        "INSERT OR REPLACE INTO salience (node_id, salience) VALUES (?1, ?2)",
-        params![node.id.0, node.salience],
-    )
-    .map_err(sqlite_error)?;
-    conn.execute(
-        "INSERT OR REPLACE INTO accessed_at (node_id, accessed_at) VALUES (?1, ?2)",
-        params![node.id.0, node.accessed_at.0],
-    )
-    .map_err(sqlite_error)?;
-    conn.execute(
-        "INSERT OR REPLACE INTO decay_checkpoint (node_id, decay_checkpoint) VALUES (?1, ?2)",
-        params![node.id.0, decay_checkpoint.0],
-    )
-    .map_err(sqlite_error)?;
-    conn.execute("DELETE FROM node_fts WHERE id = ?1", [node.id.0])
+    conn.execute_batch("BEGIN IMMEDIATE;")
         .map_err(sqlite_error)?;
-    conn.execute(
-        "INSERT INTO node_fts (id, name, content) VALUES (?1, ?2, ?3)",
-        params![node.id.0, node.name, node.content],
-    )
-    .map_err(sqlite_error)?;
-    conn.execute("DELETE FROM entity_tags WHERE node_id = ?1", [node.id.0])
-        .map_err(sqlite_error)?;
-    for tag in unique_strings(&node.entity_tags) {
+
+    let write_result = (|| -> Result<(), Error> {
         conn.execute(
-            "INSERT OR IGNORE INTO entity_tags (node_id, tag) VALUES (?1, ?2)",
-            params![node.id.0, tag],
+            "INSERT OR REPLACE INTO nodes (
+                id, name, summary, content, embedding_json, node_type, agent_id, session_id,
+                scope, confidence, valid_from, valid_until, created_at, updated_at,
+                access_count, access_history, tier, metadata
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+            params![
+                node.id.0,
+                node.name,
+                node.summary,
+                node.content,
+                encode_embedding(node.embedding.as_deref()),
+                encode_knowledge_type(&node.node_type),
+                node.origin.agent_id,
+                node.origin.session_id,
+                node.origin.scope.as_str(),
+                node.origin.confidence,
+                node.valid_from.map(|ts| ts.0),
+                node.valid_until.map(|ts| ts.0),
+                node.created_at.0,
+                node.updated_at.0,
+                node.access_count,
+                encode_timestamp_deque(&node.access_history),
+                encode_memory_tier(&node.tier),
+                encode_map(&node.metadata),
+            ],
         )
         .map_err(sqlite_error)?;
+        conn.execute(
+            "INSERT OR REPLACE INTO salience (node_id, salience) VALUES (?1, ?2)",
+            params![node.id.0, node.salience],
+        )
+        .map_err(sqlite_error)?;
+        conn.execute(
+            "INSERT OR REPLACE INTO accessed_at (node_id, accessed_at) VALUES (?1, ?2)",
+            params![node.id.0, node.accessed_at.0],
+        )
+        .map_err(sqlite_error)?;
+        conn.execute(
+            "INSERT OR REPLACE INTO decay_checkpoint (node_id, decay_checkpoint) VALUES (?1, ?2)",
+            params![node.id.0, decay_checkpoint.0],
+        )
+        .map_err(sqlite_error)?;
+        conn.execute("DELETE FROM node_fts WHERE id = ?1", [node.id.0])
+            .map_err(sqlite_error)?;
+        conn.execute(
+            "INSERT INTO node_fts (id, name, content) VALUES (?1, ?2, ?3)",
+            params![node.id.0, node.name, node.content],
+        )
+        .map_err(sqlite_error)?;
+        conn.execute("DELETE FROM entity_tags WHERE node_id = ?1", [node.id.0])
+            .map_err(sqlite_error)?;
+        for tag in unique_strings(&node.entity_tags) {
+            conn.execute(
+                "INSERT OR IGNORE INTO entity_tags (node_id, tag) VALUES (?1, ?2)",
+                params![node.id.0, tag],
+            )
+            .map_err(sqlite_error)?;
+        }
+        Ok(())
+    })();
+
+    if let Err(error) = write_result {
+        let _ = conn.execute_batch("ROLLBACK;");
+        return Err(error);
     }
+
+    if let Err(error) = conn.execute_batch("COMMIT;").map_err(sqlite_error) {
+        let _ = conn.execute_batch("ROLLBACK;");
+        return Err(error);
+    }
+
     Ok(())
 }
 
 fn insert_edge_row(conn: &Connection, edge: &Edge) -> Result<(), Error> {
-    conn.execute(
-        "INSERT OR REPLACE INTO edges (
-            id, from_node, to_node, edge_type, weight, created_at, valid_from, valid_until, metadata
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-        params![
-            edge.id.0,
-            edge.source.0,
-            edge.target.0,
-            encode_edge_type(&edge.edge_type),
-            edge.weight,
-            edge.created_at.0,
-            edge.valid_from.map(|ts| ts.0),
-            edge.valid_until.map(|ts| ts.0),
-            encode_map(&edge.metadata),
-        ],
-    )
-    .map_err(sqlite_error)?;
+    conn.execute_batch("BEGIN IMMEDIATE;")
+        .map_err(sqlite_error)?;
+
+    let write_result = (|| -> Result<(), Error> {
+        conn.execute(
+            "INSERT OR REPLACE INTO edges (
+                id, from_node, to_node, edge_type, weight, created_at, valid_from, valid_until, metadata
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                edge.id.0,
+                edge.source.0,
+                edge.target.0,
+                encode_edge_type(&edge.edge_type),
+                edge.weight,
+                edge.created_at.0,
+                edge.valid_from.map(|ts| ts.0),
+                edge.valid_until.map(|ts| ts.0),
+                encode_map(&edge.metadata),
+            ],
+        )
+        .map_err(sqlite_error)?;
+        Ok(())
+    })();
+
+    if let Err(error) = write_result {
+        let _ = conn.execute_batch("ROLLBACK;");
+        return Err(error);
+    }
+
+    if let Err(error) = conn.execute_batch("COMMIT;").map_err(sqlite_error) {
+        let _ = conn.execute_batch("ROLLBACK;");
+        return Err(error);
+    }
+
     Ok(())
 }
 
@@ -1162,7 +1475,7 @@ fn decode_scope(value: &str) -> Result<ScopePath, Error> {
 fn make_fts_query(query: &str) -> String {
     query
         .split_whitespace()
-        .map(|part| format!("\"{}\"", part.replace('"', "\"\"")))
+        .map(|part| format!("\"{}\"*", part.replace('"', "\"\"")))
         .collect::<Vec<_>>()
         .join(" ")
 }

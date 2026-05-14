@@ -26,8 +26,8 @@ pub mod storage;
 // Core re-exports
 pub use api::{
     CrystallizeRequest, CrystallizeResult, DebugOutcome, DecayModel, EnergyModel, Engine,
-    EngineConfig, EvidenceResult, IngestResult, MassModel, MergeLog, MergePair, Observation,
-    ObservedRef, PerspectiveKey, ReflectReport, SessionSummary, SpreadingModel, TickReport,
+    EngineConfig, EvidenceResult, IngestResult, MergeLog, MergePair, Observation, ObservedRef,
+    PerspectiveKey, ReflectReport, SessionSummary, SpreadingModel, TickReport,
 };
 pub use embedding::EmbeddingProvider;
 #[cfg(feature = "embed")]
@@ -41,5 +41,5 @@ pub use query::{
     ContextPackage, Fragment, PackagingMode, Query, QueryConfig, SearchInput, SearchResult,
     SearchTrace, Tension, TokenBudget,
 };
-pub use snapshot::{InMemorySnapshot, SnapshotBackend, SnapshotEntry, SnapshotId, SnapshotStore};
-pub use storage::{InMemoryStorage, StorageAdapter};
+pub use snapshot::{SnapshotBackend, SnapshotEntry, SnapshotId, SnapshotStore};
+pub use storage::{SqliteStorage, StorageAdapter};
