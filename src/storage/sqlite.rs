@@ -1412,7 +1412,7 @@ fn decode_timestamp_deque(value: &str) -> Result<VecDeque<Timestamp>, Error> {
 
 fn encode_map(map: &HashMap<String, String>) -> String {
     let mut entries = map.iter().collect::<Vec<_>>();
-    entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+    entries.sort_by_key(|(left, _)| *left);
     entries
         .into_iter()
         .map(|(key, value)| format!("{}\t{}", escape_text(key), escape_text(value)))
