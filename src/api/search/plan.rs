@@ -85,16 +85,32 @@ pub(crate) fn decompose_query(query: &str) -> Vec<String> {
         }
     }
 
-    // English: "X of Y" → extract X and Y
-    if results.is_empty() {
-        if let Some(idx) = find_word_boundary(q, " of ") {
-            let x = q[..idx].trim();
-            let y = q[idx + 4..].trim().trim_end_matches('?').trim();
-            if !x.is_empty() {
-                results.push(x.to_string());
+    {
+        let targets: Vec<&str> = if results.is_empty() {
+            vec![q]
+        } else {
+            results.iter().map(String::as_str).collect()
+        };
+        let mut of_candidates: Vec<String> = Vec::new();
+        for target in &targets {
+            if let Some(idx) = find_word_boundary(target, " of ") {
+                let x = target[..idx].trim();
+                let y = target[idx + 4..].trim().trim_end_matches('?').trim();
+                if !x.is_empty() {
+                    of_candidates.push(x.to_string());
+                }
+                if !y.is_empty() && y != x {
+                    of_candidates.push(y.to_string());
+                }
             }
-            if !y.is_empty() && y != x {
-                results.push(y.to_string());
+        }
+        if results.is_empty() {
+            results = of_candidates;
+        } else {
+            for c in of_candidates {
+                if !results.contains(&c) {
+                    results.push(c);
+                }
             }
         }
     }
