@@ -1,6 +1,6 @@
 # Architecture Overview
 
-> **Implementation status:** v0.3.0 — Cognitive engine operational. Core mechanics, scoped graph recall, unified search, crystallization, snapshots, debug lifecycle, and bitemporal queries are implemented. See [Implementation Status](#implementation-status) for method-level detail.
+> **Implementation status:** v0.4.0 — Cognitive engine operational with SqliteStorage as the sole backend. Core mechanics, scoped graph recall, unified search, crystallization, snapshots, debug lifecycle, and bitemporal queries are implemented. See [Implementation Status](#implementation-status) for method-level detail.
 
 ## High-Level Design
 
@@ -28,7 +28,7 @@ Core data structures representing the knowledge graph:
   - created_at timestamp
   - Metadata
 
-- **Graph**: Generic container `Graph<S: StorageAdapter = InMemoryStorage>` — manages nodes and edges via static dispatch over the storage backend
+- **Graph**: Generic container `Graph<S: StorageAdapter = SqliteStorage>` — manages nodes and edges via static dispatch over the storage backend
 
 ### 2. Mechanics Layer (`src/mechanics/`)
 
@@ -94,20 +94,20 @@ Abstracts the storage backend behind a trait:
   - SoA hot fields: `get_salience()`, `set_salience()`, `get_accessed_at()`, `set_accessed_at()`, `get_node_type()` — O(1) direct array access
   - Counts & iteration: `node_count()`, `edge_count()`, `all_node_ids()`, `all_edge_ids()`
 
-- **InMemoryStorage** ✅: Arena-based `Vec<Option<Node>>` with SoA hot fields
-  - `nodes: Vec<Option<Node>>` — arena with tombstones for O(1) access by ID
-  - `salience: Vec<f64>`, `accessed_at: Vec<Timestamp>`, `node_types: Vec<Option<KnowledgeType>>` — Struct-of-Arrays for cache-friendly mechanics iteration
-  - `adjacency_out: Vec<Vec<EdgeId>>`, `adjacency_in: Vec<Vec<EdgeId>>` — outgoing/incoming adjacency lists
-  - ID recycling: `free_node_ids: Vec<NodeId>`, `free_edge_ids: Vec<EdgeId>` stacks
-  - SoA mutation invariant: `get_node_mut()` does not update SoA arrays; callers must use `set_salience()` / `set_accessed_at()` for hot fields
+- **SqliteStorage** ✅: Bundled SQLite via rusqlite with FTS5 full-text search and write-behind dirty tracking
+  - `Engine::new()` opens an in-memory SQLite database — zero config, no files
+  - `SqliteStorage::open(path)` opens a file-backed database for persistence across processes
+  - Hot fields (salience, accessed_at, decay_checkpoint) use write-behind dirty tracking; flushed in batch by `flush()`
+  - `set_node()` and `set_edge()` are write-through to keep FTS5 indexes consistent
+  - `get_node_mut()` does not update hot fields; callers must use `set_salience()` / `set_accessed_at()`
 
-- **Trigger indexes** ✅/🔜: Rebuildable projections from graph nodes to candidate `NodeId`s
-  - Text/keyword search returns `(NodeId, score)` and never becomes the source of truth
+- **Trigger indexes** ✅: Rebuildable projections from graph nodes to candidate `NodeId`s
+  - Text/keyword search via FTS5 returns `(NodeId, score)` and never becomes the source of truth
   - Embeddings stored on nodes are semantic cues, not standalone memories
-  - BM25, FTS, ANN, or other optimized indexes belong in storage adapters or optional features
+  - ANN or other optimized indexes belong in storage adapters or optional features
   - Every index hit must resolve back to graph nodes and edges before packaging
 
-- **Future Implementations**: SQLite, PostgreSQL adapters (implement `StorageAdapter` trait)
+- **Future Implementations**: PostgreSQL, Neo4j adapters (implement `StorageAdapter` trait)
 
 ### 5. Cognitive Physics Layer (`src/mechanics/` + query scoring)
 
@@ -127,16 +127,16 @@ Indexes answer “where should recall start?” The cognitive graph answers “w
 Public interface for consumers:
 
 ```rust
-/// Engine<S: StorageAdapter = InMemoryStorage>
-pub struct Engine<S: StorageAdapter = InMemoryStorage> {
+/// Engine<S: StorageAdapter = SqliteStorage>
+pub struct Engine<S: StorageAdapter = SqliteStorage> {
     graph: Graph<S>,
     config: EngineConfig,
 }
 
-impl Engine<InMemoryStorage> {
-    /// Default in-memory engine, default configuration
+impl Engine<SqliteStorage> {
+    /// Default in-memory SQLite engine, default configuration
     pub fn new() -> Self;
-    /// Custom configuration, in-memory storage
+    /// Custom configuration, in-memory SQLite storage
     pub fn with_config(config: EngineConfig) -> Self;
 }
 
@@ -340,7 +340,7 @@ Only `Supersedes` has asymmetric kappa (new knowledge → old gets 1.20; old →
 
 ## Design Principles
 
-- **Zero external dependencies** for core library (`std` only)
+- **rusqlite (bundled SQLite) is the sole external dependency for core** — optional `feature = "embed"` adds FastEmbed
 - **Pure functions** for all mechanics — testable, benchmarkable, no side effects
 - **Pluggable storage** via `StorageAdapter` trait — static dispatch, no boxing overhead
 - **No async** in core — consumers wrap with async if needed
@@ -369,13 +369,13 @@ Only `Supersedes` has asymmetric kappa (new knowledge → old gets 1.20; old →
 
 ## Implementation Status
 
-> v0.3.0 — Cognitive engine operational.
+> v0.4.0 — Cognitive engine operational with SqliteStorage as the sole backend.
 
 ### Implemented ✅
 
 **Graph Layer:**
-- Node/Edge CRUD with arena-based `InMemoryStorage` (`Vec<Option<Node>>` + SoA hot fields + adjacency index)
-- Generic `Graph<S: StorageAdapter = InMemoryStorage>` with static dispatch
+- Node/Edge CRUD with `SqliteStorage` (bundled SQLite, FTS5, write-behind dirty tracking for hot fields)
+- Generic `Graph<S: StorageAdapter = SqliteStorage>` with static dispatch
 - 12 KnowledgeType variants (Identity Star / Knowledge Planet / Memory Dust)
 - 12 EdgeType variants with directional κ multipliers
 - Node schema: name (L0), summary (L1), content (L2), embedding, origin, entity_tags, valid_from/until
@@ -412,7 +412,6 @@ Only `Supersedes` has asymmetric kappa (new knowledge → old gets 1.20; old →
 - **Hybrid trigger fusion**: Preserve lexical/vector/entity/temporal candidate ranks before graph recall
 - **Social reinforcement**: Multi-agent salience bonus — logarithmic boost for nodes independently confirmed by multiple agents
 - **Cognitive engine benchmarks**: CRUD/storage benchmarks exist; spreading activation and query pipeline benchmarks needed
-- **SQLite storage adapter**: Persist graph across processes
 
 ## Direction
 

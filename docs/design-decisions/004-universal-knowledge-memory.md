@@ -77,7 +77,7 @@ Add engine-level algorithms that require no LLM: Union-Find for connected compon
 - **Identity-in-graph is novel and consistent**: If knowledge nodes have physics, identity nodes should too. No existing system does this.
 - **Repulsion completes the physics model**: Attraction without repulsion cannot model contradiction or conflict.
 - **Multiple query modes match real usage**: Research shows spreading activation covers ~40% of agent queries. The remaining 60% need structured access.
-- **All changes preserve core principles**: No LLM in core. Zero external deps. Synchronous API. Consumer handles extraction.
+- **All changes preserve core principles**: No LLM in core. rusqlite is the sole external dependency. Synchronous API. Consumer handles extraction.
 
 ## Alternatives Considered
 

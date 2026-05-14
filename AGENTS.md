@@ -28,7 +28,7 @@ src/
 
 ## CONVENTIONS
 
-- **Zero external dependencies for core** — only std library; `feature = "embed"` adds optional FastEmbed
+- **rusqlite (bundled SQLite) is the sole external dependency for core** — `feature = "embed"` adds optional FastEmbed
 - **Trait-based storage** — `StorageAdapter` trait, swappable implementations
 - **Pure functions for mechanics** — all scoring/decay functions are pure (no side effects)
 - **Builder pattern for configuration** — EngineConfig, QueryConfig
@@ -58,19 +58,19 @@ cargo bench                    # Run benchmarks
 ```rust
 /// The Anamnesis cognitive graph engine.
 ///
-/// Generic over storage backend. Default: InMemoryStorage (arena-based, sub-millisecond access).
+/// Generic over storage backend. Default: SqliteStorage (in-memory SQLite, zero-config).
 /// Requires `S: Clone` for snapshot support.
-pub struct Engine<S: StorageAdapter + Clone = InMemoryStorage> {
+pub struct Engine<S: StorageAdapter + Clone = SqliteStorage> {
     graph: Graph<S>,
     config: EngineConfig,
     snapshots: SnapshotStore<S>,
 }
 
-impl Engine<InMemoryStorage> {
-    /// Create a new engine with default configuration and in-memory storage.
+impl Engine<SqliteStorage> {
+    /// Create a new engine with default configuration and in-memory SQLite storage.
     pub fn new() -> Self;
 
-    /// Create a new engine with custom configuration and in-memory storage.
+    /// Create a new engine with custom configuration and in-memory SQLite storage.
     pub fn with_config(config: EngineConfig) -> Self;
 }
 
@@ -330,14 +330,14 @@ The optional `FastEmbedProvider` (BAAI/bge-base-en-v1.5, 768 dims) is available 
 
 ```toml
 [dependencies]
-anamnesis = { version = "0.3", features = ["embed"] }
+anamnesis = { version = "0.4", features = ["embed"] }
 ```
 
-Note: `FastEmbedProvider::new()` downloads the model on first call (~100-500 MB). This is a runtime side effect, not a core behavior. The default build has zero additional dependencies.
+Note: `FastEmbedProvider::new()` downloads the model on first call (~100-500 MB). This is a runtime side effect, not a core behavior.
 
 ## StorageAdapter Interface
 
-21 required methods across five groups, plus 6 default helper methods:
+21 required methods across five groups, plus 7 default methods (6 helper + flush):
 
 ```rust
 pub trait StorageAdapter: Send + Sync {
@@ -381,15 +381,18 @@ pub trait StorageAdapter: Send + Sync {
     fn nodes_by_scope(&self, scope: &ScopePath) -> Vec<NodeId>;
     fn node_ids_descending(&self) -> Vec<NodeId>;
     fn text_search(&self, query: &str, limit: usize) -> Vec<(NodeId, f64)>;
+
+    // Flush — default no-op; override for write-behind backends
+    // Called by Engine::tick() and Engine::snapshot() to commit pending writes.
+    fn flush(&mut self) -> Result<(), Error> { Ok(()) }
 }
 ```
 
-Ships with `InMemoryStorage` (arena-based Vec, adjacency index, ID recycling, secondary indexes for entity tags, types, agents, and projects). Implement the trait for SQLite, PostgreSQL, Neo4j, or any other backend.
+Ships with `SqliteStorage` (bundled SQLite via rusqlite, FTS5 full-text search, write-behind dirty tracking for hot fields). `Engine::new()` opens an in-memory SQLite database — zero config, no files. For persistence, use `SqliteStorage::open(path)`. Implement the trait for PostgreSQL, Neo4j, or any other backend.
 
 ## Direction
 
 Planned features for future releases — none of these are implemented yet:
 
-- **SQLite storage adapter** — persistent storage with FTS5 support
 - **Social reinforcement scoring** — multi-agent salience bonus when multiple agents independently observe the same fragment
 - **`crystallize(session_id: &str)`** — session-level auto-consolidation (current `crystallize()` is consumer-driven; session-level auto-detection is not yet implemented)
