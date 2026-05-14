@@ -8,7 +8,7 @@ use crate::graph::{Edge, Graph, Node};
 use crate::graph::{EdgeId, EdgeType, KnowledgeType, MemoryTier, NodeId, ScopePath, Timestamp};
 use crate::query::{ContextPackage, Query, QueryConfig, SearchInput, SearchResult};
 use crate::snapshot::{SnapshotId, SnapshotStore};
-use crate::storage::{InMemoryStorage, StorageAdapter};
+use crate::storage::{SqliteStorage, StorageAdapter};
 
 mod search;
 
@@ -887,16 +887,16 @@ fn salience_tier(salience: f64) -> MemoryTier {
 /// The Anamnesis cognitive graph engine.
 ///
 /// `Engine<S>` is generic over the storage backend. The default is
-/// `InMemoryStorage` (arena-based, sub-millisecond access).
-pub struct Engine<S: StorageAdapter + Clone = InMemoryStorage> {
+/// `SqliteStorage` (in-memory SQLite with write-behind hot fields).
+pub struct Engine<S: StorageAdapter + Clone = SqliteStorage> {
     graph: Graph<S>,
     config: EngineConfig,
     snapshots: SnapshotStore<S>,
     events: Vec<GraphEvent>,
 }
 
-impl Engine<InMemoryStorage> {
-    /// Create a new engine with default configuration and in-memory storage.
+impl Engine<SqliteStorage> {
+    /// Create a new engine with default configuration and in-memory SQLite storage.
     pub fn new() -> Self {
         Engine {
             graph: Graph::new(),
@@ -917,7 +917,7 @@ impl Engine<InMemoryStorage> {
     }
 }
 
-impl Default for Engine<InMemoryStorage> {
+impl Default for Engine<SqliteStorage> {
     fn default() -> Self {
         Self::new()
     }
@@ -957,9 +957,11 @@ impl<S: StorageAdapter + Clone> Engine<S> {
     }
 
     /// Store a clone of the current storage state under a label.
-    pub fn snapshot(&mut self, label: &str) -> SnapshotId {
-        self.snapshots
-            .take(label, self.graph.storage(), Timestamp::now())
+    pub fn snapshot(&mut self, label: &str) -> Result<SnapshotId, Error> {
+        self.graph.storage_mut().flush()?;
+        Ok(self
+            .snapshots
+            .take(label, self.graph.storage(), Timestamp::now()))
     }
 
     /// Restore the graph storage from a previously captured snapshot.
@@ -2199,6 +2201,8 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             }
         }
 
+        self.graph.storage_mut().flush()?;
+
         Ok(TickReport {
             nodes_decayed,
             nodes_pruned,
@@ -3305,6 +3309,11 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         Ok(results)
     }
 
+    /// Compute read-only structural health diagnostics for the graph.
+    pub fn health(&self) -> crate::mechanics::health::GraphHealth {
+        crate::mechanics::health::compute_health(self.graph.storage())
+    }
+
     /// Generate a support report for a node.
     ///
     /// Traverses only direct edges (1-hop) from the target node to count supporting
@@ -3397,12 +3406,6 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             total_support_salience,
         })
     }
-
-    /// Compute read-only structural health diagnostics for the graph.
-    pub fn health(&self) -> crate::mechanics::health::GraphHealth {
-        crate::mechanics::health::compute_health(self.graph.storage())
-    }
-
     /// Read-only access to the underlying graph.
     pub fn graph(&self) -> &Graph<S> {
         &self.graph

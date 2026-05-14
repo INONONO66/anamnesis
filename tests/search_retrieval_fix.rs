@@ -221,7 +221,7 @@ fn test_search_episodic_content_preserved() {
         .ingest(Observation {
             name: "auth bug contradiction".into(),
             summary: Some("Contradicting fact".into()),
-            content: "Auth module is secure and has no bugs.".into(),
+            content: "Auth module session review: secure and has no bugs.".into(),
             embedding: None,
             confidence: 0.9,
             node_type: KnowledgeType::Semantic,

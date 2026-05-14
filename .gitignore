@@ -2,3 +2,4 @@
 *.local.md
 .sisyphus/
 longmemeval*.json
+.fastembed_cache/

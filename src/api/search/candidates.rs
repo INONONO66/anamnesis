@@ -112,7 +112,7 @@ mod tests {
     use super::*;
     use crate::graph::node::Origin;
     use crate::graph::{Graph, KnowledgeType, MemoryTier, Node, NodeId, Timestamp};
-    use crate::storage::InMemoryStorage;
+    use crate::storage::SqliteStorage;
     use std::collections::{HashMap, VecDeque};
 
     fn make_node(
@@ -150,7 +150,7 @@ mod tests {
     }
 
     fn add(
-        graph: &mut Graph<InMemoryStorage>,
+        graph: &mut Graph<SqliteStorage>,
         name: &str,
         content: &str,
         embedding: Option<Vec<f64>>,
@@ -163,7 +163,7 @@ mod tests {
         id
     }
 
-    fn build_graph<F: FnOnce(&mut Graph<InMemoryStorage>)>(seed: F) -> Graph<InMemoryStorage> {
+    fn build_graph<F: FnOnce(&mut Graph<SqliteStorage>)>(seed: F) -> Graph<SqliteStorage> {
         let mut graph = Graph::new();
         seed(&mut graph);
         graph

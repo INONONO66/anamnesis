@@ -2,7 +2,7 @@ use anamnesis::api::{IngestResult, Observation};
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{EdgeType, KnowledgeType, NodeId, Timestamp};
 use anamnesis::snapshot::{SnapshotId, SnapshotStore};
-use anamnesis::storage::{InMemoryStorage, StorageAdapter};
+use anamnesis::storage::{SqliteStorage, StorageAdapter};
 use anamnesis::{Engine, Error};
 
 fn observation(name: &str, timestamp: Timestamp) -> Observation {
@@ -38,7 +38,7 @@ fn restore_reverts_created_nodes_and_edges() {
     let second = ingest_node(&mut engine, "second", Timestamp(11));
     let original_edge = engine.link(first, second, EdgeType::Semantic, 0.8).unwrap();
 
-    let snapshot = engine.snapshot("baseline");
+    let snapshot = engine.snapshot("baseline").unwrap();
 
     let third = ingest_node(&mut engine, "third", Timestamp(13));
     engine.link(second, third, EdgeType::Causal, 0.7).unwrap();
@@ -71,7 +71,7 @@ fn restore_preserves_soa_hot_field_consistency() {
         .set_accessed_at(node, Timestamp(21))
         .unwrap();
 
-    let snapshot = engine.snapshot("hot-fields");
+    let snapshot = engine.snapshot("hot-fields").unwrap();
 
     engine
         .graph_mut()
@@ -97,10 +97,10 @@ fn restore_preserves_soa_hot_field_consistency() {
 fn multiple_snapshots_coexist_independently() {
     let mut engine = Engine::new();
     let first = ingest_node(&mut engine, "first", Timestamp(30));
-    let snapshot_one = engine.snapshot("one-node");
+    let snapshot_one = engine.snapshot("one-node").unwrap();
 
     let second = ingest_node(&mut engine, "second", Timestamp(32));
-    let snapshot_two = engine.snapshot("two-nodes");
+    let snapshot_two = engine.snapshot("two-nodes").unwrap();
 
     let third = ingest_node(&mut engine, "third", Timestamp(34));
     assert_eq!(engine.graph().node_count(), 3);
@@ -123,9 +123,9 @@ fn list_snapshots_exposes_ids_labels_and_timestamps() {
     let mut engine = Engine::new();
     ingest_node(&mut engine, "first", Timestamp(40));
 
-    let first = engine.snapshot("before-mutation");
+    let first = engine.snapshot("before-mutation").unwrap();
     ingest_node(&mut engine, "second", Timestamp(42));
-    let second = engine.snapshot("after-mutation");
+    let second = engine.snapshot("after-mutation").unwrap();
 
     let snapshots = engine.list_snapshots();
     assert_eq!(snapshots.len(), 2);
@@ -150,7 +150,7 @@ fn restore_missing_snapshot_returns_error() {
 
 #[test]
 fn snapshot_store_drop_removes_only_requested_entry() {
-    let storage = InMemoryStorage::new();
+    let storage = SqliteStorage::new().unwrap();
     let mut store = SnapshotStore::new();
 
     let first = store.take("first", &storage, Timestamp(50));

@@ -75,10 +75,10 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-anamnesis = "0.3"
+anamnesis = "0.4"
 
 # Optional: local embedding provider (downloads model on first use, ~100-500 MB)
-# anamnesis = { version = "0.3", features = ["embed"] }
+# anamnesis = { version = "0.4", features = ["embed"] }
 ```
 
 ```rust
@@ -285,7 +285,7 @@ src/
 │   ├── perception     Novelty, confidence, and budget gating
 │   └── forgetting     Exponential/ACT-R decay + reinforcement
 ├── query/          Spreading activation, k-hop neighborhood, unified search
-├── storage/        StorageAdapter trait + InMemoryStorage
+├── storage/        StorageAdapter trait + SqliteStorage
 ├── embedding/      EmbeddingProvider trait + optional FastEmbedProvider
 ├── snapshot/       Clone-based snapshot storage
 └── api/            Engine — public interface
@@ -435,16 +435,20 @@ pub trait StorageAdapter: Send + Sync {
     fn nodes_by_scope(&self, scope: &ScopePath) -> Vec<NodeId>;
     fn node_ids_descending(&self) -> Vec<NodeId>;
     fn text_search(&self, query: &str, limit: usize) -> Vec<(NodeId, f64)>;
+
+    // Flush — default no-op; override for write-behind backends
+    // Called by Engine::tick() and Engine::snapshot() to commit pending writes.
+    fn flush(&mut self) -> Result<(), Error> { Ok(()) }
 }
 ```
 
-Ships with `InMemoryStorage` (arena-based Vec, adjacency index, ID recycling, secondary indexes for entity tags, types, agents, and scopes). Implement the trait for SQLite, PostgreSQL, Neo4j, or any other backend.
+Ships with `SqliteStorage` (bundled SQLite via rusqlite, FTS5 full-text search, write-behind dirty tracking for hot fields). `Engine::new()` opens an in-memory SQLite database — zero config, no files. For persistence, use `SqliteStorage::open(path)`. Implement the trait for PostgreSQL, Neo4j, or any other backend.
 
 </details>
 
 ## Design Principles
 
-- **Zero external dependencies** — core uses only `std`; optional `feature = "embed"` adds FastEmbed
+- **rusqlite (bundled SQLite) is the sole external dependency for core** — optional `feature = "embed"` adds FastEmbed
 - **Pure functions** for all mechanics — testable, benchmarkable, no side effects
 - **Pluggable storage** via `StorageAdapter` trait
 - **No async in core** — consumers wrap with async if needed
@@ -484,12 +488,12 @@ cargo bench                    # Run benchmarks
 
 ## Status
 
-**v0.3.0** — Full cognitive engine with debug lifecycle, snapshots, embedding provider, and unified search.
+**v0.4.0** — SqliteStorage replaces InMemoryStorage as the sole backend; full cognitive engine with debug lifecycle, snapshots, embedding provider, and unified search.
 
 | Layer | Status | Notes |
 |:------|:-------|:------|
-| Graph (Node, Edge, CRUD) | ✅ | Arena-based storage with SoA hot fields |
-| In-memory storage | ✅ | `InMemoryStorage` with adjacency index, ID recycling, secondary indexes |
+| Graph (Node, Edge, CRUD) | ✅ | SQLite-backed storage with SoA hot fields and write-behind dirty tracking |
+| SQLite storage | ✅ | `SqliteStorage` with FTS5 full-text search, adjacency index, ID recycling, secondary indexes |
 | Engine API | ✅ | All method signatures finalized |
 | Attraction | ✅ | Wired into `ingest()` — auto-linking with type affinity |
 | Gravity | ✅ | Mass computation wired into `ingest()` and `query()` |
@@ -518,7 +522,6 @@ cargo bench                    # Run benchmarks
 | Memory tier control | ✅ | `set_tier()` / `get_tier()` — Core tier protected from decay |
 | Hopfield energy model | ✅ | Pattern-completion scoring behind `EnergyModel::Hopfield` |
 | `merge_candidates()` / `auto_merge()` | ⚠️ | Deprecated since 0.3.0; use `EngineConfig::dedup_threshold` |
-| SQLite storage adapter | 🔜 | Persistent storage with FTS5 support |
 | Social reinforcement scoring | 🔜 | Multi-agent salience bonus for independently observed fragments |
 
 ## References

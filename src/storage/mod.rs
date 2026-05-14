@@ -1,15 +1,11 @@
 //! Storage abstraction for the Anamnesis graph engine.
 //!
 //! The `StorageAdapter` trait defines the interface for all storage backends.
-//! `InMemoryStorage` is the default implementation using arena-based storage
-//! with Struct of Arrays (SoA) hot fields for cache-friendly physics operations.
+//! `SqliteStorage` is the default implementation, using an in-memory SQLite
+//! database with write-behind dirty tracking for hot fields and FTS5 text search.
 
-pub mod memory;
-#[cfg(feature = "sqlite")]
 pub mod sqlite;
 
-pub use memory::InMemoryStorage;
-#[cfg(feature = "sqlite")]
 pub use sqlite::SqliteStorage;
 
 use crate::error::Error;
@@ -18,8 +14,8 @@ use crate::graph::{Edge, EdgeId, KnowledgeType, Node, NodeId, ScopePath, Timesta
 /// Storage backend interface for the Anamnesis graph engine.
 ///
 /// Implementations must provide O(1) amortized node/edge access.
-/// The `InMemoryStorage` implementation uses arena-based Vec storage
-/// with SoA hot fields for sub-millisecond spreading activation.
+/// The `SqliteStorage` implementation uses an in-memory SQLite database
+/// with cached graph objects and SoA hot fields for fast spreading activation.
 ///
 /// # Decay Checkpoint Invariant
 ///
@@ -101,6 +97,13 @@ pub trait StorageAdapter: Send + Sync {
     /// `Engine::touch()` and `set_node()` keep this equal to `accessed_at`;
     /// `Engine::tick()` advances it independently.
     fn set_decay_checkpoint(&mut self, id: NodeId, ts: Timestamp) -> Result<(), Error>;
+    /// Persist any buffered hot-field writes.
+    ///
+    /// Storage backends that write hot fields immediately can use this default no-op.
+    /// Write-behind backends should override it and preserve dirty state on failure.
+    fn flush(&mut self) -> Result<(), Error> {
+        Ok(())
+    }
     /// Get node type for a node. O(1) direct array access.
     fn get_node_type(&self, id: NodeId) -> Result<&KnowledgeType, Error>;
 

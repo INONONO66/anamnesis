@@ -204,7 +204,7 @@ fn snapshot_round_trip_preserves_checkpoint() {
     let id = ingest_first(&mut engine, observation_at("zeta", 0));
 
     engine.tick(Timestamp(3 * DAY_MS)).unwrap();
-    let snap = engine.snapshot("after-tick");
+    let snap = engine.snapshot("after-tick").unwrap();
 
     engine.touch(id, Timestamp(4 * DAY_MS)).unwrap();
     assert_eq!(

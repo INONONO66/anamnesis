@@ -11,29 +11,29 @@ pub use scope::{ScopePath, ScopeRelation};
 pub use types::{EdgeId, EdgeType, KnowledgeType, MemoryTier, NodeId, Timestamp};
 
 use crate::error::Error;
-use crate::storage::{InMemoryStorage, StorageAdapter};
+use crate::storage::{SqliteStorage, StorageAdapter};
 
 /// The cognitive graph — a directed graph of knowledge fragments.
 ///
 /// `Graph<S>` is generic over the storage backend. The default backend
-/// is `InMemoryStorage` (arena-based, sub-millisecond access).
+/// is `SqliteStorage` (in-memory SQLite with write-behind hot fields).
 ///
 /// All data lives in the storage backend. `Graph` provides typed
 /// query methods on top of the raw storage interface.
-pub struct Graph<S: StorageAdapter = InMemoryStorage> {
+pub struct Graph<S: StorageAdapter = SqliteStorage> {
     storage: S,
 }
 
-impl Graph<InMemoryStorage> {
-    /// Create a new graph with the default in-memory storage backend.
+impl Graph<SqliteStorage> {
+    /// Create a new graph with the default SQLite storage backend (in-memory).
     pub fn new() -> Self {
         Graph {
-            storage: InMemoryStorage::new(),
+            storage: SqliteStorage::new().expect("failed to initialize in-memory SQLite storage"),
         }
     }
 }
 
-impl Default for Graph<InMemoryStorage> {
+impl Default for Graph<SqliteStorage> {
     fn default() -> Self {
         Self::new()
     }

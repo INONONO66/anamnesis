@@ -8,7 +8,6 @@
 
 use crate::error::Error;
 use crate::graph::Timestamp;
-use crate::storage::InMemoryStorage;
 
 /// Unique identifier for an engine snapshot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -119,6 +118,3 @@ impl<S: Clone> SnapshotBackend<S> for SnapshotStore<S> {
         SnapshotStore::drop_snapshot(self, id)
     }
 }
-
-/// Snapshot store for the default in-memory storage backend.
-pub type InMemorySnapshot = SnapshotStore<InMemoryStorage>;

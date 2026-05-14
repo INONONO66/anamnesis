@@ -2,7 +2,7 @@ use std::collections::{HashMap, VecDeque};
 
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{KnowledgeType, MemoryTier, Node, ScopePath, Timestamp};
-use anamnesis::{InMemoryStorage, NodeId, StorageAdapter};
+use anamnesis::{NodeId, SqliteStorage, StorageAdapter};
 
 fn node(id: NodeId, scope: &str) -> Node {
     Node {
@@ -34,7 +34,7 @@ fn node(id: NodeId, scope: &str) -> Node {
 
 #[test]
 fn scope_index_populated_on_set_node() {
-    let mut storage = InMemoryStorage::new();
+    let mut storage = SqliteStorage::new().unwrap();
     let id = storage.next_node_id();
     storage.set_node(node(id, "project/a")).unwrap();
 
@@ -44,7 +44,7 @@ fn scope_index_populated_on_set_node() {
 
 #[test]
 fn scope_index_pruned_on_delete_node() {
-    let mut storage = InMemoryStorage::new();
+    let mut storage = SqliteStorage::new().unwrap();
     let id = storage.next_node_id();
     storage.set_node(node(id, "project/a")).unwrap();
     storage.delete_node(id).unwrap();
@@ -55,7 +55,7 @@ fn scope_index_pruned_on_delete_node() {
 
 #[test]
 fn scope_index_updated_on_set_node_with_new_scope() {
-    let mut storage = InMemoryStorage::new();
+    let mut storage = SqliteStorage::new().unwrap();
     let id = storage.next_node_id();
     storage.set_node(node(id, "project/a")).unwrap();
     storage.set_node(node(id, "project/b")).unwrap();
@@ -68,7 +68,7 @@ fn scope_index_updated_on_set_node_with_new_scope() {
 
 #[test]
 fn scope_index_clone_round_trip() {
-    let mut storage = InMemoryStorage::new();
+    let mut storage = SqliteStorage::new().unwrap();
     let id = storage.next_node_id();
     storage.set_node(node(id, "project/a")).unwrap();
 
@@ -82,7 +82,7 @@ fn scope_index_clone_round_trip() {
 
 #[test]
 fn nodes_by_scope_returns_insertion_order() {
-    let mut storage = InMemoryStorage::new();
+    let mut storage = SqliteStorage::new().unwrap();
     let first = storage.next_node_id();
     let second = storage.next_node_id();
     let third = storage.next_node_id();

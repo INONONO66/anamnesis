@@ -1,9 +1,9 @@
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{KnowledgeType, MemoryTier, Node, NodeId, Timestamp};
-use anamnesis::storage::{InMemoryStorage, StorageAdapter};
+use anamnesis::storage::{SqliteStorage, StorageAdapter};
 use std::collections::{HashMap, VecDeque};
 
-fn insert_node_with_content(s: &mut InMemoryStorage, content: &str) -> NodeId {
+fn insert_node_with_content(s: &mut SqliteStorage, content: &str) -> NodeId {
     let id = s.next_node_id();
     let node = Node {
         id,
@@ -36,7 +36,7 @@ fn insert_node_with_content(s: &mut InMemoryStorage, content: &str) -> NodeId {
 
 #[test]
 fn default_text_search_substring_match() {
-    let mut s = InMemoryStorage::new();
+    let mut s = SqliteStorage::new().unwrap();
     let id = insert_node_with_content(&mut s, "auth uses factory");
     let results = s.text_search("factory", 10);
     assert!(results.iter().any(|(nid, _)| *nid == id));
@@ -44,7 +44,7 @@ fn default_text_search_substring_match() {
 
 #[test]
 fn text_search_case_insensitive() {
-    let mut s = InMemoryStorage::new();
+    let mut s = SqliteStorage::new().unwrap();
     let id = insert_node_with_content(&mut s, "Auth Uses Factory");
     let results = s.text_search("factory", 10);
     assert!(results.iter().any(|(nid, _)| *nid == id));
@@ -52,7 +52,7 @@ fn text_search_case_insensitive() {
 
 #[test]
 fn text_search_limit_respected() {
-    let mut s = InMemoryStorage::new();
+    let mut s = SqliteStorage::new().unwrap();
     for i in 0..5 {
         insert_node_with_content(&mut s, &format!("factory node {}", i));
     }
@@ -62,7 +62,7 @@ fn text_search_limit_respected() {
 
 #[test]
 fn text_search_no_match() {
-    let mut s = InMemoryStorage::new();
+    let mut s = SqliteStorage::new().unwrap();
     insert_node_with_content(&mut s, "auth uses factory");
     let results = s.text_search("nonexistent", 10);
     assert!(results.is_empty());
@@ -70,7 +70,7 @@ fn text_search_no_match() {
 
 #[test]
 fn text_search_matches_content_field() {
-    let mut s = InMemoryStorage::new();
+    let mut s = SqliteStorage::new().unwrap();
     let id = s.next_node_id();
     let node = Node {
         id,
@@ -104,9 +104,13 @@ fn text_search_matches_content_field() {
 
 #[test]
 fn text_search_substring_score_is_fuzzy() {
-    let mut s = InMemoryStorage::new();
+    let mut s = SqliteStorage::new().unwrap();
     insert_node_with_content(&mut s, "factory pattern");
     let results = s.text_search("factory", 10);
     assert!(!results.is_empty());
-    assert_eq!(results[0].1, 0.5);
+    let score = results[0].1;
+    assert!(
+        score > 0.0 && score <= 1.0,
+        "score should be in (0, 1], got {score}"
+    );
 }

@@ -2,7 +2,7 @@ use anamnesis::graph::node::Origin;
 use anamnesis::graph::scope::ScopePath;
 use anamnesis::graph::{Edge, EdgeId, EdgeType, KnowledgeType, Node, NodeId, Timestamp};
 use anamnesis::mechanics::topology;
-use anamnesis::storage::{InMemoryStorage, StorageAdapter};
+use anamnesis::storage::{SqliteStorage, StorageAdapter};
 
 fn make_origin(agent: &str, session: &str, scope: &str) -> Origin {
     Origin {
@@ -38,7 +38,7 @@ fn make_node(id: u64, agent: &str, session: &str, scope: &str) -> Node {
 
 #[test]
 fn test_degree_in_out_total() {
-    let mut storage = InMemoryStorage::new();
+    let mut storage = SqliteStorage::new().unwrap();
     let node1 = make_node(1, "agent-1", "session-1", "project-a");
     let node2 = make_node(2, "agent-1", "session-1", "project-a");
     let node3 = make_node(3, "agent-1", "session-1", "project-a");
@@ -88,7 +88,7 @@ fn test_degree_in_out_total() {
 
 #[test]
 fn test_is_orphan() {
-    let mut storage = InMemoryStorage::new();
+    let mut storage = SqliteStorage::new().unwrap();
     let node = make_node(1, "agent-1", "session-1", "project-a");
     storage.set_node(node).expect("set node");
 
@@ -97,7 +97,7 @@ fn test_is_orphan() {
 
 #[test]
 fn test_bridge_score_cross_scope() {
-    let mut storage = InMemoryStorage::new();
+    let mut storage = SqliteStorage::new().unwrap();
 
     let node1 = make_node(1, "agent-1", "session-1", "project-a");
     let node2 = make_node(2, "agent-1", "session-1", "project-a");
@@ -139,7 +139,7 @@ fn test_bridge_score_cross_scope() {
 
 #[test]
 fn test_support_score_filters_edges() {
-    let mut storage = InMemoryStorage::new();
+    let mut storage = SqliteStorage::new().unwrap();
 
     let node1 = make_node(1, "agent-1", "session-1", "project-a");
     let node2 = make_node(2, "agent-1", "session-1", "project-a");
@@ -199,7 +199,7 @@ fn test_support_score_filters_edges() {
 
 #[test]
 fn test_support_score_no_incoming() {
-    let mut storage = InMemoryStorage::new();
+    let mut storage = SqliteStorage::new().unwrap();
     let node = make_node(1, "agent-1", "session-1", "project-a");
     storage.set_node(node).expect("set node");
 
@@ -209,7 +209,7 @@ fn test_support_score_no_incoming() {
 
 #[test]
 fn test_bridge_score_zero_reference() {
-    let mut storage = InMemoryStorage::new();
+    let mut storage = SqliteStorage::new().unwrap();
     let node = make_node(1, "agent-1", "session-1", "project-a");
     storage.set_node(node).expect("set node");
 
@@ -219,7 +219,7 @@ fn test_bridge_score_zero_reference() {
 
 #[test]
 fn test_support_score_all_supportive_edges() {
-    let mut storage = InMemoryStorage::new();
+    let mut storage = SqliteStorage::new().unwrap();
 
     let node1 = make_node(1, "agent-1", "session-1", "project-a");
     let node2 = make_node(2, "agent-1", "session-1", "project-a");

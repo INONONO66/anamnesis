@@ -16,7 +16,7 @@ use anamnesis::graph::node::Origin;
 use anamnesis::graph::scope::{ScopePath, ScopeRelation};
 use anamnesis::graph::{KnowledgeType, MemoryTier, Node, Timestamp};
 use anamnesis::query::{SearchInput, scope_weight};
-use anamnesis::{Engine, EngineConfig, InMemoryStorage, IngestResult, NodeId, StorageAdapter};
+use anamnesis::{Engine, EngineConfig, IngestResult, NodeId, SqliteStorage, StorageAdapter};
 
 // ===== 6 Relation Cases =====
 
@@ -208,7 +208,7 @@ fn make_indexed_node(id: NodeId, scope: &str) -> Node {
 
 #[test]
 fn scope_index_lookup_o1_after_insert() {
-    let mut storage = InMemoryStorage::new();
+    let mut storage = SqliteStorage::new().unwrap();
     let id_a = storage.next_node_id();
     let id_b = storage.next_node_id();
     let id_c = storage.next_node_id();
@@ -234,7 +234,7 @@ fn scope_index_lookup_o1_after_insert() {
 
 #[test]
 fn scope_index_clone_round_trip() {
-    let mut storage = InMemoryStorage::new();
+    let mut storage = SqliteStorage::new().unwrap();
     let a = storage.next_node_id();
     let b = storage.next_node_id();
     storage
@@ -261,7 +261,7 @@ fn scope_index_clone_round_trip() {
 
 #[test]
 fn scope_index_delete_then_reuse_node_id() {
-    let mut storage = InMemoryStorage::new();
+    let mut storage = SqliteStorage::new().unwrap();
     let id = storage.next_node_id();
     storage
         .set_node(make_indexed_node(id, "personal/foo"))
