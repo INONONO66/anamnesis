@@ -127,8 +127,8 @@ Indexes answer “where should recall start?” The cognitive graph answers “w
 Public interface for consumers:
 
 ```rust
-/// Engine<S: StorageAdapter = SqliteStorage>
-pub struct Engine<S: StorageAdapter = SqliteStorage> {
+/// Engine<S: StorageAdapter + Clone = SqliteStorage>
+pub struct Engine<S: StorageAdapter + Clone = SqliteStorage> {
     graph: Graph<S>,
     config: EngineConfig,
 }

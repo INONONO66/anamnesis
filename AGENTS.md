@@ -81,7 +81,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
     // --- Snapshot ---
 
     /// Store a clone of the current storage state under a label.
-    pub fn snapshot(&mut self, label: &str) -> SnapshotId;
+    pub fn snapshot(&mut self, label: &str) -> Result<SnapshotId, Error>;
 
     /// Restore the graph storage from a previously captured snapshot.
     pub fn restore(&mut self, id: &SnapshotId) -> Result<(), Error>;
@@ -337,7 +337,7 @@ Note: `FastEmbedProvider::new()` downloads the model on first call (~100-500 MB)
 
 ## StorageAdapter Interface
 
-21 required methods across five groups, plus 7 default methods (6 helper + flush):
+21 required methods across six groups, plus 7 default methods (6 helper + flush):
 
 ```rust
 pub trait StorageAdapter: Send + Sync {
