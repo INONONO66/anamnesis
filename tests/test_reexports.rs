@@ -46,8 +46,8 @@ fn test_api_types_import() {
 
 #[test]
 fn test_storage_import() {
-    use anamnesis::{InMemoryStorage, StorageAdapter};
-    let _ = InMemoryStorage::new();
+    use anamnesis::{SqliteStorage, StorageAdapter};
+    let _ = SqliteStorage::new().unwrap();
     let _ = std::any::type_name::<dyn StorageAdapter>();
 }
 

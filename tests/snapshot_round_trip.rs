@@ -88,7 +88,7 @@ fn snapshot_preserves_scope_index() {
         );
     }
 
-    let snap = engine.snapshot("ten-nodes-five-scopes");
+    let snap = engine.snapshot("ten-nodes-five-scopes").unwrap();
 
     // Mutate after snapshot so that restore has something to revert.
     ingest_at(&mut engine, "extra-a", scopes[0], Timestamp(1000));
@@ -139,7 +139,7 @@ fn snapshot_preserves_decay_checkpoint() {
     assert_eq!(pre_accessed_a, Timestamp(0));
     assert_eq!(pre_accessed_b, Timestamp(0));
 
-    let snap = engine.snapshot("post-tick");
+    let snap = engine.snapshot("post-tick").unwrap();
 
     // Mutate: another tick + a touch on one node should diverge both checkpoints
     // and accessed_at on id_a from the snapshot baseline.
@@ -190,7 +190,7 @@ fn snapshot_after_node_delete() {
     assert_eq!(engine.graph().node_count(), 2);
     assert!(engine.graph().get_node(id_b).is_err());
 
-    let snap = engine.snapshot("post-delete");
+    let snap = engine.snapshot("post-delete").unwrap();
 
     // Mutate: re-ingest. With LIFO free_node_ids, the next allocation reuses id_b,
     // so the new node fills the freed slot. This proves the snapshot must remember
@@ -240,7 +240,7 @@ fn snapshot_then_ingest_then_restore() {
     let id_a = ingest_at(&mut engine, "alpha", DEFAULT_SCOPE, Timestamp(0));
     assert_eq!(engine.graph().node_count(), 1);
 
-    let snap = engine.snapshot("only-alpha");
+    let snap = engine.snapshot("only-alpha").unwrap();
 
     let id_b = ingest_at(&mut engine, "bravo", DEFAULT_SCOPE, Timestamp(1));
     assert_eq!(engine.graph().node_count(), 2);
@@ -279,7 +279,7 @@ fn snapshot_preserves_hot_fields_atomically() {
     let pre_node_type = engine.graph().storage().get_node_type(id).unwrap().clone();
     let pre_node_name = engine.graph().get_node(id).unwrap().name.clone();
 
-    let snap = engine.snapshot("hot-field-baseline");
+    let snap = engine.snapshot("hot-field-baseline").unwrap();
 
     // Mutate every hot field aggressively so the restore actually has to revert.
     engine

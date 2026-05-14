@@ -3,7 +3,7 @@ use std::collections::{HashMap, VecDeque};
 
 use anamnesis::graph::node::Origin;
 use anamnesis::{
-    Edge, EdgeId, EdgeType, InMemoryStorage, KnowledgeType, Node, NodeId, StorageAdapter, Timestamp,
+    Edge, EdgeId, EdgeType, KnowledgeType, Node, NodeId, SqliteStorage, StorageAdapter, Timestamp,
 };
 
 fn make_node(id: NodeId) -> Node {
@@ -51,7 +51,7 @@ fn make_edge(id: EdgeId, source: NodeId, target: NodeId) -> Edge {
 fn bench_storage_set_get_node(c: &mut Criterion) {
     c.bench_function("storage_set_then_get_node", |b| {
         b.iter(|| {
-            let mut storage = InMemoryStorage::new();
+            let mut storage = SqliteStorage::new().unwrap();
             let id = storage.next_node_id();
             storage.set_node(black_box(make_node(id))).unwrap();
             let node = storage.get_node(id).unwrap();
@@ -64,7 +64,7 @@ fn bench_storage_hot_fields(c: &mut Criterion) {
     let mut group = c.benchmark_group("storage_hot_fields");
 
     group.bench_function("get_set_salience", |b| {
-        let mut storage = InMemoryStorage::new();
+        let mut storage = SqliteStorage::new().unwrap();
         let id = storage.next_node_id();
         storage.set_node(make_node(id)).unwrap();
         b.iter(|| {
@@ -74,7 +74,7 @@ fn bench_storage_hot_fields(c: &mut Criterion) {
     });
 
     group.bench_function("get_set_accessed_at", |b| {
-        let mut storage = InMemoryStorage::new();
+        let mut storage = SqliteStorage::new().unwrap();
         let id = storage.next_node_id();
         storage.set_node(make_node(id)).unwrap();
         b.iter(|| {
@@ -86,7 +86,7 @@ fn bench_storage_hot_fields(c: &mut Criterion) {
     });
 
     group.bench_function("get_node_type", |b| {
-        let mut storage = InMemoryStorage::new();
+        let mut storage = SqliteStorage::new().unwrap();
         let id = storage.next_node_id();
         storage.set_node(make_node(id)).unwrap();
         b.iter(|| black_box(storage.get_node_type(id).unwrap()))
@@ -99,7 +99,7 @@ fn bench_storage_adjacency(c: &mut Criterion) {
     let mut group = c.benchmark_group("storage_adjacency");
     for size in [10usize, 100, 1_000] {
         group.bench_with_input(BenchmarkId::new("edges_from", size), &size, |b, &size| {
-            let mut storage = InMemoryStorage::new();
+            let mut storage = SqliteStorage::new().unwrap();
             let hub = storage.next_node_id();
             storage.set_node(make_node(hub)).unwrap();
             for _ in 0..size {
@@ -117,7 +117,7 @@ fn bench_storage_adjacency(c: &mut Criterion) {
 fn bench_storage_delete_node(c: &mut Criterion) {
     c.bench_function("storage_delete_and_reuse", |b| {
         b.iter(|| {
-            let mut storage = InMemoryStorage::new();
+            let mut storage = SqliteStorage::new().unwrap();
             let id = storage.next_node_id();
             storage.set_node(make_node(id)).unwrap();
             storage.delete_node(id).unwrap();

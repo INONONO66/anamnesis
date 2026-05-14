@@ -1,4 +1,4 @@
-//! Comprehensive tests for InMemoryStorage Clone implementation.
+//! Comprehensive tests for SqliteStorage Clone implementation.
 //!
 //! Verifies that cloned storage is fully independent from the original,
 //! preserves all data structures (nodes, edges, hot fields, indexes),
@@ -6,7 +6,7 @@
 
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{Edge, EdgeId, EdgeType, KnowledgeType, Node, NodeId, Timestamp};
-use anamnesis::storage::{InMemoryStorage, StorageAdapter};
+use anamnesis::storage::{SqliteStorage, StorageAdapter};
 use std::collections::HashMap;
 
 /// Helper to create a test node with given ID and type.
@@ -56,7 +56,7 @@ fn make_edge(id: EdgeId, source: NodeId, target: NodeId) -> Edge {
 #[test]
 fn clone_independence_nodes() {
     // Create original storage with nodes
-    let mut original = InMemoryStorage::new();
+    let mut original = SqliteStorage::new().unwrap();
     let node1 = make_node(NodeId(0), KnowledgeType::Semantic, "node1");
     let node2 = make_node(NodeId(1), KnowledgeType::Decision, "node2");
 
@@ -87,7 +87,7 @@ fn clone_independence_nodes() {
 #[test]
 fn clone_independence_edges() {
     // Create original storage with nodes and edges
-    let mut original = InMemoryStorage::new();
+    let mut original = SqliteStorage::new().unwrap();
     let node1 = make_node(NodeId(0), KnowledgeType::Semantic, "node1");
     let node2 = make_node(NodeId(1), KnowledgeType::Decision, "node2");
 
@@ -120,7 +120,7 @@ fn clone_independence_edges() {
 #[test]
 fn clone_soa_hot_fields_consistency() {
     // Create original storage with a node
-    let mut original = InMemoryStorage::new();
+    let mut original = SqliteStorage::new().unwrap();
     let node = make_node(NodeId(0), KnowledgeType::Semantic, "test");
     original.set_node(node).unwrap();
 
@@ -153,7 +153,7 @@ fn clone_soa_hot_fields_consistency() {
 #[test]
 fn clone_soa_hot_fields_independence() {
     // Create original storage with a node
-    let mut original = InMemoryStorage::new();
+    let mut original = SqliteStorage::new().unwrap();
     let node = make_node(NodeId(0), KnowledgeType::Semantic, "test");
     original.set_node(node).unwrap();
 
@@ -181,7 +181,7 @@ fn clone_soa_hot_fields_independence() {
 #[test]
 fn clone_adjacency_index_preservation() {
     // Create original storage with nodes and edges
-    let mut original = InMemoryStorage::new();
+    let mut original = SqliteStorage::new().unwrap();
     let node1 = make_node(NodeId(0), KnowledgeType::Semantic, "node1");
     let node2 = make_node(NodeId(1), KnowledgeType::Decision, "node2");
     let node3 = make_node(NodeId(2), KnowledgeType::Episodic, "node3");
@@ -226,7 +226,7 @@ fn clone_adjacency_index_preservation() {
 #[test]
 fn clone_secondary_indexes_preservation() {
     // Create original storage with nodes having different tags and types
-    let mut original = InMemoryStorage::new();
+    let mut original = SqliteStorage::new().unwrap();
 
     let mut node1 = make_node(NodeId(0), KnowledgeType::Semantic, "node1");
     node1.entity_tags = vec!["auth".to_string(), "security".to_string()];
@@ -292,7 +292,7 @@ fn clone_secondary_indexes_preservation() {
 #[test]
 fn clone_text_search_preservation() {
     // Create original storage with nodes
-    let mut original = InMemoryStorage::new();
+    let mut original = SqliteStorage::new().unwrap();
 
     let mut node1 = make_node(NodeId(0), KnowledgeType::Semantic, "authentication system");
     node1.content = "The authentication system uses OAuth2 for security".to_string();
@@ -323,7 +323,7 @@ fn clone_text_search_preservation() {
 #[test]
 fn clone_all_node_ids_and_edge_ids() {
     // Create original storage with multiple nodes and edges
-    let mut original = InMemoryStorage::new();
+    let mut original = SqliteStorage::new().unwrap();
 
     for i in 0..5 {
         let node = make_node(NodeId(i), KnowledgeType::Semantic, &format!("node{}", i));
@@ -358,7 +358,7 @@ fn clone_all_node_ids_and_edge_ids() {
 #[test]
 fn clone_with_deleted_nodes_and_edges() {
     // Create original storage with nodes and edges
-    let mut original = InMemoryStorage::new();
+    let mut original = SqliteStorage::new().unwrap();
 
     let node1 = make_node(NodeId(0), KnowledgeType::Semantic, "node1");
     let node2 = make_node(NodeId(1), KnowledgeType::Decision, "node2");
@@ -404,7 +404,7 @@ fn clone_with_deleted_nodes_and_edges() {
 #[test]
 fn clone_id_allocation_independence() {
     // Create original storage and allocate some IDs
-    let mut original = InMemoryStorage::new();
+    let mut original = SqliteStorage::new().unwrap();
 
     let id1 = original.next_node_id();
     let id2 = original.next_node_id();

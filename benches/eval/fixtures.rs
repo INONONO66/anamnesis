@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use anamnesis::api::{IngestResult, Observation};
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{EdgeType, KnowledgeType, ScopePath, Timestamp};
-use anamnesis::storage::InMemoryStorage;
+use anamnesis::storage::SqliteStorage;
 use anamnesis::{Engine, EngineConfig, NodeId};
 
 /// Captured fixture state — engine plus a symbolic name → NodeId lookup.
@@ -32,7 +32,7 @@ use anamnesis::{Engine, EngineConfig, NodeId};
 /// and are used by the golden test to spell out expected relevant sets
 /// without hard-coding raw `NodeId` integers.
 pub struct GoldenFixture {
-    pub engine: Engine<InMemoryStorage>,
+    pub engine: Engine<SqliteStorage>,
     pub ids: HashMap<&'static str, NodeId>,
 }
 
@@ -59,7 +59,7 @@ impl GoldenFixture {
 /// that need to address nodes by symbolic name should call
 /// [`build_golden_fixture`] instead.
 #[allow(dead_code)]
-pub fn build_golden_engine() -> Engine<InMemoryStorage> {
+pub fn build_golden_engine() -> Engine<SqliteStorage> {
     build_golden_fixture().engine
 }
 
@@ -88,7 +88,7 @@ pub fn build_golden_fixture() -> GoldenFixture {
 }
 
 struct FixtureBuilder {
-    engine: Engine<InMemoryStorage>,
+    engine: Engine<SqliteStorage>,
     ids: HashMap<&'static str, NodeId>,
     next_ts: u64,
 }

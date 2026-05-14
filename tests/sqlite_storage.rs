@@ -1,5 +1,3 @@
-#![cfg(feature = "sqlite")]
-
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{EdgeType, MemoryTier, ScopePath};
 use anamnesis::storage::{SqliteStorage, StorageAdapter};
