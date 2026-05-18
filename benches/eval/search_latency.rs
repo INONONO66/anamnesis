@@ -21,6 +21,8 @@
 //! embeddings, and with a fixed ingest order. Every run on the same
 //! revision allocates `NodeId` values identically.
 
+#![cfg_attr(test, allow(dead_code))]
+
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 
@@ -213,6 +215,7 @@ fn run_criterion(engine: &Engine, criterion: &mut Criterion) {
     });
 }
 
+#[cfg(not(test))]
 fn main() {
     eprintln!("Building deterministic {NUM_NODES}-node fixture (no embeddings)...");
     let build_start = Instant::now();
@@ -238,3 +241,6 @@ fn main() {
     run_criterion(&engine, &mut criterion);
     criterion.final_summary();
 }
+
+#[cfg(test)]
+fn main() {}
