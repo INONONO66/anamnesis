@@ -22,6 +22,10 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 proptest = "1.6"
 criterion = { version = "0.5", features = ["html_reports"] }
 rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", features = ["json", "blocking"] }
+dhat = "0.3"
 
 [[bench]]
 name = "ingestion"
@@ -44,28 +48,24 @@ name = "engine_ops"
 harness = false
 
 [[bench]]
-name = "longmemeval-loader"
-path = "benches/longmemeval/loader.rs"
+name = "tick_scaling"
 harness = false
 
 [[bench]]
-name = "longmemeval-baseline"
-path = "benches/longmemeval/baseline.rs"
+name = "search_breakdown"
 harness = false
 
 [[bench]]
-name = "longmemeval-indexed"
-path = "benches/longmemeval/indexed.rs"
+name = "vector_similarity"
 harness = false
 
 [[bench]]
-name = "longmemeval-unified-search"
-path = "benches/longmemeval/unified-search.rs"
+name = "memory_real"
 harness = false
 
 [[bench]]
-name = "longmemeval-ablation"
-path = "benches/longmemeval/ablation.rs"
+name = "eval_accuracy"
+path = "benches/eval/eval_accuracy.rs"
 harness = false
 
 [[bench]]
@@ -74,16 +74,21 @@ path = "benches/eval/search_latency.rs"
 harness = false
 
 [[bench]]
+name = "download_datasets"
+path = "benches/eval/download.rs"
+harness = false
+
+[[bench]]
 name = "query_spreading"
 harness = false
 
 [[test]]
-name = "longmemeval-judge"
-path = "benches/longmemeval/judge.rs"
-
-[[test]]
 name = "eval_golden"
 path = "benches/eval/golden.rs"
+
+[[test]]
+name = "eval_common"
+path = "benches/eval_common/mod.rs"
 
 [profile.bench]
 debug = true
