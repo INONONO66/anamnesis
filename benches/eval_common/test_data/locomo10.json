@@ -1,0 +1,15 @@
+[
+  {
+    "session_1": [
+      {"speaker": "speaker_a", "text": "Hello, how are you?"},
+      {"speaker": "speaker_b", "text": "I am fine, thank you."}
+    ],
+    "session_2": [
+      {"speaker": "speaker_a", "text": "What did you do yesterday?"},
+      {"speaker": "speaker_b", "text": "I went to the park."}
+    ],
+    "qa": [
+      {"question": "What did speaker_b do yesterday?", "answer": "went to the park", "category": 1}
+    ]
+  }
+]

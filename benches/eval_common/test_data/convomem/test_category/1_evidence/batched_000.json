@@ -1,0 +1,16 @@
+{
+  "evidence_items": [
+    {
+      "question": "What did the user order?",
+      "answer": "pizza",
+      "conversations": [
+        {
+          "messages": [
+            {"speaker": "user", "text": "I want to order a pizza."},
+            {"speaker": "assistant", "text": "What size would you like?"}
+          ]
+        }
+      ]
+    }
+  ]
+}
