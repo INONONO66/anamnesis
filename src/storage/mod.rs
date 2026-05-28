@@ -178,6 +178,37 @@ pub trait StorageAdapter: Send + Sync {
         ids
     }
 
+    // ── Peer persistence (default no-ops; SqliteStorage overrides) ────────────
+
+    /// Store a peer profile. Write-through: called on every peer mutation.
+    ///
+    /// Default is a no-op for backends that don't persist peers.
+    fn store_peer(&mut self, _profile: &crate::peer::PeerProfile) -> Result<(), Error> {
+        Ok(())
+    }
+
+    /// Store an alias for a peer.
+    fn store_peer_alias(
+        &mut self,
+        _peer_id: PeerId,
+        _alias: &str,
+        _alias_type: &str,
+    ) -> Result<(), Error> {
+        Ok(())
+    }
+
+    /// Load all peers from storage into a `PeerRegistry`.
+    ///
+    /// Default returns an empty registry for backends that don't persist peers.
+    fn load_peers(&self) -> Result<crate::peer::PeerRegistry, Error> {
+        Ok(crate::peer::PeerRegistry::new())
+    }
+
+    /// Delete a peer and all its aliases from storage.
+    fn delete_peer(&mut self, _peer_id: PeerId) -> Result<(), Error> {
+        Ok(())
+    }
+
     /// Search nodes by text query (case-insensitive substring match on name and content).
     ///
     /// Returns up to `limit` node IDs with their match scores.

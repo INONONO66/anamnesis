@@ -1166,23 +1166,27 @@ pub struct Engine<S: StorageAdapter + Clone = SqliteStorage> {
 impl Engine<SqliteStorage> {
     /// Create a new engine with default configuration and in-memory SQLite storage.
     pub fn new() -> Self {
+        let graph = Graph::new();
+        let peers = graph.storage().load_peers().unwrap_or_default();
         Engine {
-            graph: Graph::new(),
+            graph,
             config: EngineConfig::default(),
             snapshots: SnapshotStore::new(),
             events: Vec::new(),
-            peers: crate::peer::PeerRegistry::new(),
+            peers,
         }
     }
 
     /// Create a new engine with custom configuration.
     pub fn with_config(config: EngineConfig) -> Self {
+        let graph = Graph::new();
+        let peers = graph.storage().load_peers().unwrap_or_default();
         Engine {
-            graph: Graph::new(),
+            graph,
             config,
             snapshots: SnapshotStore::new(),
             events: Vec::new(),
-            peers: crate::peer::PeerRegistry::new(),
+            peers,
         }
     }
 }
@@ -1196,13 +1200,28 @@ impl Default for Engine<SqliteStorage> {
 impl<S: StorageAdapter + Clone> Engine<S> {
     /// Create an engine with a custom storage backend.
     pub fn with_storage(config: EngineConfig, storage: S) -> Self {
+        let graph = Graph::with_storage(storage);
+        let peers = graph.storage().load_peers().unwrap_or_default();
         Engine {
-            graph: Graph::with_storage(storage),
+            graph,
             config,
             snapshots: SnapshotStore::new(),
             events: Vec::new(),
-            peers: crate::peer::PeerRegistry::new(),
+            peers,
         }
+    }
+
+    fn register_peer_internal(
+        &mut self,
+        name: &str,
+        trust_level: crate::peer::TrustLevel,
+    ) -> Result<crate::graph::types::PeerId, Error> {
+        let id = self.peers.register_peer(name, trust_level)?;
+        let profile = self.peers.get_peer(id).cloned();
+        if let Some(p) = profile {
+            self.graph.storage_mut().store_peer(&p)?;
+        }
+        Ok(id)
     }
 
     // ── Peer registry API ─────────────────────────────────────────────────────
@@ -1215,7 +1234,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         name: impl Into<String>,
         trust_level: crate::peer::TrustLevel,
     ) -> Result<crate::graph::types::PeerId, Error> {
-        self.peers.register_peer(name, trust_level)
+        self.register_peer_internal(&name.into(), trust_level)
     }
 
     /// Resolve any identifier (name, alias, platform username) to a `PeerId`.
@@ -1234,7 +1253,11 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         id: crate::graph::types::PeerId,
         trust_level: crate::peer::TrustLevel,
     ) -> Result<(), Error> {
-        self.peers.update_trust(id, trust_level)
+        self.peers.update_trust(id, trust_level)?;
+        if let Some(profile) = self.peers.get_peer(id) {
+            self.graph.storage_mut().store_peer(profile)?;
+        }
+        Ok(())
     }
 
     /// Add an alias to an existing peer.
@@ -1243,7 +1266,12 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         id: crate::graph::types::PeerId,
         alias: impl Into<String>,
     ) -> Result<(), Error> {
-        self.peers.add_alias(id, alias)
+        let alias = alias.into();
+        self.peers.add_alias(id, &alias)?;
+        self.graph
+            .storage_mut()
+            .store_peer_alias(id, &alias, "alias")?;
+        Ok(())
     }
 
     /// Add a platform username mapping to an existing peer.
@@ -1253,7 +1281,14 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         platform: impl Into<String>,
         username: impl Into<String>,
     ) -> Result<(), Error> {
-        self.peers.add_platform(id, platform, username)
+        let platform = platform.into();
+        let username = username.into();
+        self.peers.add_platform(id, &platform, &username)?;
+        let alias_type = format!("platform:{platform}");
+        self.graph
+            .storage_mut()
+            .store_peer_alias(id, &username, &alias_type)?;
+        Ok(())
     }
 
     /// List all registered peers.
@@ -1298,12 +1333,11 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         &mut self,
         input: PeerProfileInput,
     ) -> Result<(crate::graph::types::PeerId, IngestResult), Error> {
-        // Auto-register peer if not found
         let peer_id = match self.peers.resolve_peer(&input.peer_name) {
             Some(id) => id,
-            None => self
-                .peers
-                .register_peer(&input.peer_name, crate::peer::TrustLevel::Member)?,
+            None => {
+                self.register_peer_internal(&input.peer_name, crate::peer::TrustLevel::Member)?
+            }
         };
 
         let scope_str = format!("peer/{}/profile", peer_id.0);
@@ -1357,9 +1391,9 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         // Auto-register peer if not found
         let peer_id = match self.peers.resolve_peer(&input.peer_name) {
             Some(id) => id,
-            None => self
-                .peers
-                .register_peer(&input.peer_name, crate::peer::TrustLevel::Member)?,
+            None => {
+                self.register_peer_internal(&input.peer_name, crate::peer::TrustLevel::Member)?
+            }
         };
 
         let scope_str = format!("peer/{}/activity", peer_id.0);
@@ -1402,9 +1436,9 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         // Auto-register peer if not found
         let peer_id = match self.peers.resolve_peer(&input.peer_name) {
             Some(id) => id,
-            None => self
-                .peers
-                .register_peer(&input.peer_name, crate::peer::TrustLevel::Member)?,
+            None => {
+                self.register_peer_internal(&input.peer_name, crate::peer::TrustLevel::Member)?
+            }
         };
 
         let scope_str = format!("peer/{}/activity", peer_id.0);
@@ -1569,9 +1603,9 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             if let Some(ref peer_name) = input.about_peer {
                 let peer_id = match self.peers.resolve_peer(peer_name) {
                     Some(id) => id,
-                    None => self
-                        .peers
-                        .register_peer(peer_name, crate::peer::TrustLevel::Member)?,
+                    None => {
+                        self.register_peer_internal(peer_name, crate::peer::TrustLevel::Member)?
+                    }
                 };
                 let scope_str = format!("peer/{}/profile", peer_id.0);
                 let scope = ScopePath::new(&scope_str).unwrap_or_else(|_| ScopePath::universal());

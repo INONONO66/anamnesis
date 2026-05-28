@@ -762,6 +762,123 @@ impl StorageAdapter for SqliteStorage {
 
         self.text_search_inner(query, limit).unwrap_or_default()
     }
+
+    fn store_peer(&mut self, profile: &crate::peer::PeerProfile) -> Result<(), Error> {
+        let conn = self.lock_conn()?;
+        conn.execute(
+            "INSERT OR REPLACE INTO peers (id, name, trust_level) VALUES (?1, ?2, ?3)",
+            params![
+                profile.id.0,
+                profile.name,
+                encode_trust_level(&profile.trust_level),
+            ],
+        )
+        .map_err(sqlite_error)?;
+        conn.execute(
+            "DELETE FROM peer_aliases WHERE peer_id = ?1",
+            [profile.id.0],
+        )
+        .map_err(sqlite_error)?;
+        conn.execute(
+            "INSERT OR IGNORE INTO peer_aliases (peer_id, alias, alias_type) VALUES (?1, ?2, 'name')",
+            params![profile.id.0, profile.name],
+        )
+        .map_err(sqlite_error)?;
+        for alias in &profile.aliases {
+            conn.execute(
+                "INSERT OR IGNORE INTO peer_aliases (peer_id, alias, alias_type) VALUES (?1, ?2, 'alias')",
+                params![profile.id.0, alias],
+            )
+            .map_err(sqlite_error)?;
+        }
+        for (platform, username) in &profile.platforms {
+            let alias_type = format!("platform:{platform}");
+            conn.execute(
+                "INSERT OR IGNORE INTO peer_aliases (peer_id, alias, alias_type) VALUES (?1, ?2, ?3)",
+                params![profile.id.0, username, alias_type],
+            )
+            .map_err(sqlite_error)?;
+        }
+        Ok(())
+    }
+
+    fn store_peer_alias(
+        &mut self,
+        peer_id: PeerId,
+        alias: &str,
+        alias_type: &str,
+    ) -> Result<(), Error> {
+        let conn = self.lock_conn()?;
+        conn.execute(
+            "INSERT OR IGNORE INTO peer_aliases (peer_id, alias, alias_type) VALUES (?1, ?2, ?3)",
+            params![peer_id.0, alias, alias_type],
+        )
+        .map_err(sqlite_error)?;
+        Ok(())
+    }
+
+    fn load_peers(&self) -> Result<crate::peer::PeerRegistry, Error> {
+        let conn = self.lock_conn()?;
+        let mut registry = crate::peer::PeerRegistry::new();
+
+        let mut stmt = conn
+            .prepare("SELECT id, name, trust_level FROM peers ORDER BY id")
+            .map_err(sqlite_error)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, u64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(sqlite_error)?;
+
+        for row in rows {
+            let (id, name, trust_str) = row.map_err(sqlite_error)?;
+            let trust_level = decode_trust_level(&trust_str);
+            let peer_id = PeerId(id);
+            registry
+                .register_peer_with_id(peer_id, &name, trust_level)
+                .map_err(|e| Error::StorageError(format!("loading peer {id}: {e}")))?;
+        }
+
+        let mut alias_stmt = conn
+            .prepare("SELECT peer_id, alias, alias_type FROM peer_aliases ORDER BY peer_id")
+            .map_err(sqlite_error)?;
+        let alias_rows = alias_stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, u64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(sqlite_error)?;
+
+        for row in alias_rows {
+            let (peer_id_raw, alias, alias_type) = row.map_err(sqlite_error)?;
+            let peer_id = PeerId(peer_id_raw);
+            if alias_type == "name" {
+                continue;
+            } else if alias_type == "alias" {
+                let _ = registry.add_alias(peer_id, &alias);
+            } else if let Some(platform) = alias_type.strip_prefix("platform:") {
+                let _ = registry.add_platform(peer_id, platform, &alias);
+            }
+        }
+
+        Ok(registry)
+    }
+
+    fn delete_peer(&mut self, peer_id: PeerId) -> Result<(), Error> {
+        let conn = self.lock_conn()?;
+        conn.execute("DELETE FROM peer_aliases WHERE peer_id = ?1", [peer_id.0])
+            .map_err(sqlite_error)?;
+        conn.execute("DELETE FROM peers WHERE id = ?1", [peer_id.0])
+            .map_err(sqlite_error)?;
+        Ok(())
+    }
 }
 
 impl SqliteStorage {
@@ -1111,6 +1228,19 @@ fn create_schema(conn: &Connection) -> Result<(), Error> {
             id_type TEXT NOT NULL,
             id_value INTEGER NOT NULL,
             PRIMARY KEY (id_type, id_value)
+        );
+
+        CREATE TABLE IF NOT EXISTS peers (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            trust_level TEXT NOT NULL DEFAULT 'agent'
+        );
+
+        CREATE TABLE IF NOT EXISTS peer_aliases (
+            peer_id INTEGER NOT NULL,
+            alias TEXT NOT NULL,
+            alias_type TEXT NOT NULL DEFAULT 'alias',
+            PRIMARY KEY (peer_id, alias)
         );
 
         CREATE INDEX IF NOT EXISTS idx_nodes_type ON nodes(node_type);
@@ -1623,6 +1753,29 @@ fn decode_source_kind(value: &str) -> Result<SourceKind, Error> {
         "inferred" => Ok(SourceKind::Inferred),
         "external" => Ok(SourceKind::External),
         other => Err(Error::StorageError(format!("unknown source_kind: {other}"))),
+    }
+}
+
+fn encode_trust_level(level: &crate::peer::TrustLevel) -> &'static str {
+    match level {
+        crate::peer::TrustLevel::Owner => "owner",
+        crate::peer::TrustLevel::Admin => "admin",
+        crate::peer::TrustLevel::Member => "member",
+        crate::peer::TrustLevel::Agent => "agent",
+        crate::peer::TrustLevel::Observer => "observer",
+        crate::peer::TrustLevel::Untrusted => "untrusted",
+    }
+}
+
+fn decode_trust_level(value: &str) -> crate::peer::TrustLevel {
+    match value {
+        "owner" => crate::peer::TrustLevel::Owner,
+        "admin" => crate::peer::TrustLevel::Admin,
+        "member" => crate::peer::TrustLevel::Member,
+        "agent" => crate::peer::TrustLevel::Agent,
+        "observer" => crate::peer::TrustLevel::Observer,
+        "untrusted" => crate::peer::TrustLevel::Untrusted,
+        _ => crate::peer::TrustLevel::Agent,
     }
 }
 
