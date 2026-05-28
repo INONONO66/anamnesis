@@ -22,6 +22,8 @@ fn observation(name: &str, timestamp: Timestamp) -> Observation {
             confidence: 0.9,
         },
         timestamp,
+        valid_from: None,
+        valid_until: None,
     }
 }
 

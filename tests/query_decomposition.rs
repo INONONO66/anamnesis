@@ -28,6 +28,8 @@ fn english_who_is_pattern() {
                 confidence: 0.9,
             },
             timestamp: Timestamp::now(),
+            valid_from: None,
+            valid_until: None,
         })
         .unwrap();
 
@@ -74,6 +76,8 @@ fn english_what_is_pattern() {
                 confidence: 0.9,
             },
             timestamp: Timestamp::now(),
+            valid_from: None,
+            valid_until: None,
         })
         .unwrap();
 
@@ -120,6 +124,8 @@ fn english_of_pattern() {
                 confidence: 0.9,
             },
             timestamp: Timestamp::now(),
+            valid_from: None,
+            valid_until: None,
         })
         .unwrap();
 
@@ -166,6 +172,8 @@ fn english_how_does_pattern() {
                 confidence: 0.9,
             },
             timestamp: Timestamp::now(),
+            valid_from: None,
+            valid_until: None,
         })
         .unwrap();
 
@@ -212,6 +220,8 @@ fn korean_eui_pattern() {
                 confidence: 0.9,
             },
             timestamp: Timestamp::now(),
+            valid_from: None,
+            valid_until: None,
         })
         .unwrap();
 
@@ -258,6 +268,8 @@ fn korean_nugu_pattern() {
                 confidence: 0.9,
             },
             timestamp: Timestamp::now(),
+            valid_from: None,
+            valid_until: None,
         })
         .unwrap();
 
@@ -304,6 +316,8 @@ fn korean_mwo_pattern() {
                 confidence: 0.9,
             },
             timestamp: Timestamp::now(),
+            valid_from: None,
+            valid_until: None,
         })
         .unwrap();
 
@@ -350,6 +364,8 @@ fn no_match_returns_original() {
                 confidence: 0.9,
             },
             timestamp: Timestamp::now(),
+            valid_from: None,
+            valid_until: None,
         })
         .unwrap();
 
@@ -396,6 +412,8 @@ fn case_insensitive_english() {
                 confidence: 0.9,
             },
             timestamp: Timestamp::now(),
+            valid_from: None,
+            valid_until: None,
         })
         .unwrap();
 

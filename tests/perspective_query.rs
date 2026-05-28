@@ -33,6 +33,8 @@ fn make_observation(
             confidence: 0.9,
         },
         timestamp,
+        valid_from: None,
+        valid_until: None,
     }
 }
 

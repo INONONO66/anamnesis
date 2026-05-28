@@ -333,6 +333,8 @@ fn run_ingestion_phase(
                 entity_tags: vec![],
                 origin: make_origin(&result.session_id, 0.9),
                 timestamp: Timestamp(0),
+                valid_from: None,
+                valid_until: None,
             };
 
             let raw_id = match ingest_observation(&mut engine, raw_observation) {
@@ -391,6 +393,8 @@ fn run_ingestion_phase(
                         entity_tags: normalize_tags(&result.entity_tags),
                         origin: make_origin(&result.session_id, confidence),
                         timestamp: Timestamp(0),
+                        valid_from: None,
+                        valid_until: None,
                     };
 
                     match ingest_observation(&mut engine, extracted_observation) {

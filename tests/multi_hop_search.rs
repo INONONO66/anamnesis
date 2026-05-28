@@ -20,6 +20,8 @@ fn make_obs_tagged(name: &str, tags: Vec<&str>) -> Observation {
             confidence: 0.9,
         },
         timestamp: Timestamp(0),
+        valid_from: None,
+        valid_until: None,
     }
 }
 

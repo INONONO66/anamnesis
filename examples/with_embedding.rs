@@ -61,6 +61,8 @@ fn main() -> Result<(), anamnesis::Error> {
         entity_tags: vec!["auth".into(), "factory-pattern".into()],
         origin: origin(),
         timestamp: Timestamp(1000),
+        valid_from: None,
+        valid_until: None,
     })?;
     let id1 = match &r1 {
         IngestResult::Created(ids) => ids[0],
@@ -79,6 +81,8 @@ fn main() -> Result<(), anamnesis::Error> {
         entity_tags: vec!["auth".into()],
         origin: origin(),
         timestamp: Timestamp(2000),
+        valid_from: None,
+        valid_until: None,
     })?;
     let id2 = match &r2 {
         IngestResult::Created(ids) => ids[0],

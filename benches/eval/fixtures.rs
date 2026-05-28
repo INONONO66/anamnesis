@@ -119,6 +119,8 @@ impl FixtureBuilder {
                 confidence: 0.9,
             },
             timestamp: Timestamp(self.next_ts),
+            valid_from: None,
+            valid_until: None,
         };
         self.next_ts += 1;
 

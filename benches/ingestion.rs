@@ -31,6 +31,8 @@ fn make_observation(i: u64) -> Observation {
             confidence: 0.9,
         },
         timestamp: Timestamp(1000 + i),
+        valid_from: None,
+        valid_until: None,
     }
 }
 

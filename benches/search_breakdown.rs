@@ -65,6 +65,8 @@ fn build_fixture() -> Engine {
                     confidence: 0.9,
                 },
                 timestamp: Timestamp(ts),
+                valid_from: None,
+                valid_until: None,
             };
             ts += 1;
             engine.ingest(observation).expect("ingest should succeed");

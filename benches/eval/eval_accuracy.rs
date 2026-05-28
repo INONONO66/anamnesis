@@ -510,6 +510,8 @@ fn ingest_sessions(
                     confidence: 0.9,
                 },
                 timestamp: Timestamp(0),
+                valid_from: None,
+                valid_until: None,
             };
             match engine.ingest(observation)? {
                 IngestResult::Created(_) | IngestResult::Reinforced { .. } => {}

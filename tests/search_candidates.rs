@@ -41,6 +41,8 @@ fn ingest(
             entity_tags,
             origin: origin(name),
             timestamp: Timestamp(0),
+            valid_from: None,
+            valid_until: None,
         })
         .unwrap();
 }

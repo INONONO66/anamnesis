@@ -90,6 +90,8 @@ fn main() -> Result<(), Error> {
         entity_tags: vec!["auth".into(), "factory-pattern".into()],
         origin: origin(),
         timestamp: Timestamp(1000),
+        valid_from: None,
+        valid_until: None,
     })?;
 
     let id1 = match &result1 {
@@ -109,6 +111,8 @@ fn main() -> Result<(), Error> {
         entity_tags: vec!["auth".into()],
         origin: origin(),
         timestamp: Timestamp(2000),
+        valid_from: None,
+        valid_until: None,
     })?;
 
     let id2 = match &result2 {

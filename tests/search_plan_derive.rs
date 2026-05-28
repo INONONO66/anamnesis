@@ -24,6 +24,8 @@ fn setup_engine() -> Engine {
                 confidence: 0.9,
             },
             timestamp: Timestamp(0),
+            valid_from: None,
+            valid_until: None,
         })
         .unwrap();
     engine

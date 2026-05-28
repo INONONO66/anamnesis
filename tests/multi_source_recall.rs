@@ -29,6 +29,8 @@ fn observation_with_type(name: &str, node_type: KnowledgeType) -> Observation {
         entity_tags: Vec::new(),
         origin: origin(),
         timestamp: Timestamp(0),
+        valid_from: None,
+        valid_until: None,
     }
 }
 

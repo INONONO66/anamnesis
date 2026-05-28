@@ -30,6 +30,8 @@ fn default_seed_limit_three() {
                 confidence: 0.9,
             },
             timestamp: Timestamp::now(),
+            valid_from: None,
+            valid_until: None,
         });
     }
 
@@ -79,6 +81,8 @@ fn custom_seed_limit_five() {
                 confidence: 0.9,
             },
             timestamp: Timestamp::now(),
+            valid_from: None,
+            valid_until: None,
         });
     }
 
@@ -128,6 +132,8 @@ fn seed_limit_zero_no_panic() {
                 confidence: 0.9,
             },
             timestamp: Timestamp::now(),
+            valid_from: None,
+            valid_until: None,
         });
     }
 
@@ -177,6 +183,8 @@ fn seed_limit_larger_than_fused_returns_all() {
                 confidence: 0.9,
             },
             timestamp: Timestamp::now(),
+            valid_from: None,
+            valid_until: None,
         });
     }
 

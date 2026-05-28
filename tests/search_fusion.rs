@@ -35,6 +35,8 @@ fn ingest(engine: &mut Engine, name: &str, content: &str, embedding: Option<Vec<
             entity_tags: vec![],
             origin: origin(name),
             timestamp: Timestamp(0),
+            valid_from: None,
+            valid_until: None,
         })
         .expect("ingest must succeed in fusion smoke fixture");
 }

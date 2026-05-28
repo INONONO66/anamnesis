@@ -26,6 +26,8 @@ fn observation(name: &str, timestamp: Timestamp) -> Observation {
         entity_tags: vec!["auth".to_string()],
         origin: origin(),
         timestamp,
+        valid_from: None,
+        valid_until: None,
     }
 }
 

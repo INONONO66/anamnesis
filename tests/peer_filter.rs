@@ -25,6 +25,8 @@ fn obs_with_peer(name: &str, peer_id: PeerId) -> Observation {
             confidence: 0.9,
         },
         timestamp: Timestamp::now(),
+        valid_from: None,
+        valid_until: None,
     }
 }
 

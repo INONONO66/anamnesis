@@ -41,6 +41,8 @@ fn make_obs(
         entity_tags: vec!["test".to_string()],
         origin: make_origin("agent-1", project),
         timestamp: Timestamp(0),
+        valid_from: None,
+        valid_until: None,
     }
 }
 

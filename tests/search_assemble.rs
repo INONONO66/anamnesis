@@ -32,6 +32,8 @@ fn observation(
         entity_tags: vec![],
         origin: origin("agent-1", "session-1", scope),
         timestamp: Timestamp(timestamp),
+        valid_from: None,
+        valid_until: None,
     }
 }
 

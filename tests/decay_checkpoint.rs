@@ -29,6 +29,8 @@ fn observation_at(name: &str, ts: u64) -> Observation {
             confidence: 0.9,
         },
         timestamp: Timestamp(ts),
+        valid_from: None,
+        valid_until: None,
     }
 }
 

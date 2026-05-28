@@ -26,6 +26,8 @@ fn observation(name: &str, node_type: KnowledgeType, scope: &str, ts: Timestamp)
         entity_tags: vec![name.to_string()],
         origin: origin(scope),
         timestamp: ts,
+        valid_from: None,
+        valid_until: None,
     }
 }
 

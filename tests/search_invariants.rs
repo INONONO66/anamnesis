@@ -41,6 +41,8 @@ fn observation(name: &str, node_type: KnowledgeType, scope: &str) -> Observation
         entity_tags: vec![name.split_whitespace().next().unwrap_or(name).to_string()],
         origin: origin("agent-1", scope),
         timestamp: Timestamp(1000),
+        valid_from: None,
+        valid_until: None,
     }
 }
 

@@ -26,6 +26,8 @@ fn make_observation(name: &str, node_type: KnowledgeType) -> Observation {
             confidence: 0.9,
         },
         timestamp: Timestamp(1000),
+        valid_from: None,
+        valid_until: None,
     }
 }
 
@@ -141,6 +143,8 @@ fn node_fields_preserved_after_ingest() {
             confidence: 0.95,
         },
         timestamp: Timestamp(5000),
+        valid_from: None,
+        valid_until: None,
     };
 
     let IngestResult::Created(ids) = engine.ingest(obs).unwrap() else {

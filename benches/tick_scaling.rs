@@ -32,6 +32,8 @@ fn build_engine_with_nodes(n: usize, core_pct: usize) -> Engine {
                 confidence: 0.9,
             },
             timestamp: Timestamp(1000 + i as u64),
+            valid_from: None,
+            valid_until: None,
         };
 
         if let Ok(IngestResult::Created(ids)) = engine.ingest(obs) {

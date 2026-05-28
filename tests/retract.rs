@@ -24,6 +24,8 @@ fn obs(name: &str) -> Observation {
             confidence: 0.9,
         },
         timestamp: Timestamp::now(),
+        valid_from: None,
+        valid_until: None,
     }
 }
 

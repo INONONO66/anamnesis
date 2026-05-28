@@ -25,6 +25,8 @@ fn observation(name: &str, embedding: Option<Vec<f64>>) -> Observation {
         entity_tags: vec![name.to_string()],
         origin: origin(),
         timestamp: Timestamp(0),
+        valid_from: None,
+        valid_until: None,
     }
 }
 

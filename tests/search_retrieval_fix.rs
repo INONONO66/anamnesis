@@ -23,6 +23,8 @@ fn make_obs(name: &str, node_type: KnowledgeType) -> Observation {
             confidence: 0.9,
         },
         timestamp: Timestamp(0),
+        valid_from: None,
+        valid_until: None,
     }
 }
 
@@ -120,6 +122,8 @@ fn test_l2_budget_exhaustion_degrades_gracefully() {
                 confidence: 0.9,
             },
             timestamp: Timestamp(0),
+            valid_from: None,
+            valid_until: None,
         };
         match engine.ingest(obs).unwrap() {
             IngestResult::Created(ids) => node_ids.push(ids[0]),
@@ -179,6 +183,8 @@ fn test_search_episodic_content_preserved() {
                 confidence: 0.9,
             },
             timestamp: Timestamp(0),
+            valid_from: None,
+            valid_until: None,
         })
         .unwrap()
     {
@@ -208,6 +214,8 @@ fn test_search_episodic_content_preserved() {
                 confidence: 0.9,
             },
             timestamp: Timestamp(i as u64),
+            valid_from: None,
+            valid_until: None,
         };
         match engine.ingest(obs).unwrap() {
             IngestResult::Created(ids) => {
@@ -238,6 +246,8 @@ fn test_search_episodic_content_preserved() {
                 confidence: 0.9,
             },
             timestamp: Timestamp(100),
+            valid_from: None,
+            valid_until: None,
         })
         .unwrap()
     {

@@ -34,6 +34,8 @@ fn observation(
         entity_tags: entity_tags.iter().map(|tag| tag.to_string()).collect(),
         origin: origin("agent-1", session_id),
         timestamp: Timestamp(timestamp),
+        valid_from: None,
+        valid_until: None,
     }
 }
 

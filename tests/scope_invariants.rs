@@ -329,6 +329,8 @@ fn search_personal_foo_downweights_work_bar_vs_personal_ancestor() {
         entity_tags: Vec::new(),
         origin,
         timestamp: Timestamp(0),
+        valid_from: None,
+        valid_until: None,
     };
 
     let ancestor_id = match engine

@@ -25,6 +25,8 @@ fn observation(name: &str, _agent_id: &str, session_id: &str, tags: &[&str]) -> 
             confidence: 0.9,
         },
         timestamp: Timestamp(1000),
+        valid_from: None,
+        valid_until: None,
     }
 }
 

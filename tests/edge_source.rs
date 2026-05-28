@@ -25,6 +25,8 @@ fn make_obs(name: &str, embedding: Option<Vec<f64>>) -> Observation {
             confidence: 0.9,
         },
         timestamp: Timestamp::now(),
+        valid_from: None,
+        valid_until: None,
     }
 }
 

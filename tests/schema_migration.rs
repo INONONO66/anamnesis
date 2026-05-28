@@ -45,6 +45,8 @@ fn fresh_db_has_peer_id_column() {
             confidence: 0.9,
         },
         timestamp: Timestamp::now(),
+        valid_from: None,
+        valid_until: None,
     });
     assert!(result.is_ok(), "ingest should succeed: {:?}", result);
 }

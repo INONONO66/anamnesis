@@ -39,6 +39,8 @@ fn observation_at(name: &str, scope: &str, ts: Timestamp) -> Observation {
             confidence: 0.9,
         },
         timestamp: ts,
+        valid_from: None,
+        valid_until: None,
     }
 }
 

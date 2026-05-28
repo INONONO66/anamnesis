@@ -24,6 +24,8 @@ fn make_observation(name: &str, node_type: KnowledgeType) -> Observation {
         entity_tags: vec![],
         origin: make_origin("agent-1", "session-1", "project-a"),
         timestamp: Timestamp(1000),
+        valid_from: None,
+        valid_until: None,
     }
 }
 
@@ -239,6 +241,8 @@ fn bridge_candidates_with_cross_scope_connections() {
         entity_tags: vec!["shared".to_string()],
         origin: make_origin("agent-1", "session-1", "project-a"),
         timestamp: Timestamp(1000),
+        valid_from: None,
+        valid_until: None,
     };
     let bridge_id = match engine.ingest(obs_bridge).unwrap() {
         IngestResult::Created(ids) => ids[0],
@@ -256,6 +260,8 @@ fn bridge_candidates_with_cross_scope_connections() {
         entity_tags: vec!["tag-a".to_string()],
         origin: make_origin("agent-1", "session-1", "project-b"),
         timestamp: Timestamp(1000),
+        valid_from: None,
+        valid_until: None,
     };
     let a_id = match engine.ingest(obs_a).unwrap() {
         IngestResult::Created(ids) => ids[0],
@@ -273,6 +279,8 @@ fn bridge_candidates_with_cross_scope_connections() {
         entity_tags: vec!["tag-b".to_string()],
         origin: make_origin("agent-1", "session-1", "project-c"),
         timestamp: Timestamp(1000),
+        valid_from: None,
+        valid_until: None,
     };
     let b_id = match engine.ingest(obs_b).unwrap() {
         IngestResult::Created(ids) => ids[0],
@@ -290,6 +298,8 @@ fn bridge_candidates_with_cross_scope_connections() {
         entity_tags: vec!["tag-c".to_string()],
         origin: make_origin("agent-1", "session-1", "project-d"),
         timestamp: Timestamp(1000),
+        valid_from: None,
+        valid_until: None,
     };
     let c_id = match engine.ingest(obs_c).unwrap() {
         IngestResult::Created(ids) => ids[0],

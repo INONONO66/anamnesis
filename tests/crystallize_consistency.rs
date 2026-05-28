@@ -25,6 +25,8 @@ fn insert_source(engine: &mut Engine, name: &str, agent: &str, session: &str) ->
             entity_tags: vec!["test".to_string()],
             origin: origin(agent, session),
             timestamp: Timestamp(1000),
+            valid_from: None,
+            valid_until: None,
         })
         .unwrap()
     else {

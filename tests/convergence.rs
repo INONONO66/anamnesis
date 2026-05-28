@@ -31,6 +31,8 @@ fn convergence_enabled_stops_early() {
                 entity_tags: vec![],
                 origin: origin.clone(),
                 timestamp: Timestamp::now(),
+                valid_from: None,
+                valid_until: None,
             })
             .expect("ingest failed");
 
@@ -96,6 +98,8 @@ fn convergence_disabled_default_behavior() {
                 entity_tags: vec![],
                 origin: origin.clone(),
                 timestamp: Timestamp::now(),
+                valid_from: None,
+                valid_until: None,
             })
             .expect("ingest failed");
 

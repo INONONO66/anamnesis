@@ -28,6 +28,8 @@ fn setup_engine_with_nodes() -> (Engine, NodeId, NodeId) {
         entity_tags: vec![],
         origin: origin.clone(),
         timestamp: Timestamp::now(),
+        valid_from: None,
+        valid_until: None,
     };
 
     let obs2 = Observation {
@@ -40,6 +42,8 @@ fn setup_engine_with_nodes() -> (Engine, NodeId, NodeId) {
         entity_tags: vec![],
         origin: origin.clone(),
         timestamp: Timestamp::now(),
+        valid_from: None,
+        valid_until: None,
     };
 
     let result1 = engine.ingest(obs1).expect("ingest node1");

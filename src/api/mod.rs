@@ -561,6 +561,16 @@ pub struct Observation {
     pub origin: Origin,
     /// When this observation occurred. Defaults to Timestamp(0) if not provided.
     pub timestamp: Timestamp,
+    /// When the fact represented by this observation became valid. None = always valid.
+    ///
+    /// Passed through to `Node.valid_from` during ingest. Used by `fact_at()` for
+    /// bitemporal filtering.
+    pub valid_from: Option<Timestamp>,
+    /// When the fact represented by this observation became invalid. None = still valid.
+    ///
+    /// Passed through to `Node.valid_until` during ingest. Used by `fact_at()` for
+    /// bitemporal filtering.
+    pub valid_until: Option<Timestamp>,
 }
 
 /// Request to crystallize query results into a higher-level knowledge node.
@@ -966,6 +976,180 @@ pub struct HealthReport {
     pub grade: HealthGrade,
 }
 
+/// Input for `Engine::learn()` — project knowledge injection.
+#[derive(Debug, Clone)]
+pub struct LearnInput {
+    /// L0: One-liner label.
+    pub name: String,
+    /// L1: Optional summary.
+    pub summary: Option<String>,
+    /// L2: Full content.
+    pub content: String,
+    /// Optional embedding vector.
+    pub embedding: Option<Vec<f64>>,
+    /// Confidence [0, 1]. Default: 0.9.
+    pub confidence: Option<f64>,
+    /// Knowledge type. Default: `Semantic`.
+    pub node_type: Option<KnowledgeType>,
+    /// Entity tags.
+    pub entity_tags: Vec<String>,
+    /// Provenance.
+    pub origin: Origin,
+    /// Timestamp. Default: now.
+    pub timestamp: Option<Timestamp>,
+}
+
+/// Input for `Engine::remember_peer()` — peer profile recording.
+#[derive(Debug, Clone)]
+pub struct PeerProfileInput {
+    /// Primary display name of the peer (used for auto-registration).
+    pub peer_name: String,
+    /// L0: One-liner label for this profile entry.
+    pub name: String,
+    /// L1: Optional summary.
+    pub summary: Option<String>,
+    /// L2: Full content.
+    pub content: String,
+    /// Optional embedding vector.
+    pub embedding: Option<Vec<f64>>,
+    /// Confidence [0, 1]. Default: 0.9.
+    pub confidence: Option<f64>,
+    /// Entity tags (peer name is added automatically).
+    pub entity_tags: Vec<String>,
+    /// Source kind. Default: `HumanInput`.
+    pub source_kind: Option<crate::peer::SourceKind>,
+    /// Session ID. Default: "profile".
+    pub session_id: Option<String>,
+    /// Timestamp. Default: now.
+    pub timestamp: Option<Timestamp>,
+}
+
+/// Input for `Engine::log_activity()` — peer activity recording.
+#[derive(Debug, Clone)]
+pub struct ActivityInput {
+    /// Primary display name of the peer.
+    pub peer_name: String,
+    /// L0: One-liner label.
+    pub name: String,
+    /// L1: Optional summary.
+    pub summary: Option<String>,
+    /// L2: Full content.
+    pub content: String,
+    /// Optional embedding vector.
+    pub embedding: Option<Vec<f64>>,
+    /// Confidence [0, 1]. Default: 0.8.
+    pub confidence: Option<f64>,
+    /// Knowledge type. Default: `Episodic`.
+    pub node_type: Option<KnowledgeType>,
+    /// Entity tags.
+    pub entity_tags: Vec<String>,
+    /// Source kind. Default: `HumanInput`.
+    pub source_kind: Option<crate::peer::SourceKind>,
+    /// Session ID. Default: "activity".
+    pub session_id: Option<String>,
+    /// Timestamp. Default: now.
+    pub timestamp: Option<Timestamp>,
+    /// When the activity started (bitemporal).
+    pub valid_from: Option<Timestamp>,
+    /// When the activity ended (bitemporal).
+    pub valid_until: Option<Timestamp>,
+}
+
+/// Input for `Engine::schedule()` — event scheduling.
+#[derive(Debug, Clone)]
+pub struct ScheduleInput {
+    /// Primary display name of the peer organizing the event.
+    pub peer_name: String,
+    /// L0: One-liner label.
+    pub name: String,
+    /// L1: Optional summary.
+    pub summary: Option<String>,
+    /// L2: Full content.
+    pub content: String,
+    /// Optional embedding vector.
+    pub embedding: Option<Vec<f64>>,
+    /// Confidence [0, 1]. Default: 0.9.
+    pub confidence: Option<f64>,
+    /// Participants — converted to entity tags automatically.
+    pub participants: Vec<String>,
+    /// Additional entity tags.
+    pub entity_tags: Vec<String>,
+    /// Session ID. Default: "schedule".
+    pub session_id: Option<String>,
+    /// Timestamp. Default: now.
+    pub timestamp: Option<Timestamp>,
+    /// When the event starts (required).
+    pub valid_from: Timestamp,
+    /// When the event ends (optional).
+    pub valid_until: Option<Timestamp>,
+}
+
+/// Input for `Engine::ingest_document()` — document chunk ingestion.
+#[derive(Debug, Clone)]
+pub struct DocumentInput {
+    /// Document name (used as prefix for chunk labels).
+    pub name: String,
+    /// Text chunks to ingest as sequential `Episodic` nodes.
+    pub chunks: Vec<String>,
+    /// Confidence [0, 1]. Default: 0.8.
+    pub confidence: Option<f64>,
+    /// Entity tags applied to all chunks.
+    pub entity_tags: Vec<String>,
+    /// Provenance applied to all chunks.
+    pub origin: Origin,
+    /// Timestamp applied to all chunks. Default: now.
+    pub timestamp: Option<Timestamp>,
+}
+
+/// A single extracted fact for `Engine::ingest_conversation()`.
+#[derive(Debug, Clone)]
+pub struct ExtractedFact {
+    /// L0: One-liner label.
+    pub name: String,
+    /// L1: Optional summary.
+    pub summary: Option<String>,
+    /// L2: Full content.
+    pub content: String,
+    /// Optional embedding vector.
+    pub embedding: Option<Vec<f64>>,
+    /// Confidence [0, 1]. Default: inherits from ConversationInput.
+    pub confidence: Option<f64>,
+    /// Entity tags.
+    pub entity_tags: Vec<String>,
+}
+
+/// Input for `Engine::ingest_conversation()` — conversation ingestion.
+#[derive(Debug, Clone)]
+pub struct ConversationInput {
+    /// L0: One-liner label for the raw episode.
+    pub name: String,
+    /// L1: Optional summary.
+    pub summary: Option<String>,
+    /// L2: Raw conversation text.
+    pub raw_text: String,
+    /// Extracted facts to link to the episode.
+    pub extracted_facts: Vec<ExtractedFact>,
+    /// Confidence [0, 1]. Default: 0.8.
+    pub confidence: Option<f64>,
+    /// Entity tags for the episode.
+    pub entity_tags: Vec<String>,
+    /// Provenance.
+    pub origin: Origin,
+    /// Timestamp. Default: now.
+    pub timestamp: Option<Timestamp>,
+    /// If set, extracted facts are also stored in this peer's profile scope.
+    pub about_peer: Option<String>,
+}
+
+/// Result of `Engine::ingest_conversation()`.
+#[derive(Debug, Clone)]
+pub struct ConversationResult {
+    /// Node ID of the raw episode.
+    pub episode_id: NodeId,
+    /// Node IDs of the extracted facts.
+    pub extracted_ids: Vec<NodeId>,
+}
+
 /// The Anamnesis cognitive graph engine.
 ///
 /// `Engine<S>` is generic over the storage backend. The default is
@@ -1080,6 +1264,351 @@ impl<S: StorageAdapter + Clone> Engine<S> {
     /// Returns the number of registered peers.
     pub fn peer_count(&self) -> usize {
         self.peers.peer_count()
+    }
+
+    // ── Convenience API ───────────────────────────────────────────────────────
+
+    /// Ingest project knowledge — a semantic fact, convention, or decision.
+    ///
+    /// Convenience wrapper around `ingest()` for structured knowledge injection.
+    /// The consumer specifies the scope; the engine sets `node_type` to `Semantic`
+    /// by default (override via `node_type` field).
+    pub fn learn(&mut self, input: LearnInput) -> Result<IngestResult, Error> {
+        self.ingest(Observation {
+            name: input.name,
+            summary: input.summary,
+            content: input.content,
+            embedding: input.embedding,
+            confidence: input.confidence.unwrap_or(0.9),
+            node_type: input.node_type.unwrap_or(KnowledgeType::Semantic),
+            entity_tags: input.entity_tags,
+            origin: input.origin,
+            timestamp: input.timestamp.unwrap_or_else(Timestamp::now),
+            valid_from: None,
+            valid_until: None,
+        })
+    }
+
+    /// Record a peer profile — who this person is, what they know, their preferences.
+    ///
+    /// Stores the profile under `scope: peer/{peer_id}/profile` with
+    /// `node_type: IdentityLearned`. If `peer_name` is not yet registered,
+    /// the peer is auto-registered with `TrustLevel::Member`.
+    pub fn remember_peer(
+        &mut self,
+        input: PeerProfileInput,
+    ) -> Result<(crate::graph::types::PeerId, IngestResult), Error> {
+        // Auto-register peer if not found
+        let peer_id = match self.peers.resolve_peer(&input.peer_name) {
+            Some(id) => id,
+            None => self
+                .peers
+                .register_peer(&input.peer_name, crate::peer::TrustLevel::Member)?,
+        };
+
+        let scope_str = format!("peer/{}/profile", peer_id.0);
+        let scope = ScopePath::new(&scope_str).unwrap_or_else(|_| ScopePath::universal());
+
+        let mut entity_tags = input.entity_tags;
+        if !entity_tags.contains(&input.peer_name) {
+            entity_tags.push(input.peer_name.clone());
+        }
+        // Add all peer aliases as entity tags
+        for alias in self.peers.all_identifiers(peer_id) {
+            if !entity_tags.contains(&alias) {
+                entity_tags.push(alias);
+            }
+        }
+
+        let result = self.ingest(Observation {
+            name: input.name,
+            summary: input.summary,
+            content: input.content,
+            embedding: input.embedding,
+            confidence: input.confidence.unwrap_or(0.9),
+            node_type: KnowledgeType::IdentityLearned,
+            entity_tags,
+            origin: Origin {
+                peer_id,
+                source_kind: input
+                    .source_kind
+                    .unwrap_or(crate::peer::SourceKind::HumanInput),
+                session_id: input.session_id.unwrap_or_else(|| "profile".to_string()),
+                scope,
+                confidence: input.confidence.unwrap_or(0.9),
+            },
+            timestamp: input.timestamp.unwrap_or_else(Timestamp::now),
+            valid_from: None,
+            valid_until: None,
+        })?;
+
+        Ok((peer_id, result))
+    }
+
+    /// Record a peer activity — what they did, said, or experienced.
+    ///
+    /// Stores the activity under `scope: peer/{peer_id}/activity` with
+    /// `node_type: Episodic`. Supports `valid_from`/`valid_until` for
+    /// time-bounded activities.
+    pub fn log_activity(
+        &mut self,
+        input: ActivityInput,
+    ) -> Result<(crate::graph::types::PeerId, IngestResult), Error> {
+        // Auto-register peer if not found
+        let peer_id = match self.peers.resolve_peer(&input.peer_name) {
+            Some(id) => id,
+            None => self
+                .peers
+                .register_peer(&input.peer_name, crate::peer::TrustLevel::Member)?,
+        };
+
+        let scope_str = format!("peer/{}/activity", peer_id.0);
+        let scope = ScopePath::new(&scope_str).unwrap_or_else(|_| ScopePath::universal());
+
+        let result = self.ingest(Observation {
+            name: input.name,
+            summary: input.summary,
+            content: input.content,
+            embedding: input.embedding,
+            confidence: input.confidence.unwrap_or(0.8),
+            node_type: input.node_type.unwrap_or(KnowledgeType::Episodic),
+            entity_tags: input.entity_tags,
+            origin: Origin {
+                peer_id,
+                source_kind: input
+                    .source_kind
+                    .unwrap_or(crate::peer::SourceKind::HumanInput),
+                session_id: input.session_id.unwrap_or_else(|| "activity".to_string()),
+                scope,
+                confidence: input.confidence.unwrap_or(0.8),
+            },
+            timestamp: input.timestamp.unwrap_or_else(Timestamp::now),
+            valid_from: input.valid_from,
+            valid_until: input.valid_until,
+        })?;
+
+        Ok((peer_id, result))
+    }
+
+    /// Schedule an event — a time-bounded activity with participants.
+    ///
+    /// Stores the event under `scope: peer/{peer_id}/activity` with
+    /// `node_type: Event`. Participants are converted to entity tags.
+    /// `valid_from` is required.
+    pub fn schedule(
+        &mut self,
+        input: ScheduleInput,
+    ) -> Result<(crate::graph::types::PeerId, IngestResult), Error> {
+        // Auto-register peer if not found
+        let peer_id = match self.peers.resolve_peer(&input.peer_name) {
+            Some(id) => id,
+            None => self
+                .peers
+                .register_peer(&input.peer_name, crate::peer::TrustLevel::Member)?,
+        };
+
+        let scope_str = format!("peer/{}/activity", peer_id.0);
+        let scope = ScopePath::new(&scope_str).unwrap_or_else(|_| ScopePath::universal());
+
+        // Convert participants to entity tags
+        let mut entity_tags = input.entity_tags;
+        for participant in &input.participants {
+            if !entity_tags.contains(participant) {
+                entity_tags.push(participant.clone());
+            }
+        }
+
+        let result = self.ingest(Observation {
+            name: input.name,
+            summary: input.summary,
+            content: input.content,
+            embedding: input.embedding,
+            confidence: input.confidence.unwrap_or(0.9),
+            node_type: KnowledgeType::Event,
+            entity_tags,
+            origin: Origin {
+                peer_id,
+                source_kind: crate::peer::SourceKind::HumanInput,
+                session_id: input.session_id.unwrap_or_else(|| "schedule".to_string()),
+                scope,
+                confidence: input.confidence.unwrap_or(0.9),
+            },
+            timestamp: input.timestamp.unwrap_or_else(Timestamp::now),
+            valid_from: Some(input.valid_from),
+            valid_until: input.valid_until,
+        })?;
+
+        Ok((peer_id, result))
+    }
+
+    /// Ingest a document as a sequence of chunks.
+    ///
+    /// Each chunk becomes an `Episodic` node. Consecutive chunks are linked
+    /// with `Temporal` edges to preserve document order.
+    pub fn ingest_document(&mut self, input: DocumentInput) -> Result<Vec<NodeId>, Error> {
+        let mut node_ids = Vec::new();
+        let chunk_count = input.chunks.len();
+
+        for (i, chunk) in input.chunks.into_iter().enumerate() {
+            let result = self.ingest(Observation {
+                name: format!("{} [chunk {}/{}]", input.name, i + 1, chunk_count),
+                summary: None,
+                content: chunk,
+                embedding: None,
+                confidence: input.confidence.unwrap_or(0.8),
+                node_type: KnowledgeType::Episodic,
+                entity_tags: input.entity_tags.clone(),
+                origin: input.origin.clone(),
+                timestamp: input.timestamp.unwrap_or_else(Timestamp::now),
+                valid_from: None,
+                valid_until: None,
+            })?;
+
+            let node_id = match result {
+                IngestResult::Created(ids) => ids[0],
+                IngestResult::Reinforced { existing_id, .. } => existing_id,
+                IngestResult::CreatedWithConflict { node_ids: ids, .. } => ids[0],
+            };
+            node_ids.push(node_id);
+        }
+
+        // Link consecutive chunks with Temporal edges
+        for window in node_ids.windows(2) {
+            let (from, to) = (window[0], window[1]);
+            let eid = self.graph.next_edge_id();
+            let edge = Edge {
+                id: eid,
+                source: from,
+                target: to,
+                edge_type: EdgeType::Temporal,
+                weight: 1.0,
+                edge_source: crate::graph::edge::EdgeSource::Auto,
+                created_at: Timestamp::now(),
+                valid_from: None,
+                valid_until: None,
+                metadata: HashMap::new(),
+            };
+            self.graph.add_edge(edge)?;
+        }
+
+        Ok(node_ids)
+    }
+
+    /// Ingest a conversation — raw episode + extracted knowledge.
+    ///
+    /// The raw text becomes an `Episodic` node. Each extracted fact becomes
+    /// a `Semantic` node linked to the episode via `ExtractedFrom`. If
+    /// `about_peer` is set, extracted facts are also stored in the peer's
+    /// profile scope.
+    pub fn ingest_conversation(
+        &mut self,
+        input: ConversationInput,
+    ) -> Result<ConversationResult, Error> {
+        // Ingest the raw episode
+        let episode_result = self.ingest(Observation {
+            name: input.name.clone(),
+            summary: input.summary.clone(),
+            content: input.raw_text.clone(),
+            embedding: None,
+            confidence: input.confidence.unwrap_or(0.8),
+            node_type: KnowledgeType::Episodic,
+            entity_tags: input.entity_tags.clone(),
+            origin: input.origin.clone(),
+            timestamp: input.timestamp.unwrap_or_else(Timestamp::now),
+            valid_from: None,
+            valid_until: None,
+        })?;
+
+        let episode_id = match episode_result {
+            IngestResult::Created(ids) => ids[0],
+            IngestResult::Reinforced { existing_id, .. } => existing_id,
+            IngestResult::CreatedWithConflict { node_ids: ids, .. } => ids[0],
+        };
+
+        let mut extracted_ids = Vec::new();
+
+        // Ingest extracted facts
+        for fact in input.extracted_facts {
+            let fact_result = self.ingest(Observation {
+                name: fact.name.clone(),
+                summary: fact.summary.clone(),
+                content: fact.content.clone(),
+                embedding: fact.embedding.clone(),
+                confidence: fact.confidence.unwrap_or(input.confidence.unwrap_or(0.8)),
+                node_type: KnowledgeType::Semantic,
+                entity_tags: fact.entity_tags.clone(),
+                origin: input.origin.clone(),
+                timestamp: input.timestamp.unwrap_or_else(Timestamp::now),
+                valid_from: None,
+                valid_until: None,
+            })?;
+
+            let fact_id = match fact_result {
+                IngestResult::Created(ids) => ids[0],
+                IngestResult::Reinforced { existing_id, .. } => existing_id,
+                IngestResult::CreatedWithConflict { node_ids: ids, .. } => ids[0],
+            };
+
+            // Link fact to episode via ExtractedFrom
+            let eid = self.graph.next_edge_id();
+            let edge = Edge {
+                id: eid,
+                source: fact_id,
+                target: episode_id,
+                edge_type: EdgeType::ExtractedFrom,
+                weight: 1.0,
+                edge_source: crate::graph::edge::EdgeSource::Auto,
+                created_at: Timestamp::now(),
+                valid_from: None,
+                valid_until: None,
+                metadata: HashMap::new(),
+            };
+            self.graph.add_edge(edge)?;
+
+            // If about_peer is set, also store in peer profile
+            if let Some(ref peer_name) = input.about_peer {
+                let peer_id = match self.peers.resolve_peer(peer_name) {
+                    Some(id) => id,
+                    None => self
+                        .peers
+                        .register_peer(peer_name, crate::peer::TrustLevel::Member)?,
+                };
+                let scope_str = format!("peer/{}/profile", peer_id.0);
+                let scope = ScopePath::new(&scope_str).unwrap_or_else(|_| ScopePath::universal());
+
+                let mut profile_tags = fact.entity_tags.clone();
+                if !profile_tags.contains(peer_name) {
+                    profile_tags.push(peer_name.clone());
+                }
+
+                self.ingest(Observation {
+                    name: fact.name,
+                    summary: fact.summary,
+                    content: fact.content,
+                    embedding: fact.embedding,
+                    confidence: fact.confidence.unwrap_or(0.8),
+                    node_type: KnowledgeType::IdentityLearned,
+                    entity_tags: profile_tags,
+                    origin: Origin {
+                        peer_id,
+                        source_kind: crate::peer::SourceKind::HumanInput,
+                        session_id: input.origin.session_id.clone(),
+                        scope,
+                        confidence: fact.confidence.unwrap_or(0.8),
+                    },
+                    timestamp: input.timestamp.unwrap_or_else(Timestamp::now),
+                    valid_from: None,
+                    valid_until: None,
+                })?;
+            }
+
+            extracted_ids.push(fact_id);
+        }
+
+        Ok(ConversationResult {
+            episode_id,
+            extracted_ids,
+        })
     }
 
     /// Create an engine with a default peer pre-registered.
@@ -1571,8 +2100,8 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             created_at: now,
             updated_at: now,
             accessed_at: now,
-            valid_from: None,
-            valid_until: None,
+            valid_from: observation.valid_from,
+            valid_until: observation.valid_until,
             salience: 1.0,
             access_count: 0,
             access_history: VecDeque::new(),
@@ -3797,6 +4326,8 @@ mod tests {
                 confidence: 0.9,
             },
             timestamp: Timestamp(1000),
+            valid_from: None,
+            valid_until: None,
         }
     }
 

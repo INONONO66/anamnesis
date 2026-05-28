@@ -25,6 +25,8 @@ fn observation(name: &str, tags: &[&str], embedding: Option<Vec<f64>>) -> Observ
         entity_tags: tags.iter().map(|tag| (*tag).to_string()).collect(),
         origin: origin("topology-ingest"),
         timestamp: Timestamp(1000),
+        valid_from: None,
+        valid_until: None,
     }
 }
 
