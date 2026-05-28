@@ -6,7 +6,8 @@ use anamnesis::{Engine, EngineConfig, IngestResult, NodeId, SpreadingModel};
 
 fn origin() -> Origin {
     Origin {
-        agent_id: "agent-1".to_string(),
+        peer_id: anamnesis::graph::types::PeerId(0),
+        source_kind: anamnesis::peer::SourceKind::AgentObservation,
         session_id: "session-1".to_string(),
         scope: anamnesis::graph::ScopePath::new("test-project").expect("valid scope"),
         confidence: 1.0,

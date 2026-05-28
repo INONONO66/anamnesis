@@ -3,9 +3,10 @@ use anamnesis::graph::node::Origin;
 use anamnesis::graph::{EdgeType, KnowledgeType, ScopePath, Timestamp};
 use anamnesis::{Engine, EngineConfig, IngestResult, StorageAdapter};
 
-fn make_origin(agent: &str, session: &str, scope: &str) -> Origin {
+fn make_origin(_agent: &str, session: &str, scope: &str) -> Origin {
     Origin {
-        agent_id: agent.to_string(),
+        peer_id: anamnesis::graph::types::PeerId(0),
+        source_kind: anamnesis::peer::SourceKind::AgentObservation,
         session_id: session.to_string(),
         scope: ScopePath::new(scope).expect("valid scope"),
         confidence: 0.9,

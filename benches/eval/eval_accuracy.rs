@@ -16,7 +16,7 @@ use anamnesis::api::{IngestResult, Observation};
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{KnowledgeType, ScopePath, Timestamp};
 use anamnesis::query::{Fragment, SearchInput};
-use anamnesis::{Engine, SqliteStorage};
+use anamnesis::{Engine, EngineConfig, SqliteStorage};
 
 use eval_common::checkpoint::{self, Checkpoint, Phase, QuestionResult};
 use eval_common::datasets::{
@@ -63,6 +63,7 @@ struct Args {
     dry_run: bool,
     resume: bool,
     data_dir: PathBuf,
+    db_path: Option<PathBuf>,
 }
 
 fn main() {
@@ -111,15 +112,23 @@ fn run() -> Result<(), DynError> {
     ensure_parent_dir(&checkpoint_path)?;
     let mut checkpoint = load_or_create_checkpoint(&args, &checkpoint_path)?;
 
-    if args.resume && checkpoint.ingest_completed {
-        eprintln!("Resuming from checkpoint, re-ingesting sessions into fresh engine...");
+    let engine: Engine<SqliteStorage> = if let Some(ref db_path) = args.db_path {
+        eprintln!("LOAD DB: {}", db_path.display());
+        let storage = SqliteStorage::open(db_path)
+            .map_err(|e| format!("failed to open pre-ingested DB: {e}"))?;
+        Engine::with_storage(EngineConfig::default(), storage)
     } else {
-        eprintln!("INGEST");
-    }
-    let mut engine: Engine<SqliteStorage> = Engine::new();
-    ingest_sessions(&mut engine, &sessions)?;
+        if args.resume && checkpoint.ingest_completed {
+            eprintln!("Resuming from checkpoint, re-ingesting sessions into fresh engine...");
+        } else {
+            eprintln!("INGEST");
+        }
+        let mut engine = Engine::new();
+        ingest_sessions(&mut engine, &sessions)?;
+        engine
+    };
     checkpoint.ingest_completed = true;
-    checkpoint.db_path = Some(PathBuf::from("in-memory"));
+    checkpoint.db_path = args.db_path.clone().or(Some(PathBuf::from("in-memory")));
     checkpoint.phase = Phase::Search;
     save_checkpoint(&checkpoint_path, &checkpoint)?;
 
@@ -220,6 +229,7 @@ where
     let mut dry_run = false;
     let mut resume = false;
     let mut data_dir = PathBuf::from("benches/eval/data");
+    let mut db_path = None;
     let mut saw_actionable_arg = false;
 
     let mut iter = args.into_iter();
@@ -256,6 +266,10 @@ where
                 saw_actionable_arg = true;
                 data_dir = PathBuf::from(next_value(&mut iter, "--data-dir")?)
             }
+            "--db" => {
+                saw_actionable_arg = true;
+                db_path = Some(PathBuf::from(next_value(&mut iter, "--db")?))
+            }
             "--bench" => {}
             other => return Err(format!("unknown argument: {other}")),
         }
@@ -284,6 +298,7 @@ where
         dry_run,
         resume,
         data_dir,
+        db_path,
     }))
 }
 
@@ -333,6 +348,7 @@ Options:\n\
   --dry-run                Use MockJudge and top search hit answers; no LLM calls\n\
   --resume                 Resume from the checkpoint next to --output\n\
   --data-dir <path>        Dataset directory (default: benches/eval/data)\n\
+  --db <path>              Pre-ingested SQLite file (skips ingest phase)\n\
   --help                   Show this usage"
     );
 }
@@ -487,7 +503,8 @@ fn ingest_sessions(
                 node_type: KnowledgeType::Episodic,
                 entity_tags: vec![],
                 origin: Origin {
-                    agent_id: "eval".to_string(),
+                    peer_id: anamnesis::graph::types::PeerId(0),
+                    source_kind: anamnesis::peer::SourceKind::AgentObservation,
                     session_id: session.session_id.clone(),
                     scope: ScopePath::universal(),
                     confidence: 0.9,

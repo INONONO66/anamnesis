@@ -5,7 +5,8 @@ use anamnesis::{CrystallizeRequest, Engine, IngestResult, StorageAdapter};
 
 fn origin() -> Origin {
     Origin {
-        agent_id: "test-agent".to_string(),
+        peer_id: anamnesis::graph::types::PeerId(0),
+        source_kind: anamnesis::peer::SourceKind::AgentObservation,
         session_id: "test-session".to_string(),
         scope: anamnesis::graph::ScopePath::new("test-project").expect("valid scope"),
         confidence: 0.9,

@@ -21,7 +21,8 @@ fn make_test_node() -> Node {
         access_history: VecDeque::new(),
         tier: MemoryTier::Auto,
         origin: Origin {
-            agent_id: "a".to_string(),
+            peer_id: anamnesis::graph::types::PeerId(0),
+            source_kind: anamnesis::peer::SourceKind::AgentObservation,
             session_id: "s".to_string(),
             scope: anamnesis::graph::ScopePath::universal(),
             confidence: 1.0,

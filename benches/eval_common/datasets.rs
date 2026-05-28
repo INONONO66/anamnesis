@@ -50,7 +50,7 @@ impl Dataset for LoCoMoLoader {
         &self,
         path: &Path,
     ) -> Result<(Vec<UnifiedSession>, Vec<UnifiedQuestion>), DatasetError> {
-        let file_path = path.join("locomo10.json");
+        let file_path = path.join("locomo").join("locomo10.json");
         if !file_path.exists() {
             return Err(DatasetError::NotFound {
                 path: file_path.display().to_string(),
@@ -168,7 +168,7 @@ impl Dataset for LongMemEvalLoader {
         &self,
         path: &Path,
     ) -> Result<(Vec<UnifiedSession>, Vec<UnifiedQuestion>), DatasetError> {
-        let file_path = path.join("longmemeval_s.json");
+        let file_path = path.join("longmemeval").join("longmemeval_s.json");
         if !file_path.exists() {
             return Err(DatasetError::NotFound {
                 path: file_path.display().to_string(),
@@ -269,15 +269,22 @@ impl Dataset for ConvoMemLoader {
         &self,
         path: &Path,
     ) -> Result<(Vec<UnifiedSession>, Vec<UnifiedQuestion>), DatasetError> {
-        if !path.exists() {
+        let convomem_path = path.join("convomem");
+        let scan_path = if convomem_path.is_dir() {
+            &convomem_path
+        } else {
+            path
+        };
+        if !scan_path.exists() {
             return Err(DatasetError::NotFound {
-                path: path.display().to_string(),
+                path: scan_path.display().to_string(),
                 hint: "Download with: cargo bench --bench download_datasets -- --dataset convomem"
                     .to_string(),
             });
         }
 
-        let entries = std::fs::read_dir(path).map_err(|e| DatasetError::IoError(e.to_string()))?;
+        let entries =
+            std::fs::read_dir(scan_path).map_err(|e| DatasetError::IoError(e.to_string()))?;
         let mut all_sessions = Vec::new();
         let mut all_questions = Vec::new();
         let mut found_any = false;

@@ -98,7 +98,8 @@ fn build_fixture() -> Engine {
                 node_type: kt.clone(),
                 entity_tags: entity_tags.clone(),
                 origin: Origin {
-                    agent_id: "fixture".to_string(),
+                    peer_id: anamnesis::graph::types::PeerId(0),
+                    source_kind: anamnesis::peer::SourceKind::AgentObservation,
                     session_id: session_id.clone(),
                     scope: scope.clone(),
                     confidence: 0.9,

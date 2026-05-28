@@ -139,7 +139,8 @@ mod tests {
             access_history: VecDeque::new(),
             tier: MemoryTier::Auto,
             origin: Origin {
-                agent_id: "agent-1".into(),
+                peer_id: crate::graph::types::PeerId(0),
+                source_kind: crate::peer::SourceKind::AgentObservation,
                 session_id: "session-1".into(),
                 scope: crate::graph::ScopePath::universal(),
                 confidence: 0.9,

@@ -23,7 +23,8 @@ fn default_seed_limit_three() {
             node_type: KnowledgeType::Semantic,
             entity_tags: vec![],
             origin: Origin {
-                agent_id: "test-agent".into(),
+                peer_id: anamnesis::graph::types::PeerId(0),
+                source_kind: anamnesis::peer::SourceKind::AgentObservation,
                 session_id: "test-session".into(),
                 scope: anamnesis::graph::ScopePath::universal(),
                 confidence: 0.9,
@@ -70,7 +71,8 @@ fn custom_seed_limit_five() {
             node_type: KnowledgeType::Semantic,
             entity_tags: vec![],
             origin: Origin {
-                agent_id: "test-agent".into(),
+                peer_id: anamnesis::graph::types::PeerId(0),
+                source_kind: anamnesis::peer::SourceKind::AgentObservation,
                 session_id: "test-session".into(),
                 scope: anamnesis::graph::ScopePath::universal(),
                 confidence: 0.9,
@@ -117,7 +119,8 @@ fn seed_limit_zero_no_panic() {
             node_type: KnowledgeType::Semantic,
             entity_tags: vec![],
             origin: Origin {
-                agent_id: "test-agent".into(),
+                peer_id: anamnesis::graph::types::PeerId(0),
+                source_kind: anamnesis::peer::SourceKind::AgentObservation,
                 session_id: "test-session".into(),
                 scope: anamnesis::graph::ScopePath::universal(),
                 confidence: 0.9,
@@ -164,7 +167,8 @@ fn seed_limit_larger_than_fused_returns_all() {
             node_type: KnowledgeType::Semantic,
             entity_tags: vec![],
             origin: Origin {
-                agent_id: "test-agent".into(),
+                peer_id: anamnesis::graph::types::PeerId(0),
+                source_kind: anamnesis::peer::SourceKind::AgentObservation,
                 session_id: "test-session".into(),
                 scope: anamnesis::graph::ScopePath::universal(),
                 confidence: 0.9,

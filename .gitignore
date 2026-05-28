@@ -1,5 +1,9 @@
 /target
 *.local.md
+.omo/
+.omx/
 .sisyphus/
 longmemeval*.json
 .fastembed_cache/
+benches/eval/data/
+benches/eval/results/

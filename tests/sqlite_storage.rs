@@ -22,7 +22,8 @@ fn make_node(id: NodeId, salience: f64) -> Node {
         access_history: VecDeque::new(),
         tier: MemoryTier::Auto,
         origin: Origin {
-            agent_id: "test-agent".to_string(),
+            peer_id: anamnesis::graph::types::PeerId(0),
+            source_kind: anamnesis::peer::SourceKind::AgentObservation,
             session_id: "test-session".to_string(),
             scope: ScopePath::universal(),
             confidence: 0.9,
@@ -50,7 +51,7 @@ fn make_node_indexed(
     id: NodeId,
     entity_tags: Vec<&str>,
     node_type: KnowledgeType,
-    agent_id: &str,
+    _agent_id: &str,
     scope: Option<&str>,
 ) -> Node {
     let scope = match scope {
@@ -74,7 +75,8 @@ fn make_node_indexed(
         access_history: VecDeque::new(),
         tier: MemoryTier::Auto,
         origin: Origin {
-            agent_id: agent_id.to_string(),
+            peer_id: anamnesis::graph::types::PeerId(0),
+            source_kind: anamnesis::peer::SourceKind::AgentObservation,
             session_id: "session".to_string(),
             scope,
             confidence: 0.9,
@@ -113,7 +115,10 @@ fn set_node_populates_indexed_queries() {
 
     assert_eq!(s.nodes_by_entity_tag("auth"), vec![id]);
     assert_eq!(s.nodes_by_type(&KnowledgeType::Convention), vec![id]);
-    assert_eq!(s.nodes_by_agent("agent-A"), vec![id]);
+    assert_eq!(
+        s.nodes_by_peer(anamnesis::graph::types::PeerId(0)),
+        vec![id]
+    );
     assert_eq!(
         s.nodes_by_scope(&ScopePath::new("proj-P").expect("valid scope")),
         vec![id]
@@ -137,7 +142,10 @@ fn delete_node_removes_from_indexed_queries() {
 
     assert!(s.nodes_by_entity_tag("auth").is_empty());
     assert!(s.nodes_by_type(&KnowledgeType::Convention).is_empty());
-    assert!(s.nodes_by_agent("A").is_empty());
+    assert!(
+        s.nodes_by_peer(anamnesis::graph::types::PeerId(0))
+            .is_empty()
+    );
 }
 
 #[test]
@@ -456,26 +464,24 @@ fn nodes_by_type_returns_correct_set() {
 
 #[test]
 fn nodes_by_agent_returns_correct_set() {
+    use anamnesis::graph::types::PeerId;
+    use anamnesis::peer::SourceKind;
     let mut s = storage();
     let id1 = s.next_node_id();
     let id2 = s.next_node_id();
-    s.set_node(make_node_indexed(
-        id1,
-        vec![],
-        KnowledgeType::Semantic,
-        "agent-A",
-        None,
-    ))
-    .expect("node stored");
-    s.set_node(make_node_indexed(
-        id2,
-        vec![],
-        KnowledgeType::Semantic,
-        "agent-B",
-        None,
-    ))
-    .expect("node stored");
-    assert_eq!(s.nodes_by_agent("agent-A"), vec![id1]);
+    // Create node with PeerId(1)
+    let mut node1 = make_node_indexed(id1, vec![], KnowledgeType::Semantic, "agent-A", None);
+    node1.origin.peer_id = PeerId(1);
+    node1.origin.source_kind = SourceKind::AgentObservation;
+    s.set_node(node1).expect("node stored");
+    // Create node with PeerId(2)
+    let mut node2 = make_node_indexed(id2, vec![], KnowledgeType::Semantic, "agent-B", None);
+    node2.origin.peer_id = PeerId(2);
+    node2.origin.source_kind = SourceKind::AgentObservation;
+    s.set_node(node2).expect("node stored");
+    assert_eq!(s.nodes_by_peer(PeerId(1)), vec![id1]);
+    assert_eq!(s.nodes_by_peer(PeerId(2)), vec![id2]);
+    assert!(s.nodes_by_peer(PeerId(99)).is_empty());
 }
 
 #[test]

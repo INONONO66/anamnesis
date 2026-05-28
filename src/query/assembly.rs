@@ -638,7 +638,8 @@ mod tests {
 
     fn make_origin() -> Origin {
         Origin {
-            agent_id: "agent-1".to_string(),
+            peer_id: crate::graph::types::PeerId(0),
+            source_kind: crate::peer::SourceKind::AgentObservation,
             session_id: "session-1".to_string(),
             scope: ScopePath::new("proj-a").expect("valid scope"),
             confidence: 0.9,

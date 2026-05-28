@@ -3,12 +3,13 @@ use anamnesis::graph::node::Origin;
 use anamnesis::graph::{EdgeType, KnowledgeType, NodeId, ScopePath, ScopeRelation, Timestamp};
 use anamnesis::query::SearchInput;
 
-fn origin(agent: &str, session: &str, scope: Option<&str>) -> Origin {
+fn origin(_agent: &str, session: &str, scope: Option<&str>) -> Origin {
     let scope = scope
         .map(|s| ScopePath::new(s).expect("valid scope"))
         .unwrap_or_else(ScopePath::universal);
     Origin {
-        agent_id: agent.to_string(),
+        peer_id: anamnesis::graph::types::PeerId(0),
+        source_kind: anamnesis::peer::SourceKind::AgentObservation,
         session_id: session.to_string(),
         scope,
         confidence: 0.9,
@@ -98,7 +99,7 @@ fn identity_tension_preserved() {
     let result = engine
         .search(SearchInput {
             text: "identity-tension".into(),
-            agent_id: Some("agent-1".into()),
+            agent_id: Some("0".into()), // PeerId(0) matches nodes created with PeerId(0)
             limit: 10,
             seed_limit: Some(2),
             ..Default::default()

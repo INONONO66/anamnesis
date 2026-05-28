@@ -199,9 +199,10 @@ mod tests {
     use crate::graph::{Edge, EdgeId, KnowledgeType, Node, NodeId, Timestamp};
     use crate::storage::SqliteStorage;
 
-    fn make_origin(agent: &str, session: &str, scope: &str) -> Origin {
+    fn make_origin(_agent: &str, session: &str, scope: &str) -> Origin {
         Origin {
-            agent_id: agent.to_string(),
+            peer_id: crate::graph::types::PeerId(0),
+            source_kind: crate::peer::SourceKind::AgentObservation,
             session_id: session.to_string(),
             scope: ScopePath::new(scope).expect("valid scope"),
             confidence: 0.9,

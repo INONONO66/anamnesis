@@ -148,8 +148,9 @@ fn identity_prior_for_search<S: StorageAdapter>(
         return HashMap::new();
     };
 
+    let peer_id = crate::graph::types::PeerId(agent_id.parse::<u64>().unwrap_or(0));
     storage
-        .nodes_by_agent(agent_id)
+        .nodes_by_peer(peer_id)
         .into_iter()
         .filter_map(|node_id| {
             let node = storage.get_node(node_id).ok()?;

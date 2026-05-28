@@ -2,9 +2,11 @@
 
 use crate::error::Error;
 use crate::graph::node::Origin;
+use crate::graph::types::PeerId;
 use crate::graph::{
     Edge, EdgeId, EdgeType, KnowledgeType, MemoryTier, Node, NodeId, ScopePath, Timestamp,
 };
+use crate::peer::SourceKind;
 use crate::storage::StorageAdapter;
 use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::{HashMap, VecDeque};
@@ -59,7 +61,7 @@ impl SqliteStorage {
     }
 
     fn from_connection(conn: Connection) -> Result<Self, Error> {
-        create_schema(&conn)?;
+        migrate_schema(&conn)?;
 
         let capacity = 0;
         let mut storage = Self {
@@ -178,7 +180,27 @@ impl SqliteStorage {
         self.query_node_ids_inner(sql, value).unwrap_or_default()
     }
 
+    fn query_node_ids_u64(&self, sql: &str, value: u64) -> Vec<NodeId> {
+        self.query_node_ids_u64_inner(sql, value)
+            .unwrap_or_default()
+    }
+
     fn query_node_ids_inner(&self, sql: &str, value: &str) -> Result<Vec<NodeId>, Error> {
+        let conn = self.lock_conn()?;
+        let mut stmt = conn.prepare(sql).map_err(sqlite_error)?;
+        let rows = stmt
+            .query_map([value], |row| row.get::<_, u64>(0))
+            .map_err(sqlite_error)?;
+        let ids = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(sqlite_error)?
+            .into_iter()
+            .map(NodeId)
+            .collect();
+        Ok(ids)
+    }
+
+    fn query_node_ids_u64_inner(&self, sql: &str, value: u64) -> Result<Vec<NodeId>, Error> {
         let conn = self.lock_conn()?;
         let mut stmt = conn.prepare(sql).map_err(sqlite_error)?;
         let rows = stmt
@@ -219,10 +241,10 @@ impl Clone for SqliteStorage {
 
                     conn.execute(
                         "INSERT OR REPLACE INTO nodes (
-                            id, name, summary, content, embedding_json, node_type, agent_id, session_id,
+                            id, name, summary, content, embedding_json, node_type, peer_id, source_kind, session_id,
                             scope, confidence, valid_from, valid_until, created_at, updated_at,
                             access_count, access_history, tier, metadata
-                        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+                        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
                         params![
                             node.id.0,
                             node.name,
@@ -230,7 +252,8 @@ impl Clone for SqliteStorage {
                             node.content,
                             encode_embedding(node.embedding.as_deref()),
                             encode_knowledge_type(&node.node_type),
-                            node.origin.agent_id,
+                            node.origin.peer_id.0,
+                            encode_source_kind(&node.origin.source_kind),
                             node.origin.session_id,
                             node.origin.scope.as_str(),
                             node.origin.confidence,
@@ -712,10 +735,10 @@ impl StorageAdapter for SqliteStorage {
         )
     }
 
-    fn nodes_by_agent(&self, agent_id: &str) -> Vec<NodeId> {
-        self.query_node_ids(
-            "SELECT id FROM nodes WHERE agent_id = ?1 ORDER BY id",
-            agent_id,
+    fn nodes_by_peer(&self, peer_id: PeerId) -> Vec<NodeId> {
+        self.query_node_ids_u64(
+            "SELECT id FROM nodes WHERE peer_id = ?1 ORDER BY id",
+            peer_id.0,
         )
     }
 
@@ -827,7 +850,8 @@ mod tests {
             access_history: VecDeque::new(),
             tier: MemoryTier::Auto,
             origin: Origin {
-                agent_id: "test-agent".to_string(),
+                peer_id: crate::graph::types::PeerId(0),
+                source_kind: crate::peer::SourceKind::AgentObservation,
                 session_id: "test-session".to_string(),
                 scope: ScopePath::universal(),
                 confidence: 0.9,
@@ -925,6 +949,94 @@ mod tests {
     }
 }
 
+/// Run schema migrations to bring the database up to the current version.
+///
+/// Version history:
+/// - v1 (implicit): original schema with `agent_id TEXT` column on nodes
+/// - v2 (current): `peer_id INTEGER` + `source_kind TEXT` replace `agent_id`; peers/peer_aliases tables added
+fn migrate_schema(conn: &Connection) -> Result<(), Error> {
+    // Ensure schema_version table exists
+    conn.execute_batch("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);")
+        .map_err(sqlite_error)?;
+
+    let version: Option<u32> = conn
+        .query_row("SELECT version FROM schema_version LIMIT 1", [], |row| {
+            row.get(0)
+        })
+        .optional()
+        .map_err(sqlite_error)?;
+
+    match version {
+        None => {
+            // Fresh database — check if nodes table exists (v1 legacy)
+            let nodes_exist: bool = conn
+                .query_row(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='nodes' LIMIT 1",
+                    [],
+                    |_| Ok(()),
+                )
+                .optional()
+                .map_err(sqlite_error)?
+                .is_some();
+
+            if nodes_exist {
+                // Existing v1 database — migrate to v2
+                migrate_v1_to_v2(conn)?;
+            } else {
+                // Brand new database — create v2 schema directly
+                create_schema(conn)?;
+            }
+            conn.execute_batch("INSERT INTO schema_version (version) VALUES (2);")
+                .map_err(sqlite_error)?;
+        }
+        Some(1) => {
+            migrate_v1_to_v2(conn)?;
+            conn.execute_batch("UPDATE schema_version SET version = 2;")
+                .map_err(sqlite_error)?;
+        }
+        Some(2) => {
+            // Already at current version — ensure schema is complete
+            create_schema(conn)?;
+        }
+        Some(v) => {
+            return Err(Error::StorageError(format!(
+                "unknown schema version {v}; this build supports up to v2"
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+/// Migrate a v1 database (agent_id TEXT) to v2 (peer_id INTEGER + source_kind TEXT).
+fn migrate_v1_to_v2(conn: &Connection) -> Result<(), Error> {
+    conn.execute_batch(
+        "
+        -- Add new columns to nodes (with defaults for existing rows)
+        ALTER TABLE nodes ADD COLUMN peer_id INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE nodes ADD COLUMN source_kind TEXT NOT NULL DEFAULT 'agent_observation';
+
+        -- Create peers and peer_aliases tables
+        CREATE TABLE IF NOT EXISTS peers (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            trust_level TEXT NOT NULL DEFAULT 'agent'
+        );
+
+        CREATE TABLE IF NOT EXISTS peer_aliases (
+            peer_id INTEGER NOT NULL,
+            alias TEXT NOT NULL,
+            alias_type TEXT NOT NULL DEFAULT 'alias',
+            PRIMARY KEY (peer_id, alias)
+        );
+
+        -- Create index on peer_id
+        CREATE INDEX IF NOT EXISTS idx_nodes_peer ON nodes(peer_id);
+        ",
+    )
+    .map_err(sqlite_error)
+}
+
 fn create_schema(conn: &Connection) -> Result<(), Error> {
     conn.execute_batch(
         "
@@ -937,7 +1049,8 @@ fn create_schema(conn: &Connection) -> Result<(), Error> {
             content TEXT NOT NULL,
             embedding_json TEXT,
             node_type TEXT NOT NULL,
-            agent_id TEXT NOT NULL,
+            peer_id INTEGER NOT NULL DEFAULT 0,
+            source_kind TEXT NOT NULL DEFAULT 'agent_observation',
             session_id TEXT NOT NULL,
             scope TEXT NOT NULL,
             confidence REAL NOT NULL,
@@ -997,7 +1110,7 @@ fn create_schema(conn: &Connection) -> Result<(), Error> {
         );
 
         CREATE INDEX IF NOT EXISTS idx_nodes_type ON nodes(node_type);
-        CREATE INDEX IF NOT EXISTS idx_nodes_agent ON nodes(agent_id);
+        CREATE INDEX IF NOT EXISTS idx_nodes_peer ON nodes(peer_id);
         CREATE INDEX IF NOT EXISTS idx_nodes_scope ON nodes(scope);
         CREATE INDEX IF NOT EXISTS idx_edges_from ON edges(from_node);
         CREATE INDEX IF NOT EXISTS idx_edges_to ON edges(to_node);
@@ -1018,10 +1131,10 @@ fn insert_node_row(
     let write_result = (|| -> Result<(), Error> {
         conn.execute(
             "INSERT OR REPLACE INTO nodes (
-                id, name, summary, content, embedding_json, node_type, agent_id, session_id,
+                id, name, summary, content, embedding_json, node_type, peer_id, source_kind, session_id,
                 scope, confidence, valid_from, valid_until, created_at, updated_at,
                 access_count, access_history, tier, metadata
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
             params![
                 node.id.0,
                 node.name,
@@ -1029,7 +1142,8 @@ fn insert_node_row(
                 node.content,
                 encode_embedding(node.embedding.as_deref()),
                 encode_knowledge_type(&node.node_type),
-                node.origin.agent_id,
+                node.origin.peer_id.0,
+                encode_source_kind(&node.origin.source_kind),
                 node.origin.session_id,
                 node.origin.scope.as_str(),
                 node.origin.confidence,
@@ -1134,7 +1248,7 @@ fn load_nodes(conn: &Connection) -> Result<Vec<(Node, f64, Timestamp, Timestamp)
         .prepare(
             "SELECT
                 n.id, n.name, n.summary, n.content, n.embedding_json, n.node_type,
-                n.agent_id, n.session_id, n.scope, n.confidence, n.valid_from,
+                n.peer_id, n.source_kind, n.session_id, n.scope, n.confidence, n.valid_from,
                 n.valid_until, n.created_at, n.updated_at, n.access_count,
                 n.access_history, n.tier, n.metadata, s.salience, a.accessed_at,
                 d.decay_checkpoint
@@ -1149,7 +1263,7 @@ fn load_nodes(conn: &Connection) -> Result<Vec<(Node, f64, Timestamp, Timestamp)
     let rows = stmt
         .query_map([], |row| {
             let id = NodeId(row.get::<_, u64>(0)?);
-            let scope_raw: String = row.get(8)?;
+            let scope_raw: String = row.get(9)?;
             let node = Node {
                 id,
                 name: row.get(1)?,
@@ -1160,29 +1274,31 @@ fn load_nodes(conn: &Connection) -> Result<Vec<(Node, f64, Timestamp, Timestamp)
                 node_type: decode_knowledge_type(&row.get::<_, String>(5)?)
                     .map_err(to_sql_error)?,
                 origin: Origin {
-                    agent_id: row.get(6)?,
-                    session_id: row.get(7)?,
+                    peer_id: PeerId(row.get::<_, u64>(6)?),
+                    source_kind: decode_source_kind(&row.get::<_, String>(7)?)
+                        .map_err(to_sql_error)?,
+                    session_id: row.get(8)?,
                     scope: decode_scope(&scope_raw).map_err(to_sql_error)?,
-                    confidence: row.get(9)?,
+                    confidence: row.get(10)?,
                 },
-                valid_from: row.get::<_, Option<u64>>(10)?.map(Timestamp),
-                valid_until: row.get::<_, Option<u64>>(11)?.map(Timestamp),
-                created_at: Timestamp(row.get(12)?),
-                updated_at: Timestamp(row.get(13)?),
-                access_count: row.get(14)?,
-                access_history: decode_timestamp_deque(&row.get::<_, String>(15)?)
+                valid_from: row.get::<_, Option<u64>>(11)?.map(Timestamp),
+                valid_until: row.get::<_, Option<u64>>(12)?.map(Timestamp),
+                created_at: Timestamp(row.get(13)?),
+                updated_at: Timestamp(row.get(14)?),
+                access_count: row.get(15)?,
+                access_history: decode_timestamp_deque(&row.get::<_, String>(16)?)
                     .map_err(to_sql_error)?,
-                tier: decode_memory_tier(&row.get::<_, String>(16)?).map_err(to_sql_error)?,
-                metadata: decode_map(&row.get::<_, String>(17)?).map_err(to_sql_error)?,
-                salience: row.get(18)?,
-                accessed_at: Timestamp(row.get(19)?),
+                tier: decode_memory_tier(&row.get::<_, String>(17)?).map_err(to_sql_error)?,
+                metadata: decode_map(&row.get::<_, String>(18)?).map_err(to_sql_error)?,
+                salience: row.get(19)?,
+                accessed_at: Timestamp(row.get(20)?),
                 entity_tags: Vec::new(),
             };
             Ok((
                 node,
-                row.get::<_, f64>(18)?,
-                Timestamp(row.get(19)?),
+                row.get::<_, f64>(19)?,
                 Timestamp(row.get(20)?),
+                Timestamp(row.get(21)?),
             ))
         })
         .map_err(sqlite_error)?;
@@ -1462,6 +1578,29 @@ fn unescape_text(value: &str) -> Result<String, Error> {
         }
     }
     String::from_utf8(out).map_err(|e| Error::StorageError(format!("invalid utf-8 escape: {e}")))
+}
+
+fn encode_source_kind(kind: &SourceKind) -> &'static str {
+    match kind {
+        SourceKind::AgentObservation => "agent_observation",
+        SourceKind::HumanInput => "human_input",
+        SourceKind::DocumentExtract => "document_extract",
+        SourceKind::SystemEvent => "system_event",
+        SourceKind::Inferred => "inferred",
+        SourceKind::External => "external",
+    }
+}
+
+fn decode_source_kind(value: &str) -> Result<SourceKind, Error> {
+    match value {
+        "agent_observation" => Ok(SourceKind::AgentObservation),
+        "human_input" => Ok(SourceKind::HumanInput),
+        "document_extract" => Ok(SourceKind::DocumentExtract),
+        "system_event" => Ok(SourceKind::SystemEvent),
+        "inferred" => Ok(SourceKind::Inferred),
+        "external" => Ok(SourceKind::External),
+        other => Err(Error::StorageError(format!("unknown source_kind: {other}"))),
+    }
 }
 
 fn decode_scope(value: &str) -> Result<ScopePath, Error> {

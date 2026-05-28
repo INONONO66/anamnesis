@@ -217,7 +217,7 @@ fn assemble_graph_recall_package<S: StorageAdapter + Clone>(
             let Some(agent_id) = &config.agent_id else {
                 return None;
             };
-            (node.origin.agent_id == *agent_id)
+            (node.origin.peer_id.0.to_string() == *agent_id)
                 .then(|| (node_id, node.node_type.clone(), activation))
         })
         .collect();

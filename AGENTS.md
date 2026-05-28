@@ -392,7 +392,6 @@ Ships with `SqliteStorage` (bundled SQLite via rusqlite, FTS5 full-text search, 
 
 ## Direction
 
-Planned features for future releases — none of these are implemented yet:
+Implemented multi-agent dynamics include `reflect_batch()` entity linking, social corroboration scoring primitives, and feedback-driven salience updates. Planned features for future releases:
 
-- **Social reinforcement scoring** — multi-agent salience bonus when multiple agents independently observe the same fragment
 - **`crystallize(session_id: &str)`** — session-level auto-consolidation (current `crystallize()` is consumer-driven; session-level auto-detection is not yet implemented)

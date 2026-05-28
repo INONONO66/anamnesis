@@ -420,5 +420,5 @@ benches/crystallize_bench.rs:
 - [Karpathy LLM Wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) — "Good answers can be filed back into the wiki"
 - [ADR-002: Fragment Memory with Natural Decay](./002-fragment-memory-with-natural-decay.md) — "Consolidation is additive, not destructive"
 - [Vision: Fragments, Not Summaries](../vision.md) — "Summaries are emergent via consolidation"
-- [Insight #13: Query Crystallization](../insights-design.local.md) — Initial concept
+- [Insight #13: Query Crystallization](../insights/insights-karpathy-wiki.local.md) — Initial concept
 - [OMEGA memory consolidation](https://github.com/omega-memory/omega-memory) — Access-based reinforcement + consolidation (closest external analog)

@@ -10,7 +10,8 @@ fn setup_engine_with_nodes() -> (Engine, NodeId, NodeId) {
     let mut engine = Engine::new();
 
     let origin = Origin {
-        agent_id: "test-agent".into(),
+        peer_id: anamnesis::graph::types::PeerId(0),
+        source_kind: anamnesis::peer::SourceKind::AgentObservation,
         session_id: "test-session".into(),
         scope: anamnesis::graph::ScopePath::universal(),
         confidence: 0.9,

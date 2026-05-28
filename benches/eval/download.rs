@@ -12,15 +12,15 @@ type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
 const DEFAULT_OUTPUT_DIR: &str = "benches/eval/data";
 
-const LOCOMO_REPO: &str = "snap-llm-workshop/locomo";
-// The LoCoMo HuggingFace repository is gated in some environments; its public
-// instructions use main as the stable data ref.
-const LOCOMO_REVISION: &str = "main";
-const LOCOMO_FILE: &str = "data/locomo10.json";
+// The original HuggingFace repository (snap-llm-workshop/locomo) is no longer
+// available. We download from the canonical GitHub repository instead and
+// transform the data structure to match our loader expectations.
+const LOCOMO_GITHUB_URL: &str =
+    "https://raw.githubusercontent.com/snap-research/locomo/main/data/locomo10.json";
 
 const LONGMEMEVAL_REPO: &str = "xiaowu0162/LongMemEval";
 const LONGMEMEVAL_REVISION: &str = "2ec2a557f339b6c0369619b1ed5793734cc87533";
-const LONGMEMEVAL_FILE: &str = "longmemeval_s.json";
+const LONGMEMEVAL_FILE: &str = "longmemeval_s";
 
 const CONVOMEM_REPO: &str = "Salesforce/ConvoMem";
 const CONVOMEM_REVISION: &str = "e3e9b39115b02346824c70d349350de738f8be41";
@@ -114,6 +114,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Config>> {
                 output_dir = PathBuf::from(value);
             }
             "--force" => force = true,
+            "--bench" => {}
             other => return Err(invalid_input(format!("unknown argument: {other}"))),
         }
     }
@@ -159,13 +160,8 @@ fn download_dataset(
     config: &Config,
 ) -> Result<()> {
     match dataset {
-        Dataset::Locomo => download_hf_file(
+        Dataset::Locomo => download_locomo(
             client,
-            token,
-            dataset,
-            LOCOMO_REPO,
-            LOCOMO_REVISION,
-            LOCOMO_FILE,
             &config.output_dir.join("locomo").join("locomo10.json"),
             config.force,
         ),
@@ -184,6 +180,56 @@ fn download_dataset(
         ),
         Dataset::ConvoMem => download_convomem(client, token, config),
     }
+}
+
+fn download_locomo(client: &Client, output_path: &Path, force: bool) -> Result<()> {
+    if output_path.exists() && !force {
+        eprintln!("Skipping locomo: {} already exists", output_path.display());
+        let count = verify_json(output_path)?;
+        eprintln!("Verified locomo: {count} entries");
+        return Ok(());
+    }
+
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let response = client.get(LOCOMO_GITHUB_URL).send()?.error_for_status()?;
+    save_response(Dataset::Locomo, response, output_path)?;
+
+    transform_locomo(output_path)?;
+
+    let count = verify_json(output_path)?;
+    eprintln!("Verified locomo: {count} entries");
+    Ok(())
+}
+
+fn transform_locomo(path: &Path) -> Result<()> {
+    let file = File::open(path)?;
+    let samples: Vec<Value> = serde_json::from_reader(file)?;
+
+    let transformed: Vec<Value> = samples
+        .into_iter()
+        .map(|sample| {
+            let mut new_sample = serde_json::Map::new();
+            if let Some(qa) = sample.get("qa") {
+                new_sample.insert("qa".to_string(), qa.clone());
+            }
+            if let Some(conv) = sample.get("conversation").and_then(Value::as_object) {
+                for (key, value) in conv {
+                    if key.starts_with("session_") && !key.ends_with("_date_time") {
+                        new_sample.insert(key.clone(), value.clone());
+                    }
+                }
+            }
+            Value::Object(new_sample)
+        })
+        .collect();
+
+    let mut file = File::create(path)?;
+    serde_json::to_writer(&mut file, &transformed)?;
+    file.flush()?;
+    Ok(())
 }
 
 fn download_convomem(client: &Client, token: Option<&str>, config: &Config) -> Result<()> {
@@ -208,8 +254,10 @@ fn download_convomem(client: &Client, token: Option<&str>, config: &Config) -> R
 }
 
 fn first_convomem_evidence_path(client: &Client, token: Option<&str>) -> Result<(String, String)> {
-    let url =
-        format!("https://huggingface.co/api/datasets/{CONVOMEM_REPO}/tree/{CONVOMEM_REVISION}");
+    let evidence_root = "core_benchmark/evidence_questions";
+    let url = format!(
+        "https://huggingface.co/api/datasets/{CONVOMEM_REPO}/tree/{CONVOMEM_REVISION}/{evidence_root}"
+    );
     let response = request_with_auth(client.get(url), token)
         .send()?
         .error_for_status()?;
@@ -218,28 +266,48 @@ fn first_convomem_evidence_path(client: &Client, token: Option<&str>) -> Result<
         .as_array()
         .ok_or_else(|| invalid_data("ConvoMem tree API did not return a JSON array"))?;
 
-    let mut categories = entries
+    let mut categories: Vec<String> = entries
         .iter()
         .filter_map(|entry| {
             let entry_type = entry.get("type").and_then(Value::as_str)?;
             let path = entry.get("path").and_then(Value::as_str)?;
-            if matches!(entry_type, "directory" | "folder" | "dir") && !path.contains('/') {
-                Some(path.to_owned())
+            if matches!(entry_type, "directory" | "folder" | "dir") {
+                Some(path.rsplit('/').next().unwrap_or(path).to_owned())
             } else {
                 None
             }
         })
-        .collect::<Vec<_>>();
-
+        .collect();
     categories.sort();
 
     let category = categories
         .into_iter()
         .next()
         .ok_or_else(|| invalid_data("ConvoMem tree API did not list any category directories"))?;
-    let remote_path = format!("{category}/1_evidence/batched_000.json");
 
-    Ok((category, remote_path))
+    let evidence_dir = format!("{evidence_root}/{category}/1_evidence");
+    let url = format!(
+        "https://huggingface.co/api/datasets/{CONVOMEM_REPO}/tree/{CONVOMEM_REVISION}/{evidence_dir}"
+    );
+    let response = request_with_auth(client.get(url), token)
+        .send()?
+        .error_for_status()?;
+    let files: Value = response.json()?;
+    let first_file = files
+        .as_array()
+        .and_then(|arr| {
+            arr.iter().find_map(|entry| {
+                let path = entry.get("path").and_then(Value::as_str)?;
+                if path.ends_with(".json") {
+                    Some(path.to_owned())
+                } else {
+                    None
+                }
+            })
+        })
+        .ok_or_else(|| invalid_data("ConvoMem: no JSON files in 1_evidence directory"))?;
+
+    Ok((category, first_file))
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -669,7 +669,7 @@ pub struct MergeLog {
 /// Summary of a completed agent session for reflect_batch().
 #[derive(Debug, Clone)]
 pub struct SessionSummary {
-    pub agent_id: String,
+    pub peer_id: crate::graph::types::PeerId,
     pub session_id: String,
     pub node_ids: Vec<NodeId>,
 }
@@ -725,8 +725,8 @@ pub struct SupportReport {
     pub supporting_sources: usize,
     /// Number of nodes connected via contradicting edges (Contradicts).
     pub contradicting_sources: usize,
-    /// Number of distinct (agent_id, session_id) pairs among all source nodes.
-    /// Same-agent repetitions in different sessions count as independent.
+    /// Number of distinct (peer_id, session_id) pairs among all source nodes.
+    /// Same-peer repetitions in different sessions count as independent.
     pub independent_origins: usize,
     /// Sum of salience values of all supporting source nodes.
     pub total_support_salience: f64,
@@ -754,9 +754,9 @@ pub enum IngestResult {
 /// before spreading activation.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ObservedRef {
-    /// Observe knowledge related to another agent's contributions.
-    /// Filters to observer nodes that are connected (via edges) to nodes produced by this agent.
-    Agent(String),
+    /// Observe knowledge related to another peer's contributions.
+    /// Filters to observer nodes that are connected (via edges) to nodes produced by this peer.
+    Agent(crate::graph::types::PeerId),
     /// Observe knowledge about an entity tag.
     /// Filters to observer nodes that carry this entity tag.
     EntityTag(String),
@@ -772,8 +772,8 @@ pub enum ObservedRef {
 /// cannot recall events created before their first contribution.
 #[derive(Debug, Clone)]
 pub struct PerspectiveKey {
-    /// The agent whose perspective we are querying from.
-    pub observer_agent_id: String,
+    /// The peer whose perspective we are querying from.
+    pub observer_peer_id: crate::graph::types::PeerId,
     /// What the observer is looking at.
     pub observed: ObservedRef,
     /// Scope filter — only nodes matching this scope (or universal) are included.
@@ -1602,12 +1602,12 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         let single_source_warning = {
             let storage = self.graph.storage();
             storage.get_node(source_ids[0]).ok().is_some_and(|first| {
-                let agent = &first.origin.agent_id;
+                let peer = first.origin.peer_id;
                 let session = &first.origin.session_id;
                 source_ids[1..].iter().all(|&sid| {
-                    storage.get_node(sid).is_ok_and(|n| {
-                        n.origin.agent_id == *agent && n.origin.session_id == *session
-                    })
+                    storage
+                        .get_node(sid)
+                        .is_ok_and(|n| n.origin.peer_id == peer && n.origin.session_id == *session)
                 })
             })
         };
@@ -2299,7 +2299,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         let now = config.now.unwrap_or_else(Timestamp::now);
 
         // Stage 1: Collect all observer nodes and find observer's earliest timestamp
-        let observer_node_ids = storage.nodes_by_agent(&perspective.observer_agent_id);
+        let observer_node_ids = storage.nodes_by_peer(perspective.observer_peer_id);
         if observer_node_ids.is_empty() {
             return Ok(ContextPackage::empty());
         }
@@ -2322,11 +2322,9 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                         .filter(|nid| observer_set.contains(nid))
                         .collect()
                 }
-                ObservedRef::Agent(target_agent_id) => {
-                    let target_nodes: HashSet<NodeId> = storage
-                        .nodes_by_agent(target_agent_id)
-                        .into_iter()
-                        .collect();
+                ObservedRef::Agent(target_peer_id) => {
+                    let target_nodes: HashSet<NodeId> =
+                        storage.nodes_by_peer(*target_peer_id).into_iter().collect();
                     observer_node_ids
                         .iter()
                         .copied()
@@ -2832,9 +2830,10 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         // --- Stage 1: Collect identity nodes for this agent (indexed lookup) ---
         let identity_nodes: Vec<(Vec<f64>, KnowledgeType, f64)> =
             if let Some(ref agent_id) = config.agent_id {
-                // Use agent index to get only this agent's nodes, then filter for identity types
+                // Use peer index to get only this peer's nodes, then filter for identity types
+                let peer_id = crate::graph::types::PeerId(agent_id.parse::<u64>().unwrap_or(0));
                 storage
-                    .nodes_by_agent(agent_id)
+                    .nodes_by_peer(peer_id)
                     .into_iter()
                     .filter_map(|nid| {
                         let node = storage.get_node(nid).ok()?;
@@ -2883,7 +2882,8 @@ impl<S: StorageAdapter + Clone> Engine<S> {
 
         // Identity nodes get prior activation.
         if let Some(ref agent_id) = config.agent_id {
-            for nid in storage.nodes_by_agent(agent_id) {
+            let peer_id = crate::graph::types::PeerId(agent_id.parse::<u64>().unwrap_or(0));
+            for nid in storage.nodes_by_peer(peer_id) {
                 if nid == seed {
                     continue;
                 }
@@ -3101,7 +3101,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                         | KnowledgeType::IdentityState
                 );
                 let is_agent = match &config.agent_id {
-                    Some(aid) => node.origin.agent_id == *aid,
+                    Some(aid) => node.origin.peer_id.0.to_string() == *aid,
                     None => false,
                 };
                 if is_identity && is_agent {
@@ -3176,7 +3176,8 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             }
         }
 
-        let mut nodes_by_tag: BTreeMap<String, Vec<(NodeId, String)>> = BTreeMap::new();
+        let mut nodes_by_tag: BTreeMap<String, Vec<(NodeId, crate::graph::types::PeerId)>> =
+            BTreeMap::new();
         for node_id in input_node_ids {
             let Ok(node) = self.graph.get_node(node_id) else {
                 continue;
@@ -3188,7 +3189,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                     nodes_by_tag
                         .entry(tag.clone())
                         .or_default()
-                        .push((node_id, node.origin.agent_id.clone()));
+                        .push((node_id, node.origin.peer_id));
                 }
             }
         }
@@ -3350,7 +3351,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                     let target_node = storage.get_node(target_id)?;
                     total_support_salience += target_node.salience;
                     origins.insert((
-                        target_node.origin.agent_id.clone(),
+                        target_node.origin.peer_id,
                         target_node.origin.session_id.clone(),
                     ));
                 }
@@ -3358,7 +3359,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                     contradicting_sources += 1;
                     let target_node = storage.get_node(target_id)?;
                     origins.insert((
-                        target_node.origin.agent_id.clone(),
+                        target_node.origin.peer_id,
                         target_node.origin.session_id.clone(),
                     ));
                 }
@@ -3383,7 +3384,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                     let source_node = storage.get_node(source_id)?;
                     total_support_salience += source_node.salience;
                     origins.insert((
-                        source_node.origin.agent_id.clone(),
+                        source_node.origin.peer_id,
                         source_node.origin.session_id.clone(),
                     ));
                 }
@@ -3391,7 +3392,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                     contradicting_sources += 1;
                     let source_node = storage.get_node(source_id)?;
                     origins.insert((
-                        source_node.origin.agent_id.clone(),
+                        source_node.origin.peer_id,
                         source_node.origin.session_id.clone(),
                     ));
                 }
@@ -3433,7 +3434,8 @@ mod tests {
             node_type: KnowledgeType::Semantic,
             entity_tags: vec!["test".to_string()],
             origin: Origin {
-                agent_id: "agent-1".to_string(),
+                peer_id: crate::graph::types::PeerId(0),
+                source_kind: crate::peer::SourceKind::AgentObservation,
                 session_id: "session-1".to_string(),
                 scope: crate::graph::ScopePath::universal(),
                 confidence: 0.9,
@@ -3906,7 +3908,8 @@ mod tests {
             node_type: KnowledgeType::IdentityCore,
             embedding: Some(vec![1.0, 0.0]),
             origin: Origin {
-                agent_id: "agent-1".to_string(),
+                peer_id: crate::graph::types::PeerId(0),
+                source_kind: crate::peer::SourceKind::AgentObservation,
                 session_id: "session-1".to_string(),
                 scope: crate::graph::ScopePath::universal(),
                 confidence: 1.0,

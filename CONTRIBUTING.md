@@ -16,7 +16,7 @@ cargo build
 cargo test
 
 # Lint
-cargo clippy -- -D warnings
+cargo clippy --all-targets --all-features -- -D warnings
 
 # Format check
 cargo fmt --check
@@ -37,9 +37,11 @@ cargo fmt --check
 2. Make your changes.
 3. Ensure **all checks pass** before submitting:
    ```bash
-   cargo test --all-targets   # All tests + bench compilation
-   cargo clippy -- -D warnings # Zero warnings
-   cargo fmt --check           # Formatting
+   cargo fmt --check
+   cargo clippy --all-targets --all-features -- -D warnings
+   cargo test --all-features
+   cargo test --doc --all-features
+   cargo test --all-targets --all-features --no-run
    ```
 4. Open a pull request against `main`.
 
@@ -75,7 +77,7 @@ test(engine): add property tests for ingestion pipeline
 
 - New features should include tests in `tests/`.
 - Pure functions should consider property-based testing (`proptest`).
-- Run `cargo test --all-targets` to verify everything compiles and passes.
+- Run `cargo test --all-targets --all-features --no-run` to verify tests and benchmark targets compile without executing long-running benchmark binaries.
 
 ## Reporting Bugs
 

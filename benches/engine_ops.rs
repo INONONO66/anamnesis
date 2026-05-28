@@ -26,7 +26,8 @@ fn make_observation(i: u64) -> Observation {
         node_type: KnowledgeType::Semantic,
         entity_tags: vec!["bench".to_string()],
         origin: Origin {
-            agent_id: "bench-agent".to_string(),
+            peer_id: anamnesis::graph::types::PeerId(0),
+            source_kind: anamnesis::peer::SourceKind::AgentObservation,
             session_id: "bench-session".to_string(),
             scope: anamnesis::graph::ScopePath::universal(),
             confidence: 0.9,

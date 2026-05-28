@@ -12,6 +12,9 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
@@ -27,12 +30,21 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo doc --no-deps
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+      - run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
+
+  msrv:
+    name: MSRV (Rust 1.85)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.85
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --all-targets --all-features
 
   test:
     name: Test (nextest + doctest)
-    needs: [gatekeeper]
+    needs: [gatekeeper, msrv]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -41,13 +53,28 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
-      - run: cargo nextest run
-      - run: cargo test --doc
+      - run: cargo nextest run --all-features
+      - run: cargo test --doc --all-features
+      - name: Compile all test and bench targets without running long benchmarks
+        run: cargo test --all-targets --all-features --no-run
+
+  embed-smoke:
+    name: FastEmbed smoke test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --features embed --test fastembed_provider -- --ignored --test-threads=1
 
   coverage:
     name: Coverage
     needs: [test]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -60,10 +87,9 @@ jobs:
           fail_ci_if_error: false
 
   semver:
-    name: Semver check (advisory)
+    name: Semver check
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
         with:
@@ -86,8 +112,12 @@ jobs:
     name: Benchmarks
     runs-on: ubuntu-latest
     if: github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Run benchmarks
@@ -96,13 +126,12 @@ jobs:
           cargo bench --bench ingestion --bench graph_crud --bench storage --bench memory_usage --bench engine_ops -- --output-format bencher 2>&1 | tee output.txt
       - name: Store benchmark result
         uses: benchmark-action/github-action-benchmark@v1
-        continue-on-error: true
         with:
           tool: 'cargo'
           output-file-path: output.txt
           github-token: ${{ secrets.GITHUB_TOKEN }}
           comment-on-alert: true
-          alert-threshold: '200%'
+          alert-threshold: '15%'
           summary-always: true
           auto-push: true
           gh-pages-branch: gh-pages

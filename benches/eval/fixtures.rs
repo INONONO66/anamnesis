@@ -112,7 +112,8 @@ impl FixtureBuilder {
             node_type,
             entity_tags: entity_tags.iter().map(|tag| (*tag).to_string()).collect(),
             origin: Origin {
-                agent_id: "fixture".to_string(),
+                peer_id: anamnesis::graph::types::PeerId(0),
+                source_kind: anamnesis::peer::SourceKind::AgentObservation,
                 session_id: "golden".to_string(),
                 scope: ScopePath::new(scope).expect("valid scope path"),
                 confidence: 0.9,

@@ -196,7 +196,8 @@ fn make_indexed_node(id: NodeId, scope: &str) -> Node {
         access_history: VecDeque::new(),
         tier: MemoryTier::Auto,
         origin: Origin {
-            agent_id: "agent".to_string(),
+            peer_id: anamnesis::graph::types::PeerId(0),
+            source_kind: anamnesis::peer::SourceKind::AgentObservation,
             session_id: "session".to_string(),
             scope: ScopePath::new(scope).expect("valid scope"),
             confidence: 0.9,
@@ -304,13 +305,15 @@ fn search_personal_foo_downweights_work_bar_vs_personal_ancestor() {
     let mut engine = Engine::with_config(config);
 
     let ancestor_origin = Origin {
-        agent_id: "agent".to_string(),
+        peer_id: anamnesis::graph::types::PeerId(0),
+        source_kind: anamnesis::peer::SourceKind::AgentObservation,
         session_id: "session".to_string(),
         scope: ScopePath::new("personal").unwrap(),
         confidence: 1.0,
     };
     let unrelated_origin = Origin {
-        agent_id: "agent".to_string(),
+        peer_id: anamnesis::graph::types::PeerId(0),
+        source_kind: anamnesis::peer::SourceKind::AgentObservation,
         session_id: "session".to_string(),
         scope: ScopePath::new("work/bar").unwrap(),
         confidence: 1.0,

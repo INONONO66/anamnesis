@@ -9,7 +9,7 @@ pub mod sqlite;
 pub use sqlite::SqliteStorage;
 
 use crate::error::Error;
-use crate::graph::{Edge, EdgeId, KnowledgeType, Node, NodeId, ScopePath, Timestamp};
+use crate::graph::{Edge, EdgeId, KnowledgeType, Node, NodeId, PeerId, ScopePath, Timestamp};
 
 /// Storage backend interface for the Anamnesis graph engine.
 ///
@@ -141,16 +141,16 @@ pub trait StorageAdapter: Send + Sync {
             .collect()
     }
 
-    /// Return all node IDs created by the given agent.
+    /// Return all node IDs created by the given peer.
     ///
     /// Default implementation scans all nodes: O(N). Override for O(1) index lookup.
-    fn nodes_by_agent(&self, agent_id: &str) -> Vec<NodeId> {
+    fn nodes_by_peer(&self, peer_id: PeerId) -> Vec<NodeId> {
         self.all_node_ids()
             .into_iter()
             .filter(|&id| {
                 self.get_node(id)
                     .ok()
-                    .is_some_and(|n| n.origin.agent_id == agent_id)
+                    .is_some_and(|n| n.origin.peer_id == peer_id)
             })
             .collect()
     }

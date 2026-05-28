@@ -22,7 +22,8 @@ fn observation_at(name: &str, ts: u64) -> Observation {
         node_type: KnowledgeType::Semantic,
         entity_tags: vec!["topic".to_string()],
         origin: Origin {
-            agent_id: "agent-A".to_string(),
+            peer_id: anamnesis::graph::types::PeerId(0),
+            source_kind: anamnesis::peer::SourceKind::AgentObservation,
             session_id: "sess-1".to_string(),
             scope: anamnesis::graph::ScopePath::new("proj-X").expect("valid scope"),
             confidence: 0.9,

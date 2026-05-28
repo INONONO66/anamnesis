@@ -25,7 +25,8 @@ fn build_engine_with_nodes(n: usize, core_pct: usize) -> Engine {
             node_type: KnowledgeType::Semantic,
             entity_tags: vec![],
             origin: Origin {
-                agent_id: "bench".to_string(),
+                peer_id: anamnesis::graph::types::PeerId(0),
+                source_kind: anamnesis::peer::SourceKind::AgentObservation,
                 session_id: "bench".to_string(),
                 scope: ScopePath::universal(),
                 confidence: 0.9,
