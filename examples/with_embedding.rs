@@ -65,6 +65,7 @@ fn main() -> Result<(), anamnesis::Error> {
     let id1 = match &r1 {
         IngestResult::Created(ids) => ids[0],
         IngestResult::Reinforced { existing_id, .. } => *existing_id,
+        IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
     };
     println!("Ingested node {}", id1.0);
 
@@ -82,6 +83,7 @@ fn main() -> Result<(), anamnesis::Error> {
     let id2 = match &r2 {
         IngestResult::Created(ids) => ids[0],
         IngestResult::Reinforced { existing_id, .. } => *existing_id,
+        IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
     };
     println!("Ingested node {}", id2.0);
 

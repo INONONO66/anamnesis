@@ -36,6 +36,7 @@ fn default_seed_limit_three() {
     let result = engine.search(anamnesis::query::SearchInput {
         text: "node".into(),
         agent_id: None,
+        peer_filter: None,
         scope: anamnesis::graph::ScopePath::universal(),
         now: Timestamp::now(),
         query_embedding: None,
@@ -84,6 +85,7 @@ fn custom_seed_limit_five() {
     let result = engine.search(anamnesis::query::SearchInput {
         text: "node".into(),
         agent_id: None,
+        peer_filter: None,
         scope: anamnesis::graph::ScopePath::universal(),
         now: Timestamp::now(),
         query_embedding: None,
@@ -132,6 +134,7 @@ fn seed_limit_zero_no_panic() {
     let result = engine.search(anamnesis::query::SearchInput {
         text: "node".into(),
         agent_id: None,
+        peer_filter: None,
         scope: anamnesis::graph::ScopePath::universal(),
         now: Timestamp::now(),
         query_embedding: None,
@@ -180,6 +183,7 @@ fn seed_limit_larger_than_fused_returns_all() {
     let result = engine.search(anamnesis::query::SearchInput {
         text: "node".into(),
         agent_id: None,
+        peer_filter: None,
         scope: anamnesis::graph::ScopePath::universal(),
         now: Timestamp::now(),
         query_embedding: None,

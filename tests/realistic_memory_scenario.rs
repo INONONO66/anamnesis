@@ -49,6 +49,7 @@ fn created_id(result: IngestResult) -> NodeId {
     match result {
         IngestResult::Created(ids) => ids[0],
         IngestResult::Reinforced { .. } => panic!("expected a newly created node"),
+        IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
     }
 }
 

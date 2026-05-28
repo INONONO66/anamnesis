@@ -682,6 +682,10 @@ fn ingest_observation(
             .copied()
             .ok_or_else(|| "ingest created no node ids".to_string()),
         Ok(IngestResult::Reinforced { existing_id, .. }) => Ok(existing_id),
+        Ok(IngestResult::CreatedWithConflict { node_ids, .. }) => node_ids
+            .first()
+            .copied()
+            .ok_or_else(|| "no node ids".to_string()),
         Err(err) => Err(err.to_string()),
     }
 }

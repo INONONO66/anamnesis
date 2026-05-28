@@ -231,6 +231,10 @@ pub struct SearchInput {
     pub text: String,
     /// Agent ID for identity-biased retrieval. None = no identity bias.
     pub agent_id: Option<String>,
+    /// Peer filter — restrict results to nodes produced by these peers.
+    ///
+    /// `None` = include all peers (default). Combined with `scope` as AND.
+    pub peer_filter: Option<Vec<crate::graph::types::PeerId>>,
     /// Scope filter. `ScopePath::universal()` = universal.
     pub scope: ScopePath,
     /// Current timestamp for temporal filtering.
@@ -253,6 +257,7 @@ impl Default for SearchInput {
         SearchInput {
             text: String::new(),
             agent_id: None,
+            peer_filter: None,
             scope: ScopePath::universal(),
             now: Timestamp(0),
             query_embedding: None,

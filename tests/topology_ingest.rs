@@ -42,6 +42,7 @@ fn ingest(engine: &mut Engine, name: &str, tags: &[&str], embedding: Option<Vec<
     {
         IngestResult::Created(ids) => ids[0],
         IngestResult::Reinforced { .. } => panic!("dedup is disabled"),
+        IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
     }
 }
 
@@ -70,6 +71,7 @@ fn created_id(result: IngestResult) -> NodeId {
     match result {
         IngestResult::Created(ids) => ids[0],
         IngestResult::Reinforced { .. } => panic!("dedup is disabled"),
+        IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
     }
 }
 

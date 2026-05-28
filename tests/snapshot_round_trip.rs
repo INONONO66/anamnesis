@@ -46,6 +46,7 @@ fn ingest_at(engine: &mut Engine, name: &str, scope: &str, ts: Timestamp) -> Nod
     match engine.ingest(observation_at(name, scope, ts)).unwrap() {
         IngestResult::Created(ids) => ids[0],
         IngestResult::Reinforced { .. } => panic!("test fixture should always create a fresh node"),
+        IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
     }
 }
 

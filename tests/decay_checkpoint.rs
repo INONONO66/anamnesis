@@ -44,6 +44,7 @@ fn ingest_first(engine: &mut Engine, obs: Observation) -> NodeId {
     match engine.ingest(obs).unwrap() {
         IngestResult::Created(ids) => ids[0],
         IngestResult::Reinforced { .. } => panic!("expected fresh node"),
+        IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
     }
 }
 

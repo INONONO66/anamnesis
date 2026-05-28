@@ -48,6 +48,7 @@ fn ingest(engine: &mut Engine, name: &str, node_type: KnowledgeType, scope: &str
     match engine.ingest(observation(name, node_type, scope)).unwrap() {
         IngestResult::Created(ids) => ids[0],
         IngestResult::Reinforced { existing_id, .. } => existing_id,
+        IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
     }
 }
 

@@ -29,6 +29,7 @@ fn ingest_node(engine: &mut Engine, name: &str, timestamp: Timestamp) -> NodeId 
     match engine.ingest(observation(name, timestamp)).unwrap() {
         IngestResult::Created(ids) => ids[0],
         IngestResult::Reinforced { .. } => panic!("test observations should create nodes"),
+        IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
     }
 }
 

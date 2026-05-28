@@ -45,6 +45,7 @@ fn ingest(engine: &mut Engine, name: &str) -> NodeId {
     {
         IngestResult::Created(ids) => ids[0],
         IngestResult::Reinforced { .. } => panic!("dedup is disabled"),
+        IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
     }
 }
 
@@ -155,6 +156,7 @@ fn priority_queue_bfs_uses_identity_prior_without_dropping_seed() {
     {
         IngestResult::Created(ids) => ids[0],
         IngestResult::Reinforced { .. } => panic!("dedup is disabled"),
+        IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
     };
 
     let result = engine

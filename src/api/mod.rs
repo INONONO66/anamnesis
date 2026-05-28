@@ -121,6 +121,12 @@ pub struct EngineConfig {
     pub social_learning_rate: f64,
     /// Maximum number of mutation events retained for draining. Default: 10,000.
     pub max_events: usize,
+    /// Similarity threshold for conflict detection.
+    ///
+    /// When `conflict_threshold < similarity < dedup_threshold`, ingest returns
+    /// `IngestResult::CreatedWithConflict` and creates a `Contradicts` edge.
+    /// Default: 0.75.
+    pub conflict_threshold: f64,
 }
 
 impl Default for EngineConfig {
@@ -141,6 +147,7 @@ impl Default for EngineConfig {
             mass_model: MassModel::Legacy,
             social_learning_rate: 0.15,
             max_events: 10_000,
+            conflict_threshold: 0.75,
         }
     }
 }
@@ -732,6 +739,28 @@ pub struct SupportReport {
     pub total_support_salience: f64,
 }
 
+/// Hint about a potential conflict detected during ingest.
+#[derive(Debug, Clone)]
+pub struct ConflictHint {
+    /// The existing node that conflicts with the new observation.
+    pub existing_node: NodeId,
+    /// Similarity score [0, 1] between the new observation and the existing node.
+    pub similarity: f64,
+    /// Suggested interpretation of the conflict.
+    pub suggestion: ConflictSuggestion,
+}
+
+/// Suggested interpretation of a detected conflict.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConflictSuggestion {
+    /// The new observation likely updates the existing node.
+    ProbableUpdate,
+    /// The new observation likely disagrees with the existing node.
+    ProbableDisagreement,
+    /// The new observation is likely a near-duplicate.
+    ProbableDuplicate,
+}
+
 /// Result of an ingest operation.
 ///
 /// Indicates whether a new node was created or an existing node was reinforced.
@@ -739,6 +768,15 @@ pub struct SupportReport {
 pub enum IngestResult {
     /// A new node was created with the given IDs.
     Created(Vec<NodeId>),
+    /// A new node was created, but a potential conflict was detected with an existing node.
+    ///
+    /// A `Contradicts` edge is automatically created between the new node and the conflicting node.
+    CreatedWithConflict {
+        /// The IDs of the newly created nodes.
+        node_ids: Vec<NodeId>,
+        /// Details about the detected conflict.
+        conflict: ConflictHint,
+    },
     /// An existing node was reinforced due to similarity.
     Reinforced {
         /// The ID of the existing node that was reinforced.
@@ -882,6 +920,50 @@ fn salience_tier(salience: f64) -> MemoryTier {
     } else {
         MemoryTier::Recall
     }
+}
+
+/// Grade assigned to the graph's overall health.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum HealthGrade {
+    /// Excellent — orphan < 5%, contradiction < 3%, supersede < 10%.
+    A,
+    /// Good — orphan < 15%, contradiction < 8%, supersede < 20%.
+    B,
+    /// Fair — orphan < 30%, contradiction < 15%, supersede < 35%.
+    C,
+    /// Poor — any metric exceeds C thresholds.
+    D,
+}
+
+/// Diagnostic report for the cognitive graph.
+///
+/// Returned by `Engine::health()`. Contains structural metrics and an overall grade.
+#[derive(Debug, Clone)]
+pub struct HealthReport {
+    /// Total number of live nodes.
+    pub total_nodes: usize,
+    /// Number of nodes with no edges (orphans).
+    pub orphan_count: usize,
+    /// Number of Contradicts edges.
+    pub contradiction_count: usize,
+    /// Number of Supersedes edges.
+    pub supersede_count: usize,
+    /// Fraction of nodes that are orphans [0, 1].
+    pub orphan_rate: f64,
+    /// Fraction of edges that are Contradicts [0, 1].
+    pub contradiction_rate: f64,
+    /// Fraction of edges that are Supersedes [0, 1].
+    pub supersede_rate: f64,
+    /// Number of retracted nodes.
+    pub retracted_count: usize,
+    /// Number of nodes without an embedding vector.
+    pub missing_embedding_count: usize,
+    /// Number of registered peers.
+    pub peer_count: usize,
+    /// Average salience across all nodes.
+    pub avg_salience: f64,
+    /// Overall health grade.
+    pub grade: HealthGrade,
 }
 
 /// The Anamnesis cognitive graph engine.
@@ -1434,6 +1516,38 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             });
         }
 
+        // Conflict detection: similarity in (conflict_threshold, dedup_threshold) range.
+        let conflict_candidate = if self.config.dedup_enabled
+            && max_similarity > self.config.conflict_threshold
+            && max_similarity <= self.config.dedup_threshold
+        {
+            // Check that the candidate is not retracted
+            let is_retracted = self
+                .graph
+                .storage()
+                .get_node(most_similar_id)
+                .ok()
+                .is_some_and(|n| n.metadata.get("retracted").is_some_and(|v| v == "true"));
+            if is_retracted {
+                None
+            } else {
+                let suggestion = if max_similarity > 0.88 {
+                    ConflictSuggestion::ProbableDuplicate
+                } else if max_similarity > 0.80 {
+                    ConflictSuggestion::ProbableUpdate
+                } else {
+                    ConflictSuggestion::ProbableDisagreement
+                };
+                Some(ConflictHint {
+                    existing_node: most_similar_id,
+                    similarity: max_similarity,
+                    suggestion,
+                })
+            }
+        } else {
+            None
+        };
+
         gate_observation(
             observation.confidence,
             self.config.confidence_threshold,
@@ -1592,6 +1706,34 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                     });
                 }
             }
+        }
+
+        // If a conflict was detected, create a Contradicts edge and return CreatedWithConflict
+        if let Some(conflict) = conflict_candidate {
+            let eid = self.graph.next_edge_id();
+            let contradicts_edge = Edge {
+                id: eid,
+                source: id,
+                target: conflict.existing_node,
+                edge_type: EdgeType::Contradicts,
+                weight: conflict.similarity,
+                edge_source: crate::graph::edge::EdgeSource::Auto,
+                created_at: now,
+                valid_from: None,
+                valid_until: None,
+                metadata: HashMap::new(),
+            };
+            self.graph.add_edge(contradicts_edge)?;
+            self.emit_event(GraphEvent::EdgeCreated {
+                edge_id: eid,
+                source: id,
+                target: conflict.existing_node,
+                edge_type: EdgeType::Contradicts,
+            });
+            return Ok(IngestResult::CreatedWithConflict {
+                node_ids: vec![id],
+                conflict,
+            });
         }
 
         Ok(IngestResult::Created(vec![id]))
@@ -2105,6 +2247,38 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         Ok(node.tier.clone())
     }
 
+    /// Explicitly invalidate a node — mark it as retracted.
+    ///
+    /// Retracted nodes:
+    /// - Are excluded from `search()` results and `query()` spreading activation.
+    /// - Are still accessible via `get_node()` for audit purposes.
+    /// - Are ignored by `touch()` (salience unchanged).
+    /// - Trigger a warning when used as a `crystallize()` source.
+    ///
+    /// Edges are preserved (not deleted). The retraction is recorded in node metadata.
+    pub fn retract(
+        &mut self,
+        node_id: NodeId,
+        reason: &str,
+        timestamp: Timestamp,
+    ) -> Result<(), Error> {
+        let node = self.graph.get_node_mut(node_id)?;
+        node.metadata
+            .insert("retracted".to_string(), "true".to_string());
+        node.metadata
+            .insert("retraction_reason".to_string(), reason.to_string());
+        node.metadata
+            .insert("retracted_at".to_string(), timestamp.0.to_string());
+        node.updated_at = timestamp;
+        Ok(())
+    }
+
+    /// Returns true if the node has been retracted.
+    pub fn is_retracted(&self, node_id: NodeId) -> Result<bool, Error> {
+        let node = self.graph.get_node(node_id)?;
+        Ok(node.metadata.get("retracted").is_some_and(|v| v == "true"))
+    }
+
     /// Apply a consumer feedback signal to a node's salience.
     ///
     /// Updates salience using diminishing returns: `s += η * strength * (1 - s)` for
@@ -2294,6 +2468,97 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             nodes_decayed,
             nodes_pruned,
         })
+    }
+
+    /// Compute the health of the cognitive graph.
+    ///
+    /// Returns a `HealthReport` with structural metrics and an overall `HealthGrade`.
+    /// This is a read-only operation — it does not mutate any state.
+    /// Call this periodically to monitor graph quality; do NOT call from `tick()`.
+    pub fn health(&self) -> HealthReport {
+        let storage = self.graph.storage();
+        let node_ids = storage.all_node_ids();
+        let edge_ids = storage.all_edge_ids();
+        let total_nodes = node_ids.len();
+        let total_edges = edge_ids.len();
+
+        let mut orphan_count = 0usize;
+        let mut retracted_count = 0usize;
+        let mut missing_embedding_count = 0usize;
+        let mut salience_sum = 0.0_f64;
+
+        for &nid in &node_ids {
+            if let Ok(node) = storage.get_node(nid) {
+                if storage.edges_from(nid).is_empty() && storage.edges_to(nid).is_empty() {
+                    orphan_count += 1;
+                }
+                if node.metadata.get("retracted").is_some_and(|v| v == "true") {
+                    retracted_count += 1;
+                }
+                if node.embedding.is_none() {
+                    missing_embedding_count += 1;
+                }
+                salience_sum += storage.get_salience(nid).unwrap_or(0.0);
+            }
+        }
+
+        let mut contradiction_count = 0usize;
+        let mut supersede_count = 0usize;
+        for &eid in &edge_ids {
+            if let Ok(edge) = storage.get_edge(eid) {
+                match edge.edge_type {
+                    EdgeType::Contradicts => contradiction_count += 1,
+                    EdgeType::Supersedes => supersede_count += 1,
+                    _ => {}
+                }
+            }
+        }
+
+        let orphan_rate = if total_nodes > 0 {
+            orphan_count as f64 / total_nodes as f64
+        } else {
+            0.0
+        };
+        let contradiction_rate = if total_edges > 0 {
+            contradiction_count as f64 / total_edges as f64
+        } else {
+            0.0
+        };
+        let supersede_rate = if total_edges > 0 {
+            supersede_count as f64 / total_edges as f64
+        } else {
+            0.0
+        };
+        let avg_salience = if total_nodes > 0 {
+            salience_sum / total_nodes as f64
+        } else {
+            0.0
+        };
+
+        let grade = if orphan_rate < 0.05 && contradiction_rate < 0.03 && supersede_rate < 0.10 {
+            HealthGrade::A
+        } else if orphan_rate < 0.15 && contradiction_rate < 0.08 && supersede_rate < 0.20 {
+            HealthGrade::B
+        } else if orphan_rate < 0.30 && contradiction_rate < 0.15 && supersede_rate < 0.35 {
+            HealthGrade::C
+        } else {
+            HealthGrade::D
+        };
+
+        HealthReport {
+            total_nodes,
+            orphan_count,
+            contradiction_count,
+            supersede_count,
+            orphan_rate,
+            contradiction_rate,
+            supersede_rate,
+            retracted_count,
+            missing_embedding_count,
+            peer_count: self.peers.peer_count(),
+            avg_salience,
+            grade,
+        }
     }
 
     /// Query the graph — returns structured context for LLM consumption.
@@ -3398,8 +3663,11 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         Ok(results)
     }
 
-    /// Compute read-only structural health diagnostics for the graph.
-    pub fn health(&self) -> crate::mechanics::health::GraphHealth {
+    /// Compute read-only structural health diagnostics for the graph (legacy).
+    ///
+    /// Returns the low-level `GraphHealth` struct. For the full `HealthReport` with
+    /// grade, use `Engine::health()`.
+    pub fn graph_health(&self) -> crate::mechanics::health::GraphHealth {
         crate::mechanics::health::compute_health(self.graph.storage())
     }
 

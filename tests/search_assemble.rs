@@ -47,6 +47,7 @@ fn ingest(engine: &mut Engine, observation: Observation) -> NodeId {
     match engine.ingest(observation).expect("ingest should succeed") {
         IngestResult::Created(ids) => ids[0],
         IngestResult::Reinforced { .. } => panic!("dedup is disabled"),
+        IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
     }
 }
 

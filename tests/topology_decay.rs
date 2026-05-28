@@ -49,6 +49,7 @@ fn ingest(engine: &mut Engine, name: &str, node_type: KnowledgeType, scope: &str
     match result {
         IngestResult::Created(ids) => ids[0],
         IngestResult::Reinforced { .. } => panic!("expected fresh node"),
+        IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
     }
 }
 

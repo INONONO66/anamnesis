@@ -95,6 +95,7 @@ fn main() -> Result<(), Error> {
     let id1 = match &result1 {
         IngestResult::Created(ids) => ids[0],
         IngestResult::Reinforced { existing_id, .. } => *existing_id,
+        IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
     };
     println!("Ingested node {}: {:?}", id1.0, result1);
 
@@ -113,6 +114,7 @@ fn main() -> Result<(), Error> {
     let id2 = match &result2 {
         IngestResult::Created(ids) => ids[0],
         IngestResult::Reinforced { existing_id, .. } => *existing_id,
+        IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
     };
     println!("Ingested node {}: {:?}", id2.0, result2);
 

@@ -1,5 +1,6 @@
 //! Tests for top-k convergence termination in spreading activation.
 
+use anamnesis::IngestResult;
 use anamnesis::api::{Engine, Observation};
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{EdgeType, KnowledgeType, ScopePath, Timestamp};
@@ -36,6 +37,7 @@ fn convergence_enabled_stops_early() {
         let id = match result {
             anamnesis::api::IngestResult::Created(ids) => ids[0],
             anamnesis::api::IngestResult::Reinforced { existing_id, .. } => existing_id,
+            IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
         };
         node_ids.push(id);
     }
@@ -100,6 +102,7 @@ fn convergence_disabled_default_behavior() {
         let id = match result {
             anamnesis::api::IngestResult::Created(ids) => ids[0],
             anamnesis::api::IngestResult::Reinforced { existing_id, .. } => existing_id,
+            IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
         };
         node_ids.push(id);
     }
