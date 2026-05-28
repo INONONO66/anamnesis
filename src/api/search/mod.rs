@@ -59,15 +59,18 @@ pub(crate) fn search<S: StorageAdapter + Clone>(
         }
     }
 
-    if plan.use_vector
-        && let Some(ref query_embedding) = input.query_embedding
-    {
-        let vector_candidates =
-            candidates::collect_vector_candidates(storage, query_embedding, input.limit.max(10));
-        if !vector_candidates.is_empty() {
-            per_source.push(vector_candidates);
+    if plan.use_vector {
+        if let Some(ref query_embedding) = input.query_embedding {
+            let vector_candidates = candidates::collect_vector_candidates(
+                storage,
+                query_embedding,
+                input.limit.max(10),
+            );
+            if !vector_candidates.is_empty() {
+                per_source.push(vector_candidates);
+            }
+            strategies_used.push("vector_similarity".to_string());
         }
-        strategies_used.push("vector_similarity".to_string());
     }
 
     if plan.use_entity {
