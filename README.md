@@ -83,11 +83,16 @@ anamnesis = "0.4"
 
 ```rust
 use anamnesis::Engine;
-use anamnesis::api::Observation;
+use anamnesis::api::{IngestResult, Observation};
 use anamnesis::graph::{EdgeType, KnowledgeType, ScopePath, Timestamp};
 use anamnesis::graph::node::Origin;
+use anamnesis::graph::types::PeerId;
+use anamnesis::peer::{SourceKind, TrustLevel};
 
 let mut engine = Engine::new();
+
+// Register a peer (human or agent) before ingesting
+let agent_id = engine.register_peer("my-agent", TrustLevel::Agent).unwrap();
 
 // Ingest knowledge fragments
 let result = engine.ingest(Observation {
@@ -99,17 +104,21 @@ let result = engine.ingest(Observation {
     node_type: KnowledgeType::Semantic,
     entity_tags: vec!["auth".into(), "factory-pattern".into()],
     origin: Origin {
-        agent_id: "agent-1".into(),
+        peer_id: agent_id,
+        source_kind: SourceKind::AgentObservation,
         session_id: "session-1".into(),
         scope: ScopePath::new("my-project").expect("valid scope"),
         confidence: 0.9,
     },
     timestamp: Timestamp::now(),
+    valid_from: None,
+    valid_until: None,
 }).unwrap();
 
 let ids = match result {
-    anamnesis::api::IngestResult::Created(ids) => ids,
-    anamnesis::api::IngestResult::Reinforced { existing_id, .. } => vec![existing_id],
+    IngestResult::Created(ids) => ids,
+    IngestResult::Reinforced { existing_id, .. } => vec![existing_id],
+    IngestResult::CreatedWithConflict { node_ids, .. } => node_ids,
 };
 
 let result2 = engine.ingest(Observation {
@@ -121,17 +130,21 @@ let result2 = engine.ingest(Observation {
     node_type: KnowledgeType::Episodic,
     entity_tags: vec!["auth".into()],
     origin: Origin {
-        agent_id: "agent-1".into(),
+        peer_id: agent_id,
+        source_kind: SourceKind::AgentObservation,
         session_id: "session-5".into(),
         scope: ScopePath::new("my-project").expect("valid scope"),
         confidence: 0.85,
     },
     timestamp: Timestamp::now(),
+    valid_from: None,
+    valid_until: None,
 }).unwrap();
 
 let ids2 = match result2 {
-    anamnesis::api::IngestResult::Created(ids) => ids,
-    anamnesis::api::IngestResult::Reinforced { existing_id, .. } => vec![existing_id],
+    IngestResult::Created(ids) => ids,
+    IngestResult::Reinforced { existing_id, .. } => vec![existing_id],
+    IngestResult::CreatedWithConflict { node_ids, .. } => node_ids,
 };
 
 // Connect related knowledge

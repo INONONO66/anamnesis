@@ -3415,6 +3415,10 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             .into_iter()
             .filter_map(|nid| {
                 let node = storage.get_node(nid).ok()?;
+                // Skip retracted nodes
+                if node.metadata.get("retracted").is_some_and(|v| v == "true") {
+                    return None;
+                }
                 let salience = storage.get_salience(nid).unwrap_or(0.0);
                 Some(ScoredNode {
                     node_id: nid,
@@ -3483,6 +3487,10 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             .into_iter()
             .filter_map(|nid| {
                 let node = storage.get_node(nid).ok()?;
+                // Skip retracted nodes
+                if node.metadata.get("retracted").is_some_and(|v| v == "true") {
+                    return None;
+                }
                 let salience = storage.get_salience(nid).unwrap_or(0.0);
                 Some(ScoredNode {
                     node_id: nid,
