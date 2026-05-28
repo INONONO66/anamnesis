@@ -1016,6 +1016,9 @@ fn migrate_v1_to_v2(conn: &Connection) -> Result<(), Error> {
         ALTER TABLE nodes ADD COLUMN peer_id INTEGER NOT NULL DEFAULT 0;
         ALTER TABLE nodes ADD COLUMN source_kind TEXT NOT NULL DEFAULT 'agent_observation';
 
+        -- Add edge_source column to edges (with default for existing rows)
+        ALTER TABLE edges ADD COLUMN edge_source TEXT NOT NULL DEFAULT 'auto';
+
         -- Create peers and peer_aliases tables
         CREATE TABLE IF NOT EXISTS peers (
             id INTEGER PRIMARY KEY,
