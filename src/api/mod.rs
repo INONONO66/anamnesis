@@ -2124,6 +2124,14 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         let id = self.graph.next_node_id();
         let now = observation.timestamp;
 
+        if let (Some(vf), Some(vu)) = (observation.valid_from, observation.valid_until) {
+            if vu <= vf {
+                return Err(Error::InvalidInput(
+                    "valid_until must be greater than valid_from".to_string(),
+                ));
+            }
+        }
+
         let node = Node {
             id,
             node_type: observation.node_type.clone(),
@@ -2692,6 +2700,10 @@ impl<S: StorageAdapter + Clone> Engine<S> {
     /// checkpoint (NOT `accessed_at`). Updates BOTH `accessed_at` and
     /// `decay_checkpoint` to `now`.
     pub fn touch(&mut self, node_id: NodeId, now: Timestamp) -> Result<(), Error> {
+        if self.is_retracted(node_id)? {
+            return Ok(());
+        }
+
         use crate::mechanics::forgetting::{
             base_level_to_salience, compute_base_level, decay_salience, decay_salience_with_lambda,
             lambda_for_type, reinforce_salience,
@@ -3437,7 +3449,16 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         use crate::query::assembly::{ModeContext, ScoredNode, assemble_context_package_for_mode};
 
         let storage = self.graph.storage();
-        let mut node_ids = storage.nodes_by_type(node_type);
+        let mut node_ids: Vec<NodeId> = storage
+            .nodes_by_type(node_type)
+            .into_iter()
+            .filter(|&nid| {
+                storage
+                    .get_node(nid)
+                    .ok()
+                    .is_none_or(|n| n.metadata.get("retracted").is_none_or(|v| v != "true"))
+            })
+            .collect();
         node_ids.sort_by(|a, b| {
             let sa = storage.get_salience(*a).unwrap_or(0.0);
             let sb = storage.get_salience(*b).unwrap_or(0.0);
@@ -3449,10 +3470,6 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             .into_iter()
             .filter_map(|nid| {
                 let node = storage.get_node(nid).ok()?;
-                // Skip retracted nodes
-                if node.metadata.get("retracted").is_some_and(|v| v == "true") {
-                    return None;
-                }
                 let salience = storage.get_salience(nid).unwrap_or(0.0);
                 Some(ScoredNode {
                     node_id: nid,
@@ -3508,6 +3525,10 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                 storage
                     .get_salience(nid)
                     .is_ok_and(|salience| salience >= min_salience)
+                    && storage
+                        .get_node(nid)
+                        .ok()
+                        .is_none_or(|n| n.metadata.get("retracted").is_none_or(|v| v != "true"))
             })
             .collect();
         node_ids.sort_by(|a, b| {
@@ -3521,10 +3542,6 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             .into_iter()
             .filter_map(|nid| {
                 let node = storage.get_node(nid).ok()?;
-                // Skip retracted nodes
-                if node.metadata.get("retracted").is_some_and(|v| v == "true") {
-                    return None;
-                }
                 let salience = storage.get_salience(nid).unwrap_or(0.0);
                 Some(ScoredNode {
                     node_id: nid,
@@ -3582,10 +3599,10 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                 if node.created_at < since {
                     return None;
                 }
-                if let Some(types) = node_types
-                    && !types.iter().any(|node_type| node_type == &node.node_type)
-                {
-                    return None;
+                if let Some(types) = node_types {
+                    if !types.iter().any(|node_type| node_type == &node.node_type) {
+                        return None;
+                    }
                 }
                 let salience = storage.get_salience(nid).unwrap_or(0.0);
                 Some((
@@ -3665,22 +3682,22 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             }
 
             for &eid in storage.edges_from(nid) {
-                if let Ok(edge) = storage.get_edge(eid)
-                    && visited.insert(edge.target)
-                {
-                    let next_depth = depth + 1;
-                    depths.insert(edge.target, next_depth);
-                    queue.push_back((edge.target, next_depth));
+                if let Ok(edge) = storage.get_edge(eid) {
+                    if visited.insert(edge.target) {
+                        let next_depth = depth + 1;
+                        depths.insert(edge.target, next_depth);
+                        queue.push_back((edge.target, next_depth));
+                    }
                 }
             }
 
             for &eid in storage.edges_to(nid) {
-                if let Ok(edge) = storage.get_edge(eid)
-                    && visited.insert(edge.source)
-                {
-                    let next_depth = depth + 1;
-                    depths.insert(edge.source, next_depth);
-                    queue.push_back((edge.source, next_depth));
+                if let Ok(edge) = storage.get_edge(eid) {
+                    if visited.insert(edge.source) {
+                        let next_depth = depth + 1;
+                        depths.insert(edge.source, next_depth);
+                        queue.push_back((edge.source, next_depth));
+                    }
                 }
             }
         }

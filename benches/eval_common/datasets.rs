@@ -411,6 +411,11 @@ mod tests {
 
     #[test]
     fn eval_common_longmemeval_fixture_parses_correctly() {
+        let fixture = Path::new("benches/eval_common/test_data/longmemeval/longmemeval_s.json");
+        if !fixture.exists() {
+            eprintln!("skipping: longmemeval fixture not downloaded");
+            return;
+        }
         let loader = LongMemEvalLoader;
         let path = Path::new("benches/eval_common/test_data");
         let result = loader.load(path);

@@ -153,11 +153,7 @@ pub fn compute_report(
     let total_questions = questions.len();
     let accuracy = percentage(correct_count, total_questions);
     let avg_latency_ms = average_f64(&latencies);
-    let avg_tokens = if token_count == 0 {
-        0
-    } else {
-        token_total / token_count
-    };
+    let avg_tokens = token_total.checked_div(token_count).unwrap_or(0);
 
     let accuracy_by_type = type_counts
         .into_iter()
@@ -217,7 +213,7 @@ pub fn print_summary(report: &EvalReport) {
         eprintln!("{:<24} {:>12}", "Question Type", "Accuracy");
         eprintln!("{:-<24} {:-<12}", "", "");
         let mut type_rows: Vec<_> = report.accuracy_by_type.iter().collect();
-        type_rows.sort_by(|(left, _), (right, _)| left.cmp(right));
+        type_rows.sort_by_key(|(left, _)| *left);
         for (question_type, accuracy) in type_rows {
             eprintln!("{:<24} {:>11.2}%", question_type, accuracy * 100.0);
         }

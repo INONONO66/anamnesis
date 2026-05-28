@@ -219,11 +219,10 @@ fn assemble_graph_recall_package<S: StorageAdapter + Clone>(
     let mut contradicts_edges: Vec<(NodeId, NodeId, f64)> = Vec::new();
     for &node_id in damped_activations.keys() {
         for &edge_id in storage.edges_from(node_id) {
-            if let Ok(edge) = storage.get_edge(edge_id)
-                && matches!(edge.edge_type, EdgeType::Contradicts)
-                && edge_valid_at(edge, now)
-            {
-                contradicts_edges.push((edge.source, edge.target, edge.weight));
+            if let Ok(edge) = storage.get_edge(edge_id) {
+                if matches!(edge.edge_type, EdgeType::Contradicts) && edge_valid_at(edge, now) {
+                    contradicts_edges.push((edge.source, edge.target, edge.weight));
+                }
             }
         }
     }
