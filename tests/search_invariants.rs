@@ -20,9 +20,10 @@ fn rwr_engine() -> Engine {
     Engine::with_config(config)
 }
 
-fn origin(agent: &str, scope: &str) -> Origin {
+fn origin(_agent: &str, scope: &str) -> Origin {
     Origin {
-        agent_id: agent.to_string(),
+        peer_id: anamnesis::graph::types::PeerId(0),
+        source_kind: anamnesis::peer::SourceKind::AgentObservation,
         session_id: "session".to_string(),
         scope: ScopePath::new(scope).expect("valid scope"),
         confidence: 0.9,
@@ -40,6 +41,8 @@ fn observation(name: &str, node_type: KnowledgeType, scope: &str) -> Observation
         entity_tags: vec![name.split_whitespace().next().unwrap_or(name).to_string()],
         origin: origin("agent-1", scope),
         timestamp: Timestamp(1000),
+        valid_from: None,
+        valid_until: None,
     }
 }
 
@@ -47,6 +50,7 @@ fn ingest(engine: &mut Engine, name: &str, node_type: KnowledgeType, scope: &str
     match engine.ingest(observation(name, node_type, scope)).unwrap() {
         IngestResult::Created(ids) => ids[0],
         IngestResult::Reinforced { existing_id, .. } => existing_id,
+        IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
     }
 }
 
@@ -141,7 +145,7 @@ fn identity_tension_preserved() {
     let result = engine
         .search(SearchInput {
             text: "rust".to_string(),
-            agent_id: Some("agent-1".to_string()),
+            agent_id: Some("0".to_string()), // PeerId(0) matches nodes created with PeerId(0)
             limit: 10,
             seed_limit: Some(2),
             ..Default::default()

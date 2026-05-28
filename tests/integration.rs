@@ -19,12 +19,15 @@ fn make_observation(name: &str, node_type: KnowledgeType) -> Observation {
         node_type,
         entity_tags: vec!["test-entity".to_string()],
         origin: Origin {
-            agent_id: "agent-1".to_string(),
+            peer_id: anamnesis::graph::types::PeerId(0),
+            source_kind: anamnesis::peer::SourceKind::AgentObservation,
             session_id: "session-1".to_string(),
             scope: anamnesis::graph::ScopePath::new("anamnesis").expect("valid scope"),
             confidence: 0.9,
         },
         timestamp: Timestamp(1000),
+        valid_from: None,
+        valid_until: None,
     }
 }
 
@@ -96,7 +99,7 @@ fn engine_full_lifecycle() {
 
     // 8. Reflect batch (placeholder)
     let sessions = vec![SessionSummary {
-        agent_id: "agent-1".to_string(),
+        peer_id: anamnesis::graph::types::PeerId(0),
         session_id: "session-1".to_string(),
         node_ids: vec![ids1[0], ids2[0]],
     }];
@@ -133,12 +136,15 @@ fn node_fields_preserved_after_ingest() {
         node_type: KnowledgeType::Decision,
         entity_tags: vec!["physics".to_string(), "anamnesis".to_string()],
         origin: Origin {
-            agent_id: "user".to_string(),
+            peer_id: anamnesis::graph::types::PeerId(0),
+            source_kind: anamnesis::peer::SourceKind::AgentObservation,
             session_id: "design-session".to_string(),
             scope: anamnesis::graph::ScopePath::new("anamnesis").expect("valid scope"),
             confidence: 0.95,
         },
         timestamp: Timestamp(5000),
+        valid_from: None,
+        valid_until: None,
     };
 
     let IngestResult::Created(ids) = engine.ingest(obs).unwrap() else {

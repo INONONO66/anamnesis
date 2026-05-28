@@ -56,6 +56,7 @@ pub(crate) fn assemble_search_result<S: StorageAdapter + Clone>(
         request.activations,
         request.seed_ids,
         request.config,
+        request.input,
     );
     let packaging_mode =
         crate::query::decide_packaging(&package.tensions, request.plan, &request.input.text);
@@ -90,6 +91,7 @@ fn assemble_graph_recall_package<S: StorageAdapter + Clone>(
     activations: &HashMap<NodeId, f64>,
     seed_ids: &[NodeId],
     config: &QueryConfig,
+    input: &crate::query::SearchInput,
 ) -> ContextPackage {
     let storage = engine.graph.storage();
     let mut damped_activations = activations.clone();
@@ -155,6 +157,19 @@ fn assemble_graph_recall_package<S: StorageAdapter + Clone>(
             Ok(node) => node,
             Err(_) => continue,
         };
+
+        // Apply peer_filter: skip nodes not produced by the specified peers
+        if let Some(ref peer_filter) = input.peer_filter {
+            if !peer_filter.contains(&node.origin.peer_id) {
+                continue;
+            }
+        }
+
+        // Skip retracted nodes
+        if node.metadata.get("retracted").is_some_and(|v| v == "true") {
+            continue;
+        }
+
         let salience = storage.get_salience(node_id).unwrap_or(0.0);
         let mass = compute_mass(salience, node.access_count, &node.node_type);
         let vector_similarity = match (&config.query_embedding, &node.embedding) {
@@ -181,7 +196,13 @@ fn assemble_graph_recall_package<S: StorageAdapter + Clone>(
             })
             .max()
             .unwrap_or(0);
-        let scope_weight = scope_weight(&config.scope, &node.origin.scope, shared_entities);
+        let base_scope_weight = scope_weight(&config.scope, &node.origin.scope, shared_entities);
+        // Apply TrustLevel bonus from the engine's peer registry
+        let trust_bonus = engine
+            .get_peer(node.origin.peer_id)
+            .map(|p| p.trust_level.scope_weight_bonus())
+            .unwrap_or(0.0);
+        let scope_weight = (base_scope_weight + trust_bonus).clamp(0.0, 1.0);
         let relevance = final_score(activation, scoring_similarity, salience, mass, scope_weight);
 
         scored_nodes.push(ScoredNode {
@@ -198,11 +219,10 @@ fn assemble_graph_recall_package<S: StorageAdapter + Clone>(
     let mut contradicts_edges: Vec<(NodeId, NodeId, f64)> = Vec::new();
     for &node_id in damped_activations.keys() {
         for &edge_id in storage.edges_from(node_id) {
-            if let Ok(edge) = storage.get_edge(edge_id)
-                && matches!(edge.edge_type, EdgeType::Contradicts)
-                && edge_valid_at(edge, now)
-            {
-                contradicts_edges.push((edge.source, edge.target, edge.weight));
+            if let Ok(edge) = storage.get_edge(edge_id) {
+                if matches!(edge.edge_type, EdgeType::Contradicts) && edge_valid_at(edge, now) {
+                    contradicts_edges.push((edge.source, edge.target, edge.weight));
+                }
             }
         }
     }
@@ -217,7 +237,7 @@ fn assemble_graph_recall_package<S: StorageAdapter + Clone>(
             let Some(agent_id) = &config.agent_id else {
                 return None;
             };
-            (node.origin.agent_id == *agent_id)
+            (node.origin.peer_id.0.to_string() == *agent_id)
                 .then(|| (node_id, node.node_type.clone(), activation))
         })
         .collect();

@@ -1,12 +1,11 @@
 # Search End-to-End Latency Baseline
 
-This document records an **informational** latency baseline for
+This document records a latency baseline for
 `Engine::search()` measured with `benches/eval/search_latency.rs`.
 
-> **No CI regression gate.** Numbers here are a reference point for
-> humans, not a fail-on-regression threshold. Future commits may move
-> these numbers up or down without a build break. If you want a hard
-> regression check, that is explicitly out of scope per the plan.
+> The manual benchmark workflow publishes benchmark-action trend data and
+> alerts on regressions. These numbers remain the human-readable point-in-time
+> baseline for interpreting that trend.
 
 ## Run metadata
 
@@ -15,7 +14,7 @@ This document records an **informational** latency baseline for
 | Date (UTC)     | 2026-05-01                                  |
 | Git commit     | `60630be` (`60630be915af192143fdb0ba41412b7e3ef0ed32`) |
 | Branch         | `main`                                      |
-| Crate version  | `anamnesis 0.1.0`                           |
+| Crate version  | `anamnesis 0.4.0`                           |
 | Rust toolchain | `rustc 1.92.0 (ded5c06cf 2025-12-08)`       |
 | Profile        | `bench` (`opt-level = 3`, `debug = true`)   |
 | Host           | Darwin 25.2.0 / arm64 / macOS 26.2          |
@@ -24,7 +23,7 @@ This document records an **informational** latency baseline for
 
 | Field                | Value                                                                |
 |----------------------|----------------------------------------------------------------------|
-| Storage backend      | `InMemoryStorage` (default)                                          |
+| Storage backend      | `SqliteStorage` (default, in-memory SQLite)                          |
 | `num_nodes`          | 100,000                                                              |
 | Scopes               | `dev/rust` (40,000), `travel/japan` (30,000), `research/llm` (30,000) |
 | Knowledge types      | `Semantic`, `Entity`, `Semantic` (one per scope, in order)           |
@@ -57,7 +56,7 @@ SearchInput {
 ```
 
 This input activates four pipeline stages: text candidate collection (via
-`InMemoryStorage::text_search` over 100k nodes), entity-tag candidate
+`SqliteStorage::text_search` over 100k nodes), entity-tag candidate
 collection (`nodes_by_entity_tag("rust")` returns 40k candidates), RRF
 fusion of the two source lists, and graph recall starting from five
 fused seeds. Vector candidate collection is skipped because no embedding

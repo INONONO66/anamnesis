@@ -14,12 +14,15 @@ fn make_obs_tagged(name: &str, tags: Vec<&str>) -> Observation {
         node_type: KnowledgeType::Semantic,
         entity_tags: tags.into_iter().map(|s| s.to_string()).collect(),
         origin: Origin {
-            agent_id: "agent-1".to_string(),
+            peer_id: anamnesis::graph::types::PeerId(0),
+            source_kind: anamnesis::peer::SourceKind::AgentObservation,
             session_id: "session-1".to_string(),
             scope: anamnesis::graph::ScopePath::universal(),
             confidence: 0.9,
         },
         timestamp: Timestamp(1000),
+        valid_from: None,
+        valid_until: None,
     }
 }
 
@@ -27,6 +30,7 @@ fn created_id(result: IngestResult) -> anamnesis::NodeId {
     match result {
         IngestResult::Created(ids) => ids[0],
         IngestResult::Reinforced { existing_id, .. } => existing_id,
+        IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
     }
 }
 

@@ -1,11 +1,9 @@
-//! LLM-as-judge evaluation for LongMemEval benchmark.
-//!
-//! Provides the `Judge` trait and implementations for evaluating engine answers
-//! against expected answers. The `MockJudge` uses string matching for testing.
-//! A real LLM-based judge can be added behind a feature flag.
+use serde::{Deserialize, Serialize};
+
+use super::provider::LlmProvider;
 
 /// Result of a single judge evaluation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JudgeResult {
     /// Whether the answer was judged correct.
     pub correct: bool,
@@ -61,6 +59,37 @@ impl Judge for MockJudge {
     }
 }
 
+/// Placeholder for an LLM-backed judge.
+///
+/// The generation and parsing logic is intentionally deferred to the provider
+/// integration step.
+pub struct LlmJudge {
+    pub provider: Box<dyn LlmProvider>,
+    pub system_prompt: String,
+}
+
+impl Judge for LlmJudge {
+    fn evaluate(&self, question: &str, expected: &str, actual: &str) -> JudgeResult {
+        let prompt = format!(
+            "Question: {question}\nExpected: {expected}\nActual: {actual}\nIs the actual answer correct? Reply with 'correct' or 'incorrect'."
+        );
+
+        match self.provider.generate(&prompt) {
+            Ok(response) => {
+                let normalized = response.to_lowercase();
+                if normalized.contains("incorrect") {
+                    JudgeResult::incorrect(response)
+                } else if normalized.contains("correct") {
+                    JudgeResult::correct(response)
+                } else {
+                    JudgeResult::incorrect("unparseable judge response")
+                }
+            }
+            Err(err) => JudgeResult::incorrect(format!("judge provider failed: {err}")),
+        }
+    }
+}
+
 /// Run majority voting over multiple judge results.
 ///
 /// Returns true if more than half of the results are correct.
@@ -74,31 +103,44 @@ pub fn majority_vote(results: &[JudgeResult]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::super::provider::MockProvider;
     use super::*;
 
     #[test]
-    fn mock_judge_marks_match_as_correct() {
+    fn eval_common_mock_judge_marks_match_as_correct() {
         let j = MockJudge;
         let r = j.evaluate("Q?", "Hello", "Hello");
         assert!(r.correct);
     }
 
     #[test]
-    fn mock_judge_marks_mismatch_as_incorrect() {
+    fn eval_common_mock_judge_marks_mismatch_as_incorrect() {
         let j = MockJudge;
         let r = j.evaluate("Q?", "Hello", "World");
         assert!(!r.correct);
     }
 
     #[test]
-    fn mock_judge_case_insensitive() {
+    fn eval_common_mock_judge_case_insensitive() {
         let j = MockJudge;
         let r = j.evaluate("Q?", "Hello", "hello");
         assert!(r.correct, "should match case-insensitively");
     }
 
     #[test]
-    fn majority_voting_3_of_3_correct() {
+    fn eval_common_llm_judge_parses_correct_response() {
+        let j = LlmJudge {
+            provider: Box::new(MockProvider {
+                response: "correct".to_string(),
+            }),
+            system_prompt: String::new(),
+        };
+        let r = j.evaluate("Q?", "Hello", "Hello");
+        assert!(r.correct);
+    }
+
+    #[test]
+    fn eval_common_majority_voting_3_of_3_correct() {
         let results = vec![
             JudgeResult::correct(""),
             JudgeResult::correct(""),
@@ -108,7 +150,7 @@ mod tests {
     }
 
     #[test]
-    fn majority_voting_2_of_3_correct() {
+    fn eval_common_majority_voting_2_of_3_correct() {
         let results = vec![
             JudgeResult::correct(""),
             JudgeResult::correct(""),
@@ -118,7 +160,7 @@ mod tests {
     }
 
     #[test]
-    fn majority_voting_1_of_3_correct() {
+    fn eval_common_majority_voting_1_of_3_correct() {
         let results = vec![
             JudgeResult::correct(""),
             JudgeResult::incorrect(""),
@@ -128,7 +170,7 @@ mod tests {
     }
 
     #[test]
-    fn majority_voting_empty_returns_false() {
+    fn eval_common_majority_voting_empty_returns_false() {
         assert!(!majority_vote(&[]));
     }
 }

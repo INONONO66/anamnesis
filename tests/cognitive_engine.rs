@@ -12,12 +12,13 @@ use anamnesis::graph::{EdgeType, KnowledgeType, ScopePath, Timestamp};
 use anamnesis::query::{Query, QueryConfig};
 use anamnesis::{Engine, EngineConfig, IngestResult, StorageAdapter};
 
-fn make_origin(agent: &str, project: Option<&str>) -> Origin {
+fn make_origin(_agent: &str, project: Option<&str>) -> Origin {
     let scope = project
         .map(|s| ScopePath::new(s).expect("valid scope"))
         .unwrap_or_else(ScopePath::universal);
     Origin {
-        agent_id: agent.to_string(),
+        peer_id: anamnesis::graph::types::PeerId(0),
+        source_kind: anamnesis::peer::SourceKind::AgentObservation,
         session_id: "session-1".to_string(),
         scope,
         confidence: 0.9,
@@ -40,6 +41,8 @@ fn make_obs(
         entity_tags: vec!["test".to_string()],
         origin: make_origin("agent-1", project),
         timestamp: Timestamp(0),
+        valid_from: None,
+        valid_until: None,
     }
 }
 

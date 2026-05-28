@@ -3,9 +3,10 @@ use anamnesis::graph::node::Origin;
 use anamnesis::graph::{EdgeType, KnowledgeType, NodeId, ScopePath, Timestamp};
 use anamnesis::{CrystallizeRequest, Engine, IngestResult};
 
-fn origin(agent: &str, session: &str) -> Origin {
+fn origin(_agent: &str, session: &str) -> Origin {
     Origin {
-        agent_id: agent.to_string(),
+        peer_id: anamnesis::graph::types::PeerId(0),
+        source_kind: anamnesis::peer::SourceKind::AgentObservation,
         session_id: session.to_string(),
         scope: ScopePath::new("project-1").expect("valid scope"),
         confidence: 0.9,
@@ -24,6 +25,8 @@ fn insert_source(engine: &mut Engine, name: &str, agent: &str, session: &str) ->
             entity_tags: vec!["test".to_string()],
             origin: origin(agent, session),
             timestamp: Timestamp(1000),
+            valid_from: None,
+            valid_until: None,
         })
         .unwrap()
     else {

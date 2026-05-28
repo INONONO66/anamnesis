@@ -10,7 +10,8 @@ use anamnesis::{DebugOutcome, Engine, Error, EvidenceResult, Timestamp};
 
 fn origin() -> Origin {
     Origin {
-        agent_id: "debugger-agent".into(),
+        peer_id: anamnesis::graph::types::PeerId(0),
+        source_kind: anamnesis::peer::SourceKind::AgentObservation,
         session_id: "debug-session-1".into(),
         scope: anamnesis::graph::ScopePath::new("webapp").expect("valid scope"),
         confidence: 0.9,

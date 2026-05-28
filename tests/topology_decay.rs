@@ -7,7 +7,8 @@ const DAY_MS: u64 = 86_400_000;
 
 fn origin(scope: &str) -> Origin {
     Origin {
-        agent_id: "agent-1".to_string(),
+        peer_id: anamnesis::graph::types::PeerId(0),
+        source_kind: anamnesis::peer::SourceKind::AgentObservation,
         session_id: "session-1".to_string(),
         scope: ScopePath::new(scope).expect("valid scope"),
         confidence: 0.9,
@@ -25,6 +26,8 @@ fn observation(name: &str, node_type: KnowledgeType, scope: &str, ts: Timestamp)
         entity_tags: vec![name.to_string()],
         origin: origin(scope),
         timestamp: ts,
+        valid_from: None,
+        valid_until: None,
     }
 }
 
@@ -48,6 +51,7 @@ fn ingest(engine: &mut Engine, name: &str, node_type: KnowledgeType, scope: &str
     match result {
         IngestResult::Created(ids) => ids[0],
         IngestResult::Reinforced { .. } => panic!("expected fresh node"),
+        IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
     }
 }
 

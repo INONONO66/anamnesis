@@ -21,6 +21,8 @@
 //! embeddings, and with a fixed ingest order. Every run on the same
 //! revision allocates `NodeId` values identically.
 
+#![cfg_attr(test, allow(dead_code))]
+
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 
@@ -96,12 +98,15 @@ fn build_fixture() -> Engine {
                 node_type: kt.clone(),
                 entity_tags: entity_tags.clone(),
                 origin: Origin {
-                    agent_id: "fixture".to_string(),
+                    peer_id: anamnesis::graph::types::PeerId(0),
+                    source_kind: anamnesis::peer::SourceKind::AgentObservation,
                     session_id: session_id.clone(),
                     scope: scope.clone(),
                     confidence: 0.9,
                 },
                 timestamp: Timestamp(ts),
+                valid_from: None,
+                valid_until: None,
             };
             ts += 1;
             engine.ingest(observation).expect("ingest should succeed");
@@ -213,6 +218,7 @@ fn run_criterion(engine: &Engine, criterion: &mut Criterion) {
     });
 }
 
+#[cfg(not(test))]
 fn main() {
     eprintln!("Building deterministic {NUM_NODES}-node fixture (no embeddings)...");
     let build_start = Instant::now();
@@ -238,3 +244,6 @@ fn main() {
     run_criterion(&engine, &mut criterion);
     criterion.final_summary();
 }
+
+#[cfg(test)]
+fn main() {}

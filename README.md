@@ -11,7 +11,7 @@
   <a href="https://github.com/INONONO66/anamnesis/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/INONONO66/anamnesis/ci.yml?style=flat-square&label=CI" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="License: MIT"></a>
   <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/rust-2024_edition-orange?style=flat-square&logo=rust" alt="Rust 2024"></a>
-  <a href="https://crates.io/crates/anamnesis"><img src="https://img.shields.io/badge/crates.io-v0.2.0-e6b44c?style=flat-square" alt="crates.io"></a>
+  <a href="https://crates.io/crates/anamnesis"><img src="https://img.shields.io/crates/v/anamnesis?style=flat-square" alt="crates.io"></a>
   <a href="https://codecov.io/gh/INONONO66/anamnesis"><img src="https://img.shields.io/codecov/c/github/INONONO66/anamnesis?style=flat-square&label=coverage" alt="Coverage"></a>
   <a href="https://docs.rs/anamnesis"><img src="https://img.shields.io/docsrs/anamnesis?style=flat-square" alt="docs.rs"></a>
 </p>
@@ -83,11 +83,16 @@ anamnesis = "0.4"
 
 ```rust
 use anamnesis::Engine;
-use anamnesis::api::Observation;
+use anamnesis::api::{IngestResult, Observation};
 use anamnesis::graph::{EdgeType, KnowledgeType, ScopePath, Timestamp};
 use anamnesis::graph::node::Origin;
+use anamnesis::graph::types::PeerId;
+use anamnesis::peer::{SourceKind, TrustLevel};
 
 let mut engine = Engine::new();
+
+// Register a peer (human or agent) before ingesting
+let agent_id = engine.register_peer("my-agent", TrustLevel::Agent).unwrap();
 
 // Ingest knowledge fragments
 let result = engine.ingest(Observation {
@@ -99,17 +104,21 @@ let result = engine.ingest(Observation {
     node_type: KnowledgeType::Semantic,
     entity_tags: vec!["auth".into(), "factory-pattern".into()],
     origin: Origin {
-        agent_id: "agent-1".into(),
+        peer_id: agent_id,
+        source_kind: SourceKind::AgentObservation,
         session_id: "session-1".into(),
         scope: ScopePath::new("my-project").expect("valid scope"),
         confidence: 0.9,
     },
     timestamp: Timestamp::now(),
+    valid_from: None,
+    valid_until: None,
 }).unwrap();
 
 let ids = match result {
-    anamnesis::api::IngestResult::Created(ids) => ids,
-    anamnesis::api::IngestResult::Reinforced { existing_id, .. } => vec![existing_id],
+    IngestResult::Created(ids) => ids,
+    IngestResult::Reinforced { existing_id, .. } => vec![existing_id],
+    IngestResult::CreatedWithConflict { node_ids, .. } => node_ids,
 };
 
 let result2 = engine.ingest(Observation {
@@ -121,17 +130,21 @@ let result2 = engine.ingest(Observation {
     node_type: KnowledgeType::Episodic,
     entity_tags: vec!["auth".into()],
     origin: Origin {
-        agent_id: "agent-1".into(),
+        peer_id: agent_id,
+        source_kind: SourceKind::AgentObservation,
         session_id: "session-5".into(),
         scope: ScopePath::new("my-project").expect("valid scope"),
         confidence: 0.85,
     },
     timestamp: Timestamp::now(),
+    valid_from: None,
+    valid_until: None,
 }).unwrap();
 
 let ids2 = match result2 {
-    anamnesis::api::IngestResult::Created(ids) => ids,
-    anamnesis::api::IngestResult::Reinforced { existing_id, .. } => vec![existing_id],
+    IngestResult::Created(ids) => ids,
+    IngestResult::Reinforced { existing_id, .. } => vec![existing_id],
+    IngestResult::CreatedWithConflict { node_ids, .. } => node_ids,
 };
 
 // Connect related knowledge
@@ -480,11 +493,31 @@ The Generator extracts nodes from conversation turns. The Reflector reviews and 
 cargo build                    # Build (default features, no FastEmbed)
 cargo build --features embed   # Build with optional FastEmbed provider
 cargo test                     # Run tests
-cargo clippy -- -D warnings    # Lint (zero warnings required)
 cargo fmt --check              # Formatting
+cargo clippy --all-targets --all-features -- -D warnings  # Lint (zero warnings required)
+cargo test --all-targets --all-features --no-run          # Compile tests and benches without running long benchmarks
 cargo doc --open               # Docs
 cargo bench                    # Run benchmarks
 ```
+
+### Release gate
+
+Before publishing or tagging a release, run the same hard gates as CI:
+
+```bash
+cargo fmt --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo nextest run --all-features
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
+cargo test --doc --all-features
+cargo test --all-targets --all-features --no-run
+```
+
+CI installs `cargo-nextest` before running the test gate. If `cargo-nextest` is not available locally, use `cargo test --all-features` as the local functional-test equivalent.
+
+CI also runs the MSRV check (`cargo check --all-targets --all-features` on Rust 1.85), `cargo deny`, and PR semver checks. Run those locally when the corresponding tools are installed, especially before publishing a release.
+
+`cargo test --all-targets` intentionally is not a release gate because this crate has `harness = false` benchmark binaries that execute long-running benchmarks when invoked as test targets. Use `cargo bench` or the manual benchmark workflow for performance runs.
 
 ## Status
 
@@ -522,7 +555,7 @@ cargo bench                    # Run benchmarks
 | Memory tier control | ✅ | `set_tier()` / `get_tier()` — Core tier protected from decay |
 | Hopfield energy model | ✅ | Pattern-completion scoring behind `EnergyModel::Hopfield` |
 | `merge_candidates()` / `auto_merge()` | ⚠️ | Deprecated since 0.3.0; use `EngineConfig::dedup_threshold` |
-| Social reinforcement scoring | 🔜 | Multi-agent salience bonus for independently observed fragments |
+| Social reinforcement scoring | ✅ | Multi-agent corroboration scoring and consumer feedback salience updates |
 
 ## References
 

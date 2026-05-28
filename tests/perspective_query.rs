@@ -11,6 +11,12 @@ fn make_observation(
     timestamp: Timestamp,
     scope: &ScopePath,
 ) -> Observation {
+    // Map agent string to a stable PeerId for test isolation
+    let peer_id = anamnesis::graph::types::PeerId(match agent_id {
+        "agent-1" => 1,
+        "agent-2" => 2,
+        _ => 0,
+    });
     Observation {
         name: name.to_string(),
         summary: Some(format!("Summary of {name}")),
@@ -20,12 +26,15 @@ fn make_observation(
         node_type: KnowledgeType::Semantic,
         entity_tags: tags.iter().map(|t| (*t).to_string()).collect(),
         origin: Origin {
-            agent_id: agent_id.to_string(),
+            peer_id,
+            source_kind: anamnesis::peer::SourceKind::AgentObservation,
             session_id: "session-1".to_string(),
             scope: scope.clone(),
             confidence: 0.9,
         },
         timestamp,
+        valid_from: None,
+        valid_until: None,
     }
 }
 
@@ -59,7 +68,7 @@ fn observer_only_fragments_returned() {
         .expect("link");
 
     let perspective = PerspectiveKey {
-        observer_agent_id: "agent-1".to_string(),
+        observer_peer_id: anamnesis::graph::types::PeerId(1), // agent-1
         observed: ObservedRef::EntityTag("auth".to_string()),
         scope: ScopePath::universal(),
     };
@@ -101,7 +110,7 @@ fn observed_ref_entity_tag_filters_correctly() {
     );
 
     let perspective = PerspectiveKey {
-        observer_agent_id: "agent-1".to_string(),
+        observer_peer_id: anamnesis::graph::types::PeerId(1), // agent-1
         observed: ObservedRef::EntityTag("auth".to_string()),
         scope: ScopePath::universal(),
     };
@@ -142,8 +151,8 @@ fn observed_ref_agent_filters_correctly() {
     );
 
     let perspective = PerspectiveKey {
-        observer_agent_id: "agent-1".to_string(),
-        observed: ObservedRef::Agent("agent-2".to_string()),
+        observer_peer_id: anamnesis::graph::types::PeerId(1), // agent-1
+        observed: ObservedRef::Agent(anamnesis::graph::types::PeerId(2)), // agent-2
         scope: ScopePath::universal(),
     };
 
@@ -187,7 +196,7 @@ fn observed_ref_node_filters_correctly() {
         .expect("link");
 
     let perspective = PerspectiveKey {
-        observer_agent_id: "agent-1".to_string(),
+        observer_peer_id: anamnesis::graph::types::PeerId(1),
         observed: ObservedRef::Node(target),
         scope: ScopePath::universal(),
     };
@@ -229,7 +238,7 @@ fn scope_filtering_applied() {
     );
 
     let perspective = PerspectiveKey {
-        observer_agent_id: "agent-1".to_string(),
+        observer_peer_id: anamnesis::graph::types::PeerId(1),
         observed: ObservedRef::EntityTag("auth".to_string()),
         scope: ScopePath::new("work/team-a").expect("valid"),
     };
@@ -288,7 +297,7 @@ fn non_retroactive_excludes_pre_join_events() {
         .expect("link");
 
     let perspective = PerspectiveKey {
-        observer_agent_id: "agent-1".to_string(),
+        observer_peer_id: anamnesis::graph::types::PeerId(1), // agent-1
         observed: ObservedRef::EntityTag("auth".to_string()),
         scope: ScopePath::universal(),
     };
@@ -322,7 +331,7 @@ fn empty_observer_returns_empty_package() {
     let engine = Engine::new();
 
     let perspective = PerspectiveKey {
-        observer_agent_id: "nonexistent-agent".to_string(),
+        observer_peer_id: anamnesis::graph::types::PeerId(1),
         observed: ObservedRef::EntityTag("anything".to_string()),
         scope: ScopePath::universal(),
     };
@@ -346,7 +355,7 @@ fn no_matching_observed_ref_returns_empty() {
     );
 
     let perspective = PerspectiveKey {
-        observer_agent_id: "agent-1".to_string(),
+        observer_peer_id: anamnesis::graph::types::PeerId(1),
         observed: ObservedRef::EntityTag("nonexistent-tag".to_string()),
         scope: ScopePath::universal(),
     };

@@ -4,8 +4,8 @@
 
 | Version | Supported |
 |:--------|:----------|
-| 0.2.x   | Yes       |
-| < 0.2   | No        |
+| 0.4.x   | Yes       |
+| < 0.4   | No        |
 
 ## Reporting a Vulnerability
 
@@ -30,7 +30,7 @@ Instead, use [GitHub's private vulnerability reporting](https://github.com/INONO
 
 ## Scope
 
-Anamnesis is a library with no network exposure, no file I/O in core, and no external dependencies. The primary attack surface is malicious input to public API methods (e.g., crafted graph data causing excessive memory use or panics).
+Anamnesis is a library with no network exposure from the core engine. The default storage adapter uses bundled SQLite, and the optional `embed` feature can download a local embedding model on first use. The primary attack surface is malicious input to public API methods, storage files opened by consumers, and optional embedding-provider model downloads.
 
 ## Disclosure Policy
 

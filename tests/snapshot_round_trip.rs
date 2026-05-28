@@ -32,12 +32,15 @@ fn observation_at(name: &str, scope: &str, ts: Timestamp) -> Observation {
         node_type: KnowledgeType::Semantic,
         entity_tags: Vec::new(),
         origin: Origin {
-            agent_id: "agent-1".to_string(),
+            peer_id: anamnesis::graph::types::PeerId(0),
+            source_kind: anamnesis::peer::SourceKind::AgentObservation,
             session_id: "session-1".to_string(),
             scope: ScopePath::new(scope).expect("valid scope"),
             confidence: 0.9,
         },
         timestamp: ts,
+        valid_from: None,
+        valid_until: None,
     }
 }
 
@@ -45,6 +48,7 @@ fn ingest_at(engine: &mut Engine, name: &str, scope: &str, ts: Timestamp) -> Nod
     match engine.ingest(observation_at(name, scope, ts)).unwrap() {
         IngestResult::Created(ids) => ids[0],
         IngestResult::Reinforced { .. } => panic!("test fixture should always create a fresh node"),
+        IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
     }
 }
 

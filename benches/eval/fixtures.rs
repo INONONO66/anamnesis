@@ -112,18 +112,22 @@ impl FixtureBuilder {
             node_type,
             entity_tags: entity_tags.iter().map(|tag| (*tag).to_string()).collect(),
             origin: Origin {
-                agent_id: "fixture".to_string(),
+                peer_id: anamnesis::graph::types::PeerId(0),
+                source_kind: anamnesis::peer::SourceKind::AgentObservation,
                 session_id: "golden".to_string(),
                 scope: ScopePath::new(scope).expect("valid scope path"),
                 confidence: 0.9,
             },
             timestamp: Timestamp(self.next_ts),
+            valid_from: None,
+            valid_until: None,
         };
         self.next_ts += 1;
 
         let id = match self.engine.ingest(observation).expect("ingest") {
             IngestResult::Created(node_ids) => *node_ids.first().expect("created node id"),
             IngestResult::Reinforced { existing_id, .. } => existing_id,
+            IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
         };
         let prior = self.ids.insert(key, id);
         assert!(prior.is_none(), "duplicate fixture key: {key}");

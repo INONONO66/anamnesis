@@ -35,7 +35,7 @@ src/
 - **No async in core** — synchronous API, async wrapper can be added externally
 - **Salience as shared signal** — all mechanics read/write salience; memory tiers emerge naturally from salience ranges
 - **Fragments over summaries** — preserve individual conversation turns as nodes; summaries are emergent via consolidation, not lossy rewrites
-- **Origin on every node** — multi-agent graphs track which agent produced each fragment (`agent_id`, `session_id`, `scope`, `confidence`)
+- **Origin on every node** — multi-agent graphs track which peer produced each fragment (`peer_id`, `source_kind`, `session_id`, `scope`, `confidence`)
 
 ## COMMANDS
 
@@ -377,7 +377,7 @@ pub trait StorageAdapter: Send + Sync {
     // Default helpers (O(N) scan; override for O(1) index lookup)
     fn nodes_by_entity_tag(&self, tag: &str) -> Vec<NodeId>;
     fn nodes_by_type(&self, kt: &KnowledgeType) -> Vec<NodeId>;
-    fn nodes_by_agent(&self, agent_id: &str) -> Vec<NodeId>;
+    fn nodes_by_peer(&self, peer_id: PeerId) -> Vec<NodeId>;
     fn nodes_by_scope(&self, scope: &ScopePath) -> Vec<NodeId>;
     fn node_ids_descending(&self) -> Vec<NodeId>;
     fn text_search(&self, query: &str, limit: usize) -> Vec<(NodeId, f64)>;
@@ -392,7 +392,6 @@ Ships with `SqliteStorage` (bundled SQLite via rusqlite, FTS5 full-text search, 
 
 ## Direction
 
-Planned features for future releases — none of these are implemented yet:
+Implemented multi-agent dynamics include `reflect_batch()` entity linking, social corroboration scoring primitives, and feedback-driven salience updates. Planned features for future releases:
 
-- **Social reinforcement scoring** — multi-agent salience bonus when multiple agents independently observe the same fragment
 - **`crystallize(session_id: &str)`** — session-level auto-consolidation (current `crystallize()` is consumer-driven; session-level auto-detection is not yet implemented)

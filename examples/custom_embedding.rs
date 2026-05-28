@@ -43,7 +43,8 @@ impl EmbeddingProvider for DummyProvider {
 
 fn origin() -> Origin {
     Origin {
-        agent_id: "example-agent".into(),
+        peer_id: anamnesis::graph::types::PeerId(0),
+        source_kind: anamnesis::peer::SourceKind::AgentObservation,
         session_id: "session-1".into(),
         scope: anamnesis::graph::ScopePath::new("demo").expect("valid scope"),
         confidence: 0.9,
@@ -89,11 +90,14 @@ fn main() -> Result<(), Error> {
         entity_tags: vec!["auth".into(), "factory-pattern".into()],
         origin: origin(),
         timestamp: Timestamp(1000),
+        valid_from: None,
+        valid_until: None,
     })?;
 
     let id1 = match &result1 {
         IngestResult::Created(ids) => ids[0],
         IngestResult::Reinforced { existing_id, .. } => *existing_id,
+        IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
     };
     println!("Ingested node {}: {:?}", id1.0, result1);
 
@@ -107,11 +111,14 @@ fn main() -> Result<(), Error> {
         entity_tags: vec!["auth".into()],
         origin: origin(),
         timestamp: Timestamp(2000),
+        valid_from: None,
+        valid_until: None,
     })?;
 
     let id2 = match &result2 {
         IngestResult::Created(ids) => ids[0],
         IngestResult::Reinforced { existing_id, .. } => *existing_id,
+        IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
     };
     println!("Ingested node {}: {:?}", id2.0, result2);
 

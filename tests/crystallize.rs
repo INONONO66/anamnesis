@@ -7,7 +7,8 @@ use anamnesis::{
 
 fn origin() -> Origin {
     Origin {
-        agent_id: "agent-1".to_string(),
+        peer_id: anamnesis::graph::types::PeerId(0),
+        source_kind: anamnesis::peer::SourceKind::AgentObservation,
         session_id: "session-1".to_string(),
         scope: anamnesis::graph::ScopePath::new("project-1").expect("valid scope"),
         confidence: 0.9,
@@ -25,6 +26,8 @@ fn observation(name: &str, timestamp: Timestamp) -> Observation {
         entity_tags: vec!["auth".to_string()],
         origin: origin(),
         timestamp,
+        valid_from: None,
+        valid_until: None,
     }
 }
 

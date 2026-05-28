@@ -15,7 +15,8 @@ use anamnesis::{Engine, EngineConfig};
 
 fn origin(session: &str) -> Origin {
     Origin {
-        agent_id: "agent-1".into(),
+        peer_id: anamnesis::graph::types::PeerId(0),
+        source_kind: anamnesis::peer::SourceKind::AgentObservation,
         session_id: session.into(),
         scope: anamnesis::graph::ScopePath::universal(),
         confidence: 0.9,
@@ -34,6 +35,8 @@ fn ingest(engine: &mut Engine, name: &str, content: &str, embedding: Option<Vec<
             entity_tags: vec![],
             origin: origin(name),
             timestamp: Timestamp(0),
+            valid_from: None,
+            valid_until: None,
         })
         .expect("ingest must succeed in fusion smoke fixture");
 }

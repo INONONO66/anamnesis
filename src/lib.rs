@@ -19,6 +19,7 @@ pub mod embedding;
 pub mod error;
 pub mod graph;
 pub mod mechanics;
+pub mod peer;
 pub mod query;
 pub mod snapshot;
 pub mod storage;
@@ -34,9 +35,10 @@ pub use embedding::EmbeddingProvider;
 pub use embedding::fastembed::FastEmbedProvider;
 pub use error::Error;
 pub use graph::{Edge, Node, Origin};
-pub use graph::{EdgeId, EdgeType, KnowledgeType, NodeId, Timestamp};
+pub use graph::{EdgeId, EdgeType, KnowledgeType, NodeId, PeerId, Timestamp};
 pub use mechanics::health::GraphHealth;
 pub use mechanics::social::FeedbackSignal;
+pub use peer::{PeerProfile, PeerRegistry, SourceKind, TrustLevel};
 pub use query::{
     ContextPackage, Fragment, PackagingMode, Query, QueryConfig, SearchInput, SearchResult,
     SearchTrace, Tension, TokenBudget,

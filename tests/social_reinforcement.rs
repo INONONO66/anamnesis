@@ -4,7 +4,13 @@ use anamnesis::graph::{EdgeType, KnowledgeType, NodeId, ScopePath, Timestamp};
 use anamnesis::mechanics::social::{FeedbackSignal, social_support};
 use anamnesis::{Engine, EngineConfig, IngestResult, SessionSummary, StorageAdapter};
 
-fn observation(name: &str, agent_id: &str, session_id: &str, tags: &[&str]) -> Observation {
+fn observation(name: &str, _agent_id: &str, session_id: &str, tags: &[&str]) -> Observation {
+    let peer_id = anamnesis::graph::types::PeerId(match _agent_id {
+        "agent-a" => 1,
+        "agent-b" => 2,
+        "agent-c" => 3,
+        _ => 0,
+    });
     Observation {
         name: name.to_string(),
         summary: None,
@@ -14,12 +20,15 @@ fn observation(name: &str, agent_id: &str, session_id: &str, tags: &[&str]) -> O
         node_type: KnowledgeType::Semantic,
         entity_tags: tags.iter().map(|tag| (*tag).to_string()).collect(),
         origin: Origin {
-            agent_id: agent_id.to_string(),
+            peer_id,
+            source_kind: anamnesis::peer::SourceKind::AgentObservation,
             session_id: session_id.to_string(),
             scope: ScopePath::new("project-1").expect("valid scope"),
             confidence: 0.9,
         },
         timestamp: Timestamp(1000),
+        valid_from: None,
+        valid_until: None,
     }
 }
 
@@ -39,9 +48,15 @@ fn insert_node(
     ids[0]
 }
 
-fn session(agent_id: &str, session_id: &str, node_ids: Vec<NodeId>) -> SessionSummary {
+fn session(_agent_id: &str, session_id: &str, node_ids: Vec<NodeId>) -> SessionSummary {
+    let peer_id = anamnesis::graph::types::PeerId(match _agent_id {
+        "agent-a" => 1,
+        "agent-b" => 2,
+        "agent-c" => 3,
+        _ => 0,
+    });
     SessionSummary {
-        agent_id: agent_id.to_string(),
+        peer_id,
         session_id: session_id.to_string(),
         node_ids,
     }

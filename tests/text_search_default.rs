@@ -22,7 +22,8 @@ fn insert_node_with_content(s: &mut SqliteStorage, content: &str) -> NodeId {
         access_history: VecDeque::new(),
         tier: MemoryTier::Auto,
         origin: Origin {
-            agent_id: "agent-1".to_string(),
+            peer_id: anamnesis::graph::types::PeerId(0),
+            source_kind: anamnesis::peer::SourceKind::AgentObservation,
             session_id: "session-1".to_string(),
             scope: anamnesis::graph::ScopePath::universal(),
             confidence: 0.9,
@@ -89,7 +90,8 @@ fn text_search_matches_content_field() {
         access_history: VecDeque::new(),
         tier: MemoryTier::Auto,
         origin: Origin {
-            agent_id: "agent-1".to_string(),
+            peer_id: anamnesis::graph::types::PeerId(0),
+            source_kind: anamnesis::peer::SourceKind::AgentObservation,
             session_id: "session-1".to_string(),
             scope: anamnesis::graph::ScopePath::universal(),
             confidence: 0.9,

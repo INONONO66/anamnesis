@@ -177,7 +177,7 @@ Semantics:
 - Cross-agent **entity linking** creates shared knowledge
 - `reflect_batch()` creates Entity edges between agents' representations
 
-> **Note**: `reflect_batch()` is a placeholder in v0.2.0 — it returns an empty `ReflectReport` without performing entity linking.
+> **Note**: `reflect_batch()` creates `Entity` edges between nodes from different agents when their entity tags overlap.
 
 **Implementation**: `api/mod.rs::reflect_batch()`
 
@@ -274,32 +274,16 @@ Where:
 
 ---
 
-## ACTIONABLE NEXT STEPS
+## IMPLEMENTATION NOTES
 
-### Phase 1: Core Types (Week 1)
-- [ ] Add `Origin`, `MemoryTier`, `DissonanceClass` to `graph/node.rs`
-- [ ] Extend `EdgeType` with reasoning & contradiction edges
-- [ ] Add `personality_congruence`, `dissonance_score`, `consolidation_strength` fields to Node
+Several ideas from this synthesis are now represented in the engine:
 
-### Phase 2: Mechanics Modules (Week 2)
-- [ ] Create `mechanics/dissonance.rs` — dissonance detection & scoring
-- [ ] Create `mechanics/identity_bias.rs` — self-reference, Bayesian updating, personality congruence
-- [ ] Extend `mechanics/forgetting.rs` — CLS decay by tier
+- Origin attribution and hierarchical scope are carried by every node.
+- Reasoning, contradiction, supersession, and cross-agent entity edges are represented in `EdgeType`.
+- Identity nodes participate in recall as retrieval priors.
+- `reflect_batch()` performs metadata-only cross-agent entity linking.
 
-### Phase 3: Query Integration (Week 3)
-- [ ] Extend `query/activation.rs` — identity-constrained retrieval
-- [ ] Add personality-biased ranking
-
-### Phase 4: Engine Integration (Week 4)
-- [ ] Modify `api/engine.rs::ingest()` → `ingest_with_dissonance_awareness()`
-- [ ] Add `api/engine.rs::reflect_batch()` for multi-agent linking
-- [ ] Add `api/engine.rs::query_with_identity()` and `query_personality_biased()`
-
-### Phase 5: Testing & Benchmarking (Week 5)
-- [ ] Write integration tests in `tests/identity_memory_integration.rs`
-- [ ] Benchmark dissonance detection performance
-- [ ] Benchmark identity-constrained queries
-- [ ] Update README with examples
+The remaining research directions are adaptive belief revision, richer dissonance-aware ingestion, and additional benchmarks for identity-conditioned and contradiction-heavy recall.
 
 ---
 
@@ -328,5 +312,5 @@ See `docs/identity_memory_integration.md` for:
 
 ---
 
-**Status**: Research synthesis complete. Ready for implementation.  
-**Next**: Begin Phase 1 (core types) in Anamnesis v0.2 development cycle.
+**Status**: Research synthesis partially implemented in Anamnesis v0.4.  
+**Next**: Use targeted ADRs for any remaining belief-revision or dissonance-aware ingestion work.

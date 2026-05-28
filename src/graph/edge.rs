@@ -3,6 +3,20 @@
 use crate::graph::types::{EdgeId, EdgeType, NodeId, Timestamp};
 use std::collections::HashMap;
 
+/// The origin of an edge — how it was created.
+///
+/// Consumers set this explicitly; the engine sets it automatically for
+/// attraction auto-links (`Auto`) and `link()` calls (`Manual`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EdgeSource {
+    /// Created automatically by the engine (attraction, reflect_batch).
+    Auto,
+    /// Created explicitly by the consumer via `Engine::link()`.
+    Manual,
+    /// Derived by the engine from structural analysis (e.g. crystallize).
+    Inferred,
+}
+
 /// A directed relationship between two nodes in the cognitive graph.
 ///
 /// Edge weight represents relationship strength [0, 1].
@@ -19,6 +33,8 @@ pub struct Edge {
     pub edge_type: EdgeType,
     /// Relationship strength [0, 1].
     pub weight: f64,
+    /// How this edge was created — set automatically by the engine.
+    pub edge_source: EdgeSource,
     /// When this edge was created.
     pub created_at: Timestamp,
     /// When this relationship becomes valid in domain time.
@@ -42,6 +58,7 @@ mod tests {
             target: NodeId(20),
             edge_type: EdgeType::Reason,
             weight: 0.8,
+            edge_source: EdgeSource::Manual,
             created_at: Timestamp(1000),
             valid_from: None,
             valid_until: None,
@@ -60,6 +77,7 @@ mod tests {
             target: NodeId(2),
             edge_type: EdgeType::Contradicts,
             weight: 0.9,
+            edge_source: EdgeSource::Auto,
             created_at: Timestamp(500),
             valid_from: None,
             valid_until: None,

@@ -17,12 +17,15 @@ fn setup_engine() -> Engine {
             node_type: KnowledgeType::Semantic,
             entity_tags: vec![],
             origin: Origin {
-                agent_id: "agent-1".into(),
+                peer_id: anamnesis::graph::types::PeerId(0),
+                source_kind: anamnesis::peer::SourceKind::AgentObservation,
                 session_id: "session-1".into(),
                 scope: anamnesis::graph::ScopePath::universal(),
                 confidence: 0.9,
             },
             timestamp: Timestamp(0),
+            valid_from: None,
+            valid_until: None,
         })
         .unwrap();
     engine

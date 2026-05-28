@@ -6,9 +6,10 @@ use anamnesis::{Engine, EngineConfig, IngestResult, StorageAdapter};
 
 const DAY_MS: u64 = 86_400_000;
 
-fn origin(agent_id: &str, session_id: &str) -> Origin {
+fn origin(_agent_id: &str, session_id: &str) -> Origin {
     Origin {
-        agent_id: agent_id.to_string(),
+        peer_id: anamnesis::graph::types::PeerId(0),
+        source_kind: anamnesis::peer::SourceKind::AgentObservation,
         session_id: session_id.to_string(),
         scope: anamnesis::graph::ScopePath::new("agent-memory-project").expect("valid scope"),
         confidence: 0.95,
@@ -33,6 +34,8 @@ fn observation(
         entity_tags: entity_tags.iter().map(|tag| tag.to_string()).collect(),
         origin: origin("agent-1", session_id),
         timestamp: Timestamp(timestamp),
+        valid_from: None,
+        valid_until: None,
     }
 }
 
@@ -48,6 +51,7 @@ fn created_id(result: IngestResult) -> NodeId {
     match result {
         IngestResult::Created(ids) => ids[0],
         IngestResult::Reinforced { .. } => panic!("expected a newly created node"),
+        IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
     }
 }
 

@@ -96,7 +96,8 @@ fn all_error_variants() {
 #[test]
 fn origin_universal_and_scoped() {
     let universal = Origin {
-        agent_id: "agent-1".to_string(),
+        peer_id: anamnesis::graph::types::PeerId(0),
+        source_kind: anamnesis::peer::SourceKind::AgentObservation,
         session_id: "session-1".to_string(),
         scope: anamnesis::graph::ScopePath::universal(),
         confidence: 0.8,
@@ -104,7 +105,8 @@ fn origin_universal_and_scoped() {
     assert!(universal.scope.is_universal());
 
     let scoped = Origin {
-        agent_id: "agent-1".to_string(),
+        peer_id: anamnesis::graph::types::PeerId(0),
+        source_kind: anamnesis::peer::SourceKind::AgentObservation,
         session_id: "session-1".to_string(),
         scope: anamnesis::graph::ScopePath::new("anamnesis").expect("valid scope"),
         confidence: 0.9,

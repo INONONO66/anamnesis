@@ -23,6 +23,7 @@ fn activation_edge(
             target,
             edge_type: EdgeType::Semantic,
             weight,
+            edge_source: anamnesis::graph::edge::EdgeSource::Auto,
             created_at: Timestamp(0),
             valid_from: None,
             valid_until,
@@ -66,12 +67,15 @@ fn search_observation(name: &str) -> Observation {
         node_type: KnowledgeType::Semantic,
         entity_tags: vec![name.to_string()],
         origin: Origin {
-            agent_id: "agent-1".to_string(),
+            peer_id: anamnesis::graph::types::PeerId(0),
+            source_kind: anamnesis::peer::SourceKind::AgentObservation,
             session_id: "session-1".to_string(),
             scope: ScopePath::universal(),
             confidence: 1.0,
         },
         timestamp: Timestamp(0),
+        valid_from: None,
+        valid_until: None,
     }
 }
 

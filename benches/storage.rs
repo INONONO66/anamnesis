@@ -24,7 +24,8 @@ fn make_node(id: NodeId) -> Node {
         access_history: VecDeque::new(),
         tier: anamnesis::graph::MemoryTier::Auto,
         origin: Origin {
-            agent_id: "bench-agent".to_string(),
+            peer_id: anamnesis::graph::types::PeerId(0),
+            source_kind: anamnesis::peer::SourceKind::AgentObservation,
             session_id: "bench-session".to_string(),
             scope: anamnesis::graph::ScopePath::universal(),
             confidence: 0.9,
@@ -41,6 +42,7 @@ fn make_edge(id: EdgeId, source: NodeId, target: NodeId) -> Edge {
         target,
         edge_type: EdgeType::Semantic,
         weight: 0.8,
+        edge_source: anamnesis::graph::edge::EdgeSource::Auto,
         created_at: Timestamp(1000),
         valid_from: None,
         valid_until: None,

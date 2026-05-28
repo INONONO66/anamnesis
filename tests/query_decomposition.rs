@@ -21,12 +21,15 @@ fn english_who_is_pattern() {
             node_type: KnowledgeType::Semantic,
             entity_tags: vec![],
             origin: Origin {
-                agent_id: "test".into(),
+                peer_id: anamnesis::graph::types::PeerId(0),
+                source_kind: anamnesis::peer::SourceKind::AgentObservation,
                 session_id: "test".into(),
                 scope: anamnesis::graph::ScopePath::universal(),
                 confidence: 0.9,
             },
             timestamp: Timestamp::now(),
+            valid_from: None,
+            valid_until: None,
         })
         .unwrap();
 
@@ -36,6 +39,7 @@ fn english_who_is_pattern() {
             query_embedding: None,
             entity_tags: vec![],
             agent_id: None,
+            peer_filter: None,
             scope: anamnesis::graph::ScopePath::universal(),
             seed_limit: None,
             limit: 10,
@@ -65,12 +69,15 @@ fn english_what_is_pattern() {
             node_type: KnowledgeType::Semantic,
             entity_tags: vec![],
             origin: Origin {
-                agent_id: "test".into(),
+                peer_id: anamnesis::graph::types::PeerId(0),
+                source_kind: anamnesis::peer::SourceKind::AgentObservation,
                 session_id: "test".into(),
                 scope: anamnesis::graph::ScopePath::universal(),
                 confidence: 0.9,
             },
             timestamp: Timestamp::now(),
+            valid_from: None,
+            valid_until: None,
         })
         .unwrap();
 
@@ -80,6 +87,7 @@ fn english_what_is_pattern() {
             query_embedding: None,
             entity_tags: vec![],
             agent_id: None,
+            peer_filter: None,
             scope: anamnesis::graph::ScopePath::universal(),
             seed_limit: None,
             limit: 10,
@@ -109,12 +117,15 @@ fn english_of_pattern() {
             node_type: KnowledgeType::Semantic,
             entity_tags: vec![],
             origin: Origin {
-                agent_id: "test".into(),
+                peer_id: anamnesis::graph::types::PeerId(0),
+                source_kind: anamnesis::peer::SourceKind::AgentObservation,
                 session_id: "test".into(),
                 scope: anamnesis::graph::ScopePath::universal(),
                 confidence: 0.9,
             },
             timestamp: Timestamp::now(),
+            valid_from: None,
+            valid_until: None,
         })
         .unwrap();
 
@@ -124,6 +135,7 @@ fn english_of_pattern() {
             query_embedding: None,
             entity_tags: vec![],
             agent_id: None,
+            peer_filter: None,
             scope: anamnesis::graph::ScopePath::universal(),
             seed_limit: None,
             limit: 10,
@@ -153,12 +165,15 @@ fn english_how_does_pattern() {
             node_type: KnowledgeType::Semantic,
             entity_tags: vec![],
             origin: Origin {
-                agent_id: "test".into(),
+                peer_id: anamnesis::graph::types::PeerId(0),
+                source_kind: anamnesis::peer::SourceKind::AgentObservation,
                 session_id: "test".into(),
                 scope: anamnesis::graph::ScopePath::universal(),
                 confidence: 0.9,
             },
             timestamp: Timestamp::now(),
+            valid_from: None,
+            valid_until: None,
         })
         .unwrap();
 
@@ -168,6 +183,7 @@ fn english_how_does_pattern() {
             query_embedding: None,
             entity_tags: vec![],
             agent_id: None,
+            peer_filter: None,
             scope: anamnesis::graph::ScopePath::universal(),
             seed_limit: None,
             limit: 10,
@@ -197,12 +213,15 @@ fn korean_eui_pattern() {
             node_type: KnowledgeType::Semantic,
             entity_tags: vec![],
             origin: Origin {
-                agent_id: "test".into(),
+                peer_id: anamnesis::graph::types::PeerId(0),
+                source_kind: anamnesis::peer::SourceKind::AgentObservation,
                 session_id: "test".into(),
                 scope: anamnesis::graph::ScopePath::universal(),
                 confidence: 0.9,
             },
             timestamp: Timestamp::now(),
+            valid_from: None,
+            valid_until: None,
         })
         .unwrap();
 
@@ -212,6 +231,7 @@ fn korean_eui_pattern() {
             query_embedding: None,
             entity_tags: vec![],
             agent_id: None,
+            peer_filter: None,
             scope: anamnesis::graph::ScopePath::universal(),
             seed_limit: None,
             limit: 10,
@@ -241,12 +261,15 @@ fn korean_nugu_pattern() {
             node_type: KnowledgeType::Semantic,
             entity_tags: vec![],
             origin: Origin {
-                agent_id: "test".into(),
+                peer_id: anamnesis::graph::types::PeerId(0),
+                source_kind: anamnesis::peer::SourceKind::AgentObservation,
                 session_id: "test".into(),
                 scope: anamnesis::graph::ScopePath::universal(),
                 confidence: 0.9,
             },
             timestamp: Timestamp::now(),
+            valid_from: None,
+            valid_until: None,
         })
         .unwrap();
 
@@ -256,6 +279,7 @@ fn korean_nugu_pattern() {
             query_embedding: None,
             entity_tags: vec![],
             agent_id: None,
+            peer_filter: None,
             scope: anamnesis::graph::ScopePath::universal(),
             seed_limit: None,
             limit: 10,
@@ -285,12 +309,15 @@ fn korean_mwo_pattern() {
             node_type: KnowledgeType::Semantic,
             entity_tags: vec![],
             origin: Origin {
-                agent_id: "test".into(),
+                peer_id: anamnesis::graph::types::PeerId(0),
+                source_kind: anamnesis::peer::SourceKind::AgentObservation,
                 session_id: "test".into(),
                 scope: anamnesis::graph::ScopePath::universal(),
                 confidence: 0.9,
             },
             timestamp: Timestamp::now(),
+            valid_from: None,
+            valid_until: None,
         })
         .unwrap();
 
@@ -300,6 +327,7 @@ fn korean_mwo_pattern() {
             query_embedding: None,
             entity_tags: vec![],
             agent_id: None,
+            peer_filter: None,
             scope: anamnesis::graph::ScopePath::universal(),
             seed_limit: None,
             limit: 10,
@@ -329,12 +357,15 @@ fn no_match_returns_original() {
             node_type: KnowledgeType::Semantic,
             entity_tags: vec![],
             origin: Origin {
-                agent_id: "test".into(),
+                peer_id: anamnesis::graph::types::PeerId(0),
+                source_kind: anamnesis::peer::SourceKind::AgentObservation,
                 session_id: "test".into(),
                 scope: anamnesis::graph::ScopePath::universal(),
                 confidence: 0.9,
             },
             timestamp: Timestamp::now(),
+            valid_from: None,
+            valid_until: None,
         })
         .unwrap();
 
@@ -344,6 +375,7 @@ fn no_match_returns_original() {
             query_embedding: None,
             entity_tags: vec![],
             agent_id: None,
+            peer_filter: None,
             scope: anamnesis::graph::ScopePath::universal(),
             seed_limit: None,
             limit: 10,
@@ -373,12 +405,15 @@ fn case_insensitive_english() {
             node_type: KnowledgeType::Semantic,
             entity_tags: vec![],
             origin: Origin {
-                agent_id: "test".into(),
+                peer_id: anamnesis::graph::types::PeerId(0),
+                source_kind: anamnesis::peer::SourceKind::AgentObservation,
                 session_id: "test".into(),
                 scope: anamnesis::graph::ScopePath::universal(),
                 confidence: 0.9,
             },
             timestamp: Timestamp::now(),
+            valid_from: None,
+            valid_until: None,
         })
         .unwrap();
 
@@ -388,6 +423,7 @@ fn case_insensitive_english() {
             query_embedding: None,
             entity_tags: vec![],
             agent_id: None,
+            peer_filter: None,
             scope: anamnesis::graph::ScopePath::universal(),
             seed_limit: None,
             limit: 10,

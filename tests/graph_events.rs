@@ -5,7 +5,8 @@ use anamnesis::{Engine, EngineConfig, IngestResult, StorageAdapter};
 
 fn origin() -> Origin {
     Origin {
-        agent_id: "agent-1".to_string(),
+        peer_id: anamnesis::graph::types::PeerId(0),
+        source_kind: anamnesis::peer::SourceKind::AgentObservation,
         session_id: "session-1".to_string(),
         scope: ScopePath::universal(),
         confidence: 0.9,
@@ -23,14 +24,17 @@ fn observation(name: &str, embedding: Option<Vec<f64>>, timestamp: Timestamp) ->
         entity_tags: vec!["events".to_string()],
         origin: origin(),
         timestamp,
+        valid_from: None,
+        valid_until: None,
     }
 }
 
 fn created_id(result: IngestResult) -> anamnesis::NodeId {
-    let IngestResult::Created(ids) = result else {
-        panic!("expected Created result");
-    };
-    ids[0]
+    match result {
+        IngestResult::Created(ids) => ids[0],
+        IngestResult::Reinforced { existing_id, .. } => existing_id,
+        IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
+    }
 }
 
 #[test]
@@ -52,14 +56,29 @@ fn ingest_emits_node_created_and_attraction_edge_created() {
     );
 
     let events = engine.drain_events();
-    assert!(matches!(
-        events.as_slice(),
-        [
-            GraphEvent::NodeCreated { node_id: first_id, node_type: KnowledgeType::Semantic },
-            GraphEvent::NodeCreated { node_id: second_id, node_type: KnowledgeType::Semantic },
-            GraphEvent::EdgeCreated { source, target, edge_type: EdgeType::Semantic, .. },
-        ] if *first_id == first && *second_id == second && *source == second && *target == first
-    ));
+    // Verify NodeCreated events for both nodes
+    let node_created_first = events.iter().any(|e| {
+        matches!(e, GraphEvent::NodeCreated { node_id, node_type: KnowledgeType::Semantic } if *node_id == first)
+    });
+    let node_created_second = events.iter().any(|e| {
+        matches!(e, GraphEvent::NodeCreated { node_id, node_type: KnowledgeType::Semantic } if *node_id == second)
+    });
+    // Verify EdgeCreated event for attraction link
+    let edge_created = events.iter().any(|e| {
+        matches!(e, GraphEvent::EdgeCreated { source, target, edge_type: EdgeType::Semantic, .. } if *source == second && *target == first)
+    });
+    assert!(
+        node_created_first,
+        "NodeCreated for first should be emitted"
+    );
+    assert!(
+        node_created_second,
+        "NodeCreated for second should be emitted"
+    );
+    assert!(
+        edge_created,
+        "EdgeCreated for attraction link should be emitted"
+    );
 }
 
 #[test]

@@ -15,12 +15,15 @@ fn observation(name: &str, timestamp: Timestamp) -> Observation {
         node_type: KnowledgeType::Semantic,
         entity_tags: vec!["snapshot".to_string()],
         origin: Origin {
-            agent_id: "agent-1".to_string(),
+            peer_id: anamnesis::graph::types::PeerId(0),
+            source_kind: anamnesis::peer::SourceKind::AgentObservation,
             session_id: "session-1".to_string(),
             scope: anamnesis::graph::ScopePath::new("project-1").expect("valid scope"),
             confidence: 0.9,
         },
         timestamp,
+        valid_from: None,
+        valid_until: None,
     }
 }
 
@@ -28,6 +31,7 @@ fn ingest_node(engine: &mut Engine, name: &str, timestamp: Timestamp) -> NodeId 
     match engine.ingest(observation(name, timestamp)).unwrap() {
         IngestResult::Created(ids) => ids[0],
         IngestResult::Reinforced { .. } => panic!("test observations should create nodes"),
+        IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
     }
 }
 

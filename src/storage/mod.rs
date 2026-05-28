@@ -9,7 +9,7 @@ pub mod sqlite;
 pub use sqlite::SqliteStorage;
 
 use crate::error::Error;
-use crate::graph::{Edge, EdgeId, KnowledgeType, Node, NodeId, ScopePath, Timestamp};
+use crate::graph::{Edge, EdgeId, KnowledgeType, Node, NodeId, PeerId, ScopePath, Timestamp};
 
 /// Storage backend interface for the Anamnesis graph engine.
 ///
@@ -141,16 +141,16 @@ pub trait StorageAdapter: Send + Sync {
             .collect()
     }
 
-    /// Return all node IDs created by the given agent.
+    /// Return all node IDs created by the given peer.
     ///
     /// Default implementation scans all nodes: O(N). Override for O(1) index lookup.
-    fn nodes_by_agent(&self, agent_id: &str) -> Vec<NodeId> {
+    fn nodes_by_peer(&self, peer_id: PeerId) -> Vec<NodeId> {
         self.all_node_ids()
             .into_iter()
             .filter(|&id| {
                 self.get_node(id)
                     .ok()
-                    .is_some_and(|n| n.origin.agent_id == agent_id)
+                    .is_some_and(|n| n.origin.peer_id == peer_id)
             })
             .collect()
     }
@@ -176,6 +176,37 @@ pub trait StorageAdapter: Send + Sync {
         let mut ids = self.all_node_ids();
         ids.sort_by_key(|a| std::cmp::Reverse(a.0));
         ids
+    }
+
+    // ── Peer persistence (default no-ops; SqliteStorage overrides) ────────────
+
+    /// Store a peer profile. Write-through: called on every peer mutation.
+    ///
+    /// Default is a no-op for backends that don't persist peers.
+    fn store_peer(&mut self, _profile: &crate::peer::PeerProfile) -> Result<(), Error> {
+        Ok(())
+    }
+
+    /// Store an alias for a peer.
+    fn store_peer_alias(
+        &mut self,
+        _peer_id: PeerId,
+        _alias: &str,
+        _alias_type: &str,
+    ) -> Result<(), Error> {
+        Ok(())
+    }
+
+    /// Load all peers from storage into a `PeerRegistry`.
+    ///
+    /// Default returns an empty registry for backends that don't persist peers.
+    fn load_peers(&self) -> Result<crate::peer::PeerRegistry, Error> {
+        Ok(crate::peer::PeerRegistry::new())
+    }
+
+    /// Delete a peer and all its aliases from storage.
+    fn delete_peer(&mut self, _peer_id: PeerId) -> Result<(), Error> {
+        Ok(())
     }
 
     /// Search nodes by text query (case-insensitive substring match on name and content).

@@ -8,7 +8,7 @@ pub mod types;
 pub use edge::Edge;
 pub use node::{Node, Origin};
 pub use scope::{ScopePath, ScopeRelation};
-pub use types::{EdgeId, EdgeType, KnowledgeType, MemoryTier, NodeId, Timestamp};
+pub use types::{EdgeId, EdgeType, KnowledgeType, MemoryTier, NodeId, PeerId, Timestamp};
 
 use crate::error::Error;
 use crate::storage::{SqliteStorage, StorageAdapter};
@@ -178,7 +178,8 @@ mod tests {
             access_history: VecDeque::new(),
             tier: MemoryTier::Auto,
             origin: Origin {
-                agent_id: "agent-1".to_string(),
+                peer_id: crate::graph::types::PeerId(0),
+                source_kind: crate::peer::SourceKind::AgentObservation,
                 session_id: "session-1".to_string(),
                 scope: crate::graph::ScopePath::universal(),
                 confidence: 0.9,
@@ -195,6 +196,7 @@ mod tests {
             target: NodeId(target),
             edge_type: EdgeType::Semantic,
             weight: 0.8,
+            edge_source: crate::graph::edge::EdgeSource::Auto,
             created_at: Timestamp(0),
             valid_from: None,
             valid_until: None,

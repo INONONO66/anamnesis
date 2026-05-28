@@ -37,12 +37,15 @@ fn make_observation(i: u64, rng: &mut StdRng) -> Observation {
         node_type: KnowledgeType::Semantic,
         entity_tags: vec!["bench".to_string()],
         origin: Origin {
-            agent_id: "bench-agent".to_string(),
+            peer_id: anamnesis::graph::types::PeerId(0),
+            source_kind: anamnesis::peer::SourceKind::AgentObservation,
             session_id: "bench-session".to_string(),
             scope: anamnesis::graph::ScopePath::universal(),
             confidence: 0.9,
         },
         timestamp: Timestamp(1000 + i),
+        valid_from: None,
+        valid_until: None,
     }
 }
 
@@ -56,6 +59,10 @@ fn build_graph(node_count: usize) -> (Engine, Vec<anamnesis::NodeId>) {
         match engine.ingest(obs).unwrap() {
             IngestResult::Created(ids) => node_ids.push(ids[0]),
             IngestResult::Reinforced { existing_id, .. } => node_ids.push(existing_id),
+            IngestResult::CreatedWithConflict {
+                node_ids: conflict_ids,
+                ..
+            } => node_ids.push(conflict_ids[0]),
         }
     }
 

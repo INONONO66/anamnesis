@@ -16,12 +16,15 @@ fn make_obs(name: &str, node_type: KnowledgeType) -> Observation {
         node_type,
         entity_tags: vec![],
         origin: Origin {
-            agent_id: "agent-1".to_string(),
+            peer_id: anamnesis::graph::types::PeerId(0),
+            source_kind: anamnesis::peer::SourceKind::AgentObservation,
             session_id: "session-1".to_string(),
             scope: anamnesis::graph::ScopePath::universal(),
             confidence: 0.9,
         },
         timestamp: Timestamp(0),
+        valid_from: None,
+        valid_until: None,
     }
 }
 
@@ -112,12 +115,15 @@ fn test_l2_budget_exhaustion_degrades_gracefully() {
             node_type: KnowledgeType::Semantic,
             entity_tags: vec![],
             origin: Origin {
-                agent_id: "agent-1".to_string(),
+                peer_id: anamnesis::graph::types::PeerId(0),
+                source_kind: anamnesis::peer::SourceKind::AgentObservation,
                 session_id: "session-1".to_string(),
                 scope: anamnesis::graph::ScopePath::universal(),
                 confidence: 0.9,
             },
             timestamp: Timestamp(0),
+            valid_from: None,
+            valid_until: None,
         };
         match engine.ingest(obs).unwrap() {
             IngestResult::Created(ids) => node_ids.push(ids[0]),
@@ -170,12 +176,15 @@ fn test_search_episodic_content_preserved() {
             node_type: KnowledgeType::Semantic,
             entity_tags: vec!["auth".to_string()],
             origin: Origin {
-                agent_id: "agent-1".to_string(),
+                peer_id: anamnesis::graph::types::PeerId(0),
+                source_kind: anamnesis::peer::SourceKind::AgentObservation,
                 session_id: "session-knowledge".to_string(),
                 scope: anamnesis::graph::ScopePath::universal(),
                 confidence: 0.9,
             },
             timestamp: Timestamp(0),
+            valid_from: None,
+            valid_until: None,
         })
         .unwrap()
     {
@@ -198,12 +207,15 @@ fn test_search_episodic_content_preserved() {
             node_type: KnowledgeType::Episodic,
             entity_tags: vec!["auth".to_string()],
             origin: Origin {
-                agent_id: "agent-1".to_string(),
+                peer_id: anamnesis::graph::types::PeerId(0),
+                source_kind: anamnesis::peer::SourceKind::AgentObservation,
                 session_id: format!("session-{}", i),
                 scope: anamnesis::graph::ScopePath::universal(),
                 confidence: 0.9,
             },
             timestamp: Timestamp(i as u64),
+            valid_from: None,
+            valid_until: None,
         };
         match engine.ingest(obs).unwrap() {
             IngestResult::Created(ids) => {
@@ -227,12 +239,15 @@ fn test_search_episodic_content_preserved() {
             node_type: KnowledgeType::Semantic,
             entity_tags: vec!["auth".to_string()],
             origin: Origin {
-                agent_id: "agent-1".to_string(),
+                peer_id: anamnesis::graph::types::PeerId(0),
+                source_kind: anamnesis::peer::SourceKind::AgentObservation,
                 session_id: "session-contradiction".to_string(),
                 scope: anamnesis::graph::ScopePath::universal(),
                 confidence: 0.9,
             },
             timestamp: Timestamp(100),
+            valid_from: None,
+            valid_until: None,
         })
         .unwrap()
     {

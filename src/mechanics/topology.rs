@@ -199,9 +199,10 @@ mod tests {
     use crate::graph::{Edge, EdgeId, KnowledgeType, Node, NodeId, Timestamp};
     use crate::storage::SqliteStorage;
 
-    fn make_origin(agent: &str, session: &str, scope: &str) -> Origin {
+    fn make_origin(_agent: &str, session: &str, scope: &str) -> Origin {
         Origin {
-            agent_id: agent.to_string(),
+            peer_id: crate::graph::types::PeerId(0),
+            source_kind: crate::peer::SourceKind::AgentObservation,
             session_id: session.to_string(),
             scope: ScopePath::new(scope).expect("valid scope"),
             confidence: 0.9,
@@ -261,6 +262,7 @@ mod tests {
             target: NodeId(2),
             edge_type: EdgeType::Semantic,
             weight: 0.8,
+            edge_source: crate::graph::edge::EdgeSource::Auto,
             created_at: Timestamp(1000),
             valid_from: None,
             valid_until: None,
@@ -272,6 +274,7 @@ mod tests {
             target: NodeId(1),
             edge_type: EdgeType::Semantic,
             weight: 0.7,
+            edge_source: crate::graph::edge::EdgeSource::Auto,
             created_at: Timestamp(1000),
             valid_from: None,
             valid_until: None,
@@ -317,6 +320,7 @@ mod tests {
             target: NodeId(2),
             edge_type: EdgeType::Semantic,
             weight: 0.8,
+            edge_source: crate::graph::edge::EdgeSource::Auto,
             created_at: Timestamp(1000),
             valid_from: None,
             valid_until: None,
@@ -328,6 +332,7 @@ mod tests {
             target: NodeId(3),
             edge_type: EdgeType::Semantic,
             weight: 0.7,
+            edge_source: crate::graph::edge::EdgeSource::Auto,
             created_at: Timestamp(1000),
             valid_from: None,
             valid_until: None,
@@ -370,6 +375,7 @@ mod tests {
             target: NodeId(1),
             edge_type: EdgeType::Supports,
             weight: 0.8,
+            edge_source: crate::graph::edge::EdgeSource::Auto,
             created_at: Timestamp(1000),
             valid_from: None,
             valid_until: None,
@@ -381,6 +387,7 @@ mod tests {
             target: NodeId(1),
             edge_type: EdgeType::Contradicts,
             weight: 0.7,
+            edge_source: crate::graph::edge::EdgeSource::Auto,
             created_at: Timestamp(1000),
             valid_from: None,
             valid_until: None,
@@ -392,6 +399,7 @@ mod tests {
             target: NodeId(1),
             edge_type: EdgeType::ReinforcedBy,
             weight: 0.9,
+            edge_source: crate::graph::edge::EdgeSource::Auto,
             created_at: Timestamp(1000),
             valid_from: None,
             valid_until: None,

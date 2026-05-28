@@ -1,23 +1,41 @@
 //! Node and Origin types for the Anamnesis graph.
 
 use crate::graph::scope::ScopePath;
-use crate::graph::types::{KnowledgeType, MemoryTier, NodeId, Timestamp};
+use crate::graph::types::{KnowledgeType, MemoryTier, NodeId, PeerId, Timestamp};
+use crate::peer::SourceKind;
 use std::collections::{HashMap, VecDeque};
 
 /// Provenance and scope of a knowledge fragment.
 ///
-/// Tracks which agent produced this node, from which session,
+/// Tracks which peer produced this node, from which session,
 /// and the hierarchical scope path it belongs to.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Origin {
-    /// The agent that produced this knowledge fragment.
-    pub agent_id: String,
+    /// The peer (human or agent) that produced this knowledge fragment.
+    pub peer_id: PeerId,
+    /// The kind of source that produced this fragment.
+    pub source_kind: SourceKind,
     /// The session in which this fragment was created.
     pub session_id: String,
     /// Hierarchical scope path. `ScopePath::universal()` = applies across all scopes.
     pub scope: ScopePath,
     /// Creation-time certainty [0, 1].
     pub confidence: f64,
+}
+
+impl Origin {
+    /// Convenience constructor for tests.
+    ///
+    /// Uses `SourceKind::AgentObservation` and `confidence = 0.9`.
+    pub fn test_default(peer_id: PeerId) -> Self {
+        Self {
+            peer_id,
+            source_kind: SourceKind::AgentObservation,
+            session_id: "test-session".to_string(),
+            scope: ScopePath::universal(),
+            confidence: 0.9,
+        }
+    }
 }
 
 /// A knowledge fragment in the cognitive graph.
@@ -92,7 +110,8 @@ mod tests {
 
     fn make_origin() -> Origin {
         Origin {
-            agent_id: "agent-1".to_string(),
+            peer_id: crate::graph::types::PeerId(0),
+            source_kind: crate::peer::SourceKind::AgentObservation,
             session_id: "session-1".to_string(),
             scope: ScopePath::new("anamnesis").expect("valid scope"),
             confidence: 0.9,
@@ -102,7 +121,8 @@ mod tests {
     #[test]
     fn origin_universal() {
         let o = Origin {
-            agent_id: "agent-1".to_string(),
+            peer_id: crate::graph::types::PeerId(0),
+            source_kind: crate::peer::SourceKind::AgentObservation,
             session_id: "session-1".to_string(),
             scope: ScopePath::universal(),
             confidence: 0.8,
@@ -165,7 +185,8 @@ mod tests {
             access_history: VecDeque::new(),
             tier: MemoryTier::Auto,
             origin: Origin {
-                agent_id: "agent-1".to_string(),
+                peer_id: crate::graph::types::PeerId(0),
+                source_kind: crate::peer::SourceKind::AgentObservation,
                 session_id: "session-2".to_string(),
                 scope: ScopePath::universal(),
                 confidence: 0.7,

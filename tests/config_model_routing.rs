@@ -6,7 +6,8 @@ use anamnesis::{EnergyModel, Engine, EngineConfig, IngestResult, NodeId, Spreadi
 
 fn origin() -> Origin {
     Origin {
-        agent_id: "agent-1".to_string(),
+        peer_id: anamnesis::graph::types::PeerId(0),
+        source_kind: anamnesis::peer::SourceKind::AgentObservation,
         session_id: "session-1".to_string(),
         scope: anamnesis::graph::ScopePath::universal(),
         confidence: 1.0,
@@ -24,6 +25,8 @@ fn observation(name: &str, embedding: Option<Vec<f64>>) -> Observation {
         entity_tags: vec![name.to_string()],
         origin: origin(),
         timestamp: Timestamp(0),
+        valid_from: None,
+        valid_until: None,
     }
 }
 

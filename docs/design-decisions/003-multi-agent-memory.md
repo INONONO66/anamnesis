@@ -16,7 +16,7 @@ These patterns address a gap: without them, a shared Anamnesis graph cannot dist
 
 ## Decision
 
-Extend the Anamnesis design with three planned features:
+Extend the Anamnesis design with three features:
 
 ### 1. Origin Attribution ✅
 
@@ -35,7 +35,7 @@ Origin is metadata, not access control. It enables the consumer-side Reflector t
 
 **Implementation Status**: ✅ Accepted direction. Origin carries provenance for every node. Scope-aware recall should use a hierarchical scope path rather than a project-only identifier.
 
-### 2. Social Reinforcement ⬚
+### 2. Social Reinforcement ✅
 
 Extend gravity scoring with a logarithmic bonus for multi-agent corroboration:
 
@@ -47,9 +47,9 @@ social_bonus(node) = 1.0 + ln(distinct_agent_count)   // only if > 1
 - Logarithmic scaling prevents popularity cascades.
 - Composes with existing decay and reinforcement mechanics — does not replace them.
 
-**Implementation Status**: ⬚ Planned. Not yet wired into gravity scoring. Consumer can implement via post-query weighting.
+**Implementation Status**: ✅ Social corroboration scoring primitives and consumer feedback salience updates are implemented. Automatic gravity multiplier wiring is not part of the current engine behavior.
 
-### 3. Batch Reflect ⬚
+### 3. Batch Reflect ✅
 
 Add a round-boundary API for cross-agent entity linking:
 
@@ -61,7 +61,7 @@ pub fn reflect_batch(&mut self, sessions: &[SessionSummary]) -> Result<ReflectRe
 - Creates `Entity` edges between nodes from different agents referencing the same concept.
 - Does not merge nodes or alter salience — only creates edges for discoverability.
 
-**Implementation Status**: ⬚ Placeholder. Method signature exists in Engine API; returns empty ReflectReport. Consumer can implement entity linking via `link()` API.
+**Implementation Status**: ✅ Implemented as metadata-only cross-agent entity linking. The method creates `Entity` edges between nodes from different agents that share entity tags and returns a `ReflectReport`.
 
 ### Dependency Chain
 
@@ -89,16 +89,16 @@ Origin → Batch Reflect (needs agent_id to identify cross-agent nodes)
 |---------|--------|-------|
 | Origin struct (agent_id, session_id, scope, confidence) | ✅ | Every Node carries provenance. |
 | Hierarchical scoping via Origin.scope | ✅ | Enables multi-domain, multi-project graphs with scope-aware queries. |
-| Social reinforcement scoring | ⬚ | Planned. Consumer can implement via post-query weighting using Origin metadata. |
-| Batch reflect API | ⬚ | Method signature exists; returns empty ReflectReport. Consumer implements via `link()` API. |
+| Social reinforcement scoring | ✅ | Multi-agent corroboration scoring and consumer feedback salience updates are implemented. |
+| Batch reflect API | ✅ | Creates `Entity` edges for cross-agent nodes with shared entity tags. |
 | Entity edge type | ✅ | Defined in `src/graph/types.rs` with kappa=0.95. |
 
 ## Consequences
 
 - Node struct carries an `Origin` field (required, not optional — all nodes have provenance).
 - `EdgeType` enum includes `Entity` variant for cross-agent links.
-- Gravity scoring function can accept an optional social reinforcement multiplier (not yet wired).
-- `Engine` has `reflect_batch()` method (placeholder implementation).
+- Social reinforcement is exposed as scoring primitives and feedback-driven salience updates.
+- `Engine` has `reflect_batch()` for metadata-only cross-agent entity linking.
 - All changes are additive — no existing API breaks.
 - The consumer is responsible for populating `Origin` when ingesting and calling `reflect_batch()` at round boundaries.
 

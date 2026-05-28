@@ -3,9 +3,10 @@ use anamnesis::graph::node::Origin;
 use anamnesis::graph::{EdgeType, KnowledgeType, ScopePath, Timestamp};
 use anamnesis::{Engine, EngineConfig, IngestResult, StorageAdapter};
 
-fn make_origin(agent: &str, session: &str, scope: &str) -> Origin {
+fn make_origin(_agent: &str, session: &str, scope: &str) -> Origin {
     Origin {
-        agent_id: agent.to_string(),
+        peer_id: anamnesis::graph::types::PeerId(0),
+        source_kind: anamnesis::peer::SourceKind::AgentObservation,
         session_id: session.to_string(),
         scope: ScopePath::new(scope).expect("valid scope"),
         confidence: 0.9,
@@ -23,6 +24,8 @@ fn make_observation(name: &str, node_type: KnowledgeType) -> Observation {
         entity_tags: vec![],
         origin: make_origin("agent-1", "session-1", "project-a"),
         timestamp: Timestamp(1000),
+        valid_from: None,
+        valid_until: None,
     }
 }
 
@@ -31,13 +34,14 @@ fn ingest_node(engine: &mut Engine, name: &str, node_type: KnowledgeType) -> ana
     match result {
         IngestResult::Created(ids) => ids[0],
         IngestResult::Reinforced { existing_id, .. } => existing_id,
+        IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
     }
 }
 
 #[test]
 fn empty_graph_returns_zero_counts_and_zero_entropy() {
     let engine = Engine::new();
-    let health = engine.health();
+    let health = engine.graph_health();
 
     assert_eq!(health.node_count, 0);
     assert_eq!(health.edge_count, 0);
@@ -62,7 +66,7 @@ fn health_is_read_only_salience_unchanged() {
     let salience_before_1 = engine.graph().storage().get_salience(id1).unwrap();
     let salience_before_2 = engine.graph().storage().get_salience(id2).unwrap();
 
-    let _health = engine.health();
+    let _health = engine.graph_health();
 
     let salience_after_1 = engine.graph().storage().get_salience(id1).unwrap();
     let salience_after_2 = engine.graph().storage().get_salience(id2).unwrap();
@@ -76,7 +80,7 @@ fn single_orphan_node() {
     let mut engine = Engine::new();
     ingest_node(&mut engine, "lonely", KnowledgeType::Semantic);
 
-    let health = engine.health();
+    let health = engine.graph_health();
     assert_eq!(health.node_count, 1);
     assert_eq!(health.edge_count, 0);
     assert_eq!(health.orphan_count, 1);
@@ -97,7 +101,7 @@ fn component_count_star_topology() {
     engine.link(center, leaf2, EdgeType::Semantic, 0.8).unwrap();
     engine.link(center, leaf3, EdgeType::Semantic, 0.8).unwrap();
 
-    let health = engine.health();
+    let health = engine.graph_health();
     assert_eq!(health.node_count, 4);
     assert_eq!(health.edge_count, 3);
     assert_eq!(health.orphan_count, 0);
@@ -118,7 +122,7 @@ fn component_count_disconnected_pairs() {
     engine.link(a1, a2, EdgeType::Semantic, 0.8).unwrap();
     engine.link(b1, b2, EdgeType::Causal, 0.7).unwrap();
 
-    let health = engine.health();
+    let health = engine.graph_health();
     assert_eq!(health.node_count, 5);
     assert_eq!(health.component_count, 3);
     assert_eq!(health.orphan_count, 1);
@@ -139,7 +143,7 @@ fn contradiction_and_supersede_counts() {
     engine.link(n3, n4, EdgeType::Contradicts, 0.8).unwrap();
     engine.link(n1, n3, EdgeType::Supersedes, 0.7).unwrap();
 
-    let health = engine.health();
+    let health = engine.graph_health();
     assert_eq!(health.contradiction_count, 2);
     assert_eq!(health.supersede_count, 1);
 }
@@ -151,7 +155,7 @@ fn entropy_zero_for_single_bucket_salience() {
     ingest_node(&mut engine, "n2", KnowledgeType::Semantic);
     ingest_node(&mut engine, "n3", KnowledgeType::Semantic);
 
-    let health = engine.health();
+    let health = engine.graph_health();
     assert_eq!(health.salience_entropy, 0.0);
 }
 
@@ -161,7 +165,7 @@ fn entropy_zero_for_single_type() {
     ingest_node(&mut engine, "n1", KnowledgeType::Semantic);
     ingest_node(&mut engine, "n2", KnowledgeType::Semantic);
 
-    let health = engine.health();
+    let health = engine.graph_health();
     assert_eq!(health.type_entropy, 0.0);
 }
 
@@ -175,7 +179,7 @@ fn type_entropy_positive_for_mixed_types() {
     ingest_node(&mut engine, "entity", KnowledgeType::Entity);
     ingest_node(&mut engine, "decision", KnowledgeType::Decision);
 
-    let health = engine.health();
+    let health = engine.graph_health();
     assert!(
         (health.type_entropy - 2.0).abs() < 1e-10,
         "expected 2.0, got {}",
@@ -198,7 +202,7 @@ fn edge_type_entropy_positive_for_mixed_edges() {
     engine.link(n3, n4, EdgeType::Temporal, 0.6).unwrap();
     engine.link(n4, n1, EdgeType::Reason, 0.5).unwrap();
 
-    let health = engine.health();
+    let health = engine.graph_health();
     assert!(
         (health.edge_type_entropy - 2.0).abs() < 1e-10,
         "expected 2.0, got {}",
@@ -218,7 +222,7 @@ fn edge_type_entropy_zero_for_single_type() {
     engine.link(n1, n2, EdgeType::Semantic, 0.8).unwrap();
     engine.link(n2, n3, EdgeType::Semantic, 0.7).unwrap();
 
-    let health = engine.health();
+    let health = engine.graph_health();
     assert_eq!(health.edge_type_entropy, 0.0);
 }
 
@@ -237,10 +241,13 @@ fn bridge_candidates_with_cross_scope_connections() {
         entity_tags: vec!["shared".to_string()],
         origin: make_origin("agent-1", "session-1", "project-a"),
         timestamp: Timestamp(1000),
+        valid_from: None,
+        valid_until: None,
     };
     let bridge_id = match engine.ingest(obs_bridge).unwrap() {
         IngestResult::Created(ids) => ids[0],
         IngestResult::Reinforced { existing_id, .. } => existing_id,
+        IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
     };
 
     let obs_a = Observation {
@@ -253,10 +260,13 @@ fn bridge_candidates_with_cross_scope_connections() {
         entity_tags: vec!["tag-a".to_string()],
         origin: make_origin("agent-1", "session-1", "project-b"),
         timestamp: Timestamp(1000),
+        valid_from: None,
+        valid_until: None,
     };
     let a_id = match engine.ingest(obs_a).unwrap() {
         IngestResult::Created(ids) => ids[0],
         IngestResult::Reinforced { existing_id, .. } => existing_id,
+        IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
     };
 
     let obs_b = Observation {
@@ -269,10 +279,13 @@ fn bridge_candidates_with_cross_scope_connections() {
         entity_tags: vec!["tag-b".to_string()],
         origin: make_origin("agent-1", "session-1", "project-c"),
         timestamp: Timestamp(1000),
+        valid_from: None,
+        valid_until: None,
     };
     let b_id = match engine.ingest(obs_b).unwrap() {
         IngestResult::Created(ids) => ids[0],
         IngestResult::Reinforced { existing_id, .. } => existing_id,
+        IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
     };
 
     let obs_c = Observation {
@@ -285,10 +298,13 @@ fn bridge_candidates_with_cross_scope_connections() {
         entity_tags: vec!["tag-c".to_string()],
         origin: make_origin("agent-1", "session-1", "project-d"),
         timestamp: Timestamp(1000),
+        valid_from: None,
+        valid_until: None,
     };
     let c_id = match engine.ingest(obs_c).unwrap() {
         IngestResult::Created(ids) => ids[0],
         IngestResult::Reinforced { existing_id, .. } => existing_id,
+        IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
     };
 
     engine
@@ -301,7 +317,7 @@ fn bridge_candidates_with_cross_scope_connections() {
         .link(bridge_id, c_id, EdgeType::Semantic, 0.9)
         .unwrap();
 
-    let health = engine.health();
+    let health = engine.graph_health();
     assert!(
         health.bridge_candidate_count >= 1,
         "expected at least 1 bridge candidate, got {}",
@@ -321,7 +337,7 @@ fn node_count_and_edge_count_match_storage() {
     engine.link(n1, n2, EdgeType::Semantic, 0.8).unwrap();
     engine.link(n2, n3, EdgeType::Causal, 0.7).unwrap();
 
-    let health = engine.health();
+    let health = engine.graph_health();
     assert_eq!(health.node_count, engine.graph().node_count());
     assert_eq!(health.edge_count, engine.graph().edge_count());
 }
@@ -334,7 +350,7 @@ fn multiple_calls_return_consistent_results() {
     ingest_node(&mut engine, "n1", KnowledgeType::Semantic);
     ingest_node(&mut engine, "n2", KnowledgeType::Episodic);
 
-    let h1 = engine.health();
-    let h2 = engine.health();
+    let h1 = engine.graph_health();
+    let h2 = engine.graph_health();
     assert_eq!(h1, h2);
 }

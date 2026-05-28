@@ -1,5 +1,6 @@
 //! Tests for top-k convergence termination in spreading activation.
 
+use anamnesis::IngestResult;
 use anamnesis::api::{Engine, Observation};
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{EdgeType, KnowledgeType, ScopePath, Timestamp};
@@ -10,7 +11,8 @@ fn convergence_enabled_stops_early() {
     let mut engine = Engine::new();
 
     let origin = Origin {
-        agent_id: "test-agent".into(),
+        peer_id: anamnesis::graph::types::PeerId(0),
+        source_kind: anamnesis::peer::SourceKind::AgentObservation,
         session_id: "test-session".into(),
         scope: ScopePath::universal(),
         confidence: 0.9,
@@ -29,12 +31,15 @@ fn convergence_enabled_stops_early() {
                 entity_tags: vec![],
                 origin: origin.clone(),
                 timestamp: Timestamp::now(),
+                valid_from: None,
+                valid_until: None,
             })
             .expect("ingest failed");
 
         let id = match result {
             anamnesis::api::IngestResult::Created(ids) => ids[0],
             anamnesis::api::IngestResult::Reinforced { existing_id, .. } => existing_id,
+            IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
         };
         node_ids.push(id);
     }
@@ -73,7 +78,8 @@ fn convergence_disabled_default_behavior() {
     let mut engine = Engine::new();
 
     let origin = Origin {
-        agent_id: "test-agent".into(),
+        peer_id: anamnesis::graph::types::PeerId(0),
+        source_kind: anamnesis::peer::SourceKind::AgentObservation,
         session_id: "test-session".into(),
         scope: ScopePath::universal(),
         confidence: 0.9,
@@ -92,12 +98,15 @@ fn convergence_disabled_default_behavior() {
                 entity_tags: vec![],
                 origin: origin.clone(),
                 timestamp: Timestamp::now(),
+                valid_from: None,
+                valid_until: None,
             })
             .expect("ingest failed");
 
         let id = match result {
             anamnesis::api::IngestResult::Created(ids) => ids[0],
             anamnesis::api::IngestResult::Reinforced { existing_id, .. } => existing_id,
+            IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
         };
         node_ids.push(id);
     }

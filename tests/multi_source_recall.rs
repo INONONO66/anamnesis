@@ -6,7 +6,8 @@ use anamnesis::{Engine, EngineConfig, IngestResult, NodeId, SpreadingModel};
 
 fn origin() -> Origin {
     Origin {
-        agent_id: "agent-1".to_string(),
+        peer_id: anamnesis::graph::types::PeerId(0),
+        source_kind: anamnesis::peer::SourceKind::AgentObservation,
         session_id: "session-1".to_string(),
         scope: anamnesis::graph::ScopePath::new("test-project").expect("valid scope"),
         confidence: 1.0,
@@ -28,6 +29,8 @@ fn observation_with_type(name: &str, node_type: KnowledgeType) -> Observation {
         entity_tags: Vec::new(),
         origin: origin(),
         timestamp: Timestamp(0),
+        valid_from: None,
+        valid_until: None,
     }
 }
 
@@ -44,6 +47,7 @@ fn ingest(engine: &mut Engine, name: &str) -> NodeId {
     {
         IngestResult::Created(ids) => ids[0],
         IngestResult::Reinforced { .. } => panic!("dedup is disabled"),
+        IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
     }
 }
 
@@ -154,6 +158,7 @@ fn priority_queue_bfs_uses_identity_prior_without_dropping_seed() {
     {
         IngestResult::Created(ids) => ids[0],
         IngestResult::Reinforced { .. } => panic!("dedup is disabled"),
+        IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
     };
 
     let result = engine

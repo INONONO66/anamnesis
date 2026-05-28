@@ -1,6 +1,7 @@
 //! Tests for Engine::link endpoint validation and weight clamping.
 
 use anamnesis::Engine;
+use anamnesis::IngestResult;
 use anamnesis::api::Observation;
 use anamnesis::error::Error;
 use anamnesis::graph::node::Origin;
@@ -10,7 +11,8 @@ fn setup_engine_with_nodes() -> (Engine, NodeId, NodeId) {
     let mut engine = Engine::new();
 
     let origin = Origin {
-        agent_id: "test-agent".into(),
+        peer_id: anamnesis::graph::types::PeerId(0),
+        source_kind: anamnesis::peer::SourceKind::AgentObservation,
         session_id: "test-session".into(),
         scope: anamnesis::graph::ScopePath::universal(),
         confidence: 0.9,
@@ -26,6 +28,8 @@ fn setup_engine_with_nodes() -> (Engine, NodeId, NodeId) {
         entity_tags: vec![],
         origin: origin.clone(),
         timestamp: Timestamp::now(),
+        valid_from: None,
+        valid_until: None,
     };
 
     let obs2 = Observation {
@@ -38,6 +42,8 @@ fn setup_engine_with_nodes() -> (Engine, NodeId, NodeId) {
         entity_tags: vec![],
         origin: origin.clone(),
         timestamp: Timestamp::now(),
+        valid_from: None,
+        valid_until: None,
     };
 
     let result1 = engine.ingest(obs1).expect("ingest node1");
@@ -46,11 +52,13 @@ fn setup_engine_with_nodes() -> (Engine, NodeId, NodeId) {
     let node1 = match result1 {
         anamnesis::api::IngestResult::Created(ids) => ids[0],
         anamnesis::api::IngestResult::Reinforced { existing_id, .. } => existing_id,
+        IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
     };
 
     let node2 = match result2 {
         anamnesis::api::IngestResult::Created(ids) => ids[0],
         anamnesis::api::IngestResult::Reinforced { existing_id, .. } => existing_id,
+        IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
     };
 
     (engine, node1, node2)

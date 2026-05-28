@@ -1,6 +1,6 @@
 //! Error types for the Anamnesis engine.
 
-use crate::graph::types::{EdgeId, NodeId};
+use crate::graph::types::{EdgeId, NodeId, PeerId};
 use std::fmt;
 
 /// All errors that can occur in the Anamnesis engine.
@@ -20,6 +20,10 @@ pub enum Error {
     InvalidInput(String),
     /// Query budget exhausted before completion.
     BudgetExhausted,
+    /// A peer with the given ID was not found in the registry.
+    PeerNotFound(PeerId),
+    /// An alias or identifier is already registered to another peer.
+    DuplicateAlias(String),
 }
 
 impl fmt::Display for Error {
@@ -32,6 +36,8 @@ impl fmt::Display for Error {
             Error::InvalidConfig(msg) => write!(f, "invalid config: {}", msg),
             Error::InvalidInput(msg) => write!(f, "invalid input: {}", msg),
             Error::BudgetExhausted => write!(f, "query budget exhausted"),
+            Error::PeerNotFound(id) => write!(f, "peer not found: {}", id.0),
+            Error::DuplicateAlias(alias) => write!(f, "duplicate alias: {}", alias),
         }
     }
 }

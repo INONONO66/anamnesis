@@ -3,16 +3,23 @@ use anamnesis::graph::node::Origin;
 use anamnesis::graph::{EdgeType, KnowledgeType, NodeId, Timestamp};
 use anamnesis::{Engine, IngestResult, StorageAdapter};
 
-fn origin(agent_id: &str, session_id: &str) -> Origin {
+fn origin(_agent_id: &str, session_id: &str) -> Origin {
+    let peer_id = anamnesis::graph::types::PeerId(match _agent_id {
+        "agent-1" => 1,
+        "agent-2" => 2,
+        "agent-3" => 3,
+        _ => 0,
+    });
     Origin {
-        agent_id: agent_id.to_string(),
+        peer_id,
+        source_kind: anamnesis::peer::SourceKind::AgentObservation,
         session_id: session_id.to_string(),
         scope: anamnesis::graph::ScopePath::new("project-1").expect("valid scope"),
         confidence: 0.9,
     }
 }
 
-fn observation(name: &str, agent_id: &str, session_id: &str) -> Observation {
+fn observation(name: &str, _agent_id: &str, session_id: &str) -> Observation {
     Observation {
         name: name.to_string(),
         summary: None,
@@ -21,8 +28,10 @@ fn observation(name: &str, agent_id: &str, session_id: &str) -> Observation {
         confidence: 0.9,
         node_type: KnowledgeType::Episodic,
         entity_tags: vec!["test".to_string()],
-        origin: origin(agent_id, session_id),
+        origin: origin(_agent_id, session_id),
         timestamp: Timestamp(1000),
+        valid_from: None,
+        valid_until: None,
     }
 }
 

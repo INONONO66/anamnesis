@@ -6,7 +6,8 @@ use anamnesis::{Engine, EngineConfig, IngestResult};
 
 fn origin(scope: &str) -> Origin {
     Origin {
-        agent_id: "agent-1".to_string(),
+        peer_id: anamnesis::graph::types::PeerId(0),
+        source_kind: anamnesis::peer::SourceKind::AgentObservation,
         session_id: "session-1".to_string(),
         scope: ScopePath::new(scope).expect("valid scope"),
         confidence: 0.9,
@@ -24,6 +25,8 @@ fn observation(name: &str, tags: &[&str], embedding: Option<Vec<f64>>) -> Observ
         entity_tags: tags.iter().map(|tag| (*tag).to_string()).collect(),
         origin: origin("topology-ingest"),
         timestamp: Timestamp(1000),
+        valid_from: None,
+        valid_until: None,
     }
 }
 
@@ -41,6 +44,7 @@ fn ingest(engine: &mut Engine, name: &str, tags: &[&str], embedding: Option<Vec<
     {
         IngestResult::Created(ids) => ids[0],
         IngestResult::Reinforced { .. } => panic!("dedup is disabled"),
+        IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
     }
 }
 
@@ -69,6 +73,7 @@ fn created_id(result: IngestResult) -> NodeId {
     match result {
         IngestResult::Created(ids) => ids[0],
         IngestResult::Reinforced { .. } => panic!("dedup is disabled"),
+        IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
     }
 }
 
