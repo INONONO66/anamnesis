@@ -8,7 +8,7 @@ pub mod types;
 pub use edge::Edge;
 pub use node::{Node, Origin};
 pub use scope::{ScopePath, ScopeRelation};
-pub use types::{EdgeId, EdgeType, KnowledgeType, MemoryTier, NodeId, Timestamp};
+pub use types::{EdgeId, EdgeType, KnowledgeType, MemoryTier, NodeId, PeerId, Timestamp};
 
 use crate::error::Error;
 use crate::storage::{SqliteStorage, StorageAdapter};

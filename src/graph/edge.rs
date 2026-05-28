@@ -3,6 +3,20 @@
 use crate::graph::types::{EdgeId, EdgeType, NodeId, Timestamp};
 use std::collections::HashMap;
 
+/// The origin of an edge — how it was created.
+///
+/// Consumers set this explicitly; the engine sets it automatically for
+/// attraction auto-links (`Auto`) and `link()` calls (`Manual`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EdgeSource {
+    /// Created automatically by the engine (attraction, reflect_batch).
+    Auto,
+    /// Created explicitly by the consumer via `Engine::link()`.
+    Manual,
+    /// Derived by the engine from structural analysis (e.g. crystallize).
+    Inferred,
+}
+
 /// A directed relationship between two nodes in the cognitive graph.
 ///
 /// Edge weight represents relationship strength [0, 1].

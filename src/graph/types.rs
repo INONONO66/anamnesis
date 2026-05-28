@@ -8,6 +8,13 @@ pub struct NodeId(pub u64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct EdgeId(pub u64);
 
+/// Unique identifier for a peer (human or agent) in the registry.
+///
+/// Newtypes over `u64` — same pattern as `NodeId` and `EdgeId`.
+/// Type-safe: a `PeerId` cannot be used where a `NodeId` is expected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct PeerId(pub u64);
+
 /// Unix timestamp in milliseconds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Timestamp(pub u64);
