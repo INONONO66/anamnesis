@@ -196,6 +196,7 @@ mod tests {
             target: NodeId(target),
             edge_type: EdgeType::Semantic,
             weight: 0.8,
+            edge_source: crate::graph::edge::EdgeSource::Auto,
             created_at: Timestamp(0),
             valid_from: None,
             valid_until: None,

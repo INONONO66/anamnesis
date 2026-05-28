@@ -33,6 +33,8 @@ pub struct Edge {
     pub edge_type: EdgeType,
     /// Relationship strength [0, 1].
     pub weight: f64,
+    /// How this edge was created — set automatically by the engine.
+    pub edge_source: EdgeSource,
     /// When this edge was created.
     pub created_at: Timestamp,
     /// When this relationship becomes valid in domain time.
@@ -56,6 +58,7 @@ mod tests {
             target: NodeId(20),
             edge_type: EdgeType::Reason,
             weight: 0.8,
+            edge_source: EdgeSource::Manual,
             created_at: Timestamp(1000),
             valid_from: None,
             valid_until: None,
@@ -74,6 +77,7 @@ mod tests {
             target: NodeId(2),
             edge_type: EdgeType::Contradicts,
             weight: 0.9,
+            edge_source: EdgeSource::Auto,
             created_at: Timestamp(500),
             valid_from: None,
             valid_until: None,

@@ -1073,7 +1073,8 @@ fn create_schema(conn: &Connection) -> Result<(), Error> {
             created_at INTEGER NOT NULL,
             valid_from INTEGER,
             valid_until INTEGER,
-            metadata TEXT NOT NULL
+            metadata TEXT NOT NULL,
+            edge_source TEXT NOT NULL DEFAULT 'auto'
         );
 
         CREATE TABLE IF NOT EXISTS salience (
@@ -1212,8 +1213,8 @@ fn insert_edge_row(conn: &Connection, edge: &Edge) -> Result<(), Error> {
     let write_result = (|| -> Result<(), Error> {
         conn.execute(
             "INSERT OR REPLACE INTO edges (
-                id, from_node, to_node, edge_type, weight, created_at, valid_from, valid_until, metadata
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                id, from_node, to_node, edge_type, weight, created_at, valid_from, valid_until, metadata, edge_source
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 edge.id.0,
                 edge.source.0,
@@ -1224,6 +1225,7 @@ fn insert_edge_row(conn: &Connection, edge: &Edge) -> Result<(), Error> {
                 edge.valid_from.map(|ts| ts.0),
                 edge.valid_until.map(|ts| ts.0),
                 encode_map(&edge.metadata),
+                encode_edge_source(&edge.edge_source),
             ],
         )
         .map_err(sqlite_error)?;
@@ -1323,7 +1325,7 @@ fn load_entity_tags(conn: &Connection, node_id: NodeId) -> Result<Vec<String>, E
 fn load_edges(conn: &Connection) -> Result<Vec<Edge>, Error> {
     let mut stmt = conn
         .prepare(
-            "SELECT id, from_node, to_node, edge_type, weight, created_at, valid_from, valid_until, metadata
+            "SELECT id, from_node, to_node, edge_type, weight, created_at, valid_from, valid_until, metadata, edge_source
              FROM edges ORDER BY id",
         )
         .map_err(sqlite_error)?;
@@ -1335,6 +1337,7 @@ fn load_edges(conn: &Connection) -> Result<Vec<Edge>, Error> {
                 target: NodeId(row.get(2)?),
                 edge_type: decode_edge_type(&row.get::<_, String>(3)?).map_err(to_sql_error)?,
                 weight: row.get(4)?,
+                edge_source: decode_edge_source(&row.get::<_, String>(9)?).map_err(to_sql_error)?,
                 created_at: Timestamp(row.get(5)?),
                 valid_from: row.get::<_, Option<u64>>(6)?.map(Timestamp),
                 valid_until: row.get::<_, Option<u64>>(7)?.map(Timestamp),
@@ -1578,6 +1581,23 @@ fn unescape_text(value: &str) -> Result<String, Error> {
         }
     }
     String::from_utf8(out).map_err(|e| Error::StorageError(format!("invalid utf-8 escape: {e}")))
+}
+
+fn encode_edge_source(source: &crate::graph::edge::EdgeSource) -> &'static str {
+    match source {
+        crate::graph::edge::EdgeSource::Auto => "auto",
+        crate::graph::edge::EdgeSource::Manual => "manual",
+        crate::graph::edge::EdgeSource::Inferred => "inferred",
+    }
+}
+
+fn decode_edge_source(value: &str) -> Result<crate::graph::edge::EdgeSource, Error> {
+    match value {
+        "auto" => Ok(crate::graph::edge::EdgeSource::Auto),
+        "manual" => Ok(crate::graph::edge::EdgeSource::Manual),
+        "inferred" => Ok(crate::graph::edge::EdgeSource::Inferred),
+        other => Err(Error::StorageError(format!("unknown edge_source: {other}"))),
+    }
 }
 
 fn encode_source_kind(kind: &SourceKind) -> &'static str {

@@ -77,6 +77,7 @@ fn refutes_is_supportive_and_propagates_activation() {
                         target,
                         edge_type: EdgeType::Refutes,
                         weight: 1.0,
+                        edge_source: anamnesis::graph::edge::EdgeSource::Auto,
                         created_at: Timestamp(0),
                         valid_from: None,
                         valid_until: None,

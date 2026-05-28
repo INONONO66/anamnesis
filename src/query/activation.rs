@@ -442,6 +442,7 @@ mod tests {
                 target: target_id,
                 edge_type,
                 weight,
+                edge_source: crate::graph::edge::EdgeSource::Auto,
                 created_at: Timestamp(0),
                 valid_from: None,
                 valid_until: None,

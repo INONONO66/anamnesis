@@ -23,6 +23,7 @@ fn activation_edge(
             target,
             edge_type: EdgeType::Semantic,
             weight,
+            edge_source: anamnesis::graph::edge::EdgeSource::Auto,
             created_at: Timestamp(0),
             valid_from: None,
             valid_until,

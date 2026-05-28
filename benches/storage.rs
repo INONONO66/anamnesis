@@ -42,6 +42,7 @@ fn make_edge(id: EdgeId, source: NodeId, target: NodeId) -> Edge {
         target,
         edge_type: EdgeType::Semantic,
         weight: 0.8,
+        edge_source: anamnesis::graph::edge::EdgeSource::Auto,
         created_at: Timestamp(1000),
         valid_from: None,
         valid_until: None,

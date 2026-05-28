@@ -893,6 +893,8 @@ pub struct Engine<S: StorageAdapter + Clone = SqliteStorage> {
     config: EngineConfig,
     snapshots: SnapshotStore<S>,
     events: Vec<GraphEvent>,
+    /// Peer registry — maps PeerId to PeerProfile (name, trust, aliases, platforms).
+    peers: crate::peer::PeerRegistry,
 }
 
 impl Engine<SqliteStorage> {
@@ -903,6 +905,7 @@ impl Engine<SqliteStorage> {
             config: EngineConfig::default(),
             snapshots: SnapshotStore::new(),
             events: Vec::new(),
+            peers: crate::peer::PeerRegistry::new(),
         }
     }
 
@@ -913,6 +916,7 @@ impl Engine<SqliteStorage> {
             config,
             snapshots: SnapshotStore::new(),
             events: Vec::new(),
+            peers: crate::peer::PeerRegistry::new(),
         }
     }
 }
@@ -931,7 +935,84 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             config,
             snapshots: SnapshotStore::new(),
             events: Vec::new(),
+            peers: crate::peer::PeerRegistry::new(),
         }
+    }
+
+    // ── Peer registry API ─────────────────────────────────────────────────────
+
+    /// Register a new peer and return its assigned `PeerId`.
+    ///
+    /// Returns `Err(Error::DuplicateAlias)` if the name is already taken.
+    pub fn register_peer(
+        &mut self,
+        name: impl Into<String>,
+        trust_level: crate::peer::TrustLevel,
+    ) -> Result<crate::graph::types::PeerId, Error> {
+        self.peers.register_peer(name, trust_level)
+    }
+
+    /// Resolve any identifier (name, alias, platform username) to a `PeerId`.
+    pub fn resolve_peer(&self, identifier: &str) -> Option<crate::graph::types::PeerId> {
+        self.peers.resolve_peer(identifier)
+    }
+
+    /// Get a peer profile by `PeerId`.
+    pub fn get_peer(&self, id: crate::graph::types::PeerId) -> Option<&crate::peer::PeerProfile> {
+        self.peers.get_peer(id)
+    }
+
+    /// Update the trust level of an existing peer.
+    pub fn update_peer_trust(
+        &mut self,
+        id: crate::graph::types::PeerId,
+        trust_level: crate::peer::TrustLevel,
+    ) -> Result<(), Error> {
+        self.peers.update_trust(id, trust_level)
+    }
+
+    /// Add an alias to an existing peer.
+    pub fn add_peer_alias(
+        &mut self,
+        id: crate::graph::types::PeerId,
+        alias: impl Into<String>,
+    ) -> Result<(), Error> {
+        self.peers.add_alias(id, alias)
+    }
+
+    /// Add a platform username mapping to an existing peer.
+    pub fn add_peer_platform(
+        &mut self,
+        id: crate::graph::types::PeerId,
+        platform: impl Into<String>,
+        username: impl Into<String>,
+    ) -> Result<(), Error> {
+        self.peers.add_platform(id, platform, username)
+    }
+
+    /// List all registered peers.
+    pub fn list_peers(&self) -> Vec<&crate::peer::PeerProfile> {
+        self.peers.list_peers()
+    }
+
+    /// Returns the number of registered peers.
+    pub fn peer_count(&self) -> usize {
+        self.peers.peer_count()
+    }
+
+    /// Create an engine with a default peer pre-registered.
+    ///
+    /// Convenience constructor for quick-start scenarios.
+    pub fn with_default_peer(
+        name: impl Into<String>,
+        trust_level: crate::peer::TrustLevel,
+    ) -> Result<Self, Error>
+    where
+        S: Default,
+    {
+        let mut engine = Self::with_storage(EngineConfig::default(), S::default());
+        engine.register_peer(name, trust_level)?;
+        Ok(engine)
     }
 
     fn emit_event(&mut self, event: GraphEvent) {
@@ -1090,6 +1171,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             target: session,
             edge_type: EdgeType::BelongsTo,
             weight: 1.0,
+            edge_source: crate::graph::edge::EdgeSource::Auto,
             created_at: timestamp,
             valid_from: None,
             valid_until: None,
@@ -1196,6 +1278,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                 target: hypothesis,
                 edge_type,
                 weight: 1.0,
+                edge_source: crate::graph::edge::EdgeSource::Auto,
                 created_at: timestamp,
                 valid_from: None,
                 valid_until: None,
@@ -1494,6 +1577,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                         target: cid,
                         edge_type: EdgeType::Semantic,
                         weight: edge_score.clamp(0.0, 1.0),
+                        edge_source: crate::graph::edge::EdgeSource::Auto,
                         created_at: now,
                         valid_from: None,
                         valid_until: None,
@@ -1698,6 +1782,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                 target: source_id,
                 edge_type: EdgeType::ConsolidatedFrom,
                 weight,
+                edge_source: crate::graph::edge::EdgeSource::Inferred,
                 created_at: now,
                 valid_from: None,
                 valid_until: None,
@@ -1807,6 +1892,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                         target: candidate_id,
                         edge_type: EdgeType::Semantic,
                         weight: clamp_unit_finite(score),
+                        edge_source: crate::graph::edge::EdgeSource::Auto,
                         created_at: now,
                         valid_from: None,
                         valid_until: None,
@@ -1870,6 +1956,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             target: to,
             edge_type,
             weight: clamped_weight,
+            edge_source: crate::graph::edge::EdgeSource::Manual,
             created_at: now,
             valid_from: None,
             valid_until: None,
@@ -3235,6 +3322,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                 target,
                 edge_type: EdgeType::Entity,
                 weight: 1.0,
+                edge_source: crate::graph::edge::EdgeSource::Auto,
                 created_at: now,
                 valid_from: None,
                 valid_until: None,
