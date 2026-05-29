@@ -56,7 +56,7 @@ jobs:
       - run: cargo nextest run --all-features
       - run: cargo test --doc --all-features
       - name: Compile all test and bench targets without running long benchmarks
-        run: cargo test --all-targets --all-features --no-run
+        run: cargo test --all-targets --all-features --no-run -j2
 
   embed-smoke:
     name: FastEmbed smoke test
