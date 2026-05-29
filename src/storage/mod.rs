@@ -178,6 +178,17 @@ pub trait StorageAdapter: Send + Sync {
         ids
     }
 
+    /// Return up to `limit` live node IDs sorted by ID descending.
+    ///
+    /// Default delegates to `node_ids_descending()` + truncate.
+    /// Override for O(limit) instead of O(N log N) when only a small
+    /// prefix of the descending list is needed (e.g. ingest trigger pool).
+    fn node_ids_descending_limit(&self, limit: usize) -> Vec<NodeId> {
+        let mut ids = self.node_ids_descending();
+        ids.truncate(limit);
+        ids
+    }
+
     // ── Peer persistence (default no-ops; SqliteStorage overrides) ────────────
 
     /// Store a peer profile. Write-through: called on every peer mutation.

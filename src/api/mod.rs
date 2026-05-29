@@ -261,7 +261,7 @@ fn ingest_trigger_candidates<S: StorageAdapter>(
     exclude: Option<NodeId>,
 ) -> HashSet<NodeId> {
     let mut candidates = HashSet::new();
-    for nid in storage.node_ids_descending().into_iter().take(256) {
+    for nid in storage.node_ids_descending_limit(256) {
         if Some(nid) != exclude {
             candidates.insert(nid);
         }
@@ -2514,13 +2514,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         let mut attraction_edges = Vec::new();
         if let Some(ref embedding) = crystal_embedding {
             let mut candidate_set = HashSet::new();
-            for node_id in self
-                .graph
-                .storage()
-                .node_ids_descending()
-                .into_iter()
-                .take(256)
-            {
+            for node_id in self.graph.storage().node_ids_descending_limit(256) {
                 if node_id != id && !source_set.contains(&node_id) {
                     candidate_set.insert(node_id);
                 }

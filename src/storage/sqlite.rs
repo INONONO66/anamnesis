@@ -755,6 +755,22 @@ impl StorageAdapter for SqliteStorage {
         ids
     }
 
+    fn node_ids_descending_limit(&self, limit: usize) -> Vec<NodeId> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        let mut result = Vec::with_capacity(limit);
+        for (i, slot) in self.nodes.iter().enumerate().rev() {
+            if slot.is_some() {
+                result.push(NodeId(i as u64));
+                if result.len() >= limit {
+                    break;
+                }
+            }
+        }
+        result
+    }
+
     fn text_search(&self, query: &str, limit: usize) -> Vec<(NodeId, f64)> {
         if limit == 0 || query.trim().is_empty() {
             return Vec::new();
