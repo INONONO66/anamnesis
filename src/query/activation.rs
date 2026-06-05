@@ -70,11 +70,7 @@ pub fn fan_out_normalization_factor(valid_fan_out: usize) -> f64 {
 ///
 /// Edges without validity bounds are always valid for backward compatibility.
 pub fn edge_valid_at(edge: &Edge, as_of: Timestamp) -> bool {
-    let from_ok = edge.valid_from.is_none_or(|valid_from| as_of >= valid_from);
-    let until_ok = edge
-        .valid_until
-        .is_none_or(|valid_until| as_of <= valid_until);
-    from_ok && until_ok
+    crate::graph::valid_at(edge.valid_from, edge.valid_until, as_of)
 }
 
 #[derive(Debug, Clone, PartialEq)]

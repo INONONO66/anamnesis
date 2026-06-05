@@ -3423,13 +3423,9 @@ impl<S: StorageAdapter + Clone> Engine<S> {
     }
 
     fn node_is_valid_at(&self, node_id: NodeId, as_of: Timestamp) -> bool {
-        self.graph.get_node(node_id).is_ok_and(|node| {
-            let from_ok = node.valid_from.is_none_or(|valid_from| valid_from <= as_of);
-            let until_ok = node
-                .valid_until
-                .is_none_or(|valid_until| valid_until > as_of);
-            from_ok && until_ok
-        })
+        self.graph
+            .get_node(node_id)
+            .is_ok_and(|node| crate::graph::valid_at(node.valid_from, node.valid_until, as_of))
     }
 
     fn query_type_filtered(

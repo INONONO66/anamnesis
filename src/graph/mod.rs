@@ -3,11 +3,13 @@
 pub mod edge;
 pub mod node;
 pub mod scope;
+pub mod temporal;
 pub mod types;
 
 pub use edge::Edge;
 pub use node::{Node, Origin};
 pub use scope::{ScopePath, ScopeRelation};
+pub use temporal::valid_at;
 pub use types::{EdgeId, EdgeType, KnowledgeType, MemoryTier, NodeId, PeerId, Timestamp};
 
 use crate::error::Error;

@@ -161,3 +161,40 @@ fn edges_without_validity_bounds_are_always_valid() {
 
     assert!(package_contains(&package, target));
 }
+
+#[test]
+fn edge_excluded_at_exact_valid_until_boundary() {
+    // Validity is half-open [valid_from, valid_until): the upper bound is
+    // EXCLUSIVE, so an edge is not valid at as_of == valid_until. This pins the
+    // Phase 0 gate-unification fix (edge_valid_at previously used `<=` here).
+    let mut engine = engine();
+    let seed = ingest(&mut engine, "seed");
+    let target = ingest(&mut engine, "boundary target");
+    let edge = engine.link(seed, target, EdgeType::Semantic, 1.0).unwrap();
+    set_edge_validity(&mut engine, edge, None, Some(Timestamp(10)));
+
+    let package = associative_query(&engine, seed, Timestamp(10));
+
+    assert!(package_contains(&package, seed));
+    assert!(
+        !package_contains(&package, target),
+        "edge must be invalid at as_of == valid_until (half-open upper bound is exclusive)"
+    );
+}
+
+#[test]
+fn edge_valid_at_exact_valid_from_boundary() {
+    // The lower bound is INCLUSIVE: an edge is valid at as_of == valid_from.
+    let mut engine = engine();
+    let seed = ingest(&mut engine, "seed");
+    let target = ingest(&mut engine, "from-boundary target");
+    let edge = engine.link(seed, target, EdgeType::Semantic, 1.0).unwrap();
+    set_edge_validity(&mut engine, edge, Some(Timestamp(10)), Some(Timestamp(20)));
+
+    let package = associative_query(&engine, seed, Timestamp(10));
+
+    assert!(
+        package_contains(&package, target),
+        "edge must be valid at as_of == valid_from (half-open lower bound is inclusive)"
+    );
+}
