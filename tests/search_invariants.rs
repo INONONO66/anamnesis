@@ -1,4 +1,4 @@
-use anamnesis::api::{Engine, EngineConfig, IngestResult, Observation, SpreadingModel};
+use anamnesis::api::{Engine, EngineConfig, IngestResult, Observation};
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{EdgeType, KnowledgeType, ScopePath, ScopeRelation, Timestamp};
 use anamnesis::query::SearchInput;
@@ -12,12 +12,10 @@ fn engine() -> Engine {
     )
 }
 
+/// The retrieval flow is now a single additive directed RWR; this alias keeps the
+/// read-only invariant tests that previously toggled the spreading model.
 fn rwr_engine() -> Engine {
-    let mut config = EngineConfig::new()
-        .with_novelty_threshold(0.0)
-        .with_dedup_enabled(false);
-    config.spreading_model = SpreadingModel::RandomWalkRestart;
-    Engine::with_config(config)
+    engine()
 }
 
 fn origin(_agent: &str, scope: &str) -> Origin {

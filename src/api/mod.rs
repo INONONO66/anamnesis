@@ -12,53 +12,6 @@ use crate::storage::{SqliteStorage, StorageAdapter};
 
 mod search;
 
-/// Energy model for final score computation in spreading activation.
-///
-/// `WeightedSum` (default) uses the existing weighted final-score formula (equation 13):
-/// 0.50 * activation + 0.20 * vector_similarity + 0.15 * salience + 0.15 * mass, multiplied by scope weight.
-/// `Hopfield` uses local pattern completion to adjust embedding similarity when query
-/// and candidate embeddings are available.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum EnergyModel {
-    /// Weighted sum — backwards-compatible default.
-    #[default]
-    WeightedSum,
-    /// Hopfield pattern completion for embedding-aware scoring.
-    Hopfield,
-}
-
-/// Spreading activation model for query traversal.
-///
-/// `PriorityQueueBfs` (default) uses priority-queue BFS with hop decay and salience gating.
-/// `NormalizedPriorityQueueBfs` reduces per-edge activation from high-fan-out nodes.
-/// `RandomWalkRestart` uses matrix-free random walk with restart from the seed.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum SpreadingModel {
-    /// Priority-queue BFS — backwards-compatible default.
-    #[default]
-    PriorityQueueBfs,
-    /// Priority-queue BFS with fan-out-normalized propagation.
-    NormalizedPriorityQueueBfs,
-    /// Random walk with restart.
-    RandomWalkRestart,
-}
-
-/// Mass model for node importance computation.
-///
-/// `Legacy` (default) uses the existing formula: m_i = clamp(0.55 * s_i + 0.30 * c_i + 0.15 * mu_i, 0, 1).
-/// `Topological` incorporates graph structure: m_i = clamp(0.40 * s_i + 0.20 * c_i + 0.15 * mu_i + 0.15 * bridge + 0.10 * support, 0, 1).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum MassModel {
-    /// Legacy mass computation — backwards-compatible default.
-    #[default]
-    Legacy,
-    /// Topological mass incorporating bridge and support scores.
-    Topological,
-}
-
-const RWR_RESTART_PROBABILITY: f64 = 0.15;
-const RWR_MAX_ITERATIONS: usize = 128;
-const HOPFIELD_RETRIEVAL_ITERATIONS: usize = 3;
 const TOPOLOGY_INGEST_MAX_DEPTH: usize = 2;
 const TOPOLOGY_INGEST_ALPHA: f64 = 0.50;
 const TOPOLOGY_INGEST_BETA: f64 = 0.15;
@@ -76,11 +29,6 @@ const SALIENCE_CHANGE_EPSILON: f64 = 1e-10;
 /// supply measured per-readout work; until then a unit access is the prior.
 const ACCESS_READOUT_WORK: f64 = 1.0;
 
-struct HopfieldScoringContext {
-    retrieved: Vec<f64>,
-    energy_gain: f64,
-}
-
 /// Configuration for the Anamnesis engine.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
@@ -97,12 +45,6 @@ pub struct EngineConfig {
     pub dedup_enabled: bool,
     /// Whether ingest expands trigger candidates through nearby graph topology.
     pub topology_ingest_enabled: bool,
-    /// Energy model for final score computation in spreading activation. Default: WeightedSum (backwards-compatible).
-    pub energy_model: EnergyModel,
-    /// Spreading activation model for query traversal. Default: PriorityQueueBfs (backwards-compatible).
-    pub spreading_model: SpreadingModel,
-    /// Mass model for node importance computation. Default: Legacy (backwards-compatible).
-    pub mass_model: MassModel,
     /// Maximum number of mutation events retained for draining. Default: 10,000.
     pub max_events: usize,
     /// Similarity threshold for conflict detection.
@@ -122,9 +64,6 @@ impl Default for EngineConfig {
             dedup_threshold: 0.92,
             dedup_enabled: true,
             topology_ingest_enabled: false,
-            energy_model: EnergyModel::WeightedSum,
-            spreading_model: SpreadingModel::PriorityQueueBfs,
-            mass_model: MassModel::Legacy,
             max_events: 10_000,
             conflict_threshold: 0.75,
         }
@@ -163,11 +102,6 @@ impl EngineConfig {
 
     pub fn with_topology_ingest(mut self, enabled: bool) -> Self {
         self.topology_ingest_enabled = enabled;
-        self
-    }
-
-    pub fn with_mass_model(mut self, model: MassModel) -> Self {
-        self.mass_model = model;
         self
     }
 
@@ -312,155 +246,6 @@ fn topology_ingest_score(
         + TOPOLOGY_INGEST_DELTA * graph_proximity.clamp(0.0, 1.0)
         + TOPOLOGY_INGEST_EPSILON * bridge.clamp(0.0, 1.0))
     .clamp(0.0, 1.0)
-}
-
-fn rwr_activations<S: StorageAdapter>(
-    seed: NodeId,
-    budget: usize,
-    min_activation: f64,
-    storage: &S,
-    now: Timestamp,
-) -> HashMap<NodeId, f64> {
-    let scores = crate::query::random_walk_restart_at(
-        seed,
-        RWR_RESTART_PROBABILITY,
-        RWR_MAX_ITERATIONS,
-        storage,
-        now,
-    );
-
-    let max_score = scores
-        .values()
-        .copied()
-        .filter(|score| score.is_finite() && *score > 0.0)
-        .fold(0.0_f64, f64::max);
-
-    if max_score <= f64::EPSILON {
-        return HashMap::from([(seed, 1.0)]);
-    }
-
-    let mut normalized: Vec<(NodeId, f64)> = scores
-        .into_iter()
-        .filter_map(|(node_id, score)| {
-            if !score.is_finite() || score < 0.0 || storage.get_node(node_id).is_err() {
-                return None;
-            }
-
-            let activation = (score / max_score).clamp(0.0, 1.0);
-            if activation >= min_activation || node_id == seed {
-                Some((node_id, activation))
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    if !normalized.iter().any(|(node_id, _)| *node_id == seed) {
-        normalized.push((seed, 1.0));
-    }
-
-    normalized.sort_by(|(a_id, a_score), (b_id, b_score)| {
-        b_score
-            .partial_cmp(a_score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a_id.0.cmp(&b_id.0))
-    });
-
-    let limit = budget.max(1);
-    if normalized.len() > limit {
-        normalized.truncate(limit);
-        if !normalized.iter().any(|(node_id, _)| *node_id == seed) {
-            normalized.pop();
-            let seed_activation = normalized
-                .iter()
-                .find_map(|(node_id, activation)| (*node_id == seed).then_some(*activation))
-                .unwrap_or(1.0);
-            normalized.push((seed, seed_activation));
-        }
-    }
-
-    normalized.into_iter().collect()
-}
-
-fn build_hopfield_scoring_context<S: StorageAdapter>(
-    query_embedding: &Option<Vec<f64>>,
-    activations: &HashMap<NodeId, f64>,
-    storage: &S,
-) -> Option<HopfieldScoringContext> {
-    let query_embedding = query_embedding.as_ref()?;
-    if query_embedding.is_empty() || !finite_vector(query_embedding) {
-        return None;
-    }
-
-    let mut candidates: Vec<(NodeId, Vec<f64>)> = activations
-        .iter()
-        .filter(|(_, activation)| activation.is_finite() && **activation > 0.0)
-        .filter_map(|(node_id, _)| {
-            let embedding = storage.get_node(*node_id).ok()?.embedding.as_ref()?;
-            if embedding.len() == query_embedding.len() && finite_vector(embedding) {
-                Some((*node_id, embedding.clone()))
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    if candidates.is_empty() {
-        return None;
-    }
-
-    candidates.sort_by_key(|(node_id, _)| node_id.0);
-    let patterns: Vec<Vec<f64>> = candidates
-        .into_iter()
-        .map(|(_, embedding)| embedding)
-        .collect();
-
-    let retrieved = crate::mechanics::hopfield::retrieve(
-        query_embedding,
-        &patterns,
-        HOPFIELD_RETRIEVAL_ITERATIONS,
-    );
-    if retrieved.len() != query_embedding.len() || !finite_vector(&retrieved) {
-        return None;
-    }
-
-    let initial_energy = crate::mechanics::hopfield::energy(query_embedding, &patterns);
-    let retrieved_energy = crate::mechanics::hopfield::energy(&retrieved, &patterns);
-    let energy_gain = if initial_energy.is_finite() && retrieved_energy.is_finite() {
-        (initial_energy - retrieved_energy).max(0.0).tanh()
-    } else {
-        0.0
-    };
-
-    Some(HopfieldScoringContext {
-        retrieved,
-        energy_gain,
-    })
-}
-
-fn hopfield_adjusted_similarity(
-    context: Option<&HopfieldScoringContext>,
-    fallback_similarity: f64,
-    candidate_embedding: Option<&Vec<f64>>,
-) -> f64 {
-    let Some(context) = context else {
-        return fallback_similarity;
-    };
-    let Some(candidate_embedding) = candidate_embedding else {
-        return fallback_similarity;
-    };
-    if candidate_embedding.len() != context.retrieved.len() || !finite_vector(candidate_embedding) {
-        return fallback_similarity;
-    }
-
-    let completed_similarity =
-        crate::mechanics::attraction::cosine_similarity(&context.retrieved, candidate_embedding);
-    if !completed_similarity.is_finite() {
-        return fallback_similarity;
-    }
-
-    (0.90 * completed_similarity + 0.10 * fallback_similarity + 0.05 * context.energy_gain)
-        .clamp(0.0, 1.0)
 }
 
 /// An observation to be ingested into the graph.
@@ -3242,14 +3027,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         perspective: PerspectiveKey,
         config: &QueryConfig,
     ) -> Result<ContextPackage, Error> {
-        use std::cmp::Ordering;
-
-        use crate::mechanics::gravity::compute_mass;
-        use crate::query::activation::{
-            ActivationEdge, NodeInfo, edge_valid_at, spread_activation_with_model_and_convergence,
-        };
-        use crate::query::assembly::{ModeContext, ScoredNode, assemble_context_package_for_mode};
-        use crate::query::scoring::{final_score, scope_weight};
+        use crate::query::Fragment;
 
         let storage = self.graph.storage();
         let now = config.now.unwrap_or_else(Timestamp::now);
@@ -3341,120 +3119,42 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             return Ok(ContextPackage::empty());
         }
 
-        // Stage 4: Build initial activations from filtered candidates (salience-weighted)
-        let mut initial_activations: HashMap<NodeId, f64> = HashMap::new();
+        // Stage 4: Build the query potential field from filtered candidates.
+        // Retained action enters phi with unit coefficient (potential-landscape.md).
+        let mut field = crate::query::QueryField::new();
         for &nid in &scope_filtered {
             let salience = storage.get_salience(nid).unwrap_or(0.0);
-            let activation = (0.60 + 0.40 * salience).clamp(0.0, 1.0);
-            initial_activations.insert(nid, activation);
+            let retained_action = storage.get_retained_action(nid).unwrap_or(0.0);
+            field.set(
+                nid,
+                crate::query::FieldSignals {
+                    text_score: salience,
+                    retained_action,
+                    ..Default::default()
+                },
+            );
         }
 
-        // Stage 5: Spreading activation
-        let node_info_fn = |nid: NodeId| -> Option<NodeInfo> {
-            let node = storage.get_node(nid).ok()?;
-            let salience = storage.get_salience(nid).unwrap_or(0.0);
-            let mass = compute_mass(salience, node.access_count, &node.node_type);
+        // Stage 5: Additive directed RWR over conductance (read-only).
+        let seed_distribution = field.seed_distribution();
+        let response = crate::query::additive_rwr(&seed_distribution, storage, now);
 
-            let mut all_edges: Vec<ActivationEdge> = Vec::new();
-            for &eid in storage.edges_from(nid) {
-                if let Ok(edge) = storage.get_edge(eid) {
-                    if !edge_valid_at(edge, now) {
-                        continue;
-                    }
-                    all_edges.push(ActivationEdge {
-                        target_id: edge.target,
-                        edge: edge.clone(),
-                        is_forward: true,
-                    });
-                }
-            }
-            for &eid in storage.edges_to(nid) {
-                if let Ok(edge) = storage.get_edge(eid) {
-                    if !edge_valid_at(edge, now) {
-                        continue;
-                    }
-                    all_edges.push(ActivationEdge {
-                        target_id: edge.source,
-                        edge: edge.clone(),
-                        is_forward: false,
-                    });
-                }
-            }
-
-            Some(NodeInfo {
-                salience,
-                mass,
-                outgoing_edges: all_edges,
-            })
+        // Stage 6: Score with the readout score, applying the non-retroactive filter.
+        let scoped_config = QueryConfig {
+            scope: perspective.scope.clone(),
+            ..config.clone()
         };
-
-        let activations = spread_activation_with_model_and_convergence(
-            initial_activations,
-            node_info_fn,
-            config.budget,
-            config.min_activation,
-            config.decay_per_hop,
-            config.max_hops,
-            now,
-            self.config.spreading_model,
-            config.convergence.clone(),
-        )
-        .activations;
-
-        // Stage 6: Score results with non-retroactive filter
-        let mut scored_nodes: Vec<ScoredNode> = Vec::new();
-        for (&nid, &activation) in &activations {
-            if activation < config.min_activation {
-                continue;
-            }
-            let node = match storage.get_node(nid) {
-                Ok(n) => n,
-                Err(_) => continue,
+        let mut package = self.assemble_readout_package(&response, &scoped_config);
+        let retain_recent =
+            |frag: &Fragment| match self.graph.get_node(frag.node_id) {
+                Ok(node) => node.created_at >= observer_earliest,
+                Err(_) => false,
             };
-            // Non-retroactive: skip nodes created before observer's first contribution
-            if node.created_at < observer_earliest {
-                continue;
-            }
+        package.identity.retain(retain_recent);
+        package.knowledge.retain(retain_recent);
+        package.memories.retain(retain_recent);
 
-            let salience = storage.get_salience(nid).unwrap_or(0.0);
-            let mass = compute_mass(salience, node.access_count, &node.node_type);
-            let sw = scope_weight(&perspective.scope, &node.origin.scope, 0);
-            let relevance = final_score(activation, 0.0, salience, mass, sw);
-
-            scored_nodes.push(ScoredNode {
-                node_id: nid,
-                name: node.name.clone(),
-                summary: node.summary.clone(),
-                content: node.content.clone(),
-                node_type: node.node_type.clone(),
-                relevance,
-                origin: node.origin.clone(),
-            });
-        }
-
-        scored_nodes.sort_by(|a, b| {
-            b.relevance
-                .partial_cmp(&a.relevance)
-                .unwrap_or(Ordering::Equal)
-        });
-
-        // Stage 7: Assemble context package
-        let query_ref = Query::List {
-            min_salience: 0.0,
-            limit: scored_nodes.len(),
-        };
-
-        Ok(assemble_context_package_for_mode(
-            scored_nodes,
-            &query_ref,
-            &[],
-            &[],
-            &activations,
-            config.token_budget,
-            config.chars_per_token,
-            &perspective.scope,
-            &ModeContext::default(),
-        ))
+        Ok(package)
     }
 
     fn node_is_valid_at(&self, node_id: NodeId, as_of: Timestamp) -> bool {
@@ -3775,287 +3475,147 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         budget: usize,
         config: &QueryConfig,
     ) -> Result<ContextPackage, Error> {
-        use crate::mechanics::attraction::cosine_similarity;
-        use crate::mechanics::gravity::compute_mass;
-        use crate::mechanics::repulsion::{apply_damping, compute_repulsion, rigidity};
-        use crate::query::activation::{
-            ActivationEdge, NodeInfo, edge_valid_at, initial_activation,
-            spread_activation_with_model_and_convergence,
-        };
-        use crate::query::assembly::ScoredNode;
-        use crate::query::identity::compute_identity_prior;
-        use crate::query::scoring::{final_score, scope_weight};
-
-        // Verify seed exists
+        // Verify seed exists.
         let _ = self.graph.get_node(seed)?;
 
         let storage = self.graph.storage();
         let now = config.now.unwrap_or_else(Timestamp::now);
 
-        // --- Stage 1: Collect identity nodes for this agent (indexed lookup) ---
-        let identity_nodes: Vec<(Vec<f64>, KnowledgeType, f64)> =
-            if let Some(ref agent_id) = config.agent_id {
-                // Use peer index to get only this peer's nodes, then filter for identity types
-                let peer_id = crate::graph::types::PeerId(agent_id.parse::<u64>().unwrap_or(0));
-                storage
-                    .nodes_by_peer(peer_id)
-                    .into_iter()
-                    .filter_map(|nid| {
-                        let node = storage.get_node(nid).ok()?;
-                        let is_identity = matches!(
-                            node.node_type,
-                            KnowledgeType::IdentityCore
-                                | KnowledgeType::IdentityLearned
-                                | KnowledgeType::IdentityState
-                        );
-                        if is_identity {
-                            let emb = node.embedding.clone().unwrap_or_default();
-                            let salience = storage.get_salience(nid).unwrap_or(0.0);
-                            Some((emb, node.node_type.clone(), salience))
-                        } else {
-                            None
-                        }
-                    })
-                    .collect()
-            } else {
-                vec![]
-            };
+        // --- Stage 1: Build the query potential field from the seed + identity ---
+        //
+        // The explicit seed is the primary restart cue; the active agent's identity
+        // nodes contribute an identity bias. `A_i` (retained action) enters phi with
+        // unit coefficient by design (potential-landscape.md).
+        let mut field = crate::query::QueryField::new();
+        field.set(
+            seed,
+            crate::query::FieldSignals {
+                text_score: 1.0,
+                retained_action: storage.get_retained_action(seed).unwrap_or(0.0),
+                ..Default::default()
+            },
+        );
 
-        // --- Stage 2: Compute initial activations (eq 10) — sparse, seed-driven ---
-        let mut initial_activations: HashMap<NodeId, f64> = HashMap::new();
-
-        // Seed always gets full activation.
-        {
-            let (seed_vector_sim, seed_identity_prior) = {
-                let seed_node = storage.get_node(seed).ok();
-                let vs = match (
-                    &config.query_embedding,
-                    seed_node.and_then(|n| n.embedding.as_ref()),
-                ) {
-                    (Some(qe), Some(ne)) => cosine_similarity(qe, ne),
-                    _ => 0.0,
-                };
-                let ip = match seed_node.and_then(|n| n.embedding.as_ref()) {
-                    Some(emb) => compute_identity_prior(emb, &identity_nodes, cosine_similarity),
-                    None => 0.0,
-                };
-                (vs, ip)
-            };
-            let act = initial_activation(true, seed_vector_sim, seed_identity_prior);
-            initial_activations.insert(seed, act);
-        }
-
-        // Identity nodes get prior activation.
         if let Some(ref agent_id) = config.agent_id {
             let peer_id = crate::graph::types::PeerId(agent_id.parse::<u64>().unwrap_or(0));
             for nid in storage.nodes_by_peer(peer_id) {
-                if nid == seed {
+                let Ok(node) = storage.get_node(nid) else {
                     continue;
-                }
-
-                let (is_identity, vector_sim, identity_prior) = {
-                    let node = match storage.get_node(nid) {
-                        Ok(n) => n,
-                        Err(_) => continue,
-                    };
-                    let is_id = matches!(
-                        node.node_type,
-                        KnowledgeType::IdentityCore
-                            | KnowledgeType::IdentityLearned
-                            | KnowledgeType::IdentityState
-                    );
-                    let vs = match (&config.query_embedding, &node.embedding) {
-                        (Some(qe), Some(ne)) => cosine_similarity(qe, ne),
-                        _ => 0.0,
-                    };
-                    let ip = match &node.embedding {
-                        Some(emb) => {
-                            compute_identity_prior(emb, &identity_nodes, cosine_similarity)
-                        }
-                        None => 0.0,
-                    };
-                    (is_id, vs, ip)
                 };
+                let is_identity = matches!(
+                    node.node_type,
+                    KnowledgeType::IdentityCore
+                        | KnowledgeType::IdentityLearned
+                        | KnowledgeType::IdentityState
+                );
                 if !is_identity {
                     continue;
                 }
-
-                let act = initial_activation(false, vector_sim, identity_prior);
-                if act > config.min_activation {
-                    initial_activations.insert(nid, act);
-                }
+                let salience = storage.get_salience(nid).unwrap_or(0.0);
+                let retained_action = storage.get_retained_action(nid).unwrap_or(0.0);
+                let entry = field.entry(nid);
+                entry.identity_bias += salience;
+                entry.retained_action = retained_action;
             }
         }
 
-        // --- Stage 3: Spreading activation (eq 11) ---
-        let node_info_fn = |nid: NodeId| -> Option<NodeInfo> {
-            let node = storage.get_node(nid).ok()?;
-            let salience = storage.get_salience(nid).unwrap_or(0.0);
-            let mass = compute_mass(salience, node.access_count, &node.node_type);
+        // --- Stage 2: Additive directed RWR over conductance (read-only) ---
+        let seed_distribution = field.seed_distribution();
+        let response = crate::query::additive_rwr(&seed_distribution, storage, now);
 
-            let mut all_edges: Vec<ActivationEdge> = Vec::new();
+        let _ = budget;
+        let package = self.assemble_readout_package(&response, config);
+        Ok(package)
+    }
 
-            for &eid in storage.edges_from(nid) {
-                if let Ok(edge) = storage.get_edge(eid) {
-                    if !edge_valid_at(edge, now) {
-                        continue;
-                    }
-                    all_edges.push(ActivationEdge {
-                        target_id: edge.target,
-                        edge: edge.clone(),
-                        is_forward: true,
-                    });
-                }
-            }
-            for &eid in storage.edges_to(nid) {
-                if let Ok(edge) = storage.get_edge(eid) {
-                    if !edge_valid_at(edge, now) {
-                        continue;
-                    }
-                    all_edges.push(ActivationEdge {
-                        target_id: edge.source,
-                        edge: edge.clone(),
-                        is_forward: false,
-                    });
-                }
-            }
+    /// Score the settled activation response with the authoritative seven-term
+    /// readout score and assemble a `ContextPackage`. Read-only.
+    fn assemble_readout_package(
+        &self,
+        response: &crate::query::ActivationResponse,
+        config: &QueryConfig,
+    ) -> ContextPackage {
+        use crate::mechanics::attraction::cosine_similarity;
+        use crate::query::assembly::ScoredNode;
+        use crate::query::scoring::{ReadoutInputs, TieBreakKey, rank, readout_score, scope_weight};
 
-            Some(NodeInfo {
-                salience,
-                mass,
-                outgoing_edges: all_edges,
-            })
-        };
+        let storage = self.graph.storage();
+        let now = config.now.unwrap_or_else(Timestamp::now);
+        let activations = &response.activation;
 
-        let activations = match self.config.spreading_model {
-            SpreadingModel::PriorityQueueBfs | SpreadingModel::NormalizedPriorityQueueBfs => {
-                spread_activation_with_model_and_convergence(
-                    initial_activations,
-                    node_info_fn,
-                    budget,
-                    config.min_activation,
-                    config.decay_per_hop,
-                    config.max_hops,
-                    now,
-                    self.config.spreading_model,
-                    config.convergence.clone(),
-                )
-                .activations
-            }
-            SpreadingModel::RandomWalkRestart => {
-                rwr_activations(seed, budget, config.min_activation, storage, now)
-            }
-        };
-
-        // --- Stage 4: Repulsion damping (eqs 7-8) ---
-        let mut damped_activations = activations.clone();
-
-        for &nid in activations.keys() {
-            let contradicts_inputs: Vec<(f64, f64, f64)> = storage
-                .edges_to(nid)
-                .iter()
-                .filter_map(|&eid| {
-                    let edge = storage.get_edge(eid).ok()?;
-                    if !matches!(edge.edge_type, EdgeType::Contradicts) {
-                        return None;
-                    }
-                    if !edge_valid_at(edge, now) {
-                        return None;
-                    }
-                    let source_act = activations.get(&edge.source).copied().unwrap_or(0.0);
-                    if source_act == 0.0 {
-                        return None;
-                    }
-                    let source_node = storage.get_node(edge.source).ok()?;
-                    let rho = rigidity(&source_node.node_type);
-                    Some((edge.weight, rho, source_act))
-                })
-                .collect();
-
-            if !contradicts_inputs.is_empty() {
-                let h = compute_repulsion(&contradicts_inputs);
-                if h > 0.0 {
-                    let current = activations.get(&nid).copied().unwrap_or(0.0);
-                    let damped = apply_damping(current, h);
-                    damped_activations.insert(nid, damped);
-                }
-            }
-        }
-
-        // --- Stage 5: Final scoring (eq 13) ---
-        let seed_node = storage.get_node(seed).ok();
-        let hopfield_context = match self.config.energy_model {
-            EnergyModel::WeightedSum => None,
-            EnergyModel::Hopfield => build_hopfield_scoring_context(
-                &config.query_embedding,
-                &damped_activations,
-                storage,
-            ),
-        };
-        let mut scored_nodes: Vec<ScoredNode> = Vec::new();
-
-        for (&nid, &activation) in &damped_activations {
+        let mut scored: Vec<(f64, TieBreakKey, ScoredNode)> = Vec::new();
+        for (&nid, &activation) in activations {
             if activation < config.min_activation {
                 continue;
             }
-
             let node = match storage.get_node(nid) {
                 Ok(n) => n,
                 Err(_) => continue,
             };
 
             let salience = storage.get_salience(nid).unwrap_or(0.0);
-            let mass = compute_mass(salience, node.access_count, &node.node_type);
-
-            let vector_sim = match (&config.query_embedding, &node.embedding) {
+            let retained_action = storage.get_retained_action(nid).unwrap_or(0.0);
+            let impedance = response.impedance.get(&nid).copied().unwrap_or_default();
+            let phi = match (&config.query_embedding, &node.embedding) {
                 (Some(qe), Some(ne)) => cosine_similarity(qe, ne),
                 _ => 0.0,
             };
+            let sw = scope_weight(&config.scope, &node.origin.scope, 0);
+            let trust_weight = self
+                .get_peer(node.origin.peer_id)
+                .map(|p| p.trust_level.scope_weight_bonus())
+                .unwrap_or(0.0);
 
-            let shared_entities = seed_node
-                .map(|sn| {
-                    node.entity_tags
-                        .iter()
-                        .filter(|t| sn.entity_tags.contains(t))
-                        .count()
-                })
-                .unwrap_or(0);
-
-            let sw = scope_weight(&config.scope, &node.origin.scope, shared_entities);
-            let scoring_similarity = match self.config.energy_model {
-                EnergyModel::WeightedSum => vector_sim,
-                EnergyModel::Hopfield => hopfield_adjusted_similarity(
-                    hopfield_context.as_ref(),
-                    vector_sim,
-                    node.embedding.as_ref(),
-                ),
-            };
-            let relevance = final_score(activation, scoring_similarity, salience, mass, sw);
-
-            scored_nodes.push(ScoredNode {
-                node_id: nid,
-                name: node.name.clone(),
-                summary: node.summary.clone(),
-                content: node.content.clone(),
-                node_type: node.node_type.clone(),
-                relevance,
-                origin: node.origin.clone(),
+            let score = readout_score(&ReadoutInputs {
+                activation,
+                phi,
+                salience,
+                impedance,
+                scope_weight: sw,
+                trust_weight,
+                stress: 0.0,
             });
+
+            scored.push((
+                score,
+                TieBreakKey {
+                    node_id: nid,
+                    retained_action,
+                    impedance,
+                    accessed_at: node.accessed_at,
+                },
+                ScoredNode {
+                    node_id: nid,
+                    name: node.name.clone(),
+                    summary: node.summary.clone(),
+                    content: node.content.clone(),
+                    node_type: node.node_type.clone(),
+                    relevance: score,
+                    origin: node.origin.clone(),
+                },
+            ));
         }
 
-        // --- Stage 6: Collect Contradicts edges and identity activations ---
+        scored.sort_by(|(sa, ka, _), (sb, kb, _)| rank(*sa, ka, *sb, kb));
+        let scored_nodes: Vec<ScoredNode> = scored.into_iter().map(|(_, _, n)| n).collect();
+
+        // Surface Contradicts edges between activated sites as tensions.
         let mut contradicts_edges: Vec<(NodeId, NodeId, f64)> = Vec::new();
-        for &nid in damped_activations.keys() {
+        for &nid in activations.keys() {
             for &eid in storage.edges_from(nid) {
                 if let Ok(edge) = storage.get_edge(eid) {
-                    if matches!(edge.edge_type, EdgeType::Contradicts) && edge_valid_at(edge, now) {
+                    if matches!(edge.edge_type, EdgeType::Contradicts)
+                        && crate::query::edge_valid_at(edge, now)
+                    {
                         contradicts_edges.push((edge.source, edge.target, edge.weight));
                     }
                 }
             }
         }
+        contradicts_edges.sort_by_key(|(a, b, _)| (a.0, b.0));
+        contradicts_edges.dedup_by_key(|(a, b, _)| (a.0, b.0));
 
-        let identity_activations: Vec<(NodeId, KnowledgeType, f64)> = damped_activations
+        let identity_activations: Vec<(NodeId, KnowledgeType, f64)> = activations
             .iter()
             .filter_map(|(&nid, &act)| {
                 let node = storage.get_node(nid).ok()?;
@@ -4069,28 +3629,24 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                     Some(aid) => node.origin.peer_id.0.to_string() == *aid,
                     None => false,
                 };
-                if is_identity && is_agent {
-                    Some((nid, node.node_type.clone(), act))
-                } else {
-                    None
-                }
+                (is_identity && is_agent).then(|| (nid, node.node_type.clone(), act))
             })
             .collect();
 
-        let query_ref = Query::Associative { seed, budget };
-        let package = crate::query::assembly::assemble_context_package_for_mode(
+        crate::query::assembly::assemble_context_package_for_mode(
             scored_nodes,
-            &query_ref,
+            &Query::List {
+                min_salience: 0.0,
+                limit: usize::MAX,
+            },
             &identity_activations,
             &contradicts_edges,
-            &damped_activations,
+            activations,
             config.token_budget,
             config.chars_per_token,
             &config.scope,
             &crate::query::assembly::ModeContext::default(),
-        );
-
-        Ok(package)
+        )
     }
 
     /// Find merge candidates above similarity threshold.

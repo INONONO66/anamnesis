@@ -3,10 +3,8 @@ use std::collections::HashMap;
 use anamnesis::api::{Engine, EngineConfig, IngestResult, Observation};
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{EdgeId, EdgeType, KnowledgeType, ScopePath, Timestamp};
-use anamnesis::query::{
-    ContextPackage, Query, QueryConfig, random_walk_restart_from_distribution_at,
-};
-use anamnesis::{NodeId, SpreadingModel};
+use anamnesis::query::{ContextPackage, Query, QueryConfig, additive_rwr};
+use anamnesis::NodeId;
 
 fn engine() -> Engine {
     Engine::with_config(
@@ -115,14 +113,12 @@ fn rwr_excludes_invalid_transitions() {
     let expired_edge = engine.link(seed, expired, EdgeType::Semantic, 1.0).unwrap();
     set_edge_validity(&mut engine, expired_edge, None, Some(Timestamp(5)));
 
-    let scores = random_walk_restart_from_distribution_at(
+    let response = additive_rwr(
         &HashMap::from([(seed, 1.0)]),
-        None,
-        0.0,
-        1,
         engine.graph().storage(),
         Timestamp(10),
     );
+    let scores = &response.activation;
 
     assert!(scores.get(&valid).copied().unwrap_or(0.0) > 0.0);
     assert_eq!(scores.get(&expired).copied().unwrap_or(0.0), 0.0);
@@ -148,10 +144,9 @@ fn expired_contradicts_does_not_create_tension() {
 
 #[test]
 fn edges_without_validity_bounds_are_always_valid() {
-    let mut config = EngineConfig::new()
+    let config = EngineConfig::new()
         .with_novelty_threshold(0.0)
         .with_dedup_enabled(false);
-    config.spreading_model = SpreadingModel::PriorityQueueBfs;
     let mut engine = Engine::with_config(config);
     let seed = ingest(&mut engine, "seed");
     let target = ingest(&mut engine, "unbounded target");

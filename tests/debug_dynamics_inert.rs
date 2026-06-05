@@ -1,14 +1,10 @@
-use std::collections::HashMap;
-
-use anamnesis::graph::{Edge, EdgeId, Timestamp};
 use anamnesis::mechanics::interactions::decay_default;
-use anamnesis::mechanics::priors::decay_multiplier_for_type;
+use anamnesis::mechanics::priors::{decay_multiplier_for_type, edge_type_factor};
 use anamnesis::mechanics::gravity::{compute_mass, mass_prior};
 use anamnesis::mechanics::repulsion::rigidity;
 use anamnesis::query::assembly::{is_identity_type, is_memory_type};
 use anamnesis::query::identity::pi_tier;
-use anamnesis::query::{ActivationEdge, NodeInfo, spread_activation};
-use anamnesis::{EdgeType, KnowledgeType, NodeId};
+use anamnesis::{EdgeType, KnowledgeType};
 
 fn debug_node_types() -> [KnowledgeType; 3] {
     [
@@ -62,49 +58,14 @@ fn debug_edge_kappa_values_match_plan() {
 
 #[test]
 fn refutes_is_supportive_and_propagates_activation() {
-    let source = NodeId(1);
-    let target = NodeId(2);
-    let mut initial = HashMap::new();
-    initial.insert(source, 1.0);
-
-    let info_fn = move |node_id: NodeId| -> Option<NodeInfo> {
-        if node_id == source {
-            Some(NodeInfo {
-                salience: 1.0,
-                mass: 0.0,
-                outgoing_edges: vec![ActivationEdge {
-                    target_id: target,
-                    edge: Edge {
-                        id: EdgeId(1),
-                        source,
-                        target,
-                        edge_type: EdgeType::Refutes,
-                        weight: 1.0,
-                        conductance: 0.0,
-                        edge_source: anamnesis::graph::edge::EdgeSource::Auto,
-                        created_at: Timestamp(0),
-                        accessed_at: Timestamp(0),
-                        valid_from: None,
-                        valid_until: None,
-                        metadata: HashMap::new(),
-                    },
-                    is_forward: true,
-                }],
-            })
-        } else if node_id == target {
-            Some(NodeInfo {
-                salience: 1.0,
-                mass: 0.0,
-                outgoing_edges: vec![],
-            })
-        } else {
-            None
-        }
-    };
-
-    let activations = spread_activation(initial, info_fn, 10, 0.01, 1.0, 1);
-
-    assert_eq!(activations.get(&target).copied(), Some(0.30));
+    // Refutes is a weak supportive relation in the additive-RWR conductance matrix:
+    // its within-row edge-type factor is positive (it propagates), unlike Contradicts
+    // which is excluded (factor 0).
+    assert!(edge_type_factor(&EdgeType::Refutes, true) > 0.0);
+    assert!(edge_type_factor(&EdgeType::Refutes, false) > 0.0);
+    assert_eq!(edge_type_factor(&EdgeType::Contradicts, true), 0.0);
+    // Refutes is the weakest supportive type, below Semantic.
+    assert!(edge_type_factor(&EdgeType::Refutes, true) < edge_type_factor(&EdgeType::Semantic, true));
 }
 
 #[test]

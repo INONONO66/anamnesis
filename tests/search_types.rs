@@ -34,7 +34,9 @@ fn search_trace_default() {
     let trace = SearchTrace::default();
     assert!(trace.strategies_used.is_empty());
     assert_eq!(trace.seed_count, 0);
-    assert_eq!(trace.spread_iterations, 0);
+    assert_eq!(trace.iterations, 0);
+    assert_eq!(trace.excluded_edge_count, 0);
+    assert!(!trace.truncated);
     assert!(trace.packaging_mode.is_none());
 }
 

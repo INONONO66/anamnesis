@@ -1,7 +1,16 @@
+//! Additive directed RWR convergence and conservation invariants (Phase 3).
+//!
+//! The retrieval flow is `a_next = alpha*seed + (1-alpha)*transpose(P)*a` over
+//! row-stochastic conductance transitions (ADR-0005). Seed mass is L1-normalized
+//! and `P` is row-stochastic, so total response mass is conserved and the operator
+//! converges geometrically to a unique fixed point.
+
+use std::collections::HashMap;
+
 use anamnesis::api::Observation;
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{EdgeType, KnowledgeType, Timestamp};
-use anamnesis::query::random_walk_restart;
+use anamnesis::query::additive_rwr;
 use anamnesis::{Engine, EngineConfig, IngestResult, NodeId};
 
 fn make_observation(name: &str) -> Observation {
@@ -42,34 +51,30 @@ fn ingest_node(engine: &mut Engine, name: &str) -> NodeId {
 }
 
 #[test]
-fn rwr_converges_on_small_graph() {
+fn rwr_conserves_mass_and_converges() {
     let mut engine = make_engine();
     let seed = ingest_node(&mut engine, "seed");
-    let light = ingest_node(&mut engine, "light");
-    let heavy = ingest_node(&mut engine, "heavy");
+    let mid = ingest_node(&mut engine, "mid");
+    let leaf = ingest_node(&mut engine, "leaf");
 
-    engine.link(seed, light, EdgeType::Semantic, 0.25).unwrap();
-    engine.link(seed, heavy, EdgeType::Semantic, 1.0).unwrap();
-    engine.link(light, heavy, EdgeType::Semantic, 1.0).unwrap();
+    engine.link(seed, mid, EdgeType::Semantic, 1.0).unwrap();
+    engine.link(mid, leaf, EdgeType::Semantic, 1.0).unwrap();
 
-    let scores = random_walk_restart(seed, 0.15, 128, engine.graph().storage());
-    let scores_more = random_walk_restart(seed, 0.15, 256, engine.graph().storage());
-
-    let total: f64 = scores.values().sum();
-    assert!((total - 1.0).abs() < 1e-10, "probability leaked: {total}");
-    assert!(scores.values().all(|score| score.is_finite()));
-    assert!(
-        scores.get(&heavy).copied().unwrap_or(0.0) > scores.get(&light).copied().unwrap_or(0.0)
+    let response = additive_rwr(
+        &HashMap::from([(seed, 1.0)]),
+        engine.graph().storage(),
+        Timestamp(0),
     );
 
-    for node_id in [seed, light, heavy] {
-        let a = scores.get(&node_id).copied().unwrap_or(0.0);
-        let b = scores_more.get(&node_id).copied().unwrap_or(0.0);
-        assert!(
-            (a - b).abs() < 1e-10,
-            "node {node_id:?} did not converge: {a} vs {b}"
-        );
-    }
+    let total: f64 = response.activation.values().sum();
+    assert!(
+        (total - 1.0).abs() < 1e-8,
+        "probability leaked: {total} (iters={})",
+        response.iterations
+    );
+    assert!(response.activation.values().all(|score| score.is_finite()));
+    assert!(!response.truncated, "RWR must converge within the bound");
+    assert!(response.residual < 1e-9, "residual {} too large", response.residual);
 }
 
 #[test]
@@ -82,11 +87,30 @@ fn rwr_seed_has_highest_activation() {
     engine.link(seed, left, EdgeType::Semantic, 1.0).unwrap();
     engine.link(seed, right, EdgeType::Semantic, 1.0).unwrap();
 
-    let scores = random_walk_restart(seed, 0.15, 128, engine.graph().storage());
-    let seed_score = scores.get(&seed).copied().unwrap_or(0.0);
+    let response = additive_rwr(
+        &HashMap::from([(seed, 1.0)]),
+        engine.graph().storage(),
+        Timestamp(0),
+    );
+    let seed_score = response.activation.get(&seed).copied().unwrap_or(0.0);
 
-    assert!(seed_score > scores.get(&left).copied().unwrap_or(0.0));
-    assert!(seed_score > scores.get(&right).copied().unwrap_or(0.0));
-    assert!(scores.get(&left).copied().unwrap_or(0.0) > 0.0);
-    assert!(scores.get(&right).copied().unwrap_or(0.0) > 0.0);
+    assert!(seed_score > response.activation.get(&left).copied().unwrap_or(0.0));
+    assert!(seed_score > response.activation.get(&right).copied().unwrap_or(0.0));
+    assert!(response.activation.get(&left).copied().unwrap_or(0.0) > 0.0);
+    assert!(response.activation.get(&right).copied().unwrap_or(0.0) > 0.0);
+}
+
+#[test]
+fn rwr_is_idempotent() {
+    let mut engine = make_engine();
+    let seed = ingest_node(&mut engine, "seed");
+    let a = ingest_node(&mut engine, "a");
+    let b = ingest_node(&mut engine, "b");
+    engine.link(seed, a, EdgeType::Reason, 1.0).unwrap();
+    engine.link(a, b, EdgeType::Temporal, 1.0).unwrap();
+
+    let storage = engine.graph().storage();
+    let first = additive_rwr(&HashMap::from([(seed, 1.0)]), storage, Timestamp(0));
+    let second = additive_rwr(&HashMap::from([(seed, 1.0)]), storage, Timestamp(0));
+    assert_eq!(first.activation, second.activation);
 }

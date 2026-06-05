@@ -2,7 +2,6 @@
 
 use std::collections::BTreeMap;
 
-use crate::api::SpreadingModel;
 use crate::graph::NodeId;
 
 /// Source of a search candidate — indicates which retrieval strategy produced it.
@@ -56,23 +55,23 @@ pub struct CandidateTrace {
     pub dropped: Vec<(NodeId, &'static str)>,
 }
 
-/// Trace of graph spreading activation during a search operation.
+/// Trace of the additive RWR activation flow during a search operation.
 ///
-/// Records invocation count, activated node count, and the spreading model used.
+/// Records the settled-response diagnostics from [`crate::query::rwr`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct GraphRecallTrace {
-    /// Number of spreading activation invocations.
+    /// Number of activation-flow invocations.
     pub invocation_count: u32,
-    /// Total number of nodes activated during spreading.
+    /// Total number of sites with non-zero settled activation.
     pub activated_count: usize,
-    /// Spreading activation model used.
-    pub model_used: SpreadingModel,
-    /// Number of invalid temporal edges skipped during graph recall.
-    pub edge_count_skipped_invalid: usize,
-    /// Number of convergence check rounds performed.
-    pub convergence_rounds: usize,
-    /// Whether spreading activation converged early.
-    pub converged: bool,
+    /// RWR iterations performed before convergence (or the iteration bound).
+    pub iterations: usize,
+    /// Final residual `||a_next - a||_1` of the activation flow.
+    pub residual: f64,
+    /// Whether the iteration bound stopped convergence.
+    pub truncated: bool,
+    /// Number of edges split off to frustration (excluded `Contradicts`).
+    pub excluded_edge_count: usize,
 }
 
 /// Verbosity level for search trace output.

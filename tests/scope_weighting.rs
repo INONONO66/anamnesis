@@ -1,4 +1,4 @@
-//! Locked T16 `scope_weight` value table and final-score clamping contract.
+//! Locked T16 `scope_weight` value table.
 //!
 //! - Exact: 1.0
 //! - Universal: 0.95
@@ -8,7 +8,7 @@
 //! - Unrelated: 0.05 base, shared-entity bonus capped at +0.20 (max 0.25)
 
 use anamnesis::graph::ScopePath;
-use anamnesis::query::{final_score, scope_weight};
+use anamnesis::query::scope_weight;
 
 const EPS: f64 = 1e-10;
 
@@ -124,26 +124,4 @@ fn weight_clamped_to_one() {
             ec
         );
     }
-
-    let exact_max = final_score(1.0, 1.0, 1.0, 1.0, 1.0);
-    assert!(
-        (exact_max - 1.0).abs() < EPS,
-        "final_score with max inputs and scope_w=1.0 must equal 1.0, got {exact_max}"
-    );
-
-    let saturated = final_score(2.0, 2.0, 2.0, 2.0, 1.0);
-    assert!(
-        saturated <= 1.0 + EPS,
-        "final_score must clamp to <= 1.0, got {saturated}"
-    );
-    assert!(
-        (saturated - 1.0).abs() < EPS,
-        "final_score must reach the 1.0 ceiling under over-saturated inputs, got {saturated}"
-    );
-
-    let zero_floor = final_score(-5.0, -5.0, -5.0, -5.0, 1.0);
-    assert!(
-        zero_floor >= 0.0 - EPS,
-        "final_score must clamp to >= 0.0, got {zero_floor}"
-    );
 }

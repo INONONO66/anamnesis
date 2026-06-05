@@ -17,10 +17,17 @@
 //! backfill inverses are `logit(clamp(x, EPS, 1-EPS))` using [`LOGIT_BACKFILL_EPS`].
 //! The doc Hebbian `(1 - C_ij)` bound is realized in **Phase 3** as `(1 - project_weight(C))`.
 //!
+//! ## Phase 3 (flow + readout)
+//!
+//! Additive directed RWR: [`restart_alpha`] (reach-derived `alpha = 1/(L+1)`),
+//! [`edge_type_factor`] (within-row relative conductance per edge type, `Contradicts`
+//! excluded), [`RWR_TOLERANCE`]/[`RWR_MAX_ITERATIONS`]. Potential field:
+//! [`SEED_SOFTMAX_TAU`] plus the `beta_*` feature weights. Readout: the seven
+//! `READOUT_W_*` coefficients of the authoritative additive log-odds score.
+//!
 //! ## Reserved for later phases
 //!
-//! - Surprise gain `k` and `theta_sep` arrive with their phases (3–4).
-//!   Per-edge-type `kappa` is deferred.
+//! - Surprise gain `k` and `theta_sep` arrive with Phase 4.
 
 /// ACT-R base-level power-law decay exponent `d`.
 ///
@@ -105,9 +112,139 @@ pub fn decay_multiplier_for_type(kt: &crate::graph::KnowledgeType) -> f64 {
 
 /// Random-walk-with-restart restart probability `alpha`, default.
 ///
-/// CALIBRATED PRIOR — replaced in Phase 3 by a reach-derived
-/// `alpha = 1 - f^(1/h_half)` ([ADR-0005](../../docs/adr/0005-additive-activation-flow.md)).
+/// CALIBRATED PRIOR — superseded by the reach-derived [`restart_alpha`] below
+/// ([ADR-0005](../../docs/adr/0005-additive-activation-flow.md)). Retained only as
+/// the fallback when no mean-reach prior is supplied.
 pub const RWR_RESTART_PROBABILITY: f64 = 0.15;
+
+// --- Additive directed RWR flow (Phase 3, ADR-0005 / activation-flow.md) ----
+
+/// Mean associative reach `L` — the behavioral specification from which the RWR
+/// restart rate derives ([activation-flow.md](../../docs/05-context-retrieval/activation-flow.md)).
+///
+/// CALIBRATED PRIOR — `L` is the mean number of hops a cue's influence travels
+/// before restart. `alpha = 1 / (L + 1)`; the canonical `0.15` prior corresponds to
+/// `L ≈ 5.67` (roughly six-hop mean reach). Refit per graph statistics.
+pub const MEAN_ASSOCIATIVE_REACH_L: f64 = 5.667;
+
+/// Reach-derived RWR restart rate `alpha = 1 / (L + 1)` ([ADR-0005](../../docs/adr/0005-additive-activation-flow.md)).
+///
+/// DERIVED — forced by mean associative reach `L`: the per-hop attenuation is
+/// `(1 - alpha)` and the operator's contraction modulus is `(1 - alpha) < 1`, so the
+/// additive RWR converges geometrically to a unique fixed point. Returns the canonical
+/// fallback [`RWR_RESTART_PROBABILITY`] for non-positive `L`.
+#[inline]
+pub fn restart_alpha(l: f64) -> f64 {
+    if l <= 0.0 || !l.is_finite() {
+        return RWR_RESTART_PROBABILITY;
+    }
+    1.0 / (l + 1.0)
+}
+
+/// Convergence tolerance for the additive RWR iteration (`||a_next - a||_1`).
+///
+/// CALIBRATED PRIOR — iteration stops when the L1 change between successive
+/// responses drops below this; the geometric `(1 - alpha)` contraction guarantees
+/// it is reached well within [`RWR_MAX_ITERATIONS`].
+pub const RWR_TOLERANCE: f64 = 1e-10;
+
+/// Hard iteration bound for the additive RWR flow.
+///
+/// DERIVED — a safety cap. With contraction `(1 - alpha)` and tolerance
+/// [`RWR_TOLERANCE`], convergence is reached long before this bound; reaching it
+/// is reported as `truncated = true` (activation-flow.md failure conditions).
+pub const RWR_MAX_ITERATIONS: usize = 256;
+
+/// Within-row relative conductance multiplier per edge type
+/// (`edge_type_factor_ij`, [activation-flow.md](../../docs/05-context-retrieval/activation-flow.md)).
+///
+/// CALIBRATED PRIOR — a declared ordinal prior at cold start with the ordering
+/// `Reason` > `ReinforcedBy` > `Semantic` > `Temporal` > `RejectedAlternative`.
+/// Factors are *relative within a row* (`P` is re-normalized row-stochastic), so
+/// only the ordering is load-bearing. `Contradicts` returns `0.0` — it is excluded
+/// from propagation and routed to frustration; `Refutes` is a weak debug relation.
+/// Once per-type co-activation data exists these are refit from per-type mean `C_ij`.
+pub fn edge_type_factor(edge_type: &crate::graph::EdgeType, is_forward: bool) -> f64 {
+    use crate::graph::EdgeType;
+    match edge_type {
+        // Supersedes is directional: strong toward the new fact, weak toward the old.
+        EdgeType::Supersedes => {
+            if is_forward {
+                1.20
+            } else {
+                0.40
+            }
+        }
+        EdgeType::Reason => 1.15,
+        EdgeType::ReinforcedBy => 1.10,
+        EdgeType::Supports => 1.10,
+        EdgeType::Semantic => 1.00,
+        EdgeType::Causal => 1.00,
+        EdgeType::ConsolidatedFrom => 1.00,
+        EdgeType::ExtractedFrom => 1.00,
+        EdgeType::Entity => 0.95,
+        EdgeType::BelongsTo => 0.95,
+        EdgeType::Temporal => 0.85,
+        EdgeType::RejectedAlternative => 0.60,
+        EdgeType::Refutes => 0.30,
+        // Excluded from propagation — handled by frustration (ADR-0005).
+        EdgeType::Contradicts => 0.0,
+        EdgeType::Custom(_) => 1.00,
+    }
+}
+
+// --- Potential field / seed distribution (potential-landscape.md) -----------
+
+/// Softmax temperature `tau` for the RWR restart seed distribution
+/// (`seed_i = softmax(phi_i / tau)`, [potential-landscape.md](../../docs/04-cognitive-dynamics/potential-landscape.md)).
+///
+/// CALIBRATED PRIOR — controls how sharply the restart mass concentrates on the
+/// highest-potential cues. Lower `tau` = sharper. Fit from accepted readout data.
+pub const SEED_SOFTMAX_TAU: f64 = 1.0;
+
+/// Feature weight `beta_text` for the lexical-match term of the potential bias.
+/// CALIBRATED PRIOR — one entry of the single potential-field regression object.
+pub const BETA_TEXT: f64 = 1.0;
+/// Feature weight `beta_embed` for the embedding-similarity term.
+/// CALIBRATED PRIOR — potential-field regression object.
+pub const BETA_EMBED: f64 = 1.0;
+/// Feature weight `beta_entity` for the entity-overlap term.
+/// CALIBRATED PRIOR — potential-field regression object.
+pub const BETA_ENTITY: f64 = 1.0;
+/// Feature weight `beta_scope` for the scope-compatibility term.
+/// CALIBRATED PRIOR — potential-field regression object.
+pub const BETA_SCOPE: f64 = 1.0;
+/// Feature weight `beta_identity` for the identity-bias term.
+/// CALIBRATED PRIOR — potential-field regression object.
+pub const BETA_IDENTITY: f64 = 1.0;
+/// Feature weight `beta_prior` for the retained-action term.
+///
+/// DERIVED — fixed at `1.0` by design ([potential-landscape.md](../../docs/04-cognitive-dynamics/potential-landscape.md)):
+/// `A_i` is already log prior-odds, so by ACT-R/Bayes odds-additivity it enters
+/// `phi_i` with unit coefficient. Not a free knob.
+pub const BETA_PRIOR: f64 = 1.0;
+
+// --- Readout score (readout-scoring.md, the authoritative 7-term form) ------
+//
+// The seven coefficients are ONE calibrated re-ranking regression object, not
+// seven independent knobs. The default is unit coefficients, which recovers the
+// plain additive log-odds sum `posterior = prior + sum of evidence`. They are
+// calibrated priors, not laws (ADR-0010); refit from accepted-readout data.
+
+/// `w_a` — weight on the (logit-of) query-local activation response `a_i`.
+pub const READOUT_W_A: f64 = 1.0;
+/// `w_phi` — weight on the potential bias `phi_i`.
+pub const READOUT_W_PHI: f64 = 1.0;
+/// `w_s` — weight on the salience projection `logit(s_i)`.
+pub const READOUT_W_S: f64 = 1.0;
+/// `w_z` — penalty weight on the effective impedance `Z_i` (subtracted).
+pub const READOUT_W_Z: f64 = 1.0;
+/// `w_scope` — weight on the scope-compatibility term.
+pub const READOUT_W_SCOPE: f64 = 1.0;
+/// `w_trust` — weight on the origin/peer-reliability term.
+pub const READOUT_W_TRUST: f64 = 1.0;
+/// `w_stress` — penalty weight on attached frustration `stress_i` (subtracted).
+pub const READOUT_W_STRESS: f64 = 1.0;
 
 /// Epsilon for the clamped-logit projection backfill, so that
 /// `logit(clamp(x, EPS, 1 - EPS))` stays finite at the `0`/`1` boundaries.

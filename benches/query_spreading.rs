@@ -5,8 +5,7 @@ use rand::rngs::StdRng;
 use anamnesis::api::Observation;
 use anamnesis::graph::node::Origin;
 use anamnesis::{
-    EdgeType, Engine, EngineConfig, IngestResult, KnowledgeType, Query, QueryConfig,
-    SpreadingModel, Timestamp,
+    EdgeType, Engine, EngineConfig, IngestResult, KnowledgeType, Query, QueryConfig, Timestamp,
 };
 
 fn make_bench_engine() -> Engine {
@@ -139,41 +138,26 @@ fn bench_spreading_10k(c: &mut Criterion) {
     });
 }
 
-fn bench_pqbfs_vs_rwr(c: &mut Criterion) {
-    let mut group = c.benchmark_group("spreading_model_comparison");
+fn bench_additive_rwr(c: &mut Criterion) {
+    let mut group = c.benchmark_group("additive_rwr");
 
-    for model in [
-        SpreadingModel::PriorityQueueBfs,
-        SpreadingModel::RandomWalkRestart,
-    ] {
-        let model_name = match model {
-            SpreadingModel::PriorityQueueBfs => "pqbfs",
-            SpreadingModel::NormalizedPriorityQueueBfs => "normalized-pqbfs",
-            SpreadingModel::RandomWalkRestart => "rwr",
-        };
-
-        group.bench_with_input(
-            BenchmarkId::new("1k_nodes", model_name),
-            &model,
-            |b, _model| {
-                b.iter_batched(
-                    || {
-                        let (engine, node_ids) = build_graph(1_000);
-                        (engine, node_ids[0])
-                    },
-                    |(engine, seed)| {
-                        let config = QueryConfig::default();
-                        let query = Query::Associative {
-                            seed: black_box(seed),
-                            budget: 200,
-                        };
-                        let _ = engine.query(&query, &config);
-                    },
-                    criterion::BatchSize::SmallInput,
-                )
+    group.bench_with_input(BenchmarkId::new("1k_nodes", "rwr"), &(), |b, _| {
+        b.iter_batched(
+            || {
+                let (engine, node_ids) = build_graph(1_000);
+                (engine, node_ids[0])
             },
-        );
-    }
+            |(engine, seed)| {
+                let config = QueryConfig::default();
+                let query = Query::Associative {
+                    seed: black_box(seed),
+                    budget: 200,
+                };
+                let _ = engine.query(&query, &config);
+            },
+            criterion::BatchSize::SmallInput,
+        )
+    });
 
     group.finish();
 }
@@ -183,6 +167,6 @@ criterion_group!(
     bench_spreading_100,
     bench_spreading_1k,
     bench_spreading_10k,
-    bench_pqbfs_vs_rwr
+    bench_additive_rwr
 );
 criterion_main!(benches);

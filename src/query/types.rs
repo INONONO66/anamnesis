@@ -1,6 +1,5 @@
 //! Query types for the Anamnesis cognitive graph engine.
 
-use crate::api::SpreadingModel;
 use crate::graph::Origin;
 use crate::graph::scope::{ScopePath, ScopeRelation};
 use crate::graph::{KnowledgeType, NodeId, Timestamp};
@@ -283,24 +282,28 @@ pub enum PackagingMode {
 }
 
 /// Trace of strategies used during a search operation.
+///
+/// Carries the additive-RWR activation-flow diagnostics (iterations, residual,
+/// truncation, excluded `Contradicts` edges, and path-current count) for the
+/// authoritative read-only retrieval path.
 #[derive(Debug, Clone, Default)]
 pub struct SearchTrace {
-    /// Names of retrieval strategies used (e.g., "text_search", "spreading_activation").
+    /// Names of retrieval strategies used (e.g., "text_search", "activation_flow").
     pub strategies_used: Vec<String>,
     /// Number of seed nodes found.
     pub seed_count: usize,
-    /// Number of spreading activation iterations performed.
-    pub spread_iterations: usize,
-    /// Spreading activation model used for graph recall, when graph recall ran.
-    pub spreading_model: Option<SpreadingModel>,
+    /// Number of RWR iterations performed before convergence (or the bound).
+    pub iterations: usize,
+    /// Final residual `||a_next - a||_1` of the activation flow.
+    pub residual: f64,
+    /// Whether the iteration bound stopped convergence.
+    pub truncated: bool,
+    /// Number of edges split off to frustration (excluded `Contradicts`).
+    pub excluded_edge_count: usize,
+    /// Number of edges carrying captured path current `I_ij`.
+    pub path_current_count: usize,
     /// Packaging mode selected.
     pub packaging_mode: Option<PackagingMode>,
-    /// Number of invalid temporal edges skipped during graph recall.
-    pub edge_count_skipped_invalid: usize,
-    /// Number of convergence check rounds performed (0 if convergence disabled).
-    pub convergence_rounds: usize,
-    /// Whether spreading activation converged early (true if top-k stabilized).
-    pub converged: bool,
 }
 
 /// Internal search plan — auto-derived from SearchInput.

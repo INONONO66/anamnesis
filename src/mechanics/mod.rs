@@ -14,11 +14,9 @@
 //! - `priors`: Calibrated priors — the single home for the engine's numeric constants (ADR-0010)
 
 pub mod attraction;
-pub mod forces;
 pub mod forgetting;
 pub mod gravity;
 pub mod health;
-pub mod hopfield;
 pub mod interactions;
 pub mod perception;
 pub mod priors;

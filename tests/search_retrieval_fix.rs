@@ -321,16 +321,16 @@ fn test_search_seeds_ordered_by_relevance() {
     );
 
     // Assert spreading activation occurred as one multi-source invocation.
-    assert_eq!(result.trace.spread_iterations, 1);
+    assert!(result.trace.iterations >= 1);
 
-    // Assert strategies include spreading activation
+    // Assert strategies include the additive-RWR activation flow.
     assert!(
         result
             .trace
             .strategies_used
             .iter()
-            .any(|s| s == "spreading_activation"),
-        "Should use spreading_activation strategy"
+            .any(|s| s == "activation_flow"),
+        "Should use activation_flow strategy"
     );
 }
 

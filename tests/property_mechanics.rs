@@ -14,7 +14,8 @@ use anamnesis::mechanics::priors::{
     decay_multiplier_for_type, learning_rate, project_salience, project_weight,
     TARGET_COACTIVATION_N,
 };
-use anamnesis::query::activation::{initial_activation, propagation_strength, salience_gate};
+use anamnesis::query::field::{FieldSignals, potential_bias};
+use anamnesis::query::scoring::{ReadoutInputs, readout_score};
 use proptest::prelude::*;
 
 // ── Strategy for generating KnowledgeType variants ──────────────────────────
@@ -188,48 +189,38 @@ proptest! {
     }
 }
 
-// ── Property tests for activation mechanics ──────────────────────────────────
+// ── Property tests for the additive-RWR readout / potential field ───────────
 
 proptest! {
-    /// initial_activation: result ∈ [0, 1]
+    /// potential_bias: finite for finite inputs; A_i enters with unit coefficient.
     #[test]
-    fn prop_initial_activation_in_bounds(
-        is_seed in any::<bool>(),
-        vector_sim in 0.0f64..=1.0,
-        identity_prior in 0.0f64..=1.0,
+    fn prop_potential_bias_finite(
+        text in -5.0f64..=5.0,
+        embed in -5.0f64..=5.0,
+        retained_action in -20.0f64..=20.0,
     ) {
-        let result = initial_activation(is_seed, vector_sim, identity_prior);
-        prop_assert!(result >= 0.0, "initial_activation negative: {result}");
-        prop_assert!(result <= 1.0 + 1e-10, "initial_activation > 1.0: {result}");
+        let phi = potential_bias(&FieldSignals {
+            text_score: text,
+            embedding_score: embed,
+            retained_action,
+            ..Default::default()
+        });
+        prop_assert!(phi.is_finite(), "phi not finite: {phi}");
     }
 
-    /// salience_gate: result ∈ [0.2, 1.0]
+    /// readout_score: finite for bounded inputs (log-odds additive form).
     #[test]
-    fn prop_salience_gate_in_range(salience in 0.0f64..=1.0) {
-        let result = salience_gate(salience);
-        prop_assert!(result >= 0.2 - 1e-10, "salience_gate < 0.2: {result}");
-        prop_assert!(result <= 1.0 + 1e-10, "salience_gate > 1.0: {result}");
-    }
-
-    /// propagation_strength: result ≥ 0 when all inputs ≥ 0
-    #[test]
-    fn prop_propagation_strength_nonnegative(
-        source_activation in 0.0f64..=1.0,
-        edge_weight in 0.0f64..=1.0,
-        kappa in 0.0f64..=2.0,
-        hop_decay in 0.0f64..=1.0,
-        target_salience_gate in 0.2f64..=1.0,
-        target_gravity_boost in 1.0f64..=1.2,
+    fn prop_readout_score_finite(
+        activation in 0.0f64..=1.0,
+        phi in -10.0f64..=10.0,
+        salience in 0.0f64..=1.0,
+        impedance in 0.0f64..=40.0,
+        stress in 0.0f64..=10.0,
     ) {
-        let result = propagation_strength(
-            source_activation,
-            edge_weight,
-            kappa,
-            hop_decay,
-            target_salience_gate,
-            target_gravity_boost,
-        );
-        prop_assert!(result >= 0.0, "propagation_strength negative: {result}");
-        prop_assert!(result <= 1.0 + 1e-10, "propagation_strength > 1.0: {result}");
+        let score = readout_score(&ReadoutInputs {
+            activation, phi, salience, impedance,
+            scope_weight: 1.0, trust_weight: 0.0, stress,
+        });
+        prop_assert!(score.is_finite(), "readout_score not finite: {score}");
     }
 }

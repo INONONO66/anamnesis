@@ -34,7 +34,7 @@ pub(crate) fn search<S: StorageAdapter + Clone>(
 
     let mut per_source: Vec<Vec<SearchCandidate>> = Vec::new();
     let mut strategies_used: Vec<String> = Vec::new();
-    let mut spread_iterations = 0usize;
+    let mut flow_invocations = 0usize;
     let storage = engine.graph.storage();
 
     let sub_queries = if plan.use_text {
@@ -96,49 +96,32 @@ pub(crate) fn search<S: StorageAdapter + Clone>(
         now: (input.now.0 > 0).then_some(input.now),
         ..QueryConfig::default()
     };
-    let mut activations = HashMap::new();
-    let mut edge_count_skipped_invalid = 0usize;
-    let mut convergence_rounds = 0usize;
-    let mut converged = false;
-    let mut spreading_model = None;
+
+    let mut response = crate::query::ActivationResponse::default();
 
     if plan.use_graph {
         let identity_prior = identity_prior_for_search(storage, &config);
         let identity_prior_ref = (!identity_prior.is_empty()).then_some(&identity_prior);
-        let (graph_activations, recall_trace) = recall::run_graph_recalls(
-            storage,
-            &selected_seeds,
-            &engine.config,
-            &config,
-            identity_prior_ref,
-        );
+        let (graph_response, recall_trace) =
+            recall::run_graph_recalls(storage, &selected_seeds, &config, identity_prior_ref);
 
-        spread_iterations = recall_trace.invocation_count as usize;
-        edge_count_skipped_invalid = recall_trace.edge_count_skipped_invalid;
-        convergence_rounds = recall_trace.convergence_rounds;
-        converged = recall_trace.converged;
-        spreading_model = Some(recall_trace.model_used);
-        activations = graph_activations;
+        flow_invocations = recall_trace.invocation_count as usize;
+        response = graph_response;
     }
 
-    if spread_iterations > 0 {
-        strategies_used.push("spreading_activation".to_string());
+    if flow_invocations > 0 {
+        strategies_used.push("activation_flow".to_string());
     }
 
     assemble::assemble_search_result(
         engine,
         assemble::SearchAssemblyRequest {
-            activations: &activations,
+            response: &response,
             seed_ids: &all_seed_ids,
             config: &config,
             input: &input,
             plan: &plan,
             strategies_used,
-            spread_iterations,
-            spreading_model,
-            edge_count_skipped_invalid,
-            convergence_rounds,
-            converged,
         },
     )
 }
