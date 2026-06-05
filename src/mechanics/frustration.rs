@@ -26,16 +26,16 @@ use crate::graph::scope::{ScopePath, ScopeRelation};
 /// Two claims can only frustrate each other when their scopes actually overlap.
 /// The gate is the visibility weight of the two scopes' relationship, in `[0, 1]`:
 /// identical or universal scopes overlap fully (`1.0`); ancestor/descendant scopes
-/// overlap on their shared path; siblings overlap weakly; unrelated scopes do not
+/// overlap on their shared path; siblings overlap weakly; disjoint scopes do not
 /// overlap at all (`0.0`), so a private contradiction cannot leak across
 /// unauthorized scopes (the frustration.md safety rule).
 pub fn scope_overlap(a: &ScopePath, b: &ScopePath) -> f64 {
     match a.relation_to(b) {
-        ScopeRelation::Exact | ScopeRelation::Universal => 1.0,
+        ScopeRelation::Equal | ScopeRelation::Universal => 1.0,
         ScopeRelation::Ancestor | ScopeRelation::Descendant => 0.85,
         ScopeRelation::Sibling => 0.50,
         // Disjoint scopes never frustrate — the gate is fully closed.
-        ScopeRelation::Unrelated => 0.0,
+        ScopeRelation::Disjoint => 0.0,
     }
 }
 
@@ -126,7 +126,7 @@ mod tests {
     }
 
     #[test]
-    fn unrelated_scope_no_overlap() {
+    fn disjoint_scope_no_overlap() {
         // Disjoint scopes never frustrate — private contradictions do not leak.
         assert_eq!(scope_overlap(&scope("proj-a"), &scope("proj-b")), 0.0);
     }

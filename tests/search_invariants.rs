@@ -424,7 +424,7 @@ fn source_fragment_carries_source_scope() {
         .unwrap();
 
     assert_eq!(source_fragment.origin.scope.as_str(), "project/main");
-    assert_eq!(source_fragment.scope, ScopeRelation::Exact);
+    assert_eq!(source_fragment.scope, ScopeRelation::Equal);
 }
 
 /// Protects empty-candidate search from panicking or fabricating fragments.

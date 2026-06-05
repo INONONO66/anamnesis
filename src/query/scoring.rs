@@ -30,34 +30,34 @@ use crate::mechanics::priors::{
     READOUT_W_Z,
 };
 
-/// Maximum shared-entity bonus added to the Unrelated base weight.
-const UNRELATED_BONUS_CAP: f64 = 0.20;
+/// Maximum shared-entity bonus added to the Disjoint base weight.
+const DISJOINT_BONUS_CAP: f64 = 0.20;
 
 /// Computes the scope weight for a node relative to the query context.
 ///
 /// Hierarchical weighting based on `ScopeRelation` (locked):
-/// - Exact: 1.0
+/// - Equal: 1.0
 /// - Universal: 0.95
 /// - Ancestor / Descendant: 0.85
 /// - Sibling: 0.50
-/// - Unrelated: 0.05 + shared-entity bonus capped at +0.20
+/// - Disjoint: 0.05 + shared-entity bonus capped at +0.20
 pub fn scope_weight(
     query_scope: &ScopePath,
     node_scope: &ScopePath,
     shared_entity_count: usize,
 ) -> f64 {
     match query_scope.relation_to(node_scope) {
-        ScopeRelation::Exact => 1.0,
+        ScopeRelation::Equal => 1.0,
         ScopeRelation::Universal => 0.95,
         ScopeRelation::Ancestor | ScopeRelation::Descendant => 0.85,
         ScopeRelation::Sibling => 0.50,
-        ScopeRelation::Unrelated => {
+        ScopeRelation::Disjoint => {
             let bonus = match shared_entity_count {
                 0 => 0.0,
                 1 => 0.10,
-                _ => UNRELATED_BONUS_CAP,
+                _ => DISJOINT_BONUS_CAP,
             };
-            0.05 + bonus.min(UNRELATED_BONUS_CAP)
+            0.05 + bonus.min(DISJOINT_BONUS_CAP)
         }
     }
 }
@@ -209,12 +209,12 @@ mod tests {
     }
 
     #[test]
-    fn unrelated_base_weight() {
+    fn disjoint_base_weight() {
         assert_eq!(scope_weight(&proj("proj-a"), &proj("proj-b"), 0), 0.05);
     }
 
     #[test]
-    fn unrelated_bonus_capped() {
+    fn disjoint_bonus_capped() {
         let w = scope_weight(&proj("proj-a"), &proj("proj-b"), 100);
         assert!((w - 0.25).abs() < 1e-10);
     }

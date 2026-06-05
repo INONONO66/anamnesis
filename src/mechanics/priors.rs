@@ -254,6 +254,40 @@ pub fn coupling_seed(sim_npmi: f64, entity_npmi: f64, scope_npmi: f64, type_npmi
         + BETA_COUPLING_TYPE * f(type_npmi)
 }
 
+/// Cold-start edge-density gate `conductance_threshold` (conductance.md "Cold
+/// Start": `if coupling_seed >= conductance_threshold: create edge`).
+///
+/// CALIBRATED PRIOR (declared density knob, [ADR-0010](../../docs/adr/0010-calibrated-priors-not-laws.md)) —
+/// the minimum cold-start coupling strength below which an auto-link is *not*
+/// created, realizing the "minimum coupling" density control (dissipation.md /
+/// conductance.md "Density Control"). It gates the auto-edge path on the
+/// `coupling_seed` crossing this floor, suppressing genuinely noisy weak paths
+/// before any edge exists. `coupling_seed` lives in `[0, 1]`; this is a small
+/// positive floor. Not a behavioral law — refit as graph density statistics change.
+pub const CONDUCTANCE_THRESHOLD: f64 = 0.05;
+
+/// True when a cold-start `coupling_seed` clears the [`CONDUCTANCE_THRESHOLD`]
+/// density gate and an auto-link should be created (conductance.md "Cold Start").
+///
+/// DERIVED — the boolean form of the documented gate
+/// `coupling_seed >= conductance_threshold`. A non-finite seed never passes.
+#[inline]
+pub fn coupling_clears_threshold(coupling_seed: f64) -> bool {
+    coupling_seed.is_finite() && coupling_seed >= CONDUCTANCE_THRESHOLD
+}
+
+/// Idle-edge leak rate `eta_leak` for the `TimeElapsed` conductance dissipation
+/// (conductance.md post-commit plasticity `- eta_leak * idle_edge_leakage_ij`;
+/// interactions.md `TimeElapsed`: `C_ij' = leak_idle_edge(C_ij, idle_days)`).
+///
+/// CALIBRATED PRIOR (declared density/temperature knob, [ADR-0010](../../docs/adr/0010-calibrated-priors-not-laws.md)) —
+/// the rate at which unused weak coupling is removed over time, realizing the
+/// "edge leakage" density control (dissipation.md / conductance.md "Density
+/// Control"). It scales the per-edge idle leakage [`idle_edge_leakage`]; a value
+/// of `0.0` disables edge leakage entirely. Not a behavioral law — refit from
+/// observed edge re-use hazard, mirroring the node decay prior `d`.
+pub const ETA_LEAK: f64 = 0.10;
+
 /// Map a cold-start `coupling_seed` (in `[0, 1]`) to an initial conductance
 /// reservoir `C_ij` in log-LR units (conductance.md `initialize_conductance`).
 ///

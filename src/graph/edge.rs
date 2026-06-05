@@ -20,7 +20,7 @@ pub enum EdgeSource {
 /// A directed relationship between two nodes in the cognitive graph.
 ///
 /// Edge weight represents relationship strength [0, 1].
-/// Edge type determines propagation multiplier (kappa) during spreading activation.
+/// Edge type determines the within-row `edge_type_factor` during spreading activation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Edge {
     /// Unique identifier.
@@ -29,7 +29,7 @@ pub struct Edge {
     pub source: NodeId,
     /// Target node.
     pub target: NodeId,
-    /// Relationship type — determines kappa multiplier during spreading activation.
+    /// Relationship type — determines the `edge_type_factor` during spreading activation.
     pub edge_type: EdgeType,
     /// Relationship strength [0, 1].
     pub weight: f64,

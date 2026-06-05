@@ -48,13 +48,13 @@ fn debug_node_types_are_not_identity_or_memory() {
 }
 
 #[test]
-fn debug_edge_kappa_values_match_plan() {
-    assert_eq!(EdgeType::Supports.kappa(true), 1.10);
-    assert_eq!(EdgeType::Supports.kappa(false), 1.10);
-    assert_eq!(EdgeType::Refutes.kappa(true), 0.30);
-    assert_eq!(EdgeType::Refutes.kappa(false), 0.30);
-    assert_eq!(EdgeType::BelongsTo.kappa(true), 0.95);
-    assert_eq!(EdgeType::BelongsTo.kappa(false), 0.95);
+fn debug_edge_type_factors_match_plan() {
+    assert_eq!(edge_type_factor(&EdgeType::Supports, true), 1.10);
+    assert_eq!(edge_type_factor(&EdgeType::Supports, false), 1.10);
+    assert_eq!(edge_type_factor(&EdgeType::Refutes, true), 0.30);
+    assert_eq!(edge_type_factor(&EdgeType::Refutes, false), 0.30);
+    assert_eq!(edge_type_factor(&EdgeType::BelongsTo, true), 0.95);
+    assert_eq!(edge_type_factor(&EdgeType::BelongsTo, false), 0.95);
 }
 
 #[test]
@@ -70,7 +70,7 @@ fn refutes_is_supportive_and_propagates_activation() {
 }
 
 #[test]
-fn only_contradicts_is_inhibitory_for_kappa() {
-    assert_eq!(EdgeType::Contradicts.kappa(true), 0.0);
-    assert!(EdgeType::Refutes.kappa(true) > 0.0);
+fn only_contradicts_is_excluded_from_propagation() {
+    assert_eq!(edge_type_factor(&EdgeType::Contradicts, true), 0.0);
+    assert!(edge_type_factor(&EdgeType::Refutes, true) > 0.0);
 }

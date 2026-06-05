@@ -256,7 +256,7 @@ fn source_fragment_carries_source_scope() {
         .find(|fragment| fragment.node_id == source)
         .expect("source memory should be packaged");
     assert_eq!(fragment.origin.scope.as_str(), "source-project");
-    assert_eq!(fragment.scope, ScopeRelation::Exact);
+    assert_eq!(fragment.scope, ScopeRelation::Equal);
 }
 
 #[test]

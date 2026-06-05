@@ -26,7 +26,7 @@ pub struct ScopePath(String);
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum ScopeRelation {
     /// Paths are identical.
-    Exact,
+    Equal,
     /// Self is an ancestor of other (self is a prefix of other).
     Ancestor,
     /// Self is a descendant of other (other is a prefix of self).
@@ -36,7 +36,7 @@ pub enum ScopeRelation {
     /// One path is universal (empty).
     Universal,
     /// Paths have no hierarchical relationship.
-    Unrelated,
+    Disjoint,
 }
 
 impl ScopePath {
@@ -104,12 +104,12 @@ impl ScopePath {
 
     /// Determine the relationship between this path and another.
     ///
-    /// Returns the hierarchical relationship (Exact, Ancestor, Descendant,
-    /// Sibling, Universal, or Unrelated) between the two paths.
+    /// Returns the hierarchical relationship (Equal, Ancestor, Descendant,
+    /// Sibling, Universal, or Disjoint) between the two paths.
     pub fn relation_to(&self, other: &Self) -> ScopeRelation {
-        // Both empty → Exact
+        // Both empty → Equal
         if self.0.is_empty() && other.0.is_empty() {
-            return ScopeRelation::Exact;
+            return ScopeRelation::Equal;
         }
 
         // One empty → Universal
@@ -119,7 +119,7 @@ impl ScopePath {
 
         // Exact match
         if self.0 == other.0 {
-            return ScopeRelation::Exact;
+            return ScopeRelation::Equal;
         }
 
         // Check ancestor: self is prefix of other
@@ -144,7 +144,7 @@ impl ScopePath {
         }
 
         // No relationship
-        ScopeRelation::Unrelated
+        ScopeRelation::Disjoint
     }
 }
 
@@ -171,10 +171,10 @@ mod tests {
     // ===== Relation Tests (6 cases) =====
 
     #[test]
-    fn relation_exact_same_path() {
+    fn relation_equal_same_path() {
         let a = ScopePath::new("personal/foo").unwrap();
         let b = ScopePath::new("personal/foo").unwrap();
-        assert_eq!(a.relation_to(&b), ScopeRelation::Exact);
+        assert_eq!(a.relation_to(&b), ScopeRelation::Equal);
     }
 
     #[test]
@@ -207,10 +207,10 @@ mod tests {
     }
 
     #[test]
-    fn relation_unrelated() {
+    fn relation_disjoint() {
         let a = ScopePath::new("work").unwrap();
         let b = ScopePath::new("personal").unwrap();
-        assert_eq!(a.relation_to(&b), ScopeRelation::Unrelated);
+        assert_eq!(a.relation_to(&b), ScopeRelation::Disjoint);
     }
 
     // ===== Path Shape Tests (6 cases) =====

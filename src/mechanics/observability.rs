@@ -233,7 +233,7 @@ pub fn check_storage_invariants<S: StorageAdapter>(storage: &S) -> Vec<Invariant
             // Private-scope leakage: a *propagating* edge (one that carries flow —
             // i.e. not `Contradicts`, which is excluded from propagation) must not
             // bridge two sites whose origin scopes are mutually disjoint
-            // (`Unrelated`) when neither side is universal. Such an edge would let
+            // (`Disjoint`) when neither side is universal. Such an edge would let
             // private knowledge in one scope light up a node a query in the other,
             // disjoint scope can reach.
             if !matches!(edge.edge_type, EdgeType::Contradicts) {
@@ -244,7 +244,7 @@ pub fn check_storage_invariants<S: StorageAdapter>(storage: &S) -> Vec<Invariant
                     let tgt_scope = &tgt.origin.scope;
                     if !src_scope.is_universal()
                         && !tgt_scope.is_universal()
-                        && src_scope.relation_to(tgt_scope) == ScopeRelation::Unrelated
+                        && src_scope.relation_to(tgt_scope) == ScopeRelation::Disjoint
                     {
                         scope_leakage.push(format!(
                             "edge {eid:?} bridges disjoint scopes {} <-> {}",

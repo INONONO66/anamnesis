@@ -1006,7 +1006,7 @@ mod tests {
         let query_scope = ScopePath::new("proj-a").expect("valid scope");
         let node_scope = ScopePath::new("proj-a").expect("valid scope");
         let scope = determine_scope(&query_scope, &node_scope);
-        assert_eq!(scope, ScopeRelation::Exact);
+        assert_eq!(scope, ScopeRelation::Equal);
     }
 
     #[test]
@@ -1021,6 +1021,6 @@ mod tests {
         let query_scope = ScopePath::new("proj-a").expect("valid scope");
         let node_scope = ScopePath::new("proj-b").expect("valid scope");
         let scope = determine_scope(&query_scope, &node_scope);
-        assert_eq!(scope, ScopeRelation::Unrelated);
+        assert_eq!(scope, ScopeRelation::Disjoint);
     }
 }

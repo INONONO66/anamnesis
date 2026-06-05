@@ -102,65 +102,33 @@ pub trait StorageAdapter: Send + Sync {
     //
     // Per ADR-0002 the reservoirs (`retained_action` `A_i`, `conductance` `C_ij`)
     // are the authoritative log-odds state; `salience`/`weight` are bounded
-    // projections of them. These reservoir setters are intended to be called
-    // ONLY from commit/tick (Phase 2/5): recomputing the projection inside the
-    // setter here IS the ADR-0002 "commit recomputes projections" step. The
-    // default implementations derive a reservoir value from the existing
-    // projection (via the clamped-logit backfill) so external `StorageAdapter`
-    // impls that have not yet grown reservoir columns keep working.
+    // projections of them. The reservoir setters are called ONLY from commit/tick:
+    // recomputing the projection inside the setter IS the ADR-0002 "commit
+    // recomputes projections" step. These are required methods — a backend must
+    // persist the reservoir directly and keep its projection synchronized; no
+    // transitional projection-derived fallback exists.
 
     /// Get the retained action `A_i` (log need-odds reservoir) for a node.
-    ///
-    /// Default derives it from the salience projection via the clamped-logit
-    /// backfill, so external impls without a reservoir column degrade gracefully.
-    fn get_retained_action(&self, id: NodeId) -> Result<f64, Error> {
-        Ok(crate::mechanics::priors::salience_to_action(
-            self.get_salience(id)?,
-        ))
-    }
+    fn get_retained_action(&self, id: NodeId) -> Result<f64, Error>;
 
     /// Set the retained action `A_i` for a node and recompute the `salience`
-    /// projection. Intended to be called only from commit/tick (Phase 2/5).
-    ///
-    /// Default also writes `salience = project_salience(value)` so the bounded
-    /// projection stays consistent with the reservoir on backends without a
-    /// dedicated reservoir column.
-    fn set_retained_action(&mut self, id: NodeId, value: f64) -> Result<(), Error> {
-        self.set_salience(id, crate::mechanics::priors::project_salience(value))
-    }
+    /// projection (`salience = project_salience(value)`). Called only from
+    /// commit/tick.
+    fn set_retained_action(&mut self, id: NodeId, value: f64) -> Result<(), Error>;
 
     /// Get the conductance `C_ij` (log-likelihood-ratio reservoir) for an edge.
-    ///
-    /// Default derives it from the edge `weight` projection via the clamped-logit
-    /// backfill, so external impls without a reservoir column degrade gracefully.
-    fn get_conductance(&self, id: EdgeId) -> Result<f64, Error> {
-        Ok(crate::mechanics::priors::weight_to_conductance(
-            self.get_edge(id)?.weight,
-        ))
-    }
+    fn get_conductance(&self, id: EdgeId) -> Result<f64, Error>;
 
     /// Set the conductance `C_ij` for an edge and recompute the `weight`
-    /// projection. Intended to be called only from commit/tick (Phase 2/5).
-    ///
-    /// Default writes both `edge.conductance = value` and
-    /// `edge.weight = project_weight(value)` via `get_edge_mut`.
-    fn set_conductance(&mut self, id: EdgeId, value: f64) -> Result<(), Error> {
-        let edge = self.get_edge_mut(id)?;
-        edge.conductance = value;
-        edge.weight = crate::mechanics::priors::project_weight(value);
-        Ok(())
-    }
+    /// projection (`weight = project_weight(value)`). Called only from
+    /// commit/tick.
+    fn set_conductance(&mut self, id: EdgeId, value: f64) -> Result<(), Error>;
 
     /// Get the last-accessed timestamp for an edge. O(1) direct array access.
-    fn get_edge_accessed_at(&self, id: EdgeId) -> Result<Timestamp, Error> {
-        Ok(self.get_edge(id)?.accessed_at)
-    }
+    fn get_edge_accessed_at(&self, id: EdgeId) -> Result<Timestamp, Error>;
 
     /// Set the last-accessed timestamp for an edge.
-    fn set_edge_accessed_at(&mut self, id: EdgeId, ts: Timestamp) -> Result<(), Error> {
-        self.get_edge_mut(id)?.accessed_at = ts;
-        Ok(())
-    }
+    fn set_edge_accessed_at(&mut self, id: EdgeId, ts: Timestamp) -> Result<(), Error>;
 
     /// Persist any buffered hot-field writes.
     ///

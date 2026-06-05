@@ -512,9 +512,9 @@ mod tests {
 
     #[test]
     fn scope_variants() {
-        let s1 = ScopeRelation::Exact;
+        let s1 = ScopeRelation::Equal;
         let s2 = ScopeRelation::Universal;
-        let s3 = ScopeRelation::Unrelated;
+        let s3 = ScopeRelation::Disjoint;
         assert_ne!(s1, s2);
         assert_ne!(s2, s3);
     }

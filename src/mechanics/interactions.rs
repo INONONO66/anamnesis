@@ -125,6 +125,67 @@ pub fn hebbian_oja(conductance: f64, flux: f64, eta: f64) -> f64 {
     clamp_reservoir(conductance + eta * flux * bound)
 }
 
+/// Per-edge idle leakage amount `idle_edge_leakage_ij` (conductance.md
+/// post-commit plasticity term `- eta_leak * idle_edge_leakage_ij`).
+///
+/// This is the leak *magnitude* before the `eta_leak` rate is applied. It is the
+/// product of two factors:
+///
+/// ```text
+/// idle_edge_leakage(C_ij, idle_days) = project_weight(C_ij) * ln(1 + idle_days)
+/// ```
+///
+/// - `project_weight(C_ij)` is the current bounded coupling strength. Scaling by
+///   it realizes the density-control goal "remove unused weak coupling over time"
+///   (conductance.md / dissipation.md): the leak is proportional to present
+///   coupling, so an idle path's weight drains toward zero rather than crossing
+///   into negative log-LR runaway, and a long-saturated path resists more slowly.
+/// - `ln(1 + idle_days)` is the same power-law idle kernel used for node decay
+///   ([`decay`]): the log-odds image of the ACT-R `t^-d` form, so a freshly used
+///   edge (`idle_days <= 0`) leaks **nothing** and leakage grows sub-linearly with
+///   idle time.
+///
+/// Non-positive / non-finite `idle_days` returns `0.0` (no leak). The result is
+/// always finite and non-negative.
+#[inline]
+pub fn idle_edge_leakage(conductance: f64, idle_days: f64) -> f64 {
+    if !idle_days.is_finite() || idle_days <= 0.0 {
+        return 0.0;
+    }
+    let coupling = project_weight(conductance).clamp(0.0, 1.0);
+    coupling * (1.0 + idle_days).ln()
+}
+
+/// `TimeElapsed` — idle-edge conductance leakage (interactions.md
+/// `C_ij' = leak_idle_edge(C_ij, idle_days)`; conductance.md
+/// `- eta_leak * idle_edge_leakage_ij`).
+///
+/// Applies the leak to the authoritative conductance reservoir:
+///
+/// ```text
+/// C_ij' = C_ij - eta_leak * idle_edge_leakage(C_ij, idle_days)
+/// ```
+///
+/// This is the conductance analogue of node [`decay`]: time is an interaction and
+/// unused reservoirs leak (interactions.md). Leakage only ever lowers `C_ij`
+/// (monotonic non-increasing); a freshly used edge (`idle_days <= 0`) or a
+/// disabled rate (`eta_leak <= 0`) returns `C_ij` unchanged. The caller re-projects
+/// `weight = project_weight(C_ij')`. Result is finite-clamped.
+pub fn leak_idle_edge(conductance: f64, idle_days: f64, eta_leak: f64) -> f64 {
+    if eta_leak <= 0.0 || !eta_leak.is_finite() {
+        return conductance;
+    }
+    let leak = eta_leak * idle_edge_leakage(conductance, idle_days);
+    clamp_reservoir(conductance - leak)
+}
+
+/// [`leak_idle_edge`] with the canonical idle-edge leak rate
+/// ([`crate::mechanics::priors::ETA_LEAK`]).
+#[inline]
+pub fn leak_idle_edge_default(conductance: f64, idle_days: f64) -> f64 {
+    leak_idle_edge(conductance, idle_days, priors::ETA_LEAK)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -271,6 +332,73 @@ mod tests {
         assert!(next > c, "positive flux should raise C: {next}");
     }
 
+    // ── idle-edge leakage (TimeElapsed on conductance) ────────────────────────
+
+    use crate::mechanics::priors::ETA_LEAK;
+
+    #[test]
+    fn leak_idle_edge_recently_used_unchanged() {
+        // idle_days <= 0 → freshly used edge leaks nothing.
+        let c = 1.0;
+        assert_eq!(leak_idle_edge(c, 0.0, ETA_LEAK), c);
+        assert_eq!(leak_idle_edge(c, -5.0, ETA_LEAK), c);
+        assert_eq!(leak_idle_edge_default(c, 0.0), c);
+    }
+
+    #[test]
+    fn leak_idle_edge_idle_loses_conductance() {
+        // An idle edge with positive coupling must lose conductance.
+        let c = 1.0;
+        let leaked = leak_idle_edge_default(c, 30.0);
+        assert!(leaked < c, "idle edge must leak: {leaked} !< {c}");
+        // And the weight projection drops too.
+        assert!(project_weight(leaked) < project_weight(c));
+    }
+
+    #[test]
+    fn leak_idle_edge_is_monotonic_non_increasing() {
+        // More idle time leaks at least as much (never raises C).
+        let c = 1.5;
+        let a = leak_idle_edge_default(c, 10.0);
+        let b = leak_idle_edge_default(c, 100.0);
+        assert!(a <= c && b <= a, "expected b={b} <= a={a} <= c={c}");
+    }
+
+    #[test]
+    fn leak_idle_edge_disabled_rate_is_identity() {
+        let c = 0.8;
+        assert_eq!(leak_idle_edge(c, 365.0, 0.0), c);
+        assert_eq!(leak_idle_edge(c, 365.0, -1.0), c);
+    }
+
+    #[test]
+    fn idle_edge_leakage_zero_when_fresh() {
+        assert_eq!(idle_edge_leakage(2.0, 0.0), 0.0);
+        assert_eq!(idle_edge_leakage(2.0, f64::NAN), 0.0);
+    }
+
+    #[test]
+    fn idle_edge_leakage_bounded_and_finite() {
+        // Leak magnitude is non-negative, finite, and grows with idle time.
+        let near = idle_edge_leakage(1.0, 1.0);
+        let far = idle_edge_leakage(1.0, 1000.0);
+        assert!(near >= 0.0 && near.is_finite());
+        assert!(far >= near, "leak should grow with idle time");
+        assert!(leak_idle_edge_default(1.0, 100_000.0).is_finite());
+    }
+
+    #[test]
+    fn leak_weaker_coupling_drains_toward_zero_weight() {
+        // A weak edge under sustained idle leaks toward (but not past, in any
+        // runaway sense) a low weight; result stays finite.
+        let mut c = 0.2; // weak coupling
+        for _ in 0..200 {
+            c = leak_idle_edge_default(c, 30.0);
+        }
+        assert!(c.is_finite());
+        assert!(project_weight(c) < project_weight(0.2));
+    }
+
     // ── eta derivation ────────────────────────────────────────────────────────
 
     #[test]
@@ -310,6 +438,16 @@ mod tests {
             prop_assert!(reinforce_access(a, x.abs(), e).is_finite());
             prop_assert!(rescorla_wagner(a, x, e).is_finite());
             prop_assert!(hebbian_oja(a, x, e).is_finite());
+        }
+
+        #[test]
+        fn leak_never_increases_conductance(
+            c in -20.0f64..=20.0,
+            idle in 0.0f64..=3650.0,
+        ) {
+            let result = leak_idle_edge_default(c, idle);
+            prop_assert!(result <= c + 1e-9, "leak raised C: {result} > {c}");
+            prop_assert!(result.is_finite());
         }
     }
 }

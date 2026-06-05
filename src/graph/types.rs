@@ -94,7 +94,10 @@ pub enum MemoryTier {
     Archival,
 }
 
-/// Edge type — determines propagation multiplier (kappa) during spreading activation.
+/// Edge type — determines the within-row propagation factor during spreading
+/// activation. The factor itself is the calibrated `edge_type_factor` prior
+/// ([`crate::mechanics::priors::edge_type_factor`]); the type only names the
+/// relation.
 ///
 /// Supportive edges propagate activation. `Contradicts` is excluded from propagation
 /// and instead surfaces query-local frustration stress between its active endpoints
@@ -102,31 +105,31 @@ pub enum MemoryTier {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum EdgeType {
     // Supportive (propagation)
-    /// Conceptual relationship. kappa = 1.00
+    /// Conceptual relationship.
     Semantic,
-    /// Cause-effect relationship. kappa = 1.00
+    /// Cause-effect relationship.
     Causal,
-    /// Temporal sequence. kappa = 0.85
+    /// Temporal sequence.
     Temporal,
-    /// Decision rationale. kappa = 1.15
+    /// Decision rationale.
     Reason,
-    /// Repeated confirmation. kappa = 1.10
+    /// Repeated confirmation.
     ReinforcedBy,
-    /// Derived from multiple fragments. kappa = 1.00
+    /// Derived from multiple fragments.
     ConsolidatedFrom,
-    /// Derived knowledge to source episode. kappa = 1.00
+    /// Derived knowledge to source episode.
     ExtractedFrom,
-    /// Shared entity link across agents. kappa = 0.95
+    /// Shared entity link across agents.
     Entity,
-    /// Replaces outdated knowledge. kappa = 1.20 toward new, 0.40 toward old.
+    /// Replaces outdated knowledge (directional: strong toward new, weak toward old).
     Supersedes,
-    /// Considered and discarded option. kappa = 0.60
+    /// Considered and discarded option.
     RejectedAlternative,
-    /// Positive evidential support. kappa = 1.10
+    /// Positive evidential support.
     Supports,
-    /// Refuting evidence. Supportive low-kappa propagation, not inhibitory. kappa = 0.30
+    /// Refuting evidence. Weak supportive propagation, not inhibitory.
     Refutes,
-    /// Hierarchical or containment relationship. kappa = 0.95
+    /// Hierarchical or containment relationship.
     BelongsTo,
 
     // Constraint (excluded from propagation; surfaces frustration stress)
@@ -136,38 +139,6 @@ pub enum EdgeType {
 
     /// Consumer-defined edge type.
     Custom(String),
-}
-
-impl EdgeType {
-    /// Returns the propagation multiplier (kappa) for this edge type during spreading activation.
-    ///
-    /// `is_forward`: true when traversing source→target, false when traversing target→source.
-    /// Only `Supersedes` has different kappa values by direction.
-    pub fn kappa(&self, is_forward: bool) -> f64 {
-        match self {
-            EdgeType::Supersedes => {
-                if is_forward {
-                    1.20
-                } else {
-                    0.40
-                }
-            }
-            EdgeType::Reason => 1.15,
-            EdgeType::ReinforcedBy => 1.10,
-            EdgeType::Supports => 1.10,
-            EdgeType::Semantic => 1.00,
-            EdgeType::Causal => 1.00,
-            EdgeType::ConsolidatedFrom => 1.00,
-            EdgeType::ExtractedFrom => 1.00,
-            EdgeType::Entity => 0.95,
-            EdgeType::BelongsTo => 0.95,
-            EdgeType::Temporal => 0.85,
-            EdgeType::RejectedAlternative => 0.60,
-            EdgeType::Refutes => 0.30,
-            EdgeType::Contradicts => 0.00,
-            EdgeType::Custom(_) => 1.00,
-        }
-    }
 }
 
 #[cfg(test)]
@@ -215,20 +186,6 @@ mod tests {
             KnowledgeType::Custom("my-type".to_string()),
         ];
         assert_eq!(types.len(), 15);
-    }
-
-    #[test]
-    fn kappa_values_match_architecture() {
-        assert_eq!(EdgeType::Reason.kappa(true), 1.15);
-        assert_eq!(EdgeType::Supersedes.kappa(true), 1.20);
-        assert_eq!(EdgeType::Supersedes.kappa(false), 0.40);
-        assert_eq!(EdgeType::Contradicts.kappa(true), 0.00);
-        assert_eq!(EdgeType::Semantic.kappa(true), 1.00);
-        assert_eq!(EdgeType::Temporal.kappa(true), 0.85);
-        assert_eq!(EdgeType::RejectedAlternative.kappa(true), 0.60);
-        assert_eq!(EdgeType::Supports.kappa(true), 1.10);
-        assert_eq!(EdgeType::Refutes.kappa(true), 0.30);
-        assert_eq!(EdgeType::BelongsTo.kappa(true), 0.95);
     }
 
     #[test]

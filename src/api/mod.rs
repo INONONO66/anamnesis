@@ -567,6 +567,15 @@ pub struct TickReport {
     /// Total projection delta: summed magnitude of the salience drops across all
     /// decayed sites (`Σ |s_before - s_after|`). Zero when nothing decayed.
     pub total_salience_delta: f64,
+    /// Number of edges whose conductance projection dropped this tick from
+    /// idle-edge leakage (`C_ij' = C_ij - eta_leak * idle_edge_leakage_ij`,
+    /// conductance.md / interactions.md `TimeElapsed`). Unused weak coupling is
+    /// drained over time (density control); recently-used and protected edges are
+    /// untouched. Edges are never deleted (ADR-0006 / ADR-0008).
+    pub edges_leaked: usize,
+    /// Total conductance-projection delta: summed magnitude of the edge-weight drops
+    /// across all leaked edges (`Σ |w_before - w_after|`). Zero when nothing leaked.
+    pub total_conductance_delta: f64,
 }
 
 /// Report returned by [`Engine::commit`] — the integrated work the commit recorded.
@@ -2123,7 +2132,10 @@ impl<S: StorageAdapter + Clone> Engine<S> {
 
         if let Some(ref new_embedding) = observation.embedding {
             use crate::mechanics::interactions::hebbian_oja;
-            use crate::mechanics::priors::{learning_rate, TARGET_COACTIVATION_N};
+            use crate::mechanics::priors::{
+                coupling_clears_threshold, initialize_conductance, learning_rate,
+                TARGET_COACTIVATION_N,
+            };
             let eta = learning_rate(TARGET_COACTIVATION_N);
 
             let new_type = &observation.node_type;
@@ -2198,11 +2210,23 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                     let Ok(candidate_node) = self.graph.get_node(cid).cloned() else {
                         continue;
                     };
+                    // Cold-start density gate (conductance.md "Cold Start":
+                    // `if coupling_seed >= conductance_threshold: create edge`).
+                    // Sub-threshold coupling is a noisy weak path and must NOT
+                    // create an edge — the declared `conductance_threshold` density
+                    // knob (ADR-0010 / dissipation.md "minimum coupling").
+                    let seed = self.cold_start_coupling_seed(
+                        &new_node,
+                        &candidate_node,
+                        &EdgeType::Semantic,
+                    );
+                    if !coupling_clears_threshold(seed) {
+                        continue;
+                    }
                     // Seed conductance from the cold-start coupling; weight is the
                     // bounded projection of the seeded reservoir, never authored
                     // (conductance.md "Cold Start", ADR-0002).
-                    let conductance =
-                        self.cold_start_conductance(&new_node, &candidate_node, &EdgeType::Semantic);
+                    let conductance = initialize_conductance(seed);
                     if !conductance.is_finite() {
                         continue;
                     }
@@ -2523,12 +2547,18 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                     let Ok(candidate_node) = self.graph.get_node(candidate_id).cloned() else {
                         continue;
                     };
-                    // Cold-start coupling seed; weight derived from the reservoir.
-                    let conductance = self.cold_start_conductance(
+                    // Cold-start density gate (conductance.md "Cold Start":
+                    // `if coupling_seed >= conductance_threshold: create edge`).
+                    let seed = self.cold_start_coupling_seed(
                         &synthesis_node,
                         &candidate_node,
                         &EdgeType::Semantic,
                     );
+                    if !crate::mechanics::priors::coupling_clears_threshold(seed) {
+                        continue;
+                    }
+                    // Cold-start coupling seed; weight derived from the reservoir.
+                    let conductance = crate::mechanics::priors::initialize_conductance(seed);
                     if !conductance.is_finite() {
                         continue;
                     }
@@ -2588,11 +2618,23 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         to: &Node,
         edge_type: &EdgeType,
     ) -> f64 {
+        use crate::mechanics::priors::initialize_conductance;
+        initialize_conductance(self.cold_start_coupling_seed(from, to, edge_type))
+    }
+
+    /// The cold-start `coupling_seed = sum_f beta_coupling[f] * npmi_f` for a
+    /// candidate link (conductance.md "Cold Start").
+    ///
+    /// Extracts the four normalized NPMI features `{sim, entity, scope, type}` from
+    /// the endpoints under the requested relation and combines them with the single
+    /// `beta_coupling` regression vector. This is the value the documented density
+    /// gate `coupling_seed >= conductance_threshold`
+    /// ([`crate::mechanics::priors::coupling_clears_threshold`]) is tested against,
+    /// and the input to [`Self::cold_start_conductance`]. Pure; reads no storage.
+    fn cold_start_coupling_seed(&self, from: &Node, to: &Node, edge_type: &EdgeType) -> f64 {
         use crate::mechanics::attraction::cosine_similarity;
         use crate::mechanics::frustration::scope_overlap;
-        use crate::mechanics::priors::{
-            coupling_seed, edge_type_affinity_npmi, initialize_conductance,
-        };
+        use crate::mechanics::priors::{coupling_seed, edge_type_affinity_npmi};
 
         let sim_npmi = match (&from.embedding, &to.embedding) {
             (Some(a), Some(b)) => cosine_similarity(a, b),
@@ -2602,8 +2644,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         let scope_npmi = scope_overlap(&from.origin.scope, &to.origin.scope);
         let type_npmi = edge_type_affinity_npmi(edge_type);
 
-        let seed = coupling_seed(sim_npmi, entity_npmi, scope_npmi, type_npmi);
-        initialize_conductance(seed)
+        coupling_seed(sim_npmi, entity_npmi, scope_npmi, type_npmi)
     }
 
     /// Create a typed link, seeding its conductance from the cold-start coupling.
@@ -3300,6 +3341,8 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         let mut nodes_decayed = 0usize;
         let mut nodes_pruned = 0usize;
         let mut total_salience_delta = 0.0_f64;
+        let mut edges_leaked = 0usize;
+        let mut total_conductance_delta = 0.0_f64;
 
         for id in node_ids {
             let node_tier = match self.graph.get_node(id) {
@@ -3389,13 +3432,87 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             }
         }
 
+        // ── Idle-edge leakage (TimeElapsed on conductance) ────────────────────
+        // `C_ij' = C_ij - eta_leak * idle_edge_leakage(C_ij, idle_days)`
+        // (conductance.md post-commit plasticity / interactions.md `TimeElapsed`).
+        // Unused weak coupling drains over time (density control). Idle time is
+        // `now - edge.accessed_at` (the committed-use timestamp). Edges incident to
+        // a protected node (Core tier / `IdentityCore`) are exempt, mirroring node
+        // decay; `Contradicts` edges are excluded (routed to frustration, not
+        // propagation — ADR-0005/0006). Edges are never deleted (ADR-0008/0006).
+        {
+            use crate::mechanics::interactions::leak_idle_edge_default;
+            use crate::mechanics::priors::{project_weight, ETA_LEAK};
+
+            if ETA_LEAK > 0.0 {
+                let edge_ids = self.graph.storage().all_edge_ids();
+                for eid in edge_ids {
+                    let (source, target, edge_type, accessed_at) =
+                        match self.graph.storage().get_edge(eid) {
+                            Ok(e) => (e.source, e.target, e.edge_type.clone(), e.accessed_at),
+                            Err(_) => continue,
+                        };
+                    // Contradicts is excluded from conductance dynamics.
+                    if edge_type == EdgeType::Contradicts {
+                        continue;
+                    }
+                    // Protected if either endpoint is protected from ordinary decay.
+                    if self.is_protected_node(source) || self.is_protected_node(target) {
+                        continue;
+                    }
+
+                    let current = match self.graph.storage().get_conductance(eid) {
+                        Ok(c) => c,
+                        Err(_) => continue,
+                    };
+                    let dt_ms = now.0.saturating_sub(accessed_at.0);
+                    let idle_days = dt_ms as f64 / 86_400_000.0;
+                    if idle_days <= 0.0 {
+                        continue;
+                    }
+
+                    let next = leak_idle_edge_default(current, idle_days);
+                    if !next.is_finite() {
+                        return Err(Error::NonFinite(format!("conductance for edge {eid:?}")));
+                    }
+                    let weight_before = project_weight(current);
+                    let weight_after = project_weight(next);
+                    if (weight_before - weight_after).abs() > SALIENCE_CHANGE_EPSILON {
+                        // `set_conductance` persists the leaked reservoir and
+                        // re-projects `weight = project_weight(C_ij')`. `accessed_at`
+                        // is NOT advanced — leakage is not a use (interactions.md).
+                        if self.graph.storage_mut().set_conductance(eid, next).is_err() {
+                            continue;
+                        }
+                        edges_leaked += 1;
+                        total_conductance_delta += (weight_before - weight_after).abs();
+                    }
+                }
+            }
+        }
+
         self.graph.storage_mut().flush()?;
 
         Ok(TickReport {
             nodes_decayed,
             nodes_pruned,
             total_salience_delta,
+            edges_leaked,
+            total_conductance_delta,
         })
+    }
+
+    /// True when a node is protected from ordinary `tick` dissipation — Core tier
+    /// or `IdentityCore` type (dissipation.md "Memory Tier" / priors decay policy).
+    /// Used to exempt protected edges from idle-edge leakage. A missing node is
+    /// treated as protected (no leak applied) so a dangling edge is never mutated.
+    fn is_protected_node(&self, id: NodeId) -> bool {
+        match self.graph.get_node(id) {
+            Ok(node) => {
+                node.tier == MemoryTier::Core || node.node_type == KnowledgeType::IdentityCore
+            }
+            Err(_) => true,
+        }
     }
 
     /// Compute the health of the cognitive graph.
@@ -3645,7 +3762,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                         let rel = perspective.scope.relation_to(&node.origin.scope);
                         matches!(
                             rel,
-                            crate::graph::ScopeRelation::Exact
+                            crate::graph::ScopeRelation::Equal
                                 | crate::graph::ScopeRelation::Ancestor
                                 | crate::graph::ScopeRelation::Universal
                         )
@@ -4751,6 +4868,238 @@ mod tests {
         let mut engine = Engine::new();
         let report = engine.tick(Timestamp(1000)).unwrap();
         assert_eq!(report.nodes_decayed, 0);
+        assert_eq!(report.edges_leaked, 0);
+    }
+
+    // ── Idle-edge leakage (TimeElapsed on conductance) ────────────────────────
+
+    /// Build an edge with a fixed conductance reservoir at a known `accessed_at`,
+    /// so leakage tests do not depend on cold-start coupling magnitudes.
+    fn seed_edge(
+        engine: &mut Engine,
+        from: NodeId,
+        to: NodeId,
+        edge_type: EdgeType,
+        conductance: f64,
+        accessed_at: Timestamp,
+    ) -> EdgeId {
+        let eid = engine.graph_mut().next_edge_id();
+        let edge = Edge::seeded(
+            eid,
+            from,
+            to,
+            edge_type,
+            conductance,
+            crate::graph::edge::EdgeSource::Manual,
+            Timestamp(1000),
+            accessed_at,
+            HashMap::new(),
+        );
+        engine.graph_mut().add_edge(edge).unwrap();
+        eid
+    }
+
+    #[test]
+    fn tick_leaks_idle_edge() {
+        let mut engine = Engine::new();
+        let IngestResult::Created(a) = engine.ingest(make_observation("A")).unwrap() else {
+            panic!()
+        };
+        let IngestResult::Created(b) = engine.ingest(make_observation("B")).unwrap() else {
+            panic!()
+        };
+        // Edge last used at t=1000; conductance well above zero so it can leak.
+        let eid = seed_edge(
+            &mut engine,
+            a[0],
+            b[0],
+            EdgeType::Semantic,
+            2.0,
+            Timestamp(1000),
+        );
+        let before = engine.graph().get_edge(eid).unwrap().conductance;
+
+        // Tick 60 days later → the edge is idle and must lose conductance.
+        let later = Timestamp(1000 + 60 * 86_400_000);
+        let report = engine.tick(later).unwrap();
+
+        let after = engine.graph().get_edge(eid).unwrap().conductance;
+        assert!(after < before, "idle edge must leak: {after} !< {before}");
+        assert!(after.is_finite());
+        assert_eq!(report.edges_leaked, 1);
+        assert!(report.total_conductance_delta > 0.0);
+        // Weight projection re-derived from the leaked reservoir (ADR-0002).
+        let edge = engine.graph().get_edge(eid).unwrap();
+        assert!((edge.weight - crate::mechanics::priors::project_weight(after)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn tick_does_not_leak_recently_used_edge() {
+        let mut engine = Engine::new();
+        let IngestResult::Created(a) = engine.ingest(make_observation("A")).unwrap() else {
+            panic!()
+        };
+        let IngestResult::Created(b) = engine.ingest(make_observation("B")).unwrap() else {
+            panic!()
+        };
+        // Edge accessed AT the tick time → zero idle days → no leak.
+        let tick_time = Timestamp(1000 + 60 * 86_400_000);
+        let eid = seed_edge(&mut engine, a[0], b[0], EdgeType::Semantic, 2.0, tick_time);
+        let before = engine.graph().get_edge(eid).unwrap().conductance;
+
+        let report = engine.tick(tick_time).unwrap();
+
+        let after = engine.graph().get_edge(eid).unwrap().conductance;
+        assert_eq!(after, before, "recently-used edge must not leak");
+        assert_eq!(report.edges_leaked, 0);
+    }
+
+    #[test]
+    fn tick_does_not_leak_contradicts_edge() {
+        let mut engine = Engine::new();
+        let IngestResult::Created(a) = engine.ingest(make_observation("A")).unwrap() else {
+            panic!()
+        };
+        let IngestResult::Created(b) = engine.ingest(make_observation("B")).unwrap() else {
+            panic!()
+        };
+        let eid = seed_edge(
+            &mut engine,
+            a[0],
+            b[0],
+            EdgeType::Contradicts,
+            2.0,
+            Timestamp(1000),
+        );
+        let before = engine.graph().get_edge(eid).unwrap().conductance;
+
+        let later = Timestamp(1000 + 365 * 86_400_000);
+        let report = engine.tick(later).unwrap();
+
+        let after = engine.graph().get_edge(eid).unwrap().conductance;
+        assert_eq!(after, before, "Contradicts is excluded from leakage");
+        assert_eq!(report.edges_leaked, 0);
+    }
+
+    #[test]
+    fn tick_does_not_leak_edge_incident_to_protected_node() {
+        let mut engine = Engine::new();
+        // Identity-core endpoint is protected from ordinary dissipation.
+        let mut core_obs = make_observation("identity");
+        core_obs.node_type = KnowledgeType::IdentityCore;
+        let IngestResult::Created(core) = engine.ingest(core_obs).unwrap() else {
+            panic!()
+        };
+        let IngestResult::Created(b) = engine.ingest(make_observation("B")).unwrap() else {
+            panic!()
+        };
+        let eid = seed_edge(
+            &mut engine,
+            core[0],
+            b[0],
+            EdgeType::Semantic,
+            2.0,
+            Timestamp(1000),
+        );
+        let before = engine.graph().get_edge(eid).unwrap().conductance;
+
+        let later = Timestamp(1000 + 365 * 86_400_000);
+        engine.tick(later).unwrap();
+
+        let after = engine.graph().get_edge(eid).unwrap().conductance;
+        assert_eq!(after, before, "edge to protected node must not leak");
+    }
+
+    #[test]
+    fn tick_edge_leakage_is_deterministic() {
+        // Same graph + same tick time => identical leaked conductance.
+        let build = || {
+            let mut engine = Engine::new();
+            let IngestResult::Created(a) = engine.ingest(make_observation("A")).unwrap() else {
+                panic!()
+            };
+            let IngestResult::Created(b) = engine.ingest(make_observation("B")).unwrap() else {
+                panic!()
+            };
+            let eid = seed_edge(
+                &mut engine,
+                a[0],
+                b[0],
+                EdgeType::Semantic,
+                1.5,
+                Timestamp(1000),
+            );
+            let later = Timestamp(1000 + 90 * 86_400_000);
+            engine.tick(later).unwrap();
+            engine.graph().get_edge(eid).unwrap().conductance
+        };
+        assert_eq!(build(), build());
+    }
+
+    // ── Cold-start conductance_threshold density gate ─────────────────────────
+
+    #[test]
+    fn cold_start_subthreshold_coupling_creates_no_edge() {
+        use crate::mechanics::priors::{coupling_clears_threshold, CONDUCTANCE_THRESHOLD};
+        // Two nodes with NO embedding and DISJOINT entity tags → the cold-start
+        // coupling seed is far below `conductance_threshold`, so the auto-link path
+        // must create no edge (conductance.md "Cold Start" density gate).
+        let mut engine = Engine::new();
+        let mut o1 = make_observation("alpha");
+        o1.embedding = Some(vec![1.0, 0.0, 0.0]);
+        o1.entity_tags = vec!["alpha-only".to_string()];
+        let mut o2 = make_observation("omega");
+        // Orthogonal embedding (cosine 0) and disjoint tags → near-zero seed.
+        o2.embedding = Some(vec![0.0, 1.0, 0.0]);
+        o2.entity_tags = vec!["omega-only".to_string()];
+
+        engine.ingest(o1).unwrap();
+        engine.ingest(o2).unwrap();
+
+        // The sub-threshold seed gate held: no auto-edge was created.
+        assert_eq!(
+            engine.graph().edge_count(),
+            0,
+            "sub-threshold coupling must not create an edge"
+        );
+        // And the gate predicate agrees on a clearly sub-threshold seed.
+        assert!(!coupling_clears_threshold(0.0));
+        assert!(!coupling_clears_threshold(CONDUCTANCE_THRESHOLD - 1e-6));
+        assert!(coupling_clears_threshold(CONDUCTANCE_THRESHOLD));
+    }
+
+    #[test]
+    fn cold_start_suprathreshold_coupling_creates_edge() {
+        // The auto-link must survive BOTH the attraction candidate gate and the
+        // cold-start `conductance_threshold` density gate. An identity↔knowledge
+        // pair uses the lower attraction threshold (0.65, tau 1.25) which sits below
+        // the novelty routing boundary (theta_sep ≈ 0.30 ⇒ allocate when sim < 0.70),
+        // so two distinct sites are created and a supra-threshold coupling seed links
+        // them. Embedding cosine ≈ 0.67: novelty 0.33 > 0.30 (allocate) and
+        // attraction 0.67 * 1.25 ≈ 0.84 ≥ 0.65, and the coupling seed clears 0.05.
+        let mut engine = Engine::new();
+        let cos = 0.67_f64;
+        let mut o1 = make_observation("identity");
+        o1.node_type = KnowledgeType::IdentityLearned;
+        o1.embedding = Some(vec![1.0, 0.0]);
+        o1.entity_tags = vec!["shared".to_string()];
+        let mut o2 = make_observation("knowledge");
+        o2.node_type = KnowledgeType::Semantic;
+        o2.embedding = Some(vec![cos, (1.0 - cos * cos).sqrt()]);
+        o2.entity_tags = vec!["shared".to_string()];
+
+        let IngestResult::Created(_) = engine.ingest(o1).unwrap() else {
+            panic!("first observation should allocate a new site");
+        };
+        let IngestResult::Created(_) = engine.ingest(o2).unwrap() else {
+            panic!("second observation should allocate a distinct site (novelty > theta_sep)");
+        };
+
+        assert_eq!(
+            engine.graph().edge_count(),
+            1,
+            "supra-threshold coupling must create the auto-edge"
+        );
     }
 
     #[test]
