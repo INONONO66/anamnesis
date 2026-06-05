@@ -18,6 +18,12 @@ pub enum Error {
     InvalidConfig(String),
     /// Invalid input value.
     InvalidInput(String),
+    /// A reservoir/projection value was non-finite (NaN/Inf) at the engine boundary.
+    ///
+    /// Reservoirs (`A_i`, `C_ij`) and their projections must always be finite
+    /// (migration design risk #4; the `non_finite_hot_fields` invariant). A write
+    /// that would store a non-finite hot field is a hard error, not silently clamped.
+    NonFinite(String),
     /// Query budget exhausted before completion.
     BudgetExhausted,
     /// A peer with the given ID was not found in the registry.
@@ -35,6 +41,7 @@ impl fmt::Display for Error {
             Error::Rejected(reason) => write!(f, "observation rejected: {}", reason),
             Error::InvalidConfig(msg) => write!(f, "invalid config: {}", msg),
             Error::InvalidInput(msg) => write!(f, "invalid input: {}", msg),
+            Error::NonFinite(msg) => write!(f, "non-finite reservoir/projection: {}", msg),
             Error::BudgetExhausted => write!(f, "query budget exhausted"),
             Error::PeerNotFound(id) => write!(f, "peer not found: {}", id.0),
             Error::DuplicateAlias(alias) => write!(f, "duplicate alias: {}", alias),

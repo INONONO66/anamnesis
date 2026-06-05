@@ -12,19 +12,6 @@ use crate::storage::{SqliteStorage, StorageAdapter};
 
 mod search;
 
-/// Decay model for salience computation.
-///
-/// `Exponential` (default) uses the existing formula: s(t+dt) = b + (s(t) - b) * exp(-lambda * dt).
-/// `PowerLaw` uses ACT-R base-level activation (Anderson & Schooler 1991).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum DecayModel {
-    /// Exponential decay — backwards-compatible default.
-    #[default]
-    Exponential,
-    /// ACT-R power-law decay: B = ln(Σⱼ tⱼ⁻⁰·⁵), salience = sigmoid(B).
-    PowerLaw,
-}
-
 /// Energy model for final score computation in spreading activation.
 ///
 /// `WeightedSum` (default) uses the existing weighted final-score formula (equation 13):
@@ -81,6 +68,14 @@ const TOPOLOGY_INGEST_EPSILON: f64 = 0.10;
 const ARCHIVE_SALIENCE_THRESHOLD: f64 = 0.10;
 const SALIENCE_CHANGE_EPSILON: f64 = 1e-10;
 
+/// Default readout work delivered by a bare `Engine::touch()` access.
+///
+/// CALIBRATED PRIOR — `touch()` records a committed access with no explicit
+/// readout-work measurement, so it credits a full unit of work to the bounded
+/// saturating `access_gain` (interactions.md). The commit pipeline (Phase 5) will
+/// supply measured per-readout work; until then a unit access is the prior.
+const ACCESS_READOUT_WORK: f64 = 1.0;
+
 struct HopfieldScoringContext {
     retrieved: Vec<f64>,
     energy_gain: f64,
@@ -102,23 +97,12 @@ pub struct EngineConfig {
     pub dedup_enabled: bool,
     /// Whether ingest expands trigger candidates through nearby graph topology.
     pub topology_ingest_enabled: bool,
-    /// Decay model to use for salience computation. Default: Exponential (backwards-compatible).
-    pub decay_model: DecayModel,
-    /// Whether decay rates should be adjusted using local graph topology. Default: false.
-    pub topology_decay_enabled: bool,
-    /// Extra decay multiplier applied to orphan nodes when topology decay is enabled. Default: 0.0.
-    pub isolation_decay_factor: f64,
-    /// Decay protection multiplier applied from bridge score when topology decay is enabled. Default: 0.0.
-    pub bridge_protection_factor: f64,
     /// Energy model for final score computation in spreading activation. Default: WeightedSum (backwards-compatible).
     pub energy_model: EnergyModel,
     /// Spreading activation model for query traversal. Default: PriorityQueueBfs (backwards-compatible).
     pub spreading_model: SpreadingModel,
     /// Mass model for node importance computation. Default: Legacy (backwards-compatible).
     pub mass_model: MassModel,
-    /// Learning rate η for social feedback signals. Controls how strongly feedback
-    /// adjusts salience via `s += η * strength * (1 - s)`. Default: 0.15.
-    pub social_learning_rate: f64,
     /// Maximum number of mutation events retained for draining. Default: 10,000.
     pub max_events: usize,
     /// Similarity threshold for conflict detection.
@@ -138,14 +122,9 @@ impl Default for EngineConfig {
             dedup_threshold: 0.92,
             dedup_enabled: true,
             topology_ingest_enabled: false,
-            decay_model: DecayModel::Exponential,
-            topology_decay_enabled: false,
-            isolation_decay_factor: 0.0,
-            bridge_protection_factor: 0.0,
             energy_model: EnergyModel::WeightedSum,
             spreading_model: SpreadingModel::PriorityQueueBfs,
             mass_model: MassModel::Legacy,
-            social_learning_rate: 0.15,
             max_events: 10_000,
             conflict_threshold: 0.75,
         }
@@ -187,28 +166,8 @@ impl EngineConfig {
         self
     }
 
-    pub fn with_topology_decay(mut self, enabled: bool) -> Self {
-        self.topology_decay_enabled = enabled;
-        self
-    }
-
-    pub fn with_isolation_decay_factor(mut self, factor: f64) -> Self {
-        self.isolation_decay_factor = factor;
-        self
-    }
-
-    pub fn with_bridge_protection_factor(mut self, factor: f64) -> Self {
-        self.bridge_protection_factor = factor;
-        self
-    }
-
     pub fn with_mass_model(mut self, model: MassModel) -> Self {
         self.mass_model = model;
-        self
-    }
-
-    pub fn with_social_learning_rate(mut self, rate: f64) -> Self {
-        self.social_learning_rate = rate;
         self
     }
 
@@ -220,39 +179,6 @@ impl EngineConfig {
 
 fn finite_vector(values: &[f64]) -> bool {
     values.iter().all(|value| value.is_finite())
-}
-
-fn topology_decay_reference_degree<S: StorageAdapter>(storage: &S, node_ids: &[NodeId]) -> usize {
-    if node_ids.is_empty() {
-        return 1;
-    }
-
-    let total_degree: usize = node_ids
-        .iter()
-        .map(|&id| crate::mechanics::topology::degree(storage, id))
-        .sum();
-    (total_degree / node_ids.len()).max(1)
-}
-
-fn topology_adjusted_decay_parameter<S: StorageAdapter>(
-    storage: &S,
-    node_ids: &[NodeId],
-    node_id: NodeId,
-    lambda_base: f64,
-    isolation_decay_factor: f64,
-    bridge_protection_factor: f64,
-) -> Result<f64, Error> {
-    let d_ref = topology_decay_reference_degree(storage, node_ids);
-    let is_orphan = crate::mechanics::topology::is_orphan(storage, node_id);
-    let bridge_score = crate::mechanics::topology::bridge_score(storage, node_id, d_ref)?;
-
-    Ok(crate::mechanics::forgetting::effective_lambda(
-        lambda_base,
-        is_orphan,
-        bridge_score,
-        isolation_decay_factor,
-        bridge_protection_factor,
-    ))
 }
 
 fn ingest_trigger_candidates<S: StorageAdapter>(
@@ -1738,7 +1664,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             valid_from: None,
             valid_until: None,
             salience: 1.0,
-            retained_action: 0.0,
+            retained_action: crate::mechanics::priors::INITIAL_RETAINED_ACTION,
             access_count: 0,
             access_history: VecDeque::new(),
             tier: MemoryTier::Auto,
@@ -1796,7 +1722,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             valid_from: None,
             valid_until: None,
             salience: 1.0,
-            retained_action: 0.0,
+            retained_action: crate::mechanics::priors::INITIAL_RETAINED_ACTION,
             access_count: 0,
             access_history: VecDeque::new(),
             tier: MemoryTier::Auto,
@@ -1897,7 +1823,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             valid_from: None,
             valid_until: None,
             salience: 1.0,
-            retained_action: 0.0,
+            retained_action: crate::mechanics::priors::INITIAL_RETAINED_ACTION,
             access_count: 0,
             access_history: VecDeque::new(),
             tier: MemoryTier::Auto,
@@ -2156,7 +2082,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             valid_from: observation.valid_from,
             valid_until: observation.valid_until,
             salience: 1.0,
-            retained_action: 0.0,
+            retained_action: crate::mechanics::priors::INITIAL_RETAINED_ACTION,
             access_count: 0,
             access_history: VecDeque::new(),
             tier: crate::graph::MemoryTier::Auto,
@@ -2480,7 +2406,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             valid_from: None,
             valid_until: None,
             salience: initial_salience,
-            retained_action: 0.0,
+            retained_action: crate::mechanics::priors::salience_to_action(initial_salience),
             access_count: 0,
             access_history: VecDeque::new(),
             tier: crate::graph::MemoryTier::Auto,
@@ -2710,22 +2636,155 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         Ok(id)
     }
 
-    /// Touch a node — apply lazy decay then reinforce on access.
+    /// Apply a `PathUsed` interaction — bounded Hebbian-Oja conductance update on
+    /// the edges actually used by a committed context generation.
     ///
-    /// Phase 2: Applies decay (eq 4) BEFORE reinforcement (eq 5).
-    /// Decay is lazy: computed based on elapsed time since the last decay
-    /// checkpoint (NOT `accessed_at`). Updates BOTH `accessed_at` and
-    /// `decay_checkpoint` to `now`.
+    /// Operates on the authoritative `C_ij` reservoir (log likelihood ratio,
+    /// ADR-0002), NOT on the bounded `weight` projection. For each `(edge, flux)`
+    /// pair the conductance moves by the single-`eta` bounded Hebbian-Oja step
+    /// `dC_ij = eta * flux_ij * (1 - project_weight(C_ij))`
+    /// ([`crate::mechanics::interactions::hebbian_oja`], conductance.md /
+    /// interactions.md). The Oja bound — realized on the projection per
+    /// ADR-0002/Decision 5 ([`crate::mechanics::priors`]) — prevents raw Hebbian
+    /// runaway and hub explosion. `set_conductance` then persists the moved
+    /// reservoir and re-projects `weight = project_weight(C_ij')`.
+    ///
+    /// Read-only retrieval never reaches here: only a committed retrieval trace
+    /// (path current `I_ij` from the query field) supplies `flux`. `edges` and
+    /// `flux` must be the same length; each edge must exist; every `flux` value
+    /// must be finite. Edges are processed in the given order; the operation is
+    /// deterministic for a fixed input.
+    pub fn apply_path_used(
+        &mut self,
+        edges: Vec<EdgeId>,
+        flux: Vec<f64>,
+    ) -> Result<(), Error> {
+        use crate::mechanics::interactions::hebbian_oja;
+        use crate::mechanics::priors::{learning_rate, TARGET_COACTIVATION_N};
+
+        if edges.len() != flux.len() {
+            return Err(Error::InvalidInput(
+                "edges and flux must have the same length".to_string(),
+            ));
+        }
+        if !finite_vector(&flux) {
+            return Err(Error::NonFinite("path flux".to_string()));
+        }
+
+        let eta = learning_rate(TARGET_COACTIVATION_N);
+        for (&edge_id, &flux_ij) in edges.iter().zip(flux.iter()) {
+            // Validate the edge exists before mutating (commit must match graph state).
+            self.graph.get_edge(edge_id)?;
+            let current = self.graph.storage().get_conductance(edge_id)?;
+            let next = hebbian_oja(current, flux_ij, eta);
+            if !next.is_finite() {
+                return Err(Error::NonFinite(format!(
+                    "conductance for edge {edge_id:?}"
+                )));
+            }
+            // `set_conductance` writes both C_ij and the weight projection.
+            self.graph.storage_mut().set_conductance(edge_id, next)?;
+        }
+        Ok(())
+    }
+
+    /// Apply a `CoReadout` interaction — bounded Hebbian-Oja conductance update on
+    /// edges between site pairs that were read out together in a committed result.
+    ///
+    /// Operates on the authoritative `C_ij` reservoir (ADR-0002), NOT on the
+    /// bounded `weight` projection. For each `(site_i, site_j)` pair the
+    /// co-readout flux is `co_flux_ij = min(a_i, a_j)` (conductance.md): the pair
+    /// strengthens only as much as its weaker co-activation. That flux drives the
+    /// same single-`eta` bounded step
+    /// `dC_ij = eta * co_flux_ij * (1 - project_weight(C_ij))`
+    /// ([`crate::mechanics::interactions::hebbian_oja`]) on every existing edge
+    /// connecting the two sites (in either direction). `set_conductance` persists
+    /// the moved reservoir and re-projects `weight`.
+    ///
+    /// `pairs` and `activations` must be the same length; each activation pair
+    /// `(a_i, a_j)` must be finite. Pairs with no connecting edge are skipped (no
+    /// edge is created — co-readout strengthens existing paths only). For a fixed
+    /// graph and input the updated edges are visited in a deterministic order.
+    pub fn apply_co_readout(
+        &mut self,
+        pairs: Vec<(NodeId, NodeId)>,
+        activations: Vec<(f64, f64)>,
+    ) -> Result<(), Error> {
+        use crate::mechanics::interactions::hebbian_oja;
+        use crate::mechanics::priors::{learning_rate, TARGET_COACTIVATION_N};
+
+        if pairs.len() != activations.len() {
+            return Err(Error::InvalidInput(
+                "pairs and activations must have the same length".to_string(),
+            ));
+        }
+
+        let eta = learning_rate(TARGET_COACTIVATION_N);
+        for (&(site_i, site_j), &(a_i, a_j)) in pairs.iter().zip(activations.iter()) {
+            if !a_i.is_finite() || !a_j.is_finite() {
+                return Err(Error::NonFinite("co-readout activation".to_string()));
+            }
+            // Co-readout flux is the weaker of the two co-activations (conductance.md).
+            let co_flux = a_i.min(a_j).max(0.0);
+
+            // Collect every edge connecting the two sites (either direction),
+            // de-duplicated and stably ordered for determinism.
+            let mut edge_ids: BTreeSet<EdgeId> = BTreeSet::new();
+            for &eid in self.graph.edges_from(site_i) {
+                if let Ok(edge) = self.graph.get_edge(eid) {
+                    if edge.target == site_j {
+                        edge_ids.insert(eid);
+                    }
+                }
+            }
+            for &eid in self.graph.edges_from(site_j) {
+                if let Ok(edge) = self.graph.get_edge(eid) {
+                    if edge.target == site_i {
+                        edge_ids.insert(eid);
+                    }
+                }
+            }
+
+            for edge_id in edge_ids {
+                let current = self.graph.storage().get_conductance(edge_id)?;
+                let next = hebbian_oja(current, co_flux, eta);
+                if !next.is_finite() {
+                    return Err(Error::NonFinite(format!(
+                        "conductance for edge {edge_id:?}"
+                    )));
+                }
+                // `set_conductance` writes both C_ij and the weight projection.
+                self.graph.storage_mut().set_conductance(edge_id, next)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Touch a node — an `Accessed` interaction on the retained-action reservoir.
+    ///
+    /// Operates on the authoritative `A_i` reservoir (log need-odds), NOT on bounded
+    /// salience (ADR-0002). The ordering invariant is **decay BEFORE reinforce**
+    /// (dissipation.md / ADR-0008):
+    ///
+    /// ```text
+    /// A_after_decay = decay(A_i, now - checkpoint, node_type, d)   // power-law, log-odds
+    /// A_next        = A_after_decay + access_gain(readout_work)    // bounded, saturating
+    /// salience      = project_salience(A_next)                     // re-project
+    /// ```
+    ///
+    /// Decay is lazy: elapsed time is measured from the `decay_checkpoint` (NOT
+    /// `accessed_at`). Core tier and `IdentityCore` are protected (no decay).
+    /// Updates BOTH `accessed_at` and `decay_checkpoint` to `now`. Non-finite
+    /// reservoir values are rejected at the boundary.
     pub fn touch(&mut self, node_id: NodeId, now: Timestamp) -> Result<(), Error> {
         if self.is_retracted(node_id)? {
             return Ok(());
         }
 
-        use crate::mechanics::forgetting::{
-            base_level_to_salience, compute_base_level, decay_salience, decay_salience_with_lambda,
-            lambda_for_type, reinforce_salience,
-        };
+        use crate::mechanics::interactions::{decay_default, reinforce_access};
+        use crate::mechanics::priors::{learning_rate, project_salience, TARGET_COACTIVATION_N};
 
+        let current_action = self.graph.storage().get_retained_action(node_id)?;
         let current_salience = self.graph.storage().get_salience(node_id)?;
         let last_checkpoint = self.graph.storage().get_decay_checkpoint(node_id)?;
         let node_type = self.graph.storage().get_node_type(node_id)?.clone();
@@ -2733,60 +2792,39 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         let decay_protected =
             node_tier == MemoryTier::Core || node_type == KnowledgeType::IdentityCore;
 
-        let new_salience = match self.config.decay_model {
-            DecayModel::Exponential => {
-                let dt_ms = now.0.saturating_sub(last_checkpoint.0);
-                let dt_days = dt_ms as f64 / 86_400_000.0;
+        // Telemetry: record the access timestamp in the ring buffer (power-law shape).
+        {
+            let node = self.graph.get_node_mut(node_id)?;
+            node.record_access(now);
+        }
 
-                // Decay BEFORE reinforcement — ordering invariant (eq 4 then eq 5)
-                let decayed = if decay_protected {
-                    current_salience
-                } else if self.config.topology_decay_enabled {
-                    let node_ids = self.graph.storage().all_node_ids();
-                    let lambda = topology_adjusted_decay_parameter(
-                        self.graph.storage(),
-                        &node_ids,
-                        node_id,
-                        lambda_for_type(&node_type),
-                        self.config.isolation_decay_factor,
-                        self.config.bridge_protection_factor,
-                    )?;
-                    decay_salience_with_lambda(current_salience, dt_days, &node_type, lambda)
-                } else {
-                    decay_salience(current_salience, dt_days, &node_type)
-                };
-                reinforce_salience(decayed)
-            }
-            DecayModel::PowerLaw => {
-                let history_snapshot = {
-                    let node = self.graph.get_node_mut(node_id)?;
-                    node.record_access(now);
-                    node.access_history.clone()
-                };
-                if decay_protected {
-                    current_salience
-                } else {
-                    let decay_d = if self.config.topology_decay_enabled {
-                        let node_ids = self.graph.storage().all_node_ids();
-                        topology_adjusted_decay_parameter(
-                            self.graph.storage(),
-                            &node_ids,
-                            node_id,
-                            crate::mechanics::priors::DECAY_EXPONENT_D,
-                            self.config.isolation_decay_factor,
-                            self.config.bridge_protection_factor,
-                        )?
-                    } else {
-                        crate::mechanics::priors::DECAY_EXPONENT_D
-                    };
-                    base_level_to_salience(compute_base_level(&history_snapshot, now, decay_d))
-                }
-            }
+        let dt_ms = now.0.saturating_sub(last_checkpoint.0);
+        let dt_days = dt_ms as f64 / 86_400_000.0;
+
+        // Decay BEFORE reinforce — ordering invariant (dissipation.md / ADR-0008).
+        let action_after_decay = if decay_protected {
+            current_action
+        } else {
+            decay_default(current_action, dt_days, &node_type)
         };
 
+        // `Accessed` reinforcement: bounded saturating access gain on A_i.
+        let eta = learning_rate(TARGET_COACTIVATION_N);
+        let new_action = reinforce_access(action_after_decay, ACCESS_READOUT_WORK, eta);
+
+        if !new_action.is_finite() {
+            return Err(Error::NonFinite(format!(
+                "retained action for node {node_id:?}"
+            )));
+        }
+
+        // Re-project salience from the moved reservoir (ADR-0002: commit recomputes
+        // projection). `set_retained_action` writes both A_i and salience.
         self.graph
             .storage_mut()
-            .set_salience(node_id, new_salience)?;
+            .set_retained_action(node_id, new_action)?;
+        let new_salience = project_salience(new_action);
+
         if (new_salience - current_salience).abs() > SALIENCE_CHANGE_EPSILON {
             self.emit_event(GraphEvent::SalienceChanged {
                 node_id,
@@ -2871,32 +2909,47 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         Ok(node.metadata.get("retracted").is_some_and(|v| v == "true"))
     }
 
-    /// Apply a consumer feedback signal to a node's salience.
+    /// Apply a consumer feedback signal — a `FeedbackReceived` interaction.
     ///
-    /// Updates salience using diminishing returns: `s += η * strength * (1 - s)` for
-    /// positive signals, `s -= η * |strength| * s` for negative signals.
-    /// Only modifies salience — no content or structural changes.
+    /// Rescorla-Wagner prediction error on the authoritative `A_i` reservoir
+    /// (ADR-0002/0003): `dA_i = eta * (lambda - A_i)` where `lambda` is the reward
+    /// target derived from the signal (interactions.md). Already-well-predicted
+    /// sites move less; negative feedback lowers retained action but preserves
+    /// provenance and source content. The bounded salience projection is then
+    /// recomputed from the moved reservoir.
     pub fn apply_feedback(
         &mut self,
         node_id: NodeId,
         signal: crate::mechanics::social::FeedbackSignal,
     ) -> Result<(), Error> {
-        let current = self.graph.storage().get_salience(node_id)?;
-        let new_salience = crate::mechanics::social::apply_feedback_to_salience(
-            current,
-            &signal,
-            self.config.social_learning_rate,
-        );
+        use crate::mechanics::interactions::{lambda_reward, rescorla_wagner};
+        use crate::mechanics::priors::{learning_rate, project_salience, TARGET_COACTIVATION_N};
+
+        let current_action = self.graph.storage().get_retained_action(node_id)?;
+        let current_salience = self.graph.storage().get_salience(node_id)?;
+
+        let eta = learning_rate(TARGET_COACTIVATION_N);
+        let new_action = rescorla_wagner(current_action, lambda_reward(&signal), eta);
+        if !new_action.is_finite() {
+            return Err(Error::NonFinite(format!(
+                "retained action for node {node_id:?}"
+            )));
+        }
+
         self.graph
             .storage_mut()
-            .set_salience(node_id, new_salience)?;
-        if (new_salience - current).abs() > SALIENCE_CHANGE_EPSILON {
+            .set_retained_action(node_id, new_action)?;
+        let new_salience = project_salience(new_action);
+
+        if (new_salience - current_salience).abs() > SALIENCE_CHANGE_EPSILON {
             self.emit_event(GraphEvent::SalienceChanged {
                 node_id,
-                old: current,
+                old: current_salience,
                 new: new_salience,
             });
-            if current < ARCHIVE_SALIENCE_THRESHOLD && new_salience >= ARCHIVE_SALIENCE_THRESHOLD {
+            if current_salience < ARCHIVE_SALIENCE_THRESHOLD
+                && new_salience >= ARCHIVE_SALIENCE_THRESHOLD
+            {
                 self.emit_event(GraphEvent::NodeRevived {
                     node_id,
                     new_salience,
@@ -2906,19 +2959,23 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         Ok(())
     }
 
-    /// Advance time — apply batch decay (eq 4) to all nodes.
+    /// Advance time — a batch `TimeElapsed` interaction applying power-law
+    /// dissipation to every node's retained-action reservoir.
     ///
-    /// Reads `decay_checkpoint` (NOT `accessed_at`) as the elapsed-time baseline,
-    /// updates salience, and advances `decay_checkpoint` to `now`. `accessed_at`
-    /// is left untouched, preserving last user-access semantics.
+    /// Operates on the authoritative `A_i` reservoir (ADR-0002), not on bounded
+    /// salience: `A_i' = decay(A_i, delta_days, node_type, d)` (dissipation.md /
+    /// ADR-0008), then `salience = project_salience(A_i')` is re-projected. Reads
+    /// `decay_checkpoint` (NOT `accessed_at`) as the elapsed-time baseline and
+    /// advances `decay_checkpoint` to `now`; `accessed_at` is left untouched,
+    /// preserving last user-access semantics.
+    ///
+    /// Core tier and `IdentityCore` are protected (never decay under ordinary
+    /// tick). Non-finite reservoir values are rejected at the boundary.
     pub fn tick(&mut self, now: Timestamp) -> Result<TickReport, Error> {
-        use crate::mechanics::forgetting::{
-            base_level_to_salience, compute_base_level, decay_salience, decay_salience_with_lambda,
-            floor_for_type, lambda_for_type,
-        };
+        use crate::mechanics::interactions::decay_default;
+        use crate::mechanics::priors::project_salience;
 
         let node_ids = self.graph.storage().all_node_ids();
-        let topology_d_ref = topology_decay_reference_degree(self.graph.storage(), &node_ids);
         let mut nodes_decayed = 0usize;
         let mut nodes_pruned = 0usize;
 
@@ -2927,10 +2984,15 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                 Ok(node) => node.tier.clone(),
                 Err(_) => continue,
             };
+            // Core tier is protected from ordinary decay.
             if node_tier == MemoryTier::Core {
                 continue;
             }
 
+            let current_action = match self.graph.storage().get_retained_action(id) {
+                Ok(a) => a,
+                Err(_) => continue,
+            };
             let current_salience = match self.graph.storage().get_salience(id) {
                 Ok(s) => s,
                 Err(_) => continue,
@@ -2943,75 +3005,27 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                 Ok(kt) => kt.clone(),
                 Err(_) => continue,
             };
+            // IdentityCore is protected regardless of tier.
             if node_type == KnowledgeType::IdentityCore {
                 continue;
             }
 
-            let new_salience = match self.config.decay_model {
-                DecayModel::Exponential => {
-                    let dt_ms = now.0.saturating_sub(last_checkpoint.0);
-                    let dt_days = dt_ms as f64 / 86_400_000.0;
+            let dt_ms = now.0.saturating_sub(last_checkpoint.0);
+            let dt_days = dt_ms as f64 / 86_400_000.0;
 
-                    if self.config.topology_decay_enabled {
-                        let is_orphan =
-                            crate::mechanics::topology::is_orphan(self.graph.storage(), id);
-                        let bridge_score = match crate::mechanics::topology::bridge_score(
-                            self.graph.storage(),
-                            id,
-                            topology_d_ref,
-                        ) {
-                            Ok(score) => score,
-                            Err(_) => continue,
-                        };
-                        let lambda = crate::mechanics::forgetting::effective_lambda(
-                            lambda_for_type(&node_type),
-                            is_orphan,
-                            bridge_score,
-                            self.config.isolation_decay_factor,
-                            self.config.bridge_protection_factor,
-                        );
-                        decay_salience_with_lambda(current_salience, dt_days, &node_type, lambda)
-                    } else {
-                        decay_salience(current_salience, dt_days, &node_type)
-                    }
-                }
-                DecayModel::PowerLaw => {
-                    let history = match self.graph.get_node(id) {
-                        Ok(node) => node.access_history.clone(),
-                        Err(_) => continue,
-                    };
+            // Power-law dissipation on the reservoir (no [0,1] floor here).
+            let new_action = decay_default(current_action, dt_days, &node_type);
+            if !new_action.is_finite() {
+                return Err(Error::NonFinite(format!("retained action for node {id:?}")));
+            }
+            let new_salience = project_salience(new_action);
 
-                    let decay_d = if self.config.topology_decay_enabled {
-                        let is_orphan =
-                            crate::mechanics::topology::is_orphan(self.graph.storage(), id);
-                        let bridge_score = match crate::mechanics::topology::bridge_score(
-                            self.graph.storage(),
-                            id,
-                            topology_d_ref,
-                        ) {
-                            Ok(score) => score,
-                            Err(_) => continue,
-                        };
-                        crate::mechanics::forgetting::effective_lambda(
-                            crate::mechanics::priors::DECAY_EXPONENT_D,
-                            is_orphan,
-                            bridge_score,
-                            self.config.isolation_decay_factor,
-                            self.config.bridge_protection_factor,
-                        )
-                    } else {
-                        crate::mechanics::priors::DECAY_EXPONENT_D
-                    };
-
-                    base_level_to_salience(compute_base_level(&history, now, decay_d))
-                }
-            };
-
-            if (new_salience - current_salience).abs() > 1e-10 {
+            if (new_salience - current_salience).abs() > SALIENCE_CHANGE_EPSILON {
+                // `set_retained_action` writes both A_i and the salience projection.
                 if self
                     .graph
                     .storage_mut()
-                    .set_salience(id, new_salience)
+                    .set_retained_action(id, new_action)
                     .is_err()
                 {
                     continue;
@@ -3035,6 +3049,9 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                     && new_salience < ARCHIVE_SALIENCE_THRESHOLD
                 {
                     self.emit_event(GraphEvent::NodeArchived { node_id: id });
+                    // "Pruned" = hidden from broad retrieval (projected below the
+                    // archive threshold), never deleted (ADR-0008 / ADR-0006).
+                    nodes_pruned += 1;
                 }
 
                 let old_tier = salience_tier(current_salience);
@@ -3045,11 +3062,6 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                         from_tier: old_tier,
                         to_tier: new_tier,
                     });
-                }
-
-                let floor = floor_for_type(&node_type);
-                if new_salience <= floor + 1e-6 {
-                    nodes_pruned += 1;
                 }
             }
         }
@@ -4554,12 +4566,21 @@ mod tests {
         };
         let id = ids[0];
 
+        let a_before = engine.graph().get_node(id).unwrap().retained_action;
+
         let now = Timestamp(1000);
         engine.touch(id, now).unwrap();
 
+        // dt=0: no decay. Access gain is bounded and saturating — near the ceiling
+        // (A ≈ INITIAL_RETAINED_ACTION) the headroom (1 - project_salience(A)) ≈ 0,
+        // so A barely moves and salience stays just under 1.0.
         let node = engine.graph().get_node(id).unwrap();
-        // dt=0, no decay. reinforce(1.0) = 1.0 + 0.20*(1-1.0) = 1.0
-        assert_eq!(node.salience, 1.0);
+        assert!(
+            node.retained_action >= a_before,
+            "access should not lower A: {} < {a_before}",
+            node.retained_action
+        );
+        assert!(node.salience > 0.999 && node.salience <= 1.0, "salience={}", node.salience);
         assert_eq!(node.access_count, 1);
     }
 
@@ -4978,5 +4999,176 @@ mod tests {
         let result = engine.query(&q, &QueryConfig::default());
 
         assert!(matches!(result, Err(Error::NodeNotFound(NodeId(0)))));
+    }
+
+    // ── PathUsed / CoReadout conductance learning (conductance.md) ────────────
+
+    /// Build a two-node graph linked by one edge; return (engine, edge_id).
+    fn engine_with_edge() -> (Engine, EdgeId) {
+        let mut engine = Engine::new();
+        let IngestResult::Created(a) = engine.ingest(make_observation("A")).unwrap() else {
+            panic!("expected Created");
+        };
+        let IngestResult::Created(b) = engine.ingest(make_observation("B")).unwrap() else {
+            panic!("expected Created");
+        };
+        // link() seeds conductance at 0.0; weight at the manual 0.5 projection input.
+        let eid = engine.link(a[0], b[0], EdgeType::Semantic, 0.5).unwrap();
+        // Reset the reservoir to a clean 0.0 cold-start so the Hebbian step is
+        // measured from the documented C_ij = 0 baseline (weight 0.5).
+        engine.graph.storage_mut().set_conductance(eid, 0.0).unwrap();
+        (engine, eid)
+    }
+
+    #[test]
+    fn path_used_raises_conductance_and_weight() {
+        let (mut engine, eid) = engine_with_edge();
+        let w_before = engine.graph().get_edge(eid).unwrap().weight;
+        let c_before = engine.graph().storage().get_conductance(eid).unwrap();
+        assert_eq!(c_before, 0.0);
+
+        engine.apply_path_used(vec![eid], vec![1.0]).unwrap();
+
+        let c_after = engine.graph().storage().get_conductance(eid).unwrap();
+        let w_after = engine.graph().get_edge(eid).unwrap().weight;
+        assert!(c_after > c_before, "C must rise: {c_after} !> {c_before}");
+        assert!(w_after > w_before, "weight projection must rise: {w_after} !> {w_before}");
+        // weight is the logistic projection of C — they must stay consistent.
+        assert!((w_after - crate::mechanics::priors::project_weight(c_after)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn path_used_zero_flux_is_identity() {
+        let (mut engine, eid) = engine_with_edge();
+        engine.apply_path_used(vec![eid], vec![0.0]).unwrap();
+        assert_eq!(engine.graph().storage().get_conductance(eid).unwrap(), 0.0);
+    }
+
+    #[test]
+    fn path_used_saturates_without_runaway() {
+        let (mut engine, eid) = engine_with_edge();
+        for _ in 0..10_000 {
+            engine.apply_path_used(vec![eid], vec![1.0]).unwrap();
+        }
+        let c = engine.graph().storage().get_conductance(eid).unwrap();
+        assert!(c.is_finite(), "conductance must not run away: {c}");
+        let w = engine.graph().get_edge(eid).unwrap().weight;
+        assert!(w < 1.0, "Oja-bounded weight must stay below 1: {w}");
+    }
+
+    #[test]
+    fn path_used_length_mismatch_errors() {
+        let (mut engine, eid) = engine_with_edge();
+        let err = engine.apply_path_used(vec![eid], vec![0.5, 0.5]);
+        assert!(matches!(err, Err(Error::InvalidInput(_))));
+    }
+
+    #[test]
+    fn path_used_non_finite_flux_errors() {
+        let (mut engine, eid) = engine_with_edge();
+        let err = engine.apply_path_used(vec![eid], vec![f64::NAN]);
+        assert!(matches!(err, Err(Error::NonFinite(_))));
+    }
+
+    #[test]
+    fn path_used_missing_edge_errors() {
+        let mut engine = Engine::new();
+        let err = engine.apply_path_used(vec![EdgeId(999)], vec![1.0]);
+        assert!(err.is_err(), "missing edge must error");
+    }
+
+    #[test]
+    fn co_readout_strengthens_connecting_edge() {
+        let (mut engine, eid) = engine_with_edge();
+        let edge = engine.graph().get_edge(eid).unwrap();
+        let (a, b) = (edge.source, edge.target);
+        let c_before = engine.graph().storage().get_conductance(eid).unwrap();
+
+        engine
+            .apply_co_readout(vec![(a, b)], vec![(0.8, 0.9)])
+            .unwrap();
+
+        let c_after = engine.graph().storage().get_conductance(eid).unwrap();
+        assert!(c_after > c_before, "co-readout must raise C: {c_after}");
+    }
+
+    #[test]
+    fn co_readout_uses_weaker_activation() {
+        // co_flux = min(a_i, a_j): the same min drives identical edges identically.
+        let (mut engine_lo, eid_lo) = engine_with_edge();
+        let (mut engine_hi, eid_hi) = engine_with_edge();
+        let (a_lo, b_lo) = {
+            let e = engine_lo.graph().get_edge(eid_lo).unwrap();
+            (e.source, e.target)
+        };
+        let (a_hi, b_hi) = {
+            let e = engine_hi.graph().get_edge(eid_hi).unwrap();
+            (e.source, e.target)
+        };
+
+        // Same minimum (0.3) despite different maxima => identical conductance move.
+        engine_lo
+            .apply_co_readout(vec![(a_lo, b_lo)], vec![(0.3, 0.9)])
+            .unwrap();
+        engine_hi
+            .apply_co_readout(vec![(a_hi, b_hi)], vec![(0.3, 0.4)])
+            .unwrap();
+
+        let c_lo = engine_lo.graph().storage().get_conductance(eid_lo).unwrap();
+        let c_hi = engine_hi.graph().storage().get_conductance(eid_hi).unwrap();
+        assert!((c_lo - c_hi).abs() < 1e-12, "min-flux must drive both: {c_lo} vs {c_hi}");
+    }
+
+    #[test]
+    fn co_readout_skips_unconnected_pairs() {
+        let mut engine = Engine::new();
+        let IngestResult::Created(a) = engine.ingest(make_observation("A")).unwrap() else {
+            panic!("expected Created");
+        };
+        let IngestResult::Created(b) = engine.ingest(make_observation("B")).unwrap() else {
+            panic!("expected Created");
+        };
+        // No edge between A and B: co-readout strengthens existing paths only.
+        let edges_before = engine.graph().edge_count();
+        engine
+            .apply_co_readout(vec![(a[0], b[0])], vec![(0.9, 0.9)])
+            .unwrap();
+        assert_eq!(engine.graph().edge_count(), edges_before, "no edge created");
+    }
+
+    #[test]
+    fn co_readout_length_mismatch_errors() {
+        let (mut engine, eid) = engine_with_edge();
+        let (a, b) = {
+            let e = engine.graph().get_edge(eid).unwrap();
+            (e.source, e.target)
+        };
+        let err = engine.apply_co_readout(vec![(a, b)], vec![(0.5, 0.5), (0.5, 0.5)]);
+        assert!(matches!(err, Err(Error::InvalidInput(_))));
+    }
+
+    #[test]
+    fn co_readout_non_finite_activation_errors() {
+        let (mut engine, eid) = engine_with_edge();
+        let (a, b) = {
+            let e = engine.graph().get_edge(eid).unwrap();
+            (e.source, e.target)
+        };
+        let err = engine.apply_co_readout(vec![(a, b)], vec![(f64::INFINITY, 0.5)]);
+        assert!(matches!(err, Err(Error::NonFinite(_))));
+    }
+
+    #[test]
+    fn path_used_is_deterministic() {
+        // Same graph + same committed trace => identical conductance.
+        let (mut e1, eid1) = engine_with_edge();
+        let (mut e2, eid2) = engine_with_edge();
+        for _ in 0..5 {
+            e1.apply_path_used(vec![eid1], vec![0.7]).unwrap();
+            e2.apply_path_used(vec![eid2], vec![0.7]).unwrap();
+        }
+        let c1 = e1.graph().storage().get_conductance(eid1).unwrap();
+        let c2 = e2.graph().storage().get_conductance(eid2).unwrap();
+        assert_eq!(c1, c2, "deterministic: {c1} vs {c2}");
     }
 }

@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 
 use anamnesis::graph::{Edge, EdgeId, Timestamp};
-use anamnesis::mechanics::forgetting::{decay_salience, floor_for_type, lambda_for_type};
+use anamnesis::mechanics::interactions::decay_default;
+use anamnesis::mechanics::priors::decay_multiplier_for_type;
 use anamnesis::mechanics::gravity::{compute_mass, mass_prior};
 use anamnesis::mechanics::repulsion::rigidity;
 use anamnesis::query::assembly::{is_identity_type, is_memory_type};
@@ -19,11 +20,13 @@ fn debug_node_types() -> [KnowledgeType; 3] {
 
 #[test]
 fn debug_node_types_have_inert_decay_values() {
+    // Debug-lifecycle nodes are inert: their per-type decay multiplier is 0, so
+    // power-law dissipation leaves the retained-action reservoir A_i unchanged
+    // regardless of elapsed time (no [0,1] floor on the reservoir path).
     for node_type in debug_node_types() {
-        assert_eq!(lambda_for_type(&node_type), 0.0);
-        assert_eq!(floor_for_type(&node_type), 1.0);
-        assert_eq!(decay_salience(0.7, 365.0, &node_type), 0.7);
-        assert_eq!(decay_salience(1.0, 365.0, &node_type), 1.0);
+        assert_eq!(decay_multiplier_for_type(&node_type), 0.0);
+        assert_eq!(decay_default(0.7, 365.0, &node_type), 0.7);
+        assert_eq!(decay_default(-2.0, 365.0, &node_type), -2.0);
     }
 }
 

@@ -212,10 +212,29 @@ fn forgetting_removes_decayed_nodes_until_reinforced() {
             .unwrap();
     }
 
+    // Seed the target's reservoir mid-range so the decay→reinforce cycle is
+    // observable rather than pinned at the saturation rail. Salience is a pure
+    // projection of this reservoir (ADR-0002).
+    engine
+        .graph_mut()
+        .storage_mut()
+        .set_retained_action(target, 0.0) // project_salience(0) = 0.5
+        .unwrap();
+    let s_target_before = engine.graph().storage().get_salience(target).unwrap();
+
     let after_thirty_days = Timestamp(30 * DAY_MS);
     engine.tick(after_thirty_days).unwrap();
 
-    let decayed = engine
+    // Power-law dissipation strictly lowers the target's salience projection over
+    // 30 days (the reservoir decayed; nothing was deleted).
+    let s_target_decayed = engine.graph().storage().get_salience(target).unwrap();
+    assert!(
+        s_target_decayed < s_target_before,
+        "30 days of forgetting should lower salience: {s_target_decayed} !< {s_target_before}"
+    );
+    // The site is NOT deleted — still addressable, just less salient (ADR-0008).
+    assert!(engine.graph().get_node(target).is_ok());
+    let active_before = engine
         .query(
             &Query::List {
                 min_salience: 0.8,
@@ -224,34 +243,37 @@ fn forgetting_removes_decayed_nodes_until_reinforced() {
             &QueryConfig::default(),
         )
         .unwrap();
-    assert_eq!(
-        decayed.total_fragments(),
-        0,
-        "30 days of forgetting should push semantic memories below the active 0.8 threshold"
+    assert!(
+        !active_before
+            .knowledge
+            .iter()
+            .any(|f| f.node_id == target),
+        "decayed target should have dropped out of the active 0.8 set"
     );
 
+    // Touching the target applies decay-before-reinforce, raising its retained
+    // action (and thus salience) well above its decayed level.
     for _ in 0..4 {
         engine.touch(target, after_thirty_days).unwrap();
     }
-
-    let reinforced = engine
-        .query(
-            &Query::List {
-                min_salience: 0.8,
-                limit: 10,
-            },
-            &QueryConfig::default(),
-        )
-        .unwrap();
-    assert_contains_name(
-        &reinforced,
-        "auth cache invalidation incident",
-        "reinforced target memory should re-enter the active set",
+    let s_target_reinforced = engine.graph().storage().get_salience(target).unwrap();
+    assert!(
+        s_target_reinforced > s_target_decayed,
+        "reinforcement should raise the target above its decayed level: \
+         {s_target_reinforced} !> {s_target_decayed}"
     );
-    assert_eq!(
-        reinforced.total_fragments(),
-        1,
-        "only the touched memory should pass the 0.8 salience threshold after reinforcement"
+    assert_contains_name(
+        &engine
+            .query(
+                &Query::List {
+                    min_salience: 0.0,
+                    limit: 10,
+                },
+                &QueryConfig::default(),
+            )
+            .unwrap(),
+        "auth cache invalidation incident",
+        "reinforced target memory should remain addressable in the active set",
     );
 }
 

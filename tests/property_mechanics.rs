@@ -5,10 +5,15 @@
 
 use anamnesis::graph::KnowledgeType;
 use anamnesis::mechanics::attraction::{attraction_score, cosine_similarity, strengthen_edge};
-use anamnesis::mechanics::forgetting::{
-    base_level_to_salience, decay_salience, floor_for_type, lambda_for_type, reinforce_salience,
-};
+use anamnesis::mechanics::forgetting::base_level_to_salience;
 use anamnesis::mechanics::gravity::{compute_mass, gravity_boost, normalize_access_count};
+use anamnesis::mechanics::interactions::{
+    decay_default, hebbian_oja, reinforce_access, rescorla_wagner,
+};
+use anamnesis::mechanics::priors::{
+    decay_multiplier_for_type, learning_rate, project_salience, project_weight,
+    TARGET_COACTIVATION_N,
+};
 use anamnesis::query::activation::{initial_activation, propagation_strength, salience_gate};
 use proptest::prelude::*;
 
@@ -33,82 +38,77 @@ fn knowledge_type_strategy() -> impl Strategy<Value = KnowledgeType> {
     ]
 }
 
-// ── Property tests for forgetting mechanics ──────────────────────────────────
+// ── Property tests for reservoir dynamics (Phase 2 substrate) ────────────────
 
 proptest! {
-    /// decay_salience: result ≤ current, result ≥ 0.0
-    /// For decaying types (lambda > 0): result ≥ floor_for_type(kt) when current >= floor
-    /// For inert types (lambda = 0): result == current
+    /// decay (power-law, log-odds): never increases A_i, stays finite, and is an
+    /// identity for protected (zero-multiplier) types. There is NO [0,1] floor —
+    /// decay operates on the unbounded retained-action reservoir.
     #[test]
-    fn prop_decay_salience_bounds(
-        current in 0.0f64..=1.0,
-        dt_days in 0.0f64..=365.0,
+    fn prop_decay_never_increases_action(
+        action in -20.0f64..=20.0,
+        dt_days in 0.0f64..=3650.0,
         kt in knowledge_type_strategy(),
     ) {
-        let result = decay_salience(current, dt_days, &kt);
-        let lambda = lambda_for_type(&kt);
-        let floor = floor_for_type(&kt);
+        let result = decay_default(action, dt_days, &kt);
+        prop_assert!(result.is_finite(), "decay produced non-finite: {result}");
+        prop_assert!(result <= action + 1e-9, "decay increased A: {result} > {action}");
 
-        // Result must be non-negative and not exceed current
-        prop_assert!(result >= 0.0, "decay result negative: {result}");
-        prop_assert!(result <= current + 1e-10, "decay increased salience: {result} > {current}");
-
-        // For inert types (lambda = 0), result must equal current
-        if lambda == 0.0 {
+        if decay_multiplier_for_type(&kt) == 0.0 {
             prop_assert!(
-                (result - current).abs() < 1e-10,
-                "inert type should not decay: {result} != {current}"
+                (result - action).abs() < 1e-12,
+                "protected type must not decay: {result} != {action}"
             );
-        } else {
-            // For decaying types, if current >= floor, result must be >= floor
-            if current >= floor {
-                prop_assert!(
-                    result >= floor - 1e-10,
-                    "decay below floor: {result} < {floor}"
-                );
-            } else {
-                // If already below floor, result should equal current (unchanged)
-                prop_assert!(
-                    (result - current).abs() < 1e-10,
-                    "below-floor input should be unchanged: {result} != {current}"
-                );
-            }
         }
     }
 
-    /// reinforce_salience: result ≥ current, result ≤ 1.0
-    /// When current == 1.0, result == 1.0
+    /// access gain: bounded saturating reinforcement — never lowers A, stays finite,
+    /// and its projection never exceeds 1.0 (the Oja-style ceiling).
     #[test]
-    fn prop_reinforce_salience_bounds(current in 0.0f64..=1.0) {
-        let result = reinforce_salience(current);
-
-        // Result must be >= current and <= 1.0
-        prop_assert!(result >= current - 1e-10, "reinforce decreased salience: {result} < {current}");
-        prop_assert!(result <= 1.0 + 1e-10, "reinforce exceeded 1.0: {result}");
-
-        // At saturation, no further boost
-        if (current - 1.0).abs() < 1e-10 {
-            prop_assert!((result - 1.0).abs() < 1e-10, "at 1.0, reinforce should stay 1.0");
-        }
+    fn prop_access_gain_bounded(action in -20.0f64..=20.0, work in 0.0f64..=2.0) {
+        let eta = learning_rate(TARGET_COACTIVATION_N);
+        let result = reinforce_access(action, work, eta);
+        prop_assert!(result.is_finite());
+        prop_assert!(result >= action - 1e-9, "access gain lowered A: {result} < {action}");
+        prop_assert!(project_salience(result) <= 1.0 + 1e-12);
     }
 
-    /// lambda_for_type: result ≥ 0 for all variants
+    /// Rescorla-Wagner: always moves toward lambda (or stays), never overshoots,
+    /// and stays finite.
     #[test]
-    fn prop_lambda_for_type_nonnegative(kt in knowledge_type_strategy()) {
-        let lambda = lambda_for_type(&kt);
-        prop_assert!(lambda >= 0.0, "lambda negative: {lambda}");
+    fn prop_rescorla_wagner_toward_target(
+        action in -20.0f64..=20.0,
+        lambda in -10.0f64..=10.0,
+    ) {
+        let eta = learning_rate(TARGET_COACTIVATION_N);
+        let result = rescorla_wagner(action, lambda, eta);
+        prop_assert!(result.is_finite());
+        // The move is a fraction eta in (0,1) toward lambda: result is between
+        // action and lambda (inclusive).
+        let lo = action.min(lambda);
+        let hi = action.max(lambda);
+        prop_assert!(result >= lo - 1e-9 && result <= hi + 1e-9, "overshoot: {result}");
     }
 
-    /// floor_for_type: result ∈ [0, 1]
-    /// (1.0 sentinel for inert types is valid)
+    /// Hebbian-Oja: positive flux never lowers C, the projection stays below 1.0
+    /// (no runaway), and the value stays finite.
     #[test]
-    fn prop_floor_for_type_in_range(kt in knowledge_type_strategy()) {
-        let floor = floor_for_type(&kt);
-        prop_assert!(floor >= 0.0, "floor negative: {floor}");
-        prop_assert!(floor <= 1.0 + 1e-10, "floor > 1.0: {floor}");
+    fn prop_hebbian_oja_bounded(conductance in -20.0f64..=20.0, flux in 0.0f64..=2.0) {
+        let eta = learning_rate(TARGET_COACTIVATION_N);
+        let result = hebbian_oja(conductance, flux, eta);
+        prop_assert!(result.is_finite());
+        prop_assert!(result >= conductance - 1e-9, "positive flux lowered C: {result}");
+        prop_assert!(project_weight(result) < 1.0 + 1e-12);
     }
 
-    /// base_level_to_salience: result ∈ [0, 1]
+    /// decay_multiplier_for_type: result ∈ [0, 1] for all variants.
+    #[test]
+    fn prop_decay_multiplier_in_range(kt in knowledge_type_strategy()) {
+        let m = decay_multiplier_for_type(&kt);
+        prop_assert!((0.0..=1.0 + 1e-12).contains(&m), "multiplier out of range: {m}");
+    }
+
+    /// base_level_to_salience: result ∈ [0, 1].
     #[test]
     fn prop_base_level_to_salience_in_range(b in -100.0f64..=100.0) {
         let result = base_level_to_salience(b);

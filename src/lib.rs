@@ -26,9 +26,9 @@ pub mod storage;
 
 // Core re-exports
 pub use api::{
-    CrystallizeRequest, CrystallizeResult, DebugOutcome, DecayModel, EnergyModel, Engine,
-    EngineConfig, EvidenceResult, IngestResult, MergeLog, MergePair, Observation, ObservedRef,
-    PerspectiveKey, ReflectReport, SessionSummary, SpreadingModel, TickReport,
+    CrystallizeRequest, CrystallizeResult, DebugOutcome, EnergyModel, Engine, EngineConfig,
+    EvidenceResult, IngestResult, MergeLog, MergePair, Observation, ObservedRef, PerspectiveKey,
+    ReflectReport, SessionSummary, SpreadingModel, TickReport,
 };
 pub use embedding::EmbeddingProvider;
 #[cfg(feature = "embed")]

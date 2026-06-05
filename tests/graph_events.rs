@@ -199,11 +199,16 @@ fn tick_emits_archive_and_tier_transition_events() {
             .ingest(observation("archives", None, Timestamp(0)))
             .expect("ingest succeeds"),
     );
+    // Salience is a pure projection of the retained-action reservoir (ADR-0002):
+    // seed the *reservoir* just above the archive threshold so a year of power-law
+    // dissipation pushes its projection below it. (Poking salience directly would
+    // be overwritten by the reservoir on the next tick.)
+    let just_above = anamnesis::mechanics::priors::salience_to_action(0.11);
     engine
         .graph_mut()
         .storage_mut()
-        .set_salience(node_id, 0.11)
-        .expect("salience can be adjusted for test setup");
+        .set_retained_action(node_id, just_above)
+        .expect("reservoir can be adjusted for test setup");
     engine.drain_events();
 
     engine

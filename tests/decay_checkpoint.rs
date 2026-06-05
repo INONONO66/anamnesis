@@ -137,21 +137,22 @@ fn tick_without_salience_change_keeps_checkpoint_stable() {
 
 #[test]
 fn touch_uses_checkpoint_not_accessed_at_for_decay_baseline() {
+    use anamnesis::mechanics::interactions::{decay_default, reinforce_access};
+    use anamnesis::mechanics::priors::{learning_rate, TARGET_COACTIVATION_N};
+
     let mut engine = test_engine();
     let id = ingest_first(&mut engine, observation_at("delta", 0));
 
-    let s_initial = engine.graph().storage().get_salience(id).unwrap();
+    let a_initial = engine.graph().get_node(id).unwrap().retained_action;
+    let node_type = engine.graph().get_node(id).unwrap().node_type.clone();
 
+    // Tick to 10 days: power-law dissipation on the reservoir; checkpoint -> 10d,
+    // accessed_at left at 0 (last-access semantics preserved).
     engine.tick(Timestamp(10 * DAY_MS)).unwrap();
-    let s_after_tick = engine.graph().storage().get_salience(id).unwrap();
-    assert!(
-        s_after_tick < s_initial,
-        "tick should reduce salience over 10 days"
-    );
-
-    let pre_touch_checkpoint = engine.graph().storage().get_decay_checkpoint(id).unwrap();
+    let a_after_tick = engine.graph().get_node(id).unwrap().retained_action;
+    assert!(a_after_tick < a_initial, "tick should decay the reservoir");
     assert_eq!(
-        pre_touch_checkpoint,
+        engine.graph().storage().get_decay_checkpoint(id).unwrap(),
         Timestamp(10 * DAY_MS),
         "tick advanced checkpoint"
     );
@@ -161,13 +162,26 @@ fn touch_uses_checkpoint_not_accessed_at_for_decay_baseline() {
         "tick did not touch accessed_at"
     );
 
+    // Touch at 11 days. The decay baseline is the CHECKPOINT (10d) → only 1 day of
+    // elapsed decay, NOT accessed_at (0d) which would be 11 days of decay.
     engine.touch(id, Timestamp(11 * DAY_MS)).unwrap();
-    let s_after_touch = engine.graph().storage().get_salience(id).unwrap();
+    let a_after_touch = engine.graph().get_node(id).unwrap().retained_action;
+
+    let eta = learning_rate(TARGET_COACTIVATION_N);
+    // What touch should compute: 1 day of decay from the checkpoint, then access gain.
+    let expected_from_checkpoint =
+        reinforce_access(decay_default(a_after_tick, 1.0, &node_type), 1.0, eta);
+    // What it would WRONGLY compute if it used accessed_at (11 days elapsed).
+    let wrong_from_accessed_at =
+        reinforce_access(decay_default(a_after_tick, 11.0, &node_type), 1.0, eta);
 
     assert!(
-        s_after_touch > s_after_tick,
-        "touch with checkpoint baseline (1 day elapsed) should reinforce more than minimal decay; \
-         if touch had used accessed_at (11 days elapsed) the result would dip lower"
+        (a_after_touch - expected_from_checkpoint).abs() < 1e-9,
+        "touch must decay from the checkpoint (1 day): got {a_after_touch}, expected {expected_from_checkpoint}"
+    );
+    assert!(
+        a_after_touch > wrong_from_accessed_at,
+        "checkpoint baseline (1 day) must decay less than the stale accessed_at baseline (11 days)"
     );
 
     let storage = engine.graph().storage();

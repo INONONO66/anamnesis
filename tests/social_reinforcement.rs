@@ -2,7 +2,7 @@ use anamnesis::api::Observation;
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{EdgeType, KnowledgeType, NodeId, ScopePath, Timestamp};
 use anamnesis::mechanics::social::{FeedbackSignal, social_support};
-use anamnesis::{Engine, EngineConfig, IngestResult, SessionSummary, StorageAdapter};
+use anamnesis::{Engine, IngestResult, SessionSummary, StorageAdapter};
 
 fn observation(name: &str, _agent_id: &str, session_id: &str, tags: &[&str]) -> Observation {
     let peer_id = anamnesis::graph::types::PeerId(match _agent_id {
@@ -113,20 +113,24 @@ fn apply_feedback_useful_increases_salience() {
     let mut engine = Engine::new();
     let node_id = insert_node(&mut engine, "fact", "agent-1", "s1", &["auth"]);
 
-    // Lower salience from initial 1.0 so positive feedback can increase it
-    engine
-        .apply_feedback(node_id, FeedbackSignal::NotUseful { strength: 1.0 })
-        .unwrap();
+    // Drive the reservoir well below the positive reward target with repeated
+    // NotUseful feedback (Rescorla-Wagner moves toward the negative target), so
+    // a subsequent Useful signal has room to pull retained action back up.
+    for _ in 0..50 {
+        engine
+            .apply_feedback(node_id, FeedbackSignal::NotUseful { strength: 1.0 })
+            .unwrap();
+    }
 
     let before = engine.graph().storage().get_salience(node_id).unwrap();
-    assert!(before < 1.0);
+    assert!(before < 0.5, "should be well below the ceiling: {before}");
 
     engine
         .apply_feedback(node_id, FeedbackSignal::Useful { strength: 1.0 })
         .unwrap();
     let after = engine.graph().storage().get_salience(node_id).unwrap();
 
-    assert!(after > before);
+    assert!(after > before, "useful feedback should raise salience: {after} !> {before}");
 }
 
 #[test]
@@ -158,19 +162,25 @@ fn apply_feedback_incorrect_decreases_salience() {
 }
 
 #[test]
-fn apply_feedback_diminishing_returns_approaches_one() {
+fn apply_feedback_diminishing_returns_saturate_at_reward_target() {
     let mut engine = Engine::new();
     let node_id = insert_node(&mut engine, "fact", "agent-1", "s1", &["auth"]);
 
-    for _ in 0..100 {
+    // Rescorla-Wagner on the reservoir saturates at the reward target lambda,
+    // whose projection is project_salience(REWARD_LOG_ODDS_SCALE) = logistic(4) ≈ 0.982.
+    for _ in 0..200 {
         engine
             .apply_feedback(node_id, FeedbackSignal::Useful { strength: 1.0 })
             .unwrap();
     }
 
     let final_salience = engine.graph().storage().get_salience(node_id).unwrap();
-    assert!(final_salience > 0.99);
-    assert!(final_salience <= 1.0);
+    let target = 1.0 / (1.0 + (-4.0_f64).exp());
+    assert!(
+        (final_salience - target).abs() < 1e-3,
+        "should saturate at the reward-target projection {target}, got {final_salience}"
+    );
+    assert!(final_salience < 1.0);
 }
 
 #[test]
@@ -193,20 +203,24 @@ fn apply_feedback_does_not_modify_node_content() {
 }
 
 #[test]
-fn apply_feedback_respects_custom_learning_rate() {
-    let config = EngineConfig::new().with_social_learning_rate(0.5);
-    let mut engine = Engine::with_config(config);
+fn apply_feedback_uses_single_eta_rescorla_wagner() {
+    // Feedback is a Rescorla-Wagner update on the retained-action reservoir using
+    // the single core eta derived from N (no per-engine social_learning_rate knob):
+    //   A' = A + eta*(lambda - A), salience = project_salience(A').
+    use anamnesis::mechanics::interactions::{lambda_reward, rescorla_wagner};
+    use anamnesis::mechanics::priors::{learning_rate, project_salience, TARGET_COACTIVATION_N};
+
+    let mut engine = Engine::new();
     let node_id = insert_node(&mut engine, "fact", "agent-1", "s1", &["auth"]);
 
-    let before = engine.graph().storage().get_salience(node_id).unwrap();
-    engine
-        .apply_feedback(node_id, FeedbackSignal::Useful { strength: 1.0 })
-        .unwrap();
+    let a_before = engine.graph().get_node(node_id).unwrap().retained_action;
+    let signal = FeedbackSignal::NotUseful { strength: 1.0 };
+    engine.apply_feedback(node_id, signal.clone()).unwrap();
     let after = engine.graph().storage().get_salience(node_id).unwrap();
 
-    // Higher learning rate = larger jump
-    let expected = before + 0.5 * 1.0 * (1.0 - before);
-    assert!((after - expected).abs() < 1e-10);
+    let eta = learning_rate(TARGET_COACTIVATION_N);
+    let expected = project_salience(rescorla_wagner(a_before, lambda_reward(&signal), eta));
+    assert!((after - expected).abs() < 1e-9, "{after} != {expected}");
 }
 
 #[test]

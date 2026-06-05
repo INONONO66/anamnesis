@@ -2,7 +2,7 @@ use anamnesis::api::Observation;
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{KnowledgeType, Timestamp};
 use anamnesis::query::{Query, QueryConfig};
-use anamnesis::{Engine, EngineConfig, IngestResult};
+use anamnesis::{Engine, EngineConfig, IngestResult, StorageAdapter};
 
 fn make_obs_typed(name: &str, node_type: KnowledgeType) -> Observation {
     Observation {
@@ -132,14 +132,22 @@ fn list_orders_by_salience_descending() {
 
     let first = created_id(
         engine
-            .ingest(make_obs_typed("older", KnowledgeType::Semantic))
+            .ingest(make_obs_typed("higher", KnowledgeType::Semantic))
             .unwrap(),
     );
+    let second = created_id(
+        engine
+            .ingest(make_obs_typed("lower", KnowledgeType::Semantic))
+            .unwrap(),
+    );
+
+    // Salience is a projection of the retained-action reservoir (ADR-0002): give
+    // `second` a strictly lower reservoir so its projection sorts below `first`.
     engine
-        .ingest(make_obs_typed("newer", KnowledgeType::Semantic))
+        .graph_mut()
+        .storage_mut()
+        .set_retained_action(second, anamnesis::mechanics::priors::salience_to_action(0.40))
         .unwrap();
-    engine.tick(Timestamp(86_401_000)).unwrap();
-    engine.touch(first, Timestamp(86_402_000)).unwrap();
 
     let package = engine
         .query(
@@ -151,5 +159,6 @@ fn list_orders_by_salience_descending() {
         )
         .unwrap();
 
-    assert_eq!(package.knowledge[0].node_id, first);
+    assert_eq!(package.knowledge[0].node_id, first, "higher salience ranks first");
+    assert_eq!(package.knowledge[1].node_id, second);
 }

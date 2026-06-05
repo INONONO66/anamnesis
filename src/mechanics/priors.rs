@@ -19,14 +19,89 @@
 //!
 //! ## Reserved for later phases
 //!
-//! - Learning rates (`eta_path`, `eta_pair`, `eta_leak`), surprise gain `k`, and
-//!   `theta_sep` arrive with their phases (2–4). Per-edge-type `kappa` is deferred.
+//! - Surprise gain `k` and `theta_sep` arrive with their phases (3–4).
+//!   Per-edge-type `kappa` is deferred.
 
 /// ACT-R base-level power-law decay exponent `d`.
 ///
 /// CALIBRATED PRIOR — ACT-R canonical default `d ≈ 0.5`
 /// ([ADR-0008](../../docs/adr/0008-powerlaw-dissipation.md)).
 pub const DECAY_EXPONENT_D: f64 = 0.5;
+
+/// Target co-activation count `N` — the single behavioral specification from which
+/// every learning rate derives ([conductance.md](../../docs/04-cognitive-dynamics/conductance.md),
+/// [interactions.md](../../docs/04-cognitive-dynamics/interactions.md)).
+///
+/// CALIBRATED PRIOR — `N` is the number of full-flux interactions at which a
+/// reservoir should reach its saturation target. The single core learning rate is
+/// `eta = 1 - 0.5^(1/N)` ([`learning_rate`]); the same `eta` drives feedback
+/// (Rescorla-Wagner `dA`), Hebbian-Oja `dC`, and the saturating `access_gain`.
+/// Splitting into `eta_path`/`eta_pair` is an optional later refit of one `N`,
+/// not a separate base constant.
+pub const TARGET_COACTIVATION_N: f64 = 10.0;
+
+/// The single core learning rate `eta = 1 - 0.5^(1/N)`, derived from the target
+/// co-activation count `N` ([conductance.md](../../docs/04-cognitive-dynamics/conductance.md)).
+///
+/// DERIVED — forced by the behavioral specification `N`: after `N` full-flux
+/// updates a reservoir's projection reaches the `0.5` Oja/symmetric saturation
+/// target. Returns `0.0` for non-positive `N`. There is one core `eta`; per-channel
+/// rates are an optional refit of the same `N`, never independent constants.
+#[inline]
+pub fn learning_rate(n: f64) -> f64 {
+    if n <= 0.0 {
+        return 0.0;
+    }
+    1.0 - 0.5_f64.powf(1.0 / n)
+}
+
+/// Initial retained action `A_i` for a freshly created node (`SiteInserted`).
+///
+/// CALIBRATED PRIOR — a new site enters with high need-odds. This is the
+/// reservoir-authoritative initial value (ADR-0002): node creation sets
+/// `retained_action = INITIAL_RETAINED_ACTION` and derives
+/// `salience = project_salience(INITIAL_RETAINED_ACTION) ≈ 1.0`, so the reservoir
+/// and its projection agree from the start. `logistic(13.8) ≈ 0.999999`. Phase 4
+/// replaces this flat prior with a Bayesian-surprise initial charge.
+pub const INITIAL_RETAINED_ACTION: f64 = 13.8;
+
+/// Log-odds reward scale for Rescorla-Wagner feedback targets.
+///
+/// CALIBRATED PRIOR — a unit-strength `Useful` signal targets `+REWARD_LOG_ODDS_SCALE`
+/// log need-odds (`project_salience ≈ 0.98`), unit-strength negative feedback targets
+/// the symmetric `-REWARD_LOG_ODDS_SCALE`. The Rescorla-Wagner step moves a fraction
+/// `eta` toward this target ([`crate::mechanics::interactions::lambda_reward`]).
+pub const REWARD_LOG_ODDS_SCALE: f64 = 4.0;
+
+/// Per-`node_type` policy multiplier on the decay exponent `d` (dissipation.md).
+///
+/// CALIBRATED PRIOR — tier/type is *policy*, not an independent decay knob: it
+/// only scales the single free decay prior `d`. Core ≈ 0 (protected), Working
+/// below one, Episodic one, Archive excluded. Forgetting lives entirely in the
+/// retained-action dynamics governed by `d` together with this multiplier; there
+/// is no separate per-type decay rate.
+///
+/// Returns the factor by which `d` is scaled for the given knowledge type.
+pub fn decay_multiplier_for_type(kt: &crate::graph::KnowledgeType) -> f64 {
+    use crate::graph::KnowledgeType;
+    match kt {
+        // Core identity — protected from ordinary decay.
+        KnowledgeType::IdentityCore => 0.0,
+        // Slow-decaying identity / convention layers (Working-like).
+        KnowledgeType::IdentityLearned => 0.10,
+        KnowledgeType::Convention | KnowledgeType::Decision => 0.30,
+        KnowledgeType::IdentityState => 0.60,
+        // Ordinary semantic / procedural knowledge.
+        KnowledgeType::Semantic | KnowledgeType::Procedural | KnowledgeType::Entity => 0.40,
+        KnowledgeType::Gotcha => 0.40,
+        KnowledgeType::Event => 0.60,
+        // Episodic decays at the full nominal rate.
+        KnowledgeType::Episodic => 1.0,
+        // Debug-lifecycle nodes are inert: they do not decay under maintenance.
+        KnowledgeType::Hypothesis | KnowledgeType::Evidence | KnowledgeType::DebugSession => 0.0,
+        KnowledgeType::Custom(_) => 0.40,
+    }
+}
 
 /// Random-walk-with-restart restart probability `alpha`, default.
 ///
