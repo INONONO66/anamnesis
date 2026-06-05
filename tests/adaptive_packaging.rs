@@ -3,7 +3,8 @@ use std::collections::{HashMap, HashSet};
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{KnowledgeType, NodeId, ScopePath, Timestamp};
 use anamnesis::query::assembly::{
-    ModeContext, ScoredNode, assemble_context_package, assemble_context_package_for_mode,
+    ContradictionPair, ModeContext, ScoredNode, assemble_context_package,
+    assemble_context_package_for_mode,
 };
 use anamnesis::query::types::Query;
 
@@ -140,7 +141,14 @@ fn tension_involved_nodes_include_provenance() {
         make_scored_node(2, KnowledgeType::Semantic, "unrelated", 0.7),
     ];
 
-    let contradicts_edges = vec![(node_a, node_b, 0.9)];
+    let contradiction_pairs = vec![ContradictionPair {
+        node_a,
+        node_b,
+        edge_weight: 0.9,
+        stress: 0.54,
+        scope_overlap: 1.0,
+        temporal_overlap: 1.0,
+    }];
     let mut activations = HashMap::new();
     activations.insert(node_a, 0.8);
     activations.insert(node_b, 0.6);
@@ -156,7 +164,7 @@ fn tension_involved_nodes_include_provenance() {
         nodes,
         &query,
         &[],
-        &contradicts_edges,
+        &contradiction_pairs,
         &activations,
         10000,
         4,
@@ -278,7 +286,6 @@ fn associative_behavior_preserved() {
         nodes_clone,
         &[],
         &[],
-        &HashMap::new(),
         10000,
         4,
         &ScopePath::universal(),

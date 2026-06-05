@@ -35,7 +35,12 @@ const ACCESS_READOUT_WORK: f64 = 1.0;
 pub struct EngineConfig {
     /// Maximum number of nodes before perception gate rejects new observations.
     pub max_nodes: usize,
-    /// Minimum novelty score [0, 1] for an observation to enter the graph.
+    /// Separation boundary `theta_sep` [0, 1]: novelty `> theta_sep` allocates a new
+    /// site, novelty `<= theta_sep` routes to and reinforces the nearest one
+    /// (perception.md). This is not a free knob — its default derives from the encoder
+    /// distinct-pair distribution as `theta_sep = 1 - q95`
+    /// ([`crate::mechanics::priors::theta_sep`]); the setter exists only to override
+    /// the operative boundary in tests and diagnostics.
     pub novelty_threshold: f64,
     /// Minimum confidence [0, 1] for an observation to enter the graph.
     pub confidence_threshold: f64,
@@ -59,7 +64,15 @@ impl Default for EngineConfig {
     fn default() -> Self {
         EngineConfig {
             max_nodes: 100_000,
-            novelty_threshold: 0.30,
+            // theta_sep is NOT a free knob (perception.md, ADR-0009): it is derived
+            // deterministically from the embedding encoder's distinct-pair similarity
+            // distribution as `theta_sep = 1 - q95`. The default tracks the encoder
+            // constant rather than a hard-coded literal, so it recomputes exactly
+            // whenever the encoder changes. `with_novelty_threshold` exists only to
+            // override the operative boundary in tests/diagnostics.
+            novelty_threshold: crate::mechanics::priors::theta_sep(
+                crate::mechanics::priors::ENCODER_DISTINCT_PAIR_Q95,
+            ),
             confidence_threshold: 0.50,
             dedup_threshold: 0.92,
             dedup_enabled: true,
@@ -80,6 +93,11 @@ impl EngineConfig {
         self
     }
 
+    /// Override the encoder-derived separation boundary `theta_sep`.
+    ///
+    /// The default already tracks the encoder (`1 - q95`, see
+    /// [`crate::mechanics::priors::theta_sep`]); this setter exists only to override
+    /// the operative boundary in tests and diagnostics, not as a production knob.
     pub fn with_novelty_threshold(mut self, threshold: f64) -> Self {
         self.novelty_threshold = threshold;
         self
@@ -1764,9 +1782,11 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             attraction_score, cosine_similarity, should_create_edge, strengthen_edge, tau_type,
         };
         use crate::mechanics::gravity::compute_mass;
-        use crate::mechanics::perception::gate_observation;
+        use crate::mechanics::perception::{self, PerceptionDecision};
 
-        let (max_similarity, most_similar_id) =
+        // Nearest existing site: max similarity and the candidate embedding for the
+        // Bayesian-surprise (Mahalanobis/isotropic) prediction error.
+        let (max_similarity, most_similar_id, predicted_embedding) =
             if let Some(ref new_embedding) = observation.embedding {
                 let trigger_candidates =
                     ingest_trigger_candidates(self.graph.storage(), &observation.entity_tags, None);
@@ -1776,7 +1796,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                     trigger_candidates
                 };
 
-                candidates
+                let (sim, id) = candidates
                     .into_iter()
                     .filter_map(|nid| {
                         self.graph.storage().get_node(nid).ok().and_then(|n| {
@@ -1787,19 +1807,87 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                     })
                     .fold((0.0_f64, NodeId(0)), |(max_s, max_id), (nid, s)| {
                         if s > max_s { (s, nid) } else { (max_s, max_id) }
+                    });
+                let pred = (sim > 0.0)
+                    .then(|| {
+                        self.graph
+                            .storage()
+                            .get_node(id)
+                            .ok()
+                            .and_then(|n| n.embedding.clone())
                     })
+                    .flatten();
+                (sim, id, pred)
             } else {
-                (0.0, NodeId(0))
+                (0.0, NodeId(0), None)
             };
 
-        // Dedup check: if similarity exceeds the threshold, reinforce the existing node.
-        if self.config.dedup_enabled && max_similarity > self.config.dedup_threshold {
-            self.touch(most_similar_id, observation.timestamp)?;
-            return Ok(IngestResult::Reinforced {
-                existing_id: most_similar_id,
-                similarity: max_similarity,
-            });
-        }
+        // ── Stage 1 of perception: reject untrusted / unaffordable-and-not-novel ──
+        // ── plus Stage 2 routing. theta_sep is the encoder-derived separation     ──
+        // ── boundary `1 - q95` (perception.md, ADR-0009); the engine defaults     ──
+        // ── `novelty_threshold` to that derivation (priors::theta_sep), so the    ──
+        // ── operative value tracks the encoder rather than a hard-coded literal.  ──
+        let theta_sep = self.config.novelty_threshold;
+
+        // Surprise-gated initial charge dA = k * eps for an Allocate decision.
+        // eps is the precision-weighted (isotropic-fallback) embedding prediction
+        // error against the nearest site; absent any prediction (no embeddings yet)
+        // the site is maximally surprising and enters at the flat-prior ceiling.
+        let surprise_charge = match (&observation.embedding, &predicted_embedding) {
+            (Some(obs), Some(pred)) => {
+                let eps = perception::bayesian_surprise(obs, pred, None);
+                perception::surprise_charge(eps)
+            }
+            _ => crate::mechanics::priors::INITIAL_RETAINED_ACTION,
+        };
+
+        let decision = perception::gate(
+            observation.confidence,
+            self.config.confidence_threshold,
+            self.graph.node_count(),
+            self.config.max_nodes,
+            max_similarity,
+            theta_sep,
+            surprise_charge,
+        );
+
+        // Route-via-reinforce (familiar) vs allocate-with-surprise-charge (novel).
+        let initial_retained_action = match decision {
+            PerceptionDecision::Reject(reason) => {
+                return Err(Error::Rejected(format!(
+                    "{}: confidence {:.2}, novelty vs theta_sep {:.2}",
+                    reason.as_str(),
+                    observation.confidence,
+                    theta_sep
+                )));
+            }
+            PerceptionDecision::Route { .. } => {
+                // Route is the SSOT invariant "reinforce existing site; no new site"
+                // (perception.md decision table): the gate has already judged the
+                // input familiar (novelty <= theta_sep), so it reinforces the nearest
+                // matched site and never allocates a duplicate. This is independent of
+                // `dedup_threshold` — that knob does not gate whether routing
+                // reinforces; theta_sep alone draws the route/allocate boundary
+                // (ADR-0009). `dedup_enabled` remains the explicit master switch that
+                // turns reinforce-on-similarity off entirely. A matched site must
+                // actually exist (`max_similarity > 0`); with no embedding candidate
+                // there is nothing to route to, so the observation allocates.
+                if self.config.dedup_enabled && max_similarity > 0.0 {
+                    self.touch(most_similar_id, observation.timestamp)?;
+                    return Ok(IngestResult::Reinforced {
+                        existing_id: most_similar_id,
+                        similarity: max_similarity,
+                    });
+                }
+                // With dedup disabled, reinforce-on-route is opted out: the observation
+                // falls through to allocation with its surprise-gated charge (low, since
+                // novelty is low) rather than the flat ceiling.
+                surprise_charge
+            }
+            PerceptionDecision::Allocate {
+                surprise_charge, ..
+            } => surprise_charge,
+        };
 
         // Conflict detection: similarity in (conflict_threshold, dedup_threshold) range.
         let conflict_candidate = if self.config.dedup_enabled
@@ -1833,16 +1921,6 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             None
         };
 
-        gate_observation(
-            observation.confidence,
-            self.config.confidence_threshold,
-            self.graph.node_count(),
-            self.config.max_nodes,
-            max_similarity,
-            self.config.novelty_threshold,
-        )
-        .map_err(Error::Rejected)?;
-
         let id = self.graph.next_node_id();
         let now = observation.timestamp;
 
@@ -1866,8 +1944,10 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             accessed_at: now,
             valid_from: observation.valid_from,
             valid_until: observation.valid_until,
-            salience: 1.0,
-            retained_action: crate::mechanics::priors::INITIAL_RETAINED_ACTION,
+            // Surprise-gated initial charge (ADR-0009): salience is the projection of
+            // the retained-action reservoir, never a flat 1.0.
+            salience: crate::mechanics::priors::project_salience(initial_retained_action),
+            retained_action: initial_retained_action,
             access_count: 0,
             access_history: VecDeque::new(),
             tier: crate::graph::MemoryTier::Auto,
@@ -3468,7 +3548,9 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         ))
     }
 
-    /// Full Associative query pipeline: initial activation → spreading → repulsion → scoring → assembly.
+    /// Full Associative query pipeline: seed field → additive RWR flow → readout
+    /// scoring (with frustration `-w_stress`) → assembly. Contradictions surface as
+    /// tensions, never as activation damping (ADR-0006).
     fn query_associative(
         &self,
         seed: NodeId,
@@ -3543,6 +3625,17 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         let now = config.now.unwrap_or_else(Timestamp::now);
         let activations = &response.activation;
 
+        // Surface frustration contradiction pairs (and per-node stress) before
+        // scoring, so the readout `-w_stress` term can penalize contradicting
+        // bundles toward separation (frustration.md / ADR-0006).
+        let (contradiction_pairs, node_stress) =
+            crate::query::assembly::collect_contradiction_pairs(
+                storage,
+                activations,
+                config.min_activation,
+                now,
+            );
+
         let mut scored: Vec<(f64, TieBreakKey, ScoredNode)> = Vec::new();
         for (&nid, &activation) in activations {
             if activation < config.min_activation {
@@ -3566,6 +3659,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                 .map(|p| p.trust_level.scope_weight_bonus())
                 .unwrap_or(0.0);
 
+            let stress = node_stress.get(&nid).copied().unwrap_or(0.0);
             let score = readout_score(&ReadoutInputs {
                 activation,
                 phi,
@@ -3573,7 +3667,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                 impedance,
                 scope_weight: sw,
                 trust_weight,
-                stress: 0.0,
+                stress,
             });
 
             scored.push((
@@ -3598,22 +3692,6 @@ impl<S: StorageAdapter + Clone> Engine<S> {
 
         scored.sort_by(|(sa, ka, _), (sb, kb, _)| rank(*sa, ka, *sb, kb));
         let scored_nodes: Vec<ScoredNode> = scored.into_iter().map(|(_, _, n)| n).collect();
-
-        // Surface Contradicts edges between activated sites as tensions.
-        let mut contradicts_edges: Vec<(NodeId, NodeId, f64)> = Vec::new();
-        for &nid in activations.keys() {
-            for &eid in storage.edges_from(nid) {
-                if let Ok(edge) = storage.get_edge(eid) {
-                    if matches!(edge.edge_type, EdgeType::Contradicts)
-                        && crate::query::edge_valid_at(edge, now)
-                    {
-                        contradicts_edges.push((edge.source, edge.target, edge.weight));
-                    }
-                }
-            }
-        }
-        contradicts_edges.sort_by_key(|(a, b, _)| (a.0, b.0));
-        contradicts_edges.dedup_by_key(|(a, b, _)| (a.0, b.0));
 
         let identity_activations: Vec<(NodeId, KnowledgeType, f64)> = activations
             .iter()
@@ -3640,7 +3718,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                 limit: usize::MAX,
             },
             &identity_activations,
-            &contradicts_edges,
+            &contradiction_pairs,
             activations,
             config.token_budget,
             config.chars_per_token,
@@ -3996,7 +4074,14 @@ mod tests {
         assert_eq!(engine.graph().node_count(), 1);
         let node = engine.graph().get_node(ids[0]).unwrap();
         assert_eq!(node.name, "test node");
-        assert_eq!(node.salience, 1.0);
+        // Salience is the projection of the surprise-gated retained-action reservoir
+        // (ADR-0009), never a flat 1.0. With no embedding the observation is maximally
+        // surprising and enters near the prior ceiling project_salience(13.8) ≈ 1.
+        assert_eq!(
+            node.salience,
+            crate::mechanics::priors::project_salience(node.retained_action)
+        );
+        assert!(node.salience > 0.999 && node.salience < 1.0);
     }
 
     #[test]
@@ -4201,11 +4286,17 @@ mod tests {
         };
         let id = ids[0];
 
+        // Capture the surprise-gated initial salience (project_salience(A), not 1.0).
+        let initial_salience = engine.graph().storage().get_salience(id).unwrap();
+
         let future = Timestamp(365 * 86_400_000);
         engine.tick(future).unwrap();
 
         let salience = engine.graph().storage().get_salience(id).unwrap();
-        assert_eq!(salience, 1.0, "IdentityCore should not decay");
+        assert_eq!(
+            salience, initial_salience,
+            "IdentityCore should not decay (salience unchanged after a year)"
+        );
     }
 
     #[test]
@@ -4344,14 +4435,34 @@ mod tests {
 
     #[test]
     fn ingest_rejects_over_budget() {
-        let config = EngineConfig::new().with_max_nodes(2);
+        // Budget rejects only when FULL *and* the input is NOT novel (ADR-0009):
+        // a novel observation may still enter past a full budget. Make the third
+        // observation a near-duplicate of an existing site (low novelty) but tighten
+        // the dedup threshold so it does not route-reinforce, and disable conflict
+        // surfacing — so it reaches the budget guard as a non-novel input.
+        let config = EngineConfig::new()
+            .with_max_nodes(2)
+            .with_dedup_enabled(false);
         let mut engine = Engine::with_config(config);
 
-        let _ = engine.ingest(make_observation("node 1")).unwrap();
-        let _ = engine.ingest(make_observation("node 2")).unwrap();
+        let obs1 = Observation {
+            embedding: Some(vec![1.0, 0.0, 0.0]),
+            ..make_observation("node 1")
+        };
+        let _ = engine.ingest(obs1).unwrap();
+        let obs2 = Observation {
+            embedding: Some(vec![0.0, 1.0, 0.0]),
+            ..make_observation("node 2")
+        };
+        let _ = engine.ingest(obs2).unwrap();
 
-        let result = engine.ingest(make_observation("node 3"));
-        assert!(matches!(result, Err(Error::Rejected(_))));
+        // Near-identical to node 1 → novelty ≈ 0 ≤ theta_sep → not novel; budget full.
+        let obs3 = Observation {
+            embedding: Some(vec![1.0, 0.0001, 0.0]),
+            ..make_observation("node 3")
+        };
+        let result = engine.ingest(obs3);
+        assert!(matches!(result, Err(Error::Rejected(_))), "got {result:?}");
     }
 
     #[test]

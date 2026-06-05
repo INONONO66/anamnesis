@@ -25,9 +25,13 @@
 //! [`SEED_SOFTMAX_TAU`] plus the `beta_*` feature weights. Readout: the seven
 //! `READOUT_W_*` coefficients of the authoritative additive log-odds score.
 //!
-//! ## Reserved for later phases
+//! ## Phase 4 (frustration + surprise-gated perception)
 //!
-//! - Surprise gain `k` and `theta_sep` arrive with Phase 4.
+//! Frustration: [`CONTRADICTION_WEIGHT_DEFAULT`] is the declared per-edge stress
+//! gate factor when none is stored. Perception: the surprise gain [`SURPRISE_GAIN_K`]
+//! converts Bayesian surprise `eps` into the initial allocate charge `dA = k*eps`,
+//! and [`theta_sep`] derives the novelty separation boundary from the encoder's
+//! distinct-pair q95 ([`ENCODER_DISTINCT_PAIR_Q95`]).
 
 /// ACT-R base-level power-law decay exponent `d`.
 ///
@@ -245,6 +249,70 @@ pub const READOUT_W_SCOPE: f64 = 1.0;
 pub const READOUT_W_TRUST: f64 = 1.0;
 /// `w_stress` — penalty weight on attached frustration `stress_i` (subtracted).
 pub const READOUT_W_STRESS: f64 = 1.0;
+
+// --- Frustration (frustration.md, ADR-0006) --------------------------------
+//
+// Contradictions are SURFACED as query-local stress, never suppressed and never
+// deleted. Stress is purely a multiplicative product of gates
+// (`sigma_ij = contradiction_weight * min(a_i, a_j) * scope_overlap * temporal_overlap`);
+// if any gate is zero, `sigma = 0`. There is no exponential activation damping
+// and no rigidity term — `Contradicts` activation is never reduced.
+
+/// Default contradiction-weight gate factor `contradiction_weight_ij` for a
+/// `Contradicts` edge that carries no explicit stored weight (frustration.md).
+///
+/// CALIBRATED PRIOR — the per-edge strength of a contradiction as a stress gate.
+/// It is one multiplicative factor in `sigma_ij`; the stored edge weight (the
+/// `project_weight(C_ij)` projection) is used when present, and this is the
+/// fallback. Unit default keeps `sigma_ij = min(a_i, a_j) * scope * temporal`.
+pub const CONTRADICTION_WEIGHT_DEFAULT: f64 = 1.0;
+
+// --- Surprise-gated perception (perception.md, ADR-0009) --------------------
+//
+// Perception is a two-stage gate. Stage 1 rejects only untrusted (low-confidence)
+// or unaffordable-and-not-novel observations. Stage 2 routes survivors: novelty
+// `> theta_sep` allocates a new site (surprise-gated charge `dA = k*eps`); novelty
+// `<= theta_sep` routes to and reinforces the nearest existing site. Familiarity
+// is never a rejection reason.
+
+/// Surprise gain `k` for the allocate initial charge `dA_i = k * eps`
+/// (perception.md, [ADR-0009](../../docs/adr/0009-surprise-gated-perception.md)).
+///
+/// CALIBRATED PRIOR — the single magnitude that cannot be derived from theory
+/// alone. `eps` is the precision-weighted (Mahalanobis) embedding prediction
+/// error, a computable proxy for Bayesian surprise; absent a stored precision
+/// matrix `Sigma`, `k` absorbs both units and variance, so it must be declared and
+/// fit from encoder statistics and the target initial-charge magnitude. A new site
+/// with maximal surprise (`eps ≈ 1` under the isotropic fallback) lands near the
+/// flat-prior ceiling [`INITIAL_RETAINED_ACTION`]; a low-surprise allocate enters
+/// proportionally weaker. Replaces the old flat `salience = 1.0` initialization.
+pub const SURPRISE_GAIN_K: f64 = INITIAL_RETAINED_ACTION;
+
+/// Encoder distinct-pair cosine-similarity 95th percentile `q95`, the only input
+/// to the separation boundary [`theta_sep`] (perception.md).
+///
+/// CALIBRATED PRIOR — a property of the embedding encoder, not a behavioral knob:
+/// measure the cosine-similarity distribution over distinct sentence pairs and take
+/// its 95th percentile. It recomputes exactly whenever the encoder changes. The
+/// declared default reflects a typical sentence-embedding encoder whose distinct
+/// pairs rarely exceed `~0.7` similarity.
+pub const ENCODER_DISTINCT_PAIR_Q95: f64 = 0.70;
+
+/// Novelty separation boundary `theta_sep = 1 - q95(similarity_distinct_pairs)`
+/// (perception.md).
+///
+/// DERIVED — forced by the fixed 95th-percentile convention: `theta_sep` carries no
+/// behavioral freedom; its only input is the encoder's distinct-pair distribution.
+/// Novelty (`1 - max_similarity`) above `theta_sep` means the observation is farther
+/// from known sites than 95% of distinct pairs and should allocate a new site;
+/// otherwise it completes a known pattern and routes. Clamped to `[0, 1]`.
+#[inline]
+pub fn theta_sep(q95: f64) -> f64 {
+    if !q95.is_finite() {
+        return 1.0 - ENCODER_DISTINCT_PAIR_Q95;
+    }
+    (1.0 - q95).clamp(0.0, 1.0)
+}
 
 /// Epsilon for the clamped-logit projection backfill, so that
 /// `logit(clamp(x, EPS, 1 - EPS))` stays finite at the `0`/`1` boundaries.

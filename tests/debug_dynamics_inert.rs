@@ -1,7 +1,6 @@
 use anamnesis::mechanics::interactions::decay_default;
 use anamnesis::mechanics::priors::{decay_multiplier_for_type, edge_type_factor};
 use anamnesis::mechanics::gravity::{compute_mass, mass_prior};
-use anamnesis::mechanics::repulsion::rigidity;
 use anamnesis::query::assembly::{is_identity_type, is_memory_type};
 use anamnesis::query::identity::pi_tier;
 use anamnesis::{EdgeType, KnowledgeType};
@@ -27,10 +26,12 @@ fn debug_node_types_have_inert_decay_values() {
 }
 
 #[test]
-fn debug_node_types_have_low_mass_and_rigidity() {
+fn debug_node_types_have_low_mass() {
+    // Repulsion/rigidity is gone in the conductive model: contradictions surface as
+    // frustration stress (ADR-0006), never as activation damping. Debug-lifecycle
+    // nodes remain low-mass.
     for node_type in debug_node_types() {
         assert_eq!(mass_prior(&node_type), 0.10);
-        assert_eq!(rigidity(&node_type), 0.10);
 
         let mass = compute_mass(0.0, 0, &node_type);
         assert!((mass - 0.015).abs() < 1e-10, "mass={mass}");

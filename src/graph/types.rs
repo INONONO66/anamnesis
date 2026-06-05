@@ -96,7 +96,9 @@ pub enum MemoryTier {
 
 /// Edge type — determines propagation multiplier (kappa) during spreading activation.
 ///
-/// Supportive edges propagate activation. Contradicts is inhibitory (applies repulsion).
+/// Supportive edges propagate activation. `Contradicts` is excluded from propagation
+/// and instead surfaces query-local frustration stress between its active endpoints
+/// (frustration.md / ADR-0006) — it is never inhibitory damping.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum EdgeType {
     // Supportive (propagation)
@@ -127,8 +129,9 @@ pub enum EdgeType {
     /// Hierarchical or containment relationship. kappa = 0.95
     BelongsTo,
 
-    // Inhibitory
-    /// Conflicting assertions. Excluded from propagation; applies repulsion instead.
+    // Constraint (excluded from propagation; surfaces frustration stress)
+    /// Conflicting assertions. Excluded from propagation; surfaces query-local
+    /// frustration stress when both endpoints are active (ADR-0006), never deleted.
     Contradicts,
 
     /// Consumer-defined edge type.

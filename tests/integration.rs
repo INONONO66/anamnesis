@@ -66,14 +66,19 @@ fn engine_full_lifecycle() {
     let edge = engine.graph().get_edge(eid).unwrap();
     assert_eq!(edge.weight, 0.78);
 
-    // 3. Touch a node
-    engine.touch(ids1[0], Timestamp(2000)).unwrap();
-    engine.touch(ids1[0], Timestamp(2000)).unwrap();
+    // 3. Touch a node at the tick time so its decay-checkpoint dt is zero.
+    let tick_time = Timestamp(1000 + 30 * 86_400_000); // 30 days after ingest
+    engine.touch(ids1[0], tick_time).unwrap();
+    engine.touch(ids1[0], tick_time).unwrap();
     let node = engine.graph().get_node(ids1[0]).unwrap();
     assert_eq!(node.access_count, 2);
 
-    // 4. Tick — ids2[0] has dt=1s from ingest, ids1[0] was just touched so dt=0
-    let report = engine.tick(Timestamp(2000)).unwrap();
+    // 4. Tick 30 days out: ids2[0] (Episodic, created at t=1000) decays detectably;
+    //    ids1[0] was just touched at the tick time so its dt is zero and it does not.
+    //    Salience is the projection of the retained-action reservoir (ADR-0009), so a
+    //    meaningful elapsed interval is needed for the projection to move past the
+    //    salience-change epsilon.
+    let report = engine.tick(tick_time).unwrap();
     assert_eq!(report.nodes_decayed, 1);
 
     // 5. Query — Associative returns real results in Phase 2
@@ -160,7 +165,14 @@ fn node_fields_preserved_after_ingest() {
     assert_eq!(node.node_type, KnowledgeType::Decision);
     assert_eq!(node.entity_tags, vec!["physics", "anamnesis"]);
     assert_eq!(node.origin.scope.as_str(), "anamnesis");
-    assert_eq!(node.salience, 1.0);
+    // Salience is the projection of the surprise-gated retained-action reservoir
+    // (ADR-0009), not a flat 1.0. The first ingested node has no prediction to be
+    // surprising against, so it enters near the prior ceiling.
+    assert!(
+        node.salience > 0.999 && node.salience <= 1.0,
+        "salience should be a near-ceiling projection, got {}",
+        node.salience
+    );
     assert_eq!(node.access_count, 0);
     assert!(node.embedding.is_some());
 }

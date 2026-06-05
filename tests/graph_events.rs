@@ -94,11 +94,13 @@ fn tick_emits_salience_changed_for_decayed_nodes() {
     engine.tick(Timestamp(86_400_000)).expect("tick succeeds");
 
     let events = engine.drain_events();
+    // The pre-decay salience is the surprise-gated projection (near, but not exactly,
+    // 1.0 per ADR-0009); decay only requires that the new salience is lower.
     assert!(events.iter().any(|event| {
         matches!(
             event,
             GraphEvent::SalienceChanged { node_id: changed_id, old, new }
-                if *changed_id == node_id && (*old - 1.0).abs() < f64::EPSILON && *new < *old
+                if *changed_id == node_id && *new < *old
         )
     }));
 }

@@ -134,18 +134,36 @@ pub struct Fragment {
     pub scope: ScopeRelation,
 }
 
-/// An active contradiction between two nodes.
+/// An active contradiction between two nodes, surfaced as query-local stress.
 ///
-/// Surfaced when a Contradicts edge connects two activated nodes.
+/// Surfaced when a `Contradicts` edge connects two *active* nodes whose scopes and
+/// fact-times overlap. Per [frustration.md] / [ADR-0006] the conflict is **surfaced,
+/// never suppressed**: neither endpoint's activation is reduced and nothing is
+/// deleted. The `stress` field carries the multiplicative gate product
+/// `sigma_ij = contradiction_weight * min(a_i, a_j) * scope_overlap * temporal_overlap`,
+/// which feeds the `-w_stress` readout term and encourages conflicting bundles to
+/// separate without judging either side true.
+///
+/// [frustration.md]: ../../docs/04-cognitive-dynamics/frustration.md
+/// [ADR-0006]: ../../docs/adr/0006-frustration-not-deletion.md
 #[derive(Debug, Clone, PartialEq)]
 pub struct Tension {
-    /// First node in the contradiction.
+    /// First node in the contradiction (`primary`).
     pub node_a: NodeId,
-    /// Second node in the contradiction.
+    /// Second node in the contradiction (`conflicting`).
     pub node_b: NodeId,
-    /// Weight of the Contradicts edge [0, 1].
+    /// Weight of the `Contradicts` edge [0, 1] (the `contradiction_weight` gate).
     pub edge_weight: f64,
-    /// Optional human-readable description of the contradiction.
+    /// Query-local stress `sigma_ij` (the multiplicative gate product).
+    pub stress: f64,
+    /// Scope-overlap gate contribution `[0, 1]`.
+    pub scope_overlap: f64,
+    /// Temporal-overlap gate contribution `[0, 1]`.
+    pub temporal_overlap: f64,
+    /// Evidence sources for the contradiction — the two endpoints whose activation
+    /// raised this tension (`[primary, conflicting]`), for caller adjudication.
+    pub evidence_sources: Vec<NodeId>,
+    /// Optional human-readable explanation of the contradiction.
     pub description: Option<String>,
 }
 
@@ -454,8 +472,14 @@ mod tests {
             node_a: NodeId(1),
             node_b: NodeId(2),
             edge_weight: 0.9,
+            stress: 0.54,
+            scope_overlap: 1.0,
+            temporal_overlap: 1.0,
+            evidence_sources: vec![NodeId(1), NodeId(2)],
             description: Some("factory pattern vs DI refactor".to_string()),
         };
         assert_eq!(tension.edge_weight, 0.9);
+        assert!(tension.stress > 0.0);
+        assert_eq!(tension.evidence_sources, vec![NodeId(1), NodeId(2)]);
     }
 }

@@ -13,7 +13,6 @@ use crate::api::Engine;
 use crate::error::Error;
 use crate::graph::{EdgeType, KnowledgeType, NodeId, ScopePath, Timestamp};
 use crate::mechanics::attraction::cosine_similarity;
-use crate::query::activation::edge_valid_at;
 use crate::query::assembly::{ScoredNode, assemble_context_package, determine_scope};
 use crate::query::rwr::ActivationResponse;
 use crate::query::scoring::{ReadoutInputs, TieBreakKey, rank, readout_score, scope_weight};
@@ -98,6 +97,18 @@ fn assemble_graph_recall_package<S: StorageAdapter + Clone>(
         .map(|node| node.entity_tags.clone())
         .collect();
 
+    // Surface Contradicts edges between *active* sites as frustration tensions
+    // (frustration.md / ADR-0006). Stress is the multiplicative gate product
+    // `sigma_ij = contradiction_weight * min(a_i, a_j) * scope_overlap *
+    // temporal_overlap`; if any gate is zero the pair is not surfaced. The conflict
+    // is surfaced, never suppressed — neither endpoint's activation is reduced.
+    let (contradiction_pairs, node_stress) = crate::query::assembly::collect_contradiction_pairs(
+        storage,
+        activations,
+        config.min_activation,
+        now,
+    );
+
     let mut scored: Vec<(f64, TieBreakKey, ScoredNode)> = Vec::new();
     for (&node_id, &activation) in activations {
         if activation < config.min_activation {
@@ -145,6 +156,11 @@ fn assemble_graph_recall_package<S: StorageAdapter + Clone>(
             _ => 0.0,
         };
 
+        // Frustration stress attached to this site (sum of sigma over its active
+        // contradiction partners) feeds the readout `-w_stress` term: contradicting
+        // bundles are pushed to separate, never deleted (ADR-0006).
+        let stress = node_stress.get(&node_id).copied().unwrap_or(0.0);
+
         let inputs = ReadoutInputs {
             activation,
             phi,
@@ -152,7 +168,7 @@ fn assemble_graph_recall_package<S: StorageAdapter + Clone>(
             impedance,
             scope_weight: base_scope_weight,
             trust_weight,
-            stress: 0.0,
+            stress,
         };
         let score = readout_score(&inputs);
 
@@ -182,20 +198,6 @@ fn assemble_graph_recall_package<S: StorageAdapter + Clone>(
     scored.sort_by(|(sa, ka, _), (sb, kb, _)| rank(*sa, ka, *sb, kb));
     let scored_nodes: Vec<ScoredNode> = scored.into_iter().map(|(_, _, n)| n).collect();
 
-    // Surface Contradicts edges between activated sites as tensions (never suppressed).
-    let mut contradicts_edges: Vec<(NodeId, NodeId, f64)> = Vec::new();
-    for &node_id in activations.keys() {
-        for &edge_id in storage.edges_from(node_id) {
-            if let Ok(edge) = storage.get_edge(edge_id) {
-                if matches!(edge.edge_type, EdgeType::Contradicts) && edge_valid_at(edge, now) {
-                    contradicts_edges.push((edge.source, edge.target, edge.weight));
-                }
-            }
-        }
-    }
-    contradicts_edges.sort_by_key(|(a, b, _)| (a.0, b.0));
-    contradicts_edges.dedup_by_key(|(a, b, _)| (a.0, b.0));
-
     let identity_activations: Vec<(NodeId, KnowledgeType, f64)> = activations
         .iter()
         .filter_map(|(&node_id, &activation)| {
@@ -212,8 +214,7 @@ fn assemble_graph_recall_package<S: StorageAdapter + Clone>(
     assemble_context_package(
         scored_nodes,
         &identity_activations,
-        &contradicts_edges,
-        activations,
+        &contradiction_pairs,
         config.token_budget,
         config.chars_per_token,
         &config.scope,

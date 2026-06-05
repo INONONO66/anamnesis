@@ -13,8 +13,8 @@ pub mod types;
 
 pub use activation::edge_valid_at;
 pub use assembly::{
-    ModeContext, ScoredNode, assemble_context_package, assemble_context_package_for_mode,
-    compute_agent_tension, determine_scope,
+    ContradictionPair, ModeContext, ScoredNode, assemble_context_package,
+    assemble_context_package_for_mode, compute_agent_tension, determine_scope,
 };
 pub use candidate::{
     CandidateSource, CandidateTrace, FusedCandidate, GraphRecallTrace, SearchCandidate,

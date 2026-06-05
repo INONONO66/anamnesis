@@ -4,7 +4,10 @@
 //!
 //! - `attraction`: Cosine similarity, merge candidate detection
 //! - `gravity`: PageRank-like centrality scoring
-//! - `perception`: Novelty, confidence, and budget gating
+//! - `perception`: Two-stage observation gate (confidence/budget, then novelty
+//!   Allocate|Route) with surprise-gated initial charge (ADR-0009)
+//! - `frustration`: Query-local contradiction stress `sigma_ij` — contradictions
+//!   are surfaced as tension, never suppressed or deleted (ADR-0006)
 //! - `forgetting`: ACT-R base-level activation kernel (power-law forgetting shape)
 //! - `interactions`: Reservoir dynamics — power-law decay, Rescorla-Wagner,
 //!   access gain, and Hebbian-Oja conductance on `A_i`/`C_ij` (ADR-0002/0003/0008)
@@ -15,12 +18,12 @@
 
 pub mod attraction;
 pub mod forgetting;
+pub mod frustration;
 pub mod gravity;
 pub mod health;
 pub mod interactions;
 pub mod perception;
 pub mod priors;
 pub mod projection;
-pub mod repulsion;
 pub mod social;
 pub mod topology;

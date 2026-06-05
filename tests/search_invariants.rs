@@ -61,18 +61,21 @@ fn ingest(engine: &mut Engine, name: &str, node_type: KnowledgeType, scope: &str
 #[test]
 fn fused_order_differs_from_node_id_sort() {
     let mut engine = engine();
-    let first = ingest(
-        &mut engine,
-        "alpha weak",
-        KnowledgeType::Semantic,
-        "dev/rust",
-    );
-    let second = ingest(
-        &mut engine,
-        "alpha strong",
-        KnowledgeType::Semantic,
-        "dev/rust",
-    );
+    // Distinct embeddings so both observations allocate as separate sites at the
+    // surprise-gated ceiling (ADR-0009); identical embeddings would route the second
+    // one in at near-zero charge and collapse its salience, masking the fusion order.
+    let mut obs_first = observation("alpha weak", KnowledgeType::Semantic, "dev/rust");
+    obs_first.embedding = Some(vec![1.0, 0.0, 0.0]);
+    let first = match engine.ingest(obs_first).unwrap() {
+        IngestResult::Created(ids) => ids[0],
+        other => panic!("expected Created, got {other:?}"),
+    };
+    let mut obs_second = observation("alpha strong", KnowledgeType::Semantic, "dev/rust");
+    obs_second.embedding = Some(vec![0.0, 1.0, 0.0]);
+    let second = match engine.ingest(obs_second).unwrap() {
+        IngestResult::Created(ids) => ids[0],
+        other => panic!("expected Created, got {other:?}"),
+    };
     // second (NodeId 1) becomes an exact-name match; first (NodeId 0) keeps a partial
     // word match only. Text rank 0 must go to second despite its higher NodeId.
     engine.graph_mut().get_node_mut(second).unwrap().name = "alpha".to_string();
