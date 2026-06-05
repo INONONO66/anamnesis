@@ -30,6 +30,8 @@ P(i, j) = g_ij / sum_k g_ik
 I_ij = a_i * g_ij
 ```
 
+Row-stochasticity rests on a non-negativity invariant. `C_ij` is the unbounded log-likelihood-ratio reservoir and may be negative ([conductance.md](../04-cognitive-dynamics/conductance.md)), so `g_ij` cannot use the raw reservoir directly. `project_conductance` is therefore a **strictly positive, bounded** map of the reservoir — `project_conductance(C) = logistic(C) ∈ (0, 1)`, so `project_conductance(C) >= 0` for *every* finite `C`, including negative log-LR — and every propagating `edge_type_factor_ij > 0` (only `Contradicts`, which is excluded from `P`, has factor `0`). Hence `g_ij >= 0` for every retained edge, each row sum `sum_k g_ik > 0` whenever the source has any propagating edge, and `P(i, j) = g_ij / sum_k g_ik` is a valid row-stochastic transition matrix. Without this invariant the row-stochastic / unique-fixed-point guarantee would not be derivable from the documented quantities.
+
 Path current `I_ij = a_i * g_ij` carries the full edge conductance, including `edge_type_factor_ij`. Row normalization produces fan effect: a source with many outgoing edges contributes less per edge. Edge type factors are relative within a row; they do not create unbounded absolute activation.
 
 ## Iteration

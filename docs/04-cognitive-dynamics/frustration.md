@@ -37,13 +37,13 @@ Frustration contributes to the readout objective:
 
 ```text
 E(S | Q) =
-    field_alignment
+  - field_alignment
   - conductive_support
   + impedance_regularization
   + frustration_penalty(S, Sigma)
 ```
 
-The positive sign matters. Support lowers energy; contradiction raises it. This encourages conflicting bundles to separate without deleting either side.
+This is the same objective as [energy.md](energy.md): the leading `-`/`+` are structural descent-direction signs (`+/-1`), not tunable magnitudes. Field alignment and conductive support *lower* energy; impedance and frustration *raise* it. The positive sign on the frustration penalty is what matters here: contradiction raises energy, which encourages conflicting bundles to separate without deleting either side.
 
 The caveat from [energy.md](energy.md) applies: this objective is a strict Lyapunov function only under symmetric coupling. Directed RWR has a stationary vector, and energy is an interpretive objective.
 

@@ -84,7 +84,7 @@ a_i         = restart * seed_i + (1 - restart) * sum_j P_ji * a_j
 I_ij        = current(a_i, conductance_ij, edge_type_factor_ij)
 W_readout_i = accepted_i * a_i * phi_i            # illustrative sketch only
 dC_ij       = eta * flux_ij * (1 - C_ij)
-C_next      = project_conductance(C_ij + dC_ij)
+C_next      = clamp_log_odds(C_ij + dC_ij)
 A_next      = A_i + dV ; dV = eta_fb * (lambda - sumV)
 s_next      = project_salience(A_next - leakage_i)
 ```

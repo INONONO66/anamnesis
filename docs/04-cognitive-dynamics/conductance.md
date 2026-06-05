@@ -9,6 +9,8 @@ C_ij = associative strength S_ji
 
 An edge is not merely a "related to" marker. Under a query field, it is a conductive path and a likelihood-ratio term in posterior-odds computation. Public `edge weight` is only a bounded projection of `C_ij`.
 
+Because `C_ij` is an unbounded log-LR it may be negative, so activation flow does not use the raw reservoir as a flow weight. The flow-side projection `project_conductance(C)` is **strictly positive and bounded** — `project_conductance(C) = logistic(C) ∈ (0, 1)`, hence `project_conductance(C) >= 0` for every finite `C` — and every propagating edge type factor is `> 0` (`Contradicts` is `0` and excluded from propagation). This non-negativity is what makes the row-normalized transition matrix `P` row-stochastic; see [activation-flow.md](../05-context-retrieval/activation-flow.md).
+
 Core rule: **conductance is never set directly**. It changes only as the integrated result of physical/cognitive interactions.
 
 ## Design Goals
