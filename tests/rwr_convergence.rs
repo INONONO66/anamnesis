@@ -57,8 +57,8 @@ fn rwr_conserves_mass_and_converges() {
     let mid = ingest_node(&mut engine, "mid");
     let leaf = ingest_node(&mut engine, "leaf");
 
-    engine.link(seed, mid, EdgeType::Semantic, 1.0).unwrap();
-    engine.link(mid, leaf, EdgeType::Semantic, 1.0).unwrap();
+    engine.link(seed, mid, EdgeType::Semantic).unwrap();
+    engine.link(mid, leaf, EdgeType::Semantic).unwrap();
 
     let response = additive_rwr(
         &HashMap::from([(seed, 1.0)]),
@@ -84,8 +84,8 @@ fn rwr_seed_has_highest_activation() {
     let left = ingest_node(&mut engine, "left");
     let right = ingest_node(&mut engine, "right");
 
-    engine.link(seed, left, EdgeType::Semantic, 1.0).unwrap();
-    engine.link(seed, right, EdgeType::Semantic, 1.0).unwrap();
+    engine.link(seed, left, EdgeType::Semantic).unwrap();
+    engine.link(seed, right, EdgeType::Semantic).unwrap();
 
     let response = additive_rwr(
         &HashMap::from([(seed, 1.0)]),
@@ -106,8 +106,8 @@ fn rwr_is_idempotent() {
     let seed = ingest_node(&mut engine, "seed");
     let a = ingest_node(&mut engine, "a");
     let b = ingest_node(&mut engine, "b");
-    engine.link(seed, a, EdgeType::Reason, 1.0).unwrap();
-    engine.link(a, b, EdgeType::Temporal, 1.0).unwrap();
+    engine.link(seed, a, EdgeType::Reason).unwrap();
+    engine.link(a, b, EdgeType::Temporal).unwrap();
 
     let storage = engine.graph().storage();
     let first = additive_rwr(&HashMap::from([(seed, 1.0)]), storage, Timestamp(0));

@@ -2,7 +2,7 @@
 
 use crate::graph::Origin;
 use crate::graph::scope::{ScopePath, ScopeRelation};
-use crate::graph::{KnowledgeType, NodeId, Timestamp};
+use crate::graph::{EdgeId, EdgeType, KnowledgeType, NodeId, Timestamp};
 
 /// Query modes for different retrieval patterns.
 ///
@@ -167,6 +167,95 @@ pub struct Tension {
     pub description: Option<String>,
 }
 
+/// A site that was read out, recorded for an `Accessed` commit interaction.
+///
+/// Captured during read-only retrieval (the site appeared in the packaged result)
+/// so that a later [`Engine::commit`](crate::api::Engine::commit) can apply
+/// decay-then-`access_gain` on its retained-action reservoir (interactions.md).
+/// `readout_work` is the bounded `[0, 1]` work the site delivered to the answer —
+/// the settled query-local activation `a_i`, used as the readout-work proxy.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AccessedSite {
+    /// The site read out.
+    pub node_id: NodeId,
+    /// Bounded `[0, 1]` readout work delivered (the settled activation `a_i`).
+    pub readout_work: f64,
+}
+
+/// A pair of sites read out together, recorded for a `CoReadout` commit interaction.
+///
+/// The co-readout flux at commit time is `min(a_i, a_j)` (conductance.md); the
+/// activations are captured here so commit can reconstruct that flux deterministically.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CoReadoutPair {
+    /// First site.
+    pub node_a: NodeId,
+    /// Second site.
+    pub node_b: NodeId,
+    /// Settled query-local activation of `node_a`.
+    pub activation_a: f64,
+    /// Settled query-local activation of `node_b`.
+    pub activation_b: f64,
+}
+
+/// An edge that carried committed path current `I_ij`, recorded for a `PathUsed`
+/// commit interaction (interactions.md / conductance.md).
+///
+/// The edge's topology snapshot (`source`/`target`/`edge_type`) is captured so
+/// [`Engine::commit`](crate::api::Engine::commit) can verify the trace still matches
+/// the graph (a moved/retyped/deleted edge makes the trace stale — a hard error).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PathUsedEdge {
+    /// The edge that carried current.
+    pub edge_id: EdgeId,
+    /// Recorded source endpoint at retrieval time (topology snapshot).
+    pub source: NodeId,
+    /// Recorded target endpoint at retrieval time (topology snapshot).
+    pub target: NodeId,
+    /// Recorded edge type at retrieval time (topology snapshot).
+    pub edge_type: EdgeType,
+    /// Path current `I_ij = a_i * g_ij` at the settled response (the Hebbian flux).
+    pub flux: f64,
+}
+
+/// A presented contradiction, recorded for a `TensionActivated` commit interaction
+/// (frustration.md, ADR-0006).
+///
+/// Records that the conflict was surfaced to the caller; commit logs the tension
+/// (`S_frustration = tension_presented_ij * sigma_ij`). It never reduces either
+/// endpoint's activation and never picks a winner.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ActivatedTension {
+    /// `primary` endpoint.
+    pub node_a: NodeId,
+    /// `conflicting` endpoint.
+    pub node_b: NodeId,
+    /// Query-local stress `sigma_ij` that was presented.
+    pub stress: f64,
+}
+
+/// The read-only retrieval trace required to commit a [`ContextPackage`].
+///
+/// Per [ADR-0004](../../docs/adr/0004-query-as-field-and-commit.md) /
+/// [interactions.md](../../docs/04-cognitive-dynamics/interactions.md), retrieval is
+/// read-only and returns this trace alongside the package; an explicit
+/// [`Engine::commit`](crate::api::Engine::commit) consumes it and integrates the
+/// committed work into the reservoirs. Commit MUST validate that the trace still
+/// matches the graph state it updates: every referenced node/edge must exist and the
+/// `path_used` topology snapshot must still match (a stale/mismatched trace is a hard
+/// error). The trace is transient and carries no persistent quantity itself.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CommitTrace {
+    /// Sites read out into the package (`Accessed` candidates).
+    pub accessed: Vec<AccessedSite>,
+    /// Site pairs read out together (`CoReadout` candidates).
+    pub co_readout: Vec<CoReadoutPair>,
+    /// Edges that carried committed path current (`PathUsed` candidates).
+    pub path_used: Vec<PathUsedEdge>,
+    /// Contradictions presented to the caller (`TensionActivated` candidates).
+    pub tensions_activated: Vec<ActivatedTension>,
+}
+
 /// Token usage breakdown for a ContextPackage.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct TokenBudget {
@@ -217,6 +306,20 @@ pub struct ContextPackage {
     pub token_usage: TokenBudget,
     /// Overall tension score T_agent [0, 1]. High = identity conflicts with retrieved knowledge.
     pub agent_tension: f64,
+    /// Read-only retrieval trace required to commit this package (ADR-0004).
+    ///
+    /// Captured during retrieval; consumed by
+    /// [`Engine::commit`](crate::api::Engine::commit), which validates it against the
+    /// current graph before integrating the committed work into the reservoirs. It
+    /// carries no persistent quantity — retrieval remains read-only.
+    pub commit_trace: CommitTrace,
+    /// Node ids whose reservoirs were mutated by a successful commit of this package.
+    ///
+    /// Empty for a freshly returned (uncommitted) package; populated by
+    /// [`Engine::commit`](crate::api::Engine::commit) with the sites it actually
+    /// updated (`Accessed` + feedback targets), so the caller can attribute every
+    /// persistent delta to committed use.
+    pub committed_ids: Vec<NodeId>,
 }
 
 impl ContextPackage {
@@ -232,6 +335,8 @@ impl ContextPackage {
             tensions: vec![],
             token_usage: TokenBudget::default(),
             agent_tension: 0.0,
+            commit_trace: CommitTrace::default(),
+            committed_ids: vec![],
         }
     }
 

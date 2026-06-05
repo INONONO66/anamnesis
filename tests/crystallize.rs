@@ -31,7 +31,12 @@ fn observation(name: &str, timestamp: Timestamp) -> Observation {
     }
 }
 
-fn insert_source(engine: &mut Engine, name: &str, salience: f64) -> NodeId {
+/// Inserts a source and sets its retained-action reservoir directly.
+///
+/// `set_retained_action` writes the authoritative `A_i` and re-projects salience,
+/// so the reservoir and its projection stay coherent — crystallization synthesizes
+/// from the reservoir (ADR-0002).
+fn insert_source(engine: &mut Engine, name: &str, retained_action: f64) -> NodeId {
     let IngestResult::Created(ids) = engine.ingest(observation(name, Timestamp(1000))).unwrap()
     else {
         panic!("expected source creation");
@@ -40,9 +45,14 @@ fn insert_source(engine: &mut Engine, name: &str, salience: f64) -> NodeId {
     engine
         .graph_mut()
         .storage_mut()
-        .set_salience(id, salience)
+        .set_retained_action(id, retained_action)
         .unwrap();
     id
+}
+
+/// `project_salience(A) = logistic(A)`.
+fn project_salience(a: f64) -> f64 {
+    1.0 / (1.0 + (-a).exp())
 }
 
 fn crystallize_request(source_ids: Vec<NodeId>, embedding: Option<Vec<f64>>) -> CrystallizeRequest {
@@ -62,10 +72,17 @@ fn crystallize_request(source_ids: Vec<NodeId>, embedding: Option<Vec<f64>>) -> 
 }
 
 #[test]
-fn crystallize_creates_crystal_edges_and_reinforces_sources() {
+fn crystallize_synthesizes_additively_without_mutating_sources() {
     let mut engine = Engine::new();
-    let source_a = insert_source(&mut engine, "source-a", 0.2);
-    let source_b = insert_source(&mut engine, "source-b", 0.8);
+    // Sources with explicit retained-action reservoirs (log need-odds).
+    let action_a = 1.0;
+    let action_b = 3.0;
+    let source_a = insert_source(&mut engine, "source-a", action_a);
+    let source_b = insert_source(&mut engine, "source-b", action_b);
+
+    // Capture full source state to prove crystallize never mutates a source.
+    let before_a = engine.graph().get_node(source_a).unwrap().clone();
+    let before_b = engine.graph().get_node(source_b).unwrap().clone();
 
     let result = engine
         .crystallize(crystallize_request(
@@ -74,17 +91,25 @@ fn crystallize_creates_crystal_edges_and_reinforces_sources() {
         ))
         .unwrap();
 
-    let expected_salience = 0.60 * 0.65 + 0.25 * 0.8 + 0.15 * 0.10;
-    assert!((result.initial_salience - expected_salience).abs() < 1e-10);
+    // A_s_new = relevance-weighted average of source retained_action, plus the
+    // bounded confidence offset (2*conf - 1) * REWARD_LOG_ODDS_SCALE.
+    // relevances = [0.25, 0.75], confidence = 0.8, REWARD_LOG_ODDS_SCALE = 4.0.
+    let weighted_avg = (0.25 * action_a + 0.75 * action_b) / (0.25 + 0.75);
+    let expected_action = weighted_avg + (2.0 * 0.8 - 1.0) * 4.0;
+    let expected_salience = project_salience(expected_action);
+
+    assert!((result.initial_salience - expected_salience).abs() < 1e-9);
     assert_eq!(result.dedup_score, 0.0);
     assert_eq!(result.consolidation_edges.len(), 2);
-    assert_eq!(result.nodes_reinforced, 2);
+    // Crystallize is non-destructive: no source is reinforced.
+    assert_eq!(result.nodes_reinforced, 0);
     assert_eq!(engine.graph().node_count(), 3);
 
     let crystal = engine.graph().get_node(result.node_id).unwrap();
     assert_eq!(crystal.name, "auth synthesis");
     assert_eq!(crystal.node_type, KnowledgeType::Semantic);
-    assert!((crystal.salience - expected_salience).abs() < 1e-10);
+    assert!((crystal.salience - expected_salience).abs() < 1e-9);
+    assert!((crystal.retained_action - expected_action).abs() < 1e-9);
 
     let edge_a = engine
         .graph()
@@ -93,7 +118,6 @@ fn crystallize_creates_crystal_edges_and_reinforces_sources() {
     assert_eq!(edge_a.source, result.node_id);
     assert_eq!(edge_a.target, source_a);
     assert_eq!(edge_a.edge_type, EdgeType::ConsolidatedFrom);
-    assert!((edge_a.weight - 0.25).abs() < 1e-10);
 
     let edge_b = engine
         .graph()
@@ -102,10 +126,18 @@ fn crystallize_creates_crystal_edges_and_reinforces_sources() {
     assert_eq!(edge_b.source, result.node_id);
     assert_eq!(edge_b.target, source_b);
     assert_eq!(edge_b.edge_type, EdgeType::ConsolidatedFrom);
-    assert!((edge_b.weight - 0.75).abs() < 1e-10);
 
-    assert_eq!(engine.graph().get_node(source_a).unwrap().access_count, 1);
-    assert_eq!(engine.graph().get_node(source_b).unwrap().access_count, 1);
+    // Sources are untouched: reservoirs, salience, access count, timestamps.
+    let after_a = engine.graph().get_node(source_a).unwrap();
+    let after_b = engine.graph().get_node(source_b).unwrap();
+    assert_eq!(after_a.retained_action, before_a.retained_action);
+    assert_eq!(after_a.salience, before_a.salience);
+    assert_eq!(after_a.access_count, before_a.access_count);
+    assert_eq!(after_a.accessed_at, before_a.accessed_at);
+    assert_eq!(after_b.retained_action, before_b.retained_action);
+    assert_eq!(after_b.salience, before_b.salience);
+    assert_eq!(after_b.access_count, before_b.access_count);
+    assert_eq!(after_b.accessed_at, before_b.accessed_at);
 }
 
 #[test]

@@ -58,20 +58,16 @@ fn build_graph(node_count: usize) -> (Engine, Vec<anamnesis::NodeId>) {
         match engine.ingest(obs).unwrap() {
             IngestResult::Created(ids) => node_ids.push(ids[0]),
             IngestResult::Reinforced { existing_id, .. } => node_ids.push(existing_id),
-            IngestResult::CreatedWithConflict {
-                node_ids: conflict_ids,
-                ..
-            } => node_ids.push(conflict_ids[0]),
         }
     }
 
     for i in 0..node_count {
         if i + 1 < node_count {
-            let _ = engine.link(node_ids[i], node_ids[i + 1], EdgeType::Temporal, 0.8);
+            let _ = engine.link(node_ids[i], node_ids[i + 1], EdgeType::Temporal);
         }
 
         if i > 0 && i % 5 == 0 && i >= 5 {
-            let _ = engine.link(node_ids[i], node_ids[i - 5], EdgeType::Semantic, 0.7);
+            let _ = engine.link(node_ids[i], node_ids[i - 5], EdgeType::Semantic);
         }
     }
 

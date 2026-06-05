@@ -50,7 +50,7 @@ fn clean_graph_gets_grade_a() {
     let IngestResult::Created(ids2) = e.ingest(obs("node-b")).unwrap() else {
         panic!("expected Created");
     };
-    e.link(ids1[0], ids2[0], EdgeType::Semantic, 0.8).unwrap();
+    e.link(ids1[0], ids2[0], EdgeType::Semantic).unwrap();
     let report = e.health();
     assert_eq!(report.grade, HealthGrade::A);
     assert_eq!(report.orphan_count, 0); // both nodes have edges
@@ -83,7 +83,7 @@ fn contradiction_edges_counted() {
     let IngestResult::Created(ids2) = e.ingest(obs("node-b")).unwrap() else {
         panic!("expected Created");
     };
-    e.link(ids1[0], ids2[0], EdgeType::Contradicts, 0.9)
+    e.link(ids1[0], ids2[0], EdgeType::Contradicts)
         .unwrap();
     let report = e.health();
     assert_eq!(report.contradiction_count, 1);

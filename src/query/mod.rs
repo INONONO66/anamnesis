@@ -26,6 +26,7 @@ pub(crate) use packaging::decide_packaging;
 pub use rwr::{ActivationResponse, PathCurrentMap, additive_rwr, additive_rwr_with_alpha};
 pub use scoring::{ReadoutInputs, TieBreakKey, rank, readout_score, scope_weight, tie_break};
 pub use types::{
-    ContextPackage, ConvergenceConfig, Fragment, PackagingMode, Query, QueryConfig, SearchInput,
-    SearchResult, SearchTrace, Tension, TokenBudget,
+    AccessedSite, ActivatedTension, CoReadoutPair, CommitTrace, ContextPackage, ConvergenceConfig,
+    Fragment, PackagingMode, PathUsedEdge, Query, QueryConfig, SearchInput, SearchResult,
+    SearchTrace, Tension, TokenBudget,
 };

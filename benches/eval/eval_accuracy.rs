@@ -515,7 +515,6 @@ fn ingest_sessions(
             };
             match engine.ingest(observation)? {
                 IngestResult::Created(_) | IngestResult::Reinforced { .. } => {}
-                IngestResult::CreatedWithConflict { .. } => {}
             }
         }
     }

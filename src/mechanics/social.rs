@@ -56,6 +56,55 @@ impl FeedbackSignal {
     }
 }
 
+/// Caller confidence in a committed [`ContextPackage`](crate::query::ContextPackage).
+///
+/// Supplied to [`Engine::commit`](crate::api::Engine::commit), it grades how useful
+/// the packaged context actually was. Each level maps to a signed Rescorla-Wagner
+/// reward target via [`FeedbackSignal::from`] / `lambda_reward`
+/// ([`crate::mechanics::interactions::lambda_reward`]): the commit then moves each
+/// accessed site's retained action a fraction `eta` toward that target
+/// (interactions.md, ADR-0003). `None` confidence means "record use without a
+/// feedback signal" — see [`Engine::commit`](crate::api::Engine::commit).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfidenceLevel {
+    /// The context was clearly useful — strong positive reward.
+    High,
+    /// The context was useful — moderate positive reward.
+    Medium,
+    /// The context was weakly useful — mild positive reward.
+    Low,
+    /// The context was not useful or was misleading — negative reward.
+    None,
+}
+
+impl ConfidenceLevel {
+    /// The unit-interval strength this confidence level contributes to the reward
+    /// target. CALIBRATED PRIOR — graded steps from a strong-positive `High` down to
+    /// a full-negative `None`; the Rescorla-Wagner step scales this by
+    /// [`REWARD_LOG_ODDS_SCALE`](crate::mechanics::priors::REWARD_LOG_ODDS_SCALE).
+    pub fn strength(&self) -> f64 {
+        match self {
+            ConfidenceLevel::High => 1.0,
+            ConfidenceLevel::Medium => 0.6,
+            ConfidenceLevel::Low => 0.3,
+            ConfidenceLevel::None => -1.0,
+        }
+    }
+}
+
+impl From<ConfidenceLevel> for FeedbackSignal {
+    /// Map a commit [`ConfidenceLevel`] to the equivalent [`FeedbackSignal`], so the
+    /// same `lambda_reward` mapping drives both commit feedback and explicit feedback.
+    fn from(level: ConfidenceLevel) -> Self {
+        match level {
+            ConfidenceLevel::High => FeedbackSignal::Useful { strength: 1.0 },
+            ConfidenceLevel::Medium => FeedbackSignal::Useful { strength: 0.6 },
+            ConfidenceLevel::Low => FeedbackSignal::Useful { strength: 0.3 },
+            ConfidenceLevel::None => FeedbackSignal::NotUseful { strength: 1.0 },
+        }
+    }
+}
+
 /// Compute social support score from multi-agent corroboration.
 ///
 /// Formula: `ln(1 + distinct_agent_count) * agreement_score * avg_confidence`

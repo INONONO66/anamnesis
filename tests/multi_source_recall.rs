@@ -47,7 +47,6 @@ fn ingest(engine: &mut Engine, name: &str) -> NodeId {
     {
         IngestResult::Created(ids) => ids[0],
         IngestResult::Reinforced { .. } => panic!("dedup is disabled"),
-        IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
     }
 }
 
@@ -116,7 +115,7 @@ fn recall_reaches_linked_neighbor_via_additive_rwr() {
     let seed = ingest(&mut engine, "rwr seed");
     let neighbor = ingest(&mut engine, "rwr neighbor");
     engine
-        .link(seed, neighbor, EdgeType::Semantic, 1.0)
+        .link(seed, neighbor, EdgeType::Semantic)
         .expect("link should succeed");
 
     let result = engine
@@ -151,7 +150,6 @@ fn priority_queue_bfs_uses_identity_prior_without_dropping_seed() {
     {
         IngestResult::Created(ids) => ids[0],
         IngestResult::Reinforced { .. } => panic!("dedup is disabled"),
-        IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
     };
 
     let result = engine

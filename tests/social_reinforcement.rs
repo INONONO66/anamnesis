@@ -266,7 +266,7 @@ fn contradicts_edges_excluded_from_entity_linking() {
     let n2 = insert_node(&mut engine, "contradicts A", "agent-b", "s2", &["auth"]);
 
     // Manually add a Contradicts edge
-    engine.link(n1, n2, EdgeType::Contradicts, 0.9).unwrap();
+    engine.link(n1, n2, EdgeType::Contradicts).unwrap();
 
     // Contradicts edge exists but social_support with 0 agreement = 0
     let score = social_support(2, 0.0, 0.9);

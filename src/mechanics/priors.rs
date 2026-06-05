@@ -197,6 +197,77 @@ pub fn edge_type_factor(edge_type: &crate::graph::EdgeType, is_forward: bool) ->
     }
 }
 
+/// Largest forward [`edge_type_factor`] over all edge types — the `Supersedes`
+/// forward factor. Used to normalize the type-affinity feature into `[0, 1]`.
+///
+/// DERIVED — the max of the declared `edge_type_factor` ordinal prior; not an
+/// independent knob. If the ordering is refit this must track its new maximum.
+pub const EDGE_TYPE_FACTOR_MAX: f64 = 1.20;
+
+/// Edge-type-affinity NPMI feature `type_npmi` for the cold-start coupling seed
+/// (conductance.md "Cold Start").
+///
+/// DERIVED — the forward [`edge_type_factor`] of the requested relation,
+/// normalized into `[0, 1]` against [`EDGE_TYPE_FACTOR_MAX`] so it can enter the
+/// `coupling_seed` regression as a unit NPMI feature. `Contradicts` returns `0.0`
+/// (excluded from propagation), so a contradiction link contributes no type
+/// coupling and its seed comes only from the other features.
+#[inline]
+pub fn edge_type_affinity_npmi(edge_type: &crate::graph::EdgeType) -> f64 {
+    (edge_type_factor(edge_type, true) / EDGE_TYPE_FACTOR_MAX).clamp(0.0, 1.0)
+}
+
+// --- Cold-start coupling seed (conductance.md, Phase 5 link()) --------------
+//
+// When a link is created before any co-activation history exists, its initial
+// conductance `C_ij` is a calibrated log-LR prior estimated from features
+// (conductance.md "Cold Start"). The four coefficients are ONE calibrated
+// regression vector `beta_coupling` over the normalized NPMI features
+// `{sim, entity, scope, type}`, jointly fit at cold start — not four independent
+// knobs. The illustrative normalization sums to 1.
+
+/// `beta_coupling[sim]` — weight on the embedding-similarity NPMI feature.
+/// CALIBRATED PRIOR — one entry of the single `beta_coupling` regression vector.
+pub const BETA_COUPLING_SIM: f64 = 0.45;
+/// `beta_coupling[entity]` — weight on the entity-overlap NPMI feature.
+/// CALIBRATED PRIOR — `beta_coupling` regression vector.
+pub const BETA_COUPLING_ENTITY: f64 = 0.25;
+/// `beta_coupling[scope]` — weight on the scope-compatibility NPMI feature.
+/// CALIBRATED PRIOR — `beta_coupling` regression vector.
+pub const BETA_COUPLING_SCOPE: f64 = 0.15;
+/// `beta_coupling[type]` — weight on the edge-type-affinity NPMI feature.
+/// CALIBRATED PRIOR — `beta_coupling` regression vector.
+pub const BETA_COUPLING_TYPE: f64 = 0.15;
+
+/// Cold-start coupling seed `coupling_seed = sum_f beta_f * npmi_f` (conductance.md).
+///
+/// CALIBRATED PRIOR mapping — the four normalized NPMI features
+/// `{sim, entity, scope, type}` are combined by the single `beta_coupling`
+/// regression vector. Inputs are clamped to `[0, 1]`; the result is the cold-start
+/// coupling strength, mapped to an initial conductance reservoir by
+/// [`initialize_conductance`].
+pub fn coupling_seed(sim_npmi: f64, entity_npmi: f64, scope_npmi: f64, type_npmi: f64) -> f64 {
+    let f = |v: f64| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 };
+    BETA_COUPLING_SIM * f(sim_npmi)
+        + BETA_COUPLING_ENTITY * f(entity_npmi)
+        + BETA_COUPLING_SCOPE * f(scope_npmi)
+        + BETA_COUPLING_TYPE * f(type_npmi)
+}
+
+/// Map a cold-start `coupling_seed` (in `[0, 1]`) to an initial conductance
+/// reservoir `C_ij` in log-LR units (conductance.md `initialize_conductance`).
+///
+/// DERIVED — the coupling seed is a probability-like coupling strength; its log-LR
+/// image is `logit(coupling_seed)`, the inverse of the `project_weight` logistic,
+/// so that `project_weight(initialize_conductance(s)) ≈ s`. A zero/sub-threshold
+/// seed maps to a strongly negative (near-zero weight) cold-start path; the
+/// committed Hebbian flux later replaces the prior with measured strength. Finite
+/// at the `0`/`1` ends via the clamped logit.
+#[inline]
+pub fn initialize_conductance(coupling_seed: f64) -> f64 {
+    clamped_logit(coupling_seed)
+}
+
 // --- Potential field / seed distribution (potential-landscape.md) -----------
 
 /// Softmax temperature `tau` for the RWR restart seed distribution

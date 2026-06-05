@@ -49,7 +49,6 @@ fn engine() -> Engine {
 fn created(result: Result<IngestResult, anamnesis::Error>) -> NodeId {
     match result.expect("ingest should succeed") {
         IngestResult::Created(ids) => ids[0],
-        IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
         other => panic!("expected a created node, got {other:?}"),
     }
 }
@@ -66,9 +65,9 @@ fn contradiction_surfaces_with_stress_and_is_not_suppressed() {
     let a = created(e.ingest(obs_scoped("claim a", vec![0.0, 1.0, 0.0], "proj")));
     let b = created(e.ingest(obs_scoped("claim b", vec![0.0, 0.0, 1.0], "proj")));
 
-    e.link(hub, a, EdgeType::Semantic, 0.9).unwrap();
-    e.link(hub, b, EdgeType::Semantic, 0.9).unwrap();
-    e.link(a, b, EdgeType::Contradicts, 0.9).unwrap();
+    e.link(hub, a, EdgeType::Semantic).unwrap();
+    e.link(hub, b, EdgeType::Semantic).unwrap();
+    e.link(a, b, EdgeType::Contradicts).unwrap();
 
     let pkg = e
         .query(
@@ -117,9 +116,9 @@ fn disjoint_scope_contradiction_produces_no_stress() {
     // b lives in an unrelated scope → scope_overlap gate is 0.
     let b = created(e.ingest(obs_scoped("claim b", vec![0.0, 0.0, 1.0], "proj-b")));
 
-    e.link(hub, a, EdgeType::Semantic, 0.9).unwrap();
-    e.link(hub, b, EdgeType::Semantic, 0.9).unwrap();
-    e.link(a, b, EdgeType::Contradicts, 0.9).unwrap();
+    e.link(hub, a, EdgeType::Semantic).unwrap();
+    e.link(hub, b, EdgeType::Semantic).unwrap();
+    e.link(a, b, EdgeType::Contradicts).unwrap();
 
     let pkg = e
         .query(

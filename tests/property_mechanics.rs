@@ -4,9 +4,8 @@
 //! using proptest with 256 cases per test.
 
 use anamnesis::graph::KnowledgeType;
-use anamnesis::mechanics::attraction::{attraction_score, cosine_similarity, strengthen_edge};
+use anamnesis::mechanics::attraction::{attraction_score, cosine_similarity};
 use anamnesis::mechanics::forgetting::base_level_to_salience;
-use anamnesis::mechanics::gravity::{compute_mass, gravity_boost, normalize_access_count};
 use anamnesis::mechanics::interactions::{
     decay_default, hebbian_oja, reinforce_access, rescorla_wagner,
 };
@@ -135,57 +134,16 @@ proptest! {
         prop_assert!(result <= 1.0 + 1e-10, "cosine_similarity > 1.0: {result}");
     }
 
-    /// attraction_score: result ≥ 0
+    /// attraction_score: result ≥ 0. It is the candidate-selection affinity
+    /// `sigma_ij * tau` only — no mass / gravity term (importance is emergent,
+    /// overview.md / conductance.md).
     #[test]
     fn prop_attraction_score_nonnegative(
         sim in 0.0f64..=1.0,
         tau in 0.0f64..=2.0,
-        mass in 0.0f64..=1.0,
     ) {
-        let result = attraction_score(sim, tau, mass);
+        let result = attraction_score(sim, tau);
         prop_assert!(result >= 0.0, "attraction_score negative: {result}");
-    }
-
-    /// strengthen_edge: result ≥ current, result ≤ 1.0
-    #[test]
-    fn prop_strengthen_edge_bounds(
-        current in 0.0f64..=1.0,
-        attraction in 0.0f64..=2.0,
-    ) {
-        let result = strengthen_edge(current, attraction);
-        prop_assert!(result >= current - 1e-10, "strengthen decreased weight: {result} < {current}");
-        prop_assert!(result <= 1.0 + 1e-10, "strengthen exceeded 1.0: {result}");
-    }
-}
-
-// ── Property tests for gravity mechanics ──────────────────────────────────────
-
-proptest! {
-    /// compute_mass: result ∈ [0, 1]
-    #[test]
-    fn prop_compute_mass_in_bounds(
-        salience in 0.0f64..=1.0,
-        access_count in 0u32..=10000,
-        kt in knowledge_type_strategy(),
-    ) {
-        let result = compute_mass(salience, access_count, &kt);
-        prop_assert!(result >= 0.0, "compute_mass negative: {result}");
-        prop_assert!(result <= 1.0 + 1e-10, "compute_mass > 1.0: {result}");
-    }
-
-    /// gravity_boost: result ≥ 1.0 (boost is additive)
-    #[test]
-    fn prop_gravity_boost_at_least_one(mass in 0.0f64..=1.0) {
-        let result = gravity_boost(mass);
-        prop_assert!(result >= 1.0 - 1e-10, "gravity_boost < 1.0: {result}");
-    }
-
-    /// normalize_access_count: result ∈ [0, 1]
-    #[test]
-    fn prop_normalize_access_count_in_range(count in 0u32..=100000) {
-        let result = normalize_access_count(count);
-        prop_assert!(result >= 0.0, "normalize_access_count negative: {result}");
-        prop_assert!(result <= 1.0 + 1e-10, "normalize_access_count > 1.0: {result}");
     }
 }
 

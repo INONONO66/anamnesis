@@ -105,6 +105,16 @@ pub fn additive_rwr_with_alpha<S: StorageAdapter>(
     if restart.is_empty() {
         return ActivationResponse::default();
     }
+    // Deterministic, sorted view of the restart distribution. Iterating the
+    // `HashMap` directly would expose hash-seed-dependent ordering, and f64 addition
+    // is not associative, so the restart/dangling redistribution must accumulate in
+    // a stable order to satisfy the determinism MUST (ADR-0004: same graph + query
+    // => identical result).
+    let restart_sorted: Vec<(NodeId, f64)> = {
+        let mut v: Vec<(NodeId, f64)> = restart.iter().map(|(&id, &m)| (id, m)).collect();
+        v.sort_by_key(|(id, _)| id.0);
+        v
+    };
 
     // Precompute the transition rows once (read-only graph): for each source,
     // its outgoing transitions over projected conductance, the row sum, and the
@@ -139,7 +149,7 @@ pub fn additive_rwr_with_alpha<S: StorageAdapter>(
         let mut next: HashMap<NodeId, f64> = HashMap::with_capacity(node_ids.len());
 
         // Restart contribution.
-        for (id, mass) in &restart {
+        for (id, mass) in &restart_sorted {
             add_mass(&mut next, *id, alpha * *mass);
         }
 
@@ -159,7 +169,7 @@ pub fn additive_rwr_with_alpha<S: StorageAdapter>(
                 Some(transitions) => {
                     let row_sum: f64 = transitions.iter().map(|t| t.conductance).sum();
                     if !row_sum.is_finite() || row_sum <= 0.0 {
-                        for (id, mass) in &restart {
+                        for (id, mass) in &restart_sorted {
                             add_mass(&mut next, *id, walk_mass * *mass);
                         }
                         continue;
@@ -170,7 +180,7 @@ pub fn additive_rwr_with_alpha<S: StorageAdapter>(
                     }
                 }
                 None => {
-                    for (id, mass) in &restart {
+                    for (id, mass) in &restart_sorted {
                         add_mass(&mut next, *id, walk_mass * *mass);
                     }
                 }
@@ -186,9 +196,16 @@ pub fn additive_rwr_with_alpha<S: StorageAdapter>(
         }
     }
 
-    // Path currents at the settled response: I_ij = a_i * g_ij.
+    // Path currents at the settled response: I_ij = a_i * g_ij. Iterate sources in
+    // deterministic sorted order: an edge appears as a transition from both of its
+    // endpoints (forward and backward), so the final `path_current[edge]` is the
+    // last writer — the source order must be stable to satisfy the determinism MUST
+    // (ADR-0004). `node_ids` is already sorted; the higher-id endpoint wins.
     let mut path_current: PathCurrentMap = HashMap::new();
-    for (&source, transitions) in &rows {
+    for &source in &node_ids {
+        let Some(transitions) = rows.get(&source) else {
+            continue;
+        };
         let a_i = current.get(&source).copied().unwrap_or(0.0);
         if !a_i.is_finite() || a_i <= 0.0 {
             continue;

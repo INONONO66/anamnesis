@@ -51,7 +51,6 @@ fn created_id(result: IngestResult) -> NodeId {
     match result {
         IngestResult::Created(ids) => ids[0],
         IngestResult::Reinforced { .. } => panic!("expected a newly created node"),
-        IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
     }
 }
 
@@ -539,8 +538,8 @@ fn neighborhood_query_expands_by_requested_depth() {
             ))
             .unwrap(),
     );
-    engine.link(a, b, EdgeType::Semantic, 1.0).unwrap();
-    engine.link(b, c, EdgeType::Causal, 1.0).unwrap();
+    engine.link(a, b, EdgeType::Semantic).unwrap();
+    engine.link(b, c, EdgeType::Causal).unwrap();
 
     let depth_one = engine
         .query(
@@ -699,7 +698,7 @@ fn end_to_end_agent_memory_pipeline_surfaces_identity_and_relevant_context() {
             .unwrap(),
     );
     engine
-        .link(convention, auth_refactoring, EdgeType::Reason, 1.0)
+        .link(convention, auth_refactoring, EdgeType::Reason)
         .unwrap();
 
     engine.tick(Timestamp(30 * DAY_MS)).unwrap();

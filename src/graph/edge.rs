@@ -50,6 +50,44 @@ pub struct Edge {
     pub metadata: HashMap<String, String>,
 }
 
+impl Edge {
+    /// Construct an edge from its authoritative conductance reservoir, deriving the
+    /// bounded `weight` projection so the ADR-0002 invariant `weight =
+    /// project_weight(conductance)` holds by construction.
+    ///
+    /// Conductance is never authored as a public control knob (conductance.md): the
+    /// caller supplies the seeded log-LR reservoir (e.g. a cold-start coupling) and
+    /// the projection is computed here, never independently. Every engine edge-creation
+    /// site routes through this so `weight` can never diverge from `conductance`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn seeded(
+        id: EdgeId,
+        source: NodeId,
+        target: NodeId,
+        edge_type: EdgeType,
+        conductance: f64,
+        edge_source: EdgeSource,
+        created_at: Timestamp,
+        accessed_at: Timestamp,
+        metadata: HashMap<String, String>,
+    ) -> Self {
+        Edge {
+            id,
+            source,
+            target,
+            edge_type,
+            weight: crate::mechanics::priors::project_weight(conductance),
+            conductance,
+            edge_source,
+            created_at,
+            accessed_at,
+            valid_from: None,
+            valid_until: None,
+            metadata,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

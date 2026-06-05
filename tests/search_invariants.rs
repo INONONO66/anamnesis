@@ -48,7 +48,6 @@ fn ingest(engine: &mut Engine, name: &str, node_type: KnowledgeType, scope: &str
     match engine.ingest(observation(name, node_type, scope)).unwrap() {
         IngestResult::Created(ids) => ids[0],
         IngestResult::Reinforced { existing_id, .. } => existing_id,
-        IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
     }
 }
 
@@ -140,7 +139,7 @@ fn identity_tension_preserved() {
         "dev/rust",
     );
     engine
-        .link(identity, conflicting, EdgeType::Contradicts, 0.9)
+        .link(identity, conflicting, EdgeType::Contradicts)
         .unwrap();
 
     let result = engine
@@ -185,11 +184,11 @@ fn rwr_consults_identity_and_kappa() {
         "dev/rust",
     );
     engine
-        .link(seed, supported, EdgeType::Supersedes, 1.0)
+        .link(seed, supported, EdgeType::Supersedes)
         .unwrap();
-    engine.link(seed, refuted, EdgeType::Refutes, 1.0).unwrap();
+    engine.link(seed, refuted, EdgeType::Refutes).unwrap();
     engine
-        .link(identity, supported, EdgeType::Semantic, 1.0)
+        .link(identity, supported, EdgeType::Semantic)
         .unwrap();
 
     let result = engine
@@ -236,8 +235,8 @@ fn seed_limit_configurable_changes_recall() {
         KnowledgeType::Semantic,
         "dev/rust",
     );
-    engine.link(a, b, EdgeType::Semantic, 1.0).unwrap();
-    engine.link(b, c, EdgeType::Semantic, 1.0).unwrap();
+    engine.link(a, b, EdgeType::Semantic).unwrap();
+    engine.link(b, c, EdgeType::Semantic).unwrap();
 
     let one = engine
         .search(SearchInput {
@@ -302,28 +301,32 @@ fn whitespace_text_accepted_with_embedding() {
     );
 }
 
-/// Protects Engine::link endpoint validation and finite weight handling matrix.
+/// Protects Engine::link endpoint validation and cold-start conductance seeding.
+///
+/// `link` no longer takes a caller-supplied weight (conductance.md: conductance is
+/// never set directly). It must still reject missing endpoints, and the edge it
+/// creates must carry a finite seeded conductance reservoir whose `weight`
+/// projection lies in the bounded public range `[0, 1]` (ADR-0002).
 #[test]
 fn engine_link_validation_full_matrix() {
     let mut engine = engine();
     let a = ingest(&mut engine, "link a", KnowledgeType::Semantic, "dev/rust");
     let b = ingest(&mut engine, "link b", KnowledgeType::Semantic, "dev/rust");
 
+    assert!(engine.link(NodeId(999), b, EdgeType::Semantic).is_err());
+    assert!(engine.link(a, NodeId(999), EdgeType::Semantic).is_err());
+
+    let edge_id = engine.link(a, b, EdgeType::Semantic).unwrap();
+    let edge = engine.graph().storage().get_edge(edge_id).unwrap();
     assert!(
-        engine
-            .link(NodeId(999), b, EdgeType::Semantic, 0.5)
-            .is_err()
+        edge.conductance.is_finite(),
+        "seeded conductance must be finite"
     );
     assert!(
-        engine
-            .link(a, NodeId(999), EdgeType::Semantic, 0.5)
-            .is_err()
+        (0.0..=1.0).contains(&edge.weight),
+        "weight projection must stay in [0, 1], got {}",
+        edge.weight
     );
-    assert!(engine.link(a, b, EdgeType::Semantic, f64::NAN).is_err());
-    let low = engine.link(a, b, EdgeType::Semantic, -1.0).unwrap();
-    assert_eq!(engine.graph().storage().get_edge(low).unwrap().weight, 0.0);
-    let high = engine.link(a, b, EdgeType::Semantic, 2.0).unwrap();
-    assert_eq!(engine.graph().storage().get_edge(high).unwrap().weight, 1.0);
 }
 
 /// Protects accessed_at and decay_checkpoint synchronization invariants.
@@ -397,11 +400,11 @@ fn source_fragment_carries_source_scope() {
         "project/main",
     );
     engine
-        .link(knowledge, source, EdgeType::ExtractedFrom, 1.0)
+        .link(knowledge, source, EdgeType::ExtractedFrom)
         .unwrap();
     // Create a Contradicts edge to trigger KnowledgeWithProvenance packaging mode
     engine
-        .link(knowledge, tension, EdgeType::Contradicts, 0.8)
+        .link(knowledge, tension, EdgeType::Contradicts)
         .unwrap();
 
     let result = engine

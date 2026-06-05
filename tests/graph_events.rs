@@ -33,7 +33,6 @@ fn created_id(result: IngestResult) -> anamnesis::NodeId {
     match result {
         IngestResult::Created(ids) => ids[0],
         IngestResult::Reinforced { existing_id, .. } => existing_id,
-        IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
     }
 }
 
@@ -150,7 +149,7 @@ fn drain_clears_buffer_and_preserves_chronological_order() {
             .expect("second ingest succeeds"),
     );
     engine
-        .link(first, second, EdgeType::Causal, 0.7)
+        .link(first, second, EdgeType::Causal)
         .expect("link succeeds");
 
     assert!(engine.has_events());

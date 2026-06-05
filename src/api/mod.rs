@@ -12,12 +12,6 @@ use crate::storage::{SqliteStorage, StorageAdapter};
 
 mod search;
 
-const TOPOLOGY_INGEST_MAX_DEPTH: usize = 2;
-const TOPOLOGY_INGEST_ALPHA: f64 = 0.50;
-const TOPOLOGY_INGEST_BETA: f64 = 0.15;
-const TOPOLOGY_INGEST_GAMMA: f64 = 0.10;
-const TOPOLOGY_INGEST_DELTA: f64 = 0.15;
-const TOPOLOGY_INGEST_EPSILON: f64 = 0.10;
 const ARCHIVE_SALIENCE_THRESHOLD: f64 = 0.10;
 const SALIENCE_CHANGE_EPSILON: f64 = 1e-10;
 
@@ -48,16 +42,8 @@ pub struct EngineConfig {
     pub dedup_threshold: f64,
     /// Whether ingest should detect duplicate embeddings and reinforce existing nodes.
     pub dedup_enabled: bool,
-    /// Whether ingest expands trigger candidates through nearby graph topology.
-    pub topology_ingest_enabled: bool,
     /// Maximum number of mutation events retained for draining. Default: 10,000.
     pub max_events: usize,
-    /// Similarity threshold for conflict detection.
-    ///
-    /// When `conflict_threshold < similarity < dedup_threshold`, ingest returns
-    /// `IngestResult::CreatedWithConflict` and creates a `Contradicts` edge.
-    /// Default: 0.75.
-    pub conflict_threshold: f64,
 }
 
 impl Default for EngineConfig {
@@ -76,9 +62,7 @@ impl Default for EngineConfig {
             confidence_threshold: 0.50,
             dedup_threshold: 0.92,
             dedup_enabled: true,
-            topology_ingest_enabled: false,
             max_events: 10_000,
-            conflict_threshold: 0.75,
         }
     }
 }
@@ -118,11 +102,6 @@ impl EngineConfig {
         self
     }
 
-    pub fn with_topology_ingest(mut self, enabled: bool) -> Self {
-        self.topology_ingest_enabled = enabled;
-        self
-    }
-
     pub fn with_max_events(mut self, max_events: usize) -> Self {
         self.max_events = max_events;
         self
@@ -131,6 +110,117 @@ impl EngineConfig {
 
 fn finite_vector(values: &[f64]) -> bool {
     values.iter().all(|value| value.is_finite())
+}
+
+/// Builds the read-only [`CommitTrace`] for a packaged retrieval (ADR-0004).
+///
+/// Captures, from the settled [`ActivationResponse`](crate::query::ActivationResponse)
+/// and the assembled [`ContextPackage`], the work a later
+/// [`Engine::commit`](Engine::commit) may integrate:
+///
+/// - `accessed`: every packaged fragment, with `readout_work = clamp(a_i, 0, 1)`
+///   (the settled query-local activation as the readout-work proxy);
+/// - `co_readout`: every distinct ordered pair of packaged fragments connected by a
+///   live, propagating (non-`Contradicts`) edge, with their activations;
+/// - `path_used`: every edge that carried positive path current `I_ij`, snapshotting
+///   its `source`/`target`/`edge_type` so commit can detect a stale trace;
+/// - `tensions_activated`: every surfaced [`Tension`], with its presented stress.
+///
+/// Pure read of storage: no reservoir, projection, or timestamp is mutated.
+fn build_commit_trace<S: StorageAdapter>(
+    storage: &S,
+    response: &crate::query::ActivationResponse,
+    package: &ContextPackage,
+) -> crate::query::CommitTrace {
+    use crate::query::{AccessedSite, ActivatedTension, CoReadoutPair, CommitTrace, PathUsedEdge};
+
+    let activation_of = |id: NodeId| response.activation.get(&id).copied().unwrap_or(0.0);
+
+    // Packaged fragment ids, deterministically ordered (identity, knowledge, memories).
+    let mut packaged: Vec<NodeId> = Vec::new();
+    for frag in package
+        .identity
+        .iter()
+        .chain(package.knowledge.iter())
+        .chain(package.memories.iter())
+    {
+        if !packaged.contains(&frag.node_id) {
+            packaged.push(frag.node_id);
+        }
+    }
+
+    // `Accessed`: each packaged site, readout work = bounded settled activation.
+    let accessed: Vec<AccessedSite> = packaged
+        .iter()
+        .map(|&node_id| AccessedSite {
+            node_id,
+            readout_work: activation_of(node_id).clamp(0.0, 1.0),
+        })
+        .collect();
+
+    // `CoReadout`: distinct ordered pairs of packaged sites joined by a live,
+    // propagating edge. Iterate the stable packaged order; for each pair check both
+    // directions; skip excluded `Contradicts` edges (those are tensions, not flux).
+    let excluded: HashSet<EdgeId> = response.excluded_edges.iter().copied().collect();
+    let mut co_readout: Vec<CoReadoutPair> = Vec::new();
+    for (idx, &node_a) in packaged.iter().enumerate() {
+        for &node_b in &packaged[idx + 1..] {
+            let connected = storage.edges_from(node_a).iter().any(|&eid| {
+                !excluded.contains(&eid)
+                    && storage.get_edge(eid).is_ok_and(|e| e.target == node_b)
+            }) || storage.edges_from(node_b).iter().any(|&eid| {
+                !excluded.contains(&eid)
+                    && storage.get_edge(eid).is_ok_and(|e| e.target == node_a)
+            });
+            if connected {
+                co_readout.push(CoReadoutPair {
+                    node_a,
+                    node_b,
+                    activation_a: activation_of(node_a),
+                    activation_b: activation_of(node_b),
+                });
+            }
+        }
+    }
+
+    // `PathUsed`: every edge carrying positive path current, with a topology snapshot.
+    let mut path_edges: Vec<EdgeId> = response.path_current.keys().copied().collect();
+    path_edges.sort_by_key(|e| e.0);
+    let mut path_used: Vec<PathUsedEdge> = Vec::new();
+    for edge_id in path_edges {
+        let flux = response.path_current.get(&edge_id).copied().unwrap_or(0.0);
+        if !flux.is_finite() || flux <= 0.0 {
+            continue;
+        }
+        let Ok(edge) = storage.get_edge(edge_id) else {
+            continue;
+        };
+        path_used.push(PathUsedEdge {
+            edge_id,
+            source: edge.source,
+            target: edge.target,
+            edge_type: edge.edge_type.clone(),
+            flux,
+        });
+    }
+
+    // `TensionActivated`: each surfaced contradiction with its presented stress.
+    let tensions_activated: Vec<ActivatedTension> = package
+        .tensions
+        .iter()
+        .map(|t| ActivatedTension {
+            node_a: t.node_a,
+            node_b: t.node_b,
+            stress: t.stress,
+        })
+        .collect();
+
+    CommitTrace {
+        accessed,
+        co_readout,
+        path_used,
+        tensions_activated,
+    }
 }
 
 fn ingest_trigger_candidates<S: StorageAdapter>(
@@ -152,118 +242,6 @@ fn ingest_trigger_candidates<S: StorageAdapter>(
         }
     }
     candidates
-}
-
-fn topology_expanded_candidates<S: StorageAdapter>(
-    storage: &S,
-    trigger_candidates: &HashSet<NodeId>,
-    exclude: Option<NodeId>,
-) -> (HashSet<NodeId>, HashMap<NodeId, usize>) {
-    let mut expanded = trigger_candidates.clone();
-    let mut distances = HashMap::new();
-    let mut queue = VecDeque::new();
-
-    for &nid in trigger_candidates {
-        if Some(nid) == exclude {
-            continue;
-        }
-        distances.insert(nid, 0);
-        queue.push_back((nid, 0));
-    }
-
-    while let Some((current, depth)) = queue.pop_front() {
-        if depth >= TOPOLOGY_INGEST_MAX_DEPTH {
-            continue;
-        }
-
-        for edge_id in storage.edges_from(current) {
-            if let Ok(edge) = storage.get_edge(*edge_id) {
-                insert_topology_neighbor(
-                    edge.target,
-                    depth + 1,
-                    exclude,
-                    &mut expanded,
-                    &mut distances,
-                    &mut queue,
-                );
-            }
-        }
-        for edge_id in storage.edges_to(current) {
-            if let Ok(edge) = storage.get_edge(*edge_id) {
-                insert_topology_neighbor(
-                    edge.source,
-                    depth + 1,
-                    exclude,
-                    &mut expanded,
-                    &mut distances,
-                    &mut queue,
-                );
-            }
-        }
-    }
-
-    (expanded, distances)
-}
-
-fn insert_topology_neighbor(
-    neighbor: NodeId,
-    depth: usize,
-    exclude: Option<NodeId>,
-    expanded: &mut HashSet<NodeId>,
-    distances: &mut HashMap<NodeId, usize>,
-    queue: &mut VecDeque<(NodeId, usize)>,
-) {
-    if Some(neighbor) == exclude || depth > TOPOLOGY_INGEST_MAX_DEPTH {
-        return;
-    }
-
-    let should_visit = distances
-        .get(&neighbor)
-        .is_none_or(|existing_depth| depth < *existing_depth);
-    if should_visit {
-        distances.insert(neighbor, depth);
-        queue.push_back((neighbor, depth));
-    }
-    expanded.insert(neighbor);
-}
-
-fn entity_overlap_score(new_tags: &[String], candidate_tags: &[String]) -> f64 {
-    if new_tags.is_empty() || candidate_tags.is_empty() {
-        return 0.0;
-    }
-
-    let new_set: BTreeSet<&str> = new_tags.iter().map(String::as_str).collect();
-    let candidate_set: BTreeSet<&str> = candidate_tags.iter().map(String::as_str).collect();
-    let union = new_set.union(&candidate_set).count();
-    if union == 0 {
-        return 0.0;
-    }
-
-    new_set.intersection(&candidate_set).count() as f64 / union as f64
-}
-
-fn graph_proximity_score(depth: Option<usize>) -> f64 {
-    match depth {
-        Some(0) => 1.0,
-        Some(1) => 2.0 / 3.0,
-        Some(2) => 1.0 / 3.0,
-        _ => 0.0,
-    }
-}
-
-fn topology_ingest_score(
-    cosine: f64,
-    entity_overlap: f64,
-    salience: f64,
-    graph_proximity: f64,
-    bridge: f64,
-) -> f64 {
-    (TOPOLOGY_INGEST_ALPHA * cosine.clamp(0.0, 1.0)
-        + TOPOLOGY_INGEST_BETA * entity_overlap.clamp(0.0, 1.0)
-        + TOPOLOGY_INGEST_GAMMA * salience.clamp(0.0, 1.0)
-        + TOPOLOGY_INGEST_DELTA * graph_proximity.clamp(0.0, 1.0)
-        + TOPOLOGY_INGEST_EPSILON * bridge.clamp(0.0, 1.0))
-    .clamp(0.0, 1.0)
 }
 
 /// An observation to be ingested into the graph.
@@ -343,7 +321,11 @@ pub struct CrystallizeResult {
     pub dedup_score: f64,
     /// Attraction edges created from the crystal to similar non-source nodes.
     pub attraction_edges: Vec<EdgeId>,
-    /// Number of source nodes reinforced via `touch()`.
+    /// Number of source nodes mutated by crystallization.
+    ///
+    /// Always `0`: crystallization is additive synthesis and **never mutates its
+    /// sources** (overview.md `crystallize` contract, interactions.md
+    /// `Crystallized`). Retained for API compatibility.
     pub nodes_reinforced: usize,
     /// Initial salience assigned to the crystal.
     pub initial_salience: f64,
@@ -394,22 +376,24 @@ pub struct TickReport {
     pub nodes_pruned: usize,
 }
 
-/// A pair of nodes that are candidates for merging.
-#[derive(Debug, Clone)]
-pub struct MergePair {
-    pub node_a: NodeId,
-    pub node_b: NodeId,
-    /// Similarity score [0, 1].
-    pub similarity: f64,
-}
-
-/// Log of merges performed by Engine::auto_merge().
+/// Report returned by [`Engine::commit`] — the integrated work the commit recorded.
+///
+/// Every count names a committed interaction integrated into the reservoirs
+/// (ADR-0004 / interactions.md); the commit is the only reservoir-mutation path
+/// besides `tick`. Read-only retrieval mutates nothing, so an uncommitted package
+/// produces no deltas.
 #[derive(Debug, Clone, Default)]
-pub struct MergeLog {
-    /// Number of merges performed.
-    pub merges_performed: usize,
-    /// Node IDs that were merged (the surviving node ID).
-    pub merged_into: Vec<NodeId>,
+pub struct CommitReport {
+    /// Number of sites that received an `Accessed` (decay-then-reinforce) update.
+    pub sites_accessed: usize,
+    /// Number of sites that received a `FeedbackReceived` Rescorla-Wagner update.
+    pub feedback_applied: usize,
+    /// Number of edges that received a `PathUsed` Hebbian-Oja conductance update.
+    pub paths_strengthened: usize,
+    /// Number of `CoReadout` site pairs whose connecting edges were strengthened.
+    pub pairs_strengthened: usize,
+    /// Number of `TensionActivated` contradictions recorded.
+    pub tensions_recorded: usize,
 }
 
 /// Summary of a completed agent session for reflect_batch().
@@ -478,28 +462,6 @@ pub struct SupportReport {
     pub total_support_salience: f64,
 }
 
-/// Hint about a potential conflict detected during ingest.
-#[derive(Debug, Clone)]
-pub struct ConflictHint {
-    /// The existing node that conflicts with the new observation.
-    pub existing_node: NodeId,
-    /// Similarity score [0, 1] between the new observation and the existing node.
-    pub similarity: f64,
-    /// Suggested interpretation of the conflict.
-    pub suggestion: ConflictSuggestion,
-}
-
-/// Suggested interpretation of a detected conflict.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ConflictSuggestion {
-    /// The new observation likely updates the existing node.
-    ProbableUpdate,
-    /// The new observation likely disagrees with the existing node.
-    ProbableDisagreement,
-    /// The new observation is likely a near-duplicate.
-    ProbableDuplicate,
-}
-
 /// Result of an ingest operation.
 ///
 /// Indicates whether a new node was created or an existing node was reinforced.
@@ -507,15 +469,6 @@ pub enum ConflictSuggestion {
 pub enum IngestResult {
     /// A new node was created with the given IDs.
     Created(Vec<NodeId>),
-    /// A new node was created, but a potential conflict was detected with an existing node.
-    ///
-    /// A `Contradicts` edge is automatically created between the new node and the conflicting node.
-    CreatedWithConflict {
-        /// The IDs of the newly created nodes.
-        node_ids: Vec<NodeId>,
-        /// Details about the detected conflict.
-        conflict: ConflictHint,
-    },
     /// An existing node was reinforced due to similarity.
     Reinforced {
         /// The ID of the existing node that was reinforced.
@@ -621,34 +574,60 @@ fn clamp_unit_finite(value: f64) -> f64 {
     }
 }
 
-fn positive_edge_weight(value: f64) -> f64 {
-    if value.is_finite() {
-        value.clamp(0.1, 1.0)
-    } else {
-        0.1
-    }
-}
-
-fn crystallized_salience(
-    source_saliences: &[f64],
+/// Synthesis retained action `A_s_new` for a crystallized site — the additive,
+/// relevance-weighted average of the source `retained_action` reservoirs.
+///
+/// Crystallization is **additive synthesis only** (overview.md, interactions.md
+/// `Crystallized`): the new synthesis site inherits the weighted-mean need-odds of
+/// the fragments it consolidates and **never mutates the sources**. The work is
+/// expressed entirely in log-need-odds (reservoir) space (ADR-0002/ADR-0003), so
+/// the synthesis is a posterior-odds combination, not a `[0, 1]` salience blend.
+/// Confidence enters as a bounded additive log-odds offset
+/// (`(2*confidence - 1) * REWARD_LOG_ODDS_SCALE`): a fully confident synthesis is
+/// lifted by `+REWARD_LOG_ODDS_SCALE`, a zero-confidence one is pulled down by the
+/// symmetric amount, and a neutral `0.5` confidence leaves the source average
+/// unchanged. The result is clamped to the finite log-odds range.
+fn crystallized_action(
+    source_actions: &[f64],
     relevance_weights: &[f64],
     confidence: f64,
 ) -> f64 {
     let weight_sum: f64 = relevance_weights.iter().sum();
     let source_average = if weight_sum > f64::EPSILON {
-        source_saliences
+        source_actions
             .iter()
             .zip(relevance_weights.iter())
-            .map(|(salience, relevance)| salience * relevance)
+            .map(|(action, relevance)| action * relevance)
             .sum::<f64>()
             / weight_sum
-    } else if source_saliences.is_empty() {
+    } else if source_actions.is_empty() {
         0.0
     } else {
-        source_saliences.iter().sum::<f64>() / source_saliences.len() as f64
+        source_actions.iter().sum::<f64>() / source_actions.len() as f64
     };
 
-    (0.60 * source_average + 0.25 * confidence + 0.15 * 0.10).clamp(0.0, 1.0)
+    let confidence_offset =
+        (2.0 * confidence - 1.0) * crate::mechanics::priors::REWARD_LOG_ODDS_SCALE;
+    let clamp = crate::mechanics::priors::LOG_ODDS_CLAMP;
+    (source_average + confidence_offset).clamp(-clamp, clamp)
+}
+
+/// Entity-overlap NPMI feature `entity_npmi` — Jaccard of the two tag sets.
+///
+/// Returns `0.0` when either node has no tags. The overlap is a coupling cue: the
+/// more entities two sites share, the more likely they are co-needed.
+fn entity_overlap_npmi(a: &[String], b: &[String]) -> f64 {
+    if a.is_empty() || b.is_empty() {
+        return 0.0;
+    }
+    let set_a: HashSet<&str> = a.iter().map(String::as_str).collect();
+    let set_b: HashSet<&str> = b.iter().map(String::as_str).collect();
+    let intersection = set_a.intersection(&set_b).count();
+    if intersection == 0 {
+        return 0.0;
+    }
+    let union = set_a.union(&set_b).count();
+    intersection as f64 / union as f64
 }
 
 fn salience_tier(salience: f64) -> MemoryTier {
@@ -1230,29 +1209,35 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             let node_id = match result {
                 IngestResult::Created(ids) => ids[0],
                 IngestResult::Reinforced { existing_id, .. } => existing_id,
-                IngestResult::CreatedWithConflict { node_ids: ids, .. } => ids[0],
             };
             node_ids.push(node_id);
         }
 
-        // Link consecutive chunks with Temporal edges
+        // Link consecutive chunks with Temporal edges. Conductance is the cold-start
+        // coupling log-LR prior (calibrated over {sim, entity, scope, type}); the
+        // weight is its bounded projection, never authored (conductance.md / ADR-0002).
         for window in node_ids.windows(2) {
             let (from, to) = (window[0], window[1]);
+            let from_node = self.graph.get_node(from)?.clone();
+            let to_node = self.graph.get_node(to)?.clone();
+            let conductance =
+                self.cold_start_conductance(&from_node, &to_node, &EdgeType::Temporal);
+            if !conductance.is_finite() {
+                continue;
+            }
             let eid = self.graph.next_edge_id();
-            let edge = Edge {
-                id: eid,
-                source: from,
-                target: to,
-                edge_type: EdgeType::Temporal,
-                weight: 1.0,
-                conductance: 0.0,
-                edge_source: crate::graph::edge::EdgeSource::Auto,
-                created_at: Timestamp::now(),
-                accessed_at: Timestamp::now(),
-                valid_from: None,
-                valid_until: None,
-                metadata: HashMap::new(),
-            };
+            let now = Timestamp::now();
+            let edge = Edge::seeded(
+                eid,
+                from,
+                to,
+                EdgeType::Temporal,
+                conductance,
+                crate::graph::edge::EdgeSource::Auto,
+                now,
+                now,
+                HashMap::new(),
+            );
             self.graph.add_edge(edge)?;
         }
 
@@ -1287,7 +1272,6 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         let episode_id = match episode_result {
             IngestResult::Created(ids) => ids[0],
             IngestResult::Reinforced { existing_id, .. } => existing_id,
-            IngestResult::CreatedWithConflict { node_ids: ids, .. } => ids[0],
         };
 
         let mut extracted_ids = Vec::new();
@@ -1311,26 +1295,30 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             let fact_id = match fact_result {
                 IngestResult::Created(ids) => ids[0],
                 IngestResult::Reinforced { existing_id, .. } => existing_id,
-                IngestResult::CreatedWithConflict { node_ids: ids, .. } => ids[0],
             };
 
-            // Link fact to episode via ExtractedFrom
-            let eid = self.graph.next_edge_id();
-            let edge = Edge {
-                id: eid,
-                source: fact_id,
-                target: episode_id,
-                edge_type: EdgeType::ExtractedFrom,
-                weight: 1.0,
-                conductance: 0.0,
-                edge_source: crate::graph::edge::EdgeSource::Auto,
-                created_at: Timestamp::now(),
-                accessed_at: Timestamp::now(),
-                valid_from: None,
-                valid_until: None,
-                metadata: HashMap::new(),
-            };
-            self.graph.add_edge(edge)?;
+            // Link fact to episode via ExtractedFrom. Conductance is the cold-start
+            // coupling log-LR prior; weight is its bounded projection (ADR-0002).
+            let fact_node = self.graph.get_node(fact_id)?.clone();
+            let episode_node = self.graph.get_node(episode_id)?.clone();
+            let conductance =
+                self.cold_start_conductance(&fact_node, &episode_node, &EdgeType::ExtractedFrom);
+            if conductance.is_finite() {
+                let eid = self.graph.next_edge_id();
+                let now = Timestamp::now();
+                let edge = Edge::seeded(
+                    eid,
+                    fact_id,
+                    episode_id,
+                    EdgeType::ExtractedFrom,
+                    conductance,
+                    crate::graph::edge::EdgeSource::Auto,
+                    now,
+                    now,
+                    HashMap::new(),
+                );
+                self.graph.add_edge(edge)?;
+            }
 
             // If about_peer is set, also store in peer profile
             if let Some(ref peer_name) = input.about_peer {
@@ -1466,7 +1454,9 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             accessed_at: timestamp,
             valid_from: None,
             valid_until: None,
-            salience: 1.0,
+            salience: crate::mechanics::priors::project_salience(
+                crate::mechanics::priors::INITIAL_RETAINED_ACTION,
+            ),
             retained_action: crate::mechanics::priors::INITIAL_RETAINED_ACTION,
             access_count: 0,
             access_history: VecDeque::new(),
@@ -1524,7 +1514,9 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             accessed_at: timestamp,
             valid_from: None,
             valid_until: None,
-            salience: 1.0,
+            salience: crate::mechanics::priors::project_salience(
+                crate::mechanics::priors::INITIAL_RETAINED_ACTION,
+            ),
             retained_action: crate::mechanics::priors::INITIAL_RETAINED_ACTION,
             access_count: 0,
             access_history: VecDeque::new(),
@@ -1539,33 +1531,38 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             node_type: KnowledgeType::Hypothesis,
         });
 
-        let edge_id = self.graph.next_edge_id();
         let mut edge_metadata = HashMap::new();
         edge_metadata.insert(
             "debug_relation".to_string(),
             "hypothesis_session".to_string(),
         );
-        let edge = Edge {
-            id: edge_id,
-            source: id,
-            target: session,
-            edge_type: EdgeType::BelongsTo,
-            weight: 1.0,
-            conductance: 0.0,
-            edge_source: crate::graph::edge::EdgeSource::Auto,
-            created_at: timestamp,
-            accessed_at: timestamp,
-            valid_from: None,
-            valid_until: None,
-            metadata: edge_metadata,
-        };
-        self.graph.add_edge(edge)?;
-        self.emit_event(GraphEvent::EdgeCreated {
-            edge_id,
-            source: id,
-            target: session,
-            edge_type: EdgeType::BelongsTo,
-        });
+        // Conductance is the cold-start coupling log-LR prior; weight is its bounded
+        // projection, never authored (conductance.md / ADR-0002).
+        let hypothesis_node = self.graph.get_node(id)?.clone();
+        let session_node = self.graph.get_node(session)?.clone();
+        let conductance =
+            self.cold_start_conductance(&hypothesis_node, &session_node, &EdgeType::BelongsTo);
+        if conductance.is_finite() {
+            let edge_id = self.graph.next_edge_id();
+            let edge = Edge::seeded(
+                edge_id,
+                id,
+                session,
+                EdgeType::BelongsTo,
+                conductance,
+                crate::graph::edge::EdgeSource::Auto,
+                timestamp,
+                timestamp,
+                edge_metadata,
+            );
+            self.graph.add_edge(edge)?;
+            self.emit_event(GraphEvent::EdgeCreated {
+                edge_id,
+                source: id,
+                target: session,
+                edge_type: EdgeType::BelongsTo,
+            });
+        }
 
         Ok(id)
     }
@@ -1625,7 +1622,9 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             accessed_at: timestamp,
             valid_from: None,
             valid_until: None,
-            salience: 1.0,
+            salience: crate::mechanics::priors::project_salience(
+                crate::mechanics::priors::INITIAL_RETAINED_ACTION,
+            ),
             retained_action: crate::mechanics::priors::INITIAL_RETAINED_ACTION,
             access_count: 0,
             access_history: VecDeque::new(),
@@ -1647,7 +1646,6 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         };
 
         if let Some(edge_type) = edge_type {
-            let edge_id = self.graph.next_edge_id();
             let event_edge_type = edge_type.clone();
             let mut edge_metadata = HashMap::new();
             edge_metadata.insert(
@@ -1655,27 +1653,33 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                 "evidence_hypothesis".to_string(),
             );
             edge_metadata.insert("evidence_result".to_string(), result_label.to_string());
-            let edge = Edge {
-                id: edge_id,
-                source: id,
-                target: hypothesis,
-                edge_type,
-                weight: 1.0,
-                conductance: 0.0,
-                edge_source: crate::graph::edge::EdgeSource::Auto,
-                created_at: timestamp,
-                accessed_at: timestamp,
-                valid_from: None,
-                valid_until: None,
-                metadata: edge_metadata,
-            };
-            self.graph.add_edge(edge)?;
-            self.emit_event(GraphEvent::EdgeCreated {
-                edge_id,
-                source: id,
-                target: hypothesis,
-                edge_type: event_edge_type,
-            });
+            // Conductance is the cold-start coupling log-LR prior; weight is its
+            // bounded projection, never authored (conductance.md / ADR-0002).
+            let evidence_node = self.graph.get_node(id)?.clone();
+            let hypothesis_node = self.graph.get_node(hypothesis)?.clone();
+            let conductance =
+                self.cold_start_conductance(&evidence_node, &hypothesis_node, &edge_type);
+            if conductance.is_finite() {
+                let edge_id = self.graph.next_edge_id();
+                let edge = Edge::seeded(
+                    edge_id,
+                    id,
+                    hypothesis,
+                    edge_type,
+                    conductance,
+                    crate::graph::edge::EdgeSource::Auto,
+                    timestamp,
+                    timestamp,
+                    edge_metadata,
+                );
+                self.graph.add_edge(edge)?;
+                self.emit_event(GraphEvent::EdgeCreated {
+                    edge_id,
+                    source: id,
+                    target: hypothesis,
+                    edge_type: event_edge_type,
+                });
+            }
         }
 
         Ok(id)
@@ -1779,22 +1783,16 @@ impl<S: StorageAdapter + Clone> Engine<S> {
     /// up to 4 edges to the most similar candidates.
     pub fn ingest(&mut self, observation: Observation) -> Result<IngestResult, Error> {
         use crate::mechanics::attraction::{
-            attraction_score, cosine_similarity, should_create_edge, strengthen_edge, tau_type,
+            attraction_score, cosine_similarity, should_create_edge, tau_type,
         };
-        use crate::mechanics::gravity::compute_mass;
         use crate::mechanics::perception::{self, PerceptionDecision};
 
         // Nearest existing site: max similarity and the candidate embedding for the
         // Bayesian-surprise (Mahalanobis/isotropic) prediction error.
         let (max_similarity, most_similar_id, predicted_embedding) =
             if let Some(ref new_embedding) = observation.embedding {
-                let trigger_candidates =
+                let candidates =
                     ingest_trigger_candidates(self.graph.storage(), &observation.entity_tags, None);
-                let candidates = if self.config.topology_ingest_enabled {
-                    topology_expanded_candidates(self.graph.storage(), &trigger_candidates, None).0
-                } else {
-                    trigger_candidates
-                };
 
                 let (sim, id) = candidates
                     .into_iter()
@@ -1889,38 +1887,6 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             } => surprise_charge,
         };
 
-        // Conflict detection: similarity in (conflict_threshold, dedup_threshold) range.
-        let conflict_candidate = if self.config.dedup_enabled
-            && max_similarity > self.config.conflict_threshold
-            && max_similarity <= self.config.dedup_threshold
-        {
-            // Check that the candidate is not retracted
-            let is_retracted = self
-                .graph
-                .storage()
-                .get_node(most_similar_id)
-                .ok()
-                .is_some_and(|n| n.metadata.get("retracted").is_some_and(|v| v == "true"));
-            if is_retracted {
-                None
-            } else {
-                let suggestion = if max_similarity > 0.88 {
-                    ConflictSuggestion::ProbableDuplicate
-                } else if max_similarity > 0.80 {
-                    ConflictSuggestion::ProbableUpdate
-                } else {
-                    ConflictSuggestion::ProbableDisagreement
-                };
-                Some(ConflictHint {
-                    existing_node: most_similar_id,
-                    similarity: max_similarity,
-                    suggestion,
-                })
-            }
-        } else {
-            None
-        };
-
         let id = self.graph.next_node_id();
         let now = observation.timestamp;
 
@@ -1963,31 +1929,20 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         });
 
         if let Some(ref new_embedding) = observation.embedding {
+            use crate::mechanics::interactions::hebbian_oja;
+            use crate::mechanics::priors::{learning_rate, TARGET_COACTIVATION_N};
+            let eta = learning_rate(TARGET_COACTIVATION_N);
+
             let new_type = &observation.node_type;
             let new_tags = &observation.entity_tags;
 
             // Trigger pool: last 256 nodes by ID + entity-tag matches (indexed, O(1) dedup).
-            let trigger_candidates =
-                ingest_trigger_candidates(self.graph.storage(), new_tags, Some(id));
-            let (candidate_set, graph_distances) = if self.config.topology_ingest_enabled {
-                topology_expanded_candidates(self.graph.storage(), &trigger_candidates, Some(id))
-            } else {
-                (trigger_candidates, HashMap::new())
-            };
+            let candidate_ids: Vec<NodeId> =
+                ingest_trigger_candidates(self.graph.storage(), new_tags, Some(id))
+                    .into_iter()
+                    .collect();
 
-            let candidate_ids: Vec<NodeId> = candidate_set.into_iter().collect();
-            let topology_reference_degree = if self.config.topology_ingest_enabled {
-                candidate_ids
-                    .iter()
-                    .map(|cid| crate::mechanics::topology::degree(self.graph.storage(), *cid))
-                    .max()
-                    .unwrap_or(1)
-                    .max(1)
-            } else {
-                1
-            };
-
-            // Score candidates by attraction (eq 3)
+            // Score candidates by attraction (similarity * type affinity)
             let mut scored: Vec<(NodeId, f64)> = Vec::new();
             let mut attraction_scores: HashMap<NodeId, f64> = HashMap::new();
             for cid in &candidate_ids {
@@ -2006,30 +1961,13 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                 }
 
                 let tau = tau_type(new_type, &candidate.node_type);
-                let cand_salience = self.graph.storage().get_salience(*cid).unwrap_or(0.0);
-                let cand_mass =
-                    compute_mass(cand_salience, candidate.access_count, &candidate.node_type);
-                let attraction = attraction_score(sim, tau, cand_mass);
+                // Attraction is similarity * type-affinity only. There is no mass or
+                // gravity boost: importance is emergent (overview.md / conductance.md
+                // "Importance is emergent ... without a separate gravity or mass force").
+                let attraction = attraction_score(sim, tau);
 
                 if should_create_edge(attraction, new_type, &candidate.node_type) {
-                    let ranking_score = if self.config.topology_ingest_enabled {
-                        let bridge = crate::mechanics::topology::bridge_score(
-                            self.graph.storage(),
-                            *cid,
-                            topology_reference_degree,
-                        )
-                        .unwrap_or(0.0);
-                        topology_ingest_score(
-                            sim,
-                            entity_overlap_score(new_tags, &candidate.entity_tags),
-                            cand_salience,
-                            graph_proximity_score(graph_distances.get(cid).copied()),
-                            bridge,
-                        )
-                    } else {
-                        attraction
-                    };
-                    scored.push((*cid, ranking_score));
+                    scored.push((*cid, attraction));
                     attraction_scores.insert(*cid, attraction);
                 }
             }
@@ -2037,6 +1975,8 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             // Top 4 by score using BinaryHeap
             let top_scored = top_n_by_score(&scored, 4);
 
+            // The new site (already inserted) — needed to seed cold-start coupling.
+            let new_node = self.graph.get_node(id)?.clone();
             for (cid, score) in top_scored {
                 let edge_score = attraction_scores.get(&cid).copied().unwrap_or(score);
                 // Check existing edge in either direction
@@ -2052,27 +1992,39 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                     });
 
                 if let Some(existing) = existing_edge {
-                    let new_weight = strengthen_edge(existing.weight, edge_score);
+                    // Reinforce the authoritative conductance reservoir via the bounded
+                    // Hebbian-Oja update (conductance.md / interactions.md), never the
+                    // bounded `weight` projection. `set_conductance` re-projects weight.
                     let eid = existing.id;
-                    if let Ok(edge) = self.graph.get_edge_mut(eid) {
-                        edge.weight = new_weight;
+                    let current = self.graph.storage().get_conductance(eid)?;
+                    let next = hebbian_oja(current, clamp_unit_finite(edge_score), eta);
+                    if next.is_finite() {
+                        self.graph.storage_mut().set_conductance(eid, next)?;
                     }
                 } else {
-                    let eid = self.graph.next_edge_id();
-                    let edge = Edge {
-                        id: eid,
-                        source: id,
-                        target: cid,
-                        edge_type: EdgeType::Semantic,
-                        weight: edge_score.clamp(0.0, 1.0),
-                        conductance: 0.0,
-                        edge_source: crate::graph::edge::EdgeSource::Auto,
-                        created_at: now,
-                        accessed_at: now,
-                        valid_from: None,
-                        valid_until: None,
-                        metadata: HashMap::new(),
+                    let Ok(candidate_node) = self.graph.get_node(cid).cloned() else {
+                        continue;
                     };
+                    // Seed conductance from the cold-start coupling; weight is the
+                    // bounded projection of the seeded reservoir, never authored
+                    // (conductance.md "Cold Start", ADR-0002).
+                    let conductance =
+                        self.cold_start_conductance(&new_node, &candidate_node, &EdgeType::Semantic);
+                    if !conductance.is_finite() {
+                        continue;
+                    }
+                    let eid = self.graph.next_edge_id();
+                    let edge = Edge::seeded(
+                        eid,
+                        id,
+                        cid,
+                        EdgeType::Semantic,
+                        conductance,
+                        crate::graph::edge::EdgeSource::Auto,
+                        now,
+                        now,
+                        HashMap::new(),
+                    );
                     self.graph.add_edge(edge)?;
                     self.emit_event(GraphEvent::EdgeCreated {
                         edge_id: eid,
@@ -2082,36 +2034,6 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                     });
                 }
             }
-        }
-
-        // If a conflict was detected, create a Contradicts edge and return CreatedWithConflict
-        if let Some(conflict) = conflict_candidate {
-            let eid = self.graph.next_edge_id();
-            let contradicts_edge = Edge {
-                id: eid,
-                source: id,
-                target: conflict.existing_node,
-                edge_type: EdgeType::Contradicts,
-                weight: conflict.similarity,
-                conductance: 0.0,
-                edge_source: crate::graph::edge::EdgeSource::Auto,
-                created_at: now,
-                accessed_at: now,
-                valid_from: None,
-                valid_until: None,
-                metadata: HashMap::new(),
-            };
-            self.graph.add_edge(contradicts_edge)?;
-            self.emit_event(GraphEvent::EdgeCreated {
-                edge_id: eid,
-                source: id,
-                target: conflict.existing_node,
-                edge_type: EdgeType::Contradicts,
-            });
-            return Ok(IngestResult::CreatedWithConflict {
-                node_ids: vec![id],
-                conflict,
-            });
         }
 
         Ok(IngestResult::Created(vec![id]))
@@ -2124,9 +2046,10 @@ impl<S: StorageAdapter + Clone> Engine<S> {
     /// ordinary access.
     pub fn crystallize(&mut self, request: CrystallizeRequest) -> Result<CrystallizeResult, Error> {
         use crate::mechanics::attraction::{
-            attraction_score, cosine_similarity, should_create_edge, strengthen_edge, tau_type,
+            attraction_score, cosine_similarity, should_create_edge, tau_type,
         };
-        use crate::mechanics::gravity::compute_mass;
+        use crate::mechanics::interactions::hebbian_oja;
+        use crate::mechanics::priors::{learning_rate, TARGET_COACTIVATION_N};
 
         if request.source_ids.len() < 2 {
             return Err(Error::InvalidInput(
@@ -2148,16 +2071,15 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             }
             None => vec![1.0; request.source_ids.len()],
         };
-        let has_source_relevances = request.source_relevances.is_some();
-
         let source_ids = request.source_ids.clone();
         let source_set: HashSet<NodeId> = source_ids.iter().copied().collect();
-        let mut source_saliences = Vec::with_capacity(source_ids.len());
+        let mut source_actions = Vec::with_capacity(source_ids.len());
 
         for source_id in &source_ids {
             let _ = self.graph.get_node(*source_id)?;
-            let salience = self.graph.storage().get_salience(*source_id)?;
-            source_saliences.push(clamp_unit_finite(salience));
+            // Authoritative retained-action reservoir (log need-odds) — the
+            // synthesis node's `A_s_new` is the weighted average of these (ADR-0002).
+            source_actions.push(self.graph.storage().get_retained_action(*source_id)?);
         }
 
         let mut edges_between = 0_usize;
@@ -2249,8 +2171,11 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         }
 
         let confidence = clamp_unit_finite(request.confidence);
-        let initial_salience =
-            crystallized_salience(&source_saliences, &relevance_weights, confidence);
+        // Additive synthesis: the synthesis node's retained action is the
+        // relevance-weighted average of the SOURCE reservoirs (never mutating them);
+        // salience is its bounded projection (ADR-0002).
+        let initial_action = crystallized_action(&source_actions, &relevance_weights, confidence);
+        let initial_salience = crate::mechanics::priors::project_salience(initial_action);
 
         let id = self.graph.next_node_id();
         let now = request.timestamp;
@@ -2271,7 +2196,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             valid_from: None,
             valid_until: None,
             salience: initial_salience,
-            retained_action: crate::mechanics::priors::salience_to_action(initial_salience),
+            retained_action: initial_action,
             access_count: 0,
             access_history: VecDeque::new(),
             tier: crate::graph::MemoryTier::Auto,
@@ -2286,31 +2211,35 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             node_type: crystal_type.clone(),
         });
 
+        // Synthesis node (already inserted) — seeds the provenance edges' cold-start
+        // coupling. `ConsolidatedFrom` conductance is the calibrated log-LR prior over
+        // the {sim, entity, scope, type} features, never an authored weight (ADR-0002).
+        let synthesis_node = self.graph.get_node(id)?.clone();
         let mut consolidation_edges = Vec::with_capacity(source_ids.len());
-        for index in 0..source_ids.len() {
-            let source_id = source_ids[index];
-            let source_salience = source_saliences[index];
-            let relevance = relevance_weights[index];
+        for &source_id in &source_ids {
+            let Ok(source_node) = self.graph.get_node(source_id).cloned() else {
+                continue;
+            };
+            let conductance = self.cold_start_conductance(
+                &synthesis_node,
+                &source_node,
+                &EdgeType::ConsolidatedFrom,
+            );
+            if !conductance.is_finite() {
+                continue;
+            }
             let edge_id = self.graph.next_edge_id();
-            let weight = if has_source_relevances {
-                positive_edge_weight(relevance)
-            } else {
-                positive_edge_weight(source_salience)
-            };
-            let edge = Edge {
-                id: edge_id,
-                source: id,
-                target: source_id,
-                edge_type: EdgeType::ConsolidatedFrom,
-                weight,
-                conductance: 0.0,
-                edge_source: crate::graph::edge::EdgeSource::Inferred,
-                created_at: now,
-                accessed_at: now,
-                valid_from: None,
-                valid_until: None,
-                metadata: HashMap::new(),
-            };
+            let edge = Edge::seeded(
+                edge_id,
+                id,
+                source_id,
+                EdgeType::ConsolidatedFrom,
+                conductance,
+                crate::graph::edge::EdgeSource::Inferred,
+                now,
+                now,
+                HashMap::new(),
+            );
             self.graph.add_edge(edge)?;
             self.emit_event(GraphEvent::EdgeCreated {
                 edge_id,
@@ -2355,23 +2284,16 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                 }
 
                 let tau = tau_type(&crystal_type, &candidate.node_type);
-                let candidate_salience = self
-                    .graph
-                    .storage()
-                    .get_salience(candidate_id)
-                    .unwrap_or(0.0);
-                let candidate_mass = compute_mass(
-                    clamp_unit_finite(candidate_salience),
-                    candidate.access_count,
-                    &candidate.node_type,
-                );
-                let score = attraction_score(similarity, tau, candidate_mass);
+                // No mass / gravity boost (overview.md): attraction is the
+                // similarity * type-affinity candidate-selection score only.
+                let score = attraction_score(similarity, tau);
 
                 if should_create_edge(score, &crystal_type, &candidate.node_type) {
                     scored.push((candidate_id, score));
                 }
             }
 
+            let eta = learning_rate(TARGET_COACTIVATION_N);
             for (candidate_id, score) in top_n_by_score(&scored, 4) {
                 let existing_edge = self
                     .graph
@@ -2396,27 +2318,39 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                     });
 
                 if let Some(existing) = existing_edge {
-                    let new_weight = strengthen_edge(existing.weight, score);
+                    // Reinforce the conductance reservoir via bounded Hebbian-Oja, not
+                    // the bounded weight projection (conductance.md / ADR-0002).
                     let edge_id = existing.id;
-                    if let Ok(edge) = self.graph.get_edge_mut(edge_id) {
-                        edge.weight = new_weight;
+                    let current = self.graph.storage().get_conductance(edge_id)?;
+                    let next = hebbian_oja(current, clamp_unit_finite(score), eta);
+                    if next.is_finite() {
+                        self.graph.storage_mut().set_conductance(edge_id, next)?;
                     }
                 } else {
-                    let edge_id = self.graph.next_edge_id();
-                    let edge = Edge {
-                        id: edge_id,
-                        source: id,
-                        target: candidate_id,
-                        edge_type: EdgeType::Semantic,
-                        weight: clamp_unit_finite(score),
-                        conductance: 0.0,
-                        edge_source: crate::graph::edge::EdgeSource::Auto,
-                        created_at: now,
-                        accessed_at: now,
-                        valid_from: None,
-                        valid_until: None,
-                        metadata: HashMap::new(),
+                    let Ok(candidate_node) = self.graph.get_node(candidate_id).cloned() else {
+                        continue;
                     };
+                    // Cold-start coupling seed; weight derived from the reservoir.
+                    let conductance = self.cold_start_conductance(
+                        &synthesis_node,
+                        &candidate_node,
+                        &EdgeType::Semantic,
+                    );
+                    if !conductance.is_finite() {
+                        continue;
+                    }
+                    let edge_id = self.graph.next_edge_id();
+                    let edge = Edge::seeded(
+                        edge_id,
+                        id,
+                        candidate_id,
+                        EdgeType::Semantic,
+                        conductance,
+                        crate::graph::edge::EdgeSource::Auto,
+                        now,
+                        now,
+                        HashMap::new(),
+                    );
                     self.graph.add_edge(edge)?;
                     self.emit_event(GraphEvent::EdgeCreated {
                         edge_id,
@@ -2429,16 +2363,17 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             }
         }
 
-        for source_id in &source_ids {
-            self.touch(*source_id, now)?;
-        }
+        // Additive synthesis is non-destructive: crystallize NEVER mutates its
+        // sources (overview.md `crystallize` contract, interactions.md
+        // `Crystallized`). The synthesis node and its `ConsolidatedFrom` edges are
+        // added; the source reservoirs, timestamps, and content are left untouched.
 
         Ok(CrystallizeResult {
             node_id: id,
             consolidation_edges,
             dedup_score,
             attraction_edges,
-            nodes_reinforced: source_ids.len(),
+            nodes_reinforced: 0,
             initial_salience,
             consistency_score,
             contradiction_rate,
@@ -2448,22 +2383,68 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         })
     }
 
-    /// Create or strengthen a link between two nodes.
-    pub fn link(
-        &mut self,
-        from: NodeId,
-        to: NodeId,
-        edge_type: EdgeType,
-        weight: f64,
-    ) -> Result<EdgeId, Error> {
-        self.graph.get_node(from)?;
-        self.graph.get_node(to)?;
+    /// Cold-start conductance `C_ij = initialize_conductance(coupling_seed(...))`
+    /// for a new link between two nodes under a relation (conductance.md).
+    ///
+    /// Extracts the four normalized NPMI features `{sim, entity, scope, type}` from
+    /// the endpoints and combines them with the single `beta_coupling` regression
+    /// vector. Pure over the two nodes and the edge type; reads no storage.
+    fn cold_start_conductance(
+        &self,
+        from: &Node,
+        to: &Node,
+        edge_type: &EdgeType,
+    ) -> f64 {
+        use crate::mechanics::attraction::cosine_similarity;
+        use crate::mechanics::frustration::scope_overlap;
+        use crate::mechanics::priors::{
+            coupling_seed, edge_type_affinity_npmi, initialize_conductance,
+        };
 
-        if !weight.is_finite() {
-            return Err(Error::InvalidInput("weight must be finite".to_string()));
+        let sim_npmi = match (&from.embedding, &to.embedding) {
+            (Some(a), Some(b)) => cosine_similarity(a, b),
+            _ => 0.0,
+        };
+        let entity_npmi = entity_overlap_npmi(&from.entity_tags, &to.entity_tags);
+        let scope_npmi = scope_overlap(&from.origin.scope, &to.origin.scope);
+        let type_npmi = edge_type_affinity_npmi(edge_type);
+
+        let seed = coupling_seed(sim_npmi, entity_npmi, scope_npmi, type_npmi);
+        initialize_conductance(seed)
+    }
+
+    /// Create a typed link, seeding its conductance from the cold-start coupling.
+    ///
+    /// Conductance is **never set directly** (conductance.md): the caller does not
+    /// supply a weight. When a link is created before any co-activation history
+    /// exists, its initial `C_ij` is the calibrated log-LR prior estimated from the
+    /// four normalized NPMI features `{sim, entity, scope, type}` of the two
+    /// endpoints under the requested relation:
+    ///
+    /// ```text
+    /// coupling_seed = sum_f beta_coupling[f] * npmi_f(from, to, edge_type)
+    /// C_ij          = initialize_conductance(coupling_seed)
+    /// weight        = project_weight(C_ij)        // bounded projection
+    /// ```
+    ///
+    /// (`crate::mechanics::priors::coupling_seed` over the
+    /// `{sim, entity, scope, type}` features, then `initialize_conductance`.) The
+    /// resulting `weight` is the bounded projection of the seeded reservoir, written
+    /// only as the projection of `C_ij` (ADR-0002). Committed path flux and
+    /// co-readout later replace this cold-start prior with measured strength via the
+    /// bounded Hebbian-Oja update. Both endpoints must exist.
+    pub fn link(&mut self, from: NodeId, to: NodeId, edge_type: EdgeType) -> Result<EdgeId, Error> {
+        let from_node = self.graph.get_node(from)?.clone();
+        let to_node = self.graph.get_node(to)?.clone();
+
+        // Cold-start coupling seed: a calibrated log-LR prior from the four
+        // normalized NPMI features of the endpoints under this relation
+        // (conductance.md "Cold Start"). The conductance is derived, never set.
+        let conductance = self.cold_start_conductance(&from_node, &to_node, &edge_type);
+        if !conductance.is_finite() {
+            return Err(Error::NonFinite("seeded conductance".to_string()));
         }
-
-        let clamped_weight = weight.clamp(0.0, 1.0);
+        let weight = crate::mechanics::priors::project_weight(conductance);
 
         let id = self.graph.next_edge_id();
         let now = Timestamp::now();
@@ -2474,8 +2455,8 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             source: from,
             target: to,
             edge_type,
-            weight: clamped_weight,
-            conductance: 0.0,
+            weight,
+            conductance,
             edge_source: crate::graph::edge::EdgeSource::Manual,
             created_at: now,
             accessed_at: now,
@@ -2645,76 +2626,41 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         if self.is_retracted(node_id)? {
             return Ok(());
         }
+        // `Accessed` interaction: decay-then-`access_gain` on `A_i`. Shares the exact
+        // ordering invariant (decay BEFORE reinforce) with `commit_accessed`; the
+        // default readout work is the calibrated `ACCESS_READOUT_WORK` constant.
+        self.commit_accessed(node_id, ACCESS_READOUT_WORK, now)
+    }
 
-        use crate::mechanics::interactions::{decay_default, reinforce_access};
-        use crate::mechanics::priors::{learning_rate, project_salience, TARGET_COACTIVATION_N};
-
-        let current_action = self.graph.storage().get_retained_action(node_id)?;
-        let current_salience = self.graph.storage().get_salience(node_id)?;
-        let last_checkpoint = self.graph.storage().get_decay_checkpoint(node_id)?;
-        let node_type = self.graph.storage().get_node_type(node_id)?.clone();
-        let node_tier = self.graph.get_node(node_id)?.tier.clone();
-        let decay_protected =
-            node_tier == MemoryTier::Core || node_type == KnowledgeType::IdentityCore;
-
-        // Telemetry: record the access timestamp in the ring buffer (power-law shape).
-        {
-            let node = self.graph.get_node_mut(node_id)?;
-            node.record_access(now);
-        }
-
-        let dt_ms = now.0.saturating_sub(last_checkpoint.0);
-        let dt_days = dt_ms as f64 / 86_400_000.0;
-
-        // Decay BEFORE reinforce — ordering invariant (dissipation.md / ADR-0008).
-        let action_after_decay = if decay_protected {
-            current_action
-        } else {
-            decay_default(current_action, dt_days, &node_type)
-        };
-
-        // `Accessed` reinforcement: bounded saturating access gain on A_i.
-        let eta = learning_rate(TARGET_COACTIVATION_N);
-        let new_action = reinforce_access(action_after_decay, ACCESS_READOUT_WORK, eta);
-
-        if !new_action.is_finite() {
-            return Err(Error::NonFinite(format!(
-                "retained action for node {node_id:?}"
-            )));
-        }
-
-        // Re-project salience from the moved reservoir (ADR-0002: commit recomputes
-        // projection). `set_retained_action` writes both A_i and salience.
-        self.graph
-            .storage_mut()
-            .set_retained_action(node_id, new_action)?;
-        let new_salience = project_salience(new_action);
-
-        if (new_salience - current_salience).abs() > SALIENCE_CHANGE_EPSILON {
-            self.emit_event(GraphEvent::SalienceChanged {
-                node_id,
-                old: current_salience,
-                new: new_salience,
-            });
-            if current_salience < ARCHIVE_SALIENCE_THRESHOLD
-                && new_salience >= ARCHIVE_SALIENCE_THRESHOLD
-            {
-                self.emit_event(GraphEvent::NodeRevived {
-                    node_id,
-                    new_salience,
-                });
+    /// Batch `Accessed` interaction — apply [`touch`](Engine::touch) to many sites at
+    /// one timestamp (interactions.md `Accessed`).
+    ///
+    /// Each site is processed independently with the same decay-then-`access_gain`
+    /// ordering as the single-site `touch`: lazy power-law decay from its own
+    /// `decay_checkpoint`, then the bounded saturating access gain, then a re-projected
+    /// salience. Retracted sites are skipped. Iteration follows the caller-supplied
+    /// slice order, so the operation is deterministic for a fixed `(graph, ids, now)`.
+    ///
+    /// Returns the ids whose reservoirs were actually moved (i.e. non-retracted),
+    /// deduplicated in first-seen order, so callers can attribute the access work.
+    pub fn touch_batch(
+        &mut self,
+        node_ids: &[NodeId],
+        now: Timestamp,
+    ) -> Result<Vec<NodeId>, Error> {
+        let mut touched: Vec<NodeId> = Vec::new();
+        let mut seen: HashSet<NodeId> = HashSet::new();
+        for &node_id in node_ids {
+            if !seen.insert(node_id) {
+                continue; // already touched this id in this batch
             }
+            if self.is_retracted(node_id)? {
+                continue;
+            }
+            self.commit_accessed(node_id, ACCESS_READOUT_WORK, now)?;
+            touched.push(node_id);
         }
-
-        self.graph.storage_mut().set_accessed_at(node_id, now)?;
-        self.graph
-            .storage_mut()
-            .set_decay_checkpoint(node_id, now)?;
-
-        let node = self.graph.get_node_mut(node_id)?;
-        node.access_count += 1;
-
-        Ok(())
+        Ok(touched)
     }
 
     /// Set the explicit memory tier for a node.
@@ -2740,6 +2686,29 @@ impl<S: StorageAdapter + Clone> Engine<S> {
     pub fn get_tier(&self, node_id: NodeId) -> Result<MemoryTier, Error> {
         let node = self.graph.get_node(node_id)?;
         Ok(node.tier.clone())
+    }
+
+    /// Read-only observability getter for a node's authoritative retained-action
+    /// reservoir `A_i` (log need-odds — ADR-0002/0003).
+    ///
+    /// Exposes the reservoir directly so callers can inspect the log-odds state that
+    /// `salience` is a bounded projection of. This is a pure read: it applies no decay
+    /// and mutates nothing (retrieval/observation is read-only — ADR-0004). For the
+    /// public bounded projection use the node's `salience`; the reservoir only moves
+    /// through [`commit`](Engine::commit) / [`tick`](Engine::tick).
+    pub fn retained_action(&self, node_id: NodeId) -> Result<f64, Error> {
+        self.graph.storage().get_retained_action(node_id)
+    }
+
+    /// Read-only observability getter for an edge's authoritative conductance
+    /// reservoir `C_ij` (log likelihood ratio — ADR-0002/0003).
+    ///
+    /// Exposes the reservoir directly so callers can inspect the log-LR state that the
+    /// public edge `weight` is a bounded projection of. This is a pure read and mutates
+    /// nothing; the reservoir only moves through [`commit`](Engine::commit) /
+    /// [`tick`](Engine::tick) (`PathUsed`/`CoReadout` Hebbian-Oja and idle leakage).
+    pub fn conductance(&self, edge_id: EdgeId) -> Result<f64, Error> {
+        self.graph.storage().get_conductance(edge_id)
     }
 
     /// Explicitly invalidate a node — mark it as retracted.
@@ -2821,6 +2790,300 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                 });
             }
         }
+        Ok(())
+    }
+
+    /// Commit a retrieved [`ContextPackage`] — the only reservoir-mutation path
+    /// besides [`tick`](Engine::tick).
+    ///
+    /// Retrieval is read-only (ADR-0004): `query`/`search` return a package and its
+    /// [`CommitTrace`](crate::query::CommitTrace) but change no reservoir. This method
+    /// integrates the work the caller actually used, in two strict stages:
+    ///
+    /// 1. **Validate the trace against the current graph** (interactions.md: "Commit
+    ///    must validate that the trace corresponds to the graph state it updates").
+    ///    Every accessed / co-readout / tension node must still exist, and every
+    ///    `PathUsed` edge must still exist *with the same source, target, and type* it
+    ///    had at retrieval (topology match). A stale or mismatched trace is a hard
+    ///    [`Error`] and **no** reservoir is touched — commit is all-or-nothing.
+    /// 2. **Integrate the committed interactions** into the authoritative reservoirs
+    ///    (ADR-0002/0003):
+    ///    - `Accessed` — decay-then-`access_gain` on each packaged site's `A_i`
+    ///      (interactions.md "decay first, reinforce second");
+    ///    - `FeedbackReceived` — Rescorla-Wagner `dA_i = eta*(lambda - A_i)` on each
+    ///      packaged site, with `lambda` mapped from `feedback`
+    ///      ([`ConfidenceLevel`](crate::ConfidenceLevel) → `lambda_reward`). `None`
+    ///      feedback records use without a feedback signal;
+    ///    - `PathUsed` — bounded Hebbian-Oja `dC_ij = eta*flux*(1 - project_weight(C))`
+    ///      on each edge that carried committed path current `I_ij`;
+    ///    - `CoReadout` — the same Hebbian-Oja step with flux `min(a_i, a_j)` on the
+    ///      edges between co-read pairs;
+    ///    - `TensionActivated` — records each presented contradiction (frustration is
+    ///      surfaced, never suppressed: ADR-0006 — no activation is reduced here).
+    ///
+    /// On success the returned package has its `committed_ids` populated with the
+    /// sites whose reservoirs moved, and a [`CommitReport`] of the integrated work is
+    /// returned. Deterministic for a fixed graph + trace.
+    pub fn commit(
+        &mut self,
+        package: ContextPackage,
+        feedback: Option<crate::mechanics::social::ConfidenceLevel>,
+    ) -> Result<(ContextPackage, CommitReport), Error> {
+        use crate::mechanics::interactions::{hebbian_oja, lambda_reward, rescorla_wagner};
+        use crate::mechanics::priors::{
+            learning_rate, project_salience, TARGET_COACTIVATION_N,
+        };
+
+        // Clone the trace so the package can be returned (with `committed_ids`) after
+        // the integration loops; the trace is small and transient.
+        let trace = package.commit_trace.clone();
+        let trace = &trace;
+
+        // ── Stage 1: validate the whole trace BEFORE any mutation (all-or-nothing) ──
+
+        // Accessed / co-readout / tension nodes must still exist.
+        for site in &trace.accessed {
+            if !site.readout_work.is_finite() {
+                return Err(Error::NonFinite(format!(
+                    "readout work for node {:?}",
+                    site.node_id
+                )));
+            }
+            self.graph.get_node(site.node_id)?;
+        }
+        for pair in &trace.co_readout {
+            if !pair.activation_a.is_finite() || !pair.activation_b.is_finite() {
+                return Err(Error::NonFinite("co-readout activation".to_string()));
+            }
+            self.graph.get_node(pair.node_a)?;
+            self.graph.get_node(pair.node_b)?;
+        }
+        for tension in &trace.tensions_activated {
+            if !tension.stress.is_finite() {
+                return Err(Error::NonFinite("tension stress".to_string()));
+            }
+            self.graph.get_node(tension.node_a)?;
+            self.graph.get_node(tension.node_b)?;
+        }
+
+        // PathUsed edges must still exist AND match the recorded topology snapshot.
+        // A moved/retyped/deleted edge means the trace no longer describes the graph
+        // it would update — a stale trace, which is a hard error (interactions.md).
+        for path in &trace.path_used {
+            if !path.flux.is_finite() {
+                return Err(Error::NonFinite(format!(
+                    "path flux for edge {:?}",
+                    path.edge_id
+                )));
+            }
+            let edge = self.graph.get_edge(path.edge_id)?;
+            if edge.source != path.source
+                || edge.target != path.target
+                || edge.edge_type != path.edge_type
+            {
+                return Err(Error::InvalidInput(format!(
+                    "stale commit trace: edge {:?} topology changed since retrieval",
+                    path.edge_id
+                )));
+            }
+        }
+
+        // ── Stage 2: integrate the committed interactions into the reservoirs ──
+
+        let eta = learning_rate(TARGET_COACTIVATION_N);
+        let mut report = CommitReport::default();
+        // Sites whose reservoirs moved, in stable order, deduplicated.
+        let mut committed: Vec<NodeId> = Vec::new();
+        let mut committed_set: HashSet<NodeId> = HashSet::new();
+
+        // `Accessed` — decay-then-reinforce on each packaged site (skip retracted).
+        let now = Timestamp::now();
+        for site in &trace.accessed {
+            if self.is_retracted(site.node_id)? {
+                continue;
+            }
+            self.commit_accessed(site.node_id, site.readout_work, now)?;
+            report.sites_accessed += 1;
+            if committed_set.insert(site.node_id) {
+                committed.push(site.node_id);
+            }
+        }
+
+        // `FeedbackReceived` — Rescorla-Wagner toward the confidence-derived target.
+        if let Some(level) = feedback {
+            let signal: crate::mechanics::social::FeedbackSignal = level.into();
+            let lambda = lambda_reward(&signal);
+            for site in &trace.accessed {
+                if self.is_retracted(site.node_id)? {
+                    continue;
+                }
+                let current_action = self.graph.storage().get_retained_action(site.node_id)?;
+                let current_salience = self.graph.storage().get_salience(site.node_id)?;
+                let new_action = rescorla_wagner(current_action, lambda, eta);
+                if !new_action.is_finite() {
+                    return Err(Error::NonFinite(format!(
+                        "retained action for node {:?}",
+                        site.node_id
+                    )));
+                }
+                self.graph
+                    .storage_mut()
+                    .set_retained_action(site.node_id, new_action)?;
+                let new_salience = project_salience(new_action);
+                if (new_salience - current_salience).abs() > SALIENCE_CHANGE_EPSILON {
+                    self.emit_event(GraphEvent::SalienceChanged {
+                        node_id: site.node_id,
+                        old: current_salience,
+                        new: new_salience,
+                    });
+                }
+                report.feedback_applied += 1;
+                if committed_set.insert(site.node_id) {
+                    committed.push(site.node_id);
+                }
+            }
+        }
+
+        // `PathUsed` — bounded Hebbian-Oja conductance update on used edges.
+        for path in &trace.path_used {
+            let current = self.graph.storage().get_conductance(path.edge_id)?;
+            let next = hebbian_oja(current, path.flux, eta);
+            if !next.is_finite() {
+                return Err(Error::NonFinite(format!(
+                    "conductance for edge {:?}",
+                    path.edge_id
+                )));
+            }
+            self.graph
+                .storage_mut()
+                .set_conductance(path.edge_id, next)?;
+            self.graph
+                .storage_mut()
+                .set_edge_accessed_at(path.edge_id, now)?;
+            report.paths_strengthened += 1;
+        }
+
+        // `CoReadout` — strengthen the edges between co-read pairs by `min(a_i, a_j)`.
+        for pair in &trace.co_readout {
+            let co_flux = pair.activation_a.min(pair.activation_b).max(0.0);
+            let mut edge_ids: BTreeSet<EdgeId> = BTreeSet::new();
+            for &eid in self.graph.edges_from(pair.node_a) {
+                if self
+                    .graph
+                    .get_edge(eid)
+                    .is_ok_and(|e| e.target == pair.node_b)
+                {
+                    edge_ids.insert(eid);
+                }
+            }
+            for &eid in self.graph.edges_from(pair.node_b) {
+                if self
+                    .graph
+                    .get_edge(eid)
+                    .is_ok_and(|e| e.target == pair.node_a)
+                {
+                    edge_ids.insert(eid);
+                }
+            }
+            let mut strengthened = false;
+            for edge_id in edge_ids {
+                let current = self.graph.storage().get_conductance(edge_id)?;
+                let next = hebbian_oja(current, co_flux, eta);
+                if !next.is_finite() {
+                    return Err(Error::NonFinite(format!(
+                        "conductance for edge {edge_id:?}"
+                    )));
+                }
+                self.graph.storage_mut().set_conductance(edge_id, next)?;
+                self.graph.storage_mut().set_edge_accessed_at(edge_id, now)?;
+                strengthened = true;
+            }
+            if strengthened {
+                report.pairs_strengthened += 1;
+            }
+        }
+
+        // `TensionActivated` — record that the conflict was presented. Frustration is
+        // surfaced, never suppressed (ADR-0006): no activation is reduced here.
+        report.tensions_recorded = trace.tensions_activated.len();
+
+        let mut package = package;
+        package.committed_ids = committed;
+        Ok((package, report))
+    }
+
+    /// `Accessed` integration for one site — decay-then-`access_gain` on `A_i`.
+    ///
+    /// Shares the `touch()` ordering invariant (decay BEFORE reinforce, dissipation.md /
+    /// ADR-0008): lazy power-law decay from the `decay_checkpoint`, then the bounded
+    /// saturating access gain scaled by the committed `readout_work`. Updates both
+    /// `accessed_at` and `decay_checkpoint` to `now` and re-projects salience.
+    fn commit_accessed(
+        &mut self,
+        node_id: NodeId,
+        readout_work: f64,
+        now: Timestamp,
+    ) -> Result<(), Error> {
+        use crate::mechanics::interactions::{decay_default, reinforce_access};
+        use crate::mechanics::priors::{learning_rate, project_salience, TARGET_COACTIVATION_N};
+
+        let current_action = self.graph.storage().get_retained_action(node_id)?;
+        let current_salience = self.graph.storage().get_salience(node_id)?;
+        let last_checkpoint = self.graph.storage().get_decay_checkpoint(node_id)?;
+        let node_type = self.graph.storage().get_node_type(node_id)?.clone();
+        let node_tier = self.graph.get_node(node_id)?.tier.clone();
+        let decay_protected =
+            node_tier == MemoryTier::Core || node_type == KnowledgeType::IdentityCore;
+
+        {
+            let node = self.graph.get_node_mut(node_id)?;
+            node.record_access(now);
+        }
+
+        let dt_ms = now.0.saturating_sub(last_checkpoint.0);
+        let dt_days = dt_ms as f64 / 86_400_000.0;
+
+        // Decay BEFORE reinforce — ordering invariant (dissipation.md / ADR-0008).
+        let action_after_decay = if decay_protected {
+            current_action
+        } else {
+            decay_default(current_action, dt_days, &node_type)
+        };
+
+        let eta = learning_rate(TARGET_COACTIVATION_N);
+        let new_action = reinforce_access(action_after_decay, readout_work.max(0.0), eta);
+        if !new_action.is_finite() {
+            return Err(Error::NonFinite(format!(
+                "retained action for node {node_id:?}"
+            )));
+        }
+
+        self.graph
+            .storage_mut()
+            .set_retained_action(node_id, new_action)?;
+        let new_salience = project_salience(new_action);
+        if (new_salience - current_salience).abs() > SALIENCE_CHANGE_EPSILON {
+            self.emit_event(GraphEvent::SalienceChanged {
+                node_id,
+                old: current_salience,
+                new: new_salience,
+            });
+            if current_salience < ARCHIVE_SALIENCE_THRESHOLD
+                && new_salience >= ARCHIVE_SALIENCE_THRESHOLD
+            {
+                self.emit_event(GraphEvent::NodeRevived {
+                    node_id,
+                    new_salience,
+                });
+            }
+        }
+        self.graph.storage_mut().set_accessed_at(node_id, now)?;
+        self.graph
+            .storage_mut()
+            .set_decay_checkpoint(node_id, now)?;
+
+        let node = self.graph.get_node_mut(node_id)?;
+        node.access_count += 1;
         Ok(())
     }
 
@@ -3711,7 +3974,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             })
             .collect();
 
-        crate::query::assembly::assemble_context_package_for_mode(
+        let mut package = crate::query::assembly::assemble_context_package_for_mode(
             scored_nodes,
             &Query::List {
                 min_salience: 0.0,
@@ -3724,31 +3987,14 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             config.chars_per_token,
             &config.scope,
             &crate::query::assembly::ModeContext::default(),
-        )
-    }
+        );
 
-    /// Find merge candidates above similarity threshold.
-    ///
-    /// Deprecated: Use `EngineConfig::dedup_threshold` in `ingest()` instead.
-    /// The dedup gate in ingest() replaces this need.
-    #[deprecated(
-        since = "0.3.0",
-        note = "Dedup gate in ingest() replaces this need. See EngineConfig::dedup_threshold."
-    )]
-    pub fn merge_candidates(&self, _threshold: f64) -> Result<Vec<MergePair>, Error> {
-        Ok(vec![])
-    }
-
-    /// Execute auto-merge with undo log.
-    ///
-    /// Deprecated: Use `EngineConfig::dedup_threshold` in `ingest()` instead.
-    /// The dedup gate in ingest() replaces this need.
-    #[deprecated(
-        since = "0.3.0",
-        note = "Dedup gate in ingest() replaces this need. See EngineConfig::dedup_threshold."
-    )]
-    pub fn auto_merge(&mut self, _threshold: f64) -> Result<MergeLog, Error> {
-        Ok(MergeLog::default())
+        // Capture the read-only commit trace from the settled response and the
+        // packaged result (ADR-0004 / interactions.md). This carries no persistent
+        // quantity — it only lets a later `commit` integrate the work the caller
+        // actually used. Retrieval stays read-only.
+        package.commit_trace = build_commit_trace(storage, response, &package);
+        package
     }
 
     fn has_entity_edge_between(&self, a: NodeId, b: NodeId) -> bool {
@@ -3827,21 +4073,31 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                 continue;
             }
 
+            // Conductance is the cold-start coupling log-LR prior; weight is its
+            // bounded projection, never authored (conductance.md / ADR-0002).
+            let (Ok(source_node), Ok(target_node)) = (
+                self.graph.get_node(source).cloned(),
+                self.graph.get_node(target).cloned(),
+            ) else {
+                continue;
+            };
+            let conductance =
+                self.cold_start_conductance(&source_node, &target_node, &EdgeType::Entity);
+            if !conductance.is_finite() {
+                continue;
+            }
             let edge_id = self.graph.next_edge_id();
-            let edge = Edge {
-                id: edge_id,
+            let edge = Edge::seeded(
+                edge_id,
                 source,
                 target,
-                edge_type: EdgeType::Entity,
-                weight: 1.0,
-                conductance: 0.0,
-                edge_source: crate::graph::edge::EdgeSource::Auto,
-                created_at: now,
-                accessed_at: now,
-                valid_from: None,
-                valid_until: None,
-                metadata: HashMap::new(),
-            };
+                EdgeType::Entity,
+                conductance,
+                crate::graph::edge::EdgeSource::Auto,
+                now,
+                now,
+                HashMap::new(),
+            );
             self.graph.add_edge(edge)?;
             self.emit_event(GraphEvent::EdgeCreated {
                 edge_id,
@@ -4094,11 +4350,14 @@ mod tests {
             panic!("expected Created");
         };
         let eid = engine
-            .link(ids1[0], ids2[0], EdgeType::Semantic, 0.8)
+            .link(ids1[0], ids2[0], EdgeType::Semantic)
             .unwrap();
         assert_eq!(engine.graph().edge_count(), 1);
         let edge = engine.graph().get_edge(eid).unwrap();
-        assert_eq!(edge.weight, 0.8);
+        // Conductance is seeded from the cold-start coupling; weight is its bounded
+        // projection (ADR-0002), not a caller-supplied value.
+        assert!(edge.conductance.is_finite());
+        assert!((0.0..=1.0).contains(&edge.weight));
     }
 
     #[test]
@@ -4133,14 +4392,6 @@ mod tests {
     }
 
     #[test]
-    fn merge_candidates_returns_empty() {
-        let engine = Engine::new();
-        #[allow(deprecated)]
-        let candidates = engine.merge_candidates(0.9).unwrap();
-        assert!(candidates.is_empty());
-    }
-
-    #[test]
     fn reflect_batch_returns_report() {
         let mut engine = Engine::new();
         let report = engine.reflect_batch(&[]).unwrap();
@@ -4157,7 +4408,7 @@ mod tests {
             panic!("expected Created");
         };
         let eid = engine
-            .link(ids1[0], ids2[0], EdgeType::Semantic, 0.5)
+            .link(ids1[0], ids2[0], EdgeType::Semantic)
             .unwrap();
         let edge = engine.graph().get_edge(eid).unwrap();
         assert!(edge.created_at.0 > 0);
@@ -4530,7 +4781,7 @@ mod tests {
         };
 
         engine
-            .link(ids1[0], ids2[0], EdgeType::Semantic, 0.8)
+            .link(ids1[0], ids2[0], EdgeType::Semantic)
             .unwrap();
 
         let q = Query::Associative {
@@ -4578,7 +4829,7 @@ mod tests {
             panic!("expected Created");
         };
         engine
-            .link(identity_ids[0], semantic_ids[0], EdgeType::Semantic, 0.8)
+            .link(identity_ids[0], semantic_ids[0], EdgeType::Semantic)
             .unwrap();
 
         let q = Query::Associative {
@@ -4622,7 +4873,7 @@ mod tests {
             panic!("expected Created");
         };
         engine
-            .link(ids1[0], ids2[0], EdgeType::Contradicts, 0.9)
+            .link(ids1[0], ids2[0], EdgeType::Contradicts)
             .unwrap();
 
         let q = Query::Associative {
@@ -4680,7 +4931,7 @@ mod tests {
             panic!("expected Created");
         };
         // link() seeds conductance at 0.0; weight at the manual 0.5 projection input.
-        let eid = engine.link(a[0], b[0], EdgeType::Semantic, 0.5).unwrap();
+        let eid = engine.link(a[0], b[0], EdgeType::Semantic).unwrap();
         // Reset the reservoir to a clean 0.0 cold-start so the Hebbian step is
         // measured from the documented C_ij = 0 baseline (weight 0.5).
         engine.graph.storage_mut().set_conductance(eid, 0.0).unwrap();

@@ -58,8 +58,8 @@ fn consistent_sources_with_supportive_edges() {
     let b = insert_source(&mut engine, "src-b", "agent-2", "sess-2");
     let c = insert_source(&mut engine, "src-c", "agent-3", "sess-3");
 
-    engine.link(a, b, EdgeType::Supports, 0.8).unwrap();
-    engine.link(b, c, EdgeType::Reason, 0.7).unwrap();
+    engine.link(a, b, EdgeType::Supports).unwrap();
+    engine.link(b, c, EdgeType::Reason).unwrap();
 
     let result = engine
         .crystallize(crystal_request(vec![a, b, c], origin("agent-1", "sess-1")))
@@ -90,7 +90,7 @@ fn contradicting_sources() {
     let a = insert_source(&mut engine, "src-a", "agent-1", "sess-1");
     let b = insert_source(&mut engine, "src-b", "agent-2", "sess-2");
 
-    engine.link(a, b, EdgeType::Contradicts, 0.9).unwrap();
+    engine.link(a, b, EdgeType::Contradicts).unwrap();
 
     let result = engine
         .crystallize(crystal_request(vec![a, b], origin("agent-1", "sess-1")))

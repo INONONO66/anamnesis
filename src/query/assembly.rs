@@ -394,6 +394,11 @@ pub fn assemble_context_package(
         tensions,
         token_usage: budget,
         agent_tension,
+        // The commit trace and committed ids are populated by the caller that holds
+        // the activation response and storage (`Engine::assemble_readout_package`);
+        // assembly is pure and storage-free, so it leaves them empty here.
+        commit_trace: crate::query::types::CommitTrace::default(),
+        committed_ids: Vec::new(),
     }
 }
 

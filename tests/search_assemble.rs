@@ -49,7 +49,6 @@ fn ingest(engine: &mut Engine, observation: Observation) -> NodeId {
     match engine.ingest(observation).expect("ingest should succeed") {
         IngestResult::Created(ids) => ids[0],
         IngestResult::Reinforced { .. } => panic!("dedup is disabled"),
-        IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
     }
 }
 
@@ -96,7 +95,7 @@ fn identity_tension_preserved() {
         ),
     );
     engine
-        .link(identity, fact, EdgeType::Contradicts, 0.9)
+        .link(identity, fact, EdgeType::Contradicts)
         .expect("link should succeed");
 
     let result = engine
@@ -125,7 +124,7 @@ fn knowledge_only_omits_source_memories_and_memory_tokens() {
         observation("linked-source knowledge", KnowledgeType::Semantic, None, 1),
     );
     engine
-        .link(source, knowledge, EdgeType::ExtractedFrom, 0.8)
+        .link(source, knowledge, EdgeType::ExtractedFrom)
         .expect("link should succeed");
 
     let result = engine
@@ -181,7 +180,7 @@ fn knowledge_only_drops_unlinked_episodic() {
         observation("drop-check knowledge", KnowledgeType::Semantic, None, 2),
     );
     engine
-        .link(source, knowledge, EdgeType::ExtractedFrom, 0.8)
+        .link(source, knowledge, EdgeType::ExtractedFrom)
         .expect("link should succeed");
 
     let result = engine
@@ -234,10 +233,10 @@ fn source_fragment_carries_source_scope() {
         ),
     );
     engine
-        .link(source, knowledge, EdgeType::ExtractedFrom, 0.8)
+        .link(source, knowledge, EdgeType::ExtractedFrom)
         .expect("link should succeed");
     engine
-        .link(knowledge, contrary, EdgeType::Contradicts, 0.8)
+        .link(knowledge, contrary, EdgeType::Contradicts)
         .expect("link should succeed");
 
     let result = engine

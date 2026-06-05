@@ -35,13 +35,12 @@ fn test_query_types_import() {
 #[test]
 fn test_api_types_import() {
     use anamnesis::{
-        EngineConfig, MergeLog, MergePair, Observation, ReflectReport, SessionSummary, TickReport,
+        EngineConfig, Observation, ReflectReport, SessionSummary, TickReport,
     };
     let _ = EngineConfig::default();
     let _ = TickReport::default();
-    let _ = MergeLog::default();
     let _ = ReflectReport::default();
-    let _ = std::any::type_name::<(Observation, MergePair, SessionSummary)>();
+    let _ = std::any::type_name::<(Observation, SessionSummary)>();
 }
 
 #[test]

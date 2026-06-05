@@ -34,7 +34,6 @@ fn ingest_node(engine: &mut Engine, name: &str, node_type: KnowledgeType) -> ana
     match result {
         IngestResult::Created(ids) => ids[0],
         IngestResult::Reinforced { existing_id, .. } => existing_id,
-        IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
     }
 }
 
@@ -97,9 +96,9 @@ fn component_count_star_topology() {
     let leaf2 = ingest_node(&mut engine, "leaf-2", KnowledgeType::Semantic);
     let leaf3 = ingest_node(&mut engine, "leaf-3", KnowledgeType::Semantic);
 
-    engine.link(center, leaf1, EdgeType::Semantic, 0.8).unwrap();
-    engine.link(center, leaf2, EdgeType::Semantic, 0.8).unwrap();
-    engine.link(center, leaf3, EdgeType::Semantic, 0.8).unwrap();
+    engine.link(center, leaf1, EdgeType::Semantic).unwrap();
+    engine.link(center, leaf2, EdgeType::Semantic).unwrap();
+    engine.link(center, leaf3, EdgeType::Semantic).unwrap();
 
     let health = engine.graph_health();
     assert_eq!(health.node_count, 4);
@@ -119,8 +118,8 @@ fn component_count_disconnected_pairs() {
     let b2 = ingest_node(&mut engine, "b2", KnowledgeType::Semantic);
     let orphan = ingest_node(&mut engine, "orphan", KnowledgeType::Semantic);
 
-    engine.link(a1, a2, EdgeType::Semantic, 0.8).unwrap();
-    engine.link(b1, b2, EdgeType::Causal, 0.7).unwrap();
+    engine.link(a1, a2, EdgeType::Semantic).unwrap();
+    engine.link(b1, b2, EdgeType::Causal).unwrap();
 
     let health = engine.graph_health();
     assert_eq!(health.node_count, 5);
@@ -139,9 +138,9 @@ fn contradiction_and_supersede_counts() {
     let n3 = ingest_node(&mut engine, "n3", KnowledgeType::Semantic);
     let n4 = ingest_node(&mut engine, "n4", KnowledgeType::Semantic);
 
-    engine.link(n1, n2, EdgeType::Contradicts, 0.9).unwrap();
-    engine.link(n3, n4, EdgeType::Contradicts, 0.8).unwrap();
-    engine.link(n1, n3, EdgeType::Supersedes, 0.7).unwrap();
+    engine.link(n1, n2, EdgeType::Contradicts).unwrap();
+    engine.link(n3, n4, EdgeType::Contradicts).unwrap();
+    engine.link(n1, n3, EdgeType::Supersedes).unwrap();
 
     let health = engine.graph_health();
     assert_eq!(health.contradiction_count, 2);
@@ -197,10 +196,10 @@ fn edge_type_entropy_positive_for_mixed_edges() {
     let n3 = ingest_node(&mut engine, "n3", KnowledgeType::Semantic);
     let n4 = ingest_node(&mut engine, "n4", KnowledgeType::Semantic);
 
-    engine.link(n1, n2, EdgeType::Semantic, 0.8).unwrap();
-    engine.link(n2, n3, EdgeType::Causal, 0.7).unwrap();
-    engine.link(n3, n4, EdgeType::Temporal, 0.6).unwrap();
-    engine.link(n4, n1, EdgeType::Reason, 0.5).unwrap();
+    engine.link(n1, n2, EdgeType::Semantic).unwrap();
+    engine.link(n2, n3, EdgeType::Causal).unwrap();
+    engine.link(n3, n4, EdgeType::Temporal).unwrap();
+    engine.link(n4, n1, EdgeType::Reason).unwrap();
 
     let health = engine.graph_health();
     assert!(
@@ -219,8 +218,8 @@ fn edge_type_entropy_zero_for_single_type() {
     let n2 = ingest_node(&mut engine, "n2", KnowledgeType::Semantic);
     let n3 = ingest_node(&mut engine, "n3", KnowledgeType::Semantic);
 
-    engine.link(n1, n2, EdgeType::Semantic, 0.8).unwrap();
-    engine.link(n2, n3, EdgeType::Semantic, 0.7).unwrap();
+    engine.link(n1, n2, EdgeType::Semantic).unwrap();
+    engine.link(n2, n3, EdgeType::Semantic).unwrap();
 
     let health = engine.graph_health();
     assert_eq!(health.edge_type_entropy, 0.0);
@@ -247,7 +246,6 @@ fn bridge_candidates_with_cross_scope_connections() {
     let bridge_id = match engine.ingest(obs_bridge).unwrap() {
         IngestResult::Created(ids) => ids[0],
         IngestResult::Reinforced { existing_id, .. } => existing_id,
-        IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
     };
 
     let obs_a = Observation {
@@ -266,7 +264,6 @@ fn bridge_candidates_with_cross_scope_connections() {
     let a_id = match engine.ingest(obs_a).unwrap() {
         IngestResult::Created(ids) => ids[0],
         IngestResult::Reinforced { existing_id, .. } => existing_id,
-        IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
     };
 
     let obs_b = Observation {
@@ -285,7 +282,6 @@ fn bridge_candidates_with_cross_scope_connections() {
     let b_id = match engine.ingest(obs_b).unwrap() {
         IngestResult::Created(ids) => ids[0],
         IngestResult::Reinforced { existing_id, .. } => existing_id,
-        IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
     };
 
     let obs_c = Observation {
@@ -304,17 +300,16 @@ fn bridge_candidates_with_cross_scope_connections() {
     let c_id = match engine.ingest(obs_c).unwrap() {
         IngestResult::Created(ids) => ids[0],
         IngestResult::Reinforced { existing_id, .. } => existing_id,
-        IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
     };
 
     engine
-        .link(bridge_id, a_id, EdgeType::Semantic, 0.9)
+        .link(bridge_id, a_id, EdgeType::Semantic)
         .unwrap();
     engine
-        .link(bridge_id, b_id, EdgeType::Semantic, 0.9)
+        .link(bridge_id, b_id, EdgeType::Semantic)
         .unwrap();
     engine
-        .link(bridge_id, c_id, EdgeType::Semantic, 0.9)
+        .link(bridge_id, c_id, EdgeType::Semantic)
         .unwrap();
 
     let health = engine.graph_health();
@@ -334,8 +329,8 @@ fn node_count_and_edge_count_match_storage() {
     let n2 = ingest_node(&mut engine, "n2", KnowledgeType::Episodic);
     let n3 = ingest_node(&mut engine, "n3", KnowledgeType::Entity);
 
-    engine.link(n1, n2, EdgeType::Semantic, 0.8).unwrap();
-    engine.link(n2, n3, EdgeType::Causal, 0.7).unwrap();
+    engine.link(n1, n2, EdgeType::Semantic).unwrap();
+    engine.link(n2, n3, EdgeType::Causal).unwrap();
 
     let health = engine.graph_health();
     assert_eq!(health.node_count, engine.graph().node_count());

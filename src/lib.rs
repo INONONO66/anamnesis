@@ -1,6 +1,6 @@
 //! Anamnesis — cognitive graph engine for LLM agents.
 //!
-//! Knowledge with attraction, gravity, perception, and forgetting.
+//! Knowledge with spreading activation, conductance, perception, and forgetting.
 //!
 //! # Quick Start
 //!
@@ -27,8 +27,8 @@ pub mod storage;
 // Core re-exports
 pub use api::{
     CrystallizeRequest, CrystallizeResult, DebugOutcome, Engine, EngineConfig, EvidenceResult,
-    IngestResult, MergeLog, MergePair, Observation, ObservedRef, PerspectiveKey, ReflectReport,
-    SessionSummary, TickReport,
+    IngestResult, Observation, ObservedRef, PerspectiveKey, ReflectReport, SessionSummary,
+    TickReport,
 };
 pub use embedding::EmbeddingProvider;
 #[cfg(feature = "embed")]
@@ -37,11 +37,12 @@ pub use error::Error;
 pub use graph::{Edge, Node, Origin};
 pub use graph::{EdgeId, EdgeType, KnowledgeType, NodeId, PeerId, Timestamp};
 pub use mechanics::health::GraphHealth;
-pub use mechanics::social::FeedbackSignal;
+pub use mechanics::social::{ConfidenceLevel, FeedbackSignal};
 pub use peer::{PeerProfile, PeerRegistry, SourceKind, TrustLevel};
 pub use query::{
-    ContextPackage, Fragment, PackagingMode, Query, QueryConfig, SearchInput, SearchResult,
-    SearchTrace, Tension, TokenBudget,
+    AccessedSite, ActivatedTension, CoReadoutPair, CommitTrace, ContextPackage, Fragment,
+    PackagingMode, PathUsedEdge, Query, QueryConfig, SearchInput, SearchResult, SearchTrace,
+    Tension, TokenBudget,
 };
 pub use snapshot::{SnapshotBackend, SnapshotEntry, SnapshotId, SnapshotStore};
 pub use storage::{SqliteStorage, StorageAdapter};

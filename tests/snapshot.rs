@@ -31,7 +31,6 @@ fn ingest_node(engine: &mut Engine, name: &str, timestamp: Timestamp) -> NodeId 
     match engine.ingest(observation(name, timestamp)).unwrap() {
         IngestResult::Created(ids) => ids[0],
         IngestResult::Reinforced { .. } => panic!("test observations should create nodes"),
-        IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
     }
 }
 
@@ -40,12 +39,12 @@ fn restore_reverts_created_nodes_and_edges() {
     let mut engine = Engine::new();
     let first = ingest_node(&mut engine, "first", Timestamp(10));
     let second = ingest_node(&mut engine, "second", Timestamp(11));
-    let original_edge = engine.link(first, second, EdgeType::Semantic, 0.8).unwrap();
+    let original_edge = engine.link(first, second, EdgeType::Semantic).unwrap();
 
     let snapshot = engine.snapshot("baseline").unwrap();
 
     let third = ingest_node(&mut engine, "third", Timestamp(13));
-    engine.link(second, third, EdgeType::Causal, 0.7).unwrap();
+    engine.link(second, third, EdgeType::Causal).unwrap();
     assert_eq!(engine.graph().node_count(), 3);
     assert_eq!(engine.graph().edge_count(), 2);
 

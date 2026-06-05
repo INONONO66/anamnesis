@@ -86,7 +86,7 @@ fn scenario_peer_registration_and_ingest() {
     };
 
     // Link them
-    e.link(alice_ids[0], bob_ids[0], EdgeType::Contradicts, 0.7)
+    e.link(alice_ids[0], bob_ids[0], EdgeType::Contradicts)
         .unwrap();
 
     // Health check
@@ -196,7 +196,6 @@ fn scenario_convenience_methods_full_flow() {
     let schedule_id = match schedule_result {
         IngestResult::Created(ids) => ids[0],
         IngestResult::Reinforced { existing_id, .. } => existing_id,
-        IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
     };
     let schedule_node = e.graph().get_node(schedule_id).unwrap();
     assert_eq!(schedule_node.valid_from, Some(valid_from));
@@ -408,7 +407,7 @@ fn scenario_health_grade_a_for_clean_graph() {
     else {
         panic!("expected Created");
     };
-    e.link(ids1[0], ids2[0], EdgeType::Semantic, 0.8).unwrap();
+    e.link(ids1[0], ids2[0], EdgeType::Semantic).unwrap();
 
     let report = e.health();
     assert_eq!(report.grade, HealthGrade::A);

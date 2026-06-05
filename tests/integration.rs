@@ -1,7 +1,7 @@
 //! Integration tests for the Phase 1 skeleton.
 //!
 //! These tests verify the full Engine lifecycle:
-//! ingest → link → touch → tick → query → merge_candidates → reflect_batch
+//! ingest → link → touch → tick → query → reflect_batch
 
 use anamnesis::api::{Observation, SessionSummary};
 use anamnesis::graph::node::Origin;
@@ -60,11 +60,14 @@ fn engine_full_lifecycle() {
 
     // 2. Link the nodes
     let eid = engine
-        .link(ids1[0], ids2[0], EdgeType::Semantic, 0.78)
+        .link(ids1[0], ids2[0], EdgeType::Semantic)
         .unwrap();
     assert_eq!(engine.graph().edge_count(), 1);
     let edge = engine.graph().get_edge(eid).unwrap();
-    assert_eq!(edge.weight, 0.78);
+    // link seeds conductance from the cold-start coupling; weight is its bounded
+    // projection (ADR-0002), not a caller-supplied value.
+    assert!(edge.conductance.is_finite());
+    assert!((0.0..=1.0).contains(&edge.weight));
 
     // 3. Touch a node at the tick time so its decay-checkpoint dt is zero.
     let tick_time = Timestamp(1000 + 30 * 86_400_000); // 30 days after ingest
@@ -92,17 +95,7 @@ fn engine_full_lifecycle() {
         "Associative query should return results"
     );
 
-    // 6. Merge candidates (deprecated)
-    #[allow(deprecated)]
-    let candidates = engine.merge_candidates(0.9).unwrap();
-    assert!(candidates.is_empty());
-
-    // 7. Auto merge (deprecated)
-    #[allow(deprecated)]
-    let log = engine.auto_merge(0.9).unwrap();
-    assert_eq!(log.merges_performed, 0);
-
-    // 8. Reflect batch (placeholder)
+    // 6. Reflect batch (placeholder)
     let sessions = vec![SessionSummary {
         peer_id: anamnesis::graph::types::PeerId(0),
         session_id: "session-1".to_string(),
@@ -202,9 +195,9 @@ fn multiple_edge_types() {
     let id2 = ids2[0];
     let id3 = ids3[0];
 
-    engine.link(id1, id2, EdgeType::Reason, 1.0).unwrap();
+    engine.link(id1, id2, EdgeType::Reason).unwrap();
     engine
-        .link(id1, id3, EdgeType::RejectedAlternative, 0.6)
+        .link(id1, id3, EdgeType::RejectedAlternative)
         .unwrap();
 
     assert_eq!(engine.graph().edge_count(), 2);

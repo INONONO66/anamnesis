@@ -1,6 +1,5 @@
 use anamnesis::mechanics::interactions::decay_default;
 use anamnesis::mechanics::priors::{decay_multiplier_for_type, edge_type_factor};
-use anamnesis::mechanics::gravity::{compute_mass, mass_prior};
 use anamnesis::query::assembly::{is_identity_type, is_memory_type};
 use anamnesis::query::identity::pi_tier;
 use anamnesis::{EdgeType, KnowledgeType};
@@ -26,15 +25,16 @@ fn debug_node_types_have_inert_decay_values() {
 }
 
 #[test]
-fn debug_node_types_have_low_mass() {
-    // Repulsion/rigidity is gone in the conductive model: contradictions surface as
-    // frustration stress (ADR-0006), never as activation damping. Debug-lifecycle
-    // nodes remain low-mass.
+fn debug_node_types_are_inert_under_dissipation() {
+    // The legacy gravity/mass force is gone (overview.md / conductance.md): importance
+    // is emergent, there is no separate mass boost. Debug-lifecycle nodes are instead
+    // characterized as *inert*: their per-type decay multiplier is exactly 0, so
+    // power-law dissipation never moves their retained-action reservoir regardless of
+    // elapsed time or sign.
     for node_type in debug_node_types() {
-        assert_eq!(mass_prior(&node_type), 0.10);
-
-        let mass = compute_mass(0.0, 0, &node_type);
-        assert!((mass - 0.015).abs() < 1e-10, "mass={mass}");
+        assert_eq!(decay_multiplier_for_type(&node_type), 0.0);
+        assert_eq!(decay_default(0.5, 1000.0, &node_type), 0.5);
+        assert_eq!(decay_default(-1.5, 1000.0, &node_type), -1.5);
     }
 }
 

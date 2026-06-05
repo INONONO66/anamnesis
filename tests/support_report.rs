@@ -95,13 +95,13 @@ fn support_report_consolidated_from_edges() {
 
     // Create ConsolidatedFrom edges: target -> sources
     engine
-        .link(target, source_a, EdgeType::ConsolidatedFrom, 0.8)
+        .link(target, source_a, EdgeType::ConsolidatedFrom)
         .unwrap();
     engine
-        .link(target, source_b, EdgeType::ConsolidatedFrom, 0.9)
+        .link(target, source_b, EdgeType::ConsolidatedFrom)
         .unwrap();
     engine
-        .link(target, source_c, EdgeType::ConsolidatedFrom, 0.7)
+        .link(target, source_c, EdgeType::ConsolidatedFrom)
         .unwrap();
 
     let report = engine.support_report(target).unwrap();
@@ -131,10 +131,10 @@ fn support_report_reinforced_by_edges() {
         .unwrap();
 
     engine
-        .link(target, source_a, EdgeType::ReinforcedBy, 0.8)
+        .link(target, source_a, EdgeType::ReinforcedBy)
         .unwrap();
     engine
-        .link(target, source_b, EdgeType::ReinforcedBy, 0.7)
+        .link(target, source_b, EdgeType::ReinforcedBy)
         .unwrap();
 
     let report = engine.support_report(target).unwrap();
@@ -158,7 +158,7 @@ fn support_report_supports_edges() {
         .unwrap();
 
     engine
-        .link(target, source, EdgeType::Supports, 0.9)
+        .link(target, source, EdgeType::Supports)
         .unwrap();
 
     let report = engine.support_report(target).unwrap();
@@ -188,10 +188,10 @@ fn support_report_contradicts_edges() {
         .unwrap();
 
     engine
-        .link(target, contra_a, EdgeType::Contradicts, 0.8)
+        .link(target, contra_a, EdgeType::Contradicts)
         .unwrap();
     engine
-        .link(target, contra_b, EdgeType::Contradicts, 0.7)
+        .link(target, contra_b, EdgeType::Contradicts)
         .unwrap();
 
     let report = engine.support_report(target).unwrap();
@@ -227,13 +227,13 @@ fn support_report_mixed_edges() {
         .unwrap();
 
     engine
-        .link(target, support_a, EdgeType::ConsolidatedFrom, 0.8)
+        .link(target, support_a, EdgeType::ConsolidatedFrom)
         .unwrap();
     engine
-        .link(target, support_b, EdgeType::ReinforcedBy, 0.9)
+        .link(target, support_b, EdgeType::ReinforcedBy)
         .unwrap();
     engine
-        .link(target, contra, EdgeType::Contradicts, 0.7)
+        .link(target, contra, EdgeType::Contradicts)
         .unwrap();
 
     let report = engine.support_report(target).unwrap();
@@ -264,10 +264,10 @@ fn support_report_incoming_edges() {
 
     // Create incoming edges: source -> target
     engine
-        .link(source_a, target, EdgeType::ConsolidatedFrom, 0.8)
+        .link(source_a, target, EdgeType::ConsolidatedFrom)
         .unwrap();
     engine
-        .link(source_b, target, EdgeType::Supports, 0.9)
+        .link(source_b, target, EdgeType::Supports)
         .unwrap();
 
     let report = engine.support_report(target).unwrap();
@@ -299,13 +299,13 @@ fn support_report_circular_evidence_prevention() {
     // Create edges: target -> source_a -> target (circular)
     // and target -> source_b
     engine
-        .link(target, source_a, EdgeType::ConsolidatedFrom, 0.8)
+        .link(target, source_a, EdgeType::ConsolidatedFrom)
         .unwrap();
     engine
-        .link(source_a, target, EdgeType::ConsolidatedFrom, 0.7)
+        .link(source_a, target, EdgeType::ConsolidatedFrom)
         .unwrap();
     engine
-        .link(target, source_b, EdgeType::ConsolidatedFrom, 0.9)
+        .link(target, source_b, EdgeType::ConsolidatedFrom)
         .unwrap();
 
     let report = engine.support_report(target).unwrap();
@@ -345,11 +345,11 @@ fn support_report_ignores_other_edge_types() {
 
     // Create edges of types that should be ignored
     engine
-        .link(target, semantic, EdgeType::Semantic, 0.8)
+        .link(target, semantic, EdgeType::Semantic)
         .unwrap();
-    engine.link(target, causal, EdgeType::Causal, 0.9).unwrap();
+    engine.link(target, causal, EdgeType::Causal).unwrap();
     engine
-        .link(target, temporal, EdgeType::Temporal, 0.7)
+        .link(target, temporal, EdgeType::Temporal)
         .unwrap();
 
     let report = engine.support_report(target).unwrap();
@@ -379,10 +379,10 @@ fn support_report_same_agent_different_sessions() {
         .unwrap();
 
     engine
-        .link(target, source_a, EdgeType::ConsolidatedFrom, 0.8)
+        .link(target, source_a, EdgeType::ConsolidatedFrom)
         .unwrap();
     engine
-        .link(target, source_b, EdgeType::ConsolidatedFrom, 0.9)
+        .link(target, source_b, EdgeType::ConsolidatedFrom)
         .unwrap();
 
     let report = engine.support_report(target).unwrap();
@@ -409,10 +409,10 @@ fn support_report_duplicate_edges_same_target() {
 
     // Create two edges to the same target (should only count once due to visited set)
     engine
-        .link(target, source, EdgeType::ConsolidatedFrom, 0.8)
+        .link(target, source, EdgeType::ConsolidatedFrom)
         .unwrap();
     engine
-        .link(target, source, EdgeType::ReinforcedBy, 0.9)
+        .link(target, source, EdgeType::ReinforcedBy)
         .unwrap();
 
     let report = engine.support_report(target).unwrap();

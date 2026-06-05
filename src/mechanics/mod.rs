@@ -2,8 +2,7 @@
 //!
 //! Each submodule contains pure functions with no side effects.
 //!
-//! - `attraction`: Cosine similarity, merge candidate detection
-//! - `gravity`: PageRank-like centrality scoring
+//! - `attraction`: Cosine similarity + type-affinity candidate selection (no mass)
 //! - `perception`: Two-stage observation gate (confidence/budget, then novelty
 //!   Allocate|Route) with surprise-gated initial charge (ADR-0009)
 //! - `frustration`: Query-local contradiction stress `sigma_ij` — contradictions
@@ -19,7 +18,6 @@
 pub mod attraction;
 pub mod forgetting;
 pub mod frustration;
-pub mod gravity;
 pub mod health;
 pub mod interactions;
 pub mod perception;

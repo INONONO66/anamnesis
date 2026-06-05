@@ -74,6 +74,12 @@ pub(crate) fn assemble_search_result<S: StorageAdapter + Clone>(
         apply_validity_filter(engine, &mut package, request.input.now);
     }
 
+    // Capture the read-only commit trace from the FINAL package (after packaging mode
+    // and validity filtering), so a later `commit` only integrates work for sites that
+    // actually survived into the result (ADR-0004 / interactions.md). Read-only.
+    package.commit_trace =
+        crate::api::build_commit_trace(engine.graph.storage(), request.response, &package);
+
     let mut trace = trace;
     trace.packaging_mode = Some(packaging_mode);
 

@@ -116,13 +116,13 @@ fn full_cognitive_lifecycle() {
     );
 
     engine
-        .link(semantic1_id, semantic2_id, EdgeType::Semantic, 0.9)
+        .link(semantic1_id, semantic2_id, EdgeType::Semantic)
         .unwrap();
     engine
-        .link(decision_id, semantic1_id, EdgeType::Reason, 0.8)
+        .link(decision_id, semantic1_id, EdgeType::Reason)
         .unwrap();
     engine
-        .link(episodic_id, semantic1_id, EdgeType::ExtractedFrom, 0.7)
+        .link(episodic_id, semantic1_id, EdgeType::ExtractedFrom)
         .unwrap();
 
     let week_later = Timestamp(7 * 86_400_000);
@@ -326,7 +326,7 @@ fn scope_same_project_preferred() {
     let other_id = other_ids[0];
 
     engine
-        .link(same_id, other_id, EdgeType::Semantic, 0.8)
+        .link(same_id, other_id, EdgeType::Semantic)
         .unwrap();
 
     let q = Query::Associative {
@@ -393,7 +393,7 @@ fn contradicts_creates_tension() {
     };
     let id1 = ids1[0];
     let id2 = ids2[0];
-    engine.link(id1, id2, EdgeType::Contradicts, 0.9).unwrap();
+    engine.link(id1, id2, EdgeType::Contradicts).unwrap();
 
     let q = Query::Associative {
         seed: id1,

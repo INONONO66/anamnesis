@@ -353,7 +353,7 @@ fn run_ingestion_phase(
             };
 
             if let (Some(prev_id), Some(current_id)) = (previous_raw_id, raw_id) {
-                if let Err(err) = engine.link(prev_id, current_id, EdgeType::Temporal, 0.8) {
+                if let Err(err) = engine.link(prev_id, current_id, EdgeType::Temporal) {
                     eprintln!(
                         "temporal link failed for {}#{}: {err}",
                         result.session_id, result.turn_index
@@ -402,7 +402,7 @@ fn run_ingestion_phase(
                             total_nodes += 1;
                             if let Some(raw_id) = raw_id {
                                 if let Err(err) =
-                                    engine.link(extracted_id, raw_id, EdgeType::ExtractedFrom, 1.0)
+                                    engine.link(extracted_id, raw_id, EdgeType::ExtractedFrom)
                                 {
                                     eprintln!(
                                         "extracted link failed for {}#{}: {err}",
@@ -686,10 +686,6 @@ fn ingest_observation(
             .copied()
             .ok_or_else(|| "ingest created no node ids".to_string()),
         Ok(IngestResult::Reinforced { existing_id, .. }) => Ok(existing_id),
-        Ok(IngestResult::CreatedWithConflict { node_ids, .. }) => node_ids
-            .first()
-            .copied()
-            .ok_or_else(|| "no node ids".to_string()),
         Err(err) => Err(err.to_string()),
     }
 }

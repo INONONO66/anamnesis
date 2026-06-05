@@ -29,7 +29,6 @@ fn created_id(result: IngestResult) -> NodeId {
     match result {
         IngestResult::Created(ids) => ids[0],
         IngestResult::Reinforced { .. } => panic!("expected Created"),
-        IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
     }
 }
 
@@ -39,7 +38,7 @@ fn supersedes_invalidates_old_fact() {
     let old = created_id(engine.ingest(make_obs("old fact")).unwrap());
     let new = created_id(engine.ingest(make_obs("new fact")).unwrap());
 
-    engine.link(new, old, EdgeType::Supersedes, 1.0).unwrap();
+    engine.link(new, old, EdgeType::Supersedes).unwrap();
 
     let old_node = engine.graph().get_node(old).unwrap();
     let new_node = engine.graph().get_node(new).unwrap();
@@ -60,7 +59,7 @@ fn fact_at_returns_only_valid_facts() {
     let new_fact = created_id(engine.ingest(make_obs("new fact")).unwrap());
 
     engine
-        .link(new_fact, old, EdgeType::Supersedes, 1.0)
+        .link(new_fact, old, EdgeType::Supersedes)
         .unwrap();
 
     let old_node = engine.graph().get_node(old).unwrap();

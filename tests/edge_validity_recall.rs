@@ -80,7 +80,7 @@ fn expired_edge_skipped_during_recall() {
     let mut engine = engine();
     let seed = ingest(&mut engine, "seed");
     let expired = ingest(&mut engine, "expired target");
-    let edge = engine.link(seed, expired, EdgeType::Semantic, 1.0).unwrap();
+    let edge = engine.link(seed, expired, EdgeType::Semantic).unwrap();
     set_edge_validity(&mut engine, edge, None, Some(Timestamp(5)));
 
     let package = associative_query(&engine, seed, Timestamp(10));
@@ -94,7 +94,7 @@ fn valid_edge_is_traversable() {
     let mut engine = engine();
     let seed = ingest(&mut engine, "seed");
     let target = ingest(&mut engine, "valid target");
-    let edge = engine.link(seed, target, EdgeType::Semantic, 1.0).unwrap();
+    let edge = engine.link(seed, target, EdgeType::Semantic).unwrap();
     set_edge_validity(&mut engine, edge, Some(Timestamp(5)), Some(Timestamp(15)));
 
     let package = associative_query(&engine, seed, Timestamp(10));
@@ -109,8 +109,8 @@ fn rwr_excludes_invalid_transitions() {
     let valid = ingest(&mut engine, "valid");
     let expired = ingest(&mut engine, "expired");
 
-    engine.link(seed, valid, EdgeType::Semantic, 1.0).unwrap();
-    let expired_edge = engine.link(seed, expired, EdgeType::Semantic, 1.0).unwrap();
+    engine.link(seed, valid, EdgeType::Semantic).unwrap();
+    let expired_edge = engine.link(seed, expired, EdgeType::Semantic).unwrap();
     set_edge_validity(&mut engine, expired_edge, None, Some(Timestamp(5)));
 
     let response = additive_rwr(
@@ -130,9 +130,9 @@ fn expired_contradicts_does_not_create_tension() {
     let seed = ingest(&mut engine, "claim a");
     let target = ingest(&mut engine, "claim b");
 
-    engine.link(seed, target, EdgeType::Semantic, 1.0).unwrap();
+    engine.link(seed, target, EdgeType::Semantic).unwrap();
     let contradiction = engine
-        .link(seed, target, EdgeType::Contradicts, 1.0)
+        .link(seed, target, EdgeType::Contradicts)
         .unwrap();
     set_edge_validity(&mut engine, contradiction, None, Some(Timestamp(5)));
 
@@ -150,7 +150,7 @@ fn edges_without_validity_bounds_are_always_valid() {
     let mut engine = Engine::with_config(config);
     let seed = ingest(&mut engine, "seed");
     let target = ingest(&mut engine, "unbounded target");
-    engine.link(seed, target, EdgeType::Semantic, 1.0).unwrap();
+    engine.link(seed, target, EdgeType::Semantic).unwrap();
 
     let package = associative_query(&engine, seed, Timestamp(999));
 
@@ -165,7 +165,7 @@ fn edge_excluded_at_exact_valid_until_boundary() {
     let mut engine = engine();
     let seed = ingest(&mut engine, "seed");
     let target = ingest(&mut engine, "boundary target");
-    let edge = engine.link(seed, target, EdgeType::Semantic, 1.0).unwrap();
+    let edge = engine.link(seed, target, EdgeType::Semantic).unwrap();
     set_edge_validity(&mut engine, edge, None, Some(Timestamp(10)));
 
     let package = associative_query(&engine, seed, Timestamp(10));
@@ -183,7 +183,7 @@ fn edge_valid_at_exact_valid_from_boundary() {
     let mut engine = engine();
     let seed = ingest(&mut engine, "seed");
     let target = ingest(&mut engine, "from-boundary target");
-    let edge = engine.link(seed, target, EdgeType::Semantic, 1.0).unwrap();
+    let edge = engine.link(seed, target, EdgeType::Semantic).unwrap();
     set_edge_validity(&mut engine, edge, Some(Timestamp(10)), Some(Timestamp(20)));
 
     let package = associative_query(&engine, seed, Timestamp(10));

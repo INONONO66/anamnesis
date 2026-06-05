@@ -89,7 +89,7 @@ fn bench_ingest_link_workflow(c: &mut Criterion) {
                     }
                     for i in 0..(size - 1) {
                         engine
-                            .link(all_ids[i], all_ids[i + 1], EdgeType::Semantic, 0.75)
+                            .link(all_ids[i], all_ids[i + 1], EdgeType::Semantic)
                             .unwrap();
                     }
                     engine.touch(all_ids[0], Timestamp::now()).unwrap();

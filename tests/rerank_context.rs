@@ -30,7 +30,6 @@ fn created_id(result: IngestResult) -> anamnesis::NodeId {
     match result {
         IngestResult::Created(ids) => ids[0],
         IngestResult::Reinforced { existing_id, .. } => existing_id,
-        IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
     }
 }
 
