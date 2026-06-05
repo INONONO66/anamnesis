@@ -162,9 +162,17 @@ fn assemble_graph_recall_package<S: StorageAdapter + Clone>(
             .max()
             .unwrap_or(0);
         let base_scope_weight = scope_weight(&config.scope, &node.origin.scope, shared_entities);
+        // trust_weight = coarse-level prior bonus + evidence-driven projection
+        // (social.md "Retrieval Effects": ranking through trust-weighted readout).
+        // The coarse `TrustLevel` is the declared prior offset; the evidence trust
+        // reservoir, moved by corroboration/feedback, projects to a bounded
+        // (-0.5, 0.5) term so a peer with no evidence contributes only its prior.
         let trust_weight = engine
             .get_peer(node.origin.peer_id)
-            .map(|p| p.trust_level.scope_weight_bonus())
+            .map(|p| {
+                p.trust_level.scope_weight_bonus()
+                    + crate::mechanics::priors::project_trust(p.trust_reservoir)
+            })
             .unwrap_or(0.0);
 
         // phi_i: query-field potential bias. The embedding alignment is folded in

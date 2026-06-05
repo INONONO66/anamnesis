@@ -1,4 +1,4 @@
-//! Tests for SQLite schema migration infrastructure (v1 → v2 → v3).
+//! Tests for SQLite schema migration infrastructure (v1 → v2 → v3 → v4).
 
 use anamnesis::storage::SqliteStorage;
 use rusqlite::{Connection, OptionalExtension};
@@ -51,13 +51,13 @@ fn schema_version(conn: &Connection) -> u32 {
     .expect("schema_version")
 }
 
-// ── Fresh DB gets version 3 ───────────────────────────────────────────────────
+// ── Fresh DB gets the current version ─────────────────────────────────────────
 
 #[test]
-fn fresh_db_gets_schema_version_3() {
-    // A new file-backed DB should be created at v3 directly.
+fn fresh_db_gets_current_schema_version() {
+    // A new file-backed DB should be created at the current version directly.
     let tmp = std::env::temp_dir().join(format!(
-        "anamnesis_test_freshv3_{}.db",
+        "anamnesis_test_freshv4_{}.db",
         std::process::id()
     ));
     let storage = SqliteStorage::open(&tmp).expect("storage init");
@@ -65,7 +65,15 @@ fn fresh_db_gets_schema_version_3() {
     assert_eq!(storage.node_count(), 0);
 
     let conn = Connection::open(&tmp).expect("reopen");
-    assert_eq!(schema_version(&conn), 3, "fresh DB should be at schema v3");
+    assert_eq!(schema_version(&conn), 4, "fresh DB should be at schema v4");
+
+    // The v4 peer evidence-trust columns are present on a fresh DB.
+    let peer_cols: Vec<String> = table_columns(&conn, "peers")
+        .into_iter()
+        .map(|(name, _, _, _)| name)
+        .collect();
+    assert!(peer_cols.iter().any(|c| c == "trust_reservoir"));
+    assert!(peer_cols.iter().any(|c| c == "trust_evidence_count"));
 
     let _ = std::fs::remove_file(&tmp);
 }
@@ -109,7 +117,7 @@ fn fresh_db_has_peer_id_column() {
 // ── Migration test ────────────────────────────────────────────────────────────
 
 #[test]
-fn existing_db_migrates_from_v1_to_v3() {
+fn existing_db_migrates_from_v1_to_current() {
     // Create a temp file path
     let tmp = std::env::temp_dir().join(format!("anamnesis_test_v1_{}.db", std::process::id()));
 
@@ -192,15 +200,23 @@ fn existing_db_migrates_from_v1_to_v3() {
 
         assert_eq!(
             schema_version(&conn),
-            3,
-            "schema_version should be 3 after full v1 -> v3 migration"
+            4,
+            "schema_version should be 4 after full v1 -> v4 migration"
         );
+
+        // The v4 peer evidence-trust columns exist after the full chain too.
+        let peer_cols: Vec<String> = table_columns(&conn, "peers")
+            .into_iter()
+            .map(|(name, _, _, _)| name)
+            .collect();
+        assert!(peer_cols.iter().any(|c| c == "trust_reservoir"));
+        assert!(peer_cols.iter().any(|c| c == "trust_evidence_count"));
     }
 
     let _ = std::fs::remove_file(&tmp);
 }
 
-// ── Fresh-v3 schema == migrated-v3 schema ──────────────────────────────────────
+// ── Fresh schema == migrated schema ────────────────────────────────────────────
 
 /// Build a v1-style database at `path` (legacy `agent_id`, no reservoir
 /// columns/tables, no schema_version row), optionally seeding a node + edge so
@@ -285,39 +301,46 @@ fn build_v1_db(path: &std::path::Path, seed: bool) {
 }
 
 #[test]
-fn fresh_v3_schema_equals_migrated_v3_schema() {
-    // Fresh v3 DB.
+fn fresh_schema_equals_migrated_schema() {
+    // Fresh current-version DB.
     let fresh_path = std::env::temp_dir().join(format!(
         "anamnesis_test_fresh_eq_{}.db",
         std::process::id()
     ));
-    SqliteStorage::open(&fresh_path).expect("fresh v3 storage");
+    SqliteStorage::open(&fresh_path).expect("fresh storage");
 
-    // v1 -> v3 migrated DB.
+    // v1 -> current migrated DB.
     let migrated_path = std::env::temp_dir().join(format!(
         "anamnesis_test_migrated_eq_{}.db",
         std::process::id()
     ));
     build_v1_db(&migrated_path, true);
-    SqliteStorage::open(&migrated_path).expect("migrate v1 -> v3");
+    SqliteStorage::open(&migrated_path).expect("migrate v1 -> current");
 
     let fresh = Connection::open(&fresh_path).expect("reopen fresh");
     let migrated = Connection::open(&migrated_path).expect("reopen migrated");
 
-    assert_eq!(schema_version(&fresh), 3);
-    assert_eq!(schema_version(&migrated), 3);
+    assert_eq!(schema_version(&fresh), 4);
+    assert_eq!(schema_version(&migrated), 4);
 
     // Columns of edges (the table whose layout differs across the migration).
     assert_eq!(
         table_columns(&fresh, "edges"),
         table_columns(&migrated, "edges"),
-        "fresh-v3 and migrated-v3 edges columns must be identical"
+        "fresh and migrated edges columns must be identical"
     );
     // retained_action table columns.
     assert_eq!(
         table_columns(&fresh, "retained_action"),
         table_columns(&migrated, "retained_action"),
-        "fresh-v3 and migrated-v3 retained_action columns must be identical"
+        "fresh and migrated retained_action columns must be identical"
+    );
+    // peers table columns (the v4-touched table) must match column-for-column,
+    // including the evidence-trust columns and their defaults.
+    assert_eq!(
+        table_columns(&fresh, "peers"),
+        table_columns(&migrated, "peers"),
+        "fresh and migrated peers columns must be identical"
     );
 
     // Index lists must match for every reservoir-touched table.
@@ -344,7 +367,7 @@ fn v3_backfill_is_deterministic_and_complete() {
         std::process::id()
     ));
     build_v1_db(&tmp, true);
-    SqliteStorage::open(&tmp).expect("migrate v1 -> v3");
+    SqliteStorage::open(&tmp).expect("migrate v1 -> current");
 
     let conn = Connection::open(&tmp).expect("reopen");
 

@@ -645,6 +645,16 @@ pub enum GraphEvent {
         node_id: NodeId,
         new_salience: f64,
     },
+    /// A peer's evidence trust reservoir moved through `update_peer_trust`
+    /// (social.md "Peer Trust": "Trust updates must leave traces"). The coarse
+    /// `trust_level` and origin are unchanged — only the evidence estimate moved.
+    PeerTrustChanged {
+        peer_id: crate::graph::types::PeerId,
+        /// Trust reservoir (log trust-odds) before the evidence update.
+        old: f64,
+        /// Trust reservoir (log trust-odds) after the evidence update.
+        new: f64,
+    },
 }
 
 /// Report of supporting and contradicting evidence for a node.
@@ -1157,7 +1167,14 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         self.peers.get_peer(id)
     }
 
-    /// Update the trust level of an existing peer.
+    /// Set the coarse trust level of an existing peer — an explicit policy decision.
+    ///
+    /// The coarse `TrustLevel` is the *prior* for the evidence trust reservoir
+    /// (social.md "Peer Trust"). Re-labelling re-seeds the reservoir to the new
+    /// level's prior ONLY when no evidence has yet moved it; once corroboration or
+    /// feedback has accumulated, the learned estimate is preserved (never silently
+    /// erased). For evidence-driven movement use
+    /// [`update_peer_trust_evidence`](Engine::update_peer_trust_evidence).
     pub fn update_peer_trust(
         &mut self,
         id: crate::graph::types::PeerId,
@@ -1168,6 +1185,42 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             self.graph.storage_mut().store_peer(profile)?;
         }
         Ok(())
+    }
+
+    /// Move a peer's evidence trust reservoir toward a signed evidence target —
+    /// the single traceable trust-evidence update path (social.md "Peer Trust").
+    ///
+    /// `signed_strength ∈ [-1, 1]`: positive is corroboration / useful feedback
+    /// (raises trust), negative is contradiction / not-useful feedback (lowers it).
+    /// The reservoir moves a fraction
+    /// [`TRUST_LEARNING_RATE`](crate::mechanics::priors::TRUST_LEARNING_RATE) — the
+    /// slow peer-reliability rate — toward
+    /// [`trust_evidence_target`](crate::mechanics::priors::trust_evidence_target),
+    /// the Rescorla-Wagner form shared with site feedback. The move is **traceable**
+    /// (a [`GraphEvent::PeerTrustChanged`] is emitted and the moved reservoir is
+    /// persisted) and **non-destructive**: the coarse `trust_level`, name, aliases,
+    /// and every site origin are untouched — only the evidence estimate moves
+    /// (social.md: "Peer trust never erases origin"). Returns the new reservoir.
+    pub fn update_peer_trust_evidence(
+        &mut self,
+        id: crate::graph::types::PeerId,
+        signed_strength: f64,
+    ) -> Result<f64, Error> {
+        use crate::mechanics::priors::{trust_evidence_target, TRUST_LEARNING_RATE};
+
+        let target = trust_evidence_target(signed_strength);
+        let (old, new) = self.peers.nudge_trust(id, target, TRUST_LEARNING_RATE)?;
+        if let Some(profile) = self.peers.get_peer(id) {
+            self.graph.storage_mut().store_peer(profile)?;
+        }
+        if (new - old).abs() > f64::EPSILON {
+            self.emit_event(GraphEvent::PeerTrustChanged {
+                peer_id: id,
+                old,
+                new,
+            });
+        }
+        Ok(new)
     }
 
     /// Add an alias to an existing peer.
@@ -3147,6 +3200,14 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         if let Some(level) = feedback {
             let signal: crate::mechanics::social::FeedbackSignal = level.into();
             let lambda = lambda_reward(&signal);
+            // Same feedback also nudges the reliability of the peers who originated
+            // the used sites (social.md: "positive feedback reinforces peer
+            // reliability; negative feedback lowers trust through prediction error").
+            // Each distinct origin peer is nudged once, in stable order, so a multi-
+            // site package does not over-credit one peer.
+            let feedback_strength = signal.signed_strength();
+            let mut peers_to_nudge: Vec<crate::graph::types::PeerId> = Vec::new();
+            let mut peer_seen: HashSet<crate::graph::types::PeerId> = HashSet::new();
             for site in &trace.accessed {
                 if self.is_retracted(site.node_id)? {
                     continue;
@@ -3171,10 +3232,20 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                         new: new_salience,
                     });
                 }
+                if let Ok(node) = self.graph.get_node(site.node_id) {
+                    let peer_id = node.origin.peer_id;
+                    if self.peers.get_peer(peer_id).is_some() && peer_seen.insert(peer_id) {
+                        peers_to_nudge.push(peer_id);
+                    }
+                }
                 report.feedback_applied += 1;
                 if committed_set.insert(site.node_id) {
                     committed.push(site.node_id);
                 }
+            }
+            // Route every peer trust move through the single traceable evidence path.
+            for peer_id in peers_to_nudge {
+                self.update_peer_trust_evidence(peer_id, feedback_strength)?;
             }
         }
 
@@ -4230,9 +4301,14 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                 _ => 0.0,
             };
             let sw = scope_weight(&config.scope, &node.origin.scope, 0);
+            // Coarse-level prior bonus + evidence-driven trust projection (social.md
+            // "Retrieval Effects"); mirrors the assemble readout path.
             let trust_weight = self
                 .get_peer(node.origin.peer_id)
-                .map(|p| p.trust_level.scope_weight_bonus())
+                .map(|p| {
+                    p.trust_level.scope_weight_bonus()
+                        + crate::mechanics::priors::project_trust(p.trust_reservoir)
+                })
                 .unwrap_or(0.0);
 
             let stress = node_stress.get(&nid).copied().unwrap_or(0.0);
@@ -4354,6 +4430,10 @@ impl<S: StorageAdapter + Clone> Engine<S> {
 
         let mut candidate_pairs = BTreeSet::new();
         let mut clusters_found = 0usize;
+        // Distinct peers whose claims were corroborated by ≥1 other agent on a
+        // shared entity. Corroboration raises trust (social.md "Peer Trust"); each
+        // such peer is nudged once per reflect_batch via the traceable evidence path.
+        let mut corroborated_peers: BTreeSet<crate::graph::types::PeerId> = BTreeSet::new();
         for nodes in nodes_by_tag.values() {
             let mut has_cross_agent_pair = false;
             for i in 0..nodes.len() {
@@ -4365,6 +4445,9 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                     }
 
                     has_cross_agent_pair = true;
+                    // Both peers agreed on this entity — corroboration evidence.
+                    corroborated_peers.insert(*left_agent);
+                    corroborated_peers.insert(*right_agent);
                     let pair = if left_id < right_id {
                         (*left_id, *right_id)
                     } else {
@@ -4419,6 +4502,16 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                 edge_type: EdgeType::Entity,
             });
             entity_edges_created += 1;
+        }
+
+        // Corroboration trust update: every peer corroborated by another agent on a
+        // shared entity gets a full-strength positive trust nudge through the single
+        // traceable evidence path (social.md "Peer Trust": corroboration raises
+        // trust). Only registered peers move; origin and the coarse level are intact.
+        for peer_id in corroborated_peers {
+            if self.peers.get_peer(peer_id).is_some() {
+                self.update_peer_trust_evidence(peer_id, 1.0)?;
+            }
         }
 
         Ok(ReflectReport {
@@ -5070,6 +5163,9 @@ mod tests {
 
     #[test]
     fn cold_start_suprathreshold_coupling_creates_edge() {
+        use crate::mechanics::priors::{
+            coupling_clears_threshold, initialize_conductance, project_weight,
+        };
         // The auto-link must survive BOTH the attraction candidate gate and the
         // cold-start `conductance_threshold` density gate. An identity↔knowledge
         // pair uses the lower attraction threshold (0.65, tau 1.25) which sits below
@@ -5088,17 +5184,48 @@ mod tests {
         o2.embedding = Some(vec![cos, (1.0 - cos * cos).sqrt()]);
         o2.entity_tags = vec!["shared".to_string()];
 
-        let IngestResult::Created(_) = engine.ingest(o1).unwrap() else {
+        let IngestResult::Created(ids1) = engine.ingest(o1).unwrap() else {
             panic!("first observation should allocate a new site");
         };
-        let IngestResult::Created(_) = engine.ingest(o2).unwrap() else {
+        let IngestResult::Created(ids2) = engine.ingest(o2).unwrap() else {
             panic!("second observation should allocate a distinct site (novelty > theta_sep)");
         };
+        let (id1, id2) = (ids1[0], ids2[0]);
 
         assert_eq!(
             engine.graph().edge_count(),
             1,
             "supra-threshold coupling must create the auto-edge"
+        );
+
+        // DoD trace: the created edge's conductance is the cold-start coupling seed
+        // mapped through `initialize_conductance`, and its public `weight` is the
+        // bounded projection of that reservoir — `weight = project_weight(
+        // initialize_conductance(coupling_seed))` (conductance.md "Cold Start",
+        // ADR-0002). The seed is recomputed via the same engine helper the gate
+        // tests, over the new site (id2, ingested second) toward its candidate (id1).
+        let new_node = engine.graph().get_node(id2).unwrap().clone();
+        let cand_node = engine.graph().get_node(id1).unwrap().clone();
+        let seed = engine.cold_start_coupling_seed(&new_node, &cand_node, &EdgeType::Semantic);
+        assert!(
+            coupling_clears_threshold(seed),
+            "fixture seed must clear the conductance_threshold gate"
+        );
+        let expected_conductance = initialize_conductance(seed);
+        let expected_weight = project_weight(expected_conductance);
+
+        let edge_id = engine.graph().edges_from(id2)[0];
+        let edge = engine.graph().get_edge(edge_id).unwrap();
+        assert_eq!(edge.source, id2);
+        assert_eq!(edge.target, id1);
+        assert_eq!(edge.edge_type, EdgeType::Semantic);
+        assert!(
+            (edge.conductance - expected_conductance).abs() < 1e-12,
+            "edge conductance must be initialize_conductance(coupling_seed)"
+        );
+        assert!(
+            (edge.weight - expected_weight).abs() < 1e-12,
+            "edge weight must be project_weight(initialize_conductance(coupling_seed))"
         );
     }
 

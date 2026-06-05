@@ -944,11 +944,15 @@ impl StorageAdapter for SqliteStorage {
     fn store_peer(&mut self, profile: &crate::peer::PeerProfile) -> Result<(), Error> {
         let conn = self.lock_conn()?;
         conn.execute(
-            "INSERT OR REPLACE INTO peers (id, name, trust_level) VALUES (?1, ?2, ?3)",
+            "INSERT OR REPLACE INTO peers \
+             (id, name, trust_level, trust_reservoir, trust_evidence_count) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
                 profile.id.0,
                 profile.name,
                 encode_trust_level(&profile.trust_level),
+                profile.trust_reservoir,
+                profile.trust_evidence_count,
             ],
         )
         .map_err(sqlite_error)?;
@@ -1000,7 +1004,10 @@ impl StorageAdapter for SqliteStorage {
         let mut registry = crate::peer::PeerRegistry::new();
 
         let mut stmt = conn
-            .prepare("SELECT id, name, trust_level FROM peers ORDER BY id")
+            .prepare(
+                "SELECT id, name, trust_level, trust_reservoir, trust_evidence_count \
+                 FROM peers ORDER BY id",
+            )
             .map_err(sqlite_error)?;
         let rows = stmt
             .query_map([], |row| {
@@ -1008,17 +1015,25 @@ impl StorageAdapter for SqliteStorage {
                     row.get::<_, u64>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
+                    row.get::<_, f64>(3)?,
+                    row.get::<_, u64>(4)?,
                 ))
             })
             .map_err(sqlite_error)?;
 
         for row in rows {
-            let (id, name, trust_str) = row.map_err(sqlite_error)?;
+            let (id, name, trust_str, trust_reservoir, trust_evidence_count) =
+                row.map_err(sqlite_error)?;
             let trust_level = decode_trust_level(&trust_str);
             let peer_id = PeerId(id);
             registry
                 .register_peer_with_id(peer_id, &name, trust_level)
                 .map_err(|e| Error::StorageError(format!("loading peer {id}: {e}")))?;
+            // Restore the persisted evidence trust state (corroboration/feedback
+            // moved the reservoir; do not re-seed from the coarse level).
+            registry
+                .set_trust_state(peer_id, trust_reservoir, trust_evidence_count)
+                .map_err(|e| Error::StorageError(format!("loading peer trust {id}: {e}")))?;
         }
 
         let mut alias_stmt = conn
@@ -1345,15 +1360,18 @@ mod tests {
 /// Current on-disk schema version. The fresh-DB `create_schema` path and the
 /// incremental migration chain must converge on an IDENTICAL schema at this
 /// version (same columns, same indexes).
-const SCHEMA_VERSION: u32 = 3;
+const SCHEMA_VERSION: u32 = 4;
 
 /// Run schema migrations to bring the database up to the current version.
 ///
 /// Version history:
 /// - v1 (implicit): original schema with `agent_id TEXT` column on nodes
 /// - v2: `peer_id INTEGER` + `source_kind TEXT` replace `agent_id`; peers/peer_aliases tables added
-/// - v3 (current): `retained_action` reservoir table + edge `conductance`/`accessed_at`
+/// - v3: `retained_action` reservoir table + edge `conductance`/`accessed_at`
 ///   reservoir columns (ADR-0002); valid-interval and salience-projection indexes
+/// - v4 (current): peer evidence-trust columns `trust_reservoir REAL` +
+///   `trust_evidence_count INTEGER` (social.md "Peer Trust"); seeded from the coarse
+///   `trust_level` prior for existing peers
 fn migrate_schema(conn: &Connection) -> Result<(), Error> {
     // Ensure schema_version table exists
     conn.execute_batch("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);")
@@ -1383,8 +1401,9 @@ fn migrate_schema(conn: &Connection) -> Result<(), Error> {
                 // Existing v1 database — migrate forward through the full chain.
                 migrate_v1_to_v2(conn)?;
                 migrate_v2_to_v3(conn)?;
+                migrate_v3_to_v4(conn)?;
             } else {
-                // Brand new database — create the current (v3) schema directly.
+                // Brand new database — create the current (v4) schema directly.
                 create_schema(conn)?;
             }
             conn.execute_batch(&format!(
@@ -1395,6 +1414,7 @@ fn migrate_schema(conn: &Connection) -> Result<(), Error> {
         Some(1) => {
             migrate_v1_to_v2(conn)?;
             migrate_v2_to_v3(conn)?;
+            migrate_v3_to_v4(conn)?;
             conn.execute_batch(&format!(
                 "UPDATE schema_version SET version = {SCHEMA_VERSION};"
             ))
@@ -1402,12 +1422,20 @@ fn migrate_schema(conn: &Connection) -> Result<(), Error> {
         }
         Some(2) => {
             migrate_v2_to_v3(conn)?;
+            migrate_v3_to_v4(conn)?;
             conn.execute_batch(&format!(
                 "UPDATE schema_version SET version = {SCHEMA_VERSION};"
             ))
             .map_err(sqlite_error)?;
         }
         Some(3) => {
+            migrate_v3_to_v4(conn)?;
+            conn.execute_batch(&format!(
+                "UPDATE schema_version SET version = {SCHEMA_VERSION};"
+            ))
+            .map_err(sqlite_error)?;
+        }
+        Some(4) => {
             // Already at current version — ensure schema is complete (idempotent
             // CREATE IF NOT EXISTS only; no bare ALTER that would fail twice).
             create_schema(conn)?;
@@ -1507,6 +1535,61 @@ fn migrate_v2_to_v3(conn: &Connection) -> Result<(), Error> {
             conn.execute(
                 "UPDATE edges SET conductance = ?2, accessed_at = ?3 WHERE id = ?1",
                 params![edge_id, conductance, created_at],
+            )
+            .map_err(sqlite_error)?;
+        }
+
+        Ok(())
+    })();
+
+    if let Err(error) = result {
+        let _ = conn.execute_batch("ROLLBACK;");
+        return Err(error);
+    }
+
+    if let Err(error) = conn.execute_batch("COMMIT;").map_err(sqlite_error) {
+        let _ = conn.execute_batch("ROLLBACK;");
+        return Err(error);
+    }
+
+    Ok(())
+}
+
+/// Migrate a v3 database to v4: add the peer evidence-trust columns
+/// `trust_reservoir REAL` and `trust_evidence_count INTEGER` (social.md "Peer
+/// Trust"), then seed each existing peer's reservoir from its coarse `trust_level`
+/// prior so cold-start behavior is unchanged. The whole migration is one transaction.
+fn migrate_v3_to_v4(conn: &Connection) -> Result<(), Error> {
+    conn.execute_batch("BEGIN IMMEDIATE;")
+        .map_err(sqlite_error)?;
+
+    let result = (|| -> Result<(), Error> {
+        conn.execute_batch(
+            "
+            ALTER TABLE peers ADD COLUMN trust_reservoir REAL NOT NULL DEFAULT 0;
+            ALTER TABLE peers ADD COLUMN trust_evidence_count INTEGER NOT NULL DEFAULT 0;
+            ",
+        )
+        .map_err(sqlite_error)?;
+
+        // Seed the reservoir from the coarse level prior (computed in Rust — the
+        // mapping is a small lookup, SQLite has no helper for it).
+        let peer_rows: Vec<(u64, String)> = {
+            let mut stmt = conn
+                .prepare("SELECT id, trust_level FROM peers")
+                .map_err(sqlite_error)?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((row.get::<_, u64>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(sqlite_error)?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(sqlite_error)?
+        };
+        for (id, trust_str) in peer_rows {
+            let prior = decode_trust_level(&trust_str).prior_trust_reservoir();
+            conn.execute(
+                "UPDATE peers SET trust_reservoir = ?2 WHERE id = ?1",
+                params![id, prior],
             )
             .map_err(sqlite_error)?;
         }
@@ -1642,7 +1725,9 @@ fn create_schema(conn: &Connection) -> Result<(), Error> {
         CREATE TABLE IF NOT EXISTS peers (
             id INTEGER PRIMARY KEY,
             name TEXT NOT NULL,
-            trust_level TEXT NOT NULL DEFAULT 'agent'
+            trust_level TEXT NOT NULL DEFAULT 'agent',
+            trust_reservoir REAL NOT NULL DEFAULT 0,
+            trust_evidence_count INTEGER NOT NULL DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS peer_aliases (

@@ -25,8 +25,7 @@ use std::collections::HashMap;
 
 use crate::graph::{EdgeId, EdgeType, NodeId, Timestamp};
 use crate::mechanics::priors::{
-    self, RWR_MAX_ITERATIONS, RWR_TOLERANCE, edge_type_factor, project_conductance, project_weight,
-    restart_alpha,
+    self, RWR_MAX_ITERATIONS, RWR_TOLERANCE, edge_type_factor, project_conductance, restart_alpha,
 };
 use crate::query::activation::edge_valid_at;
 use crate::storage::StorageAdapter;
@@ -305,17 +304,16 @@ fn collect_transitions<S: StorageAdapter>(
 }
 
 /// `g_ij = project_conductance(C_ij) * edge_type_factor_ij`, as a positive
-/// within-row conductance. `project_conductance` is the log-LR reservoir clamped to
-/// a finite range; we map it through `project_weight` (logistic) to a strictly
-/// positive `(0, 1)` conductance so row normalization is well-defined for all
-/// finite reservoirs (including negative log-LR).
+/// within-row conductance (activation-flow.md). [`project_conductance`] maps the
+/// unbounded log-LR reservoir to a strictly positive `(0, 1)` conductance, so row
+/// normalization `P(i,j) = g_ij / sum_k g_ik` is well-defined and `P` stays
+/// row-stochastic for every finite reservoir (including negative log-LR).
 fn transition_conductance(conductance: f64, edge_type: &EdgeType, is_forward: bool) -> f64 {
     let factor = edge_type_factor(edge_type, is_forward);
     if !factor.is_finite() || factor <= 0.0 {
         return 0.0;
     }
-    // project_conductance keeps C finite; project_weight maps it to (0,1).
-    let g = project_weight(project_conductance(conductance)) * factor;
+    let g = project_conductance(conductance) * factor;
     if g.is_finite() && g > 0.0 { g } else { 0.0 }
 }
 
@@ -364,6 +362,7 @@ mod tests {
     use std::collections::VecDeque;
 
     use super::*;
+    use crate::mechanics::priors::project_weight;
     use crate::graph::edge::EdgeSource;
     use crate::graph::node::Origin;
     use crate::graph::{Edge, KnowledgeType, MemoryTier, Node, ScopePath};
@@ -493,6 +492,41 @@ mod tests {
         let p: Vec<f64> = transitions.iter().map(|t| t.conductance / row_sum).collect();
         let total: f64 = p.iter().sum();
         assert!((total - 1.0).abs() < 1e-12, "P row must sum to 1, got {total}");
+    }
+
+    #[test]
+    fn negative_conductance_reservoir_still_yields_row_stochastic_p() {
+        // The row-stochasticity invariant (activation-flow.md): `C_ij` is an unbounded
+        // log-LR that may be NEGATIVE, yet `g_ij = project_conductance(C_ij) * factor`
+        // stays strictly positive because `project_conductance = logistic(C) > 0`. So
+        // even an edge with a negative reservoir keeps the P-row a valid distribution.
+        let storage = store(
+            &[0, 1, 2],
+            vec![
+                // Negative log-LR reservoir on the first edge — would be non-positive
+                // if the raw reservoir were used as a flow weight.
+                edge(0, 0, 1, EdgeType::Semantic, -5.0),
+                edge(1, 0, 2, EdgeType::Reason, 3.0),
+            ],
+        );
+        let mut transitions = Vec::new();
+        let mut excluded = Vec::new();
+        collect_transitions(NodeId(0), &storage, Timestamp(0), &mut transitions, &mut excluded);
+        // Both edges propagate: g_ij > 0 even for the negative-reservoir edge.
+        assert_eq!(transitions.len(), 2, "negative-C edge must still propagate");
+        for t in &transitions {
+            assert!(t.conductance > 0.0, "g_ij must be > 0, got {}", t.conductance);
+        }
+        let row_sum: f64 = transitions.iter().map(|t| t.conductance).sum();
+        assert!(row_sum > 0.0, "row sum must be a valid positive normalizer");
+        let total: f64 = transitions.iter().map(|t| t.conductance / row_sum).sum();
+        assert!((total - 1.0).abs() < 1e-12, "P row must sum to 1, got {total}");
+        // End-to-end: the negative-reservoir target is reached by propagation, and the
+        // full response still conserves mass (row-stochastic P + L1 seed).
+        let r = additive_rwr(&HashMap::from([(NodeId(0), 1.0)]), &storage, Timestamp(0));
+        assert!(r.activation.get(&NodeId(1)).copied().unwrap_or(0.0) > 0.0);
+        let mass: f64 = r.activation.values().sum();
+        assert!((mass - 1.0).abs() < 1e-7, "mass not conserved: {mass}");
     }
 
     #[test]

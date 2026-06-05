@@ -31,15 +31,20 @@ impl Timestamp {
     }
 }
 
-/// Knowledge type taxonomy — determines decay rate, mass prior, and physics behavior.
+/// Knowledge type taxonomy. `node_type` is a *policy* input to the dissipation and
+/// coupling priors, not an independent dynamics knob:
+/// - decay: it selects the per-type multiplier on the single free decay prior `d`
+///   ([`crate::mechanics::priors::decay_multiplier_for_type`], dissipation.md) —
+///   Core is protected (≈0), identity/convention layers decay slowly, episodic at
+///   the full rate, debug-lifecycle nodes are inert;
+/// - coupling: it contributes the edge-type-affinity feature to the cold-start
+///   coupling seed (conductance.md). It supplies no separate decay rate or weight.
 ///
-/// Three classes of matter:
-/// - Identity (Star): high mass, low/no decay
-/// - Knowledge (Planet): medium mass, moderate decay  
-/// - Memory (Dust): low mass, fast decay
+/// Tiers below group the variants by how strongly they resist dissipation
+/// (slow-decaying identity, ordinary knowledge, fast-decaying memory).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum KnowledgeType {
-    // Identity (Star — high mass, low/no decay)
+    // Identity — slow / protected decay.
     /// L0: Immutable core trait. No decay. ("I am a code architect")
     IdentityCore,
     /// L1: Experience-formed trait. Very slow decay. ("prefers factory pattern")
@@ -47,7 +52,7 @@ pub enum KnowledgeType {
     /// L2: Current state. Normal decay. ("refactoring auth module")
     IdentityState,
 
-    // Knowledge (Planet — medium mass, moderate decay)
+    // Knowledge — moderate decay.
     /// Extracted fact from conversation or document.
     Semantic,
     /// How-to or execution pattern.
@@ -67,7 +72,7 @@ pub enum KnowledgeType {
     /// Debugging session or investigation trace that should remain inert.
     DebugSession,
 
-    // Memory (Dust — low mass, fast decay)
+    // Memory — fast decay.
     /// Raw conversation turn or session text.
     Episodic,
     /// Time-bound occurrence or event.

@@ -16,6 +16,8 @@
 //! `C_ij` = log likelihood ratio (unbounded) and `weight = project_weight(C) = logistic(C)`;
 //! backfill inverses are `logit(clamp(x, EPS, 1-EPS))` using [`LOGIT_BACKFILL_EPS`].
 //! The doc Hebbian `(1 - C_ij)` bound is realized in **Phase 3** as `(1 - project_weight(C))`.
+//! The unbounded reservoirs are finite-guarded by [`clamp_log_odds`]; the flow's
+//! positive-bounded transition conductance is [`project_conductance`] = `logistic(C)`.
 //!
 //! ## Phase 3 (flow + readout)
 //!
@@ -372,6 +374,92 @@ pub const READOUT_W_STRESS: f64 = 1.0;
 /// fallback. Unit default keeps `sigma_ij = min(a_i, a_j) * scope * temporal`.
 pub const CONTRADICTION_WEIGHT_DEFAULT: f64 = 1.0;
 
+// --- Peer trust as evidence (social.md, peer-identity.md) -------------------
+//
+// Trust is a calibrated evidence signal, not an authorization decision
+// (social.md "Peer Trust"). It is an authoritative LOG-ODDS reservoir on the
+// peer profile — same units as `A_i`/`C_ij` — that corroboration and feedback
+// move through the single traceable update path `update_peer_trust`. The coarse
+// `TrustLevel` enum supplies the *prior* (the cold-start reservoir); evidence
+// then moves it. The readout `trust_weight` term is the bounded projection of
+// this reservoir, so origin/provenance is never erased — only the evidence
+// estimate moves (social.md: "Trust updates must leave traces").
+
+/// Per-evidence trust-update rate `eta_trust` — the SLOW peer-reliability rate
+/// (social.md "Fast/Slow Learning": slow = accumulated peer reliability).
+///
+/// CALIBRATED PRIOR (declared) — peer trust is *durable*: a single corroboration
+/// or feedback event should nudge the trust reservoir, not swing it. It is the
+/// slow consolidation rate of complementary learning systems, so it is a small
+/// fraction of the core fast learning rate [`learning_rate`]`(N)`. The trust
+/// reservoir moves a fraction `eta_trust` toward the per-event evidence target
+/// (`update_trust_reservoir`); accumulated events compound into durable trust.
+/// Refit from observed peer-reliability hazard, mirroring the node decay prior.
+pub const TRUST_LEARNING_RATE: f64 = 0.05;
+
+/// Per-event corroboration evidence target in log-odds units
+/// (social.md "Peer Trust": corroboration raises trust).
+///
+/// CALIBRATED PRIOR (declared) — a single full-strength multi-agent
+/// corroboration is positive evidence of peer reliability, targeting
+/// `+CORROBORATION_LOG_ODDS` log trust-odds; a single full-strength negative
+/// feedback / contradiction targets the symmetric `-CORROBORATION_LOG_ODDS`.
+/// One `update_trust_reservoir` step moves the reservoir a fraction
+/// [`TRUST_LEARNING_RATE`] toward this target, so trust saturates at the target
+/// projection only after many consistent events — never from one signal.
+pub const CORROBORATION_LOG_ODDS: f64 = REWARD_LOG_ODDS_SCALE;
+
+/// Move a peer's trust reservoir a fraction `eta` toward an evidence `target`
+/// (log-odds), the Rescorla-Wagner form shared with feedback
+/// ([`crate::mechanics::interactions::rescorla_wagner`]).
+///
+/// DERIVED — trust is evidence, so it integrates like every other reservoir:
+/// `trust' = trust + eta * (target - trust)`. With `target = ±CORROBORATION_LOG_ODDS`
+/// and `eta = TRUST_LEARNING_RATE` this is the minimal evidence-driven update
+/// social.md specifies; positive evidence (corroboration / useful feedback) raises
+/// trust, negative evidence lowers it, both bounded and traceable. The result is
+/// finite-guarded by [`clamp_log_odds`] so the reservoir stays in safe range.
+#[inline]
+pub fn update_trust_reservoir(trust: f64, target: f64, eta: f64) -> f64 {
+    if !trust.is_finite() || !target.is_finite() || !eta.is_finite() {
+        return clamp_log_odds(if trust.is_finite() { trust } else { 0.0 });
+    }
+    clamp_log_odds(trust + eta * (target - trust))
+}
+
+/// Per-event trust evidence target for a signed evidence strength in `[-1, 1]`
+/// (positive = corroboration / useful, negative = contradiction / not-useful).
+///
+/// DERIVED — scales the declared per-event [`CORROBORATION_LOG_ODDS`] by the
+/// signed strength, the same shape as [`crate::mechanics::interactions::lambda_reward`]
+/// for site feedback. A full-strength corroboration targets `+CORROBORATION_LOG_ODDS`;
+/// strength is clamped to `[-1, 1]` so a single event cannot overshoot the prior.
+#[inline]
+pub fn trust_evidence_target(signed_strength: f64) -> f64 {
+    let s = if signed_strength.is_finite() {
+        signed_strength.clamp(-1.0, 1.0)
+    } else {
+        0.0
+    };
+    s * CORROBORATION_LOG_ODDS
+}
+
+/// `trust_weight = project_trust(trust_reservoir)` — the readout term's
+/// evidence-driven component (social.md "Retrieval Effects": ranking through
+/// trust-weighted readout).
+///
+/// DERIVED — the trust reservoir is log trust-odds; its bounded view is the
+/// centered logistic `logistic(trust) - 0.5 ∈ (-0.5, 0.5)`, so a peer with no
+/// evidence (`trust = 0`) contributes `0` to the readout, positive evidence adds
+/// a bounded positive bonus, and negative evidence a bounded penalty. This is the
+/// `w_trust` input in `readout_score`; the coarse `TrustLevel` bonus is added on
+/// top as the declared prior offset, so both the level and the moved evidence
+/// show up in ranking without either erasing the other.
+#[inline]
+pub fn project_trust(trust_reservoir: f64) -> f64 {
+    project_salience(clamp_log_odds(trust_reservoir)) - 0.5
+}
+
 // --- Surprise-gated perception (perception.md, ADR-0009) --------------------
 //
 // Perception is a two-stage gate. Stage 1 rejects only untrusted (low-confidence)
@@ -482,13 +570,279 @@ pub fn weight_to_conductance(weight: f64) -> f64 {
     clamped_logit(weight)
 }
 
-/// Finite-guard for the conductance reservoir: clamps to `[-LOG_ODDS_CLAMP,
-/// LOG_ODDS_CLAMP]`. This is NOT a `[0, 1]` bound — `C_ij` is unbounded log-LR.
+/// Finite-guard for a log-odds reservoir value: clamps to `[-LOG_ODDS_CLAMP,
+/// LOG_ODDS_CLAMP]`. This is NOT a `[0, 1]` bound — `A_i` and `C_ij` are unbounded
+/// log-odds; this only traps numerical blowups well inside `f64` range.
 ///
 /// The doc's Hebbian Oja bound `dC = η·flux·(1 - C_ij)` (conductance.md) is
 /// realized in Phase 3 as saturation via the *projection* `(1 - project_weight(C))`,
-/// keeping `C` in log-LR units (migration design Decision 5).
+/// keeping `C` in log-LR units (migration design Decision 5). The Hebbian
+/// reservoir update `C_next = clamp_log_odds(C_ij + dC_ij)` (overview.md) uses this
+/// guard to keep the updated reservoir finite.
+#[inline]
+pub fn clamp_log_odds(value: f64) -> f64 {
+    value.clamp(-LOG_ODDS_CLAMP, LOG_ODDS_CLAMP)
+}
+
+/// Flow conductance mapping `g = project_conductance(C)` for the additive directed
+/// RWR (`g_ij = project_conductance(C_ij) * edge_type_factor_ij`,
+/// [activation-flow.md](../../docs/05-context-retrieval/activation-flow.md)).
+///
+/// DERIVED — the activation flow needs a strictly **positive, bounded** per-edge
+/// conductance so that row normalization `P(i,j) = g_ij / sum_k g_ik` is
+/// well-defined and `P` stays row-stochastic for *every* finite reservoir,
+/// including negative log-LR. `C_ij` is unbounded log-LR; its probability-like
+/// image is `logistic(C)` ∈ (0, 1), which is `> 0` for all finite `C` (the
+/// reservoir is first finite-guarded by [`clamp_log_odds`]). This is the same
+/// logistic projection as [`project_weight`]; the distinct name marks its role as
+/// the flow's transition conductance. `edge_type_factor` then scales it within the
+/// row, and `Contradicts` (factor `0.0`) drops out of `P` entirely.
 #[inline]
 pub fn project_conductance(conductance: f64) -> f64 {
-    conductance.clamp(-LOG_ODDS_CLAMP, LOG_ODDS_CLAMP)
+    logistic(clamp_log_odds(conductance))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Cold-start coupling seed + conductance_threshold density gate ─────────
+    //
+    // Proving traces for the conductance.md "Cold Start" formulas:
+    //   coupling_seed = sum_f beta_coupling[f] * npmi_f
+    //   if coupling_seed >= conductance_threshold: create edge
+    //   C_ij = initialize_conductance(coupling_seed); weight = project_weight(C_ij)
+
+    #[test]
+    fn coupling_seed_is_the_beta_weighted_npmi_sum() {
+        // The four declared betas combine the normalized NPMI features.
+        let s = coupling_seed(1.0, 1.0, 1.0, 1.0);
+        let expected =
+            BETA_COUPLING_SIM + BETA_COUPLING_ENTITY + BETA_COUPLING_SCOPE + BETA_COUPLING_TYPE;
+        assert!((s - expected).abs() < 1e-12);
+        // Per-feature contribution: only the sim feature fires.
+        assert!((coupling_seed(1.0, 0.0, 0.0, 0.0) - BETA_COUPLING_SIM).abs() < 1e-12);
+        // All-zero features → zero seed.
+        assert_eq!(coupling_seed(0.0, 0.0, 0.0, 0.0), 0.0);
+    }
+
+    #[test]
+    fn coupling_seed_clamps_features_to_unit_and_rejects_nonfinite() {
+        // Out-of-range and non-finite NPMI inputs are clamped/zeroed, never explode.
+        let over = coupling_seed(5.0, -2.0, f64::NAN, f64::INFINITY);
+        // Only sim survives clamped to 1.0; entity clamps to 0; nan/inf → 0.
+        assert!((over - BETA_COUPLING_SIM).abs() < 1e-12);
+    }
+
+    #[test]
+    fn coupling_clears_threshold_matches_documented_gate() {
+        // `coupling_seed >= conductance_threshold` is the create-edge predicate.
+        assert!(!coupling_clears_threshold(0.0));
+        assert!(!coupling_clears_threshold(CONDUCTANCE_THRESHOLD - 1e-9));
+        assert!(coupling_clears_threshold(CONDUCTANCE_THRESHOLD));
+        assert!(coupling_clears_threshold(CONDUCTANCE_THRESHOLD + 1e-9));
+        // A non-finite seed never passes the gate.
+        assert!(!coupling_clears_threshold(f64::NAN));
+        assert!(!coupling_clears_threshold(f64::INFINITY));
+    }
+
+    // ── Flow conductance mapping `project_conductance` (activation-flow.md) ───
+    //
+    // Proving trace for `g_ij = project_conductance(C_ij) * edge_type_factor_ij`
+    // keeping `P` row-stochastic: `project_conductance` must be strictly positive
+    // and bounded for every finite reservoir `C`, so each `g_ij >= 0` and the row
+    // sum is a valid normalizer.
+
+    #[test]
+    fn project_conductance_is_positive_and_bounded_for_all_finite_c() {
+        // Strictly positive and at most 1 across the full finite log-LR range — the
+        // row-stochastic requirement g > 0 for all finite C so that the row sum is a
+        // valid normalizer (activation-flow.md). The upper bound saturates to exactly
+        // 1.0 at extreme reservoirs (logistic(±LOG_ODDS_CLAMP)), which is in [0, 1].
+        for c in [-1e9_f64, -100.0, -13.8, -1.0, 0.0, 1.0, 13.8, 100.0, 1e9] {
+            let g = project_conductance(c);
+            assert!(g > 0.0 && g <= 1.0, "project_conductance({c}) = {g} not in (0,1]");
+        }
+        // Moderate reservoirs land strictly interior.
+        for c in [-13.0_f64, -1.0, 0.0, 1.0, 13.0] {
+            let g = project_conductance(c);
+            assert!(g > 0.0 && g < 1.0, "interior expected for c={c}: {g}");
+        }
+        // C = 0 (no evidence) projects to the 0.5 midpoint.
+        assert!((project_conductance(0.0) - 0.5).abs() < 1e-12);
+        // Monotone increasing in the reservoir.
+        assert!(project_conductance(1.0) > project_conductance(-1.0));
+        // Non-finite reservoirs are finite-guarded, never NaN/inf.
+        assert!(project_conductance(f64::INFINITY).is_finite());
+        assert!(project_conductance(f64::NEG_INFINITY).is_finite());
+        assert!(project_conductance(f64::INFINITY) > 0.0);
+    }
+
+    #[test]
+    fn edge_type_factor_is_positive_for_propagation_and_zero_only_for_contradicts() {
+        use crate::graph::EdgeType;
+        // The second half of the `g_ij >= 0` row-stochasticity invariant
+        // (activation-flow.md "Conductance Matrix"): every *propagating* edge type
+        // factor is strictly positive, so `g_ij = project_conductance(C) * factor`
+        // stays non-negative; only `Contradicts` is `0` and it is excluded from `P`.
+        let propagating = [
+            EdgeType::Semantic,
+            EdgeType::Causal,
+            EdgeType::Temporal,
+            EdgeType::Reason,
+            EdgeType::ReinforcedBy,
+            EdgeType::ConsolidatedFrom,
+            EdgeType::ExtractedFrom,
+            EdgeType::Entity,
+            EdgeType::Supersedes,
+            EdgeType::RejectedAlternative,
+            EdgeType::Supports,
+            EdgeType::Refutes,
+            EdgeType::BelongsTo,
+            EdgeType::Custom("x".to_string()),
+        ];
+        for et in &propagating {
+            // Both directions of every propagating edge are strictly positive.
+            assert!(
+                edge_type_factor(et, true) > 0.0,
+                "forward {et:?} factor must be > 0"
+            );
+            assert!(
+                edge_type_factor(et, false) > 0.0,
+                "backward {et:?} factor must be > 0"
+            );
+        }
+        // Contradicts is the only zero factor — excluded from propagation.
+        assert_eq!(edge_type_factor(&EdgeType::Contradicts, true), 0.0);
+        assert_eq!(edge_type_factor(&EdgeType::Contradicts, false), 0.0);
+    }
+
+    #[test]
+    fn flow_weight_g_is_non_negative_for_every_finite_reservoir_and_propagating_type() {
+        use crate::graph::EdgeType;
+        // The composed invariant: `g_ij = project_conductance(C_ij) * edge_type_factor_ij
+        // >= 0` for every finite reservoir `C` (including negative log-LR) and every
+        // propagating edge type, so each row sum is a valid non-negative normalizer and
+        // `P(i,j) = g_ij / sum_k g_ik` is row-stochastic (activation-flow.md).
+        for c in [-1e9_f64, -40.0, -13.8, -1.0, 0.0, 1.0, 13.8, 40.0, 1e9] {
+            for et in [
+                EdgeType::Semantic,
+                EdgeType::Reason,
+                EdgeType::Temporal,
+                EdgeType::RejectedAlternative,
+                EdgeType::Refutes,
+                EdgeType::Supersedes,
+            ] {
+                for is_forward in [true, false] {
+                    let g = project_conductance(c) * edge_type_factor(&et, is_forward);
+                    assert!(g >= 0.0, "g({c}, {et:?}, fwd={is_forward}) = {g} must be >= 0");
+                    assert!(g.is_finite(), "g must be finite");
+                }
+            }
+            // Contradicts collapses g to exactly 0 — it never enters P.
+            let g_contra = project_conductance(c) * edge_type_factor(&EdgeType::Contradicts, true);
+            assert_eq!(g_contra, 0.0);
+        }
+    }
+
+    #[test]
+    fn project_conductance_is_logistic_of_clamped_reservoir() {
+        // Code symbol == doc symbol: `project_conductance(C)` is the logistic of the
+        // finite-guarded reservoir, i.e. the same projection as `project_weight`
+        // composed with `clamp_log_odds`.
+        for c in [-50.0_f64, -2.0, 0.0, 2.0, 50.0] {
+            assert_eq!(project_conductance(c), project_weight(clamp_log_odds(c)));
+        }
+    }
+
+    #[test]
+    fn clamp_log_odds_is_a_finite_guard_not_a_unit_bound() {
+        // The renamed reservoir finite-guard clamps to [-LOG_ODDS_CLAMP, LOG_ODDS_CLAMP],
+        // NOT to [0, 1]: values inside the band pass through, including negatives.
+        assert_eq!(clamp_log_odds(1e9), LOG_ODDS_CLAMP);
+        assert_eq!(clamp_log_odds(-1e9), -LOG_ODDS_CLAMP);
+        assert_eq!(clamp_log_odds(0.5), 0.5);
+        assert_eq!(clamp_log_odds(-3.0), -3.0);
+        assert!(clamp_log_odds(f64::INFINITY).is_finite());
+        assert!(clamp_log_odds(f64::NEG_INFINITY).is_finite());
+    }
+
+    // ── Peer trust as evidence (social.md "Peer Trust") ──────────────────────
+    //
+    // Proving traces: corroboration raises the trust reservoir, contradiction
+    // lowers it, both bounded; the readout `project_trust` term moves with the
+    // reservoir and is `0` at the no-evidence prior.
+
+    #[test]
+    fn update_trust_reservoir_moves_a_fraction_toward_the_target() {
+        // Rescorla-Wagner form: one step closes a fraction `eta` of the gap.
+        let trust = 0.0;
+        let target = CORROBORATION_LOG_ODDS;
+        let eta = TRUST_LEARNING_RATE;
+        let next = update_trust_reservoir(trust, target, eta);
+        let expected = trust + eta * (target - trust);
+        assert!((next - expected).abs() < 1e-12);
+        // Positive evidence raises, negative evidence lowers, both from the prior.
+        assert!(update_trust_reservoir(0.0, CORROBORATION_LOG_ODDS, eta) > 0.0);
+        assert!(update_trust_reservoir(0.0, -CORROBORATION_LOG_ODDS, eta) < 0.0);
+    }
+
+    #[test]
+    fn repeated_corroboration_saturates_at_the_target_not_beyond() {
+        // Durable, bounded: many consistent corroborations converge to the target
+        // projection from below, never overshoot it (social.md: bounded, traceable).
+        let mut trust = 0.0;
+        for _ in 0..1000 {
+            trust = update_trust_reservoir(trust, CORROBORATION_LOG_ODDS, TRUST_LEARNING_RATE);
+        }
+        assert!((trust - CORROBORATION_LOG_ODDS).abs() < 1e-6);
+        // Slow rate: a single event does NOT swing trust to the target.
+        let one = update_trust_reservoir(0.0, CORROBORATION_LOG_ODDS, TRUST_LEARNING_RATE);
+        assert!(one < 0.5 * CORROBORATION_LOG_ODDS);
+    }
+
+    #[test]
+    fn trust_evidence_target_scales_and_clamps_signed_strength() {
+        assert!((trust_evidence_target(1.0) - CORROBORATION_LOG_ODDS).abs() < 1e-12);
+        assert!((trust_evidence_target(-1.0) + CORROBORATION_LOG_ODDS).abs() < 1e-12);
+        assert_eq!(trust_evidence_target(0.0), 0.0);
+        // Out-of-range strength is clamped — one event cannot overshoot the prior.
+        assert!((trust_evidence_target(5.0) - CORROBORATION_LOG_ODDS).abs() < 1e-12);
+        assert_eq!(trust_evidence_target(f64::NAN), 0.0);
+    }
+
+    #[test]
+    fn project_trust_is_zero_at_prior_and_monotone_bounded() {
+        // No evidence (trust reservoir = 0) contributes nothing to the readout.
+        assert!(project_trust(0.0).abs() < 1e-12);
+        // Bounded in [-0.5, 0.5] and monotone increasing in the reservoir; the
+        // extremes saturate to exactly ±0.5 at the log-odds clamp (logistic(±40)).
+        assert!(project_trust(1.0) > project_trust(-1.0));
+        for t in [-1e9_f64, -40.0, -1.0, 0.0, 1.0, 40.0, 1e9] {
+            let w = project_trust(t);
+            assert!((-0.5..=0.5).contains(&w), "project_trust({t}) = {w} not in [-0.5, 0.5]");
+        }
+        // Moderate reservoirs land strictly interior.
+        for t in [-13.0_f64, -1.0, 0.0, 1.0, 13.0] {
+            let w = project_trust(t);
+            assert!(w > -0.5 && w < 0.5, "interior expected for t={t}: {w}");
+        }
+        // Non-finite reservoirs are finite-guarded.
+        assert!(project_trust(f64::INFINITY).is_finite());
+        assert!(project_trust(f64::NEG_INFINITY).is_finite());
+    }
+
+    #[test]
+    fn initialize_conductance_is_the_logit_inverse_of_project_weight() {
+        // C_ij = logit(coupling_seed), so project_weight(C_ij) recovers the seed
+        // (round-trip through the logistic projection, ADR-0002).
+        for seed in [0.05_f64, 0.2, 0.5, 0.8, 0.95] {
+            let c = initialize_conductance(seed);
+            assert!(c.is_finite());
+            assert!((project_weight(c) - seed).abs() < 1e-9);
+        }
+        // Endpoints stay finite via the clamped logit.
+        assert!(initialize_conductance(0.0).is_finite());
+        assert!(initialize_conductance(1.0).is_finite());
+    }
 }

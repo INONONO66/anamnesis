@@ -40,13 +40,16 @@ impl Origin {
 
 /// A knowledge fragment in the cognitive graph.
 ///
-/// Nodes carry multi-resolution content (L0/L1/L2), physics state (salience),
-/// provenance (origin), and classification (node_type, entity_tags).
+/// Nodes carry multi-resolution content (L0/L1/L2), memory-strength state
+/// (`retained_action` and its `salience` projection), provenance (origin), and
+/// classification (node_type, entity_tags).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Node {
     /// Unique identifier.
     pub id: NodeId,
-    /// Knowledge type — determines decay rate, mass prior, and physics behavior.
+    /// Knowledge type — *policy* input to the decay and coupling priors (it scales
+    /// the single decay prior `d` via `decay_multiplier_for_type` and supplies the
+    /// edge-type-affinity coupling feature); it is not an independent dynamics knob.
     pub node_type: KnowledgeType,
 
     // Multi-resolution content
@@ -71,11 +74,14 @@ pub struct Node {
     /// When the fact represented by this node became invalid. None = still valid.
     pub valid_until: Option<Timestamp>,
 
-    // Physics state
-    /// Salience score [0, 1]. The universal currency — all mechanics read/write this.
+    // Memory-strength state
+    /// Salience score [0, 1] — the bounded projection of `retained_action`
+    /// (`salience = project_salience(retained_action)`, ADR-0002). It is a derived
+    /// read-only view: only `commit`/`tick` may *store* it; mechanics that change
+    /// memory strength write the `retained_action` reservoir, not this field.
     pub salience: f64,
-    /// Retained action `A_i` — authoritative log need-odds reservoir; `salience` is its
-    /// bounded projection (`salience = project_salience(retained_action)`, ADR-0002).
+    /// Retained action `A_i` — the authoritative log need-odds reservoir. `salience`
+    /// is its bounded projection (ADR-0002).
     pub retained_action: f64,
     /// Number of times this node has been accessed via touch().
     pub access_count: u32,
