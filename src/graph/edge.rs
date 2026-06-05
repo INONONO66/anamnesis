@@ -33,10 +33,15 @@ pub struct Edge {
     pub edge_type: EdgeType,
     /// Relationship strength [0, 1].
     pub weight: f64,
+    /// Conductance `C_ij` — authoritative log-likelihood-ratio reservoir; `weight` is its
+    /// bounded projection (`weight = project_weight(conductance)`, ADR-0002).
+    pub conductance: f64,
     /// How this edge was created — set automatically by the engine.
     pub edge_source: EdgeSource,
     /// When this edge was created.
     pub created_at: Timestamp,
+    /// When this edge was last accessed (committed). Used for idle-edge leakage.
+    pub accessed_at: Timestamp,
     /// When this relationship becomes valid in domain time.
     pub valid_from: Option<Timestamp>,
     /// When this relationship stops being valid in domain time.
@@ -58,8 +63,10 @@ mod tests {
             target: NodeId(20),
             edge_type: EdgeType::Reason,
             weight: 0.8,
+            conductance: 0.0,
             edge_source: EdgeSource::Manual,
             created_at: Timestamp(1000),
+            accessed_at: Timestamp(1000),
             valid_from: None,
             valid_until: None,
             metadata: HashMap::new(),
@@ -77,8 +84,10 @@ mod tests {
             target: NodeId(2),
             edge_type: EdgeType::Contradicts,
             weight: 0.9,
+            conductance: 0.0,
             edge_source: EdgeSource::Auto,
             created_at: Timestamp(500),
+            accessed_at: Timestamp(500),
             valid_from: None,
             valid_until: None,
             metadata: HashMap::new(),

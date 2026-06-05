@@ -26,6 +26,7 @@ fn make_node(id: NodeId, node_type: KnowledgeType, name: &str) -> Node {
         access_count: 0,
         access_history: Default::default(),
         salience: 0.75,
+        retained_action: 0.0,
         tier: Default::default(),
         entity_tags: vec!["tag1".to_string(), "tag2".to_string()],
         origin: Origin {
@@ -47,8 +48,10 @@ fn make_edge(id: EdgeId, source: NodeId, target: NodeId) -> Edge {
         target,
         edge_type: EdgeType::Semantic,
         weight: 0.8,
+        conductance: 0.0,
         edge_source: anamnesis::graph::edge::EdgeSource::Auto,
         created_at: Timestamp(1000),
+        accessed_at: Timestamp(1000),
         valid_from: None,
         valid_until: None,
         metadata: HashMap::new(),

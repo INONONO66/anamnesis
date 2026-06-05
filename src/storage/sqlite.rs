@@ -27,11 +27,17 @@ pub struct SqliteStorage {
     nodes: Vec<Option<Node>>,
     edges: Vec<Option<Edge>>,
     salience: Vec<f64>,
+    retained_action: Vec<f64>,
     accessed_at: Vec<Timestamp>,
     decay_checkpoint: Vec<Timestamp>,
+    edge_conductance: Vec<f64>,
+    edge_accessed_at: Vec<Timestamp>,
     dirty_salience: Vec<bool>,
+    dirty_retained_action: Vec<bool>,
     dirty_accessed_at: Vec<bool>,
     dirty_decay_checkpoint: Vec<bool>,
+    dirty_edge_conductance: Vec<bool>,
+    dirty_edge_accessed_at: Vec<bool>,
     node_types: Vec<Option<KnowledgeType>>,
     adjacency_out: Vec<Vec<EdgeId>>,
     adjacency_in: Vec<Vec<EdgeId>>,
@@ -69,11 +75,17 @@ impl SqliteStorage {
             nodes: Vec::new(),
             edges: Vec::new(),
             salience: Vec::new(),
+            retained_action: Vec::new(),
             accessed_at: Vec::new(),
             decay_checkpoint: Vec::new(),
+            edge_conductance: Vec::new(),
+            edge_accessed_at: Vec::new(),
             dirty_salience: vec![false; capacity],
+            dirty_retained_action: vec![false; capacity],
             dirty_accessed_at: vec![false; capacity],
             dirty_decay_checkpoint: vec![false; capacity],
+            dirty_edge_conductance: vec![false; capacity],
+            dirty_edge_accessed_at: vec![false; capacity],
             node_types: Vec::new(),
             adjacency_out: Vec::new(),
             adjacency_in: Vec::new(),
@@ -99,9 +111,11 @@ impl SqliteStorage {
             let new_len = idx + 1;
             self.nodes.resize_with(new_len, || None);
             self.salience.resize(new_len, 0.0);
+            self.retained_action.resize(new_len, 0.0);
             self.accessed_at.resize(new_len, Timestamp(0));
             self.decay_checkpoint.resize(new_len, Timestamp(0));
             self.dirty_salience.resize(new_len, false);
+            self.dirty_retained_action.resize(new_len, false);
             self.dirty_accessed_at.resize(new_len, false);
             self.dirty_decay_checkpoint.resize(new_len, false);
             self.node_types.resize_with(new_len, || None);
@@ -112,7 +126,12 @@ impl SqliteStorage {
 
     fn ensure_edge_capacity(&mut self, idx: usize) {
         if idx >= self.edges.len() {
-            self.edges.resize_with(idx + 1, || None);
+            let new_len = idx + 1;
+            self.edges.resize_with(new_len, || None);
+            self.edge_conductance.resize(new_len, 0.0);
+            self.edge_accessed_at.resize(new_len, Timestamp(0));
+            self.dirty_edge_conductance.resize(new_len, false);
+            self.dirty_edge_accessed_at.resize(new_len, false);
         }
     }
 
@@ -132,10 +151,11 @@ impl SqliteStorage {
             (nodes, edges, free_nodes, free_edges)
         };
 
-        for (node, salience, accessed_at, decay_checkpoint) in nodes {
+        for (node, salience, retained_action, accessed_at, decay_checkpoint) in nodes {
             let idx = node.id.0 as usize;
             self.ensure_node_capacity(idx);
             self.salience[idx] = salience;
+            self.retained_action[idx] = retained_action;
             self.accessed_at[idx] = accessed_at;
             self.decay_checkpoint[idx] = decay_checkpoint;
             self.node_types[idx] = Some(node.node_type.clone());
@@ -148,6 +168,8 @@ impl SqliteStorage {
             self.ensure_edge_capacity(idx);
             self.ensure_node_capacity(edge.source.0 as usize);
             self.ensure_node_capacity(edge.target.0 as usize);
+            self.edge_conductance[idx] = edge.conductance;
+            self.edge_accessed_at[idx] = edge.accessed_at;
             self.adjacency_out[edge.source.0 as usize].push(edge.id);
             self.adjacency_in[edge.target.0 as usize].push(edge.id);
             self.edges[idx] = Some(edge);
@@ -171,8 +193,14 @@ impl SqliteStorage {
             .find_map(|(idx, slot)| slot.as_ref().map(|_| idx as u64 + 1))
             .unwrap_or(0);
         self.dirty_salience = vec![false; self.nodes.len()];
+        self.dirty_retained_action = vec![false; self.nodes.len()];
         self.dirty_accessed_at = vec![false; self.nodes.len()];
         self.dirty_decay_checkpoint = vec![false; self.nodes.len()];
+        // Size edge SoA + reset edge dirty arrays to the final edge capacity.
+        self.edge_conductance.resize(self.edges.len(), 0.0);
+        self.edge_accessed_at.resize(self.edges.len(), Timestamp(0));
+        self.dirty_edge_conductance = vec![false; self.edges.len()];
+        self.dirty_edge_accessed_at = vec![false; self.edges.len()];
         Ok(())
     }
 
@@ -287,6 +315,12 @@ impl Clone for SqliteStorage {
                     )
                     .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
 
+                    conn.execute(
+                        "INSERT OR REPLACE INTO retained_action (node_id, value) VALUES (?1, ?2)",
+                        params![node.id.0, node.retained_action],
+                    )
+                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+
                     conn.execute("DELETE FROM node_fts WHERE id = ?1", [node.id.0])
                         .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
 
@@ -316,8 +350,8 @@ impl Clone for SqliteStorage {
 
                     conn.execute(
                         "INSERT OR REPLACE INTO edges (
-                            id, from_node, to_node, edge_type, weight, created_at, valid_from, valid_until, metadata
-                        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                            id, from_node, to_node, edge_type, weight, created_at, valid_from, valid_until, metadata, edge_source, conductance, accessed_at
+                        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                         params![
                             edge.id.0,
                             edge.source.0,
@@ -328,6 +362,9 @@ impl Clone for SqliteStorage {
                             edge.valid_from.map(|ts| ts.0),
                             edge.valid_until.map(|ts| ts.0),
                             encode_map(&edge.metadata),
+                            encode_edge_source(&edge.edge_source),
+                            edge.conductance,
+                            edge.accessed_at.0,
                         ],
                     )
                     .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
@@ -419,9 +456,11 @@ impl StorageAdapter for SqliteStorage {
         }
 
         self.salience[idx] = node.salience;
+        self.retained_action[idx] = node.retained_action;
         self.accessed_at[idx] = node.accessed_at;
         self.decay_checkpoint[idx] = node.accessed_at;
         self.dirty_salience[idx] = false;
+        self.dirty_retained_action[idx] = false;
         self.dirty_accessed_at[idx] = false;
         self.dirty_decay_checkpoint[idx] = false;
         self.node_types[idx] = Some(node.node_type.clone());
@@ -466,6 +505,8 @@ impl StorageAdapter for SqliteStorage {
                 .map_err(sqlite_error)?;
             conn.execute("DELETE FROM decay_checkpoint WHERE node_id = ?1", [id.0])
                 .map_err(sqlite_error)?;
+            conn.execute("DELETE FROM retained_action WHERE node_id = ?1", [id.0])
+                .map_err(sqlite_error)?;
             conn.execute("DELETE FROM nodes WHERE id = ?1", [id.0])
                 .map_err(sqlite_error)?;
             conn.execute(
@@ -477,9 +518,11 @@ impl StorageAdapter for SqliteStorage {
 
         self.nodes[idx] = None;
         self.salience[idx] = 0.0;
+        self.retained_action[idx] = 0.0;
         self.accessed_at[idx] = Timestamp(0);
         self.decay_checkpoint[idx] = Timestamp(0);
         self.dirty_salience[idx] = false;
+        self.dirty_retained_action[idx] = false;
         self.dirty_accessed_at[idx] = false;
         self.dirty_decay_checkpoint[idx] = false;
         self.node_types[idx] = None;
@@ -507,6 +550,10 @@ impl StorageAdapter for SqliteStorage {
             let conn = self.lock_conn()?;
             insert_edge_row(&conn, &edge)?;
         }
+        self.edge_conductance[idx] = edge.conductance;
+        self.edge_accessed_at[idx] = edge.accessed_at;
+        self.dirty_edge_conductance[idx] = false;
+        self.dirty_edge_accessed_at[idx] = false;
         self.adjacency_out[edge.source.0 as usize].push(edge.id);
         self.adjacency_in[edge.target.0 as usize].push(edge.id);
         self.edges[idx] = Some(edge);
@@ -553,6 +600,10 @@ impl StorageAdapter for SqliteStorage {
         self.adjacency_out[source_idx].retain(|eid| *eid != id);
         self.adjacency_in[target_idx].retain(|eid| *eid != id);
         self.edges[idx] = None;
+        self.edge_conductance[idx] = 0.0;
+        self.edge_accessed_at[idx] = Timestamp(0);
+        self.dirty_edge_conductance[idx] = false;
+        self.dirty_edge_accessed_at[idx] = false;
         self.live_edge_count -= 1;
         self.free_edge_ids.push(id);
         Ok(())
@@ -632,6 +683,79 @@ impl StorageAdapter for SqliteStorage {
         Ok(())
     }
 
+    fn get_retained_action(&self, id: NodeId) -> Result<f64, Error> {
+        let idx = id.0 as usize;
+        if idx >= self.nodes.len() || self.nodes[idx].is_none() {
+            return Err(Error::NodeNotFound(id));
+        }
+        Ok(self.retained_action[idx])
+    }
+
+    fn set_retained_action(&mut self, id: NodeId, value: f64) -> Result<(), Error> {
+        let idx = id.0 as usize;
+        if idx >= self.nodes.len() || self.nodes[idx].is_none() {
+            return Err(Error::NodeNotFound(id));
+        }
+        // Reservoir is authoritative; recompute the salience projection
+        // (ADR-0002 "commit recomputes projections" — intended for commit/tick).
+        let salience = crate::mechanics::priors::project_salience(value);
+        self.retained_action[idx] = value;
+        self.dirty_retained_action[idx] = true;
+        self.salience[idx] = salience;
+        self.dirty_salience[idx] = true;
+        if let Some(node) = self.nodes[idx].as_mut() {
+            node.retained_action = value;
+            node.salience = salience;
+        }
+        Ok(())
+    }
+
+    fn get_conductance(&self, id: EdgeId) -> Result<f64, Error> {
+        let idx = id.0 as usize;
+        if idx >= self.edges.len() || self.edges[idx].is_none() {
+            return Err(Error::EdgeNotFound(id));
+        }
+        Ok(self.edge_conductance[idx])
+    }
+
+    fn set_conductance(&mut self, id: EdgeId, value: f64) -> Result<(), Error> {
+        let idx = id.0 as usize;
+        if idx >= self.edges.len() || self.edges[idx].is_none() {
+            return Err(Error::EdgeNotFound(id));
+        }
+        // Reservoir is authoritative; recompute the weight projection
+        // (ADR-0002 "commit recomputes projections" — intended for commit/tick).
+        let weight = crate::mechanics::priors::project_weight(value);
+        self.edge_conductance[idx] = value;
+        self.dirty_edge_conductance[idx] = true;
+        if let Some(edge) = self.edges[idx].as_mut() {
+            edge.conductance = value;
+            edge.weight = weight;
+        }
+        Ok(())
+    }
+
+    fn get_edge_accessed_at(&self, id: EdgeId) -> Result<Timestamp, Error> {
+        let idx = id.0 as usize;
+        if idx >= self.edges.len() || self.edges[idx].is_none() {
+            return Err(Error::EdgeNotFound(id));
+        }
+        Ok(self.edge_accessed_at[idx])
+    }
+
+    fn set_edge_accessed_at(&mut self, id: EdgeId, ts: Timestamp) -> Result<(), Error> {
+        let idx = id.0 as usize;
+        if idx >= self.edges.len() || self.edges[idx].is_none() {
+            return Err(Error::EdgeNotFound(id));
+        }
+        self.edge_accessed_at[idx] = ts;
+        self.dirty_edge_accessed_at[idx] = true;
+        if let Some(edge) = self.edges[idx].as_mut() {
+            edge.accessed_at = ts;
+        }
+        Ok(())
+    }
+
     fn flush(&mut self) -> Result<(), Error> {
         {
             let conn = self.lock_conn()?;
@@ -669,6 +793,41 @@ impl StorageAdapter for SqliteStorage {
                     }
                 }
 
+                for (idx, dirty) in self.dirty_retained_action.iter().enumerate() {
+                    if *dirty {
+                        conn.execute(
+                            "INSERT OR REPLACE INTO retained_action (node_id, value) VALUES (?1, ?2)",
+                            params![idx as u64, self.retained_action[idx]],
+                        )
+                        .map_err(sqlite_error)?;
+                    }
+                }
+
+                for (idx, dirty) in self.dirty_edge_conductance.iter().enumerate() {
+                    if *dirty {
+                        // Persist the conductance reservoir AND its weight
+                        // projection together (ADR-0002: weight tracks C_ij).
+                        let weight = self.edges[idx].as_ref().map(|e| e.weight).unwrap_or_else(
+                            || crate::mechanics::priors::project_weight(self.edge_conductance[idx]),
+                        );
+                        conn.execute(
+                            "UPDATE edges SET conductance = ?2, weight = ?3 WHERE id = ?1",
+                            params![idx as u64, self.edge_conductance[idx], weight],
+                        )
+                        .map_err(sqlite_error)?;
+                    }
+                }
+
+                for (idx, dirty) in self.dirty_edge_accessed_at.iter().enumerate() {
+                    if *dirty {
+                        conn.execute(
+                            "UPDATE edges SET accessed_at = ?2 WHERE id = ?1",
+                            params![idx as u64, self.edge_accessed_at[idx].0],
+                        )
+                        .map_err(sqlite_error)?;
+                    }
+                }
+
                 Ok(())
             })();
 
@@ -684,8 +843,11 @@ impl StorageAdapter for SqliteStorage {
         }
 
         self.dirty_salience.fill(false);
+        self.dirty_retained_action.fill(false);
         self.dirty_accessed_at.fill(false);
         self.dirty_decay_checkpoint.fill(false);
+        self.dirty_edge_conductance.fill(false);
+        self.dirty_edge_accessed_at.fill(false);
         Ok(())
     }
 
@@ -979,6 +1141,7 @@ mod tests {
             valid_from: None,
             valid_until: None,
             salience,
+            retained_action: 0.0,
             access_count: 0,
             access_history: VecDeque::new(),
             tier: MemoryTier::Auto,
@@ -1037,6 +1200,103 @@ mod tests {
     }
 
     #[test]
+    fn reservoir_setters_update_projection_and_mark_dirty() {
+        let mut storage = SqliteStorage::new().expect("sqlite storage initializes");
+        let id = storage.next_node_id();
+        storage.set_node(make_node(id, 0.5)).expect("node stored");
+        let idx = id.0 as usize;
+
+        let action = 1.25_f64;
+        storage
+            .set_retained_action(id, action)
+            .expect("retained action updated");
+        assert_eq!(storage.get_retained_action(id).unwrap(), action);
+        // Reservoir is authoritative; salience is its projection.
+        assert_eq!(
+            storage.get_salience(id).unwrap(),
+            crate::mechanics::priors::project_salience(action)
+        );
+        assert!(storage.dirty_retained_action[idx]);
+        assert!(storage.dirty_salience[idx]);
+        // Dense Node record must agree with the SoA arrays.
+        let node = storage.get_node(id).unwrap();
+        assert_eq!(node.retained_action, action);
+        assert_eq!(
+            node.salience,
+            crate::mechanics::priors::project_salience(action)
+        );
+    }
+
+    #[test]
+    fn reservoirs_round_trip_through_flush_and_reopen() {
+        let path = temp_db_path("flush-reservoirs");
+        let (node_id, edge_id) = {
+            let mut storage = SqliteStorage::open(&path).expect("sqlite storage opens");
+            let n0 = storage.next_node_id();
+            let n1 = storage.next_node_id();
+            storage.set_node(make_node(n0, 0.5)).expect("node 0 stored");
+            storage.set_node(make_node(n1, 0.5)).expect("node 1 stored");
+
+            let e0 = storage.next_edge_id();
+            storage
+                .set_edge(crate::graph::Edge {
+                    id: e0,
+                    source: n0,
+                    target: n1,
+                    edge_type: EdgeType::Semantic,
+                    weight: 0.5,
+                    conductance: 0.0,
+                    edge_source: crate::graph::edge::EdgeSource::Auto,
+                    created_at: Timestamp(1000),
+                    accessed_at: Timestamp(1000),
+                    valid_from: None,
+                    valid_until: None,
+                    metadata: HashMap::new(),
+                })
+                .expect("edge 0 stored");
+
+            storage
+                .set_retained_action(n0, 2.5)
+                .expect("retained action set");
+            storage.set_conductance(e0, -1.5).expect("conductance set");
+            storage
+                .set_edge_accessed_at(e0, Timestamp(5555))
+                .expect("edge accessed_at set");
+
+            let nidx = n0.0 as usize;
+            let eidx = e0.0 as usize;
+            assert!(storage.dirty_retained_action[nidx]);
+            assert!(storage.dirty_edge_conductance[eidx]);
+            assert!(storage.dirty_edge_accessed_at[eidx]);
+
+            storage.flush().expect("reservoirs flush");
+
+            assert!(!storage.dirty_retained_action[nidx]);
+            assert!(!storage.dirty_edge_conductance[eidx]);
+            assert!(!storage.dirty_edge_accessed_at[eidx]);
+            (n0, e0)
+        };
+
+        let reopened = SqliteStorage::open(&path).expect("sqlite storage reopens");
+        assert_eq!(reopened.get_retained_action(node_id).unwrap(), 2.5);
+        assert_eq!(
+            reopened.get_salience(node_id).unwrap(),
+            crate::mechanics::priors::project_salience(2.5)
+        );
+        assert_eq!(reopened.get_conductance(edge_id).unwrap(), -1.5);
+        assert_eq!(
+            reopened.get_edge(edge_id).unwrap().weight,
+            crate::mechanics::priors::project_weight(-1.5)
+        );
+        assert_eq!(
+            reopened.get_edge_accessed_at(edge_id).unwrap(),
+            Timestamp(5555)
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn flush_persists_dirty_hot_fields_and_clears_flags() {
         let path = temp_db_path("flush-hot-fields");
         let id = {
@@ -1082,11 +1342,18 @@ mod tests {
     }
 }
 
+/// Current on-disk schema version. The fresh-DB `create_schema` path and the
+/// incremental migration chain must converge on an IDENTICAL schema at this
+/// version (same columns, same indexes).
+const SCHEMA_VERSION: u32 = 3;
+
 /// Run schema migrations to bring the database up to the current version.
 ///
 /// Version history:
 /// - v1 (implicit): original schema with `agent_id TEXT` column on nodes
-/// - v2 (current): `peer_id INTEGER` + `source_kind TEXT` replace `agent_id`; peers/peer_aliases tables added
+/// - v2: `peer_id INTEGER` + `source_kind TEXT` replace `agent_id`; peers/peer_aliases tables added
+/// - v3 (current): `retained_action` reservoir table + edge `conductance`/`accessed_at`
+///   reservoir columns (ADR-0002); valid-interval and salience-projection indexes
 fn migrate_schema(conn: &Connection) -> Result<(), Error> {
     // Ensure schema_version table exists
     conn.execute_batch("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);")
@@ -1101,7 +1368,7 @@ fn migrate_schema(conn: &Connection) -> Result<(), Error> {
 
     match version {
         None => {
-            // Fresh database — check if nodes table exists (v1 legacy)
+            // No schema_version row — check if nodes table exists (v1 legacy)
             let nodes_exist: bool = conn
                 .query_row(
                     "SELECT 1 FROM sqlite_master WHERE type='table' AND name='nodes' LIMIT 1",
@@ -1113,29 +1380,148 @@ fn migrate_schema(conn: &Connection) -> Result<(), Error> {
                 .is_some();
 
             if nodes_exist {
-                // Existing v1 database — migrate to v2
+                // Existing v1 database — migrate forward through the full chain.
                 migrate_v1_to_v2(conn)?;
+                migrate_v2_to_v3(conn)?;
             } else {
-                // Brand new database — create v2 schema directly
+                // Brand new database — create the current (v3) schema directly.
                 create_schema(conn)?;
             }
-            conn.execute_batch("INSERT INTO schema_version (version) VALUES (2);")
-                .map_err(sqlite_error)?;
+            conn.execute_batch(&format!(
+                "INSERT INTO schema_version (version) VALUES ({SCHEMA_VERSION});"
+            ))
+            .map_err(sqlite_error)?;
         }
         Some(1) => {
             migrate_v1_to_v2(conn)?;
-            conn.execute_batch("UPDATE schema_version SET version = 2;")
-                .map_err(sqlite_error)?;
+            migrate_v2_to_v3(conn)?;
+            conn.execute_batch(&format!(
+                "UPDATE schema_version SET version = {SCHEMA_VERSION};"
+            ))
+            .map_err(sqlite_error)?;
         }
         Some(2) => {
-            // Already at current version — ensure schema is complete
+            migrate_v2_to_v3(conn)?;
+            conn.execute_batch(&format!(
+                "UPDATE schema_version SET version = {SCHEMA_VERSION};"
+            ))
+            .map_err(sqlite_error)?;
+        }
+        Some(3) => {
+            // Already at current version — ensure schema is complete (idempotent
+            // CREATE IF NOT EXISTS only; no bare ALTER that would fail twice).
             create_schema(conn)?;
         }
         Some(v) => {
             return Err(Error::StorageError(format!(
-                "unknown schema version {v}; this build supports up to v2"
+                "unknown schema version {v}; this build supports up to v{SCHEMA_VERSION}"
             )));
         }
+    }
+
+    Ok(())
+}
+
+/// Migrate a v2 database to v3: add the `retained_action` reservoir table and
+/// the edge `conductance`/`accessed_at` reservoir columns (ADR-0002), create the
+/// valid-interval and salience-projection indexes, then DETERMINISTICALLY
+/// backfill the reservoirs from the existing bounded projections.
+///
+/// The whole migration runs inside one transaction. The backfill is computed in
+/// Rust via [`crate::mechanics::priors`] (SQLite is built without
+/// `SQLITE_ENABLE_MATH_FUNCTIONS`, so the clamped-logit cannot run in SQL).
+fn migrate_v2_to_v3(conn: &Connection) -> Result<(), Error> {
+    conn.execute_batch("BEGIN IMMEDIATE;")
+        .map_err(sqlite_error)?;
+
+    let result = (|| -> Result<(), Error> {
+        // Schema changes: reservoir table + edge reservoir columns + indexes.
+        conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS retained_action (
+                node_id INTEGER PRIMARY KEY,
+                value REAL NOT NULL
+            );
+
+            ALTER TABLE edges ADD COLUMN conductance REAL NOT NULL DEFAULT 0;
+            ALTER TABLE edges ADD COLUMN accessed_at INTEGER NOT NULL DEFAULT 0;
+
+            -- New v3 indexes (valid-interval + salience projection).
+            CREATE INDEX IF NOT EXISTS idx_nodes_valid ON nodes(valid_from, valid_until);
+            CREATE INDEX IF NOT EXISTS idx_edges_valid ON edges(valid_from, valid_until);
+            CREATE INDEX IF NOT EXISTS idx_salience ON salience(salience);
+
+            -- Converge on the same index set as the fresh create_schema path,
+            -- regardless of which earlier-version indexes were already present
+            -- (all IF NOT EXISTS, so this is idempotent).
+            CREATE INDEX IF NOT EXISTS idx_nodes_type ON nodes(node_type);
+            CREATE INDEX IF NOT EXISTS idx_nodes_peer ON nodes(peer_id);
+            CREATE INDEX IF NOT EXISTS idx_nodes_scope ON nodes(scope);
+            CREATE INDEX IF NOT EXISTS idx_edges_from ON edges(from_node);
+            CREATE INDEX IF NOT EXISTS idx_edges_to ON edges(to_node);
+            CREATE INDEX IF NOT EXISTS idx_entity_tags_tag ON entity_tags(tag);
+            ",
+        )
+        .map_err(sqlite_error)?;
+
+        // Deterministic node reservoir backfill:
+        //   retained_action.value = salience_to_action(salience)
+        // Read every salience row, compute in Rust, write back.
+        let salience_rows: Vec<(u64, f64)> = {
+            let mut stmt = conn
+                .prepare("SELECT node_id, salience FROM salience")
+                .map_err(sqlite_error)?;
+            let rows = stmt
+                .query_map([], |row| Ok((row.get::<_, u64>(0)?, row.get::<_, f64>(1)?)))
+                .map_err(sqlite_error)?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(sqlite_error)?
+        };
+        for (node_id, salience) in salience_rows {
+            let action = crate::mechanics::priors::salience_to_action(salience);
+            conn.execute(
+                "INSERT OR REPLACE INTO retained_action (node_id, value) VALUES (?1, ?2)",
+                params![node_id, action],
+            )
+            .map_err(sqlite_error)?;
+        }
+
+        // Deterministic edge reservoir backfill:
+        //   conductance = weight_to_conductance(weight); accessed_at = created_at.
+        let edge_rows: Vec<(u64, f64, u64)> = {
+            let mut stmt = conn
+                .prepare("SELECT id, weight, created_at FROM edges")
+                .map_err(sqlite_error)?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, u64>(0)?,
+                        row.get::<_, f64>(1)?,
+                        row.get::<_, u64>(2)?,
+                    ))
+                })
+                .map_err(sqlite_error)?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(sqlite_error)?
+        };
+        for (edge_id, weight, created_at) in edge_rows {
+            let conductance = crate::mechanics::priors::weight_to_conductance(weight);
+            conn.execute(
+                "UPDATE edges SET conductance = ?2, accessed_at = ?3 WHERE id = ?1",
+                params![edge_id, conductance, created_at],
+            )
+            .map_err(sqlite_error)?;
+        }
+
+        Ok(())
+    })();
+
+    if let Err(error) = result {
+        let _ = conn.execute_batch("ROLLBACK;");
+        return Err(error);
+    }
+
+    if let Err(error) = conn.execute_batch("COMMIT;").map_err(sqlite_error) {
+        let _ = conn.execute_batch("ROLLBACK;");
+        return Err(error);
     }
 
     Ok(())
@@ -1210,12 +1596,19 @@ fn create_schema(conn: &Connection) -> Result<(), Error> {
             valid_from INTEGER,
             valid_until INTEGER,
             metadata TEXT NOT NULL,
-            edge_source TEXT NOT NULL DEFAULT 'auto'
+            edge_source TEXT NOT NULL DEFAULT 'auto',
+            conductance REAL NOT NULL DEFAULT 0,
+            accessed_at INTEGER NOT NULL DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS salience (
             node_id INTEGER PRIMARY KEY,
             salience REAL NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS retained_action (
+            node_id INTEGER PRIMARY KEY,
+            value REAL NOT NULL
         );
 
         CREATE TABLE IF NOT EXISTS accessed_at (
@@ -1265,6 +1658,9 @@ fn create_schema(conn: &Connection) -> Result<(), Error> {
         CREATE INDEX IF NOT EXISTS idx_edges_from ON edges(from_node);
         CREATE INDEX IF NOT EXISTS idx_edges_to ON edges(to_node);
         CREATE INDEX IF NOT EXISTS idx_entity_tags_tag ON entity_tags(tag);
+        CREATE INDEX IF NOT EXISTS idx_nodes_valid ON nodes(valid_from, valid_until);
+        CREATE INDEX IF NOT EXISTS idx_edges_valid ON edges(valid_from, valid_until);
+        CREATE INDEX IF NOT EXISTS idx_salience ON salience(salience);
         ",
     )
     .map_err(sqlite_error)
@@ -1323,6 +1719,11 @@ fn insert_node_row(
             params![node.id.0, decay_checkpoint.0],
         )
         .map_err(sqlite_error)?;
+        conn.execute(
+            "INSERT OR REPLACE INTO retained_action (node_id, value) VALUES (?1, ?2)",
+            params![node.id.0, node.retained_action],
+        )
+        .map_err(sqlite_error)?;
         conn.execute("DELETE FROM node_fts WHERE id = ?1", [node.id.0])
             .map_err(sqlite_error)?;
         conn.execute(
@@ -1362,8 +1763,8 @@ fn insert_edge_row(conn: &Connection, edge: &Edge) -> Result<(), Error> {
     let write_result = (|| -> Result<(), Error> {
         conn.execute(
             "INSERT OR REPLACE INTO edges (
-                id, from_node, to_node, edge_type, weight, created_at, valid_from, valid_until, metadata, edge_source
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                id, from_node, to_node, edge_type, weight, created_at, valid_from, valid_until, metadata, edge_source, conductance, accessed_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 edge.id.0,
                 edge.source.0,
@@ -1375,6 +1776,8 @@ fn insert_edge_row(conn: &Connection, edge: &Edge) -> Result<(), Error> {
                 edge.valid_until.map(|ts| ts.0),
                 encode_map(&edge.metadata),
                 encode_edge_source(&edge.edge_source),
+                edge.conductance,
+                edge.accessed_at.0,
             ],
         )
         .map_err(sqlite_error)?;
@@ -1394,7 +1797,19 @@ fn insert_edge_row(conn: &Connection, edge: &Edge) -> Result<(), Error> {
     Ok(())
 }
 
-fn load_nodes(conn: &Connection) -> Result<Vec<(Node, f64, Timestamp, Timestamp)>, Error> {
+/// A loaded node plus its SoA hot fields: `(node, salience, retained_action,
+/// accessed_at, decay_checkpoint)`.
+type LoadedNode = (Node, f64, f64, Timestamp, Timestamp);
+
+fn load_nodes(conn: &Connection) -> Result<Vec<LoadedNode>, Error> {
+    // All hot-field tables are read via LEFT JOIN so a node missing a hot-field
+    // row (e.g. inserted before a flush, an incomplete transaction, or
+    // corruption) degrades gracefully without node loss: a node present in the
+    // `nodes` table always loads. Missing values fall back to defaults in Rust
+    // (salience -> 0.0, accessed_at/decay_checkpoint -> Timestamp(0)).
+    // The COALESCE onto the clamped-logit backfill of salience is also done in
+    // Rust (SQLite is built without SQLITE_ENABLE_MATH_FUNCTIONS, so `LN` is
+    // unavailable): NULL `r.value` falls back to `salience_to_action(salience)`.
     let mut stmt = conn
         .prepare(
             "SELECT
@@ -1402,11 +1817,12 @@ fn load_nodes(conn: &Connection) -> Result<Vec<(Node, f64, Timestamp, Timestamp)
                 n.peer_id, n.source_kind, n.session_id, n.scope, n.confidence, n.valid_from,
                 n.valid_until, n.created_at, n.updated_at, n.access_count,
                 n.access_history, n.tier, n.metadata, s.salience, a.accessed_at,
-                d.decay_checkpoint
+                d.decay_checkpoint, r.value
              FROM nodes n
-             JOIN salience s ON s.node_id = n.id
-             JOIN accessed_at a ON a.node_id = n.id
-             JOIN decay_checkpoint d ON d.node_id = n.id
+             LEFT JOIN salience s ON s.node_id = n.id
+             LEFT JOIN accessed_at a ON a.node_id = n.id
+             LEFT JOIN decay_checkpoint d ON d.node_id = n.id
+             LEFT JOIN retained_action r ON r.node_id = n.id
              ORDER BY n.id",
         )
         .map_err(sqlite_error)?;
@@ -1415,6 +1831,15 @@ fn load_nodes(conn: &Connection) -> Result<Vec<(Node, f64, Timestamp, Timestamp)
         .query_map([], |row| {
             let id = NodeId(row.get::<_, u64>(0)?);
             let scope_raw: String = row.get(9)?;
+            // Missing salience row (LEFT JOIN NULL) defaults to 0.0.
+            let salience: f64 = row.get::<_, Option<f64>>(19)?.unwrap_or(0.0);
+            // COALESCE(r.value, salience_to_action(salience)) — done in Rust.
+            let retained_action: f64 = row
+                .get::<_, Option<f64>>(22)?
+                .unwrap_or_else(|| crate::mechanics::priors::salience_to_action(salience));
+            // Missing accessed_at / decay_checkpoint rows default to Timestamp(0).
+            let accessed_at = Timestamp(row.get::<_, Option<u64>>(20)?.unwrap_or(0));
+            let decay_checkpoint = Timestamp(row.get::<_, Option<u64>>(21)?.unwrap_or(0));
             let node = Node {
                 id,
                 name: row.get(1)?,
@@ -1441,21 +1866,17 @@ fn load_nodes(conn: &Connection) -> Result<Vec<(Node, f64, Timestamp, Timestamp)
                     .map_err(to_sql_error)?,
                 tier: decode_memory_tier(&row.get::<_, String>(17)?).map_err(to_sql_error)?,
                 metadata: decode_map(&row.get::<_, String>(18)?).map_err(to_sql_error)?,
-                salience: row.get(19)?,
-                accessed_at: Timestamp(row.get(20)?),
+                salience,
+                retained_action,
+                accessed_at,
                 entity_tags: Vec::new(),
             };
-            Ok((
-                node,
-                row.get::<_, f64>(19)?,
-                Timestamp(row.get(20)?),
-                Timestamp(row.get(21)?),
-            ))
+            Ok((node, salience, retained_action, accessed_at, decay_checkpoint))
         })
         .map_err(sqlite_error)?;
 
     let mut nodes = rows.collect::<Result<Vec<_>, _>>().map_err(sqlite_error)?;
-    for (node, _, _, _) in &mut nodes {
+    for (node, _, _, _, _) in &mut nodes {
         node.entity_tags = load_entity_tags(conn, node.id)?;
     }
     Ok(nodes)
@@ -1474,7 +1895,7 @@ fn load_entity_tags(conn: &Connection, node_id: NodeId) -> Result<Vec<String>, E
 fn load_edges(conn: &Connection) -> Result<Vec<Edge>, Error> {
     let mut stmt = conn
         .prepare(
-            "SELECT id, from_node, to_node, edge_type, weight, created_at, valid_from, valid_until, metadata, edge_source
+            "SELECT id, from_node, to_node, edge_type, weight, created_at, valid_from, valid_until, metadata, edge_source, conductance, accessed_at
              FROM edges ORDER BY id",
         )
         .map_err(sqlite_error)?;
@@ -1486,8 +1907,10 @@ fn load_edges(conn: &Connection) -> Result<Vec<Edge>, Error> {
                 target: NodeId(row.get(2)?),
                 edge_type: decode_edge_type(&row.get::<_, String>(3)?).map_err(to_sql_error)?,
                 weight: row.get(4)?,
+                conductance: row.get(10)?,
                 edge_source: decode_edge_source(&row.get::<_, String>(9)?).map_err(to_sql_error)?,
                 created_at: Timestamp(row.get(5)?),
+                accessed_at: Timestamp(row.get(11)?),
                 valid_from: row.get::<_, Option<u64>>(6)?.map(Timestamp),
                 valid_until: row.get::<_, Option<u64>>(7)?.map(Timestamp),
                 metadata: decode_map(&row.get::<_, String>(8)?).map_err(to_sql_error)?,

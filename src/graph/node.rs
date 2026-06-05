@@ -74,6 +74,9 @@ pub struct Node {
     // Physics state
     /// Salience score [0, 1]. The universal currency — all mechanics read/write this.
     pub salience: f64,
+    /// Retained action `A_i` — authoritative log need-odds reservoir; `salience` is its
+    /// bounded projection (`salience = project_salience(retained_action)`, ADR-0002).
+    pub retained_action: f64,
     /// Number of times this node has been accessed via touch().
     pub access_count: u32,
     /// Ring buffer of recent access timestamps for power-law decay computation.
@@ -153,6 +156,7 @@ mod tests {
             valid_from: None,
             valid_until: None,
             salience: 0.85,
+            retained_action: 0.0,
             access_count: 0,
             access_history: VecDeque::new(),
             tier: MemoryTier::Auto,
@@ -181,6 +185,7 @@ mod tests {
             valid_from: None,
             valid_until: None,
             salience: 1.0,
+            retained_action: 0.0,
             access_count: 0,
             access_history: VecDeque::new(),
             tier: MemoryTier::Auto,

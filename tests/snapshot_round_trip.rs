@@ -361,3 +361,120 @@ fn snapshot_preserves_hot_fields_atomically() {
     assert_eq!(node.id, id, "Node identity must be preserved");
     assert_eq!(node.name, pre_node_name, "Node.name must be preserved");
 }
+
+#[test]
+fn snapshot_preserves_reservoirs() {
+    use anamnesis::graph::{Edge, EdgeType, MemoryTier, Node};
+    use anamnesis::mechanics::priors::{project_salience, project_weight};
+    use anamnesis::snapshot::SnapshotStore;
+    use anamnesis::storage::SqliteStorage;
+    use std::collections::{HashMap, VecDeque};
+
+    fn make_node(id: NodeId) -> Node {
+        Node {
+            id,
+            node_type: KnowledgeType::Semantic,
+            name: format!("node-{}", id.0),
+            summary: None,
+            content: "reservoir content".to_string(),
+            embedding: None,
+            created_at: Timestamp(1000),
+            updated_at: Timestamp(1000),
+            accessed_at: Timestamp(1000),
+            valid_from: None,
+            valid_until: None,
+            salience: 0.5,
+            retained_action: 0.0,
+            access_count: 0,
+            access_history: VecDeque::new(),
+            tier: MemoryTier::Auto,
+            origin: Origin {
+                peer_id: anamnesis::graph::types::PeerId(0),
+                source_kind: anamnesis::peer::SourceKind::AgentObservation,
+                session_id: "s".to_string(),
+                scope: ScopePath::universal(),
+                confidence: 0.9,
+            },
+            entity_tags: Vec::new(),
+            metadata: HashMap::new(),
+        }
+    }
+
+    let mut storage = SqliteStorage::new().expect("storage init");
+
+    let n0 = storage.next_node_id();
+    let n1 = storage.next_node_id();
+    storage.set_node(make_node(n0)).expect("node 0");
+    storage.set_node(make_node(n1)).expect("node 1");
+
+    let e0 = storage.next_edge_id();
+    storage
+        .set_edge(Edge {
+            id: e0,
+            source: n0,
+            target: n1,
+            edge_type: EdgeType::Semantic,
+            weight: 0.5,
+            conductance: 0.0,
+            edge_source: anamnesis::graph::edge::EdgeSource::Auto,
+            created_at: Timestamp(1000),
+            accessed_at: Timestamp(1000),
+            valid_from: None,
+            valid_until: None,
+            metadata: HashMap::new(),
+        })
+        .expect("edge 0");
+
+    // Drive the reservoirs to non-trivial log-odds values via the commit-style
+    // setters; these recompute the bounded projections.
+    let ra = 1.75_f64;
+    let cond = -0.625_f64;
+    storage.set_retained_action(n0, ra).expect("set A_0");
+    storage.set_conductance(e0, cond).expect("set C_0");
+    storage
+        .set_edge_accessed_at(e0, Timestamp(4242))
+        .expect("set edge accessed_at");
+
+    // Reservoir is authoritative; the projection must track it.
+    assert_eq!(storage.get_retained_action(n0).unwrap(), ra);
+    assert!((storage.get_salience(n0).unwrap() - project_salience(ra)).abs() < 1e-12);
+    assert_eq!(storage.get_conductance(e0).unwrap(), cond);
+    assert!((storage.get_edge(e0).unwrap().weight - project_weight(cond)).abs() < 1e-12);
+
+    // Snapshot -> mutate -> restore -> identical.
+    let mut store: SnapshotStore<SqliteStorage> = SnapshotStore::new();
+    let snap = store.take("reservoir-baseline", &storage, Timestamp(0));
+
+    storage.set_retained_action(n0, -3.0).expect("mutate A_0");
+    storage.set_conductance(e0, 2.0).expect("mutate C_0");
+    storage
+        .set_edge_accessed_at(e0, Timestamp(9999))
+        .expect("mutate edge accessed_at");
+    assert_ne!(storage.get_retained_action(n0).unwrap(), ra);
+
+    let restored = store.restore(&snap).expect("restore");
+
+    assert_eq!(
+        restored.get_retained_action(n0).unwrap(),
+        ra,
+        "retained_action reservoir must round-trip through snapshot"
+    );
+    assert!(
+        (restored.get_salience(n0).unwrap() - project_salience(ra)).abs() < 1e-12,
+        "salience projection must round-trip consistently with the reservoir"
+    );
+    assert_eq!(
+        restored.get_conductance(e0).unwrap(),
+        cond,
+        "conductance reservoir must round-trip through snapshot"
+    );
+    assert!(
+        (restored.get_edge(e0).unwrap().weight - project_weight(cond)).abs() < 1e-12,
+        "edge weight projection must round-trip consistently with the reservoir"
+    );
+    assert_eq!(
+        restored.get_edge_accessed_at(e0).unwrap(),
+        Timestamp(4242),
+        "edge accessed_at must round-trip through snapshot"
+    );
+}
