@@ -44,6 +44,7 @@ pub(crate) fn assemble_search_result<S: StorageAdapter + Clone>(
         excluded_edge_count: request.response.excluded_edges.len(),
         path_current_count: request.response.path_current.len(),
         packaging_mode: None,
+        energy: crate::mechanics::energy::EnergyTerms::default(),
     };
 
     if request.response.activation.is_empty() {
@@ -80,8 +81,19 @@ pub(crate) fn assemble_search_result<S: StorageAdapter + Clone>(
     package.commit_trace =
         crate::api::build_commit_trace(engine.graph.storage(), request.response, &package);
 
+    // Compute the query-local readout energy `E(S | Q)` over the FINAL packaged active
+    // subsystem (energy.md / ADR-0007). Interpretive only — explains why the bundle was
+    // selected; the RWR stationary vector is the true fixed point. Never stored.
+    let energy = crate::api::build_readout_energy(
+        engine.graph.storage(),
+        request.response,
+        &package,
+        request.config.query_embedding.as_ref(),
+    );
+
     let mut trace = trace;
     trace.packaging_mode = Some(packaging_mode);
+    trace.energy = energy;
 
     Ok(SearchResult { package, trace })
 }

@@ -427,6 +427,12 @@ pub struct SearchTrace {
     pub path_current_count: usize,
     /// Packaging mode selected.
     pub packaging_mode: Option<PackagingMode>,
+    /// Query-local readout energy `E(S | Q)` decomposed over the packaged active
+    /// subsystem (energy.md / ADR-0007). This is an *interpretive* objective that
+    /// explains why the bundle was selected; it is query-local and never stored, and
+    /// the RWR stationary vector (captured by `residual`/`iterations` above) remains
+    /// the true fixed point. Default (`E = 0`) for an empty result.
+    pub energy: crate::mechanics::energy::EnergyTerms,
 }
 
 /// Internal search plan — auto-derived from SearchInput.

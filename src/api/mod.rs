@@ -112,6 +112,100 @@ fn finite_vector(values: &[f64]) -> bool {
     values.iter().all(|value| value.is_finite())
 }
 
+/// Compare two storages field-for-field and return a description of the first
+/// per-node or per-edge mismatch, or `None` if they are byte-for-byte equivalent.
+///
+/// This backs the `snapshot_restore_consistency` invariant: a clone (the
+/// "restore") must reproduce identical state, so this checks the full `Node` and
+/// `Edge` records (content, summary, embedding, origin, metadata, access_history,
+/// tier, validity, and the bounded projections via their `PartialEq`) plus the
+/// authoritative SoA reservoir/hot fields read through their accessors
+/// (`retained_action` `A_i`, `conductance` `C_ij`, `accessed_at`,
+/// `decay_checkpoint`) — fields a struct copy can lag when marked dirty, and the
+/// exact class of field the clone path could silently drop. Float reservoir/hot
+/// fields are compared by bit pattern so a dropped column reading back as a
+/// default (or a `NaN`) is always caught.
+fn snapshot_restore_mismatch<S: StorageAdapter>(original: &S, restored: &S) -> Option<String> {
+    let bits_differ = |a: f64, b: f64| a.to_bits() != b.to_bits();
+
+    let orig_node_ids = original.all_node_ids();
+    let restored_node_ids = restored.all_node_ids();
+    if orig_node_ids != restored_node_ids {
+        return Some(format!(
+            "node id set differs: original {orig_node_ids:?} vs restored {restored_node_ids:?}"
+        ));
+    }
+
+    for id in orig_node_ids {
+        match (original.get_node(id), restored.get_node(id)) {
+            (Ok(a), Ok(b)) if a != b => {
+                return Some(format!("node {id:?} record differs after restore"));
+            }
+            (Ok(_), Ok(_)) => {}
+            _ => return Some(format!("node {id:?} not retrievable from both stores")),
+        }
+        if bits_differ(
+            original.get_salience(id).unwrap_or(f64::NAN),
+            restored.get_salience(id).unwrap_or(f64::NAN),
+        ) {
+            return Some(format!("node {id:?} salience differs after restore"));
+        }
+        if bits_differ(
+            original.get_retained_action(id).unwrap_or(f64::NAN),
+            restored.get_retained_action(id).unwrap_or(f64::NAN),
+        ) {
+            return Some(format!("node {id:?} retained_action differs after restore"));
+        }
+        match (original.get_accessed_at(id), restored.get_accessed_at(id)) {
+            (Ok(a), Ok(b)) if a != b => {
+                return Some(format!("node {id:?} accessed_at differs after restore"));
+            }
+            (Ok(_), Ok(_)) => {}
+            _ => return Some(format!("node {id:?} accessed_at not retrievable from both stores")),
+        }
+        match (
+            original.get_decay_checkpoint(id),
+            restored.get_decay_checkpoint(id),
+        ) {
+            (Ok(a), Ok(b)) if a != b => {
+                return Some(format!("node {id:?} decay_checkpoint differs after restore"));
+            }
+            (Ok(_), Ok(_)) => {}
+            _ => {
+                return Some(format!(
+                    "node {id:?} decay_checkpoint not retrievable from both stores"
+                ));
+            }
+        }
+    }
+
+    let orig_edge_ids = original.all_edge_ids();
+    let restored_edge_ids = restored.all_edge_ids();
+    if orig_edge_ids != restored_edge_ids {
+        return Some(format!(
+            "edge id set differs: original {orig_edge_ids:?} vs restored {restored_edge_ids:?}"
+        ));
+    }
+
+    for id in orig_edge_ids {
+        match (original.get_edge(id), restored.get_edge(id)) {
+            (Ok(a), Ok(b)) if a != b => {
+                return Some(format!("edge {id:?} record differs after restore"));
+            }
+            (Ok(_), Ok(_)) => {}
+            _ => return Some(format!("edge {id:?} not retrievable from both stores")),
+        }
+        if bits_differ(
+            original.get_conductance(id).unwrap_or(f64::NAN),
+            restored.get_conductance(id).unwrap_or(f64::NAN),
+        ) {
+            return Some(format!("edge {id:?} conductance differs after restore"));
+        }
+    }
+
+    None
+}
+
 /// Builds the read-only [`CommitTrace`] for a packaged retrieval (ADR-0004).
 ///
 /// Captures, from the settled [`ActivationResponse`](crate::query::ActivationResponse)
@@ -221,6 +315,96 @@ fn build_commit_trace<S: StorageAdapter>(
         path_used,
         tensions_activated,
     }
+}
+
+/// Builds the query-local readout energy decomposition `E(S | Q)` over the packaged
+/// active subsystem (energy.md / ADR-0007).
+///
+/// The active subsystem `S` is the set of packaged fragments. From the settled
+/// [`ActivationResponse`](crate::query::ActivationResponse) this assembles the four
+/// structural energy terms:
+///
+/// - **field_alignment**: per-site `a_i * phi_i`, where `phi_i` is the same embedding
+///   alignment the readout score used (cosine of query/site embeddings, else `0`), so
+///   the explanation is consistent with the ranking;
+/// - **conductive_support**: per-bond `project_weight(C_ij) * min(a_i, a_j)` over the
+///   live propagating edges between packaged sites (`Contradicts` excluded);
+/// - **impedance_regularization**: per-site `a_i * Z_i` from the response impedance;
+/// - **frustration_penalty**: the summed surfaced tension stresses.
+///
+/// This is **interpretive and never stored** — it explains and ranks the bundle
+/// around the RWR stationary vector `a*`, which is the true fixed point. Pure read of
+/// storage; nothing is mutated.
+fn build_readout_energy<S: StorageAdapter>(
+    storage: &S,
+    response: &crate::query::ActivationResponse,
+    package: &ContextPackage,
+    query_embedding: Option<&Vec<f64>>,
+) -> crate::mechanics::energy::EnergyTerms {
+    use crate::mechanics::attraction::cosine_similarity;
+    use crate::mechanics::energy::{SiteBond, SiteEnergy, energy};
+
+    let activation_of = |id: NodeId| response.activation.get(&id).copied().unwrap_or(0.0);
+
+    // The active subsystem S = packaged fragment ids, deterministically ordered.
+    let mut packaged: Vec<NodeId> = Vec::new();
+    for frag in package
+        .identity
+        .iter()
+        .chain(package.knowledge.iter())
+        .chain(package.memories.iter())
+    {
+        if !packaged.contains(&frag.node_id) {
+            packaged.push(frag.node_id);
+        }
+    }
+
+    // Per-site energy contributions: a_i, phi_i (embedding alignment, matching the
+    // readout score), Z_i (effective impedance from the settled response).
+    let mut sites: Vec<SiteEnergy> = Vec::with_capacity(packaged.len());
+    for &id in &packaged {
+        let phi = match (query_embedding, storage.get_node(id).ok().and_then(|n| n.embedding.as_ref())) {
+            (Some(qe), Some(ne)) => cosine_similarity(qe, ne),
+            _ => 0.0,
+        };
+        sites.push(SiteEnergy {
+            activation: activation_of(id),
+            phi,
+            impedance: response.impedance.get(&id).copied().unwrap_or_default(),
+        });
+    }
+
+    // Conductive bonds between distinct packaged sites joined by a live, propagating
+    // (non-`Contradicts`) edge. Each undirected bond is counted once.
+    let excluded: HashSet<EdgeId> = response.excluded_edges.iter().copied().collect();
+    let mut bonds: Vec<SiteBond> = Vec::new();
+    for (idx, &node_a) in packaged.iter().enumerate() {
+        for &node_b in &packaged[idx + 1..] {
+            let conductance = storage
+                .edges_from(node_a)
+                .iter()
+                .chain(storage.edges_to(node_a).iter())
+                .filter(|&&eid| !excluded.contains(&eid))
+                .filter_map(|&eid| storage.get_edge(eid).ok())
+                .find(|e| {
+                    (e.source == node_a && e.target == node_b)
+                        || (e.source == node_b && e.target == node_a)
+                })
+                .map(|e| storage.get_conductance(e.id).unwrap_or(e.conductance));
+            if let Some(conductance) = conductance {
+                bonds.push(SiteBond {
+                    conductance,
+                    activation_i: activation_of(node_a),
+                    activation_j: activation_of(node_b),
+                });
+            }
+        }
+    }
+
+    // Frustration: the surfaced tension stresses over the active subsystem.
+    let stresses: Vec<f64> = package.tensions.iter().map(|t| t.stress).collect();
+
+    energy(&sites, &bonds, &stresses)
 }
 
 fn ingest_trigger_candidates<S: StorageAdapter>(
@@ -366,14 +550,23 @@ pub enum DebugOutcome {
     Abandoned,
 }
 
-/// Report returned by Engine::tick().
+/// Report returned by [`Engine::tick`] — the dissipation volume and projection
+/// deltas of one maintenance pass (observability.md).
+///
+/// `tick` decays the retained-action reservoir `A_i` (power-law, ADR-0008) and
+/// re-projects `salience = project_salience(A_i)`; this report summarizes how
+/// much dissipation occurred and how far the salience projections moved.
 #[derive(Debug, Clone, Default)]
 pub struct TickReport {
-    /// Number of nodes whose salience changed during this tick.
+    /// Dissipation volume: number of sites whose salience projection changed.
     pub nodes_decayed: usize,
-    /// Number of nodes whose salience reached their type-specific floor during this tick.
-    /// These nodes are dormant (near-zero activity) but remain in the graph.
+    /// Number of sites whose salience projection crossed below the archive
+    /// threshold this tick. These sites are dormant (hidden from broad retrieval)
+    /// but are never deleted (ADR-0006 / ADR-0008).
     pub nodes_pruned: usize,
+    /// Total projection delta: summed magnitude of the salience drops across all
+    /// decayed sites (`Σ |s_before - s_after|`). Zero when nothing decayed.
+    pub total_salience_delta: f64,
 }
 
 /// Report returned by [`Engine::commit`] — the integrated work the commit recorded.
@@ -3106,6 +3299,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         let node_ids = self.graph.storage().all_node_ids();
         let mut nodes_decayed = 0usize;
         let mut nodes_pruned = 0usize;
+        let mut total_salience_delta = 0.0_f64;
 
         for id in node_ids {
             let node_tier = match self.graph.get_node(id) {
@@ -3167,6 +3361,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                     continue;
                 }
                 nodes_decayed += 1;
+                total_salience_delta += (current_salience - new_salience).abs();
                 self.emit_event(GraphEvent::SalienceChanged {
                     node_id: id,
                     old: current_salience,
@@ -3199,6 +3394,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         Ok(TickReport {
             nodes_decayed,
             nodes_pruned,
+            total_salience_delta,
         })
     }
 
@@ -4168,12 +4364,126 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         Ok(results)
     }
 
-    /// Compute read-only structural health diagnostics for the graph (legacy).
+    /// Compute the nine-metric read-only [`GraphHealth`] for the graph
+    /// (observability.md). Uses the current system time as the `stale_ratio`
+    /// reference; for a deterministic reference use [`Engine::graph_health_at`].
     ///
-    /// Returns the low-level `GraphHealth` struct. For the full `HealthReport` with
-    /// grade, use `Engine::health()`.
+    /// [`GraphHealth`]: crate::mechanics::health::GraphHealth
     pub fn graph_health(&self) -> crate::mechanics::health::GraphHealth {
-        crate::mechanics::health::compute_health(self.graph.storage())
+        self.graph_health_at(Timestamp::now())
+    }
+
+    /// Compute the nine-metric [`GraphHealth`] as of the supplied `now` timestamp.
+    ///
+    /// `now` is the reference for the `stale_ratio` window, so passing a fixed
+    /// timestamp makes the report fully deterministic (used by tests and the
+    /// determinism invariant). Read-only — never mutates state.
+    ///
+    /// [`GraphHealth`]: crate::mechanics::health::GraphHealth
+    pub fn graph_health_at(&self, now: Timestamp) -> crate::mechanics::health::GraphHealth {
+        crate::mechanics::health::compute_health(self.graph.storage(), now)
+    }
+
+    /// Run the full [`InvariantCheck`] suite (observability.md) and return an
+    /// [`InvariantReport`].
+    ///
+    /// Covers the eight structural invariants plus `snapshot_restore_consistency`
+    /// (a clone must re-read identical field-for-field — every `Node`/`Edge`
+    /// record plus the authoritative SoA reservoir/hot fields) and `determinism`
+    /// (same graph + query twice yields an identical `ContextPackage`). The
+    /// determinism probe re-runs
+    /// `probe` — a representative query — against the live graph twice and against
+    /// a clone, asserting byte-identical `ContextPackage`s. Pass `None` to skip
+    /// the query-dependent determinism probe (the structural checks still run).
+    ///
+    /// Read-only: the clone is discarded; no graph state is mutated.
+    ///
+    /// [`InvariantCheck`]: crate::mechanics::observability::InvariantCheck
+    /// [`InvariantReport`]: crate::mechanics::observability::InvariantReport
+    pub fn check_invariants(
+        &self,
+        probe: Option<&SearchInput>,
+    ) -> crate::mechanics::observability::InvariantReport {
+        use crate::mechanics::observability::{
+            InvariantCheck, InvariantResult, check_storage_invariants,
+        };
+
+        let mut results = check_storage_invariants(self.graph.storage());
+
+        // snapshot_restore_consistency: a clone must reproduce identical per-node
+        // and per-edge state. The clone is a deep copy of storage, so any field
+        // the clone path drops (e.g. a reservoir column, content, or access
+        // history) surfaces here as a field-level mismatch — not merely as a shift
+        // in one of the nine aggregate health metrics. We compare the full `Node`
+        // and `Edge` records (which carry content, summary, embedding, origin,
+        // metadata, access_history, tier, validity, and the projections) together
+        // with the authoritative SoA reservoir/hot fields read through their
+        // accessors (`retained_action`, `conductance`, `accessed_at`,
+        // `decay_checkpoint`), which the cached struct can lag when marked dirty.
+        let snapshot_result = {
+            let cloned = self.graph.storage().clone();
+            match snapshot_restore_mismatch(self.graph.storage(), &cloned) {
+                None => InvariantResult::ok(InvariantCheck::SnapshotRestoreConsistency),
+                Some(detail) => InvariantResult::failed(
+                    InvariantCheck::SnapshotRestoreConsistency,
+                    1,
+                    detail,
+                ),
+            }
+        };
+        results.push(snapshot_result);
+
+        // determinism: same graph + query twice => identical ContextPackage.
+        if let Some(input) = probe {
+            let determinism_result = match (
+                self.search(input.clone()),
+                self.search(input.clone()),
+            ) {
+                (Ok(a), Ok(b)) => {
+                    if a.package == b.package {
+                        InvariantResult::ok(InvariantCheck::Determinism)
+                    } else {
+                        InvariantResult::failed(
+                            InvariantCheck::Determinism,
+                            1,
+                            "two identical queries produced different ContextPackages",
+                        )
+                    }
+                }
+                _ => InvariantResult::failed(
+                    InvariantCheck::Determinism,
+                    1,
+                    "determinism probe query errored",
+                ),
+            };
+            results.push(determinism_result);
+        }
+
+        crate::mechanics::observability::InvariantReport { results }
+    }
+
+    /// Derive the [`OperationalWarning`]s implied by the current [`GraphHealth`]
+    /// (observability.md). Read-only; uses the current system time as the
+    /// `stale_ratio` reference. For a deterministic reference use
+    /// [`Engine::operational_warnings_at`].
+    ///
+    /// [`OperationalWarning`]: crate::mechanics::observability::OperationalWarning
+    /// [`GraphHealth`]: crate::mechanics::health::GraphHealth
+    pub fn operational_warnings(&self) -> Vec<crate::mechanics::observability::OperationalWarning> {
+        self.operational_warnings_at(Timestamp::now())
+    }
+
+    /// Derive the [`OperationalWarning`]s as of the supplied `now` timestamp.
+    ///
+    /// `now` is the reference for the staleness-derived warnings, so passing a
+    /// fixed timestamp makes the result deterministic. Read-only.
+    ///
+    /// [`OperationalWarning`]: crate::mechanics::observability::OperationalWarning
+    pub fn operational_warnings_at(
+        &self,
+        now: Timestamp,
+    ) -> Vec<crate::mechanics::observability::OperationalWarning> {
+        crate::mechanics::observability::derive_warnings(&self.graph_health_at(now))
     }
 
     /// Generate a support report for a node.
@@ -4317,6 +4627,70 @@ mod tests {
     fn engine_default() {
         let engine = Engine::default();
         assert_eq!(engine.graph().node_count(), 0);
+    }
+
+    #[test]
+    fn snapshot_restore_mismatch_clean_for_faithful_clone() {
+        let mut engine = Engine::new();
+        let IngestResult::Created(ids) = engine.ingest(make_observation("node A")).unwrap() else {
+            panic!("expected Created");
+        };
+        let IngestResult::Created(ids2) = engine.ingest(make_observation("node B")).unwrap() else {
+            panic!("expected Created");
+        };
+        engine.link(ids[0], ids2[0], EdgeType::Semantic).unwrap();
+
+        let clone = engine.graph().storage().clone();
+        assert!(
+            snapshot_restore_mismatch(engine.graph().storage(), &clone).is_none(),
+            "a faithful clone must re-read identical field-for-field"
+        );
+    }
+
+    #[test]
+    fn snapshot_restore_mismatch_detects_dropped_reservoir_field() {
+        // Simulate the regression the invariant guards against: a "restore" that
+        // silently loses an authoritative reservoir/hot field even though every
+        // aggregate health metric would be unaffected. Tampering the clone's SoA
+        // salience must be caught field-for-field.
+        let mut engine = Engine::new();
+        let IngestResult::Created(ids) = engine.ingest(make_observation("node A")).unwrap() else {
+            panic!("expected Created");
+        };
+
+        let mut clone = engine.graph().storage().clone();
+        let original_salience = clone.get_salience(ids[0]).unwrap();
+        clone
+            .set_salience(ids[0], original_salience * 0.5)
+            .unwrap();
+
+        let mismatch = snapshot_restore_mismatch(engine.graph().storage(), &clone);
+        assert!(
+            mismatch.is_some(),
+            "a clone that lost a hot field must be reported as a mismatch"
+        );
+    }
+
+    #[test]
+    fn snapshot_restore_mismatch_detects_dropped_decay_checkpoint() {
+        // decay_checkpoint is a SoA-only field absent from the `Node` record and
+        // from every aggregate health metric — exactly the silent-drop class the
+        // finding calls out.
+        let mut engine = Engine::new();
+        let IngestResult::Created(ids) = engine.ingest(make_observation("node A")).unwrap() else {
+            panic!("expected Created");
+        };
+
+        let mut clone = engine.graph().storage().clone();
+        let checkpoint = clone.get_decay_checkpoint(ids[0]).unwrap();
+        clone
+            .set_decay_checkpoint(ids[0], Timestamp(checkpoint.0 + 1))
+            .unwrap();
+
+        assert!(
+            snapshot_restore_mismatch(engine.graph().storage(), &clone).is_some(),
+            "a clone that lost decay_checkpoint must be reported as a mismatch"
+        );
     }
 
     #[test]

@@ -93,6 +93,10 @@ name = "eval_golden"
 path = "benches/eval/golden.rs"
 
 [[test]]
+name = "eval_regression"
+path = "benches/eval/regression.rs"
+
+[[test]]
 name = "eval_common"
 path = "benches/eval_common/mod.rs"
 

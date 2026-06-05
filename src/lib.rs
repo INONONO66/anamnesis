@@ -36,7 +36,13 @@ pub use embedding::fastembed::FastEmbedProvider;
 pub use error::Error;
 pub use graph::{Edge, Node, Origin};
 pub use graph::{EdgeId, EdgeType, KnowledgeType, NodeId, PeerId, Timestamp};
+pub use mechanics::energy::{
+    EnergyTerms, SiteBond, SiteEnergy, dirichlet_energy, energy as readout_energy,
+};
 pub use mechanics::health::GraphHealth;
+pub use mechanics::observability::{
+    InvariantCheck, InvariantReport, InvariantResult, OperationalWarning,
+};
 pub use mechanics::social::{ConfidenceLevel, FeedbackSignal};
 pub use peer::{PeerProfile, PeerRegistry, SourceKind, TrustLevel};
 pub use query::{
