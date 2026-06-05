@@ -10,7 +10,7 @@ use crate::graph::{EdgeType, NodeId, Timestamp};
 use crate::query::activation::edge_valid_at;
 use crate::storage::StorageAdapter;
 
-const DEFAULT_RESTART_PROBABILITY: f64 = 0.15;
+const DEFAULT_RESTART_PROBABILITY: f64 = crate::mechanics::priors::RWR_RESTART_PROBABILITY;
 const CONVERGENCE_EPSILON: f64 = 1e-12;
 const IDENTITY_RESTART_WEIGHT: f64 = 0.10;
 

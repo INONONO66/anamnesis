@@ -2749,12 +2749,12 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                             self.graph.storage(),
                             &node_ids,
                             node_id,
-                            0.5,
+                            crate::mechanics::priors::DECAY_EXPONENT_D,
                             self.config.isolation_decay_factor,
                             self.config.bridge_protection_factor,
                         )?
                     } else {
-                        0.5
+                        crate::mechanics::priors::DECAY_EXPONENT_D
                     };
                     base_level_to_salience(compute_base_level(&history_snapshot, now, decay_d))
                 }
@@ -2970,14 +2970,14 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                             Err(_) => continue,
                         };
                         crate::mechanics::forgetting::effective_lambda(
-                            0.5,
+                            crate::mechanics::priors::DECAY_EXPONENT_D,
                             is_orphan,
                             bridge_score,
                             self.config.isolation_decay_factor,
                             self.config.bridge_protection_factor,
                         )
                     } else {
-                        0.5
+                        crate::mechanics::priors::DECAY_EXPONENT_D
                     };
 
                     base_level_to_salience(compute_base_level(&history, now, decay_d))
