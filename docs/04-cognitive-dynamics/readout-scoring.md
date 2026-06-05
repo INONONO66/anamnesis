@@ -2,6 +2,8 @@
 
 Readout scoring chooses which activated sites become context. Activation flow returns a transient response over the graph; readout turns that response into ranked, budgeted output.
 
+This document is the authoritative definition of the readout score. [overview.md](overview.md) defers to the form given here.
+
 The scoring layer must respect the reservoir/projection boundary. It reads retained action, salience, conductance-derived activation, impedance, scope, and stress. It does not directly set any persistent quantity.
 
 ## Input Signals
@@ -34,7 +36,7 @@ Scores are for ranking within a query. Because RWR values shrink as graph size g
 
 ## Coefficients
 
-Coefficients are calibrated priors. They should be fit from accepted readout data or target entropy. They are not universal laws.
+The seven coefficients are one calibrated re-ranking regression object, not seven independent knobs. The score is additive in log-odds space: it reads as a posterior log-odds, `posterior = prior + sum of evidence`, where each term contributes its evidence to the ranking. The default is unit coefficients (`w_* = 1`), which recovers the plain additive log-odds sum; the regression is then fit from accepted readout data or target entropy per [ADR-0010](../adr/0010-calibrated-priors-not-laws.md). They are calibrated priors, not universal laws.
 
 | Coefficient | Calibration Source |
 |---|---|

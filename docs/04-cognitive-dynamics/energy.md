@@ -32,6 +32,8 @@ E(S | Q) =
 | `impedance_regularization` | Cost of lighting isolated or cold sites |
 | `frustration_penalty` | Stress from contradictory sites active together |
 
+The four leading `-`/`+` term coefficients are structural descent-direction signs (`+/-1`), not tunable magnitudes. They encode that alignment and conductive support lower energy while impedance and frustration raise it; there are no per-term weights to fit.
+
 The result is query-local and is not stored.
 
 ## Two Layers
@@ -70,16 +72,17 @@ There is a continuous-time intuition:
 da/dt = -L_rw * a + s(t) - decay
 ```
 
-But once query injection and dissipation exist, no conservation law applies. Use separate symbols for symmetric coupling Laplacian and directed transition matrix. The stationary vector `a*` is primary; energy explains and stabilizes readout around it.
+But once query injection and dissipation exist, no conservation law applies. Use separate symbols for symmetric coupling Laplacian and directed transition matrix. The energy/Lyapunov reading is exact only under symmetric coupling (`C_ij = C_ji`); under directed RWR the true fixed point is the RWR stationary activation vector `a*`, and energy is an interpretive descent objective rather than a quantity the dynamics literally minimize. The stationary vector `a*` is primary; energy explains and stabilizes readout around it.
 
 ## Restart Alpha
 
-`alpha` is derived from associative reach:
+`alpha` is derived from the single mean associative reach `L`:
 
 ```text
-(1 - alpha)^h_half = f
-alpha = 1 - f^(1/h_half)
+alpha = 1 / (L + 1)
 ```
+
+Equivalently, if influence should decay to `f` after `h_half` hops, `alpha = 1 - f^(1/h_half)` expresses the same single reach degree of freedom. See [activation-flow.md](../05-context-retrieval/activation-flow.md).
 
 Smaller `alpha` means longer reach and slower convergence. Larger diffusion risks over-smoothing by weakly activating too much of the graph.
 

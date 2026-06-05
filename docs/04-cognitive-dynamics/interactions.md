@@ -40,7 +40,7 @@ Public salience and edge weight are projections of these reservoirs.
 query field Q
   -> seed distribution
   -> activation flow a*
-  -> path current I_ij = a_i * conductance_ij
+  -> path current I_ij = a_i * g_ij   (g_ij = project_conductance(C_ij) * edge_type_factor_ij)
   -> readout sites
   -> optional commit trace
 ```
@@ -70,6 +70,8 @@ The same query can be rerun safely before commit. Commit must validate that the 
 
 ## Derived Deltas
 
+Reinforcement uses a single learning rate `eta = 1 - 0.5^(1/N)`, derived from one target co-activation count `N` as in [conductance.md](conductance.md). The same `eta` drives feedback and conductance updates; `access_gain` is a bounded saturating function of this family. Per-channel rates are an optional later refit of one `N`, not separate constants.
+
 ### `SiteInserted` - Surprise Gate
 
 ```text
@@ -85,7 +87,7 @@ A_after_decay = decay(A_i, now - accessed_at)
 A_next        = A_after_decay + access_gain(readout_work)
 ```
 
-Decay first, reinforce second.
+Decay first, reinforce second. `access_gain` is bounded and saturating, so repeated access cannot drive retained action past its ceiling.
 
 ### `FeedbackReceived` - Rescorla-Wagner
 

@@ -81,15 +81,19 @@ Mechanics should be pure functions where possible. `Engine` orchestrates storage
 ```text
 phi_i       = potential_bias(query_field, site_i)
 a_i         = restart * seed_i + (1 - restart) * sum_j P_ji * a_j
-I_ij        = current(a_i, conductance_ij)
-W_readout_i = accepted_i * a_i * phi_i
-dC_ij       = eta * a_i * a_j * (1 - C_ij)
+I_ij        = current(a_i, conductance_ij, edge_type_factor_ij)
+W_readout_i = accepted_i * a_i * phi_i            # illustrative sketch only
+dC_ij       = eta * flux_ij * (1 - C_ij)
 C_next      = project_conductance(C_ij + dC_ij)
-A_next      = A_i + dV ; dV = alpha * (lambda - sumV)
+A_next      = A_i + dV ; dV = eta_fb * (lambda - sumV)
 s_next      = project_salience(A_next - leakage_i)
 ```
 
-The restart rate is derived from associative reach, not chosen as an arbitrary knob: if influence should decay to `f` after `h_half` hops, use `alpha = 1 - f^(1/h_half)`. Or expose mean reach `L` and set `alpha = 1/(L+1)`.
+The restart rate is derived from associative reach, not chosen as an arbitrary knob: expose mean reach `L` and set `alpha = 1/(L+1)`. (Equivalently, if influence should decay to `f` after `h_half` hops, `alpha = 1 - f^(1/h_half)` is the same single reach degree of freedom.) `alpha` is the only restart knob here; the `eta_fb` in the feedback update above is a distinct quantity (see below).
+
+`W_readout_i` above is an illustrative sketch, not the readout definition. The authoritative readout score is the additive log-odds re-ranking defined in [readout-scoring.md](readout-scoring.md) (`w_a * logit_or_rank(a_i) + w_phi * phi_i + w_s * logit(s_i) - w_z * Z_i + w_scope * scope + w_trust * trust - w_stress * stress`). Where the two differ, defer to [readout-scoring.md](readout-scoring.md).
+
+`I_ij` includes the within-row edge type factor; its definition `I_ij = a_i * project_conductance(C_ij) * edge_type_factor_ij` lives in [activation-flow.md](../05-context-retrieval/activation-flow.md). `dC_ij` here is the unified commit-gated form: the `flux_ij` is the committed-usage flux (`path_used * I_ij` and `co_readout * min(a_i, a_j)`), not a raw `a_i * a_j` product; see [conductance.md](conductance.md) for the gated update and its `(1 - C_ij)` Oja bound. The feedback learning rate `eta_fb` is the Rescorla-Wagner rate `eta = 1 - 0.5^(1/N)` derived from the co-activation target `N` (see [interactions.md](interactions.md)); despite the shared Greek letter in some prose, it is **not** the RWR restart rate `alpha = 1/(L+1)`.
 
 ## Failure Conditions
 

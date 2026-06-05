@@ -42,7 +42,7 @@ Then normalize to an RWR restart distribution:
 seed_i = softmax(phi_i / tau)
 ```
 
-`beta` and `tau` are calibrated priors. They can be fit from accepted readout data.
+`beta_prior = 1` by design: `A_i` is already log prior-odds, so by ACT-R/Bayes odds-additivity it enters `phi_i` with unit coefficient (no calibration). The remaining `beta` feature weights and the softmax temperature `tau` are calibrated priors — one regression object plus one temperature — and can be fit from accepted readout data.
 
 ## Uses
 

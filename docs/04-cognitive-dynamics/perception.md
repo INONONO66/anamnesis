@@ -48,7 +48,7 @@ The old rule "low novelty means reject" is removed. Familiar input reinforces ex
 
 ## Novelty And `theta_sep`
 
-Novelty is the distance from the nearest candidate site. `theta_sep` is calibrated from the embedding encoder, not chosen arbitrarily. Measure the cosine-similarity distribution for distinct sentence pairs and use the high percentile as the separation boundary.
+Novelty is the distance from the nearest candidate site. `theta_sep` is not a free knob: it is derived deterministically from the embedding encoder's distinct-pair similarity distribution. Measure the cosine-similarity distribution for distinct sentence pairs and take the 95th percentile as the separation boundary. Given the fixed 95th-percentile convention, `theta_sep` carries no behavioral freedom; its only input is the encoder distribution, so it recomputes exactly whenever the encoder changes.
 
 ```text
 theta_sep = 1 - q95(similarity_distinct_pairs)
@@ -63,7 +63,7 @@ eps = (embedding_obs - embedding_pred)^T Sigma^-1 (embedding_obs - embedding_pre
 dA_i = k * eps
 ```
 
-`eps` is a computable proxy for Bayesian surprise. Anamnesis does not have an explicit generative model, so literal KL is approximated by precision-weighted embedding error.
+`eps` is a computable proxy for Bayesian surprise: the precision-weighted (Mahalanobis) embedding distance between observation and prediction. Anamnesis does not have an explicit generative model, so literal KL is approximated by precision-weighted embedding error. `k` is the single calibrated scalar that converts this surprise into the initial retained-action charge `dA_i = k * eps`. It is the one magnitude that cannot be derived from theory alone: absent a stored precision matrix `Sigma`, `k` absorbs both units and variance, so it must be declared and calibrated from embedding-encoder statistics and the target initial-charge magnitude.
 
 This avoids the white-snow paradox: high Shannon information that does not change belief receives little charge; inputs far from prior expectation receive more.
 
@@ -72,10 +72,10 @@ This avoids the white-snow paradox: high Shannon information that does not chang
 When novelty is below the separation threshold, route to the nearest site and reinforce it:
 
 ```text
-dA_i = eta(novelty) * (lambda - current_prediction_i)
+dA_i = eta * (lambda - current_prediction_i)
 ```
 
-The update has diminishing returns because it is proportional to prediction error. `eta` can increase with novelty and should be calibrated from observed learning behavior.
+The update has diminishing returns because it is proportional to the prediction error `(lambda - current_prediction_i)`, not because of a novelty-varying rate. `eta` is the single learning rate `eta = 1 - 0.5^(1/N)` derived from the co-activation target `N` (see [interactions.md](interactions.md)); it is not a function of novelty.
 
 ## Duplicate Handling
 

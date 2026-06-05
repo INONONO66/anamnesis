@@ -30,7 +30,7 @@ P(i, j) = g_ij / sum_k g_ik
 I_ij = a_i * g_ij
 ```
 
-Row normalization produces fan effect: a source with many outgoing edges contributes less per edge. Edge type factors are relative within a row; they do not create unbounded absolute activation.
+Path current `I_ij = a_i * g_ij` carries the full edge conductance, including `edge_type_factor_ij`. Row normalization produces fan effect: a source with many outgoing edges contributes less per edge. Edge type factors are relative within a row; they do not create unbounded absolute activation.
 
 ## Iteration
 
@@ -76,6 +76,8 @@ flowchart LR
 Contradictory evidence is not added or subtracted here. It branches into frustration.
 
 ## Edge Factors
+
+`edge_type_factor_ij` is a within-row relative conductance multiplier per edge type. At cold start it is a declared ordinal prior with the ordering `Reason` > `ReinforcedBy` > `Semantic` > `Temporal` > `RejectedAlternative`. Once per-type co-activation data exists, the numeric factors are refit from per-type mean log likelihood ratio (`C_ij`), normalized within row so `P` stays row-stochastic; they then cease to be free.
 
 | Edge Type | Effect |
 |---|---|

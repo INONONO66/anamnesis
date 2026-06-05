@@ -33,7 +33,7 @@ A_i' = decay(A_i, delta_days, node_type, d)
 s_i' = project_salience(A_i')
 ```
 
-Node type supplies calibrated priors for decay rate and floor. Debug lifecycle nodes may be inert. Core identity may be protected.
+`d` is the single free decay prior; it sets the entire `decay()` curve. Node type does not supply a separate decay knob: per-tier leak is a `node_type` policy multiplier on `d` (Core near zero, Working below one, Episodic one, Archive excluded), not an independent calibrated rate. Debug lifecycle nodes may be inert. Core identity may be protected.
 
 ## Time Unit
 
@@ -47,7 +47,7 @@ Between-query dissipation uses days unless explicitly stated otherwise. Query-lo
 log P(reaccess after t) = c - d * log(t)
 ```
 
-Common ACT-R defaults are acceptable priors, but production graphs should fit `d` from observed access logs.
+Common ACT-R defaults are acceptable priors, but production graphs should fit `d` from observed access logs. `d` is the only free decay parameter: there is no separate decay multiplier knob. Forgetting lives in the retained-action dynamics governed by `d`, and the per-tier leak follows from `d` together with the `node_type` policy multiplier.
 
 ## Readout Work: Decay First, Reinforce Second
 

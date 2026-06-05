@@ -28,6 +28,36 @@ decay exponent d: fit from re-access hazard or ACT-R prior
 
 The docs must not present these values as universal laws. Refit them when graph topology, agent behavior, or embedding geometry changes.
 
+### Irreducible Priors
+
+The free-prior set is minimal. These are the only declared behavioral priors; everything else derives from them.
+
+Free behavioral priors:
+
+- `d` — decay exponent (power-law base-level aging).
+- `L` — mean associative reach (hops influence travels before negligible).
+- `N` — target co-activation count to reach the conductance saturation target.
+- `k` — surprise-to-charge gain (Bayesian surprise into initial retained-action charge).
+- `beta_coupling` — cold-start pairwise coupling regression vector over NPMI features.
+- `beta_phi` — unary potential-bias feature-weight vector (`beta_prior` fixed `= 1` by design, for odds additivity).
+- `w_readout` — readout re-ranking coefficient object.
+- `edge_type_factor` — ordinal per-type within-row conductance prior.
+
+Declared density/temperature knobs: `tau` (seed softmax temperature), `conductance_threshold` (cold-start edge density), `eta_leak` (idle-edge leak rate), `b` (activation-budget threshold, `= 0` by convention).
+
+Numerical guards (not behavioral): `LOGIT_BACKFILL_EPS`, `C_MAX`, `rwr_tolerance`.
+
+Everything else derives:
+
+- `alpha = 1 / (L + 1)` from `L`.
+- every `eta = 1 - 0.5^(1/N)` from `N`.
+- surprise charge `dA_i = k * eps` from `k`.
+- projection salience/weight `= logistic` of the reservoirs.
+- `theta_sep = 1 - q95(distinct-pair similarity)` from the encoder.
+- `coupling_seed` from `beta_coupling`.
+- `phi_i` / `seed_i` from `beta_phi`.
+- `readout_score` from `w_readout`.
+
 ## Physics-Borrowing Guardrails
 
 | Guardrail | Rule |
