@@ -102,6 +102,40 @@ pub fn classify_additive(single_a: f64, single_b: f64, both: f64) -> AdditiveRes
     }
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LogFit {
+    /// R² of the ACT-R log-linear model `y = m*ln(x) + c` (power-law base-level).
+    pub r2_log: f64,
+    /// R² of the linear-in-time model `y = m*x + c` (exponential-style decay).
+    pub r2_linear: f64,
+    /// Slope of the log-linear fit (≈ -d for ACT-R base-level decay).
+    pub slope_log: f64,
+    pub pred_log: Vec<f64>,
+    pub pred_linear: Vec<f64>,
+}
+
+/// Fit a decaying reservoir against the **ACT-R shifted-log power-law** form
+/// (linear in `ln(1+t)` — the engine's `decay(A,Δt) = A - d·ln(1+Δt)`, the
+/// signature of power-law forgetting) versus a linear-in-time form
+/// (`A = c - b*t`, the shape an exponential/linear decay would take). Power-law
+/// dissipation should fit the shifted-log form far better. Requires `xs >= 0`.
+pub fn fit_log_vs_linear(xs: &[f64], ys: &[f64]) -> LogFit {
+    let lx: Vec<f64> = xs.iter().map(|x| (1.0 + x).ln()).collect();
+    let (m_log, c_log) = linreg(&lx, ys);
+    let pred_log: Vec<f64> = lx.iter().map(|l| m_log * l + c_log).collect();
+
+    let (m_lin, c_lin) = linreg(xs, ys);
+    let pred_linear: Vec<f64> = xs.iter().map(|x| m_lin * x + c_lin).collect();
+
+    LogFit {
+        r2_log: r2(ys, &pred_log),
+        r2_linear: r2(ys, &pred_linear),
+        slope_log: m_log,
+        pred_log,
+        pred_linear,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -145,5 +179,21 @@ mod tests {
         assert!(r.additive, "{r:?}");
         let r2 = classify_additive(0.2, 0.25, 0.26); // ~max
         assert!(!r2.additive, "{r2:?}");
+    }
+
+    #[test]
+    fn log_linear_prefers_log_on_actr_data() {
+        // A = 5 - 0.5*ln(1+t): the engine's shifted-log power-law decay shape.
+        let t: [f64; 6] = [0.02, 0.1, 1.0, 2.0, 6.0, 31.0];
+        let y: Vec<f64> = t.iter().map(|t| 5.0 - 0.5 * (1.0 + t).ln()).collect();
+        let f = fit_log_vs_linear(&t, &y);
+        assert!(f.r2_log > 0.999, "r2_log {}", f.r2_log);
+        assert!(
+            f.r2_log > f.r2_linear,
+            "log {} should beat linear {}",
+            f.r2_log,
+            f.r2_linear
+        );
+        assert!((f.slope_log + 0.5).abs() < 1e-6, "slope {}", f.slope_log);
     }
 }

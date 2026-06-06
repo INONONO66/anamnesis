@@ -9,31 +9,26 @@ fn assert_paradigm(p: impl Paradigm) {
 }
 
 #[test]
-#[ignore = "implemented in Phase 2"]
 fn forgetting_is_power_law() {
     assert_paradigm(fidelity_common::paradigms::forgetting::Forgetting);
 }
 
 #[test]
-#[ignore = "implemented in Phase 2"]
 fn fan_effect_decreases_activation() {
     assert_paradigm(fidelity_common::paradigms::fan::FanEffect);
 }
 
 #[test]
-#[ignore = "implemented in Phase 2"]
 fn priming_is_additive() {
     assert_paradigm(fidelity_common::paradigms::priming::Priming);
 }
 
 #[test]
-#[ignore = "implemented in Phase 2"]
 fn interference_surfaces_frustration() {
     assert_paradigm(fidelity_common::paradigms::interference::Interference);
 }
 
 #[test]
-#[ignore = "implemented in Phase 2"]
 fn testing_effect_beats_restudy() {
     assert_paradigm(fidelity_common::paradigms::testing_effect::TestingEffect);
 }
