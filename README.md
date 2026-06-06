@@ -3,8 +3,8 @@
 </p>
 
 <p align="center">
-  <strong>Cognitive dynamics engine for LLMs</strong><br>
-  Knowledge with attraction, gravity, perception, and forgetting.
+  <strong>Cognitive memory engine for LLMs</strong><br>
+  A conductive network with associative recall, power-law forgetting, and contradiction held as tension.
 </p>
 
 <p align="center">
@@ -38,17 +38,19 @@ None provide what a long-running agent actually needs: **fragment-level knowledg
 
 Anamnesis gives LLM agents **associative memory**. It builds a graph of knowledge fragments connected by typed relationships — not summaries, not embeddings, not flat text.
 
-**Not a database.** A graph engine with cognitive dynamics:
+**Not a database.** A conductive network with cognitive dynamics (the formal spec lives in [`docs/`](docs/README.md)):
 
 | Mechanic | What It Does |
 |:---------|:-------------|
-| **Attraction** | Related fragments cluster together (embedding similarity, entity overlap) |
-| **Gravity** | Important nodes (high centrality) attract new knowledge naturally |
-| **Perception** | Input gating — not every observation enters the graph (novelty, confidence, budget) |
-| **Forgetting** | Salience decays over time; access reinforces. Unused knowledge fades |
-| **Spreading Activation** | Query from a seed, activation spreads through edges with decay, returns subgraph within token budget |
+| **Associative recall** | Additive directed **random-walk-with-restart (RWR)** spreads activation from query seeds along typed edges; converging evidence sums (never max). |
+| **Conductance** | Edges hold an associative-strength reservoir (a log-likelihood-ratio); committed co-use strengthens links via an Oja-bounded Hebbian update. |
+| **Forgetting** | Memory strength is a reservoir that dissipates with a **power-law** (ACT-R) curve on `tick()`; committed use reinforces it. Unused knowledge fades — it is never deleted. |
+| **Perception** | **Surprise-gated** input: an observation charges memory in proportion to prediction error, then novelty/confidence/budget decide whether it allocates a new site or routes to the nearest one. |
+| **Frustration** | Contradictions are **excluded from propagation** and surfaced as tension (`sigma_ij`), never overwritten — both sides keep their provenance. |
 
-One cue activates related fragments, which activate further fragments — reconstructing understanding from partial cues the way human recall works. Keyword and embedding search help find the first cue; graph physics decides what comes back with it.
+One cue activates related fragments, which activate further fragments — reconstructing understanding from partial cues the way human recall works. Keyword and embedding search find the first cue; the conductive network decides what comes back with it.
+
+> **Reservoirs vs projections** ([ADR-0002](docs/adr/0002-reservoir-projection-state.md)): the authoritative state is unbounded log-odds reservoirs (`retained_action` per node, `conductance` per edge). The public `salience` / `weight` in `[0, 1]` are their bounded `logistic` projections, written only by `commit`/`tick` — read-only retrieval never mutates them.
 
 ### How It Compares
 
@@ -63,9 +65,21 @@ One cue activates related fragments, which activate further fragments — recons
 
 **vs RAG pipelines** — Anamnesis makes zero LLM calls in its core. Retrieval is deterministic graph traversal, not embedding similarity lookup. No embedding drift, no inference cost on every query.
 
-**vs LLM context documents** — Context docs require manual compilation, suffer brevity bias on every rewrite, and have no mechanism for forgetting or contradiction detection. Anamnesis handles all three automatically: salience decay removes stale knowledge, spreading activation surfaces relevant fragments, and `Contradicts` edges flag tensions in query results.
+**vs LLM context documents** — Context docs require manual compilation, suffer brevity bias on every rewrite, and have no mechanism for forgetting or contradiction detection. Anamnesis handles all three automatically: power-law dissipation removes stale knowledge, spreading activation surfaces relevant fragments, and `Contradicts` edges surface tensions in query results.
 
 **vs vector-only stores** — Embedding similarity finds *similar* fragments. Spreading activation finds *related* fragments — following typed reasoning chains (causes, contradictions, decisions, confirmations) that embed alone cannot represent. Embeddings are useful cues, but they are not the memory itself.
+
+### Engine vs Consumer
+
+Anamnesis is a **library — a memory kernel**, not a service. It owns the *physics of memory* (storage, spreading activation, dissipation, reinforcement, frustration, temporal validity) and deliberately leaves the *sensory/motor* layer to you. Unlike hosted memory APIs (Mem0, Zep, Supermemory) that bundle extraction + embeddings + serving, Anamnesis stays a deterministic, local-first, embeddable core that you drive.
+
+| The engine provides | You implement (or wrap) |
+|:--|:--|
+| Graph + reservoirs, RWR retrieval, readout, packaging | **Encoding**: raw input → `Observation` (type, entity tags, origin, timestamp) — usually via an LLM |
+| Power-law dissipation, commit-gated reinforcement | **Embeddings**: the `EmbeddingProvider` (node *and* query vectors are caller-supplied) |
+| Frustration, `fact_at` bitemporal validity | **Edge strategy**: provide embeddings (auto-coupling) or call `link()` |
+| Snapshots, SQLite storage, health/invariants | **Queries & commit**: when to query, and when use is *committed* (reinforcement) |
+| Pure mechanics, no LLM calls, no background tasks | **`tick(now)` scheduling**, **LLM answering**, **serving** (e.g. an MCP bridge) |
 
 ## Quick Start
 
@@ -75,10 +89,10 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-anamnesis = "0.4"
+anamnesis = "0.5"
 
 # Optional: local embedding provider (downloads model on first use, ~100-500 MB)
-# anamnesis = { version = "0.4", features = ["embed"] }
+# anamnesis = { version = "0.5", features = ["embed"] }
 ```
 
 ```rust
@@ -118,7 +132,6 @@ let result = engine.ingest(Observation {
 let ids = match result {
     IngestResult::Created(ids) => ids,
     IngestResult::Reinforced { existing_id, .. } => vec![existing_id],
-    IngestResult::CreatedWithConflict { node_ids, .. } => node_ids,
 };
 
 let result2 = engine.ingest(Observation {
@@ -144,13 +157,13 @@ let result2 = engine.ingest(Observation {
 let ids2 = match result2 {
     IngestResult::Created(ids) => ids,
     IngestResult::Reinforced { existing_id, .. } => vec![existing_id],
-    IngestResult::CreatedWithConflict { node_ids, .. } => node_ids,
 };
 
-// Connect related knowledge
-engine.link(ids[0], ids2[0], EdgeType::Semantic, 0.78).unwrap();
+// Connect related knowledge (conductance is seeded from the cold-start coupling
+// prior — edge weight is a projection, never passed in)
+engine.link(ids[0], ids2[0], EdgeType::Semantic).unwrap();
 
-// Reinforce on access (lazy decay + salience boost)
+// Reinforce on access (lazy power-law dissipation + reservoir reinforcement)
 engine.touch(ids[0], Timestamp::now()).unwrap();
 ```
 
@@ -193,7 +206,7 @@ Anamnesis preserves **individual conversation turns as nodes**. Each retains ori
 
 <br>
 
-Identity is not a runtime behavior prompt. It is represented by high-mass identity nodes inside the same graph and acts as a retrieval prior:
+Identity is not a runtime behavior prompt. It is represented by high-salience identity nodes inside the same graph and acts as a retrieval prior:
 
 | Type | Role | Dynamics |
 |:-----|:-----|:---------|
@@ -257,11 +270,11 @@ A node at salience 0.03 is invisible to queries but **still exists** in the grap
 
 <br>
 
-Tiers are **salience ranges**, not separate stores. Gravity and forgetting naturally distribute nodes:
+Tiers are **salience ranges**, not separate stores. Reinforcement and dissipation naturally distribute nodes:
 
 | Tier | Salience | Role |
 |:-----|:---------|:-----|
-| Core Memory | > 0.8 | Project conventions, active decisions. Maintained by gravity. |
+| Core Memory | > 0.8 | Project conventions, active decisions. Kept high by repeated committed use. |
 | Working Knowledge | 0.4 – 0.8 | Current task learnings, session-scoped observations. |
 | Accumulated Wisdom | 0.1 – 0.4 | Cross-session knowledge. Surfaced by spreading activation. |
 | Archive | < 0.1 | Decayed nodes. Invisible, but reactivatable via `touch()`. |
@@ -277,11 +290,12 @@ Beyond structural edges (semantic, temporal, causal), Anamnesis preserves decisi
 
 | Edge Type | Purpose |
 |:----------|:--------|
-| `REASON` | Why a decision was made |
-| `REJECTED_ALTERNATIVE` | Option considered and discarded |
-| `SUPERSEDES` | Replaces outdated knowledge |
-| `REINFORCED_BY` | Confirmed by repeated experience |
-| `CONSOLIDATED_FROM` | Derived from multiple fragments |
+| `Reason` | Why a decision was made |
+| `RejectedAlternative` | Option considered and discarded |
+| `Supersedes` | Replaces outdated knowledge (sets validity windows) |
+| `ReinforcedBy` | Confirmed by repeated experience |
+| `ConsolidatedFrom` | Derived from multiple fragments |
+| `Contradicts` | Conflict — excluded from propagation, surfaced as frustration |
 
 When a new agent session starts, it inherits not rules but *judgment*.
 
@@ -291,17 +305,20 @@ When a new agent session starts, it inherits not rules but *judgment*.
 
 ```
 src/
-├── graph/          Node, Edge, Graph — core data structures
-├── mechanics/      Pure scoring functions, no side effects
-│   ├── attraction     Cosine similarity, auto-linking
-│   ├── gravity        PageRank-like centrality scoring
-│   ├── perception     Novelty, confidence, and budget gating
-│   └── forgetting     Exponential/ACT-R decay + reinforcement
-├── query/          Spreading activation, k-hop neighborhood, unified search
+├── graph/          Node, Edge, Origin, scope, time, types — data + reservoirs
+├── mechanics/      Pure cognitive functions, no side effects
+│   ├── perception     Surprise gating — novelty, confidence, budget
+│   ├── attraction     Cosine/entity coupling for cold-start edge creation
+│   ├── interactions   Dissipation, Rescorla-Wagner, Oja-bounded Hebbian updates
+│   ├── frustration    Contradiction stress (sigma_ij), surfaced not deleted
+│   ├── energy         Query-local energy objective E(S | Q)
+│   ├── projection     Reservoir ↔ bounded projection (logistic / logit)
+│   └── priors         Calibrated irreducible priors (d, L, N, k, …)
+├── query/          Additive directed RWR, potential field, 7-term readout, search
 ├── storage/        StorageAdapter trait + SqliteStorage
 ├── embedding/      EmbeddingProvider trait + optional FastEmbedProvider
 ├── snapshot/       Clone-based snapshot storage
-└── api/            Engine — public interface
+└── api/            Engine — public interface (ingest, query, commit, tick, …)
 ```
 
 <details>
@@ -311,38 +328,26 @@ src/
 
 ```
 Observation
-  │
+  │  surprise-gated perception (novelty / confidence / budget)
   ▼
-Perception ── novelty / confidence / budget ──► reject or accept
-  │
+Ingest ── allocate new site OR route to nearest ──► Graph (reservoirs)
+  │  cold-start coupling may seed a Semantic edge (embedding/entity above threshold)
   ▼
-Ingestion ── create node ──► Graph
-  │
+Query ── additive directed RWR from seeds ──► 7-term readout ──► budget-bounded ContextPackage
+  │       (Contradicts excluded from propagation, surfaced as frustration)
   ▼
-Attraction ── similarity scoring ──► edge creation / dedup reinforcement
-  │
-  ▼
-Gravity ── centrality scoring ──► hub node identification
+Commit ── the only reservoir-mutation path besides tick() ──►
+          power-law reinforcement + Oja-bounded Hebbian edge strengthening
 
          ┌────────────────────────────────────┐
-         │  tick() — periodic                  │
-         │  decay saliences, prune if needed   │
-         └────────────────────────────────────┘
-
-Query ── spreading activation ──► budget-constrained ContextPackage
-  │
-  ▼
-Touch ── reinforce on access ──► salience spike + reactivation
-
-         ┌────────────────────────────────────┐
-         │  crystallize() — post-session       │
-         │  ConsolidatedFrom edges, salience   │
-         │  promotion from source fragments    │
+         │  tick(now) — periodic               │
+         │  power-law dissipation + edge       │
+         │  leakage; flush storage             │
          └────────────────────────────────────┘
 
          ┌────────────────────────────────────┐
-         │  reflect_batch() — cross-agent      │
-         │  Entity edges via entity tag match  │
+         │  crystallize() / reflect_batch()    │
+         │  synthesis + cross-agent Entity links│
          └────────────────────────────────────┘
 ```
 
@@ -368,7 +373,7 @@ impl Engine {
     // Core operations
     pub fn ingest(&mut self, observation: Observation) -> Result<IngestResult, Error>;
     pub fn crystallize(&mut self, request: CrystallizeRequest) -> Result<CrystallizeResult, Error>;
-    pub fn link(&mut self, from: NodeId, to: NodeId, t: EdgeType, w: f64) -> Result<EdgeId, Error>;
+    pub fn link(&mut self, from: NodeId, to: NodeId, edge_type: EdgeType) -> Result<EdgeId, Error>;
     pub fn touch(&mut self, node_id: NodeId, now: Timestamp) -> Result<(), Error>;
     pub fn set_tier(&mut self, node_id: NodeId, tier: MemoryTier) -> Result<(), Error>;
     pub fn get_tier(&self, node_id: NodeId) -> Result<MemoryTier, Error>;
@@ -391,11 +396,14 @@ impl Engine {
     // Cross-agent
     pub fn reflect_batch(&mut self, sessions: &[SessionSummary]) -> Result<ReflectReport, Error>;
 
-    // Deprecated — use EngineConfig::dedup_threshold in ingest() instead
-    #[deprecated(since = "0.3.0")]
-    pub fn merge_candidates(&self, threshold: f64) -> Result<Vec<MergePair>, Error>;
-    #[deprecated(since = "0.3.0")]
-    pub fn auto_merge(&mut self, threshold: f64) -> Result<MergeLog, Error>;
+    // Commit — the only reservoir-mutation path besides tick(): reinforces the
+    // memories actually used and strengthens co-used edges (commit-gated Hebbian).
+    pub fn commit(&mut self, package: ContextPackage, feedback: Option<ConfidenceLevel>)
+        -> Result<(ContextPackage, CommitReport), Error>;
+
+    // Peers
+    pub fn register_peer(&mut self, name: impl Into<String>, trust_level: TrustLevel)
+        -> Result<PeerId, Error>;
 }
 ```
 
@@ -521,25 +529,25 @@ CI also runs the MSRV check (`cargo check --all-targets --all-features` on Rust 
 
 ## Status
 
-**v0.4.0** — SqliteStorage replaces InMemoryStorage as the sole backend; full cognitive engine with debug lifecycle, snapshots, embedding provider, and unified search.
+**v0.5.0** — migrated to the **conductive-network** model: additive directed RWR, log-odds reservoirs (`retained_action` / `conductance`) with bounded projections, power-law dissipation, commit-gated Hebbian learning, and frustration. Breaking redesign vs 0.4 (force/gravity/BFS/Hopfield models removed); the [techspec](docs/README.md) is the source of truth.
 
 | Layer | Status | Notes |
 |:------|:-------|:------|
 | Graph (Node, Edge, CRUD) | ✅ | SQLite-backed storage with SoA hot fields and write-behind dirty tracking |
 | SQLite storage | ✅ | `SqliteStorage` with FTS5 full-text search, adjacency index, ID recycling, secondary indexes |
 | Engine API | ✅ | All method signatures finalized |
-| Attraction | ✅ | Wired into `ingest()` — auto-linking with type affinity |
-| Gravity | ✅ | Mass computation wired into `ingest()` and `query()` |
-| Perception | ✅ | Gating wired into `ingest()` — novelty, confidence, budget |
-| Forgetting | ✅ | Lazy decay in `touch()`, batch decay in `tick()` — Exponential and ACT-R PowerLaw |
-| Spreading activation | ✅ | Priority-queue BFS and Random Walk with Restart |
-| Repulsion | ✅ | Contradicts edges apply damping during query |
+| Cold-start coupling | ✅ | Embedding/entity/scope/type-weighted seed creates `Semantic` edges in `ingest()` |
+| Conductance learning | ✅ | Commit-gated Oja-bounded Hebbian edge strengthening |
+| Perception | ✅ | Surprise-gated, wired into `ingest()` — novelty, confidence, budget |
+| Forgetting (dissipation) | ✅ | Power-law (ACT-R) reservoir decay in `tick()`; lazy decay in `touch()` |
+| Activation flow | ✅ | Additive directed random-walk-with-restart (RWR); BFS/force models removed |
+| Frustration | ✅ | `Contradicts` excluded from propagation, surfaced as tension (`sigma_ij`) |
 | Identity prior | ✅ | Top-3 identity nodes bias query activation |
 | Scope weighting | ✅ | Hierarchical scope-path scoring with entity overlap bonus |
 | ContextPackage | ✅ | Structured output: identity/knowledge/memories/tensions |
 | Agent tension | ✅ | Contradiction tension measurement in query results |
 | Multi-resolution content (L0/L1/L2) | ✅ | Token budget controls fragment detail level |
-| Reasoning edge types | ✅ | 15 edge types with directional kappa multipliers |
+| Typed edges | ✅ | Edge types with directional type factors (`Contradicts` excluded from flow) |
 | Embedding persistence | ✅ | Stored on Node, used for similarity operations |
 | Origin attribution | ✅ | agent_id, session_id, scope, confidence |
 | Non-Associative query modes | ✅ | TypeFiltered, Neighborhood, Temporal, List — all implemented |
@@ -553,9 +561,9 @@ CI also runs the MSRV check (`cargo check --all-targets --all-features` on Rust 
 | EmbeddingProvider trait | ✅ | Synchronous, Send + Sync; `embed()`, `dimensions()`, `model_name()`, `widen()` |
 | FastEmbedProvider | ✅ | Behind `feature = "embed"`; BAAI/bge-base-en-v1.5, 768 dims |
 | Memory tier control | ✅ | `set_tier()` / `get_tier()` — Core tier protected from decay |
-| Hopfield energy model | ✅ | Pattern-completion scoring behind `EnergyModel::Hopfield` |
-| `merge_candidates()` / `auto_merge()` | ⚠️ | Deprecated since 0.3.0; use `EngineConfig::dedup_threshold` |
-| Social reinforcement scoring | ✅ | Multi-agent corroboration scoring and consumer feedback salience updates |
+| Energy objective | ✅ | Query-local `E(S \| Q)` with symmetric-coupling caveat (Hopfield/force models removed) |
+| Commit pipeline | ✅ | `commit()` — reinforcement + Hebbian learning; the only reservoir-mutation path besides `tick()` |
+| Social reinforcement scoring | ✅ | Multi-agent corroboration scoring and consumer feedback reservoir updates |
 
 ## References
 
