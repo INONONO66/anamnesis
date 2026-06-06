@@ -76,7 +76,7 @@ Edges connect sites and carry typed relationships.
 | `Supersedes` | Replaces older knowledge |
 | `RejectedAlternative` | Considered and discarded option |
 | `Supports` | Positive evidential support for a hypothesis |
-| `Refutes` | Refuting evidence for a hypothesis; a positive conductive path that surfaces counter-evidence (inhibition is modeled by `Contradicts`/frustration, never negative conductance) |
+| `Refutes` | Refuting evidence for a hypothesis; a positive conductive path that surfaces counter-evidence (inhibition is modeled by `Contradicts`/frustration, never negative conductance). Surfacing refuting evidence raises the hypothesis's *retrievability*, not its credence — recall co-activates a claim with its rebuttal; acceptance is decided only by the debug lifecycle (`confirm`/`reject`), a channel separate from activation |
 | `BelongsTo` | Debug-session membership |
 | `Contradicts` | Constraint edge excluded from propagation and surfaced as frustration |
 | `Custom(String)` | Consumer-defined relationship |
