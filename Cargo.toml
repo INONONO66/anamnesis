@@ -88,6 +88,11 @@ required-features = ["embed"]
 name = "query_spreading"
 harness = false
 
+[[bench]]
+name = "fidelity_report"
+path = "benches/fidelity_report.rs"
+harness = false
+
 [[test]]
 name = "eval_golden"
 path = "benches/eval/golden.rs"
