@@ -7,7 +7,7 @@ Anamnesis separates record time, fact time, and access time. A memory can be rec
 | Axis | Fields | Meaning |
 |---|---|---|
 | Record time | `created_at`, `updated_at` | When the engine stored or modified the site/edge |
-| Access time | `accessed_at` | Last committed access used for dissipation and reinforcement |
+| Access time | `accessed_at`, `access_history` | Last committed access plus the bounded 32-trace window that is the persistent substrate of base-level `B_i` |
 | Fact time | `valid_from`, `valid_until` | When the content is true or applicable |
 | Query time | `as_of` | Time filter requested by `fact_at` or temporal query |
 
@@ -27,25 +27,36 @@ A bounded interval must be well-formed: `valid_from < valid_until`. Because the 
 
 ## Access History
 
-Access is a committed interaction. It is not updated by read-only retrieval. The caller must commit that a site was actually used before `accessed_at` and retained action move.
+Access is a committed interaction. It is not updated by read-only retrieval. The caller must commit that a site was actually used before `accessed_at` and the access history move.
 
-Access history drives:
+`access_history` is a bounded 32-trace window — a creation trace plus each committed access — and it is the PERSISTENT substrate of base-level activation:
 
-- lazy dissipation,
-- reinforcement on use,
+```text
+B_i = ln( sum_j (now - t_j)^(-d*m_type) )
+```
+
+The `t_j` are the traces in this window; `m_type` is the `node_type` policy multiplier on the single decay prior `d`. `B_i` is computed on demand from the trace history; it is NOT maintained by incremental scalar decay. Because the sum ages every prior trace to `now` before adding any new trace, the multi-trace form reproduces power-law forgetting AND the testing and spacing effects.
+
+The persistent access-history window drives:
+
+- base-level forgetting and use-driven reinforcement (`B_i`),
 - recency-aware packaging,
 - stale-site observability.
 
+The evidence prior `P_i` is a separate persistent prior (encoding surprise, feedback / social reinforcement, peer trust). It does NOT undergo base-level (use-driven) decay; it is a decay-exempt evidence offset. Public salience is the bounded logistic projection of the sum, `s_i = logistic(B_i + P_i)`.
+
 ## Tick And Access Interactions
 
-`tick(now)` applies batch dissipation. `touch(node_id, now)` applies lazy dissipation first, then access reinforcement. The ordering is invariant:
+`tick(now)` ages base-level activation by recomputing `B_i` from the access-history window at the new `now` (the evidence prior `P_i` is not use-decayed). `touch(node_id, now)` appends a fresh trace stamped at `now` into the window.
+
+Decay-first ordering is INTRINSIC. Appending a now-stamped trace into a current-time-aged sum means `B_i` always ages prior traces to `now` before adding the new one — so there is no separate decay-then-reinforce scalar step and no `reinforce(A, work)` function:
 
 ```text
-decay first
-then reinforce
+B_i = ln( sum_j (now - t_j)^(-d*m_type) )   // existing t_j already aged to now
+        append a fresh trace t = now         // contributes (now - now + epsilon)^... 
 ```
 
-This prevents stale sites from receiving a full reinforcement boost without paying accumulated leakage.
+This intrinsically prevents stale sites from receiving a full reinforcement boost without paying accumulated leakage: the old traces are evaluated at the current `now`, so their decayed contribution is already reflected before the new trace is added.
 
 ## Time Units
 
@@ -57,8 +68,9 @@ Core formulas use days for long-horizon memory decay unless a document explicitl
 
 ## Design Invariants
 
-- Query-time activation is fast transient state; dissipation is slow between-query state.
+- Query-time activation is fast transient state; base-level aging is slow between-query state.
 - Record time, fact time, and access time remain distinct.
-- Access timestamps update only through committed interactions.
+- Access timestamps and the access-history window update only through committed interactions.
+- The access-history window (bounded to 32 traces) is the persistent substrate of `B_i`; `B_i` is computed from it, never maintained as an incremental scalar.
 - Time filtering applies before readout packaging.
 - Missing validity bounds are explicit unbounded intervals, not unknown errors.

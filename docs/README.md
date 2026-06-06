@@ -14,7 +14,7 @@ These documents are not a code status table or an audit log. Each chapter descri
 - **The theory is spreading activation.** Cues activate related memories and spread through associations. Conductance is associative strength (`log-LR`); the conductive-network frame is the representation, not a separate theory.
 - **Retrieval is perturbation.** A query imposes a semantic potential field on the graph; retrieval is the resulting flow and readout.
 - **Use leaves work behind.** Only fragments and paths actually consumed as context are integrated as committed work, lowering impedance for future retrieval.
-- **Forgetting is leakage.** Unused sites are not deleted. Their retained action falls through leakage and dissipation.
+- **Forgetting is multi-trace base-level decay.** Unused sites are not deleted. Their base-level activation `B_i = ln( Σ_j (now − t_j)^(−d·m_type) )` falls as access traces age (power-law), rather than through a scalar leak; a committed access appends a fresh trace and lifts it back up.
 - **Contradiction is frustration.** Conflicting knowledge is preserved as constraint stress and surfaced in context instead of being hidden or erased.
 - **Scope and origin are required.** Every site carries agent, session, scope, and confidence.
 - **Storage is swappable.** The public engine runs over a storage trait. SQLite is the default adapter.

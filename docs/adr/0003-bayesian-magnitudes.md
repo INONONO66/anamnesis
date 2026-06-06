@@ -13,10 +13,12 @@ Cognitive memory systems often introduce constants and weights because they feel
 Use odds-form Bayes as the unit discipline:
 
 ```text
-retained action A_i = log prior need-odds
-conductance C_ij    = log likelihood ratio
-posterior           = prior + sum evidence
+node strength A_i = B_i + P_i = log prior need-odds
+conductance C_ij  = log likelihood ratio
+posterior         = prior + sum evidence
 ```
+
+Node strength decomposes: `B_i` is the multi-trace ACT-R base-level term (use-driven, owns forgetting) and `P_i` is the decay-exempt evidence prior. Both read in odds units.
 
 Every persistent delta must be traceable to one of:
 
@@ -32,7 +34,7 @@ The engine must identify whether a constant is derived or calibrated. It must no
 
 | Quantity | Source |
 |---|---|
-| initial retained action | precision-weighted surprise |
+| initial evidence prior `P_i` | precision-weighted surprise |
 | route reinforcement | Rescorla-Wagner prediction error |
 | conductance prior | feature PMI / calibrated regression |
 | conductance update | co-activation flux with Oja bound |

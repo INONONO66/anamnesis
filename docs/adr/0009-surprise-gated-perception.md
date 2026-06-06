@@ -16,11 +16,11 @@ Separate rejection from routing:
 - Allocate a new site when novelty exceeds the separation threshold.
 - Route familiar observations to an existing site and reinforce it.
 
-For allocated sites, initial retained action is surprise-gated:
+For allocated sites, the initial evidence prior `P_i` is surprise-gated:
 
 ```text
 eps = (embedding_obs - embedding_pred)^T Sigma^-1 (embedding_obs - embedding_pred)
-dA_i = k * eps
+P_i_init = k * eps
 ```
 
 `eps` is a computable proxy for Bayesian surprise. It measures how much the observation moves the graph's expectation.
@@ -30,9 +30,10 @@ dA_i = k * eps
 Benefits:
 
 - Familiar useful input reinforces instead of disappearing.
-- Noisy or redundant fragments receive little initial charge.
-- Belief-changing input receives stronger initial retained action.
-- Perception aligns with later retained-action dynamics.
+- Noisy or redundant fragments receive a small initial evidence prior `P_i`.
+- Belief-changing input receives a stronger initial evidence prior `P_i`.
+- Because `P_i` is a decay-exempt evidence offset (it does not undergo base-level use-driven decay), encoding surprise persists as a stable prior rather than bleeding away with the base-level term `B_i`.
+- Perception aligns with the `A_i = B_i + P_i` decomposition: allocation also stamps a creation trace that seeds `B_i`.
 
 Tradeoffs:
 
@@ -52,4 +53,4 @@ Rejected. It cannot distinguish noise from meaningful surprise.
 
 ### Let caller choose initial salience
 
-Rejected. It bypasses reservoir/projection invariants.
+Rejected. It bypasses the `A_i = B_i + P_i` decomposition and the logistic projection `s_i = logistic(B_i + P_i)`.

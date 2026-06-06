@@ -8,7 +8,7 @@ This chapter fixes what Anamnesis is responsible for and what it deliberately le
 |---|---|---|
 | G1 | Typed conductive graph | Sites and edges represent knowledge type, origin, time, scope, and conductance |
 | G2 | Perception gate | Observations branch into new site allocation, duplicate-work integration, or rejection |
-| G3 | Retained-action dynamics | Readout work and time interactions operate on the same reservoir |
+| G3 | Retained-action dynamics | Readout and time interactions act on the multi-trace base level `B_i` (committed access appends a trace; aging is power-law over the trace history), while feedback and social reinforcement update a separate non-decaying evidence prior `P_i` |
 | G4 | Associative retrieval | Text, vector, and activation-flow results merge into one context package |
 | G5 | Contradiction visibility | Conflicting relations are returned as frustration/tension instead of hidden |
 | G6 | Scoped memory | Session, project, and universal scopes affect retrieval and promotion |

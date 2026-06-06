@@ -25,8 +25,8 @@ Trust is a calibrated evidence signal, not an authorization decision.
 | source confidence | Initial weight for observation admission |
 | corroboration | Raises trust and may strengthen entity/conductance links |
 | contradiction | Creates tensions and may lower trust if repeatedly unresolved |
-| positive feedback | Reinforces sites and peer reliability |
-| negative feedback | Lowers retained action or trust through prediction error |
+| positive feedback | Raises the evidence prior `P_i` and peer reliability |
+| negative feedback | Lowers the evidence prior `P_i` or trust through prediction error |
 
 Trust updates must leave traces. The engine must not silently rewrite provenance.
 
@@ -51,13 +51,13 @@ Reflection:
 
 ## Feedback-Based Work
 
-Feedback is another committed interaction:
+Feedback is another committed interaction. It updates the evidence prior `P_i`, the decay-exempt term that holds feedback and social reinforcement:
 
 ```text
-dA_i = eta * (feedback_target - predicted_value_i)
+dP_i = eta * (lambda - predicted_i)
 ```
 
-Positive feedback can raise retained action and trust. Negative feedback can lower them. Both are bounded and traceable.
+Positive feedback can raise the evidence prior `P_i` and trust. Negative feedback can lower them. Both are bounded and traceable. Spacing and testing effects do not come from feedback writes: they are intrinsic to the base-level term `B_i`, which rises whenever a committed access appends a fresh trace.
 
 ## Fast/Slow Learning
 
@@ -97,7 +97,7 @@ Reflection cost is proportional to the number of session nodes and shared entity
 - Private scope leakage through cross-agent reflection.
 - Silent trust mutation without trace.
 - Automatic truth judgment from peer majority alone.
-- Feedback directly setting salience instead of updating reservoirs.
+- Feedback directly setting salience instead of updating the evidence prior `P_i` (or, for use-driven reinforcement, appending an access trace to `B_i`).
 
 ## Related Documents
 

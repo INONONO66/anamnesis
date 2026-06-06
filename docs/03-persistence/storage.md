@@ -9,7 +9,7 @@ Storage owns the durable graph state. The engine uses storage through a trait, a
 | ID allocation | Allocate node and edge identifiers |
 | CRUD | Store, fetch, mutate, and delete nodes and edges |
 | adjacency | Return outgoing and incoming edge ids |
-| hot fields | Read and write retained action, conductance, accessed time, checkpoints, and type |
+| hot fields | Read and write access history, evidence prior, conductance, accessed time, and type (retained-action `B_i` is computed from access history, not stored) |
 | iteration | Enumerate all node and edge ids |
 | search helpers | Provide type, scope, peer, entity, and text scans |
 | flush | Commit pending writes for write-behind backends |
@@ -38,14 +38,20 @@ pub trait StorageAdapter: Send + Sync {
     fn edges_from(&self, id: NodeId) -> &[EdgeId];
     fn edges_to(&self, id: NodeId) -> &[EdgeId];
 
-    fn get_retained_action(&self, id: NodeId) -> Result<f64, Error>;
-    fn set_retained_action(&mut self, id: NodeId, action: f64) -> Result<(), Error>;
+    // Persistent substrate of base-level B_i: the bounded 32-trace access window.
+    // B_i = ln( sum_j (now - t_j)^(-d*m_type) ) is computed on demand from these
+    // traces; it is not a stored scalar. A committed access appends a now-stamped
+    // trace (evicting the oldest beyond the 32-trace window).
+    fn get_access_history(&self, id: NodeId) -> Result<&[Timestamp], Error>;
+    fn append_access_trace(&mut self, id: NodeId, t: Timestamp) -> Result<(), Error>;
+    // Persistent decay-exempt evidence prior P_i (encoding surprise, feedback /
+    // social reinforcement, peer trust). It does not undergo base-level decay.
+    fn get_evidence_prior(&self, id: NodeId) -> Result<f64, Error>;
+    fn set_evidence_prior(&mut self, id: NodeId, prior: f64) -> Result<(), Error>;
     fn get_salience(&self, id: NodeId) -> Result<f64, Error>;
     fn set_salience(&mut self, id: NodeId, salience: f64) -> Result<(), Error>;
     fn get_accessed_at(&self, id: NodeId) -> Result<Timestamp, Error>;
     fn set_accessed_at(&mut self, id: NodeId, ts: Timestamp) -> Result<(), Error>;
-    fn get_decay_checkpoint(&self, id: NodeId) -> Result<Timestamp, Error>;
-    fn set_decay_checkpoint(&mut self, id: NodeId, ts: Timestamp) -> Result<(), Error>;
     fn get_node_type(&self, id: NodeId) -> Result<&KnowledgeType, Error>;
 
     fn get_conductance(&self, id: EdgeId) -> Result<f64, Error>;
@@ -60,7 +66,7 @@ pub trait StorageAdapter: Send + Sync {
 }
 ```
 
-`get_node_mut` and `get_edge_mut` are for metadata and non-hot fields. Hot-field updates use dedicated methods so maintenance and commit paths do not rewrite whole node or edge objects. Reservoir setters are storage-contract methods, not public semantic operations; public behavior changes physical quantities through interactions.
+`get_node_mut` and `get_edge_mut` are for metadata and non-hot fields. Hot-field updates use dedicated methods so maintenance and commit paths do not rewrite whole node or edge objects. The access-history and evidence-prior accessors are storage-contract methods, not public semantic operations; public behavior changes the persistent substrate through interactions (a committed access appends a trace; feedback and encoding surprise move `P_i`). The base-level term `B_i` is never a stored field, so storage exposes no `B_i` setter — it is recomputed from `access_history` whenever salience is projected.
 
 ## SQLite Schema Overview
 
@@ -68,7 +74,7 @@ pub trait StorageAdapter: Send + Sync {
 |---|---|
 | `nodes` | Site identity, content, type, origin, scope, time, projections |
 | `edges` | Directed relationships, type, projections, validity |
-| `node_hot` | Cache-friendly retained action, salience, access time |
+| `node_hot` | Cache-friendly access history (bounded 32-trace window), evidence prior `P_i`, salience, access time; the retained-action base-level `B_i` is computed from access history, not stored |
 | `edge_hot` | Cache-friendly conductance, weight, access time |
 | `adjacency_from` | Outgoing edge index |
 | `adjacency_to` | Incoming edge index |
@@ -105,7 +111,7 @@ Snapshot is intentionally clone-based. This keeps the core simple and makes the 
 
 ## Error Policy
 
-- Every persisted node has a `decay_checkpoint`. It is initialized to the node's `created_at` on first commit, and the `v2 -> v3` migration backfills legacy nodes to `created_at` (or the later `accessed_at`) so no checkpoint precedes the node's own history. `get_decay_checkpoint` is therefore total for existing nodes and never fabricates a default; it errors only with `NodeNotFound`.
+- `decay_checkpoint` is largely obsolete under recompute-from-history. Base-level `B_i` is computed directly from `access_history` by aging every trace to `now`, so there is no scalar reservoir carrying an "as-of" timestamp that a checkpoint must guard. The earliest trace is the creation trace, so the access-history window is self-dating and no separate checkpoint is needed to keep `B_i` total. Adapters that still carry a `decay_checkpoint` column (e.g. from the `v2 -> v3` migration) may retain it for telemetry, but it is no longer load-bearing for memory strength; the persistent substrate is the access-history window plus `P_i`.
 - Missing nodes or edges return typed errors.
 - Storage implementations do not leak backend-specific errors directly across the trait boundary.
 - `flush` failures propagate to callers.
@@ -116,7 +122,7 @@ Snapshot is intentionally clone-based. This keeps the core simple and makes the 
 
 | Operation | Target |
 |---|---|
-| hot retained-action update | Avoid serializing the whole node object |
+| hot access-trace append / evidence-prior update | Avoid serializing the whole node object; the access-history window is bounded to 32 traces |
 | hot conductance update | Avoid serializing the whole edge object |
 | adjacency traversal | Cost proportional to degree |
 | full scan | Allowed only for maintenance and benchmarks |

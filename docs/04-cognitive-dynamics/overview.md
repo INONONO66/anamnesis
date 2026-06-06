@@ -7,17 +7,17 @@ The graph is not a static document list. It is a driven-dissipative network: a q
 ## Core Axiom
 
 ```text
-retained action A_i = ACT-R base-level activation = log NEED-ODDS
+retained action A_i = B_i + P_i                  = log NEED-ODDS
 conductance  C_ij  = associative strength       = log LIKELIHOOD RATIO
 
 query activation a_i is transient and is never stored.
 
-total A_i = B_i + sum_j W_j * S_ji
-          = log prior odds + sum log likelihood ratios
-          = log posterior odds
+total = (B_i + P_i) + sum_j W_j * S_ji
+      = log prior odds + sum log likelihood ratios
+      = log posterior odds
 ```
 
-Retained action is prior need-odds. Conductance is the likelihood-ratio contribution of a cue. Retrieval computes posterior need-odds. `salience` is a bounded projection of `A_i`; `edge weight` is a bounded projection of `C_ij`.
+Retained action is prior need-odds and decomposes into two terms: the base-level `B_i = ln( Σ_j (now − t_j)^(−d·m_type) )` over the node's access-trace history (which owns power-law forgetting and use-driven reinforcement) plus the evidence prior `P_i` (encoding surprise, feedback / social reinforcement, peer trust), a decay-exempt evidence offset. Conductance is the likelihood-ratio contribution of a cue. Retrieval computes posterior need-odds. `salience` is the bounded projection of the sum, `s_i = logistic(B_i + P_i)`; `edge weight` is a bounded projection of `C_ij`.
 
 The resulting rule is strict: **do not set these magnitudes directly**. Graph state changes only through integrated interactions whose increments are justified by Bayesian/ACT-R meaning.
 
@@ -25,8 +25,8 @@ The resulting rule is strict: **do not set these magnitudes directly**. Graph st
 
 ```mermaid
 flowchart TB
-    ingest["Ingest<br/>site creation + initial coupling<br/>(surprise-gated initial charge)"] --> state["Network state<br/>sites + conductance + retained action<br/>(reservoir: A_i, C_ij)"]
-    maintain["Maintenance<br/>dissipation + leakage<br/>(power-law base-level)"] --> state
+    ingest["Ingest<br/>site creation + initial coupling<br/>(seeds evidence prior P_i ← k·eps)"] --> state["Network state<br/>sites + conductance + retained action<br/>(reservoir: access traces→B_i, P_i, C_ij)"]
+    maintain["Maintenance<br/>dissipation + leakage<br/>(ages access traces → B_i, power-law)"] --> state
     retrieval["Retrieval<br/>query field + activation flow<br/>(additive RWR, no mutation)"] --> readout["Readout<br/>lit memory sites"]
     readout --> package["ContextPackage"]
     package --> commit["Commit<br/>work + flux trace"]
@@ -44,7 +44,7 @@ Retrieval settles quickly inside a query and stores nothing. Maintenance and com
 | Input | Use |
 |---|---|
 | node type | leakage prior, packaging bucket, coupling prior |
-| retained action | salience projection, readout prior, maintenance |
+| retained action | salience projection (`logistic(B_i + P_i)`), readout prior, maintenance; access-trace history feeds `B_i`, the evidence prior is `P_i` |
 | conductance | activation flow, path selection, consolidation |
 | origin | scope, trust, peer reflection |
 | valid interval | `fact_at` and temporal filtering |
@@ -52,7 +52,7 @@ Retrieval settles quickly inside a query and stores nothing. Maintenance and com
 
 ## Shared Invariants
 
-- `salience` is a projection of retained action, not a public control knob.
+- `salience` is the bounded projection `s_i = logistic(B_i + P_i)` of retained action, not a public control knob.
 - `edge weight` is a projection of conductance, not authoritative state.
 - Activation, current, impedance, and stress are query-local transient state.
 - Read-only retrieval cannot create hidden mutation.
@@ -65,14 +65,14 @@ Retrieval settles quickly inside a query and stores nothing. Maintenance and com
 
 | Flow | Reads | Writes | Result | Bayesian Meaning |
 |---|---|---|---|---|
-| perception | observation, scope, confidence | site or initial coupling | ingest result | surprise-gated initial charge |
+| perception | observation, scope, confidence | site (seeds evidence prior `P_i ← k·eps`), creation trace, or initial coupling | ingest result | encoding-surprise prior `P_i` |
 | conductance | nearby sites, entity overlap, flux trace | conductance reservoir | conductive edges | bounded Hebbian update toward log-LR |
 | potential landscape | query field, retained action, conductance | nothing persistent | basin bias and impedance | restart seed from log prior odds |
-| dissipation | time, leakage prior, retained action | retained-action reservoir | tick report | base-level aging |
+| dissipation | time, leakage prior, access-trace history | base-level `B_i` (via aging traces to now); does not touch `P_i` | tick report | multi-trace base-level aging |
 | frustration | contradiction constraints, active response | tension trace | surfaced conflict | constraint stress |
 | readout | flow, impedance, scope, stress | nothing persistent | ranked sites | posterior odds crosses sink/threshold |
-| interaction | committed usage event | retained action, conductance, trace | update report | prediction-error and flux integration |
-| social | peer metadata | entity coupling or trust adjustment | reflect report | peer evidence updates coupling/trust |
+| interaction | committed usage event | access trace (appended at `now` → `B_i`), evidence prior `P_i` (feedback `dP_i = eta·(lambda − predicted_i)`), conductance | update report | prediction-error and flux integration |
+| social | peer metadata | entity coupling or evidence prior `P_i` (peer trust) | reflect report | peer evidence updates coupling/`P_i` |
 
 ## Computation Style
 
@@ -85,8 +85,9 @@ I_ij        = current(a_i, conductance_ij, edge_type_factor_ij)
 W_readout_i = accepted_i * a_i * phi_i            # illustrative sketch only
 dC_ij       = eta * flux_ij * (1 - C_ij)
 C_next      = clamp_log_odds(C_ij + dC_ij)
-A_next      = A_i + dV ; dV = eta_fb * (lambda - sumV)
-s_next      = project_salience(A_next - leakage_i)
+B_i         = ln( sum_j (now - t_j)^(-d * m_type) )   # multi-trace base-level over access traces
+P_next      = P_i + dP ; dP = eta_fb * (lambda - predicted_i)   # evidence prior, decay-exempt
+s_next      = logistic(B_i + P_next)
 ```
 
 The restart rate is derived from associative reach, not chosen as an arbitrary knob: expose mean reach `L` and set `alpha = 1/(L+1)`. (Equivalently, if influence should decay to `f` after `h_half` hops, `alpha = 1 - f^(1/h_half)` is the same single reach degree of freedom.) `alpha` is the only restart knob here; the `eta_fb` in the feedback update above is a distinct quantity (see below).
@@ -106,7 +107,7 @@ The restart rate is derived from associative reach, not chosen as an arbitrary k
 
 ## Document Map
 
-- [perception.md](perception.md): surprise-gated site allocation and routing.
+- [perception.md](perception.md): site allocation that seeds the encoding-surprise prior `P_i ← k·eps`, and routing.
 - [conductance.md](conductance.md): Oja-bounded Hebbian conductance updates.
 - [potential-landscape.md](potential-landscape.md) and [readout-scoring.md](readout-scoring.md): RWR flow and readout.
 - [dissipation.md](dissipation.md): power-law base-level retention and telemetry separation.

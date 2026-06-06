@@ -14,13 +14,15 @@ Store authoritative reservoirs separately from bounded projections:
 
 | Reservoir | Projection |
 |---|---|
-| `retained_action A_i` | `salience s_i` |
+| `retained_action A_i = B_i + P_i` | `salience s_i` |
 | `conductance C_ij` | `edge weight w_ij` |
+
+The node reservoir is no longer a single scalar. It is the node's access-trace history (a bounded 32-trace window: a creation trace plus each committed access) — from which the base-level `B_i = ln( Σ_j (now − t_j)^(−d·m_type) )` is computed on demand — together with the persistent evidence prior `P_i` (encoding surprise, feedback / social reinforcement, peer trust). `B_i` owns forgetting and use-driven reinforcement; `P_i` is a decay-exempt evidence offset.
 
 Reservoirs are changed only by interactions. Projections are derived views used by APIs, ranking, packaging, and storage indexes.
 
 ```text
-s_i = project_salience(A_i)
+s_i = logistic(B_i + P_i)
 w_ij = project_weight(C_ij)
 ```
 
@@ -63,4 +65,4 @@ Rejected. Two authoritative values can diverge. Projection must be derived.
 
 ### Add a separate decay multiplier
 
-Rejected. Forgetting belongs in retained-action dynamics, not in an extra knob.
+Rejected. Forgetting belongs in the base-level term `B_i`, which falls as its access traces age (power-law) and rises when a committed access appends a fresh trace; it is not an extra scalar decay knob. `B_i` is computed on demand from the trace history, not maintained by incremental scalar decay.

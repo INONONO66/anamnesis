@@ -13,8 +13,10 @@ A node is a memory site. It stores identity, source content, projections, proven
 | `summary` | Optional L1 summary |
 | `content` | L2 full preserved content |
 | `node_type` | Knowledge taxonomy value |
-| `retained_action` | Authoritative memory-strength reservoir |
-| `salience` | Bounded projection of retained action |
+| `retained_action` | Persistent memory strength `A_i = B_i + P_i`; the base-level term `B_i` is computed on demand from `access_history` (not stored), the evidence prior `P_i` is stored |
+| `access_history` | Bounded 32-trace window (creation trace plus committed accesses); the persistent substrate from which `B_i` is computed |
+| `evidence_prior` | Stored evidence prior `P_i` (encoding surprise, feedback / social reinforcement, peer trust); a decay-exempt evidence offset |
+| `salience` | Bounded logistic projection of the sum, `s_i = logistic(B_i + P_i)` |
 | `embedding` | Optional semantic vector |
 | `entity_tags` | Normalized entity labels |
 | `origin` | Peer, session, scope, source kind, confidence |
@@ -44,7 +46,7 @@ Every site carries origin. Provenance is not optional.
 | Memory | `Episodic`, `Event` | Raw or time-bound fragments |
 | Custom | `Custom(String)` | Consumer-defined type |
 
-Type affects decay prior, packaging bucket, readout treatment, and conductance priors. It must not be replaced by free-form strings at the engine boundary except through `Custom`.
+Type affects decay prior, packaging bucket, readout treatment, and conductance priors. The decay prior is the `node_type` policy multiplier `m_type` on the single base-level exponent `d` (it scales `d·m_type` in `B_i`), not an independent rate. It must not be replaced by free-form strings at the engine boundary except through `Custom`.
 
 ## Edges
 
@@ -87,9 +89,11 @@ Edges connect sites and carry typed relationships.
 
 | State | Persistent? | Query-local? |
 |---|---:|---:|
-| `retained_action` | yes | read |
+| `access_history` (drives `B_i`) | yes | read |
+| `evidence_prior P_i` | yes | read |
+| `base-level B_i` | computed (not stored) | read |
 | `conductance` | yes | read |
-| `salience` | projected | read |
+| `salience` = `logistic(B_i + P_i)` | projected | read |
 | `weight` | projected | read |
 | `activation a_i` | no | yes |
 | `current I_ij` | no | yes |

@@ -32,12 +32,14 @@ The docs must not present these values as universal laws. Refit them when graph 
 
 The free-prior set is minimal. These are the only declared behavioral priors; everything else derives from them.
 
+The irreducible-prior count is UNCHANGED under the two-term `A_i = B_i + P_i` decomposition: `d`, `k`, and `N` all survive (along with the per-`node_type` multiplier on `d`). Only their targets change — `d` now governs the exponent of the multi-trace base-level sum, and `k` now seeds the encoding-surprise evidence prior `P_i` rather than charging a use-decaying reservoir. No prior is added or removed.
+
 Free behavioral priors:
 
-- `d` — decay exponent (power-law base-level aging).
+- `d` — decay exponent (governs the multi-trace base-level sum `B_i = ln( Σ_j (now − t_j)^(−d·m_type) )`; the per-`node_type` policy multiplier `m_type` scales this single decay prior).
 - `L` — mean associative reach (hops influence travels before negligible).
 - `N` — target co-activation count to reach the conductance saturation target.
-- `k` — surprise-to-charge gain (Bayesian surprise into initial retained-action charge).
+- `k` — encoding-surprise gain into the evidence prior `P_i` (Bayesian surprise seeds the decay-exempt evidence offset).
 - `beta_coupling` — cold-start pairwise coupling regression vector over NPMI features.
 - `beta_phi` — unary potential-bias feature-weight vector (`beta_prior` fixed `= 1` by design, for odds additivity).
 - `w_readout` — readout re-ranking coefficient object.
@@ -51,8 +53,8 @@ Everything else derives:
 
 - `alpha = 1 / (L + 1)` from `L`.
 - every `eta = 1 - 0.5^(1/N)` from `N`.
-- surprise charge `dA_i = k * eps` from `k`.
-- projection salience/weight `= logistic` of the reservoirs.
+- encoding-surprise prior `P_i(init) = k * eps` from `k` (seeds `P_i`, decay-exempt).
+- public salience `s_i = logistic(B_i + P_i)` from the base-level sum plus the evidence prior.
 - `theta_sep = 1 - q95(distinct-pair similarity)` from the encoder.
 - `coupling_seed` from `beta_coupling`.
 - `phi_i` / `seed_i` from `beta_phi`.

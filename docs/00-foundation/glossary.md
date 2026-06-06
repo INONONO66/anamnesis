@@ -6,8 +6,10 @@ This glossary defines the terms used across the Anamnesis technical specificatio
 
 | Term | Meaning |
 |---|---|
-| `retained_action A_i` | Persistent memory strength for site `i`; ACT-R base-level activation; log need-odds |
-| `salience s_i` | Bounded public projection of `A_i`; useful for ranking and packaging, not authoritative state |
+| `retained_action A_i` | Persistent memory strength for site `i`; composite `A_i = B_i + P_i` of base-level activation and an evidence prior; log need-odds |
+| `base-level B_i` | Multi-trace ACT-R base-level activation over the node's access-trace history; owns forgetting and use-driven reinforcement; computed on demand from traces |
+| `evidence prior P_i` | Separate persistent prior holding encoding surprise, feedback / social reinforcement, and peer trust; a decay-exempt evidence offset |
+| `salience s_i` | Bounded public projection of the sum `B_i + P_i`; useful for ranking and packaging, not authoritative state |
 | `conductance C_ij` | Persistent associative strength from cue `j` to target `i`; log likelihood ratio |
 | `edge weight w_ij` | Bounded public projection of `C_ij`; storage/API-facing value |
 | reservoir | The authoritative persistent quantity that dynamics update |
@@ -16,11 +18,13 @@ This glossary defines the terms used across the Anamnesis technical specificatio
 Core axiom:
 
 ```text
-retained action A_i = log prior need-odds
+retained action A_i = B_i + P_i = log prior need-odds
 conductance C_ij    = log likelihood ratio
-total activation    = B_i + sum_j W_j * S_ji
+total activation    = (B_i + P_i) + sum_j W_j * S_ji
                     = log posterior need-odds
 ```
+
+`A_i` decomposes into two terms: the base-level `B_i = ln( Σ_j (now − t_j)^(−d·m_type) )` over the node's access traces (which owns power-law forgetting and use-driven reinforcement) and the evidence prior `P_i` (encoding surprise, feedback, social reinforcement, peer trust). Dissipation acts on `B_i` only; `P_i` is a decay-exempt evidence offset.
 
 ## Core Terms
 
@@ -35,7 +39,7 @@ total activation    = B_i + sum_j W_j * S_ji
 | impedance `Z_i` | Effective difficulty of activating site `i` from the current query field |
 | readout | Selecting lit sites for packaging into context |
 | committed work | Evidence that a readout site or path was actually used by the caller |
-| dissipation | Time-based leakage of retained action |
+| dissipation | Time-based aging of the base-level term `B_i` as its access traces age (power-law); does not act on the evidence prior `P_i` |
 | frustration | Constraint stress when contradictory sites are active together |
 | tension | A surfaced contradiction item in returned context |
 | scope | Visibility and validity boundary such as session, project, or universal |
@@ -56,8 +60,8 @@ total activation    = B_i + sum_j W_j * S_ji
 
 | Symbol | Meaning |
 |---|---|
-| `A_i` | retained action for site `i` |
-| `s_i` | salience projection for site `i` |
+| `A_i` | retained action for site `i`; the composite `A_i = B_i + P_i` |
+| `s_i` | salience projection for site `i`; `s_i = logistic(B_i + P_i)` |
 | `C_ij` | conductance from `j` to `i` |
 | `w_ij` | projected edge weight |
 | `a_i` | query-local activation response |
@@ -68,7 +72,8 @@ total activation    = B_i + sum_j W_j * S_ji
 | `lambda` | target reward or asymptote in Rescorla-Wagner-style updates |
 | `Sigma` | uncertainty / precision structure for surprise or stress calculations |
 | `Z_i` | impedance of site `i` |
-| `B_i` | ACT-R base-level activation of site `i`; the axiom's prior term, equal to `A_i` (log prior need-odds) |
+| `B_i` | multi-trace ACT-R base-level activation of site `i`; `B_i = ln( Σ_j (now − t_j)^(−d·m_type) )` over the node's access traces; owns forgetting and use-driven reinforcement |
+| `P_i` | evidence prior for site `i`; encoding surprise, feedback / social reinforcement, and peer trust; decay-exempt (does not undergo base-level use-driven decay) |
 | `W_j` | Attentional weight of cue `j` in the activation sum |
 | `S_ji` | Associative strength from cue `j` to target `i`; the log-LR contribution, equal to `C_ij` |
 

@@ -40,9 +40,9 @@ flowchart TB
     commit --> graph
 ```
 
-1. **Ingest loop.** Observations pass through perception, allocate or route to sites, and may create initial conductance.
-2. **Maintenance loop.** Time advances retained action and edge leakage through dissipation.
-3. **Retrieval loop.** Queries compute transient activation, package context, and only update reservoirs when use is committed.
+1. **Ingest loop.** Observations pass through perception, allocate or route to sites, seed the evidence prior `P_i` with encoding surprise, and may create initial conductance.
+2. **Maintenance loop.** Time ages base-level activation `B_i` (recomputed from each node's access-history window at the new `now`) and applies edge leakage; the evidence prior `P_i` is not use-decayed.
+3. **Retrieval loop.** Queries compute transient activation, package context, and only update persistent state when use is committed (a committed access appends an access trace, raising `B_i`).
 
 ## Public Surface
 
@@ -67,7 +67,7 @@ Default construction uses in-memory SQLite. Persistent use passes a file-backed 
 | `confidence_threshold` | Minimum origin confidence for admission |
 | `dedup_threshold` | Backward-compatible duplicate routing threshold |
 | `dedup_enabled` | Enables duplicate routing instead of unconditional allocation |
-| `decay_model` | Exponential or ACT-R power-law dissipation model |
+| `decay_model` | Exponential or ACT-R power-law dissipation model; the ACT-R power-law model is the multi-trace base-level form `B_i = ln( Σ_j (now − t_j)^(−d·m_type) )` over the node's access-history window |
 | `energy_model` | Readout scoring objective |
 | `spreading_model` | Activation-flow traversal model |
 
@@ -80,8 +80,8 @@ Not all of these are calibrated priors. `max_nodes` and `dedup_enabled` are oper
 | `ingest` | Applies perception, creates or routes a site, and returns created/reinforced ids |
 | `query` | Runs retrieval without hidden mutation and returns `ContextPackage` |
 | `search` | Fuses text, vector, lexical, temporal, scope, and graph cues before packaging |
-| `touch` | Applies lazy dissipation, then integrates access reinforcement |
-| `tick` | Applies batch dissipation and flushes storage |
+| `touch` | Appends a committed access trace stamped at `now`, raising `B_i` (the base-level sum ages prior traces to `now` before adding it, so decay-first ordering is intrinsic) |
+| `tick` | Ages `B_i` by recomputing from each node's access-history window at `now` (`P_i` is not use-decayed) and flushes storage |
 | `link` | Creates or strengthens an edge through a typed relationship |
 | `crystallize` | Adds a synthesis site and `ConsolidatedFrom` edges; never overwrites sources |
 | `snapshot` / `restore` | Captures and restores cloned storage state |
@@ -139,7 +139,7 @@ Storage access is orchestrated by `Engine`. Mechanics functions take typed input
 | Synchronous core | No async runtime required by the library |
 | Pluggability | Storage adapters satisfy one trait |
 | Traceability | Search, tick, reflect, and commit paths expose structured reports |
-| Bounded projections | Salience and edge weight stay in the closed public range `[0, 1]` — the bounded projection of an unbounded reservoir via `logistic`, whose extreme values saturate to the `0`/`1` endpoints in storage (the `projection_range` invariant validates `[0, 1]`) |
+| Bounded projections | Salience and edge weight stay in the closed public range `[0, 1]` — salience is the bounded logistic projection of the unbounded sum, `s_i = logistic(B_i + P_i)`, whose extreme values saturate to the `0`/`1` endpoints in storage (the `projection_range` invariant validates `[0, 1]`) |
 | No hidden mutation | Retrieval does not change reservoirs unless committed |
 
 ## Dependency Direction
