@@ -99,7 +99,7 @@ Contradictory evidence is not added or subtracted here. It branches into frustra
 | path current map | Edge id to `I_ij` |
 | effective impedance | Approximate access cost from query field |
 | iterations | Iteration count |
-| residual | Final `||a_next - a||_1` |
+| residual | Final L1 norm `\|\|a_next - a\|\|_1` of successive iterates |
 | truncated | Whether max iterations stopped convergence |
 | excluded_edges | Edges split to frustration |
 

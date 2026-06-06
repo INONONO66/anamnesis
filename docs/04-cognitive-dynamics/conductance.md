@@ -75,14 +75,14 @@ Path current `I_ij` carries reach from the query field. Reach is parameterized b
 
 ```text
 C_ij' = C_ij
-  + eta * path_flux_ij * (1 - C_ij)
-  + eta * co_flux_ij  * (1 - C_ij)
+  + eta * path_flux_ij * (1 - project_weight(C_ij))
+  + eta * co_flux_ij  * (1 - project_weight(C_ij))
   - eta_leak * idle_edge_leakage_ij
 
 edge_weight_ij = project_weight(C_ij')
 ```
 
-The `(1 - C_ij)` term is the Oja bound: it bounds the update and prevents raw Hebbian runaway. The target remains associative log-LR: as use accumulates, cold-start priors are replaced by measured co-activation strength.
+The `(1 - project_weight(C_ij))` term is the Oja bound: it bounds the update and prevents raw Hebbian runaway. The bound is applied to the **bounded projection** `project_weight(C_ij) = logistic(C_ij) ∈ (0, 1)`, not to the raw reservoir — `C_ij` is an unbounded log-LR, so a literal `(1 - C_ij)` factor would go negative and invert the update sign once `C_ij > 1`. Projecting first keeps the saturation headroom in `(0, 1)`: as `project_weight(C_ij) -> 1` the update -> 0, while `C_ij` itself stays in log-LR units. The target remains associative log-LR: as use accumulates, cold-start priors are replaced by measured co-activation strength.
 
 The learning rate is a single rate `eta` derived from one behavioral specification: the target co-activation count `N` at which conductance should reach the saturation target. The saturation target `0.5` is a fixed Oja/symmetric convention (any value in `(0,1)` works; it is not a free knob), so:
 

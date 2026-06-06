@@ -68,6 +68,9 @@ total activation    = B_i + sum_j W_j * S_ji
 | `lambda` | target reward or asymptote in Rescorla-Wagner-style updates |
 | `Sigma` | uncertainty / precision structure for surprise or stress calculations |
 | `Z_i` | impedance of site `i` |
+| `B_i` | ACT-R base-level activation of site `i`; the axiom's prior term, equal to `A_i` (log prior need-odds) |
+| `W_j` | Attentional weight of cue `j` in the activation sum |
+| `S_ji` | Associative strength from cue `j` to target `i`; the log-LR contribution, equal to `C_ij` |
 
 ## Common Distinctions
 

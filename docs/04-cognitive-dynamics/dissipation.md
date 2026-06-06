@@ -84,8 +84,7 @@ Tier is policy. It must not become a hidden direct salience setter.
 - salience projection deltas,
 - tier transitions,
 - archived/reactivated counts,
-- flush status,
-- errors.
+- flush status.
 
 ## Relation To Deletion
 

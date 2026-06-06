@@ -8,7 +8,7 @@ Peer identity records who produced a fragment and how that source should affect 
 |---|---|
 | `peer_id` | Stable peer identifier |
 | `display_name` | Human-readable label |
-| `trust_level` | Coarse source class such as human, agent, tool, or system |
+| `trust_level` | Ranked authority level (`Untrusted` … `Owner`); source classification is `source_kind` on `Origin` |
 | `trust_profile` | Calibrated reliability signals |
 | `created_at` | Registration time |
 
@@ -56,7 +56,7 @@ Peer identity must not override scope visibility. A trusted private fragment sti
 
 ## Session Summary
 
-`SessionSummary` carries `agent_id`, `session_id`, and node ids produced in a session. `reflect_batch` uses this metadata to add entity links across agents. It does not merge nodes or call an LLM.
+`SessionSummary` carries `peer_id`, `session_id`, and node ids produced in a session. `reflect_batch` uses this metadata to add entity links across agents. It does not merge nodes or call an LLM.
 
 ## Related Documents
 

@@ -36,7 +36,7 @@ Benefits:
 
 Tradeoffs:
 
-- Requires calibrated novelty threshold.
+- Requires a calibrated novelty threshold.
 - Precision estimates are approximations unless variance is stored.
 - Paraphrase routing may need advisory adjudication near the boundary.
 

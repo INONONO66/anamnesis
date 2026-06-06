@@ -21,7 +21,7 @@ Examples:
 ```text
 conductance feature weights: regression coefficients over NPMI features
 Hebbian eta: eta = 1 - target^(1/N)
-RWR alpha: alpha = 1 - f^(1/h_half)
+RWR alpha: alpha = 1 / (L + 1)
 readout temperature: fit from target entropy or accepted context labels
 decay exponent d: fit from re-access hazard or ACT-R prior
 ```

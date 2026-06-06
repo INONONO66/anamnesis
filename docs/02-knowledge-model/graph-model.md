@@ -53,7 +53,7 @@ Edges connect sites and carry typed relationships.
 | Field | Meaning |
 |---|---|
 | `id` | Stable `EdgeId` |
-| `from` / `to` | Directed endpoints |
+| `source` / `target` | Directed endpoints |
 | `edge_type` | Relationship taxonomy value |
 | `conductance` | Authoritative associative-strength reservoir |
 | `weight` | Bounded projection of conductance |

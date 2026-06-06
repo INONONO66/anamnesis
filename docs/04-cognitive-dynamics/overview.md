@@ -99,7 +99,7 @@ The restart rate is derived from associative reach, not chosen as an arbitrary k
 
 - Out-of-range configuration values fail engine creation or the call boundary.
 - Non-finite calculation results become errors.
-- Unknown node ids return storage errors.
+- Unknown node ids return `NodeNotFound`; unknown edge ids return `EdgeNotFound`. `StorageError` is reserved for backend failures.
 - A zero token budget returns empty context and trace.
 - Commit traces that do not match retrieval traces fail interaction validation.
 - Attempts to set reservoirs directly through retrieval violate invariants.

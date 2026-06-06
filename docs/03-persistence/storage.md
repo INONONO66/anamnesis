@@ -42,6 +42,8 @@ pub trait StorageAdapter: Send + Sync {
     fn set_salience(&mut self, id: NodeId, salience: f64) -> Result<(), Error>;
     fn get_accessed_at(&self, id: NodeId) -> Result<Timestamp, Error>;
     fn set_accessed_at(&mut self, id: NodeId, ts: Timestamp) -> Result<(), Error>;
+    fn get_decay_checkpoint(&self, id: NodeId) -> Result<Timestamp, Error>;
+    fn set_decay_checkpoint(&mut self, id: NodeId, ts: Timestamp) -> Result<(), Error>;
     fn get_node_type(&self, id: NodeId) -> Result<&KnowledgeType, Error>;
 
     fn node_count(&self) -> usize;
