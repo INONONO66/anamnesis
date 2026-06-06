@@ -6,7 +6,7 @@
 //!
 //! ```text
 //! readout_score_i =
-//!     w_a     * logit_or_rank(a_i)
+//!     w_a     * logit(a_i)
 //!   + w_phi   * phi_i
 //!   + w_s     * logit(s_i)
 //!   - w_z     * Z_i
@@ -97,7 +97,7 @@ impl Default for ReadoutInputs {
 
 /// Computes the authoritative seven-term additive log-odds readout score.
 ///
-/// The activation term uses `logit(a_i)` (the `logit_or_rank` form); `s_i` enters
+/// The activation term uses `logit(a_i)`; `s_i` enters
 /// as `logit(s_i)`; `phi_i` and the scope/trust terms enter linearly; impedance and
 /// stress are subtracted. Inputs are clamped to keep the logits finite.
 pub fn readout_score(input: &ReadoutInputs) -> f64 {
