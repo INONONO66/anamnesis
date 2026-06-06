@@ -32,7 +32,7 @@ This chapter fixes what Anamnesis is responsible for and what it deliberately le
 The MVP is a local library:
 
 1. Observation ingest, duplicate routing, and initial conductance proposals.
-2. `tick`-based dissipation and `Accessed` interaction integration.
+2. `tick`-based dissipation and committed `Accessed` interaction integration.
 3. `search` and `query` producing `ContextPackage` values and reflecting committed retrieval.
 4. SQLite storage and clone-based snapshots.
 5. Origin, scope, and bitemporal fields.

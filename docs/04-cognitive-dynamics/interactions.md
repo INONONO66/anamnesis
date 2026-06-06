@@ -67,6 +67,7 @@ The same query can be rerun safely before commit. Commit must validate that the 
 | `PathUsed` | edge ids, path current | `dC_ij` path flux |
 | `TimeElapsed` | now, checkpoints | leakage |
 | `TensionActivated` | contradiction pair, stress | tension trace |
+| `Crystallized` | source sites, synthesis content | new site `dA_s` (weighted from sources), seed `dC_sj` on `ConsolidatedFrom` edges; sources unchanged |
 
 ## Derived Deltas
 

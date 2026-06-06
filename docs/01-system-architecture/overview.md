@@ -71,7 +71,7 @@ Default construction uses in-memory SQLite. Persistent use passes a file-backed 
 | `energy_model` | Readout scoring objective |
 | `spreading_model` | Activation-flow traversal model |
 
-Configuration values are calibrated priors. They are not physical constants; consumers may refit them to their graph statistics.
+Not all of these are calibrated priors. `max_nodes` and `dedup_enabled` are operational knobs; `decay_model`, `energy_model`, and `spreading_model` select a formula family. The threshold fields (`novelty_threshold`, `confidence_threshold`, `dedup_threshold`) are calibrated priors that project onto the underlying behavioral priors (see [ADR-0010](../adr/0010-calibrated-priors-not-laws.md)); they are not physical constants, and consumers may refit them to their graph statistics.
 
 ## Core Method Contracts
 
@@ -139,7 +139,7 @@ Storage access is orchestrated by `Engine`. Mechanics functions take typed input
 | Synchronous core | No async runtime required by the library |
 | Pluggability | Storage adapters satisfy one trait |
 | Traceability | Search, tick, reflect, and commit paths expose structured reports |
-| Bounded projections | Salience and edge weight stay in closed public ranges |
+| Bounded projections | Salience and edge weight stay in the closed public range `[0, 1]` — the bounded projection of an unbounded reservoir via `logistic`, whose extreme values saturate to the `0`/`1` endpoints in storage (the `projection_range` invariant validates `[0, 1]`) |
 | No hidden mutation | Retrieval does not change reservoirs unless committed |
 
 ## Dependency Direction

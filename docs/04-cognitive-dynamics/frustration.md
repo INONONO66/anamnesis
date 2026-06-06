@@ -29,7 +29,9 @@ sigma_ij =
   * temporal_overlap
 ```
 
-Each factor is a gate. If either endpoint is inactive, if the scopes do not overlap, or if the facts are not valid together, stress is zero.
+`contradiction_weight_ij` is not a new free constant. A `Contradicts` edge carries the same conductance reservoir `C_ij` as any other edge, and the weight is its bounded projection `contradiction_weight_ij = project_weight(C_ij) = logistic(C_ij) ∈ (0, 1)` — the same `project_weight` that yields `edge_weight_ij` in [conductance.md](conductance.md). The reservoir is authoritative; the gate is its derived projection. Cold-start `C_ij` comes from the documented coupling prior, so nothing here adds to the irreducible-prior set in [ADR-0010](../adr/0010-calibrated-priors-not-laws.md).
+
+Each factor is a gate. If either endpoint is inactive, if the scopes do not overlap, or if the facts are not valid together, stress is zero. Because `project_weight(C_ij) ∈ (0, 1)`, a saturated contradiction approaches but never exceeds full stress.
 
 ## Link To Energy
 

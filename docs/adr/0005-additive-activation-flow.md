@@ -20,17 +20,13 @@ Multiple incoming paths are summed. Do not use max-path as the core activation o
 
 `Contradicts` edges are excluded from propagation and routed to frustration. Contradiction is not evidence to add or subtract in activation flow.
 
-`alpha` is derived from associative reach:
-
-```text
-alpha = 1 - f^(1/h_half)
-```
-
-or from mean reach `L`:
+`alpha` is derived from the single associative-reach prior `L`:
 
 ```text
 alpha = 1 / (L + 1)
 ```
+
+Equivalently, if influence should decay to factor `f` after `h_half` hops, `alpha = 1 - f^(1/h_half)` expresses the same single reach degree of freedom. `L` is the only free prior; see [ADR-0010](0010-calibrated-priors-not-laws.md).
 
 ## Consequences
 

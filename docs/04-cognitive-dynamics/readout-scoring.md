@@ -23,7 +23,7 @@ The scoring layer must respect the reservoir/projection boundary. It reads retai
 
 ```text
 readout_score_i =
-    w_a     * logit_or_rank(a_i)
+    w_a     * logit(a_i)
   + w_phi   * phi_i
   + w_s     * logit(s_i)
   - w_z     * Z_i

@@ -12,9 +12,27 @@ project/anamnesis
 project/anamnesis/session/2026-06-05
 ```
 
-`ScopePath::universal()` is the global scope. Other paths are compared structurally.
+`ScopePath::universal()` is the global scope, represented by the empty path. Other paths are compared structurally by segment prefixes.
+
+Paths are canonical before comparison:
+
+- `/` is the only separator. Segments are matched verbatim and case-sensitively; there is no case folding and no separator escaping.
+- A trailing `/` is trimmed (`a/b/` becomes `a/b`).
+- Consecutive slashes and empty segments are rejected at construction, not collapsed (`a//b` and `a//` are errors, never `a/b` or `a`). Only `ScopePath::universal()` may produce the empty path.
+
+Structural comparison then operates on whole segments: a path is an `Ancestor` of another when its segment sequence is a strict prefix of the other's, a `Descendant` in the reverse case, `Sibling` when both share the same parent segments but differ in the last, and `Disjoint` otherwise. The empty (universal) path takes precedence and yields `Universal` against any non-empty path.
 
 ## Scope Relation
+
+Two scope paths have exactly one relation. The relation is the first match in this precedence order, which resolves the overlap between `Universal` (the empty path is a prefix of every path) and the structural `Equal`/`Ancestor` cases:
+
+1. Both paths universal → `Equal`
+2. Exactly one path universal → `Universal`
+3. Identical paths → `Equal`
+4. Self is a strict prefix of other → `Ancestor`
+5. Other is a strict prefix of self → `Descendant`
+6. Same parent, different final segment → `Sibling`
+7. Otherwise → `Disjoint`
 
 | Relation | Meaning | Retrieval Handling |
 |---|---|---|
@@ -23,7 +41,7 @@ project/anamnesis/session/2026-06-05
 | `Descendant` | Narrower than query scope | Requires visibility check |
 | `Sibling` | Same parent, different branch | Lower relevance |
 | `Disjoint` | No relation | Excluded by default |
-| `Universal` | Applies everywhere | Always a candidate |
+| `Universal` | Exactly one path is universal | Always a candidate |
 
 ## Promotion Conditions
 

@@ -30,6 +30,7 @@ The seed score is a log-linear combination over calibrated features:
 phi_i =
     beta_text     * text_score_i
   + beta_embed    * embedding_score_i
+  + beta_seed     * seed_score_i
   + beta_entity   * entity_overlap_i
   + beta_scope    * scope_weight_i
   + beta_prior    * A_i

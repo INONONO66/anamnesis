@@ -42,11 +42,18 @@ Trace may expose more internal scores than the final context body. It is for deb
 | scope_distribution | Site count by scope |
 | stale_ratio | Sites not accessed recently |
 
+Definitions, so the metrics are computed identically across environments:
+
+- **disconnected site (orphan).** A site with no retained edge whose flow-side projection `project_conductance(C_ij)` exceeds the engine's conductance threshold (the same threshold whose miscalibration the Operational Warnings table attributes to a high orphan ratio). `orphan_ratio = disconnected_sites / node_count`.
+- **entropy metrics.** Shannon entropy `H = -sum_k p_k * log(p_k)` over the projection distribution normalized to sum to 1 (`salience_entropy` over `salience s_i`, `conductance_entropy` over the bounded `edge_weight = project_weight(C_ij)`), reported in nats. Low entropy means the projections have collapsed onto a few sites.
+- **degree.** The graph is directed (activation flow normalizes outgoing edges; see [activation-flow.md](../05-context-retrieval/activation-flow.md)), so `average_degree` is the mean total degree (in-edges + out-edges) per site.
+- **stale site.** A site whose `now - accessed_at` exceeds the configured stale window. `accessed_at` advances only on committed access; query-only retrieval leaves it unchanged (see [dissipation.md](../04-cognitive-dynamics/dissipation.md)). The conductance threshold and stale window are operational [EngineConfig](../01-system-architecture/overview.md#engineconfig) knobs, not calibrated priors.
+
 ## Invariant Checks
 
 The engine should expose checks for:
 
-- projection values inside range,
+- public projections within closed bounds (salience `s_i` and edge weight `w_ij` in `[0, 1]`, including clamped boundary values `0` and `1`),
 - adjacency consistency,
 - missing origins,
 - invalid validity intervals,

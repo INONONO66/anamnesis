@@ -75,7 +75,8 @@ Edges connect sites and carry typed relationships.
 | `Entity` | Shared entity link, including cross-agent reflection |
 | `Supersedes` | Replaces older knowledge |
 | `RejectedAlternative` | Considered and discarded option |
-| `Supports` / `Refutes` | Evidence relation for hypotheses |
+| `Supports` | Positive evidential support for a hypothesis |
+| `Refutes` | Refuting evidence for a hypothesis; a positive conductive path that surfaces counter-evidence (inhibition is modeled by `Contradicts`/frustration, never negative conductance) |
 | `BelongsTo` | Debug-session membership |
 | `Contradicts` | Constraint edge excluded from propagation and surfaced as frustration |
 | `Custom(String)` | Consumer-defined relationship |
@@ -92,6 +93,7 @@ Edges connect sites and carry typed relationships.
 | `weight` | projected | read |
 | `activation a_i` | no | yes |
 | `current I_ij` | no | yes |
+| `impedance Z_i` | no | yes |
 | `stress sigma_ij` | no | yes |
 | `trace` | returned / optionally committed | yes |
 

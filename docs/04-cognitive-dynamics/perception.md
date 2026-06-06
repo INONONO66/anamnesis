@@ -25,9 +25,13 @@ The gate has two stages. Rejection happens only in stage 1. Stage 2 routes survi
 
 | Result | Stage | Condition | State Change |
 |---|---|---|---|
-| Reject | Stage 1 | low confidence or budget full and not novel | none; return reason |
+| Reject | Stage 1 | required fields missing (malformed) | none; return reason |
+| Reject | Stage 1 | scope path violates policy | none; return reason |
+| Reject | Stage 1 | low confidence, or budget full and observation is novel (would need a new site) | none; return reason |
 | Allocate | Stage 2 | novelty `> theta_sep` | new site, surprise-gated `A_i`, coupling seed |
 | Route | Stage 2 | novelty `<= theta_sep` | reinforce existing site; no new site |
+
+Stage 1 evaluates these guards in order: well-formedness, then scope validity, then confidence, then budget. The four guards correspond one-to-one with the reasons in the [Rejection Trace](#rejection-trace).
 
 `A_i` is retained action. Public salience is its projection. Perception never sets salience directly.
 
@@ -35,12 +39,16 @@ The gate has two stages. Rejection happens only in stage 1. Stage 2 routes survi
 
 ```mermaid
 flowchart TB
-    obs["Observation"] --> confidence["confidence guard"]
-    confidence -->|fail| reject["Reject"]
-    confidence -->|pass| budget["budget guard"]
-    budget -->|full + not novel| reject
-    budget -->|pass| novelty["novelty / theta_sep"]
-    novelty -->|separate| allocate["Allocate site"]
+    obs["Observation"] --> wellformed["well-formedness guard"]
+    wellformed -->|fail| reject["Reject"]
+    wellformed -->|pass| scope["scope guard"]
+    scope -->|fail| reject
+    scope -->|pass| confidence["confidence guard"]
+    confidence -->|fail| reject
+    confidence -->|pass| novelty["novelty / theta_sep"]
+    novelty -->|separate| budget["budget guard"]
+    budget -->|full| reject
+    budget -->|pass| allocate["Allocate site"]
     novelty -->|complete| route["Route to existing site"]
 ```
 
@@ -86,7 +94,7 @@ Duplicate does not mean byte-identical text. Same entity, high embedding similar
 | Reason | Meaning |
 |---|---|
 | `low_confidence` | Origin confidence failed stage 1 |
-| `budget_exceeded` | Node budget is full and input is not novel |
+| `budget_exceeded` | Node budget is full and input is novel (would need a new site) |
 | `invalid_scope` | Scope path violates policy |
 | `malformed_observation` | Required fields are missing |
 
@@ -98,7 +106,7 @@ Similarity alone is not a rejection reason.
 |---|---|---|
 | uncalibrated `theta_sep` | over/under-segmentation | recalibrate on distinct pairs |
 | no precision estimate | surprise scale is arbitrary | store/update variance or declare `k` calibrated |
-| budget veto too broad | novel input rejected despite budget policy | guard only when full and not novel |
+| budget veto too broad | familiar input rejected despite routing to an existing site | guard only when full and input is novel |
 | paraphrase misrouting | distinct knowledge merged | use advisory conflict band and adjudication |
 
 ## Cost

@@ -49,8 +49,9 @@ Peer identity can affect:
 - ranking through trust-weighted readout,
 - tension surfacing when trusted peers disagree,
 - cross-agent entity linking,
-- provenance packaging,
-- promotion from narrow scopes to broader scopes.
+- provenance packaging.
+
+Peer identity also informs promotion eligibility: corroboration and contradiction signals feed the promotion conditions in [scoping-promotion.md](scoping-promotion.md). Promotion itself is a write operation (it adds a broader-scope synthesis and `ConsolidatedFrom` edges); read-only retrieval never performs it.
 
 Peer identity must not override scope visibility. A trusted private fragment still cannot leak into an unauthorized query scope.
 

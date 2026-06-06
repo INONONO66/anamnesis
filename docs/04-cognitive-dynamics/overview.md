@@ -68,7 +68,7 @@ Retrieval settles quickly inside a query and stores nothing. Maintenance and com
 | perception | observation, scope, confidence | site or initial coupling | ingest result | surprise-gated initial charge |
 | conductance | nearby sites, entity overlap, flux trace | conductance reservoir | conductive edges | bounded Hebbian update toward log-LR |
 | potential landscape | query field, retained action, conductance | nothing persistent | basin bias and impedance | restart seed from log prior odds |
-| dissipation | time, leakage prior, retained action | retained-action projection | tick report | base-level aging |
+| dissipation | time, leakage prior, retained action | retained-action reservoir | tick report | base-level aging |
 | frustration | contradiction constraints, active response | tension trace | surfaced conflict | constraint stress |
 | readout | flow, impedance, scope, stress | nothing persistent | ranked sites | posterior odds crosses sink/threshold |
 | interaction | committed usage event | retained action, conductance, trace | update report | prediction-error and flux integration |

@@ -47,12 +47,13 @@ Embedding proposes where current should be injected. Conductance determines how 
 
 ## Symmetric Coupling: True Lyapunov
 
-For a symmetric subgraph (`C_ij = C_ji`), graph energy has a strict Dirichlet form:
+For a symmetric subgraph (`C_ij = C_ji`), graph energy has a strict Dirichlet form. The Laplacian is built from the **non-negative flow-side projection** `G_ij = project_conductance(C_ij) = logistic(C_ij)` in `(0, 1)`, not the raw reservoir: `C_ij` is an unbounded log-LR that may be negative, and negative weights would break the positive-semidefiniteness that makes this a valid Lyapunov function. See [conductance.md](conductance.md).
 
 ```text
-L = D - C
-D_ii = sum_j C_ij
-a^T L a = 1/2 * sum_{i,j} C_ij * (a_i - a_j)^2
+G_ij  = project_conductance(C_ij)
+L_sym = D - G
+D_ii  = sum_j G_ij
+a^T L_sym a = 1/2 * sum_{i,j} G_ij * (a_i - a_j)^2
 ```
 
 This measures how much the activation pattern violates the conductive structure. In this limited case, "energy descent" and "attractor" language is exact.
@@ -69,8 +70,11 @@ P = row_normalized_conductance
 There is a continuous-time intuition:
 
 ```text
-da/dt = -L_rw * a + s(t) - decay
+da/dt = -L_rw * a + alpha * s(t)
+L_rw  = I - (1 - alpha) * P^T
 ```
+
+Dissipation is not a separate additive term: it is the state-proportional leak carried by the identity part of `-L_rw * a`. The fixed point `da/dt = 0` is exactly the discrete RWR solution `a* = alpha * (I - (1 - alpha) P^T)^{-1} * s`. The day-scale `decay()` of retained action (see [dissipation.md](dissipation.md)) is a distinct process and must not be folded into this dimensionless activation flow.
 
 But once query injection and dissipation exist, no conservation law applies. Use separate symbols for symmetric coupling Laplacian and directed transition matrix. The energy/Lyapunov reading is exact only under symmetric coupling (`C_ij = C_ji`); under directed RWR the true fixed point is the RWR stationary activation vector `a*`, and energy is an interpretive descent objective rather than a quantity the dynamics literally minimize. The stationary vector `a*` is primary; energy explains and stabilizes readout around it.
 

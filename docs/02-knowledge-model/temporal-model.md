@@ -23,6 +23,8 @@ valid_from <= as_of < valid_until
 
 Missing bounds mean unbounded on that side. A fact with no validity interval is treated as generally valid unless scope policy says otherwise.
 
+A bounded interval must be well-formed: `valid_from < valid_until`. Because the upper bound is exclusive, a zero-width interval (`valid_from == valid_until`) is empty and matches no `as_of`, so it is treated as malformed by validity-interval observability. Encode an instantaneous fact or event by leaving `valid_until` unbounded (it becomes true at `valid_from` and stays true), or, if it must expire, by giving it a minimal nonzero width (`valid_until = valid_from + 1` time unit). Never encode a point in time as a zero-width interval.
+
 ## Access History
 
 Access is a committed interaction. It is not updated by read-only retrieval. The caller must commit that a site was actually used before `accessed_at` and retained action move.

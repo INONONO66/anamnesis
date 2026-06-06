@@ -50,7 +50,7 @@ Each benchmark query should declare:
 | Operation | Small | Medium |
 |---|---:|---:|
 | ingest | interactive | bounded by top-k candidate scan |
-| associative query | sub-second target | p95 budget required |
+| search | sub-second target | p95 budget required |
 | tick full scan | seconds or less | batch or incremental path required |
 | snapshot | interactive | background recommended |
 

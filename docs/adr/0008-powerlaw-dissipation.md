@@ -18,7 +18,7 @@ A_i' = decay(A_i, delta_days, node_type, d)
 s_i' = project_salience(A_i')
 ```
 
-Apply decay before reinforcement on access:
+Apply decay before reinforcement on committed access:
 
 ```text
 A_after_decay = decay(A_before, now - accessed_at)

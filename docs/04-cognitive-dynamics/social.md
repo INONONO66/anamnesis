@@ -61,14 +61,14 @@ Positive feedback can raise retained action and trust. Negative feedback can low
 
 ## Fast/Slow Learning
 
-Peer feedback can use separate fast and slow rates:
+There is one learning rate `eta = 1 - 0.5^(1/N)` derived from the target co-activation count `N`, as in [interactions.md](interactions.md) and [conductance.md](conductance.md). Fast/slow behavior is not two independent constants; it is an optional data-justified refit of the same family with a smaller `N` for fast adaptation and a larger `N` for slow consolidation, fit only once data shows the two channels strengthen at different rates:
 
-| Rate | Use |
-|---|---|
-| fast | recent explicit user feedback |
-| slow | accumulated peer reliability |
+| Channel | Refit | Use |
+|---|---|---|
+| fast | small `N_fast` | recent explicit user feedback |
+| slow | large `N_slow` | accumulated peer reliability |
 
-This mirrors complementary learning systems: quick adaptation for local behavior, slow consolidation for durable trust.
+This mirrors complementary learning systems: quick adaptation for local behavior, slow consolidation for durable trust. Both rates remain refits of one `N`, not separate base constants.
 
 ## Desirable Difficulty
 

@@ -20,6 +20,8 @@ sigma_ij =
   * temporal_overlap
 ```
 
+Each factor is a bounded gate. `contradiction_weight_ij` is the non-negative constraint strength carried by the `Contradicts` edge, `min(a_i, a_j)` is the bounded query-local activation, and `scope_overlap`, `temporal_overlap` each lie in `[0, 1]` (`0` = no overlap, `1` = full overlap). So `sigma_ij >= 0`, and if any gate is `0` the stress is `0`. See [frustration.md](../04-cognitive-dynamics/frustration.md).
+
 The result is returned as tension. No side is automatically judged true.
 
 ## Consequences
