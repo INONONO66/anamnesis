@@ -142,9 +142,10 @@ fn disjoint_scope_contradiction_produces_no_stress() {
     );
 }
 
-/// More-surprising input receives higher initial retained action than less-surprising
-/// input (ADR-0009): allocate charge is `dA = k * eps`, monotone in the prediction
-/// error against the nearest site.
+/// More-surprising input receives a higher initial evidence prior `P_i` (ADR-0009):
+/// `P_i ← k * eps`, monotone in the prediction error against the nearest site. Both
+/// fresh sites share an equal creation-trace base level `B_i`, so the higher
+/// composite `A_i = B_i + P_i` reflects the larger surprise prior directly.
 #[test]
 fn more_surprising_input_gets_higher_initial_retained_action() {
     let mut e = engine();
@@ -163,6 +164,14 @@ fn more_surprising_input_gets_higher_initial_retained_action() {
     assert!(
         far_a > near_a,
         "more-surprising input should get higher initial A_i: far={far_a} near={near_a}"
+    );
+
+    // The surprise difference lives in the decay-exempt evidence prior P_i (ADR-0008).
+    let near_p = e.graph().storage().get_evidence_prior(near).unwrap();
+    let far_p = e.graph().storage().get_evidence_prior(far).unwrap();
+    assert!(
+        far_p > near_p,
+        "more-surprising input should get higher initial P_i: far={far_p} near={near_p}"
     );
 }
 

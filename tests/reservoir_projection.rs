@@ -1,9 +1,12 @@
 //! Reservoir↔projection functions (Phase 1 foundation).
 //!
-//! Locked conventions (migration design Decision 5, ADR-0002/0003):
-//! - `A_i` retained action = log need-odds (unbounded); `salience = logistic(A)`.
+//! Locked conventions (migration design Decision 5, ADR-0002/0003/0008):
+//! - `A_i` retained action = composite log need-odds `B_i + P_i`;
+//!   `salience = logistic(A_i)`. The projection math is identical whether its input
+//!   is a stored scalar or the recomputed composite.
 //! - `C_ij` conductance = log likelihood ratio (unbounded); `weight = logistic(C)`.
-//! - Backfill inverses are `logit(clamp(x, EPS, 1-EPS))`, finite at the 0/1 ends.
+//! - Backfill inverses are `logit(clamp(x, EPS, 1-EPS))`, finite at the 0/1 ends;
+//!   `salience_to_action` is now the `v3→v4` evidence-prior backfill helper.
 //! - `clamp_log_odds` is the reservoir finite-guard (numerical safety), not [0,1].
 //! - `project_conductance` is the flow's positive-bounded `(0,1)` transition
 //!   conductance `logistic(clamp_log_odds(C))` (activation-flow.md).

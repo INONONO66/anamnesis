@@ -29,6 +29,7 @@ fn make_node(id: u64, agent: &str, session: &str, scope: &str) -> Node {
         valid_until: None,
         salience: 0.5,
         retained_action: 0.0,
+        evidence_prior: 0.0,
         access_count: 0,
         access_history: Default::default(),
         tier: Default::default(),

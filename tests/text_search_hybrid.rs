@@ -19,6 +19,7 @@ fn insert_node_with_name(s: &mut SqliteStorage, name: &str) -> NodeId {
         valid_until: None,
         salience: 1.0,
         retained_action: 0.0,
+        evidence_prior: 0.0,
         access_count: 0,
         access_history: VecDeque::new(),
         tier: MemoryTier::Auto,

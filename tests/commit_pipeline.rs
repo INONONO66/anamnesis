@@ -3,10 +3,12 @@
 //! Proves the read-only/commit boundary (ADR-0004 / interactions.md):
 //! - `query`/`search` return a `ContextPackage` with a `commit_trace` but mutate
 //!   nothing (read-only is retry-safe);
-//! - `Engine::commit` is the only reservoir-mutation path besides `tick`: it
+//! - `Engine::commit` is the only persistent-mutation path besides `tick`: it
 //!   validates the trace against the current graph, then integrates the committed
-//!   `Accessed` / `CoReadout` / `PathUsed` / `TensionActivated` interactions and
-//!   the `ConfidenceLevel` feedback into `A_i` / `C_ij`;
+//!   interactions — `Accessed` appends access traces (raising `B_i`),
+//!   `FeedbackReceived` (`ConfidenceLevel`) moves the decay-exempt evidence prior
+//!   `P_i`, and `CoReadout` / `PathUsed` update conductance `C_ij` (Hebbian-Oja);
+//!   `TensionActivated` records contradictions (ADR-0008);
 //! - a stale/mismatched trace is a hard error and mutates nothing.
 
 use anamnesis::api::Observation;

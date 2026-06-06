@@ -27,6 +27,7 @@ fn make_node(id: NodeId, node_type: KnowledgeType, name: &str) -> Node {
         access_history: Default::default(),
         salience: 0.75,
         retained_action: 0.0,
+        evidence_prior: 0.0,
         tier: Default::default(),
         entity_tags: vec!["tag1".to_string(), "tag2".to_string()],
         origin: Origin {

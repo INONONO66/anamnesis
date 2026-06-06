@@ -123,60 +123,75 @@ fn snapshot_preserves_scope_index() {
 }
 
 #[test]
-fn snapshot_preserves_decay_checkpoint() {
+fn snapshot_preserves_access_history_and_evidence_prior() {
+    // Under A_i = B_i + P_i the persistent node substrate is the access-trace
+    // history (drives B_i) plus the decay-exempt evidence prior P_i (ADR-0008).
+    // Snapshot/restore must preserve both, byte-for-byte, across a post-snapshot
+    // mutation that appends a trace and moves P_i.
     let mut engine = test_engine();
 
     let id_a = ingest_at(&mut engine, "alpha", DEFAULT_SCOPE, Timestamp(0));
     let id_b = ingest_at(&mut engine, "bravo", DEFAULT_SCOPE, Timestamp(0));
 
-    // Tick at +3d so decay_checkpoint advances away from accessed_at on both nodes.
-    engine.tick(Timestamp(3 * DAY_MS)).unwrap();
-
-    let pre_checkpoint_a = engine.graph().storage().get_decay_checkpoint(id_a).unwrap();
-    let pre_checkpoint_b = engine.graph().storage().get_decay_checkpoint(id_b).unwrap();
+    let pre_traces_a = engine
+        .graph()
+        .get_node(id_a)
+        .unwrap()
+        .access_history
+        .clone();
+    let pre_traces_b = engine
+        .graph()
+        .get_node(id_b)
+        .unwrap()
+        .access_history
+        .clone();
+    let pre_prior_a = engine.graph().storage().get_evidence_prior(id_a).unwrap();
     let pre_accessed_a = engine.graph().storage().get_accessed_at(id_a).unwrap();
-    let pre_accessed_b = engine.graph().storage().get_accessed_at(id_b).unwrap();
 
-    assert_eq!(pre_checkpoint_a, Timestamp(3 * DAY_MS));
-    assert_eq!(pre_checkpoint_b, Timestamp(3 * DAY_MS));
-    assert_eq!(pre_accessed_a, Timestamp(0));
-    assert_eq!(pre_accessed_b, Timestamp(0));
+    let snap = engine.snapshot("pre-mutation").unwrap();
 
-    let snap = engine.snapshot("post-tick").unwrap();
-
-    // Mutate: another tick + a touch on one node should diverge both checkpoints
-    // and accessed_at on id_a from the snapshot baseline.
-    engine.tick(Timestamp(7 * DAY_MS)).unwrap();
+    // Mutate: a touch on id_a appends a now-stamped trace and advances accessed_at;
+    // a direct evidence-prior write diverges P_i from the snapshot baseline.
     engine.touch(id_a, Timestamp(8 * DAY_MS)).unwrap();
+    engine
+        .graph_mut()
+        .storage_mut()
+        .set_evidence_prior(id_a, pre_prior_a + 5.0)
+        .unwrap();
 
     assert_ne!(
-        engine.graph().storage().get_decay_checkpoint(id_a).unwrap(),
-        pre_checkpoint_a,
-        "post-mutation checkpoint must differ from snapshot baseline"
+        engine.graph().get_node(id_a).unwrap().access_history,
+        pre_traces_a,
+        "post-mutation trace history must differ from snapshot baseline"
+    );
+    assert_ne!(
+        engine.graph().storage().get_evidence_prior(id_a).unwrap(),
+        pre_prior_a,
+        "post-mutation evidence prior must differ from snapshot baseline"
     );
 
     engine.restore(&snap).unwrap();
 
     let storage = engine.graph().storage();
     assert_eq!(
-        storage.get_decay_checkpoint(id_a).unwrap(),
-        pre_checkpoint_a,
-        "decay_checkpoint for id_a must be restored to pre-snapshot value"
+        storage.get_node(id_a).unwrap().access_history,
+        pre_traces_a,
+        "access_history for id_a must be restored to its pre-snapshot trace window"
     );
     assert_eq!(
-        storage.get_decay_checkpoint(id_b).unwrap(),
-        pre_checkpoint_b,
-        "decay_checkpoint for id_b must be restored to pre-snapshot value"
+        storage.get_node(id_b).unwrap().access_history,
+        pre_traces_b,
+        "access_history for the untouched node must also match pre-snapshot"
+    );
+    assert_eq!(
+        storage.get_evidence_prior(id_a).unwrap(),
+        pre_prior_a,
+        "evidence prior P_i for id_a must be restored to its pre-snapshot value"
     );
     assert_eq!(
         storage.get_accessed_at(id_a).unwrap(),
         pre_accessed_a,
         "accessed_at must follow the snapshot, not the post-snapshot touch"
-    );
-    assert_eq!(
-        storage.get_accessed_at(id_b).unwrap(),
-        pre_accessed_b,
-        "accessed_at for untouched node must also match pre-snapshot"
     );
 }
 
@@ -384,6 +399,7 @@ fn snapshot_preserves_reservoirs() {
             valid_until: None,
             salience: 0.5,
             retained_action: 0.0,
+            evidence_prior: 0.0,
             access_count: 0,
             access_history: VecDeque::new(),
             tier: MemoryTier::Auto,

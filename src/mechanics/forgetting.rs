@@ -1,16 +1,19 @@
 //! ACT-R base-level activation kernel (Anderson & Schooler 1991).
 //!
-//! This is the pure power-law base-level kernel `B = ln(Σⱼ tⱼ⁻ᵈ)`. Per
-//! [ADR-0008](../../docs/adr/0008-powerlaw-dissipation.md) forgetting is power-law
-//! base-level dissipation; the reservoir-space dissipation that maintenance applies
-//! lives in [`crate::mechanics::interactions::decay`]. This module retains the
-//! ACT-R kernel itself, used to characterise the power-law forgetting shape.
+//! This is the pure power-law base-level kernel `B_i = ln(Σⱼ (now − tⱼ)⁻ᵈ)`. Per
+//! [ADR-0008](../../docs/adr/0008-powerlaw-dissipation.md) persistent node strength
+//! decomposes as `A_i = B_i + P_i`: the base level `B_i` owns forgetting and
+//! use-driven reinforcement and is the LIVE node strength term, while `P_i` (the
+//! stored, decay-exempt `evidence_prior`) holds encoding surprise, feedback, and
+//! peer trust. `B_i` is recomputed on demand from the node's access-trace history
+//! (a creation trace plus each committed access, bounded to 32 traces); there is no
+//! scalar reservoir that maintenance decays. Salience is the logistic projection of
+//! the composite sum, `s_i = logistic(B_i + P_i)`.
 //!
-//! The legacy bounded-`[0,1]` exponential salience decay (`decay_salience`,
-//! `reinforce_salience`, `floor_for_type`, `lambda_for_type`, `effective_lambda`)
-//! was removed in the Phase 2 dynamics-substrate migration: dissipation and access
-//! reinforcement now operate on the authoritative `A_i` reservoir, not on bounded
-//! salience. See [interactions.md](../../docs/04-cognitive-dynamics/interactions.md).
+//! Aging is intrinsic: `B_i` ages every trace to `now` whenever it is read, so a
+//! committed access appends a fresh trace inside the same sum that ages the prior
+//! ones (decay-first by construction). See
+//! [interactions.md](../../docs/04-cognitive-dynamics/interactions.md).
 
 use crate::graph::Timestamp;
 use std::collections::VecDeque;
@@ -92,5 +95,34 @@ mod tests {
         assert!((base_level_to_salience(0.0) - 0.5).abs() < 1e-9);
         assert!(base_level_to_salience(20.0) > 0.99);
         assert!(base_level_to_salience(-20.0) < 0.01);
+    }
+
+    #[test]
+    fn creation_trace_makes_fresh_node_finite() {
+        // A freshly created node seeds a creation trace at `created_at`, so its
+        // base level is finite (not NEG_INFINITY) even before any access. With the
+        // creation trace stamped at `now` itself, dt floors to 1ms and B ≈ ln(1) = 0.
+        let mut h = VecDeque::new();
+        let created = Timestamp(5_000);
+        h.push_back(created);
+        let b = compute_base_level(&h, created, 0.5);
+        assert!(b.is_finite(), "fresh node B must be finite, got {b}");
+        assert!(b.abs() < 1e-9, "fresh-at-now B should be ≈ 0, got {b}");
+    }
+
+    #[test]
+    fn composite_salience_combines_base_level_and_prior() {
+        // salience = logistic(B_i + P_i). A high decay-exempt prior keeps a node
+        // salient at birth even though its base level is ≈ 0.
+        let mut h = VecDeque::new();
+        let now = Timestamp(1_000);
+        h.push_back(now);
+        let b = compute_base_level(&h, now, 0.5);
+        let p = 13.8; // surprise-ceiling evidence prior
+        let s = base_level_to_salience(b + p);
+        assert!(
+            s > 0.999,
+            "high prior should land salience near 1.0, got {s}"
+        );
     }
 }

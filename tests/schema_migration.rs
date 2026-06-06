@@ -64,7 +64,7 @@ fn fresh_db_gets_current_schema_version() {
     assert_eq!(storage.node_count(), 0);
 
     let conn = Connection::open(&tmp).expect("reopen");
-    assert_eq!(schema_version(&conn), 4, "fresh DB should be at schema v4");
+    assert_eq!(schema_version(&conn), 5, "fresh DB should be at schema v5");
 
     // The v4 peer evidence-trust columns are present on a fresh DB.
     let peer_cols: Vec<String> = table_columns(&conn, "peers")
@@ -73,6 +73,16 @@ fn fresh_db_gets_current_schema_version() {
         .collect();
     assert!(peer_cols.iter().any(|c| c == "trust_reservoir"));
     assert!(peer_cols.iter().any(|c| c == "trust_evidence_count"));
+
+    // The v5 evidence-prior column P_i is present on the nodes table.
+    let node_cols: Vec<String> = table_columns(&conn, "nodes")
+        .into_iter()
+        .map(|(name, _, _, _)| name)
+        .collect();
+    assert!(
+        node_cols.iter().any(|c| c == "evidence_prior"),
+        "fresh DB nodes table must carry the v5 evidence_prior column"
+    );
 
     let _ = std::fs::remove_file(&tmp);
 }
@@ -199,8 +209,8 @@ fn existing_db_migrates_from_v1_to_current() {
 
         assert_eq!(
             schema_version(&conn),
-            4,
-            "schema_version should be 4 after full v1 -> v4 migration"
+            5,
+            "schema_version should be 5 after full v1 -> v5 migration"
         );
 
         // The v4 peer evidence-trust columns exist after the full chain too.
@@ -210,6 +220,16 @@ fn existing_db_migrates_from_v1_to_current() {
             .collect();
         assert!(peer_cols.iter().any(|c| c == "trust_reservoir"));
         assert!(peer_cols.iter().any(|c| c == "trust_evidence_count"));
+
+        // The v5 evidence-prior column exists after the full chain too.
+        let node_cols: Vec<String> = table_columns(&conn, "nodes")
+            .into_iter()
+            .map(|(name, _, _, _)| name)
+            .collect();
+        assert!(
+            node_cols.iter().any(|c| c == "evidence_prior"),
+            "migrated nodes table must carry the v5 evidence_prior column"
+        );
     }
 
     let _ = std::fs::remove_file(&tmp);
@@ -317,9 +337,22 @@ fn fresh_schema_equals_migrated_schema() {
     let fresh = Connection::open(&fresh_path).expect("reopen fresh");
     let migrated = Connection::open(&migrated_path).expect("reopen migrated");
 
-    assert_eq!(schema_version(&fresh), 4);
-    assert_eq!(schema_version(&migrated), 4);
+    assert_eq!(schema_version(&fresh), 5);
+    assert_eq!(schema_version(&migrated), 5);
 
+    // Both the fresh-create and migration paths must converge on a nodes table that
+    // carries the v5 evidence_prior column (legacy v1->v2 ALTERs leave the rest of
+    // the column ORDER divergent, which is why the full nodes list is not compared).
+    let fresh_node_cols: Vec<String> = table_columns(&fresh, "nodes")
+        .into_iter()
+        .map(|(name, _, _, _)| name)
+        .collect();
+    let migrated_node_cols: Vec<String> = table_columns(&migrated, "nodes")
+        .into_iter()
+        .map(|(name, _, _, _)| name)
+        .collect();
+    assert!(fresh_node_cols.iter().any(|c| c == "evidence_prior"));
+    assert!(migrated_node_cols.iter().any(|c| c == "evidence_prior"));
     // Columns of edges (the table whose layout differs across the migration).
     assert_eq!(
         table_columns(&fresh, "edges"),

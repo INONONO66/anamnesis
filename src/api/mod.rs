@@ -15,12 +15,12 @@ mod search;
 const ARCHIVE_SALIENCE_THRESHOLD: f64 = 0.10;
 const SALIENCE_CHANGE_EPSILON: f64 = 1e-10;
 
-/// Default readout work delivered by a bare `Engine::touch()` access.
+/// Default readout work tag for a bare `Engine::touch()` access.
 ///
-/// CALIBRATED PRIOR — `touch()` records a committed access with no explicit
-/// readout-work measurement, so it credits a full unit of work to the bounded
-/// saturating `access_gain` (interactions.md). The commit pipeline (Phase 5) will
-/// supply measured per-readout work; until then a unit access is the prior.
+/// Under the `A_i = B_i + P_i` model a committed access appends a trace (raising
+/// the base level `B_i`); there is no scalar access-gain that `readout_work` scales
+/// (ADR-0008). The value is retained as the canonical per-touch readout-work tag
+/// the commit pipeline carries; the access effect itself is the appended trace.
 const ACCESS_READOUT_WORK: f64 = 1.0;
 
 /// Configuration for the Anamnesis engine.
@@ -118,13 +118,15 @@ fn finite_vector(values: &[f64]) -> bool {
 /// This backs the `snapshot_restore_consistency` invariant: a clone (the
 /// "restore") must reproduce identical state, so this checks the full `Node` and
 /// `Edge` records (content, summary, embedding, origin, metadata, access_history,
-/// tier, validity, and the bounded projections via their `PartialEq`) plus the
-/// authoritative SoA reservoir/hot fields read through their accessors
-/// (`retained_action` `A_i`, `conductance` `C_ij`, `accessed_at`,
-/// `decay_checkpoint`) — fields a struct copy can lag when marked dirty, and the
-/// exact class of field the clone path could silently drop. Float reservoir/hot
-/// fields are compared by bit pattern so a dropped column reading back as a
-/// default (or a `NaN`) is always caught.
+/// evidence_prior, tier, validity, and the bounded projections via their
+/// `PartialEq`) plus the SoA reservoir/hot fields read through their accessors
+/// (the cached composite `retained_action` `A_i`, `conductance` `C_ij`,
+/// `accessed_at`, the dormant `decay_checkpoint`) — fields a struct copy can lag
+/// when marked dirty, and the exact class of field the clone path could silently
+/// drop. The persistent node substrate (the access-trace history and `P_i`) lives
+/// on the `Node` record and is covered by the record `PartialEq`. Float
+/// reservoir/hot fields are compared by bit pattern so a dropped column reading
+/// back as a default (or a `NaN`) is always caught.
 fn snapshot_restore_mismatch<S: StorageAdapter>(original: &S, restored: &S) -> Option<String> {
     let bits_differ = |a: f64, b: f64| a.to_bits() != b.to_bits();
 
@@ -793,13 +795,15 @@ fn clamp_unit_finite(value: f64) -> f64 {
     }
 }
 
-/// Synthesis retained action `A_s_new` for a crystallized site — the additive,
-/// relevance-weighted average of the source `retained_action` reservoirs.
+/// Synthesis evidence prior for a crystallized site — the additive,
+/// relevance-weighted average of the source composite strengths `A_i = B_i + P_i`.
 ///
 /// Crystallization is **additive synthesis only** (overview.md, interactions.md
 /// `Crystallized`): the new synthesis site inherits the weighted-mean need-odds of
-/// the fragments it consolidates and **never mutates the sources**. The work is
-/// expressed entirely in log-need-odds (reservoir) space (ADR-0002/ADR-0003), so
+/// the fragments it consolidates and **never mutates the sources**. The synthesized
+/// strength is evidence-derived, so the result seeds the synthesis node's
+/// decay-exempt evidence prior `P_i` (a creation trace seeds its base level `B_i`).
+/// The work is expressed entirely in log-need-odds space (ADR-0008/ADR-0003), so
 /// the synthesis is a posterior-odds combination, not a `[0, 1]` salience blend.
 /// Confidence enters as a bounded additive log-odds offset
 /// (`(2*confidence - 1) * REWARD_LOG_ODDS_SCALE`): a fully confident synthesis is
@@ -825,6 +829,29 @@ fn crystallized_action(source_actions: &[f64], relevance_weights: &[f64], confid
         (2.0 * confidence - 1.0) * crate::mechanics::priors::REWARD_LOG_ODDS_SCALE;
     let clamp = crate::mechanics::priors::LOG_ODDS_CLAMP;
     (source_average + confidence_offset).clamp(-clamp, clamp)
+}
+
+/// Seed the strength state for a freshly created node under `A_i = B_i + P_i`.
+///
+/// Returns `(salience, retained_action, access_history)` for a node whose evidence
+/// prior is `prior` and whose creation trace is stamped at `now` (ADR-0008). The
+/// lone creation trace floors to 1ms at `now`, so `B_i ≈ ln(1) = 0` and the cached
+/// `salience = logistic(B_i + prior)`; the trace keeps `B_i` finite for a node that
+/// is never accessed (`compute_base_level` returns `NEG_INFINITY` on empty history).
+fn seed_node_strength(
+    node_type: &KnowledgeType,
+    prior: f64,
+    now: Timestamp,
+) -> (f64, f64, VecDeque<Timestamp>) {
+    let mut access_history = VecDeque::new();
+    access_history.push_back(now);
+    let decay_d = crate::mechanics::priors::DECAY_EXPONENT_D
+        * crate::mechanics::priors::decay_multiplier_for_type(node_type);
+    let base_level =
+        crate::mechanics::forgetting::compute_base_level(&access_history, now, decay_d);
+    let retained_action = base_level + prior;
+    let salience = crate::mechanics::priors::project_salience(retained_action);
+    (salience, retained_action, access_history)
 }
 
 /// Entity-overlap NPMI feature `entity_npmi` — Jaccard of the two tag sets.
@@ -1700,6 +1727,13 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         metadata.insert("debug_started_at".to_string(), timestamp.0.to_string());
         metadata.insert("debug_problem".to_string(), problem.to_string());
 
+        // Debug-lifecycle node: decay-exempt (m_type = 0). The flat prior enters as
+        // the evidence prior P_i; a creation trace seeds B_i (ADR-0008).
+        let (salience, retained_action, access_history) = seed_node_strength(
+            &KnowledgeType::DebugSession,
+            crate::mechanics::priors::INITIAL_RETAINED_ACTION,
+            timestamp,
+        );
         let node = Node {
             id,
             node_type: KnowledgeType::DebugSession,
@@ -1712,12 +1746,11 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             accessed_at: timestamp,
             valid_from: None,
             valid_until: None,
-            salience: crate::mechanics::priors::project_salience(
-                crate::mechanics::priors::INITIAL_RETAINED_ACTION,
-            ),
-            retained_action: crate::mechanics::priors::INITIAL_RETAINED_ACTION,
+            salience,
+            retained_action,
+            evidence_prior: crate::mechanics::priors::INITIAL_RETAINED_ACTION,
             access_count: 0,
-            access_history: VecDeque::new(),
+            access_history,
             tier: MemoryTier::Auto,
             origin,
             entity_tags: Vec::new(),
@@ -1760,6 +1793,13 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         metadata.insert("hypothesis_status".to_string(), "open".to_string());
         metadata.insert("hypothesis_logged_at".to_string(), timestamp.0.to_string());
 
+        // Debug-lifecycle node: decay-exempt (m_type = 0). The flat prior enters as
+        // the evidence prior P_i; a creation trace seeds B_i (ADR-0008).
+        let (salience, retained_action, access_history) = seed_node_strength(
+            &KnowledgeType::Hypothesis,
+            crate::mechanics::priors::INITIAL_RETAINED_ACTION,
+            timestamp,
+        );
         let node = Node {
             id,
             node_type: KnowledgeType::Hypothesis,
@@ -1772,12 +1812,11 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             accessed_at: timestamp,
             valid_from: None,
             valid_until: None,
-            salience: crate::mechanics::priors::project_salience(
-                crate::mechanics::priors::INITIAL_RETAINED_ACTION,
-            ),
-            retained_action: crate::mechanics::priors::INITIAL_RETAINED_ACTION,
+            salience,
+            retained_action,
+            evidence_prior: crate::mechanics::priors::INITIAL_RETAINED_ACTION,
             access_count: 0,
-            access_history: VecDeque::new(),
+            access_history,
             tier: MemoryTier::Auto,
             origin,
             entity_tags: Vec::new(),
@@ -1868,6 +1907,13 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             );
         }
 
+        // Debug-lifecycle node: decay-exempt (m_type = 0). The flat prior enters as
+        // the evidence prior P_i; a creation trace seeds B_i (ADR-0008).
+        let (salience, retained_action, access_history) = seed_node_strength(
+            &KnowledgeType::Evidence,
+            crate::mechanics::priors::INITIAL_RETAINED_ACTION,
+            timestamp,
+        );
         let node = Node {
             id,
             node_type: KnowledgeType::Evidence,
@@ -1880,12 +1926,11 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             accessed_at: timestamp,
             valid_from: None,
             valid_until: None,
-            salience: crate::mechanics::priors::project_salience(
-                crate::mechanics::priors::INITIAL_RETAINED_ACTION,
-            ),
-            retained_action: crate::mechanics::priors::INITIAL_RETAINED_ACTION,
+            salience,
+            retained_action,
+            evidence_prior: crate::mechanics::priors::INITIAL_RETAINED_ACTION,
             access_count: 0,
-            access_history: VecDeque::new(),
+            access_history,
             tier: MemoryTier::Auto,
             origin,
             entity_tags: Vec::new(),
@@ -2085,10 +2130,11 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         // ── operative value tracks the encoder rather than a hard-coded literal.  ──
         let theta_sep = self.config.novelty_threshold;
 
-        // Surprise-gated initial charge dA = k * eps for an Allocate decision.
-        // eps is the precision-weighted (isotropic-fallback) embedding prediction
-        // error against the nearest site; absent any prediction (no embeddings yet)
-        // the site is maximally surprising and enters at the flat-prior ceiling.
+        // Surprise-gated initial evidence prior P_i = k * eps for an Allocate
+        // decision (ADR-0009). eps is the precision-weighted (isotropic-fallback)
+        // embedding prediction error against the nearest site; absent any prediction
+        // (no embeddings yet) the site is maximally surprising and its prior enters
+        // at the surprise ceiling (`SURPRISE_GAIN_K == INITIAL_RETAINED_ACTION`).
         let surprise_charge = match (&observation.embedding, &predicted_embedding) {
             (Some(obs), Some(pred)) => {
                 let eps = perception::bayesian_surprise(obs, pred, None);
@@ -2108,7 +2154,8 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         );
 
         // Route-via-reinforce (familiar) vs allocate-with-surprise-charge (novel).
-        let initial_retained_action = match decision {
+        // The resolved value is the initial evidence prior P_i for the new site.
+        let initial_evidence_prior = match decision {
             PerceptionDecision::Reject(reason) => {
                 return Err(Error::Rejected(format!(
                     "{}: confidence {:.2}, novelty vs theta_sep {:.2}",
@@ -2156,6 +2203,17 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             }
         }
 
+        // Seed the creation trace so B_i is finite at birth (compute_base_level
+        // returns NEG_INFINITY on empty history). At `now` the lone trace floors to
+        // 1ms, so B_i ≈ ln(1) = 0 and salience ≈ logistic(P_i) (ADR-0008/0009).
+        let mut access_history = VecDeque::new();
+        access_history.push_back(now);
+        let decay_d = crate::mechanics::priors::DECAY_EXPONENT_D
+            * crate::mechanics::priors::decay_multiplier_for_type(&observation.node_type);
+        let base_level =
+            crate::mechanics::forgetting::compute_base_level(&access_history, now, decay_d);
+        let initial_action = base_level + initial_evidence_prior;
+
         let node = Node {
             id,
             node_type: observation.node_type.clone(),
@@ -2168,12 +2226,12 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             accessed_at: now,
             valid_from: observation.valid_from,
             valid_until: observation.valid_until,
-            // Surprise-gated initial charge (ADR-0009): salience is the projection of
-            // the retained-action reservoir, never a flat 1.0.
-            salience: crate::mechanics::priors::project_salience(initial_retained_action),
-            retained_action: initial_retained_action,
+            // salience = logistic(B_i + P_i), the cached composite projection.
+            salience: crate::mechanics::priors::project_salience(initial_action),
+            retained_action: initial_action,
+            evidence_prior: initial_evidence_prior,
             access_count: 0,
-            access_history: VecDeque::new(),
+            access_history,
             tier: crate::graph::MemoryTier::Auto,
             origin: observation.origin,
             entity_tags: observation.entity_tags.clone(),
@@ -2350,8 +2408,8 @@ impl<S: StorageAdapter + Clone> Engine<S> {
 
         for source_id in &source_ids {
             let _ = self.graph.get_node(*source_id)?;
-            // Authoritative retained-action reservoir (log need-odds) — the
-            // synthesis node's `A_s_new` is the weighted average of these (ADR-0002).
+            // Composite source strength A_i = B_i + P_i (cached) — the synthesis
+            // node's evidence prior is the weighted average of these (ADR-0008).
             source_actions.push(self.graph.storage().get_retained_action(*source_id)?);
         }
 
@@ -2444,14 +2502,23 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         }
 
         let confidence = clamp_unit_finite(request.confidence);
-        // Additive synthesis: the synthesis node's retained action is the
-        // relevance-weighted average of the SOURCE reservoirs (never mutating them);
-        // salience is its bounded projection (ADR-0002).
-        let initial_action = crystallized_action(&source_actions, &relevance_weights, confidence);
-        let initial_salience = crate::mechanics::priors::project_salience(initial_action);
+        // Additive synthesis: the synthesized strength is evidence-derived, so the
+        // relevance-weighted average of the SOURCE composite strengths becomes the
+        // synthesis node's decay-exempt evidence prior P_i (sources are never
+        // mutated). A creation trace seeds its base level B_i; salience is the
+        // logistic projection of B_i + P_i (ADR-0008).
+        let synthesis_prior = crystallized_action(&source_actions, &relevance_weights, confidence);
 
         let id = self.graph.next_node_id();
         let now = request.timestamp;
+        let decay_d = crate::mechanics::priors::DECAY_EXPONENT_D
+            * crate::mechanics::priors::decay_multiplier_for_type(&request.node_type);
+        let mut access_history = VecDeque::new();
+        access_history.push_back(now);
+        let base_level =
+            crate::mechanics::forgetting::compute_base_level(&access_history, now, decay_d);
+        let initial_action = base_level + synthesis_prior;
+        let initial_salience = crate::mechanics::priors::project_salience(initial_action);
         let crystal_embedding = request.embedding.clone();
         let crystal_type = request.node_type.clone();
         let crystal_tags = request.entity_tags.clone();
@@ -2470,8 +2537,9 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             valid_until: None,
             salience: initial_salience,
             retained_action: initial_action,
+            evidence_prior: synthesis_prior,
             access_count: 0,
-            access_history: VecDeque::new(),
+            access_history,
             tier: crate::graph::MemoryTier::Auto,
             origin: request.origin,
             entity_tags: request.entity_tags,
@@ -2887,40 +2955,41 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         Ok(())
     }
 
-    /// Touch a node — an `Accessed` interaction on the retained-action reservoir.
+    /// Touch a node — an `Accessed` interaction (ADR-0008).
     ///
-    /// Operates on the authoritative `A_i` reservoir (log need-odds), NOT on bounded
-    /// salience (ADR-0002). The ordering invariant is **decay BEFORE reinforce**
-    /// (dissipation.md / ADR-0008):
+    /// A committed access appends a now-stamped trace to the node's `access_history`,
+    /// raising the base level `B_i`; the `salience`/`retained_action` cache is then
+    /// refreshed from `B_i(now) + P_i`:
     ///
     /// ```text
-    /// A_after_decay = decay(A_i, now - checkpoint, node_type, d)   // power-law, log-odds
-    /// A_next        = A_after_decay + access_gain(readout_work)    // bounded, saturating
-    /// salience      = project_salience(A_next)                     // re-project
+    /// traces_i ← append(traces_i, now)             // bounded 32-trace window
+    /// B_i      = ln( Σ_j (now − t_j)^(−d·m_type) ) // ages prior traces to now
+    /// salience = logistic(B_i + P_i)               // refresh cache
     /// ```
     ///
-    /// Decay is lazy: elapsed time is measured from the `decay_checkpoint` (NOT
-    /// `accessed_at`). Core tier and `IdentityCore` are protected (no decay).
-    /// Updates BOTH `accessed_at` and `decay_checkpoint` to `now`. Non-finite
-    /// reservoir values are rejected at the boundary.
+    /// Decay-first ordering is intrinsic: `B_i` ages every prior trace to `now`
+    /// inside the same sum that adds the new one — there is no scalar decay step and
+    /// no scalar access gain. `accessed_at` is advanced to `now`. The decay-exempt
+    /// `P_i` is unchanged. Non-finite values are rejected at the boundary.
     pub fn touch(&mut self, node_id: NodeId, now: Timestamp) -> Result<(), Error> {
         if self.is_retracted(node_id)? {
             return Ok(());
         }
-        // `Accessed` interaction: decay-then-`access_gain` on `A_i`. Shares the exact
-        // ordering invariant (decay BEFORE reinforce) with `commit_accessed`; the
-        // default readout work is the calibrated `ACCESS_READOUT_WORK` constant.
+        // `Accessed` interaction: append a trace + recompute B_i. Shares the exact
+        // path with `commit_accessed`; `ACCESS_READOUT_WORK` is the canonical
+        // per-touch readout-work tag (the access effect is the appended trace).
         self.commit_accessed(node_id, ACCESS_READOUT_WORK, now)
     }
 
     /// Batch `Accessed` interaction — apply [`touch`](Engine::touch) to many sites at
     /// one timestamp (interactions.md `Accessed`).
     ///
-    /// Each site is processed independently with the same decay-then-`access_gain`
-    /// ordering as the single-site `touch`: lazy power-law decay from its own
-    /// `decay_checkpoint`, then the bounded saturating access gain, then a re-projected
-    /// salience. Retracted sites are skipped. Iteration follows the caller-supplied
-    /// slice order, so the operation is deterministic for a fixed `(graph, ids, now)`.
+    /// Each site is processed independently with the same trace-append semantics as
+    /// the single-site `touch`: a now-stamped trace is appended to its
+    /// `access_history` (raising `B_i`), then the `salience`/`retained_action` cache
+    /// is refreshed from `B_i(now) + P_i`. Retracted sites are skipped. Iteration
+    /// follows the caller-supplied slice order, so the operation is deterministic for
+    /// a fixed `(graph, ids, now)`.
     ///
     /// Returns the ids whose reservoirs were actually moved (i.e. non-retracted),
     /// deduplicated in first-seen order, so callers can attribute the access work.
@@ -3026,12 +3095,13 @@ impl<S: StorageAdapter + Clone> Engine<S> {
 
     /// Apply a consumer feedback signal — a `FeedbackReceived` interaction.
     ///
-    /// Rescorla-Wagner prediction error on the authoritative `A_i` reservoir
-    /// (ADR-0002/0003): `dA_i = eta * (lambda - A_i)` where `lambda` is the reward
-    /// target derived from the signal (interactions.md). Already-well-predicted
-    /// sites move less; negative feedback lowers retained action but preserves
-    /// provenance and source content. The bounded salience projection is then
-    /// recomputed from the moved reservoir.
+    /// Rescorla-Wagner prediction error on the decay-exempt evidence prior `P_i`
+    /// (ADR-0008): `dP_i = eta * (lambda - predicted)` where `lambda` is the reward
+    /// target derived from the signal and `predicted` is the current `P_i`
+    /// (interactions.md). Feedback moves the persistent prior, NOT the base level:
+    /// already-well-predicted sites move less; negative feedback lowers `P_i` but
+    /// preserves provenance and source content. The `salience`/`retained_action`
+    /// cache is then refreshed from `B_i(now) + P_i_new`.
     pub fn apply_feedback(
         &mut self,
         node_id: NodeId,
@@ -3040,17 +3110,28 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         use crate::mechanics::interactions::{lambda_reward, rescorla_wagner};
         use crate::mechanics::priors::{TARGET_COACTIVATION_N, learning_rate, project_salience};
 
-        let current_action = self.graph.storage().get_retained_action(node_id)?;
         let current_salience = self.graph.storage().get_salience(node_id)?;
+        let current_prior = self.graph.storage().get_evidence_prior(node_id)?;
+        let now = self.graph.get_node(node_id)?.accessed_at;
 
         let eta = learning_rate(TARGET_COACTIVATION_N);
-        let new_action = rescorla_wagner(current_action, lambda_reward(&signal), eta);
+        let new_prior = rescorla_wagner(current_prior, lambda_reward(&signal), eta);
+        if !new_prior.is_finite() {
+            return Err(Error::NonFinite(format!(
+                "evidence prior for node {node_id:?}"
+            )));
+        }
+        self.graph
+            .storage_mut()
+            .set_evidence_prior(node_id, new_prior)?;
+
+        // Refresh the composite cache from B_i(now) + P_i_new.
+        let new_action = self.recompute_composite_action(node_id, now)?;
         if !new_action.is_finite() {
             return Err(Error::NonFinite(format!(
                 "retained action for node {node_id:?}"
             )));
         }
-
         self.graph
             .storage_mut()
             .set_retained_action(node_id, new_action)?;
@@ -3087,14 +3168,15 @@ impl<S: StorageAdapter + Clone> Engine<S> {
     ///    `PathUsed` edge must still exist *with the same source, target, and type* it
     ///    had at retrieval (topology match). A stale or mismatched trace is a hard
     ///    [`Error`] and **no** reservoir is touched — commit is all-or-nothing.
-    /// 2. **Integrate the committed interactions** into the authoritative reservoirs
-    ///    (ADR-0002/0003):
-    ///    - `Accessed` — decay-then-`access_gain` on each packaged site's `A_i`
-    ///      (interactions.md "decay first, reinforce second");
-    ///    - `FeedbackReceived` — Rescorla-Wagner `dA_i = eta*(lambda - A_i)` on each
-    ///      packaged site, with `lambda` mapped from `feedback`
-    ///      ([`ConfidenceLevel`](crate::ConfidenceLevel) → `lambda_reward`). `None`
-    ///      feedback records use without a feedback signal;
+    /// 2. **Integrate the committed interactions** into the persistent substrate
+    ///    (ADR-0008/0003):
+    ///    - `Accessed` — append a now-stamped trace to each packaged site's
+    ///      `access_history` (raising `B_i`; decay-first is intrinsic to the
+    ///      base-level sum), then refresh its salience cache;
+    ///    - `FeedbackReceived` — Rescorla-Wagner `dP_i = eta*(lambda - P_i)` on each
+    ///      packaged site's decay-exempt evidence prior, with `lambda` mapped from
+    ///      `feedback` ([`ConfidenceLevel`](crate::ConfidenceLevel) → `lambda_reward`).
+    ///      `None` feedback records use without a feedback signal;
     ///    - `PathUsed` — bounded Hebbian-Oja `dC_ij = eta*flux*(1 - project_weight(C))`
     ///      on each edge that carried committed path current `I_ij`;
     ///    - `CoReadout` — the same Hebbian-Oja step with flux `min(a_i, a_j)` on the
@@ -3204,9 +3286,21 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                 if self.is_retracted(site.node_id)? {
                     continue;
                 }
-                let current_action = self.graph.storage().get_retained_action(site.node_id)?;
+                // Feedback moves the decay-exempt evidence prior P_i (ADR-0008),
+                // then the composite cache is refreshed from B_i(now) + P_i_new.
+                let current_prior = self.graph.storage().get_evidence_prior(site.node_id)?;
                 let current_salience = self.graph.storage().get_salience(site.node_id)?;
-                let new_action = rescorla_wagner(current_action, lambda, eta);
+                let new_prior = rescorla_wagner(current_prior, lambda, eta);
+                if !new_prior.is_finite() {
+                    return Err(Error::NonFinite(format!(
+                        "evidence prior for node {:?}",
+                        site.node_id
+                    )));
+                }
+                self.graph
+                    .storage_mut()
+                    .set_evidence_prior(site.node_id, new_prior)?;
+                let new_action = self.recompute_composite_action(site.node_id, now)?;
                 if !new_action.is_finite() {
                     return Err(Error::NonFinite(format!(
                         "retained action for node {:?}",
@@ -3311,56 +3405,39 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         Ok((package, report))
     }
 
-    /// `Accessed` integration for one site — decay-then-`access_gain` on `A_i`.
+    /// `Accessed` integration for one site — append a trace, recompute strength.
     ///
-    /// Shares the `touch()` ordering invariant (decay BEFORE reinforce, dissipation.md /
-    /// ADR-0008): lazy power-law decay from the `decay_checkpoint`, then the bounded
-    /// saturating access gain scaled by the committed `readout_work`. Updates both
-    /// `accessed_at` and `decay_checkpoint` to `now` and re-projects salience.
+    /// Under `A_i = B_i + P_i` a committed access appends a now-stamped trace to the
+    /// node's `access_history` (dissipation.md / ADR-0008). Decay-first ordering is
+    /// intrinsic: recomputing `B_i = ln(Σ_j (now − t_j)^(−d·m_type))` ages every
+    /// prior trace to `now` inside the same sum that adds the new one — there is no
+    /// scalar decay step and no scalar access gain. The `salience`/`retained_action`
+    /// cache is then refreshed from the recomputed `B_i(now) + P_i` and `accessed_at`
+    /// advanced to `now`. `_readout_work` no longer scales a gain (the access effect
+    /// is the appended trace), but is retained on the signature for the commit
+    /// pipeline's per-readout work tag.
     fn commit_accessed(
         &mut self,
         node_id: NodeId,
-        readout_work: f64,
+        _readout_work: f64,
         now: Timestamp,
     ) -> Result<(), Error> {
-        use crate::mechanics::interactions::{decay_default, reinforce_access};
-        use crate::mechanics::priors::{TARGET_COACTIVATION_N, learning_rate, project_salience};
-
-        let current_action = self.graph.storage().get_retained_action(node_id)?;
         let current_salience = self.graph.storage().get_salience(node_id)?;
-        let last_checkpoint = self.graph.storage().get_decay_checkpoint(node_id)?;
-        let node_type = self.graph.storage().get_node_type(node_id)?.clone();
-        let node_tier = self.graph.get_node(node_id)?.tier.clone();
-        let decay_protected =
-            node_tier == MemoryTier::Core || node_type == KnowledgeType::IdentityCore;
 
-        {
-            let node = self.graph.get_node_mut(node_id)?;
-            node.record_access(now);
-        }
+        // The committed access IS the new trace (raises B_i); persist it durably.
+        self.graph.storage_mut().append_access_trace(node_id, now)?;
 
-        let dt_ms = now.0.saturating_sub(last_checkpoint.0);
-        let dt_days = dt_ms as f64 / 86_400_000.0;
-
-        // Decay BEFORE reinforce — ordering invariant (dissipation.md / ADR-0008).
-        let action_after_decay = if decay_protected {
-            current_action
-        } else {
-            decay_default(current_action, dt_days, &node_type)
-        };
-
-        let eta = learning_rate(TARGET_COACTIVATION_N);
-        let new_action = reinforce_access(action_after_decay, readout_work.max(0.0), eta);
+        let new_action = self.recompute_composite_action(node_id, now)?;
         if !new_action.is_finite() {
             return Err(Error::NonFinite(format!(
                 "retained action for node {node_id:?}"
             )));
         }
-
+        // Refresh the composite cache (recomputes salience = logistic(B_i + P_i)).
         self.graph
             .storage_mut()
             .set_retained_action(node_id, new_action)?;
-        let new_salience = project_salience(new_action);
+        let new_salience = crate::mechanics::priors::project_salience(new_action);
         if (new_salience - current_salience).abs() > SALIENCE_CHANGE_EPSILON {
             self.emit_event(GraphEvent::SalienceChanged {
                 node_id,
@@ -3377,29 +3454,44 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             }
         }
         self.graph.storage_mut().set_accessed_at(node_id, now)?;
-        self.graph
-            .storage_mut()
-            .set_decay_checkpoint(node_id, now)?;
 
         let node = self.graph.get_node_mut(node_id)?;
         node.access_count += 1;
         Ok(())
     }
 
-    /// Advance time — a batch `TimeElapsed` interaction applying power-law
-    /// dissipation to every node's retained-action reservoir.
+    /// Recompute the composite retained action `A_i = B_i(now) + P_i` for a node.
     ///
-    /// Operates on the authoritative `A_i` reservoir (ADR-0002), not on bounded
-    /// salience: `A_i' = decay(A_i, delta_days, node_type, d)` (dissipation.md /
-    /// ADR-0008), then `salience = project_salience(A_i')` is re-projected. Reads
-    /// `decay_checkpoint` (NOT `accessed_at`) as the elapsed-time baseline and
-    /// advances `decay_checkpoint` to `now`; `accessed_at` is left untouched,
-    /// preserving last user-access semantics.
+    /// `B_i` is the multi-trace ACT-R base level over the node's current
+    /// `access_history` aged to `now`, with the single decay prior `d` scaled by the
+    /// `node_type` policy multiplier `m_type` (dissipation.md). `P_i` is the stored,
+    /// decay-exempt `evidence_prior`. The creation trace seeded at ingest keeps `B_i`
+    /// finite for a node that has never been accessed.
+    fn recompute_composite_action(&self, node_id: NodeId, now: Timestamp) -> Result<f64, Error> {
+        use crate::mechanics::forgetting::compute_base_level;
+        use crate::mechanics::priors::{DECAY_EXPONENT_D, decay_multiplier_for_type};
+
+        let node_type = self.graph.storage().get_node_type(node_id)?.clone();
+        let decay_d = DECAY_EXPONENT_D * decay_multiplier_for_type(&node_type);
+        let history = self.graph.storage().get_access_history(node_id)?;
+        let base_level = compute_base_level(history, now, decay_d);
+        let prior = self.graph.storage().get_evidence_prior(node_id)?;
+        Ok(base_level + prior)
+    }
+
+    /// Advance time — a batch `TimeElapsed` interaction that recomputes every node's
+    /// salience from its base level aged to `now`.
     ///
-    /// Core tier and `IdentityCore` are protected (never decay under ordinary
-    /// tick). Non-finite reservoir values are rejected at the boundary.
+    /// Under `A_i = B_i + P_i` (ADR-0008) time applies NO scalar shift: each node's
+    /// `salience = logistic(B_i(now) + P_i)` is recomputed, where
+    /// `B_i = ln(Σ_j (now − t_j)^(−d·m_type))` falls purely because `now` advanced
+    /// relative to the fixed access traces, and the decay-exempt `P_i` is unchanged.
+    /// `accessed_at` is left untouched, preserving last user-access semantics. Idle
+    /// edges still leak their conductance.
+    ///
+    /// Core tier and `IdentityCore` are protected (never decay under ordinary tick).
+    /// Non-finite values are rejected at the boundary.
     pub fn tick(&mut self, now: Timestamp) -> Result<TickReport, Error> {
-        use crate::mechanics::interactions::decay_default;
         use crate::mechanics::priors::project_salience;
 
         let node_ids = self.graph.storage().all_node_ids();
@@ -3419,16 +3511,8 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                 continue;
             }
 
-            let current_action = match self.graph.storage().get_retained_action(id) {
-                Ok(a) => a,
-                Err(_) => continue,
-            };
             let current_salience = match self.graph.storage().get_salience(id) {
                 Ok(s) => s,
-                Err(_) => continue,
-            };
-            let last_checkpoint = match self.graph.storage().get_decay_checkpoint(id) {
-                Ok(t) => t,
                 Err(_) => continue,
             };
             let node_type = match self.graph.storage().get_node_type(id) {
@@ -3440,30 +3524,23 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                 continue;
             }
 
-            let dt_ms = now.0.saturating_sub(last_checkpoint.0);
-            let dt_days = dt_ms as f64 / 86_400_000.0;
-
-            // Power-law dissipation on the reservoir (no [0,1] floor here).
-            let new_action = decay_default(current_action, dt_days, &node_type);
+            // Recompute B_i(now) + P_i — B_i falls because `now` advanced relative to
+            // the fixed traces; no stored reservoir is shifted.
+            let new_action = match self.recompute_composite_action(id, now) {
+                Ok(a) => a,
+                Err(_) => continue,
+            };
             if !new_action.is_finite() {
                 return Err(Error::NonFinite(format!("retained action for node {id:?}")));
             }
             let new_salience = project_salience(new_action);
 
             if (new_salience - current_salience).abs() > SALIENCE_CHANGE_EPSILON {
-                // `set_retained_action` writes both A_i and the salience projection.
+                // `set_retained_action` refreshes the composite cache + salience.
                 if self
                     .graph
                     .storage_mut()
                     .set_retained_action(id, new_action)
-                    .is_err()
-                {
-                    continue;
-                }
-                if self
-                    .graph
-                    .storage_mut()
-                    .set_decay_checkpoint(id, now)
                     .is_err()
                 {
                     continue;
@@ -4621,10 +4698,11 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         // history) surfaces here as a field-level mismatch — not merely as a shift
         // in one of the nine aggregate health metrics. We compare the full `Node`
         // and `Edge` records (which carry content, summary, embedding, origin,
-        // metadata, access_history, tier, validity, and the projections) together
-        // with the authoritative SoA reservoir/hot fields read through their
-        // accessors (`retained_action`, `conductance`, `accessed_at`,
-        // `decay_checkpoint`), which the cached struct can lag when marked dirty.
+        // metadata, access_history, evidence_prior, tier, validity, and the
+        // projections) together with the SoA reservoir/hot fields read through their
+        // accessors (the cached composite `retained_action`, `conductance`,
+        // `accessed_at`, the dormant `decay_checkpoint`), which the cached struct can
+        // lag when marked dirty.
         let snapshot_result = {
             let cloned = self.graph.storage().clone();
             match snapshot_restore_mismatch(self.graph.storage(), &cloned) {
@@ -4904,14 +4982,22 @@ mod tests {
         assert_eq!(engine.graph().node_count(), 1);
         let node = engine.graph().get_node(ids[0]).unwrap();
         assert_eq!(node.name, "test node");
-        // Salience is the projection of the surprise-gated retained-action reservoir
-        // (ADR-0009), never a flat 1.0. With no embedding the observation is maximally
-        // surprising and enters near the prior ceiling project_salience(13.8) ≈ 1.
+        // salience = logistic(B_i + P_i) (ADR-0008), never a flat 1.0. With no
+        // embedding the observation is maximally surprising, so its evidence prior
+        // P_i enters near the ceiling (k·eps fallback = INITIAL_RETAINED_ACTION) and
+        // salience ≈ logistic(B_creation ≈ 0 + P_i) ≈ 1.
         assert_eq!(
             node.salience,
             crate::mechanics::priors::project_salience(node.retained_action)
         );
         assert!(node.salience > 0.999 && node.salience < 1.0);
+        // Ingest seeds exactly the creation trace so B_i is finite at birth.
+        assert_eq!(node.access_history.len(), 1, "creation trace seeded");
+        assert_eq!(
+            node.evidence_prior,
+            crate::mechanics::priors::INITIAL_RETAINED_ACTION,
+            "encoding-surprise prior P_i ← k·eps (max-surprise fallback)"
+        );
     }
 
     #[test]
@@ -5262,7 +5348,7 @@ mod tests {
     }
 
     #[test]
-    fn touch_applies_decay_before_reinforcement() {
+    fn touch_appends_trace_and_keeps_salience_bounded() {
         let mut engine = Engine::new();
         let IngestResult::Created(ids) = engine.ingest(make_observation("node")).unwrap() else {
             panic!("expected Created");
@@ -5272,10 +5358,12 @@ mod tests {
         let future = Timestamp(1000 + 30 * 86_400_000);
         engine.touch(id, future).unwrap();
 
+        // A committed access appends a now-stamped trace (raising B_i); salience is
+        // the bounded logistic projection of B_i(now) + P_i, never exactly 1.0.
         let node = engine.graph().get_node(id).unwrap();
         assert!(
             node.salience < 1.0,
-            "salience should have decayed: {}",
+            "salience projection is strictly bounded: {}",
             node.salience
         );
         assert!(
@@ -5284,10 +5372,13 @@ mod tests {
             node.salience
         );
         assert_eq!(node.access_count, 1);
+        // The creation trace plus the touch trace are both present.
+        assert_eq!(node.access_history.len(), 2);
+        assert_eq!(*node.access_history.back().unwrap(), future);
     }
 
     #[test]
-    fn touch_immediate_reinforces_without_decay() {
+    fn touch_immediate_appends_trace_and_does_not_lower_strength() {
         let mut engine = Engine::new();
         let IngestResult::Created(ids) = engine.ingest(make_observation("node")).unwrap() else {
             panic!("expected Created");
@@ -5299,9 +5390,9 @@ mod tests {
         let now = Timestamp(1000);
         engine.touch(id, now).unwrap();
 
-        // dt=0: no decay. Access gain is bounded and saturating — near the ceiling
-        // (A ≈ INITIAL_RETAINED_ACTION) the headroom (1 - project_salience(A)) ≈ 0,
-        // so A barely moves and salience stays just under 1.0.
+        // Immediate touch (same now): the appended trace ages prior traces to `now`
+        // inside the same B_i sum, so an extra coincident trace can only raise B_i
+        // (decay-first is intrinsic, ADR-0008). A_i is the recomputed composite cache.
         let node = engine.graph().get_node(id).unwrap();
         assert!(
             node.retained_action >= a_before,

@@ -28,12 +28,14 @@ pub struct SqliteStorage {
     edges: Vec<Option<Edge>>,
     salience: Vec<f64>,
     retained_action: Vec<f64>,
+    evidence_prior: Vec<f64>,
     accessed_at: Vec<Timestamp>,
     decay_checkpoint: Vec<Timestamp>,
     edge_conductance: Vec<f64>,
     edge_accessed_at: Vec<Timestamp>,
     dirty_salience: Vec<bool>,
     dirty_retained_action: Vec<bool>,
+    dirty_evidence_prior: Vec<bool>,
     dirty_accessed_at: Vec<bool>,
     dirty_decay_checkpoint: Vec<bool>,
     dirty_edge_conductance: Vec<bool>,
@@ -76,12 +78,14 @@ impl SqliteStorage {
             edges: Vec::new(),
             salience: Vec::new(),
             retained_action: Vec::new(),
+            evidence_prior: Vec::new(),
             accessed_at: Vec::new(),
             decay_checkpoint: Vec::new(),
             edge_conductance: Vec::new(),
             edge_accessed_at: Vec::new(),
             dirty_salience: vec![false; capacity],
             dirty_retained_action: vec![false; capacity],
+            dirty_evidence_prior: vec![false; capacity],
             dirty_accessed_at: vec![false; capacity],
             dirty_decay_checkpoint: vec![false; capacity],
             dirty_edge_conductance: vec![false; capacity],
@@ -112,10 +116,12 @@ impl SqliteStorage {
             self.nodes.resize_with(new_len, || None);
             self.salience.resize(new_len, 0.0);
             self.retained_action.resize(new_len, 0.0);
+            self.evidence_prior.resize(new_len, 0.0);
             self.accessed_at.resize(new_len, Timestamp(0));
             self.decay_checkpoint.resize(new_len, Timestamp(0));
             self.dirty_salience.resize(new_len, false);
             self.dirty_retained_action.resize(new_len, false);
+            self.dirty_evidence_prior.resize(new_len, false);
             self.dirty_accessed_at.resize(new_len, false);
             self.dirty_decay_checkpoint.resize(new_len, false);
             self.node_types.resize_with(new_len, || None);
@@ -156,6 +162,7 @@ impl SqliteStorage {
             self.ensure_node_capacity(idx);
             self.salience[idx] = salience;
             self.retained_action[idx] = retained_action;
+            self.evidence_prior[idx] = node.evidence_prior;
             self.accessed_at[idx] = accessed_at;
             self.decay_checkpoint[idx] = decay_checkpoint;
             self.node_types[idx] = Some(node.node_type.clone());
@@ -194,8 +201,10 @@ impl SqliteStorage {
             .unwrap_or(0);
         self.dirty_salience = vec![false; self.nodes.len()];
         self.dirty_retained_action = vec![false; self.nodes.len()];
+        self.dirty_evidence_prior = vec![false; self.nodes.len()];
         self.dirty_accessed_at = vec![false; self.nodes.len()];
         self.dirty_decay_checkpoint = vec![false; self.nodes.len()];
+        self.evidence_prior.resize(self.nodes.len(), 0.0);
         // Size edge SoA + reset edge dirty arrays to the final edge capacity.
         self.edge_conductance.resize(self.edges.len(), 0.0);
         self.edge_accessed_at.resize(self.edges.len(), Timestamp(0));
@@ -271,8 +280,8 @@ impl Clone for SqliteStorage {
                         "INSERT OR REPLACE INTO nodes (
                             id, name, summary, content, embedding_json, node_type, peer_id, source_kind, session_id,
                             scope, confidence, valid_from, valid_until, created_at, updated_at,
-                            access_count, access_history, tier, metadata
-                        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+                            access_count, access_history, tier, metadata, evidence_prior
+                        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
                         params![
                             node.id.0,
                             node.name,
@@ -293,6 +302,7 @@ impl Clone for SqliteStorage {
                             encode_timestamp_deque(&node.access_history),
                             encode_memory_tier(&node.tier),
                             encode_map(&node.metadata),
+                            node.evidence_prior,
                         ],
                     )
                     .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
@@ -457,10 +467,12 @@ impl StorageAdapter for SqliteStorage {
 
         self.salience[idx] = node.salience;
         self.retained_action[idx] = node.retained_action;
+        self.evidence_prior[idx] = node.evidence_prior;
         self.accessed_at[idx] = node.accessed_at;
         self.decay_checkpoint[idx] = node.accessed_at;
         self.dirty_salience[idx] = false;
         self.dirty_retained_action[idx] = false;
+        self.dirty_evidence_prior[idx] = false;
         self.dirty_accessed_at[idx] = false;
         self.dirty_decay_checkpoint[idx] = false;
         self.node_types[idx] = Some(node.node_type.clone());
@@ -519,10 +531,12 @@ impl StorageAdapter for SqliteStorage {
         self.nodes[idx] = None;
         self.salience[idx] = 0.0;
         self.retained_action[idx] = 0.0;
+        self.evidence_prior[idx] = 0.0;
         self.accessed_at[idx] = Timestamp(0);
         self.decay_checkpoint[idx] = Timestamp(0);
         self.dirty_salience[idx] = false;
         self.dirty_retained_action[idx] = false;
+        self.dirty_evidence_prior[idx] = false;
         self.dirty_accessed_at[idx] = false;
         self.dirty_decay_checkpoint[idx] = false;
         self.node_types[idx] = None;
@@ -683,6 +697,61 @@ impl StorageAdapter for SqliteStorage {
         Ok(())
     }
 
+    fn get_access_history(&self, id: NodeId) -> Result<&VecDeque<Timestamp>, Error> {
+        let idx = id.0 as usize;
+        self.nodes
+            .get(idx)
+            .and_then(|slot| slot.as_ref())
+            .map(|node| &node.access_history)
+            .ok_or(Error::NodeNotFound(id))
+    }
+
+    fn append_access_trace(&mut self, id: NodeId, ts: Timestamp) -> Result<(), Error> {
+        let idx = id.0 as usize;
+        if idx >= self.nodes.len() || self.nodes[idx].is_none() {
+            return Err(Error::NodeNotFound(id));
+        }
+        // Append the now-stamped trace to the bounded 32-trace window in memory.
+        let encoded = if let Some(node) = self.nodes[idx].as_mut() {
+            node.record_access(ts);
+            encode_timestamp_deque(&node.access_history)
+        } else {
+            return Err(Error::NodeNotFound(id));
+        };
+        // B_i is recomputed from access_history at projection time, so the trace
+        // must be durably persisted now (write-through on the nodes row column).
+        {
+            let conn = self.lock_conn()?;
+            conn.execute(
+                "UPDATE nodes SET access_history = ?2 WHERE id = ?1",
+                params![id.0, encoded],
+            )
+            .map_err(sqlite_error)?;
+        }
+        Ok(())
+    }
+
+    fn get_evidence_prior(&self, id: NodeId) -> Result<f64, Error> {
+        let idx = id.0 as usize;
+        if idx >= self.nodes.len() || self.nodes[idx].is_none() {
+            return Err(Error::NodeNotFound(id));
+        }
+        Ok(self.evidence_prior[idx])
+    }
+
+    fn set_evidence_prior(&mut self, id: NodeId, prior: f64) -> Result<(), Error> {
+        let idx = id.0 as usize;
+        if idx >= self.nodes.len() || self.nodes[idx].is_none() {
+            return Err(Error::NodeNotFound(id));
+        }
+        self.evidence_prior[idx] = prior;
+        self.dirty_evidence_prior[idx] = true;
+        if let Some(node) = self.nodes[idx].as_mut() {
+            node.evidence_prior = prior;
+        }
+        Ok(())
+    }
+
     fn get_retained_action(&self, id: NodeId) -> Result<f64, Error> {
         let idx = id.0 as usize;
         if idx >= self.nodes.len() || self.nodes[idx].is_none() {
@@ -803,6 +872,18 @@ impl StorageAdapter for SqliteStorage {
                     }
                 }
 
+                for (idx, dirty) in self.dirty_evidence_prior.iter().enumerate() {
+                    if *dirty {
+                        // `evidence_prior` is a column on the `nodes` table (P_i is
+                        // a decay-exempt persistent reservoir, ADR-0008).
+                        conn.execute(
+                            "UPDATE nodes SET evidence_prior = ?2 WHERE id = ?1",
+                            params![idx as u64, self.evidence_prior[idx]],
+                        )
+                        .map_err(sqlite_error)?;
+                    }
+                }
+
                 for (idx, dirty) in self.dirty_edge_conductance.iter().enumerate() {
                     if *dirty {
                         // Persist the conductance reservoir AND its weight
@@ -850,6 +931,7 @@ impl StorageAdapter for SqliteStorage {
 
         self.dirty_salience.fill(false);
         self.dirty_retained_action.fill(false);
+        self.dirty_evidence_prior.fill(false);
         self.dirty_accessed_at.fill(false);
         self.dirty_decay_checkpoint.fill(false);
         self.dirty_edge_conductance.fill(false);
@@ -1163,6 +1245,7 @@ mod tests {
             valid_until: None,
             salience,
             retained_action: 0.0,
+            evidence_prior: 0.0,
             access_count: 0,
             access_history: VecDeque::new(),
             tier: MemoryTier::Auto,
@@ -1366,7 +1449,7 @@ mod tests {
 /// Current on-disk schema version. The fresh-DB `create_schema` path and the
 /// incremental migration chain must converge on an IDENTICAL schema at this
 /// version (same columns, same indexes).
-const SCHEMA_VERSION: u32 = 4;
+const SCHEMA_VERSION: u32 = 5;
 
 /// Run schema migrations to bring the database up to the current version.
 ///
@@ -1375,9 +1458,17 @@ const SCHEMA_VERSION: u32 = 4;
 /// - v2: `peer_id INTEGER` + `source_kind TEXT` replace `agent_id`; peers/peer_aliases tables added
 /// - v3: `retained_action` reservoir table + edge `conductance`/`accessed_at`
 ///   reservoir columns (ADR-0002); valid-interval and salience-projection indexes
-/// - v4 (current): peer evidence-trust columns `trust_reservoir REAL` +
+/// - v4: peer evidence-trust columns `trust_reservoir REAL` +
 ///   `trust_evidence_count INTEGER` (social.md "Peer Trust"); seeded from the coarse
 ///   `trust_level` prior for existing peers
+/// - v5 (current): `nodes.evidence_prior REAL NOT NULL DEFAULT 0` — the persistent,
+///   decay-exempt evidence prior `P_i` of the `A_i = B_i + P_i` decomposition
+///   (ADR-0008). Backfilled to `0.0`: the base-level `B_i` is recomputed from
+///   `access_history`, so persistent strength comes purely from `B_i` at first
+///   recompute; backfilling `P_i` from the old `retained_action` scalar would
+///   double-count access history (that scalar already absorbed it). The obsolete
+///   `decay_checkpoint` / `retained_action` tables are retained for snapshot
+///   back-compat but are no longer load-bearing for memory strength.
 fn migrate_schema(conn: &Connection) -> Result<(), Error> {
     // Ensure schema_version table exists
     conn.execute_batch("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);")
@@ -1408,8 +1499,9 @@ fn migrate_schema(conn: &Connection) -> Result<(), Error> {
                 migrate_v1_to_v2(conn)?;
                 migrate_v2_to_v3(conn)?;
                 migrate_v3_to_v4(conn)?;
+                migrate_v4_to_v5(conn)?;
             } else {
-                // Brand new database — create the current (v4) schema directly.
+                // Brand new database — create the current (v5) schema directly.
                 create_schema(conn)?;
             }
             conn.execute_batch(&format!(
@@ -1421,6 +1513,7 @@ fn migrate_schema(conn: &Connection) -> Result<(), Error> {
             migrate_v1_to_v2(conn)?;
             migrate_v2_to_v3(conn)?;
             migrate_v3_to_v4(conn)?;
+            migrate_v4_to_v5(conn)?;
             conn.execute_batch(&format!(
                 "UPDATE schema_version SET version = {SCHEMA_VERSION};"
             ))
@@ -1429,6 +1522,7 @@ fn migrate_schema(conn: &Connection) -> Result<(), Error> {
         Some(2) => {
             migrate_v2_to_v3(conn)?;
             migrate_v3_to_v4(conn)?;
+            migrate_v4_to_v5(conn)?;
             conn.execute_batch(&format!(
                 "UPDATE schema_version SET version = {SCHEMA_VERSION};"
             ))
@@ -1436,12 +1530,20 @@ fn migrate_schema(conn: &Connection) -> Result<(), Error> {
         }
         Some(3) => {
             migrate_v3_to_v4(conn)?;
+            migrate_v4_to_v5(conn)?;
             conn.execute_batch(&format!(
                 "UPDATE schema_version SET version = {SCHEMA_VERSION};"
             ))
             .map_err(sqlite_error)?;
         }
         Some(4) => {
+            migrate_v4_to_v5(conn)?;
+            conn.execute_batch(&format!(
+                "UPDATE schema_version SET version = {SCHEMA_VERSION};"
+            ))
+            .map_err(sqlite_error)?;
+        }
+        Some(5) => {
             // Already at current version — ensure schema is complete (idempotent
             // CREATE IF NOT EXISTS only; no bare ALTER that would fail twice).
             create_schema(conn)?;
@@ -1616,6 +1718,26 @@ fn migrate_v3_to_v4(conn: &Connection) -> Result<(), Error> {
     Ok(())
 }
 
+/// Migrate a v4 database to v5: add the `nodes.evidence_prior` column — the
+/// persistent, decay-exempt evidence prior `P_i` of the `A_i = B_i + P_i`
+/// decomposition (ADR-0008).
+///
+/// Backfill is `0.0` (the column DEFAULT): the base level `B_i` is recomputed from
+/// each node's `access_history`, so persistent strength comes purely from `B_i` at
+/// first recompute. Backfilling `P_i` from the obsolete `retained_action` scalar
+/// would double-count access history (that scalar already absorbed accesses), so a
+/// zero prior is the doc-faithful choice and needs no Rust loop. The obsolete
+/// `retained_action` / `decay_checkpoint` tables are left in place for snapshot
+/// back-compat; they are no longer load-bearing for memory strength.
+fn migrate_v4_to_v5(conn: &Connection) -> Result<(), Error> {
+    conn.execute_batch(
+        "
+        ALTER TABLE nodes ADD COLUMN evidence_prior REAL NOT NULL DEFAULT 0;
+        ",
+    )
+    .map_err(sqlite_error)
+}
+
 /// Migrate a v1 database (agent_id TEXT) to v2 (peer_id INTEGER + source_kind TEXT).
 fn migrate_v1_to_v2(conn: &Connection) -> Result<(), Error> {
     conn.execute_batch(
@@ -1672,7 +1794,8 @@ fn create_schema(conn: &Connection) -> Result<(), Error> {
             access_count INTEGER NOT NULL,
             access_history TEXT NOT NULL,
             tier TEXT NOT NULL,
-            metadata TEXT NOT NULL
+            metadata TEXT NOT NULL,
+            evidence_prior REAL NOT NULL DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS edges (
@@ -1770,8 +1893,8 @@ fn insert_node_row(
             "INSERT OR REPLACE INTO nodes (
                 id, name, summary, content, embedding_json, node_type, peer_id, source_kind, session_id,
                 scope, confidence, valid_from, valid_until, created_at, updated_at,
-                access_count, access_history, tier, metadata
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+                access_count, access_history, tier, metadata, evidence_prior
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
             params![
                 node.id.0,
                 node.name,
@@ -1792,6 +1915,7 @@ fn insert_node_row(
                 encode_timestamp_deque(&node.access_history),
                 encode_memory_tier(&node.tier),
                 encode_map(&node.metadata),
+                node.evidence_prior,
             ],
         )
         .map_err(sqlite_error)?;
@@ -1908,7 +2032,7 @@ fn load_nodes(conn: &Connection) -> Result<Vec<LoadedNode>, Error> {
                 n.peer_id, n.source_kind, n.session_id, n.scope, n.confidence, n.valid_from,
                 n.valid_until, n.created_at, n.updated_at, n.access_count,
                 n.access_history, n.tier, n.metadata, s.salience, a.accessed_at,
-                d.decay_checkpoint, r.value
+                d.decay_checkpoint, r.value, n.evidence_prior
              FROM nodes n
              LEFT JOIN salience s ON s.node_id = n.id
              LEFT JOIN accessed_at a ON a.node_id = n.id
@@ -1931,6 +2055,8 @@ fn load_nodes(conn: &Connection) -> Result<Vec<LoadedNode>, Error> {
             // Missing accessed_at / decay_checkpoint rows default to Timestamp(0).
             let accessed_at = Timestamp(row.get::<_, Option<u64>>(20)?.unwrap_or(0));
             let decay_checkpoint = Timestamp(row.get::<_, Option<u64>>(21)?.unwrap_or(0));
+            // Evidence prior P_i (NOT NULL DEFAULT 0 column on `nodes`).
+            let evidence_prior: f64 = row.get::<_, Option<f64>>(23)?.unwrap_or(0.0);
             let node = Node {
                 id,
                 name: row.get(1)?,
@@ -1959,6 +2085,7 @@ fn load_nodes(conn: &Connection) -> Result<Vec<LoadedNode>, Error> {
                 metadata: decode_map(&row.get::<_, String>(18)?).map_err(to_sql_error)?,
                 salience,
                 retained_action,
+                evidence_prior,
                 accessed_at,
                 entity_tags: Vec::new(),
             };

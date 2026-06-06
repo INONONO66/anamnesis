@@ -44,13 +44,13 @@ Anamnesis gives LLM agents **associative memory**. It builds a graph of knowledg
 |:---------|:-------------|
 | **Associative recall** | Additive directed **random-walk-with-restart (RWR)** spreads activation from query seeds along typed edges; converging evidence sums (never max). |
 | **Conductance** | Edges hold an associative-strength reservoir (a log-likelihood-ratio); committed co-use strengthens links via an Oja-bounded Hebbian update. |
-| **Forgetting** | Memory strength is a reservoir that dissipates with a **power-law** (ACT-R) curve on `tick()`; committed use reinforces it. Unused knowledge fades — it is never deleted. |
+| **Forgetting** | Memory strength is `A_i = B_i + P_i`: `B_i` is the ACT-R **base-level** activation recomputed from the access-trace history (it falls as time passes since each access/the creation event), and `P_i` is a persistent, decay-exempt **evidence prior** (encoding surprise, feedback, peer trust). `salience = logistic(B_i + P_i)`. A committed access appends a trace (raising `B_i`); feedback moves `P_i`; unused knowledge fades as `B_i` decays — it is never deleted. |
 | **Perception** | **Surprise-gated** input: an observation charges memory in proportion to prediction error, then novelty/confidence/budget decide whether it allocates a new site or routes to the nearest one. |
 | **Frustration** | Contradictions are **excluded from propagation** and surfaced as tension (`sigma_ij`), never overwritten — both sides keep their provenance. |
 
 One cue activates related fragments, which activate further fragments — reconstructing understanding from partial cues the way human recall works. Keyword and embedding search find the first cue; the conductive network decides what comes back with it.
 
-> **Reservoirs vs projections** ([ADR-0002](docs/adr/0002-reservoir-projection-state.md)): the authoritative state is unbounded log-odds reservoirs (`retained_action` per node, `conductance` per edge). The public `salience` / `weight` in `[0, 1]` are their bounded `logistic` projections, re-derived by the write paths (`ingest`, `link`, `touch`, `commit`, `crystallize`, `tick`). The invariant is that **read-only retrieval (`query` / `search` / `fact_at`) never mutates either** — reservoirs change only through explicit writes and time.
+> **Reservoirs vs projections** ([ADR-0002](docs/adr/0002-reservoir-projection-state.md), [ADR-0008](docs/adr/0008-powerlaw-dissipation.md)): per node, the persistent state is the bounded access-trace history (which drives the base level `B_i`, recomputed on demand and never stored) plus a decay-exempt evidence prior `P_i`; per edge, `conductance` is an unbounded log-LR reservoir. The public `salience = logistic(B_i + P_i)` / `weight` in `[0, 1]` are bounded `logistic` projections, refreshed by the write paths (`ingest`, `link`, `touch`, `commit`, `crystallize`, `tick`). The invariant is that **read-only retrieval (`query` / `search` / `fact_at`) never mutates persistent state** — it changes only through explicit writes and time.
 
 ### How It Compares
 
@@ -163,7 +163,7 @@ let ids2 = match result2 {
 // prior — edge weight is a projection, never passed in)
 engine.link(ids[0], ids2[0], EdgeType::Semantic).unwrap();
 
-// Reinforce on access (lazy power-law dissipation + reservoir reinforcement)
+// Reinforce on access (appends an access trace, raising the base level B_i)
 engine.touch(ids[0], Timestamp::now()).unwrap();
 ```
 
@@ -252,16 +252,16 @@ personal-projects/anamnesis/search
 
 <br>
 
-Salience decays over time via `tick()`. Knowledge that matters gets reinforced through `touch()` on access; knowledge that doesn't fades naturally.
+Salience is `logistic(B_i + P_i)`. As time passes without access, the base level `B_i` falls (the access traces age), so salience drops on `tick()`. A committed access via `touch()` appends a fresh trace, raising `B_i` (and hence salience) back up; the decay-exempt evidence prior `P_i` is left untouched.
 
 ```
 March:     Node created, salience 0.7
-June:      No access, decay → 0.08 (below threshold, invisible)
-September: Direct mention → touch() → salience spikes back
+June:      No access — B_i has aged, salience → 0.08 (below threshold, invisible)
+September: Direct mention → touch() appends a fresh trace → B_i (and salience) recover
            Connected nodes reactivate via spreading activation
 ```
 
-A node at salience 0.03 is invisible to queries but **still exists** in the graph. The access path weakened, not the memory itself.
+A node at salience 0.03 is invisible to queries but **still exists** in the graph. The base level decayed, not the memory itself.
 
 </details>
 
@@ -337,13 +337,14 @@ Query ── additive directed RWR from seeds ──► 7-term readout ──►
   │       (read-only: reservoirs unchanged; Contradicts excluded, surfaced as frustration)
   ▼
 Commit ── write-back for used memories ──►
-          power-law reinforcement + Oja-bounded Hebbian edge strengthening
-          (touch()/touch_batch() reinforce directly; tick() advances time)
+          append access traces (B_i) + evidence-prior update (P_i)
+          + Oja-bounded Hebbian edge strengthening
+          (touch()/touch_batch() append a trace directly; tick() advances time)
 
          ┌────────────────────────────────────┐
          │  tick(now) — periodic               │
-         │  power-law dissipation + edge       │
-         │  leakage; flush storage             │
+         │  recompute salience from B_i(now)   │
+         │  + edge leakage; flush storage      │
          └────────────────────────────────────┘
 
          ┌────────────────────────────────────┐
@@ -531,7 +532,9 @@ CI also runs the MSRV check (`cargo check --all-targets --all-features` on Rust 
 
 ## Status
 
-**v0.5.0** — migrated to the **conductive-network** model: additive directed RWR, log-odds reservoirs (`retained_action` / `conductance`) with bounded projections, power-law dissipation, commit-gated Hebbian learning, and frustration. Breaking redesign vs 0.4 (force/gravity/BFS/Hopfield models removed); the [techspec](docs/README.md) is the source of truth.
+**v0.5.0** — migrated to the **conductive-network** model: additive directed RWR, log-odds reservoirs with bounded projections, power-law dissipation, commit-gated Hebbian learning, and frustration. Breaking redesign vs 0.4 (force/gravity/BFS/Hopfield models removed); the [techspec](docs/README.md) is the source of truth.
+
+Node strength is now decomposed as `A_i = B_i + P_i` ([ADR-0008](docs/adr/0008-powerlaw-dissipation.md)): the ACT-R base level `B_i` is recomputed on demand from the access-trace history (forgetting and use-driven reinforcement live here), and the persistent evidence prior `P_i` (encoding surprise, feedback, peer trust) is decay-exempt. The edge `conductance` log-LR reservoir is unchanged.
 
 | Layer | Status | Notes |
 |:------|:-------|:------|
@@ -541,7 +544,7 @@ CI also runs the MSRV check (`cargo check --all-targets --all-features` on Rust 
 | Cold-start coupling | ✅ | Embedding/entity/scope/type-weighted seed creates `Semantic` edges in `ingest()` |
 | Conductance learning | ✅ | Commit-gated Oja-bounded Hebbian edge strengthening |
 | Perception | ✅ | Surprise-gated, wired into `ingest()` — novelty, confidence, budget |
-| Forgetting (dissipation) | ✅ | Power-law (ACT-R) reservoir decay in `tick()`; lazy decay in `touch()` |
+| Forgetting (dissipation) | ✅ | ACT-R base level `B_i` recomputed from access traces; `tick()` recomputes salience as `B_i(now)` falls; `touch()` appends an access trace (no scalar decay). Evidence prior `P_i` is decay-exempt |
 | Activation flow | ✅ | Additive directed random-walk-with-restart (RWR); BFS/force models removed |
 | Frustration | ✅ | `Contradicts` excluded from propagation, surfaced as tension (`sigma_ij`) |
 | Identity prior | ✅ | Top-3 identity nodes bias query activation |
@@ -564,7 +567,7 @@ CI also runs the MSRV check (`cargo check --all-targets --all-features` on Rust 
 | FastEmbedProvider | ✅ | Behind `feature = "embed"`; BAAI/bge-base-en-v1.5, 768 dims |
 | Memory tier control | ✅ | `set_tier()` / `get_tier()` — Core tier protected from decay |
 | Energy objective | ✅ | Query-local `E(S \| Q)` with symmetric-coupling caveat (Hopfield/force models removed) |
-| Commit pipeline | ✅ | `commit()` — write-back for query usage: reinforcement + Hebbian learning (read-only retrieval mutates nothing) |
+| Commit pipeline | ✅ | `commit()` — write-back for query usage: access-trace append (`B_i`) + evidence-prior update (`P_i`) + Hebbian edge learning (read-only retrieval mutates nothing) |
 | Social reinforcement scoring | ✅ | Multi-agent corroboration scoring and consumer feedback reservoir updates |
 
 ## References

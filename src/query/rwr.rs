@@ -397,6 +397,7 @@ mod tests {
             valid_until: None,
             salience: project_weight(crate::mechanics::priors::INITIAL_RETAINED_ACTION),
             retained_action: crate::mechanics::priors::INITIAL_RETAINED_ACTION,
+            evidence_prior: crate::mechanics::priors::INITIAL_RETAINED_ACTION,
             access_count: 0,
             access_history: VecDeque::new(),
             tier: MemoryTier::Auto,

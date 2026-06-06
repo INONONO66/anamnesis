@@ -3,19 +3,18 @@
 //! Tests invariants for pure functions in the mechanics and query modules
 //! using proptest with 256 cases per test.
 
-use anamnesis::graph::KnowledgeType;
+use anamnesis::graph::{KnowledgeType, Timestamp};
 use anamnesis::mechanics::attraction::{attraction_score, cosine_similarity};
-use anamnesis::mechanics::forgetting::base_level_to_salience;
-use anamnesis::mechanics::interactions::{
-    decay_default, hebbian_oja, reinforce_access, rescorla_wagner,
-};
+use anamnesis::mechanics::forgetting::{base_level_to_salience, compute_base_level};
+use anamnesis::mechanics::interactions::{hebbian_oja, rescorla_wagner};
 use anamnesis::mechanics::priors::{
-    TARGET_COACTIVATION_N, decay_multiplier_for_type, learning_rate, project_salience,
+    DECAY_EXPONENT_D, TARGET_COACTIVATION_N, decay_multiplier_for_type, learning_rate,
     project_weight,
 };
 use anamnesis::query::field::{FieldSignals, potential_bias};
 use anamnesis::query::scoring::{ReadoutInputs, readout_score};
 use proptest::prelude::*;
+use std::collections::VecDeque;
 
 // ── Strategy for generating KnowledgeType variants ──────────────────────────
 
@@ -38,39 +37,35 @@ fn knowledge_type_strategy() -> impl Strategy<Value = KnowledgeType> {
     ]
 }
 
-// ── Property tests for reservoir dynamics (Phase 2 substrate) ────────────────
+// ── Property tests for the base-level forgetting kernel (B_i, ADR-0008) ──────
 
 proptest! {
-    /// decay (power-law, log-odds): never increases A_i, stays finite, and is an
-    /// identity for protected (zero-multiplier) types. There is NO [0,1] floor —
-    /// decay operates on the unbounded retained-action reservoir.
+    /// compute_base_level (B_i): for a fixed access trace, the base level is
+    /// monotone NON-INCREASING in elapsed time (forgetting), stays finite for a
+    /// non-empty history, and is independent of elapsed time when the decay
+    /// exponent is 0 (protected / inert types).
     #[test]
-    fn prop_decay_never_increases_action(
-        action in -20.0f64..=20.0,
-        dt_days in 0.0f64..=3650.0,
+    fn prop_base_level_decays_with_time(
+        created_ms in 0u64..=1_000_000,
+        later in 1u64..=10_000_000,
+        more in 1u64..=10_000_000,
         kt in knowledge_type_strategy(),
     ) {
-        let result = decay_default(action, dt_days, &kt);
-        prop_assert!(result.is_finite(), "decay produced non-finite: {result}");
-        prop_assert!(result <= action + 1e-9, "decay increased A: {result} > {action}");
-
-        if decay_multiplier_for_type(&kt) == 0.0 {
-            prop_assert!(
-                (result - action).abs() < 1e-12,
-                "protected type must not decay: {result} != {action}"
-            );
+        let decay_d = DECAY_EXPONENT_D * decay_multiplier_for_type(&kt);
+        let mut history = VecDeque::new();
+        history.push_back(Timestamp(created_ms));
+        let now1 = Timestamp(created_ms + later);
+        let now2 = Timestamp(created_ms + later + more);
+        let b1 = compute_base_level(&history, now1, decay_d);
+        let b2 = compute_base_level(&history, now2, decay_d);
+        prop_assert!(b1.is_finite() && b2.is_finite());
+        if decay_d == 0.0 {
+            // Exponent 0 → dt^0 = 1 for every trace; B_i is time-invariant.
+            prop_assert!((b1 - b2).abs() < 1e-12, "inert type changed: {b1} vs {b2}");
+        } else {
+            // More elapsed time never raises the base level (forgetting).
+            prop_assert!(b2 <= b1 + 1e-9, "older read raised B_i: {b2} > {b1}");
         }
-    }
-
-    /// access gain: bounded saturating reinforcement — never lowers A, stays finite,
-    /// and its projection never exceeds 1.0 (the Oja-style ceiling).
-    #[test]
-    fn prop_access_gain_bounded(action in -20.0f64..=20.0, work in 0.0f64..=2.0) {
-        let eta = learning_rate(TARGET_COACTIVATION_N);
-        let result = reinforce_access(action, work, eta);
-        prop_assert!(result.is_finite());
-        prop_assert!(result >= action - 1e-9, "access gain lowered A: {result} < {action}");
-        prop_assert!(project_salience(result) <= 1.0 + 1e-12);
     }
 
     /// Rescorla-Wagner: always moves toward lambda (or stays), never overshoots,

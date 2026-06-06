@@ -1,8 +1,11 @@
-//! Reservoir-space power-law dissipation (Phase 2 dynamics substrate).
+//! Power-law base-level forgetting (ADR-0008).
 //!
-//! Forgetting is power-law base-level dissipation of the retained-action reservoir
-//! `A_i` (ADR-0008); `salience = project_salience(A_i)` is a derived projection.
-//! Power-law is the only decay model — `touch()`/`tick()` operate on `A_i`.
+//! Persistent node strength is `A_i = B_i + P_i`. The base level
+//! `B_i = ln(Σ_j (now − t_j)^(−d·m_type))` is recomputed on demand from the
+//! access-trace history (never stored); `P_i` is a decay-exempt evidence prior.
+//! `salience = logistic(B_i + P_i)`. A committed access (`touch`) appends a trace,
+//! raising `B_i`; `tick` recomputes salience as `B_i(now)` falls with elapsed time —
+//! it does not shift a stored reservoir. `retained_action` is the cached composite.
 
 use anamnesis::Engine;
 use anamnesis::api::{EngineConfig, IngestResult, Observation};
@@ -57,7 +60,7 @@ fn touch_records_access_history() {
 }
 
 #[test]
-fn tick_decays_reservoir_and_reprojects_salience() {
+fn tick_recomputes_lower_salience_as_base_level_ages() {
     let mut e = engine();
     let IngestResult::Created(ids) = e.ingest(make_obs("b")).unwrap() else {
         panic!("expected Created");
@@ -67,13 +70,15 @@ fn tick_decays_reservoir_and_reprojects_salience() {
     let a0 = e.graph().get_node(id).unwrap().retained_action;
     let s0 = e.graph().get_node(id).unwrap().salience;
 
-    // 30 days elapsed: power-law dissipation lowers A_i and thus salience.
+    // 30 days elapsed: no stored reservoir is shifted — B_i(now) falls because the
+    // fixed creation trace is aged to a later `now`, so the recomputed composite
+    // A_i = B_i + P_i (and its salience projection) drops.
     e.tick(Timestamp(1000 + 30 * DAY_MS)).unwrap();
     let node = e.graph().get_node(id).unwrap();
 
     assert!(
         node.retained_action < a0,
-        "A_i should decay: {}",
+        "recomputed A_i fell because B_i(now) decreased: {}",
         node.retained_action
     );
     assert!(
@@ -81,22 +86,25 @@ fn tick_decays_reservoir_and_reprojects_salience() {
         "salience projection should fall: {}",
         node.salience
     );
-    // No [0,1] floor on the reservoir, but the projection is always in (0,1).
+    // The projection is always strictly in (0, 1).
     assert!(node.salience > 0.0 && node.salience < 1.0);
 }
 
 #[test]
-fn touch_decays_before_reinforcing() {
+fn touch_appends_trace_recompute_is_decay_first() {
     let mut e = engine();
     let IngestResult::Created(ids) = e.ingest(make_obs("c")).unwrap() else {
         panic!("expected Created");
     };
     let id = ids[0];
 
-    // Touch far in the future: decay (30 days) is applied before access gain.
+    // Touch far in the future: the access appends a trace at `now` and salience is
+    // logistic(B_i(now) + P_i). Decay-first is intrinsic — B_i ages the creation
+    // trace to `now` inside the same sum that adds the fresh trace.
     e.touch(id, Timestamp(1000 + 30 * DAY_MS)).unwrap();
     let node = e.graph().get_node(id).unwrap();
 
     assert!(node.salience > 0.0 && node.salience < 1.0);
     assert_eq!(node.access_count, 1);
+    assert_eq!(node.access_history.len(), 2, "creation + touch traces");
 }

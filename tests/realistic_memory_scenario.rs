@@ -211,14 +211,16 @@ fn forgetting_removes_decayed_nodes_until_reinforced() {
             .unwrap();
     }
 
-    // Seed the target's reservoir mid-range so the decay→reinforce cycle is
-    // observable rather than pinned at the saturation rail. Salience is a pure
-    // projection of this reservoir (ADR-0002).
+    // Seed the target's evidence prior P_i to zero so the decay→reinforce cycle is
+    // observable rather than pinned at the saturation rail by the flat surprise
+    // ceiling. Salience is logistic(B_i + P_i) (ADR-0008); a touch refreshes the
+    // cache so the pre-tick reading reflects the new prior.
     engine
         .graph_mut()
         .storage_mut()
-        .set_retained_action(target, 0.0) // project_salience(0) = 0.5
+        .set_evidence_prior(target, 0.0)
         .unwrap();
+    engine.touch(target, Timestamp(0)).unwrap();
     let s_target_before = engine.graph().storage().get_salience(target).unwrap();
 
     let after_thirty_days = Timestamp(30 * DAY_MS);

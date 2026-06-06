@@ -163,6 +163,15 @@ pub fn check_storage_invariants<S: StorageAdapter>(storage: &S) -> Vec<Invariant
             projection_range.push(format!("node {id:?} salience = {salience}"));
         }
 
+        // The persistent decay-exempt evidence prior P_i must be finite (ADR-0008).
+        // The composite cache A_i = B_i + P_i is also checked: B_i is recomputed from
+        // access_history and is finite as long as the creation trace keeps the
+        // history non-empty, so a non-finite A_i flags either a non-finite P_i or an
+        // empty trace window.
+        let prior = storage.get_evidence_prior(id).unwrap_or(f64::NAN);
+        if !prior.is_finite() {
+            reservoir_non_finite.push(format!("node {id:?} evidence_prior = {prior}"));
+        }
         let action = storage.get_retained_action(id).unwrap_or(f64::NAN);
         if !action.is_finite() {
             reservoir_non_finite.push(format!("node {id:?} retained_action = {action}"));

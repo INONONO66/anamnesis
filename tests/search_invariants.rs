@@ -338,16 +338,33 @@ fn hot_field_setter_sync_invariant() {
         "dev/rust",
     );
 
+    // touch updates accessed_at to now AND appends an access trace (raising B_i):
+    // the hot-field SoA and the dense Node must stay in sync (ADR-0008).
+    let traces_before = engine.graph().get_node(id).unwrap().access_history.len();
     engine.touch(id, Timestamp(2000)).unwrap();
+    let storage = engine.graph().storage();
+    assert_eq!(storage.get_accessed_at(id).unwrap(), Timestamp(2000));
+    assert_eq!(
+        storage.get_node(id).unwrap().access_history.len(),
+        traces_before + 1,
+        "touch must append a durable access trace"
+    );
+
+    // tick recomputes salience but is NOT a committed access: accessed_at and the
+    // trace history are left untouched (last-access semantics preserved).
+    let traces_after_touch = engine.graph().get_node(id).unwrap().access_history.len();
+    engine.tick(Timestamp(3000)).unwrap();
     let storage = engine.graph().storage();
     assert_eq!(
         storage.get_accessed_at(id).unwrap(),
-        storage.get_decay_checkpoint(id).unwrap()
+        Timestamp(2000),
+        "tick must not advance accessed_at"
     );
-
-    engine.tick(Timestamp(3000)).unwrap();
-    let storage = engine.graph().storage();
-    assert!(storage.get_decay_checkpoint(id).unwrap() >= storage.get_accessed_at(id).unwrap());
+    assert_eq!(
+        storage.get_node(id).unwrap().access_history.len(),
+        traces_after_touch,
+        "tick must not append a trace"
+    );
 }
 
 /// Protects deterministic RRF tie-breaking by NodeId ascending.

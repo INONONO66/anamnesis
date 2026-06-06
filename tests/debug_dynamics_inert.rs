@@ -1,5 +1,4 @@
-use anamnesis::mechanics::interactions::decay_default;
-use anamnesis::mechanics::priors::{decay_multiplier_for_type, edge_type_factor};
+use anamnesis::mechanics::priors::{DECAY_EXPONENT_D, decay_multiplier_for_type, edge_type_factor};
 use anamnesis::query::assembly::{is_identity_type, is_memory_type};
 use anamnesis::query::identity::pi_tier;
 use anamnesis::{EdgeType, KnowledgeType};
@@ -14,13 +13,15 @@ fn debug_node_types() -> [KnowledgeType; 3] {
 
 #[test]
 fn debug_node_types_have_inert_decay_values() {
-    // Debug-lifecycle nodes are inert: their per-type decay multiplier is 0, so
-    // power-law dissipation leaves the retained-action reservoir A_i unchanged
-    // regardless of elapsed time (no [0,1] floor on the reservoir path).
+    // Debug-lifecycle nodes are inert: their per-type decay multiplier is 0, so the
+    // base-level exponent `d·m_type` collapses to 0. Every trace ages as `dt^0 = 1`,
+    // so `B_i` never falls with elapsed time (ADR-0008) — the node is decay-exempt.
     for node_type in debug_node_types() {
         assert_eq!(decay_multiplier_for_type(&node_type), 0.0);
-        assert_eq!(decay_default(0.7, 365.0, &node_type), 0.7);
-        assert_eq!(decay_default(-2.0, 365.0, &node_type), -2.0);
+        assert_eq!(
+            DECAY_EXPONENT_D * decay_multiplier_for_type(&node_type),
+            0.0
+        );
     }
 }
 
@@ -28,13 +29,15 @@ fn debug_node_types_have_inert_decay_values() {
 fn debug_node_types_are_inert_under_dissipation() {
     // The legacy gravity/mass force is gone (overview.md / conductance.md): importance
     // is emergent, there is no separate mass boost. Debug-lifecycle nodes are instead
-    // characterized as *inert*: their per-type decay multiplier is exactly 0, so
-    // power-law dissipation never moves their retained-action reservoir regardless of
-    // elapsed time or sign.
+    // characterized as *inert*: their per-type decay multiplier is exactly 0, so the
+    // base-level decay exponent is 0 and elapsed time never lowers their base level
+    // `B_i` (forgetting lives in `B_i`; `P_i` is decay-exempt regardless).
     for node_type in debug_node_types() {
         assert_eq!(decay_multiplier_for_type(&node_type), 0.0);
-        assert_eq!(decay_default(0.5, 1000.0, &node_type), 0.5);
-        assert_eq!(decay_default(-1.5, 1000.0, &node_type), -1.5);
+        assert_eq!(
+            DECAY_EXPONENT_D * decay_multiplier_for_type(&node_type),
+            0.0
+        );
     }
 }
 

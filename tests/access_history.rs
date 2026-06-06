@@ -1,6 +1,7 @@
-use anamnesis::Node;
+use anamnesis::api::Observation;
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{KnowledgeType, MemoryTier, NodeId, Timestamp};
+use anamnesis::{Engine, EngineConfig, IngestResult, Node};
 use std::collections::{HashMap, VecDeque};
 
 fn make_test_node() -> Node {
@@ -18,6 +19,7 @@ fn make_test_node() -> Node {
         valid_until: None,
         salience: 1.0,
         retained_action: 0.0,
+        evidence_prior: 0.0,
         access_count: 0,
         access_history: VecDeque::new(),
         tier: MemoryTier::Auto,
@@ -35,8 +37,48 @@ fn make_test_node() -> Node {
 
 #[test]
 fn access_history_starts_empty() {
+    // A hand-built Node literal carries no traces until one is recorded; the engine
+    // seeds the creation trace at ingest (see `ingest_seeds_creation_trace`).
     let node = make_test_node();
     assert_eq!(node.access_history.len(), 0);
+}
+
+#[test]
+fn ingest_seeds_creation_trace() {
+    // The creation event IS a trace (ADR-0008): a freshly ingested node carries
+    // exactly one access trace, stamped at created_at, so its base level B_i is
+    // finite at birth (compute_base_level returns NEG_INFINITY on empty history).
+    let mut engine = Engine::with_config(
+        EngineConfig::new()
+            .with_novelty_threshold(0.0)
+            .with_dedup_enabled(false),
+    );
+    let obs = Observation {
+        name: "seeded".to_string(),
+        summary: None,
+        content: "creation trace".to_string(),
+        embedding: None,
+        confidence: 0.9,
+        node_type: KnowledgeType::Semantic,
+        entity_tags: vec![],
+        origin: Origin {
+            peer_id: anamnesis::graph::types::PeerId(0),
+            source_kind: anamnesis::peer::SourceKind::AgentObservation,
+            session_id: "s".to_string(),
+            scope: anamnesis::graph::ScopePath::universal(),
+            confidence: 0.9,
+        },
+        timestamp: Timestamp(4242),
+        valid_from: None,
+        valid_until: None,
+    };
+    let IngestResult::Created(ids) = engine.ingest(obs).unwrap() else {
+        panic!("expected Created");
+    };
+    let node = engine.graph().get_node(ids[0]).unwrap();
+    assert_eq!(node.access_history.len(), 1, "creation trace seeded");
+    assert_eq!(*node.access_history.front().unwrap(), Timestamp(4242));
+    assert!(node.retained_action.is_finite());
 }
 
 #[test]

@@ -193,6 +193,7 @@ fn make_indexed_node(id: NodeId, scope: &str) -> Node {
         valid_until: None,
         salience: 0.5,
         retained_action: 0.0,
+        evidence_prior: 0.0,
         access_count: 0,
         access_history: VecDeque::new(),
         tier: MemoryTier::Auto,
