@@ -50,7 +50,7 @@ Anamnesis gives LLM agents **associative memory**. It builds a graph of knowledg
 
 One cue activates related fragments, which activate further fragments — reconstructing understanding from partial cues the way human recall works. Keyword and embedding search find the first cue; the conductive network decides what comes back with it.
 
-> **Reservoirs vs projections** ([ADR-0002](docs/adr/0002-reservoir-projection-state.md)): the authoritative state is unbounded log-odds reservoirs (`retained_action` per node, `conductance` per edge). The public `salience` / `weight` in `[0, 1]` are their bounded `logistic` projections, written only by `commit`/`tick` — read-only retrieval never mutates them.
+> **Reservoirs vs projections** ([ADR-0002](docs/adr/0002-reservoir-projection-state.md)): the authoritative state is unbounded log-odds reservoirs (`retained_action` per node, `conductance` per edge). The public `salience` / `weight` in `[0, 1]` are their bounded `logistic` projections, re-derived by the write paths (`ingest`, `link`, `touch`, `commit`, `crystallize`, `tick`). The invariant is that **read-only retrieval (`query` / `search` / `fact_at`) never mutates either** — reservoirs change only through explicit writes and time.
 
 ### How It Compares
 
@@ -334,10 +334,11 @@ Ingest ── allocate new site OR route to nearest ──► Graph (reservoirs)
   │  cold-start coupling may seed a Semantic edge (embedding/entity above threshold)
   ▼
 Query ── additive directed RWR from seeds ──► 7-term readout ──► budget-bounded ContextPackage
-  │       (Contradicts excluded from propagation, surfaced as frustration)
+  │       (read-only: reservoirs unchanged; Contradicts excluded, surfaced as frustration)
   ▼
-Commit ── the only reservoir-mutation path besides tick() ──►
+Commit ── write-back for used memories ──►
           power-law reinforcement + Oja-bounded Hebbian edge strengthening
+          (touch()/touch_batch() reinforce directly; tick() advances time)
 
          ┌────────────────────────────────────┐
          │  tick(now) — periodic               │
@@ -396,8 +397,9 @@ impl Engine {
     // Cross-agent
     pub fn reflect_batch(&mut self, sessions: &[SessionSummary]) -> Result<ReflectReport, Error>;
 
-    // Commit — the only reservoir-mutation path besides tick(): reinforces the
-    // memories actually used and strengthens co-used edges (commit-gated Hebbian).
+    // Commit — write-back for the retrieval loop: reinforces the memories actually
+    // used and strengthens co-used edges (commit-gated Hebbian). Read-only query
+    // changes nothing; touch()/tick() also mutate reservoirs by other paths.
     pub fn commit(&mut self, package: ContextPackage, feedback: Option<ConfidenceLevel>)
         -> Result<(ContextPackage, CommitReport), Error>;
 
@@ -562,7 +564,7 @@ CI also runs the MSRV check (`cargo check --all-targets --all-features` on Rust 
 | FastEmbedProvider | ✅ | Behind `feature = "embed"`; BAAI/bge-base-en-v1.5, 768 dims |
 | Memory tier control | ✅ | `set_tier()` / `get_tier()` — Core tier protected from decay |
 | Energy objective | ✅ | Query-local `E(S \| Q)` with symmetric-coupling caveat (Hopfield/force models removed) |
-| Commit pipeline | ✅ | `commit()` — reinforcement + Hebbian learning; the only reservoir-mutation path besides `tick()` |
+| Commit pipeline | ✅ | `commit()` — write-back for query usage: reinforcement + Hebbian learning (read-only retrieval mutates nothing) |
 | Social reinforcement scoring | ✅ | Multi-agent corroboration scoring and consumer feedback reservoir updates |
 
 ## References
