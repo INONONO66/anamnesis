@@ -1,9 +1,9 @@
 [package]
 name = "anamnesis"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.85"
-description = "Cognitive graph engine for LLMs — knowledge with attraction, gravity, perception, and forgetting"
+description = "Cognitive memory engine for LLMs — Bayesian conductive-network recall with perception, dissipation, and frustration"
 license = "MIT"
 repository = "https://github.com/INONONO66/anamnesis"
 
