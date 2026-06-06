@@ -1,4 +1,4 @@
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 
@@ -134,35 +134,10 @@ fn bench_spreading_10k(c: &mut Criterion) {
     });
 }
 
-fn bench_additive_rwr(c: &mut Criterion) {
-    let mut group = c.benchmark_group("additive_rwr");
-
-    group.bench_with_input(BenchmarkId::new("1k_nodes", "rwr"), &(), |b, _| {
-        b.iter_batched(
-            || {
-                let (engine, node_ids) = build_graph(1_000);
-                (engine, node_ids[0])
-            },
-            |(engine, seed)| {
-                let config = QueryConfig::default();
-                let query = Query::Associative {
-                    seed: black_box(seed),
-                    budget: 200,
-                };
-                let _ = engine.query(&query, &config);
-            },
-            criterion::BatchSize::SmallInput,
-        )
-    });
-
-    group.finish();
-}
-
 criterion_group!(
     benches,
     bench_spreading_100,
     bench_spreading_1k,
-    bench_spreading_10k,
-    bench_additive_rwr
+    bench_spreading_10k
 );
 criterion_main!(benches);
