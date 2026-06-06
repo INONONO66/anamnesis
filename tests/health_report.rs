@@ -83,8 +83,7 @@ fn contradiction_edges_counted() {
     let IngestResult::Created(ids2) = e.ingest(obs("node-b")).unwrap() else {
         panic!("expected Created");
     };
-    e.link(ids1[0], ids2[0], EdgeType::Contradicts)
-        .unwrap();
+    e.link(ids1[0], ids2[0], EdgeType::Contradicts).unwrap();
     let report = e.health();
     assert_eq!(report.contradiction_count, 1);
 }

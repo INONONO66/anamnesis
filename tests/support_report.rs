@@ -157,9 +157,7 @@ fn support_report_supports_edges() {
         .set_salience(source, 0.8)
         .unwrap();
 
-    engine
-        .link(target, source, EdgeType::Supports)
-        .unwrap();
+    engine.link(target, source, EdgeType::Supports).unwrap();
 
     let report = engine.support_report(target).unwrap();
     assert_eq!(report.supporting_sources, 1);
@@ -255,9 +253,7 @@ fn support_report_mixed_edges() {
     engine
         .link(target, support_b, EdgeType::ReinforcedBy)
         .unwrap();
-    engine
-        .link(target, contra, EdgeType::Contradicts)
-        .unwrap();
+    engine.link(target, contra, EdgeType::Contradicts).unwrap();
 
     let report = engine.support_report(target).unwrap();
     assert_eq!(report.supporting_sources, 2);
@@ -289,9 +285,7 @@ fn support_report_incoming_edges() {
     engine
         .link(source_a, target, EdgeType::ConsolidatedFrom)
         .unwrap();
-    engine
-        .link(source_b, target, EdgeType::Supports)
-        .unwrap();
+    engine.link(source_b, target, EdgeType::Supports).unwrap();
 
     let report = engine.support_report(target).unwrap();
     assert_eq!(report.supporting_sources, 2);
@@ -367,13 +361,9 @@ fn support_report_ignores_other_edge_types() {
         .unwrap();
 
     // Create edges of types that should be ignored
-    engine
-        .link(target, semantic, EdgeType::Semantic)
-        .unwrap();
+    engine.link(target, semantic, EdgeType::Semantic).unwrap();
     engine.link(target, causal, EdgeType::Causal).unwrap();
-    engine
-        .link(target, temporal, EdgeType::Temporal)
-        .unwrap();
+    engine.link(target, temporal, EdgeType::Temporal).unwrap();
 
     let report = engine.support_report(target).unwrap();
     assert_eq!(report.supporting_sources, 0);
@@ -434,9 +424,7 @@ fn support_report_duplicate_edges_same_target() {
     engine
         .link(target, source, EdgeType::ConsolidatedFrom)
         .unwrap();
-    engine
-        .link(target, source, EdgeType::ReinforcedBy)
-        .unwrap();
+    engine.link(target, source, EdgeType::ReinforcedBy).unwrap();
 
     let report = engine.support_report(target).unwrap();
     // The visited set prevents counting the same node twice

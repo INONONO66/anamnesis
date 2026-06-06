@@ -121,7 +121,11 @@ fn softmax(phi: &HashMap<NodeId, f64>, tau: f64) -> HashMap<NodeId, f64> {
     if phi.is_empty() {
         return HashMap::new();
     }
-    let tau = if tau.is_finite() && tau > 0.0 { tau } else { 1.0 };
+    let tau = if tau.is_finite() && tau > 0.0 {
+        tau
+    } else {
+        1.0
+    };
 
     // Stable iteration order for determinism in the max/sum reductions.
     let mut entries: Vec<(NodeId, f64)> = phi
@@ -188,7 +192,10 @@ mod tests {
         );
         let seed = field.seed_distribution();
         let total: f64 = seed.values().sum();
-        assert!((total - 1.0).abs() < 1e-12, "seed must sum to 1, got {total}");
+        assert!(
+            (total - 1.0).abs() < 1e-12,
+            "seed must sum to 1, got {total}"
+        );
     }
 
     #[test]

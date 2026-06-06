@@ -183,9 +183,7 @@ fn rwr_consults_identity_and_kappa() {
         KnowledgeType::Semantic,
         "dev/rust",
     );
-    engine
-        .link(seed, supported, EdgeType::Supersedes)
-        .unwrap();
+    engine.link(seed, supported, EdgeType::Supersedes).unwrap();
     engine.link(seed, refuted, EdgeType::Refutes).unwrap();
     engine
         .link(identity, supported, EdgeType::Semantic)

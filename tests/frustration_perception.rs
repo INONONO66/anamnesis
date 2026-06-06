@@ -8,13 +8,13 @@
 //! - more-surprising input → higher initial `A_i`;
 //! - familiar input routes-and-reinforces, never rejects (ADR-0009).
 
+use anamnesis::StorageAdapter;
 use anamnesis::api::{Engine, EngineConfig, IngestResult, Observation};
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::types::PeerId;
 use anamnesis::graph::{EdgeType, KnowledgeType, NodeId, ScopePath, Timestamp};
 use anamnesis::peer::SourceKind;
 use anamnesis::query::{Query, QueryConfig};
-use anamnesis::StorageAdapter;
 
 fn obs_scoped(name: &str, embedding: Vec<f64>, scope: &str) -> Observation {
     Observation {
@@ -90,11 +90,13 @@ fn contradiction_surfaces_with_stress_and_is_not_suppressed() {
     let tension = pkg
         .tensions
         .iter()
-        .find(|t| {
-            (t.node_a == a && t.node_b == b) || (t.node_a == b && t.node_b == a)
-        })
+        .find(|t| (t.node_a == a && t.node_b == b) || (t.node_a == b && t.node_b == a))
         .expect("the Contradicts pair must surface as a tension");
-    assert!(tension.stress > 0.0, "stress must be positive: {}", tension.stress);
+    assert!(
+        tension.stress > 0.0,
+        "stress must be positive: {}",
+        tension.stress
+    );
     assert!(tension.scope_overlap > 0.0);
     assert!(tension.temporal_overlap > 0.0);
     assert_eq!(tension.evidence_sources.len(), 2);
@@ -130,9 +132,10 @@ fn disjoint_scope_contradiction_produces_no_stress() {
         )
         .unwrap();
 
-    let surfaced = pkg.tensions.iter().any(|t| {
-        (t.node_a == a && t.node_b == b) || (t.node_a == b && t.node_b == a)
-    });
+    let surfaced = pkg
+        .tensions
+        .iter()
+        .any(|t| (t.node_a == a && t.node_b == b) || (t.node_a == b && t.node_b == a));
     assert!(
         !surfaced,
         "disjoint-scope contradiction must not surface (scope gate closed)"

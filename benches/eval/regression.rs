@@ -279,8 +279,14 @@ fn judge_quality_regression_is_deterministic() {
     let ta = a.iter().find(|t| t.label == "small").unwrap();
     let tb = b.iter().find(|t| t.label == "small").unwrap();
 
-    let oa: Vec<Vec<NodeId>> = cases.iter().map(|c| evaluate_quality(ta, c).top10).collect();
-    let ob: Vec<Vec<NodeId>> = cases.iter().map(|c| evaluate_quality(tb, c).top10).collect();
+    let oa: Vec<Vec<NodeId>> = cases
+        .iter()
+        .map(|c| evaluate_quality(ta, c).top10)
+        .collect();
+    let ob: Vec<Vec<NodeId>> = cases
+        .iter()
+        .map(|c| evaluate_quality(tb, c).top10)
+        .collect();
     assert_eq!(oa, ob, "golden top-10 ordering must be deterministic");
 }
 

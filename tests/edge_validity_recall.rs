@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 
+use anamnesis::NodeId;
 use anamnesis::api::{Engine, EngineConfig, IngestResult, Observation};
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{EdgeId, EdgeType, KnowledgeType, ScopePath, Timestamp};
 use anamnesis::query::{ContextPackage, Query, QueryConfig, additive_rwr};
-use anamnesis::NodeId;
 
 fn engine() -> Engine {
     Engine::with_config(
@@ -131,9 +131,7 @@ fn expired_contradicts_does_not_create_tension() {
     let target = ingest(&mut engine, "claim b");
 
     engine.link(seed, target, EdgeType::Semantic).unwrap();
-    let contradiction = engine
-        .link(seed, target, EdgeType::Contradicts)
-        .unwrap();
+    let contradiction = engine.link(seed, target, EdgeType::Contradicts).unwrap();
     set_edge_validity(&mut engine, contradiction, None, Some(Timestamp(5)));
 
     let package = associative_query(&engine, seed, Timestamp(10));

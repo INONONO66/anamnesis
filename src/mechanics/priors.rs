@@ -249,7 +249,13 @@ pub const BETA_COUPLING_TYPE: f64 = 0.15;
 /// coupling strength, mapped to an initial conductance reservoir by
 /// [`initialize_conductance`].
 pub fn coupling_seed(sim_npmi: f64, entity_npmi: f64, scope_npmi: f64, type_npmi: f64) -> f64 {
-    let f = |v: f64| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 };
+    let f = |v: f64| {
+        if v.is_finite() {
+            v.clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
+    };
     BETA_COUPLING_SIM * f(sim_npmi)
         + BETA_COUPLING_ENTITY * f(entity_npmi)
         + BETA_COUPLING_SCOPE * f(scope_npmi)
@@ -285,7 +291,7 @@ pub fn coupling_clears_threshold(coupling_seed: f64) -> bool {
 /// CALIBRATED PRIOR (declared density/temperature knob, [ADR-0010](../../docs/adr/0010-calibrated-priors-not-laws.md)) —
 /// the rate at which unused weak coupling is removed over time, realizing the
 /// "edge leakage" density control (dissipation.md / conductance.md "Density
-/// Control"). It scales the per-edge idle leakage [`idle_edge_leakage`]; a value
+/// Control"). It scales the per-edge idle leakage [`crate::mechanics::interactions::idle_edge_leakage`]; a value
 /// of `0.0` disables edge leakage entirely. Not a behavioral law — refit from
 /// observed edge re-use hazard, mirroring the node decay prior `d`.
 pub const ETA_LEAK: f64 = 0.10;
@@ -661,7 +667,10 @@ mod tests {
         // 1.0 at extreme reservoirs (logistic(±LOG_ODDS_CLAMP)), which is in [0, 1].
         for c in [-1e9_f64, -100.0, -13.8, -1.0, 0.0, 1.0, 13.8, 100.0, 1e9] {
             let g = project_conductance(c);
-            assert!(g > 0.0 && g <= 1.0, "project_conductance({c}) = {g} not in (0,1]");
+            assert!(
+                g > 0.0 && g <= 1.0,
+                "project_conductance({c}) = {g} not in (0,1]"
+            );
         }
         // Moderate reservoirs land strictly interior.
         for c in [-13.0_f64, -1.0, 0.0, 1.0, 13.0] {
@@ -735,7 +744,10 @@ mod tests {
             ] {
                 for is_forward in [true, false] {
                     let g = project_conductance(c) * edge_type_factor(&et, is_forward);
-                    assert!(g >= 0.0, "g({c}, {et:?}, fwd={is_forward}) = {g} must be >= 0");
+                    assert!(
+                        g >= 0.0,
+                        "g({c}, {et:?}, fwd={is_forward}) = {g} must be >= 0"
+                    );
                     assert!(g.is_finite(), "g must be finite");
                 }
             }
@@ -820,7 +832,10 @@ mod tests {
         assert!(project_trust(1.0) > project_trust(-1.0));
         for t in [-1e9_f64, -40.0, -1.0, 0.0, 1.0, 40.0, 1e9] {
             let w = project_trust(t);
-            assert!((-0.5..=0.5).contains(&w), "project_trust({t}) = {w} not in [-0.5, 0.5]");
+            assert!(
+                (-0.5..=0.5).contains(&w),
+                "project_trust({t}) = {w} not in [-0.5, 0.5]"
+            );
         }
         // Moderate reservoirs land strictly interior.
         for t in [-13.0_f64, -1.0, 0.0, 1.0, 13.0] {

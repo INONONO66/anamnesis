@@ -807,9 +807,15 @@ impl StorageAdapter for SqliteStorage {
                     if *dirty {
                         // Persist the conductance reservoir AND its weight
                         // projection together (ADR-0002: weight tracks C_ij).
-                        let weight = self.edges[idx].as_ref().map(|e| e.weight).unwrap_or_else(
-                            || crate::mechanics::priors::project_weight(self.edge_conductance[idx]),
-                        );
+                        let weight =
+                            self.edges[idx]
+                                .as_ref()
+                                .map(|e| e.weight)
+                                .unwrap_or_else(|| {
+                                    crate::mechanics::priors::project_weight(
+                                        self.edge_conductance[idx],
+                                    )
+                                });
                         conn.execute(
                             "UPDATE edges SET conductance = ?2, weight = ?3 WHERE id = ?1",
                             params![idx as u64, self.edge_conductance[idx], weight],
@@ -1956,7 +1962,13 @@ fn load_nodes(conn: &Connection) -> Result<Vec<LoadedNode>, Error> {
                 accessed_at,
                 entity_tags: Vec::new(),
             };
-            Ok((node, salience, retained_action, accessed_at, decay_checkpoint))
+            Ok((
+                node,
+                salience,
+                retained_action,
+                accessed_at,
+                decay_checkpoint,
+            ))
         })
         .map_err(sqlite_error)?;
 

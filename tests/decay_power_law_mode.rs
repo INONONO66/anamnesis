@@ -71,8 +71,16 @@ fn tick_decays_reservoir_and_reprojects_salience() {
     e.tick(Timestamp(1000 + 30 * DAY_MS)).unwrap();
     let node = e.graph().get_node(id).unwrap();
 
-    assert!(node.retained_action < a0, "A_i should decay: {}", node.retained_action);
-    assert!(node.salience < s0, "salience projection should fall: {}", node.salience);
+    assert!(
+        node.retained_action < a0,
+        "A_i should decay: {}",
+        node.retained_action
+    );
+    assert!(
+        node.salience < s0,
+        "salience projection should fall: {}",
+        node.salience
+    );
     // No [0,1] floor on the reservoir, but the projection is always in (0,1).
     assert!(node.salience > 0.0 && node.salience < 1.0);
 }

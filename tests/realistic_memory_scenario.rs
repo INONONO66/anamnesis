@@ -243,10 +243,7 @@ fn forgetting_removes_decayed_nodes_until_reinforced() {
         )
         .unwrap();
     assert!(
-        !active_before
-            .knowledge
-            .iter()
-            .any(|f| f.node_id == target),
+        !active_before.knowledge.iter().any(|f| f.node_id == target),
         "decayed target should have dropped out of the active 0.8 set"
     );
 

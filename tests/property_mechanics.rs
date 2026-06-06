@@ -10,8 +10,8 @@ use anamnesis::mechanics::interactions::{
     decay_default, hebbian_oja, reinforce_access, rescorla_wagner,
 };
 use anamnesis::mechanics::priors::{
-    decay_multiplier_for_type, learning_rate, project_salience, project_weight,
-    TARGET_COACTIVATION_N,
+    TARGET_COACTIVATION_N, decay_multiplier_for_type, learning_rate, project_salience,
+    project_weight,
 };
 use anamnesis::query::field::{FieldSignals, potential_bias};
 use anamnesis::query::scoring::{ReadoutInputs, readout_score};

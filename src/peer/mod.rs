@@ -194,8 +194,7 @@ impl PeerRegistry {
         trust_evidence_count: u64,
     ) -> Result<(), Error> {
         let profile = self.peers.get_mut(&id).ok_or(Error::PeerNotFound(id))?;
-        profile.trust_reservoir =
-            crate::mechanics::priors::clamp_log_odds(trust_reservoir);
+        profile.trust_reservoir = crate::mechanics::priors::clamp_log_odds(trust_reservoir);
         profile.trust_evidence_count = trust_evidence_count;
         Ok(())
     }
@@ -274,12 +273,7 @@ impl PeerRegistry {
     /// evidence count is incremented so a policy re-label never silently discards
     /// the learned estimate. Never touches `trust_level`, name, or aliases — origin
     /// and provenance are preserved (social.md: "Peer trust never erases origin").
-    pub fn nudge_trust(
-        &mut self,
-        id: PeerId,
-        target: f64,
-        eta: f64,
-    ) -> Result<(f64, f64), Error> {
+    pub fn nudge_trust(&mut self, id: PeerId, target: f64, eta: f64) -> Result<(f64, f64), Error> {
         let profile = self.peers.get_mut(&id).ok_or(Error::PeerNotFound(id))?;
         let old = profile.trust_reservoir;
         let new = crate::mechanics::priors::update_trust_reservoir(old, target, eta);

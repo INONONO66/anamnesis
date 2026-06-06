@@ -143,12 +143,7 @@ pub struct TieBreakKey {
 
 /// Orders two candidates by readout score (descending), then by the deterministic
 /// tie-breaker chain. The preferred candidate sorts first.
-pub fn rank(
-    score_a: f64,
-    key_a: &TieBreakKey,
-    score_b: f64,
-    key_b: &TieBreakKey,
-) -> Ordering {
+pub fn rank(score_a: f64, key_a: &TieBreakKey, score_b: f64, key_b: &TieBreakKey) -> Ordering {
     cmp_f64_desc(score_a, score_b).then_with(|| tie_break(key_a, key_b))
 }
 
@@ -195,12 +190,18 @@ mod tests {
 
     #[test]
     fn universal_node_weight() {
-        assert_eq!(scope_weight(&proj("proj-a"), &ScopePath::universal(), 0), 0.95);
+        assert_eq!(
+            scope_weight(&proj("proj-a"), &ScopePath::universal(), 0),
+            0.95
+        );
     }
 
     #[test]
     fn ancestor_weight() {
-        assert_eq!(scope_weight(&proj("proj-a"), &proj("proj-a/feature"), 0), 0.85);
+        assert_eq!(
+            scope_weight(&proj("proj-a"), &proj("proj-a/feature"), 0),
+            0.85
+        );
     }
 
     #[test]

@@ -137,7 +137,7 @@ fn tick_without_salience_change_keeps_checkpoint_stable() {
 #[test]
 fn touch_uses_checkpoint_not_accessed_at_for_decay_baseline() {
     use anamnesis::mechanics::interactions::{decay_default, reinforce_access};
-    use anamnesis::mechanics::priors::{learning_rate, TARGET_COACTIVATION_N};
+    use anamnesis::mechanics::priors::{TARGET_COACTIVATION_N, learning_rate};
 
     let mut engine = test_engine();
     let id = ingest_first(&mut engine, observation_at("delta", 0));

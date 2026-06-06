@@ -107,7 +107,10 @@ fn idle_edge_conductance_and_weight_strictly_decrease_after_tick() {
         "idle edge weight must strictly decrease: {after_w} !< {before_w}"
     );
     // Reservoir and projection remain finite.
-    assert!(after_c.is_finite(), "conductance must stay finite: {after_c}");
+    assert!(
+        after_c.is_finite(),
+        "conductance must stay finite: {after_c}"
+    );
     assert!(after_w.is_finite(), "weight must stay finite: {after_w}");
     // ADR-0002: tick re-projects weight = project_weight(C_ij') (it is an
     // allowed projection writer); the stored weight matches the reservoir.
@@ -198,16 +201,17 @@ fn longer_idle_leaks_at_least_as_much() {
         let a = insert(&mut engine, "A");
         let b = insert(&mut engine, "B");
         let eid = seed_edge(&mut engine, a, b, 2.0, Timestamp(1000));
-        engine
-            .tick(Timestamp(1000 + idle_days * DAY_MS))
-            .unwrap();
+        engine.tick(Timestamp(1000 + idle_days * DAY_MS)).unwrap();
         engine.conductance(eid).unwrap()
     };
 
     let short = leaked_after(30);
     let long = leaked_after(365);
 
-    assert!(short <= 2.0, "30-day idle must not raise conductance: {short}");
+    assert!(
+        short <= 2.0,
+        "30-day idle must not raise conductance: {short}"
+    );
     assert!(
         long <= short,
         "365-day idle must leak at least as much as 30-day: {long} !<= {short}"

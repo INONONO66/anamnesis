@@ -205,14 +205,22 @@ fn decay_episodic_faster_than_semantic() {
     let episodic_id = episodic_ids[0];
     let semantic_id = semantic_ids[0];
 
-    let episodic_a0 = engine.graph().get_node(episodic_id).unwrap().retained_action;
+    let episodic_a0 = engine
+        .graph()
+        .get_node(episodic_id)
+        .unwrap()
+        .retained_action;
 
     let month_later = Timestamp(30 * 86_400_000);
     engine.tick(month_later).unwrap();
 
     let episodic_s = engine.graph().storage().get_salience(episodic_id).unwrap();
     let semantic_s = engine.graph().storage().get_salience(semantic_id).unwrap();
-    let episodic_a = engine.graph().get_node(episodic_id).unwrap().retained_action;
+    let episodic_a = engine
+        .graph()
+        .get_node(episodic_id)
+        .unwrap()
+        .retained_action;
 
     // Relative ordering is the invariant: episodic (full decay multiplier) loses
     // more retained action than semantic over the same interval.
@@ -325,9 +333,7 @@ fn scope_same_project_preferred() {
     let same_id = same_ids[0];
     let other_id = other_ids[0];
 
-    engine
-        .link(same_id, other_id, EdgeType::Semantic)
-        .unwrap();
+    engine.link(same_id, other_id, EdgeType::Semantic).unwrap();
 
     let q = Query::Associative {
         seed: same_id,

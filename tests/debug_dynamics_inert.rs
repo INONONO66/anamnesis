@@ -66,7 +66,9 @@ fn refutes_is_supportive_and_propagates_activation() {
     assert!(edge_type_factor(&EdgeType::Refutes, false) > 0.0);
     assert_eq!(edge_type_factor(&EdgeType::Contradicts, true), 0.0);
     // Refutes is the weakest supportive type, below Semantic.
-    assert!(edge_type_factor(&EdgeType::Refutes, true) < edge_type_factor(&EdgeType::Semantic, true));
+    assert!(
+        edge_type_factor(&EdgeType::Refutes, true) < edge_type_factor(&EdgeType::Semantic, true)
+    );
 }
 
 #[test]

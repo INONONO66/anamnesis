@@ -12,14 +12,15 @@ fn table_columns(conn: &Connection, table: &str) -> Vec<(String, String, i64, St
         .query_map([], |row| {
             // cid, name, type, notnull, dflt_value, pk
             Ok((
-                row.get::<_, String>(1)?,                          // name
-                row.get::<_, String>(2)?,                          // type
-                row.get::<_, i64>(3)?,                             // notnull
+                row.get::<_, String>(1)?,                             // name
+                row.get::<_, String>(2)?,                             // type
+                row.get::<_, i64>(3)?,                                // notnull
                 row.get::<_, Option<String>>(4)?.unwrap_or_default(), // default
             ))
         })
         .expect("query table_info");
-    rows.collect::<Result<Vec<_>, _>>().expect("collect table_info")
+    rows.collect::<Result<Vec<_>, _>>()
+        .expect("collect table_info")
 }
 
 /// Collect the sorted list of index names defined on a table.
@@ -56,10 +57,8 @@ fn schema_version(conn: &Connection) -> u32 {
 #[test]
 fn fresh_db_gets_current_schema_version() {
     // A new file-backed DB should be created at the current version directly.
-    let tmp = std::env::temp_dir().join(format!(
-        "anamnesis_test_freshv4_{}.db",
-        std::process::id()
-    ));
+    let tmp =
+        std::env::temp_dir().join(format!("anamnesis_test_freshv4_{}.db", std::process::id()));
     let storage = SqliteStorage::open(&tmp).expect("storage init");
     use anamnesis::storage::StorageAdapter;
     assert_eq!(storage.node_count(), 0);
@@ -303,10 +302,8 @@ fn build_v1_db(path: &std::path::Path, seed: bool) {
 #[test]
 fn fresh_schema_equals_migrated_schema() {
     // Fresh current-version DB.
-    let fresh_path = std::env::temp_dir().join(format!(
-        "anamnesis_test_fresh_eq_{}.db",
-        std::process::id()
-    ));
+    let fresh_path =
+        std::env::temp_dir().join(format!("anamnesis_test_fresh_eq_{}.db", std::process::id()));
     SqliteStorage::open(&fresh_path).expect("fresh storage");
 
     // v1 -> current migrated DB.
@@ -362,10 +359,8 @@ fn fresh_schema_equals_migrated_schema() {
 fn v3_backfill_is_deterministic_and_complete() {
     use anamnesis::mechanics::priors::{salience_to_action, weight_to_conductance};
 
-    let tmp = std::env::temp_dir().join(format!(
-        "anamnesis_test_backfill_{}.db",
-        std::process::id()
-    ));
+    let tmp =
+        std::env::temp_dir().join(format!("anamnesis_test_backfill_{}.db", std::process::id()));
     build_v1_db(&tmp, true);
     SqliteStorage::open(&tmp).expect("migrate v1 -> current");
 

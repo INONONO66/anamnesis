@@ -72,7 +72,12 @@ pub fn additive_rwr<S: StorageAdapter>(
     storage: &S,
     now: Timestamp,
 ) -> ActivationResponse {
-    additive_rwr_with_alpha(seed, restart_alpha(priors::MEAN_ASSOCIATIVE_REACH_L), storage, now)
+    additive_rwr_with_alpha(
+        seed,
+        restart_alpha(priors::MEAN_ASSOCIATIVE_REACH_L),
+        storage,
+        now,
+    )
 }
 
 /// Runs the additive directed RWR with an explicit restart rate `alpha`.
@@ -123,13 +128,7 @@ pub fn additive_rwr_with_alpha<S: StorageAdapter>(
 
     for &source in &node_ids {
         let mut transitions: Vec<Transition> = Vec::new();
-        collect_transitions(
-            source,
-            storage,
-            now,
-            &mut transitions,
-            &mut excluded_edges,
-        );
+        collect_transitions(source, storage, now, &mut transitions, &mut excluded_edges);
         if !transitions.is_empty() {
             rows.insert(source, transitions);
         }
@@ -346,7 +345,11 @@ fn add_mass(distribution: &mut HashMap<NodeId, f64>, node_id: NodeId, mass: f64)
     }
 }
 
-fn l1_delta(current: &HashMap<NodeId, f64>, next: &HashMap<NodeId, f64>, node_ids: &[NodeId]) -> f64 {
+fn l1_delta(
+    current: &HashMap<NodeId, f64>,
+    next: &HashMap<NodeId, f64>,
+    node_ids: &[NodeId],
+) -> f64 {
     node_ids
         .iter()
         .map(|id| {
@@ -362,10 +365,10 @@ mod tests {
     use std::collections::VecDeque;
 
     use super::*;
-    use crate::mechanics::priors::project_weight;
     use crate::graph::edge::EdgeSource;
     use crate::graph::node::Origin;
     use crate::graph::{Edge, KnowledgeType, MemoryTier, Node, ScopePath};
+    use crate::mechanics::priors::project_weight;
     use crate::peer::SourceKind;
     use crate::storage::SqliteStorage;
 
@@ -469,7 +472,12 @@ mod tests {
             ],
         );
         // High alpha (short reach) keeps mass near the restart seed.
-        let r = additive_rwr_with_alpha(&HashMap::from([(NodeId(0), 1.0)]), 0.6, &storage, Timestamp(0));
+        let r = additive_rwr_with_alpha(
+            &HashMap::from([(NodeId(0), 1.0)]),
+            0.6,
+            &storage,
+            Timestamp(0),
+        );
         let a0 = r.activation[&NodeId(0)];
         let a3 = r.activation.get(&NodeId(3)).copied().unwrap_or(0.0);
         assert!(a0 > a3, "seed {a0} should exceed far node {a3}");
@@ -487,11 +495,23 @@ mod tests {
         );
         let mut transitions = Vec::new();
         let mut excluded = Vec::new();
-        collect_transitions(NodeId(0), &storage, Timestamp(0), &mut transitions, &mut excluded);
+        collect_transitions(
+            NodeId(0),
+            &storage,
+            Timestamp(0),
+            &mut transitions,
+            &mut excluded,
+        );
         let row_sum: f64 = transitions.iter().map(|t| t.conductance).sum();
-        let p: Vec<f64> = transitions.iter().map(|t| t.conductance / row_sum).collect();
+        let p: Vec<f64> = transitions
+            .iter()
+            .map(|t| t.conductance / row_sum)
+            .collect();
         let total: f64 = p.iter().sum();
-        assert!((total - 1.0).abs() < 1e-12, "P row must sum to 1, got {total}");
+        assert!(
+            (total - 1.0).abs() < 1e-12,
+            "P row must sum to 1, got {total}"
+        );
     }
 
     #[test]
@@ -511,16 +531,29 @@ mod tests {
         );
         let mut transitions = Vec::new();
         let mut excluded = Vec::new();
-        collect_transitions(NodeId(0), &storage, Timestamp(0), &mut transitions, &mut excluded);
+        collect_transitions(
+            NodeId(0),
+            &storage,
+            Timestamp(0),
+            &mut transitions,
+            &mut excluded,
+        );
         // Both edges propagate: g_ij > 0 even for the negative-reservoir edge.
         assert_eq!(transitions.len(), 2, "negative-C edge must still propagate");
         for t in &transitions {
-            assert!(t.conductance > 0.0, "g_ij must be > 0, got {}", t.conductance);
+            assert!(
+                t.conductance > 0.0,
+                "g_ij must be > 0, got {}",
+                t.conductance
+            );
         }
         let row_sum: f64 = transitions.iter().map(|t| t.conductance).sum();
         assert!(row_sum > 0.0, "row sum must be a valid positive normalizer");
         let total: f64 = transitions.iter().map(|t| t.conductance / row_sum).sum();
-        assert!((total - 1.0).abs() < 1e-12, "P row must sum to 1, got {total}");
+        assert!(
+            (total - 1.0).abs() < 1e-12,
+            "P row must sum to 1, got {total}"
+        );
         // End-to-end: the negative-reservoir target is reached by propagation, and the
         // full response still conserves mass (row-stochastic P + L1 seed).
         let r = additive_rwr(&HashMap::from([(NodeId(0), 1.0)]), &storage, Timestamp(0));
@@ -531,10 +564,7 @@ mod tests {
 
     #[test]
     fn contradicts_edges_are_excluded() {
-        let storage = store(
-            &[0, 1],
-            vec![edge(0, 0, 1, EdgeType::Contradicts, 5.0)],
-        );
+        let storage = store(&[0, 1], vec![edge(0, 0, 1, EdgeType::Contradicts, 5.0)]);
         let r = additive_rwr(&HashMap::from([(NodeId(0), 1.0)]), &storage, Timestamp(0));
         assert_eq!(r.excluded_edges, vec![EdgeId(0)]);
         // Node 1 receives no propagation; only restart mass on the seed.

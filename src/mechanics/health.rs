@@ -123,10 +123,7 @@ pub fn compute_health<S: StorageAdapter>(storage: &S, now: Timestamp) -> GraphHe
             *scope_distribution.entry(key).or_insert(0) += 1;
         }
 
-        let accessed = storage
-            .get_accessed_at(id)
-            .unwrap_or(Timestamp(0))
-            .0;
+        let accessed = storage.get_accessed_at(id).unwrap_or(Timestamp(0)).0;
         let elapsed = now.0.saturating_sub(accessed) as f64;
         if elapsed > stale_window_ms {
             stale_count += 1;

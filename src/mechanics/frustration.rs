@@ -84,7 +84,11 @@ pub fn stress(
     let scope = gate(scope_overlap);
     let temporal = gate(temporal_overlap);
     let sigma = cw * min_active * scope * temporal;
-    if sigma.is_finite() { sigma.max(0.0) } else { 0.0 }
+    if sigma.is_finite() {
+        sigma.max(0.0)
+    } else {
+        0.0
+    }
 }
 
 /// `S_frustration(i, j) = tension_presented_ij * sigma_ij` — the commit-time stress
@@ -122,7 +126,10 @@ mod tests {
 
     #[test]
     fn universal_full_overlap() {
-        assert_eq!(scope_overlap(&scope("proj-a"), &ScopePath::universal()), 1.0);
+        assert_eq!(
+            scope_overlap(&scope("proj-a"), &ScopePath::universal()),
+            1.0
+        );
     }
 
     #[test]
@@ -150,25 +157,13 @@ mod tests {
     #[test]
     fn one_expired_no_temporal_overlap() {
         // b expired before as_of → no overlap.
-        let g = temporal_overlap(
-            None,
-            None,
-            None,
-            Some(Timestamp(50)),
-            Timestamp(100),
-        );
+        let g = temporal_overlap(None, None, None, Some(Timestamp(50)), Timestamp(100));
         assert_eq!(g, 0.0);
     }
 
     #[test]
     fn one_not_yet_valid_no_temporal_overlap() {
-        let g = temporal_overlap(
-            None,
-            None,
-            Some(Timestamp(200)),
-            None,
-            Timestamp(100),
-        );
+        let g = temporal_overlap(None, None, Some(Timestamp(200)), None, Timestamp(100));
         assert_eq!(g, 0.0);
     }
 

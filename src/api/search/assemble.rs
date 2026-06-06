@@ -149,7 +149,11 @@ fn assemble_graph_recall_package<S: StorageAdapter + Clone>(
 
         let salience = storage.get_salience(node_id).unwrap_or(0.0);
         let retained_action = storage.get_retained_action(node_id).unwrap_or(0.0);
-        let impedance = response.impedance.get(&node_id).copied().unwrap_or_default();
+        let impedance = response
+            .impedance
+            .get(&node_id)
+            .copied()
+            .unwrap_or_default();
 
         let shared_entities = seed_entity_tags
             .iter()

@@ -74,7 +74,11 @@ fn rwr_conserves_mass_and_converges() {
     );
     assert!(response.activation.values().all(|score| score.is_finite()));
     assert!(!response.truncated, "RWR must converge within the bound");
-    assert!(response.residual < 1e-9, "residual {} too large", response.residual);
+    assert!(
+        response.residual < 1e-9,
+        "residual {} too large",
+        response.residual
+    );
 }
 
 #[test]

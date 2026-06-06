@@ -45,7 +45,10 @@ fn projections_land_in_closed_unit_interval() {
     // Realistic backfill-range reservoirs project strictly interior.
     for a in [-13.0_f64, -1.0, 0.0, 1.0, 13.0] {
         let s = project_salience(a);
-        assert!(s > 0.0 && s < 1.0, "salience should be interior for a={a}: {s}");
+        assert!(
+            s > 0.0 && s < 1.0,
+            "salience should be interior for a={a}: {s}"
+        );
     }
 }
 
@@ -78,7 +81,10 @@ fn project_conductance_is_positive_bounded_for_row_stochastic_p() {
     // bound saturates to exactly 1.0 at extreme reservoirs, which is in [0, 1].
     for c in [-1e9_f64, -13.8, -1.0, 0.0, 1.0, 13.8, 1e9] {
         let g = project_conductance(c);
-        assert!(g > 0.0 && g <= 1.0, "project_conductance({c}) = {g} not in (0,1]");
+        assert!(
+            g > 0.0 && g <= 1.0,
+            "project_conductance({c}) = {g} not in (0,1]"
+        );
         assert_eq!(g, project_weight(clamp_log_odds(c)));
     }
     assert!(project_conductance(f64::INFINITY).is_finite());

@@ -52,22 +52,28 @@ fn fixture() -> (Engine, anamnesis::NodeId, anamnesis::NodeId, EdgeId) {
     // edge between the pair is the explicit manual link below, keeping the fixture's
     // conductance topology fully deterministic.
     let IngestResult::Created(a) = engine
-        .ingest(obs("auth uses factory pattern", KnowledgeType::Semantic, vec![1.0, 0.0]))
+        .ingest(obs(
+            "auth uses factory pattern",
+            KnowledgeType::Semantic,
+            vec![1.0, 0.0],
+        ))
         .unwrap()
     else {
         panic!("expected Created");
     };
     let IngestResult::Created(b) = engine
-        .ingest(obs("deployment runs on friday", KnowledgeType::Semantic, vec![0.0, 1.0]))
+        .ingest(obs(
+            "deployment runs on friday",
+            KnowledgeType::Semantic,
+            vec![0.0, 1.0],
+        ))
         .unwrap()
     else {
         panic!("expected Created");
     };
     let seed = a[0];
     let neighbor = b[0];
-    let edge = engine
-        .link(seed, neighbor, EdgeType::Semantic)
-        .unwrap();
+    let edge = engine.link(seed, neighbor, EdgeType::Semantic).unwrap();
     (engine, seed, neighbor, edge)
 }
 
@@ -89,7 +95,10 @@ fn query_is_read_only_and_carries_a_commit_trace() {
 
     // Read-only: the seed's reservoir is untouched by retrieval.
     let action_after = engine.graph().storage().get_retained_action(seed).unwrap();
-    assert_eq!(action_before, action_after, "query must not mutate reservoirs");
+    assert_eq!(
+        action_before, action_after,
+        "query must not mutate reservoirs"
+    );
 
     // The trace records the accessed sites and the path that carried current.
     assert!(
@@ -121,8 +130,14 @@ fn commit_integrates_access_path_and_feedback() {
 
     // Accessed + feedback integrated into the accessed sites; path strengthened.
     assert!(report.sites_accessed >= 1, "at least the seed was accessed");
-    assert!(report.feedback_applied >= 1, "feedback applied to accessed sites");
-    assert!(report.paths_strengthened >= 1, "the used edge was strengthened");
+    assert!(
+        report.feedback_applied >= 1,
+        "feedback applied to accessed sites"
+    );
+    assert!(
+        report.paths_strengthened >= 1,
+        "the used edge was strengthened"
+    );
     assert!(
         committed.committed_ids.contains(&seed),
         "committed_ids should include the seed"
@@ -185,7 +200,10 @@ fn commit_without_feedback_records_access_only() {
 
     let (_committed, report) = engine.commit(pkg, None).unwrap();
     assert!(report.sites_accessed >= 1);
-    assert_eq!(report.feedback_applied, 0, "no feedback signal => no RW update");
+    assert_eq!(
+        report.feedback_applied, 0,
+        "no feedback signal => no RW update"
+    );
 }
 
 #[test]
@@ -218,8 +236,24 @@ fn commit_conductance_update_is_deterministic_for_same_graph_and_trace() {
     // same conductance: the Hebbian-Oja update is a pure function of (C, flux, eta).
     let (mut e1, s1, _n1, edge1) = fixture();
     let (mut e2, s2, _n2, edge2) = fixture();
-    let pkg1 = e1.query(&Query::Associative { seed: s1, budget: 100 }, &qconfig()).unwrap();
-    let pkg2 = e2.query(&Query::Associative { seed: s2, budget: 100 }, &qconfig()).unwrap();
+    let pkg1 = e1
+        .query(
+            &Query::Associative {
+                seed: s1,
+                budget: 100,
+            },
+            &qconfig(),
+        )
+        .unwrap();
+    let pkg2 = e2
+        .query(
+            &Query::Associative {
+                seed: s2,
+                budget: 100,
+            },
+            &qconfig(),
+        )
+        .unwrap();
     // Drive both commits off the SAME captured flux so the assertion isolates the
     // update rule (not the RWR flow's hash-order f64 summation).
     let flux1 = flux_of(&pkg1);

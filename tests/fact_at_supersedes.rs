@@ -58,9 +58,7 @@ fn fact_at_returns_only_valid_facts() {
     let old = created_id(engine.ingest(make_obs("old fact")).unwrap());
     let new_fact = created_id(engine.ingest(make_obs("new fact")).unwrap());
 
-    engine
-        .link(new_fact, old, EdgeType::Supersedes)
-        .unwrap();
+    engine.link(new_fact, old, EdgeType::Supersedes).unwrap();
 
     let old_node = engine.graph().get_node(old).unwrap();
     assert!(old_node.valid_until.is_some());

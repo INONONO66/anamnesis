@@ -145,7 +145,10 @@ fn list_orders_by_salience_descending() {
     engine
         .graph_mut()
         .storage_mut()
-        .set_retained_action(second, anamnesis::mechanics::priors::salience_to_action(0.40))
+        .set_retained_action(
+            second,
+            anamnesis::mechanics::priors::salience_to_action(0.40),
+        )
         .unwrap();
 
     let package = engine
@@ -158,6 +161,9 @@ fn list_orders_by_salience_descending() {
         )
         .unwrap();
 
-    assert_eq!(package.knowledge[0].node_id, first, "higher salience ranks first");
+    assert_eq!(
+        package.knowledge[0].node_id, first,
+        "higher salience ranks first"
+    );
     assert_eq!(package.knowledge[1].node_id, second);
 }

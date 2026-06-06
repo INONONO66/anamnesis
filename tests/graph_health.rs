@@ -86,8 +86,14 @@ fn health_is_read_only_salience_unchanged() {
 
     let _health = engine.graph_health_at(Timestamp(2000));
 
-    assert_eq!(before_1, engine.graph().storage().get_salience(id1).unwrap());
-    assert_eq!(before_2, engine.graph().storage().get_salience(id2).unwrap());
+    assert_eq!(
+        before_1,
+        engine.graph().storage().get_salience(id1).unwrap()
+    );
+    assert_eq!(
+        before_2,
+        engine.graph().storage().get_salience(id2).unwrap()
+    );
     assert_eq!(
         action_before_1,
         engine.graph().storage().get_retained_action(id1).unwrap()
@@ -248,12 +254,7 @@ fn healthy_graph_passes_all_structural_invariants() {
     );
 
     // Projection range and finiteness must always hold post-commit-discipline.
-    assert!(
-        report
-            .get(InvariantCheck::ProjectionRange)
-            .unwrap()
-            .passed
-    );
+    assert!(report.get(InvariantCheck::ProjectionRange).unwrap().passed);
     assert!(
         report
             .get(InvariantCheck::NonFiniteHotFields)
@@ -294,8 +295,18 @@ fn private_scope_leakage_detects_bridge_across_disjoint_scopes() {
     let mut engine = Engine::with_config(config);
 
     // Two nodes in disjoint (Unrelated) private scopes, neither universal.
-    let personal = ingest_in(&mut engine, "personal note", KnowledgeType::Semantic, "personal/foo");
-    let work = ingest_in(&mut engine, "work note", KnowledgeType::Semantic, "work/bar");
+    let personal = ingest_in(
+        &mut engine,
+        "personal note",
+        KnowledgeType::Semantic,
+        "personal/foo",
+    );
+    let work = ingest_in(
+        &mut engine,
+        "work note",
+        KnowledgeType::Semantic,
+        "work/bar",
+    );
 
     // A propagating (non-Contradicts) edge bridging them is a leak: it lets
     // private knowledge in one scope light up a node a query in the other,
@@ -320,8 +331,18 @@ fn private_scope_leakage_ignores_contradicts_bridge() {
 
     // Same disjoint scopes, but a Contradicts edge does not propagate flow, so
     // it is not a leak — tension surfaces across scopes without leaking activation.
-    let personal = ingest_in(&mut engine, "personal note", KnowledgeType::Semantic, "personal/foo");
-    let work = ingest_in(&mut engine, "work note", KnowledgeType::Semantic, "work/bar");
+    let personal = ingest_in(
+        &mut engine,
+        "personal note",
+        KnowledgeType::Semantic,
+        "personal/foo",
+    );
+    let work = ingest_in(
+        &mut engine,
+        "work note",
+        KnowledgeType::Semantic,
+        "work/bar",
+    );
     engine.link(personal, work, EdgeType::Contradicts).unwrap();
 
     let report = engine.check_invariants(None);

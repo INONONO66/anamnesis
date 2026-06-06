@@ -75,11 +75,7 @@ fn bench_link(c: &mut Criterion) {
                 panic!("expected Created");
             };
             engine
-                .link(
-                    black_box(ids1[0]),
-                    black_box(ids2[0]),
-                    EdgeType::Semantic,
-                )
+                .link(black_box(ids1[0]), black_box(ids2[0]), EdgeType::Semantic)
                 .unwrap()
         })
     });

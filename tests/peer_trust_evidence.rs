@@ -17,8 +17,8 @@ use anamnesis::graph::node::Origin;
 use anamnesis::graph::types::PeerId;
 use anamnesis::graph::{KnowledgeType, NodeId, ScopePath, Timestamp};
 use anamnesis::mechanics::priors::{
-    project_trust, trust_evidence_target, update_trust_reservoir, CORROBORATION_LOG_ODDS,
-    TRUST_LEARNING_RATE,
+    CORROBORATION_LOG_ODDS, TRUST_LEARNING_RATE, project_trust, trust_evidence_target,
+    update_trust_reservoir,
 };
 use anamnesis::peer::{SourceKind, TrustLevel};
 use anamnesis::query::{Query, QueryConfig};
@@ -71,13 +71,19 @@ fn positive_evidence_raises_trust_reservoir_traceably() {
     let alice = engine.register_peer("alice", TrustLevel::Agent).unwrap();
 
     let before = engine.get_peer(alice).unwrap().trust_reservoir;
-    assert_eq!(before, 0.0, "Agent prior is the neutral no-evidence reservoir");
+    assert_eq!(
+        before, 0.0,
+        "Agent prior is the neutral no-evidence reservoir"
+    );
 
     let _ = engine.drain_events();
     let new = engine.update_peer_trust_evidence(alice, 1.0).unwrap();
 
     // Corroboration RAISES the trust reservoir.
-    assert!(new > before, "positive evidence must raise trust: {new} !> {before}");
+    assert!(
+        new > before,
+        "positive evidence must raise trust: {new} !> {before}"
+    );
     let after = engine.get_peer(alice).unwrap().trust_reservoir;
     assert_eq!(after, new, "the returned reservoir is the persisted one");
 
@@ -125,7 +131,10 @@ fn trust_evidence_never_erases_origin() {
     assert_eq!(profile.trust_level, TrustLevel::Member);
     assert_eq!(profile.name, "alice");
     assert!(profile.aliases.contains(&"ali".to_string()));
-    assert_eq!(profile.trust_evidence_count, 5, "evidence count is part of the trace");
+    assert_eq!(
+        profile.trust_evidence_count, 5,
+        "evidence count is part of the trace"
+    );
     assert_eq!(engine.resolve_peer("ali"), Some(alice));
 }
 
@@ -136,7 +145,10 @@ fn single_event_is_a_slow_durable_nudge_not_a_swing() {
 
     let after_one = engine.update_peer_trust_evidence(p, 1.0).unwrap();
     // One event closes only a fraction TRUST_LEARNING_RATE of the gap to target.
-    assert!(after_one < 0.5 * CORROBORATION_LOG_ODDS, "one event must not swing trust");
+    assert!(
+        after_one < 0.5 * CORROBORATION_LOG_ODDS,
+        "one event must not swing trust"
+    );
 
     // Accumulated consistent evidence converges toward the target (durable).
     for _ in 0..500 {
@@ -144,7 +156,10 @@ fn single_event_is_a_slow_durable_nudge_not_a_swing() {
     }
     let saturated = engine.get_peer(p).unwrap().trust_reservoir;
     assert!((saturated - CORROBORATION_LOG_ODDS).abs() < 1e-3);
-    assert!(saturated < CORROBORATION_LOG_ODDS + 1e-9, "bounded — never overshoots");
+    assert!(
+        saturated < CORROBORATION_LOG_ODDS + 1e-9,
+        "bounded — never overshoots"
+    );
 }
 
 // ── reflect_batch corroboration raises the corroborating peers' trust ────────
@@ -166,8 +181,16 @@ fn reflect_batch_corroboration_raises_registered_peer_trust_traceably() {
     let _ = engine.drain_events();
     let report = engine
         .reflect_batch(&[
-            SessionSummary { peer_id: a, session_id: "s1".into(), node_ids: vec![n1] },
-            SessionSummary { peer_id: b, session_id: "s2".into(), node_ids: vec![n2] },
+            SessionSummary {
+                peer_id: a,
+                session_id: "s1".into(),
+                node_ids: vec![n1],
+            },
+            SessionSummary {
+                peer_id: b,
+                session_id: "s2".into(),
+                node_ids: vec![n2],
+            },
         ])
         .unwrap();
 
@@ -175,8 +198,14 @@ fn reflect_batch_corroboration_raises_registered_peer_trust_traceably() {
     assert!(report.entity_edges_created >= 1);
     let trust_a_after = engine.get_peer(a).unwrap().trust_reservoir;
     let trust_b_after = engine.get_peer(b).unwrap().trust_reservoir;
-    assert!(trust_a_after > trust_a_before, "corroboration raises peer a's trust");
-    assert!(trust_b_after > trust_b_before, "corroboration raises peer b's trust");
+    assert!(
+        trust_a_after > trust_a_before,
+        "corroboration raises peer a's trust"
+    );
+    assert!(
+        trust_b_after > trust_b_before,
+        "corroboration raises peer b's trust"
+    );
 
     // Traceable: a PeerTrustChanged event was emitted for each corroborated peer.
     let events = engine.drain_events();
@@ -202,8 +231,16 @@ fn reflect_batch_single_agent_repeats_do_not_corroborate_trust() {
 
     engine
         .reflect_batch(&[
-            SessionSummary { peer_id: a, session_id: "s1".into(), node_ids: vec![n1] },
-            SessionSummary { peer_id: a, session_id: "s2".into(), node_ids: vec![n2] },
+            SessionSummary {
+                peer_id: a,
+                session_id: "s1".into(),
+                node_ids: vec![n1],
+            },
+            SessionSummary {
+                peer_id: a,
+                session_id: "s2".into(),
+                node_ids: vec![n2],
+            },
         ])
         .unwrap();
 
@@ -252,8 +289,14 @@ fn trust_reservoir_feeds_the_readout_trust_weight() {
     // prior projects zero, so evidence movement directly enters ranking.
     assert_eq!(project_trust(0.0), 0.0);
     let raised = update_trust_reservoir(0.0, trust_evidence_target(1.0), TRUST_LEARNING_RATE);
-    assert!(project_trust(raised) > 0.0, "raised trust contributes a positive readout term");
+    assert!(
+        project_trust(raised) > 0.0,
+        "raised trust contributes a positive readout term"
+    );
 
     let lowered = update_trust_reservoir(0.0, trust_evidence_target(-1.0), TRUST_LEARNING_RATE);
-    assert!(project_trust(lowered) < 0.0, "lowered trust contributes a negative readout term");
+    assert!(
+        project_trust(lowered) < 0.0,
+        "lowered trust contributes a negative readout term"
+    );
 }

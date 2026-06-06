@@ -285,7 +285,7 @@ fn result(check: InvariantCheck, violations: Vec<String>) -> InvariantResult {
 
 /// Whether a bitemporal validity interval is well-formed: a present pair must be
 /// non-empty under the half-open `[from, until)` convention shared with
-/// [`valid_at`] (an interval with `from >= until` can never be valid at any
+/// [`crate::graph::valid_at`] (an interval with `from >= until` can never be valid at any
 /// `as_of`). The validity-interval invariant uses this predicate.
 #[inline]
 pub fn interval_well_formed(
@@ -300,7 +300,7 @@ pub fn interval_well_formed(
 
 // ── Operational warnings (observability.md) ────────────────────────────────
 
-/// A heuristic operational warning derived from [`GraphHealth`].
+/// A heuristic operational warning derived from [`crate::GraphHealth`].
 ///
 /// These are the five rows of the observability.md "Operational Warnings" table.
 /// Each names a likely cause and a recommended action; they are advisory, never
@@ -334,9 +334,7 @@ impl OperationalWarning {
     /// The recommended action, per the observability.md table.
     pub fn action(&self) -> &'static str {
         match self {
-            OperationalWarning::HighOrphanRatio => {
-                "Recalibrate threshold or candidate generation"
-            }
+            OperationalWarning::HighOrphanRatio => "Recalibrate threshold or candidate generation",
             OperationalWarning::HighContradictionRatio => "Review tension handling",
             OperationalWarning::LowSalienceEntropy => "Inspect dissipation and reinforcement",
             OperationalWarning::DenseGraph => "Apply edge budget / leakage",
@@ -358,7 +356,7 @@ const WARN_DENSE_DEGREE: f64 = 20.0;
 /// Minimum node count before entropy/degree warnings are meaningful.
 const WARN_MIN_NODES: usize = 8;
 
-/// Derive the operational warnings implied by a [`GraphHealth`] summary.
+/// Derive the operational warnings implied by a [`crate::GraphHealth`] summary.
 ///
 /// `stale_core` is reported when the graph is stale overall (high `stale_ratio`)
 /// — a proxy for "an important identity has not been accessed"; the engine layer

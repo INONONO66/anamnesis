@@ -51,9 +51,25 @@ mod tests {
     #[test]
     fn closed_open_interval() {
         // [5, 10): 5 in, 10 out
-        assert!(valid_at(Some(Timestamp(5)), Some(Timestamp(10)), Timestamp(5)));
-        assert!(valid_at(Some(Timestamp(5)), Some(Timestamp(10)), Timestamp(9)));
-        assert!(!valid_at(Some(Timestamp(5)), Some(Timestamp(10)), Timestamp(10)));
-        assert!(!valid_at(Some(Timestamp(5)), Some(Timestamp(10)), Timestamp(4)));
+        assert!(valid_at(
+            Some(Timestamp(5)),
+            Some(Timestamp(10)),
+            Timestamp(5)
+        ));
+        assert!(valid_at(
+            Some(Timestamp(5)),
+            Some(Timestamp(10)),
+            Timestamp(9)
+        ));
+        assert!(!valid_at(
+            Some(Timestamp(5)),
+            Some(Timestamp(10)),
+            Timestamp(10)
+        ));
+        assert!(!valid_at(
+            Some(Timestamp(5)),
+            Some(Timestamp(10)),
+            Timestamp(4)
+        ));
     }
 }

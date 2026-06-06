@@ -13,7 +13,7 @@ use anamnesis::graph::node::Origin;
 use anamnesis::graph::types::PeerId;
 use anamnesis::graph::{KnowledgeType, ScopePath, Timestamp};
 use anamnesis::peer::SourceKind;
-use anamnesis::{Engine, EngineConfig, EdgeType, StorageAdapter};
+use anamnesis::{EdgeType, Engine, EngineConfig, StorageAdapter};
 
 fn obs(name: &str, embedding: Vec<f64>) -> Observation {
     Observation {

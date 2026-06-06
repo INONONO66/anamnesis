@@ -161,14 +161,20 @@ fn snapshot_restore_mismatch<S: StorageAdapter>(original: &S, restored: &S) -> O
                 return Some(format!("node {id:?} accessed_at differs after restore"));
             }
             (Ok(_), Ok(_)) => {}
-            _ => return Some(format!("node {id:?} accessed_at not retrievable from both stores")),
+            _ => {
+                return Some(format!(
+                    "node {id:?} accessed_at not retrievable from both stores"
+                ));
+            }
         }
         match (
             original.get_decay_checkpoint(id),
             restored.get_decay_checkpoint(id),
         ) {
             (Ok(a), Ok(b)) if a != b => {
-                return Some(format!("node {id:?} decay_checkpoint differs after restore"));
+                return Some(format!(
+                    "node {id:?} decay_checkpoint differs after restore"
+                ));
             }
             (Ok(_), Ok(_)) => {}
             _ => {
@@ -260,11 +266,9 @@ fn build_commit_trace<S: StorageAdapter>(
     for (idx, &node_a) in packaged.iter().enumerate() {
         for &node_b in &packaged[idx + 1..] {
             let connected = storage.edges_from(node_a).iter().any(|&eid| {
-                !excluded.contains(&eid)
-                    && storage.get_edge(eid).is_ok_and(|e| e.target == node_b)
+                !excluded.contains(&eid) && storage.get_edge(eid).is_ok_and(|e| e.target == node_b)
             }) || storage.edges_from(node_b).iter().any(|&eid| {
-                !excluded.contains(&eid)
-                    && storage.get_edge(eid).is_ok_and(|e| e.target == node_a)
+                !excluded.contains(&eid) && storage.get_edge(eid).is_ok_and(|e| e.target == node_a)
             });
             if connected {
                 co_readout.push(CoReadoutPair {
@@ -363,7 +367,10 @@ fn build_readout_energy<S: StorageAdapter>(
     // readout score), Z_i (effective impedance from the settled response).
     let mut sites: Vec<SiteEnergy> = Vec::with_capacity(packaged.len());
     for &id in &packaged {
-        let phi = match (query_embedding, storage.get_node(id).ok().and_then(|n| n.embedding.as_ref())) {
+        let phi = match (
+            query_embedding,
+            storage.get_node(id).ok().and_then(|n| n.embedding.as_ref()),
+        ) {
             (Some(qe), Some(ne)) => cosine_similarity(qe, ne),
             _ => 0.0,
         };
@@ -799,11 +806,7 @@ fn clamp_unit_finite(value: f64) -> f64 {
 /// lifted by `+REWARD_LOG_ODDS_SCALE`, a zero-confidence one is pulled down by the
 /// symmetric amount, and a neutral `0.5` confidence leaves the source average
 /// unchanged. The result is clamped to the finite log-odds range.
-fn crystallized_action(
-    source_actions: &[f64],
-    relevance_weights: &[f64],
-    confidence: f64,
-) -> f64 {
+fn crystallized_action(source_actions: &[f64], relevance_weights: &[f64], confidence: f64) -> f64 {
     let weight_sum: f64 = relevance_weights.iter().sum();
     let source_average = if weight_sum > f64::EPSILON {
         source_actions
@@ -1206,7 +1209,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         id: crate::graph::types::PeerId,
         signed_strength: f64,
     ) -> Result<f64, Error> {
-        use crate::mechanics::priors::{trust_evidence_target, TRUST_LEARNING_RATE};
+        use crate::mechanics::priors::{TRUST_LEARNING_RATE, trust_evidence_target};
 
         let target = trust_evidence_target(signed_strength);
         let (old, new) = self.peers.nudge_trust(id, target, TRUST_LEARNING_RATE)?;
@@ -2186,8 +2189,8 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         if let Some(ref new_embedding) = observation.embedding {
             use crate::mechanics::interactions::hebbian_oja;
             use crate::mechanics::priors::{
-                coupling_clears_threshold, initialize_conductance, learning_rate,
-                TARGET_COACTIVATION_N,
+                TARGET_COACTIVATION_N, coupling_clears_threshold, initialize_conductance,
+                learning_rate,
             };
             let eta = learning_rate(TARGET_COACTIVATION_N);
 
@@ -2319,7 +2322,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             attraction_score, cosine_similarity, should_create_edge, tau_type,
         };
         use crate::mechanics::interactions::hebbian_oja;
-        use crate::mechanics::priors::{learning_rate, TARGET_COACTIVATION_N};
+        use crate::mechanics::priors::{TARGET_COACTIVATION_N, learning_rate};
 
         if request.source_ids.len() < 2 {
             return Err(Error::InvalidInput(
@@ -2665,12 +2668,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
     /// Extracts the four normalized NPMI features `{sim, entity, scope, type}` from
     /// the endpoints and combines them with the single `beta_coupling` regression
     /// vector. Pure over the two nodes and the edge type; reads no storage.
-    fn cold_start_conductance(
-        &self,
-        from: &Node,
-        to: &Node,
-        edge_type: &EdgeType,
-    ) -> f64 {
+    fn cold_start_conductance(&self, from: &Node, to: &Node, edge_type: &EdgeType) -> f64 {
         use crate::mechanics::priors::initialize_conductance;
         initialize_conductance(self.cold_start_coupling_seed(from, to, edge_type))
     }
@@ -2787,13 +2785,9 @@ impl<S: StorageAdapter + Clone> Engine<S> {
     /// `flux` must be the same length; each edge must exist; every `flux` value
     /// must be finite. Edges are processed in the given order; the operation is
     /// deterministic for a fixed input.
-    pub fn apply_path_used(
-        &mut self,
-        edges: Vec<EdgeId>,
-        flux: Vec<f64>,
-    ) -> Result<(), Error> {
+    pub fn apply_path_used(&mut self, edges: Vec<EdgeId>, flux: Vec<f64>) -> Result<(), Error> {
         use crate::mechanics::interactions::hebbian_oja;
-        use crate::mechanics::priors::{learning_rate, TARGET_COACTIVATION_N};
+        use crate::mechanics::priors::{TARGET_COACTIVATION_N, learning_rate};
 
         if edges.len() != flux.len() {
             return Err(Error::InvalidInput(
@@ -2844,7 +2838,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         activations: Vec<(f64, f64)>,
     ) -> Result<(), Error> {
         use crate::mechanics::interactions::hebbian_oja;
-        use crate::mechanics::priors::{learning_rate, TARGET_COACTIVATION_N};
+        use crate::mechanics::priors::{TARGET_COACTIVATION_N, learning_rate};
 
         if pairs.len() != activations.len() {
             return Err(Error::InvalidInput(
@@ -3044,7 +3038,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         signal: crate::mechanics::social::FeedbackSignal,
     ) -> Result<(), Error> {
         use crate::mechanics::interactions::{lambda_reward, rescorla_wagner};
-        use crate::mechanics::priors::{learning_rate, project_salience, TARGET_COACTIVATION_N};
+        use crate::mechanics::priors::{TARGET_COACTIVATION_N, learning_rate, project_salience};
 
         let current_action = self.graph.storage().get_retained_action(node_id)?;
         let current_salience = self.graph.storage().get_salience(node_id)?;
@@ -3117,9 +3111,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         feedback: Option<crate::mechanics::social::ConfidenceLevel>,
     ) -> Result<(ContextPackage, CommitReport), Error> {
         use crate::mechanics::interactions::{hebbian_oja, lambda_reward, rescorla_wagner};
-        use crate::mechanics::priors::{
-            learning_rate, project_salience, TARGET_COACTIVATION_N,
-        };
+        use crate::mechanics::priors::{TARGET_COACTIVATION_N, learning_rate, project_salience};
 
         // Clone the trace so the package can be returned (with `committed_ids`) after
         // the integration loops; the trace is small and transient.
@@ -3300,7 +3292,9 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                     )));
                 }
                 self.graph.storage_mut().set_conductance(edge_id, next)?;
-                self.graph.storage_mut().set_edge_accessed_at(edge_id, now)?;
+                self.graph
+                    .storage_mut()
+                    .set_edge_accessed_at(edge_id, now)?;
                 strengthened = true;
             }
             if strengthened {
@@ -3330,7 +3324,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         now: Timestamp,
     ) -> Result<(), Error> {
         use crate::mechanics::interactions::{decay_default, reinforce_access};
-        use crate::mechanics::priors::{learning_rate, project_salience, TARGET_COACTIVATION_N};
+        use crate::mechanics::priors::{TARGET_COACTIVATION_N, learning_rate, project_salience};
 
         let current_action = self.graph.storage().get_retained_action(node_id)?;
         let current_salience = self.graph.storage().get_salience(node_id)?;
@@ -3513,7 +3507,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         // propagation — ADR-0005/0006). Edges are never deleted (ADR-0008/0006).
         {
             use crate::mechanics::interactions::leak_idle_edge_default;
-            use crate::mechanics::priors::{project_weight, ETA_LEAK};
+            use crate::mechanics::priors::{ETA_LEAK, project_weight};
 
             if ETA_LEAK > 0.0 {
                 let edge_ids = self.graph.storage().all_edge_ids();
@@ -3872,11 +3866,10 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             ..config.clone()
         };
         let mut package = self.assemble_readout_package(&response, &scoped_config);
-        let retain_recent =
-            |frag: &Fragment| match self.graph.get_node(frag.node_id) {
-                Ok(node) => node.created_at >= observer_earliest,
-                Err(_) => false,
-            };
+        let retain_recent = |frag: &Fragment| match self.graph.get_node(frag.node_id) {
+            Ok(node) => node.created_at >= observer_earliest,
+            Err(_) => false,
+        };
         package.identity.retain(retain_recent);
         package.knowledge.retain(retain_recent);
         package.memories.retain(retain_recent);
@@ -4266,7 +4259,9 @@ impl<S: StorageAdapter + Clone> Engine<S> {
     ) -> ContextPackage {
         use crate::mechanics::attraction::cosine_similarity;
         use crate::query::assembly::ScoredNode;
-        use crate::query::scoring::{ReadoutInputs, TieBreakKey, rank, readout_score, scope_weight};
+        use crate::query::scoring::{
+            ReadoutInputs, TieBreakKey, rank, readout_score, scope_weight,
+        };
 
         let storage = self.graph.storage();
         let now = config.now.unwrap_or_else(Timestamp::now);
@@ -4634,21 +4629,17 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             let cloned = self.graph.storage().clone();
             match snapshot_restore_mismatch(self.graph.storage(), &cloned) {
                 None => InvariantResult::ok(InvariantCheck::SnapshotRestoreConsistency),
-                Some(detail) => InvariantResult::failed(
-                    InvariantCheck::SnapshotRestoreConsistency,
-                    1,
-                    detail,
-                ),
+                Some(detail) => {
+                    InvariantResult::failed(InvariantCheck::SnapshotRestoreConsistency, 1, detail)
+                }
             }
         };
         results.push(snapshot_result);
 
         // determinism: same graph + query twice => identical ContextPackage.
         if let Some(input) = probe {
-            let determinism_result = match (
-                self.search(input.clone()),
-                self.search(input.clone()),
-            ) {
+            let determinism_result = match (self.search(input.clone()), self.search(input.clone()))
+            {
                 (Ok(a), Ok(b)) => {
                     if a.package == b.package {
                         InvariantResult::ok(InvariantCheck::Determinism)
@@ -4871,9 +4862,7 @@ mod tests {
 
         let mut clone = engine.graph().storage().clone();
         let original_salience = clone.get_salience(ids[0]).unwrap();
-        clone
-            .set_salience(ids[0], original_salience * 0.5)
-            .unwrap();
+        clone.set_salience(ids[0], original_salience * 0.5).unwrap();
 
         let mismatch = snapshot_restore_mismatch(engine.graph().storage(), &clone);
         assert!(
@@ -4934,9 +4923,7 @@ mod tests {
         let IngestResult::Created(ids2) = engine.ingest(make_observation("node B")).unwrap() else {
             panic!("expected Created");
         };
-        let eid = engine
-            .link(ids1[0], ids2[0], EdgeType::Semantic)
-            .unwrap();
+        let eid = engine.link(ids1[0], ids2[0], EdgeType::Semantic).unwrap();
         assert_eq!(engine.graph().edge_count(), 1);
         let edge = engine.graph().get_edge(eid).unwrap();
         // Conductance is seeded from the cold-start coupling; weight is its bounded
@@ -5134,7 +5121,7 @@ mod tests {
 
     #[test]
     fn cold_start_subthreshold_coupling_creates_no_edge() {
-        use crate::mechanics::priors::{coupling_clears_threshold, CONDUCTANCE_THRESHOLD};
+        use crate::mechanics::priors::{CONDUCTANCE_THRESHOLD, coupling_clears_threshold};
         // Two nodes with NO embedding and DISJOINT entity tags → the cold-start
         // coupling seed is far below `conductance_threshold`, so the auto-link path
         // must create no edge (conductance.md "Cold Start" density gate).
@@ -5258,9 +5245,7 @@ mod tests {
         let IngestResult::Created(ids2) = engine.ingest(make_observation("B")).unwrap() else {
             panic!("expected Created");
         };
-        let eid = engine
-            .link(ids1[0], ids2[0], EdgeType::Semantic)
-            .unwrap();
+        let eid = engine.link(ids1[0], ids2[0], EdgeType::Semantic).unwrap();
         let edge = engine.graph().get_edge(eid).unwrap();
         assert!(edge.created_at.0 > 0);
     }
@@ -5323,7 +5308,11 @@ mod tests {
             "access should not lower A: {} < {a_before}",
             node.retained_action
         );
-        assert!(node.salience > 0.999 && node.salience <= 1.0, "salience={}", node.salience);
+        assert!(
+            node.salience > 0.999 && node.salience <= 1.0,
+            "salience={}",
+            node.salience
+        );
         assert_eq!(node.access_count, 1);
     }
 
@@ -5631,9 +5620,7 @@ mod tests {
             panic!("expected Created");
         };
 
-        engine
-            .link(ids1[0], ids2[0], EdgeType::Semantic)
-            .unwrap();
+        engine.link(ids1[0], ids2[0], EdgeType::Semantic).unwrap();
 
         let q = Query::Associative {
             seed: ids1[0],
@@ -5785,7 +5772,11 @@ mod tests {
         let eid = engine.link(a[0], b[0], EdgeType::Semantic).unwrap();
         // Reset the reservoir to a clean 0.0 cold-start so the Hebbian step is
         // measured from the documented C_ij = 0 baseline (weight 0.5).
-        engine.graph.storage_mut().set_conductance(eid, 0.0).unwrap();
+        engine
+            .graph
+            .storage_mut()
+            .set_conductance(eid, 0.0)
+            .unwrap();
         (engine, eid)
     }
 
@@ -5801,7 +5792,10 @@ mod tests {
         let c_after = engine.graph().storage().get_conductance(eid).unwrap();
         let w_after = engine.graph().get_edge(eid).unwrap().weight;
         assert!(c_after > c_before, "C must rise: {c_after} !> {c_before}");
-        assert!(w_after > w_before, "weight projection must rise: {w_after} !> {w_before}");
+        assert!(
+            w_after > w_before,
+            "weight projection must rise: {w_after} !> {w_before}"
+        );
         // weight is the logistic projection of C — they must stay consistent.
         assert!((w_after - crate::mechanics::priors::project_weight(c_after)).abs() < 1e-12);
     }
@@ -5885,7 +5879,10 @@ mod tests {
 
         let c_lo = engine_lo.graph().storage().get_conductance(eid_lo).unwrap();
         let c_hi = engine_hi.graph().storage().get_conductance(eid_hi).unwrap();
-        assert!((c_lo - c_hi).abs() < 1e-12, "min-flux must drive both: {c_lo} vs {c_hi}");
+        assert!(
+            (c_lo - c_hi).abs() < 1e-12,
+            "min-flux must drive both: {c_lo} vs {c_hi}"
+        );
     }
 
     #[test]

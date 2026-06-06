@@ -23,7 +23,7 @@
 
 use crate::graph::KnowledgeType;
 use crate::mechanics::priors::{
-    self, decay_multiplier_for_type, project_weight, DECAY_EXPONENT_D, LOG_ODDS_CLAMP,
+    self, DECAY_EXPONENT_D, LOG_ODDS_CLAMP, decay_multiplier_for_type, project_weight,
 };
 
 /// Finite-guard for a reservoir value: clamps to `[-LOG_ODDS_CLAMP, LOG_ODDS_CLAMP]`.
@@ -101,7 +101,7 @@ pub fn rescorla_wagner(retained_action: f64, lambda: f64, eta: f64) -> f64 {
     clamp_reservoir(retained_action + eta * (lambda - retained_action))
 }
 
-/// Map a consumer [`FeedbackSignal`] to a Rescorla-Wagner reward target `lambda`
+/// Map a consumer [`crate::FeedbackSignal`] to a Rescorla-Wagner reward target `lambda`
 /// in log-odds units ([`crate::mechanics::priors::REWARD_LOG_ODDS_SCALE`]).
 ///
 /// CALIBRATED PRIOR mapping — a `Useful` signal of strength `s` sets the target to
@@ -189,7 +189,7 @@ pub fn leak_idle_edge_default(conductance: f64, idle_days: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mechanics::priors::{learning_rate, project_salience, TARGET_COACTIVATION_N};
+    use crate::mechanics::priors::{TARGET_COACTIVATION_N, learning_rate, project_salience};
     use proptest::prelude::*;
 
     fn eta() -> f64 {
@@ -262,13 +262,20 @@ mod tests {
             let next = reinforce_access(a, 1.0, eta());
             let gain = next - a;
             assert!(gain >= 0.0, "gain must be non-negative");
-            assert!(gain <= prev_gain + 1e-12, "gain must diminish monotonically");
+            assert!(
+                gain <= prev_gain + 1e-12,
+                "gain must diminish monotonically"
+            );
             prev_gain = gain;
             a = next;
         }
         assert!(a.is_finite());
         assert!(project_salience(a) < 1.0, "projection must never reach 1");
-        assert!(project_salience(a) > 0.9, "but should climb high: {}", project_salience(a));
+        assert!(
+            project_salience(a) > 0.9,
+            "but should climb high: {}",
+            project_salience(a)
+        );
     }
 
     #[test]
@@ -298,7 +305,10 @@ mod tests {
         let lambda = 4.0;
         let far = rescorla_wagner(0.0, lambda, eta()) - 0.0;
         let near = rescorla_wagner(3.5, lambda, eta()) - 3.5;
-        assert!(far > near, "well-predicted should move less: {far} vs {near}");
+        assert!(
+            far > near,
+            "well-predicted should move less: {far} vs {near}"
+        );
     }
 
     #[test]

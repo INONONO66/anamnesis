@@ -39,9 +39,7 @@ fn link_creates_manual_edge() {
     let IngestResult::Created(ids2) = engine.ingest(make_obs("node-b", None)).unwrap() else {
         panic!("expected Created");
     };
-    let eid = engine
-        .link(ids1[0], ids2[0], EdgeType::Semantic)
-        .unwrap();
+    let eid = engine.link(ids1[0], ids2[0], EdgeType::Semantic).unwrap();
     let edge = engine.graph().get_edge(eid).unwrap();
     assert_eq!(edge.edge_source, EdgeSource::Manual);
 }

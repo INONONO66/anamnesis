@@ -130,7 +130,10 @@ fn apply_feedback_useful_increases_salience() {
         .unwrap();
     let after = engine.graph().storage().get_salience(node_id).unwrap();
 
-    assert!(after > before, "useful feedback should raise salience: {after} !> {before}");
+    assert!(
+        after > before,
+        "useful feedback should raise salience: {after} !> {before}"
+    );
 }
 
 #[test]
@@ -208,7 +211,7 @@ fn apply_feedback_uses_single_eta_rescorla_wagner() {
     // the single core eta derived from N (no per-engine social_learning_rate knob):
     //   A' = A + eta*(lambda - A), salience = project_salience(A').
     use anamnesis::mechanics::interactions::{lambda_reward, rescorla_wagner};
-    use anamnesis::mechanics::priors::{learning_rate, project_salience, TARGET_COACTIVATION_N};
+    use anamnesis::mechanics::priors::{TARGET_COACTIVATION_N, learning_rate, project_salience};
 
     let mut engine = Engine::new();
     let node_id = insert_node(&mut engine, "fact", "agent-1", "s1", &["auth"]);

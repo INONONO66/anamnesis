@@ -178,6 +178,12 @@ fn energy_is_query_local_and_not_stored() {
 
     // Not stored: a read-only search never mutates the authoritative reservoir or
     // its projection — energy lives only on the transient trace.
-    assert_eq!(e.retained_action(a).expect("retained_action"), action_before);
-    assert_eq!(e.graph().get_node(a).expect("node").salience, salience_before);
+    assert_eq!(
+        e.retained_action(a).expect("retained_action"),
+        action_before
+    );
+    assert_eq!(
+        e.graph().get_node(a).expect("node").salience,
+        salience_before
+    );
 }

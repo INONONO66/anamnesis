@@ -59,9 +59,7 @@ fn engine_full_lifecycle() {
     assert_eq!(engine.graph().node_count(), 2);
 
     // 2. Link the nodes
-    let eid = engine
-        .link(ids1[0], ids2[0], EdgeType::Semantic)
-        .unwrap();
+    let eid = engine.link(ids1[0], ids2[0], EdgeType::Semantic).unwrap();
     assert_eq!(engine.graph().edge_count(), 1);
     let edge = engine.graph().get_edge(eid).unwrap();
     // link seeds conductance from the cold-start coupling; weight is its bounded

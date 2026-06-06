@@ -820,14 +820,7 @@ mod tests {
             make_node(0, KnowledgeType::Episodic, "session note", 0.7),
             make_node(1, KnowledgeType::Event, "deployment event", 0.6),
         ];
-        let pkg = assemble_context_package(
-            nodes,
-            &[],
-            &[],
-            10000,
-            4,
-            &ScopePath::universal(),
-        );
+        let pkg = assemble_context_package(nodes, &[], &[], 10000, 4, &ScopePath::universal());
         assert_eq!(pkg.memories.len(), 2);
         assert_eq!(pkg.identity.len(), 0);
         assert_eq!(pkg.knowledge.len(), 0);
@@ -840,14 +833,7 @@ mod tests {
             make_node(1, KnowledgeType::Semantic, &"b".repeat(100), 0.8),
             make_node(2, KnowledgeType::Semantic, &"c".repeat(100), 0.7),
         ];
-        let pkg = assemble_context_package(
-            nodes,
-            &[],
-            &[],
-            10,
-            4,
-            &ScopePath::universal(),
-        );
+        let pkg = assemble_context_package(nodes, &[], &[], 10, 4, &ScopePath::universal());
         assert!(
             pkg.token_usage.used <= 10 + 1,
             "used {} tokens, budget was 10",
@@ -861,14 +847,7 @@ mod tests {
         node.summary = Some("summary".to_string());
         node.content = "c".to_string();
 
-        let pkg = assemble_context_package(
-            vec![node],
-            &[],
-            &[],
-            2,
-            1,
-            &ScopePath::universal(),
-        );
+        let pkg = assemble_context_package(vec![node], &[], &[], 2, 1, &ScopePath::universal());
 
         assert_eq!(pkg.memories.len(), 1);
         assert_eq!(pkg.memories[0].summary, None);
@@ -883,14 +862,7 @@ mod tests {
         node.summary = None;
         node.content = "cc".to_string();
 
-        let pkg = assemble_context_package(
-            vec![node],
-            &[],
-            &[],
-            3,
-            1,
-            &ScopePath::universal(),
-        );
+        let pkg = assemble_context_package(vec![node], &[], &[], 3, 1, &ScopePath::universal());
 
         assert_eq!(pkg.memories.len(), 1);
         assert_eq!(pkg.memories[0].summary, None);
@@ -903,14 +875,8 @@ mod tests {
     fn tensions_populated_for_activated_contradictions() {
         // Pairs are surfaced with their precomputed stress and gates.
         let contradicts = vec![pair(0, 1, 0.48)];
-        let pkg = assemble_context_package(
-            vec![],
-            &[],
-            &contradicts,
-            10000,
-            4,
-            &ScopePath::universal(),
-        );
+        let pkg =
+            assemble_context_package(vec![], &[], &contradicts, 10000, 4, &ScopePath::universal());
         assert_eq!(pkg.tensions.len(), 1);
         assert_eq!(pkg.tensions[0].node_a, NodeId(0));
         assert_eq!(pkg.tensions[0].node_b, NodeId(1));
@@ -927,14 +893,8 @@ mod tests {
             make_node(1, KnowledgeType::Semantic, "claim B", 0.85),
         ];
         let contradicts = vec![pair(0, 1, 0.5)];
-        let pkg = assemble_context_package(
-            nodes,
-            &[],
-            &contradicts,
-            10000,
-            4,
-            &ScopePath::universal(),
-        );
+        let pkg =
+            assemble_context_package(nodes, &[], &contradicts, 10000, 4, &ScopePath::universal());
         assert_eq!(pkg.knowledge.len(), 2, "both contradicting claims survive");
         assert_eq!(pkg.tensions.len(), 1);
         assert!(pkg.tensions[0].stress > 0.0);
@@ -942,14 +902,7 @@ mod tests {
 
     #[test]
     fn agent_tension_zero_without_contradictions() {
-        let pkg = assemble_context_package(
-            vec![],
-            &[],
-            &[],
-            10000,
-            4,
-            &ScopePath::universal(),
-        );
+        let pkg = assemble_context_package(vec![], &[], &[], 10000, 4, &ScopePath::universal());
         assert_eq!(pkg.agent_tension, 0.0);
     }
 
@@ -988,14 +941,7 @@ mod tests {
             make_node(1, KnowledgeType::Semantic, "high relevance", 0.9),
             make_node(2, KnowledgeType::Semantic, "medium relevance", 0.6),
         ];
-        let pkg = assemble_context_package(
-            nodes,
-            &[],
-            &[],
-            10000,
-            4,
-            &ScopePath::universal(),
-        );
+        let pkg = assemble_context_package(nodes, &[], &[], 10000, 4, &ScopePath::universal());
         assert_eq!(pkg.knowledge.len(), 3);
         assert!(pkg.knowledge[0].relevance >= pkg.knowledge[1].relevance);
         assert!(pkg.knowledge[1].relevance >= pkg.knowledge[2].relevance);

@@ -586,16 +586,8 @@ fn seed_research_llm(b: &mut FixtureBuilder) {
 
 fn wire_edges(b: &mut FixtureBuilder) {
     // dev/rust edges
-    b.link(
-        "rust.result.type",
-        "rust.result.unwrap",
-        EdgeType::Reason,
-    );
-    b.link(
-        "rust.result.type",
-        "rust.result.question",
-        EdgeType::Causal,
-    );
+    b.link("rust.result.type", "rust.result.unwrap", EdgeType::Reason);
+    b.link("rust.result.type", "rust.result.question", EdgeType::Causal);
     b.link(
         "rust.tokio.runtime",
         "rust.tokio.async_std",
@@ -618,11 +610,7 @@ fn wire_edges(b: &mut FixtureBuilder) {
     );
 
     // travel/japan edges
-    b.link(
-        "japan.city.tokyo",
-        "japan.city.kyoto",
-        EdgeType::Semantic,
-    );
+    b.link("japan.city.tokyo", "japan.city.kyoto", EdgeType::Semantic);
     b.link(
         "japan.transport.shinkansen",
         "japan.transport.jrpass.tourist",
@@ -656,9 +644,5 @@ fn wire_edges(b: &mut FixtureBuilder) {
         EdgeType::Supersedes,
     );
     b.link("llm.align.rlhf", "llm.align.dpo", EdgeType::Reason);
-    b.link(
-        "llm.open.llama2",
-        "llm.open.llama3",
-        EdgeType::Supersedes,
-    );
+    b.link("llm.open.llama2", "llm.open.llama3", EdgeType::Supersedes);
 }
