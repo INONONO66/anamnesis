@@ -202,6 +202,29 @@ fn support_report_contradicts_edges() {
 }
 
 #[test]
+fn support_report_counts_refutes_as_contradicting() {
+    // `Refutes` is the debug-lifecycle counter-evidence edge that
+    // `log_evidence(EvidenceResult::Contradicts)` creates (Evidence -> Hypothesis).
+    // It must be counted as contradicting evidence, in both edge directions.
+    let mut engine = Engine::new();
+
+    let target = insert_node(&mut engine, "target", "agent-1", "session-1");
+    // Outgoing Refutes (target -> refuted_out).
+    let refuted_out = insert_node(&mut engine, "refuted-out", "agent-2", "session-2");
+    // Incoming Refutes (refuter_in -> target): the direction log_evidence produces.
+    let refuter_in = insert_node(&mut engine, "refuter-in", "agent-3", "session-3");
+
+    engine.link(target, refuted_out, EdgeType::Refutes).unwrap();
+    engine.link(refuter_in, target, EdgeType::Refutes).unwrap();
+
+    let report = engine.support_report(target).unwrap();
+    assert_eq!(report.supporting_sources, 0);
+    assert_eq!(report.contradicting_sources, 2); // counted in both directions
+    assert_eq!(report.independent_origins, 2); // (agent-2, session-2), (agent-3, session-3)
+    assert_eq!(report.total_support_salience, 0.0); // No supporting sources
+}
+
+#[test]
 fn support_report_mixed_edges() {
     let mut engine = Engine::new();
 

@@ -665,7 +665,7 @@ pub enum GraphEvent {
 pub struct SupportReport {
     /// Number of nodes connected via supporting edges (ConsolidatedFrom, ReinforcedBy, Supports).
     pub supporting_sources: usize,
-    /// Number of nodes connected via contradicting edges (Contradicts).
+    /// Number of nodes connected via contradicting edges (Contradicts, Refutes).
     pub contradicting_sources: usize,
     /// Number of distinct (peer_id, session_id) pairs among all source nodes.
     /// Same-peer repetitions in different sessions count as independent.
@@ -4702,7 +4702,8 @@ impl<S: StorageAdapter + Clone> Engine<S> {
     /// and contradicting sources, measure evidence independence, and sum support salience.
     ///
     /// Supporting edges: `ConsolidatedFrom`, `ReinforcedBy`, `Supports`.
-    /// Contradicting edges: `Contradicts`.
+    /// Contradicting edges: `Contradicts`, `Refutes` (the debug-lifecycle
+    /// counter-evidence edge created by `log_evidence`).
     ///
     /// Returns an error if the node does not exist.
     pub fn support_report(&self, node_id: NodeId) -> Result<SupportReport, Error> {
@@ -4736,7 +4737,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                         target_node.origin.session_id.clone(),
                     ));
                 }
-                EdgeType::Contradicts => {
+                EdgeType::Contradicts | EdgeType::Refutes => {
                     contradicting_sources += 1;
                     let target_node = storage.get_node(target_id)?;
                     origins.insert((
@@ -4769,7 +4770,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                         source_node.origin.session_id.clone(),
                     ));
                 }
-                EdgeType::Contradicts => {
+                EdgeType::Contradicts | EdgeType::Refutes => {
                     contradicting_sources += 1;
                     let source_node = storage.get_node(source_id)?;
                     origins.insert((
