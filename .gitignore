@@ -8,3 +8,4 @@ longmemeval*.json
 benches/eval/data/
 benches/eval/results/
 docs/superpowers/
+target/fidelity/
