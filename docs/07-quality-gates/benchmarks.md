@@ -79,6 +79,7 @@ Fast retrieval is not enough. Benchmarks also store:
 
 ## Related Documents
 
+- Cognitive-fidelity results (forgetting, spacing, fan charts) are in [fidelity-results.md](fidelity-results.md).
 - Observability reports are defined in [observability.md](observability.md).
 - Query flow is defined in [pipeline.md](../05-context-retrieval/pipeline.md).
 - Storage cost is defined in [storage.md](../03-persistence/storage.md).

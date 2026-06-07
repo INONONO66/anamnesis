@@ -93,6 +93,11 @@ name = "fidelity_report"
 path = "benches/fidelity_report.rs"
 harness = false
 
+[[bench]]
+name = "fidelity_showcase"
+path = "benches/fidelity_showcase.rs"
+harness = false
+
 [[test]]
 name = "eval_golden"
 path = "benches/eval/golden.rs"
