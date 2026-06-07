@@ -29,8 +29,13 @@ fn interference_surfaces_frustration() {
 }
 
 #[test]
-fn testing_effect_beats_restudy() {
-    assert_paradigm(fidelity_common::paradigms::testing_effect::TestingEffect);
+fn commitment_committed_beats_read_only() {
+    assert_paradigm(fidelity_common::paradigms::commitment::Commitment);
+}
+
+#[test]
+fn spacing_effect_beats_massed() {
+    assert_paradigm(fidelity_common::paradigms::spacing::Spacing);
 }
 
 #[test]

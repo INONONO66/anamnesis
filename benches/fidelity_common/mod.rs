@@ -37,6 +37,7 @@ pub fn all() -> Vec<Box<dyn Paradigm>> {
         Box::new(paradigms::fan::FanEffect),
         Box::new(paradigms::priming::Priming),
         Box::new(paradigms::interference::Interference),
-        Box::new(paradigms::testing_effect::TestingEffect),
+        Box::new(paradigms::commitment::Commitment),
+        Box::new(paradigms::spacing::Spacing),
     ]
 }

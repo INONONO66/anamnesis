@@ -114,13 +114,13 @@ pub struct LogFit {
     pub pred_linear: Vec<f64>,
 }
 
-/// Fit a decaying reservoir against the **ACT-R shifted-log power-law** form
-/// (linear in `ln(1+t)` — the engine's `decay(A,Δt) = A - d·ln(1+Δt)`, the
-/// signature of power-law forgetting) versus a linear-in-time form
-/// (`A = c - b*t`, the shape an exponential/linear decay would take). Power-law
-/// dissipation should fit the shifted-log form far better. Requires `xs >= 0`.
+/// Fit a decaying reservoir against the **ACT-R base-level** form (linear in
+/// `ln(t)` — the multi-trace base-level `B_i = ln(Σ_j (now−t_j)^−d)`, which for a
+/// single trace is `−d·ln(Δt)`, the signature of power-law forgetting) versus a
+/// linear-in-time form (`A = c − b*t`, the shape an exponential/linear decay would
+/// take). Power-law dissipation should fit the log form far better. Requires `xs > 0`.
 pub fn fit_log_vs_linear(xs: &[f64], ys: &[f64]) -> LogFit {
-    let lx: Vec<f64> = xs.iter().map(|x| (1.0 + x).ln()).collect();
+    let lx: Vec<f64> = xs.iter().map(|x| x.ln()).collect();
     let (m_log, c_log) = linreg(&lx, ys);
     let pred_log: Vec<f64> = lx.iter().map(|l| m_log * l + c_log).collect();
 
@@ -183,9 +183,9 @@ mod tests {
 
     #[test]
     fn log_linear_prefers_log_on_actr_data() {
-        // A = 5 - 0.5*ln(1+t): the engine's shifted-log power-law decay shape.
+        // A = 5 - 0.5*ln(t): the ACT-R base-level shape (single-trace B_i = -d*ln(Δt)).
         let t: [f64; 6] = [0.02, 0.1, 1.0, 2.0, 6.0, 31.0];
-        let y: Vec<f64> = t.iter().map(|t| 5.0 - 0.5 * (1.0 + t).ln()).collect();
+        let y: Vec<f64> = t.iter().map(|t| 5.0 - 0.5 * t.ln()).collect();
         let f = fit_log_vs_linear(&t, &y);
         assert!(f.r2_log > 0.999, "r2_log {}", f.r2_log);
         assert!(

@@ -46,5 +46,5 @@ def plot(name, logx=False):
 
 if __name__ == "__main__":
     plot("forgetting", logx=True)
-    for n in ("fan_effect", "priming", "interference", "testing_effect"):
+    for n in ("fan_effect", "priming", "interference", "commitment", "spacing"):
         plot(n)

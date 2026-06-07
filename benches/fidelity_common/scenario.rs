@@ -54,6 +54,24 @@ pub fn ingest(engine: &mut Engine, name: &str, node_type: KnowledgeType) -> Node
     ids[0]
 }
 
+/// Ingest one node BORN at `when`: its creation trace is stamped at `when` (the
+/// engine seeds the creation trace from `observation.timestamp`). Used by the
+/// spacing paradigm so the first study event IS the creation trace (Pavlik-Anderson
+/// framing), with no synthetic day-0 trace ahead of it.
+pub fn ingest_at(
+    engine: &mut Engine,
+    name: &str,
+    node_type: KnowledgeType,
+    when: Timestamp,
+) -> NodeId {
+    let mut obs = observation(name, node_type);
+    obs.timestamp = when;
+    let IngestResult::Created(ids) = engine.ingest(obs).unwrap() else {
+        panic!("expected Created for {name}");
+    };
+    ids[0]
+}
+
 /// Settled query-local activation a_i for `target` when RWR is seeded at `seed`.
 pub fn activation_from(engine: &Engine, seed: NodeId, target: NodeId) -> f64 {
     let resp = additive_rwr(

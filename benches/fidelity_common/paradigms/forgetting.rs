@@ -40,7 +40,19 @@ impl Paradigm for Forgetting {
         }
 
         let fit = metrics::fit_log_vs_linear(&delays_days, &retention);
-        let passed = fit.r2_log >= 0.98 && fit.r2_log > fit.r2_linear && fit.slope_log < 0.0;
+        // The slope must match the CALIBRATED decay, not be an arbitrary negative
+        // number: a single-trace node decays at d_j = m_type·α, so retained_action
+        // falls along slope −m_type·α in ln(t). Tie the assertion to the real
+        // constants (Episodic m_type · DECAY_INTERCEPT) within ±5%.
+        let expected_slope =
+            -anamnesis::mechanics::priors::decay_multiplier_for_type(&KnowledgeType::Episodic)
+                * anamnesis::mechanics::priors::DECAY_INTERCEPT;
+        let slope_matches =
+            (fit.slope_log - expected_slope).abs() <= 0.05 * expected_slope.abs() + 0.01;
+        let passed = fit.r2_log >= 0.98
+            && fit.r2_log > fit.r2_linear
+            && fit.slope_log < 0.0
+            && slope_matches;
 
         ParadigmResult {
             name: "forgetting",
@@ -63,14 +75,16 @@ impl Paradigm for Forgetting {
             ],
             metrics: serde_json::json!({
                 "r2_log": fit.r2_log, "r2_linear": fit.r2_linear, "slope_log": fit.slope_log,
+                "expected_slope": expected_slope, "slope_matches_calibrated_decay": slope_matches,
             }),
             passed,
             explanation: format!(
-                "retained_action {} ACT-R log-linear in time (r2_log={:.4} vs r2_linear={:.4}, slope={:.4}) — power-law base-level dissipation, not exponential",
+                "retained_action {} ACT-R log-linear in time (r2_log={:.4} vs r2_linear={:.4}, slope={:.4} vs calibrated −m_type·α={:.4}) — power-law base-level dissipation, not exponential, at the calibrated decay rate",
                 if passed { "is" } else { "is NOT" },
                 fit.r2_log,
                 fit.r2_linear,
-                fit.slope_log
+                fit.slope_log,
+                expected_slope
             ),
         }
     }
