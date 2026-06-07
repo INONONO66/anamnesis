@@ -341,16 +341,16 @@ Commit ── write-back for used memories ──►
           + Oja-bounded Hebbian edge strengthening
           (touch()/touch_batch() append a trace directly; tick() advances time)
 
-         ┌────────────────────────────────────┐
-         │  tick(now) — periodic               │
-         │  recompute salience from B_i(now)   │
-         │  + edge leakage; flush storage      │
-         └────────────────────────────────────┘
+         ┌────────────────────────────────────────┐
+         │  tick(now) — periodic                  │
+         │  recompute salience from B_i(now)      │
+         │  + edge leakage; flush storage         │
+         └────────────────────────────────────────┘
 
-         ┌────────────────────────────────────┐
-         │  crystallize() / reflect_batch()    │
-         │  synthesis + cross-agent Entity links│
-         └────────────────────────────────────┘
+         ┌────────────────────────────────────────┐
+         │  crystallize() / reflect_batch()       │
+         │  synthesis + cross-agent Entity links  │
+         └────────────────────────────────────────┘
 ```
 
 </details>
