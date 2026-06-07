@@ -64,7 +64,7 @@ fn ingest_seeds_creation_trace() {
         "ingest must seed exactly the creation trace"
     );
     assert_eq!(
-        *node.access_history.front().unwrap(),
+        node.access_history.front().unwrap().at,
         Timestamp(0),
         "creation trace must be stamped at created_at"
     );
@@ -97,7 +97,7 @@ fn touch_appends_trace_and_updates_accessed_at() {
         "touch must append an access trace (raising B_i)"
     );
     assert_eq!(
-        *node.access_history.back().unwrap(),
+        node.access_history.back().unwrap().at,
         t_touch,
         "appended trace must be stamped at now"
     );

@@ -8,9 +8,11 @@
 use anamnesis::mechanics::priors;
 
 #[test]
-fn decay_exponent_d_is_actr_default() {
-    // ACT-R canonical power-law base-level decay exponent (ADR-0008).
-    assert_eq!(priors::DECAY_EXPONENT_D, 0.5);
+fn per_trace_decay_constants_are_locked() {
+    // Activation-dependent per-trace decay d_j = m_type·(c·e^{m} + α)
+    // (Pavlik & Anderson 2005, ADR-0008): the locked floor α and scale c.
+    assert_eq!(priors::DECAY_INTERCEPT, 0.40);
+    assert_eq!(priors::DECAY_SCALE, 2.0);
 }
 
 #[test]

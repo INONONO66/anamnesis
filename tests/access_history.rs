@@ -1,8 +1,16 @@
 use anamnesis::api::Observation;
 use anamnesis::graph::node::Origin;
-use anamnesis::graph::{KnowledgeType, MemoryTier, NodeId, Timestamp};
+use anamnesis::graph::{AccessTrace, KnowledgeType, MemoryTier, NodeId, Timestamp};
 use anamnesis::{Engine, EngineConfig, IngestResult, Node};
 use std::collections::{HashMap, VecDeque};
+
+/// A test access trace at `at` with an arbitrary (non-load-bearing) decay.
+fn trace(at: u64) -> AccessTrace {
+    AccessTrace {
+        at: Timestamp(at),
+        decay: 0.16,
+    }
+}
 
 fn make_test_node() -> Node {
     Node {
@@ -77,7 +85,7 @@ fn ingest_seeds_creation_trace() {
     };
     let node = engine.graph().get_node(ids[0]).unwrap();
     assert_eq!(node.access_history.len(), 1, "creation trace seeded");
-    assert_eq!(*node.access_history.front().unwrap(), Timestamp(4242));
+    assert_eq!(node.access_history.front().unwrap().at, Timestamp(4242));
     assert!(node.retained_action.is_finite());
 }
 
@@ -85,22 +93,22 @@ fn ingest_seeds_creation_trace() {
 fn access_history_caps_at_32() {
     let mut node = make_test_node();
     for i in 0..35u64 {
-        node.record_access(Timestamp(i));
+        node.record_access(trace(i));
     }
     assert_eq!(node.access_history.len(), 32);
     assert!(
-        node.access_history.front().unwrap().0 >= 3,
+        node.access_history.front().unwrap().at.0 >= 3,
         "oldest entry should be at index 3 or later, got {}",
-        node.access_history.front().unwrap().0
+        node.access_history.front().unwrap().at.0
     );
 }
 
 #[test]
 fn access_history_preserves_order() {
     let mut node = make_test_node();
-    node.record_access(Timestamp(10));
-    node.record_access(Timestamp(20));
-    node.record_access(Timestamp(30));
-    assert_eq!(node.access_history.front().unwrap().0, 10);
-    assert_eq!(node.access_history.back().unwrap().0, 30);
+    node.record_access(trace(10));
+    node.record_access(trace(20));
+    node.record_access(trace(30));
+    assert_eq!(node.access_history.front().unwrap().at.0, 10);
+    assert_eq!(node.access_history.back().unwrap().at.0, 30);
 }

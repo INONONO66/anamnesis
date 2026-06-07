@@ -1,11 +1,19 @@
-use anamnesis::graph::Timestamp;
+use anamnesis::graph::{AccessTrace, Timestamp};
 use anamnesis::mechanics::forgetting::{base_level_to_salience, compute_base_level};
 use std::collections::VecDeque;
 
+/// A single access trace at `at` carrying per-trace decay `d`.
+fn trace(at: u64, d: f64) -> AccessTrace {
+    AccessTrace {
+        at: Timestamp(at),
+        decay: d,
+    }
+}
+
 #[test]
 fn empty_history_returns_neg_infinity() {
-    let h: VecDeque<Timestamp> = VecDeque::new();
-    let result = compute_base_level(&h, Timestamp(1000), 0.5);
+    let h: VecDeque<AccessTrace> = VecDeque::new();
+    let result = compute_base_level(&h, Timestamp(1000));
     assert!(
         result.is_infinite() && result < 0.0,
         "empty history should return NEG_INFINITY, got {result}"
@@ -15,13 +23,13 @@ fn empty_history_returns_neg_infinity() {
 #[test]
 fn single_access_act_r_formula_exact() {
     let mut h = VecDeque::new();
-    h.push_back(Timestamp(0));
+    h.push_back(trace(0, 0.5));
     // 1 week = 7 * 24 * 3600 * 1000 ms
     let now = Timestamp(7 * 24 * 3600 * 1000);
     let dt = now.0 as f64;
     // ACT-R exact: B = ln(dt^-0.5)
     let expected = (dt.powf(-0.5)).ln();
-    let actual = compute_base_level(&h, now, 0.5);
+    let actual = compute_base_level(&h, now);
     assert!(
         (actual - expected).abs() < 1e-9,
         "B = {actual} vs expected {expected}"
@@ -30,13 +38,15 @@ fn single_access_act_r_formula_exact() {
 
 #[test]
 fn multiple_accesses_sum_correctly() {
+    // Each trace carries its own per-trace decay; here both use d = 0.5 so the
+    // closed form B = ln(Σ dt^-0.5) is exact.
     let mut h = VecDeque::new();
-    h.push_back(Timestamp(0));
-    h.push_back(Timestamp(1000));
+    h.push_back(trace(0, 0.5));
+    h.push_back(trace(1000, 0.5));
     let now = Timestamp(2000);
     // dt1 = 2000, dt2 = 1000
     let expected = (2000_f64.powf(-0.5) + 1000_f64.powf(-0.5)).ln();
-    let actual = compute_base_level(&h, now, 0.5);
+    let actual = compute_base_level(&h, now);
     assert!(
         (actual - expected).abs() < 1e-9,
         "B = {actual} vs expected {expected}"

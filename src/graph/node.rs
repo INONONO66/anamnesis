@@ -1,7 +1,7 @@
 //! Node and Origin types for the Anamnesis graph.
 
 use crate::graph::scope::ScopePath;
-use crate::graph::types::{KnowledgeType, MemoryTier, NodeId, PeerId, Timestamp};
+use crate::graph::types::{AccessTrace, KnowledgeType, MemoryTier, NodeId, PeerId, Timestamp};
 use crate::peer::SourceKind;
 use std::collections::{HashMap, VecDeque};
 
@@ -95,9 +95,10 @@ pub struct Node {
     /// Number of times this node has been accessed via touch().
     pub access_count: u32,
     /// Bounded 32-trace access-history window (a creation trace plus each committed
-    /// access). It is the load-bearing input to the base level
-    /// `B_i = ln(Σ_j (now − t_j)^(−d·m_type))`; oldest traces drop when full.
-    pub access_history: VecDeque<Timestamp>,
+    /// access). Each [`AccessTrace`] carries its own activation-dependent decay
+    /// `d_j` (Pavlik & Anderson 2005), so it is the load-bearing input to the base
+    /// level `B_i = ln(Σ_j (now − at_j)^(−d_j))`; oldest traces drop when full.
+    pub access_history: VecDeque<AccessTrace>,
     /// Explicit memory tier override for salience-based tiering.
     pub tier: MemoryTier,
 
@@ -113,9 +114,13 @@ pub struct Node {
 }
 
 impl Node {
-    /// Record an access timestamp. Maintains a ring buffer capped at 32 entries.
-    pub fn record_access(&mut self, ts: Timestamp) {
-        self.access_history.push_back(ts);
+    /// Record an access trace. Maintains a ring buffer capped at 32 entries.
+    ///
+    /// The trace carries its own pre-computed per-trace decay `d_j`; the caller is
+    /// responsible for computing it from the existing history at the access moment
+    /// ([`crate::mechanics::forgetting::compute_trace_decay`]) before pushing.
+    pub fn record_access(&mut self, trace: AccessTrace) {
+        self.access_history.push_back(trace);
         if self.access_history.len() > 32 {
             self.access_history.pop_front();
         }

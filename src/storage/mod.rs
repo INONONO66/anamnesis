@@ -9,7 +9,9 @@ pub mod sqlite;
 pub use sqlite::SqliteStorage;
 
 use crate::error::Error;
-use crate::graph::{Edge, EdgeId, KnowledgeType, Node, NodeId, PeerId, ScopePath, Timestamp};
+use crate::graph::{
+    AccessTrace, Edge, EdgeId, KnowledgeType, Node, NodeId, PeerId, ScopePath, Timestamp,
+};
 use std::collections::VecDeque;
 
 /// Storage backend interface for the Anamnesis graph engine.
@@ -21,10 +23,12 @@ use std::collections::VecDeque;
 /// # Node strength substrate
 ///
 /// Persistent node strength is `A_i = B_i + P_i` (ADR-0008). The base level `B_i`
-/// is the multi-trace ACT-R activation `ln(Σ_j (now − t_j)^(−d·m_type))` over the
-/// node's bounded 32-trace `access_history`; it is computed on demand and is NOT a
-/// stored field, so the trait exposes no `B_i` setter. The persistent substrate is
-/// the access-history window (a committed access appends a now-stamped trace via
+/// is the multi-trace ACT-R activation `ln(Σ_j (now − at_j)^(−d_j))` over the
+/// node's bounded 32-trace `access_history`, where each trace carries its own
+/// activation-dependent decay `d_j` (Pavlik & Anderson 2005); it is computed on
+/// demand and is NOT a stored field, so the trait exposes no `B_i` setter. The
+/// persistent substrate is the access-history window (a committed access appends a
+/// now-stamped [`AccessTrace`] via
 /// [`append_access_trace`](StorageAdapter::append_access_trace)) plus the
 /// decay-EXEMPT evidence prior `P_i`
 /// ([`get_evidence_prior`](StorageAdapter::get_evidence_prior) /
@@ -112,17 +116,22 @@ pub trait StorageAdapter: Send + Sync {
 
     // ── Base-level substrate: access-trace history (B_i) ──────────────────────
     //
-    // B_i = ln(Σ_j (now − t_j)^(−d·m_type)) is computed on demand from these traces
+    // B_i = ln(Σ_j (now − at_j)^(−d_j)) is computed on demand from these traces
     // ([`crate::mechanics::forgetting::compute_base_level`]); it is not a stored
-    // scalar. A committed access appends a now-stamped trace (evicting the oldest
-    // beyond the bounded 32-trace window), raising B_i.
+    // scalar. Each [`AccessTrace`] carries its own activation-dependent decay `d_j`
+    // (Pavlik & Anderson 2005). A committed access appends a now-stamped trace whose
+    // `d_j` was computed from the existing history
+    // ([`crate::mechanics::forgetting::compute_trace_decay`]), evicting the oldest
+    // beyond the bounded 32-trace window, raising B_i.
 
     /// Get the node's bounded access-trace history (the substrate of `B_i`).
-    fn get_access_history(&self, id: NodeId) -> Result<&VecDeque<Timestamp>, Error>;
+    fn get_access_history(&self, id: NodeId) -> Result<&VecDeque<AccessTrace>, Error>;
 
-    /// Append a now-stamped access trace, maintaining the bounded 32-trace window,
-    /// and durably persist it. Called only from commit/touch (a committed access).
-    fn append_access_trace(&mut self, id: NodeId, ts: Timestamp) -> Result<(), Error>;
+    /// Append an access trace, maintaining the bounded 32-trace window, and durably
+    /// persist it. Called only from commit/touch (a committed access). The trace's
+    /// `decay` must already be computed from the pre-append history
+    /// ([`crate::mechanics::forgetting::compute_trace_decay`]).
+    fn append_access_trace(&mut self, id: NodeId, trace: AccessTrace) -> Result<(), Error>;
 
     // ── Persistent reservoirs (decay-exempt evidence prior P_i, conductance) ──
     //

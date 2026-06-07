@@ -31,6 +31,27 @@ impl Timestamp {
     }
 }
 
+/// A single access trace in a node's bounded access-history window.
+///
+/// Each trace records both *when* it was laid down (`at`) and the per-trace decay
+/// rate `d_j` (`decay`) computed once at that moment from the activation of the
+/// EXISTING traces (Pavlik & Anderson 2005 activation-dependent decay,
+/// dissipation.md). The base level sums each trace with its OWN decay,
+/// `B_i = ln(Σ_j (now − at_j)^(−decay_j))`, so a trace laid down on a strongly
+/// active node decays faster than one laid down on a cold node.
+///
+/// Derives mirror [`super::node::Node`] (`Debug, Clone, PartialEq`) plus `Copy`
+/// since both fields are scalar; it deliberately does NOT derive `Eq`/`Hash`/`Ord`
+/// because `decay` is an `f64`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AccessTrace {
+    /// When this access trace was laid down (the event timestamp).
+    pub at: Timestamp,
+    /// The per-trace decay rate `d_j`, computed once at creation from the
+    /// activation of the existing traces and then stored immutably with the trace.
+    pub decay: f64,
+}
+
 /// Knowledge type taxonomy. `node_type` is a *policy* input to the dissipation and
 /// coupling priors, not an independent dynamics knob:
 /// - decay: it selects the per-type multiplier on the single free decay prior `d`

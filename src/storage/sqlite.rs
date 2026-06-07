@@ -4,7 +4,8 @@ use crate::error::Error;
 use crate::graph::node::Origin;
 use crate::graph::types::PeerId;
 use crate::graph::{
-    Edge, EdgeId, EdgeType, KnowledgeType, MemoryTier, Node, NodeId, ScopePath, Timestamp,
+    AccessTrace, Edge, EdgeId, EdgeType, KnowledgeType, MemoryTier, Node, NodeId, ScopePath,
+    Timestamp,
 };
 use crate::peer::SourceKind;
 use crate::storage::StorageAdapter;
@@ -299,7 +300,7 @@ impl Clone for SqliteStorage {
                             node.created_at.0,
                             node.updated_at.0,
                             node.access_count,
-                            encode_timestamp_deque(&node.access_history),
+                            encode_access_history(&node.access_history),
                             encode_memory_tier(&node.tier),
                             encode_map(&node.metadata),
                             node.evidence_prior,
@@ -697,7 +698,7 @@ impl StorageAdapter for SqliteStorage {
         Ok(())
     }
 
-    fn get_access_history(&self, id: NodeId) -> Result<&VecDeque<Timestamp>, Error> {
+    fn get_access_history(&self, id: NodeId) -> Result<&VecDeque<AccessTrace>, Error> {
         let idx = id.0 as usize;
         self.nodes
             .get(idx)
@@ -706,15 +707,16 @@ impl StorageAdapter for SqliteStorage {
             .ok_or(Error::NodeNotFound(id))
     }
 
-    fn append_access_trace(&mut self, id: NodeId, ts: Timestamp) -> Result<(), Error> {
+    fn append_access_trace(&mut self, id: NodeId, trace: AccessTrace) -> Result<(), Error> {
         let idx = id.0 as usize;
         if idx >= self.nodes.len() || self.nodes[idx].is_none() {
             return Err(Error::NodeNotFound(id));
         }
-        // Append the now-stamped trace to the bounded 32-trace window in memory.
+        // Append the trace (with its pre-computed per-trace decay) to the bounded
+        // 32-trace window in memory.
         let encoded = if let Some(node) = self.nodes[idx].as_mut() {
-            node.record_access(ts);
-            encode_timestamp_deque(&node.access_history)
+            node.record_access(trace);
+            encode_access_history(&node.access_history)
         } else {
             return Err(Error::NodeNotFound(id));
         };
@@ -1444,6 +1446,77 @@ mod tests {
 
         let _ = std::fs::remove_file(path);
     }
+
+    #[test]
+    fn access_history_encode_decode_round_trip_is_lossless() {
+        // The per-trace decay `d_j` is an f64; `to_bits`/`from_bits` must round-trip
+        // it EXACTLY (bit-for-bit), including awkward values, so a re-opened DB
+        // reproduces the activation-dependent decays without drift.
+        let mut history: VecDeque<AccessTrace> = VecDeque::new();
+        history.push_back(AccessTrace {
+            at: Timestamp(1_000),
+            decay: 0.16, // m_type·α for Semantic
+        });
+        history.push_back(AccessTrace {
+            at: Timestamp(86_401_000),
+            decay: 0.234_567_890_123_456_7,
+        });
+        history.push_back(AccessTrace {
+            at: Timestamp(u64::MAX),
+            decay: 0.0, // Core: permanent
+        });
+
+        let encoded = encode_access_history(&history);
+        // Format sanity: ";"-separated "ts,decaybits" entries.
+        assert_eq!(encoded.split(';').count(), 3);
+        let decoded = decode_access_history(&encoded).expect("decode round-trips");
+        assert_eq!(decoded.len(), history.len());
+        for (orig, got) in history.iter().zip(decoded.iter()) {
+            assert_eq!(orig.at, got.at, "timestamp must round-trip");
+            assert_eq!(
+                orig.decay.to_bits(),
+                got.decay.to_bits(),
+                "per-trace decay must round-trip bit-for-bit"
+            );
+        }
+
+        // Empty deque ↔ empty string.
+        let empty: VecDeque<AccessTrace> = VecDeque::new();
+        assert_eq!(encode_access_history(&empty), "");
+        assert!(decode_access_history("").expect("empty decodes").is_empty());
+    }
+
+    #[test]
+    fn append_access_trace_persists_per_trace_decay() {
+        // A committed access appends a trace whose decay is durably persisted and
+        // recovered on re-open.
+        let path = temp_db_path("append-trace");
+        let id = {
+            let mut storage = SqliteStorage::open(&path).expect("sqlite storage opens");
+            let id = storage.next_node_id();
+            storage.set_node(make_node(id, 0.5)).expect("node stored");
+            storage
+                .append_access_trace(
+                    id,
+                    AccessTrace {
+                        at: Timestamp(5_000),
+                        decay: 0.16,
+                    },
+                )
+                .expect("trace appended");
+            storage.flush().expect("flush");
+            id
+        };
+
+        let reopened = SqliteStorage::open(&path).expect("sqlite storage reopens");
+        let hist = reopened.get_access_history(id).expect("history exists");
+        assert_eq!(hist.len(), 1);
+        let trace = hist.front().expect("one trace");
+        assert_eq!(trace.at, Timestamp(5_000));
+        assert_eq!(trace.decay.to_bits(), 0.16_f64.to_bits());
+
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 /// Current on-disk schema version. The fresh-DB `create_schema` path and the
@@ -1469,6 +1542,18 @@ const SCHEMA_VERSION: u32 = 5;
 ///   double-count access history (that scalar already absorbed it). The obsolete
 ///   `decay_checkpoint` / `retained_action` tables are retained for snapshot
 ///   back-compat but are no longer load-bearing for memory strength.
+///
+///   The `access_history` TEXT column now stores semicolon-separated `ts,decaybits`
+///   pairs (the per-trace activation-dependent decay `d_j`, Pavlik & Anderson 2005;
+///   see [`encode_access_history`]) rather than the comma-separated timestamps that
+///   the unreleased intermediate revision of this same column used. No version bump
+///   is taken for this format change: the timestamp-only ACT-R `access_history`
+///   format never reached a released schema (`main` is at v2 with the legacy
+///   exponential-salience model; v3–v5 and the base-level substrate live only on this
+///   unmerged branch), and the only `access_history` rows a forward migration
+///   encounters (the v1→v5 chain) are the empty legacy strings, which decode
+///   identically under both formats. A round-trip encode/decode test guards the
+///   `to_bits`/`from_bits` losslessness.
 fn migrate_schema(conn: &Connection) -> Result<(), Error> {
     // Ensure schema_version table exists
     conn.execute_batch("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);")
@@ -1912,7 +1997,7 @@ fn insert_node_row(
                 node.created_at.0,
                 node.updated_at.0,
                 node.access_count,
-                encode_timestamp_deque(&node.access_history),
+                encode_access_history(&node.access_history),
                 encode_memory_tier(&node.tier),
                 encode_map(&node.metadata),
                 node.evidence_prior,
@@ -2079,7 +2164,7 @@ fn load_nodes(conn: &Connection) -> Result<Vec<LoadedNode>, Error> {
                 created_at: Timestamp(row.get(13)?),
                 updated_at: Timestamp(row.get(14)?),
                 access_count: row.get(15)?,
-                access_history: decode_timestamp_deque(&row.get::<_, String>(16)?)
+                access_history: decode_access_history(&row.get::<_, String>(16)?)
                     .map_err(to_sql_error)?,
                 tier: decode_memory_tier(&row.get::<_, String>(17)?).map_err(to_sql_error)?,
                 metadata: decode_map(&row.get::<_, String>(18)?).map_err(to_sql_error)?,
@@ -2303,24 +2388,43 @@ fn decode_embedding(value: Option<String>) -> Result<Option<Vec<f64>>, Error> {
         .transpose()
 }
 
-fn encode_timestamp_deque(value: &VecDeque<Timestamp>) -> String {
+/// Encode the bounded access-history window as semicolon-separated `ts,decaybits`
+/// pairs. The per-trace decay `d_j` (`f64`) is serialized losslessly via
+/// [`f64::to_bits`] so the activation-dependent decay round-trips exactly; an empty
+/// deque encodes to the empty string.
+fn encode_access_history(value: &VecDeque<AccessTrace>) -> String {
     value
         .iter()
-        .map(|ts| ts.0.to_string())
+        .map(|trace| format!("{},{}", trace.at.0, trace.decay.to_bits()))
         .collect::<Vec<_>>()
-        .join(",")
+        .join(";")
 }
 
-fn decode_timestamp_deque(value: &str) -> Result<VecDeque<Timestamp>, Error> {
+/// Decode the access-history column written by [`encode_access_history`]: each
+/// `;`-separated entry is `ts,decaybits`, with the decay recovered exactly via
+/// [`f64::from_bits`]. An empty string decodes to an empty deque.
+fn decode_access_history(value: &str) -> Result<VecDeque<AccessTrace>, Error> {
     if value.is_empty() {
         return Ok(VecDeque::new());
     }
     value
-        .split(',')
-        .map(|part| {
-            part.parse::<u64>()
-                .map(Timestamp)
-                .map_err(|e| Error::StorageError(format!("invalid timestamp '{part}': {e}")))
+        .split(';')
+        .map(|entry| {
+            let (ts_part, decay_part) = entry.split_once(',').ok_or_else(|| {
+                Error::StorageError(format!(
+                    "invalid access trace '{entry}': missing ',' separator"
+                ))
+            })?;
+            let at = ts_part.parse::<u64>().map(Timestamp).map_err(|e| {
+                Error::StorageError(format!("invalid trace timestamp '{ts_part}': {e}"))
+            })?;
+            let bits = decay_part.parse::<u64>().map_err(|e| {
+                Error::StorageError(format!("invalid trace decay bits '{decay_part}': {e}"))
+            })?;
+            Ok(AccessTrace {
+                at,
+                decay: f64::from_bits(bits),
+            })
         })
         .collect()
 }

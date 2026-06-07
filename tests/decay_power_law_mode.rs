@@ -1,8 +1,9 @@
 //! Power-law base-level forgetting (ADR-0008).
 //!
 //! Persistent node strength is `A_i = B_i + P_i`. The base level
-//! `B_i = ln(Σ_j (now − t_j)^(−d·m_type))` is recomputed on demand from the
-//! access-trace history (never stored); `P_i` is a decay-exempt evidence prior.
+//! `B_i = ln(Σ_j (now − at_j)^(−d_j))` (each trace's own activation-dependent decay
+//! `d_j`, Pavlik & Anderson 2005) is recomputed on demand from the access-trace
+//! history (never stored); `P_i` is a decay-exempt evidence prior.
 //! `salience = logistic(B_i + P_i)`. A committed access (`touch`) appends a trace,
 //! raising `B_i`; `tick` recomputes salience as `B_i(now)` falls with elapsed time —
 //! it does not shift a stored reservoir. `retained_action` is the cached composite.

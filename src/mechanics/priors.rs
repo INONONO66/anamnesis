@@ -35,11 +35,21 @@
 //! and [`theta_sep`] derives the novelty separation boundary from the encoder's
 //! distinct-pair q95 ([`ENCODER_DISTINCT_PAIR_Q95`]).
 
-/// ACT-R base-level power-law decay exponent `d`.
+/// Floor per-trace decay rate when activation is zero — the ACT-R intercept `α`
+/// of the activation-dependent decay `d_j = m_type·(c·e^{m_j} + α)`
+/// (Pavlik & Anderson 2005, [ADR-0008](../../docs/adr/0008-powerlaw-dissipation.md)).
 ///
-/// CALIBRATED PRIOR — ACT-R canonical default `d ≈ 0.5`
-/// ([ADR-0008](../../docs/adr/0008-powerlaw-dissipation.md)).
-pub const DECAY_EXPONENT_D: f64 = 0.5;
+/// CALIBRATED PRIOR — the decay a freshly laid trace receives at zero existing
+/// activation; the single-trace forgetting slope is exactly `−m_type·α`.
+pub const DECAY_INTERCEPT: f64 = 0.40;
+
+/// Activation sensitivity `c` of the per-trace decay rate — the ACT-R scale of the
+/// activation-dependent decay `d_j = m_type·(c·e^{m_j} + α)` (Pavlik & Anderson 2005).
+///
+/// CALIBRATED PRIOR — how strongly the activation `m_j` of the EXISTING traces, at
+/// the moment a new trace is laid down, accelerates that trace's decay. Locked to the
+/// smallest `c` giving a robust recency-controlled spacing margin at the delayed test.
+pub const DECAY_SCALE: f64 = 2.0;
 
 /// Target co-activation count `N` — the single behavioral specification from which
 /// every learning rate derives ([conductance.md](../../docs/04-cognitive-dynamics/conductance.md),
@@ -86,15 +96,19 @@ pub const INITIAL_RETAINED_ACTION: f64 = 13.8;
 /// `eta` toward this target ([`crate::mechanics::interactions::lambda_reward`]).
 pub const REWARD_LOG_ODDS_SCALE: f64 = 4.0;
 
-/// Per-`node_type` policy multiplier on the decay exponent `d` (dissipation.md).
+/// Per-`node_type` policy multiplier `m_type` on the per-trace decay rate
+/// (dissipation.md).
 ///
-/// CALIBRATED PRIOR — tier/type is *policy*, not an independent decay knob: it
-/// only scales the single free decay prior `d`. Core ≈ 0 (protected), Working
-/// below one, Episodic one, Archive excluded. Forgetting lives entirely in the
-/// retained-action dynamics governed by `d` together with this multiplier; there
-/// is no separate per-type decay rate.
+/// CALIBRATED PRIOR — tier/type is *policy*, not an independent decay knob: it is
+/// the OUTER multiplier on the activation-dependent per-trace decay
+/// `d_j = m_type·(c·e^{m_j} + α)` (Pavlik & Anderson 2005). Core ≈ 0 (protected,
+/// so `d_j = 0` ⇒ permanent), Working below one, Episodic one, Archive excluded.
+/// Forgetting lives entirely in the per-trace decay rates governed by
+/// [`DECAY_SCALE`]/[`DECAY_INTERCEPT`] together with this multiplier; there is no
+/// separate per-type decay rate.
 ///
-/// Returns the factor by which `d` is scaled for the given knowledge type.
+/// Returns the factor `m_type` by which the per-trace decay is scaled for the
+/// given knowledge type.
 pub fn decay_multiplier_for_type(kt: &crate::graph::KnowledgeType) -> f64 {
     use crate::graph::KnowledgeType;
     match kt {

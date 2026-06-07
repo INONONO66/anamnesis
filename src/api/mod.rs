@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 use crate::error::Error;
 use crate::graph::node::Origin;
-use crate::graph::{Edge, Graph, Node};
+use crate::graph::{AccessTrace, Edge, Graph, Node};
 use crate::graph::{EdgeId, EdgeType, KnowledgeType, MemoryTier, NodeId, ScopePath, Timestamp};
 use crate::query::{ContextPackage, Query, QueryConfig, SearchInput, SearchResult};
 use crate::snapshot::{SnapshotId, SnapshotStore};
@@ -842,13 +842,18 @@ fn seed_node_strength(
     node_type: &KnowledgeType,
     prior: f64,
     now: Timestamp,
-) -> (f64, f64, VecDeque<Timestamp>) {
+) -> (f64, f64, VecDeque<AccessTrace>) {
+    // The creation trace is the first trace, so its activation-dependent decay is the
+    // floor `d_j = m_type·α` (Pavlik & Anderson 2005; equals `compute_trace_decay`
+    // on an empty history).
+    let m_type = crate::mechanics::priors::decay_multiplier_for_type(node_type);
+    let creation_decay = m_type * crate::mechanics::priors::DECAY_INTERCEPT;
     let mut access_history = VecDeque::new();
-    access_history.push_back(now);
-    let decay_d = crate::mechanics::priors::DECAY_EXPONENT_D
-        * crate::mechanics::priors::decay_multiplier_for_type(node_type);
-    let base_level =
-        crate::mechanics::forgetting::compute_base_level(&access_history, now, decay_d);
+    access_history.push_back(AccessTrace {
+        at: now,
+        decay: creation_decay,
+    });
+    let base_level = crate::mechanics::forgetting::compute_base_level(&access_history, now);
     let retained_action = base_level + prior;
     let salience = crate::mechanics::priors::project_salience(retained_action);
     (salience, retained_action, access_history)
@@ -2205,13 +2210,17 @@ impl<S: StorageAdapter + Clone> Engine<S> {
 
         // Seed the creation trace so B_i is finite at birth (compute_base_level
         // returns NEG_INFINITY on empty history). At `now` the lone trace floors to
-        // 1ms, so B_i ≈ ln(1) = 0 and salience ≈ logistic(P_i) (ADR-0008/0009).
+        // 1ms, so B_i ≈ ln(1) = 0 and salience ≈ logistic(P_i) (ADR-0008/0009). Its
+        // per-trace decay is the creation floor d_j = m_type·α (Pavlik & Anderson 2005).
+        let creation_decay =
+            crate::mechanics::priors::decay_multiplier_for_type(&observation.node_type)
+                * crate::mechanics::priors::DECAY_INTERCEPT;
         let mut access_history = VecDeque::new();
-        access_history.push_back(now);
-        let decay_d = crate::mechanics::priors::DECAY_EXPONENT_D
-            * crate::mechanics::priors::decay_multiplier_for_type(&observation.node_type);
-        let base_level =
-            crate::mechanics::forgetting::compute_base_level(&access_history, now, decay_d);
+        access_history.push_back(AccessTrace {
+            at: now,
+            decay: creation_decay,
+        });
+        let base_level = crate::mechanics::forgetting::compute_base_level(&access_history, now);
         let initial_action = base_level + initial_evidence_prior;
 
         let node = Node {
@@ -2511,12 +2520,16 @@ impl<S: StorageAdapter + Clone> Engine<S> {
 
         let id = self.graph.next_node_id();
         let now = request.timestamp;
-        let decay_d = crate::mechanics::priors::DECAY_EXPONENT_D
-            * crate::mechanics::priors::decay_multiplier_for_type(&request.node_type);
+        // Creation trace at the floor decay d_j = m_type·α (Pavlik & Anderson 2005).
+        let creation_decay =
+            crate::mechanics::priors::decay_multiplier_for_type(&request.node_type)
+                * crate::mechanics::priors::DECAY_INTERCEPT;
         let mut access_history = VecDeque::new();
-        access_history.push_back(now);
-        let base_level =
-            crate::mechanics::forgetting::compute_base_level(&access_history, now, decay_d);
+        access_history.push_back(AccessTrace {
+            at: now,
+            decay: creation_decay,
+        });
+        let base_level = crate::mechanics::forgetting::compute_base_level(&access_history, now);
         let initial_action = base_level + synthesis_prior;
         let initial_salience = crate::mechanics::priors::project_salience(initial_action);
         let crystal_embedding = request.embedding.clone();
@@ -2962,8 +2975,9 @@ impl<S: StorageAdapter + Clone> Engine<S> {
     /// refreshed from `B_i(now) + P_i`:
     ///
     /// ```text
-    /// traces_i ← append(traces_i, now)             // bounded 32-trace window
-    /// B_i      = ln( Σ_j (now − t_j)^(−d·m_type) ) // ages prior traces to now
+    /// d_new    = m_type·(c·e^{m} + α)              // activation-dependent (P&A 2005)
+    /// traces_i ← append(traces_i, {now, d_new})    // bounded 32-trace window
+    /// B_i      = ln( Σ_j (now − at_j)^(−d_j) )     // ages prior traces to now
     /// salience = logistic(B_i + P_i)               // refresh cache
     /// ```
     ///
@@ -3407,9 +3421,10 @@ impl<S: StorageAdapter + Clone> Engine<S> {
 
     /// `Accessed` integration for one site — append a trace, recompute strength.
     ///
-    /// Under `A_i = B_i + P_i` a committed access appends a now-stamped trace to the
+    /// Under `A_i = B_i + P_i` a committed access appends a now-stamped trace (with
+    /// its own activation-dependent decay `d_new`, Pavlik & Anderson 2005) to the
     /// node's `access_history` (dissipation.md / ADR-0008). Decay-first ordering is
-    /// intrinsic: recomputing `B_i = ln(Σ_j (now − t_j)^(−d·m_type))` ages every
+    /// intrinsic: recomputing `B_i = ln(Σ_j (now − at_j)^(−d_j))` ages every
     /// prior trace to `now` inside the same sum that adds the new one — there is no
     /// scalar decay step and no scalar access gain. The `salience`/`retained_action`
     /// cache is then refreshed from the recomputed `B_i(now) + P_i` and `accessed_at`
@@ -3424,8 +3439,27 @@ impl<S: StorageAdapter + Clone> Engine<S> {
     ) -> Result<(), Error> {
         let current_salience = self.graph.storage().get_salience(node_id)?;
 
-        // The committed access IS the new trace (raises B_i); persist it durably.
-        self.graph.storage_mut().append_access_trace(node_id, now)?;
+        // The committed access IS the new trace (raises B_i); persist it durably. Its
+        // activation-dependent decay d_new = m_type·(c·e^{m} + α) is computed ONCE
+        // from the EXISTING history (before the append), where m is the activation of
+        // the prior traces at `now` (Pavlik & Anderson 2005). The trace then stores
+        // its decay immutably.
+        let new_trace = {
+            use crate::mechanics::forgetting::compute_trace_decay;
+            use crate::mechanics::priors::{
+                DECAY_INTERCEPT, DECAY_SCALE, decay_multiplier_for_type,
+            };
+            let m_type = decay_multiplier_for_type(self.graph.storage().get_node_type(node_id)?);
+            let existing = self.graph.storage().get_access_history(node_id)?;
+            let d_new = compute_trace_decay(existing, now, m_type, DECAY_SCALE, DECAY_INTERCEPT);
+            AccessTrace {
+                at: now,
+                decay: d_new,
+            }
+        };
+        self.graph
+            .storage_mut()
+            .append_access_trace(node_id, new_trace)?;
 
         let new_action = self.recompute_composite_action(node_id, now)?;
         if !new_action.is_finite() {
@@ -3463,18 +3497,16 @@ impl<S: StorageAdapter + Clone> Engine<S> {
     /// Recompute the composite retained action `A_i = B_i(now) + P_i` for a node.
     ///
     /// `B_i` is the multi-trace ACT-R base level over the node's current
-    /// `access_history` aged to `now`, with the single decay prior `d` scaled by the
-    /// `node_type` policy multiplier `m_type` (dissipation.md). `P_i` is the stored,
-    /// decay-exempt `evidence_prior`. The creation trace seeded at ingest keeps `B_i`
-    /// finite for a node that has never been accessed.
+    /// `access_history` aged to `now`, where each trace carries its OWN
+    /// activation-dependent decay `d_j` (Pavlik & Anderson 2005), so
+    /// `B_i = ln(Σ_j (now − at_j)^(−d_j))`. `P_i` is the stored, decay-exempt
+    /// `evidence_prior`. The creation trace seeded at ingest keeps `B_i` finite for a
+    /// node that has never been accessed.
     fn recompute_composite_action(&self, node_id: NodeId, now: Timestamp) -> Result<f64, Error> {
         use crate::mechanics::forgetting::compute_base_level;
-        use crate::mechanics::priors::{DECAY_EXPONENT_D, decay_multiplier_for_type};
 
-        let node_type = self.graph.storage().get_node_type(node_id)?.clone();
-        let decay_d = DECAY_EXPONENT_D * decay_multiplier_for_type(&node_type);
         let history = self.graph.storage().get_access_history(node_id)?;
-        let base_level = compute_base_level(history, now, decay_d);
+        let base_level = compute_base_level(history, now);
         let prior = self.graph.storage().get_evidence_prior(node_id)?;
         Ok(base_level + prior)
     }
@@ -3484,8 +3516,9 @@ impl<S: StorageAdapter + Clone> Engine<S> {
     ///
     /// Under `A_i = B_i + P_i` (ADR-0008) time applies NO scalar shift: each node's
     /// `salience = logistic(B_i(now) + P_i)` is recomputed, where
-    /// `B_i = ln(Σ_j (now − t_j)^(−d·m_type))` falls purely because `now` advanced
-    /// relative to the fixed access traces, and the decay-exempt `P_i` is unchanged.
+    /// `B_i = ln(Σ_j (now − at_j)^(−d_j))` falls purely because `now` advanced
+    /// relative to the fixed access traces (each with its own stored `d_j`), and the
+    /// decay-exempt `P_i` is unchanged.
     /// `accessed_at` is left untouched, preserving last user-access semantics. Idle
     /// edges still leak their conductance.
     ///
@@ -5374,7 +5407,7 @@ mod tests {
         assert_eq!(node.access_count, 1);
         // The creation trace plus the touch trace are both present.
         assert_eq!(node.access_history.len(), 2);
-        assert_eq!(*node.access_history.back().unwrap(), future);
+        assert_eq!(node.access_history.back().unwrap().at, future);
     }
 
     #[test]

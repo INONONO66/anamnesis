@@ -3,12 +3,12 @@
 //! Tests invariants for pure functions in the mechanics and query modules
 //! using proptest with 256 cases per test.
 
-use anamnesis::graph::{KnowledgeType, Timestamp};
+use anamnesis::graph::{AccessTrace, KnowledgeType, Timestamp};
 use anamnesis::mechanics::attraction::{attraction_score, cosine_similarity};
 use anamnesis::mechanics::forgetting::{base_level_to_salience, compute_base_level};
 use anamnesis::mechanics::interactions::{hebbian_oja, rescorla_wagner};
 use anamnesis::mechanics::priors::{
-    DECAY_EXPONENT_D, TARGET_COACTIVATION_N, decay_multiplier_for_type, learning_rate,
+    DECAY_INTERCEPT, TARGET_COACTIVATION_N, decay_multiplier_for_type, learning_rate,
     project_weight,
 };
 use anamnesis::query::field::{FieldSignals, potential_bias};
@@ -51,13 +51,18 @@ proptest! {
         more in 1u64..=10_000_000,
         kt in knowledge_type_strategy(),
     ) {
-        let decay_d = DECAY_EXPONENT_D * decay_multiplier_for_type(&kt);
+        // A single creation trace carries the floor per-trace decay d_j = m_type·α
+        // (Pavlik & Anderson 2005); m_type = 0 ⇒ d_j = 0 (protected / inert types).
+        let decay_d = decay_multiplier_for_type(&kt) * DECAY_INTERCEPT;
         let mut history = VecDeque::new();
-        history.push_back(Timestamp(created_ms));
+        history.push_back(AccessTrace {
+            at: Timestamp(created_ms),
+            decay: decay_d,
+        });
         let now1 = Timestamp(created_ms + later);
         let now2 = Timestamp(created_ms + later + more);
-        let b1 = compute_base_level(&history, now1, decay_d);
-        let b2 = compute_base_level(&history, now2, decay_d);
+        let b1 = compute_base_level(&history, now1);
+        let b2 = compute_base_level(&history, now2);
         prop_assert!(b1.is_finite() && b2.is_finite());
         if decay_d == 0.0 {
             // Exponent 0 → dt^0 = 1 for every trace; B_i is time-invariant.

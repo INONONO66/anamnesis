@@ -1,4 +1,6 @@
-use anamnesis::mechanics::priors::{DECAY_EXPONENT_D, decay_multiplier_for_type, edge_type_factor};
+use anamnesis::mechanics::priors::{
+    DECAY_INTERCEPT, DECAY_SCALE, decay_multiplier_for_type, edge_type_factor,
+};
 use anamnesis::query::assembly::{is_identity_type, is_memory_type};
 use anamnesis::query::identity::pi_tier;
 use anamnesis::{EdgeType, KnowledgeType};
@@ -13,15 +15,17 @@ fn debug_node_types() -> [KnowledgeType; 3] {
 
 #[test]
 fn debug_node_types_have_inert_decay_values() {
-    // Debug-lifecycle nodes are inert: their per-type decay multiplier is 0, so the
-    // base-level exponent `d·m_type` collapses to 0. Every trace ages as `dt^0 = 1`,
+    // Debug-lifecycle nodes are inert: their per-type decay multiplier `m_type` is 0,
+    // and since it is the OUTER multiplier on the per-trace decay
+    // `d_j = m_type·(c·e^{m} + α)` (Pavlik & Anderson 2005), every per-trace decay
+    // collapses to 0 regardless of activation. Every trace then ages as `dt^0 = 1`,
     // so `B_i` never falls with elapsed time (ADR-0008) — the node is decay-exempt.
     for node_type in debug_node_types() {
-        assert_eq!(decay_multiplier_for_type(&node_type), 0.0);
-        assert_eq!(
-            DECAY_EXPONENT_D * decay_multiplier_for_type(&node_type),
-            0.0
-        );
+        let m_type = decay_multiplier_for_type(&node_type);
+        assert_eq!(m_type, 0.0);
+        // Both terms of the per-trace decay vanish under the zero outer multiplier.
+        assert_eq!(m_type * DECAY_INTERCEPT, 0.0);
+        assert_eq!(m_type * DECAY_SCALE, 0.0);
     }
 }
 
@@ -29,15 +33,15 @@ fn debug_node_types_have_inert_decay_values() {
 fn debug_node_types_are_inert_under_dissipation() {
     // The legacy gravity/mass force is gone (overview.md / conductance.md): importance
     // is emergent, there is no separate mass boost. Debug-lifecycle nodes are instead
-    // characterized as *inert*: their per-type decay multiplier is exactly 0, so the
-    // base-level decay exponent is 0 and elapsed time never lowers their base level
-    // `B_i` (forgetting lives in `B_i`; `P_i` is decay-exempt regardless).
+    // characterized as *inert*: their per-type decay multiplier `m_type` is exactly 0,
+    // so every per-trace decay `d_j = m_type·(c·e^{m} + α)` is 0 and elapsed time
+    // never lowers their base level `B_i` (forgetting lives in `B_i`; `P_i` is
+    // decay-exempt regardless).
     for node_type in debug_node_types() {
-        assert_eq!(decay_multiplier_for_type(&node_type), 0.0);
-        assert_eq!(
-            DECAY_EXPONENT_D * decay_multiplier_for_type(&node_type),
-            0.0
-        );
+        let m_type = decay_multiplier_for_type(&node_type);
+        assert_eq!(m_type, 0.0);
+        assert_eq!(m_type * DECAY_INTERCEPT, 0.0);
+        assert_eq!(m_type * DECAY_SCALE, 0.0);
     }
 }
 
