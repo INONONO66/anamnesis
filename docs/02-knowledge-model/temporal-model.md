@@ -40,10 +40,10 @@ The `t_j` are the timestamps in this window, each paired with its own decay rate
 
 ```text
 m_j = ln( sum_{k existing} (t_j - t_k)^(-d_k) )   // activation from prior traces at j's creation; empty history => m_j = -inf
-d_j = m_type * ( c * e^{m_j} + alpha )            // c = DECAY_SCALE, alpha = DECAY_INTERCEPT (floor)
+d_j = m_type * ( c * e^{m_j} + α )            // c = DECAY_SCALE, α = DECAY_INTERCEPT (floor)
 ```
 
-`m_type` is the `node_type` policy multiplier; it is the OUTER multiplier on the per-trace formula (so `m_type = 0` types yield `d_j = 0` and never decay). The two calibrated priors `alpha` (floor decay) and `c` (activation sensitivity) replace the former single global decay exponent. `B_i` is computed on demand from the trace history; it is NOT maintained by incremental scalar decay. Because the sum ages every prior trace to `now` before adding any new trace, the multi-trace form reproduces power-law forgetting AND the spacing effect genuinely: a massed re-presentation lands at high activation, so its `d_j` is high and it decays fast, while a spaced re-presentation lands at low activation, so its `d_j ≈ m_type·alpha` is low and durable. The testing effect (test-vs-restudy at equal timing) is NOT cleanly reproduced by activation-dependent decay alone and is not claimed; spaced practice wins only at sufficiently delayed tests (the documented retention-interval crossover).
+`m_type` is the `node_type` policy multiplier; it is the OUTER multiplier on the per-trace formula (so `m_type = 0` types yield `d_j = 0` and never decay). The two calibrated priors `α` (floor decay) and `c` (activation sensitivity) set each per-trace `d_j`. `B_i` is computed on demand from the trace history; it is NOT maintained by incremental scalar decay. Because the sum ages every prior trace to `now` before adding any new trace, the multi-trace form reproduces power-law forgetting AND the spacing effect genuinely: a massed re-presentation lands at high activation, so its `d_j` is high and it decays fast, while a spaced re-presentation lands at low activation, so its `d_j ≈ m_type·α` is low and durable. The testing effect (test-vs-restudy at equal timing) is NOT cleanly reproduced by activation-dependent decay alone and is not claimed; spaced practice wins only at sufficiently delayed tests (the documented retention-interval crossover).
 
 The persistent access-history window drives:
 
@@ -62,7 +62,7 @@ Decay-first ordering is INTRINSIC. Appending a now-stamped trace into a current-
 ```text
 B_i = ln( sum_j (now - t_j)^(-d_j) )         // existing t_j already aged to now; each d_j is static from creation
         compute d_new from m_now             // activation of the existing traces, m_now = ln( sum_j (now - t_j)^(-d_j) )
-        append a fresh trace (now, d_new)     // contributes (now - now + epsilon)^(-d_new)
+        append a fresh trace (now, d_new)     // contributes Δ_min^(-d_new); elapsed (now - t_j) floored to Δ_min (1 ms in the reference implementation)
 ```
 
 This intrinsically prevents stale sites from receiving a full reinforcement boost without paying accumulated leakage: the old traces are evaluated at the current `now`, so their decayed contribution is already reflected before the new trace is added.

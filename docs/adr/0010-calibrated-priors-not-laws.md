@@ -32,7 +32,7 @@ The docs must not present these values as universal laws. Refit them when graph 
 
 The free-prior set is minimal. These are the only declared behavioral priors; everything else derives from them.
 
-Activation-dependent decay splits the former single decay exponent `d` into two calibrated priors — `α` (floor decay) and `c` (activation sensitivity) — so the decay-prior count goes from one to two; `k` and `N` survive (along with the per-`node_type` multiplier `m_type`). Their targets also changed under the two-term `A_i = B_i + P_i` decomposition: `α` and `c` set each per-trace rate `d_j = m_type·(c·e^{m_j}+α)` in the multi-trace base-level sum, and `k` now seeds the encoding-surprise evidence prior `P_i` rather than charging a use-decaying reservoir. This `d → {α, c}` split is the only change to the prior set; nothing else is added or removed.
+Activation-dependent decay declares two calibrated decay priors — `α` (floor decay) and `c` (activation sensitivity) — which, with the per-`node_type` multiplier `m_type`, set each per-trace rate `d_j = m_type·(c·e^{m_j}+α)` in the multi-trace base-level sum. `k` seeds the encoding-surprise evidence prior `P_i`, and `N` is the conductance-saturation target. Each is a calibrated prior, not a law.
 
 Free behavioral priors:
 

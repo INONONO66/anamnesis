@@ -86,13 +86,13 @@ W_readout_i = accepted_i * a_i * phi_i            # illustrative sketch only
 dC_ij       = eta * flux_ij * (1 - C_ij)
 C_next      = clamp_log_odds(C_ij + dC_ij)
 B_i         = ln( sum_j (now - t_j)^(-d_j) )          # multi-trace base-level over access traces; d_j stored with each trace
-d_j         = m_type * (c * e^m_j + alpha)            # per-trace decay computed once at trace creation
-m_j         = ln( sum_{k existing} (t_j - t_k)^(-d_k) )  # activation from prior traces at j's creation time
+d_j         = m_type * (c * e^m_j + α)               # per-trace decay computed once at trace creation (α = decay intercept)
+m_j         = ln( sum_{k existing} (t_j - t_k)^(-d_k) )  # activation from prior traces at j's creation time; empty history ⇒ m_j = −∞ (creation trace ⇒ d_j = m_type·α)
 P_next      = P_i + dP ; dP = eta_fb * (lambda - predicted_i)   # evidence prior, decay-exempt
 s_next      = logistic(B_i + P_next)
 ```
 
-The restart rate is derived from associative reach, not chosen as an arbitrary knob: expose mean reach `L` and set `alpha = 1/(L+1)`. (Equivalently, if influence should decay to `f` after `h_half` hops, `alpha = 1 - f^(1/h_half)` is the same single reach degree of freedom.) `alpha` is the only restart knob here; the `eta_fb` in the feedback update above is a distinct quantity (see below).
+The restart rate is derived from associative reach, not chosen as an arbitrary knob: expose mean reach `L` and set `alpha = 1/(L+1)`. (Equivalently, if influence should decay to `f` after `h_half` hops, `alpha = 1 - f^(1/h_half)` is the same single reach degree of freedom.) `alpha` (ASCII) is the only restart knob here — distinct from the decay intercept `α` in the `d_j` line above; the `eta_fb` in the feedback update is another distinct quantity (see below).
 
 `W_readout_i` above is an illustrative sketch, not the readout definition. The authoritative readout score is the additive log-odds re-ranking defined in [readout-scoring.md](readout-scoring.md) (`w_a * logit_or_rank(a_i) + w_phi * phi_i + w_s * logit(s_i) - w_z * Z_i + w_scope * scope + w_trust * trust - w_stress * stress`). Where the two differ, defer to [readout-scoring.md](readout-scoring.md).
 

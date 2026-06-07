@@ -9,7 +9,7 @@ Storage owns the durable graph state. The engine uses storage through a trait, a
 | ID allocation | Allocate node and edge identifiers |
 | CRUD | Store, fetch, mutate, and delete nodes and edges |
 | adjacency | Return outgoing and incoming edge ids |
-| hot fields | Read and write access history, evidence prior, conductance, accessed time, and type (retained-action `B_i` is computed from access history, not stored) |
+| hot fields | Read and write access history, evidence prior, conductance, accessed time, and type (`B_i` is computed from access history; retained action `A_i = B_i + P_i` is not stored as a scalar) |
 | iteration | Enumerate all node and edge ids |
 | search helpers | Provide type, scope, peer, entity, and text scans |
 | flush | Commit pending writes for write-behind backends |
@@ -41,9 +41,10 @@ pub trait StorageAdapter: Send + Sync {
     // Persistent substrate of base-level B_i: the bounded 32-trace access window.
     // Each trace is a pair (Timestamp, per-trace decay rate d_j).
     // B_i = ln( sum_j (now - t_j)^(-d_j) ) is computed on demand from these
-    // traces; it is not a stored scalar. The per-trace decay rate is computed
+    // traces (elapsed time is floored to a minimum positive delta, 1 ms, so a
+    // freshly stamped trace does not diverge); it is not a stored scalar. The per-trace decay rate is computed
     // ONCE at creation from the activation m_j of the traces that already exist
-    // (d_j = m_type * ( c * e^{m_j} + alpha )) and then stored immutably with the
+    // (d_j = m_type * ( c * e^{m_j} + α )) and then stored immutably with the
     // trace. A committed access:
     // 1. computes d_now from the current activation m_now of the existing traces;
     // 2. appends a (now-stamped, d_now) trace, evicting the oldest beyond the

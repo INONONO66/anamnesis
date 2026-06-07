@@ -46,7 +46,7 @@ Every site carries origin. Provenance is not optional.
 | Memory | `Episodic`, `Event` | Raw or time-bound fragments |
 | Custom | `Custom(String)` | Consumer-defined type |
 
-Type affects decay prior, packaging bucket, readout treatment, and conductance priors. The decay prior is the `node_type` policy multiplier `m_type` applied during per-trace `d_j` computation: it is the outer multiplier in `d_j = m_type · ( c · e^{m_j} + alpha )`, not an independent rate. A type with `m_type = 0` (e.g. `IdentityCore`, `Hypothesis`, `Evidence`, `DebugSession`) yields `d_j = 0` for every trace and never decays. It must not be replaced by free-form strings at the engine boundary except through `Custom`.
+Type affects decay prior, packaging bucket, readout treatment, and conductance priors. The decay prior is the `node_type` policy multiplier `m_type` applied during per-trace `d_j` computation: it is the outer multiplier in `d_j = m_type · ( c · e^{m_j} + α )`, not an independent rate. A type with `m_type = 0` (e.g. `IdentityCore`, `Hypothesis`, `Evidence`, `DebugSession`) yields `d_j = 0` for every trace and never decays. It must not be replaced by free-form strings at the engine boundary except through `Custom`.
 
 ## Edges
 

@@ -26,7 +26,7 @@ where each trace j is a pair (t_j, d_j):
   d_j = m_type · ( c · e^{m_j} + α )              // per-trace decay computed at creation, never recomputed
 ```
 
-The `t_j` are the timestamps of the node's access traces (a creation trace plus each committed access; a bounded 32-trace window). The creation trace has an empty prior history, so `m_j = −∞`, `e^{m_j} = 0`, and `d_j = m_type·α` (the floor). `m_type` is the `node_type` policy multiplier; it is the OUTER factor, so `m_type = 0` types decay-exempt (`d_j = 0`, permanent). Instead of one global decay prior `d`, there are TWO calibrated priors:
+The `t_j` are the timestamps of the node's access traces (a creation trace plus each committed access; a bounded 32-trace window). The creation trace has an empty prior history, so `m_j = −∞`, `e^{m_j} = 0`, and `d_j = m_type·α` (the floor). Elapsed time `now − t_j` is floored to a minimum positive delta `Δ_min` (1 ms in the reference implementation), so a committed access stamped at `now` contributes `Δ_min^(−d_j)` instead of diverging. `m_type` is the `node_type` policy multiplier; it is the OUTER factor, so `m_type = 0` types decay-exempt (`d_j = 0`, permanent). Instead of one global decay prior `d`, there are TWO calibrated priors:
 
 - `α` (intercept): floor decay rate when activation is zero.
 - `c` (scale): how much current activation increases the per-trace decay rate.

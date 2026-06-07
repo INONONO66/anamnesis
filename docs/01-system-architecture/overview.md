@@ -67,7 +67,7 @@ Default construction uses in-memory SQLite. Persistent use passes a file-backed 
 | `confidence_threshold` | Minimum origin confidence for admission |
 | `dedup_threshold` | Backward-compatible duplicate routing threshold |
 | `dedup_enabled` | Enables duplicate routing instead of unconditional allocation |
-| `decay_model` | Exponential or ACT-R activation-dependent power-law dissipation model (Pavlik & Anderson 2005); the ACT-R model is the multi-trace base-level form `B_i = ln( Σ_j (now − t_j)^(−d_j) )` over the node's access-history window, where each trace stores its own decay rate `d_j = m_type·(c·e^{m_j} + α)` computed at creation from current activation |
+| `decay_model` | ACT-R activation-dependent power-law dissipation model (Pavlik & Anderson 2005); the multi-trace base-level form `B_i = ln( Σ_j (now − t_j)^(−d_j) )` over the node's access-history window, where each trace stores its own decay rate `d_j = m_type·(c·e^{m_j} + α)` computed at creation from current activation |
 | `energy_model` | Readout scoring objective |
 | `spreading_model` | Activation-flow traversal model |
 

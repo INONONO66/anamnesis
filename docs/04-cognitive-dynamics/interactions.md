@@ -92,7 +92,7 @@ traces_i ← append(traces_i, (now, d_now))    // bounded 32-trace window; each 
 B_i = ln( Σ_j (now − t_j)^(−d_j) )
 ```
 
-A committed access appends a trace stamped at `now`, carrying its own decay rate `d_now` computed from the activation of the existing traces and then frozen; it does not apply a scalar `access_gain`. Decay-first ordering is intrinsic because `B_i` ages all prior traces to `now` inside the same sum that adds the new trace. The bounded trace window keeps repeated access from driving `B_i` without limit.
+A committed access appends a trace stamped at `now`, carrying its own decay rate `d_now` computed from the activation of the existing traces and then frozen; it does not apply a scalar `access_gain`. Decay-first ordering is intrinsic because `B_i` ages all prior traces to `now` inside the same sum that adds the new trace. Its own elapsed term is `now − now = 0`, floored to a minimum positive delta `Δ_min` (1 ms in the reference implementation), so the fresh trace contributes `Δ_min^(−d_now)` rather than diverging. The bounded trace window keeps repeated access from driving `B_i` without limit.
 
 ### `FeedbackReceived` - Rescorla-Wagner
 
