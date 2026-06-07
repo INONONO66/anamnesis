@@ -23,7 +23,7 @@ conductance feature weights: regression coefficients over NPMI features
 Hebbian eta: eta = 1 - target^(1/N)
 RWR alpha: alpha = 1 / (L + 1)
 readout temperature: fit from target entropy or accepted context labels
-decay exponent d: fit from re-access hazard or ACT-R prior
+decay intercept α and scale c: fit from re-access hazard, or ACT-R priors calibrated to the time base
 ```
 
 The docs must not present these values as universal laws. Refit them when graph topology, agent behavior, or embedding geometry changes.
@@ -32,11 +32,12 @@ The docs must not present these values as universal laws. Refit them when graph 
 
 The free-prior set is minimal. These are the only declared behavioral priors; everything else derives from them.
 
-The irreducible-prior count is UNCHANGED under the two-term `A_i = B_i + P_i` decomposition: `d`, `k`, and `N` all survive (along with the per-`node_type` multiplier on `d`). Only their targets change — `d` now governs the exponent of the multi-trace base-level sum, and `k` now seeds the encoding-surprise evidence prior `P_i` rather than charging a use-decaying reservoir. No prior is added or removed.
+Activation-dependent decay splits the former single decay exponent `d` into two calibrated priors — `α` (floor decay) and `c` (activation sensitivity) — so the decay-prior count goes from one to two; `k` and `N` survive (along with the per-`node_type` multiplier `m_type`). Their targets also changed under the two-term `A_i = B_i + P_i` decomposition: `α` and `c` set each per-trace rate `d_j = m_type·(c·e^{m_j}+α)` in the multi-trace base-level sum, and `k` now seeds the encoding-surprise evidence prior `P_i` rather than charging a use-decaying reservoir. This `d → {α, c}` split is the only change to the prior set; nothing else is added or removed.
 
 Free behavioral priors:
 
-- `d` — decay exponent (governs the multi-trace base-level sum `B_i = ln( Σ_j (now − t_j)^(−d·m_type) )`; the per-`node_type` policy multiplier `m_type` scales this single decay prior).
+- `α` (`DECAY_INTERCEPT`, calibrated default `0.40`) — floor decay rate when activation is zero; with `c` it sets each per-trace rate `d_j = m_type·(c·e^{m_j}+α)` in the multi-trace base-level sum `B_i = ln( Σ_j (now − t_j)^(−d_j) )`. The per-`node_type` policy multiplier `m_type` scales it (`m_type = 0` ⇒ permanent).
+- `c` (`DECAY_SCALE`, calibrated default `2.0`) — activation sensitivity: how steeply a trace's decay rate rises with the activation `m_j` present when that trace is created (the spacing mechanism).
 - `L` — mean associative reach (hops influence travels before negligible).
 - `N` — target co-activation count to reach the conductance saturation target.
 - `k` — encoding-surprise gain into the evidence prior `P_i` (Bayesian surprise seeds the decay-exempt evidence offset).

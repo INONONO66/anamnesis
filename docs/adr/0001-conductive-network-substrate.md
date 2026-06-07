@@ -16,7 +16,7 @@ Use **spreading activation (ACT-R)** as the theoretical substrate. Express the a
 
 The persistent quantities are:
 
-- **retained action `A_i = B_i + P_i`**: log prior need-odds, a composite of two terms. Only `B_i` is the ACT-R base-level activation, `B_i = ln( Σ_j (now − t_j)^(−d·m_type) )` over the node's access traces; it owns forgetting and use-driven reinforcement. `P_i` is a separate, decay-exempt evidence prior (encoding surprise, feedback / social reinforcement, peer trust).
+- **retained action `A_i = B_i + P_i`**: log prior need-odds, a composite of two terms. Only `B_i` is the ACT-R base-level activation, `B_i = ln( Σ_j (now − t_j)^(−d_j) )` over the node's access traces (each trace carries its own activation-dependent decay rate `d_j`); it owns forgetting and use-driven reinforcement. `P_i` is a separate, decay-exempt evidence prior (encoding surprise, feedback / social reinforcement, peer trust).
 - **conductance `C_ij`**: associative strength, log likelihood ratio.
 
 The query-local quantity is:
@@ -46,7 +46,7 @@ Benefits:
 - Flow and stored landscape use one vocabulary.
 - Importance is emergent rather than hand-assigned mass.
 - Fan effect, per-hop attenuation, and convergence fall out of RWR normalization and restart.
-- Predictions remain falsifiable: power-law forgetting, the testing and spacing effects (both reproduced by the multi-trace base-level sum), the fan effect, and RWR fixed-point convergence.
+- Predictions remain falsifiable: power-law forgetting and the spacing effect (reproduced by the activation-dependent multi-trace base-level sum), the fan effect, and RWR fixed-point convergence. (The testing effect is not claimed; see [ADR-0008](0008-powerlaw-dissipation.md).)
 
 Tradeoffs:
 

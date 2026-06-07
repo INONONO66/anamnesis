@@ -67,7 +67,7 @@ Default construction uses in-memory SQLite. Persistent use passes a file-backed 
 | `confidence_threshold` | Minimum origin confidence for admission |
 | `dedup_threshold` | Backward-compatible duplicate routing threshold |
 | `dedup_enabled` | Enables duplicate routing instead of unconditional allocation |
-| `decay_model` | Exponential or ACT-R power-law dissipation model; the ACT-R power-law model is the multi-trace base-level form `B_i = ln( Σ_j (now − t_j)^(−d·m_type) )` over the node's access-history window |
+| `decay_model` | Exponential or ACT-R activation-dependent power-law dissipation model (Pavlik & Anderson 2005); the ACT-R model is the multi-trace base-level form `B_i = ln( Σ_j (now − t_j)^(−d_j) )` over the node's access-history window, where each trace stores its own decay rate `d_j = m_type·(c·e^{m_j} + α)` computed at creation from current activation |
 | `energy_model` | Readout scoring objective |
 | `spreading_model` | Activation-flow traversal model |
 
@@ -80,7 +80,7 @@ Not all of these are calibrated priors. `max_nodes` and `dedup_enabled` are oper
 | `ingest` | Applies perception, creates or routes a site, and returns created/reinforced ids |
 | `query` | Runs retrieval without hidden mutation and returns `ContextPackage` |
 | `search` | Fuses text, vector, lexical, temporal, scope, and graph cues before packaging |
-| `touch` | Appends a committed access trace stamped at `now`, raising `B_i` (the base-level sum ages prior traces to `now` before adding it, so decay-first ordering is intrinsic) |
+| `touch` | Computes `d_now = m_type·(c·e^{m_now} + α)` from the current activation `m_now` of existing traces, then appends a committed access trace `(now, d_now)`, raising `B_i` (the base-level sum ages prior traces to `now` before adding the new one with its stored `d_now`, so decay-first ordering is intrinsic) |
 | `tick` | Ages `B_i` by recomputing from each node's access-history window at `now` (`P_i` is not use-decayed) and flushes storage |
 | `link` | Creates or strengthens an edge through a typed relationship |
 | `crystallize` | Adds a synthesis site and `ConsolidatedFrom` edges; never overwrites sources |

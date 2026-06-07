@@ -16,13 +16,22 @@ Decompose persistent node strength into a base-level term and a decay-exempt evi
 A_i = B_i + P_i
 ```
 
-`B_i` is the multi-trace ACT-R base-level activation over the node's access-trace history:
+`B_i` is the multi-trace ACT-R base-level activation over the node's access-trace history. Following Pavlik & Anderson (2005), decay is activation-dependent: EACH trace stores its own decay rate, computed once at the moment the trace is created:
 
 ```text
-B_i = ln( Σ_j (now − t_j)^(−d·m_type) )
+B_i = ln( Σ_j (now − t_j)^(−d_j) )
+
+where each trace j is a pair (t_j, d_j):
+  m_j = ln( Σ_{k existing} (t_j − t_k)^(−d_k) )   // activation from prior traces, evaluated at j's creation time
+  d_j = m_type · ( c · e^{m_j} + α )              // per-trace decay computed at creation, never recomputed
 ```
 
-The `t_j` are the node's access traces (a creation trace plus each committed access; a bounded 32-trace window), and `m_type` is the `node_type` policy multiplier on the single decay prior `d`. `B_i` owns forgetting and use-driven reinforcement: it falls as traces age and rises when a committed access appends a fresh trace stamped at `now`. It is computed on demand from the trace history, not maintained by incremental scalar decay.
+The `t_j` are the timestamps of the node's access traces (a creation trace plus each committed access; a bounded 32-trace window). The creation trace has an empty prior history, so `m_j = −∞`, `e^{m_j} = 0`, and `d_j = m_type·α` (the floor). `m_type` is the `node_type` policy multiplier; it is the OUTER factor, so `m_type = 0` types decay-exempt (`d_j = 0`, permanent). Instead of one global decay prior `d`, there are TWO calibrated priors:
+
+- `α` (intercept): floor decay rate when activation is zero.
+- `c` (scale): how much current activation increases the per-trace decay rate.
+
+`B_i` owns forgetting and use-driven reinforcement: it falls as traces age and rises when a committed access appends a fresh trace stamped at `now` (with its own `d_now` computed from current activation). It is computed on demand from the trace history, not maintained by incremental scalar decay.
 
 `P_i` is a separate persistent prior holding encoding surprise (`P_i ← k·eps` at allocation, ADR-0009), feedback / social reinforcement (`dP_i = eta·(lambda − predicted_i)`), and peer trust. `P_i` does NOT undergo base-level decay; it is a decay-exempt evidence offset.
 
@@ -39,7 +48,7 @@ Decay-first ordering is intrinsic: a committed access appends a trace stamped at
 Benefits:
 
 - Matches ACT-R base-level memory shape.
-- The multi-trace sum reproduces power-law forgetting AND the testing and spacing effects, which a single scalar reservoir cannot.
+- The activation-dependent multi-trace sum reproduces power-law forgetting AND the spacing effect genuinely, which a single scalar reservoir cannot. The testing effect is NOT cleanly reproduced by activation-dependent decay alone; see the caveat below.
 - Preserves source fragments for reactivation.
 - Makes stale knowledge less likely without erasing provenance.
 - Separates use-driven forgetting (`B_i`) from durable evidence (`P_i`), so encoding surprise, feedback, and peer trust are not eroded by disuse.
@@ -47,9 +56,21 @@ Benefits:
 Tradeoffs:
 
 - Full tick can be expensive on large graphs.
-- Trace-window management: each node carries a bounded 32-trace history that must be appended on committed access and capped.
+- Trace-window management: each node carries a bounded 32-trace history of `(t_j, d_j)` pairs that must be appended on committed access and capped.
+- Per-trace decay computation: `d_j` must be computed at trace-creation time from the current activation `m_j` and persisted alongside `t_j`; it is never recomputed at readout.
 - `B_i` is recomputed from traces on demand rather than read from a stored scalar.
-- Decay constants must be calibrated.
+- Decay constants must be calibrated (now `α` and `c` rather than a single `d`).
+
+## Spacing And The Honest Testing Caveat
+
+The spacing effect — stronger long-term retention for spaced practice than for massed practice — is genuinely reproduced by activation-dependent decay, and it emerges from the per-trace mechanism rather than from recency:
+
+- Massed re-presentation occurs at high activation `m_j`, producing a high `d_j`, so that trace decays fast and contributes little durable strength.
+- Spaced re-presentation occurs at low activation `m_j`, producing a low `d_j` (≈ `m_type·α`), so that trace is durable and lifts later strength.
+
+This is a true spacing × retention-interval interaction: spaced practice wins only at a sufficiently DELAYED test. Holding the last study event fixed (recency-controlled), an early test favors clustered/massed practice and a later test favors spaced practice (the crossover is around a moderate retention interval). A pure recency model cannot produce such a crossover, so the crossover is positive evidence that the win comes from activation-dependent `d_j`, not from recency. The single-trace forgetting curve remains log-linear with slope `−m_type·α`.
+
+The testing effect — that a retrieval attempt aids retention more than an equivalent restudy at matched timing — is NOT cleanly reproduced by this model, and we do not claim it. To the base-level sum a presentation is a presentation regardless of whether it was a test or a restudy, so activation-dependent decay alone cannot dissociate the two; capturing it would require additional mechanisms (elaboration, transfer-appropriate processing) beyond what is modeled here. What the engine DOES express is a distinct commitment principle: a committed retrieval appends a durable trace and raises `B_i`, whereas a read-only retrieval mutates nothing. That is an engine invariant about commitment, explicitly NOT the human testing effect.
 
 ## Alternatives Considered
 
@@ -71,4 +92,4 @@ Structurally impossible under this model. There is no scalar reinforce step: a c
 
 ### Single scalar reservoir with decay-then-reinforce
 
-Rejected. A single maintained scalar updated by `decay(A_i, Δt)` then a reinforcement add reproduces only plain power-law forgetting; it cannot express the testing and spacing effects and forces forgetting and durable evidence onto one reservoir that disuse then erodes.
+Rejected. A single maintained scalar updated by `decay(A_i, Δt)` then a reinforcement add reproduces only plain power-law forgetting; it cannot express the spacing effect (which requires per-trace, activation-dependent decay) and forces forgetting and durable evidence onto one reservoir that disuse then erodes. (The testing effect remains unresolved even under activation-dependent decay; see the caveat above.)

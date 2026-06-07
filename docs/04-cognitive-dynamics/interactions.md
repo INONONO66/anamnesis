@@ -86,11 +86,13 @@ The encoding-surprise prior `P_i` is proportional to how much the observation ch
 ### `Accessed` - Readout Work
 
 ```text
-traces_i ← append(traces_i, now)   // bounded 32-trace window
-B_i = ln( Σ_j (now − t_j)^(−d·m_type) )
+m_now = ln( Σ_j (now − t_j)^(−d_j) )         // activation from EXISTING traces, before appending
+d_now = m_type · ( c · e^{m_now} + α )       // computed once, then frozen with the new trace
+traces_i ← append(traces_i, (now, d_now))    // bounded 32-trace window; each trace stores its timestamp AND its decay rate
+B_i = ln( Σ_j (now − t_j)^(−d_j) )
 ```
 
-A committed access appends a trace stamped at `now`; it does not apply a scalar `access_gain`. Decay-first ordering is intrinsic because `B_i` ages all prior traces to `now` inside the same sum that adds the new trace. The bounded trace window keeps repeated access from driving `B_i` without limit.
+A committed access appends a trace stamped at `now`, carrying its own decay rate `d_now` computed from the activation of the existing traces and then frozen; it does not apply a scalar `access_gain`. Decay-first ordering is intrinsic because `B_i` ages all prior traces to `now` inside the same sum that adds the new trace. The bounded trace window keeps repeated access from driving `B_i` without limit.
 
 ### `FeedbackReceived` - Rescorla-Wagner
 
@@ -111,7 +113,7 @@ dC_ij = eta * flux_ij * (1 - C_ij)
 ### `TimeElapsed` - Power-Law Dissipation
 
 ```text
-B_i = ln( Σ_j (now − t_j)^(−d·m_type) )   // recomputed at now from the trace history
+B_i = ln( Σ_j (now − t_j)^(−d_j) )   // recomputed at now; each d_j is static from when its trace was created
 C_ij' = leak_idle_edge(C_ij, idle_days)
 ```
 

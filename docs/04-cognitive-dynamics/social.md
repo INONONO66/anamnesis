@@ -57,7 +57,7 @@ Feedback is another committed interaction. It updates the evidence prior `P_i`, 
 dP_i = eta * (lambda - predicted_i)
 ```
 
-Positive feedback can raise the evidence prior `P_i` and trust. Negative feedback can lower them. Both are bounded and traceable. Spacing and testing effects do not come from feedback writes: they are intrinsic to the base-level term `B_i`, which rises whenever a committed access appends a fresh trace.
+Positive feedback can raise the evidence prior `P_i` and trust. Negative feedback can lower them. Both are bounded and traceable. The spacing effect does not come from feedback writes: it is intrinsic to the base-level term `B_i = ln( Σ_j (now − t_j)^(−d_j) )`, where each trace's decay rate `d_j` depends on the activation `m_j` at the moment the trace is created. Spaced re-presentation occurs at low activation → low `d_j` → durable strength, while massed re-presentation lands at high activation → high `d_j` → fast decay. The testing effect is not cleanly reproduced by this model (see [dissipation.md](dissipation.md)).
 
 ## Fast/Slow Learning
 

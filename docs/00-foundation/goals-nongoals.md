@@ -8,7 +8,7 @@ This chapter fixes what Anamnesis is responsible for and what it deliberately le
 |---|---|---|
 | G1 | Typed conductive graph | Sites and edges represent knowledge type, origin, time, scope, and conductance |
 | G2 | Perception gate | Observations branch into new site allocation, duplicate-work integration, or rejection |
-| G3 | Retained-action dynamics | Readout and time interactions act on the multi-trace base level `B_i` (committed access appends a trace; aging is power-law over the trace history), while feedback and social reinforcement update a separate non-decaying evidence prior `P_i` |
+| G3 | Retained-action dynamics | Readout and time interactions act on the multi-trace base level `B_i` (committed access appends a trace whose per-trace decay rate `d_j = m_type·(c·e^{m_j} + α)` is fixed at creation from current activation; aging is power-law over the trace history). Activation-dependent decay reproduces the spacing effect — spaced re-presentation at low activation earns a low `d_j` and durable strength — subject to the documented retention-interval crossover (spaced wins only at sufficiently delayed tests). Feedback and social reinforcement update a separate non-decaying evidence prior `P_i` |
 | G4 | Associative retrieval | Text, vector, and activation-flow results merge into one context package |
 | G5 | Contradiction visibility | Conflicting relations are returned as frustration/tension instead of hidden |
 | G6 | Scoped memory | Session, project, and universal scopes affect retrieval and promotion |
@@ -26,6 +26,7 @@ This chapter fixes what Anamnesis is responsible for and what it deliberately le
 - The core does not overwrite original fragments with summaries.
 - The core does not treat visualization coordinates as semantic distance.
 - The core does not include remote sync or an authorization server.
+- The core does not claim to reproduce the human testing effect. Activation-dependent decay treats a committed retrieval as a presentation regardless of whether it was a test or a restudy, so the test-vs-restudy dissociation at equal timing is out of scope; the engine instead models a separate commitment principle (a committed retrieval appends a durable trace; a read-only retrieval mutates nothing).
 
 ## MVP Scope
 

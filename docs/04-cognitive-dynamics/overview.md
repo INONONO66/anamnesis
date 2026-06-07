@@ -17,7 +17,7 @@ total = (B_i + P_i) + sum_j W_j * S_ji
       = log posterior odds
 ```
 
-Retained action is prior need-odds and decomposes into two terms: the base-level `B_i = ln( Σ_j (now − t_j)^(−d·m_type) )` over the node's access-trace history (which owns power-law forgetting and use-driven reinforcement) plus the evidence prior `P_i` (encoding surprise, feedback / social reinforcement, peer trust), a decay-exempt evidence offset. Conductance is the likelihood-ratio contribution of a cue. Retrieval computes posterior need-odds. `salience` is the bounded projection of the sum, `s_i = logistic(B_i + P_i)`; `edge weight` is a bounded projection of `C_ij`.
+Retained action is prior need-odds and decomposes into two terms: the base-level `B_i = ln( Σ_j (now − t_j)^(−d_j) )` over the node's access-trace history, where each `d_j = m_type · ( c · e^{m_j} + α )` is computed from activation `m_j` at trace creation (which owns power-law forgetting and use-driven reinforcement, including the genuine spacing effect) plus the evidence prior `P_i` (encoding surprise, feedback / social reinforcement, peer trust), a decay-exempt evidence offset. Conductance is the likelihood-ratio contribution of a cue. Retrieval computes posterior need-odds. `salience` is the bounded projection of the sum, `s_i = logistic(B_i + P_i)`; `edge weight` is a bounded projection of `C_ij`.
 
 The resulting rule is strict: **do not set these magnitudes directly**. Graph state changes only through integrated interactions whose increments are justified by Bayesian/ACT-R meaning.
 
@@ -85,7 +85,9 @@ I_ij        = current(a_i, conductance_ij, edge_type_factor_ij)
 W_readout_i = accepted_i * a_i * phi_i            # illustrative sketch only
 dC_ij       = eta * flux_ij * (1 - C_ij)
 C_next      = clamp_log_odds(C_ij + dC_ij)
-B_i         = ln( sum_j (now - t_j)^(-d * m_type) )   # multi-trace base-level over access traces
+B_i         = ln( sum_j (now - t_j)^(-d_j) )          # multi-trace base-level over access traces; d_j stored with each trace
+d_j         = m_type * (c * e^m_j + alpha)            # per-trace decay computed once at trace creation
+m_j         = ln( sum_{k existing} (t_j - t_k)^(-d_k) )  # activation from prior traces at j's creation time
 P_next      = P_i + dP ; dP = eta_fb * (lambda - predicted_i)   # evidence prior, decay-exempt
 s_next      = logistic(B_i + P_next)
 ```

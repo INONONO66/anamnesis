@@ -74,7 +74,7 @@ da/dt = -L_rw * a + alpha * s(t)
 L_rw  = I - (1 - alpha) * P^T
 ```
 
-Dissipation is not a separate additive term: it is the state-proportional leak carried by the identity part of `-L_rw * a`. The fixed point `da/dt = 0` is exactly the discrete RWR solution `a* = alpha * (I - (1 - alpha) P^T)^{-1} * s`. The day-scale forgetting of node strength is owned by the multi-trace base level `B_i = ln( Σ_j (now − t_j)^(−d·m_type) )` (older traces age; see [dissipation.md](dissipation.md)), not by a scalar `decay(A, Δt)` shift; this is a distinct process and must not be folded into this dimensionless activation flow.
+Dissipation is not a separate additive term: it is the state-proportional leak carried by the identity part of `-L_rw * a`. The fixed point `da/dt = 0` is exactly the discrete RWR solution `a* = alpha * (I - (1 - alpha) P^T)^{-1} * s`. The day-scale forgetting of node strength is owned by the multi-trace base level `B_i = ln( Σ_j (now − t_j)^(−d_j) )` (older traces age, each at its own per-trace rate; see [dissipation.md](dissipation.md)), not by a scalar `decay(A, Δt)` shift; this is a distinct process and must not be folded into this dimensionless activation flow.
 
 But once query injection and dissipation exist, no conservation law applies. Use separate symbols for symmetric coupling Laplacian and directed transition matrix. The energy/Lyapunov reading is exact only under symmetric coupling (`C_ij = C_ji`); under directed RWR the true fixed point is the RWR stationary activation vector `a*`, and energy is an interpretive descent objective rather than a quantity the dynamics literally minimize. The stationary vector `a*` is primary; energy explains and stabilizes readout around it.
 

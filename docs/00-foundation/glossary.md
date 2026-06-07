@@ -7,7 +7,7 @@ This glossary defines the terms used across the Anamnesis technical specificatio
 | Term | Meaning |
 |---|---|
 | `retained_action A_i` | Persistent memory strength for site `i`; composite `A_i = B_i + P_i` of base-level activation and an evidence prior; log need-odds |
-| `base-level B_i` | Multi-trace ACT-R base-level activation over the node's access-trace history; owns forgetting and use-driven reinforcement; computed on demand from traces |
+| `base-level B_i` | Multi-trace ACT-R base-level activation over the node's access-trace history: `B_i = ln( Σ_j (now − t_j)^(−d_j) )` where each trace j stores (timestamp, per-trace decay rate `d_j`) computed at creation from current activation; owns forgetting and use-driven reinforcement; computed on demand from traces |
 | `evidence prior P_i` | Separate persistent prior holding encoding surprise, feedback / social reinforcement, and peer trust; a decay-exempt evidence offset |
 | `salience s_i` | Bounded public projection of the sum `B_i + P_i`; useful for ranking and packaging, not authoritative state |
 | `conductance C_ij` | Persistent associative strength from cue `j` to target `i`; log likelihood ratio |
@@ -24,7 +24,7 @@ total activation    = (B_i + P_i) + sum_j W_j * S_ji
                     = log posterior need-odds
 ```
 
-`A_i` decomposes into two terms: the base-level `B_i = ln( Σ_j (now − t_j)^(−d·m_type) )` over the node's access traces (which owns power-law forgetting and use-driven reinforcement) and the evidence prior `P_i` (encoding surprise, feedback, social reinforcement, peer trust). Dissipation acts on `B_i` only; `P_i` is a decay-exempt evidence offset.
+`A_i` decomposes into two terms: the base-level `B_i = ln( Σ_j (now − t_j)^(−d_j) )` over the node's access traces, where each trace j stores (timestamp, per-trace decay rate `d_j`) computed from activation `m_j` at creation via `d_j = m_type · ( c · e^{m_j} + α )`, owning power-law forgetting and use-driven reinforcement; and the evidence prior `P_i` (encoding surprise, feedback, social reinforcement, peer trust). Dissipation acts on `B_i` only; `P_i` is a decay-exempt evidence offset.
 
 ## Core Terms
 
@@ -72,7 +72,12 @@ total activation    = (B_i + P_i) + sum_j W_j * S_ji
 | `lambda` | target reward or asymptote in Rescorla-Wagner-style updates |
 | `Sigma` | uncertainty / precision structure for surprise or stress calculations |
 | `Z_i` | impedance of site `i` |
-| `B_i` | multi-trace ACT-R base-level activation of site `i`; `B_i = ln( Σ_j (now − t_j)^(−d·m_type) )` over the node's access traces; owns forgetting and use-driven reinforcement |
+| `B_i` | multi-trace ACT-R base-level activation of site `i`; `B_i = ln( Σ_j (now − t_j)^(−d_j) )` where `d_j = m_type · ( c · e^{m_j} + α )`; owns forgetting and use-driven reinforcement |
+| `d_j` | per-trace decay rate for trace `j`, computed once at creation from current activation `m_j`, then stored immutably with the trace |
+| `m_j` | activation from the existing traces evaluated at the moment trace `j` is created; `m_j = ln( Σ_{k existing} (t_j − t_k)^(−d_k) )` (empty history ⇒ `m_j = −∞`) |
+| `m_type` | per-`node_type` decay multiplier; outer factor on `d_j` (a type with `m_type = 0` is permanent) |
+| `α` | decay intercept `DECAY_INTERCEPT`; floor decay rate when activation is zero |
+| `c` | decay scale `DECAY_SCALE`; sensitivity of the decay rate to current activation `m_j` |
 | `P_i` | evidence prior for site `i`; encoding surprise, feedback / social reinforcement, and peer trust; decay-exempt (does not undergo base-level use-driven decay) |
 | `W_j` | Attentional weight of cue `j` in the activation sum |
 | `S_ji` | Associative strength from cue `j` to target `i`; the log-LR contribution, equal to `C_ij` |

@@ -29,13 +29,21 @@ A bounded interval must be well-formed: `valid_from < valid_until`. Because the 
 
 Access is a committed interaction. It is not updated by read-only retrieval. The caller must commit that a site was actually used before `accessed_at` and the access history move.
 
-`access_history` is a bounded 32-trace window — a creation trace plus each committed access — and it is the PERSISTENT substrate of base-level activation:
+`access_history` is a bounded 32-trace window — a creation trace plus each committed access — and it is the PERSISTENT substrate of base-level activation. EACH trace stores a pair `(timestamp t_j, per-trace decay rate d_j)`:
 
 ```text
-B_i = ln( sum_j (now - t_j)^(-d*m_type) )
+B_i = ln( sum_j (now - t_j)^(-d_j) )
+where d_j is the per-trace decay rate stored alongside t_j in the access history.
 ```
 
-The `t_j` are the traces in this window; `m_type` is the `node_type` policy multiplier on the single decay prior `d`. `B_i` is computed on demand from the trace history; it is NOT maintained by incremental scalar decay. Because the sum ages every prior trace to `now` before adding any new trace, the multi-trace form reproduces power-law forgetting AND the testing and spacing effects.
+The `t_j` are the timestamps in this window, each paired with its own decay rate `d_j` (activation-dependent, Pavlik & Anderson 2005). `d_j` is computed ONCE when the trace is created, from the activation `m_j` of the traces that already existed at that moment:
+
+```text
+m_j = ln( sum_{k existing} (t_j - t_k)^(-d_k) )   // activation from prior traces at j's creation; empty history => m_j = -inf
+d_j = m_type * ( c * e^{m_j} + alpha )            // c = DECAY_SCALE, alpha = DECAY_INTERCEPT (floor)
+```
+
+`m_type` is the `node_type` policy multiplier; it is the OUTER multiplier on the per-trace formula (so `m_type = 0` types yield `d_j = 0` and never decay). The two calibrated priors `alpha` (floor decay) and `c` (activation sensitivity) replace the former single global decay exponent. `B_i` is computed on demand from the trace history; it is NOT maintained by incremental scalar decay. Because the sum ages every prior trace to `now` before adding any new trace, the multi-trace form reproduces power-law forgetting AND the spacing effect genuinely: a massed re-presentation lands at high activation, so its `d_j` is high and it decays fast, while a spaced re-presentation lands at low activation, so its `d_j ≈ m_type·alpha` is low and durable. The testing effect (test-vs-restudy at equal timing) is NOT cleanly reproduced by activation-dependent decay alone and is not claimed; spaced practice wins only at sufficiently delayed tests (the documented retention-interval crossover).
 
 The persistent access-history window drives:
 
@@ -52,8 +60,9 @@ The evidence prior `P_i` is a separate persistent prior (encoding surprise, feed
 Decay-first ordering is INTRINSIC. Appending a now-stamped trace into a current-time-aged sum means `B_i` always ages prior traces to `now` before adding the new one — so there is no separate decay-then-reinforce scalar step and no `reinforce(A, work)` function:
 
 ```text
-B_i = ln( sum_j (now - t_j)^(-d*m_type) )   // existing t_j already aged to now
-        append a fresh trace t = now         // contributes (now - now + epsilon)^... 
+B_i = ln( sum_j (now - t_j)^(-d_j) )         // existing t_j already aged to now; each d_j is static from creation
+        compute d_new from m_now             // activation of the existing traces, m_now = ln( sum_j (now - t_j)^(-d_j) )
+        append a fresh trace (now, d_new)     // contributes (now - now + epsilon)^(-d_new)
 ```
 
 This intrinsically prevents stale sites from receiving a full reinforcement boost without paying accumulated leakage: the old traces are evaluated at the current `now`, so their decayed contribution is already reflected before the new trace is added.
@@ -71,6 +80,6 @@ Core formulas use days for long-horizon memory decay unless a document explicitl
 - Query-time activation is fast transient state; base-level aging is slow between-query state.
 - Record time, fact time, and access time remain distinct.
 - Access timestamps and the access-history window update only through committed interactions.
-- The access-history window (bounded to 32 traces) is the persistent substrate of `B_i`; `B_i` is computed from it, never maintained as an incremental scalar.
+- The access-history window (bounded to 32 traces) is the persistent substrate of `B_i`; each trace stores `(timestamp, per-trace decay rate d_j)`, with `d_j` fixed at creation; `B_i` is computed from it, never maintained as an incremental scalar.
 - Time filtering applies before readout packaging.
 - Missing validity bounds are explicit unbounded intervals, not unknown errors.

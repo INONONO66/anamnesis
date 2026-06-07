@@ -17,7 +17,7 @@ Store authoritative reservoirs separately from bounded projections:
 | `retained_action A_i = B_i + P_i` | `salience s_i` |
 | `conductance C_ij` | `edge weight w_ij` |
 
-The node reservoir is no longer a single scalar. It is the node's access-trace history (a bounded 32-trace window: a creation trace plus each committed access) — from which the base-level `B_i = ln( Σ_j (now − t_j)^(−d·m_type) )` is computed on demand — together with the persistent evidence prior `P_i` (encoding surprise, feedback / social reinforcement, peer trust). `B_i` owns forgetting and use-driven reinforcement; `P_i` is a decay-exempt evidence offset.
+The node reservoir is no longer a single scalar. It is the node's access-trace history (a bounded 32-trace window: a creation trace plus each committed access) — from which the base-level `B_i = ln( Σ_j (now − t_j)^(−d_j) )` (per-trace activation-dependent decay) is computed on demand — together with the persistent evidence prior `P_i` (encoding surprise, feedback / social reinforcement, peer trust). `B_i` owns forgetting and use-driven reinforcement; `P_i` is a decay-exempt evidence offset.
 
 Reservoirs are changed only by interactions. Projections are derived views used by APIs, ranking, packaging, and storage indexes.
 

@@ -14,7 +14,7 @@ A node is a memory site. It stores identity, source content, projections, proven
 | `content` | L2 full preserved content |
 | `node_type` | Knowledge taxonomy value |
 | `retained_action` | Persistent memory strength `A_i = B_i + P_i`; the base-level term `B_i` is computed on demand from `access_history` (not stored), the evidence prior `P_i` is stored |
-| `access_history` | Bounded 32-trace window (creation trace plus committed accesses); the persistent substrate from which `B_i` is computed |
+| `access_history` | Bounded 32-trace window (creation trace plus committed accesses); each trace is a pair `(timestamp, per-trace decay rate d_j)`, with `d_j` computed at creation from current activation and immutable thereafter; the persistent substrate from which `B_i` is computed |
 | `evidence_prior` | Stored evidence prior `P_i` (encoding surprise, feedback / social reinforcement, peer trust); a decay-exempt evidence offset |
 | `salience` | Bounded logistic projection of the sum, `s_i = logistic(B_i + P_i)` |
 | `embedding` | Optional semantic vector |
@@ -46,7 +46,7 @@ Every site carries origin. Provenance is not optional.
 | Memory | `Episodic`, `Event` | Raw or time-bound fragments |
 | Custom | `Custom(String)` | Consumer-defined type |
 
-Type affects decay prior, packaging bucket, readout treatment, and conductance priors. The decay prior is the `node_type` policy multiplier `m_type` on the single base-level exponent `d` (it scales `d·m_type` in `B_i`), not an independent rate. It must not be replaced by free-form strings at the engine boundary except through `Custom`.
+Type affects decay prior, packaging bucket, readout treatment, and conductance priors. The decay prior is the `node_type` policy multiplier `m_type` applied during per-trace `d_j` computation: it is the outer multiplier in `d_j = m_type · ( c · e^{m_j} + alpha )`, not an independent rate. A type with `m_type = 0` (e.g. `IdentityCore`, `Hypothesis`, `Evidence`, `DebugSession`) yields `d_j = 0` for every trace and never decays. It must not be replaced by free-form strings at the engine boundary except through `Custom`.
 
 ## Edges
 
