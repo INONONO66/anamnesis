@@ -75,12 +75,7 @@ fn bench_link(c: &mut Criterion) {
                 panic!("expected Created");
             };
             engine
-                .link(
-                    black_box(ids1[0]),
-                    black_box(ids2[0]),
-                    EdgeType::Semantic,
-                    0.8,
-                )
+                .link(black_box(ids1[0]), black_box(ids2[0]), EdgeType::Semantic)
                 .unwrap()
         })
     });
@@ -104,7 +99,7 @@ fn bench_link_chain(c: &mut Criterion) {
                         panic!("expected Created");
                     };
                     engine
-                        .link(prev[0], curr_ids[0], EdgeType::Temporal, 0.7)
+                        .link(prev[0], curr_ids[0], EdgeType::Temporal)
                         .unwrap();
                     prev = curr_ids;
                 }

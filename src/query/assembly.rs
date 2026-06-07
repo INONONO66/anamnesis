@@ -1,20 +1,155 @@
 //! ContextPackage assembly for the Anamnesis query pipeline.
 //!
 //! Partitions scored nodes by type (identity/knowledge/memories), applies
-//! L0/L1/L2 resolution based on token budget, and computes agent tension.
+//! L0/L1/L2 resolution based on token budget, and surfaces contradiction tensions.
 //!
 //! All functions are pure: no side effects, no storage access.
 //!
-//! ## Equation
-//! (14) T_agent = sum_{k in Identity(a)} rho_k * sum_{Contradicts(k)} w_neg * X_j
+//! ## Frustration (frustration.md, ADR-0006)
+//!
+//! Contradictions are surfaced as query-local stress, never suppressed or deleted.
+//! Each active `Contradicts` pair becomes a [`Tension`] carrying the multiplicative
+//! gate product `sigma_ij = contradiction_weight * min(a_i, a_j) * scope_overlap *
+//! temporal_overlap`. The per-pair stress and gates are precomputed by the caller
+//! (which has storage access for scopes/validity) and passed in as
+//! [`ContradictionPair`] values; assembly does not re-judge the gates.
 
 use std::collections::{HashMap, HashSet};
 
 use crate::graph::node::Origin;
 use crate::graph::scope::{ScopePath, ScopeRelation};
 use crate::graph::{KnowledgeType, NodeId};
-use crate::mechanics::repulsion::rigidity;
 use crate::query::types::{ContextPackage, Fragment, Query, Tension, TokenBudget};
+
+/// A surfaced contradiction pair with precomputed frustration stress.
+///
+/// The endpoints are *active* (both pass `min_activation`) and the multiplicative
+/// gates (`scope_overlap`, `temporal_overlap`) have already been evaluated by the
+/// caller. `stress` is the gate product `sigma_ij`; a pair is only built when all
+/// gates are open, so `stress > 0`. The conflict is surfaced, never suppressed:
+/// neither endpoint's activation is reduced (ADR-0006).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ContradictionPair {
+    /// `primary` endpoint.
+    pub node_a: NodeId,
+    /// `conflicting` endpoint.
+    pub node_b: NodeId,
+    /// `Contradicts` edge weight (the `contradiction_weight` gate factor).
+    pub edge_weight: f64,
+    /// Query-local stress `sigma_ij`.
+    pub stress: f64,
+    /// Scope-overlap gate contribution.
+    pub scope_overlap: f64,
+    /// Temporal-overlap gate contribution.
+    pub temporal_overlap: f64,
+}
+
+/// Surfaces frustration contradiction pairs and the per-node attached stress from
+/// the settled activation response (frustration.md, ADR-0006).
+///
+/// A `Contradicts` edge between two *active* sites (both `>= min_activation`) becomes
+/// a [`ContradictionPair`] whose stress is the multiplicative gate product
+/// `sigma_ij = contradiction_weight * min(a_i, a_j) * scope_overlap *
+/// temporal_overlap`. A pair is surfaced only when every gate is open (`stress > 0`):
+/// inactive endpoints, disjoint scopes, or facts not valid together yield no stress,
+/// so private contradictions cannot leak and time-filtered queries return only stress
+/// valid at that time. Read-only: activations are read, never modified.
+///
+/// Returns `(pairs sorted by (a, b), per-node summed stress)`.
+pub fn collect_contradiction_pairs<S: crate::storage::StorageAdapter>(
+    storage: &S,
+    activations: &HashMap<NodeId, f64>,
+    min_activation: f64,
+    now: crate::graph::Timestamp,
+) -> (Vec<ContradictionPair>, HashMap<NodeId, f64>) {
+    use crate::graph::EdgeType;
+    use crate::mechanics::{frustration, priors};
+    use crate::query::activation::edge_valid_at;
+
+    let mut pairs: Vec<ContradictionPair> = Vec::new();
+    let mut node_stress: HashMap<NodeId, f64> = HashMap::new();
+    let mut seen: HashSet<(u64, u64)> = HashSet::new();
+
+    let mut active_ids: Vec<NodeId> = activations.keys().copied().collect();
+    active_ids.sort_by_key(|id| id.0);
+
+    for &node_id in &active_ids {
+        if activations.get(&node_id).copied().unwrap_or(0.0) < min_activation {
+            continue;
+        }
+        let mut edge_ids: Vec<_> = storage.edges_from(node_id).to_vec();
+        edge_ids.extend(storage.edges_to(node_id).iter().copied());
+        edge_ids.sort_by_key(|e| e.0);
+        edge_ids.dedup();
+
+        for edge_id in edge_ids {
+            let Ok(edge) = storage.get_edge(edge_id) else {
+                continue;
+            };
+            if !matches!(edge.edge_type, EdgeType::Contradicts) || !edge_valid_at(edge, now) {
+                continue;
+            }
+            let (primary, conflicting) = if edge.source.0 <= edge.target.0 {
+                (edge.source, edge.target)
+            } else {
+                (edge.target, edge.source)
+            };
+            if !seen.insert((primary.0, conflicting.0)) {
+                continue;
+            }
+
+            let a_primary = activations.get(&primary).copied().unwrap_or(0.0);
+            let a_conflicting = activations.get(&conflicting).copied().unwrap_or(0.0);
+            if a_primary < min_activation || a_conflicting < min_activation {
+                continue;
+            }
+
+            let (Ok(np), Ok(nc)) = (storage.get_node(primary), storage.get_node(conflicting))
+            else {
+                continue;
+            };
+
+            let scope_gate = frustration::scope_overlap(&np.origin.scope, &nc.origin.scope);
+            let temporal_gate = frustration::temporal_overlap(
+                np.valid_from,
+                np.valid_until,
+                nc.valid_from,
+                nc.valid_until,
+                now,
+            );
+            let contradiction_weight = if edge.weight.is_finite() && edge.weight > 0.0 {
+                edge.weight
+            } else {
+                priors::CONTRADICTION_WEIGHT_DEFAULT
+            };
+
+            let sigma = frustration::stress(
+                contradiction_weight,
+                a_primary,
+                a_conflicting,
+                scope_gate,
+                temporal_gate,
+            );
+            if sigma <= 0.0 {
+                continue;
+            }
+
+            pairs.push(ContradictionPair {
+                node_a: primary,
+                node_b: conflicting,
+                edge_weight: edge.weight,
+                stress: sigma,
+                scope_overlap: scope_gate,
+                temporal_overlap: temporal_gate,
+            });
+            *node_stress.entry(primary).or_insert(0.0) += sigma;
+            *node_stress.entry(conflicting).or_insert(0.0) += sigma;
+        }
+    }
+
+    pairs.sort_by_key(|p| (p.node_a.0, p.node_b.0));
+    (pairs, node_stress)
+}
 
 /// Determines the scope of a node relative to the query context.
 pub fn determine_scope(query_scope: &ScopePath, node_scope: &ScopePath) -> ScopeRelation {
@@ -113,40 +248,26 @@ pub struct ScoredNode {
     pub origin: Origin,
 }
 
-/// Computes the agent tension score.
+/// Computes the overall agent-tension score `T_agent`.
 ///
-/// Equation (14): T_agent = sum_{k in Identity(a)} rho_k * sum_{Contradicts(k)} w_neg * X_j
-///
-/// Only counts contradictions where the identity node is actually an endpoint
-/// (source or target). The "other" endpoint's activation is used as X_j.
+/// `T_agent` is the total query-local frustration stress attached to the agent's
+/// active identity, clamped to `[0, 1]`: the sum of `sigma_ij` over surfaced
+/// contradiction pairs that have an identity node as an endpoint. This replaces the
+/// old rigidity-weighted repulsion sum — stress already carries the multiplicative
+/// gates (`contradiction_weight * min(a) * scope * temporal`), so no separate
+/// rigidity term is applied (ADR-0006: contradictions are surfaced, not suppressed).
 pub fn compute_agent_tension(
     identity_activations: &[(NodeId, KnowledgeType, f64)],
-    contradicts_edges: &[(NodeId, NodeId, f64)],
-    activations: &HashMap<NodeId, f64>,
+    contradiction_pairs: &[ContradictionPair],
 ) -> f64 {
+    let identity_ids: HashSet<NodeId> = identity_activations.iter().map(|(id, _, _)| *id).collect();
+
     let mut tension = 0.0;
-
-    for (identity_id, kt, _identity_activation) in identity_activations {
-        let rho = rigidity(kt);
-
-        for (source, target, w_neg) in contradicts_edges {
-            let other = if source == identity_id {
-                Some(target)
-            } else if target == identity_id {
-                Some(source)
-            } else {
-                None
-            };
-
-            if let Some(other_id) = other {
-                let other_activation = activations.get(other_id).copied().unwrap_or(0.0);
-                if other_activation > 0.0 {
-                    tension += rho * w_neg * other_activation;
-                }
-            }
+    for pair in contradiction_pairs {
+        if identity_ids.contains(&pair.node_a) || identity_ids.contains(&pair.node_b) {
+            tension += pair.stress.max(0.0);
         }
     }
-
     tension.clamp(0.0, 1.0)
 }
 
@@ -155,13 +276,12 @@ pub fn compute_agent_tension(
 /// 1. Sorts nodes by relevance (descending).
 /// 2. Assigns resolution (L0/L1/L2) by relevance and remaining token budget.
 /// 3. Partitions into identity / knowledge / memories by [`KnowledgeType`].
-/// 4. Collects [`Tension`] entries for activated contradiction pairs.
-/// 5. Computes `agent_tension` via equation (14).
+/// 4. Surfaces [`Tension`] entries from the precomputed contradiction pairs.
+/// 5. Computes `agent_tension` as the identity-attached stress sum.
 pub fn assemble_context_package(
     mut scored_nodes: Vec<ScoredNode>,
     identity_activations: &[(NodeId, KnowledgeType, f64)],
-    contradicts_edges: &[(NodeId, NodeId, f64)],
-    activations: &HashMap<NodeId, f64>,
+    contradiction_pairs: &[ContradictionPair],
     token_budget: usize,
     chars_per_token: usize,
     query_scope: &ScopePath,
@@ -249,21 +369,23 @@ pub fn assemble_context_package(
         }
     }
 
-    // Build tensions from Contradicts edges between activated nodes
-    for (source, target, w) in contradicts_edges {
-        let source_act = activations.get(source).copied().unwrap_or(0.0);
-        let target_act = activations.get(target).copied().unwrap_or(0.0);
-        if source_act > 0.0 && target_act > 0.0 {
-            tensions.push(Tension {
-                node_a: *source,
-                node_b: *target,
-                edge_weight: *w,
-                description: None,
-            });
-        }
+    // Surface tensions from the precomputed contradiction pairs. Each pair already
+    // passed every gate (both endpoints active, scopes overlap, valid together), so
+    // its stress is positive. The conflict is surfaced, not suppressed.
+    for pair in contradiction_pairs {
+        tensions.push(Tension {
+            node_a: pair.node_a,
+            node_b: pair.node_b,
+            edge_weight: pair.edge_weight,
+            stress: pair.stress,
+            scope_overlap: pair.scope_overlap,
+            temporal_overlap: pair.temporal_overlap,
+            evidence_sources: vec![pair.node_a, pair.node_b],
+            description: None,
+        });
     }
 
-    let agent_tension = compute_agent_tension(identity_activations, contradicts_edges, activations);
+    let agent_tension = compute_agent_tension(identity_activations, contradiction_pairs);
 
     ContextPackage {
         identity: identity_frags,
@@ -272,6 +394,11 @@ pub fn assemble_context_package(
         tensions,
         token_usage: budget,
         agent_tension,
+        // The commit trace and committed ids are populated by the caller that holds
+        // the activation response and storage (`Engine::assemble_readout_package`);
+        // assembly is pure and storage-free, so it leaves them empty here.
+        commit_trace: crate::query::types::CommitTrace::default(),
+        committed_ids: Vec::new(),
     }
 }
 
@@ -319,7 +446,7 @@ pub fn assemble_context_package_for_mode(
     scored_nodes: Vec<ScoredNode>,
     query: &Query,
     identity_activations: &[(NodeId, KnowledgeType, f64)],
-    contradicts_edges: &[(NodeId, NodeId, f64)],
+    contradiction_pairs: &[ContradictionPair],
     activations: &HashMap<NodeId, f64>,
     token_budget: usize,
     chars_per_token: usize,
@@ -334,7 +461,7 @@ pub fn assemble_context_package_for_mode(
                 query,
                 &mode_context.adjacent_ids,
                 activations,
-                contradicts_edges,
+                contradiction_pairs,
             );
             (
                 n.node_id,
@@ -350,8 +477,7 @@ pub fn assemble_context_package_for_mode(
     let mut package = assemble_context_package(
         scored_nodes,
         identity_activations,
-        contradicts_edges,
-        activations,
+        contradiction_pairs,
         token_budget,
         chars_per_token,
         query_scope,
@@ -400,15 +526,15 @@ fn target_resolution_for_node(
     query: &Query,
     adjacent_ids: &HashSet<NodeId>,
     activations: &HashMap<NodeId, f64>,
-    contradicts_edges: &[(NodeId, NodeId, f64)],
+    contradiction_pairs: &[ContradictionPair],
 ) -> Resolution {
     let is_adjacent = adjacent_ids.contains(&node.node_id);
     let is_identity = is_identity_type(&node.node_type);
     let is_memory = is_memory_type(&node.node_type);
 
-    let in_tension = contradicts_edges
+    let in_tension = contradiction_pairs
         .iter()
-        .any(|(a, b, _)| *a == node.node_id || *b == node.node_id);
+        .any(|p| p.node_a == node.node_id || p.node_b == node.node_id);
 
     let activation = activations.get(&node.node_id).copied().unwrap_or(0.0);
     let elevated_memory = is_memory
@@ -658,6 +784,17 @@ mod tests {
         }
     }
 
+    fn pair(a: u64, b: u64, stress: f64) -> ContradictionPair {
+        ContradictionPair {
+            node_a: NodeId(a),
+            node_b: NodeId(b),
+            edge_weight: 0.9,
+            stress,
+            scope_overlap: 1.0,
+            temporal_overlap: 1.0,
+        }
+    }
+
     #[test]
     fn identity_nodes_go_to_identity_partition() {
         let nodes = vec![
@@ -668,7 +805,6 @@ mod tests {
             nodes,
             &[],
             &[],
-            &HashMap::new(),
             10000,
             4,
             &ScopePath::new("proj-a").expect("valid scope"),
@@ -684,15 +820,7 @@ mod tests {
             make_node(0, KnowledgeType::Episodic, "session note", 0.7),
             make_node(1, KnowledgeType::Event, "deployment event", 0.6),
         ];
-        let pkg = assemble_context_package(
-            nodes,
-            &[],
-            &[],
-            &HashMap::new(),
-            10000,
-            4,
-            &ScopePath::universal(),
-        );
+        let pkg = assemble_context_package(nodes, &[], &[], 10000, 4, &ScopePath::universal());
         assert_eq!(pkg.memories.len(), 2);
         assert_eq!(pkg.identity.len(), 0);
         assert_eq!(pkg.knowledge.len(), 0);
@@ -705,15 +833,7 @@ mod tests {
             make_node(1, KnowledgeType::Semantic, &"b".repeat(100), 0.8),
             make_node(2, KnowledgeType::Semantic, &"c".repeat(100), 0.7),
         ];
-        let pkg = assemble_context_package(
-            nodes,
-            &[],
-            &[],
-            &HashMap::new(),
-            10,
-            4,
-            &ScopePath::universal(),
-        );
+        let pkg = assemble_context_package(nodes, &[], &[], 10, 4, &ScopePath::universal());
         assert!(
             pkg.token_usage.used <= 10 + 1,
             "used {} tokens, budget was 10",
@@ -727,15 +847,7 @@ mod tests {
         node.summary = Some("summary".to_string());
         node.content = "c".to_string();
 
-        let pkg = assemble_context_package(
-            vec![node],
-            &[],
-            &[],
-            &HashMap::new(),
-            2,
-            1,
-            &ScopePath::universal(),
-        );
+        let pkg = assemble_context_package(vec![node], &[], &[], 2, 1, &ScopePath::universal());
 
         assert_eq!(pkg.memories.len(), 1);
         assert_eq!(pkg.memories[0].summary, None);
@@ -750,15 +862,7 @@ mod tests {
         node.summary = None;
         node.content = "cc".to_string();
 
-        let pkg = assemble_context_package(
-            vec![node],
-            &[],
-            &[],
-            &HashMap::new(),
-            3,
-            1,
-            &ScopePath::universal(),
-        );
+        let pkg = assemble_context_package(vec![node], &[], &[], 3, 1, &ScopePath::universal());
 
         assert_eq!(pkg.memories.len(), 1);
         assert_eq!(pkg.memories[0].summary, None);
@@ -769,53 +873,47 @@ mod tests {
 
     #[test]
     fn tensions_populated_for_activated_contradictions() {
-        let a = NodeId(0);
-        let b = NodeId(1);
-        let mut activations = HashMap::new();
-        activations.insert(a, 0.8);
-        activations.insert(b, 0.6);
-
-        let contradicts = vec![(a, b, 0.9)];
-        let pkg = assemble_context_package(
-            vec![],
-            &[],
-            &contradicts,
-            &activations,
-            10000,
-            4,
-            &ScopePath::universal(),
-        );
+        // Pairs are surfaced with their precomputed stress and gates.
+        let contradicts = vec![pair(0, 1, 0.48)];
+        let pkg =
+            assemble_context_package(vec![], &[], &contradicts, 10000, 4, &ScopePath::universal());
         assert_eq!(pkg.tensions.len(), 1);
-        assert_eq!(pkg.tensions[0].node_a, a);
-        assert_eq!(pkg.tensions[0].node_b, b);
+        assert_eq!(pkg.tensions[0].node_a, NodeId(0));
+        assert_eq!(pkg.tensions[0].node_b, NodeId(1));
+        assert!((pkg.tensions[0].stress - 0.48).abs() < 1e-12);
+        assert_eq!(pkg.tensions[0].evidence_sources, vec![NodeId(0), NodeId(1)]);
+    }
+
+    #[test]
+    fn contradiction_pair_does_not_suppress_activation() {
+        // ADR-0006: surfacing a tension must not reduce either endpoint. The
+        // package carries the tension while both nodes remain in the output.
+        let nodes = vec![
+            make_node(0, KnowledgeType::Semantic, "claim A", 0.9),
+            make_node(1, KnowledgeType::Semantic, "claim B", 0.85),
+        ];
+        let contradicts = vec![pair(0, 1, 0.5)];
+        let pkg =
+            assemble_context_package(nodes, &[], &contradicts, 10000, 4, &ScopePath::universal());
+        assert_eq!(pkg.knowledge.len(), 2, "both contradicting claims survive");
+        assert_eq!(pkg.tensions.len(), 1);
+        assert!(pkg.tensions[0].stress > 0.0);
     }
 
     #[test]
     fn agent_tension_zero_without_contradictions() {
-        let pkg = assemble_context_package(
-            vec![],
-            &[],
-            &[],
-            &HashMap::new(),
-            10000,
-            4,
-            &ScopePath::universal(),
-        );
+        let pkg = assemble_context_package(vec![], &[], &[], 10000, 4, &ScopePath::universal());
         assert_eq!(pkg.agent_tension, 0.0);
     }
 
     #[test]
     fn agent_tension_nonzero_with_identity_contradiction() {
         let identity_id = NodeId(0);
-        let contradicted = NodeId(1);
-        let mut activations = HashMap::new();
-        activations.insert(identity_id, 0.9);
-        activations.insert(contradicted, 0.8);
 
         let identity_acts = vec![(identity_id, KnowledgeType::IdentityCore, 0.9)];
-        let contradicts = vec![(identity_id, contradicted, 0.8)];
+        let contradicts = vec![pair(0, 1, 0.72)];
 
-        let tension = compute_agent_tension(&identity_acts, &contradicts, &activations);
+        let tension = compute_agent_tension(&identity_acts, &contradicts);
         assert!(
             tension > 0.0,
             "tension should be > 0 with active contradiction"
@@ -825,17 +923,11 @@ mod tests {
     #[test]
     fn agent_tension_ignores_unrelated_contradictions() {
         let identity_id = NodeId(0);
-        let unrelated_a = NodeId(5);
-        let unrelated_b = NodeId(6);
-        let mut activations = HashMap::new();
-        activations.insert(identity_id, 0.9);
-        activations.insert(unrelated_a, 0.8);
-        activations.insert(unrelated_b, 0.7);
 
         let identity_acts = vec![(identity_id, KnowledgeType::IdentityCore, 0.9)];
-        let contradicts = vec![(unrelated_a, unrelated_b, 0.9)];
+        let contradicts = vec![pair(5, 6, 0.9)];
 
-        let tension = compute_agent_tension(&identity_acts, &contradicts, &activations);
+        let tension = compute_agent_tension(&identity_acts, &contradicts);
         assert_eq!(
             tension, 0.0,
             "unrelated contradictions should not affect identity tension"
@@ -849,15 +941,7 @@ mod tests {
             make_node(1, KnowledgeType::Semantic, "high relevance", 0.9),
             make_node(2, KnowledgeType::Semantic, "medium relevance", 0.6),
         ];
-        let pkg = assemble_context_package(
-            nodes,
-            &[],
-            &[],
-            &HashMap::new(),
-            10000,
-            4,
-            &ScopePath::universal(),
-        );
+        let pkg = assemble_context_package(nodes, &[], &[], 10000, 4, &ScopePath::universal());
         assert_eq!(pkg.knowledge.len(), 3);
         assert!(pkg.knowledge[0].relevance >= pkg.knowledge[1].relevance);
         assert!(pkg.knowledge[1].relevance >= pkg.knowledge[2].relevance);
@@ -868,7 +952,7 @@ mod tests {
         let query_scope = ScopePath::new("proj-a").expect("valid scope");
         let node_scope = ScopePath::new("proj-a").expect("valid scope");
         let scope = determine_scope(&query_scope, &node_scope);
-        assert_eq!(scope, ScopeRelation::Exact);
+        assert_eq!(scope, ScopeRelation::Equal);
     }
 
     #[test]
@@ -883,6 +967,6 @@ mod tests {
         let query_scope = ScopePath::new("proj-a").expect("valid scope");
         let node_scope = ScopePath::new("proj-b").expect("valid scope");
         let scope = determine_scope(&query_scope, &node_scope);
-        assert_eq!(scope, ScopeRelation::Unrelated);
+        assert_eq!(scope, ScopeRelation::Disjoint);
     }
 }

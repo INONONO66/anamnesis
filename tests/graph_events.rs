@@ -33,7 +33,6 @@ fn created_id(result: IngestResult) -> anamnesis::NodeId {
     match result {
         IngestResult::Created(ids) => ids[0],
         IngestResult::Reinforced { existing_id, .. } => existing_id,
-        IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
     }
 }
 
@@ -94,11 +93,13 @@ fn tick_emits_salience_changed_for_decayed_nodes() {
     engine.tick(Timestamp(86_400_000)).expect("tick succeeds");
 
     let events = engine.drain_events();
+    // The pre-decay salience is the surprise-gated projection (near, but not exactly,
+    // 1.0 per ADR-0009); decay only requires that the new salience is lower.
     assert!(events.iter().any(|event| {
         matches!(
             event,
             GraphEvent::SalienceChanged { node_id: changed_id, old, new }
-                if *changed_id == node_id && (*old - 1.0).abs() < f64::EPSILON && *new < *old
+                if *changed_id == node_id && *new < *old
         )
     }));
 }
@@ -148,7 +149,7 @@ fn drain_clears_buffer_and_preserves_chronological_order() {
             .expect("second ingest succeeds"),
     );
     engine
-        .link(first, second, EdgeType::Causal, 0.7)
+        .link(first, second, EdgeType::Causal)
         .expect("link succeeds");
 
     assert!(engine.has_events());
@@ -199,11 +200,22 @@ fn tick_emits_archive_and_tier_transition_events() {
             .ingest(observation("archives", None, Timestamp(0)))
             .expect("ingest succeeds"),
     );
+    // Salience is logistic(B_i + P_i) (ADR-0008). Seed the decay-exempt evidence
+    // prior P_i so that with the creation trace's B_i ≈ 0 the node starts just above
+    // the archive threshold; a year of base-level forgetting (B_i falls) then pushes
+    // the projection below it. P_i itself is decay-exempt, so the drop comes from
+    // B_i. (Poking the salience/retained_action cache directly would be overwritten
+    // by the recompute on the next tick.)
+    let just_above = anamnesis::mechanics::priors::salience_to_action(0.11);
     engine
         .graph_mut()
         .storage_mut()
-        .set_salience(node_id, 0.11)
-        .expect("salience can be adjusted for test setup");
+        .set_evidence_prior(node_id, just_above)
+        .expect("evidence prior can be adjusted for test setup");
+    // Refresh the cache so the pre-tick salience reflects the new prior.
+    engine
+        .touch(node_id, Timestamp(0))
+        .expect("touch refreshes cache");
     engine.drain_events();
 
     engine

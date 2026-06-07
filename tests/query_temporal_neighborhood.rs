@@ -58,7 +58,7 @@ fn neighborhood_returns_n_hop_subgraph() {
         IngestResult::Created(ids) => ids[0],
         _ => panic!(),
     };
-    e.link(a, b, EdgeType::Semantic, 1.0).unwrap();
+    e.link(a, b, EdgeType::Semantic).unwrap();
 
     let pkg = e
         .query(

@@ -127,18 +127,17 @@ impl FixtureBuilder {
         let id = match self.engine.ingest(observation).expect("ingest") {
             IngestResult::Created(node_ids) => *node_ids.first().expect("created node id"),
             IngestResult::Reinforced { existing_id, .. } => existing_id,
-            IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
         };
         let prior = self.ids.insert(key, id);
         assert!(prior.is_none(), "duplicate fixture key: {key}");
         id
     }
 
-    fn link(&mut self, from: &str, to: &str, edge_type: EdgeType, weight: f64) {
+    fn link(&mut self, from: &str, to: &str, edge_type: EdgeType) {
         let from_id = *self.ids.get(from).expect("link from key");
         let to_id = *self.ids.get(to).expect("link to key");
         self.engine
-            .link(from_id, to_id, edge_type, weight)
+            .link(from_id, to_id, edge_type)
             .expect("link should succeed");
     }
 }
@@ -587,67 +586,45 @@ fn seed_research_llm(b: &mut FixtureBuilder) {
 
 fn wire_edges(b: &mut FixtureBuilder) {
     // dev/rust edges
-    b.link(
-        "rust.result.type",
-        "rust.result.unwrap",
-        EdgeType::Reason,
-        0.9,
-    );
-    b.link(
-        "rust.result.type",
-        "rust.result.question",
-        EdgeType::Causal,
-        0.85,
-    );
+    b.link("rust.result.type", "rust.result.unwrap", EdgeType::Reason);
+    b.link("rust.result.type", "rust.result.question", EdgeType::Causal);
     b.link(
         "rust.tokio.runtime",
         "rust.tokio.async_std",
         EdgeType::Contradicts,
-        0.9,
     );
     b.link(
         "rust.tokio.runtime",
         "rust.tokio.async_std",
         EdgeType::Supersedes,
-        0.85,
     );
     b.link(
         "rust.types.ownership",
         "rust.types.borrow",
         EdgeType::Semantic,
-        0.95,
     );
     b.link(
         "rust.types.ownership",
         "rust.types.lifetime",
         EdgeType::Semantic,
-        0.85,
     );
 
     // travel/japan edges
-    b.link(
-        "japan.city.tokyo",
-        "japan.city.kyoto",
-        EdgeType::Semantic,
-        0.7,
-    );
+    b.link("japan.city.tokyo", "japan.city.kyoto", EdgeType::Semantic);
     b.link(
         "japan.transport.shinkansen",
         "japan.transport.jrpass.tourist",
         EdgeType::Causal,
-        0.8,
     );
     b.link(
         "japan.transport.jrpass.tourist",
         "japan.transport.jrpass.abroad",
         EdgeType::Reason,
-        0.85,
     );
     b.link(
         "japan.cuisine.ramen",
         "japan.cuisine.sushi",
         EdgeType::Semantic,
-        0.6,
     );
 
     // research/llm edges
@@ -655,25 +632,17 @@ fn wire_edges(b: &mut FixtureBuilder) {
         "llm.transformer.architecture",
         "llm.transformer.self",
         EdgeType::Causal,
-        0.85,
     );
     b.link(
         "llm.transformer.self",
         "llm.transformer.multihead",
         EdgeType::Semantic,
-        0.9,
     );
     b.link(
         "llm.positional.sinusoidal",
         "llm.positional.rope",
         EdgeType::Supersedes,
-        0.85,
     );
-    b.link("llm.align.rlhf", "llm.align.dpo", EdgeType::Reason, 0.8);
-    b.link(
-        "llm.open.llama2",
-        "llm.open.llama3",
-        EdgeType::Supersedes,
-        0.95,
-    );
+    b.link("llm.align.rlhf", "llm.align.dpo", EdgeType::Reason);
+    b.link("llm.open.llama2", "llm.open.llama3", EdgeType::Supersedes);
 }

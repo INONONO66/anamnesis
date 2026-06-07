@@ -78,7 +78,6 @@ fn peer_aliases_included_in_entity_tags() {
     let node_id = match result {
         anamnesis::IngestResult::Created(ids) => ids[0],
         anamnesis::IngestResult::Reinforced { existing_id, .. } => existing_id,
-        anamnesis::IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
     };
     let node = e.graph().get_node(node_id).unwrap();
     // Both "chulsoo" and "김철수" should be in entity_tags

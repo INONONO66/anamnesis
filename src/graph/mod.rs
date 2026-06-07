@@ -3,12 +3,16 @@
 pub mod edge;
 pub mod node;
 pub mod scope;
+pub mod temporal;
 pub mod types;
 
 pub use edge::Edge;
 pub use node::{Node, Origin};
 pub use scope::{ScopePath, ScopeRelation};
-pub use types::{EdgeId, EdgeType, KnowledgeType, MemoryTier, NodeId, PeerId, Timestamp};
+pub use temporal::valid_at;
+pub use types::{
+    AccessTrace, EdgeId, EdgeType, KnowledgeType, MemoryTier, NodeId, PeerId, Timestamp,
+};
 
 use crate::error::Error;
 use crate::storage::{SqliteStorage, StorageAdapter};
@@ -174,6 +178,8 @@ mod tests {
             valid_from: None,
             valid_until: None,
             salience: 0.8,
+            retained_action: 0.0,
+            evidence_prior: 0.0,
             access_count: 0,
             access_history: VecDeque::new(),
             tier: MemoryTier::Auto,
@@ -196,8 +202,10 @@ mod tests {
             target: NodeId(target),
             edge_type: EdgeType::Semantic,
             weight: 0.8,
+            conductance: 0.0,
             edge_source: crate::graph::edge::EdgeSource::Auto,
             created_at: Timestamp(0),
+            accessed_at: Timestamp(0),
             valid_from: None,
             valid_until: None,
             metadata: HashMap::new(),

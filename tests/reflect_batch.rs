@@ -79,8 +79,15 @@ fn shared_tag_across_two_agents_creates_entity_edge() {
     assert_eq!(edge.source, first);
     assert_eq!(edge.target, second);
     assert_eq!(edge.edge_type, EdgeType::Entity);
-    assert_eq!(edge.weight, 1.0);
-    assert!(edge.weight.is_finite() && edge.weight > 0.0);
+    // Weight is the bounded projection of the cold-start coupling conductance, never
+    // an authored literal (ADR-0002 / conductance.md): the two notes share the "auth"
+    // entity tag and scope, so the seeded coupling is positive and the weight must be
+    // exactly project_weight(conductance), finite and > 0.5.
+    assert_eq!(
+        edge.weight,
+        anamnesis::mechanics::priors::project_weight(edge.conductance)
+    );
+    assert!(edge.weight.is_finite() && edge.weight > 0.5);
 }
 
 #[test]

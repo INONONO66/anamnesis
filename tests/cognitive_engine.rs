@@ -116,13 +116,13 @@ fn full_cognitive_lifecycle() {
     );
 
     engine
-        .link(semantic1_id, semantic2_id, EdgeType::Semantic, 0.9)
+        .link(semantic1_id, semantic2_id, EdgeType::Semantic)
         .unwrap();
     engine
-        .link(decision_id, semantic1_id, EdgeType::Reason, 0.8)
+        .link(decision_id, semantic1_id, EdgeType::Reason)
         .unwrap();
     engine
-        .link(episodic_id, semantic1_id, EdgeType::ExtractedFrom, 0.7)
+        .link(episodic_id, semantic1_id, EdgeType::ExtractedFrom)
         .unwrap();
 
     let week_later = Timestamp(7 * 86_400_000);
@@ -205,19 +205,34 @@ fn decay_episodic_faster_than_semantic() {
     let episodic_id = episodic_ids[0];
     let semantic_id = semantic_ids[0];
 
+    let episodic_a0 = engine
+        .graph()
+        .get_node(episodic_id)
+        .unwrap()
+        .retained_action;
+
     let month_later = Timestamp(30 * 86_400_000);
     engine.tick(month_later).unwrap();
 
     let episodic_s = engine.graph().storage().get_salience(episodic_id).unwrap();
     let semantic_s = engine.graph().storage().get_salience(semantic_id).unwrap();
+    let episodic_a = engine
+        .graph()
+        .get_node(episodic_id)
+        .unwrap()
+        .retained_action;
 
+    // Relative ordering is the invariant: episodic (full decay multiplier) loses
+    // more retained action than semantic over the same interval.
     assert!(
         episodic_s < semantic_s,
-        "episodic ({episodic_s:.3}) should decay faster than semantic ({semantic_s:.3})"
+        "episodic ({episodic_s:.6}) should decay faster than semantic ({semantic_s:.6})"
     );
+    // Power-law dissipation strictly lowers the episodic reservoir after 30 days
+    // (no [0,1] floor on the reservoir path).
     assert!(
-        episodic_s < 0.5,
-        "episodic should have decayed significantly after 30 days: {episodic_s:.3}"
+        episodic_a < episodic_a0,
+        "episodic retained action should decay: {episodic_a} !< {episodic_a0}"
     );
 }
 
@@ -318,9 +333,7 @@ fn scope_same_project_preferred() {
     let same_id = same_ids[0];
     let other_id = other_ids[0];
 
-    engine
-        .link(same_id, other_id, EdgeType::Semantic, 0.8)
-        .unwrap();
+    engine.link(same_id, other_id, EdgeType::Semantic).unwrap();
 
     let q = Query::Associative {
         seed: same_id,
@@ -386,7 +399,7 @@ fn contradicts_creates_tension() {
     };
     let id1 = ids1[0];
     let id2 = ids2[0];
-    engine.link(id1, id2, EdgeType::Contradicts, 0.9).unwrap();
+    engine.link(id1, id2, EdgeType::Contradicts).unwrap();
 
     let q = Query::Associative {
         seed: id1,

@@ -48,7 +48,6 @@ fn ingest_at(engine: &mut Engine, name: &str, scope: &str, ts: Timestamp) -> Nod
     match engine.ingest(observation_at(name, scope, ts)).unwrap() {
         IngestResult::Created(ids) => ids[0],
         IngestResult::Reinforced { .. } => panic!("test fixture should always create a fresh node"),
-        IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
     }
 }
 
@@ -124,60 +123,75 @@ fn snapshot_preserves_scope_index() {
 }
 
 #[test]
-fn snapshot_preserves_decay_checkpoint() {
+fn snapshot_preserves_access_history_and_evidence_prior() {
+    // Under A_i = B_i + P_i the persistent node substrate is the access-trace
+    // history (drives B_i) plus the decay-exempt evidence prior P_i (ADR-0008).
+    // Snapshot/restore must preserve both, byte-for-byte, across a post-snapshot
+    // mutation that appends a trace and moves P_i.
     let mut engine = test_engine();
 
     let id_a = ingest_at(&mut engine, "alpha", DEFAULT_SCOPE, Timestamp(0));
     let id_b = ingest_at(&mut engine, "bravo", DEFAULT_SCOPE, Timestamp(0));
 
-    // Tick at +3d so decay_checkpoint advances away from accessed_at on both nodes.
-    engine.tick(Timestamp(3 * DAY_MS)).unwrap();
-
-    let pre_checkpoint_a = engine.graph().storage().get_decay_checkpoint(id_a).unwrap();
-    let pre_checkpoint_b = engine.graph().storage().get_decay_checkpoint(id_b).unwrap();
+    let pre_traces_a = engine
+        .graph()
+        .get_node(id_a)
+        .unwrap()
+        .access_history
+        .clone();
+    let pre_traces_b = engine
+        .graph()
+        .get_node(id_b)
+        .unwrap()
+        .access_history
+        .clone();
+    let pre_prior_a = engine.graph().storage().get_evidence_prior(id_a).unwrap();
     let pre_accessed_a = engine.graph().storage().get_accessed_at(id_a).unwrap();
-    let pre_accessed_b = engine.graph().storage().get_accessed_at(id_b).unwrap();
 
-    assert_eq!(pre_checkpoint_a, Timestamp(3 * DAY_MS));
-    assert_eq!(pre_checkpoint_b, Timestamp(3 * DAY_MS));
-    assert_eq!(pre_accessed_a, Timestamp(0));
-    assert_eq!(pre_accessed_b, Timestamp(0));
+    let snap = engine.snapshot("pre-mutation").unwrap();
 
-    let snap = engine.snapshot("post-tick").unwrap();
-
-    // Mutate: another tick + a touch on one node should diverge both checkpoints
-    // and accessed_at on id_a from the snapshot baseline.
-    engine.tick(Timestamp(7 * DAY_MS)).unwrap();
+    // Mutate: a touch on id_a appends a now-stamped trace and advances accessed_at;
+    // a direct evidence-prior write diverges P_i from the snapshot baseline.
     engine.touch(id_a, Timestamp(8 * DAY_MS)).unwrap();
+    engine
+        .graph_mut()
+        .storage_mut()
+        .set_evidence_prior(id_a, pre_prior_a + 5.0)
+        .unwrap();
 
     assert_ne!(
-        engine.graph().storage().get_decay_checkpoint(id_a).unwrap(),
-        pre_checkpoint_a,
-        "post-mutation checkpoint must differ from snapshot baseline"
+        engine.graph().get_node(id_a).unwrap().access_history,
+        pre_traces_a,
+        "post-mutation trace history must differ from snapshot baseline"
+    );
+    assert_ne!(
+        engine.graph().storage().get_evidence_prior(id_a).unwrap(),
+        pre_prior_a,
+        "post-mutation evidence prior must differ from snapshot baseline"
     );
 
     engine.restore(&snap).unwrap();
 
     let storage = engine.graph().storage();
     assert_eq!(
-        storage.get_decay_checkpoint(id_a).unwrap(),
-        pre_checkpoint_a,
-        "decay_checkpoint for id_a must be restored to pre-snapshot value"
+        storage.get_node(id_a).unwrap().access_history,
+        pre_traces_a,
+        "access_history for id_a must be restored to its pre-snapshot trace window"
     );
     assert_eq!(
-        storage.get_decay_checkpoint(id_b).unwrap(),
-        pre_checkpoint_b,
-        "decay_checkpoint for id_b must be restored to pre-snapshot value"
+        storage.get_node(id_b).unwrap().access_history,
+        pre_traces_b,
+        "access_history for the untouched node must also match pre-snapshot"
+    );
+    assert_eq!(
+        storage.get_evidence_prior(id_a).unwrap(),
+        pre_prior_a,
+        "evidence prior P_i for id_a must be restored to its pre-snapshot value"
     );
     assert_eq!(
         storage.get_accessed_at(id_a).unwrap(),
         pre_accessed_a,
         "accessed_at must follow the snapshot, not the post-snapshot touch"
-    );
-    assert_eq!(
-        storage.get_accessed_at(id_b).unwrap(),
-        pre_accessed_b,
-        "accessed_at for untouched node must also match pre-snapshot"
     );
 }
 
@@ -360,4 +374,122 @@ fn snapshot_preserves_hot_fields_atomically() {
     );
     assert_eq!(node.id, id, "Node identity must be preserved");
     assert_eq!(node.name, pre_node_name, "Node.name must be preserved");
+}
+
+#[test]
+fn snapshot_preserves_reservoirs() {
+    use anamnesis::graph::{Edge, EdgeType, MemoryTier, Node};
+    use anamnesis::mechanics::priors::{project_salience, project_weight};
+    use anamnesis::snapshot::SnapshotStore;
+    use anamnesis::storage::SqliteStorage;
+    use std::collections::{HashMap, VecDeque};
+
+    fn make_node(id: NodeId) -> Node {
+        Node {
+            id,
+            node_type: KnowledgeType::Semantic,
+            name: format!("node-{}", id.0),
+            summary: None,
+            content: "reservoir content".to_string(),
+            embedding: None,
+            created_at: Timestamp(1000),
+            updated_at: Timestamp(1000),
+            accessed_at: Timestamp(1000),
+            valid_from: None,
+            valid_until: None,
+            salience: 0.5,
+            retained_action: 0.0,
+            evidence_prior: 0.0,
+            access_count: 0,
+            access_history: VecDeque::new(),
+            tier: MemoryTier::Auto,
+            origin: Origin {
+                peer_id: anamnesis::graph::types::PeerId(0),
+                source_kind: anamnesis::peer::SourceKind::AgentObservation,
+                session_id: "s".to_string(),
+                scope: ScopePath::universal(),
+                confidence: 0.9,
+            },
+            entity_tags: Vec::new(),
+            metadata: HashMap::new(),
+        }
+    }
+
+    let mut storage = SqliteStorage::new().expect("storage init");
+
+    let n0 = storage.next_node_id();
+    let n1 = storage.next_node_id();
+    storage.set_node(make_node(n0)).expect("node 0");
+    storage.set_node(make_node(n1)).expect("node 1");
+
+    let e0 = storage.next_edge_id();
+    storage
+        .set_edge(Edge {
+            id: e0,
+            source: n0,
+            target: n1,
+            edge_type: EdgeType::Semantic,
+            weight: 0.5,
+            conductance: 0.0,
+            edge_source: anamnesis::graph::edge::EdgeSource::Auto,
+            created_at: Timestamp(1000),
+            accessed_at: Timestamp(1000),
+            valid_from: None,
+            valid_until: None,
+            metadata: HashMap::new(),
+        })
+        .expect("edge 0");
+
+    // Drive the reservoirs to non-trivial log-odds values via the commit-style
+    // setters; these recompute the bounded projections.
+    let ra = 1.75_f64;
+    let cond = -0.625_f64;
+    storage.set_retained_action(n0, ra).expect("set A_0");
+    storage.set_conductance(e0, cond).expect("set C_0");
+    storage
+        .set_edge_accessed_at(e0, Timestamp(4242))
+        .expect("set edge accessed_at");
+
+    // Reservoir is authoritative; the projection must track it.
+    assert_eq!(storage.get_retained_action(n0).unwrap(), ra);
+    assert!((storage.get_salience(n0).unwrap() - project_salience(ra)).abs() < 1e-12);
+    assert_eq!(storage.get_conductance(e0).unwrap(), cond);
+    assert!((storage.get_edge(e0).unwrap().weight - project_weight(cond)).abs() < 1e-12);
+
+    // Snapshot -> mutate -> restore -> identical.
+    let mut store: SnapshotStore<SqliteStorage> = SnapshotStore::new();
+    let snap = store.take("reservoir-baseline", &storage, Timestamp(0));
+
+    storage.set_retained_action(n0, -3.0).expect("mutate A_0");
+    storage.set_conductance(e0, 2.0).expect("mutate C_0");
+    storage
+        .set_edge_accessed_at(e0, Timestamp(9999))
+        .expect("mutate edge accessed_at");
+    assert_ne!(storage.get_retained_action(n0).unwrap(), ra);
+
+    let restored = store.restore(&snap).expect("restore");
+
+    assert_eq!(
+        restored.get_retained_action(n0).unwrap(),
+        ra,
+        "retained_action reservoir must round-trip through snapshot"
+    );
+    assert!(
+        (restored.get_salience(n0).unwrap() - project_salience(ra)).abs() < 1e-12,
+        "salience projection must round-trip consistently with the reservoir"
+    );
+    assert_eq!(
+        restored.get_conductance(e0).unwrap(),
+        cond,
+        "conductance reservoir must round-trip through snapshot"
+    );
+    assert!(
+        (restored.get_edge(e0).unwrap().weight - project_weight(cond)).abs() < 1e-12,
+        "edge weight projection must round-trip consistently with the reservoir"
+    );
+    assert_eq!(
+        restored.get_edge_accessed_at(e0).unwrap(),
+        Timestamp(4242),
+        "edge accessed_at must round-trip through snapshot"
+    );
 }

@@ -55,7 +55,14 @@ fn start_debug_creates_debug_session_node_with_metadata() {
     assert_eq!(node.content, "Parser returns stale errors");
     assert_eq!(node.created_at, Timestamp(42));
     assert_eq!(node.updated_at, Timestamp(42));
-    assert_eq!(node.salience, 1.0);
+    // Salience is the bounded projection of the retained-action reservoir, not a
+    // flat literal (ADR-0002): a fresh debug-session site enters at the flat-prior
+    // ceiling project_salience(INITIAL_RETAINED_ACTION) ≈ 0.999999.
+    let expected_salience = anamnesis::mechanics::priors::project_salience(
+        anamnesis::mechanics::priors::INITIAL_RETAINED_ACTION,
+    );
+    assert_eq!(node.salience, expected_salience);
+    assert!(node.salience > 0.999);
     assert_eq!(
         node.metadata.get("debug_kind").map(String::as_str),
         Some("session")

@@ -64,7 +64,7 @@ fn observer_only_fragments_returned() {
         make_observation("agent-2 knows auth", "agent-2", &["auth"], ts, &scope),
     );
     engine
-        .link(a1_node, a2_node, EdgeType::Semantic, 0.8)
+        .link(a1_node, a2_node, EdgeType::Semantic)
         .expect("link");
 
     let perspective = PerspectiveKey {
@@ -141,7 +141,7 @@ fn observed_ref_agent_filters_correctly() {
     );
     // agent-1 links to agent-2's node (has observed it)
     engine
-        .link(a1_node, a2_node, EdgeType::Semantic, 0.9)
+        .link(a1_node, a2_node, EdgeType::Semantic)
         .expect("link");
 
     // Also add agent-1 node with no connection to agent-2
@@ -192,7 +192,7 @@ fn observed_ref_node_filters_correctly() {
         make_observation("no connection", "agent-1", &["isolated"], ts, &scope),
     );
     engine
-        .link(connected, target, EdgeType::Semantic, 0.8)
+        .link(connected, target, EdgeType::Semantic)
         .expect("link");
 
     let perspective = PerspectiveKey {
@@ -293,7 +293,7 @@ fn non_retroactive_excludes_pre_join_events() {
 
     // Link agent-1's node to the pre-existing node
     engine
-        .link(a1_node, pre_join, EdgeType::Semantic, 0.9)
+        .link(a1_node, pre_join, EdgeType::Semantic)
         .expect("link");
 
     let perspective = PerspectiveKey {

@@ -87,7 +87,6 @@ fn remember_peer_uses_profile_scope() {
     let node_id = match result {
         anamnesis::IngestResult::Created(ids) => ids[0],
         anamnesis::IngestResult::Reinforced { existing_id, .. } => existing_id,
-        anamnesis::IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
     };
     let node = e.graph().get_node(node_id).unwrap();
     let expected_scope = format!("peer/{}/profile", peer_id.0);
@@ -120,7 +119,6 @@ fn log_activity_uses_activity_scope() {
     let node_id = match result {
         anamnesis::IngestResult::Created(ids) => ids[0],
         anamnesis::IngestResult::Reinforced { existing_id, .. } => existing_id,
-        anamnesis::IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
     };
     let node = e.graph().get_node(node_id).unwrap();
     let expected_scope = format!("peer/{}/activity", peer_id.0);

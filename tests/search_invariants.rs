@@ -1,4 +1,4 @@
-use anamnesis::api::{Engine, EngineConfig, IngestResult, Observation, SpreadingModel};
+use anamnesis::api::{Engine, EngineConfig, IngestResult, Observation};
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{EdgeType, KnowledgeType, ScopePath, ScopeRelation, Timestamp};
 use anamnesis::query::SearchInput;
@@ -12,12 +12,10 @@ fn engine() -> Engine {
     )
 }
 
+/// The retrieval flow is now a single additive directed RWR; this alias keeps the
+/// read-only invariant tests that previously toggled the spreading model.
 fn rwr_engine() -> Engine {
-    let mut config = EngineConfig::new()
-        .with_novelty_threshold(0.0)
-        .with_dedup_enabled(false);
-    config.spreading_model = SpreadingModel::RandomWalkRestart;
-    Engine::with_config(config)
+    engine()
 }
 
 fn origin(_agent: &str, scope: &str) -> Origin {
@@ -50,7 +48,6 @@ fn ingest(engine: &mut Engine, name: &str, node_type: KnowledgeType, scope: &str
     match engine.ingest(observation(name, node_type, scope)).unwrap() {
         IngestResult::Created(ids) => ids[0],
         IngestResult::Reinforced { existing_id, .. } => existing_id,
-        IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
     }
 }
 
@@ -63,18 +60,21 @@ fn ingest(engine: &mut Engine, name: &str, node_type: KnowledgeType, scope: &str
 #[test]
 fn fused_order_differs_from_node_id_sort() {
     let mut engine = engine();
-    let first = ingest(
-        &mut engine,
-        "alpha weak",
-        KnowledgeType::Semantic,
-        "dev/rust",
-    );
-    let second = ingest(
-        &mut engine,
-        "alpha strong",
-        KnowledgeType::Semantic,
-        "dev/rust",
-    );
+    // Distinct embeddings so both observations allocate as separate sites at the
+    // surprise-gated ceiling (ADR-0009); identical embeddings would route the second
+    // one in at near-zero charge and collapse its salience, masking the fusion order.
+    let mut obs_first = observation("alpha weak", KnowledgeType::Semantic, "dev/rust");
+    obs_first.embedding = Some(vec![1.0, 0.0, 0.0]);
+    let first = match engine.ingest(obs_first).unwrap() {
+        IngestResult::Created(ids) => ids[0],
+        other => panic!("expected Created, got {other:?}"),
+    };
+    let mut obs_second = observation("alpha strong", KnowledgeType::Semantic, "dev/rust");
+    obs_second.embedding = Some(vec![0.0, 1.0, 0.0]);
+    let second = match engine.ingest(obs_second).unwrap() {
+        IngestResult::Created(ids) => ids[0],
+        other => panic!("expected Created, got {other:?}"),
+    };
     // second (NodeId 1) becomes an exact-name match; first (NodeId 0) keeps a partial
     // word match only. Text rank 0 must go to second despite its higher NodeId.
     engine.graph_mut().get_node_mut(second).unwrap().name = "alpha".to_string();
@@ -139,7 +139,7 @@ fn identity_tension_preserved() {
         "dev/rust",
     );
     engine
-        .link(identity, conflicting, EdgeType::Contradicts, 0.9)
+        .link(identity, conflicting, EdgeType::Contradicts)
         .unwrap();
 
     let result = engine
@@ -183,12 +183,10 @@ fn rwr_consults_identity_and_kappa() {
         KnowledgeType::Semantic,
         "dev/rust",
     );
+    engine.link(seed, supported, EdgeType::Supersedes).unwrap();
+    engine.link(seed, refuted, EdgeType::Refutes).unwrap();
     engine
-        .link(seed, supported, EdgeType::Supersedes, 1.0)
-        .unwrap();
-    engine.link(seed, refuted, EdgeType::Refutes, 1.0).unwrap();
-    engine
-        .link(identity, supported, EdgeType::Semantic, 1.0)
+        .link(identity, supported, EdgeType::Semantic)
         .unwrap();
 
     let result = engine
@@ -235,8 +233,8 @@ fn seed_limit_configurable_changes_recall() {
         KnowledgeType::Semantic,
         "dev/rust",
     );
-    engine.link(a, b, EdgeType::Semantic, 1.0).unwrap();
-    engine.link(b, c, EdgeType::Semantic, 1.0).unwrap();
+    engine.link(a, b, EdgeType::Semantic).unwrap();
+    engine.link(b, c, EdgeType::Semantic).unwrap();
 
     let one = engine
         .search(SearchInput {
@@ -301,28 +299,32 @@ fn whitespace_text_accepted_with_embedding() {
     );
 }
 
-/// Protects Engine::link endpoint validation and finite weight handling matrix.
+/// Protects Engine::link endpoint validation and cold-start conductance seeding.
+///
+/// `link` no longer takes a caller-supplied weight (conductance.md: conductance is
+/// never set directly). It must still reject missing endpoints, and the edge it
+/// creates must carry a finite seeded conductance reservoir whose `weight`
+/// projection lies in the bounded public range `[0, 1]` (ADR-0002).
 #[test]
 fn engine_link_validation_full_matrix() {
     let mut engine = engine();
     let a = ingest(&mut engine, "link a", KnowledgeType::Semantic, "dev/rust");
     let b = ingest(&mut engine, "link b", KnowledgeType::Semantic, "dev/rust");
 
+    assert!(engine.link(NodeId(999), b, EdgeType::Semantic).is_err());
+    assert!(engine.link(a, NodeId(999), EdgeType::Semantic).is_err());
+
+    let edge_id = engine.link(a, b, EdgeType::Semantic).unwrap();
+    let edge = engine.graph().storage().get_edge(edge_id).unwrap();
     assert!(
-        engine
-            .link(NodeId(999), b, EdgeType::Semantic, 0.5)
-            .is_err()
+        edge.conductance.is_finite(),
+        "seeded conductance must be finite"
     );
     assert!(
-        engine
-            .link(a, NodeId(999), EdgeType::Semantic, 0.5)
-            .is_err()
+        (0.0..=1.0).contains(&edge.weight),
+        "weight projection must stay in [0, 1], got {}",
+        edge.weight
     );
-    assert!(engine.link(a, b, EdgeType::Semantic, f64::NAN).is_err());
-    let low = engine.link(a, b, EdgeType::Semantic, -1.0).unwrap();
-    assert_eq!(engine.graph().storage().get_edge(low).unwrap().weight, 0.0);
-    let high = engine.link(a, b, EdgeType::Semantic, 2.0).unwrap();
-    assert_eq!(engine.graph().storage().get_edge(high).unwrap().weight, 1.0);
 }
 
 /// Protects accessed_at and decay_checkpoint synchronization invariants.
@@ -336,16 +338,33 @@ fn hot_field_setter_sync_invariant() {
         "dev/rust",
     );
 
+    // touch updates accessed_at to now AND appends an access trace (raising B_i):
+    // the hot-field SoA and the dense Node must stay in sync (ADR-0008).
+    let traces_before = engine.graph().get_node(id).unwrap().access_history.len();
     engine.touch(id, Timestamp(2000)).unwrap();
+    let storage = engine.graph().storage();
+    assert_eq!(storage.get_accessed_at(id).unwrap(), Timestamp(2000));
+    assert_eq!(
+        storage.get_node(id).unwrap().access_history.len(),
+        traces_before + 1,
+        "touch must append a durable access trace"
+    );
+
+    // tick recomputes salience but is NOT a committed access: accessed_at and the
+    // trace history are left untouched (last-access semantics preserved).
+    let traces_after_touch = engine.graph().get_node(id).unwrap().access_history.len();
+    engine.tick(Timestamp(3000)).unwrap();
     let storage = engine.graph().storage();
     assert_eq!(
         storage.get_accessed_at(id).unwrap(),
-        storage.get_decay_checkpoint(id).unwrap()
+        Timestamp(2000),
+        "tick must not advance accessed_at"
     );
-
-    engine.tick(Timestamp(3000)).unwrap();
-    let storage = engine.graph().storage();
-    assert!(storage.get_decay_checkpoint(id).unwrap() >= storage.get_accessed_at(id).unwrap());
+    assert_eq!(
+        storage.get_node(id).unwrap().access_history.len(),
+        traces_after_touch,
+        "tick must not append a trace"
+    );
 }
 
 /// Protects deterministic RRF tie-breaking by NodeId ascending.
@@ -396,11 +415,11 @@ fn source_fragment_carries_source_scope() {
         "project/main",
     );
     engine
-        .link(knowledge, source, EdgeType::ExtractedFrom, 1.0)
+        .link(knowledge, source, EdgeType::ExtractedFrom)
         .unwrap();
     // Create a Contradicts edge to trigger KnowledgeWithProvenance packaging mode
     engine
-        .link(knowledge, tension, EdgeType::Contradicts, 0.8)
+        .link(knowledge, tension, EdgeType::Contradicts)
         .unwrap();
 
     let result = engine
@@ -420,7 +439,7 @@ fn source_fragment_carries_source_scope() {
         .unwrap();
 
     assert_eq!(source_fragment.origin.scope.as_str(), "project/main");
-    assert_eq!(source_fragment.scope, ScopeRelation::Exact);
+    assert_eq!(source_fragment.scope, ScopeRelation::Equal);
 }
 
 /// Protects empty-candidate search from panicking or fabricating fragments.

@@ -33,7 +33,6 @@ fn schedule_sets_valid_from() {
     let node_id = match result {
         anamnesis::IngestResult::Created(ids) => ids[0],
         anamnesis::IngestResult::Reinforced { existing_id, .. } => existing_id,
-        anamnesis::IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
     };
     let node = e.graph().get_node(node_id).unwrap();
     assert_eq!(node.valid_from, Some(valid_from));

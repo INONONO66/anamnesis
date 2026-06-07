@@ -1,12 +1,11 @@
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 
 use anamnesis::api::Observation;
 use anamnesis::graph::node::Origin;
 use anamnesis::{
-    EdgeType, Engine, EngineConfig, IngestResult, KnowledgeType, Query, QueryConfig,
-    SpreadingModel, Timestamp,
+    EdgeType, Engine, EngineConfig, IngestResult, KnowledgeType, Query, QueryConfig, Timestamp,
 };
 
 fn make_bench_engine() -> Engine {
@@ -59,20 +58,16 @@ fn build_graph(node_count: usize) -> (Engine, Vec<anamnesis::NodeId>) {
         match engine.ingest(obs).unwrap() {
             IngestResult::Created(ids) => node_ids.push(ids[0]),
             IngestResult::Reinforced { existing_id, .. } => node_ids.push(existing_id),
-            IngestResult::CreatedWithConflict {
-                node_ids: conflict_ids,
-                ..
-            } => node_ids.push(conflict_ids[0]),
         }
     }
 
     for i in 0..node_count {
         if i + 1 < node_count {
-            let _ = engine.link(node_ids[i], node_ids[i + 1], EdgeType::Temporal, 0.8);
+            let _ = engine.link(node_ids[i], node_ids[i + 1], EdgeType::Temporal);
         }
 
         if i > 0 && i % 5 == 0 && i >= 5 {
-            let _ = engine.link(node_ids[i], node_ids[i - 5], EdgeType::Semantic, 0.7);
+            let _ = engine.link(node_ids[i], node_ids[i - 5], EdgeType::Semantic);
         }
     }
 
@@ -139,50 +134,10 @@ fn bench_spreading_10k(c: &mut Criterion) {
     });
 }
 
-fn bench_pqbfs_vs_rwr(c: &mut Criterion) {
-    let mut group = c.benchmark_group("spreading_model_comparison");
-
-    for model in [
-        SpreadingModel::PriorityQueueBfs,
-        SpreadingModel::RandomWalkRestart,
-    ] {
-        let model_name = match model {
-            SpreadingModel::PriorityQueueBfs => "pqbfs",
-            SpreadingModel::NormalizedPriorityQueueBfs => "normalized-pqbfs",
-            SpreadingModel::RandomWalkRestart => "rwr",
-        };
-
-        group.bench_with_input(
-            BenchmarkId::new("1k_nodes", model_name),
-            &model,
-            |b, _model| {
-                b.iter_batched(
-                    || {
-                        let (engine, node_ids) = build_graph(1_000);
-                        (engine, node_ids[0])
-                    },
-                    |(engine, seed)| {
-                        let config = QueryConfig::default();
-                        let query = Query::Associative {
-                            seed: black_box(seed),
-                            budget: 200,
-                        };
-                        let _ = engine.query(&query, &config);
-                    },
-                    criterion::BatchSize::SmallInput,
-                )
-            },
-        );
-    }
-
-    group.finish();
-}
-
 criterion_group!(
     benches,
     bench_spreading_100,
     bench_spreading_1k,
-    bench_spreading_10k,
-    bench_pqbfs_vs_rwr
+    bench_spreading_10k
 );
 criterion_main!(benches);

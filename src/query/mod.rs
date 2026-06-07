@@ -3,6 +3,7 @@
 pub mod activation;
 pub mod assembly;
 pub mod candidate;
+pub mod field;
 pub mod identity;
 pub mod packaging;
 pub mod rerank;
@@ -10,27 +11,22 @@ pub mod rwr;
 pub mod scoring;
 pub mod types;
 
-pub use activation::{
-    ActivationEdge, NodeInfo, SpreadingActivationResult, edge_valid_at, initial_activation,
-    salience_gate, spread_activation, spread_activation_at, spread_activation_with_convergence,
-    spread_activation_with_model_and_convergence,
-};
+pub use activation::edge_valid_at;
 pub use assembly::{
-    ModeContext, ScoredNode, assemble_context_package, assemble_context_package_for_mode,
-    compute_agent_tension, determine_scope,
+    ContradictionPair, ModeContext, ScoredNode, assemble_context_package,
+    assemble_context_package_for_mode, compute_agent_tension, determine_scope,
 };
 pub use candidate::{
     CandidateSource, CandidateTrace, FusedCandidate, GraphRecallTrace, SearchCandidate,
     SearchTraceLevel,
 };
+pub use field::{FieldSignals, QueryField, potential_bias};
 pub use identity::compute_identity_prior;
 pub(crate) use packaging::decide_packaging;
-pub use rwr::{
-    random_walk_restart, random_walk_restart_at, random_walk_restart_from_distribution,
-    random_walk_restart_from_distribution_at,
-};
-pub use scoring::{all_forces, compute_with_forces, final_score, scope_weight};
+pub use rwr::{ActivationResponse, PathCurrentMap, additive_rwr, additive_rwr_with_alpha};
+pub use scoring::{ReadoutInputs, TieBreakKey, rank, readout_score, scope_weight, tie_break};
 pub use types::{
-    ContextPackage, ConvergenceConfig, Fragment, PackagingMode, Query, QueryConfig, SearchInput,
-    SearchResult, SearchTrace, Tension, TokenBudget,
+    AccessedSite, ActivatedTension, CoReadoutPair, CommitTrace, ContextPackage, ConvergenceConfig,
+    Fragment, PackagingMode, PathUsedEdge, Query, QueryConfig, SearchInput, SearchResult,
+    SearchTrace, Tension, TokenBudget,
 };

@@ -14,8 +14,12 @@
 //!
 //! # Feedback Signal
 //!
-//! Consumer-provided feedback adjusts salience with diminishing returns:
-//! `s += η * signal_strength * (1 - s)` where η = social_learning_rate.
+//! Consumer-provided [`FeedbackSignal`]s drive a `FeedbackReceived` interaction: the
+//! engine maps the signal to a Rescorla-Wagner reward target in log-odds space and
+//! applies `dA_i = eta * (lambda - A_i)` on the authoritative retained-action
+//! reservoir (see [`crate::mechanics::interactions::lambda_reward`] /
+//! [`crate::mechanics::interactions::rescorla_wagner`]). This module owns the signal
+//! type and its directionality; the reservoir update lives in `interactions`.
 
 /// Feedback signal from the consumer about a knowledge fragment's utility.
 ///
@@ -52,6 +56,55 @@ impl FeedbackSignal {
     }
 }
 
+/// Caller confidence in a committed [`ContextPackage`](crate::query::ContextPackage).
+///
+/// Supplied to [`Engine::commit`](crate::api::Engine::commit), it grades how useful
+/// the packaged context actually was. Each level maps to a signed Rescorla-Wagner
+/// reward target via [`FeedbackSignal::from`] / `lambda_reward`
+/// ([`crate::mechanics::interactions::lambda_reward`]): the commit then moves each
+/// accessed site's retained action a fraction `eta` toward that target
+/// (interactions.md, ADR-0003). `None` confidence means "record use without a
+/// feedback signal" — see [`Engine::commit`](crate::api::Engine::commit).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfidenceLevel {
+    /// The context was clearly useful — strong positive reward.
+    High,
+    /// The context was useful — moderate positive reward.
+    Medium,
+    /// The context was weakly useful — mild positive reward.
+    Low,
+    /// The context was not useful or was misleading — negative reward.
+    None,
+}
+
+impl ConfidenceLevel {
+    /// The unit-interval strength this confidence level contributes to the reward
+    /// target. CALIBRATED PRIOR — graded steps from a strong-positive `High` down to
+    /// a full-negative `None`; the Rescorla-Wagner step scales this by
+    /// [`REWARD_LOG_ODDS_SCALE`](crate::mechanics::priors::REWARD_LOG_ODDS_SCALE).
+    pub fn strength(&self) -> f64 {
+        match self {
+            ConfidenceLevel::High => 1.0,
+            ConfidenceLevel::Medium => 0.6,
+            ConfidenceLevel::Low => 0.3,
+            ConfidenceLevel::None => -1.0,
+        }
+    }
+}
+
+impl From<ConfidenceLevel> for FeedbackSignal {
+    /// Map a commit [`ConfidenceLevel`] to the equivalent [`FeedbackSignal`], so the
+    /// same `lambda_reward` mapping drives both commit feedback and explicit feedback.
+    fn from(level: ConfidenceLevel) -> Self {
+        match level {
+            ConfidenceLevel::High => FeedbackSignal::Useful { strength: 1.0 },
+            ConfidenceLevel::Medium => FeedbackSignal::Useful { strength: 0.6 },
+            ConfidenceLevel::Low => FeedbackSignal::Useful { strength: 0.3 },
+            ConfidenceLevel::None => FeedbackSignal::NotUseful { strength: 1.0 },
+        }
+    }
+}
+
 /// Compute social support score from multi-agent corroboration.
 ///
 /// Formula: `ln(1 + distinct_agent_count) * agreement_score * avg_confidence`
@@ -74,36 +127,6 @@ pub fn social_support(
     avg_confidence: f64,
 ) -> f64 {
     (1.0 + distinct_agent_count as f64).ln() * agreement_score * avg_confidence
-}
-
-/// Apply feedback signal to current salience using diminishing returns.
-///
-/// Formula: `s + η * signal_strength * (1 - s)` for positive signals,
-/// `s - η * |signal_strength| * s` for negative signals.
-///
-/// Positive signals approach 1.0 asymptotically (diminishing returns).
-/// Negative signals approach 0.0 asymptotically (diminishing reduction).
-/// Result is always clamped to [0, 1].
-///
-/// # Arguments
-///
-/// * `current_salience` — Current salience value [0, 1].
-/// * `signal` — The feedback signal with direction and strength.
-/// * `learning_rate` — η, the social learning rate (typically 0.15).
-pub fn apply_feedback_to_salience(
-    current_salience: f64,
-    signal: &FeedbackSignal,
-    learning_rate: f64,
-) -> f64 {
-    let signed = signal.signed_strength();
-    let new_salience = if signed >= 0.0 {
-        // Positive: s + η * strength * (1 - s), diminishing returns toward 1.0
-        current_salience + learning_rate * signed * (1.0 - current_salience)
-    } else {
-        // Negative: s - η * |strength| * s, diminishing reduction toward 0.0
-        current_salience + learning_rate * signed * current_salience
-    };
-    new_salience.clamp(0.0, 1.0)
 }
 
 #[cfg(test)]
@@ -148,68 +171,6 @@ mod tests {
         let full = social_support(3, 1.0, 1.0);
         let low_conf = social_support(3, 1.0, 0.3);
         assert!((low_conf - full * 0.3).abs() < 1e-10);
-    }
-
-    #[test]
-    fn feedback_useful_increases_salience() {
-        let signal = FeedbackSignal::Useful { strength: 1.0 };
-        let new_s = apply_feedback_to_salience(0.5, &signal, 0.15);
-        assert!(new_s > 0.5);
-        // Expected: 0.5 + 0.15 * 1.0 * (1 - 0.5) = 0.575
-        assert!((new_s - 0.575).abs() < 1e-10);
-    }
-
-    #[test]
-    fn feedback_not_useful_decreases_salience() {
-        let signal = FeedbackSignal::NotUseful { strength: 1.0 };
-        let new_s = apply_feedback_to_salience(0.5, &signal, 0.15);
-        assert!(new_s < 0.5);
-        // Expected: 0.5 - 0.15 * 1.0 * 0.5 = 0.425
-        assert!((new_s - 0.425).abs() < 1e-10);
-    }
-
-    #[test]
-    fn feedback_incorrect_decreases_salience() {
-        let signal = FeedbackSignal::Incorrect { strength: 0.8 };
-        let new_s = apply_feedback_to_salience(0.6, &signal, 0.15);
-        assert!(new_s < 0.6);
-        // Expected: 0.6 - 0.15 * 0.8 * 0.6 = 0.528
-        assert!((new_s - 0.528).abs() < 1e-10);
-    }
-
-    #[test]
-    fn feedback_diminishing_returns_approaches_one() {
-        let signal = FeedbackSignal::Useful { strength: 1.0 };
-        let mut s = 0.5;
-        for _ in 0..100 {
-            s = apply_feedback_to_salience(s, &signal, 0.15);
-        }
-        // After many applications, approaches 1.0 but never exceeds
-        assert!(s > 0.99);
-        assert!(s <= 1.0);
-    }
-
-    #[test]
-    fn feedback_diminishing_reduction_approaches_zero() {
-        let signal = FeedbackSignal::NotUseful { strength: 1.0 };
-        let mut s = 0.5;
-        for _ in 0..100 {
-            s = apply_feedback_to_salience(s, &signal, 0.15);
-        }
-        // After many applications, approaches 0.0 but never goes below
-        assert!(s < 0.01);
-        assert!(s >= 0.0);
-    }
-
-    #[test]
-    fn feedback_clamped_to_bounds() {
-        let signal = FeedbackSignal::Useful { strength: 1.0 };
-        let new_s = apply_feedback_to_salience(1.0, &signal, 0.15);
-        assert_eq!(new_s, 1.0);
-
-        let signal = FeedbackSignal::NotUseful { strength: 1.0 };
-        let new_s = apply_feedback_to_salience(0.0, &signal, 0.15);
-        assert_eq!(new_s, 0.0);
     }
 
     #[test]

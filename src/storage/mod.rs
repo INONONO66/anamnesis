@@ -9,7 +9,10 @@ pub mod sqlite;
 pub use sqlite::SqliteStorage;
 
 use crate::error::Error;
-use crate::graph::{Edge, EdgeId, KnowledgeType, Node, NodeId, PeerId, ScopePath, Timestamp};
+use crate::graph::{
+    AccessTrace, Edge, EdgeId, KnowledgeType, Node, NodeId, PeerId, ScopePath, Timestamp,
+};
+use std::collections::VecDeque;
 
 /// Storage backend interface for the Anamnesis graph engine.
 ///
@@ -17,15 +20,28 @@ use crate::graph::{Edge, EdgeId, KnowledgeType, Node, NodeId, PeerId, ScopePath,
 /// The `SqliteStorage` implementation uses an in-memory SQLite database
 /// with cached graph objects and SoA hot fields for fast spreading activation.
 ///
-/// # Decay Checkpoint Invariant
+/// # Node strength substrate
 ///
-/// `decay_checkpoint` is an internal SoA hot field separate from `accessed_at`.
-/// It records the last time decay was applied to a node and is the source of
-/// truth for elapsed-time computation in lazy/batch decay.
+/// Persistent node strength is `A_i = B_i + P_i` (ADR-0008). The base level `B_i`
+/// is the multi-trace ACT-R activation `ln(Σ_j (now − at_j)^(−d_j))` over the
+/// node's bounded 32-trace `access_history`, where each trace carries its own
+/// activation-dependent decay `d_j` (Pavlik & Anderson 2005); it is computed on
+/// demand and is NOT a stored field, so the trait exposes no `B_i` setter. The
+/// persistent substrate is the access-history window (a committed access appends a
+/// now-stamped [`AccessTrace`] via
+/// [`append_access_trace`](StorageAdapter::append_access_trace)) plus the
+/// decay-EXEMPT evidence prior `P_i`
+/// ([`get_evidence_prior`](StorageAdapter::get_evidence_prior) /
+/// [`set_evidence_prior`](StorageAdapter::set_evidence_prior)). `retained_action`
+/// and `salience` are CACHED projections of the composite, refreshed only by
+/// commit/touch/tick; read-only access returns the cache unchanged.
 ///
-/// After `set_node()` and `Engine::touch()`, `decay_checkpoint == accessed_at`.
-/// Only `Engine::tick()` may diverge them: tick advances `decay_checkpoint`
-/// while leaving `accessed_at` untouched (preserving last-access semantics).
+/// # Decay checkpoint (obsolete)
+///
+/// `decay_checkpoint` is retained only for snapshot/back-compat (the `v2 -> v3`
+/// migration introduced it). Under recompute-from-history it is no longer
+/// load-bearing for memory strength: `B_i` ages every trace to `now` directly, so
+/// no "as-of" baseline is needed. Engine maintenance no longer reads or advances it.
 pub trait StorageAdapter: Send + Sync {
     // ID allocation
     /// Allocate the next available NodeId (reuses freed IDs when available).
@@ -88,15 +104,76 @@ pub trait StorageAdapter: Send + Sync {
     fn set_accessed_at(&mut self, id: NodeId, ts: Timestamp) -> Result<(), Error>;
     /// Get the decay checkpoint timestamp for a node. O(1) direct array access.
     ///
-    /// The decay checkpoint records the last time decay was applied; it is the
-    /// baseline for elapsed-time computation in lazy/batch decay. See trait-level
-    /// "Decay Checkpoint Invariant" docs for ordering rules vs `accessed_at`.
+    /// OBSOLETE under the base-level model: retained for snapshot/back-compat only
+    /// (see the trait-level "Decay checkpoint (obsolete)" docs). It is no longer a
+    /// load-bearing input to memory strength — `B_i` ages traces to `now` directly.
     fn get_decay_checkpoint(&self, id: NodeId) -> Result<Timestamp, Error>;
     /// Set the decay checkpoint timestamp for a node.
     ///
-    /// `Engine::touch()` and `set_node()` keep this equal to `accessed_at`;
-    /// `Engine::tick()` advances it independently.
+    /// OBSOLETE: kept for snapshot/back-compat parity. Engine maintenance no longer
+    /// advances it.
     fn set_decay_checkpoint(&mut self, id: NodeId, ts: Timestamp) -> Result<(), Error>;
+
+    // ── Base-level substrate: access-trace history (B_i) ──────────────────────
+    //
+    // B_i = ln(Σ_j (now − at_j)^(−d_j)) is computed on demand from these traces
+    // ([`crate::mechanics::forgetting::compute_base_level`]); it is not a stored
+    // scalar. Each [`AccessTrace`] carries its own activation-dependent decay `d_j`
+    // (Pavlik & Anderson 2005). A committed access appends a now-stamped trace whose
+    // `d_j` was computed from the existing history
+    // ([`crate::mechanics::forgetting::compute_trace_decay`]), evicting the oldest
+    // beyond the bounded 32-trace window, raising B_i.
+
+    /// Get the node's bounded access-trace history (the substrate of `B_i`).
+    fn get_access_history(&self, id: NodeId) -> Result<&VecDeque<AccessTrace>, Error>;
+
+    /// Append an access trace, maintaining the bounded 32-trace window, and durably
+    /// persist it. Called only from commit/touch (a committed access). The trace's
+    /// `decay` must already be computed from the pre-append history
+    /// ([`crate::mechanics::forgetting::compute_trace_decay`]).
+    fn append_access_trace(&mut self, id: NodeId, trace: AccessTrace) -> Result<(), Error>;
+
+    // ── Persistent reservoirs (decay-exempt evidence prior P_i, conductance) ──
+    //
+    // `P_i` (`evidence_prior`) is the persistent, decay-exempt log-odds offset
+    // holding encoding surprise, feedback / social reinforcement, and peer trust
+    // (ADR-0008). `conductance` `C_ij` is the edge associative reservoir; `weight`
+    // is its bounded projection. The setters recompute the projection inside the
+    // setter (the ADR "commit recomputes projections" step).
+
+    /// Get the evidence prior `P_i` (decay-exempt log-odds offset) for a node.
+    fn get_evidence_prior(&self, id: NodeId) -> Result<f64, Error>;
+
+    /// Set the evidence prior `P_i` for a node. Called only from
+    /// ingest/feedback/commit; the engine refreshes the `salience`/`retained_action`
+    /// cache from `B_i(now) + P_i` afterwards.
+    fn set_evidence_prior(&mut self, id: NodeId, prior: f64) -> Result<(), Error>;
+
+    /// Get the cached composite retained action `A_i = B_i + P_i` for a node.
+    ///
+    /// This returns the CACHED snapshot last written by commit/touch/tick (it is not
+    /// recomputed on read), so read-only query/search return a stable value.
+    fn get_retained_action(&self, id: NodeId) -> Result<f64, Error>;
+
+    /// Refresh the cached composite retained action `A_i` for a node and recompute
+    /// the `salience` projection (`salience = project_salience(value)`). Called only
+    /// from commit/touch/tick with the freshly recomputed `B_i(now) + P_i`.
+    fn set_retained_action(&mut self, id: NodeId, value: f64) -> Result<(), Error>;
+
+    /// Get the conductance `C_ij` (log-likelihood-ratio reservoir) for an edge.
+    fn get_conductance(&self, id: EdgeId) -> Result<f64, Error>;
+
+    /// Set the conductance `C_ij` for an edge and recompute the `weight`
+    /// projection (`weight = project_weight(value)`). Called only from
+    /// commit/tick.
+    fn set_conductance(&mut self, id: EdgeId, value: f64) -> Result<(), Error>;
+
+    /// Get the last-accessed timestamp for an edge. O(1) direct array access.
+    fn get_edge_accessed_at(&self, id: EdgeId) -> Result<Timestamp, Error>;
+
+    /// Set the last-accessed timestamp for an edge.
+    fn set_edge_accessed_at(&mut self, id: EdgeId, ts: Timestamp) -> Result<(), Error>;
+
     /// Persist any buffered hot-field writes.
     ///
     /// Storage backends that write hot fields immediately can use this default no-op.

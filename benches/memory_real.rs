@@ -95,7 +95,6 @@ fn main() {
             NodeId(all_ids[i] as u64 + 1),
             NodeId(all_ids[i + 1] as u64 + 1),
             EdgeType::Semantic,
-            0.75,
         );
     }
     let stats = dhat::HeapStats::get();

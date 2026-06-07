@@ -35,7 +35,7 @@ fn edge_default_has_no_valid_range() {
         IngestResult::Created(ids) => ids[0],
         _ => panic!("expected Created"),
     };
-    let eid = e.link(a, b, EdgeType::Semantic, 1.0).unwrap();
+    let eid = e.link(a, b, EdgeType::Semantic).unwrap();
     let edge = e.graph().get_edge(eid).unwrap();
     assert!(edge.valid_from.is_none());
     assert!(edge.valid_until.is_none());

@@ -1,6 +1,5 @@
 //! Tests for top-k convergence termination in spreading activation.
 
-use anamnesis::IngestResult;
 use anamnesis::api::{Engine, Observation};
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{EdgeType, KnowledgeType, ScopePath, Timestamp};
@@ -39,14 +38,13 @@ fn convergence_enabled_stops_early() {
         let id = match result {
             anamnesis::api::IngestResult::Created(ids) => ids[0],
             anamnesis::api::IngestResult::Reinforced { existing_id, .. } => existing_id,
-            IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
         };
         node_ids.push(id);
     }
 
     for i in 0..node_ids.len() - 1 {
         engine
-            .link(node_ids[i], node_ids[i + 1], EdgeType::Semantic, 0.8)
+            .link(node_ids[i], node_ids[i + 1], EdgeType::Semantic)
             .expect("link failed");
     }
 
@@ -106,14 +104,13 @@ fn convergence_disabled_default_behavior() {
         let id = match result {
             anamnesis::api::IngestResult::Created(ids) => ids[0],
             anamnesis::api::IngestResult::Reinforced { existing_id, .. } => existing_id,
-            IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
         };
         node_ids.push(id);
     }
 
     for i in 0..node_ids.len() - 1 {
         engine
-            .link(node_ids[i], node_ids[i + 1], EdgeType::Semantic, 0.8)
+            .link(node_ids[i], node_ids[i + 1], EdgeType::Semantic)
             .expect("link failed");
     }
 

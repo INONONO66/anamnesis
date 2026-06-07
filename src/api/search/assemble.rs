@@ -1,16 +1,21 @@
-//! Result assembly stage — package graph activations into a `SearchResult`.
+//! Result assembly stage — package the settled activation response into a `SearchResult`.
+//!
+//! Read-only. Scores each activated site with the authoritative seven-term
+//! additive log-odds readout score ([readout-scoring.md]), applies the
+//! deterministic tie-breaker chain, and packages the result. It never mutates
+//! reservoirs or projections.
+//!
+//! [readout-scoring.md]: ../../docs/04-cognitive-dynamics/readout-scoring.md
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
-use crate::api::{Engine, SpreadingModel};
+use crate::api::Engine;
 use crate::error::Error;
 use crate::graph::{EdgeType, KnowledgeType, NodeId, ScopePath, Timestamp};
 use crate::mechanics::attraction::cosine_similarity;
-use crate::mechanics::gravity::compute_mass;
-use crate::mechanics::repulsion::{apply_damping, compute_repulsion, rigidity};
-use crate::query::activation::edge_valid_at;
 use crate::query::assembly::{ScoredNode, assemble_context_package, determine_scope};
-use crate::query::scoring::{final_score, scope_weight};
+use crate::query::rwr::ActivationResponse;
+use crate::query::scoring::{ReadoutInputs, TieBreakKey, rank, readout_score, scope_weight};
 use crate::query::types::SearchPlan;
 use crate::query::{
     ContextPackage, Fragment, PackagingMode, QueryConfig, SearchInput, SearchResult, SearchTrace,
@@ -18,42 +23,40 @@ use crate::query::{
 use crate::storage::StorageAdapter;
 
 pub(crate) struct SearchAssemblyRequest<'a> {
-    pub(crate) activations: &'a HashMap<NodeId, f64>,
+    pub(crate) response: &'a ActivationResponse,
     pub(crate) seed_ids: &'a [NodeId],
     pub(crate) config: &'a QueryConfig,
     pub(crate) input: &'a SearchInput,
     pub(crate) plan: &'a SearchPlan,
     pub(crate) strategies_used: Vec<String>,
-    pub(crate) spread_iterations: usize,
-    pub(crate) spreading_model: Option<SpreadingModel>,
-    pub(crate) edge_count_skipped_invalid: usize,
-    pub(crate) convergence_rounds: usize,
-    pub(crate) converged: bool,
 }
 
 pub(crate) fn assemble_search_result<S: StorageAdapter + Clone>(
     engine: &Engine<S>,
     request: SearchAssemblyRequest<'_>,
 ) -> Result<SearchResult, Error> {
-    if request.activations.is_empty() {
+    let trace = SearchTrace {
+        strategies_used: request.strategies_used.clone(),
+        seed_count: request.seed_ids.len(),
+        iterations: request.response.iterations,
+        residual: request.response.residual,
+        truncated: request.response.truncated,
+        excluded_edge_count: request.response.excluded_edges.len(),
+        path_current_count: request.response.path_current.len(),
+        packaging_mode: None,
+        energy: crate::mechanics::energy::EnergyTerms::default(),
+    };
+
+    if request.response.activation.is_empty() {
         return Ok(SearchResult {
             package: ContextPackage::empty(),
-            trace: SearchTrace {
-                strategies_used: request.strategies_used,
-                seed_count: request.seed_ids.len(),
-                spread_iterations: request.spread_iterations,
-                spreading_model: request.spreading_model,
-                packaging_mode: None,
-                edge_count_skipped_invalid: request.edge_count_skipped_invalid,
-                convergence_rounds: request.convergence_rounds,
-                converged: request.converged,
-            },
+            trace,
         });
     }
 
     let mut package = assemble_graph_recall_package(
         engine,
-        request.activations,
+        request.response,
         request.seed_ids,
         request.config,
         request.input,
@@ -72,83 +75,60 @@ pub(crate) fn assemble_search_result<S: StorageAdapter + Clone>(
         apply_validity_filter(engine, &mut package, request.input.now);
     }
 
-    let trace = SearchTrace {
-        strategies_used: request.strategies_used,
-        seed_count: request.seed_ids.len(),
-        spread_iterations: request.spread_iterations,
-        spreading_model: request.spreading_model,
-        packaging_mode: Some(packaging_mode),
-        edge_count_skipped_invalid: request.edge_count_skipped_invalid,
-        convergence_rounds: request.convergence_rounds,
-        converged: request.converged,
-    };
+    // Capture the read-only commit trace from the FINAL package (after packaging mode
+    // and validity filtering), so a later `commit` only integrates work for sites that
+    // actually survived into the result (ADR-0004 / interactions.md). Read-only.
+    package.commit_trace =
+        crate::api::build_commit_trace(engine.graph.storage(), request.response, &package);
+
+    // Compute the query-local readout energy `E(S | Q)` over the FINAL packaged active
+    // subsystem (energy.md / ADR-0007). Interpretive only — explains why the bundle was
+    // selected; the RWR stationary vector is the true fixed point. Never stored.
+    let energy = crate::api::build_readout_energy(
+        engine.graph.storage(),
+        request.response,
+        &package,
+        request.config.query_embedding.as_ref(),
+    );
+
+    let mut trace = trace;
+    trace.packaging_mode = Some(packaging_mode);
+    trace.energy = energy;
 
     Ok(SearchResult { package, trace })
 }
 
 fn assemble_graph_recall_package<S: StorageAdapter + Clone>(
     engine: &Engine<S>,
-    activations: &HashMap<NodeId, f64>,
+    response: &ActivationResponse,
     seed_ids: &[NodeId],
     config: &QueryConfig,
     input: &crate::query::SearchInput,
 ) -> ContextPackage {
     let storage = engine.graph.storage();
-    let mut damped_activations = activations.clone();
     let now = config.now.unwrap_or_else(Timestamp::now);
-
-    for &node_id in activations.keys() {
-        let contradicts_inputs: Vec<(f64, f64, f64)> = storage
-            .edges_to(node_id)
-            .iter()
-            .filter_map(|&edge_id| {
-                let edge = storage.get_edge(edge_id).ok()?;
-                if !matches!(edge.edge_type, EdgeType::Contradicts) {
-                    return None;
-                }
-                if !edge_valid_at(edge, now) {
-                    return None;
-                }
-                let source_activation = activations.get(&edge.source).copied().unwrap_or(0.0);
-                if source_activation == 0.0 {
-                    return None;
-                }
-                let source_node = storage.get_node(edge.source).ok()?;
-                Some((
-                    edge.weight,
-                    rigidity(&source_node.node_type),
-                    source_activation,
-                ))
-            })
-            .collect();
-
-        if contradicts_inputs.is_empty() {
-            continue;
-        }
-
-        let repulsion = compute_repulsion(&contradicts_inputs);
-        if repulsion > 0.0 {
-            let current = activations.get(&node_id).copied().unwrap_or(0.0);
-            damped_activations.insert(node_id, apply_damping(current, repulsion));
-        }
-    }
+    let activations = &response.activation;
 
     let seed_entity_tags: Vec<Vec<String>> = seed_ids
         .iter()
         .filter_map(|node_id| storage.get_node(*node_id).ok())
         .map(|node| node.entity_tags.clone())
         .collect();
-    let hopfield_context = match engine.config.energy_model {
-        super::super::EnergyModel::WeightedSum => None,
-        super::super::EnergyModel::Hopfield => super::super::build_hopfield_scoring_context(
-            &config.query_embedding,
-            &damped_activations,
-            storage,
-        ),
-    };
 
-    let mut scored_nodes = Vec::new();
-    for (&node_id, &activation) in &damped_activations {
+    // Surface Contradicts edges between *active* sites as frustration tensions
+    // (frustration.md / ADR-0006). Stress is the multiplicative gate product
+    // `sigma_ij = contradiction_weight * min(a_i, a_j) * scope_overlap *
+    // temporal_overlap`; if any gate is zero the pair is not surfaced. The conflict
+    // is surfaced, never suppressed — neither endpoint's activation is reduced.
+    let (contradiction_pairs, node_stress) = crate::query::assembly::collect_contradiction_pairs(
+        storage,
+        activations,
+        config.min_activation,
+        now,
+    );
+
+    let mut scored: Vec<(f64, TieBreakKey, ScoredNode)> = Vec::new();
+    for (&node_id, &activation) in activations {
         if activation < config.min_activation {
             continue;
         }
@@ -158,34 +138,23 @@ fn assemble_graph_recall_package<S: StorageAdapter + Clone>(
             Err(_) => continue,
         };
 
-        // Apply peer_filter: skip nodes not produced by the specified peers
         if let Some(ref peer_filter) = input.peer_filter {
             if !peer_filter.contains(&node.origin.peer_id) {
                 continue;
             }
         }
-
-        // Skip retracted nodes
         if node.metadata.get("retracted").is_some_and(|v| v == "true") {
             continue;
         }
 
         let salience = storage.get_salience(node_id).unwrap_or(0.0);
-        let mass = compute_mass(salience, node.access_count, &node.node_type);
-        let vector_similarity = match (&config.query_embedding, &node.embedding) {
-            (Some(query_embedding), Some(node_embedding)) => {
-                cosine_similarity(query_embedding, node_embedding)
-            }
-            _ => 0.0,
-        };
-        let scoring_similarity = match engine.config.energy_model {
-            super::super::EnergyModel::WeightedSum => vector_similarity,
-            super::super::EnergyModel::Hopfield => super::super::hopfield_adjusted_similarity(
-                hopfield_context.as_ref(),
-                vector_similarity,
-                node.embedding.as_ref(),
-            ),
-        };
+        let retained_action = storage.get_retained_action(node_id).unwrap_or(0.0);
+        let impedance = response
+            .impedance
+            .get(&node_id)
+            .copied()
+            .unwrap_or_default();
+
         let shared_entities = seed_entity_tags
             .iter()
             .map(|tags| {
@@ -197,46 +166,76 @@ fn assemble_graph_recall_package<S: StorageAdapter + Clone>(
             .max()
             .unwrap_or(0);
         let base_scope_weight = scope_weight(&config.scope, &node.origin.scope, shared_entities);
-        // Apply TrustLevel bonus from the engine's peer registry
-        let trust_bonus = engine
+        // trust_weight = coarse-level prior bonus + evidence-driven projection
+        // (social.md "Retrieval Effects": ranking through trust-weighted readout).
+        // The coarse `TrustLevel` is the declared prior offset; the evidence trust
+        // reservoir, moved by corroboration/feedback, projects to a bounded
+        // (-0.5, 0.5) term so a peer with no evidence contributes only its prior.
+        let trust_weight = engine
             .get_peer(node.origin.peer_id)
-            .map(|p| p.trust_level.scope_weight_bonus())
+            .map(|p| {
+                p.trust_level.scope_weight_bonus()
+                    + crate::mechanics::priors::project_trust(p.trust_reservoir)
+            })
             .unwrap_or(0.0);
-        let scope_weight = (base_scope_weight + trust_bonus).clamp(0.0, 1.0);
-        let relevance = final_score(activation, scoring_similarity, salience, mass, scope_weight);
 
-        scored_nodes.push(ScoredNode {
+        // phi_i: query-field potential bias. The embedding alignment is folded in
+        // as the phi term so the readout can credit semantic match additively.
+        let phi = match (&config.query_embedding, &node.embedding) {
+            (Some(qe), Some(ne)) => cosine_similarity(qe, ne),
+            _ => 0.0,
+        };
+
+        // Frustration stress attached to this site (sum of sigma over its active
+        // contradiction partners) feeds the readout `-w_stress` term: contradicting
+        // bundles are pushed to separate, never deleted (ADR-0006).
+        let stress = node_stress.get(&node_id).copied().unwrap_or(0.0);
+
+        let inputs = ReadoutInputs {
+            activation,
+            phi,
+            salience,
+            impedance,
+            scope_weight: base_scope_weight,
+            trust_weight,
+            stress,
+        };
+        let score = readout_score(&inputs);
+
+        let key = TieBreakKey {
             node_id,
-            name: node.name.clone(),
-            summary: node.summary.clone(),
-            content: node.content.clone(),
-            node_type: node.node_type.clone(),
-            relevance,
-            origin: node.origin.clone(),
-        });
+            retained_action,
+            impedance,
+            accessed_at: node.accessed_at,
+        };
+
+        scored.push((
+            score,
+            key,
+            ScoredNode {
+                node_id,
+                name: node.name.clone(),
+                summary: node.summary.clone(),
+                content: node.content.clone(),
+                node_type: node.node_type.clone(),
+                relevance: score,
+                origin: node.origin.clone(),
+            },
+        ));
     }
 
-    let mut contradicts_edges: Vec<(NodeId, NodeId, f64)> = Vec::new();
-    for &node_id in damped_activations.keys() {
-        for &edge_id in storage.edges_from(node_id) {
-            if let Ok(edge) = storage.get_edge(edge_id) {
-                if matches!(edge.edge_type, EdgeType::Contradicts) && edge_valid_at(edge, now) {
-                    contradicts_edges.push((edge.source, edge.target, edge.weight));
-                }
-            }
-        }
-    }
+    // Rank by readout score with the deterministic tie-breaker chain.
+    scored.sort_by(|(sa, ka, _), (sb, kb, _)| rank(*sa, ka, *sb, kb));
+    let scored_nodes: Vec<ScoredNode> = scored.into_iter().map(|(_, _, n)| n).collect();
 
-    let identity_activations: Vec<(NodeId, KnowledgeType, f64)> = damped_activations
+    let identity_activations: Vec<(NodeId, KnowledgeType, f64)> = activations
         .iter()
         .filter_map(|(&node_id, &activation)| {
             let node = storage.get_node(node_id).ok()?;
             if !is_identity_type(&node.node_type) {
                 return None;
             }
-            let Some(agent_id) = &config.agent_id else {
-                return None;
-            };
+            let agent_id = config.agent_id.as_ref()?;
             (node.origin.peer_id.0.to_string() == *agent_id)
                 .then(|| (node_id, node.node_type.clone(), activation))
         })
@@ -245,8 +244,7 @@ fn assemble_graph_recall_package<S: StorageAdapter + Clone>(
     assemble_context_package(
         scored_nodes,
         &identity_activations,
-        &contradicts_edges,
-        &damped_activations,
+        &contradiction_pairs,
         config.token_budget,
         config.chars_per_token,
         &config.scope,
@@ -438,13 +436,10 @@ fn node_is_valid_at<S: StorageAdapter + Clone>(
     node_id: NodeId,
     as_of: Timestamp,
 ) -> bool {
-    engine.graph.get_node(node_id).is_ok_and(|node| {
-        let from_ok = node.valid_from.is_none_or(|valid_from| valid_from <= as_of);
-        let until_ok = node
-            .valid_until
-            .is_none_or(|valid_until| valid_until > as_of);
-        from_ok && until_ok
-    })
+    engine
+        .graph
+        .get_node(node_id)
+        .is_ok_and(|node| crate::graph::valid_at(node.valid_from, node.valid_until, as_of))
 }
 
 fn is_identity_type(node_type: &KnowledgeType) -> bool {

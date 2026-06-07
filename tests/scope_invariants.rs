@@ -21,10 +21,10 @@ use anamnesis::{Engine, EngineConfig, IngestResult, NodeId, SqliteStorage, Stora
 // ===== 6 Relation Cases =====
 
 #[test]
-fn relation_exact_returns_full_weight() {
+fn relation_equal_returns_full_weight() {
     let a = ScopePath::new("personal/foo").unwrap();
     let b = ScopePath::new("personal/foo").unwrap();
-    assert_eq!(a.relation_to(&b), ScopeRelation::Exact);
+    assert_eq!(a.relation_to(&b), ScopeRelation::Equal);
     let w = scope_weight(&a, &b, 0);
     assert!(
         (w - 1.0).abs() < 1e-10,
@@ -89,10 +89,10 @@ fn relation_universal_returns_locked_weight() {
 }
 
 #[test]
-fn relation_unrelated_returns_locked_weight_with_bonus_cap() {
+fn relation_disjoint_returns_locked_weight_with_bonus_cap() {
     let query = ScopePath::new("work").unwrap();
     let node = ScopePath::new("personal").unwrap();
-    assert_eq!(query.relation_to(&node), ScopeRelation::Unrelated);
+    assert_eq!(query.relation_to(&node), ScopeRelation::Disjoint);
 
     let base = scope_weight(&query, &node, 0);
     assert!(
@@ -192,6 +192,8 @@ fn make_indexed_node(id: NodeId, scope: &str) -> Node {
         valid_from: None,
         valid_until: None,
         salience: 0.5,
+        retained_action: 0.0,
+        evidence_prior: 0.0,
         access_count: 0,
         access_history: VecDeque::new(),
         tier: MemoryTier::Auto,
@@ -350,14 +352,14 @@ fn search_personal_foo_downweights_work_bar_vs_personal_ancestor() {
 
     let query_scope = ScopePath::new("personal/foo").unwrap();
     let ancestor_scope = ScopePath::new("personal").unwrap();
-    let unrelated_scope = ScopePath::new("work/bar").unwrap();
+    let disjoint_scope = ScopePath::new("work/bar").unwrap();
     assert_eq!(
         query_scope.relation_to(&ancestor_scope),
         ScopeRelation::Descendant
     );
     assert_eq!(
-        query_scope.relation_to(&unrelated_scope),
-        ScopeRelation::Unrelated
+        query_scope.relation_to(&disjoint_scope),
+        ScopeRelation::Disjoint
     );
 
     let result = engine

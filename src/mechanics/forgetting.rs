@@ -1,154 +1,92 @@
-//! Forgetting mechanics — salience decay and reinforcement.
+//! ACT-R base-level activation kernel with activation-dependent per-trace decay
+//! (Anderson & Schooler 1991; Pavlik & Anderson 2005).
 //!
-//! All functions are pure: no side effects, no storage access.
+//! This is the multi-trace base-level kernel `B_i = ln(Σⱼ (now − atⱼ)^(−dⱼ))`. Per
+//! [ADR-0008](../../docs/adr/0008-powerlaw-dissipation.md) persistent node strength
+//! decomposes as `A_i = B_i + P_i`: the base level `B_i` owns forgetting and
+//! use-driven reinforcement and is the LIVE node strength term, while `P_i` (the
+//! stored, decay-exempt `evidence_prior`) holds encoding surprise, feedback, and
+//! peer trust. `B_i` is recomputed on demand from the node's access-trace history
+//! (a creation trace plus each committed access, bounded to 32 traces); there is no
+//! scalar reservoir that maintenance decays. Salience is the logistic projection of
+//! the composite sum, `s_i = logistic(B_i + P_i)`.
 //!
-//! ## Equations
-//! - (4) Decay: s(t+dt) = b + (s(t) - b) * exp(-lambda * dt_days)
-//! - (5) Reinforcement: s <- clamp(s + 0.20 * (1 - s), 0, 1)
+//! Each trace carries its OWN decay rate `dⱼ` ([`crate::graph::AccessTrace`]),
+//! computed ONCE at the moment the trace is laid down from the activation `mⱼ` of
+//! the EXISTING traces: `dⱼ = m_type·(c·e^{mⱼ} + α)` (Pavlik & Anderson 2005,
+//! [`compute_trace_decay`]). A trace laid down on a strongly active node decays
+//! faster, which is what produces the genuine spacing effect.
+//!
+//! Aging is intrinsic: `B_i` ages every trace to `now` whenever it is read, so a
+//! committed access appends a fresh trace inside the same sum that ages the prior
+//! ones (decay-first by construction). See
+//! [interactions.md](../../docs/04-cognitive-dynamics/interactions.md).
 
-use crate::graph::KnowledgeType;
-use crate::graph::Timestamp;
+use crate::graph::{AccessTrace, Timestamp};
 use std::collections::VecDeque;
 
-/// Returns the per-day decay rate (lambda) for a knowledge type.
+/// Multi-trace ACT-R base-level activation with per-trace decay (Anderson &
+/// Schooler 1991; Pavlik & Anderson 2005).
 ///
-/// Higher lambda = faster decay. IdentityCore never decays (lambda = 0).
-pub fn lambda_for_type(kt: &KnowledgeType) -> f64 {
-    match kt {
-        KnowledgeType::IdentityCore => 0.0,
-        KnowledgeType::IdentityLearned => 0.005,
-        KnowledgeType::IdentityState => 0.030,
-        KnowledgeType::Convention | KnowledgeType::Decision => 0.015,
-        KnowledgeType::Semantic | KnowledgeType::Procedural | KnowledgeType::Entity => 0.020,
-        KnowledgeType::Episodic => 0.050,
-        KnowledgeType::Event => 0.030,
-        KnowledgeType::Gotcha => 0.020,
-        KnowledgeType::Hypothesis | KnowledgeType::Evidence | KnowledgeType::DebugSession => 0.0,
-        KnowledgeType::Custom(_) => 0.020,
-    }
-}
-
-/// Adjusts a base decay rate using local graph topology signals.
+/// `B = ln(Σⱼ (now − atⱼ)^(−dⱼ))` where each `dⱼ` is the trace's own stored decay
+/// rate. Each `(now − atⱼ)` is the elapsed time in milliseconds since the j-th
+/// access, floored to `max(1)` ms.
 ///
-/// Isolated nodes decay faster, while bridge nodes receive decay protection:
-/// `lambda_eff = lambda_base * (1 + isolation_factor * is_orphan) * (1 - bridge_factor * bridge_score)`.
-pub fn effective_lambda(
-    lambda_base: f64,
-    is_orphan: bool,
-    bridge_score: f64,
-    isolation_factor: f64,
-    bridge_factor: f64,
-) -> f64 {
-    let orphan_indicator = if is_orphan { 1.0 } else { 0.0 };
-    let isolation_multiplier = 1.0 + isolation_factor * orphan_indicator;
-    let bridge_protection = 1.0 - bridge_factor * bridge_score;
-
-    lambda_base * isolation_multiplier * bridge_protection
-}
-
-/// Returns the salience floor (minimum value) for a knowledge type.
-///
-/// Salience never decays below this floor. IdentityCore floor equals
-/// the current salience (it never changes).
-pub fn floor_for_type(kt: &KnowledgeType) -> f64 {
-    match kt {
-        KnowledgeType::IdentityCore => 1.0, // sentinel: handled specially in decay_salience
-        KnowledgeType::IdentityLearned => 0.30,
-        KnowledgeType::IdentityState => 0.10,
-        KnowledgeType::Convention | KnowledgeType::Decision => 0.10,
-        KnowledgeType::Semantic | KnowledgeType::Procedural | KnowledgeType::Entity => 0.02,
-        KnowledgeType::Episodic => 0.00,
-        KnowledgeType::Event => 0.02,
-        KnowledgeType::Gotcha => 0.02,
-        KnowledgeType::Hypothesis | KnowledgeType::Evidence | KnowledgeType::DebugSession => 1.0,
-        KnowledgeType::Custom(_) => 0.02,
-    }
-}
-
-/// Applies exponential decay to a salience value.
-///
-/// Equation (4): s(t+dt) = b + (s(t) - b) * exp(-lambda * dt_days)
-///
-/// - `current`: current salience [0, 1]
-/// - `dt_days`: elapsed time in days (must be >= 0)
-/// - `kt`: knowledge type (determines lambda and floor)
-///
-/// Returns the new salience, clamped to [floor, current].
-/// IdentityCore nodes are never decayed (returns `current` unchanged).
-pub fn decay_salience(current: f64, dt_days: f64, kt: &KnowledgeType) -> f64 {
-    decay_salience_with_lambda(current, dt_days, kt, lambda_for_type(kt))
-}
-
-/// Applies exponential decay using an explicit decay rate.
-///
-/// This keeps [`decay_salience`] backwards-compatible while allowing callers to
-/// supply topology-adjusted decay rates.
-pub(crate) fn decay_salience_with_lambda(
-    current: f64,
-    dt_days: f64,
-    kt: &KnowledgeType,
-    lambda: f64,
-) -> f64 {
-    // IdentityCore never decays
-    if matches!(kt, KnowledgeType::IdentityCore) {
-        return current;
-    }
-
-    let floor = floor_for_type(kt);
-
-    // No decay if lambda is zero or no time has passed
-    if lambda == 0.0 || dt_days <= 0.0 {
-        return current;
-    }
-
-    // If already at or below floor, no further decay possible
-    if current <= floor {
-        return current;
-    }
-
-    let decayed = floor + (current - floor) * (-lambda * dt_days).exp();
-    // Clamp to [floor, current] — decay never increases salience
-    decayed.clamp(floor, current)
-}
-
-/// Applies reinforcement boost to a salience value.
-///
-/// Equation (5): s <- clamp(s + 0.20 * (1 - s), 0, 1)
-///
-/// The `(1 - s)` factor creates diminishing returns: the closer to 1.0,
-/// the smaller the boost. At s=1.0, the boost is 0.
-pub fn reinforce_salience(current: f64) -> f64 {
-    (current + 0.20 * (1.0 - current)).clamp(0.0, 1.0)
-}
-
-/// ACT-R base-level activation (Anderson & Schooler 1991).
-///
-/// B = ln(Σⱼ tⱼ⁻ᵈ) where d is the decay parameter (typically 0.5).
-///
-/// Each tⱼ is the elapsed time in milliseconds since the j-th access.
-/// Returns negative infinity when access_history is empty (no activation).
+/// Returns negative infinity when `access_history` is empty (no activation).
 /// Result is not clamped — can be any real number including negative.
-pub fn compute_base_level(
-    access_history: &VecDeque<Timestamp>,
-    now: Timestamp,
-    decay_d: f64,
-) -> f64 {
+pub fn compute_base_level(access_history: &VecDeque<AccessTrace>, now: Timestamp) -> f64 {
     if access_history.is_empty() {
         return f64::NEG_INFINITY;
     }
     let sum: f64 = access_history
         .iter()
-        .map(|&t| {
-            let dt = now.0.saturating_sub(t.0).max(1) as f64;
-            dt.powf(-decay_d)
+        .map(|trace| {
+            let dt = now.0.saturating_sub(trace.at.0).max(1) as f64;
+            dt.powf(-trace.decay)
         })
         .sum();
     sum.ln()
 }
 
-/// Map ACT-R base-level activation to salience in [0, 1].
+/// Activation-dependent per-trace decay `d_j` (Pavlik & Anderson 2005).
 ///
-/// Uses sigmoid: σ(b) = 1 / (1 + exp(-b)).
+/// Computed ONCE at the moment a trace is laid down (at time `now`) from the
+/// activation `m` of the EXISTING traces:
+/// - empty history (the creation / first trace) ⇒ `m = −∞`, `e^m = 0`, so the
+///   floor `d_j = m_type · intercept_alpha` applies;
+/// - otherwise `m = ln(Σ_existing (now − at_k)^(−d_k))` and
+///   `d_j = m_type · (scale_c · e^m + intercept_alpha)`.
+///
+/// `m_type` ([`crate::mechanics::priors::decay_multiplier_for_type`]) is the OUTER
+/// multiplier, so a decay-exempt type (`m_type = 0`) yields `d_j = 0` (permanent).
+/// `scale_c` and `intercept_alpha` are the locked
+/// [`crate::mechanics::priors::DECAY_SCALE`] / [`crate::mechanics::priors::DECAY_INTERCEPT`].
+pub fn compute_trace_decay(
+    existing: &VecDeque<AccessTrace>,
+    now: Timestamp,
+    m_type: f64,
+    scale_c: f64,
+    intercept_alpha: f64,
+) -> f64 {
+    if existing.is_empty() {
+        // Creation / first-trace floor: e^{−∞} = 0 ⇒ d_j = m_type·α.
+        return m_type * intercept_alpha;
+    }
+    let activation_sum: f64 = existing
+        .iter()
+        .map(|trace| {
+            let dt = now.0.saturating_sub(trace.at.0).max(1) as f64;
+            dt.powf(-trace.decay)
+        })
+        .sum();
+    let m = activation_sum.ln();
+    m_type * (scale_c * m.exp() + intercept_alpha)
+}
+
+/// Map ACT-R base-level activation to a bounded value in [0, 1].
+///
+/// Uses sigmoid: σ(b) = 1 / (1 + exp(-b)). This is the same logistic form used by
+/// `project_salience`, applied to the base-level activation `B` directly.
 /// - B = −∞ → 0.0  (no activation)
 /// - B = 0  → 0.5  (neutral)
 /// - B → +∞ → 1.0  (fully active)
@@ -162,133 +100,171 @@ pub fn base_level_to_salience(b: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use proptest::prelude::*;
+    use crate::mechanics::priors::{DECAY_INTERCEPT, DECAY_SCALE};
 
-    // ── Deterministic tests ──────────────────────────────────────────────────
-
-    #[test]
-    fn identity_core_never_decays() {
-        let s = 0.8;
-        assert_eq!(decay_salience(s, 365.0, &KnowledgeType::IdentityCore), s);
-        assert_eq!(decay_salience(s, 0.0, &KnowledgeType::IdentityCore), s);
+    /// Helper: a single trace at `at` with decay rate `d`.
+    fn trace(at: u64, d: f64) -> AccessTrace {
+        AccessTrace {
+            at: Timestamp(at),
+            decay: d,
+        }
     }
 
     #[test]
-    fn decay_with_zero_dt_returns_current() {
-        for kt in [
-            KnowledgeType::Semantic,
-            KnowledgeType::Episodic,
-            KnowledgeType::IdentityLearned,
+    fn empty_history_is_neg_infinity() {
+        let h: VecDeque<AccessTrace> = VecDeque::new();
+        let b = compute_base_level(&h, Timestamp(1000));
+        assert!(b.is_infinite() && b < 0.0);
+    }
+
+    #[test]
+    fn single_access_act_r_exact() {
+        let mut h = VecDeque::new();
+        h.push_back(trace(0, 0.5));
+        let now = Timestamp(7 * 24 * 3600 * 1000);
+        let dt = now.0 as f64;
+        let expected = dt.powf(-0.5).ln();
+        let actual = compute_base_level(&h, now);
+        assert!((actual - expected).abs() < 1e-9, "{actual} != {expected}");
+    }
+
+    #[test]
+    fn more_recent_access_raises_base_level() {
+        let mut old = VecDeque::new();
+        old.push_back(trace(0, 0.5));
+        let mut recent = VecDeque::new();
+        recent.push_back(trace(900_000, 0.5));
+        let now = Timestamp(1_000_000);
+        assert!(compute_base_level(&recent, now) > compute_base_level(&old, now));
+    }
+
+    #[test]
+    fn base_level_to_salience_in_unit_range() {
+        assert_eq!(base_level_to_salience(f64::NEG_INFINITY), 0.0);
+        assert!((base_level_to_salience(0.0) - 0.5).abs() < 1e-9);
+        assert!(base_level_to_salience(20.0) > 0.99);
+        assert!(base_level_to_salience(-20.0) < 0.01);
+    }
+
+    #[test]
+    fn creation_trace_makes_fresh_node_finite() {
+        // A freshly created node seeds a creation trace at `created_at`, so its
+        // base level is finite (not NEG_INFINITY) even before any access. With the
+        // creation trace stamped at `now` itself, dt floors to 1ms and B ≈ ln(1) = 0.
+        let mut h = VecDeque::new();
+        let created = 5_000;
+        h.push_back(trace(created, 0.5 * DECAY_INTERCEPT));
+        let b = compute_base_level(&h, Timestamp(created));
+        assert!(b.is_finite(), "fresh node B must be finite, got {b}");
+        assert!(b.abs() < 1e-9, "fresh-at-now B should be ≈ 0, got {b}");
+    }
+
+    #[test]
+    fn composite_salience_combines_base_level_and_prior() {
+        // salience = logistic(B_i + P_i). A high decay-exempt prior keeps a node
+        // salient at birth even though its base level is ≈ 0.
+        let mut h = VecDeque::new();
+        let now = Timestamp(1_000);
+        h.push_back(trace(now.0, 0.4 * DECAY_INTERCEPT));
+        let b = compute_base_level(&h, now);
+        let p = 13.8; // surprise-ceiling evidence prior
+        let s = base_level_to_salience(b + p);
+        assert!(
+            s > 0.999,
+            "high prior should land salience near 1.0, got {s}"
+        );
+    }
+
+    // ── Activation-dependent per-trace decay (Pavlik & Anderson 2005) ─────────
+
+    #[test]
+    fn empty_history_trace_decay_is_floor() {
+        // The creation / first trace has no existing activation: e^{−∞} = 0 ⇒
+        // d_j = m_type·α exactly (the locked floor).
+        let h: VecDeque<AccessTrace> = VecDeque::new();
+        let m_type = 0.40; // Semantic
+        let d = compute_trace_decay(&h, Timestamp(0), m_type, DECAY_SCALE, DECAY_INTERCEPT);
+        assert!(
+            (d - m_type * DECAY_INTERCEPT).abs() < 1e-12,
+            "creation decay must be m_type·α = {}, got {d}",
+            m_type * DECAY_INTERCEPT
+        );
+    }
+
+    #[test]
+    fn core_type_trace_decay_is_zero() {
+        // m_type = 0 ⇒ d_j = 0 for every trace (permanent, no decay).
+        let mut h = VecDeque::new();
+        h.push_back(trace(0, 0.0));
+        let d_empty = compute_trace_decay(
+            &VecDeque::new(),
+            Timestamp(1000),
+            0.0,
+            DECAY_SCALE,
+            DECAY_INTERCEPT,
+        );
+        let d_nonempty =
+            compute_trace_decay(&h, Timestamp(1000), 0.0, DECAY_SCALE, DECAY_INTERCEPT);
+        assert_eq!(d_empty, 0.0);
+        assert_eq!(d_nonempty, 0.0);
+    }
+
+    #[test]
+    fn core_type_base_level_constant_in_time() {
+        // With every trace decay = 0, B = ln(Σ_j dt^0) = ln(n) regardless of `now`.
+        let mut h = VecDeque::new();
+        h.push_back(trace(0, 0.0));
+        h.push_back(trace(1_000, 0.0));
+        h.push_back(trace(2_000, 0.0));
+        let n = h.len() as f64;
+        for now in [
+            Timestamp(3_000),
+            Timestamp(10_000_000),
+            Timestamp(u64::MAX / 2),
         ] {
-            assert_eq!(decay_salience(0.8, 0.0, &kt), 0.8);
+            let b = compute_base_level(&h, now);
+            assert!(
+                (b - n.ln()).abs() < 1e-12,
+                "Core B must equal ln(n)={} at now={now:?}, got {b}",
+                n.ln()
+            );
         }
     }
 
     #[test]
-    fn episodic_decays_faster_than_semantic() {
-        let s = 1.0;
-        let dt = 14.0; // 2 weeks
-        let episodic = decay_salience(s, dt, &KnowledgeType::Episodic);
-        let semantic = decay_salience(s, dt, &KnowledgeType::Semantic);
+    fn single_trace_semantic_slope_is_minus_m_type_alpha() {
+        // A single Semantic creation trace (decay = m_type·α) gives a perfectly
+        // log-linear forgetting curve B = −d·ln(dt), so the slope of B against
+        // ln(dt) is exactly −d = −m_type·α = −0.16.
+        let m_type = 0.40_f64; // Semantic
+        let d = m_type * DECAY_INTERCEPT; // 0.16
+        let mut h = VecDeque::new();
+        h.push_back(trace(0, d));
+        // Two probe times; slope = ΔB / Δln(dt).
+        let dt1 = 10_000.0_f64;
+        let dt2 = 1_000_000.0_f64;
+        let b1 = compute_base_level(&h, Timestamp(dt1 as u64));
+        let b2 = compute_base_level(&h, Timestamp(dt2 as u64));
+        let slope = (b2 - b1) / (dt2.ln() - dt1.ln());
         assert!(
-            episodic < semantic,
-            "episodic={episodic}, semantic={semantic}"
+            (slope + 0.16).abs() < 1e-9,
+            "single-trace Semantic slope must be −0.16, got {slope}"
         );
     }
 
     #[test]
-    fn decay_approaches_floor_over_time() {
-        let s = 1.0;
-        let floor = floor_for_type(&KnowledgeType::Episodic);
-        let decayed = decay_salience(s, 365.0, &KnowledgeType::Episodic);
-        // After a year, should be very close to floor
-        assert!(decayed < 0.05, "expected near floor, got {decayed}");
-        assert!(decayed >= floor);
-    }
-
-    #[test]
-    fn identity_learned_floor_is_respected() {
-        let floor = floor_for_type(&KnowledgeType::IdentityLearned);
-        let decayed = decay_salience(floor + 0.01, 10000.0, &KnowledgeType::IdentityLearned);
-        assert!(decayed >= floor, "decayed below floor: {decayed} < {floor}");
-    }
-
-    #[test]
-    fn reinforce_at_zero_gives_point_two() {
-        let result = reinforce_salience(0.0);
-        assert!((result - 0.20).abs() < 1e-10);
-    }
-
-    #[test]
-    fn reinforce_at_one_returns_one() {
-        assert_eq!(reinforce_salience(1.0), 1.0);
-    }
-
-    #[test]
-    fn reinforce_at_half_gives_point_six() {
-        let result = reinforce_salience(0.5);
-        assert!((result - 0.60).abs() < 1e-10);
-    }
-
-    #[test]
-    fn reinforce_is_diminishing() {
-        // Boost at s=0.1 should be larger than boost at s=0.9
-        let boost_low = reinforce_salience(0.1) - 0.1;
-        let boost_high = reinforce_salience(0.9) - 0.9;
+    fn second_trace_decays_faster_than_creation_floor() {
+        // A second trace laid down while the first is still active sees m > −∞, so
+        // its decay exceeds the m_type·α floor (activation-dependent acceleration).
+        let m_type = 0.40_f64;
+        let floor = m_type * DECAY_INTERCEPT;
+        let mut h = VecDeque::new();
+        h.push_back(trace(0, floor));
+        let now = Timestamp(1_000); // first trace still active
+        let d2 = compute_trace_decay(&h, now, m_type, DECAY_SCALE, DECAY_INTERCEPT);
         assert!(
-            boost_low > boost_high,
-            "boost_low={boost_low}, boost_high={boost_high}"
+            d2 > floor,
+            "active-node trace decay {d2} must exceed floor {floor}"
         );
-    }
-
-    #[test]
-    fn lambda_values_match_architecture() {
-        assert_eq!(lambda_for_type(&KnowledgeType::IdentityCore), 0.0);
-        assert_eq!(lambda_for_type(&KnowledgeType::IdentityLearned), 0.005);
-        assert_eq!(lambda_for_type(&KnowledgeType::Episodic), 0.050);
-        assert_eq!(lambda_for_type(&KnowledgeType::Semantic), 0.020);
-        assert_eq!(lambda_for_type(&KnowledgeType::Convention), 0.015);
-    }
-
-    // ── Property tests ───────────────────────────────────────────────────────
-
-    proptest! {
-        #[test]
-        fn decay_output_in_bounds(
-            s in 0.0f64..=1.0,
-            dt in 0.0f64..=365.0,
-        ) {
-            let kt = KnowledgeType::Semantic;
-            let result = decay_salience(s, dt, &kt);
-            let floor = floor_for_type(&kt);
-            if s >= floor {
-                prop_assert!(result >= floor, "result {result} below floor {floor}");
-            } else {
-                prop_assert!(result == s, "below-floor input should be unchanged: {result} != {s}");
-            }
-            prop_assert!(result <= s + 1e-10, "result {result} exceeds input {s}");
-        }
-
-        #[test]
-        fn decay_never_increases(
-            s in 0.0f64..=1.0,
-            dt in 0.001f64..=365.0,
-        ) {
-            let result = decay_salience(s, dt, &KnowledgeType::Episodic);
-            prop_assert!(result <= s + 1e-10, "decay increased salience: {result} > {s}");
-        }
-
-        #[test]
-        fn reinforce_output_in_bounds(s in 0.0f64..=1.0) {
-            let result = reinforce_salience(s);
-            prop_assert!(result >= s - 1e-10, "reinforce decreased salience: {result} < {s}");
-            prop_assert!(result <= 1.0 + 1e-10, "reinforce exceeded 1.0: {result}");
-        }
-
-        #[test]
-        fn reinforce_never_decreases(s in 0.0f64..=1.0) {
-            let result = reinforce_salience(s);
-            prop_assert!(result >= s - 1e-10);
-        }
     }
 }

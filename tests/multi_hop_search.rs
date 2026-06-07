@@ -44,7 +44,7 @@ fn multi_hop_finds_linked_entities() {
         IngestResult::Created(ids) => ids[0],
         _ => panic!("expected Created"),
     };
-    e.link(ceo, hashed, EdgeType::Semantic, 1.0).unwrap();
+    e.link(ceo, hashed, EdgeType::Semantic).unwrap();
 
     let result = e
         .search(SearchInput {

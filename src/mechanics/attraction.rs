@@ -4,7 +4,14 @@
 //!
 //! ## Equations
 //! - (2) Similarity: sigma_ij = max(0, cosine(e_i, e_j))
-//! - (3) Attraction: A_ij = sigma_ij * tau_type(i, j) * (1 + 0.20 * m_j)
+//! - (3) Attraction: A_ij = sigma_ij * tau_type(i, j)
+//!
+//! Attraction is a *candidate-selection* affinity only — similarity scaled by type
+//! affinity. There is no mass or gravity boost: importance is emergent, not a
+//! separate force (overview.md / conductance.md "Importance is emergent ... without
+//! a separate gravity or mass force"). The strength a created edge carries comes
+//! from the cold-start coupling seed (a calibrated log-LR prior), not from this
+//! affinity; see `conductance.md` and `Engine::cold_start_conductance`.
 
 use crate::graph::KnowledgeType;
 
@@ -69,15 +76,18 @@ pub fn tau_type(a: &KnowledgeType, b: &KnowledgeType) -> f64 {
     1.00
 }
 
-/// Computes the attraction score between two nodes.
+/// Computes the attraction score between two nodes — the candidate-selection affinity.
 ///
-/// Equation (3): A_ij = sigma_ij * tau_type(i, j) * (1 + 0.20 * m_j)
+/// Equation (3): A_ij = sigma_ij * tau_type(i, j)
 ///
 /// - `similarity`: cosine similarity between embeddings [0, 1]
 /// - `tau`: type affinity multiplier from `tau_type()`
-/// - `target_mass`: mass of the target node [0, 1]
-pub fn attraction_score(similarity: f64, tau: f64, target_mass: f64) -> f64 {
-    similarity * tau * (1.0 + 0.20 * target_mass)
+///
+/// There is no mass / gravity term: importance is emergent (overview.md /
+/// conductance.md). This score only gates *which* candidates become edges; the
+/// edge's actual strength is its cold-start coupling seed.
+pub fn attraction_score(similarity: f64, tau: f64) -> f64 {
+    similarity * tau
 }
 
 /// Returns the edge creation threshold for a pair of knowledge types.
@@ -101,15 +111,6 @@ pub fn edge_threshold(a: &KnowledgeType, b: &KnowledgeType) -> f64 {
 /// Uses type-specific thresholds: 0.65 for Identity pairs, 0.72 for all others.
 pub fn should_create_edge(score: f64, a: &KnowledgeType, b: &KnowledgeType) -> bool {
     score >= edge_threshold(a, b)
-}
-
-/// Computes the new edge weight after strengthening an existing edge.
-///
-/// Formula: w_new = clamp(w_old + 0.25 * A_ij * (1 - w_old), 0, 1)
-///
-/// This creates diminishing returns: the closer to 1.0, the smaller the increase.
-pub fn strengthen_edge(current_weight: f64, attraction: f64) -> f64 {
-    (current_weight + 0.25 * attraction * (1.0 - current_weight)).clamp(0.0, 1.0)
 }
 
 #[cfg(test)]
@@ -254,24 +255,13 @@ mod tests {
         ));
     }
 
-    // ── Edge strengthening ───────────────────────────────────────────────────
+    // ── Attraction (similarity * type affinity, no mass) ──────────────────────
 
     #[test]
-    fn strengthen_from_zero() {
-        // w=0, A=1.0 → 0 + 0.25 * 1.0 * 1.0 = 0.25
-        assert!((strengthen_edge(0.0, 1.0) - 0.25).abs() < 1e-10);
-    }
-
-    #[test]
-    fn strengthen_at_one_stays_one() {
-        assert_eq!(strengthen_edge(1.0, 1.0), 1.0);
-    }
-
-    #[test]
-    fn strengthen_diminishing_returns() {
-        let boost_low = strengthen_edge(0.1, 1.0) - 0.1;
-        let boost_high = strengthen_edge(0.9, 1.0) - 0.9;
-        assert!(boost_low > boost_high);
+    fn attraction_is_similarity_times_tau() {
+        // No mass term: A_ij = sigma_ij * tau.
+        assert!((attraction_score(0.8, 1.25) - 1.0).abs() < 1e-10);
+        assert!((attraction_score(0.5, 1.0) - 0.5).abs() < 1e-10);
     }
 
     // ── Property tests ───────────────────────────────────────────────────────
@@ -290,13 +280,12 @@ mod tests {
         }
 
         #[test]
-        fn strengthen_output_in_bounds(
-            w in 0.0f64..=1.0,
-            a in 0.0f64..=2.0,
+        fn attraction_nonnegative(
+            sim in 0.0f64..=1.0,
+            tau in 0.0f64..=1.30,
         ) {
-            let result = strengthen_edge(w, a);
-            prop_assert!(result >= w - 1e-10, "strengthen decreased weight");
-            prop_assert!(result <= 1.0 + 1e-10, "strengthen exceeded 1.0");
+            let result = attraction_score(sim, tau);
+            prop_assert!(result >= 0.0, "attraction negative: {result}");
         }
     }
 }

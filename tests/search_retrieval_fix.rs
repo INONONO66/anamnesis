@@ -221,7 +221,7 @@ fn test_search_episodic_content_preserved() {
             IngestResult::Created(ids) => {
                 episodic_ids.push(ids[0]);
                 engine
-                    .link(ids[0], semantic_id, EdgeType::ExtractedFrom, 0.9)
+                    .link(ids[0], semantic_id, EdgeType::ExtractedFrom)
                     .unwrap();
             }
             _ => panic!("expected Created"),
@@ -255,7 +255,7 @@ fn test_search_episodic_content_preserved() {
         _ => panic!("expected Created"),
     };
     engine
-        .link(semantic_id, contradiction_id, EdgeType::Contradicts, 0.8)
+        .link(semantic_id, contradiction_id, EdgeType::Contradicts)
         .unwrap();
 
     // Search for matching text
@@ -321,16 +321,16 @@ fn test_search_seeds_ordered_by_relevance() {
     );
 
     // Assert spreading activation occurred as one multi-source invocation.
-    assert_eq!(result.trace.spread_iterations, 1);
+    assert!(result.trace.iterations >= 1);
 
-    // Assert strategies include spreading activation
+    // Assert strategies include the additive-RWR activation flow.
     assert!(
         result
             .trace
             .strategies_used
             .iter()
-            .any(|s| s == "spreading_activation"),
-        "Should use spreading_activation strategy"
+            .any(|s| s == "activation_flow"),
+        "Should use activation_flow strategy"
     );
 }
 
@@ -356,7 +356,7 @@ fn test_knowledge_only_excludes_memories() {
         _ => panic!("expected Created"),
     };
     engine
-        .link(episodic_id, semantic_id, EdgeType::ExtractedFrom, 0.9)
+        .link(episodic_id, semantic_id, EdgeType::ExtractedFrom)
         .unwrap();
 
     // Search with ordinary text (triggers KnowledgeOnly packaging mode)

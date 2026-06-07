@@ -31,15 +31,41 @@ impl Timestamp {
     }
 }
 
-/// Knowledge type taxonomy — determines decay rate, mass prior, and physics behavior.
+/// A single access trace in a node's bounded access-history window.
 ///
-/// Three classes of matter:
-/// - Identity (Star): high mass, low/no decay
-/// - Knowledge (Planet): medium mass, moderate decay  
-/// - Memory (Dust): low mass, fast decay
+/// Each trace records both *when* it was laid down (`at`) and the per-trace decay
+/// rate `d_j` (`decay`) computed once at that moment from the activation of the
+/// EXISTING traces (Pavlik & Anderson 2005 activation-dependent decay,
+/// dissipation.md). The base level sums each trace with its OWN decay,
+/// `B_i = ln(Σ_j (now − at_j)^(−decay_j))`, so a trace laid down on a strongly
+/// active node decays faster than one laid down on a cold node.
+///
+/// Derives mirror [`super::node::Node`] (`Debug, Clone, PartialEq`) plus `Copy`
+/// since both fields are scalar; it deliberately does NOT derive `Eq`/`Hash`/`Ord`
+/// because `decay` is an `f64`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AccessTrace {
+    /// When this access trace was laid down (the event timestamp).
+    pub at: Timestamp,
+    /// The per-trace decay rate `d_j`, computed once at creation from the
+    /// activation of the existing traces and then stored immutably with the trace.
+    pub decay: f64,
+}
+
+/// Knowledge type taxonomy. `node_type` is a *policy* input to the dissipation and
+/// coupling priors, not an independent dynamics knob:
+/// - decay: it selects the per-type multiplier on the single free decay prior `d`
+///   ([`crate::mechanics::priors::decay_multiplier_for_type`], dissipation.md) —
+///   Core is protected (≈0), identity/convention layers decay slowly, episodic at
+///   the full rate, debug-lifecycle nodes are inert;
+/// - coupling: it contributes the edge-type-affinity feature to the cold-start
+///   coupling seed (conductance.md). It supplies no separate decay rate or weight.
+///
+/// Tiers below group the variants by how strongly they resist dissipation
+/// (slow-decaying identity, ordinary knowledge, fast-decaying memory).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum KnowledgeType {
-    // Identity (Star — high mass, low/no decay)
+    // Identity — slow / protected decay.
     /// L0: Immutable core trait. No decay. ("I am a code architect")
     IdentityCore,
     /// L1: Experience-formed trait. Very slow decay. ("prefers factory pattern")
@@ -47,7 +73,7 @@ pub enum KnowledgeType {
     /// L2: Current state. Normal decay. ("refactoring auth module")
     IdentityState,
 
-    // Knowledge (Planet — medium mass, moderate decay)
+    // Knowledge — moderate decay.
     /// Extracted fact from conversation or document.
     Semantic,
     /// How-to or execution pattern.
@@ -67,7 +93,7 @@ pub enum KnowledgeType {
     /// Debugging session or investigation trace that should remain inert.
     DebugSession,
 
-    // Memory (Dust — low mass, fast decay)
+    // Memory — fast decay.
     /// Raw conversation turn or session text.
     Episodic,
     /// Time-bound occurrence or event.
@@ -94,77 +120,51 @@ pub enum MemoryTier {
     Archival,
 }
 
-/// Edge type — determines propagation multiplier (kappa) during spreading activation.
+/// Edge type — determines the within-row propagation factor during spreading
+/// activation. The factor itself is the calibrated `edge_type_factor` prior
+/// ([`crate::mechanics::priors::edge_type_factor`]); the type only names the
+/// relation.
 ///
-/// Supportive edges propagate activation. Contradicts is inhibitory (applies repulsion).
+/// Supportive edges propagate activation. `Contradicts` is excluded from propagation
+/// and instead surfaces query-local frustration stress between its active endpoints
+/// (frustration.md / ADR-0006) — it is never inhibitory damping.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum EdgeType {
     // Supportive (propagation)
-    /// Conceptual relationship. kappa = 1.00
+    /// Conceptual relationship.
     Semantic,
-    /// Cause-effect relationship. kappa = 1.00
+    /// Cause-effect relationship.
     Causal,
-    /// Temporal sequence. kappa = 0.85
+    /// Temporal sequence.
     Temporal,
-    /// Decision rationale. kappa = 1.15
+    /// Decision rationale.
     Reason,
-    /// Repeated confirmation. kappa = 1.10
+    /// Repeated confirmation.
     ReinforcedBy,
-    /// Derived from multiple fragments. kappa = 1.00
+    /// Derived from multiple fragments.
     ConsolidatedFrom,
-    /// Derived knowledge to source episode. kappa = 1.00
+    /// Derived knowledge to source episode.
     ExtractedFrom,
-    /// Shared entity link across agents. kappa = 0.95
+    /// Shared entity link across agents.
     Entity,
-    /// Replaces outdated knowledge. kappa = 1.20 toward new, 0.40 toward old.
+    /// Replaces outdated knowledge (directional: strong toward new, weak toward old).
     Supersedes,
-    /// Considered and discarded option. kappa = 0.60
+    /// Considered and discarded option.
     RejectedAlternative,
-    /// Positive evidential support. kappa = 1.10
+    /// Positive evidential support.
     Supports,
-    /// Refuting evidence. Supportive low-kappa propagation, not inhibitory. kappa = 0.30
+    /// Refuting evidence. Weak supportive propagation, not inhibitory.
     Refutes,
-    /// Hierarchical or containment relationship. kappa = 0.95
+    /// Hierarchical or containment relationship.
     BelongsTo,
 
-    // Inhibitory
-    /// Conflicting assertions. Excluded from propagation; applies repulsion instead.
+    // Constraint (excluded from propagation; surfaces frustration stress)
+    /// Conflicting assertions. Excluded from propagation; surfaces query-local
+    /// frustration stress when both endpoints are active (ADR-0006), never deleted.
     Contradicts,
 
     /// Consumer-defined edge type.
     Custom(String),
-}
-
-impl EdgeType {
-    /// Returns the propagation multiplier (kappa) for this edge type during spreading activation.
-    ///
-    /// `is_forward`: true when traversing source→target, false when traversing target→source.
-    /// Only `Supersedes` has different kappa values by direction.
-    pub fn kappa(&self, is_forward: bool) -> f64 {
-        match self {
-            EdgeType::Supersedes => {
-                if is_forward {
-                    1.20
-                } else {
-                    0.40
-                }
-            }
-            EdgeType::Reason => 1.15,
-            EdgeType::ReinforcedBy => 1.10,
-            EdgeType::Supports => 1.10,
-            EdgeType::Semantic => 1.00,
-            EdgeType::Causal => 1.00,
-            EdgeType::ConsolidatedFrom => 1.00,
-            EdgeType::ExtractedFrom => 1.00,
-            EdgeType::Entity => 0.95,
-            EdgeType::BelongsTo => 0.95,
-            EdgeType::Temporal => 0.85,
-            EdgeType::RejectedAlternative => 0.60,
-            EdgeType::Refutes => 0.30,
-            EdgeType::Contradicts => 0.00,
-            EdgeType::Custom(_) => 1.00,
-        }
-    }
 }
 
 #[cfg(test)]
@@ -212,20 +212,6 @@ mod tests {
             KnowledgeType::Custom("my-type".to_string()),
         ];
         assert_eq!(types.len(), 15);
-    }
-
-    #[test]
-    fn kappa_values_match_architecture() {
-        assert_eq!(EdgeType::Reason.kappa(true), 1.15);
-        assert_eq!(EdgeType::Supersedes.kappa(true), 1.20);
-        assert_eq!(EdgeType::Supersedes.kappa(false), 0.40);
-        assert_eq!(EdgeType::Contradicts.kappa(true), 0.00);
-        assert_eq!(EdgeType::Semantic.kappa(true), 1.00);
-        assert_eq!(EdgeType::Temporal.kappa(true), 0.85);
-        assert_eq!(EdgeType::RejectedAlternative.kappa(true), 0.60);
-        assert_eq!(EdgeType::Supports.kappa(true), 1.10);
-        assert_eq!(EdgeType::Refutes.kappa(true), 0.30);
-        assert_eq!(EdgeType::BelongsTo.kappa(true), 0.95);
     }
 
     #[test]

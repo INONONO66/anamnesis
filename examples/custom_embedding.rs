@@ -97,7 +97,6 @@ fn main() -> Result<(), Error> {
     let id1 = match &result1 {
         IngestResult::Created(ids) => ids[0],
         IngestResult::Reinforced { existing_id, .. } => *existing_id,
-        IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
     };
     println!("Ingested node {}: {:?}", id1.0, result1);
 
@@ -118,11 +117,10 @@ fn main() -> Result<(), Error> {
     let id2 = match &result2 {
         IngestResult::Created(ids) => ids[0],
         IngestResult::Reinforced { existing_id, .. } => *existing_id,
-        IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
     };
     println!("Ingested node {}: {:?}", id2.0, result2);
 
-    let edge_id = engine.link(id1, id2, EdgeType::Semantic, 0.78)?;
+    let edge_id = engine.link(id1, id2, EdgeType::Semantic)?;
     println!("Linked {} → {} (edge {})", id1.0, id2.0, edge_id.0);
 
     engine.touch(id1, Timestamp(3000))?;

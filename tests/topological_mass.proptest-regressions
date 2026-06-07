@@ -1,7 +1,0 @@
-# Seeds for failure cases proptest has generated in the past. It is
-# automatically read and these particular cases re-run before any
-# novel cases are generated.
-#
-# It is recommended to check this file in to source control so that
-# everyone who runs the test benefits from these saved cases.
-cc 947a313a347fb9f28a92c5a103c9b303414369ffacb145e44707fb7b490d8750 # shrinks to salience = 0.8448942862173601, access_count = 93, kt = IdentityCore

@@ -9,7 +9,7 @@ use anamnesis::{Engine, EngineConfig};
 fn default_seed_limit_three() {
     let mut engine = Engine::with_config(
         EngineConfig::default()
-            .with_dedup_threshold(2.0)
+            .with_dedup_enabled(false)
             .with_novelty_threshold(0.0),
     );
 
@@ -60,7 +60,7 @@ fn default_seed_limit_three() {
 fn custom_seed_limit_five() {
     let mut engine = Engine::with_config(
         EngineConfig::default()
-            .with_dedup_threshold(2.0)
+            .with_dedup_enabled(false)
             .with_novelty_threshold(0.0),
     );
 
@@ -111,7 +111,7 @@ fn custom_seed_limit_five() {
 fn seed_limit_zero_no_panic() {
     let mut engine = Engine::with_config(
         EngineConfig::default()
-            .with_dedup_threshold(2.0)
+            .with_dedup_enabled(false)
             .with_novelty_threshold(0.0),
     );
 
@@ -162,7 +162,7 @@ fn seed_limit_zero_no_panic() {
 fn seed_limit_larger_than_fused_returns_all() {
     let mut engine = Engine::with_config(
         EngineConfig::default()
-            .with_dedup_threshold(2.0)
+            .with_dedup_enabled(false)
             .with_novelty_threshold(0.0),
     );
 

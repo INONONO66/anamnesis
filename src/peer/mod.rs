@@ -40,6 +40,24 @@ impl TrustLevel {
             TrustLevel::Untrusted => -0.05,
         }
     }
+
+    /// The cold-start trust reservoir (log trust-odds) this coarse level seeds.
+    ///
+    /// The coarse `TrustLevel` is the *prior*; evidence (corroboration / feedback)
+    /// then moves the reservoir through `update_peer_trust`. A neutral `Agent`
+    /// starts at `0.0` (no-evidence prior); higher levels start with a positive
+    /// prior, `Untrusted` with a negative one. Units match `A_i`/`C_ij` log-odds
+    /// (mechanics::priors), so the reservoir composes additively with evidence.
+    pub fn prior_trust_reservoir(&self) -> f64 {
+        match self {
+            TrustLevel::Owner => 4.0,
+            TrustLevel::Admin => 2.0,
+            TrustLevel::Member => 1.0,
+            TrustLevel::Agent => 0.0,
+            TrustLevel::Observer => 0.0,
+            TrustLevel::Untrusted => -2.0,
+        }
+    }
 }
 
 /// The kind of source that produced a knowledge fragment.
@@ -70,6 +88,19 @@ pub struct PeerProfile {
     pub name: String,
     /// Trust level assigned to this peer.
     pub trust_level: TrustLevel,
+    /// Evidence-updated trust reservoir in log trust-odds (social.md "Peer Trust").
+    ///
+    /// Authoritative trust state, same units as the `A_i`/`C_ij` reservoirs. Seeded
+    /// from `trust_level.prior_trust_reservoir()` (the coarse level is the *prior*),
+    /// then moved by corroboration and feedback through the single traceable update
+    /// path. Its bounded projection (`mechanics::priors::project_trust`) is the
+    /// readout `trust_weight` evidence term. Moving it never erases origin or the
+    /// coarse level — only the evidence estimate changes.
+    pub trust_reservoir: f64,
+    /// Count of corroboration/feedback events that have moved `trust_reservoir`.
+    /// Part of the trust trace (peer-identity.md "Trust Profile": corroboration /
+    /// contradiction / feedback counts); a non-silent record that trust moved.
+    pub trust_evidence_count: u64,
     /// Additional aliases (nicknames, handles).
     pub aliases: Vec<String>,
     /// Platform to username mappings (e.g. "discord" to "ino#1234").
@@ -77,11 +108,14 @@ pub struct PeerProfile {
 }
 
 impl PeerProfile {
-    /// Create a new profile with the given name and trust level.
+    /// Create a new profile with the given name and trust level. The evidence
+    /// trust reservoir is seeded from the coarse level's declared prior.
     pub fn new(id: PeerId, name: impl Into<String>, trust_level: TrustLevel) -> Self {
         Self {
             id,
             name: name.into(),
+            trust_reservoir: trust_level.prior_trust_reservoir(),
+            trust_evidence_count: 0,
             trust_level,
             aliases: Vec::new(),
             platforms: HashMap::new(),
@@ -149,6 +183,22 @@ impl PeerRegistry {
         Ok(())
     }
 
+    /// Restore the persisted evidence trust state for a peer (loader only).
+    ///
+    /// Used by storage load to recover the trust reservoir and evidence count that
+    /// corroboration/feedback moved, rather than re-seeding from the coarse level.
+    pub fn set_trust_state(
+        &mut self,
+        id: PeerId,
+        trust_reservoir: f64,
+        trust_evidence_count: u64,
+    ) -> Result<(), Error> {
+        let profile = self.peers.get_mut(&id).ok_or(Error::PeerNotFound(id))?;
+        profile.trust_reservoir = crate::mechanics::priors::clamp_log_odds(trust_reservoir);
+        profile.trust_evidence_count = trust_evidence_count;
+        Ok(())
+    }
+
     /// Resolve any identifier (name, alias, platform username) to a `PeerId`.
     pub fn resolve_peer(&self, identifier: &str) -> Option<PeerId> {
         self.index.get(identifier).copied()
@@ -197,11 +247,39 @@ impl PeerRegistry {
         Ok(())
     }
 
-    /// Update the trust level of an existing peer.
+    /// Set the coarse trust level of an existing peer (an explicit policy decision).
+    ///
+    /// This re-seeds the evidence trust reservoir to the new level's prior ONLY when
+    /// no evidence has yet moved it (`trust_evidence_count == 0`); once corroboration
+    /// or feedback has accumulated, the evidence estimate is preserved so a policy
+    /// re-label never silently erases learned reliability.
     pub fn update_trust(&mut self, id: PeerId, trust_level: TrustLevel) -> Result<(), Error> {
         let profile = self.peers.get_mut(&id).ok_or(Error::PeerNotFound(id))?;
         profile.trust_level = trust_level;
+        if profile.trust_evidence_count == 0 {
+            profile.trust_reservoir = trust_level.prior_trust_reservoir();
+        }
         Ok(())
+    }
+
+    /// Move a peer's evidence trust reservoir one Rescorla-Wagner step toward a
+    /// signed evidence target (social.md "Peer Trust"): the single registry-level
+    /// trust-evidence update path.
+    ///
+    /// `target` and `eta` are supplied by the engine from
+    /// [`crate::mechanics::priors`] (`trust_evidence_target` /
+    /// `update_trust_reservoir` / `TRUST_LEARNING_RATE`). Returns the
+    /// `(old_reservoir, new_reservoir)` pair so the caller can emit a trace; the
+    /// evidence count is incremented so a policy re-label never silently discards
+    /// the learned estimate. Never touches `trust_level`, name, or aliases — origin
+    /// and provenance are preserved (social.md: "Peer trust never erases origin").
+    pub fn nudge_trust(&mut self, id: PeerId, target: f64, eta: f64) -> Result<(f64, f64), Error> {
+        let profile = self.peers.get_mut(&id).ok_or(Error::PeerNotFound(id))?;
+        let old = profile.trust_reservoir;
+        let new = crate::mechanics::priors::update_trust_reservoir(old, target, eta);
+        profile.trust_reservoir = new;
+        profile.trust_evidence_count = profile.trust_evidence_count.saturating_add(1);
+        Ok((old, new))
     }
 
     /// List all registered peers.

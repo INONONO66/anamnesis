@@ -3,7 +3,7 @@
 //!
 //! Reference: https://doi.org/10.1371/journal.pone.0120644
 
-use anamnesis::graph::Timestamp;
+use anamnesis::graph::{AccessTrace, Timestamp};
 use anamnesis::mechanics::forgetting::{base_level_to_salience, compute_base_level};
 use std::collections::VecDeque;
 
@@ -63,16 +63,21 @@ fn fit_power_law(data: &[(f64, f64)]) -> f64 {
 }
 
 fn rmse_power_law(data: &[(f64, f64)], scale: f64) -> f64 {
-    // Single access at t=0 (in ms)
-    let access_time = Timestamp(0);
+    // Single access trace at t=0 (in ms). A lone trace carries the ACT-R canonical
+    // exponent d = 0.5 as its per-trace decay, giving the pure power-law curve
+    // B = ln(dt^(-0.5)) (Anderson & Schooler 1991).
+    let access_trace = AccessTrace {
+        at: Timestamp(0),
+        decay: 0.5,
+    };
     let sum_sq: f64 = data
         .iter()
         .map(|&(t_days, r)| {
             let t_ms = (t_days * 86_400_000.0) as u64;
             let now = Timestamp(t_ms.max(1));
             let mut history = VecDeque::new();
-            history.push_back(access_time);
-            let b = compute_base_level(&history, now, 0.5);
+            history.push_back(access_trace);
+            let b = compute_base_level(&history, now);
             let predicted = base_level_to_salience(b * scale);
             (predicted - r).powi(2)
         })

@@ -1,7 +1,7 @@
 //! Node and Origin types for the Anamnesis graph.
 
 use crate::graph::scope::ScopePath;
-use crate::graph::types::{KnowledgeType, MemoryTier, NodeId, PeerId, Timestamp};
+use crate::graph::types::{AccessTrace, KnowledgeType, MemoryTier, NodeId, PeerId, Timestamp};
 use crate::peer::SourceKind;
 use std::collections::{HashMap, VecDeque};
 
@@ -40,13 +40,16 @@ impl Origin {
 
 /// A knowledge fragment in the cognitive graph.
 ///
-/// Nodes carry multi-resolution content (L0/L1/L2), physics state (salience),
-/// provenance (origin), and classification (node_type, entity_tags).
+/// Nodes carry multi-resolution content (L0/L1/L2), memory-strength state
+/// (`retained_action` and its `salience` projection), provenance (origin), and
+/// classification (node_type, entity_tags).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Node {
     /// Unique identifier.
     pub id: NodeId,
-    /// Knowledge type — determines decay rate, mass prior, and physics behavior.
+    /// Knowledge type — *policy* input to the decay and coupling priors (it scales
+    /// the single decay prior `d` via `decay_multiplier_for_type` and supplies the
+    /// edge-type-affinity coupling feature); it is not an independent dynamics knob.
     pub node_type: KnowledgeType,
 
     // Multi-resolution content
@@ -71,14 +74,31 @@ pub struct Node {
     /// When the fact represented by this node became invalid. None = still valid.
     pub valid_until: Option<Timestamp>,
 
-    // Physics state
-    /// Salience score [0, 1]. The universal currency — all mechanics read/write this.
+    // Memory-strength state
+    /// Salience score [0, 1] — the bounded logistic projection of the composite
+    /// retained action, `salience = logistic(B_i + P_i)` (ADR-0008). It is a CACHED
+    /// read-only view: only `commit`/`touch`/`tick` *refresh* it (recomputing
+    /// `B_i(now)` and adding `P_i`); read-only query/search must not recompute it.
     pub salience: f64,
+    /// Retained action `A_i = B_i + P_i` — the composite log need-odds strength.
+    /// `B_i` is the multi-trace ACT-R base level computed on demand from
+    /// `access_history` (NOT stored); `P_i` is the stored `evidence_prior`. This
+    /// field is a CACHED snapshot of the composite, refreshed only on
+    /// commit/touch/tick at that event's `now`; read paths return it unchanged
+    /// (ADR-0008).
+    pub retained_action: f64,
+    /// Evidence prior `P_i` — a persistent, decay-EXEMPT log-odds offset holding
+    /// encoding surprise (`P_i ← k·eps` at allocation), feedback / social
+    /// reinforcement (`dP_i = eta·(lambda − predicted)`), and peer trust. It does
+    /// NOT undergo base-level decay (ADR-0008 / ADR-0009).
+    pub evidence_prior: f64,
     /// Number of times this node has been accessed via touch().
     pub access_count: u32,
-    /// Ring buffer of recent access timestamps for power-law decay computation.
-    /// Capped at 32 entries — oldest are dropped when full.
-    pub access_history: VecDeque<Timestamp>,
+    /// Bounded 32-trace access-history window (a creation trace plus each committed
+    /// access). Each [`AccessTrace`] carries its own activation-dependent decay
+    /// `d_j` (Pavlik & Anderson 2005), so it is the load-bearing input to the base
+    /// level `B_i = ln(Σ_j (now − at_j)^(−d_j))`; oldest traces drop when full.
+    pub access_history: VecDeque<AccessTrace>,
     /// Explicit memory tier override for salience-based tiering.
     pub tier: MemoryTier,
 
@@ -94,9 +114,13 @@ pub struct Node {
 }
 
 impl Node {
-    /// Record an access timestamp. Maintains a ring buffer capped at 32 entries.
-    pub fn record_access(&mut self, ts: Timestamp) {
-        self.access_history.push_back(ts);
+    /// Record an access trace. Maintains a ring buffer capped at 32 entries.
+    ///
+    /// The trace carries its own pre-computed per-trace decay `d_j`; the caller is
+    /// responsible for computing it from the existing history at the access moment
+    /// ([`crate::mechanics::forgetting::compute_trace_decay`]) before pushing.
+    pub fn record_access(&mut self, trace: AccessTrace) {
+        self.access_history.push_back(trace);
         if self.access_history.len() > 32 {
             self.access_history.pop_front();
         }
@@ -153,6 +177,8 @@ mod tests {
             valid_from: None,
             valid_until: None,
             salience: 0.85,
+            retained_action: 0.0,
+            evidence_prior: 0.0,
             access_count: 0,
             access_history: VecDeque::new(),
             tier: MemoryTier::Auto,
@@ -181,6 +207,8 @@ mod tests {
             valid_from: None,
             valid_until: None,
             salience: 1.0,
+            retained_action: 0.0,
+            evidence_prior: 0.0,
             access_count: 0,
             access_history: VecDeque::new(),
             tier: MemoryTier::Auto,

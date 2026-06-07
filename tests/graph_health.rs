@@ -1,19 +1,25 @@
+//! `GraphHealth` (nine observability.md metrics), the `InvariantCheck` suite, and
+//! `OperationalWarning`s. Rewritten for the conductive-network model: health is
+//! now reported as ratios/entropies/distributions over the reservoirs and their
+//! projections, never as the legacy force-model counts.
+
 use anamnesis::api::Observation;
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{EdgeType, KnowledgeType, ScopePath, Timestamp};
-use anamnesis::{Engine, EngineConfig, IngestResult, StorageAdapter};
+use anamnesis::mechanics::observability::InvariantCheck;
+use anamnesis::{Engine, EngineConfig, IngestResult, OperationalWarning, StorageAdapter};
 
-fn make_origin(_agent: &str, session: &str, scope: &str) -> Origin {
+fn make_origin(scope: &str) -> Origin {
     Origin {
         peer_id: anamnesis::graph::types::PeerId(0),
         source_kind: anamnesis::peer::SourceKind::AgentObservation,
-        session_id: session.to_string(),
+        session_id: "session-1".to_string(),
         scope: ScopePath::new(scope).expect("valid scope"),
         confidence: 0.9,
     }
 }
 
-fn make_observation(name: &str, node_type: KnowledgeType) -> Observation {
+fn make_observation_in(name: &str, node_type: KnowledgeType, scope: &str) -> Observation {
     Observation {
         name: name.to_string(),
         summary: None,
@@ -22,37 +28,48 @@ fn make_observation(name: &str, node_type: KnowledgeType) -> Observation {
         confidence: 0.9,
         node_type,
         entity_tags: vec![],
-        origin: make_origin("agent-1", "session-1", "project-a"),
+        origin: make_origin(scope),
         timestamp: Timestamp(1000),
         valid_from: None,
         valid_until: None,
     }
 }
 
-fn ingest_node(engine: &mut Engine, name: &str, node_type: KnowledgeType) -> anamnesis::NodeId {
-    let result = engine.ingest(make_observation(name, node_type)).unwrap();
+fn ingest_in(
+    engine: &mut Engine,
+    name: &str,
+    node_type: KnowledgeType,
+    scope: &str,
+) -> anamnesis::NodeId {
+    let result = engine
+        .ingest(make_observation_in(name, node_type, scope))
+        .unwrap();
     match result {
         IngestResult::Created(ids) => ids[0],
         IngestResult::Reinforced { existing_id, .. } => existing_id,
-        IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
     }
 }
 
+fn ingest_node(engine: &mut Engine, name: &str, node_type: KnowledgeType) -> anamnesis::NodeId {
+    ingest_in(engine, name, node_type, "project-a")
+}
+
+// ── GraphHealth: the nine metrics ───────────────────────────────────────────
+
 #[test]
-fn empty_graph_returns_zero_counts_and_zero_entropy() {
+fn empty_graph_zero_metrics() {
     let engine = Engine::new();
-    let health = engine.graph_health();
+    let health = engine.graph_health_at(Timestamp(0));
 
     assert_eq!(health.node_count, 0);
     assert_eq!(health.edge_count, 0);
-    assert_eq!(health.orphan_count, 0);
-    assert_eq!(health.component_count, 0);
-    assert_eq!(health.contradiction_count, 0);
-    assert_eq!(health.supersede_count, 0);
+    assert_eq!(health.orphan_ratio, 0.0);
+    assert_eq!(health.contradiction_ratio, 0.0);
     assert_eq!(health.salience_entropy, 0.0);
-    assert_eq!(health.type_entropy, 0.0);
-    assert_eq!(health.edge_type_entropy, 0.0);
-    assert_eq!(health.bridge_candidate_count, 0);
+    assert_eq!(health.conductance_entropy, 0.0);
+    assert_eq!(health.average_degree, 0.0);
+    assert!(health.scope_distribution.is_empty());
+    assert_eq!(health.stale_ratio, 0.0);
 }
 
 #[test]
@@ -63,32 +80,40 @@ fn health_is_read_only_salience_unchanged() {
     let id1 = ingest_node(&mut engine, "node-1", KnowledgeType::Semantic);
     let id2 = ingest_node(&mut engine, "node-2", KnowledgeType::Episodic);
 
-    let salience_before_1 = engine.graph().storage().get_salience(id1).unwrap();
-    let salience_before_2 = engine.graph().storage().get_salience(id2).unwrap();
+    let before_1 = engine.graph().storage().get_salience(id1).unwrap();
+    let before_2 = engine.graph().storage().get_salience(id2).unwrap();
+    let action_before_1 = engine.graph().storage().get_retained_action(id1).unwrap();
 
-    let _health = engine.graph_health();
+    let _health = engine.graph_health_at(Timestamp(2000));
 
-    let salience_after_1 = engine.graph().storage().get_salience(id1).unwrap();
-    let salience_after_2 = engine.graph().storage().get_salience(id2).unwrap();
-
-    assert_eq!(salience_before_1, salience_after_1);
-    assert_eq!(salience_before_2, salience_after_2);
+    assert_eq!(
+        before_1,
+        engine.graph().storage().get_salience(id1).unwrap()
+    );
+    assert_eq!(
+        before_2,
+        engine.graph().storage().get_salience(id2).unwrap()
+    );
+    assert_eq!(
+        action_before_1,
+        engine.graph().storage().get_retained_action(id1).unwrap()
+    );
 }
 
 #[test]
-fn single_orphan_node() {
+fn single_orphan_drives_orphan_ratio() {
     let mut engine = Engine::new();
     ingest_node(&mut engine, "lonely", KnowledgeType::Semantic);
 
-    let health = engine.graph_health();
+    let health = engine.graph_health_at(Timestamp(1000));
     assert_eq!(health.node_count, 1);
     assert_eq!(health.edge_count, 0);
-    assert_eq!(health.orphan_count, 1);
-    assert_eq!(health.component_count, 1);
+    assert_eq!(health.orphan_ratio, 1.0);
+    assert_eq!(health.average_degree, 0.0);
 }
 
 #[test]
-fn component_count_star_topology() {
+fn orphan_ratio_and_average_degree_star_topology() {
     let config = EngineConfig::new().with_novelty_threshold(0.0);
     let mut engine = Engine::with_config(config);
 
@@ -97,40 +122,20 @@ fn component_count_star_topology() {
     let leaf2 = ingest_node(&mut engine, "leaf-2", KnowledgeType::Semantic);
     let leaf3 = ingest_node(&mut engine, "leaf-3", KnowledgeType::Semantic);
 
-    engine.link(center, leaf1, EdgeType::Semantic, 0.8).unwrap();
-    engine.link(center, leaf2, EdgeType::Semantic, 0.8).unwrap();
-    engine.link(center, leaf3, EdgeType::Semantic, 0.8).unwrap();
+    engine.link(center, leaf1, EdgeType::Semantic).unwrap();
+    engine.link(center, leaf2, EdgeType::Semantic).unwrap();
+    engine.link(center, leaf3, EdgeType::Semantic).unwrap();
 
-    let health = engine.graph_health();
+    let health = engine.graph_health_at(Timestamp(1000));
     assert_eq!(health.node_count, 4);
     assert_eq!(health.edge_count, 3);
-    assert_eq!(health.orphan_count, 0);
-    assert_eq!(health.component_count, 1);
+    assert_eq!(health.orphan_ratio, 0.0);
+    // 2 * 3 edges / 4 nodes = 1.5 mean degree.
+    assert!((health.average_degree - 1.5).abs() < 1e-12);
 }
 
 #[test]
-fn component_count_disconnected_pairs() {
-    let config = EngineConfig::new().with_novelty_threshold(0.0);
-    let mut engine = Engine::with_config(config);
-
-    let a1 = ingest_node(&mut engine, "a1", KnowledgeType::Semantic);
-    let a2 = ingest_node(&mut engine, "a2", KnowledgeType::Semantic);
-    let b1 = ingest_node(&mut engine, "b1", KnowledgeType::Semantic);
-    let b2 = ingest_node(&mut engine, "b2", KnowledgeType::Semantic);
-    let orphan = ingest_node(&mut engine, "orphan", KnowledgeType::Semantic);
-
-    engine.link(a1, a2, EdgeType::Semantic, 0.8).unwrap();
-    engine.link(b1, b2, EdgeType::Causal, 0.7).unwrap();
-
-    let health = engine.graph_health();
-    assert_eq!(health.node_count, 5);
-    assert_eq!(health.component_count, 3);
-    assert_eq!(health.orphan_count, 1);
-    let _ = orphan;
-}
-
-#[test]
-fn contradiction_and_supersede_counts() {
+fn contradiction_ratio_reflects_tension_edges() {
     let config = EngineConfig::new().with_novelty_threshold(0.0);
     let mut engine = Engine::with_config(config);
 
@@ -139,194 +144,69 @@ fn contradiction_and_supersede_counts() {
     let n3 = ingest_node(&mut engine, "n3", KnowledgeType::Semantic);
     let n4 = ingest_node(&mut engine, "n4", KnowledgeType::Semantic);
 
-    engine.link(n1, n2, EdgeType::Contradicts, 0.9).unwrap();
-    engine.link(n3, n4, EdgeType::Contradicts, 0.8).unwrap();
-    engine.link(n1, n3, EdgeType::Supersedes, 0.7).unwrap();
+    engine.link(n1, n2, EdgeType::Contradicts).unwrap();
+    engine.link(n3, n4, EdgeType::Semantic).unwrap();
 
-    let health = engine.graph_health();
-    assert_eq!(health.contradiction_count, 2);
-    assert_eq!(health.supersede_count, 1);
+    let health = engine.graph_health_at(Timestamp(1000));
+    // 1 of 2 edges is a Contradicts edge.
+    assert!((health.contradiction_ratio - 0.5).abs() < 1e-12);
 }
 
 #[test]
-fn entropy_zero_for_single_bucket_salience() {
+fn salience_entropy_zero_for_single_bucket() {
     let mut engine = Engine::new();
     ingest_node(&mut engine, "n1", KnowledgeType::Semantic);
     ingest_node(&mut engine, "n2", KnowledgeType::Semantic);
     ingest_node(&mut engine, "n3", KnowledgeType::Semantic);
 
-    let health = engine.graph_health();
+    // Fresh sites all project near salience 1.0 → single bucket → zero entropy.
+    let health = engine.graph_health_at(Timestamp(1000));
     assert_eq!(health.salience_entropy, 0.0);
 }
 
 #[test]
-fn entropy_zero_for_single_type() {
+fn conductance_entropy_zero_for_no_edges() {
     let mut engine = Engine::new();
+    ingest_node(&mut engine, "n1", KnowledgeType::Semantic);
+
+    let health = engine.graph_health_at(Timestamp(1000));
+    assert_eq!(health.conductance_entropy, 0.0);
+}
+
+#[test]
+fn scope_distribution_counts_by_scope() {
+    let config = EngineConfig::new().with_novelty_threshold(0.0);
+    let mut engine = Engine::with_config(config);
+
+    ingest_in(&mut engine, "a1", KnowledgeType::Semantic, "project-a");
+    ingest_in(&mut engine, "a2", KnowledgeType::Semantic, "project-a");
+    ingest_in(&mut engine, "b1", KnowledgeType::Semantic, "project-b");
+
+    let health = engine.graph_health_at(Timestamp(1000));
+    assert_eq!(health.scope_distribution.get("project-a"), Some(&2));
+    assert_eq!(health.scope_distribution.get("project-b"), Some(&1));
+}
+
+#[test]
+fn stale_ratio_grows_with_elapsed_time() {
+    let config = EngineConfig::new().with_novelty_threshold(0.0);
+    let mut engine = Engine::with_config(config);
+
     ingest_node(&mut engine, "n1", KnowledgeType::Semantic);
     ingest_node(&mut engine, "n2", KnowledgeType::Semantic);
 
-    let health = engine.graph_health();
-    assert_eq!(health.type_entropy, 0.0);
+    // Just after creation: nothing is stale.
+    let fresh = engine.graph_health_at(Timestamp(2000));
+    assert_eq!(fresh.stale_ratio, 0.0);
+
+    // 60 days later (window is 30 days): everything is stale.
+    let day_ms = 86_400_000u64;
+    let stale = engine.graph_health_at(Timestamp(1000 + 60 * day_ms));
+    assert_eq!(stale.stale_ratio, 1.0);
 }
 
 #[test]
-fn type_entropy_positive_for_mixed_types() {
-    let config = EngineConfig::new().with_novelty_threshold(0.0);
-    let mut engine = Engine::with_config(config);
-
-    ingest_node(&mut engine, "semantic", KnowledgeType::Semantic);
-    ingest_node(&mut engine, "episodic", KnowledgeType::Episodic);
-    ingest_node(&mut engine, "entity", KnowledgeType::Entity);
-    ingest_node(&mut engine, "decision", KnowledgeType::Decision);
-
-    let health = engine.graph_health();
-    assert!(
-        (health.type_entropy - 2.0).abs() < 1e-10,
-        "expected 2.0, got {}",
-        health.type_entropy
-    );
-}
-
-#[test]
-fn edge_type_entropy_positive_for_mixed_edges() {
-    let config = EngineConfig::new().with_novelty_threshold(0.0);
-    let mut engine = Engine::with_config(config);
-
-    let n1 = ingest_node(&mut engine, "n1", KnowledgeType::Semantic);
-    let n2 = ingest_node(&mut engine, "n2", KnowledgeType::Semantic);
-    let n3 = ingest_node(&mut engine, "n3", KnowledgeType::Semantic);
-    let n4 = ingest_node(&mut engine, "n4", KnowledgeType::Semantic);
-
-    engine.link(n1, n2, EdgeType::Semantic, 0.8).unwrap();
-    engine.link(n2, n3, EdgeType::Causal, 0.7).unwrap();
-    engine.link(n3, n4, EdgeType::Temporal, 0.6).unwrap();
-    engine.link(n4, n1, EdgeType::Reason, 0.5).unwrap();
-
-    let health = engine.graph_health();
-    assert!(
-        (health.edge_type_entropy - 2.0).abs() < 1e-10,
-        "expected 2.0, got {}",
-        health.edge_type_entropy
-    );
-}
-
-#[test]
-fn edge_type_entropy_zero_for_single_type() {
-    let config = EngineConfig::new().with_novelty_threshold(0.0);
-    let mut engine = Engine::with_config(config);
-
-    let n1 = ingest_node(&mut engine, "n1", KnowledgeType::Semantic);
-    let n2 = ingest_node(&mut engine, "n2", KnowledgeType::Semantic);
-    let n3 = ingest_node(&mut engine, "n3", KnowledgeType::Semantic);
-
-    engine.link(n1, n2, EdgeType::Semantic, 0.8).unwrap();
-    engine.link(n2, n3, EdgeType::Semantic, 0.7).unwrap();
-
-    let health = engine.graph_health();
-    assert_eq!(health.edge_type_entropy, 0.0);
-}
-
-#[test]
-fn bridge_candidates_with_cross_scope_connections() {
-    let config = EngineConfig::new().with_novelty_threshold(0.0);
-    let mut engine = Engine::with_config(config);
-
-    let obs_bridge = Observation {
-        name: "bridge".to_string(),
-        summary: None,
-        content: "Bridge node".to_string(),
-        embedding: None,
-        confidence: 0.9,
-        node_type: KnowledgeType::Entity,
-        entity_tags: vec!["shared".to_string()],
-        origin: make_origin("agent-1", "session-1", "project-a"),
-        timestamp: Timestamp(1000),
-        valid_from: None,
-        valid_until: None,
-    };
-    let bridge_id = match engine.ingest(obs_bridge).unwrap() {
-        IngestResult::Created(ids) => ids[0],
-        IngestResult::Reinforced { existing_id, .. } => existing_id,
-        IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
-    };
-
-    let obs_a = Observation {
-        name: "scope-a-node".to_string(),
-        summary: None,
-        content: "Node in scope A".to_string(),
-        embedding: None,
-        confidence: 0.9,
-        node_type: KnowledgeType::Semantic,
-        entity_tags: vec!["tag-a".to_string()],
-        origin: make_origin("agent-1", "session-1", "project-b"),
-        timestamp: Timestamp(1000),
-        valid_from: None,
-        valid_until: None,
-    };
-    let a_id = match engine.ingest(obs_a).unwrap() {
-        IngestResult::Created(ids) => ids[0],
-        IngestResult::Reinforced { existing_id, .. } => existing_id,
-        IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
-    };
-
-    let obs_b = Observation {
-        name: "scope-b-node".to_string(),
-        summary: None,
-        content: "Node in scope B".to_string(),
-        embedding: None,
-        confidence: 0.9,
-        node_type: KnowledgeType::Semantic,
-        entity_tags: vec!["tag-b".to_string()],
-        origin: make_origin("agent-1", "session-1", "project-c"),
-        timestamp: Timestamp(1000),
-        valid_from: None,
-        valid_until: None,
-    };
-    let b_id = match engine.ingest(obs_b).unwrap() {
-        IngestResult::Created(ids) => ids[0],
-        IngestResult::Reinforced { existing_id, .. } => existing_id,
-        IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
-    };
-
-    let obs_c = Observation {
-        name: "scope-c-node".to_string(),
-        summary: None,
-        content: "Node in scope C".to_string(),
-        embedding: None,
-        confidence: 0.9,
-        node_type: KnowledgeType::Semantic,
-        entity_tags: vec!["tag-c".to_string()],
-        origin: make_origin("agent-1", "session-1", "project-d"),
-        timestamp: Timestamp(1000),
-        valid_from: None,
-        valid_until: None,
-    };
-    let c_id = match engine.ingest(obs_c).unwrap() {
-        IngestResult::Created(ids) => ids[0],
-        IngestResult::Reinforced { existing_id, .. } => existing_id,
-        IngestResult::CreatedWithConflict { node_ids, .. } => node_ids[0],
-    };
-
-    engine
-        .link(bridge_id, a_id, EdgeType::Semantic, 0.9)
-        .unwrap();
-    engine
-        .link(bridge_id, b_id, EdgeType::Semantic, 0.9)
-        .unwrap();
-    engine
-        .link(bridge_id, c_id, EdgeType::Semantic, 0.9)
-        .unwrap();
-
-    let health = engine.graph_health();
-    assert!(
-        health.bridge_candidate_count >= 1,
-        "expected at least 1 bridge candidate, got {}",
-        health.bridge_candidate_count
-    );
-}
-
-#[test]
-fn node_count_and_edge_count_match_storage() {
+fn node_and_edge_counts_match_graph() {
     let config = EngineConfig::new().with_novelty_threshold(0.0);
     let mut engine = Engine::with_config(config);
 
@@ -334,23 +214,199 @@ fn node_count_and_edge_count_match_storage() {
     let n2 = ingest_node(&mut engine, "n2", KnowledgeType::Episodic);
     let n3 = ingest_node(&mut engine, "n3", KnowledgeType::Entity);
 
-    engine.link(n1, n2, EdgeType::Semantic, 0.8).unwrap();
-    engine.link(n2, n3, EdgeType::Causal, 0.7).unwrap();
+    engine.link(n1, n2, EdgeType::Semantic).unwrap();
+    engine.link(n2, n3, EdgeType::Causal).unwrap();
 
-    let health = engine.graph_health();
+    let health = engine.graph_health_at(Timestamp(1000));
     assert_eq!(health.node_count, engine.graph().node_count());
     assert_eq!(health.edge_count, engine.graph().edge_count());
 }
 
 #[test]
-fn multiple_calls_return_consistent_results() {
+fn graph_health_is_deterministic() {
     let config = EngineConfig::new().with_novelty_threshold(0.0);
     let mut engine = Engine::with_config(config);
 
     ingest_node(&mut engine, "n1", KnowledgeType::Semantic);
     ingest_node(&mut engine, "n2", KnowledgeType::Episodic);
 
-    let h1 = engine.graph_health();
-    let h2 = engine.graph_health();
+    let h1 = engine.graph_health_at(Timestamp(5000));
+    let h2 = engine.graph_health_at(Timestamp(5000));
     assert_eq!(h1, h2);
+}
+
+// ── InvariantCheck suite ────────────────────────────────────────────────────
+
+#[test]
+fn healthy_graph_passes_all_structural_invariants() {
+    let config = EngineConfig::new().with_novelty_threshold(0.0);
+    let mut engine = Engine::with_config(config);
+
+    let n1 = ingest_node(&mut engine, "n1", KnowledgeType::Semantic);
+    let n2 = ingest_node(&mut engine, "n2", KnowledgeType::Semantic);
+    engine.link(n1, n2, EdgeType::Semantic).unwrap();
+
+    let report = engine.check_invariants(None);
+    assert!(
+        report.all_passed(),
+        "expected clean invariants, got violations: {:?}",
+        report.violations().collect::<Vec<_>>()
+    );
+
+    // Projection range and finiteness must always hold post-commit-discipline.
+    assert!(report.get(InvariantCheck::ProjectionRange).unwrap().passed);
+    assert!(
+        report
+            .get(InvariantCheck::NonFiniteHotFields)
+            .unwrap()
+            .passed
+    );
+    assert!(report.get(InvariantCheck::ReservoirFinite).unwrap().passed);
+    assert!(
+        report
+            .get(InvariantCheck::SnapshotRestoreConsistency)
+            .unwrap()
+            .passed
+    );
+}
+
+#[test]
+fn private_scope_leakage_is_clean_for_hierarchical_scopes() {
+    let config = EngineConfig::new().with_novelty_threshold(0.0);
+    let mut engine = Engine::with_config(config);
+
+    // Two nodes in related (parent/child) scopes linked: not a leak.
+    let parent = ingest_in(&mut engine, "parent", KnowledgeType::Semantic, "org");
+    let child = ingest_in(&mut engine, "child", KnowledgeType::Semantic, "org/team");
+    engine.link(parent, child, EdgeType::Semantic).unwrap();
+
+    let report = engine.check_invariants(None);
+    assert!(
+        report
+            .get(InvariantCheck::PrivateScopeLeakage)
+            .unwrap()
+            .passed
+    );
+}
+
+#[test]
+fn private_scope_leakage_detects_bridge_across_disjoint_scopes() {
+    let config = EngineConfig::new().with_novelty_threshold(0.0);
+    let mut engine = Engine::with_config(config);
+
+    // Two nodes in disjoint (Unrelated) private scopes, neither universal.
+    let personal = ingest_in(
+        &mut engine,
+        "personal note",
+        KnowledgeType::Semantic,
+        "personal/foo",
+    );
+    let work = ingest_in(
+        &mut engine,
+        "work note",
+        KnowledgeType::Semantic,
+        "work/bar",
+    );
+
+    // A propagating (non-Contradicts) edge bridging them is a leak: it lets
+    // private knowledge in one scope light up a node a query in the other,
+    // disjoint scope can reach.
+    engine.link(personal, work, EdgeType::Semantic).unwrap();
+
+    let report = engine.check_invariants(None);
+    let leakage = report
+        .get(InvariantCheck::PrivateScopeLeakage)
+        .expect("leakage result present");
+    assert!(
+        !leakage.passed,
+        "expected a private-scope leakage violation, got: {leakage:?}"
+    );
+    assert_eq!(leakage.violation_count, 1);
+}
+
+#[test]
+fn private_scope_leakage_ignores_contradicts_bridge() {
+    let config = EngineConfig::new().with_novelty_threshold(0.0);
+    let mut engine = Engine::with_config(config);
+
+    // Same disjoint scopes, but a Contradicts edge does not propagate flow, so
+    // it is not a leak — tension surfaces across scopes without leaking activation.
+    let personal = ingest_in(
+        &mut engine,
+        "personal note",
+        KnowledgeType::Semantic,
+        "personal/foo",
+    );
+    let work = ingest_in(
+        &mut engine,
+        "work note",
+        KnowledgeType::Semantic,
+        "work/bar",
+    );
+    engine.link(personal, work, EdgeType::Contradicts).unwrap();
+
+    let report = engine.check_invariants(None);
+    assert!(
+        report
+            .get(InvariantCheck::PrivateScopeLeakage)
+            .unwrap()
+            .passed
+    );
+}
+
+#[test]
+fn determinism_invariant_holds_for_repeated_query() {
+    let config = EngineConfig::new().with_novelty_threshold(0.0);
+    let mut engine = Engine::with_config(config);
+
+    let n1 = ingest_node(&mut engine, "auth uses factory", KnowledgeType::Semantic);
+    let n2 = ingest_node(&mut engine, "factory pattern note", KnowledgeType::Semantic);
+    engine.link(n1, n2, EdgeType::Semantic).unwrap();
+
+    let probe = anamnesis::SearchInput {
+        text: "factory".to_string(),
+        scope: ScopePath::new("project-a").unwrap(),
+        now: Timestamp(2000),
+        limit: 10,
+        ..Default::default()
+    };
+
+    let report = engine.check_invariants(Some(&probe));
+    assert!(
+        report.get(InvariantCheck::Determinism).unwrap().passed,
+        "determinism violation: {:?}",
+        report.get(InvariantCheck::Determinism)
+    );
+}
+
+// ── OperationalWarnings ─────────────────────────────────────────────────────
+
+#[test]
+fn healthy_small_graph_has_no_warnings() {
+    let config = EngineConfig::new().with_novelty_threshold(0.0);
+    let mut engine = Engine::with_config(config);
+
+    let n1 = ingest_node(&mut engine, "n1", KnowledgeType::Semantic);
+    let n2 = ingest_node(&mut engine, "n2", KnowledgeType::Semantic);
+    engine.link(n1, n2, EdgeType::Semantic).unwrap();
+
+    // Reference time just after creation (well inside the stale window).
+    assert!(engine.operational_warnings_at(Timestamp(2000)).is_empty());
+}
+
+#[test]
+fn many_orphans_trigger_orphan_warning() {
+    let config = EngineConfig::new().with_novelty_threshold(0.0);
+    let mut engine = Engine::with_config(config);
+
+    // Ten orphan nodes → orphan_ratio = 1.0 > 0.30 threshold.
+    for i in 0..10 {
+        ingest_node(&mut engine, &format!("orphan-{i}"), KnowledgeType::Semantic);
+    }
+
+    assert!(
+        engine
+            .operational_warnings_at(Timestamp(2000))
+            .contains(&OperationalWarning::HighOrphanRatio)
+    );
 }

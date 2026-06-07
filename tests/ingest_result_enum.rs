@@ -89,5 +89,12 @@ fn ingest_result_created_ids_are_valid() {
     let node_id = ids[0];
     let node = e.graph().get_node(node_id).expect("node should exist");
     assert_eq!(node.name, "valid");
-    assert_eq!(node.salience, 1.0);
+    // Salience is the projection of the surprise-gated retained-action reservoir
+    // (ADR-0009), not a flat 1.0. A no-embedding observation is maximally surprising
+    // and enters just below the prior ceiling.
+    assert!(
+        node.salience > 0.999 && node.salience < 1.0,
+        "salience should be a near-ceiling projection, got {}",
+        node.salience
+    );
 }

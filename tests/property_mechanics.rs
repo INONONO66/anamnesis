@@ -3,14 +3,18 @@
 //! Tests invariants for pure functions in the mechanics and query modules
 //! using proptest with 256 cases per test.
 
-use anamnesis::graph::KnowledgeType;
-use anamnesis::mechanics::attraction::{attraction_score, cosine_similarity, strengthen_edge};
-use anamnesis::mechanics::forgetting::{
-    base_level_to_salience, decay_salience, floor_for_type, lambda_for_type, reinforce_salience,
+use anamnesis::graph::{AccessTrace, KnowledgeType, Timestamp};
+use anamnesis::mechanics::attraction::{attraction_score, cosine_similarity};
+use anamnesis::mechanics::forgetting::{base_level_to_salience, compute_base_level};
+use anamnesis::mechanics::interactions::{hebbian_oja, rescorla_wagner};
+use anamnesis::mechanics::priors::{
+    DECAY_INTERCEPT, TARGET_COACTIVATION_N, decay_multiplier_for_type, learning_rate,
+    project_weight,
 };
-use anamnesis::mechanics::gravity::{compute_mass, gravity_boost, normalize_access_count};
-use anamnesis::query::activation::{initial_activation, propagation_strength, salience_gate};
+use anamnesis::query::field::{FieldSignals, potential_bias};
+use anamnesis::query::scoring::{ReadoutInputs, readout_score};
 use proptest::prelude::*;
+use std::collections::VecDeque;
 
 // ── Strategy for generating KnowledgeType variants ──────────────────────────
 
@@ -33,82 +37,78 @@ fn knowledge_type_strategy() -> impl Strategy<Value = KnowledgeType> {
     ]
 }
 
-// ── Property tests for forgetting mechanics ──────────────────────────────────
+// ── Property tests for the base-level forgetting kernel (B_i, ADR-0008) ──────
 
 proptest! {
-    /// decay_salience: result ≤ current, result ≥ 0.0
-    /// For decaying types (lambda > 0): result ≥ floor_for_type(kt) when current >= floor
-    /// For inert types (lambda = 0): result == current
+    /// compute_base_level (B_i): for a fixed access trace, the base level is
+    /// monotone NON-INCREASING in elapsed time (forgetting), stays finite for a
+    /// non-empty history, and is independent of elapsed time when the decay
+    /// exponent is 0 (protected / inert types).
     #[test]
-    fn prop_decay_salience_bounds(
-        current in 0.0f64..=1.0,
-        dt_days in 0.0f64..=365.0,
+    fn prop_base_level_decays_with_time(
+        created_ms in 0u64..=1_000_000,
+        later in 1u64..=10_000_000,
+        more in 1u64..=10_000_000,
         kt in knowledge_type_strategy(),
     ) {
-        let result = decay_salience(current, dt_days, &kt);
-        let lambda = lambda_for_type(&kt);
-        let floor = floor_for_type(&kt);
-
-        // Result must be non-negative and not exceed current
-        prop_assert!(result >= 0.0, "decay result negative: {result}");
-        prop_assert!(result <= current + 1e-10, "decay increased salience: {result} > {current}");
-
-        // For inert types (lambda = 0), result must equal current
-        if lambda == 0.0 {
-            prop_assert!(
-                (result - current).abs() < 1e-10,
-                "inert type should not decay: {result} != {current}"
-            );
+        // A single creation trace carries the floor per-trace decay d_j = m_type·α
+        // (Pavlik & Anderson 2005); m_type = 0 ⇒ d_j = 0 (protected / inert types).
+        let decay_d = decay_multiplier_for_type(&kt) * DECAY_INTERCEPT;
+        let mut history = VecDeque::new();
+        history.push_back(AccessTrace {
+            at: Timestamp(created_ms),
+            decay: decay_d,
+        });
+        let now1 = Timestamp(created_ms + later);
+        let now2 = Timestamp(created_ms + later + more);
+        let b1 = compute_base_level(&history, now1);
+        let b2 = compute_base_level(&history, now2);
+        prop_assert!(b1.is_finite() && b2.is_finite());
+        if decay_d == 0.0 {
+            // Exponent 0 → dt^0 = 1 for every trace; B_i is time-invariant.
+            prop_assert!((b1 - b2).abs() < 1e-12, "inert type changed: {b1} vs {b2}");
         } else {
-            // For decaying types, if current >= floor, result must be >= floor
-            if current >= floor {
-                prop_assert!(
-                    result >= floor - 1e-10,
-                    "decay below floor: {result} < {floor}"
-                );
-            } else {
-                // If already below floor, result should equal current (unchanged)
-                prop_assert!(
-                    (result - current).abs() < 1e-10,
-                    "below-floor input should be unchanged: {result} != {current}"
-                );
-            }
+            // More elapsed time never raises the base level (forgetting).
+            prop_assert!(b2 <= b1 + 1e-9, "older read raised B_i: {b2} > {b1}");
         }
     }
 
-    /// reinforce_salience: result ≥ current, result ≤ 1.0
-    /// When current == 1.0, result == 1.0
+    /// Rescorla-Wagner: always moves toward lambda (or stays), never overshoots,
+    /// and stays finite.
     #[test]
-    fn prop_reinforce_salience_bounds(current in 0.0f64..=1.0) {
-        let result = reinforce_salience(current);
-
-        // Result must be >= current and <= 1.0
-        prop_assert!(result >= current - 1e-10, "reinforce decreased salience: {result} < {current}");
-        prop_assert!(result <= 1.0 + 1e-10, "reinforce exceeded 1.0: {result}");
-
-        // At saturation, no further boost
-        if (current - 1.0).abs() < 1e-10 {
-            prop_assert!((result - 1.0).abs() < 1e-10, "at 1.0, reinforce should stay 1.0");
-        }
+    fn prop_rescorla_wagner_toward_target(
+        action in -20.0f64..=20.0,
+        lambda in -10.0f64..=10.0,
+    ) {
+        let eta = learning_rate(TARGET_COACTIVATION_N);
+        let result = rescorla_wagner(action, lambda, eta);
+        prop_assert!(result.is_finite());
+        // The move is a fraction eta in (0,1) toward lambda: result is between
+        // action and lambda (inclusive).
+        let lo = action.min(lambda);
+        let hi = action.max(lambda);
+        prop_assert!(result >= lo - 1e-9 && result <= hi + 1e-9, "overshoot: {result}");
     }
 
-    /// lambda_for_type: result ≥ 0 for all variants
+    /// Hebbian-Oja: positive flux never lowers C, the projection stays below 1.0
+    /// (no runaway), and the value stays finite.
     #[test]
-    fn prop_lambda_for_type_nonnegative(kt in knowledge_type_strategy()) {
-        let lambda = lambda_for_type(&kt);
-        prop_assert!(lambda >= 0.0, "lambda negative: {lambda}");
+    fn prop_hebbian_oja_bounded(conductance in -20.0f64..=20.0, flux in 0.0f64..=2.0) {
+        let eta = learning_rate(TARGET_COACTIVATION_N);
+        let result = hebbian_oja(conductance, flux, eta);
+        prop_assert!(result.is_finite());
+        prop_assert!(result >= conductance - 1e-9, "positive flux lowered C: {result}");
+        prop_assert!(project_weight(result) < 1.0 + 1e-12);
     }
 
-    /// floor_for_type: result ∈ [0, 1]
-    /// (1.0 sentinel for inert types is valid)
+    /// decay_multiplier_for_type: result ∈ [0, 1] for all variants.
     #[test]
-    fn prop_floor_for_type_in_range(kt in knowledge_type_strategy()) {
-        let floor = floor_for_type(&kt);
-        prop_assert!(floor >= 0.0, "floor negative: {floor}");
-        prop_assert!(floor <= 1.0 + 1e-10, "floor > 1.0: {floor}");
+    fn prop_decay_multiplier_in_range(kt in knowledge_type_strategy()) {
+        let m = decay_multiplier_for_type(&kt);
+        prop_assert!((0.0..=1.0 + 1e-12).contains(&m), "multiplier out of range: {m}");
     }
 
-    /// base_level_to_salience: result ∈ [0, 1]
+    /// base_level_to_salience: result ∈ [0, 1].
     #[test]
     fn prop_base_level_to_salience_in_range(b in -100.0f64..=100.0) {
         let result = base_level_to_salience(b);
@@ -134,102 +134,51 @@ proptest! {
         prop_assert!(result <= 1.0 + 1e-10, "cosine_similarity > 1.0: {result}");
     }
 
-    /// attraction_score: result ≥ 0
+    /// attraction_score: result ≥ 0. It is the candidate-selection affinity
+    /// `sigma_ij * tau` only — no mass / gravity term (importance is emergent,
+    /// overview.md / conductance.md).
     #[test]
     fn prop_attraction_score_nonnegative(
         sim in 0.0f64..=1.0,
         tau in 0.0f64..=2.0,
-        mass in 0.0f64..=1.0,
     ) {
-        let result = attraction_score(sim, tau, mass);
+        let result = attraction_score(sim, tau);
         prop_assert!(result >= 0.0, "attraction_score negative: {result}");
     }
-
-    /// strengthen_edge: result ≥ current, result ≤ 1.0
-    #[test]
-    fn prop_strengthen_edge_bounds(
-        current in 0.0f64..=1.0,
-        attraction in 0.0f64..=2.0,
-    ) {
-        let result = strengthen_edge(current, attraction);
-        prop_assert!(result >= current - 1e-10, "strengthen decreased weight: {result} < {current}");
-        prop_assert!(result <= 1.0 + 1e-10, "strengthen exceeded 1.0: {result}");
-    }
 }
 
-// ── Property tests for gravity mechanics ──────────────────────────────────────
+// ── Property tests for the additive-RWR readout / potential field ───────────
 
 proptest! {
-    /// compute_mass: result ∈ [0, 1]
+    /// potential_bias: finite for finite inputs; A_i enters with unit coefficient.
     #[test]
-    fn prop_compute_mass_in_bounds(
+    fn prop_potential_bias_finite(
+        text in -5.0f64..=5.0,
+        embed in -5.0f64..=5.0,
+        retained_action in -20.0f64..=20.0,
+    ) {
+        let phi = potential_bias(&FieldSignals {
+            text_score: text,
+            embedding_score: embed,
+            retained_action,
+            ..Default::default()
+        });
+        prop_assert!(phi.is_finite(), "phi not finite: {phi}");
+    }
+
+    /// readout_score: finite for bounded inputs (log-odds additive form).
+    #[test]
+    fn prop_readout_score_finite(
+        activation in 0.0f64..=1.0,
+        phi in -10.0f64..=10.0,
         salience in 0.0f64..=1.0,
-        access_count in 0u32..=10000,
-        kt in knowledge_type_strategy(),
+        impedance in 0.0f64..=40.0,
+        stress in 0.0f64..=10.0,
     ) {
-        let result = compute_mass(salience, access_count, &kt);
-        prop_assert!(result >= 0.0, "compute_mass negative: {result}");
-        prop_assert!(result <= 1.0 + 1e-10, "compute_mass > 1.0: {result}");
-    }
-
-    /// gravity_boost: result ≥ 1.0 (boost is additive)
-    #[test]
-    fn prop_gravity_boost_at_least_one(mass in 0.0f64..=1.0) {
-        let result = gravity_boost(mass);
-        prop_assert!(result >= 1.0 - 1e-10, "gravity_boost < 1.0: {result}");
-    }
-
-    /// normalize_access_count: result ∈ [0, 1]
-    #[test]
-    fn prop_normalize_access_count_in_range(count in 0u32..=100000) {
-        let result = normalize_access_count(count);
-        prop_assert!(result >= 0.0, "normalize_access_count negative: {result}");
-        prop_assert!(result <= 1.0 + 1e-10, "normalize_access_count > 1.0: {result}");
-    }
-}
-
-// ── Property tests for activation mechanics ──────────────────────────────────
-
-proptest! {
-    /// initial_activation: result ∈ [0, 1]
-    #[test]
-    fn prop_initial_activation_in_bounds(
-        is_seed in any::<bool>(),
-        vector_sim in 0.0f64..=1.0,
-        identity_prior in 0.0f64..=1.0,
-    ) {
-        let result = initial_activation(is_seed, vector_sim, identity_prior);
-        prop_assert!(result >= 0.0, "initial_activation negative: {result}");
-        prop_assert!(result <= 1.0 + 1e-10, "initial_activation > 1.0: {result}");
-    }
-
-    /// salience_gate: result ∈ [0.2, 1.0]
-    #[test]
-    fn prop_salience_gate_in_range(salience in 0.0f64..=1.0) {
-        let result = salience_gate(salience);
-        prop_assert!(result >= 0.2 - 1e-10, "salience_gate < 0.2: {result}");
-        prop_assert!(result <= 1.0 + 1e-10, "salience_gate > 1.0: {result}");
-    }
-
-    /// propagation_strength: result ≥ 0 when all inputs ≥ 0
-    #[test]
-    fn prop_propagation_strength_nonnegative(
-        source_activation in 0.0f64..=1.0,
-        edge_weight in 0.0f64..=1.0,
-        kappa in 0.0f64..=2.0,
-        hop_decay in 0.0f64..=1.0,
-        target_salience_gate in 0.2f64..=1.0,
-        target_gravity_boost in 1.0f64..=1.2,
-    ) {
-        let result = propagation_strength(
-            source_activation,
-            edge_weight,
-            kappa,
-            hop_decay,
-            target_salience_gate,
-            target_gravity_boost,
-        );
-        prop_assert!(result >= 0.0, "propagation_strength negative: {result}");
-        prop_assert!(result <= 1.0 + 1e-10, "propagation_strength > 1.0: {result}");
+        let score = readout_score(&ReadoutInputs {
+            activation, phi, salience, impedance,
+            scope_weight: 1.0, trust_weight: 0.0, stress,
+        });
+        prop_assert!(score.is_finite(), "readout_score not finite: {score}");
     }
 }
