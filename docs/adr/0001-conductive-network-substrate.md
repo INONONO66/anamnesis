@@ -26,9 +26,10 @@ The query-local quantity is:
 Core axiom:
 
 ```text
-A_i = (B_i + P_i) + sum_j W_j * S_ji
-    = log prior odds + sum log likelihood ratios
-    = log posterior odds
+total_i = A_i + sum_j W_j * S_ji
+        = (B_i + P_i) + sum_j W_j * S_ji
+        = log prior odds + sum log likelihood ratios
+        = log posterior odds
 ```
 
 Activation flow settles through additive RWR:

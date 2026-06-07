@@ -20,10 +20,13 @@ E(S | Q) =
     + frustration_penalty
 ```
 
-Under symmetric conductance, the Dirichlet form is a true Lyapunov energy:
+Under symmetric conductance (`C_ij = C_ji`), the Dirichlet form built from the
+non-negative flow-side projection `G_ij = project_conductance(C_ij)` (not the raw
+log-LR reservoir, which may be negative) is a true Lyapunov energy:
 
 ```text
-a^T L a = 1/2 * sum_{i,j} C_ij * (a_i - a_j)^2
+G_ij    = project_conductance(C_ij)   // logistic(C_ij) in (0, 1); see energy.md / conductance.md
+a^T L a = 1/2 * sum_{i,j} G_ij * (a_i - a_j)^2
 ```
 
 Under directed RWR, the true fixed point is:

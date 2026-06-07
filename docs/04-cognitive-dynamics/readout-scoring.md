@@ -13,6 +13,7 @@ The scoring layer must respect the reservoir/projection boundary. It reads retai
 | `a_i` | Query-local activation response |
 | `phi_i` | Potential bias from the query field |
 | `s_i` | Salience projection |
+| `A_i` | Retained action (prior need-odds); read input and tie-breaker |
 | `Z_i` | Effective impedance |
 | `scope_weight_i` | Scope compatibility |
 | `trust_weight_i` | Origin/peer reliability |
