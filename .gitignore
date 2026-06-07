@@ -7,3 +7,4 @@ longmemeval*.json
 .fastembed_cache/
 benches/eval/data/
 benches/eval/results/
+docs/superpowers/

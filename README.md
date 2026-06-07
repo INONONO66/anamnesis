@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  <a href="#quick-start">Quick Start</a> · <a href="docs/vision.md">Vision</a> · <a href="docs/architecture.md">Architecture</a> · <a href="docs/design-decisions/">Design Decisions</a>
+  <a href="#quick-start">Quick Start</a> · <a href="docs/README.md">Docs</a> · <a href="docs/00-foundation/vision.md">Vision</a> · <a href="docs/01-system-architecture/overview.md">Architecture</a>
 </p>
 
 ---
