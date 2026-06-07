@@ -24,13 +24,13 @@ impl Commitment {
             if committed {
                 e.touch(seed, day(d)).unwrap(); // committed retrieval: appends a durable trace
             } else {
-                // read-only retrieval: mutates nothing (`query` takes `&self`; see the
+                // read-only retrieval at the SAME scheduled day (time-matched to the
+                // committed arm); mutates nothing (`query` takes `&self`; see the
                 // read_only_retrieval_does_not_mutate_reservoirs invariant test).
+                let mut cfg = QueryConfig::default();
+                cfg.now = Some(day(d));
                 let _ = e
-                    .query(
-                        &Query::Associative { seed, budget: 100 },
-                        &QueryConfig::default(),
-                    )
+                    .query(&Query::Associative { seed, budget: 100 }, &cfg)
                     .unwrap();
             }
         }
