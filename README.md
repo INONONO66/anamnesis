@@ -44,7 +44,7 @@ Anamnesis gives LLM agents **associative memory**. It builds a graph of knowledg
 |:---------|:-------------|
 | **Associative recall** | Additive directed **random-walk-with-restart (RWR)** spreads activation from query seeds along typed edges; converging evidence sums (never max). |
 | **Conductance** | Edges hold an associative-strength reservoir (a log-likelihood-ratio); committed co-use strengthens links via an Oja-bounded Hebbian update. |
-| **Forgetting** | Memory strength is `A_i = B_i + P_i`: `B_i` is the ACT-R **base-level** activation recomputed from the access-trace history (it falls as time passes since each access/the creation event), and `P_i` is a persistent, decay-exempt **evidence prior** (encoding surprise, feedback, peer trust). `salience = logistic(B_i + P_i)`. A committed access appends a trace (raising `B_i`); feedback moves `P_i`; unused knowledge fades as `B_i` decays — it is never deleted. |
+| **Forgetting** | Memory strength is `A_i = B_i + P_i`: `B_i` is the ACT-R **base-level** activation recomputed from the access-trace history, where **each trace carries its own activation-dependent decay rate** `d_j = m_type·(c·e^{m_j}+α)` (Pavlik & Anderson 2005) — so massed re-presentation forgets fast and spaced re-presentation stays durable (the **spacing effect**). `P_i` is a persistent, decay-exempt **evidence prior** (encoding surprise, feedback, peer trust). `salience = logistic(B_i + P_i)`. A committed access appends a trace (raising `B_i`); feedback moves `P_i`; unused knowledge fades as `B_i` decays — it is never deleted. |
 | **Perception** | **Surprise-gated** input: an observation charges memory in proportion to prediction error, then novelty/confidence/budget decide whether it allocates a new site or routes to the nearest one. |
 | **Frustration** | Contradictions are **excluded from propagation** and surfaced as tension (`sigma_ij`), never overwritten — both sides keep their provenance. |
 
@@ -534,7 +534,7 @@ CI also runs the MSRV check (`cargo check --all-targets --all-features` on Rust 
 
 **v0.5.0** — migrated to the **conductive-network** model: additive directed RWR, log-odds reservoirs with bounded projections, power-law dissipation, commit-gated Hebbian learning, and frustration. Breaking redesign vs 0.4 (force/gravity/BFS/Hopfield models removed); the [techspec](docs/README.md) is the source of truth.
 
-Node strength is now decomposed as `A_i = B_i + P_i` ([ADR-0008](docs/adr/0008-powerlaw-dissipation.md)): the ACT-R base level `B_i` is recomputed on demand from the access-trace history (forgetting and use-driven reinforcement live here), and the persistent evidence prior `P_i` (encoding surprise, feedback, peer trust) is decay-exempt. The edge `conductance` log-LR reservoir is unchanged.
+Node strength is now decomposed as `A_i = B_i + P_i` ([ADR-0008](docs/adr/0008-powerlaw-dissipation.md)): the ACT-R base level `B_i` is recomputed on demand from the access-trace history (forgetting and use-driven reinforcement live here), and the persistent evidence prior `P_i` (encoding surprise, feedback, peer trust) is decay-exempt. Each access trace carries its own **activation-dependent decay rate** `d_j = m_type·(c·e^{m_j}+α)` (Pavlik & Anderson 2005), so the multi-trace base level genuinely reproduces the **spacing effect** (the human *testing* effect is not claimed). The edge `conductance` log-LR reservoir is unchanged.
 
 | Layer | Status | Notes |
 |:------|:-------|:------|
@@ -544,7 +544,7 @@ Node strength is now decomposed as `A_i = B_i + P_i` ([ADR-0008](docs/adr/0008-p
 | Cold-start coupling | ✅ | Embedding/entity/scope/type-weighted seed creates `Semantic` edges in `ingest()` |
 | Conductance learning | ✅ | Commit-gated Oja-bounded Hebbian edge strengthening |
 | Perception | ✅ | Surprise-gated, wired into `ingest()` — novelty, confidence, budget |
-| Forgetting (dissipation) | ✅ | ACT-R base level `B_i` recomputed from access traces; `tick()` recomputes salience as `B_i(now)` falls; `touch()` appends an access trace (no scalar decay). Evidence prior `P_i` is decay-exempt |
+| Forgetting (dissipation) | ✅ | ACT-R base level `B_i` recomputed from access traces with **per-trace activation-dependent decay** (Pavlik-Anderson; reproduces the spacing effect); `tick()` recomputes salience as `B_i(now)` falls; `touch()` appends an access trace (no scalar decay). Evidence prior `P_i` is decay-exempt |
 | Activation flow | ✅ | Additive directed random-walk-with-restart (RWR); BFS/force models removed |
 | Frustration | ✅ | `Contradicts` excluded from propagation, surfaced as tension (`sigma_ij`) |
 | Identity prior | ✅ | Top-3 identity nodes bias query activation |
