@@ -156,37 +156,12 @@ fn readout_retrievals(
     question: &BenchQuestion,
     top_k: usize,
 ) -> Vec<RetrievedMemory> {
-    let mut seen_units = HashSet::new();
-    readout
-        .iter()
-        .take(top_k)
-        .enumerate()
-        .filter_map(|(index, candidate)| {
-            let provenance = graph.provenance_by_node.get(&candidate.node_id)?;
-            let matched_gold_units: Vec<_> = question
-                .gold
-                .matched_units(
-                    &provenance.raw_session_id,
-                    provenance.raw_turn_id.as_deref(),
-                    &provenance.content,
-                )
-                .into_iter()
-                .filter(|unit| seen_units.insert(unit.clone()))
-                .collect();
-            let relevant = !matched_gold_units.is_empty();
-            Some(RetrievedMemory {
-                rank: index + 1,
-                node_id: candidate.node_id.0,
-                relevant,
-                matched_gold_units,
-                score: candidate.score,
-                session_id: provenance.session_id.clone(),
-                raw_session_id: provenance.raw_session_id.clone(),
-                raw_turn_id: provenance.raw_turn_id.clone(),
-                content_chars: provenance.content.chars().count(),
-            })
-        })
-        .collect()
+    build_retrievals(
+        readout.iter().map(|c| (c.node_id, c.score)),
+        graph,
+        question,
+        top_k,
+    )
 }
 
 fn retrieved_memories(
@@ -195,13 +170,26 @@ fn retrieved_memories(
     question: &BenchQuestion,
     top_k: usize,
 ) -> Vec<RetrievedMemory> {
+    build_retrievals(
+        ranked_fragments(package).into_iter().map(|f| (f.node_id, f.relevance)),
+        graph,
+        question,
+        top_k,
+    )
+}
+
+fn build_retrievals(
+    ranked: impl Iterator<Item = (anamnesis::graph::NodeId, f64)>,
+    graph: &BuiltMemoryGraph,
+    question: &BenchQuestion,
+    top_k: usize,
+) -> Vec<RetrievedMemory> {
     let mut seen_units = HashSet::new();
-    ranked_fragments(package)
-        .into_iter()
+    ranked
         .take(top_k)
         .enumerate()
-        .filter_map(|(index, fragment)| {
-            let provenance = graph.provenance_by_node.get(&fragment.node_id)?;
+        .filter_map(|(index, (node_id, score))| {
+            let provenance = graph.provenance_by_node.get(&node_id)?;
             let matched_gold_units: Vec<_> = question
                 .gold
                 .matched_units(
@@ -215,10 +203,10 @@ fn retrieved_memories(
             let relevant = !matched_gold_units.is_empty();
             Some(RetrievedMemory {
                 rank: index + 1,
-                node_id: fragment.node_id.0,
+                node_id: node_id.0,
                 relevant,
                 matched_gold_units,
-                score: fragment.relevance,
+                score,
                 session_id: provenance.session_id.clone(),
                 raw_session_id: provenance.raw_session_id.clone(),
                 raw_turn_id: provenance.raw_turn_id.clone(),

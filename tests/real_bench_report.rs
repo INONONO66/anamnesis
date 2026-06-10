@@ -78,10 +78,14 @@ fn write_report_rejects_symlinked_allowed_parent() {
 
 #[test]
 fn diagnostics_hit_at_k_and_mean_first_hit_rank() {
-    // Two questions: first has first_hit_rank=Some(1), second has None.
+    // Four questions across two types:
+    //   "single-session-user": q1 hits at rank 1, q2 misses entirely
+    //   "temporal": q3 hits at rank 3, q4 misses entirely
     let questions = vec![
         question_eval("q1", "single-session-user", Some(1)),
         question_eval("q2", "single-session-user", None),
+        question_eval("q3", "temporal", Some(3)),
+        question_eval("q4", "temporal", None),
     ];
     let input = ReportInput {
         dataset: BenchDatasetName::Locomo,
@@ -97,10 +101,47 @@ fn diagnostics_hit_at_k_and_mean_first_hit_rank() {
     };
     let report = build_report(input);
 
-    assert_eq!(report.diagnostics.hit_at_1, 0.5, "1 of 2 hit at rank 1");
-    assert_eq!(report.diagnostics.hit_at_3, 0.5, "same — only rank-1 hit");
-    assert_eq!(report.diagnostics.mean_first_hit_rank, 1.0, "only one rank, it is 1");
+    // hit_at_1: only q1 hits at rank <=1 → 1/4
+    assert_eq!(report.diagnostics.hit_at_1, 0.25, "1 of 4 hit at rank 1");
+    // hit_at_3: q1 (rank 1) and q3 (rank 3) → 2/4
+    assert_eq!(report.diagnostics.hit_at_3, 0.5, "2 of 4 hit at rank <=3");
+    // hit_at_5: same two hits at rank <=5 → 2/4
+    assert_eq!(report.diagnostics.hit_at_5, 0.5, "2 of 4 hit at rank <=5");
+    // hit_at_10 and hit_at_20: same two hits → 2/4
+    assert_eq!(report.diagnostics.hit_at_10, 0.5, "2 of 4 hit at rank <=10");
+    assert_eq!(report.diagnostics.hit_at_20, 0.5, "2 of 4 hit at rank <=20");
+    // mean_first_hit_rank: only ranks 1 and 3 are present → (1 + 3) / 2 = 2.0
+    assert_eq!(report.diagnostics.mean_first_hit_rank, 2.0, "mean of ranks 1 and 3");
     assert_eq!(report.diagnostics.avg_returned_fragments, 0.0);
+
+    // Pin per-type averaging math for "single-session-user":
+    //   q1: recall_at_k=1.0, mrr=1.0   q2: recall_at_k=0.0, mrr=0.0
+    //   averaged: recall_at_k=0.5, mrr=0.5
+    let ssu = report
+        .diagnostics
+        .per_type
+        .get("single-session-user")
+        .expect("single-session-user breakdown present");
+    assert_eq!(ssu.questions, 2);
+    assert_eq!(ssu.recall_at_k, 0.5, "avg recall for single-session-user");
+    assert_eq!(ssu.mrr, 0.5, "avg mrr for single-session-user");
+
+    // Pin per-type averaging math for "temporal":
+    //   q3: recall_at_k=1.0, mrr=1/3   q4: recall_at_k=0.0, mrr=0.0
+    //   averaged: recall_at_k=0.5, mrr=1/6
+    let temporal = report
+        .diagnostics
+        .per_type
+        .get("temporal")
+        .expect("temporal breakdown present");
+    assert_eq!(temporal.questions, 2);
+    assert_eq!(temporal.recall_at_k, 0.5, "avg recall for temporal");
+    assert!(
+        (temporal.mrr - 1.0 / 6.0).abs() < 1e-10,
+        "avg mrr for temporal: expected {}, got {}",
+        1.0_f64 / 6.0,
+        temporal.mrr
+    );
 }
 
 fn question_eval(id: &str, qtype: &str, first_hit: Option<usize>) -> QuestionEvaluation {
