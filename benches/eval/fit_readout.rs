@@ -3,6 +3,10 @@
 //! feature rows. Even sample_index = train, odd = dev. Never fit on eval data
 //! you intend to report.
 //!
+//! Objective caveat: this optimizes per-node label MRR (no gold-unit novelty
+//! dedup), a close proxy for — but not identical to — the benchmark report's
+//! novelty-deduped MRR surface.
+//!
 //! Usage: cargo bench --bench fit_readout -- <features.jsonl> [top_k]
 
 use std::collections::BTreeMap;
