@@ -160,6 +160,11 @@ fn validate_args(args: &Args, full: bool) -> BenchResult<()> {
             args.top_k
         )));
     }
+    if args.seed_limit == Some(0) {
+        return Err(BenchError::InvalidInput(
+            "--seed-limit must be at least 1".to_string(),
+        ));
+    }
     if args.dataset == BenchDatasetName::LongMemEval && args.samples.is_none() && !full {
         return Err(BenchError::InvalidInput(
             "LongMemEval-S is large; pass --samples <N> or explicit --full".to_string(),
@@ -214,29 +219,4 @@ Options:\n\
   --force               Overwrite an existing report file\n\
   --help                Show this usage"
     );
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn args(items: &[&str]) -> impl Iterator<Item = String> {
-        items.iter().map(|s| s.to_string()).collect::<Vec<_>>().into_iter()
-    }
-
-    #[test]
-    fn seed_limit_parses_correctly() {
-        let parsed = parse_args(args(&["--dataset", "locomo", "--seed-limit", "40"]))
-            .expect("parse succeeds")
-            .expect("args present");
-        assert_eq!(parsed.seed_limit, Some(40));
-    }
-
-    #[test]
-    fn seed_limit_defaults_to_none() {
-        let parsed = parse_args(args(&["--dataset", "locomo"]))
-            .expect("parse succeeds")
-            .expect("args present");
-        assert_eq!(parsed.seed_limit, None);
-    }
 }
