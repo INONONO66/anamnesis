@@ -14,7 +14,9 @@ use serde_json::json;
 use eval_common::real_bench::dataset::{
     BenchDatasetName, load_benchmark_dataset, parse_benchmark_dataset,
 };
-use eval_common::real_bench::graph::{build_memory_graph, evaluate_questions, run_warmup};
+use eval_common::real_bench::graph::{
+    build_memory_graph, evaluate_questions, run_warmup, speaker_cue_tags,
+};
 
 #[derive(Clone, Default)]
 struct CountingEmbedder {
@@ -298,6 +300,15 @@ fn missing_dataset_path_returns_clear_error() {
     .expect_err("missing dataset should fail");
 
     assert!(err.to_string().contains("Dataset not found"));
+}
+
+#[test]
+fn speaker_cue_tags_match_question_mentions() {
+    let speakers = vec!["Caroline".to_string(), "Melanie".to_string(), "user".to_string()];
+    let tags = speaker_cue_tags(&speakers, "What did Caroline say about the trip?");
+    assert_eq!(tags, vec!["speaker-caroline".to_string()]);
+    // Generic roles never become cues.
+    assert!(speaker_cue_tags(&speakers, "what did the user say").is_empty());
 }
 
 fn embed_text(text: &str) -> Vec<f32> {

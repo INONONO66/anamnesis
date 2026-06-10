@@ -3,7 +3,7 @@ use std::time::Instant;
 
 use anamnesis::embedding::EmbeddingProvider;
 use anamnesis::query::{ContextPackage, Fragment, ReadoutCandidate, SearchInput, SearchResult};
-use anamnesis::{ConfidenceLevel, Engine, SqliteStorage};
+use anamnesis::{ConfidenceLevel, SqliteStorage};
 use serde::{Deserialize, Serialize};
 
 use super::super::dataset::BenchQuestion;
@@ -57,7 +57,7 @@ pub fn run_warmup(
 ) -> BenchResult<WarmupReport> {
     let mut report = WarmupReport::default();
     for question in questions {
-        let result = search_question(&graph.engine, question, provider, top_k)?;
+        let result = search_question(&*graph, question, provider, top_k)?;
         let (_, commit) = graph
             .engine
             .commit(result.package, Some(ConfidenceLevel::Medium))
@@ -88,7 +88,7 @@ fn evaluate_question(
     top_k: usize,
 ) -> BenchResult<QuestionEvaluation> {
     let start = Instant::now();
-    let result = search_question(&graph.engine, question, provider, top_k)?;
+    let result = search_question(graph, question, provider, top_k)?;
     let search_latency_ms = start.elapsed().as_secs_f64() * 1000.0;
 
     // Primary surface: pre-package readout candidates
@@ -129,7 +129,7 @@ fn evaluate_question(
 }
 
 fn search_question(
-    engine: &Engine<SqliteStorage>,
+    graph: &BuiltMemoryGraph,
     question: &BenchQuestion,
     provider: &dyn EmbeddingProvider,
     top_k: usize,
@@ -138,12 +138,15 @@ fn search_question(
         .into_iter()
         .next()
         .ok_or_else(|| BenchError::Embedding("provider returned no query embedding".to_string()))?;
-    let result = engine
+    let entity_tags = super::speaker_cue_tags(&graph.speakers, &question.question);
+    let result = graph
+        .engine
         .search(SearchInput {
             text: question.question.clone(),
             query_embedding: Some(embedding),
             limit: top_k,
             seed_limit: Some(top_k.max(1)),
+            entity_tags,
             ..SearchInput::default()
         })
         .map_err(|err| BenchError::Engine(err.to_string()))?;

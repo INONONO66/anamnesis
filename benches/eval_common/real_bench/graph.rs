@@ -22,6 +22,7 @@ pub struct BuiltMemoryGraph {
     pub engine: Engine<SqliteStorage>,
     pub provenance_by_node: HashMap<NodeId, NodeProvenance>,
     pub stats: GraphBuildStats,
+    pub speakers: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -136,10 +137,19 @@ pub fn build_memory_graph(
         }
     }
 
+    let speakers: Vec<String> = session_turns
+        .iter()
+        .flat_map(|turns| turns.iter().map(|turn| turn.speaker.clone()))
+        .filter(|s| !s.trim().is_empty())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+
     Ok(BuiltMemoryGraph {
         engine,
         provenance_by_node,
         stats,
+        speakers,
     })
 }
 
@@ -241,6 +251,24 @@ fn make_name(content: &str) -> String {
     } else {
         name
     }
+}
+
+const GENERIC_ROLES: [&str; 6] = ["user", "assistant", "system", "human", "ai", "bot"];
+
+/// Exact-match corpus speaker names in the question text and return their
+/// entity tags. Sensory cue extraction only — no gold evidence involved.
+pub fn speaker_cue_tags(speakers: &[String], question: &str) -> Vec<String> {
+    let question_lower = question.to_lowercase();
+    speakers
+        .iter()
+        .filter(|speaker| {
+            let lower = speaker.to_lowercase();
+            lower.len() >= 3
+                && !GENERIC_ROLES.contains(&lower.as_str())
+                && question_lower.contains(&lower)
+        })
+        .map(|speaker| format!("speaker-{}", normalize_tag(speaker)))
+        .collect()
 }
 
 fn entity_tags(dataset: &str, turn: &BenchTurn) -> Vec<String> {
