@@ -89,7 +89,7 @@ fn quality_cases() -> Vec<QualityCase> {
     vec![
         QualityCase {
             // Broad cluster query: the five "caching" knowledge members must
-            // dominate the top-k (KnowledgeOnly packaging — no provenance trigger).
+            // dominate the top-k (Balanced packaging — no provenance trigger).
             label: "caching.cluster",
             query: "caching",
             agent: false,

@@ -397,7 +397,8 @@ pub enum PackagingMode {
     /// Preserve the readout's bucket shape unchanged (readout-scoring.md
     /// "Bucket Handling"). Default for plain queries.
     Balanced,
-    /// Knowledge fragments only.
+    /// Knowledge fragments only. Retained for API stability / future policy
+    /// use; no longer auto-selected by `decide_packaging`.
     KnowledgeOnly,
     /// Knowledge + provenance (source episodes).
     KnowledgeWithProvenance,
