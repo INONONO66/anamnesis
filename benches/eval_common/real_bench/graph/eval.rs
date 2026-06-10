@@ -2,13 +2,13 @@ use std::collections::HashSet;
 use std::time::Instant;
 
 use anamnesis::embedding::EmbeddingProvider;
-use anamnesis::query::{ContextPackage, Fragment, SearchInput};
+use anamnesis::query::{ContextPackage, Fragment, ReadoutCandidate, SearchInput, SearchResult};
 use anamnesis::{ConfidenceLevel, Engine, SqliteStorage};
 use serde::{Deserialize, Serialize};
 
 use super::super::dataset::BenchQuestion;
 use super::super::error::{BenchError, BenchResult};
-use super::super::metrics::{RankedRetrieval, RetrievalMetrics, retrieval_metrics};
+use super::super::metrics::{RankedRetrieval, RetrievalMetrics, first_hit_rank, retrieval_metrics};
 use super::{BuiltMemoryGraph, embed_texts};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -22,9 +22,17 @@ pub struct WarmupReport {
 pub struct QuestionEvaluation {
     pub question_id: String,
     pub question_type: String,
+    /// Sample (conversation/haystack) this question belongs to — needed for
+    /// train/dev split comparisons (even = train, odd = dev).
+    pub sample_index: usize,
     pub search_latency_ms: f64,
     pub total_relevant: usize,
+    /// Pre-package readout surface (primary retrieval metric).
     pub retrieval_metrics: RetrievalMetrics,
+    /// Packaged ContextPackage surface (context-shape metric).
+    pub package_metrics: RetrievalMetrics,
+    pub first_hit_rank: Option<usize>,
+    pub returned_fragments: usize,
     pub retrievals: Vec<RetrievedMemory>,
 }
 
@@ -52,7 +60,7 @@ pub fn run_warmup(
         let result = search_question(&graph.engine, question, provider, top_k)?;
         let (_, commit) = graph
             .engine
-            .commit(result, Some(ConfidenceLevel::Medium))
+            .commit(result.package, Some(ConfidenceLevel::Medium))
             .map_err(|err| BenchError::Engine(err.to_string()))?;
         report.questions += 1;
         report.sites_accessed += commit.sites_accessed;
@@ -80,23 +88,42 @@ fn evaluate_question(
     top_k: usize,
 ) -> BenchResult<QuestionEvaluation> {
     let start = Instant::now();
-    let package = search_question(&graph.engine, question, provider, top_k)?;
+    let result = search_question(&graph.engine, question, provider, top_k)?;
     let search_latency_ms = start.elapsed().as_secs_f64() * 1000.0;
-    let retrievals = retrieved_memories(&package, graph, question, top_k);
-    let ranked: Vec<_> = retrievals
+
+    // Primary surface: pre-package readout candidates
+    let retrievals = readout_retrievals(&result.trace.readout, graph, question, top_k);
+    let readout_ranked: Vec<_> = retrievals
         .iter()
         .map(|item| RankedRetrieval {
             matched_gold_units: item.matched_gold_units.clone(),
             score: item.score,
         })
         .collect();
+
+    // Package surface: packaged ContextPackage fragments
+    let package_retrievals = retrieved_memories(&result.package, graph, question, top_k);
+    let package_ranked: Vec<_> = package_retrievals
+        .iter()
+        .map(|item| RankedRetrieval {
+            matched_gold_units: item.matched_gold_units.clone(),
+            score: item.score,
+        })
+        .collect();
+
     let total_relevant = question.gold.total_relevant_units();
+    let returned_fragments = result.package.total_fragments();
+
     Ok(QuestionEvaluation {
         question_id: question.question_id.clone(),
         question_type: question.question_type.clone(),
+        sample_index: question.sample_index,
         search_latency_ms,
         total_relevant,
-        retrieval_metrics: retrieval_metrics(&ranked, total_relevant, top_k),
+        retrieval_metrics: retrieval_metrics(&readout_ranked, total_relevant, top_k),
+        package_metrics: retrieval_metrics(&package_ranked, total_relevant, top_k),
+        first_hit_rank: first_hit_rank(&readout_ranked),
+        returned_fragments,
         retrievals,
     })
 }
@@ -106,7 +133,7 @@ fn search_question(
     question: &BenchQuestion,
     provider: &dyn EmbeddingProvider,
     top_k: usize,
-) -> BenchResult<ContextPackage> {
+) -> BenchResult<SearchResult> {
     let embedding = embed_texts(provider, std::slice::from_ref(&question.question))?
         .into_iter()
         .next()
@@ -120,7 +147,46 @@ fn search_question(
             ..SearchInput::default()
         })
         .map_err(|err| BenchError::Engine(err.to_string()))?;
-    Ok(result.package)
+    Ok(result)
+}
+
+fn readout_retrievals(
+    readout: &[ReadoutCandidate],
+    graph: &BuiltMemoryGraph,
+    question: &BenchQuestion,
+    top_k: usize,
+) -> Vec<RetrievedMemory> {
+    let mut seen_units = HashSet::new();
+    readout
+        .iter()
+        .take(top_k)
+        .enumerate()
+        .filter_map(|(index, candidate)| {
+            let provenance = graph.provenance_by_node.get(&candidate.node_id)?;
+            let matched_gold_units: Vec<_> = question
+                .gold
+                .matched_units(
+                    &provenance.raw_session_id,
+                    provenance.raw_turn_id.as_deref(),
+                    &provenance.content,
+                )
+                .into_iter()
+                .filter(|unit| seen_units.insert(unit.clone()))
+                .collect();
+            let relevant = !matched_gold_units.is_empty();
+            Some(RetrievedMemory {
+                rank: index + 1,
+                node_id: candidate.node_id.0,
+                relevant,
+                matched_gold_units,
+                score: candidate.score,
+                session_id: provenance.session_id.clone(),
+                raw_session_id: provenance.raw_session_id.clone(),
+                raw_turn_id: provenance.raw_turn_id.clone(),
+                content_chars: provenance.content.chars().count(),
+            })
+        })
+        .collect()
 }
 
 fn retrieved_memories(

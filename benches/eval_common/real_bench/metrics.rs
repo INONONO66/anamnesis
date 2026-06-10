@@ -16,6 +16,14 @@ pub struct RetrievalMetrics {
     pub ndcg_at_k: f64,
 }
 
+/// One-based rank of the first retrieval that matches any gold unit.
+pub fn first_hit_rank(ranked: &[RankedRetrieval]) -> Option<usize> {
+    ranked
+        .iter()
+        .position(|item| !item.matched_gold_units.is_empty())
+        .map(|index| index + 1)
+}
+
 pub fn retrieval_metrics(
     ranked: &[RankedRetrieval],
     total_relevant: usize,

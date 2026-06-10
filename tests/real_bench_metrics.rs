@@ -3,7 +3,7 @@ mod eval_common;
 
 use eval_common::real_bench::dataset::GoldEvidence;
 use eval_common::real_bench::graph::ranked_fragments_for_test;
-use eval_common::real_bench::metrics::{RankedRetrieval, retrieval_metrics};
+use eval_common::real_bench::metrics::{RankedRetrieval, first_hit_rank, retrieval_metrics};
 
 use anamnesis::graph::scope::ScopeRelation;
 use anamnesis::graph::{KnowledgeType, NodeId, Origin, PeerId};
@@ -122,6 +122,16 @@ fn gold_evidence_prefers_exact_turns_and_dedupes_answer_sessions() {
         lme.matched_units("answer_1", None, "second turn"),
         vec!["session:answer_1".to_string()]
     );
+}
+
+#[test]
+fn first_hit_rank_reports_one_based_position() {
+    let ranked = vec![
+        RankedRetrieval { matched_gold_units: vec![], score: 0.9 },
+        RankedRetrieval { matched_gold_units: vec!["turn:t1".into()], score: 0.8 },
+    ];
+    assert_eq!(first_hit_rank(&ranked), Some(2));
+    assert_eq!(first_hit_rank(&ranked[..1]), None);
 }
 
 fn fragment(id: u64, node_type: KnowledgeType, relevance: f64) -> Fragment {
