@@ -367,18 +367,26 @@ pub const BETA_PRIOR: f64 = 1.0;
 // --- Readout score (readout-scoring.md, the authoritative 7-term form) ------
 //
 // The seven coefficients are ONE calibrated re-ranking regression object, not
-// seven independent knobs. The default is unit coefficients, which recovers the
-// plain additive log-odds sum `posterior = prior + sum of evidence`. They are
-// calibrated priors, not laws (ADR-0010); refit from accepted-readout data.
+// seven independent knobs. Unit coefficients recover the plain additive
+// log-odds sum `posterior = prior + sum of evidence`. They are calibrated
+// priors, not laws (ADR-0010); refit from accepted-readout data.
+//
+// CALIBRATED 2026-06-11 (docs/07-quality-gates/calibration-records.md):
+// coordinate search over (w_a, w_phi, w_s, w_z) on the LoCoMo-10 even-sample
+// train split (`fit_readout`, mean MRR@20 objective); dev MRR 0.1629 -> 0.1831.
+// `w_z = 0` reflects that `Z_i = -ln(a_i)` is redundant with `logit(a_i)` —
+// the term stays in the form, its coefficient is calibrated off.
 
 /// `w_a` — weight on the (logit-of) query-local activation response `a_i`.
-pub const READOUT_W_A: f64 = 1.0;
+pub const READOUT_W_A: f64 = 4.0;
 /// `w_phi` — weight on the potential bias `phi_i`.
-pub const READOUT_W_PHI: f64 = 1.0;
+pub const READOUT_W_PHI: f64 = 4.0;
 /// `w_s` — weight on the salience projection `logit(s_i)`.
 pub const READOUT_W_S: f64 = 1.0;
 /// `w_z` — penalty weight on the effective impedance `Z_i` (subtracted).
-pub const READOUT_W_Z: f64 = 1.0;
+/// Calibrated to zero: the RWR approximation `Z_i = -ln(a_i)` makes the term
+/// redundant with the activation term (same signal, double-counted).
+pub const READOUT_W_Z: f64 = 0.0;
 /// `w_scope` — weight on the scope-compatibility term.
 pub const READOUT_W_SCOPE: f64 = 1.0;
 /// `w_trust` — weight on the origin/peer-reliability term.
