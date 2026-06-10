@@ -1,4 +1,5 @@
 pub mod dataset;
+pub mod embed_cache;
 pub mod error;
 pub mod graph;
 pub mod metrics;

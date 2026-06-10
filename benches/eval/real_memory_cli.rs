@@ -19,6 +19,7 @@ pub(crate) struct Args {
     pub(crate) skip_adversarial: bool,
     pub(crate) allow_download: bool,
     pub(crate) force: bool,
+    pub(crate) embed_cache: Option<PathBuf>,
 }
 
 pub(crate) fn parse_args<I>(args: I) -> BenchResult<Option<Args>>
@@ -86,6 +87,10 @@ where
                 parsed.saw_arg = true;
                 parsed.force = true;
             }
+            "--embed-cache" => {
+                parsed.saw_arg = true;
+                parsed.embed_cache = Some(PathBuf::from(next_value(&mut iter, "--embed-cache")?));
+            }
             "--bench" => {}
             other => {
                 return Err(BenchError::InvalidInput(format!(
@@ -118,6 +123,7 @@ struct ParsedArgs {
     skip_adversarial: bool,
     allow_download: bool,
     force: bool,
+    embed_cache: Option<PathBuf>,
     saw_arg: bool,
 }
 
@@ -136,6 +142,7 @@ impl Default for ParsedArgs {
             skip_adversarial: false,
             allow_download: false,
             force: false,
+            embed_cache: None,
             saw_arg: false,
         }
     }
@@ -158,6 +165,7 @@ impl ParsedArgs {
             skip_adversarial: self.skip_adversarial,
             allow_download: self.allow_download,
             force: self.force,
+            embed_cache: self.embed_cache,
         })
     }
 }
@@ -237,6 +245,7 @@ Options:\n\
   --allow-download      Allow FastEmbed model download/cache initialization\n\
   --full                Permit uncapped LongMemEval-S runs\n\
   --force               Overwrite an existing report file\n\
+  --embed-cache <path>  SQLite embedding cache (model-keyed; speeds reruns)\n\
   --help                Show this usage"
     );
 }

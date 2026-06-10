@@ -75,3 +75,22 @@ fn stratify_satisfies_the_longmemeval_size_guard() {
         .expect("args present");
     assert_eq!(parsed.stratify, Some(30));
 }
+
+#[test]
+fn embed_cache_parses_to_some_path() {
+    let parsed = parse_args(args(&["--dataset", "locomo", "--embed-cache", "/tmp/my_cache.sqlite"]))
+        .expect("parse succeeds")
+        .expect("args present");
+    assert_eq!(
+        parsed.embed_cache,
+        Some(std::path::PathBuf::from("/tmp/my_cache.sqlite"))
+    );
+}
+
+#[test]
+fn embed_cache_defaults_to_none() {
+    let parsed = parse_args(args(&["--dataset", "locomo"]))
+        .expect("parse succeeds")
+        .expect("args present");
+    assert_eq!(parsed.embed_cache, None);
+}

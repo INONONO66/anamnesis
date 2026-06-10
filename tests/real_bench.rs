@@ -176,7 +176,7 @@ fn graph_build_warmup_and_evaluation_use_embeddings_and_commit() {
     .expect("LoCoMo JSON should parse");
 
     let embedder = CountingEmbedder::default();
-    let mut built = build_memory_graph(&loaded, &embedder).expect("graph builds");
+    let mut built = build_memory_graph(&loaded, &embedder, None).expect("graph builds");
 
     assert_eq!(built.stats.nodes_created, 4);
     assert_eq!(built.stats.extracted_edges_created, 2);
@@ -258,12 +258,12 @@ fn graph_build_warmup_and_evaluation_use_embeddings_and_commit() {
         .count();
     assert_eq!(temporal_edges, 1);
 
-    let warmup = run_warmup(&mut built, &loaded.questions[..1], &embedder, 3, None)
+    let warmup = run_warmup(&mut built, &loaded.questions[..1], &embedder, None, 3, None)
         .expect("warmup commits search packages");
     assert_eq!(warmup.questions, 1);
     assert!(warmup.sites_accessed > 0);
 
-    let evaluated = evaluate_questions(&built, &loaded.questions[1..], &embedder, 3, None)
+    let evaluated = evaluate_questions(&built, &loaded.questions[1..], &embedder, None, 3, None)
         .expect("held-out retrieval evaluates");
     assert_eq!(evaluated.len(), 1);
     assert_eq!(evaluated[0].question_id, loaded.questions[1].question_id);
@@ -432,4 +432,51 @@ fn embed_text(text: &str) -> Vec<f32> {
         1.0,
     ]
     .to_vec()
+}
+
+#[test]
+fn embed_cache_second_build_makes_zero_provider_calls() {
+    use eval_common::real_bench::embed_cache::EmbedCache;
+
+    let loaded = parse_benchmark_dataset(
+        BenchDatasetName::Locomo,
+        &json!([{
+            "session_1": [
+                {"dia_id": "D1:1", "speaker": "Alice", "text": "Alice likes hiking."},
+                {"dia_id": "D1:2", "speaker": "Bob", "text": "Bob prefers swimming."}
+            ],
+            "qa": [{
+                "question": "What does Alice like?",
+                "answer": "hiking",
+                "category": 1,
+                "evidence": ["D1:1"]
+            }]
+        }]),
+        Some(1),
+    )
+    .expect("LoCoMo JSON should parse");
+
+    let cache_dir =
+        std::env::temp_dir().join(format!("embed-cache-hit-test-{}", std::process::id()));
+    std::fs::create_dir_all(&cache_dir).unwrap();
+    let cache_path = cache_dir.join("cache.sqlite");
+
+    // First build — populates the cache.
+    let embedder1 = CountingEmbedder::default();
+    let cache1 = EmbedCache::open(&cache_path, embedder1.model_name()).unwrap();
+    build_memory_graph(&loaded, &embedder1, Some(&cache1)).expect("first graph builds");
+    let calls_after_first_build = embedder1.calls();
+    assert!(calls_after_first_build > 0, "first build must call provider");
+
+    // Second build — all embeddings are already cached, provider must not be called.
+    let embedder2 = CountingEmbedder::default();
+    let cache2 = EmbedCache::open(&cache_path, embedder2.model_name()).unwrap();
+    build_memory_graph(&loaded, &embedder2, Some(&cache2)).expect("second graph builds");
+    assert_eq!(
+        embedder2.calls(),
+        0,
+        "second build with warm cache must make 0 provider calls"
+    );
+
+    std::fs::remove_dir_all(cache_dir).ok();
 }

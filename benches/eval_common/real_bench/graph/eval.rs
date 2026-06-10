@@ -53,12 +53,13 @@ pub fn run_warmup(
     graph: &mut BuiltMemoryGraph,
     questions: &[BenchQuestion],
     provider: &dyn EmbeddingProvider,
+    cache: Option<&super::super::embed_cache::EmbedCache>,
     top_k: usize,
     seed_limit: Option<usize>,
 ) -> BenchResult<WarmupReport> {
     let mut report = WarmupReport::default();
     for question in questions {
-        let result = search_question(&*graph, question, provider, top_k, seed_limit)?;
+        let result = search_question(&*graph, question, provider, cache, top_k, seed_limit)?;
         let (_, commit) = graph
             .engine
             .commit(result.package, Some(ConfidenceLevel::Medium))
@@ -74,12 +75,13 @@ pub fn evaluate_questions(
     graph: &BuiltMemoryGraph,
     questions: &[BenchQuestion],
     provider: &dyn EmbeddingProvider,
+    cache: Option<&super::super::embed_cache::EmbedCache>,
     top_k: usize,
     seed_limit: Option<usize>,
 ) -> BenchResult<Vec<QuestionEvaluation>> {
     questions
         .iter()
-        .map(|question| evaluate_question(graph, question, provider, top_k, seed_limit))
+        .map(|question| evaluate_question(graph, question, provider, cache, top_k, seed_limit))
         .collect()
 }
 
@@ -87,11 +89,12 @@ fn evaluate_question(
     graph: &BuiltMemoryGraph,
     question: &BenchQuestion,
     provider: &dyn EmbeddingProvider,
+    cache: Option<&super::super::embed_cache::EmbedCache>,
     top_k: usize,
     seed_limit: Option<usize>,
 ) -> BenchResult<QuestionEvaluation> {
     let start = Instant::now();
-    let result = search_question(graph, question, provider, top_k, seed_limit)?;
+    let result = search_question(graph, question, provider, cache, top_k, seed_limit)?;
     let search_latency_ms = start.elapsed().as_secs_f64() * 1000.0;
 
     // Primary surface: pre-package readout candidates
@@ -135,10 +138,11 @@ fn search_question(
     graph: &BuiltMemoryGraph,
     question: &BenchQuestion,
     provider: &dyn EmbeddingProvider,
+    cache: Option<&super::super::embed_cache::EmbedCache>,
     top_k: usize,
     seed_limit: Option<usize>,
 ) -> BenchResult<SearchResult> {
-    let embedding = embed_texts(provider, std::slice::from_ref(&question.question))?
+    let embedding = embed_texts(provider, cache, std::slice::from_ref(&question.question))?
         .into_iter()
         .next()
         .ok_or_else(|| BenchError::Embedding("provider returned no query embedding".to_string()))?;

@@ -83,6 +83,13 @@ fn run() -> BenchResult<()> {
         provider.dimensions()
     );
 
+    let cache = args
+        .embed_cache
+        .as_deref()
+        .map(|path| eval_common::real_bench::embed_cache::EmbedCache::open(path, provider.model_name()))
+        .transpose()?;
+    let cache_ref = cache.as_ref();
+
     // One memory store per sample (LoCoMo conversation / LongMemEval haystack),
     // matching the standard per-conversation evaluation protocol. Warmup commits
     // the first N questions of each sample against that sample's graph.
@@ -113,10 +120,10 @@ fn run() -> BenchResult<()> {
 
     for group in &groups {
         let sample_index = group.questions[0].sample_index;
-        let mut graph = build_memory_graph(group, &provider)?;
+        let mut graph = build_memory_graph(group, &provider, cache_ref)?;
         let (warmup_questions, eval_questions) = group.questions.split_at(args.warmup);
-        let warmup = run_warmup(&mut graph, warmup_questions, &provider, args.top_k, args.seed_limit)?;
-        let sample_evals = evaluate_questions(&graph, eval_questions, &provider, args.top_k, args.seed_limit)?;
+        let warmup = run_warmup(&mut graph, warmup_questions, &provider, cache_ref, args.top_k, args.seed_limit)?;
+        let sample_evals = evaluate_questions(&graph, eval_questions, &provider, cache_ref, args.top_k, args.seed_limit)?;
         eprintln!(
             "SAMPLE {} sessions={} warmup={} eval={}",
             sample_index,

@@ -53,6 +53,7 @@ const TURN_GAP_SECS: u64 = 60;
 pub fn build_memory_graph(
     dataset: &LoadedBenchmark,
     provider: &dyn EmbeddingProvider,
+    cache: Option<&super::embed_cache::EmbedCache>,
 ) -> BenchResult<BuiltMemoryGraph> {
     // Two views per turn: the speaker-prefixed turn (episodic) and the
     // speaker-prefixed +/-1-turn context window (semantic). Benchmark
@@ -77,8 +78,8 @@ pub fn build_memory_graph(
         .iter()
         .flat_map(|turns| (0..turns.len()).map(|index| window_text(turns, index)))
         .collect();
-    let speaker_embeddings = embed_texts(provider, &speaker_texts)?;
-    let window_embeddings = embed_texts(provider, &window_texts)?;
+    let speaker_embeddings = embed_texts(provider, cache, &speaker_texts)?;
+    let window_embeddings = embed_texts(provider, cache, &window_texts)?;
 
     let mut engine = Engine::with_config(benchmark_config());
     let mut provenance_by_node = HashMap::new();
@@ -187,12 +188,43 @@ fn benchmark_config() -> EngineConfig {
 
 pub(super) fn embed_texts(
     provider: &dyn EmbeddingProvider,
+    cache: Option<&super::embed_cache::EmbedCache>,
     texts: &[String],
 ) -> BenchResult<Vec<Vec<f64>>> {
-    let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
-    provider
-        .embed_f64(&refs)
-        .map_err(|err| BenchError::Embedding(err.to_string()))
+    let Some(cache) = cache else {
+        let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+        return provider
+            .embed_f64(&refs)
+            .map_err(|err| BenchError::Embedding(err.to_string()));
+    };
+
+    let mut results: Vec<Option<Vec<f64>>> = Vec::with_capacity(texts.len());
+    let mut missing: Vec<usize> = Vec::new();
+    for (index, text) in texts.iter().enumerate() {
+        let hit = cache.get(text)?;
+        if hit.is_none() {
+            missing.push(index);
+        }
+        results.push(hit);
+    }
+    if !missing.is_empty() {
+        let refs: Vec<&str> = missing.iter().map(|&i| texts[i].as_str()).collect();
+        let fresh = provider
+            .embed_f64(&refs)
+            .map_err(|err| BenchError::Embedding(err.to_string()))?;
+        if fresh.len() != missing.len() {
+            return Err(BenchError::Embedding(format!(
+                "provider returned {} embeddings for {} texts",
+                fresh.len(),
+                missing.len()
+            )));
+        }
+        for (&index, vec) in missing.iter().zip(fresh) {
+            cache.put(&texts[index], &vec)?;
+            results[index] = Some(vec);
+        }
+    }
+    Ok(results.into_iter().map(|v| v.expect("filled above")).collect())
 }
 
 fn ingest_turn(
