@@ -18,8 +18,13 @@ impl EmbedCache {
             }
         }
         let conn = Connection::open(path).map_err(|e| BenchError::Engine(e.to_string()))?;
+        // WAL + relaxed sync: cold-cache population writes hundreds of
+        // thousands of rows; per-row fsync under the default journal mode
+        // would dominate the very cost this cache exists to remove.
         conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS embeddings (
+            "PRAGMA journal_mode=WAL;
+             PRAGMA synchronous=NORMAL;
+             CREATE TABLE IF NOT EXISTS embeddings (
                 model TEXT NOT NULL,
                 text  TEXT NOT NULL,
                 vec   BLOB NOT NULL,
@@ -47,11 +52,13 @@ impl EmbedCache {
     }
 
     pub fn put(&self, text: &str, vec: &[f64]) -> BenchResult<()> {
-        self.conn
-            .execute(
+        let mut stmt = self
+            .conn
+            .prepare_cached(
                 "INSERT OR REPLACE INTO embeddings (model, text, vec) VALUES (?1, ?2, ?3)",
-                rusqlite::params![&self.model, text, encode(vec)],
             )
+            .map_err(|e| BenchError::Engine(e.to_string()))?;
+        stmt.execute(rusqlite::params![&self.model, text, encode(vec)])
             .map_err(|e| BenchError::Engine(e.to_string()))?;
         Ok(())
     }
