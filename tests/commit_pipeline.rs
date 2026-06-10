@@ -155,6 +155,66 @@ fn commit_integrates_access_path_and_feedback() {
 }
 
 #[test]
+fn commit_trace_excludes_unpackaged_positive_current_edges() {
+    let config = EngineConfig::new()
+        .with_novelty_threshold(0.0)
+        .with_dedup_enabled(false);
+    let mut engine = Engine::with_config(config);
+
+    let IngestResult::Created(a) = engine
+        .ingest(obs("a", KnowledgeType::Semantic, vec![1.0, 0.0]))
+        .unwrap()
+    else {
+        panic!("expected Created");
+    };
+    let IngestResult::Created(b) = engine
+        .ingest(obs("b", KnowledgeType::Semantic, vec![0.0, 1.0]))
+        .unwrap()
+    else {
+        panic!("expected Created");
+    };
+    let seed = a[0];
+    let unpackaged = b[0];
+    let traversed_edge = engine.link(seed, unpackaged, EdgeType::Semantic).unwrap();
+
+    let mut config = qconfig();
+    config.token_budget = 1;
+    config.chars_per_token = 8;
+    config.min_activation = 0.0;
+
+    let pkg = engine
+        .query(&Query::Associative { seed, budget: 100 }, &config)
+        .unwrap();
+
+    assert_eq!(
+        pkg.total_fragments(),
+        1,
+        "test setup must surface only the seed so outgoing graph current is not presented"
+    );
+    assert!(
+        pkg.commit_trace
+            .accessed
+            .iter()
+            .any(|site| site.node_id == seed),
+        "the surfaced seed is still an Accessed commit candidate"
+    );
+    assert!(
+        pkg.commit_trace
+            .accessed
+            .iter()
+            .all(|site| site.node_id != unpackaged),
+        "the neighbor must remain outside the surfaced package"
+    );
+    assert!(
+        pkg.commit_trace
+            .path_used
+            .iter()
+            .all(|path| path.edge_id != traversed_edge),
+        "mere graph traversal/current through an unpackaged node must not become PathUsed"
+    );
+}
+
+#[test]
 fn commit_with_stale_trace_is_a_hard_error() {
     let (mut engine, seed, _neighbor, edge) = fixture();
 

@@ -65,6 +65,7 @@ dependencies = [
  "criterion",
  "dhat",
  "fastembed",
+ "libc",
  "proptest",
  "rand 0.8.6",
  "reqwest",

@@ -13,7 +13,9 @@ use crate::api::Engine;
 use crate::error::Error;
 use crate::graph::{EdgeType, KnowledgeType, NodeId, ScopePath, Timestamp};
 use crate::mechanics::attraction::cosine_similarity;
-use crate::query::assembly::{ScoredNode, assemble_context_package, determine_scope};
+use crate::query::assembly::{
+    ScoredNode, assemble_context_package, determine_scope, estimate_tokens,
+};
 use crate::query::rwr::ActivationResponse;
 use crate::query::scoring::{ReadoutInputs, TieBreakKey, rank, readout_score, scope_weight};
 use crate::query::types::SearchPlan;
@@ -74,6 +76,11 @@ pub(crate) fn assemble_search_result<S: StorageAdapter + Clone>(
     if request.input.now.0 > 0 {
         apply_validity_filter(engine, &mut package, request.input.now);
     }
+    apply_result_limit(
+        &mut package,
+        request.input.limit,
+        request.config.chars_per_token,
+    );
 
     // Capture the read-only commit trace from the FINAL package (after packaging mode
     // and validity filtering), so a later `commit` only integrates work for sites that
@@ -429,6 +436,78 @@ fn apply_validity_filter<S: StorageAdapter + Clone>(
         node_is_valid_at(engine, tension.node_a, now)
             && node_is_valid_at(engine, tension.node_b, now)
     });
+}
+
+fn apply_result_limit(package: &mut ContextPackage, limit: usize, chars_per_token: usize) {
+    if package.total_fragments() <= limit {
+        return;
+    }
+
+    let mut ranked: Vec<(NodeId, f64)> = package
+        .identity
+        .iter()
+        .chain(package.knowledge.iter())
+        .chain(package.memories.iter())
+        .map(|fragment| (fragment.node_id, fragment.relevance))
+        .collect();
+    ranked.sort_by(|(left_id, left_score), (right_id, right_score)| {
+        right_score
+            .total_cmp(left_score)
+            .then_with(|| left_id.cmp(right_id))
+    });
+    let allowed: HashSet<NodeId> = ranked
+        .into_iter()
+        .take(limit)
+        .map(|(node_id, _)| node_id)
+        .collect();
+
+    package
+        .identity
+        .retain(|fragment| allowed.contains(&fragment.node_id));
+    package
+        .knowledge
+        .retain(|fragment| allowed.contains(&fragment.node_id));
+    package
+        .memories
+        .retain(|fragment| allowed.contains(&fragment.node_id));
+    package
+        .tensions
+        .retain(|tension| allowed.contains(&tension.node_a) && allowed.contains(&tension.node_b));
+    recalculate_token_usage(package, chars_per_token);
+}
+
+fn recalculate_token_usage(package: &mut ContextPackage, chars_per_token: usize) {
+    let total = package.token_usage.total;
+    package.token_usage = crate::query::TokenBudget::new(total);
+    package.token_usage.identity_used = package
+        .identity
+        .iter()
+        .map(|fragment| fragment_tokens(fragment, chars_per_token))
+        .sum();
+    package.token_usage.knowledge_used = package
+        .knowledge
+        .iter()
+        .map(|fragment| fragment_tokens(fragment, chars_per_token))
+        .sum();
+    package.token_usage.memories_used = package
+        .memories
+        .iter()
+        .map(|fragment| fragment_tokens(fragment, chars_per_token))
+        .sum();
+    package.token_usage.used = package.token_usage.identity_used
+        + package.token_usage.knowledge_used
+        + package.token_usage.memories_used;
+}
+
+fn fragment_tokens(fragment: &Fragment, chars_per_token: usize) -> usize {
+    let mut tokens = estimate_tokens(&fragment.name, chars_per_token);
+    if let Some(summary) = &fragment.summary {
+        tokens += estimate_tokens(summary, chars_per_token);
+    }
+    if let Some(content) = &fragment.content {
+        tokens += estimate_tokens(content, chars_per_token);
+    }
+    tokens
 }
 
 fn node_is_valid_at<S: StorageAdapter + Clone>(

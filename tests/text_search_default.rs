@@ -109,6 +109,44 @@ fn text_search_matches_content_field() {
 }
 
 #[test]
+fn text_search_stems_inflected_forms() {
+    let mut s = SqliteStorage::new().unwrap();
+    let id = insert_node_with_content(&mut s, "Researching adoption agencies for a family");
+    let results = s.text_search("research", 10);
+    assert!(
+        results.iter().any(|(nid, _)| *nid == id),
+        "porter stemming should match 'research' against 'Researching'"
+    );
+}
+
+#[test]
+fn text_search_natural_question_matches_partial_tokens() {
+    let mut s = SqliteStorage::new().unwrap();
+    let id = insert_node_with_content(&mut s, "Caroline: Researching adoption agencies");
+    let results = s.text_search("What did Caroline research?", 10);
+    assert!(
+        results.iter().any(|(nid, _)| *nid == id),
+        "a natural-language question should match nodes containing only some query tokens"
+    );
+}
+
+#[test]
+fn text_search_ranks_more_token_overlap_higher() {
+    let mut s = SqliteStorage::new().unwrap();
+    let both = insert_node_with_content(&mut s, "Caroline researched adoption agencies");
+    let one = insert_node_with_content(&mut s, "Caroline ran a charity race");
+    let results = s.text_search("What did Caroline research?", 10);
+    let pos = |target: NodeId| results.iter().position(|(nid, _)| *nid == target);
+    let both_pos = pos(both).expect("two-token match should be returned");
+    if let Some(one_pos) = pos(one) {
+        assert!(
+            both_pos < one_pos,
+            "node matching more query tokens must rank higher"
+        );
+    }
+}
+
+#[test]
 fn text_search_substring_score_is_fuzzy() {
     let mut s = SqliteStorage::new().unwrap();
     insert_node_with_content(&mut s, "factory pattern");

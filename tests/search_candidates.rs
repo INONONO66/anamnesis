@@ -50,7 +50,8 @@ fn ingest(
 fn engine_with(setup: impl FnOnce(&mut Engine)) -> Engine {
     let config = EngineConfig::default()
         .with_novelty_threshold(0.0)
-        .with_dedup_threshold(2.0);
+        .with_dedup_threshold(2.0)
+        .with_dedup_enabled(false);
     let mut engine = Engine::with_config(config);
     setup(&mut engine);
     engine
@@ -134,5 +135,39 @@ fn collect_entity_returns_correct_source_rank() {
             .iter()
             .any(|s| s == "entity_tags"),
         "entity_tags must be activated by plan.use_entity"
+    );
+}
+
+#[test]
+fn search_candidate_pool_can_exceed_result_limit() {
+    let engine = engine_with(|e| {
+        for index in 0..25 {
+            ingest(
+                e,
+                &format!("candidate-{index:02}"),
+                "shared vector candidate",
+                Some(vec![1.0, 0.0]),
+                vec![],
+            );
+        }
+    });
+
+    let result = engine
+        .search(SearchInput {
+            query_embedding: Some(vec![1.0, 0.0]),
+            limit: 20,
+            seed_limit: Some(25),
+            ..Default::default()
+        })
+        .expect("embedding-only search must succeed");
+
+    assert_eq!(
+        result.trace.seed_count, 25,
+        "source candidate collection must be able to feed more seeds than the final result limit"
+    );
+    assert!(
+        result.package.total_fragments() <= 20,
+        "final result surface must preserve SearchInput::limit; got {} fragments",
+        result.package.total_fragments()
     );
 }

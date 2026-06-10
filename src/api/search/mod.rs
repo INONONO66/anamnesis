@@ -20,6 +20,8 @@ pub(crate) mod seeds;
 use crate::api::Engine;
 use crate::storage::StorageAdapter;
 
+const DEFAULT_SOURCE_CANDIDATE_LIMIT: usize = 64;
+
 /// Execute unified search — combines text search, vector similarity, and graph traversal.
 ///
 /// Automatically derives a `SearchPlan` from the input and executes the appropriate
@@ -42,11 +44,15 @@ pub(crate) fn search<S: StorageAdapter + Clone>(
     } else {
         Vec::new()
     };
+    let source_candidate_limit = input
+        .limit
+        .max(plan.seed_limit)
+        .max(DEFAULT_SOURCE_CANDIDATE_LIMIT);
 
     if plan.use_text {
         for sub_query in &sub_queries {
             let text_candidates =
-                candidates::collect_text_candidates(storage, sub_query, input.limit.max(10));
+                candidates::collect_text_candidates(storage, sub_query, source_candidate_limit);
             if !text_candidates.is_empty() {
                 if !strategies_used
                     .iter()
@@ -64,7 +70,7 @@ pub(crate) fn search<S: StorageAdapter + Clone>(
             let vector_candidates = candidates::collect_vector_candidates(
                 storage,
                 query_embedding,
-                input.limit.max(10),
+                source_candidate_limit,
             );
             if !vector_candidates.is_empty() {
                 per_source.push(vector_candidates);
@@ -74,8 +80,11 @@ pub(crate) fn search<S: StorageAdapter + Clone>(
     }
 
     if plan.use_entity {
-        let entity_candidates =
-            candidates::collect_entity_candidates(storage, &input.entity_tags, input.limit.max(10));
+        let entity_candidates = candidates::collect_entity_candidates(
+            storage,
+            &input.entity_tags,
+            source_candidate_limit,
+        );
         if !entity_candidates.is_empty() {
             per_source.push(entity_candidates);
             strategies_used.push("entity_tags".to_string());

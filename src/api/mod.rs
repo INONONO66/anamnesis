@@ -224,8 +224,9 @@ fn snapshot_restore_mismatch<S: StorageAdapter>(original: &S, restored: &S) -> O
 ///   (the settled query-local activation as the readout-work proxy);
 /// - `co_readout`: every distinct ordered pair of packaged fragments connected by a
 ///   live, propagating (non-`Contradicts`) edge, with their activations;
-/// - `path_used`: every edge that carried positive path current `I_ij`, snapshotting
-///   its `source`/`target`/`edge_type` so commit can detect a stale trace;
+/// - `path_used`: every edge between packaged fragments that carried positive path
+///   current `I_ij`, snapshotting its `source`/`target`/`edge_type` so commit can
+///   detect a stale trace;
 /// - `tensions_activated`: every surfaced [`Tension`], with its presented stress.
 ///
 /// Pure read of storage: no reservoir, projection, or timestamp is mutated.
@@ -250,6 +251,7 @@ fn build_commit_trace<S: StorageAdapter>(
             packaged.push(frag.node_id);
         }
     }
+    let packaged_set: HashSet<NodeId> = packaged.iter().copied().collect();
 
     // `Accessed`: each packaged site, readout work = bounded settled activation.
     let accessed: Vec<AccessedSite> = packaged
@@ -295,6 +297,9 @@ fn build_commit_trace<S: StorageAdapter>(
         let Ok(edge) = storage.get_edge(edge_id) else {
             continue;
         };
+        if !packaged_set.contains(&edge.source) || !packaged_set.contains(&edge.target) {
+            continue;
+        }
         path_used.push(PathUsedEdge {
             edge_id,
             source: edge.source,
