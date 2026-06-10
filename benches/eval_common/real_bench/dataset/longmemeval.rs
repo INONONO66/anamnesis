@@ -23,6 +23,7 @@ pub(super) fn parse_longmemeval(
             .and_then(Value::as_array)
             .ok_or_else(|| BenchError::Parse("haystack_sessions missing".to_string()))?;
         let raw_session_ids = string_array_field(instance, "haystack_session_ids");
+        let haystack_dates = string_array_field(instance, "haystack_dates");
         let mut session_ids = Vec::new();
 
         for (session_index, turns_value) in haystack.iter().enumerate() {
@@ -33,17 +34,23 @@ pub(super) fn parse_longmemeval(
             let session_id = format!("lme-{question_id}-{session_index}");
             let turns = parse_turns(turns_value, &session_id, &raw_session_id);
             if !turns.is_empty() {
+                let start_timestamp = haystack_dates
+                    .get(session_index)
+                    .and_then(|d| super::dates::parse_longmemeval_date(d));
                 session_ids.push(session_id.clone());
                 sessions.push(BenchSession {
                     session_id,
                     raw_session_id,
                     sample_index: questions.len(),
                     turns,
+                    start_timestamp,
                 });
             }
         }
 
         let answer = string_field(instance, "answer").unwrap_or_default();
+        let question_date = string_field(instance, "question_date")
+            .and_then(|d| super::dates::parse_longmemeval_date(&d));
         questions.push(BenchQuestion {
             question_id,
             question: string_field(instance, "question").unwrap_or_default(),
@@ -58,6 +65,7 @@ pub(super) fn parse_longmemeval(
                 evidence_session_ids: Vec::new(),
                 answer_session_ids: string_array_field(instance, "answer_session_ids"),
             },
+            question_date,
         });
     }
 

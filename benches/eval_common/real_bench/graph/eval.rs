@@ -151,6 +151,10 @@ fn search_question(
             limit: top_k,
             seed_limit: Some(seed_limit.unwrap_or(top_k).max(1)),
             entity_tags,
+            now: question
+                .question_date
+                .map(anamnesis::graph::Timestamp)
+                .unwrap_or(anamnesis::graph::Timestamp(0)),
             ..SearchInput::default()
         })
         .map_err(|err| BenchError::Engine(err.to_string()))?;

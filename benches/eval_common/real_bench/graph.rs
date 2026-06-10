@@ -44,8 +44,9 @@ pub struct NodeProvenance {
     pub content: String,
 }
 
-/// Sessions are spaced a day apart and turns a minute apart, anchored to the
-/// wall clock, so activation-dependent decay sees realistic trace ages.
+/// Dataset timestamps are used for ingest when present (preferred); otherwise
+/// sessions are spaced a day apart anchored to the wall clock so
+/// activation-dependent decay sees realistic synthetic trace ages.
 const SESSION_GAP_SECS: u64 = 86_400;
 const TURN_GAP_SECS: u64 = 60;
 
@@ -90,7 +91,9 @@ pub fn build_memory_graph(
 
     for (session_index, turns) in session_turns.iter().enumerate() {
         let mut previous = None;
-        let session_start = base_timestamp + session_index as u64 * SESSION_GAP_SECS;
+        let session_start = dataset.sessions[session_index]
+            .start_timestamp
+            .unwrap_or_else(|| base_timestamp + session_index as u64 * SESSION_GAP_SECS);
         for (turn_position, turn) in turns.iter().enumerate() {
             let speaker_embedding = speaker_embeddings
                 .get(embedding_index)

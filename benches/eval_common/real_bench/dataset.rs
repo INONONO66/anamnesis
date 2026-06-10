@@ -8,6 +8,7 @@ use super::error::{BenchError, BenchResult};
 
 mod locomo;
 mod longmemeval;
+pub mod dates;
 
 const MAX_DATASET_BYTES: u64 = 512 * 1024 * 1024;
 
@@ -49,6 +50,9 @@ pub struct BenchSession {
     pub raw_session_id: String,
     pub sample_index: usize,
     pub turns: Vec<BenchTurn>,
+    /// Dataset-declared session start, epoch seconds UTC, when parseable.
+    #[serde(default)]
+    pub start_timestamp: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -71,6 +75,9 @@ pub struct BenchQuestion {
     pub sample_index: usize,
     pub session_ids: Vec<String>,
     pub gold: GoldEvidence,
+    /// Dataset-declared question date, epoch seconds UTC, when parseable.
+    #[serde(default)]
+    pub question_date: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

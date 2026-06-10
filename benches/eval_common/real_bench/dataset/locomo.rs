@@ -71,11 +71,16 @@ fn parse_session(
         })
         .collect();
 
+    let date_key = format!("{session_key}_date_time");
+    let start_timestamp = string_field(sample, &date_key)
+        .and_then(|d| super::dates::parse_locomo_date_time(&d));
+
     Ok(BenchSession {
         session_id,
         raw_session_id: session_key.to_string(),
         sample_index,
         turns,
+        start_timestamp,
     })
 }
 
@@ -109,6 +114,7 @@ fn parse_questions(
                 evidence_turn_ids,
                 answer_session_ids: Vec::new(),
             },
+            question_date: None,
         });
     }
 }

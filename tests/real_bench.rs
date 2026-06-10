@@ -54,6 +54,7 @@ fn locomo_loader_preserves_evidence_turn_ids() {
                 {"dia_id": "D1:2", "speaker": "Melanie", "text": "Caroline adopted a corgi named Pixel."},
                 {"dia_id": "D1:3", "speaker": "Caroline", "text": "Pixel joined agility class."}
             ],
+            "session_1_date_time": "1:56 pm on 8 May, 2023",
             "qa": [{
                 "question": "What dog did Caroline adopt?",
                 "answer": "Pixel",
@@ -82,6 +83,16 @@ fn locomo_loader_preserves_evidence_turn_ids() {
         vec!["turn:D1:3".to_string()]
     );
     assert_eq!(loaded.questions[0].gold.answer_needles, vec!["pixel"]);
+    // 2023-05-08 13:56:00 UTC = 1683504000 + 13*3600 + 56*60
+    assert_eq!(
+        loaded.sessions[0].start_timestamp,
+        Some(1_683_504_000 + 13 * 3600 + 56 * 60),
+        "session_1_date_time must be parsed to epoch seconds"
+    );
+    assert_eq!(
+        loaded.questions[0].question_date, None,
+        "LoCoMo questions carry no question_date"
+    );
 }
 
 #[test]
@@ -93,7 +104,9 @@ fn longmemeval_loader_preserves_answer_session_ids() {
             "question": "What degree did I graduate with?",
             "answer": "Business Administration",
             "question_type": "single-session-user",
+            "question_date": "2023/05/30 (Tue) 23:59",
             "haystack_session_ids": ["distractor_1", "answer_1"],
+            "haystack_dates": ["2023/05/20 (Sat) 02:21", "2023/05/25 (Thu) 10:00"],
             "answer_session_ids": ["answer_1"],
             "haystack_sessions": [
                 [{"role": "user", "content": "A distractor conversation."}],
@@ -116,6 +129,24 @@ fn longmemeval_loader_preserves_answer_session_ids() {
     assert_eq!(
         loaded.questions[0].gold.answer_needles,
         vec!["business administration"]
+    );
+    // 2023-05-20 02:21 UTC = 1684540800 + 2*3600 + 21*60
+    assert_eq!(
+        loaded.sessions[0].start_timestamp,
+        Some(1_684_540_800 + 2 * 3600 + 21 * 60),
+        "first haystack_dates entry must be parsed to epoch seconds"
+    );
+    // 2023-05-25 10:00 UTC = 1684972800 + 10*3600
+    assert_eq!(
+        loaded.sessions[1].start_timestamp,
+        Some(1_684_972_800 + 10 * 3600),
+        "second haystack_dates entry must be parsed to epoch seconds"
+    );
+    // 2023-05-30 23:59 UTC = 1685404800 + 23*3600 + 59*60
+    assert_eq!(
+        loaded.questions[0].question_date,
+        Some(1_685_404_800 + 23 * 3600 + 59 * 60),
+        "question_date must be parsed to epoch seconds"
     );
 }
 
