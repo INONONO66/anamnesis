@@ -53,6 +53,12 @@ topology, agent behavior, embedding geometry, or dataset changes.
     collector returns NodeId-ordered arbitrary matches) flood seed fusion:
     Recall@20 0.504 → 0.285. Bench default is cues-off (`--speaker-cues` to
     re-enable for ablations) until the entity channel is selectivity-aware.
+- **LongMemEval-S stratified check (30/type, 180 questions, all six types):**
+  with the shipped point — Recall@20 0.896, MRR 0.817, NDCG 0.770, hit@1
+  0.744, p50 17.6ms. Hard types hold up: multi-session 0.752,
+  temporal-reasoning 0.839, knowledge-update 0.983. (The prior 2026-06-10
+  measurement covered only 50 single-session-user questions: 0.90 / 0.6725.)
+  Evidence: `real-memory-longmemeval-strat30-postfit-20260611.json`.
 - **Evidence:** `.omo/evidence/real-memory-locomo-fixed-20260611.json`,
   `.omo/evidence/fit-readout-20260611.json`,
   `.omo/evidence/abl-*.json` (ablation matrix),
