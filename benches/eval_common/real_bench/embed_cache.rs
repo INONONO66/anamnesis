@@ -32,7 +32,10 @@ impl EmbedCache {
             );",
         )
         .map_err(|e| BenchError::Engine(e.to_string()))?;
-        Ok(Self { conn, model: model.to_string() })
+        Ok(Self {
+            conn,
+            model: model.to_string(),
+        })
     }
 
     pub fn get(&self, text: &str) -> BenchResult<Option<Vec<f64>>> {

@@ -9,6 +9,7 @@ pub mod packaging;
 pub mod rerank;
 pub mod rwr;
 pub mod scoring;
+pub(crate) mod temporal;
 pub mod types;
 
 pub use activation::edge_valid_at;

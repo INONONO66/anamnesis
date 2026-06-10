@@ -63,13 +63,17 @@ where
             }
             "--seed-limit" => {
                 parsed.saw_arg = true;
-                parsed.seed_limit =
-                    Some(parse_usize(&next_value(&mut iter, "--seed-limit")?, "--seed-limit")?);
+                parsed.seed_limit = Some(parse_usize(
+                    &next_value(&mut iter, "--seed-limit")?,
+                    "--seed-limit",
+                )?);
             }
             "--stratify" => {
                 parsed.saw_arg = true;
-                parsed.stratify =
-                    Some(parse_usize(&next_value(&mut iter, "--stratify")?, "--stratify")?);
+                parsed.stratify = Some(parse_usize(
+                    &next_value(&mut iter, "--stratify")?,
+                    "--stratify",
+                )?);
             }
             "--full" => {
                 parsed.saw_arg = true;

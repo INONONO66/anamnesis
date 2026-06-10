@@ -111,7 +111,10 @@ fn diagnostics_hit_at_k_and_mean_first_hit_rank() {
     assert_eq!(report.diagnostics.hit_at_10, 0.5, "2 of 4 hit at rank <=10");
     assert_eq!(report.diagnostics.hit_at_20, 0.5, "2 of 4 hit at rank <=20");
     // mean_first_hit_rank: only ranks 1 and 3 are present → (1 + 3) / 2 = 2.0
-    assert_eq!(report.diagnostics.mean_first_hit_rank, 2.0, "mean of ranks 1 and 3");
+    assert_eq!(
+        report.diagnostics.mean_first_hit_rank, 2.0,
+        "mean of ranks 1 and 3"
+    );
     assert_eq!(report.diagnostics.avg_returned_fragments, 0.0);
 
     // Pin per-type averaging math for "single-session-user":

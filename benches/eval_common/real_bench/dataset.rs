@@ -6,9 +6,9 @@ use serde_json::Value;
 use super::super::locomo_pipeline::{answer_needles, normalize_for_match};
 use super::error::{BenchError, BenchResult};
 
+pub mod dates;
 mod locomo;
 mod longmemeval;
-pub mod dates;
 
 const MAX_DATASET_BYTES: u64 = 512 * 1024 * 1024;
 

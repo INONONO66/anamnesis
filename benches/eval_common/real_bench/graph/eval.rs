@@ -186,7 +186,9 @@ fn retrieved_memories(
     top_k: usize,
 ) -> Vec<RetrievedMemory> {
     build_retrievals(
-        ranked_fragments(package).into_iter().map(|f| (f.node_id, f.relevance)),
+        ranked_fragments(package)
+            .into_iter()
+            .map(|f| (f.node_id, f.relevance)),
         graph,
         question,
         top_k,

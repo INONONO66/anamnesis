@@ -335,7 +335,11 @@ fn missing_dataset_path_returns_clear_error() {
 
 #[test]
 fn speaker_cue_tags_match_question_mentions() {
-    let speakers = vec!["Caroline".to_string(), "Melanie".to_string(), "user".to_string()];
+    let speakers = vec![
+        "Caroline".to_string(),
+        "Melanie".to_string(),
+        "user".to_string(),
+    ];
     let tags = speaker_cue_tags(&speakers, "What did Caroline say about the trip?");
     assert_eq!(tags, vec!["speaker-caroline".to_string()]);
     // Generic roles never become cues.
@@ -466,7 +470,10 @@ fn embed_cache_second_build_makes_zero_provider_calls() {
     let cache1 = EmbedCache::open(&cache_path, embedder1.model_name()).unwrap();
     build_memory_graph(&loaded, &embedder1, Some(&cache1)).expect("first graph builds");
     let calls_after_first_build = embedder1.calls();
-    assert!(calls_after_first_build > 0, "first build must call provider");
+    assert!(
+        calls_after_first_build > 0,
+        "first build must call provider"
+    );
 
     // Second build — all embeddings are already cached, provider must not be called.
     let embedder2 = CountingEmbedder::default();

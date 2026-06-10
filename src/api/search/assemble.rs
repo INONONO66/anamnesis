@@ -144,7 +144,8 @@ fn assemble_graph_recall_package<S: StorageAdapter + Clone>(
         now,
     );
 
-    let mut scored: Vec<(f64, TieBreakKey, crate::query::ReadoutCandidate, ScoredNode)> = Vec::new();
+    let mut scored: Vec<(f64, TieBreakKey, crate::query::ReadoutCandidate, ScoredNode)> =
+        Vec::new();
     for (&node_id, &activation) in activations {
         if activation < config.min_activation {
             continue;
@@ -576,8 +577,8 @@ mod tests {
     use super::*;
     use crate::api::{Engine, EngineConfig};
     use crate::graph::{KnowledgeType, ScopePath};
-    use crate::query::{Fragment, PackagingMode, TokenBudget};
     use crate::query::types::{CommitTrace, ContextPackage};
+    use crate::query::{Fragment, PackagingMode, TokenBudget};
 
     fn make_memory_fragment() -> Fragment {
         use crate::graph::node::Origin;

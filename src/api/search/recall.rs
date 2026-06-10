@@ -3,11 +3,21 @@
 //! Read-only. Converts the fused-candidate seed distribution into a query
 //! potential field, derives the softmax restart seed, and runs the additive RWR
 //! ([`crate::query::rwr`]). Returns the settled response plus a recall trace.
+//!
+//! # Temporal score coverage
+//!
+//! Seeds have their `temporal_score` field set here from the parsed query time
+//! cues and the node's `created_at` timestamp (query-local, never stored).
+//! Graph-reached non-seed nodes get the `FieldSignals` default (`0.0` temporal).
+//! That asymmetry mirrors how text/entity signals are handled and is acceptable
+//! for v1; per-node temporal computation in assemble is intentionally omitted to
+//! keep the change minimal.
 
 use std::collections::HashMap;
 
 use crate::graph::NodeId;
 use crate::query::field::{FieldSignals, QueryField};
+use crate::query::temporal::TimeRange;
 use crate::query::{
     ActivationResponse, CandidateSource, FusedCandidate, GraphRecallTrace, QueryConfig,
     additive_rwr,
@@ -19,6 +29,7 @@ pub(crate) fn run_graph_recalls<S: StorageAdapter>(
     fused_seeds: &[FusedCandidate],
     query_config: &QueryConfig,
     identity_prior: Option<&HashMap<NodeId, f64>>,
+    time_cues: &[TimeRange],
 ) -> (ActivationResponse, GraphRecallTrace, QueryField) {
     let now = query_config
         .now
@@ -29,7 +40,14 @@ pub(crate) fn run_graph_recalls<S: StorageAdapter>(
     let mut field = QueryField::new();
     for seed in fused_seeds {
         let retained_action = storage.get_retained_action(seed.node_id).unwrap_or(0.0);
-        field.set(seed.node_id, field_signals(seed, retained_action));
+        let mut signals = field_signals(seed, retained_action);
+        if !time_cues.is_empty() {
+            if let Ok(node) = storage.get_node(seed.node_id) {
+                signals.temporal_score =
+                    crate::query::temporal::temporal_proximity(node.created_at.0, time_cues);
+            }
+        }
+        field.set(seed.node_id, signals);
     }
     if let Some(prior) = identity_prior {
         for (&node_id, &bias) in prior {

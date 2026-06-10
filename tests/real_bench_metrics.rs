@@ -127,8 +127,14 @@ fn gold_evidence_prefers_exact_turns_and_dedupes_answer_sessions() {
 #[test]
 fn first_hit_rank_reports_one_based_position() {
     let ranked = vec![
-        RankedRetrieval { matched_gold_units: vec![], score: 0.9 },
-        RankedRetrieval { matched_gold_units: vec!["turn:t1".into()], score: 0.8 },
+        RankedRetrieval {
+            matched_gold_units: vec![],
+            score: 0.9,
+        },
+        RankedRetrieval {
+            matched_gold_units: vec!["turn:t1".into()],
+            score: 0.8,
+        },
     ];
     assert_eq!(first_hit_rank(&ranked), Some(2));
     assert_eq!(first_hit_rank(&ranked[..1]), None);

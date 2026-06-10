@@ -112,8 +112,13 @@ pub(crate) fn search<S: StorageAdapter + Clone>(
     if plan.use_graph {
         let identity_prior = identity_prior_for_search(storage, &config);
         let identity_prior_ref = (!identity_prior.is_empty()).then_some(&identity_prior);
-        let (graph_response, recall_trace, recall_field) =
-            recall::run_graph_recalls(storage, &selected_seeds, &config, identity_prior_ref);
+        let (graph_response, recall_trace, recall_field) = recall::run_graph_recalls(
+            storage,
+            &selected_seeds,
+            &config,
+            identity_prior_ref,
+            &plan.time_cues,
+        );
 
         flow_invocations = recall_trace.invocation_count as usize;
         response = graph_response;

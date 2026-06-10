@@ -224,7 +224,10 @@ pub(super) fn embed_texts(
             results[index] = Some(vec);
         }
     }
-    Ok(results.into_iter().map(|v| v.expect("filled above")).collect())
+    Ok(results
+        .into_iter()
+        .map(|v| v.expect("filled above"))
+        .collect())
 }
 
 fn ingest_turn(

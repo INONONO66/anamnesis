@@ -8,6 +8,7 @@
 //! ```text
 //! phi_i = beta_text*text + beta_embed*embed + beta_entity*entity
 //!       + beta_scope*scope + beta_prior*A_i + beta_identity*identity
+//!       + beta_temporal*temporal_score
 //! seed_i = softmax(phi_i / tau)
 //! ```
 //!
@@ -19,7 +20,8 @@ use std::collections::HashMap;
 
 use crate::graph::NodeId;
 use crate::mechanics::priors::{
-    BETA_EMBED, BETA_ENTITY, BETA_IDENTITY, BETA_PRIOR, BETA_SCOPE, BETA_TEXT, SEED_SOFTMAX_TAU,
+    BETA_EMBED, BETA_ENTITY, BETA_IDENTITY, BETA_PRIOR, BETA_SCOPE, BETA_TEMPORAL, BETA_TEXT,
+    SEED_SOFTMAX_TAU,
 };
 
 /// Per-site bias inputs to the potential field.
@@ -40,6 +42,8 @@ pub struct FieldSignals {
     pub retained_action: f64,
     /// Active-agent identity prior.
     pub identity_bias: f64,
+    /// Proximity to explicit time cues in the query (1.0 inside a cued range).
+    pub temporal_score: f64,
 }
 
 /// A query potential field over candidate sites.
@@ -109,14 +113,16 @@ impl QueryField {
 /// The log-linear potential bias for one site.
 ///
 /// `phi_i = beta_text*text + beta_embed*embed + beta_entity*entity
-///        + beta_scope*scope + beta_prior*A_i + beta_identity*identity`
+///        + beta_scope*scope + beta_prior*A_i + beta_identity*identity
+///        + beta_temporal*temporal_score`
 pub fn potential_bias(s: &FieldSignals) -> f64 {
     let phi = BETA_TEXT * finite(s.text_score)
         + BETA_EMBED * finite(s.embedding_score)
         + BETA_ENTITY * finite(s.entity_overlap)
         + BETA_SCOPE * finite(s.scope_weight)
         + BETA_PRIOR * finite(s.retained_action)
-        + BETA_IDENTITY * finite(s.identity_bias);
+        + BETA_IDENTITY * finite(s.identity_bias)
+        + BETA_TEMPORAL * finite(s.temporal_score);
     if phi.is_finite() { phi } else { 0.0 }
 }
 

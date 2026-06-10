@@ -55,12 +55,17 @@ fn run() -> BenchResult<()> {
     if let Some(per_type) = args.stratify {
         let before = loaded.questions.len();
         stratify_questions(&mut loaded.questions, per_type);
-        eprintln!("STRATIFY {per_type}/type: {before} -> {} questions", loaded.questions.len());
+        eprintln!(
+            "STRATIFY {per_type}/type: {before} -> {} questions",
+            loaded.questions.len()
+        );
     }
     let loaded = restrict_to_questions(loaded, args.samples);
     let mut type_counts: std::collections::BTreeMap<&str, usize> = Default::default();
     for question in &loaded.questions {
-        *type_counts.entry(question.question_type.as_str()).or_insert(0) += 1;
+        *type_counts
+            .entry(question.question_type.as_str())
+            .or_insert(0) += 1;
     }
     eprintln!("TYPES {type_counts:?}");
     if loaded.questions.is_empty() {
@@ -86,7 +91,9 @@ fn run() -> BenchResult<()> {
     let cache = args
         .embed_cache
         .as_deref()
-        .map(|path| eval_common::real_bench::embed_cache::EmbedCache::open(path, provider.model_name()))
+        .map(|path| {
+            eval_common::real_bench::embed_cache::EmbedCache::open(path, provider.model_name())
+        })
         .transpose()?;
     let cache_ref = cache.as_ref();
 
@@ -122,8 +129,22 @@ fn run() -> BenchResult<()> {
         let sample_index = group.questions[0].sample_index;
         let mut graph = build_memory_graph(group, &provider, cache_ref)?;
         let (warmup_questions, eval_questions) = group.questions.split_at(args.warmup);
-        let warmup = run_warmup(&mut graph, warmup_questions, &provider, cache_ref, args.top_k, args.seed_limit)?;
-        let sample_evals = evaluate_questions(&graph, eval_questions, &provider, cache_ref, args.top_k, args.seed_limit)?;
+        let warmup = run_warmup(
+            &mut graph,
+            warmup_questions,
+            &provider,
+            cache_ref,
+            args.top_k,
+            args.seed_limit,
+        )?;
+        let sample_evals = evaluate_questions(
+            &graph,
+            eval_questions,
+            &provider,
+            cache_ref,
+            args.top_k,
+            args.seed_limit,
+        )?;
         eprintln!(
             "SAMPLE {} sessions={} warmup={} eval={}",
             sample_index,

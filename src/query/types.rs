@@ -497,6 +497,8 @@ pub(crate) struct SearchPlan {
     pub seed_limit: usize,
     /// Packaging mode for result assembly.
     pub packaging_mode: PackagingMode,
+    /// Explicit time cues parsed from the query text (query-local, never stored).
+    pub time_cues: Vec<crate::query::temporal::TimeRange>,
 }
 
 /// Result of a unified search operation.

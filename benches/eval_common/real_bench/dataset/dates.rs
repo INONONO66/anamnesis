@@ -4,8 +4,18 @@
 //! LoCoMo:      "1:56 pm on 8 May, 2023"  → epoch seconds (UTC).
 
 const MONTHS: [&str; 12] = [
-    "january", "february", "march", "april", "may", "june", "july", "august",
-    "september", "october", "november", "december",
+    "january",
+    "february",
+    "march",
+    "april",
+    "may",
+    "june",
+    "july",
+    "august",
+    "september",
+    "october",
+    "november",
+    "december",
 ];
 
 /// Days from civil date (Howard Hinnant's algorithm), valid for year >= 1970.
@@ -38,7 +48,8 @@ pub fn parse_longmemeval_date(value: &str) -> Option<u64> {
     let mut date_part = None;
     let mut time_part = (0u32, 0u32);
     for token in value.split_whitespace() {
-        let token = token.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '/' && c != ':');
+        let token =
+            token.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '/' && c != ':');
         if token.matches('/').count() == 2 {
             let mut parts = token.split('/');
             let year: i64 = parts.next()?.parse().ok()?;

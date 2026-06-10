@@ -333,6 +333,15 @@ pub fn initialize_conductance(coupling_seed: f64) -> f64 {
 /// highest-potential cues. Lower `tau` = sharper. Fit from accepted readout data.
 pub const SEED_SOFTMAX_TAU: f64 = 1.0;
 
+/// Feature weight `beta_temporal` for the temporal-proximity term.
+/// CALIBRATED PRIOR — potential-field regression object.
+pub const BETA_TEMPORAL: f64 = 1.0;
+
+/// Temporal-proximity decay scale in days for query time cues:
+/// `temporal_score = exp(-days_outside_range / this)`.
+/// DECLARED density/temperature-class knob (ADR-0010), not a law.
+pub const TEMPORAL_PROXIMITY_DECAY_DAYS: f64 = 7.0;
+
 /// Feature weight `beta_text` for the lexical-match term of the potential bias.
 /// CALIBRATED PRIOR — one entry of the single potential-field regression object.
 pub const BETA_TEXT: f64 = 1.0;

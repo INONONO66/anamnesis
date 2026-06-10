@@ -44,8 +44,18 @@ fn text_match_is_credited_in_readout_phi() {
     let mut engine = Engine::with_config(config);
     // Identical embeddings: cosine ties. Only "ownership" text differs.
     let shared = vec![1.0, 0.0, 0.0, 0.0];
-    ingest(&mut engine, "matched", "rust ownership semantics", shared.clone());
-    ingest(&mut engine, "unmatched", "completely different topic", shared.clone());
+    ingest(
+        &mut engine,
+        "matched",
+        "rust ownership semantics",
+        shared.clone(),
+    );
+    ingest(
+        &mut engine,
+        "unmatched",
+        "completely different topic",
+        shared.clone(),
+    );
 
     let result = engine
         .search(SearchInput {
@@ -57,7 +67,11 @@ fn text_match_is_credited_in_readout_phi() {
         .expect("search must succeed");
 
     let readout = &result.trace.readout;
-    assert!(readout.len() >= 2, "both nodes must be scored, got {}", readout.len());
+    assert!(
+        readout.len() >= 2,
+        "both nodes must be scored, got {}",
+        readout.len()
+    );
 
     // The top-ranked candidate must be the text-matched node, and its phi must
     // strictly exceed the embedding-identical unmatched node's phi.

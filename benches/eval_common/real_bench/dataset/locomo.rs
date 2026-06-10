@@ -72,8 +72,8 @@ fn parse_session(
         .collect();
 
     let date_key = format!("{session_key}_date_time");
-    let start_timestamp = string_field(sample, &date_key)
-        .and_then(|d| super::dates::parse_locomo_date_time(&d));
+    let start_timestamp =
+        string_field(sample, &date_key).and_then(|d| super::dates::parse_locomo_date_time(&d));
 
     Ok(BenchSession {
         session_id,

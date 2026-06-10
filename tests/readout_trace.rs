@@ -47,8 +47,18 @@ fn engine_with(setup: impl FnOnce(&mut Engine)) -> Engine {
 #[test]
 fn readout_trace_lists_ranked_candidates_with_components() {
     let engine = engine_with(|e| {
-        ingest(e, "alpha", "alpha factory pattern handler", KnowledgeType::Semantic);
-        ingest(e, "beta", "beta factory utility helper", KnowledgeType::Semantic);
+        ingest(
+            e,
+            "alpha",
+            "alpha factory pattern handler",
+            KnowledgeType::Semantic,
+        );
+        ingest(
+            e,
+            "beta",
+            "beta factory utility helper",
+            KnowledgeType::Semantic,
+        );
         ingest(e, "gamma", "gamma unrelated text", KnowledgeType::Semantic);
     });
 
@@ -61,7 +71,10 @@ fn readout_trace_lists_ranked_candidates_with_components() {
         .expect("search must succeed");
 
     let readout = &result.trace.readout;
-    assert!(!readout.is_empty(), "trace.readout must list scored candidates");
+    assert!(
+        !readout.is_empty(),
+        "trace.readout must list scored candidates"
+    );
 
     // Ranked descending by score.
     for pair in readout.windows(2) {
