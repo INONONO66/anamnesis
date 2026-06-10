@@ -265,10 +265,23 @@ pub fn speaker_cue_tags(speakers: &[String], question: &str) -> Vec<String> {
             let lower = speaker.to_lowercase();
             lower.len() >= 3
                 && !GENERIC_ROLES.contains(&lower.as_str())
-                && question_lower.contains(&lower)
+                && name_in_question(&lower, &question_lower)
         })
         .map(|speaker| format!("speaker-{}", normalize_tag(speaker)))
         .collect()
+}
+
+/// Whether a lowercased speaker name appears in the lowercased question.
+/// Single-word names require a whole-token match so "Tim" never fires on
+/// "times"; multi-word names ("mary jane") use phrase containment.
+fn name_in_question(name_lower: &str, question_lower: &str) -> bool {
+    if name_lower.contains(' ') {
+        question_lower.contains(name_lower)
+    } else {
+        question_lower
+            .split(|c: char| !c.is_alphanumeric())
+            .any(|token| token == name_lower)
+    }
 }
 
 fn entity_tags(dataset: &str, turn: &BenchTurn) -> Vec<String> {

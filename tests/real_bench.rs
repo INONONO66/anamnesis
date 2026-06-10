@@ -311,6 +311,33 @@ fn speaker_cue_tags_match_question_mentions() {
     assert!(speaker_cue_tags(&speakers, "what did the user say").is_empty());
 }
 
+#[test]
+fn speaker_cue_tags_require_whole_token_matches() {
+    let speakers = vec!["Tim".to_string(), "Sam".to_string(), "Nate".to_string()];
+    // Substrings inside words must never fire ("times", "same", "donate").
+    assert!(speaker_cue_tags(&speakers, "How many times did they meet?").is_empty());
+    assert!(speaker_cue_tags(&speakers, "Did they order the same dish?").is_empty());
+    assert!(speaker_cue_tags(&speakers, "Did Melanie donate to charity?").is_empty());
+    // Whole-token mentions still match, including with punctuation, and the
+    // output preserves the input speaker order.
+    assert_eq!(
+        speaker_cue_tags(&speakers, "What did Tim, not Sam, decide?"),
+        vec!["speaker-tim".to_string(), "speaker-sam".to_string()]
+    );
+}
+
+#[test]
+fn speaker_cue_tags_handle_multi_word_and_short_names() {
+    let speakers = vec!["Mary Jane".to_string(), "Jo".to_string()];
+    // Multi-word names round-trip through the same normalize_tag as ingest.
+    assert_eq!(
+        speaker_cue_tags(&speakers, "Where did Mary Jane travel last summer?"),
+        vec!["speaker-mary-jane".to_string()]
+    );
+    // Names shorter than 3 chars are skipped even when mentioned.
+    assert!(speaker_cue_tags(&speakers, "What does Jo think?").is_empty());
+}
+
 fn embed_text(text: &str) -> Vec<f32> {
     let normalized = text.to_lowercase();
     [
