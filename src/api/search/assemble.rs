@@ -7,6 +7,11 @@
 //!
 //! [readout-scoring.md]: ../../docs/04-cognitive-dynamics/readout-scoring.md
 
+/// Trace-size cap for the pre-packaging readout candidate list (ADR-0010
+/// "Numerical guards"). Limits the `SearchTrace::readout` vector to a bounded
+/// constant; does not affect the packaging or result-limit logic below.
+const READOUT_TRACE_CAP: usize = 200;
+
 use std::collections::HashSet;
 
 use crate::api::Engine;
@@ -47,6 +52,7 @@ pub(crate) fn assemble_search_result<S: StorageAdapter + Clone>(
         path_current_count: request.response.path_current.len(),
         packaging_mode: None,
         energy: crate::mechanics::energy::EnergyTerms::default(),
+        readout: Vec::new(),
     };
 
     if request.response.activation.is_empty() {
@@ -56,7 +62,7 @@ pub(crate) fn assemble_search_result<S: StorageAdapter + Clone>(
         });
     }
 
-    let mut package = assemble_graph_recall_package(
+    let (mut package, readout_candidates) = assemble_graph_recall_package(
         engine,
         request.response,
         request.seed_ids,
@@ -101,6 +107,7 @@ pub(crate) fn assemble_search_result<S: StorageAdapter + Clone>(
     let mut trace = trace;
     trace.packaging_mode = Some(packaging_mode);
     trace.energy = energy;
+    trace.readout = readout_candidates;
 
     Ok(SearchResult { package, trace })
 }
@@ -111,7 +118,7 @@ fn assemble_graph_recall_package<S: StorageAdapter + Clone>(
     seed_ids: &[NodeId],
     config: &QueryConfig,
     input: &crate::query::SearchInput,
-) -> ContextPackage {
+) -> (ContextPackage, Vec<crate::query::ReadoutCandidate>) {
     let storage = engine.graph.storage();
     let now = config.now.unwrap_or_else(Timestamp::now);
     let activations = &response.activation;
@@ -134,7 +141,7 @@ fn assemble_graph_recall_package<S: StorageAdapter + Clone>(
         now,
     );
 
-    let mut scored: Vec<(f64, TieBreakKey, ScoredNode)> = Vec::new();
+    let mut scored: Vec<(f64, TieBreakKey, crate::query::ReadoutCandidate, ScoredNode)> = Vec::new();
     for (&node_id, &activation) in activations {
         if activation < config.min_activation {
             continue;
@@ -216,9 +223,22 @@ fn assemble_graph_recall_package<S: StorageAdapter + Clone>(
             accessed_at: node.accessed_at,
         };
 
+        let readout_candidate = crate::query::ReadoutCandidate {
+            node_id,
+            score,
+            activation: inputs.activation,
+            phi: inputs.phi,
+            salience: inputs.salience,
+            impedance: inputs.impedance,
+            scope_weight: inputs.scope_weight,
+            trust_weight: inputs.trust_weight,
+            stress: inputs.stress,
+        };
+
         scored.push((
             score,
             key,
+            readout_candidate,
             ScoredNode {
                 node_id,
                 name: node.name.clone(),
@@ -232,8 +252,18 @@ fn assemble_graph_recall_package<S: StorageAdapter + Clone>(
     }
 
     // Rank by readout score with the deterministic tie-breaker chain.
-    scored.sort_by(|(sa, ka, _), (sb, kb, _)| rank(*sa, ka, *sb, kb));
-    let scored_nodes: Vec<ScoredNode> = scored.into_iter().map(|(_, _, n)| n).collect();
+    scored.sort_by(|(sa, ka, _, _), (sb, kb, _, _)| rank(*sa, ka, *sb, kb));
+
+    // Capture the ranked pre-packaging readout candidate list with per-term score
+    // components (readout-scoring.md "Trace"). Capped at READOUT_TRACE_CAP as a
+    // numerical guard (ADR-0010); all packaged sites are always within this cap.
+    let readout_candidates: Vec<crate::query::ReadoutCandidate> = scored
+        .iter()
+        .take(READOUT_TRACE_CAP)
+        .map(|(_, _, candidate, _)| candidate.clone())
+        .collect();
+
+    let scored_nodes: Vec<ScoredNode> = scored.into_iter().map(|(_, _, _, n)| n).collect();
 
     let identity_activations: Vec<(NodeId, KnowledgeType, f64)> = activations
         .iter()
@@ -248,14 +278,15 @@ fn assemble_graph_recall_package<S: StorageAdapter + Clone>(
         })
         .collect();
 
-    assemble_context_package(
+    let package = assemble_context_package(
         scored_nodes,
         &identity_activations,
         &contradiction_pairs,
         config.token_budget,
         config.chars_per_token,
         &config.scope,
-    )
+    );
+    (package, readout_candidates)
 }
 
 fn apply_packaging_mode<S: StorageAdapter + Clone>(
