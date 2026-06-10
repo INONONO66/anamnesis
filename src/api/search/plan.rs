@@ -35,7 +35,7 @@ pub(crate) fn derive_search_plan(
         use_graph: true,
         use_persona_bias,
         seed_limit,
-        packaging_mode: PackagingMode::KnowledgeOnly,
+        packaging_mode: PackagingMode::Balanced,
     })
 }
 

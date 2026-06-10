@@ -234,7 +234,9 @@ fn graph_build_warmup_and_evaluation_use_embeddings_and_commit() {
         .expect("held-out retrieval evaluates");
     assert_eq!(evaluated.len(), 1);
     assert_eq!(evaluated[0].question_id, loaded.questions[1].question_id);
-    assert_eq!(evaluated[0].retrievals.len(), 2);
+    // Balanced packaging preserves both knowledge and memory fragments in the
+    // package, so all top-k slots are filled (4 nodes, top_k=3 → 3 retrievals).
+    assert_eq!(evaluated[0].retrievals.len(), 3);
     assert!(
         evaluated[0].retrieval_metrics.mrr > 0.0,
         "the relevant evidence turn should be recovered in the top-k"

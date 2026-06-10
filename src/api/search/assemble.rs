@@ -307,6 +307,7 @@ fn apply_packaging_mode<S: StorageAdapter + Clone>(
     package: &mut ContextPackage,
 ) {
     match packaging_mode {
+        PackagingMode::Balanced => {}
         PackagingMode::KnowledgeOnly => {
             package.token_usage.used = package
                 .token_usage
@@ -568,4 +569,86 @@ fn is_identity_type(node_type: &KnowledgeType) -> bool {
         node_type,
         KnowledgeType::IdentityCore | KnowledgeType::IdentityLearned | KnowledgeType::IdentityState
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::{Engine, EngineConfig};
+    use crate::graph::{KnowledgeType, ScopePath};
+    use crate::query::{Fragment, PackagingMode, TokenBudget};
+    use crate::query::types::{CommitTrace, ContextPackage};
+
+    fn make_memory_fragment() -> Fragment {
+        use crate::graph::node::Origin;
+        use crate::graph::scope::ScopeRelation;
+        Fragment {
+            node_id: crate::graph::NodeId(1),
+            name: "episode".into(),
+            summary: Some("summary".into()),
+            content: Some("content".into()),
+            node_type: KnowledgeType::Episodic,
+            relevance: 0.8,
+            origin: Origin {
+                peer_id: crate::graph::types::PeerId(0),
+                source_kind: crate::peer::SourceKind::AgentObservation,
+                session_id: "s1".into(),
+                scope: ScopePath::universal(),
+                confidence: 0.9,
+            },
+            scope: ScopeRelation::Universal,
+        }
+    }
+
+    /// `KnowledgeOnly` must clear the memories bucket and adjust token accounting.
+    #[test]
+    fn knowledge_only_clears_memories_and_adjusts_tokens() {
+        let engine: Engine<_> = Engine::with_config(EngineConfig::default());
+        let scope = ScopePath::universal();
+        let fragment = make_memory_fragment();
+        // Estimate tokens contributed by this fragment.
+        let fragment_tokens = {
+            let chars_per_token = 4usize;
+            let mut t = crate::query::assembly::estimate_tokens(&fragment.name, chars_per_token);
+            if let Some(ref s) = fragment.summary {
+                t += crate::query::assembly::estimate_tokens(s, chars_per_token);
+            }
+            if let Some(ref c) = fragment.content {
+                t += crate::query::assembly::estimate_tokens(c, chars_per_token);
+            }
+            t
+        };
+
+        let mut package = ContextPackage {
+            identity: vec![],
+            knowledge: vec![],
+            memories: vec![fragment],
+            tensions: vec![],
+            token_usage: TokenBudget {
+                total: 4000,
+                used: fragment_tokens + 100, // 100 from knowledge
+                identity_used: 0,
+                knowledge_used: 100,
+                memories_used: fragment_tokens,
+            },
+            agent_tension: 0.0,
+            commit_trace: CommitTrace::default(),
+            committed_ids: vec![],
+        };
+
+        apply_packaging_mode(&engine, PackagingMode::KnowledgeOnly, &scope, &mut package);
+
+        assert!(
+            package.memories.is_empty(),
+            "KnowledgeOnly must clear the memories bucket"
+        );
+        assert_eq!(
+            package.token_usage.memories_used, 0,
+            "KnowledgeOnly must zero memories_used"
+        );
+        assert_eq!(
+            package.token_usage.used, 100,
+            "KnowledgeOnly must subtract memories tokens from used"
+        );
+    }
 }

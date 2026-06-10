@@ -4,7 +4,7 @@
 //! - High tension (Contradicts edges) → KnowledgeWithProvenance
 //! - Persona bias requested → PersonaWeighted
 //! - Temporal keywords in query → Timeline
-//! - Default → KnowledgeOnly
+//! - Default → Balanced (preserve the readout's bucket shape; readout-scoring.md "Bucket Handling")
 
 use crate::query::types::{PackagingMode, SearchPlan, Tension};
 
@@ -14,7 +14,7 @@ use crate::query::types::{PackagingMode, SearchPlan, Tension};
 /// 1. If tensions are present → `KnowledgeWithProvenance`
 /// 2. If persona bias is requested → `PersonaWeighted`
 /// 3. If query contains temporal keywords → `Timeline`
-/// 4. Default → `KnowledgeOnly`
+/// 4. Default → `Balanced` (preserve the readout's bucket shape; readout-scoring.md "Bucket Handling")
 pub(crate) fn decide_packaging(
     tensions: &[Tension],
     plan: &SearchPlan,
@@ -39,5 +39,5 @@ pub(crate) fn decide_packaging(
         return PackagingMode::Timeline;
     }
 
-    PackagingMode::KnowledgeOnly
+    PackagingMode::Balanced
 }

@@ -394,7 +394,10 @@ impl Default for SearchInput {
 /// Packaging mode for ContextPackage assembly.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PackagingMode {
-    /// Knowledge fragments only (default).
+    /// Preserve the readout's bucket shape unchanged (readout-scoring.md
+    /// "Bucket Handling"). Default for plain queries.
+    Balanced,
+    /// Knowledge fragments only.
     KnowledgeOnly,
     /// Knowledge + provenance (source episodes).
     KnowledgeWithProvenance,

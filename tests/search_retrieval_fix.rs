@@ -334,12 +334,14 @@ fn test_search_seeds_ordered_by_relevance() {
     );
 }
 
-/// Test that KnowledgeOnly packaging mode excludes memories.
+/// Test that Balanced packaging (the default) preserves episodic memories in plain queries.
 ///
-/// KnowledgeOnly mode should return only knowledge fragments and keep token
-/// accounting consistent with the returned package.
+/// Plain queries (no tensions, no persona, no temporal keywords) must default to
+/// `PackagingMode::Balanced`, which preserves the readout's bucket shape unchanged
+/// (readout-scoring.md "Bucket Handling"). Episodic nodes that win readout must not
+/// be cleared from `package.memories`.
 #[test]
-fn test_knowledge_only_excludes_memories() {
+fn test_balanced_default_preserves_episodic_memories() {
     let config = EngineConfig::default().with_novelty_threshold(0.0);
     let mut engine = Engine::with_config(config);
 
@@ -359,7 +361,7 @@ fn test_knowledge_only_excludes_memories() {
         .link(episodic_id, semantic_id, EdgeType::ExtractedFrom)
         .unwrap();
 
-    // Search with ordinary text (triggers KnowledgeOnly packaging mode)
+    // Plain text search: no temporal keywords, no persona, no tensions → Balanced default.
     let result = engine
         .search(SearchInput {
             text: "semantic episodic".into(),
@@ -368,16 +370,21 @@ fn test_knowledge_only_excludes_memories() {
         })
         .unwrap();
 
+    assert_eq!(
+        result.trace.packaging_mode,
+        Some(anamnesis::query::PackagingMode::Balanced),
+        "plain text query must default to Balanced packaging"
+    );
+    // Episodic node that won readout must survive in the memories bucket.
     assert!(
         result
             .package
             .memories
             .iter()
-            .all(|m| m.node_id != episodic_id),
-        "Episodic node should not be in memories partition"
+            .any(|m| m.node_id == episodic_id),
+        "Episodic node that won readout must be present in memories under Balanced packaging"
     );
-    assert!(result.package.memories.is_empty());
-    assert_eq!(result.package.token_usage.memories_used, 0);
+    // Token accounting must be internally consistent regardless of packaging mode.
     assert_eq!(
         result.package.token_usage.used,
         result.package.token_usage.identity_used
