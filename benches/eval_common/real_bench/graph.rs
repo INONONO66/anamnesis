@@ -17,8 +17,8 @@ mod eval;
 #[cfg(test)]
 pub use eval::ranked_fragments_for_test;
 pub use eval::{
-    QuestionEvaluation, ReadoutFeatureRow, RetrievedMemory, WarmupReport, evaluate_questions,
-    run_warmup,
+    EvalOptions, QuestionEvaluation, ReadoutFeatureRow, RetrievedMemory, WarmupReport,
+    evaluate_questions, run_warmup,
 };
 
 pub struct BuiltMemoryGraph {

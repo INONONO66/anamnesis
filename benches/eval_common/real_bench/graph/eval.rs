@@ -11,6 +11,20 @@ use super::super::error::{BenchError, BenchResult};
 use super::super::metrics::{RankedRetrieval, RetrievalMetrics, first_hit_rank, retrieval_metrics};
 use super::{BuiltMemoryGraph, embed_texts};
 
+/// Knobs for warmup/evaluation runs, bundled to keep call sites readable.
+#[derive(Clone, Copy, Default)]
+pub struct EvalOptions<'a> {
+    pub top_k: usize,
+    pub seed_limit: Option<usize>,
+    pub cache: Option<&'a super::super::embed_cache::EmbedCache>,
+    pub dump_features: bool,
+    /// Inject speaker entity-tag cues parsed from the question text.
+    /// Default OFF: with a single speaker tag matching ~half a conversation,
+    /// the entity channel floods seed fusion with arbitrary same-speaker
+    /// turns (measured −21pp Recall@20 on LoCoMo).
+    pub speaker_cues: bool,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WarmupReport {
     pub questions: usize,
@@ -74,13 +88,11 @@ pub fn run_warmup(
     graph: &mut BuiltMemoryGraph,
     questions: &[BenchQuestion],
     provider: &dyn EmbeddingProvider,
-    cache: Option<&super::super::embed_cache::EmbedCache>,
-    top_k: usize,
-    seed_limit: Option<usize>,
+    opts: &EvalOptions<'_>,
 ) -> BenchResult<WarmupReport> {
     let mut report = WarmupReport::default();
     for question in questions {
-        let result = search_question(&*graph, question, provider, cache, top_k, seed_limit)?;
+        let result = search_question(&*graph, question, provider, opts)?;
         let (_, commit) = graph
             .engine
             .commit(result.package, Some(ConfidenceLevel::Medium))
@@ -96,24 +108,11 @@ pub fn evaluate_questions(
     graph: &BuiltMemoryGraph,
     questions: &[BenchQuestion],
     provider: &dyn EmbeddingProvider,
-    cache: Option<&super::super::embed_cache::EmbedCache>,
-    top_k: usize,
-    seed_limit: Option<usize>,
-    dump_features: bool,
+    opts: &EvalOptions<'_>,
 ) -> BenchResult<Vec<QuestionEvaluation>> {
     questions
         .iter()
-        .map(|question| {
-            evaluate_question(
-                graph,
-                question,
-                provider,
-                cache,
-                top_k,
-                seed_limit,
-                dump_features,
-            )
-        })
+        .map(|question| evaluate_question(graph, question, provider, opts))
         .collect()
 }
 
@@ -121,17 +120,14 @@ fn evaluate_question(
     graph: &BuiltMemoryGraph,
     question: &BenchQuestion,
     provider: &dyn EmbeddingProvider,
-    cache: Option<&super::super::embed_cache::EmbedCache>,
-    top_k: usize,
-    seed_limit: Option<usize>,
-    dump_features: bool,
+    opts: &EvalOptions<'_>,
 ) -> BenchResult<QuestionEvaluation> {
     let start = Instant::now();
-    let result = search_question(graph, question, provider, cache, top_k, seed_limit)?;
+    let result = search_question(graph, question, provider, opts)?;
     let search_latency_ms = start.elapsed().as_secs_f64() * 1000.0;
 
     // Primary surface: pre-package readout candidates
-    let retrievals = readout_retrievals(&result.trace.readout, graph, question, top_k);
+    let retrievals = readout_retrievals(&result.trace.readout, graph, question, opts.top_k);
     let readout_ranked: Vec<_> = retrievals
         .iter()
         .map(|item| RankedRetrieval {
@@ -141,7 +137,7 @@ fn evaluate_question(
         .collect();
 
     // Package surface: packaged ContextPackage fragments
-    let package_retrievals = retrieved_memories(&result.package, graph, question, top_k);
+    let package_retrievals = retrieved_memories(&result.package, graph, question, opts.top_k);
     let package_ranked: Vec<_> = package_retrievals
         .iter()
         .map(|item| RankedRetrieval {
@@ -153,7 +149,7 @@ fn evaluate_question(
     let total_relevant = question.gold.total_relevant_units();
     let returned_fragments = result.package.total_fragments();
 
-    let features = if dump_features {
+    let features = if opts.dump_features {
         result
             .trace
             .readout
@@ -197,8 +193,8 @@ fn evaluate_question(
         sample_index: question.sample_index,
         search_latency_ms,
         total_relevant,
-        retrieval_metrics: retrieval_metrics(&readout_ranked, total_relevant, top_k),
-        package_metrics: retrieval_metrics(&package_ranked, total_relevant, top_k),
+        retrieval_metrics: retrieval_metrics(&readout_ranked, total_relevant, opts.top_k),
+        package_metrics: retrieval_metrics(&package_ranked, total_relevant, opts.top_k),
         first_hit_rank: first_hit_rank(&readout_ranked),
         returned_fragments,
         retrievals,
@@ -210,22 +206,28 @@ fn search_question(
     graph: &BuiltMemoryGraph,
     question: &BenchQuestion,
     provider: &dyn EmbeddingProvider,
-    cache: Option<&super::super::embed_cache::EmbedCache>,
-    top_k: usize,
-    seed_limit: Option<usize>,
+    opts: &EvalOptions<'_>,
 ) -> BenchResult<SearchResult> {
-    let embedding = embed_texts(provider, cache, std::slice::from_ref(&question.question))?
-        .into_iter()
-        .next()
-        .ok_or_else(|| BenchError::Embedding("provider returned no query embedding".to_string()))?;
-    let entity_tags = super::speaker_cue_tags(&graph.speakers, &question.question);
+    let embedding = embed_texts(
+        provider,
+        opts.cache,
+        std::slice::from_ref(&question.question),
+    )?
+    .into_iter()
+    .next()
+    .ok_or_else(|| BenchError::Embedding("provider returned no query embedding".to_string()))?;
+    let entity_tags = if opts.speaker_cues {
+        super::speaker_cue_tags(&graph.speakers, &question.question)
+    } else {
+        Vec::new()
+    };
     let result = graph
         .engine
         .search(SearchInput {
             text: question.question.clone(),
             query_embedding: Some(embedding),
-            limit: top_k,
-            seed_limit: Some(seed_limit.unwrap_or(top_k).max(1)),
+            limit: opts.top_k,
+            seed_limit: Some(opts.seed_limit.unwrap_or(opts.top_k).max(1)),
             entity_tags,
             now: question
                 .question_date

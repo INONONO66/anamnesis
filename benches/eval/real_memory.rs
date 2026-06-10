@@ -10,7 +10,7 @@ use eval_common::real_bench::dataset::{
     stratify_questions,
 };
 use eval_common::real_bench::graph::{
-    GraphBuildStats, build_memory_graph, evaluate_questions, run_warmup,
+    EvalOptions, GraphBuildStats, build_memory_graph, evaluate_questions, run_warmup,
 };
 use eval_common::real_bench::graph::{QuestionEvaluation, WarmupReport};
 use eval_common::real_bench::report::{
@@ -96,6 +96,13 @@ fn run() -> BenchResult<()> {
         })
         .transpose()?;
     let cache_ref = cache.as_ref();
+    let opts = EvalOptions {
+        top_k: args.top_k,
+        seed_limit: args.seed_limit,
+        cache: cache_ref,
+        dump_features: args.dump_features.is_some(),
+        speaker_cues: args.speaker_cues,
+    };
 
     // One memory store per sample (LoCoMo conversation / LongMemEval haystack),
     // matching the standard per-conversation evaluation protocol. Warmup commits
@@ -129,23 +136,8 @@ fn run() -> BenchResult<()> {
         let sample_index = group.questions[0].sample_index;
         let mut graph = build_memory_graph(group, &provider, cache_ref)?;
         let (warmup_questions, eval_questions) = group.questions.split_at(args.warmup);
-        let warmup = run_warmup(
-            &mut graph,
-            warmup_questions,
-            &provider,
-            cache_ref,
-            args.top_k,
-            args.seed_limit,
-        )?;
-        let sample_evals = evaluate_questions(
-            &graph,
-            eval_questions,
-            &provider,
-            cache_ref,
-            args.top_k,
-            args.seed_limit,
-            args.dump_features.is_some(),
-        )?;
+        let warmup = run_warmup(&mut graph, warmup_questions, &provider, &opts)?;
+        let sample_evals = evaluate_questions(&graph, eval_questions, &provider, &opts)?;
         eprintln!(
             "SAMPLE {} sessions={} warmup={} eval={}",
             sample_index,

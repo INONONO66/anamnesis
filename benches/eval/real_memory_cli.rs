@@ -21,6 +21,7 @@ pub(crate) struct Args {
     pub(crate) force: bool,
     pub(crate) embed_cache: Option<PathBuf>,
     pub(crate) dump_features: Option<PathBuf>,
+    pub(crate) speaker_cues: bool,
 }
 
 pub(crate) fn parse_args<I>(args: I) -> BenchResult<Option<Args>>
@@ -101,6 +102,10 @@ where
                 parsed.dump_features =
                     Some(PathBuf::from(next_value(&mut iter, "--dump-features")?));
             }
+            "--speaker-cues" => {
+                parsed.saw_arg = true;
+                parsed.speaker_cues = true;
+            }
             "--bench" => {}
             other => {
                 return Err(BenchError::InvalidInput(format!(
@@ -135,6 +140,7 @@ struct ParsedArgs {
     force: bool,
     embed_cache: Option<PathBuf>,
     dump_features: Option<PathBuf>,
+    speaker_cues: bool,
     saw_arg: bool,
 }
 
@@ -155,6 +161,7 @@ impl Default for ParsedArgs {
             force: false,
             embed_cache: None,
             dump_features: None,
+            speaker_cues: false,
             saw_arg: false,
         }
     }
@@ -179,6 +186,7 @@ impl ParsedArgs {
             force: self.force,
             embed_cache: self.embed_cache,
             dump_features: self.dump_features,
+            speaker_cues: self.speaker_cues,
         })
     }
 }
@@ -260,6 +268,7 @@ Options:\n\
   --force                  Overwrite an existing report file\n\
   --embed-cache <path>     SQLite embedding cache (model-keyed; speeds reruns)\n\
   --dump-features <path>   Write per-candidate readout feature rows (JSONL) for calibration\n\
+  --speaker-cues           Inject speaker entity-tag cues from question text (ablation)\n\
   --help                   Show this usage"
     );
 }

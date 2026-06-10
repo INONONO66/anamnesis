@@ -15,7 +15,7 @@ use eval_common::real_bench::dataset::{
     BenchDatasetName, load_benchmark_dataset, parse_benchmark_dataset, stratify_questions,
 };
 use eval_common::real_bench::graph::{
-    build_memory_graph, evaluate_questions, run_warmup, speaker_cue_tags,
+    EvalOptions, build_memory_graph, evaluate_questions, run_warmup, speaker_cue_tags,
 };
 
 #[derive(Clone, Default)]
@@ -258,8 +258,16 @@ fn graph_build_warmup_and_evaluation_use_embeddings_and_commit() {
         .count();
     assert_eq!(temporal_edges, 1);
 
-    let warmup = run_warmup(&mut built, &loaded.questions[..1], &embedder, None, 3, None)
-        .expect("warmup commits search packages");
+    let warmup = run_warmup(
+        &mut built,
+        &loaded.questions[..1],
+        &embedder,
+        &EvalOptions {
+            top_k: 3,
+            ..Default::default()
+        },
+    )
+    .expect("warmup commits search packages");
     assert_eq!(warmup.questions, 1);
     assert!(warmup.sites_accessed > 0);
 
@@ -267,10 +275,10 @@ fn graph_build_warmup_and_evaluation_use_embeddings_and_commit() {
         &built,
         &loaded.questions[1..],
         &embedder,
-        None,
-        3,
-        None,
-        false,
+        &EvalOptions {
+            top_k: 3,
+            ..Default::default()
+        },
     )
     .expect("held-out retrieval evaluates");
     assert_eq!(evaluated.len(), 1);

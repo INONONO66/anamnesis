@@ -123,3 +123,19 @@ fn dump_features_defaults_to_none() {
         .expect("args present");
     assert_eq!(parsed.dump_features, None);
 }
+
+#[test]
+fn speaker_cues_flag_parses_true() {
+    let parsed = parse_args(args(&["--dataset", "locomo", "--speaker-cues"]))
+        .expect("parse succeeds")
+        .expect("args present");
+    assert!(parsed.speaker_cues);
+}
+
+#[test]
+fn speaker_cues_defaults_to_false() {
+    let parsed = parse_args(args(&["--dataset", "locomo"]))
+        .expect("parse succeeds")
+        .expect("args present");
+    assert!(!parsed.speaker_cues);
+}
