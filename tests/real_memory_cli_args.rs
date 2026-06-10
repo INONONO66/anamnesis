@@ -67,3 +67,11 @@ fn stratify_zero_is_rejected() {
         .expect_err("--stratify 0 must be rejected");
     assert!(err.to_string().contains("--stratify"));
 }
+
+#[test]
+fn stratify_satisfies_the_longmemeval_size_guard() {
+    let parsed = parse_args(args(&["--dataset", "longmemeval", "--stratify", "30"]))
+        .expect("--stratify must satisfy the LongMemEval size guard")
+        .expect("args present");
+    assert_eq!(parsed.stratify, Some(30));
+}

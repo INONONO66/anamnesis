@@ -179,9 +179,14 @@ fn validate_args(args: &Args, full: bool) -> BenchResult<()> {
             "--stratify must be at least 1".to_string(),
         ));
     }
-    if args.dataset == BenchDatasetName::LongMemEval && args.samples.is_none() && !full {
+    if args.dataset == BenchDatasetName::LongMemEval
+        && args.samples.is_none()
+        && args.stratify.is_none()
+        && !full
+    {
         return Err(BenchError::InvalidInput(
-            "LongMemEval-S is large; pass --samples <N> or explicit --full".to_string(),
+            "LongMemEval-S is large; pass --samples <N>, --stratify <N>, or explicit --full"
+                .to_string(),
         ));
     }
     Ok(())
