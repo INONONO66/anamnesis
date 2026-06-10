@@ -36,6 +36,7 @@ pub(crate) struct SearchAssemblyRequest<'a> {
     pub(crate) input: &'a SearchInput,
     pub(crate) plan: &'a SearchPlan,
     pub(crate) strategies_used: Vec<String>,
+    pub(crate) field: &'a crate::query::field::QueryField,
 }
 
 pub(crate) fn assemble_search_result<S: StorageAdapter + Clone>(
@@ -68,6 +69,7 @@ pub(crate) fn assemble_search_result<S: StorageAdapter + Clone>(
         request.seed_ids,
         request.config,
         request.input,
+        request.field,
     );
     let packaging_mode =
         crate::query::decide_packaging(&package.tensions, request.plan, &request.input.text);
@@ -118,6 +120,7 @@ fn assemble_graph_recall_package<S: StorageAdapter + Clone>(
     seed_ids: &[NodeId],
     config: &QueryConfig,
     input: &crate::query::SearchInput,
+    field: &crate::query::field::QueryField,
 ) -> (ContextPackage, Vec<crate::query::ReadoutCandidate>) {
     let storage = engine.graph.storage();
     let now = config.now.unwrap_or_else(Timestamp::now);
@@ -193,12 +196,18 @@ fn assemble_graph_recall_package<S: StorageAdapter + Clone>(
             })
             .unwrap_or(0.0);
 
-        // phi_i: query-field potential bias. The embedding alignment is folded in
-        // as the phi term so the readout can credit semantic match additively.
-        let phi = match (&config.query_embedding, &node.embedding) {
+        // phi_i: full query-field potential bias (potential-landscape.md).
+        // Seeded sites keep their collected text/entity/prior signals; the
+        // embedding term is refreshed with the query cosine so graph-reached
+        // sites (absent from the field) still get semantic-alignment credit.
+        // Scope stays out of phi here: it has its own readout term.
+        let cosine = match (&config.query_embedding, &node.embedding) {
             (Some(qe), Some(ne)) => cosine_similarity(qe, ne),
             _ => 0.0,
         };
+        let mut signals = field.get(node_id).copied().unwrap_or_default();
+        signals.embedding_score = signals.embedding_score.max(cosine);
+        let phi = crate::query::field::potential_bias(&signals);
 
         // Frustration stress attached to this site (sum of sigma over its active
         // contradiction partners) feeds the readout `-w_stress` term: contradicting

@@ -79,6 +79,11 @@ impl QueryField {
         self.signals.is_empty()
     }
 
+    /// Read a site's signals, if the site is in the field.
+    pub fn get(&self, node_id: NodeId) -> Option<&FieldSignals> {
+        self.signals.get(&node_id)
+    }
+
     /// Compute the potential bias `phi_i` for every candidate site.
     pub fn potential_bias(&self) -> HashMap<NodeId, f64> {
         self.signals

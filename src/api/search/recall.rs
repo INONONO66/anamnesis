@@ -19,7 +19,7 @@ pub(crate) fn run_graph_recalls<S: StorageAdapter>(
     fused_seeds: &[FusedCandidate],
     query_config: &QueryConfig,
     identity_prior: Option<&HashMap<NodeId, f64>>,
-) -> (ActivationResponse, GraphRecallTrace) {
+) -> (ActivationResponse, GraphRecallTrace, QueryField) {
     let now = query_config
         .now
         .unwrap_or_else(crate::graph::Timestamp::now);
@@ -53,7 +53,7 @@ pub(crate) fn run_graph_recalls<S: StorageAdapter>(
         excluded_edge_count: response.excluded_edges.len(),
     };
 
-    (response, trace)
+    (response, trace, field)
 }
 
 /// Map a fused candidate's per-source raw scores onto the potential-field
