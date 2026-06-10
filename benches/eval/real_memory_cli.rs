@@ -14,6 +14,7 @@ pub(crate) struct Args {
     pub(crate) samples: Option<usize>,
     pub(crate) warmup: usize,
     pub(crate) top_k: usize,
+    pub(crate) seed_limit: Option<usize>,
     pub(crate) skip_adversarial: bool,
     pub(crate) allow_download: bool,
     pub(crate) force: bool,
@@ -58,6 +59,11 @@ where
                 parsed.saw_arg = true;
                 parsed.top_k = parse_usize(&next_value(&mut iter, "--top-k")?, "--top-k")?;
             }
+            "--seed-limit" => {
+                parsed.saw_arg = true;
+                parsed.seed_limit =
+                    Some(parse_usize(&next_value(&mut iter, "--seed-limit")?, "--seed-limit")?);
+            }
             "--full" => {
                 parsed.saw_arg = true;
                 parsed.full = true;
@@ -100,6 +106,7 @@ struct ParsedArgs {
     samples: Option<usize>,
     warmup: usize,
     top_k: usize,
+    seed_limit: Option<usize>,
     full: bool,
     skip_adversarial: bool,
     allow_download: bool,
@@ -116,6 +123,7 @@ impl Default for ParsedArgs {
             samples: None,
             warmup: 0,
             top_k: 20,
+            seed_limit: None,
             full: false,
             skip_adversarial: false,
             allow_download: false,
@@ -137,6 +145,7 @@ impl ParsedArgs {
             samples: self.samples,
             warmup: self.warmup,
             top_k: self.top_k,
+            seed_limit: self.seed_limit,
             skip_adversarial: self.skip_adversarial,
             allow_download: self.allow_download,
             force: self.force,
@@ -197,6 +206,7 @@ Options:\n\
   --samples <N>         Limit evaluated questions after loading\n\
   --warmup <N>          Commit the first N selected questions before eval (default: 0)\n\
   --top-k <N>           Retrieval cutoff (default: 20)\n\
+  --seed-limit <N>      RWR seed count (default: top-k)\n\
   --skip-adversarial    Drop adversarial-category questions (LoCoMo protocol parity)\n\
   --output <path>       Report path (default: benches/eval/results/real-memory-*.json)\n\
   --allow-download      Allow FastEmbed model download/cache initialization\n\
@@ -204,4 +214,29 @@ Options:\n\
   --force               Overwrite an existing report file\n\
   --help                Show this usage"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(items: &[&str]) -> impl Iterator<Item = String> {
+        items.iter().map(|s| s.to_string()).collect::<Vec<_>>().into_iter()
+    }
+
+    #[test]
+    fn seed_limit_parses_correctly() {
+        let parsed = parse_args(args(&["--dataset", "locomo", "--seed-limit", "40"]))
+            .expect("parse succeeds")
+            .expect("args present");
+        assert_eq!(parsed.seed_limit, Some(40));
+    }
+
+    #[test]
+    fn seed_limit_defaults_to_none() {
+        let parsed = parse_args(args(&["--dataset", "locomo"]))
+            .expect("parse succeeds")
+            .expect("args present");
+        assert_eq!(parsed.seed_limit, None);
+    }
 }

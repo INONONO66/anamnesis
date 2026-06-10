@@ -227,12 +227,12 @@ fn graph_build_warmup_and_evaluation_use_embeddings_and_commit() {
         .count();
     assert_eq!(temporal_edges, 1);
 
-    let warmup = run_warmup(&mut built, &loaded.questions[..1], &embedder, 3)
+    let warmup = run_warmup(&mut built, &loaded.questions[..1], &embedder, 3, None)
         .expect("warmup commits search packages");
     assert_eq!(warmup.questions, 1);
     assert!(warmup.sites_accessed > 0);
 
-    let evaluated = evaluate_questions(&built, &loaded.questions[1..], &embedder, 3)
+    let evaluated = evaluate_questions(&built, &loaded.questions[1..], &embedder, 3, None)
         .expect("held-out retrieval evaluates");
     assert_eq!(evaluated.len(), 1);
     assert_eq!(evaluated[0].question_id, loaded.questions[1].question_id);

@@ -54,10 +54,11 @@ pub fn run_warmup(
     questions: &[BenchQuestion],
     provider: &dyn EmbeddingProvider,
     top_k: usize,
+    seed_limit: Option<usize>,
 ) -> BenchResult<WarmupReport> {
     let mut report = WarmupReport::default();
     for question in questions {
-        let result = search_question(&*graph, question, provider, top_k)?;
+        let result = search_question(&*graph, question, provider, top_k, seed_limit)?;
         let (_, commit) = graph
             .engine
             .commit(result.package, Some(ConfidenceLevel::Medium))
@@ -74,10 +75,11 @@ pub fn evaluate_questions(
     questions: &[BenchQuestion],
     provider: &dyn EmbeddingProvider,
     top_k: usize,
+    seed_limit: Option<usize>,
 ) -> BenchResult<Vec<QuestionEvaluation>> {
     questions
         .iter()
-        .map(|question| evaluate_question(graph, question, provider, top_k))
+        .map(|question| evaluate_question(graph, question, provider, top_k, seed_limit))
         .collect()
 }
 
@@ -86,9 +88,10 @@ fn evaluate_question(
     question: &BenchQuestion,
     provider: &dyn EmbeddingProvider,
     top_k: usize,
+    seed_limit: Option<usize>,
 ) -> BenchResult<QuestionEvaluation> {
     let start = Instant::now();
-    let result = search_question(graph, question, provider, top_k)?;
+    let result = search_question(graph, question, provider, top_k, seed_limit)?;
     let search_latency_ms = start.elapsed().as_secs_f64() * 1000.0;
 
     // Primary surface: pre-package readout candidates
@@ -133,6 +136,7 @@ fn search_question(
     question: &BenchQuestion,
     provider: &dyn EmbeddingProvider,
     top_k: usize,
+    seed_limit: Option<usize>,
 ) -> BenchResult<SearchResult> {
     let embedding = embed_texts(provider, std::slice::from_ref(&question.question))?
         .into_iter()
@@ -145,7 +149,7 @@ fn search_question(
             text: question.question.clone(),
             query_embedding: Some(embedding),
             limit: top_k,
-            seed_limit: Some(top_k.max(1)),
+            seed_limit: Some(seed_limit.unwrap_or(top_k).max(1)),
             entity_tags,
             ..SearchInput::default()
         })

@@ -104,8 +104,8 @@ fn run() -> BenchResult<()> {
         let sample_index = group.questions[0].sample_index;
         let mut graph = build_memory_graph(group, &provider)?;
         let (warmup_questions, eval_questions) = group.questions.split_at(args.warmup);
-        let warmup = run_warmup(&mut graph, warmup_questions, &provider, args.top_k)?;
-        let sample_evals = evaluate_questions(&graph, eval_questions, &provider, args.top_k)?;
+        let warmup = run_warmup(&mut graph, warmup_questions, &provider, args.top_k, args.seed_limit)?;
+        let sample_evals = evaluate_questions(&graph, eval_questions, &provider, args.top_k, args.seed_limit)?;
         eprintln!(
             "SAMPLE {} sessions={} warmup={} eval={}",
             sample_index,
