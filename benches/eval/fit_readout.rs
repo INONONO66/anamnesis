@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use std::io::BufRead;
 
 const EPS: f64 = 1e-6;
-const GRID: [f64; 7] = [0.0, 0.25, 0.5, 1.0, 1.5, 2.0, 4.0];
+const GRID: [f64; 9] = [0.0, 0.25, 0.5, 1.0, 1.5, 2.0, 4.0, 8.0, 16.0];
 
 #[derive(Debug, Clone, serde::Deserialize)]
 struct Row {
