@@ -373,14 +373,14 @@ pub const BETA_PRIOR: f64 = 1.0;
 //
 // CALIBRATED 2026-06-11 (docs/07-quality-gates/calibration-records.md):
 // coordinate search over (w_a, w_phi, w_s, w_z) on the LoCoMo-10 even-sample
-// train split (`fit_readout`, mean MRR@20 objective); dev MRR 0.1629 -> 0.2847.
+// train split (`fit_readout`, mean MRR@20 objective); dev MRR 0.1629 -> 0.1831.
 // `w_z = 0` reflects that `Z_i = -ln(a_i)` is redundant with `logit(a_i)` —
 // the term stays in the form, its coefficient is calibrated off.
 
 /// `w_a` — weight on the (logit-of) query-local activation response `a_i`.
-pub const READOUT_W_A: f64 = 0.25;
+pub const READOUT_W_A: f64 = 4.0;
 /// `w_phi` — weight on the potential bias `phi_i`.
-pub const READOUT_W_PHI: f64 = 16.0;
+pub const READOUT_W_PHI: f64 = 4.0;
 /// `w_s` — weight on the salience projection `logit(s_i)`.
 pub const READOUT_W_S: f64 = 1.0;
 /// `w_z` — penalty weight on the effective impedance `Z_i` (subtracted).

@@ -36,7 +36,16 @@ topology, agent behavior, embedding geometry, or dataset changes.
   tie-breaker"; the seed field keeps `beta_prior · A_i` per
   potential-landscape.md. Measured effect of the bad state: LoCoMo Recall@20
   0.508 → 0.228 (with the speaker-cue regression compounding).
+- **Alternative point (recall-leaning, not shipped):** extended-grid refit
+  found `w_a=0.25, w_phi=16` with proxy dev MRR 0.2847 — live re-measurement
+  gave Recall@20 0.577 / hit@20 0.658 but report MRR 0.153 and NDCG 0.242
+  (worse than the shipped point: 0.540 / 0.188 / 0.256). The per-node proxy
+  diverges once live scoring re-selects the top-200 trace cap; a deduped,
+  live-surface objective is future work. Evidence:
+  `real-memory-locomo-postfit2-20260611.json`.
 - **Negative results worth keeping:**
+  - RWR visit budget ×10/×20 changes nothing (identical metrics, +18ms p50):
+    the activation set already converges under the default budget.
   - Seed-limit expansion (40/80 vs top-k=20) *hurts*: Recall@20
     0.508 → 0.376 → 0.249. Restart mass spreads over low-quality fused
     candidates; candidate starvation is not the bottleneck.
