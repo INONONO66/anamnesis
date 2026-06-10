@@ -197,15 +197,17 @@ fn assemble_graph_recall_package<S: StorageAdapter + Clone>(
             .unwrap_or(0.0);
 
         // phi_i: full query-field potential bias (potential-landscape.md).
-        // Seeded sites keep their collected text/entity/prior signals; the
-        // embedding term is refreshed with the query cosine so graph-reached
-        // sites (absent from the field) still get semantic-alignment credit.
-        // Scope stays out of phi here: it has its own readout term.
+        // Seeded sites keep their collected text/entity signals; the embedding
+        // term is refreshed with the query cosine and the prior `A_i` is
+        // threaded in for every site, so graph-reached sites (absent from the
+        // field) still get semantic-alignment and prior-odds credit. Scope
+        // stays out of phi here: it has its own readout term.
         let cosine = match (&config.query_embedding, &node.embedding) {
             (Some(qe), Some(ne)) => cosine_similarity(qe, ne),
             _ => 0.0,
         };
         let mut signals = field.get(node_id).copied().unwrap_or_default();
+        signals.retained_action = retained_action;
         signals.embedding_score = signals.embedding_score.max(cosine);
         let phi = crate::query::field::potential_bias(&signals);
 
