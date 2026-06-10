@@ -19,6 +19,25 @@ pub struct WarmupReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReadoutFeatureRow {
+    pub question_id: String,
+    pub question_type: String,
+    pub sample_index: usize,
+    pub rank: usize,
+    pub node_id: u64,
+    /// Gold relevance of this node's provenance (independent per node — no
+    /// novelty dedup, unlike the metric surface).
+    pub label: bool,
+    pub activation: f64,
+    pub phi: f64,
+    pub salience: f64,
+    pub impedance: f64,
+    pub scope_weight: f64,
+    pub trust_weight: f64,
+    pub stress: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QuestionEvaluation {
     pub question_id: String,
     pub question_type: String,
@@ -34,6 +53,8 @@ pub struct QuestionEvaluation {
     pub first_hit_rank: Option<usize>,
     pub returned_fragments: usize,
     pub retrievals: Vec<RetrievedMemory>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub features: Vec<ReadoutFeatureRow>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -78,10 +99,21 @@ pub fn evaluate_questions(
     cache: Option<&super::super::embed_cache::EmbedCache>,
     top_k: usize,
     seed_limit: Option<usize>,
+    dump_features: bool,
 ) -> BenchResult<Vec<QuestionEvaluation>> {
     questions
         .iter()
-        .map(|question| evaluate_question(graph, question, provider, cache, top_k, seed_limit))
+        .map(|question| {
+            evaluate_question(
+                graph,
+                question,
+                provider,
+                cache,
+                top_k,
+                seed_limit,
+                dump_features,
+            )
+        })
         .collect()
 }
 
@@ -92,6 +124,7 @@ fn evaluate_question(
     cache: Option<&super::super::embed_cache::EmbedCache>,
     top_k: usize,
     seed_limit: Option<usize>,
+    dump_features: bool,
 ) -> BenchResult<QuestionEvaluation> {
     let start = Instant::now();
     let result = search_question(graph, question, provider, cache, top_k, seed_limit)?;
@@ -120,6 +153,44 @@ fn evaluate_question(
     let total_relevant = question.gold.total_relevant_units();
     let returned_fragments = result.package.total_fragments();
 
+    let features = if dump_features {
+        result
+            .trace
+            .readout
+            .iter()
+            .enumerate()
+            .take(200)
+            .filter_map(|(index, candidate)| {
+                let provenance = graph.provenance_by_node.get(&candidate.node_id)?;
+                let label = !question
+                    .gold
+                    .matched_units(
+                        &provenance.raw_session_id,
+                        provenance.raw_turn_id.as_deref(),
+                        &provenance.content,
+                    )
+                    .is_empty();
+                Some(ReadoutFeatureRow {
+                    question_id: question.question_id.clone(),
+                    question_type: question.question_type.clone(),
+                    sample_index: question.sample_index,
+                    rank: index + 1,
+                    node_id: candidate.node_id.0,
+                    label,
+                    activation: candidate.activation,
+                    phi: candidate.phi,
+                    salience: candidate.salience,
+                    impedance: candidate.impedance,
+                    scope_weight: candidate.scope_weight,
+                    trust_weight: candidate.trust_weight,
+                    stress: candidate.stress,
+                })
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     Ok(QuestionEvaluation {
         question_id: question.question_id.clone(),
         question_type: question.question_type.clone(),
@@ -131,6 +202,7 @@ fn evaluate_question(
         first_hit_rank: first_hit_rank(&readout_ranked),
         returned_fragments,
         retrievals,
+        features,
     })
 }
 

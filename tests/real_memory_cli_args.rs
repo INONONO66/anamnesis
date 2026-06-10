@@ -99,3 +99,27 @@ fn embed_cache_defaults_to_none() {
         .expect("args present");
     assert_eq!(parsed.embed_cache, None);
 }
+
+#[test]
+fn dump_features_parses_to_some_path() {
+    let parsed = parse_args(args(&[
+        "--dataset",
+        "locomo",
+        "--dump-features",
+        "/tmp/x.jsonl",
+    ]))
+    .expect("parse succeeds")
+    .expect("args present");
+    assert_eq!(
+        parsed.dump_features,
+        Some(std::path::PathBuf::from("/tmp/x.jsonl"))
+    );
+}
+
+#[test]
+fn dump_features_defaults_to_none() {
+    let parsed = parse_args(args(&["--dataset", "locomo"]))
+        .expect("parse succeeds")
+        .expect("args present");
+    assert_eq!(parsed.dump_features, None);
+}

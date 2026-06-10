@@ -144,6 +144,7 @@ fn run() -> BenchResult<()> {
             cache_ref,
             args.top_k,
             args.seed_limit,
+            args.dump_features.is_some(),
         )?;
         eprintln!(
             "SAMPLE {} sessions={} warmup={} eval={}",
@@ -163,6 +164,31 @@ fn run() -> BenchResult<()> {
         warmup_total.sites_accessed += warmup.sites_accessed;
         warmup_total.paths_strengthened += warmup.paths_strengthened;
         evaluations.extend(sample_evals);
+    }
+
+    if let Some(path) = &args.dump_features {
+        use std::io::Write;
+        let file =
+            std::fs::File::create(path).map_err(|e| BenchError::InvalidInput(e.to_string()))?;
+        let mut writer = std::io::BufWriter::new(file);
+        let mut rows = 0usize;
+        for evaluation in &evaluations {
+            for row in &evaluation.features {
+                serde_json::to_writer(&mut writer, row)
+                    .map_err(|e| BenchError::Parse(e.to_string()))?;
+                writer
+                    .write_all(b"\n")
+                    .map_err(|e| BenchError::Parse(e.to_string()))?;
+                rows += 1;
+            }
+        }
+        writer
+            .flush()
+            .map_err(|e| BenchError::Parse(e.to_string()))?;
+        eprintln!("FEATURES {rows} rows -> {}", path.display());
+        for evaluation in &mut evaluations {
+            evaluation.features.clear();
+        }
     }
 
     let report = build_report(ReportInput {

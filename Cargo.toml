@@ -92,6 +92,11 @@ harness = false
 required-features = ["embed"]
 
 [[bench]]
+name = "fit_readout"
+path = "benches/eval/fit_readout.rs"
+harness = false
+
+[[bench]]
 name = "query_spreading"
 harness = false
 

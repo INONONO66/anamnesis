@@ -167,6 +167,7 @@ fn question_eval(id: &str, qtype: &str, first_hit: Option<usize>) -> QuestionEva
         first_hit_rank: first_hit,
         returned_fragments: 0,
         retrievals: Vec::new(),
+        features: Vec::new(),
     }
 }
 

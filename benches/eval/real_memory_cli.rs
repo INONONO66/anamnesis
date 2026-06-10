@@ -20,6 +20,7 @@ pub(crate) struct Args {
     pub(crate) allow_download: bool,
     pub(crate) force: bool,
     pub(crate) embed_cache: Option<PathBuf>,
+    pub(crate) dump_features: Option<PathBuf>,
 }
 
 pub(crate) fn parse_args<I>(args: I) -> BenchResult<Option<Args>>
@@ -95,6 +96,11 @@ where
                 parsed.saw_arg = true;
                 parsed.embed_cache = Some(PathBuf::from(next_value(&mut iter, "--embed-cache")?));
             }
+            "--dump-features" => {
+                parsed.saw_arg = true;
+                parsed.dump_features =
+                    Some(PathBuf::from(next_value(&mut iter, "--dump-features")?));
+            }
             "--bench" => {}
             other => {
                 return Err(BenchError::InvalidInput(format!(
@@ -128,6 +134,7 @@ struct ParsedArgs {
     allow_download: bool,
     force: bool,
     embed_cache: Option<PathBuf>,
+    dump_features: Option<PathBuf>,
     saw_arg: bool,
 }
 
@@ -147,6 +154,7 @@ impl Default for ParsedArgs {
             allow_download: false,
             force: false,
             embed_cache: None,
+            dump_features: None,
             saw_arg: false,
         }
     }
@@ -170,6 +178,7 @@ impl ParsedArgs {
             allow_download: self.allow_download,
             force: self.force,
             embed_cache: self.embed_cache,
+            dump_features: self.dump_features,
         })
     }
 }
@@ -237,19 +246,20 @@ pub(crate) fn print_usage() {
     eprintln!(
         "Usage: cargo bench --features embed --bench real_memory -- --dataset <locomo|longmemeval> [options]\n\n\
 Options:\n\
-  --dataset <name>      Dataset to run (required)\n\
-  --data-dir <path>     Dataset directory (default: benches/eval/data)\n\
-  --samples <N>         Limit evaluated questions after loading\n\
-  --warmup <N>          Commit the first N selected questions before eval (default: 0)\n\
-  --top-k <N>           Retrieval cutoff (default: 20)\n\
-  --seed-limit <N>      RWR seed count (default: top-k)\n\
-  --stratify <N>        Keep first N questions per question_type (LongMemEval; loads full file)\n\
-  --skip-adversarial    Drop adversarial-category questions (LoCoMo protocol parity)\n\
-  --output <path>       Report path (default: benches/eval/results/real-memory-*.json)\n\
-  --allow-download      Allow FastEmbed model download/cache initialization\n\
-  --full                Permit uncapped LongMemEval-S runs\n\
-  --force               Overwrite an existing report file\n\
-  --embed-cache <path>  SQLite embedding cache (model-keyed; speeds reruns)\n\
-  --help                Show this usage"
+  --dataset <name>         Dataset to run (required)\n\
+  --data-dir <path>        Dataset directory (default: benches/eval/data)\n\
+  --samples <N>            Limit evaluated questions after loading\n\
+  --warmup <N>             Commit the first N selected questions before eval (default: 0)\n\
+  --top-k <N>              Retrieval cutoff (default: 20)\n\
+  --seed-limit <N>         RWR seed count (default: top-k)\n\
+  --stratify <N>           Keep first N questions per question_type (LongMemEval; loads full file)\n\
+  --skip-adversarial       Drop adversarial-category questions (LoCoMo protocol parity)\n\
+  --output <path>          Report path (default: benches/eval/results/real-memory-*.json)\n\
+  --allow-download         Allow FastEmbed model download/cache initialization\n\
+  --full                   Permit uncapped LongMemEval-S runs\n\
+  --force                  Overwrite an existing report file\n\
+  --embed-cache <path>     SQLite embedding cache (model-keyed; speeds reruns)\n\
+  --dump-features <path>   Write per-candidate readout feature rows (JSONL) for calibration\n\
+  --help                   Show this usage"
     );
 }
