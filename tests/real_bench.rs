@@ -12,7 +12,7 @@ use anamnesis::{Error, graph::EdgeType};
 use serde_json::json;
 
 use eval_common::real_bench::dataset::{
-    BenchDatasetName, load_benchmark_dataset, parse_benchmark_dataset,
+    BenchDatasetName, load_benchmark_dataset, parse_benchmark_dataset, stratify_questions,
 };
 use eval_common::real_bench::graph::{
     build_memory_graph, evaluate_questions, run_warmup, speaker_cue_tags,
@@ -367,6 +367,60 @@ fn speaker_cue_tags_handle_multi_word_and_short_names() {
     );
     // Names shorter than 3 chars are skipped even when mentioned.
     assert!(speaker_cue_tags(&speakers, "What does Jo think?").is_empty());
+}
+
+#[test]
+fn stratify_questions_caps_per_type_and_preserves_order() {
+    // Build a Vec<BenchQuestion> with three types: A×3, B×2, C×1.
+    // After stratify(2) we expect A×2, B×2, C×1 (5 total), in original order.
+    use eval_common::real_bench::dataset::{BenchQuestion, GoldEvidence};
+
+    fn make_question(id: &str, question_type: &str, sample_index: usize) -> BenchQuestion {
+        BenchQuestion {
+            question_id: id.to_string(),
+            question: id.to_string(),
+            expected_answer: String::new(),
+            question_type: question_type.to_string(),
+            sample_index,
+            session_ids: Vec::new(),
+            gold: GoldEvidence::default(),
+            question_date: None,
+        }
+    }
+
+    let mut questions = vec![
+        make_question("a1", "A", 0),
+        make_question("b1", "B", 1),
+        make_question("a2", "A", 2),
+        make_question("c1", "C", 3),
+        make_question("b2", "B", 4),
+        make_question("a3", "A", 5),
+    ];
+
+    stratify_questions(&mut questions, 2);
+
+    // Exactly 5 survivors
+    assert_eq!(questions.len(), 5);
+    // a3 (third A) must be dropped
+    assert!(!questions.iter().any(|q| q.question_id == "a3"));
+    // All others must be present
+    for id in ["a1", "b1", "a2", "c1", "b2"] {
+        assert!(
+            questions.iter().any(|q| q.question_id == id),
+            "question {id} must survive"
+        );
+    }
+    // Original order must be preserved
+    let ids: Vec<&str> = questions.iter().map(|q| q.question_id.as_str()).collect();
+    assert_eq!(ids, vec!["a1", "b1", "a2", "c1", "b2"]);
+
+    // At most 2 of each type
+    let a_count = questions.iter().filter(|q| q.question_type == "A").count();
+    let b_count = questions.iter().filter(|q| q.question_type == "B").count();
+    let c_count = questions.iter().filter(|q| q.question_type == "C").count();
+    assert_eq!(a_count, 2);
+    assert_eq!(b_count, 2);
+    assert_eq!(c_count, 1);
 }
 
 fn embed_text(text: &str) -> Vec<f32> {

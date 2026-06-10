@@ -218,6 +218,25 @@ pub fn split_by_sample(loaded: LoadedBenchmark) -> Vec<LoadedBenchmark> {
         .collect()
 }
 
+/// Keep the first `per_type` questions of each `question_type`, discarding the
+/// rest.  Order among survivors is preserved.  Sessions are NOT pruned here;
+/// call `restrict_to_questions` (or `split_by_sample`) afterward to drop
+/// unreferenced sessions.
+pub fn stratify_questions(questions: &mut Vec<BenchQuestion>, per_type: usize) {
+    let mut kept_per_type: std::collections::HashMap<String, usize> = Default::default();
+    questions.retain(|question| {
+        let count = kept_per_type
+            .entry(question.question_type.clone())
+            .or_insert(0);
+        if *count < per_type {
+            *count += 1;
+            true
+        } else {
+            false
+        }
+    });
+}
+
 pub fn restrict_to_questions(
     mut loaded: LoadedBenchmark,
     question_limit: Option<usize>,

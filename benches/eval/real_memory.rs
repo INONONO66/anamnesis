@@ -7,6 +7,7 @@ use std::process;
 use anamnesis::EmbeddingProvider;
 use eval_common::real_bench::dataset::{
     BenchDatasetName, load_benchmark_dataset, restrict_to_questions, split_by_sample,
+    stratify_questions,
 };
 use eval_common::real_bench::graph::{
     GraphBuildStats, build_memory_graph, evaluate_questions, run_warmup,
@@ -36,7 +37,7 @@ fn run() -> BenchResult<()> {
     let output = prepare_report_output(&args.output, args.force)?;
 
     eprintln!("LOAD {}", args.dataset.as_str());
-    let loader_limit = (args.dataset == BenchDatasetName::LongMemEval)
+    let loader_limit = (args.dataset == BenchDatasetName::LongMemEval && args.stratify.is_none())
         .then_some(args.samples)
         .flatten();
     let mut loaded = load_benchmark_dataset(args.dataset, &args.data_dir, loader_limit)?;
@@ -51,7 +52,17 @@ fn run() -> BenchResult<()> {
             loaded.questions.len()
         );
     }
+    if let Some(per_type) = args.stratify {
+        let before = loaded.questions.len();
+        stratify_questions(&mut loaded.questions, per_type);
+        eprintln!("STRATIFY {per_type}/type: {before} -> {} questions", loaded.questions.len());
+    }
     let loaded = restrict_to_questions(loaded, args.samples);
+    let mut type_counts: std::collections::BTreeMap<&str, usize> = Default::default();
+    for question in &loaded.questions {
+        *type_counts.entry(question.question_type.as_str()).or_insert(0) += 1;
+    }
+    eprintln!("TYPES {type_counts:?}");
     if loaded.questions.is_empty() {
         return Err(BenchError::InvalidInput(
             "selected dataset contains no questions".to_string(),

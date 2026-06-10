@@ -15,6 +15,7 @@ pub(crate) struct Args {
     pub(crate) warmup: usize,
     pub(crate) top_k: usize,
     pub(crate) seed_limit: Option<usize>,
+    pub(crate) stratify: Option<usize>,
     pub(crate) skip_adversarial: bool,
     pub(crate) allow_download: bool,
     pub(crate) force: bool,
@@ -64,6 +65,11 @@ where
                 parsed.seed_limit =
                     Some(parse_usize(&next_value(&mut iter, "--seed-limit")?, "--seed-limit")?);
             }
+            "--stratify" => {
+                parsed.saw_arg = true;
+                parsed.stratify =
+                    Some(parse_usize(&next_value(&mut iter, "--stratify")?, "--stratify")?);
+            }
             "--full" => {
                 parsed.saw_arg = true;
                 parsed.full = true;
@@ -107,6 +113,7 @@ struct ParsedArgs {
     warmup: usize,
     top_k: usize,
     seed_limit: Option<usize>,
+    stratify: Option<usize>,
     full: bool,
     skip_adversarial: bool,
     allow_download: bool,
@@ -124,6 +131,7 @@ impl Default for ParsedArgs {
             warmup: 0,
             top_k: 20,
             seed_limit: None,
+            stratify: None,
             full: false,
             skip_adversarial: false,
             allow_download: false,
@@ -146,6 +154,7 @@ impl ParsedArgs {
             warmup: self.warmup,
             top_k: self.top_k,
             seed_limit: self.seed_limit,
+            stratify: self.stratify,
             skip_adversarial: self.skip_adversarial,
             allow_download: self.allow_download,
             force: self.force,
@@ -163,6 +172,11 @@ fn validate_args(args: &Args, full: bool) -> BenchResult<()> {
     if args.seed_limit == Some(0) {
         return Err(BenchError::InvalidInput(
             "--seed-limit must be at least 1".to_string(),
+        ));
+    }
+    if args.stratify == Some(0) {
+        return Err(BenchError::InvalidInput(
+            "--stratify must be at least 1".to_string(),
         ));
     }
     if args.dataset == BenchDatasetName::LongMemEval && args.samples.is_none() && !full {
@@ -212,6 +226,7 @@ Options:\n\
   --warmup <N>          Commit the first N selected questions before eval (default: 0)\n\
   --top-k <N>           Retrieval cutoff (default: 20)\n\
   --seed-limit <N>      RWR seed count (default: top-k)\n\
+  --stratify <N>        Keep first N questions per question_type (LongMemEval; loads full file)\n\
   --skip-adversarial    Drop adversarial-category questions (LoCoMo protocol parity)\n\
   --output <path>       Report path (default: benches/eval/results/real-memory-*.json)\n\
   --allow-download      Allow FastEmbed model download/cache initialization\n\

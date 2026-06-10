@@ -44,3 +44,26 @@ fn seed_limit_zero_is_rejected() {
         .expect_err("--seed-limit 0 must be rejected");
     assert!(err.to_string().contains("--seed-limit"));
 }
+
+#[test]
+fn stratify_parses_correctly() {
+    let parsed = parse_args(args(&["--dataset", "locomo", "--stratify", "10"]))
+        .expect("parse succeeds")
+        .expect("args present");
+    assert_eq!(parsed.stratify, Some(10));
+}
+
+#[test]
+fn stratify_defaults_to_none() {
+    let parsed = parse_args(args(&["--dataset", "locomo"]))
+        .expect("parse succeeds")
+        .expect("args present");
+    assert_eq!(parsed.stratify, None);
+}
+
+#[test]
+fn stratify_zero_is_rejected() {
+    let err = parse_args(args(&["--dataset", "locomo", "--stratify", "0"]))
+        .expect_err("--stratify 0 must be rejected");
+    assert!(err.to_string().contains("--stratify"));
+}
