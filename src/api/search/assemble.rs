@@ -197,18 +197,25 @@ fn assemble_graph_recall_package<S: StorageAdapter + Clone>(
             })
             .unwrap_or(0.0);
 
-        // phi_i: full query-field potential bias (potential-landscape.md).
+        // phi_i: query-ALIGNMENT potential bias (potential-landscape.md).
         // Seeded sites keep their collected text/entity signals; the embedding
-        // term is refreshed with the query cosine and the prior `A_i` is
-        // threaded in for every site, so graph-reached sites (absent from the
-        // field) still get semantic-alignment and prior-odds credit. Scope
-        // stays out of phi here: it has its own readout term.
+        // term is refreshed with the query cosine so graph-reached sites
+        // (absent from the field) still get semantic-alignment credit.
+        //
+        // The prior `A_i` is deliberately EXCLUDED here. readout-scoring.md
+        // lists `A_i` as "read input and tie-breaker", not a scored term: the
+        // reservoir already reaches the score through `logit(s_i)`
+        // (`s_i = logistic(A_i)`), so folding it into phi double-counts the
+        // prior and lets encoding-time magnitudes (≈3–12 log-odds) drown the
+        // bounded alignment signals. `beta_prior · A_i` remains in the SEED
+        // field where potential-landscape.md mandates it (restart prior odds).
+        // Scope also stays out of phi: it has its own readout term.
         let cosine = match (&config.query_embedding, &node.embedding) {
             (Some(qe), Some(ne)) => cosine_similarity(qe, ne),
             _ => 0.0,
         };
         let mut signals = field.get(node_id).copied().unwrap_or_default();
-        signals.retained_action = retained_action;
+        signals.retained_action = 0.0;
         signals.embedding_score = signals.embedding_score.max(cosine);
         let phi = crate::query::field::potential_bias(&signals);
 
