@@ -465,9 +465,9 @@ pub struct SearchTrace {
     /// the true fixed point. Default (`E = 0`) for an empty result.
     pub energy: crate::mechanics::energy::EnergyTerms,
     /// Ranked pre-packaging readout candidates with score components
-    /// ([readout-scoring.md] "Trace"). Capped at a fixed trace size (ADR-0010
-    /// "Numerical guards"); the final [`ContextPackage`] is always a subset of
-    /// this surface. Query-local, never stored.
+    /// ([readout-scoring.md] "Trace"). Capped at a fixed trace-size memory
+    /// bound; under that cap the final [`ContextPackage`] is a subset of this
+    /// surface. Query-local, never stored.
     ///
     /// [readout-scoring.md]: ../../docs/04-cognitive-dynamics/readout-scoring.md
     pub readout: Vec<ReadoutCandidate>,

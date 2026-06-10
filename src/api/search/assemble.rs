@@ -7,11 +7,6 @@
 //!
 //! [readout-scoring.md]: ../../docs/04-cognitive-dynamics/readout-scoring.md
 
-/// Trace-size cap for the pre-packaging readout candidate list (ADR-0010
-/// "Numerical guards"). Limits the `SearchTrace::readout` vector to a bounded
-/// constant; does not affect the packaging or result-limit logic below.
-const READOUT_TRACE_CAP: usize = 200;
-
 use std::collections::HashSet;
 
 use crate::api::Engine;
@@ -28,6 +23,11 @@ use crate::query::{
     ContextPackage, Fragment, PackagingMode, QueryConfig, SearchInput, SearchResult, SearchTrace,
 };
 use crate::storage::StorageAdapter;
+
+/// Trace-size memory bound for the pre-packaging readout candidate list. Not a
+/// behavioral prior (ADR-0010) — it only caps the diagnostic
+/// `SearchTrace::readout` vector and never affects packaging or result limits.
+const READOUT_TRACE_CAP: usize = 200;
 
 pub(crate) struct SearchAssemblyRequest<'a> {
     pub(crate) response: &'a ActivationResponse,
