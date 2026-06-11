@@ -83,6 +83,39 @@ Anamnesis is a **library — a memory kernel**, not a service. It owns the *phys
 | Snapshots, SQLite storage, health/invariants | **Queries & commit**: when to query, and when use is *committed* (reinforcement) |
 | Pure mechanics, no LLM calls, no background tasks | **`tick(now)` scheduling**, **LLM answering**, **serving** (e.g. an MCP bridge) |
 
+## Benchmarks
+
+Long-term conversational memory benchmarks, **retrieval-only dry runs**: no LLM
+anywhere — ingest is raw turns + embeddings (`bge-base-en-v1.5`), retrieval is
+the engine's deterministic pipeline. Reproducible via
+`cargo bench --features embed --bench real_memory` (see
+[calibration records](docs/07-quality-gates/calibration-records.md) for full
+provenance, ablations, and negative results).
+
+| Benchmark | Gold granularity | Recall@20 | MRR | NDCG@20 | p50 |
+|:--|:--|--:|--:|--:|--:|
+| **LongMemEval-S** (stratified 30/type, all 6 types, 180 q) | session-level | **94.7%** | **0.861** | 0.824 | ~18 ms |
+| **LoCoMo** (full non-adversarial, 1540 q) | turn-level strict | **77.6%** | **0.291** | 0.386 | ~30 ms |
+
+Read these numbers for what they are:
+
+- **Retrieval metrics, not answer accuracy.** Published memory-system scores
+  (Mem0, Zep, LangMem, …) are LLM-as-judge *answer* scores — a different
+  measurement. These numbers bound what an answer stage could see in context
+  (LoCoMo hit@20 = 84.6%, LongMemEval hit@1 = 81.1%).
+- **No usage learning is measured here.** Runs are cold-start (no `commit`
+  warmup), so the readout calibration intentionally zeroes the salience
+  coefficient (`w_s = 0`) — on unused memory, salience carries only
+  encoding-time noise. Deployments that accumulate real usage should refit it
+  per [ADR-0010](docs/adr/0010-calibrated-priors-not-laws.md); the
+  reinforcement dynamics themselves are validated by the
+  [cognitive-fidelity gates](docs/07-quality-gates/fidelity-results.md), not
+  by these benchmarks.
+- Readout coefficients were fit on the even-sample half of LoCoMo and
+  validated on the held-out half (Recall@20 77.8% / MRR 0.287 on unseen
+  conversations); LongMemEval numbers use the same weights with zero
+  dataset-specific tuning.
+
 ## Quick Start
 
 > **Anamnesis is in active development.** The core engine is functional — mechanics, query pipeline, debug lifecycle, snapshots, and unified search are all operational. See [Status](#status) for the full breakdown.
