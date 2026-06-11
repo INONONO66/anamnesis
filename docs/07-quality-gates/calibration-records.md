@@ -4,6 +4,31 @@ Per [ADR-0010](../adr/0010-calibrated-priors-not-laws.md), every refit of a
 calibrated prior records its data, procedure, and result here. Refit when graph
 topology, agent behavior, embedding geometry, or dataset changes.
 
+## 2026-06-11 v2 — readout coefficients refit (deduped NDCG objective)
+
+- **Supersedes** the v1 fit below. Tool change: `fit_readout` now replays the
+  report's novelty-deduped gains in re-ranked order and optimizes mean
+  NDCG@20 (rows carry `matched_units` + `total_relevant`).
+- **Values:** `w_a = 0.25`, `w_phi = 16.0`, `w_s = 0.0`, `w_z = 0.0`;
+  `w_scope = w_trust = w_stress = 1.0` (unfit, declared priors).
+- **Live confirmation (LoCoMo full non-adversarial, includes the relative-time
+  cue + LoCoMo question-time fallback changes of the same date):** Recall@20
+  0.540 → **0.776**, MRR 0.188 → **0.291**, NDCG 0.256 → **0.386**, hit@20
+  0.614 → 0.846. Dev-half (never seen by the fit): 0.778 / 0.287. Offline
+  replay now agrees with live (predicted 0.756 / 0.286).
+- **Why `w_s = 0`:** with no usage data the salience projection
+  `s_i = logistic(A_i)` carries only the creation-time reservoir (encoding
+  surprise) — in logit space it spans ≈6–14 and is noise w.r.t. query
+  alignment, the same pathology the A_i phi exclusion removed, re-entering
+  through the salience channel. REFIT with real usage/commit data before
+  relying on salience at readout in long-lived deployments.
+- **Method lesson:** a per-node, static-surface proxy objective diverged from
+  the live metric; the replayed-dedup objective on the dumped surface closed
+  the gap. Fitted points must still be live-confirmed (the dump cannot see
+  nodes outside its 200-row surface).
+- **Evidence:** `real-memory-locomo-fit2pt-20260611.json`,
+  `fit2-readout-20260611.json`, `locomo-features-v2-20260611.jsonl`.
+
 ## 2026-06-11 — readout coefficients (`w_a`, `w_phi`, `w_s`, `w_z`)
 
 - **Data:** LoCoMo-10 non-adversarial (1540 questions), retrieval-only dry run,
