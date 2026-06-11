@@ -8,8 +8,8 @@
 //!   - temporal_field.rs         – date cues bias retrieval by timestamp
 //!   - readout_phi_excludes_prior.rs – committed prior must not enter readout phi
 //!   - memory_framework.rs       – Memory API: graph shape, edges, timestamps,
-//!                                  buffering, add_note, engine() escape hatch,
-//!                                  search/recall/used/tick (CI link-budget)
+//!     buffering, add_note, engine() escape hatch, search/recall/used/tick
+//!     (CI link-budget)
 
 use anamnesis::api::Observation;
 use anamnesis::graph::node::Origin;
