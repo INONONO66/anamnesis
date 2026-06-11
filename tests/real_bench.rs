@@ -15,7 +15,8 @@ use eval_common::real_bench::dataset::{
     BenchDatasetName, load_benchmark_dataset, parse_benchmark_dataset, stratify_questions,
 };
 use eval_common::real_bench::graph::{
-    EvalOptions, build_memory_graph, evaluate_questions, run_warmup, speaker_cue_tags,
+    CachingProvider, EvalOptions, build_memory_graph, evaluate_questions, run_warmup,
+    speaker_cue_tags,
 };
 
 #[derive(Clone, Default)]
@@ -177,7 +178,11 @@ fn graph_build_warmup_and_evaluation_use_embeddings_and_commit() {
     .expect("LoCoMo JSON should parse");
 
     let embedder = CountingEmbedder::default();
-    let mut built = build_memory_graph(&loaded, &embedder, None).expect("graph builds");
+    let mut built = build_memory_graph(
+        &loaded,
+        Arc::new(CachingProvider::new(Arc::new(embedder.clone()), None)),
+    )
+    .expect("graph builds");
 
     assert_eq!(built.stats.nodes_created, 4);
     assert_eq!(built.stats.extracted_edges_created, 2);
@@ -274,7 +279,6 @@ fn graph_build_warmup_and_evaluation_use_embeddings_and_commit() {
     let warmup = run_warmup(
         &mut built,
         &loaded.questions[..1],
-        &embedder,
         &EvalOptions {
             top_k: 3,
             ..Default::default()
@@ -287,7 +291,6 @@ fn graph_build_warmup_and_evaluation_use_embeddings_and_commit() {
     let evaluated = evaluate_questions(
         &mut built,
         &loaded.questions[1..],
-        &embedder,
         &EvalOptions {
             top_k: 3,
             ..Default::default()
@@ -497,7 +500,14 @@ fn embed_cache_second_build_makes_zero_provider_calls() {
     // First build — populates the cache.
     let embedder1 = CountingEmbedder::default();
     let cache1 = EmbedCache::open(&cache_path, embedder1.model_name()).unwrap();
-    build_memory_graph(&loaded, &embedder1, Some(&cache1)).expect("first graph builds");
+    build_memory_graph(
+        &loaded,
+        Arc::new(CachingProvider::new(
+            Arc::new(embedder1.clone()),
+            Some(cache1),
+        )),
+    )
+    .expect("first graph builds");
     let calls_after_first_build = embedder1.calls();
     assert!(
         calls_after_first_build > 0,
@@ -507,7 +517,14 @@ fn embed_cache_second_build_makes_zero_provider_calls() {
     // Second build — all embeddings are already cached, provider must not be called.
     let embedder2 = CountingEmbedder::default();
     let cache2 = EmbedCache::open(&cache_path, embedder2.model_name()).unwrap();
-    build_memory_graph(&loaded, &embedder2, Some(&cache2)).expect("second graph builds");
+    build_memory_graph(
+        &loaded,
+        Arc::new(CachingProvider::new(
+            Arc::new(embedder2.clone()),
+            Some(cache2),
+        )),
+    )
+    .expect("second graph builds");
     assert_eq!(
         embedder2.calls(),
         0,
@@ -538,12 +555,15 @@ fn dump_features_populates_matched_units_and_total_relevant() {
     .expect("LoCoMo JSON should parse");
 
     let embedder = CountingEmbedder::default();
-    let mut built = build_memory_graph(&loaded, &embedder, None).expect("graph builds");
+    let mut built = build_memory_graph(
+        &loaded,
+        Arc::new(CachingProvider::new(Arc::new(embedder.clone()), None)),
+    )
+    .expect("graph builds");
 
     let evaluated = evaluate_questions(
         &mut built,
         &loaded.questions,
-        &embedder,
         &EvalOptions {
             top_k: 10,
             dump_features: true,

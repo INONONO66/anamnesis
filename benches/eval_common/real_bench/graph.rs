@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anamnesis::Error;
 use anamnesis::Memory;
@@ -8,7 +8,7 @@ use anamnesis::embedding::EmbeddingProvider;
 use anamnesis::graph::{NodeId, Timestamp};
 use serde::{Deserialize, Serialize};
 
-use super::dataset::{BenchSession, BenchTurn, LoadedBenchmark};
+use super::dataset::{BenchTurn, LoadedBenchmark};
 use super::error::{BenchError, BenchResult};
 
 mod eval;
@@ -54,30 +54,16 @@ const TURN_GAP_SECS: u64 = 60;
 
 // ── build_memory_graph ───────────────────────────────────────────────────────
 
+/// Build the in-memory graph from a loaded benchmark dataset.
+///
+/// `provider` must be a `CachingProvider` (or any `Arc<dyn EmbeddingProvider>`)
+/// that handles both ingest-time embeddings (called per-text by `Memory::add`)
+/// and query-time embeddings (called by `Memory::search_result_at_with`).
+/// Build it with [`CachingProvider::new`] before calling this function.
 pub fn build_memory_graph(
     dataset: &LoadedBenchmark,
-    provider: &dyn EmbeddingProvider,
-    cache: Option<&super::embed_cache::EmbedCache>,
+    provider: Arc<dyn EmbeddingProvider>,
 ) -> BenchResult<BuiltMemoryGraph> {
-    // Wrap provider + cache into an Arc so Memory can hold it.
-    // SAFETY: CachingProvider borrows from the outer scope, but we only use it
-    // inside this function before returning, so the lifetimes are correct.
-    // We use Arc<CachingProvider> with a transmuted lifetime to satisfy the
-    // 'static bound — instead, we wrap with a newtype that erases the lifetime
-    // by holding the provider/cache pointers as raw references.
-    //
-    // Simpler: build an owned Vec<Vec<f64>> for all texts upfront via
-    // embed_texts (preserves batch caching), then hand a StaticProvider to
-    // Memory that serves pre-computed embeddings. But that reintroduces the
-    // batch pre-compute. Instead, use the Arc trick: create a
-    // CachingProviderArc that boxes the inner ref behind Arc<Mutex<..>> — but
-    // that requires 'static inner.
-    //
-    // Cleanest solution that doesn't require 'static: Pre-embed all texts
-    // upfront (preserving the cache/batch path) then give Memory a
-    // PrecomputedProvider backed by those vecs. This is equivalent to the old
-    // recipe for embedding VALUES, different only in how the Arc is handed in.
-
     let session_turns: Vec<Vec<&BenchTurn>> = dataset
         .sessions
         .iter()
@@ -90,35 +76,12 @@ pub fn build_memory_graph(
         })
         .collect();
 
-    // Pre-compute all embeddings upfront (same as before: batched + cached).
-    // This ensures embedding VALUES are identical to the old recipe.
-    let speaker_texts: Vec<String> = session_turns
+    let total_texts = session_turns
         .iter()
-        .flat_map(|turns| turns.iter().map(|turn| speaker_text(turn)))
-        .collect();
-    let window_texts: Vec<String> = session_turns
-        .iter()
-        .flat_map(|turns| (0..turns.len()).map(|index| window_text(turns, index)))
-        .collect();
-    let speaker_embeddings = embed_texts(provider, cache, &speaker_texts)?;
-    let window_embeddings = embed_texts(provider, cache, &window_texts)?;
+        .map(|turns| turns.len() * 2)
+        .sum::<usize>();
 
-    let total_texts = speaker_embeddings.len() + window_embeddings.len();
-
-    // Build a PrecomputedProvider that serves embeddings by text lookup.
-    // We index them in insertion order (same as the old recipe).
-    let mut embed_map: HashMap<String, Vec<f64>> = HashMap::new();
-    for (text, embedding) in speaker_texts.iter().zip(speaker_embeddings.iter()) {
-        embed_map.insert(text.clone(), embedding.clone());
-    }
-    for (text, embedding) in window_texts.iter().zip(window_embeddings.iter()) {
-        embed_map
-            .entry(text.clone())
-            .or_insert_with(|| embedding.clone());
-    }
-    let precomputed = Arc::new(PrecomputedProvider(embed_map));
-
-    let mut memory = Memory::in_memory_with_provider(precomputed as Arc<dyn EmbeddingProvider>)
+    let mut memory = Memory::in_memory_with_provider(provider)
         .map_err(|err| BenchError::Engine(err.to_string()))?;
 
     let mut provenance_by_node: HashMap<NodeId, NodeProvenance> = HashMap::new();
@@ -202,107 +165,101 @@ pub fn build_memory_graph(
     })
 }
 
-// ── PrecomputedProvider ───────────────────────────────────────────────────────
+// ── CachingProvider ───────────────────────────────────────────────────────────
 
-/// An `EmbeddingProvider` backed by a pre-computed lookup table.
+/// An `EmbeddingProvider` that wraps an inner provider with an optional SQLite
+/// embedding cache.
 ///
-/// Used by `build_memory_graph` to hand pre-batched embeddings to `Memory`
-/// without re-computing them. Text lookup is exact-match; unknown texts are
-/// an error (should never happen in normal bench flow).
-struct PrecomputedProvider(HashMap<String, Vec<f64>>);
+/// Every call to `embed` is resolved per-text: cache hits are served from the
+/// SQLite store; misses are batched into the inner provider and written back.
+/// This makes reruns cheap while allowing `Memory` to embed arbitrary texts
+/// (including query strings) without pre-batching.
+///
+/// `EmbedCache` holds a `rusqlite::Connection` which is `Send` but not `Sync`;
+/// we guard it with a `Mutex` so that `CachingProvider` is `Send + Sync`.
+pub struct CachingProvider {
+    inner: Arc<dyn EmbeddingProvider>,
+    cache: Option<Mutex<super::embed_cache::EmbedCache>>,
+}
 
-impl EmbeddingProvider for PrecomputedProvider {
+impl CachingProvider {
+    /// Create a new `CachingProvider`.
+    ///
+    /// Pass `cache: None` for an uncached provider (still wraps `inner`
+    /// transparently).
+    pub fn new(
+        inner: Arc<dyn EmbeddingProvider>,
+        cache: Option<super::embed_cache::EmbedCache>,
+    ) -> Self {
+        Self {
+            inner,
+            cache: cache.map(Mutex::new),
+        }
+    }
+}
+
+impl EmbeddingProvider for CachingProvider {
     fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, Error> {
-        texts
-            .iter()
-            .map(|text| {
-                self.0
-                    .get(*text)
-                    .map(|v| v.iter().map(|&x| x as f32).collect())
-                    .ok_or_else(|| {
-                        Error::InvalidInput(format!(
-                            "PrecomputedProvider: no embedding for {:?}",
-                            text
-                        ))
-                    })
-            })
-            .collect()
+        let Some(cache_mutex) = &self.cache else {
+            return self.inner.embed(texts);
+        };
+        let cache = cache_mutex
+            .lock()
+            .map_err(|_| Error::InvalidInput("embed cache mutex poisoned".to_string()))?;
+
+        // Per-text cache lookup; collect indices of misses.
+        let mut results: Vec<Option<Vec<f32>>> = Vec::with_capacity(texts.len());
+        let mut miss_indices: Vec<usize> = Vec::new();
+        for (index, text) in texts.iter().enumerate() {
+            let hit = cache
+                .get(text)
+                .map_err(|e| Error::InvalidInput(e.to_string()))?
+                .map(|f64_vec| f64_vec.iter().map(|&x| x as f32).collect());
+            if hit.is_none() {
+                miss_indices.push(index);
+            }
+            results.push(hit);
+        }
+
+        if !miss_indices.is_empty() {
+            let miss_texts: Vec<&str> = miss_indices.iter().map(|&i| texts[i]).collect();
+            let fresh = self.inner.embed(&miss_texts)?;
+            if fresh.len() != miss_indices.len() {
+                return Err(Error::InvalidInput(format!(
+                    "CachingProvider: inner provider returned {} embeddings for {} texts",
+                    fresh.len(),
+                    miss_indices.len()
+                )));
+            }
+            for (&index, vec_f32) in miss_indices.iter().zip(fresh.iter()) {
+                let vec_f64: Vec<f64> = vec_f32.iter().map(|&x| x as f64).collect();
+                cache
+                    .put(texts[index], &vec_f64)
+                    .map_err(|e| Error::InvalidInput(e.to_string()))?;
+                results[index] = Some(vec_f32.clone());
+            }
+        }
+
+        Ok(results
+            .into_iter()
+            .map(|v| v.expect("all slots filled above"))
+            .collect())
     }
 
     fn dimensions(&self) -> usize {
-        self.0.values().next().map(|v| v.len()).unwrap_or(0)
+        self.inner.dimensions()
     }
 
     fn model_name(&self) -> &str {
-        "precomputed"
+        self.inner.model_name()
     }
 }
 
 // ── Misc helpers ─────────────────────────────────────────────────────────────
 
-fn speaker_text(turn: &BenchTurn) -> String {
-    format!("{}: {}", turn.speaker, turn.content)
-}
-
-fn window_text(turns: &[&BenchTurn], index: usize) -> String {
-    let mut parts = Vec::new();
-    if index > 0 {
-        parts.push(speaker_text(turns[index - 1]));
-    }
-    parts.push(speaker_text(turns[index]));
-    if index + 1 < turns.len() {
-        parts.push(speaker_text(turns[index + 1]));
-    }
-    parts.join("\n")
-}
-
 fn ingest_base_timestamp(session_count: u64) -> u64 {
     let span = session_count.max(1) * SESSION_GAP_SECS + SESSION_GAP_SECS;
     Timestamp::now().0.saturating_sub(span)
-}
-
-pub(super) fn embed_texts(
-    provider: &dyn EmbeddingProvider,
-    cache: Option<&super::embed_cache::EmbedCache>,
-    texts: &[String],
-) -> BenchResult<Vec<Vec<f64>>> {
-    let Some(cache) = cache else {
-        let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
-        return provider
-            .embed_f64(&refs)
-            .map_err(|err| BenchError::Embedding(err.to_string()));
-    };
-
-    let mut results: Vec<Option<Vec<f64>>> = Vec::with_capacity(texts.len());
-    let mut missing: Vec<usize> = Vec::new();
-    for (index, text) in texts.iter().enumerate() {
-        let hit = cache.get(text)?;
-        if hit.is_none() {
-            missing.push(index);
-        }
-        results.push(hit);
-    }
-    if !missing.is_empty() {
-        let refs: Vec<&str> = missing.iter().map(|&i| texts[i].as_str()).collect();
-        let fresh = provider
-            .embed_f64(&refs)
-            .map_err(|err| BenchError::Embedding(err.to_string()))?;
-        if fresh.len() != missing.len() {
-            return Err(BenchError::Embedding(format!(
-                "provider returned {} embeddings for {} texts",
-                fresh.len(),
-                missing.len()
-            )));
-        }
-        for (&index, vec) in missing.iter().zip(fresh) {
-            cache.put(&texts[index], &vec)?;
-            results[index] = Some(vec);
-        }
-    }
-    Ok(results
-        .into_iter()
-        .map(|v| v.expect("filled above"))
-        .collect())
 }
 
 fn node_provenance(dataset: &str, turn: &BenchTurn) -> NodeProvenance {
