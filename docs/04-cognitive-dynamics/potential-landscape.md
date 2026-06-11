@@ -47,12 +47,13 @@ seed_i = softmax(phi_i / tau)
 
 `beta_prior = 1` by design: `A_i` is already log prior-odds, so by ACT-R/Bayes odds-additivity it enters `phi_i` with unit coefficient (no calibration). The remaining `beta` feature weights and the softmax temperature `tau` are calibrated priors — one regression object plus one temperature — and can be fit from accepted readout data.
 
-`temporal_score_i` is derived from deterministic, explicit time cues in the
-query text (dates, month-year mentions). It is `1.0` when the site's timestamp
-falls inside a cued range and decays exponentially outside it with the declared
-scale `TEMPORAL_PROXIMITY_DECAY_DAYS`. Like every other bias input it is
-query-local and transient: no cue ever mutates retained action, salience, or
-conductance.
+`temporal_score_i` is derived from deterministic time cues in the query text —
+explicit dates (ISO, day-month-year, month-year) and relative expressions
+("yesterday", "last summer") resolved against the query's `now`. It is `1.0`
+when the site's timestamp falls inside a cued range and decays exponentially
+outside it with the declared scale `TEMPORAL_PROXIMITY_DECAY_DAYS`. Like every
+other bias input it is query-local and transient: no cue ever mutates retained
+action, salience, or conductance.
 
 ## Uses
 
