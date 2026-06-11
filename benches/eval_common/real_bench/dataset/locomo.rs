@@ -34,6 +34,27 @@ pub(super) fn parse_locomo(
         parse_questions(sample, sample_index, &sample_session_ids, &mut questions);
     }
 
+    // For questions with no question_date, set a deterministic fallback:
+    // max(session.start_timestamp) + 86_400 for sessions belonging to the same sample.
+    // This is sensory metadata (the dialog's own dates) — not gold.
+    let max_session_ts_by_sample: std::collections::HashMap<usize, u64> = {
+        let mut map: std::collections::HashMap<usize, u64> = std::collections::HashMap::new();
+        for session in &sessions {
+            if let Some(ts) = session.start_timestamp {
+                let entry = map.entry(session.sample_index).or_insert(0);
+                *entry = (*entry).max(ts);
+            }
+        }
+        map
+    };
+    for question in &mut questions {
+        if question.question_date.is_none() {
+            if let Some(&max_ts) = max_session_ts_by_sample.get(&question.sample_index) {
+                question.question_date = Some(max_ts + 86_400);
+            }
+        }
+    }
+
     Ok(LoadedBenchmark {
         dataset: BenchDatasetName::Locomo,
         sessions,

@@ -90,8 +90,9 @@ fn locomo_loader_preserves_evidence_turn_ids() {
         "session_1_date_time must be parsed to epoch seconds"
     );
     assert_eq!(
-        loaded.questions[0].question_date, None,
-        "LoCoMo questions carry no question_date"
+        loaded.questions[0].question_date,
+        Some(1_683_554_160 + 86_400),
+        "LoCoMo question_date must be set to max(session start) + 1 day when session is dated"
     );
 }
 
