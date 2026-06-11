@@ -73,15 +73,17 @@ One cue activates related fragments, which activate further fragments — recons
 
 ### Engine vs Consumer
 
+Anamnesis exposes two API surfaces: the **Framework API** ([`Memory`](https://docs.rs/anamnesis/latest/anamnesis/struct.Memory.html)) and the **Kernel API** ([`Engine`](https://docs.rs/anamnesis/latest/anamnesis/api/struct.Engine.html)). `Memory` is the official consumer-layer default, built entirely on `Engine`'s public API.
+
 Anamnesis is a **library — a memory kernel**, not a service. It owns the *physics of memory* (storage, spreading activation, dissipation, reinforcement, frustration, temporal validity) and deliberately leaves the *sensory/motor* layer to you. Unlike hosted memory APIs (Mem0, Zep, Supermemory) that bundle extraction + embeddings + serving, Anamnesis stays a deterministic, local-first, embeddable core that you drive.
 
-| The engine provides | You implement (or wrap) |
-|:--|:--|
-| Graph + reservoirs, RWR retrieval, readout, packaging | **Encoding**: raw input → `Observation` (type, entity tags, origin, timestamp) — usually via an LLM |
-| Power-law dissipation, commit-gated reinforcement | **Embeddings**: the `EmbeddingProvider` (node *and* query vectors are caller-supplied) |
-| Frustration, `fact_at` bitemporal validity | **Edge strategy**: provide embeddings (auto-coupling) or call `link()` |
-| Snapshots, SQLite storage, health/invariants | **Queries & commit**: when to query, and when use is *committed* (reinforcement) |
-| Pure mechanics, no LLM calls, no background tasks | **`tick(now)` scheduling**, **LLM answering**, **serving** (e.g. an MCP bridge) |
+| The kernel provides | Default consumer (`Memory`) handles | You can replace |
+|:--|:--|:--|
+| Graph + reservoirs, RWR retrieval, readout, packaging | **Encoding**: speaker-prefixed turns → Episodic + Semantic nodes, session/speaker tags | Yes — drop to `Engine` and provide your own `Observation`s |
+| Power-law dissipation, commit-gated reinforcement | **Embeddings**: wires in `EmbeddingProvider`; default uses `bge-base-en-v1.5` via `feature = "embed"` | Yes — supply any `Arc<dyn EmbeddingProvider>` |
+| Frustration, `fact_at` bitemporal validity | **Edge strategy**: `ExtractedFrom` + `Temporal` edges per recipe | Yes — call `engine_mut().link()` directly |
+| Snapshots, SQLite storage, health/invariants | **Queries & commit**: `search` auto-flushes; `used` commits reinforcement | Yes — use `engine().search()` / `engine_mut().commit()` |
+| Pure mechanics, no LLM calls, no background tasks | **`tick` scheduling**, no serving opinion | `tick(now)` — caller schedules; retrieval quality depends on encoding; the validated recipe is `Memory` |
 
 ## Benchmarks
 
@@ -90,7 +92,9 @@ anywhere — ingest is raw turns + embeddings (`bge-base-en-v1.5`), retrieval is
 the engine's deterministic pipeline. Reproducible via
 `cargo bench --features embed --bench real_memory` (see
 [calibration records](docs/07-quality-gates/calibration-records.md) for full
-provenance, ablations, and negative results).
+provenance, ablations, and negative results). These numbers are measured through
+the `Memory` framework API exactly as shipped — the benchmark harness builds and
+queries via `Memory`.
 
 | Benchmark | Gold granularity | Recall@20 | MRR | NDCG@20 | p50 |
 |:--|:--|--:|--:|--:|--:|
@@ -124,83 +128,34 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-anamnesis = "0.5"
-
 # Optional: local embedding provider (downloads model on first use, ~100-500 MB)
-# anamnesis = { version = "0.6", features = ["embed"] }
+anamnesis = { version = "0.6", features = ["embed"] }
 ```
 
-```rust
-use anamnesis::Engine;
-use anamnesis::api::{IngestResult, Observation};
-use anamnesis::graph::{EdgeType, KnowledgeType, ScopePath, Timestamp};
-use anamnesis::graph::node::Origin;
-use anamnesis::graph::types::PeerId;
-use anamnesis::peer::{SourceKind, TrustLevel};
+```rust,no_run
+use anamnesis::{Memory, Timestamp};
 
-let mut engine = Engine::new();
+// 1. Open a persistent Memory (feature = "embed" wires in bge-base-en-v1.5)
+let mut mem = Memory::open("my-memory.db").unwrap();
 
-// Register a peer (human or agent) before ingesting
-let agent_id = engine.register_peer("my-agent", TrustLevel::Agent).unwrap();
+// 2. Add conversational turns — the bench recipe runs automatically
+let now = Timestamp::now();
+mem.add("session-1", "Alice", "I prefer dark mode", now).unwrap();
+mem.add("session-1", "Bob",   "Got it, dark mode it is", now).unwrap();
 
-// Ingest knowledge fragments
-let result = engine.ingest(Observation {
-    name: "auth uses factory pattern".into(),
-    summary: Some("Confirmed across multiple sessions".into()),
-    content: "The auth module uses factory pattern for handler creation".into(),
-    embedding: Some(vec![0.8, 0.2, 0.1]),
-    confidence: 0.9,
-    node_type: KnowledgeType::Semantic,
-    entity_tags: vec!["auth".into(), "factory-pattern".into()],
-    origin: Origin {
-        peer_id: agent_id,
-        source_kind: SourceKind::AgentObservation,
-        session_id: "session-1".into(),
-        scope: ScopePath::new("my-project").expect("valid scope"),
-        confidence: 0.9,
-    },
-    timestamp: Timestamp::now(),
-    valid_from: None,
-    valid_until: None,
-}).unwrap();
+// 3. Search (auto-flushes pending buffers before querying)
+let recall = mem.search("display preferences", 5).unwrap();
+for hit in &recall.hits {
+    println!("{:.3}  {}", hit.score, hit.text);
+}
 
-let ids = match result {
-    IngestResult::Created(ids) => ids,
-    IngestResult::Reinforced { existing_id, .. } => vec![existing_id],
-};
-
-let result2 = engine.ingest(Observation {
-    name: "race condition in auth middleware".into(),
-    summary: None,
-    content: "Found a race condition in the auth middleware during session #5".into(),
-    embedding: Some(vec![0.75, 0.3, 0.15]),
-    confidence: 0.85,
-    node_type: KnowledgeType::Episodic,
-    entity_tags: vec!["auth".into()],
-    origin: Origin {
-        peer_id: agent_id,
-        source_kind: SourceKind::AgentObservation,
-        session_id: "session-5".into(),
-        scope: ScopePath::new("my-project").expect("valid scope"),
-        confidence: 0.85,
-    },
-    timestamp: Timestamp::now(),
-    valid_from: None,
-    valid_until: None,
-}).unwrap();
-
-let ids2 = match result2 {
-    IngestResult::Created(ids) => ids,
-    IngestResult::Reinforced { existing_id, .. } => vec![existing_id],
-};
-
-// Connect related knowledge (conductance is seeded from the cold-start coupling
-// prior — edge weight is a projection, never passed in)
-engine.link(ids[0], ids2[0], EdgeType::Semantic).unwrap();
-
-// Reinforce on access (appends an access trace, raising the base level B_i)
-engine.touch(ids[0], Timestamp::now()).unwrap();
+// 4. Reinforce what was actually used (commit-gated Hebbian strengthening)
+mem.used(recall).unwrap();
 ```
+
+**Use `Memory`** unless you need custom node/edge types, your own ingest representation, custom packaging policy, peer/trust control, or the debug lifecycle — then drop to **`Engine`** (the kernel API). `Memory` is built entirely on `Engine`'s public API: anything it does, you can do.
+
+For direct `Engine` usage see the [Kernel API section](#engine-vs-consumer) and [`docs/`](docs/README.md).
 
 ## Core Concepts
 

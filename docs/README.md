@@ -39,6 +39,7 @@ These documents are not a code status table or an audit log. Each chapter descri
 
 ### 01 - Architecture
 - [overview.md](01-system-architecture/overview.md) - system boundary, main flows, public surface
+- [framework-layer.md](01-system-architecture/framework-layer.md) - Framework API (`Memory`): recipe, buffering semantics, boundary rules, benchmark attribution
 
 ### 02 - Knowledge Model
 - [graph-model.md](02-knowledge-model/graph-model.md) - nodes, edges, types, tiers

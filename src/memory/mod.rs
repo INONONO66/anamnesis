@@ -607,12 +607,12 @@ impl<S: StorageAdapter + Clone> Memory<S> {
     /// raw [`SearchResult`] (including [`SearchTrace`](crate::query::SearchTrace)
     /// with pre-packaging readout candidates) and accepts optional tuning knobs.
     ///
-    /// Prefer [`search_at`] for ordinary use-cases. This method exists for
+    /// Prefer [`search_at`](Memory::search_at) for ordinary use-cases. This method exists for
     /// consumers (benchmarks, tooling) that need the full readout trace or need
     /// to override seed-limit / entity-tag cues without constructing a
     /// [`SearchInput`] manually.
     ///
-    /// Flush semantics are the same as [`search_at`]: all pending session buffers
+    /// Flush semantics are the same as [`search_at`](Memory::search_at): all pending session buffers
     /// are flushed before the query is executed.
     pub fn search_result_at_with(
         &mut self,
