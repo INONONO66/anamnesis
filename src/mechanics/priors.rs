@@ -371,18 +371,21 @@ pub const BETA_PRIOR: f64 = 1.0;
 // log-odds sum `posterior = prior + sum of evidence`. They are calibrated
 // priors, not laws (ADR-0010); refit from accepted-readout data.
 //
-// CALIBRATED 2026-06-11 (docs/07-quality-gates/calibration-records.md):
+// CALIBRATED 2026-06-11 v2 (docs/07-quality-gates/calibration-records.md):
 // coordinate search over (w_a, w_phi, w_s, w_z) on the LoCoMo-10 even-sample
-// train split (`fit_readout`, mean MRR@20 objective); dev MRR 0.1629 -> 0.1831.
-// `w_z = 0` reflects that `Z_i = -ln(a_i)` is redundant with `logit(a_i)` —
-// the term stays in the form, its coefficient is calibrated off.
+// train split (`fit_readout`, replayed novelty-deduped NDCG@20 objective);
+// live-confirmed dev Recall@20 0.526 -> 0.778, MRR 0.183 -> 0.287.
+// `w_z = 0`: the RWR approximation `Z_i = -ln(a_i)` duplicates `logit(a_i)`.
+// `w_s = 0`: in no-usage data salience projects the creation-time reservoir
+// (encoding surprise), which is noise w.r.t. query alignment — refit with
+// real usage/commit data before relying on salience at readout.
 
 /// `w_a` — weight on the (logit-of) query-local activation response `a_i`.
-pub const READOUT_W_A: f64 = 4.0;
+pub const READOUT_W_A: f64 = 0.25;
 /// `w_phi` — weight on the potential bias `phi_i`.
-pub const READOUT_W_PHI: f64 = 4.0;
+pub const READOUT_W_PHI: f64 = 16.0;
 /// `w_s` — weight on the salience projection `logit(s_i)`.
-pub const READOUT_W_S: f64 = 1.0;
+pub const READOUT_W_S: f64 = 0.0;
 /// `w_z` — penalty weight on the effective impedance `Z_i` (subtracted).
 /// Calibrated to zero: the RWR approximation `Z_i = -ln(a_i)` makes the term
 /// redundant with the activation term (same signal, double-counted).
