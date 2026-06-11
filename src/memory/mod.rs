@@ -60,7 +60,7 @@ use crate::graph::types::PeerId;
 use crate::graph::{EdgeType, KnowledgeType, NodeId, ScopePath, Timestamp};
 use crate::mechanics::social::ConfidenceLevel;
 use crate::peer::SourceKind;
-use crate::query::{ContextPackage, SearchInput};
+use crate::query::{ContextPackage, SearchInput, SearchResult};
 use crate::storage::{SqliteStorage, StorageAdapter};
 
 /// Per-session state for incremental window finalization.
@@ -483,6 +483,22 @@ impl<S: StorageAdapter + Clone> Memory<S> {
 
 // ── Search / recall / used / tick ─────────────────────────────────────────────
 
+/// Optional tuning knobs for [`Memory::search_result_at_with`].
+///
+/// All fields default to the bench-validated recipe values. Override only when
+/// you have a measured reason to deviate.
+#[derive(Debug, Clone, Default)]
+pub struct SearchTuning {
+    /// Override the number of seed nodes to expand with graph recall.
+    ///
+    /// `None` (default) uses the recipe default (`limit.max(1)`).
+    pub seed_limit: Option<usize>,
+    /// Entity tags to inject as retrieval seeds (e.g. speaker cues).
+    ///
+    /// Empty (default) = entity-tag retrieval OFF (bench default, speaker cues OFF).
+    pub entity_tags: Vec<String>,
+}
+
 /// A single ranked memory hit from a [`Recall`].
 ///
 /// Returned by [`Memory::search`] and [`Memory::search_at`] from the engine's
@@ -585,6 +601,40 @@ impl<S: StorageAdapter + Clone> Memory<S> {
             hits,
             package: result.package,
         })
+    }
+
+    /// Power-user variant: like [`search_at`](Memory::search_at) but returns the
+    /// raw [`SearchResult`] (including [`SearchTrace`](crate::query::SearchTrace)
+    /// with pre-packaging readout candidates) and accepts optional tuning knobs.
+    ///
+    /// Prefer [`search_at`] for ordinary use-cases. This method exists for
+    /// consumers (benchmarks, tooling) that need the full readout trace or need
+    /// to override seed-limit / entity-tag cues without constructing a
+    /// [`SearchInput`] manually.
+    ///
+    /// Flush semantics are the same as [`search_at`]: all pending session buffers
+    /// are flushed before the query is executed.
+    pub fn search_result_at_with(
+        &mut self,
+        query: &str,
+        limit: usize,
+        now: Timestamp,
+        tuning: &SearchTuning,
+    ) -> Result<SearchResult, Error> {
+        self.flush_all()?;
+
+        let embedding = embed_one(&*self.provider, query)?;
+        let seed_limit = tuning.seed_limit.unwrap_or_else(|| limit.max(1));
+        let input = SearchInput {
+            text: query.to_string(),
+            query_embedding: Some(embedding),
+            limit,
+            seed_limit: Some(seed_limit),
+            now,
+            entity_tags: tuning.entity_tags.clone(),
+            ..SearchInput::default()
+        };
+        self.engine.search(input)
     }
 
     /// Commit a [`Recall`]'s context package with [`ConfidenceLevel::Medium`] reinforcement.

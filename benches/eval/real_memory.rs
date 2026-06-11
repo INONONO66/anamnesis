@@ -137,7 +137,7 @@ fn run() -> BenchResult<()> {
         let mut graph = build_memory_graph(group, &provider, cache_ref)?;
         let (warmup_questions, eval_questions) = group.questions.split_at(args.warmup);
         let warmup = run_warmup(&mut graph, warmup_questions, &provider, &opts)?;
-        let sample_evals = evaluate_questions(&graph, eval_questions, &provider, &opts)?;
+        let sample_evals = evaluate_questions(&mut graph, eval_questions, &provider, &opts)?;
         eprintln!(
             "SAMPLE {} sessions={} warmup={} eval={}",
             sample_index,
@@ -146,8 +146,8 @@ fn run() -> BenchResult<()> {
             sample_evals.len()
         );
 
-        node_count += graph.engine.graph().node_count();
-        edge_count += graph.engine.graph().edge_count();
+        node_count += graph.memory.engine().graph().node_count();
+        edge_count += graph.memory.engine().graph().edge_count();
         graph_stats.nodes_created += graph.stats.nodes_created;
         graph_stats.temporal_edges_created += graph.stats.temporal_edges_created;
         graph_stats.extracted_edges_created += graph.stats.extracted_edges_created;

@@ -30,6 +30,7 @@ pub use memory::AddReceipt;
 pub use memory::Hit;
 pub use memory::Memory;
 pub use memory::Recall;
+pub use memory::SearchTuning;
 
 // Core re-exports
 pub use api::{

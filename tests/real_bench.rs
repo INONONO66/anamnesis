@@ -181,7 +181,7 @@ fn graph_build_warmup_and_evaluation_use_embeddings_and_commit() {
 
     assert_eq!(built.stats.nodes_created, 4);
     assert_eq!(built.stats.extracted_edges_created, 2);
-    assert_eq!(built.engine.graph().node_count(), 4);
+    assert_eq!(built.memory.engine().graph().node_count(), 4);
     assert_eq!(
         built.stats.embedded_texts, 4,
         "each turn embeds a speaker-prefixed view and a context-window view"
@@ -193,7 +193,12 @@ fn graph_build_warmup_and_evaluation_use_embeddings_and_commit() {
     let mut episodic_contents = Vec::new();
     let mut semantic_contents = Vec::new();
     for (&node_id, provenance) in &built.provenance_by_node {
-        let node = built.engine.graph().get_node(node_id).expect("node exists");
+        let node = built
+            .memory
+            .engine()
+            .graph()
+            .get_node(node_id)
+            .expect("node exists");
         assert!(
             !provenance.content.contains(':'),
             "provenance content must stay the raw turn text"
@@ -232,7 +237,12 @@ fn graph_build_warmup_and_evaluation_use_embeddings_and_commit() {
     // the recent past.
     let now = anamnesis::graph::Timestamp::now().0;
     for &node_id in built.provenance_by_node.keys() {
-        let node = built.engine.graph().get_node(node_id).expect("node exists");
+        let node = built
+            .memory
+            .engine()
+            .graph()
+            .get_node(node_id)
+            .expect("node exists");
         assert!(
             node.created_at.0 <= now,
             "ingest timestamps must be in the past"
@@ -245,13 +255,15 @@ fn graph_build_warmup_and_evaluation_use_embeddings_and_commit() {
     }
 
     let temporal_edges = built
-        .engine
+        .memory
+        .engine()
         .graph()
         .all_edge_ids()
         .into_iter()
         .filter(|edge_id| {
             built
-                .engine
+                .memory
+                .engine()
                 .graph()
                 .get_edge(*edge_id)
                 .is_ok_and(|edge| edge.edge_type == EdgeType::Temporal)
@@ -273,7 +285,7 @@ fn graph_build_warmup_and_evaluation_use_embeddings_and_commit() {
     assert!(warmup.sites_accessed > 0);
 
     let evaluated = evaluate_questions(
-        &built,
+        &mut built,
         &loaded.questions[1..],
         &embedder,
         &EvalOptions {
@@ -526,10 +538,10 @@ fn dump_features_populates_matched_units_and_total_relevant() {
     .expect("LoCoMo JSON should parse");
 
     let embedder = CountingEmbedder::default();
-    let built = build_memory_graph(&loaded, &embedder, None).expect("graph builds");
+    let mut built = build_memory_graph(&loaded, &embedder, None).expect("graph builds");
 
     let evaluated = evaluate_questions(
-        &built,
+        &mut built,
         &loaded.questions,
         &embedder,
         &EvalOptions {

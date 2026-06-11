@@ -1,12 +1,11 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
-use anamnesis::api::{IngestResult, Observation};
+use anamnesis::Error;
+use anamnesis::Memory;
+use anamnesis::SqliteStorage;
 use anamnesis::embedding::EmbeddingProvider;
-use anamnesis::graph::node::Origin;
-use anamnesis::graph::types::PeerId;
-use anamnesis::graph::{EdgeType, KnowledgeType, NodeId, ScopePath, Timestamp};
-use anamnesis::peer::SourceKind;
-use anamnesis::{Engine, EngineConfig, SqliteStorage};
+use anamnesis::graph::{NodeId, Timestamp};
 use serde::{Deserialize, Serialize};
 
 use super::dataset::{BenchSession, BenchTurn, LoadedBenchmark};
@@ -22,7 +21,7 @@ pub use eval::{
 };
 
 pub struct BuiltMemoryGraph {
-    pub engine: Engine<SqliteStorage>,
+    pub memory: Memory<SqliteStorage>,
     pub provenance_by_node: HashMap<NodeId, NodeProvenance>,
     pub stats: GraphBuildStats,
     pub speakers: Vec<String>,
@@ -53,15 +52,32 @@ pub struct NodeProvenance {
 const SESSION_GAP_SECS: u64 = 86_400;
 const TURN_GAP_SECS: u64 = 60;
 
+// ── build_memory_graph ───────────────────────────────────────────────────────
+
 pub fn build_memory_graph(
     dataset: &LoadedBenchmark,
     provider: &dyn EmbeddingProvider,
     cache: Option<&super::embed_cache::EmbedCache>,
 ) -> BenchResult<BuiltMemoryGraph> {
-    // Two views per turn: the speaker-prefixed turn (episodic) and the
-    // speaker-prefixed +/-1-turn context window (semantic). Benchmark
-    // questions reference participants by name and often depend on the
-    // surrounding exchange, so both views carry signals the raw turn lacks.
+    // Wrap provider + cache into an Arc so Memory can hold it.
+    // SAFETY: CachingProvider borrows from the outer scope, but we only use it
+    // inside this function before returning, so the lifetimes are correct.
+    // We use Arc<CachingProvider> with a transmuted lifetime to satisfy the
+    // 'static bound — instead, we wrap with a newtype that erases the lifetime
+    // by holding the provider/cache pointers as raw references.
+    //
+    // Simpler: build an owned Vec<Vec<f64>> for all texts upfront via
+    // embed_texts (preserves batch caching), then hand a StaticProvider to
+    // Memory that serves pre-computed embeddings. But that reintroduces the
+    // batch pre-compute. Instead, use the Arc trick: create a
+    // CachingProviderArc that boxes the inner ref behind Arc<Mutex<..>> — but
+    // that requires 'static inner.
+    //
+    // Cleanest solution that doesn't require 'static: Pre-embed all texts
+    // upfront (preserving the cache/batch path) then give Memory a
+    // PrecomputedProvider backed by those vecs. This is equivalent to the old
+    // recipe for embedding VALUES, different only in how the Arc is handed in.
+
     let session_turns: Vec<Vec<&BenchTurn>> = dataset
         .sessions
         .iter()
@@ -73,6 +89,9 @@ pub fn build_memory_graph(
                 .collect()
         })
         .collect();
+
+    // Pre-compute all embeddings upfront (same as before: batched + cached).
+    // This ensures embedding VALUES are identical to the old recipe.
     let speaker_texts: Vec<String> = session_turns
         .iter()
         .flat_map(|turns| turns.iter().map(|turn| speaker_text(turn)))
@@ -84,63 +103,86 @@ pub fn build_memory_graph(
     let speaker_embeddings = embed_texts(provider, cache, &speaker_texts)?;
     let window_embeddings = embed_texts(provider, cache, &window_texts)?;
 
-    let mut engine = Engine::with_config(benchmark_config());
-    let mut provenance_by_node = HashMap::new();
+    let total_texts = speaker_embeddings.len() + window_embeddings.len();
+
+    // Build a PrecomputedProvider that serves embeddings by text lookup.
+    // We index them in insertion order (same as the old recipe).
+    let mut embed_map: HashMap<String, Vec<f64>> = HashMap::new();
+    for (text, embedding) in speaker_texts.iter().zip(speaker_embeddings.iter()) {
+        embed_map.insert(text.clone(), embedding.clone());
+    }
+    for (text, embedding) in window_texts.iter().zip(window_embeddings.iter()) {
+        embed_map
+            .entry(text.clone())
+            .or_insert_with(|| embedding.clone());
+    }
+    let precomputed = Arc::new(PrecomputedProvider(embed_map));
+
+    let mut memory = Memory::in_memory_with_provider(precomputed as Arc<dyn EmbeddingProvider>)
+        .map_err(|err| BenchError::Engine(err.to_string()))?;
+
+    let mut provenance_by_node: HashMap<NodeId, NodeProvenance> = HashMap::new();
     let mut stats = GraphBuildStats {
-        embedded_texts: speaker_embeddings.len() + window_embeddings.len(),
+        embedded_texts: total_texts,
         ..GraphBuildStats::default()
     };
-    let mut embedding_index = 0usize;
+
     let base_timestamp = ingest_base_timestamp(session_turns.len() as u64);
 
+    // Per-session: keep the previous turn's provenance so we can insert the
+    // semantic node's provenance when AddReceipt.finalized_semantic arrives
+    // (one-turn lag: semantic of turn i-1 is returned when turn i is added).
     for (session_index, turns) in session_turns.iter().enumerate() {
-        let mut previous = None;
-        let session_start = dataset.sessions[session_index]
+        let session = &dataset.sessions[session_index];
+        let session_id = &session.raw_session_id;
+        let session_start = session
             .start_timestamp
             .unwrap_or_else(|| base_timestamp + session_index as u64 * SESSION_GAP_SECS);
+
+        // Provenance of the previous turn — needed to assign the semantic node
+        // id returned by add() (which is the semantic for that previous turn).
+        let mut prev_provenance: Option<NodeProvenance> = None;
+
         for (turn_position, turn) in turns.iter().enumerate() {
-            let speaker_embedding = speaker_embeddings
-                .get(embedding_index)
-                .cloned()
-                .ok_or_else(|| BenchError::Embedding("missing turn embedding".to_string()))?;
-            let window_embedding = window_embeddings
-                .get(embedding_index)
-                .cloned()
-                .ok_or_else(|| BenchError::Embedding("missing window embedding".to_string()))?;
             let timestamp = Timestamp(session_start + turn_position as u64 * TURN_GAP_SECS);
-            embedding_index += 1;
-            let raw_id = ingest_turn(
-                &mut engine,
-                dataset.dataset.as_str(),
-                turn,
-                speaker_text(turn),
-                speaker_embedding,
-                KnowledgeType::Episodic,
-                timestamp,
-            )?;
-            let semantic_id = ingest_turn(
-                &mut engine,
-                dataset.dataset.as_str(),
-                turn,
-                window_text(turns, turn_position),
-                window_embedding,
-                KnowledgeType::Semantic,
-                timestamp,
-            )?;
-            stats.nodes_created += 2;
-            provenance_by_node.insert(raw_id, node_provenance(dataset.dataset.as_str(), turn));
-            provenance_by_node.insert(semantic_id, node_provenance(dataset.dataset.as_str(), turn));
-            engine
-                .link(semantic_id, raw_id, EdgeType::ExtractedFrom)
+
+            let receipt = memory
+                .add(session_id, &turn.speaker, &turn.content, timestamp)
                 .map_err(|err| BenchError::Engine(err.to_string()))?;
-            stats.extracted_edges_created += 1;
-            if let Some(previous_id) = previous {
-                engine
-                    .link(previous_id, raw_id, EdgeType::Temporal)
-                    .map_err(|err| BenchError::Engine(err.to_string()))?;
+
+            // The episodic node belongs to the current turn.
+            let epi_prov = node_provenance(dataset.dataset.as_str(), turn);
+            provenance_by_node.insert(receipt.episodic, epi_prov.clone());
+            stats.nodes_created += 1;
+
+            // The semantic node (if returned) belongs to the PREVIOUS turn
+            // (one-turn lag: it was finalized now that we have the +1 context).
+            if let Some(sem_id) = receipt.finalized_semantic {
+                if let Some(prev_prov) = prev_provenance.take() {
+                    provenance_by_node.insert(sem_id, prev_prov);
+                }
+                stats.nodes_created += 1;
+                stats.extracted_edges_created += 1;
+            }
+
+            // Temporal edge counter: wired by Memory for every turn after the first.
+            if turn_position > 0 {
                 stats.temporal_edges_created += 1;
             }
-            previous = Some(raw_id);
+
+            prev_provenance = Some(epi_prov);
+        }
+
+        // Flush the session to finalize the last turn's semantic node.
+        let last_sem_id = memory
+            .flush_session(session_id)
+            .map_err(|err| BenchError::Engine(err.to_string()))?;
+        if let Some(sem_id) = last_sem_id {
+            if let Some(prev_prov) = prev_provenance.take() {
+                provenance_by_node.insert(sem_id, prev_prov);
+            }
+            stats.nodes_created += 1;
+            stats.extracted_edges_created += 1;
         }
     }
 
@@ -153,12 +195,50 @@ pub fn build_memory_graph(
         .collect();
 
     Ok(BuiltMemoryGraph {
-        engine,
+        memory,
         provenance_by_node,
         stats,
         speakers,
     })
 }
+
+// ── PrecomputedProvider ───────────────────────────────────────────────────────
+
+/// An `EmbeddingProvider` backed by a pre-computed lookup table.
+///
+/// Used by `build_memory_graph` to hand pre-batched embeddings to `Memory`
+/// without re-computing them. Text lookup is exact-match; unknown texts are
+/// an error (should never happen in normal bench flow).
+struct PrecomputedProvider(HashMap<String, Vec<f64>>);
+
+impl EmbeddingProvider for PrecomputedProvider {
+    fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, Error> {
+        texts
+            .iter()
+            .map(|text| {
+                self.0
+                    .get(*text)
+                    .map(|v| v.iter().map(|&x| x as f32).collect())
+                    .ok_or_else(|| {
+                        Error::InvalidInput(format!(
+                            "PrecomputedProvider: no embedding for {:?}",
+                            text
+                        ))
+                    })
+            })
+            .collect()
+    }
+
+    fn dimensions(&self) -> usize {
+        self.0.values().next().map(|v| v.len()).unwrap_or(0)
+    }
+
+    fn model_name(&self) -> &str {
+        "precomputed"
+    }
+}
+
+// ── Misc helpers ─────────────────────────────────────────────────────────────
 
 fn speaker_text(turn: &BenchTurn) -> String {
     format!("{}: {}", turn.speaker, turn.content)
@@ -179,14 +259,6 @@ fn window_text(turns: &[&BenchTurn], index: usize) -> String {
 fn ingest_base_timestamp(session_count: u64) -> u64 {
     let span = session_count.max(1) * SESSION_GAP_SECS + SESSION_GAP_SECS;
     Timestamp::now().0.saturating_sub(span)
-}
-
-fn benchmark_config() -> EngineConfig {
-    let mut config = EngineConfig::default();
-    config.dedup_enabled = false;
-    config.novelty_threshold = 0.0;
-    config.confidence_threshold = 0.0;
-    config
 }
 
 pub(super) fn embed_texts(
@@ -233,46 +305,6 @@ pub(super) fn embed_texts(
         .collect())
 }
 
-fn ingest_turn(
-    engine: &mut Engine<SqliteStorage>,
-    dataset: &str,
-    turn: &BenchTurn,
-    content: String,
-    embedding: Vec<f64>,
-    node_type: KnowledgeType,
-    timestamp: Timestamp,
-) -> BenchResult<NodeId> {
-    let observation = Observation {
-        name: make_name(&content),
-        summary: Some(format!("{} turn {}", turn.speaker, turn.turn_index + 1)),
-        content,
-        embedding: Some(embedding),
-        confidence: 0.95,
-        node_type,
-        entity_tags: entity_tags(dataset, turn),
-        origin: Origin {
-            peer_id: PeerId(0),
-            source_kind: SourceKind::AgentObservation,
-            session_id: turn.session_id.clone(),
-            scope: ScopePath::universal(),
-            confidence: 0.95,
-        },
-        timestamp,
-        valid_from: None,
-        valid_until: None,
-    };
-    match engine
-        .ingest(observation)
-        .map_err(|err| BenchError::Engine(err.to_string()))?
-    {
-        IngestResult::Created(ids) => ids
-            .first()
-            .copied()
-            .ok_or_else(|| BenchError::Engine("ingest created no node".to_string())),
-        IngestResult::Reinforced { existing_id, .. } => Ok(existing_id),
-    }
-}
-
 fn node_provenance(dataset: &str, turn: &BenchTurn) -> NodeProvenance {
     NodeProvenance {
         dataset: dataset.to_string(),
@@ -282,15 +314,6 @@ fn node_provenance(dataset: &str, turn: &BenchTurn) -> NodeProvenance {
         turn_index: turn.turn_index,
         speaker: turn.speaker.clone(),
         content: turn.content.clone(),
-    }
-}
-
-fn make_name(content: &str) -> String {
-    let name: String = content.chars().take(50).collect();
-    if name.trim().is_empty() {
-        "empty turn".to_string()
-    } else {
-        name
     }
 }
 
@@ -323,18 +346,6 @@ fn name_in_question(name_lower: &str, question_lower: &str) -> bool {
             .split(|c: char| !c.is_alphanumeric())
             .any(|token| token == name_lower)
     }
-}
-
-fn entity_tags(dataset: &str, turn: &BenchTurn) -> Vec<String> {
-    let mut tags = vec![
-        format!("dataset-{}", normalize_tag(dataset)),
-        format!("session-{}", normalize_tag(&turn.raw_session_id)),
-        format!("speaker-{}", normalize_tag(&turn.speaker)),
-    ];
-    if let Some(raw_turn_id) = &turn.raw_turn_id {
-        tags.push(format!("turn-{}", normalize_tag(raw_turn_id)));
-    }
-    tags
 }
 
 fn normalize_tag(value: &str) -> String {
