@@ -27,9 +27,18 @@
 //! - `flush_session` / `flush_all` finalize the last buffered turn with window
 //!   `(prev?, last)` — no `+1` to append.
 //!
-//! The resulting node set, content, timestamps and edges are identical to the
-//! batch recipe. Node-ID *ordering* may differ (semantics land one step later),
-//! which can flip retrieval ties broken by node id.
+//! The resulting node set, content, timestamps and edges are **identical to the
+//! batch recipe for uninterrupted sessions**. A flush/search boundary finalizes
+//! the pending turn without its future neighbor (one-sided window), which is the
+//! one unavoidable divergence from the batch recipe. Node-ID *ordering* may also
+//! differ (semantics land one step later), which can flip retrieval ties broken
+//! by node id.
+//!
+//! # Drop and explicit flush
+//!
+//! `Memory` implements `Drop`, which calls `flush_all()` in a best-effort
+//! manner (errors are swallowed). For reliable error handling, call
+//! `flush_all()` explicitly before dropping.
 //!
 //! # Escape hatch
 //!
@@ -55,12 +64,18 @@ use crate::query::{ContextPackage, SearchInput};
 use crate::storage::{SqliteStorage, StorageAdapter};
 
 /// Per-session state for incremental window finalization.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct SessionBuffer {
     /// The buffered turn waiting for its `+1` context (to build the Semantic window).
     pending: Option<PendingTurn>,
     /// 1-based turn index (incremented each `add`).
     turn_index: usize,
+    /// The last episodic NodeId from this session (retained across flush boundaries
+    /// to wire Temporal edges to the next `add`).
+    last_episodic_id: Option<NodeId>,
+    /// Speaker-prefixed text of the last finalized turn (retained across flush
+    /// boundaries to include as `prev` context in the next turn's window).
+    last_speaker_text: Option<String>,
 }
 
 /// A buffered turn waiting for the next turn (to complete its context window).
@@ -80,15 +95,6 @@ struct PendingTurn {
     speaker: String,
     /// 1-based turn index.
     turn_index: usize,
-}
-
-impl Default for SessionBuffer {
-    fn default() -> Self {
-        SessionBuffer {
-            pending: None,
-            turn_index: 0,
-        }
-    }
 }
 
 /// Receipt returned by [`Memory::add`] and [`Memory::add_note`].
@@ -124,11 +130,24 @@ pub struct Memory<S: StorageAdapter + Clone = SqliteStorage> {
 // ── Engine config used by Memory (bench defaults) ────────────────────────────
 
 fn memory_engine_config() -> EngineConfig {
-    let mut config = EngineConfig::default();
-    config.dedup_enabled = false;
-    config.novelty_threshold = 0.0;
-    config.confidence_threshold = 0.0;
-    config
+    EngineConfig {
+        dedup_enabled: false,
+        novelty_threshold: 0.0,
+        confidence_threshold: 0.0,
+        ..EngineConfig::default()
+    }
+}
+
+// ── Drop ─────────────────────────────────────────────────────────────────────
+
+impl<S: StorageAdapter + Clone> Drop for Memory<S> {
+    /// Best-effort flush of all pending session buffers on drop.
+    ///
+    /// Errors are swallowed. Call [`flush_all`](Memory::flush_all) explicitly
+    /// before dropping if you need to observe errors.
+    fn drop(&mut self) {
+        let _ = self.flush_all();
+    }
 }
 
 // ── Constructors — `embed` feature ───────────────────────────────────────────
@@ -198,6 +217,19 @@ impl<S: StorageAdapter + Clone> Memory<S> {
     ///
     /// Returns an [`AddReceipt`] with `episodic` = the new episodic node id and
     /// `finalized_semantic` = the previous turn's semantic node id (if any).
+    ///
+    /// # Buffering and the final turn
+    ///
+    /// The last buffered turn's Semantic view is written at the next `add`,
+    /// `flush_session`, `flush_all`, `search`/`search_at`, or on `Drop`.
+    /// Call [`flush_all`](Memory::flush_all) explicitly to observe any errors
+    /// from that finalization (Drop swallows them).
+    ///
+    /// # Error safety
+    ///
+    /// If this method returns `Err`, the session buffer is left exactly as it
+    /// was before the call — the previously-pending turn is never silently lost.
+    /// `turn_index` is only incremented on success.
     pub fn add(
         &mut self,
         session: &str,
@@ -207,14 +239,37 @@ impl<S: StorageAdapter + Clone> Memory<S> {
     ) -> Result<AddReceipt, Error> {
         let session_buf = self.sessions.entry(session.to_string()).or_default();
 
-        // Advance the 1-based turn index BEFORE use.
-        session_buf.turn_index += 1;
-        let turn_index = session_buf.turn_index;
+        // Snapshot continuity state BEFORE any mutation so we can use it
+        // throughout without borrowing `session_buf` again mid-sequence.
+        let pending_snapshot = session_buf.pending.clone();
+        let next_turn_index = session_buf.turn_index + 1;
+        let continuity_prev_epi = session_buf.last_episodic_id;
 
         let speaker_text = format!("{}: {}", speaker, text);
 
-        // Step 1: embed and ingest Episodic node.
+        // ── Phase A: all fallible work (NO buffer mutation yet) ──────────────
+
+        // (a) Embed the current turn's episodic text.
         let epi_embedding = embed_one(&*self.provider, &speaker_text)?;
+
+        // (b) If pending: build window and embed it. Both are fallible.
+        let pending_window_result: Option<(String, Vec<f64>)> =
+            if let Some(ref pending) = pending_snapshot {
+                let window = build_window(
+                    pending.prev_speaker_text.as_deref(),
+                    &pending.speaker_text,
+                    Some(&speaker_text),
+                );
+                let sem_embedding = embed_one(&*self.provider, &window)?;
+                Some((window, sem_embedding))
+            } else {
+                None
+            };
+
+        // ── Phase B: ingest operations (also fallible, but ordered so buffer
+        //    mutation only happens after all ingests succeed) ─────────────────
+
+        // (c) Ingest current episodic node.
         let epi_id = ingest_node(
             &mut self.engine,
             &speaker_text,
@@ -223,21 +278,14 @@ impl<S: StorageAdapter + Clone> Memory<S> {
             KnowledgeType::Episodic,
             at,
             entity_tags_for(session, speaker),
-            Some(format!("{} turn {}", speaker, turn_index)),
+            Some(format!("{} turn {}", speaker, next_turn_index)),
             session,
         )?;
 
-        // Step 2 & 3: take the pending buffered turn (if any), finalize its
-        // Semantic now that we have the `+1` context, and wire Temporal edge.
-        let pending = session_buf.pending.take();
-        let finalized_semantic = if let Some(pending) = pending {
-            // The previous turn's speaker_text becomes `prev` for this window.
-            let window = build_window(
-                pending.prev_speaker_text.as_deref(),
-                &pending.speaker_text,
-                Some(&speaker_text),
-            );
-            let sem_embedding = embed_one(&*self.provider, &window)?;
+        // (d) If pending: ingest its semantic, then wire ExtractedFrom + Temporal.
+        let finalized_semantic = if let (Some(pending), Some((window, sem_embedding))) =
+            (pending_snapshot, pending_window_result)
+        {
             let sem_id = ingest_node(
                 &mut self.engine,
                 &window,
@@ -249,47 +297,58 @@ impl<S: StorageAdapter + Clone> Memory<S> {
                 Some(format!("{} turn {}", pending.speaker, pending.turn_index)),
                 &pending.session_id,
             )?;
-            // Link Semantic -> ExtractedFrom -> Episodic(i-1)
             self.engine
                 .link(sem_id, pending.episodic_id, EdgeType::ExtractedFrom)?;
-            // Temporal edge: epi(i-1) -> epi(i)
+            // Temporal: epi(i-1) → epi(i). Use pending.episodic_id as the prior
+            // episodic (from the pending turn, not the continuity state, since a
+            // pending turn means we are in the normal mid-session flow).
             self.engine
                 .link(pending.episodic_id, epi_id, EdgeType::Temporal)?;
-
-            // The `prev_speaker_text` for the NEW pending is the finalized turn's speaker_text.
-            let prev_for_new_pending = Some(pending.speaker_text);
-            // Step 4: buffer current turn with correct `prev_speaker_text`.
-            let buf = self.sessions.get_mut(session).unwrap();
-            buf.pending = Some(PendingTurn {
-                episodic_id: epi_id,
-                at,
-                prev_speaker_text: prev_for_new_pending,
-                speaker_text: speaker_text.clone(),
-                session_id: session.to_string(),
-                speaker: speaker.to_string(),
-                turn_index,
-            });
-
-            Some(sem_id)
+            Some((sem_id, pending.speaker_text))
         } else {
-            // No previous pending: this is the first turn in the session.
-            // Step 4: buffer current turn with no prev.
-            let buf = self.sessions.get_mut(session).unwrap();
-            buf.pending = Some(PendingTurn {
-                episodic_id: epi_id,
-                at,
-                prev_speaker_text: None,
-                speaker_text: speaker_text.clone(),
-                session_id: session.to_string(),
-                speaker: speaker.to_string(),
-                turn_index,
-            });
+            // No pending in the buffer. But if we have a cross-flush continuity
+            // episodic, wire its Temporal edge now.
+            if let Some(prev_epi_id) = continuity_prev_epi {
+                self.engine.link(prev_epi_id, epi_id, EdgeType::Temporal)?;
+            }
             None
         };
 
+        // ── Phase E: ALL fallible work done — now mutate buffer state ─────────
+
+        let buf = self.sessions.get_mut(session)
+            // SAFETY: we inserted the entry at the top of this function via
+            // `or_default()`, so it is guaranteed to be present.
+            .expect("session buffer must exist after or_default()");
+
+        buf.turn_index = next_turn_index;
+
+        // Update cross-flush continuity fields.
+        buf.last_episodic_id = Some(epi_id);
+
+        // The `prev_speaker_text` for the NEW pending is the finalized turn's
+        // speaker_text (if we just finalized one), otherwise the retained
+        // cross-flush prev (if any), otherwise None.
+        let prev_for_new_pending = finalized_semantic
+            .as_ref()
+            .map(|(_, prev_text)| prev_text.clone())
+            .or_else(|| buf.last_speaker_text.clone());
+
+        buf.last_speaker_text = Some(speaker_text.clone());
+
+        buf.pending = Some(PendingTurn {
+            episodic_id: epi_id,
+            at,
+            prev_speaker_text: prev_for_new_pending,
+            speaker_text: speaker_text.clone(),
+            session_id: session.to_string(),
+            speaker: speaker.to_string(),
+            turn_index: next_turn_index,
+        });
+
         Ok(AddReceipt {
             episodic: epi_id,
-            finalized_semantic,
+            finalized_semantic: finalized_semantic.map(|(sem_id, _)| sem_id),
         })
     }
 
@@ -338,12 +397,24 @@ impl<S: StorageAdapter + Clone> Memory<S> {
         })
     }
 
-    /// Finalize the last buffered turn for `session` and remove it from the
-    /// per-session buffer.
+    /// Finalize the last buffered turn for `session`.
+    ///
+    /// Writes the pending turn's Semantic node (one-sided window — no `+1`
+    /// neighbor, because this is a flush boundary) and removes it from the
+    /// per-session buffer. Continuity state (`last_episodic_id`,
+    /// `last_speaker_text`) is retained so that a subsequent `add` on the
+    /// same session still produces a Temporal edge and includes the prev-turn
+    /// text in the new window.
     ///
     /// Returns the `NodeId` of the semantic node created for the last turn,
     /// or `None` if the session had no buffered turn (already flushed or
     /// never existed).
+    ///
+    /// # Note
+    ///
+    /// The final turn's semantic view is written here (or at `flush_all` /
+    /// `search` / `Drop`). Call this explicitly before dropping if you need
+    /// to observe errors — `Drop` swallows them.
     pub fn flush_session(&mut self, session: &str) -> Result<Option<NodeId>, Error> {
         let pending = match self.sessions.get_mut(session) {
             Some(buf) => buf.pending.take(),
@@ -371,10 +442,22 @@ impl<S: StorageAdapter + Clone> Memory<S> {
         )?;
         self.engine
             .link(sem_id, pending.episodic_id, EdgeType::ExtractedFrom)?;
+
+        // Retain continuity state so the next `add` on this session can wire
+        // a Temporal edge and include this turn's text as prev-window context.
+        if let Some(buf) = self.sessions.get_mut(session) {
+            buf.last_episodic_id = Some(pending.episodic_id);
+            buf.last_speaker_text = Some(pending.speaker_text);
+        }
+
         Ok(Some(sem_id))
     }
 
     /// Finalize all pending sessions.
+    ///
+    /// The final turn's semantic view for each session is written here.
+    /// Call this explicitly before dropping if you need to observe errors —
+    /// `Drop` swallows them.
     pub fn flush_all(&mut self) -> Result<(), Error> {
         let sessions: Vec<String> = self.sessions.keys().cloned().collect();
         for session in sessions {
@@ -509,6 +592,12 @@ impl<S: StorageAdapter + Clone> Memory<S> {
     /// Call this **only** for results you actually used — reinforcement is
     /// commit-gated. Calling `used` strengthens the accessed nodes' retained-action
     /// reservoirs, making them more salient in future retrievals.
+    ///
+    /// Note: reinforcement is anchored to wall-clock time internally
+    /// (`Engine::commit` uses the real clock), so callers using logical-time
+    /// (`search_at` with a synthetic `now`) should be aware that the decay
+    /// applied to committed nodes is wall-clock anchored, not logical-time
+    /// anchored.
     pub fn used(&mut self, recall: Recall) -> Result<(), Error> {
         self.engine
             .commit(recall.package, Some(ConfidenceLevel::Medium))?;
