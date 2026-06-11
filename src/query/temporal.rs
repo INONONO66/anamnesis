@@ -37,6 +37,23 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
+/// Inverse of `days_from_civil`: convert a day count (days since 1970-01-01,
+/// may be negative) to a proleptic Gregorian (year, month, day).
+/// Howard Hinnant's algorithm — http://howardhinnant.github.io/date_algorithms.html
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m as u32, d as u32)
+}
+
 fn day_epoch(year: i64, month: u32, day: u32) -> Option<u64> {
     if !(1..=12).contains(&month) || !(1..=31).contains(&day) || !(1970..=2200).contains(&year) {
         return None;
@@ -58,7 +75,9 @@ fn month_range(year: i64, month: u32) -> Option<TimeRange> {
 
 /// Extract explicit date cues: `YYYY-MM-DD`, `YYYY/MM/DD`,
 /// `D Month YYYY`, `Month D YYYY` (comma tolerated), `Month YYYY`.
-pub(crate) fn parse_time_cues(text: &str) -> Vec<TimeRange> {
+/// When `now != 0`, also resolves relative expressions ("yesterday", "last week", etc.).
+/// When `now == 0`, relative cues are skipped and only explicit dates are parsed.
+pub(crate) fn parse_time_cues(text: &str, now: u64) -> Vec<TimeRange> {
     let lower = text.to_lowercase();
     let tokens: Vec<&str> = lower
         .split(|c: char| c.is_whitespace() || c == ',' || c == '?' || c == '.' || c == '!')
@@ -113,6 +132,7 @@ pub(crate) fn parse_time_cues(text: &str) -> Vec<TimeRange> {
             }
         }
     }
+    let _ = now; // used in Task 2 for relative cues
     ranges.dedup();
     ranges
 }
@@ -149,7 +169,7 @@ mod tests {
 
     #[test]
     fn parses_natural_language_date() {
-        let cues = parse_time_cues("what happened on 8 May 2023");
+        let cues = parse_time_cues("what happened on 8 May 2023", 0);
         assert_eq!(cues.len(), 1, "expected one cue, got {cues:?}");
         assert_eq!(
             cues[0].start, MAY_8_2023,
@@ -164,14 +184,14 @@ mod tests {
 
     #[test]
     fn parses_iso_date() {
-        let cues = parse_time_cues("event on 2023-05-08 was notable");
+        let cues = parse_time_cues("event on 2023-05-08 was notable", 0);
         assert_eq!(cues.len(), 1, "expected one cue");
         assert_eq!(cues[0].start, MAY_8_2023);
     }
 
     #[test]
     fn parses_month_year_range() {
-        let cues = parse_time_cues("events in May 2023");
+        let cues = parse_time_cues("events in May 2023", 0);
         assert_eq!(cues.len(), 1, "expected one cue for month range");
         // May 2023: 2023-05-01 00:00 UTC = 1682899200
         assert_eq!(cues[0].start, 1_682_899_200, "start must be 2023-05-01");
@@ -184,13 +204,13 @@ mod tests {
 
     #[test]
     fn no_dates_returns_empty() {
-        let cues = parse_time_cues("beach trip planning notes");
+        let cues = parse_time_cues("beach trip planning notes", 0);
         assert!(cues.is_empty(), "expected no cues, got {cues:?}");
     }
 
     #[test]
     fn bare_number_produces_nothing() {
-        let cues = parse_time_cues("8 items in list");
+        let cues = parse_time_cues("8 items in list", 0);
         assert!(
             cues.is_empty(),
             "bare number without context must not produce cue"
@@ -199,7 +219,7 @@ mod tests {
 
     #[test]
     fn year_alone_produces_nothing() {
-        let cues = parse_time_cues("something in 2023");
+        let cues = parse_time_cues("something in 2023", 0);
         assert!(
             cues.is_empty(),
             "year alone without month must not produce cue"
@@ -244,5 +264,48 @@ mod tests {
     #[test]
     fn proximity_zero_for_empty_cues() {
         assert_eq!(temporal_proximity(MAY_8_2023, &[]), 0.0);
+    }
+
+    // ---- civil_from_days round-trips ----
+
+    #[test]
+    fn civil_roundtrip_ordinary() {
+        for &(y, m, d) in &[
+            (2023i64, 5u32, 8u32),
+            (2023, 9, 15),
+            (2023, 1, 1),
+            (2023, 12, 31),
+            (1970, 1, 1),
+        ] {
+            let days = days_from_civil(y, m, d);
+            assert_eq!(
+                civil_from_days(days),
+                (y, m, d),
+                "round-trip failed for {y}-{m:02}-{d:02}"
+            );
+        }
+    }
+
+    #[test]
+    fn civil_roundtrip_leap_day() {
+        let days = days_from_civil(2024, 2, 29);
+        assert_eq!(civil_from_days(days), (2024, 2, 29));
+    }
+
+    #[test]
+    fn parse_time_cues_now_zero_explicit_still_works() {
+        // now=0 must not break existing explicit-date parsing.
+        let cues = parse_time_cues("event on 2023-05-08 was notable", 0);
+        assert_eq!(cues.len(), 1);
+        assert_eq!(cues[0].start, MAY_8_2023);
+    }
+
+    #[test]
+    fn parse_time_cues_now_nonzero_explicit_still_works() {
+        // now != 0 must still handle explicit ISO dates.
+        let now_sept_15 = 1_694_736_000u64; // 2023-09-15 00:00 UTC
+        let cues = parse_time_cues("event on 2023-05-08 was notable", now_sept_15);
+        assert_eq!(cues.len(), 1);
+        assert_eq!(cues[0].start, MAY_8_2023);
     }
 }
