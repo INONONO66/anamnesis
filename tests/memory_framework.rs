@@ -1,0 +1,474 @@
+//! Memory framework API tests (Task 1).
+//!
+//! Covers: graph shape after 3-turn session + flush, window contents, edges,
+//! timestamps preserved, buffering semantics, add_note, engine() escape hatch.
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use anamnesis::embedding::EmbeddingProvider;
+use anamnesis::memory::Memory;
+use anamnesis::{EdgeType, Error, KnowledgeType, NodeId, Timestamp};
+
+// ---------------------------------------------------------------------------
+// Deterministic test embedder (same shape as real_bench CountingEmbedder)
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Default)]
+struct TestEmbedder {
+    #[allow(dead_code)]
+    calls: Arc<AtomicUsize>,
+}
+
+/// Embeds text as a 4-d vector derived from character bytes so identical texts
+/// always produce identical vectors and distinct texts produce distinct ones.
+fn embed_text(text: &str) -> Vec<f32> {
+    let bytes = text.as_bytes();
+    let a = bytes.iter().step_by(1).map(|&b| b as f32).sum::<f32>();
+    let b = bytes
+        .iter()
+        .skip(1)
+        .step_by(2)
+        .map(|&b| b as f32)
+        .sum::<f32>();
+    let c = bytes
+        .iter()
+        .skip(2)
+        .step_by(3)
+        .map(|&b| b as f32)
+        .sum::<f32>();
+    let d = bytes.len() as f32;
+    let mag = (a * a + b * b + c * c + d * d).sqrt().max(1.0);
+    vec![a / mag, b / mag, c / mag, d / mag]
+}
+
+impl EmbeddingProvider for TestEmbedder {
+    fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, Error> {
+        self.calls.fetch_add(texts.len(), Ordering::Relaxed);
+        Ok(texts.iter().map(|t| embed_text(t)).collect())
+    }
+
+    fn dimensions(&self) -> usize {
+        4
+    }
+
+    fn model_name(&self) -> &str {
+        "test-embedder"
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helper: collect all edges between a pair of nodes from the engine
+// ---------------------------------------------------------------------------
+
+fn edges_between(mem: &Memory, from: NodeId, to: NodeId) -> Vec<EdgeType> {
+    let g = mem.engine().graph();
+    g.edges_from(from)
+        .iter()
+        .filter_map(|&eid| {
+            let e = g.get_edge(eid).ok()?;
+            if e.target == to {
+                Some(e.edge_type.clone())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Task-1 tests
+// ---------------------------------------------------------------------------
+
+/// After a 3-turn session + flush there must be exactly 6 nodes (3 epi + 3 sem).
+#[test]
+fn three_turn_session_yields_six_nodes_after_flush() {
+    let provider: Arc<dyn EmbeddingProvider> = Arc::new(TestEmbedder::default());
+    let mut mem = Memory::in_memory_with_provider(provider).expect("in_memory_with_provider");
+
+    let t0 = Timestamp(1_000_000);
+    let t1 = Timestamp(1_000_060);
+    let t2 = Timestamp(1_000_120);
+
+    mem.add("sess1", "Alice", "Hello there", t0).unwrap();
+    mem.add("sess1", "Bob", "Hi Alice", t1).unwrap();
+    mem.add("sess1", "Alice", "How are you?", t2).unwrap();
+    mem.flush_session("sess1").unwrap();
+
+    assert_eq!(
+        mem.engine().graph().node_count(),
+        6,
+        "3 episodic + 3 semantic"
+    );
+}
+
+/// Timestamps on episodic nodes must match the `at` argument supplied to `add`.
+#[test]
+fn episodic_timestamps_are_preserved() {
+    let provider: Arc<dyn EmbeddingProvider> = Arc::new(TestEmbedder::default());
+    let mut mem = Memory::in_memory_with_provider(provider).expect("in_memory_with_provider");
+
+    let t0 = Timestamp(2_000_000);
+    let t1 = Timestamp(2_000_060);
+
+    let r0 = mem.add("sess", "A", "turn zero", t0).unwrap();
+    let r1 = mem.add("sess", "B", "turn one", t1).unwrap();
+    mem.flush_session("sess").unwrap();
+
+    let g = mem.engine().graph();
+    let epi0 = g.get_node(r0.episodic).unwrap();
+    let epi1 = g.get_node(r1.episodic).unwrap();
+    assert_eq!(epi0.created_at, t0, "episodic t0 must carry t0");
+    assert_eq!(epi1.created_at, t1, "episodic t1 must carry t1");
+}
+
+/// Semantic node for turn N must NOT exist until turn N+1 arrives (or flush).
+/// After turn 0 is added there is 1 episodic and no semantic yet.
+#[test]
+fn semantic_absent_until_next_turn() {
+    let provider: Arc<dyn EmbeddingProvider> = Arc::new(TestEmbedder::default());
+    let mut mem = Memory::in_memory_with_provider(provider).expect("in_memory_with_provider");
+
+    mem.add("s", "A", "first", Timestamp(1)).unwrap();
+    // Only 1 node (the episodic for turn 0); no semantic yet.
+    assert_eq!(
+        mem.engine().graph().node_count(),
+        1,
+        "only episodic before next turn"
+    );
+
+    let r0 = mem.add("s", "B", "second", Timestamp(2)).unwrap();
+    // Now turn 0's semantic should be finalized.
+    assert!(
+        r0.finalized_semantic.is_some(),
+        "second add must finalize previous turn's semantic"
+    );
+    assert_eq!(
+        mem.engine().graph().node_count(),
+        3,
+        "2 episodic + 1 semantic after turn 1"
+    );
+}
+
+/// Window contents: turn 0's window = "A: first\nB: second",
+/// turn 1's window (after flush) = "A: first\nB: second\nA: third",
+/// turn 2's window = "B: second\nA: third".
+#[test]
+fn window_contents_correct() {
+    let provider: Arc<dyn EmbeddingProvider> = Arc::new(TestEmbedder::default());
+    let mut mem = Memory::in_memory_with_provider(provider).expect("in_memory_with_provider");
+
+    let _r0 = mem.add("s", "A", "first", Timestamp(1)).unwrap();
+    let r1 = mem.add("s", "B", "second", Timestamp(2)).unwrap();
+    let r2 = mem.add("s", "A", "third", Timestamp(3)).unwrap();
+    mem.flush_session("s").unwrap();
+
+    let g = mem.engine().graph();
+
+    // turn 0's semantic is finalized when turn 1 arrives (r1.finalized_semantic)
+    let sem0_id = r1
+        .finalized_semantic
+        .expect("sem0 should be finalized at turn 1");
+    let sem0 = g.get_node(sem0_id).unwrap();
+    assert_eq!(
+        sem0.content, "A: first\nB: second",
+        "turn 0 window = self + next"
+    );
+
+    // turn 1's semantic is finalized when turn 2 arrives (r2.finalized_semantic)
+    let sem1_id = r2
+        .finalized_semantic
+        .expect("sem1 should be finalized at turn 2");
+    let sem1 = g.get_node(sem1_id).unwrap();
+    assert_eq!(
+        sem1.content, "A: first\nB: second\nA: third",
+        "turn 1 window = prev + self + next"
+    );
+
+    // turn 2's semantic is finalized at flush; returned by flush_session
+    // We don't have a direct handle here, but we can find it by exclusion.
+    // It must be a Semantic node not equal to sem0/sem1.
+    let sem_nodes: Vec<NodeId> = g
+        .all_node_ids()
+        .into_iter()
+        .filter(|&nid| {
+            g.get_node(nid)
+                .map(|n| n.node_type == KnowledgeType::Semantic)
+                .unwrap_or(false)
+        })
+        .collect();
+    assert_eq!(sem_nodes.len(), 3, "3 semantic nodes after full flush");
+
+    let sem2_id = *sem_nodes
+        .iter()
+        .find(|&&nid| nid != sem0_id && nid != sem1_id)
+        .expect("third semantic must exist");
+    let sem2 = g.get_node(sem2_id).unwrap();
+    assert_eq!(
+        sem2.content, "B: second\nA: third",
+        "turn 2 window = prev + self (no next)"
+    );
+}
+
+/// Each semantic node must have an ExtractedFrom edge to its episodic node.
+#[test]
+fn extracted_from_edges_present() {
+    let provider: Arc<dyn EmbeddingProvider> = Arc::new(TestEmbedder::default());
+    let mut mem = Memory::in_memory_with_provider(provider).expect("in_memory_with_provider");
+
+    let r0 = mem.add("s", "A", "first", Timestamp(1)).unwrap();
+    let r1 = mem.add("s", "B", "second", Timestamp(2)).unwrap();
+    let r2 = mem.add("s", "A", "third", Timestamp(3)).unwrap();
+    mem.flush_session("s").unwrap();
+
+    let sem0 = r1.finalized_semantic.unwrap();
+    let sem1 = r2.finalized_semantic.unwrap();
+
+    // sem0 -> ExtractedFrom -> epi0
+    let edges = edges_between(&mem, sem0, r0.episodic);
+    assert!(
+        edges.contains(&EdgeType::ExtractedFrom),
+        "sem0 must have ExtractedFrom edge to epi0"
+    );
+
+    // sem1 -> ExtractedFrom -> epi1
+    let edges = edges_between(&mem, sem1, r1.episodic);
+    assert!(
+        edges.contains(&EdgeType::ExtractedFrom),
+        "sem1 must have ExtractedFrom edge to epi1"
+    );
+}
+
+/// Temporal edges must link consecutive episodic nodes: epi0 -> epi1 -> epi2.
+#[test]
+fn temporal_edges_link_consecutive_episodics() {
+    let provider: Arc<dyn EmbeddingProvider> = Arc::new(TestEmbedder::default());
+    let mut mem = Memory::in_memory_with_provider(provider).expect("in_memory_with_provider");
+
+    let r0 = mem.add("s", "A", "first", Timestamp(1)).unwrap();
+    let r1 = mem.add("s", "B", "second", Timestamp(2)).unwrap();
+    let r2 = mem.add("s", "A", "third", Timestamp(3)).unwrap();
+    mem.flush_session("s").unwrap();
+
+    let edges01 = edges_between(&mem, r0.episodic, r1.episodic);
+    assert!(
+        edges01.contains(&EdgeType::Temporal),
+        "epi0 -> epi1 Temporal edge must exist"
+    );
+    let edges12 = edges_between(&mem, r1.episodic, r2.episodic);
+    assert!(
+        edges12.contains(&EdgeType::Temporal),
+        "epi1 -> epi2 Temporal edge must exist"
+    );
+}
+
+/// Semantic nodes carry the timestamp of their episodic turn, not flush time.
+#[test]
+fn semantic_timestamps_match_episodic() {
+    let provider: Arc<dyn EmbeddingProvider> = Arc::new(TestEmbedder::default());
+    let mut mem = Memory::in_memory_with_provider(provider).expect("in_memory_with_provider");
+
+    let t0 = Timestamp(5_000_000);
+    let t1 = Timestamp(5_000_060);
+
+    let r0 = mem.add("s", "A", "turn 0", t0).unwrap();
+    let r1 = mem.add("s", "B", "turn 1", t1).unwrap();
+    mem.flush_session("s").unwrap();
+
+    let g = mem.engine().graph();
+    let sem0_id = r1.finalized_semantic.unwrap();
+    let sem0 = g.get_node(sem0_id).unwrap();
+    assert_eq!(
+        sem0.created_at, t0,
+        "semantic for turn 0 must carry turn 0's timestamp"
+    );
+
+    // After flush the last semantic carries t1
+    let sem1_nodes: Vec<NodeId> = g
+        .all_node_ids()
+        .into_iter()
+        .filter(|&nid| {
+            g.get_node(nid)
+                .map(|n| n.node_type == KnowledgeType::Semantic && nid != sem0_id)
+                .unwrap_or(false)
+        })
+        .collect();
+    assert_eq!(sem1_nodes.len(), 1);
+    let sem1 = g.get_node(sem1_nodes[0]).unwrap();
+    assert_eq!(
+        sem1.created_at, t1,
+        "semantic for turn 1 must carry turn 1's timestamp"
+    );
+    // episodic for r0 must also carry t0
+    assert_eq!(g.get_node(r0.episodic).unwrap().created_at, t0);
+}
+
+/// `add_note` must create both episodic and semantic nodes immediately (no buffering).
+#[test]
+fn add_note_is_immediate() {
+    let provider: Arc<dyn EmbeddingProvider> = Arc::new(TestEmbedder::default());
+    let mut mem = Memory::in_memory_with_provider(provider).expect("in_memory_with_provider");
+
+    let receipt = mem
+        .add_note("A standalone note about nothing", Timestamp(999))
+        .unwrap();
+
+    // Both episodic and semantic must exist immediately.
+    assert!(
+        receipt.finalized_semantic.is_some(),
+        "add_note must immediately finalize semantic"
+    );
+    assert_eq!(
+        mem.engine().graph().node_count(),
+        2,
+        "add_note: 1 epi + 1 sem"
+    );
+
+    // The semantic must have ExtractedFrom edge to the episodic.
+    let sem_id = receipt.finalized_semantic.unwrap();
+    let edges = edges_between(&mem, sem_id, receipt.episodic);
+    assert!(edges.contains(&EdgeType::ExtractedFrom));
+}
+
+/// `engine()` escape hatch returns a reference to the same engine (visible via node count).
+#[test]
+fn engine_escape_hatch_visible() {
+    let provider: Arc<dyn EmbeddingProvider> = Arc::new(TestEmbedder::default());
+    let mut mem = Memory::in_memory_with_provider(provider).expect("in_memory_with_provider");
+
+    assert_eq!(
+        mem.engine().graph().node_count(),
+        0,
+        "fresh engine has no nodes"
+    );
+
+    mem.add("s", "X", "something", Timestamp(1)).unwrap();
+    assert_eq!(
+        mem.engine().graph().node_count(),
+        1,
+        "escape hatch sees the node"
+    );
+}
+
+/// `engine_mut()` escape hatch allows raw ingest; node is visible immediately.
+#[test]
+fn engine_mut_escape_hatch_allows_raw_ingest() {
+    use anamnesis::api::Observation;
+    use anamnesis::graph::ScopePath;
+    use anamnesis::graph::node::Origin;
+    use anamnesis::graph::types::PeerId;
+    use anamnesis::peer::SourceKind;
+
+    let provider: Arc<dyn EmbeddingProvider> = Arc::new(TestEmbedder::default());
+    let mut mem = Memory::in_memory_with_provider(provider).expect("in_memory_with_provider");
+
+    mem.engine_mut()
+        .ingest(Observation {
+            name: "raw".into(),
+            summary: None,
+            content: "raw content".into(),
+            embedding: None,
+            confidence: 0.9,
+            node_type: KnowledgeType::Semantic,
+            entity_tags: vec![],
+            origin: Origin {
+                peer_id: PeerId(0),
+                source_kind: SourceKind::AgentObservation,
+                session_id: "raw-session".into(),
+                scope: ScopePath::universal(),
+                confidence: 0.9,
+            },
+            timestamp: Timestamp(1),
+            valid_from: None,
+            valid_until: None,
+        })
+        .unwrap();
+
+    assert_eq!(
+        mem.engine().graph().node_count(),
+        1,
+        "raw ingest via engine_mut must be visible"
+    );
+}
+
+/// `flush_all` finalizes all pending sessions at once.
+#[test]
+fn flush_all_finalizes_multiple_sessions() {
+    let provider: Arc<dyn EmbeddingProvider> = Arc::new(TestEmbedder::default());
+    let mut mem = Memory::in_memory_with_provider(provider).expect("in_memory_with_provider");
+
+    // Two sessions, one turn each (no buffered semantic yet before flush_all).
+    mem.add("sess-a", "Alice", "hello from a", Timestamp(100))
+        .unwrap();
+    mem.add("sess-b", "Bob", "hello from b", Timestamp(200))
+        .unwrap();
+
+    // 2 episodics, 0 semantics yet.
+    assert_eq!(mem.engine().graph().node_count(), 2);
+
+    mem.flush_all().unwrap();
+
+    // Each session finalizes its last buffered turn: 2 epi + 2 sem.
+    assert_eq!(
+        mem.engine().graph().node_count(),
+        4,
+        "flush_all must finalize both sessions"
+    );
+}
+
+/// Entity tags must include session-<norm> and speaker-<norm> but NOT a dataset tag.
+#[test]
+fn entity_tags_contain_session_and_speaker_no_dataset() {
+    let provider: Arc<dyn EmbeddingProvider> = Arc::new(TestEmbedder::default());
+    let mut mem = Memory::in_memory_with_provider(provider).expect("in_memory_with_provider");
+
+    let r = mem
+        .add("My Session", "Alice Smith", "hi", Timestamp(1))
+        .unwrap();
+    let g = mem.engine().graph();
+    let node = g.get_node(r.episodic).unwrap();
+
+    let tags = &node.entity_tags;
+    assert!(
+        tags.iter().any(|t| t == "session-my-session"),
+        "must have session-my-session tag, got: {tags:?}"
+    );
+    assert!(
+        tags.iter().any(|t| t == "speaker-alice-smith"),
+        "must have speaker-alice-smith tag, got: {tags:?}"
+    );
+    assert!(
+        !tags.iter().any(|t| t.starts_with("dataset-")),
+        "must NOT have a dataset- tag, got: {tags:?}"
+    );
+}
+
+/// The summary field must be `"{speaker} turn {1-based-index}"`.
+#[test]
+fn summary_matches_speaker_turn_index() {
+    let provider: Arc<dyn EmbeddingProvider> = Arc::new(TestEmbedder::default());
+    let mut mem = Memory::in_memory_with_provider(provider).expect("in_memory_with_provider");
+
+    let r0 = mem
+        .add("s", "Alice", "first turn text", Timestamp(1))
+        .unwrap();
+    let r1 = mem
+        .add("s", "Bob", "second turn text", Timestamp(2))
+        .unwrap();
+    mem.flush_session("s").unwrap();
+
+    let g = mem.engine().graph();
+    let epi0 = g.get_node(r0.episodic).unwrap();
+    let epi1 = g.get_node(r1.episodic).unwrap();
+
+    assert_eq!(
+        epi0.summary.as_deref(),
+        Some("Alice turn 1"),
+        "first turn summary"
+    );
+    assert_eq!(
+        epi1.summary.as_deref(),
+        Some("Bob turn 2"),
+        "second turn summary"
+    );
+}

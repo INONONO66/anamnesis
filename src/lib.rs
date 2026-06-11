@@ -19,10 +19,15 @@ pub mod embedding;
 pub mod error;
 pub mod graph;
 pub mod mechanics;
+pub mod memory;
 pub mod peer;
 pub mod query;
 pub mod snapshot;
 pub mod storage;
+
+// Framework API — the validated consumer layer.
+pub use memory::AddReceipt;
+pub use memory::Memory;
 
 // Core re-exports
 pub use api::{
