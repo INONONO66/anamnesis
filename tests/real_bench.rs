@@ -503,3 +503,67 @@ fn embed_cache_second_build_makes_zero_provider_calls() {
 
     std::fs::remove_dir_all(cache_dir).ok();
 }
+
+#[test]
+fn dump_features_populates_matched_units_and_total_relevant() {
+    let loaded = parse_benchmark_dataset(
+        BenchDatasetName::Locomo,
+        &json!([{
+            "session_1": [
+                {"dia_id": "D1:1", "speaker": "Caroline", "text": "Caroline adopted a corgi named Pixel."},
+                {"dia_id": "D1:2", "speaker": "Melanie", "text": "Pixel likes agility practice."}
+            ],
+            "qa": [{
+                "question": "What is Caroline's corgi named?",
+                "answer": "Pixel",
+                "category": 1,
+                "evidence": ["D1:1"]
+            }]
+        }]),
+        Some(1),
+    )
+    .expect("LoCoMo JSON should parse");
+
+    let embedder = CountingEmbedder::default();
+    let built = build_memory_graph(&loaded, &embedder, None).expect("graph builds");
+
+    let evaluated = evaluate_questions(
+        &built,
+        &loaded.questions,
+        &embedder,
+        &EvalOptions {
+            top_k: 10,
+            dump_features: true,
+            ..Default::default()
+        },
+    )
+    .expect("evaluation with dump_features succeeds");
+
+    assert_eq!(evaluated.len(), 1);
+    let eval = &evaluated[0];
+    assert!(
+        !eval.features.is_empty(),
+        "dump_features=true must produce feature rows"
+    );
+    for row in &eval.features {
+        // total_relevant must be non-zero (one evidence turn exists)
+        assert!(
+            row.total_relevant > 0,
+            "total_relevant must be set on every row"
+        );
+        // label must be consistent with matched_units
+        assert_eq!(
+            row.label,
+            !row.matched_units.is_empty(),
+            "label must equal !matched_units.is_empty() for row at rank {}",
+            row.rank
+        );
+    }
+    // At least one row must have a non-empty matched_units (the evidence turn)
+    assert!(
+        eval.features
+            .iter()
+            .any(|row| !row.matched_units.is_empty()),
+        "at least one feature row must match the evidence turn"
+    );
+}

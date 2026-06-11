@@ -42,6 +42,11 @@ pub struct ReadoutFeatureRow {
     /// Gold relevance of this node's provenance (independent per node — no
     /// novelty dedup, unlike the metric surface).
     pub label: bool,
+    /// Raw gold units matched by this node's provenance (NO cross-row novelty
+    /// dedup — the fit tool replays dedup in rank order, mirroring metrics.rs).
+    pub matched_units: Vec<String>,
+    /// Total relevant gold units for the question (denominator for recall/NDCG).
+    pub total_relevant: usize,
     pub activation: f64,
     pub phi: f64,
     pub salience: f64,
@@ -158,14 +163,12 @@ fn evaluate_question(
             .take(200)
             .filter_map(|(index, candidate)| {
                 let provenance = graph.provenance_by_node.get(&candidate.node_id)?;
-                let label = !question
-                    .gold
-                    .matched_units(
-                        &provenance.raw_session_id,
-                        provenance.raw_turn_id.as_deref(),
-                        &provenance.content,
-                    )
-                    .is_empty();
+                let matched_units = question.gold.matched_units(
+                    &provenance.raw_session_id,
+                    provenance.raw_turn_id.as_deref(),
+                    &provenance.content,
+                );
+                let label = !matched_units.is_empty();
                 Some(ReadoutFeatureRow {
                     question_id: question.question_id.clone(),
                     question_type: question.question_type.clone(),
@@ -173,6 +176,8 @@ fn evaluate_question(
                     rank: index + 1,
                     node_id: candidate.node_id.0,
                     label,
+                    matched_units,
+                    total_relevant,
                     activation: candidate.activation,
                     phi: candidate.phi,
                     salience: candidate.salience,
