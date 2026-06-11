@@ -43,13 +43,15 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::Engine;
-use crate::api::{EngineConfig, IngestResult, Observation};
+use crate::api::{EngineConfig, IngestResult, Observation, TickReport};
 use crate::embedding::EmbeddingProvider;
 use crate::error::Error;
 use crate::graph::node::Origin;
 use crate::graph::types::PeerId;
 use crate::graph::{EdgeType, KnowledgeType, NodeId, ScopePath, Timestamp};
+use crate::mechanics::social::ConfidenceLevel;
 use crate::peer::SourceKind;
+use crate::query::{ContextPackage, SearchInput};
 use crate::storage::{SqliteStorage, StorageAdapter};
 
 /// Per-session state for incremental window finalization.
@@ -394,6 +396,152 @@ impl<S: StorageAdapter + Clone> Memory<S> {
     pub fn engine_mut(&mut self) -> &mut Engine<S> {
         &mut self.engine
     }
+}
+
+// ── Search / recall / used / tick ─────────────────────────────────────────────
+
+/// A single ranked memory hit from a [`Recall`].
+///
+/// Returned by [`Memory::search`] and [`Memory::search_at`] from the engine's
+/// pre-packaging readout surface — the same surface the benchmarks measure.
+#[derive(Debug, Clone)]
+pub struct Hit {
+    /// Id of the retrieved node.
+    pub node_id: NodeId,
+    /// Full content of the node (L2).
+    pub text: String,
+    /// Readout score (ranking key; higher = more relevant).
+    pub score: f64,
+    /// Timestamp when the node was created.
+    pub at: Timestamp,
+    /// Normalized speaker extracted from the node's `speaker-<norm>` entity tag, if any.
+    pub speaker: Option<String>,
+    /// Normalized session extracted from the node's `session-<norm>` entity tag, if any.
+    pub session: Option<String>,
+}
+
+/// Output of [`Memory::search`] / [`Memory::search_at`].
+///
+/// `hits` are the ranked results from the pre-packaging readout surface.
+/// `package` is the assembled [`ContextPackage`] — pass it to [`Memory::used`]
+/// when you actually use the results (commit-gated reinforcement).
+#[derive(Debug, Clone)]
+pub struct Recall {
+    /// Top-`limit` hits ranked by readout score, highest first.
+    pub hits: Vec<Hit>,
+    /// Assembled context package — consume via [`Memory::used`] to reinforce.
+    pub package: ContextPackage,
+}
+
+impl<S: StorageAdapter + Clone> Memory<S> {
+    /// Search memory at wall-clock `now`.
+    ///
+    /// Equivalent to `search_at(query, limit, Timestamp::now())`. For deterministic
+    /// or time-travel queries use [`search_at`](Memory::search_at) instead.
+    pub fn search(&mut self, query: &str, limit: usize) -> Result<Recall, Error> {
+        self.search_at(query, limit, Timestamp::now())
+    }
+
+    /// Search memory at an explicit `now` timestamp.
+    ///
+    /// First flushes all pending session buffers so that every previously added
+    /// turn is searchable (even the last unfinalized one). Then embeds the query,
+    /// runs the bench-default `SearchInput` through the engine, and maps the
+    /// `trace.readout` top-`limit` candidates to [`Hit`]s.
+    ///
+    /// The [`Recall`] contains both the ranked hits and the assembled
+    /// [`ContextPackage`]; pass the `Recall` to [`used`](Memory::used) when the
+    /// results are actually consumed.
+    pub fn search_at(
+        &mut self,
+        query: &str,
+        limit: usize,
+        now: Timestamp,
+    ) -> Result<Recall, Error> {
+        // Flush pending buffers so the last buffered turn is searchable.
+        self.flush_all()?;
+
+        // Embed the query via the provider.
+        let embedding = embed_one(&*self.provider, query)?;
+
+        // Build bench-default SearchInput: text + query_embedding + limit +
+        // seed_limit = Some(limit.max(1)); speaker cues OFF; now = explicit.
+        let input = SearchInput {
+            text: query.to_string(),
+            query_embedding: Some(embedding),
+            limit,
+            seed_limit: Some(limit.max(1)),
+            now,
+            entity_tags: Vec::new(), // speaker cues OFF (bench default)
+            ..SearchInput::default()
+        };
+
+        let result = self.engine.search(input)?;
+
+        // Map trace.readout top-limit to Hits. Skip entries whose node lookup fails.
+        let hits: Vec<Hit> = result
+            .trace
+            .readout
+            .iter()
+            .take(limit)
+            .filter_map(|candidate| {
+                let node = self.engine.graph().get_node(candidate.node_id).ok()?;
+                let (speaker, session) = parse_entity_tags(&node.entity_tags);
+                Some(Hit {
+                    node_id: candidate.node_id,
+                    text: node.content.clone(),
+                    score: candidate.score,
+                    at: node.created_at,
+                    speaker,
+                    session,
+                })
+            })
+            .collect();
+
+        Ok(Recall {
+            hits,
+            package: result.package,
+        })
+    }
+
+    /// Commit a [`Recall`]'s context package with [`ConfidenceLevel::Medium`] reinforcement.
+    ///
+    /// Call this **only** for results you actually used — reinforcement is
+    /// commit-gated. Calling `used` strengthens the accessed nodes' retained-action
+    /// reservoirs, making them more salient in future retrievals.
+    pub fn used(&mut self, recall: Recall) -> Result<(), Error> {
+        self.engine
+            .commit(recall.package, Some(ConfidenceLevel::Medium))?;
+        Ok(())
+    }
+
+    /// Advance the engine's decay clock to `now`.
+    ///
+    /// Decays the retained-action reservoir `A_i` for all nodes and re-projects
+    /// salience. Returns the tick report for observability.
+    pub fn tick(&mut self, now: Timestamp) -> Result<TickReport, Error> {
+        self.engine.tick(now)
+    }
+}
+
+// ── Search helpers ────────────────────────────────────────────────────────────
+
+/// Extract `(speaker, session)` from a node's entity tags.
+///
+/// Looks for `speaker-<norm>` and `session-<norm>` tags (the convention used
+/// by the bench recipe). Returns `None` for each if the corresponding tag is
+/// absent.
+fn parse_entity_tags(tags: &[String]) -> (Option<String>, Option<String>) {
+    let mut speaker = None;
+    let mut session = None;
+    for tag in tags {
+        if let Some(s) = tag.strip_prefix("speaker-") {
+            speaker = Some(s.to_string());
+        } else if let Some(s) = tag.strip_prefix("session-") {
+            session = Some(s.to_string());
+        }
+    }
+    (speaker, session)
 }
 
 // ── Recipe helpers ────────────────────────────────────────────────────────────

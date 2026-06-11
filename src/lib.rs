@@ -27,7 +27,9 @@ pub mod storage;
 
 // Framework API — the validated consumer layer.
 pub use memory::AddReceipt;
+pub use memory::Hit;
 pub use memory::Memory;
+pub use memory::Recall;
 
 // Core re-exports
 pub use api::{
