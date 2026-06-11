@@ -4,6 +4,11 @@ Per [ADR-0010](../adr/0010-calibrated-priors-not-laws.md), every refit of a
 calibrated prior records its data, procedure, and result here. Refit when graph
 topology, agent behavior, embedding geometry, or dataset changes.
 
+Evidence file names below refer to local benchmark outputs (not committed —
+they are multi-MB run reports). Every number is reproducible from the named
+dataset + command via `cargo bench --features embed --bench real_memory`;
+runs are deterministic for a fixed dataset and embedding model.
+
 ## 2026-06-11 v2 — readout coefficients refit (deduped NDCG objective)
 
 - **Supersedes** the v1 fit below. Tool change: `fit_readout` now replays the
@@ -78,13 +83,19 @@ topology, agent behavior, embedding geometry, or dataset changes.
     collector returns NodeId-ordered arbitrary matches) flood seed fusion:
     Recall@20 0.504 → 0.285. Bench default is cues-off (`--speaker-cues` to
     re-enable for ablations) until the entity channel is selectivity-aware.
+- **LongMemEval-S full official split (500 questions), v2 weights:** Recall@20
+  0.938, MRR 0.872, NDCG 0.808, hit@1 0.826, hit@20 0.980, p50 25.7ms.
+  Per type: knowledge-update 0.981, multi-session 0.924, temporal-reasoning
+  0.884, single-session-assistant 1.000, single-session-user 0.986,
+  single-session-preference 0.900. Evidence:
+  `real-memory-longmemeval-full500-20260611.json`.
 - **LongMemEval-S stratified check (30/type, 180 questions, all six types):**
   with the shipped point — Recall@20 0.896, MRR 0.817, NDCG 0.770, hit@1
   0.744, p50 17.6ms. Hard types hold up: multi-session 0.752,
   temporal-reasoning 0.839, knowledge-update 0.983. (The prior 2026-06-10
   measurement covered only 50 single-session-user questions: 0.90 / 0.6725.)
   Evidence: `real-memory-longmemeval-strat30-postfit-20260611.json`.
-- **Evidence:** `.omo/evidence/real-memory-locomo-fixed-20260611.json`,
-  `.omo/evidence/fit-readout-20260611.json`,
-  `.omo/evidence/abl-*.json` (ablation matrix),
-  `.omo/evidence/real-memory-locomo-postfit-20260611.json`.
+- **Evidence:** `real-memory-locomo-fixed-20260611.json`,
+  `fit-readout-20260611.json`,
+  `abl-*.json` (ablation matrix),
+  `real-memory-locomo-postfit-20260611.json`.
