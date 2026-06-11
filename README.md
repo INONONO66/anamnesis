@@ -94,7 +94,7 @@ provenance, ablations, and negative results).
 
 | Benchmark | Gold granularity | Recall@20 | MRR | NDCG@20 | p50 |
 |:--|:--|--:|--:|--:|--:|
-| **LongMemEval-S** (stratified 30/type, all 6 types, 180 q) | session-level | **94.7%** | **0.861** | 0.824 | ~18 ms |
+| **LongMemEval-S** (full official split, 500 q, all 6 types) | session-level | **93.8%** | **0.872** | 0.808 | ~26 ms |
 | **LoCoMo** (full non-adversarial, 1540 q) | turn-level strict | **77.6%** | **0.291** | 0.386 | ~30 ms |
 
 Read these numbers for what they are:
@@ -102,7 +102,7 @@ Read these numbers for what they are:
 - **Retrieval metrics, not answer accuracy.** Published memory-system scores
   (Mem0, Zep, LangMem, …) are LLM-as-judge *answer* scores — a different
   measurement. These numbers bound what an answer stage could see in context
-  (LoCoMo hit@20 = 84.6%, LongMemEval hit@1 = 81.1%).
+  (LoCoMo hit@20 = 84.6%; LongMemEval hit@1 = 82.6%, hit@20 = 98.0%).
 - **No usage learning is measured here.** Runs are cold-start (no `commit`
   warmup), so the readout calibration intentionally zeroes the salience
   coefficient (`w_s = 0`) — on unused memory, salience carries only
