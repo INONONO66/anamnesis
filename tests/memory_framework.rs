@@ -600,56 +600,6 @@ fn search_auto_flushes_pending_buffers() {
 /// on a direction, we use the strongest invariant the public surface allows: the
 /// committed node must remain in the top-5 readout of the second search (rank
 /// stability). If it was relevant before, it remains relevant after commit (the
-/// commit cannot destroy relevance).
-#[test]
-fn used_reinforces_top_node() {
-    let mut mem = make_memory();
-
-    // Use timestamps close to real wall clock so commit's internal `now` doesn't
-    // introduce large decay relative to the node creation times.
-    let base = Timestamp::now();
-    let t0 = Timestamp(base.0.saturating_sub(3_000));
-    let t1 = Timestamp(base.0.saturating_sub(2_000));
-    let t2 = Timestamp(base.0.saturating_sub(1_000));
-
-    mem.add("r", "A", "reinforcement learning reward signal", t0)
-        .unwrap();
-    mem.add("r", "B", "unrelated topic about cooking", t1)
-        .unwrap();
-    mem.add("r", "A", "another unrelated topic about cooking", t2)
-        .unwrap();
-    mem.flush_all().unwrap();
-
-    let search_now = Timestamp::now();
-
-    // First search — record the top-hit node_id and score.
-    let recall1 = mem
-        .search_at("reinforcement learning", 5, search_now)
-        .expect("first search");
-    assert!(!recall1.hits.is_empty(), "first search must return hits");
-    let top_node = recall1.hits[0].node_id;
-
-    // Commit the first recall with Medium confidence (reinforces accessed nodes).
-    mem.used(recall1).expect("used should succeed");
-
-    // Second search — the committed node must still appear in the top-5.
-    // Rank stability is the strongest invariant we can assert without peeking
-    // at reservoir internals: a committed node cannot become less retrievable
-    // than it was before reinforcement.
-    let recall2 = mem
-        .search_at("reinforcement learning", 5, search_now)
-        .expect("second search");
-    assert!(!recall2.hits.is_empty(), "second search must return hits");
-
-    let still_present = recall2.hits.iter().any(|h| h.node_id == top_node);
-    assert!(
-        still_present,
-        "post-commit the reinforced node must remain in the top-5 readout; \
-         top_node={top_node:?}, hits: {:?}",
-        recall2.hits.iter().map(|h| h.node_id).collect::<Vec<_>>()
-    );
-}
-
 /// Test 4 — `search_at` with an explicit past `now` works on nodes with old timestamps.
 ///
 /// Nodes created at old timestamps must be retrievable when searching with any
@@ -943,10 +893,8 @@ fn temporal_edge_across_search_boundary() {
 }
 
 // ---------------------------------------------------------------------------
-// Minor rename: used_commits_without_derank (was used_reinforces_top_node)
 // ---------------------------------------------------------------------------
 
-/// Renamed from `used_reinforces_top_node` → `used_commits_without_derank`.
 /// Proves rank stability (what it proves), not reinforcement direction.
 /// The committed node must remain in the top-5 readout after `used`.
 #[test]
