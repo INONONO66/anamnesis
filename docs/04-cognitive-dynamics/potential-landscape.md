@@ -21,6 +21,7 @@ query field Q -> potential bias phi_i -> seed distribution e_i -> activation flo
 | scope relation | Visibility and relevance |
 | retained action | Prior need-odds |
 | identity prior | Active agent identity context |
+| temporal proximity | Closeness of a site's timestamp to explicit time cues in the query |
 
 ## Potential Bias
 
@@ -35,6 +36,7 @@ phi_i =
   + beta_scope    * scope_weight_i
   + beta_prior    * A_i
   + beta_identity * identity_bias_i
+  + beta_temporal * temporal_score_i
 ```
 
 Then normalize to an RWR restart distribution:
@@ -44,6 +46,14 @@ seed_i = softmax(phi_i / tau)
 ```
 
 `beta_prior = 1` by design: `A_i` is already log prior-odds, so by ACT-R/Bayes odds-additivity it enters `phi_i` with unit coefficient (no calibration). The remaining `beta` feature weights and the softmax temperature `tau` are calibrated priors — one regression object plus one temperature — and can be fit from accepted readout data.
+
+`temporal_score_i` is derived from deterministic time cues in the query text —
+explicit dates (ISO, day-month-year, month-year) and relative expressions
+("yesterday", "last summer") resolved against the query's `now`. It is `1.0`
+when the site's timestamp falls inside a cued range and decays exponentially
+outside it with the declared scale `TEMPORAL_PROXIMITY_DECAY_DAYS`. Like every
+other bias input it is query-local and transient: no cue ever mutates retained
+action, salience, or conductance.
 
 ## Uses
 

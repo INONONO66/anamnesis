@@ -223,8 +223,9 @@ mod tests {
     // ── readout score ────────────────────────────────────────────────────────
 
     #[test]
-    fn additive_log_odds_default_unit_coefficients() {
-        // With unit coefficients the score is the additive sum of terms.
+    fn additive_log_odds_with_calibrated_coefficients() {
+        // The score is the weighted additive sum of terms under the current
+        // calibrated regression object (calibration-records.md 2026-06-11).
         let input = ReadoutInputs {
             activation: 0.5,
             phi: 1.0,
@@ -234,8 +235,9 @@ mod tests {
             trust_weight: 0.0,
             stress: 0.0,
         };
-        // logit(0.5) = 0, logit(0.5) = 0; so score = phi + scope = 2.0
-        assert!((readout_score(&input) - 2.0).abs() < 1e-9);
+        // logit(0.5) = 0 twice; score = W_PHI*phi + W_SCOPE*scope.
+        let expected = READOUT_W_PHI + READOUT_W_SCOPE;
+        assert!((readout_score(&input) - expected).abs() < 1e-9);
     }
 
     #[test]
@@ -252,13 +254,20 @@ mod tests {
     }
 
     #[test]
-    fn impedance_penalizes() {
+    fn impedance_term_calibrated_off_but_form_preserved() {
+        // `Z_i = -ln(a_i)` duplicates the activation signal, so calibration
+        // set `w_z = 0` (calibration-records.md 2026-06-11). The subtractive
+        // term stays in the form; with the current coefficient it is inert.
         let base = ReadoutInputs::default();
         let impeded = ReadoutInputs {
             impedance: 3.0,
             ..Default::default()
         };
-        assert!(readout_score(&impeded) < readout_score(&base));
+        let delta = readout_score(&base) - readout_score(&impeded);
+        assert!(
+            (delta - READOUT_W_Z * 3.0).abs() < 1e-12,
+            "impedance must subtract exactly w_z * Z_i, got delta {delta}"
+        );
     }
 
     #[test]

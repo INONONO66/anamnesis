@@ -21,12 +21,13 @@ fn search_input_default() {
 #[test]
 fn packaging_mode_variants() {
     let modes = [
+        PackagingMode::Balanced,
         PackagingMode::KnowledgeOnly,
         PackagingMode::KnowledgeWithProvenance,
         PackagingMode::PersonaWeighted,
         PackagingMode::Timeline,
     ];
-    assert_eq!(modes.len(), 4);
+    assert_eq!(modes.len(), 5);
 }
 
 #[test]

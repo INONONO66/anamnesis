@@ -1,6 +1,6 @@
 [package]
 name = "anamnesis"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Cognitive memory engine for LLMs — Bayesian conductive-network recall with perception, dissipation, and frustration"
@@ -26,6 +26,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12", features = ["json", "blocking"] }
 dhat = "0.3"
+libc = "0.2"
 
 [[bench]]
 name = "ingestion"
@@ -83,6 +84,17 @@ name = "pre_ingest"
 path = "benches/eval/pre_ingest.rs"
 harness = false
 required-features = ["embed"]
+
+[[bench]]
+name = "real_memory"
+path = "benches/eval/real_memory.rs"
+harness = false
+required-features = ["embed"]
+
+[[bench]]
+name = "fit_readout"
+path = "benches/eval/fit_readout.rs"
+harness = false
 
 [[bench]]
 name = "query_spreading"

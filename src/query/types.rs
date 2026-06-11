@@ -394,7 +394,11 @@ impl Default for SearchInput {
 /// Packaging mode for ContextPackage assembly.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PackagingMode {
-    /// Knowledge fragments only (default).
+    /// Preserve the readout's bucket shape unchanged (readout-scoring.md
+    /// "Bucket Handling"). Default for plain queries.
+    Balanced,
+    /// Knowledge fragments only. Retained for API stability / future policy
+    /// use; no longer auto-selected by `decide_packaging`.
     KnowledgeOnly,
     /// Knowledge + provenance (source episodes).
     KnowledgeWithProvenance,
@@ -402,6 +406,37 @@ pub enum PackagingMode {
     PersonaWeighted,
     /// Timeline-ordered (temporal emphasis).
     Timeline,
+}
+
+/// One scored candidate in the pre-packaging readout, with the per-term
+/// score components of the authoritative seven-term additive log-odds score
+/// ([readout-scoring.md] "Trace"). Query-local, never stored.
+///
+/// All fields are captured before any packaging-mode filter, validity filter,
+/// or result-limit trim, so the `readout` vector on [`SearchTrace`] is always
+/// a *superset* of the final [`ContextPackage`] surface.
+///
+/// [readout-scoring.md]: ../../docs/04-cognitive-dynamics/readout-scoring.md
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReadoutCandidate {
+    /// Site id.
+    pub node_id: crate::graph::NodeId,
+    /// Final readout score (ranking key).
+    pub score: f64,
+    /// Query-local activation response `a_i`.
+    pub activation: f64,
+    /// Query-field potential bias `phi_i`.
+    pub phi: f64,
+    /// Salience projection `s_i`.
+    pub salience: f64,
+    /// Effective impedance `Z_i`.
+    pub impedance: f64,
+    /// Scope compatibility weight.
+    pub scope_weight: f64,
+    /// Origin/peer reliability weight.
+    pub trust_weight: f64,
+    /// Frustration stress attached to selected contradictions.
+    pub stress: f64,
 }
 
 /// Trace of strategies used during a search operation.
@@ -433,6 +468,13 @@ pub struct SearchTrace {
     /// the RWR stationary vector (captured by `residual`/`iterations` above) remains
     /// the true fixed point. Default (`E = 0`) for an empty result.
     pub energy: crate::mechanics::energy::EnergyTerms,
+    /// Ranked pre-packaging readout candidates with score components
+    /// ([readout-scoring.md] "Trace"). Capped at a fixed trace-size memory
+    /// bound; under that cap the final [`ContextPackage`] is a subset of this
+    /// surface. Query-local, never stored.
+    ///
+    /// [readout-scoring.md]: ../../docs/04-cognitive-dynamics/readout-scoring.md
+    pub readout: Vec<ReadoutCandidate>,
 }
 
 /// Internal search plan — auto-derived from SearchInput.
@@ -455,6 +497,8 @@ pub(crate) struct SearchPlan {
     pub seed_limit: usize,
     /// Packaging mode for result assembly.
     pub packaging_mode: PackagingMode,
+    /// Explicit time cues parsed from the query text (query-local, never stored).
+    pub time_cues: Vec<crate::query::temporal::TimeRange>,
 }
 
 /// Result of a unified search operation.

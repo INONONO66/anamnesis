@@ -9,6 +9,7 @@ pub mod packaging;
 pub mod rerank;
 pub mod rwr;
 pub mod scoring;
+pub(crate) mod temporal;
 pub mod types;
 
 pub use activation::edge_valid_at;
@@ -27,6 +28,6 @@ pub use rwr::{ActivationResponse, PathCurrentMap, additive_rwr, additive_rwr_wit
 pub use scoring::{ReadoutInputs, TieBreakKey, rank, readout_score, scope_weight, tie_break};
 pub use types::{
     AccessedSite, ActivatedTension, CoReadoutPair, CommitTrace, ContextPackage, ConvergenceConfig,
-    Fragment, PackagingMode, PathUsedEdge, Query, QueryConfig, SearchInput, SearchResult,
-    SearchTrace, Tension, TokenBudget,
+    Fragment, PackagingMode, PathUsedEdge, Query, QueryConfig, ReadoutCandidate, SearchInput,
+    SearchResult, SearchTrace, Tension, TokenBudget,
 };

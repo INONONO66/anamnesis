@@ -113,7 +113,10 @@ fn identity_tension_preserved() {
 }
 
 #[test]
-fn knowledge_only_omits_source_memories_and_memory_tokens() {
+fn balanced_default_preserves_activated_memories_and_token_accounting() {
+    // Balanced packaging (the default for plain queries) is a no-op on the
+    // assembled package: episodic nodes that won activation appear in memories,
+    // and token accounting stays consistent (readout-scoring.md "Bucket Handling").
     let mut engine = engine();
     let source = ingest(
         &mut engine,
@@ -136,6 +139,10 @@ fn knowledge_only_omits_source_memories_and_memory_tokens() {
         })
         .expect("search should succeed");
 
+    assert_eq!(
+        result.trace.packaging_mode,
+        Some(anamnesis::query::PackagingMode::Balanced)
+    );
     assert!(
         result
             .package
@@ -143,9 +150,9 @@ fn knowledge_only_omits_source_memories_and_memory_tokens() {
             .iter()
             .any(|f| f.node_id == knowledge)
     );
-    assert!(!result.package.memories.iter().any(|f| f.node_id == source));
-    assert!(result.package.memories.is_empty());
-    assert_eq!(result.package.token_usage.memories_used, 0);
+    // Balanced preserves the assembled memories bucket unchanged.
+    assert!(result.package.memories.iter().any(|f| f.node_id == source));
+    // Token accounting must always be internally consistent.
     assert_eq!(
         result.package.token_usage.used,
         result.package.token_usage.identity_used
@@ -155,7 +162,9 @@ fn knowledge_only_omits_source_memories_and_memory_tokens() {
 }
 
 #[test]
-fn knowledge_only_drops_unlinked_episodic() {
+fn balanced_default_preserves_all_activated_episodic_nodes() {
+    // Under Balanced packaging, all episodic nodes that win activation appear in
+    // the memories bucket regardless of whether they have ExtractedFrom links.
     let mut engine = engine();
     let source = ingest(
         &mut engine,
@@ -192,9 +201,15 @@ fn knowledge_only_drops_unlinked_episodic() {
         })
         .expect("search should succeed");
 
-    assert!(!result.package.memories.iter().any(|f| f.node_id == source));
+    assert_eq!(
+        result.trace.packaging_mode,
+        Some(anamnesis::query::PackagingMode::Balanced)
+    );
+    // Both episodic nodes matched the query and won activation; both survive
+    // in the memories bucket under Balanced packaging.
+    assert!(result.package.memories.iter().any(|f| f.node_id == source));
     assert!(
-        !result
+        result
             .package
             .memories
             .iter()

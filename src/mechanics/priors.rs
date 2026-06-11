@@ -333,6 +333,15 @@ pub fn initialize_conductance(coupling_seed: f64) -> f64 {
 /// highest-potential cues. Lower `tau` = sharper. Fit from accepted readout data.
 pub const SEED_SOFTMAX_TAU: f64 = 1.0;
 
+/// Feature weight `beta_temporal` for the temporal-proximity term.
+/// CALIBRATED PRIOR — potential-field regression object.
+pub const BETA_TEMPORAL: f64 = 1.0;
+
+/// Temporal-proximity decay scale in days for query time cues:
+/// `temporal_score = exp(-days_outside_range / this)`.
+/// DECLARED density/temperature-class knob (ADR-0010), not a law.
+pub const TEMPORAL_PROXIMITY_DECAY_DAYS: f64 = 7.0;
+
 /// Feature weight `beta_text` for the lexical-match term of the potential bias.
 /// CALIBRATED PRIOR — one entry of the single potential-field regression object.
 pub const BETA_TEXT: f64 = 1.0;
@@ -358,18 +367,29 @@ pub const BETA_PRIOR: f64 = 1.0;
 // --- Readout score (readout-scoring.md, the authoritative 7-term form) ------
 //
 // The seven coefficients are ONE calibrated re-ranking regression object, not
-// seven independent knobs. The default is unit coefficients, which recovers the
-// plain additive log-odds sum `posterior = prior + sum of evidence`. They are
-// calibrated priors, not laws (ADR-0010); refit from accepted-readout data.
+// seven independent knobs. Unit coefficients recover the plain additive
+// log-odds sum `posterior = prior + sum of evidence`. They are calibrated
+// priors, not laws (ADR-0010); refit from accepted-readout data.
+//
+// CALIBRATED 2026-06-11 v2 (docs/07-quality-gates/calibration-records.md):
+// coordinate search over (w_a, w_phi, w_s, w_z) on the LoCoMo-10 even-sample
+// train split (`fit_readout`, replayed novelty-deduped NDCG@20 objective);
+// live-confirmed dev Recall@20 0.526 -> 0.778, MRR 0.183 -> 0.287.
+// `w_z = 0`: the RWR approximation `Z_i = -ln(a_i)` duplicates `logit(a_i)`.
+// `w_s = 0`: in no-usage data salience projects the creation-time reservoir
+// (encoding surprise), which is noise w.r.t. query alignment — refit with
+// real usage/commit data before relying on salience at readout.
 
 /// `w_a` — weight on the (logit-of) query-local activation response `a_i`.
-pub const READOUT_W_A: f64 = 1.0;
+pub const READOUT_W_A: f64 = 0.25;
 /// `w_phi` — weight on the potential bias `phi_i`.
-pub const READOUT_W_PHI: f64 = 1.0;
+pub const READOUT_W_PHI: f64 = 16.0;
 /// `w_s` — weight on the salience projection `logit(s_i)`.
-pub const READOUT_W_S: f64 = 1.0;
+pub const READOUT_W_S: f64 = 0.0;
 /// `w_z` — penalty weight on the effective impedance `Z_i` (subtracted).
-pub const READOUT_W_Z: f64 = 1.0;
+/// Calibrated to zero: the RWR approximation `Z_i = -ln(a_i)` makes the term
+/// redundant with the activation term (same signal, double-counted).
+pub const READOUT_W_Z: f64 = 0.0;
 /// `w_scope` — weight on the scope-compatibility term.
 pub const READOUT_W_SCOPE: f64 = 1.0;
 /// `w_trust` — weight on the origin/peer-reliability term.

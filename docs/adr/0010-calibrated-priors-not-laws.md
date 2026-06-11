@@ -46,7 +46,7 @@ Free behavioral priors:
 - `w_readout` — readout re-ranking coefficient object.
 - `edge_type_factor` — ordinal per-type within-row conductance prior.
 
-Declared density/temperature knobs: `tau` (seed softmax temperature), `conductance_threshold` (cold-start edge density), `eta_leak` (idle-edge leak rate), `b` (activation-budget threshold, `= 0` by convention).
+Declared density/temperature knobs: `tau` (seed softmax temperature), `conductance_threshold` (cold-start edge density), `eta_leak` (idle-edge leak rate), `b` (activation-budget threshold, `= 0` by convention), `TEMPORAL_PROXIMITY_DECAY_DAYS` (temporal-proximity decay scale in days for query time cues).
 
 Numerical guards (not behavioral): `LOGIT_BACKFILL_EPS`, `C_MAX`, `rwr_tolerance`.
 

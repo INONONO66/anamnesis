@@ -20,6 +20,8 @@ pub(crate) mod seeds;
 use crate::api::Engine;
 use crate::storage::StorageAdapter;
 
+const DEFAULT_SOURCE_CANDIDATE_LIMIT: usize = 64;
+
 /// Execute unified search — combines text search, vector similarity, and graph traversal.
 ///
 /// Automatically derives a `SearchPlan` from the input and executes the appropriate
@@ -42,11 +44,15 @@ pub(crate) fn search<S: StorageAdapter + Clone>(
     } else {
         Vec::new()
     };
+    let source_candidate_limit = input
+        .limit
+        .max(plan.seed_limit)
+        .max(DEFAULT_SOURCE_CANDIDATE_LIMIT);
 
     if plan.use_text {
         for sub_query in &sub_queries {
             let text_candidates =
-                candidates::collect_text_candidates(storage, sub_query, input.limit.max(10));
+                candidates::collect_text_candidates(storage, sub_query, source_candidate_limit);
             if !text_candidates.is_empty() {
                 if !strategies_used
                     .iter()
@@ -64,7 +70,7 @@ pub(crate) fn search<S: StorageAdapter + Clone>(
             let vector_candidates = candidates::collect_vector_candidates(
                 storage,
                 query_embedding,
-                input.limit.max(10),
+                source_candidate_limit,
             );
             if !vector_candidates.is_empty() {
                 per_source.push(vector_candidates);
@@ -74,8 +80,11 @@ pub(crate) fn search<S: StorageAdapter + Clone>(
     }
 
     if plan.use_entity {
-        let entity_candidates =
-            candidates::collect_entity_candidates(storage, &input.entity_tags, input.limit.max(10));
+        let entity_candidates = candidates::collect_entity_candidates(
+            storage,
+            &input.entity_tags,
+            source_candidate_limit,
+        );
         if !entity_candidates.is_empty() {
             per_source.push(entity_candidates);
             strategies_used.push("entity_tags".to_string());
@@ -98,15 +107,22 @@ pub(crate) fn search<S: StorageAdapter + Clone>(
     };
 
     let mut response = crate::query::ActivationResponse::default();
+    let mut field = crate::query::field::QueryField::new();
 
     if plan.use_graph {
         let identity_prior = identity_prior_for_search(storage, &config);
         let identity_prior_ref = (!identity_prior.is_empty()).then_some(&identity_prior);
-        let (graph_response, recall_trace) =
-            recall::run_graph_recalls(storage, &selected_seeds, &config, identity_prior_ref);
+        let (graph_response, recall_trace, recall_field) = recall::run_graph_recalls(
+            storage,
+            &selected_seeds,
+            &config,
+            identity_prior_ref,
+            &plan.time_cues,
+        );
 
         flow_invocations = recall_trace.invocation_count as usize;
         response = graph_response;
+        field = recall_field;
     }
 
     if flow_invocations > 0 {
@@ -122,6 +138,7 @@ pub(crate) fn search<S: StorageAdapter + Clone>(
             input: &input,
             plan: &plan,
             strategies_used,
+            field: &field,
         },
     )
 }

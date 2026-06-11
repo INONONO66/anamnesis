@@ -13,7 +13,9 @@ use crate::api::Engine;
 use crate::error::Error;
 use crate::graph::{EdgeType, KnowledgeType, NodeId, ScopePath, Timestamp};
 use crate::mechanics::attraction::cosine_similarity;
-use crate::query::assembly::{ScoredNode, assemble_context_package, determine_scope};
+use crate::query::assembly::{
+    ScoredNode, assemble_context_package, determine_scope, estimate_tokens,
+};
 use crate::query::rwr::ActivationResponse;
 use crate::query::scoring::{ReadoutInputs, TieBreakKey, rank, readout_score, scope_weight};
 use crate::query::types::SearchPlan;
@@ -22,6 +24,11 @@ use crate::query::{
 };
 use crate::storage::StorageAdapter;
 
+/// Trace-size memory bound for the pre-packaging readout candidate list. Not a
+/// behavioral prior (ADR-0010) — it only caps the diagnostic
+/// `SearchTrace::readout` vector and never affects packaging or result limits.
+const READOUT_TRACE_CAP: usize = 200;
+
 pub(crate) struct SearchAssemblyRequest<'a> {
     pub(crate) response: &'a ActivationResponse,
     pub(crate) seed_ids: &'a [NodeId],
@@ -29,6 +36,7 @@ pub(crate) struct SearchAssemblyRequest<'a> {
     pub(crate) input: &'a SearchInput,
     pub(crate) plan: &'a SearchPlan,
     pub(crate) strategies_used: Vec<String>,
+    pub(crate) field: &'a crate::query::field::QueryField,
 }
 
 pub(crate) fn assemble_search_result<S: StorageAdapter + Clone>(
@@ -45,6 +53,7 @@ pub(crate) fn assemble_search_result<S: StorageAdapter + Clone>(
         path_current_count: request.response.path_current.len(),
         packaging_mode: None,
         energy: crate::mechanics::energy::EnergyTerms::default(),
+        readout: Vec::new(),
     };
 
     if request.response.activation.is_empty() {
@@ -54,12 +63,13 @@ pub(crate) fn assemble_search_result<S: StorageAdapter + Clone>(
         });
     }
 
-    let mut package = assemble_graph_recall_package(
+    let (mut package, readout_candidates) = assemble_graph_recall_package(
         engine,
         request.response,
         request.seed_ids,
         request.config,
         request.input,
+        request.field,
     );
     let packaging_mode =
         crate::query::decide_packaging(&package.tensions, request.plan, &request.input.text);
@@ -74,6 +84,11 @@ pub(crate) fn assemble_search_result<S: StorageAdapter + Clone>(
     if request.input.now.0 > 0 {
         apply_validity_filter(engine, &mut package, request.input.now);
     }
+    apply_result_limit(
+        &mut package,
+        request.input.limit,
+        request.config.chars_per_token,
+    );
 
     // Capture the read-only commit trace from the FINAL package (after packaging mode
     // and validity filtering), so a later `commit` only integrates work for sites that
@@ -94,6 +109,7 @@ pub(crate) fn assemble_search_result<S: StorageAdapter + Clone>(
     let mut trace = trace;
     trace.packaging_mode = Some(packaging_mode);
     trace.energy = energy;
+    trace.readout = readout_candidates;
 
     Ok(SearchResult { package, trace })
 }
@@ -104,7 +120,8 @@ fn assemble_graph_recall_package<S: StorageAdapter + Clone>(
     seed_ids: &[NodeId],
     config: &QueryConfig,
     input: &crate::query::SearchInput,
-) -> ContextPackage {
+    field: &crate::query::field::QueryField,
+) -> (ContextPackage, Vec<crate::query::ReadoutCandidate>) {
     let storage = engine.graph.storage();
     let now = config.now.unwrap_or_else(Timestamp::now);
     let activations = &response.activation;
@@ -127,7 +144,8 @@ fn assemble_graph_recall_package<S: StorageAdapter + Clone>(
         now,
     );
 
-    let mut scored: Vec<(f64, TieBreakKey, ScoredNode)> = Vec::new();
+    let mut scored: Vec<(f64, TieBreakKey, crate::query::ReadoutCandidate, ScoredNode)> =
+        Vec::new();
     for (&node_id, &activation) in activations {
         if activation < config.min_activation {
             continue;
@@ -179,12 +197,27 @@ fn assemble_graph_recall_package<S: StorageAdapter + Clone>(
             })
             .unwrap_or(0.0);
 
-        // phi_i: query-field potential bias. The embedding alignment is folded in
-        // as the phi term so the readout can credit semantic match additively.
-        let phi = match (&config.query_embedding, &node.embedding) {
+        // phi_i: query-ALIGNMENT potential bias (potential-landscape.md).
+        // Seeded sites keep their collected text/entity signals; the embedding
+        // term is refreshed with the query cosine so graph-reached sites
+        // (absent from the field) still get semantic-alignment credit.
+        //
+        // The prior `A_i` is deliberately EXCLUDED here. readout-scoring.md
+        // lists `A_i` as "read input and tie-breaker", not a scored term: the
+        // reservoir already reaches the score through `logit(s_i)`
+        // (`s_i = logistic(A_i)`), so folding it into phi double-counts the
+        // prior and lets encoding-time magnitudes (≈3–12 log-odds) drown the
+        // bounded alignment signals. `beta_prior · A_i` remains in the SEED
+        // field where potential-landscape.md mandates it (restart prior odds).
+        // Scope also stays out of phi: it has its own readout term.
+        let cosine = match (&config.query_embedding, &node.embedding) {
             (Some(qe), Some(ne)) => cosine_similarity(qe, ne),
             _ => 0.0,
         };
+        let mut signals = field.get(node_id).copied().unwrap_or_default();
+        signals.retained_action = 0.0;
+        signals.embedding_score = signals.embedding_score.max(cosine);
+        let phi = crate::query::field::potential_bias(&signals);
 
         // Frustration stress attached to this site (sum of sigma over its active
         // contradiction partners) feeds the readout `-w_stress` term: contradicting
@@ -209,9 +242,22 @@ fn assemble_graph_recall_package<S: StorageAdapter + Clone>(
             accessed_at: node.accessed_at,
         };
 
+        let readout_candidate = crate::query::ReadoutCandidate {
+            node_id,
+            score,
+            activation: inputs.activation,
+            phi: inputs.phi,
+            salience: inputs.salience,
+            impedance: inputs.impedance,
+            scope_weight: inputs.scope_weight,
+            trust_weight: inputs.trust_weight,
+            stress: inputs.stress,
+        };
+
         scored.push((
             score,
             key,
+            readout_candidate,
             ScoredNode {
                 node_id,
                 name: node.name.clone(),
@@ -225,8 +271,18 @@ fn assemble_graph_recall_package<S: StorageAdapter + Clone>(
     }
 
     // Rank by readout score with the deterministic tie-breaker chain.
-    scored.sort_by(|(sa, ka, _), (sb, kb, _)| rank(*sa, ka, *sb, kb));
-    let scored_nodes: Vec<ScoredNode> = scored.into_iter().map(|(_, _, n)| n).collect();
+    scored.sort_by(|(sa, ka, _, _), (sb, kb, _, _)| rank(*sa, ka, *sb, kb));
+
+    // Capture the ranked pre-packaging readout candidate list with per-term score
+    // components (readout-scoring.md "Trace"). Capped at READOUT_TRACE_CAP as a
+    // numerical guard (ADR-0010); all packaged sites are always within this cap.
+    let readout_candidates: Vec<crate::query::ReadoutCandidate> = scored
+        .iter()
+        .take(READOUT_TRACE_CAP)
+        .map(|(_, _, candidate, _)| candidate.clone())
+        .collect();
+
+    let scored_nodes: Vec<ScoredNode> = scored.into_iter().map(|(_, _, _, n)| n).collect();
 
     let identity_activations: Vec<(NodeId, KnowledgeType, f64)> = activations
         .iter()
@@ -241,14 +297,15 @@ fn assemble_graph_recall_package<S: StorageAdapter + Clone>(
         })
         .collect();
 
-    assemble_context_package(
+    let package = assemble_context_package(
         scored_nodes,
         &identity_activations,
         &contradiction_pairs,
         config.token_budget,
         config.chars_per_token,
         &config.scope,
-    )
+    );
+    (package, readout_candidates)
 }
 
 fn apply_packaging_mode<S: StorageAdapter + Clone>(
@@ -258,6 +315,7 @@ fn apply_packaging_mode<S: StorageAdapter + Clone>(
     package: &mut ContextPackage,
 ) {
     match packaging_mode {
+        PackagingMode::Balanced => {}
         PackagingMode::KnowledgeOnly => {
             package.token_usage.used = package
                 .token_usage
@@ -431,6 +489,78 @@ fn apply_validity_filter<S: StorageAdapter + Clone>(
     });
 }
 
+fn apply_result_limit(package: &mut ContextPackage, limit: usize, chars_per_token: usize) {
+    if package.total_fragments() <= limit {
+        return;
+    }
+
+    let mut ranked: Vec<(NodeId, f64)> = package
+        .identity
+        .iter()
+        .chain(package.knowledge.iter())
+        .chain(package.memories.iter())
+        .map(|fragment| (fragment.node_id, fragment.relevance))
+        .collect();
+    ranked.sort_by(|(left_id, left_score), (right_id, right_score)| {
+        right_score
+            .total_cmp(left_score)
+            .then_with(|| left_id.cmp(right_id))
+    });
+    let allowed: HashSet<NodeId> = ranked
+        .into_iter()
+        .take(limit)
+        .map(|(node_id, _)| node_id)
+        .collect();
+
+    package
+        .identity
+        .retain(|fragment| allowed.contains(&fragment.node_id));
+    package
+        .knowledge
+        .retain(|fragment| allowed.contains(&fragment.node_id));
+    package
+        .memories
+        .retain(|fragment| allowed.contains(&fragment.node_id));
+    package
+        .tensions
+        .retain(|tension| allowed.contains(&tension.node_a) && allowed.contains(&tension.node_b));
+    recalculate_token_usage(package, chars_per_token);
+}
+
+fn recalculate_token_usage(package: &mut ContextPackage, chars_per_token: usize) {
+    let total = package.token_usage.total;
+    package.token_usage = crate::query::TokenBudget::new(total);
+    package.token_usage.identity_used = package
+        .identity
+        .iter()
+        .map(|fragment| fragment_tokens(fragment, chars_per_token))
+        .sum();
+    package.token_usage.knowledge_used = package
+        .knowledge
+        .iter()
+        .map(|fragment| fragment_tokens(fragment, chars_per_token))
+        .sum();
+    package.token_usage.memories_used = package
+        .memories
+        .iter()
+        .map(|fragment| fragment_tokens(fragment, chars_per_token))
+        .sum();
+    package.token_usage.used = package.token_usage.identity_used
+        + package.token_usage.knowledge_used
+        + package.token_usage.memories_used;
+}
+
+fn fragment_tokens(fragment: &Fragment, chars_per_token: usize) -> usize {
+    let mut tokens = estimate_tokens(&fragment.name, chars_per_token);
+    if let Some(summary) = &fragment.summary {
+        tokens += estimate_tokens(summary, chars_per_token);
+    }
+    if let Some(content) = &fragment.content {
+        tokens += estimate_tokens(content, chars_per_token);
+    }
+    tokens
+}
+
 fn node_is_valid_at<S: StorageAdapter + Clone>(
     engine: &Engine<S>,
     node_id: NodeId,
@@ -447,4 +577,86 @@ fn is_identity_type(node_type: &KnowledgeType) -> bool {
         node_type,
         KnowledgeType::IdentityCore | KnowledgeType::IdentityLearned | KnowledgeType::IdentityState
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::{Engine, EngineConfig};
+    use crate::graph::{KnowledgeType, ScopePath};
+    use crate::query::types::{CommitTrace, ContextPackage};
+    use crate::query::{Fragment, PackagingMode, TokenBudget};
+
+    fn make_memory_fragment() -> Fragment {
+        use crate::graph::node::Origin;
+        use crate::graph::scope::ScopeRelation;
+        Fragment {
+            node_id: crate::graph::NodeId(1),
+            name: "episode".into(),
+            summary: Some("summary".into()),
+            content: Some("content".into()),
+            node_type: KnowledgeType::Episodic,
+            relevance: 0.8,
+            origin: Origin {
+                peer_id: crate::graph::types::PeerId(0),
+                source_kind: crate::peer::SourceKind::AgentObservation,
+                session_id: "s1".into(),
+                scope: ScopePath::universal(),
+                confidence: 0.9,
+            },
+            scope: ScopeRelation::Universal,
+        }
+    }
+
+    /// `KnowledgeOnly` must clear the memories bucket and adjust token accounting.
+    #[test]
+    fn knowledge_only_clears_memories_and_adjusts_tokens() {
+        let engine: Engine<_> = Engine::with_config(EngineConfig::default());
+        let scope = ScopePath::universal();
+        let fragment = make_memory_fragment();
+        // Estimate tokens contributed by this fragment.
+        let fragment_tokens = {
+            let chars_per_token = 4usize;
+            let mut t = crate::query::assembly::estimate_tokens(&fragment.name, chars_per_token);
+            if let Some(ref s) = fragment.summary {
+                t += crate::query::assembly::estimate_tokens(s, chars_per_token);
+            }
+            if let Some(ref c) = fragment.content {
+                t += crate::query::assembly::estimate_tokens(c, chars_per_token);
+            }
+            t
+        };
+
+        let mut package = ContextPackage {
+            identity: vec![],
+            knowledge: vec![],
+            memories: vec![fragment],
+            tensions: vec![],
+            token_usage: TokenBudget {
+                total: 4000,
+                used: fragment_tokens + 100, // 100 from knowledge
+                identity_used: 0,
+                knowledge_used: 100,
+                memories_used: fragment_tokens,
+            },
+            agent_tension: 0.0,
+            commit_trace: CommitTrace::default(),
+            committed_ids: vec![],
+        };
+
+        apply_packaging_mode(&engine, PackagingMode::KnowledgeOnly, &scope, &mut package);
+
+        assert!(
+            package.memories.is_empty(),
+            "KnowledgeOnly must clear the memories bucket"
+        );
+        assert_eq!(
+            package.token_usage.memories_used, 0,
+            "KnowledgeOnly must zero memories_used"
+        );
+        assert_eq!(
+            package.token_usage.used, 100,
+            "KnowledgeOnly must subtract memories tokens from used"
+        );
+    }
 }

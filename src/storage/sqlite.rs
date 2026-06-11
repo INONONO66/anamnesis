@@ -1921,7 +1921,8 @@ fn create_schema(conn: &Connection) -> Result<(), Error> {
         CREATE VIRTUAL TABLE IF NOT EXISTS node_fts USING fts5(
             id UNINDEXED,
             name,
-            content
+            content,
+            tokenize = 'porter unicode61'
         );
 
         CREATE TABLE IF NOT EXISTS entity_tags (
@@ -2554,12 +2555,15 @@ fn decode_scope(value: &str) -> Result<ScopePath, Error> {
     }
 }
 
+/// OR-joined prefix terms: natural-language queries should match nodes that
+/// contain only some of the query tokens, ranked by BM25 (which downweights
+/// common tokens), instead of requiring every token to be present.
 fn make_fts_query(query: &str) -> String {
     query
         .split_whitespace()
         .map(|part| format!("\"{}\"*", part.replace('"', "\"\"")))
         .collect::<Vec<_>>()
-        .join(" ")
+        .join(" OR ")
 }
 
 fn rank_to_score(rank: f64) -> f64 {

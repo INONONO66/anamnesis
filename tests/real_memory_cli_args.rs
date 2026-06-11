@@ -1,0 +1,141 @@
+//! Argument-parsing tests for the `real_memory` bench CLI.
+//!
+//! The bench target itself is `harness = false`, so `#[test]` functions inside
+//! it never execute; the CLI module is included here by path so its parser
+//! runs under the normal integration-test harness.
+
+#![allow(dead_code)]
+
+#[path = "../benches/eval_common/mod.rs"]
+mod eval_common;
+
+#[path = "../benches/eval/real_memory_cli.rs"]
+mod real_memory_cli;
+
+use real_memory_cli::parse_args;
+
+fn args(items: &[&str]) -> impl Iterator<Item = String> + use<> {
+    items
+        .iter()
+        .map(|s| s.to_string())
+        .collect::<Vec<_>>()
+        .into_iter()
+}
+
+#[test]
+fn seed_limit_parses_correctly() {
+    let parsed = parse_args(args(&["--dataset", "locomo", "--seed-limit", "40"]))
+        .expect("parse succeeds")
+        .expect("args present");
+    assert_eq!(parsed.seed_limit, Some(40));
+}
+
+#[test]
+fn seed_limit_defaults_to_none() {
+    let parsed = parse_args(args(&["--dataset", "locomo"]))
+        .expect("parse succeeds")
+        .expect("args present");
+    assert_eq!(parsed.seed_limit, None);
+}
+
+#[test]
+fn seed_limit_zero_is_rejected() {
+    let err = parse_args(args(&["--dataset", "locomo", "--seed-limit", "0"]))
+        .expect_err("--seed-limit 0 must be rejected");
+    assert!(err.to_string().contains("--seed-limit"));
+}
+
+#[test]
+fn stratify_parses_correctly() {
+    let parsed = parse_args(args(&["--dataset", "locomo", "--stratify", "10"]))
+        .expect("parse succeeds")
+        .expect("args present");
+    assert_eq!(parsed.stratify, Some(10));
+}
+
+#[test]
+fn stratify_defaults_to_none() {
+    let parsed = parse_args(args(&["--dataset", "locomo"]))
+        .expect("parse succeeds")
+        .expect("args present");
+    assert_eq!(parsed.stratify, None);
+}
+
+#[test]
+fn stratify_zero_is_rejected() {
+    let err = parse_args(args(&["--dataset", "locomo", "--stratify", "0"]))
+        .expect_err("--stratify 0 must be rejected");
+    assert!(err.to_string().contains("--stratify"));
+}
+
+#[test]
+fn stratify_satisfies_the_longmemeval_size_guard() {
+    let parsed = parse_args(args(&["--dataset", "longmemeval", "--stratify", "30"]))
+        .expect("--stratify must satisfy the LongMemEval size guard")
+        .expect("args present");
+    assert_eq!(parsed.stratify, Some(30));
+}
+
+#[test]
+fn embed_cache_parses_to_some_path() {
+    let parsed = parse_args(args(&[
+        "--dataset",
+        "locomo",
+        "--embed-cache",
+        "/tmp/my_cache.sqlite",
+    ]))
+    .expect("parse succeeds")
+    .expect("args present");
+    assert_eq!(
+        parsed.embed_cache,
+        Some(std::path::PathBuf::from("/tmp/my_cache.sqlite"))
+    );
+}
+
+#[test]
+fn embed_cache_defaults_to_none() {
+    let parsed = parse_args(args(&["--dataset", "locomo"]))
+        .expect("parse succeeds")
+        .expect("args present");
+    assert_eq!(parsed.embed_cache, None);
+}
+
+#[test]
+fn dump_features_parses_to_some_path() {
+    let parsed = parse_args(args(&[
+        "--dataset",
+        "locomo",
+        "--dump-features",
+        "/tmp/x.jsonl",
+    ]))
+    .expect("parse succeeds")
+    .expect("args present");
+    assert_eq!(
+        parsed.dump_features,
+        Some(std::path::PathBuf::from("/tmp/x.jsonl"))
+    );
+}
+
+#[test]
+fn dump_features_defaults_to_none() {
+    let parsed = parse_args(args(&["--dataset", "locomo"]))
+        .expect("parse succeeds")
+        .expect("args present");
+    assert_eq!(parsed.dump_features, None);
+}
+
+#[test]
+fn speaker_cues_flag_parses_true() {
+    let parsed = parse_args(args(&["--dataset", "locomo", "--speaker-cues"]))
+        .expect("parse succeeds")
+        .expect("args present");
+    assert!(parsed.speaker_cues);
+}
+
+#[test]
+fn speaker_cues_defaults_to_false() {
+    let parsed = parse_args(args(&["--dataset", "locomo"]))
+        .expect("parse succeeds")
+        .expect("args present");
+    assert!(!parsed.speaker_cues);
+}

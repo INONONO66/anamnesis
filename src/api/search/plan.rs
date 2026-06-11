@@ -26,6 +26,7 @@ pub(crate) fn derive_search_plan(
     let use_entity = !input.entity_tags.is_empty();
     let use_persona_bias = input.agent_id.is_some();
     let seed_limit = input.seed_limit.unwrap_or(3);
+    let time_cues = crate::query::temporal::parse_time_cues(&text, input.now.0);
 
     Ok(SearchPlan {
         text,
@@ -35,7 +36,8 @@ pub(crate) fn derive_search_plan(
         use_graph: true,
         use_persona_bias,
         seed_limit,
-        packaging_mode: PackagingMode::KnowledgeOnly,
+        packaging_mode: PackagingMode::Balanced,
+        time_cues,
     })
 }
 
