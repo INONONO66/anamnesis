@@ -127,7 +127,7 @@ Add to your `Cargo.toml`:
 anamnesis = "0.5"
 
 # Optional: local embedding provider (downloads model on first use, ~100-500 MB)
-# anamnesis = { version = "0.5", features = ["embed"] }
+# anamnesis = { version = "0.6", features = ["embed"] }
 ```
 
 ```rust
@@ -566,6 +566,8 @@ CI also runs the MSRV check (`cargo check --all-targets --all-features` on Rust 
 `cargo test --all-targets` intentionally is not a release gate because this crate has `harness = false` benchmark binaries that execute long-running benchmarks when invoked as test targets. Use `cargo bench` or the manual benchmark workflow for performance runs.
 
 ## Status
+
+**v0.6.0** — retrieval overhaul on the conductive-network model: alignment-only readout potential, ADR-0010 calibrated readout coefficients, `SearchTrace.readout` diagnostics, temporal query cues, and `Balanced` packaging (see [calibration records](docs/07-quality-gates/calibration-records.md)). Breaking vs 0.5: new public fields on `SearchTrace`/`FieldSignals`, new `PackagingMode` variant.
 
 **v0.5.0** — migrated to the **conductive-network** model: additive directed RWR, log-odds reservoirs with bounded projections, power-law dissipation, commit-gated Hebbian learning, and frustration. Breaking redesign vs 0.4 (force/gravity/BFS/Hopfield models removed); the [techspec](docs/README.md) is the source of truth.
 
