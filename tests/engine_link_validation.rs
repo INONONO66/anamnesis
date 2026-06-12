@@ -5,8 +5,8 @@
 //! cold-start coupling and derives the bounded `weight` projection (ADR-0002).
 
 use anamnesis::Engine;
-use anamnesis::IngestResult;
 use anamnesis::api::Observation;
+use anamnesis::engine::IngestResult;
 use anamnesis::error::Error;
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{EdgeType, KnowledgeType, NodeId, Timestamp};

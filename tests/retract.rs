@@ -1,11 +1,12 @@
 //! Tests for Engine::retract() API (T10).
 
+use anamnesis::Engine;
 use anamnesis::api::{IngestResult, Observation};
+use anamnesis::engine::EngineConfig;
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::types::PeerId;
 use anamnesis::graph::{KnowledgeType, ScopePath, Timestamp};
 use anamnesis::peer::SourceKind;
-use anamnesis::{Engine, EngineConfig};
 
 fn obs(name: &str) -> Observation {
     Observation {
@@ -95,7 +96,7 @@ fn retracted_node_excluded_from_search() {
 
 #[test]
 fn touch_on_retracted_node_does_not_change_salience() {
-    use anamnesis::StorageAdapter;
+    use anamnesis::engine::StorageAdapter;
     let mut e = engine();
     let IngestResult::Created(ids) = e.ingest(obs("node-a")).unwrap() else {
         panic!("expected Created");

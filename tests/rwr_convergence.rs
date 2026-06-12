@@ -7,11 +7,12 @@
 
 use std::collections::HashMap;
 
+use anamnesis::Engine;
 use anamnesis::api::Observation;
+use anamnesis::engine::{EngineConfig, IngestResult, NodeId};
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{EdgeType, KnowledgeType, Timestamp};
 use anamnesis::query::additive_rwr;
-use anamnesis::{Engine, EngineConfig, IngestResult, NodeId};
 
 fn make_observation(name: &str) -> Observation {
     Observation {

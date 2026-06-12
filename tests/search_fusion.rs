@@ -7,11 +7,12 @@
 
 use std::collections::HashSet;
 
+use anamnesis::Engine;
 use anamnesis::api::Observation;
+use anamnesis::engine::{EngineConfig, NodeId};
 use anamnesis::graph::node::Origin;
-use anamnesis::graph::{KnowledgeType, NodeId, Timestamp};
+use anamnesis::graph::{KnowledgeType, Timestamp};
 use anamnesis::query::SearchInput;
-use anamnesis::{Engine, EngineConfig};
 
 fn origin(session: &str) -> Origin {
     Origin {

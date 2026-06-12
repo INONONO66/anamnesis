@@ -1,7 +1,8 @@
+use anamnesis::Engine;
 use anamnesis::api::Observation;
+use anamnesis::engine::{IngestResult, SessionSummary};
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{EdgeType, KnowledgeType, NodeId, Timestamp};
-use anamnesis::{Engine, IngestResult, SessionSummary};
 
 fn observation(name: &str, _agent_id: &str, session_id: &str, tags: &[&str]) -> Observation {
     let peer_id = anamnesis::graph::types::PeerId(match _agent_id {

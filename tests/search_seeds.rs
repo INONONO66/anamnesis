@@ -1,9 +1,10 @@
 //! Integration tests for seed selection via SearchInput.seed_limit.
 
+use anamnesis::Engine;
 use anamnesis::api::Observation;
+use anamnesis::engine::EngineConfig;
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{KnowledgeType, Timestamp};
-use anamnesis::{Engine, EngineConfig};
 
 #[test]
 fn default_seed_limit_three() {

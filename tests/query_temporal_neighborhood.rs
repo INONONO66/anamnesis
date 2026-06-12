@@ -1,8 +1,9 @@
+use anamnesis::Engine;
 use anamnesis::api::Observation;
+use anamnesis::engine::IngestResult;
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{EdgeType, KnowledgeType, Timestamp};
 use anamnesis::query::{Query, QueryConfig};
-use anamnesis::{Engine, IngestResult};
 
 fn make_obs(name: &str, ts: u64) -> Observation {
     Observation {

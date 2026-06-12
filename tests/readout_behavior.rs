@@ -11,11 +11,12 @@
 //!     buffering, add_note, engine() escape hatch, search/recall/used/tick
 //!     (CI link-budget)
 
+use anamnesis::Engine;
 use anamnesis::api::Observation;
+use anamnesis::engine::EngineConfig;
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{KnowledgeType, Timestamp};
 use anamnesis::query::SearchInput;
-use anamnesis::{Engine, EngineConfig};
 
 // ---------------------------------------------------------------------------
 // Shared fixture helpers
@@ -478,7 +479,7 @@ fn no_cue_means_no_temporal_separation() {
 
 #[test]
 fn committed_prior_does_not_enter_readout_phi() {
-    use anamnesis::ConfidenceLevel;
+    use anamnesis::engine::ConfidenceLevel;
 
     let config = EngineConfig::default()
         .with_novelty_threshold(0.0)
@@ -532,9 +533,10 @@ mod memory_framework {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use anamnesis::Error;
     use anamnesis::embedding::EmbeddingProvider;
+    use anamnesis::engine::{EdgeType, NodeId};
     use anamnesis::memory::Memory;
-    use anamnesis::{EdgeType, Error, NodeId};
 
     // -----------------------------------------------------------------------
     // Deterministic test embedder (same shape as real_bench CountingEmbedder)

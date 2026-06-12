@@ -50,7 +50,7 @@ fn search_trace_default() {
 
 #[test]
 fn search_result_construction() {
-    use anamnesis::ContextPackage;
+    use anamnesis::engine::ContextPackage;
     let result = SearchResult {
         package: ContextPackage::empty(),
         trace: SearchTrace::default(),

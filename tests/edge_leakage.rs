@@ -18,11 +18,12 @@
 //! directly — the test seeds the reservoir through the storage layer and lets
 //! `tick` perform the documented leak.
 
+use anamnesis::Engine;
 use anamnesis::api::Observation;
+use anamnesis::engine::{IngestResult, StorageAdapter};
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{EdgeId, EdgeType, KnowledgeType, NodeId, ScopePath, Timestamp};
 use anamnesis::mechanics::priors::project_weight;
-use anamnesis::{Engine, IngestResult, StorageAdapter};
 
 const DAY_MS: u64 = 86_400_000;
 

@@ -12,10 +12,11 @@
 //! - a stale/mismatched trace is a hard error and mutates nothing.
 
 use anamnesis::api::Observation;
+use anamnesis::engine::{ConfidenceLevel, EngineConfig, IngestResult, StorageAdapter};
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{EdgeId, EdgeType, KnowledgeType, ScopePath, Timestamp};
 use anamnesis::query::{Query, QueryConfig};
-use anamnesis::{ConfidenceLevel, Engine, EngineConfig, Error, IngestResult, StorageAdapter};
+use anamnesis::{Engine, Error};
 
 fn origin(project: &str) -> Origin {
     Origin {
@@ -44,7 +45,12 @@ fn obs(name: &str, kt: KnowledgeType, embedding: Vec<f64>) -> Observation {
 }
 
 /// Build a tiny linked graph and return (engine, seed, neighbor, edge).
-fn fixture() -> (Engine, anamnesis::NodeId, anamnesis::NodeId, EdgeId) {
+fn fixture() -> (
+    Engine,
+    anamnesis::engine::NodeId,
+    anamnesis::engine::NodeId,
+    EdgeId,
+) {
     let config = EngineConfig::new()
         .with_novelty_threshold(0.0)
         .with_dedup_enabled(false);
@@ -281,7 +287,7 @@ fn commit_conductance_update_is_deterministic_for_same_graph_and_trace() {
     let q = Query::Associative { seed, budget: 100 };
     let p_first = engine.query(&q, &qconfig()).unwrap();
     let p_second = engine.query(&q, &qconfig()).unwrap();
-    let flux_of = |pkg: &anamnesis::ContextPackage| {
+    let flux_of = |pkg: &anamnesis::engine::ContextPackage| {
         pkg.commit_trace
             .path_used
             .iter()

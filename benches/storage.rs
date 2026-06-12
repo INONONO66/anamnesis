@@ -1,10 +1,10 @@
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use std::collections::{HashMap, VecDeque};
 
-use anamnesis::graph::node::Origin;
-use anamnesis::{
+use anamnesis::engine::{
     Edge, EdgeId, EdgeType, KnowledgeType, Node, NodeId, SqliteStorage, StorageAdapter, Timestamp,
 };
+use anamnesis::graph::node::Origin;
 
 fn make_node(id: NodeId) -> Node {
     Node {

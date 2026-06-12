@@ -7,11 +7,11 @@
 
 use anamnesis::api::Observation;
 use anamnesis::embedding::{EmbeddingProvider, widen};
-use anamnesis::graph::node::Origin;
-use anamnesis::{
-    EdgeType, Engine, EngineConfig, Error, IngestResult, KnowledgeType, Query, QueryConfig,
-    Timestamp,
+use anamnesis::engine::{
+    EdgeType, EngineConfig, IngestResult, KnowledgeType, Query, QueryConfig, Timestamp,
 };
+use anamnesis::graph::node::Origin;
+use anamnesis::{Engine, Error};
 
 /// A dummy embedding provider that maps text length to a 384-dimensional vector.
 ///

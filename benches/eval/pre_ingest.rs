@@ -12,11 +12,12 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+use anamnesis::Engine;
 use anamnesis::api::{IngestResult, Observation};
 use anamnesis::embedding::{EmbeddingProvider, widen};
+use anamnesis::engine::{EngineConfig, SqliteStorage};
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{EdgeType, KnowledgeType, NodeId, ScopePath, Timestamp};
-use anamnesis::{Engine, EngineConfig, SqliteStorage};
 use serde::{Deserialize, Serialize};
 
 use eval_common::datasets::{

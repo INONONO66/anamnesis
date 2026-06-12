@@ -22,7 +22,8 @@
 //! ```rust,no_run
 //! # #[cfg(feature = "embed")]
 //! # fn main() -> Result<(), anamnesis::Error> {
-//! use anamnesis::{Memory, Timestamp};
+//! use anamnesis::{Memory, Engine};
+//! use anamnesis::engine::Timestamp;
 //!
 //! // 1. Open a persistent Memory (requires feature = "embed")
 //! let mut mem = Memory::open("my-memory.db")?;
@@ -66,51 +67,48 @@
 //! | [`anamnesis::memory`](crate::memory) | Framework API — `Memory`, `Hit`, `Recall`, `SearchTuning`, `AddReceipt` |
 //! | [`anamnesis::engine`](crate::engine) | Kernel API — `Engine`, `EngineConfig`, graph types, storage, embeddings |
 //!
-//! Root shortcuts: [`Memory`] and [`Engine`] are re-exported at the crate root
-//! as the two entry points. All pre-existing `0.6.0` paths (`anamnesis::query::*`,
-//! `anamnesis::graph::*`, `anamnesis::api::*`, root `ConfidenceLevel`,
-//! `SqliteStorage`, etc.) remain valid.
+//! ## Public API contract
+//!
+//! The public API consists of exactly three root symbols and two namespaces:
+//!
+//! - **Root**: [`Memory`], [`Engine`], [`Error`]
+//! - **Framework**: [`anamnesis::memory`](crate::memory) — `Memory`, `Hit`, `Recall`, `SearchTuning`, `AddReceipt`
+//! - **Kernel**: [`anamnesis::engine`](crate::engine) — `Engine`, `EngineConfig`, graph types, query types,
+//!   peer/trust types, observability, storage, and embeddings
+//!
+//! Legacy module paths (`anamnesis::api`, `anamnesis::graph`, `anamnesis::query`,
+//! `anamnesis::mechanics`, `anamnesis::peer`, `anamnesis::snapshot`,
+//! `anamnesis::storage`, `anamnesis::embedding`, `anamnesis::error`) **compile** for
+//! backward compatibility but are hidden from documentation and slated for removal in
+//! a future major release. Migrate to `anamnesis::engine::*` or `anamnesis::memory::*`.
 
+// Legacy paths — kept compiling for migration; use anamnesis::engine / anamnesis::memory.
+// Removal planned for a future major.
+#[doc(hidden)]
 pub mod api;
+#[doc(hidden)]
 pub mod embedding;
-pub mod engine;
+#[doc(hidden)]
 pub mod error;
+#[doc(hidden)]
 pub mod graph;
+#[doc(hidden)]
 pub mod mechanics;
-pub mod memory;
+#[doc(hidden)]
 pub mod peer;
+#[doc(hidden)]
 pub mod query;
+#[doc(hidden)]
 pub mod snapshot;
+#[doc(hidden)]
 pub mod storage;
 
-// Framework API — the validated consumer layer.
-pub use memory::Memory;
+/// Kernel API — full engine surface in one namespace.
+pub mod engine;
+/// Framework API — bench-proven ingest recipe with two-door entry.
+pub mod memory;
 
-// Core re-exports
-pub use api::{
-    CrystallizeRequest, CrystallizeResult, DebugOutcome, Engine, EngineConfig, EvidenceResult,
-    IngestResult, Observation, ObservedRef, PerspectiveKey, ReflectReport, SessionSummary,
-    TickReport,
-};
-pub use embedding::EmbeddingProvider;
-#[cfg(feature = "embed")]
-pub use embedding::fastembed::FastEmbedProvider;
+// Root re-exports — exactly three symbols.
+pub use api::Engine;
 pub use error::Error;
-pub use graph::{Edge, Node, Origin};
-pub use graph::{EdgeId, EdgeType, KnowledgeType, NodeId, PeerId, Timestamp};
-pub use mechanics::energy::{
-    EnergyTerms, SiteBond, SiteEnergy, dirichlet_energy, energy as readout_energy,
-};
-pub use mechanics::health::GraphHealth;
-pub use mechanics::observability::{
-    InvariantCheck, InvariantReport, InvariantResult, OperationalWarning,
-};
-pub use mechanics::social::{ConfidenceLevel, FeedbackSignal};
-pub use peer::{PeerProfile, PeerRegistry, SourceKind, TrustLevel};
-pub use query::{
-    AccessedSite, ActivatedTension, CoReadoutPair, CommitTrace, ContextPackage, Fragment,
-    PackagingMode, PathUsedEdge, Query, QueryConfig, SearchInput, SearchResult, SearchTrace,
-    Tension, TokenBudget,
-};
-pub use snapshot::{SnapshotBackend, SnapshotEntry, SnapshotId, SnapshotStore};
-pub use storage::{SqliteStorage, StorageAdapter};
+pub use memory::Memory;

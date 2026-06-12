@@ -2,11 +2,12 @@ use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 
+use anamnesis::Engine;
 use anamnesis::api::Observation;
-use anamnesis::graph::node::Origin;
-use anamnesis::{
-    EdgeType, Engine, EngineConfig, IngestResult, KnowledgeType, Query, QueryConfig, Timestamp,
+use anamnesis::engine::{
+    EdgeType, EngineConfig, IngestResult, KnowledgeType, Query, QueryConfig, Timestamp,
 };
+use anamnesis::graph::node::Origin;
 
 fn make_bench_engine() -> Engine {
     Engine::with_config(
@@ -48,7 +49,7 @@ fn make_observation(i: u64, rng: &mut StdRng) -> Observation {
     }
 }
 
-fn build_graph(node_count: usize) -> (Engine, Vec<anamnesis::NodeId>) {
+fn build_graph(node_count: usize) -> (Engine, Vec<anamnesis::engine::NodeId>) {
     let mut engine = make_bench_engine();
     let mut rng = StdRng::seed_from_u64(42);
     let mut node_ids = Vec::with_capacity(node_count);

@@ -13,7 +13,7 @@ mod fixtures;
 
 use std::collections::HashSet;
 
-use anamnesis::NodeId;
+use anamnesis::engine::NodeId;
 use anamnesis::query::SearchInput;
 
 use fixtures::{GoldenFixture, build_golden_fixture};

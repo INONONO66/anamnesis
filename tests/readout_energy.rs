@@ -7,13 +7,14 @@
 //! fixed point. These tests assert the wiring and the structural-sign semantics,
 //! not specific magnitudes.
 
+use anamnesis::Engine;
 use anamnesis::api::Observation;
+use anamnesis::engine::{EdgeType, EngineConfig, IngestResult, NodeId};
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::types::PeerId;
 use anamnesis::graph::{KnowledgeType, ScopePath, Timestamp};
 use anamnesis::peer::SourceKind;
 use anamnesis::query::SearchInput;
-use anamnesis::{EdgeType, Engine, EngineConfig, IngestResult, NodeId};
 
 fn engine() -> Engine {
     Engine::with_config(

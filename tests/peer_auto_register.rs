@@ -1,9 +1,10 @@
 //! Tests for peer auto-register + alias↔entity_tags (T17).
 
+use anamnesis::Engine;
 use anamnesis::api::PeerProfileInput;
+use anamnesis::engine::EngineConfig;
 use anamnesis::graph::Timestamp;
 use anamnesis::peer::TrustLevel;
-use anamnesis::{Engine, EngineConfig};
 
 fn engine() -> Engine {
     Engine::with_config(EngineConfig::new().with_novelty_threshold(0.0))
@@ -76,8 +77,8 @@ fn peer_aliases_included_in_entity_tags() {
         })
         .unwrap();
     let node_id = match result {
-        anamnesis::IngestResult::Created(ids) => ids[0],
-        anamnesis::IngestResult::Reinforced { existing_id, .. } => existing_id,
+        anamnesis::engine::IngestResult::Created(ids) => ids[0],
+        anamnesis::engine::IngestResult::Reinforced { existing_id, .. } => existing_id,
     };
     let node = e.graph().get_node(node_id).unwrap();
     // Both "chulsoo" and "김철수" should be in entity_tags

@@ -1,11 +1,12 @@
 //! Tests for learn(), remember_peer(), log_activity() convenience methods (T15).
 
+use anamnesis::Engine;
 use anamnesis::api::{ActivityInput, LearnInput, PeerProfileInput};
+use anamnesis::engine::EngineConfig;
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::types::PeerId;
 use anamnesis::graph::{KnowledgeType, ScopePath, Timestamp};
 use anamnesis::peer::{SourceKind, TrustLevel};
-use anamnesis::{Engine, EngineConfig};
 
 fn default_origin() -> Origin {
     Origin {
@@ -39,7 +40,10 @@ fn learn_ingests_semantic_node() {
             timestamp: Some(Timestamp::now()),
         })
         .unwrap();
-    assert!(matches!(result, anamnesis::IngestResult::Created(_)));
+    assert!(matches!(
+        result,
+        anamnesis::engine::IngestResult::Created(_)
+    ));
 }
 
 // ── remember_peer() ───────────────────────────────────────────────────────────
@@ -85,8 +89,8 @@ fn remember_peer_uses_profile_scope() {
         })
         .unwrap();
     let node_id = match result {
-        anamnesis::IngestResult::Created(ids) => ids[0],
-        anamnesis::IngestResult::Reinforced { existing_id, .. } => existing_id,
+        anamnesis::engine::IngestResult::Created(ids) => ids[0],
+        anamnesis::engine::IngestResult::Reinforced { existing_id, .. } => existing_id,
     };
     let node = e.graph().get_node(node_id).unwrap();
     let expected_scope = format!("peer/{}/profile", peer_id.0);
@@ -117,8 +121,8 @@ fn log_activity_uses_activity_scope() {
         })
         .unwrap();
     let node_id = match result {
-        anamnesis::IngestResult::Created(ids) => ids[0],
-        anamnesis::IngestResult::Reinforced { existing_id, .. } => existing_id,
+        anamnesis::engine::IngestResult::Created(ids) => ids[0],
+        anamnesis::engine::IngestResult::Reinforced { existing_id, .. } => existing_id,
     };
     let node = e.graph().get_node(node_id).unwrap();
     let expected_scope = format!("peer/{}/activity", peer_id.0);

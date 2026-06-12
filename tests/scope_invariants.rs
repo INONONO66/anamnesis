@@ -10,13 +10,14 @@
 
 use std::collections::{HashMap, VecDeque};
 
+use anamnesis::Engine;
 use anamnesis::api::Observation;
+use anamnesis::engine::{EngineConfig, IngestResult, NodeId, SqliteStorage, StorageAdapter};
 use anamnesis::error::Error;
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::scope::{ScopePath, ScopeRelation};
 use anamnesis::graph::{KnowledgeType, MemoryTier, Node, Timestamp};
 use anamnesis::query::{SearchInput, scope_weight};
-use anamnesis::{Engine, EngineConfig, IngestResult, NodeId, SqliteStorage, StorageAdapter};
 
 // ===== 6 Relation Cases =====
 

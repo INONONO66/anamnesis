@@ -1,7 +1,8 @@
+use anamnesis::Engine;
 use anamnesis::api::Observation;
+use anamnesis::engine::{CrystallizeRequest, IngestResult};
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{EdgeType, KnowledgeType, NodeId, ScopePath, Timestamp};
-use anamnesis::{CrystallizeRequest, Engine, IngestResult};
 
 fn origin(_agent: &str, session: &str) -> Origin {
     Origin {

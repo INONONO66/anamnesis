@@ -1,8 +1,9 @@
+use anamnesis::Engine;
 use anamnesis::api::Observation;
+use anamnesis::engine::IngestResult;
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{KnowledgeType, Timestamp};
 use anamnesis::query::{Query, QueryConfig};
-use anamnesis::{Engine, IngestResult};
 
 fn make_obs_tagged(name: &str, tags: Vec<&str>) -> Observation {
     Observation {
@@ -26,7 +27,7 @@ fn make_obs_tagged(name: &str, tags: Vec<&str>) -> Observation {
     }
 }
 
-fn created_id(result: IngestResult) -> anamnesis::NodeId {
+fn created_id(result: IngestResult) -> anamnesis::engine::NodeId {
     match result {
         IngestResult::Created(ids) => ids[0],
         IngestResult::Reinforced { existing_id, .. } => existing_id,

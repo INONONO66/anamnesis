@@ -12,11 +12,12 @@ use std::path::{Path, PathBuf};
 use std::process;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use anamnesis::Engine;
 use anamnesis::api::{IngestResult, Observation};
+use anamnesis::engine::{EngineConfig, SqliteStorage};
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{KnowledgeType, ScopePath, Timestamp};
 use anamnesis::query::{Fragment, SearchInput};
-use anamnesis::{Engine, EngineConfig, SqliteStorage};
 
 use eval_common::checkpoint::{self, Checkpoint, Phase, QuestionResult};
 use eval_common::datasets::{

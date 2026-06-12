@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
-use anamnesis::NodeId;
 use anamnesis::api::{Engine, EngineConfig, IngestResult, Observation};
+use anamnesis::engine::NodeId;
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{EdgeId, EdgeType, KnowledgeType, ScopePath, Timestamp};
 use anamnesis::query::{ContextPackage, Query, QueryConfig, additive_rwr};

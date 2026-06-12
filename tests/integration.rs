@@ -3,11 +3,12 @@
 //! These tests verify the full Engine lifecycle:
 //! ingest → link → touch → tick → query → reflect_batch
 
+use anamnesis::Engine;
 use anamnesis::api::{Observation, SessionSummary};
+use anamnesis::engine::{EngineConfig, IngestResult};
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{EdgeType, KnowledgeType, Timestamp};
 use anamnesis::query::{Query, QueryConfig};
-use anamnesis::{Engine, EngineConfig, IngestResult};
 
 fn make_observation(name: &str, node_type: KnowledgeType) -> Observation {
     Observation {

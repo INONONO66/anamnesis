@@ -1,8 +1,9 @@
+use anamnesis::Engine;
 use anamnesis::api::Observation;
+use anamnesis::engine::{EngineConfig, IngestResult, ObservedRef, PerspectiveKey};
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{EdgeType, KnowledgeType, NodeId, ScopePath, Timestamp};
 use anamnesis::query::QueryConfig;
-use anamnesis::{Engine, EngineConfig, IngestResult, ObservedRef, PerspectiveKey};
 
 fn make_observation(
     name: &str,

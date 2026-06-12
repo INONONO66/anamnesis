@@ -1,8 +1,8 @@
 use std::collections::{HashMap, VecDeque};
 
+use anamnesis::engine::{NodeId, SqliteStorage, StorageAdapter};
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{KnowledgeType, MemoryTier, Node, ScopePath, Timestamp};
-use anamnesis::{NodeId, SqliteStorage, StorageAdapter};
 
 fn node(id: NodeId, scope: &str) -> Node {
     Node {

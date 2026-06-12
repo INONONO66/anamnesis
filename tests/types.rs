@@ -2,9 +2,10 @@
 //!
 //! Verifies all enum variants and struct fields can be constructed.
 
+use anamnesis::Error;
+use anamnesis::engine::{EdgeId, EdgeType, KnowledgeType, NodeId, Query, Timestamp};
 use anamnesis::graph::node::Origin;
 use anamnesis::query::{ContextPackage, TokenBudget};
-use anamnesis::{EdgeId, EdgeType, Error, KnowledgeType, NodeId, Query, Timestamp};
 
 #[test]
 fn all_knowledge_types() {

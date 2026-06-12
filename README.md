@@ -73,7 +73,7 @@ One cue activates related fragments, which activate further fragments — recons
 
 ### Engine vs Consumer
 
-Anamnesis exposes two API surfaces: the **Framework API** ([`anamnesis::memory::Memory`](https://docs.rs/anamnesis/latest/anamnesis/memory/struct.Memory.html)) and the **Kernel API** ([`anamnesis::engine`](https://docs.rs/anamnesis/latest/anamnesis/engine/index.html)). `Memory` is the official consumer-layer default, built entirely on `Engine`'s public API. Root shortcuts `Memory` and `Engine` are re-exported at the crate root for convenience.
+Anamnesis exposes two API surfaces: the **Framework API** ([`anamnesis::memory::Memory`](https://docs.rs/anamnesis/latest/anamnesis/memory/struct.Memory.html)) and the **Kernel API** ([`anamnesis::engine`](https://docs.rs/anamnesis/latest/anamnesis/engine/index.html)). `Memory` is the official consumer-layer default, built entirely on `Engine`'s public API. The crate root re-exports exactly three symbols — `Memory`, `Engine`, and `Error` — and nothing else; legacy module paths (`anamnesis::api`, `anamnesis::graph`, etc.) remain compilable for migration but are hidden from documentation and slated for removal in a future major.
 
 Anamnesis is a **library — a memory kernel**, not a service. It owns the *physics of memory* (storage, spreading activation, dissipation, reinforcement, frustration, temporal validity) and deliberately leaves the *sensory/motor* layer to you. Unlike hosted memory APIs (Mem0, Zep, Supermemory) that bundle extraction + embeddings + serving, Anamnesis stays a deterministic, local-first, embeddable core that you drive.
 
@@ -129,7 +129,7 @@ Add to your `Cargo.toml`:
 ```toml
 [dependencies]
 # Optional: local embedding provider (downloads model on first use, ~100-500 MB)
-anamnesis = { version = "0.6", features = ["embed"] }
+anamnesis = { version = "0.7", features = ["embed"] }
 ```
 
 ```rust,no_run
@@ -529,6 +529,8 @@ CI also runs the MSRV check (`cargo check --all-targets --all-features` on Rust 
 `cargo test --all-targets` intentionally is not a release gate because this crate has `harness = false` benchmark binaries that execute long-running benchmarks when invoked as test targets. Use `cargo bench` or the manual benchmark workflow for performance runs.
 
 ## Status
+
+**v0.7.0** — two-door public API surface: root re-exports exactly `Memory`, `Engine`, `Error`; `anamnesis::engine::*` is the full kernel namespace; `anamnesis::memory::*` is the framework namespace. Legacy top-level modules (`api`, `graph`, `mechanics`, `peer`, `query`, `snapshot`, `storage`, `embedding`, `error`) are doc-hidden but remain compilable for migration. Breaking vs 0.6: all root shortcuts beyond the three named types are removed.
 
 **v0.6.0** — retrieval overhaul on the conductive-network model: alignment-only readout potential, ADR-0010 calibrated readout coefficients, `SearchTrace.readout` diagnostics, temporal query cues, and `Balanced` packaging (see [calibration records](docs/07-quality-gates/calibration-records.md)). Breaking vs 0.5: new public fields on `SearchTrace`/`FieldSignals`, new `PackagingMode` variant.
 

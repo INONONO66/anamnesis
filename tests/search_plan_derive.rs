@@ -1,8 +1,9 @@
 use anamnesis::api::Observation;
+use anamnesis::engine::EngineConfig;
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{KnowledgeType, Timestamp};
 use anamnesis::query::SearchInput;
-use anamnesis::{Engine, EngineConfig, Error};
+use anamnesis::{Engine, Error};
 
 fn setup_engine() -> Engine {
     let config = EngineConfig::default().with_novelty_threshold(0.0);

@@ -1,7 +1,8 @@
+use anamnesis::Engine;
 use anamnesis::api::{GraphEvent, Observation};
+use anamnesis::engine::{EngineConfig, IngestResult, StorageAdapter};
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{EdgeType, KnowledgeType, MemoryTier, ScopePath, Timestamp};
-use anamnesis::{Engine, EngineConfig, IngestResult, StorageAdapter};
 
 fn origin() -> Origin {
     Origin {
@@ -29,7 +30,7 @@ fn observation(name: &str, embedding: Option<Vec<f64>>, timestamp: Timestamp) ->
     }
 }
 
-fn created_id(result: IngestResult) -> anamnesis::NodeId {
+fn created_id(result: IngestResult) -> anamnesis::engine::NodeId {
     match result {
         IngestResult::Created(ids) => ids[0],
         IngestResult::Reinforced { existing_id, .. } => existing_id,

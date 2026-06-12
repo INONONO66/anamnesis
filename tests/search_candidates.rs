@@ -7,11 +7,12 @@
 //! invariants are pinned in `src/api/search/candidates.rs` under
 //! `#[cfg(test)]`.
 
+use anamnesis::Engine;
 use anamnesis::api::Observation;
+use anamnesis::engine::EngineConfig;
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{KnowledgeType, Timestamp};
 use anamnesis::query::SearchInput;
-use anamnesis::{Engine, EngineConfig};
 
 fn origin(session: &str) -> Origin {
     Origin {

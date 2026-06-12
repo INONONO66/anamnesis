@@ -309,7 +309,7 @@ pub fn interval_well_formed(
 
 // ── Operational warnings (observability.md) ────────────────────────────────
 
-/// A heuristic operational warning derived from [`crate::GraphHealth`].
+/// A heuristic operational warning derived from [`crate::mechanics::health::GraphHealth`].
 ///
 /// These are the five rows of the observability.md "Operational Warnings" table.
 /// Each names a likely cause and a recommended action; they are advisory, never
@@ -365,7 +365,7 @@ const WARN_DENSE_DEGREE: f64 = 20.0;
 /// Minimum node count before entropy/degree warnings are meaningful.
 const WARN_MIN_NODES: usize = 8;
 
-/// Derive the operational warnings implied by a [`crate::GraphHealth`] summary.
+/// Derive the operational warnings implied by a [`crate::mechanics::health::GraphHealth`] summary.
 ///
 /// `stale_core` is reported when the graph is stale overall (high `stale_ratio`)
 /// — a proxy for "an important identity has not been accessed"; the engine layer

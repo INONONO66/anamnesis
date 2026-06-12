@@ -1,11 +1,12 @@
 //! Tests for ingest_conversation() convenience method (T16).
 
+use anamnesis::Engine;
 use anamnesis::api::{ConversationInput, ExtractedFact};
+use anamnesis::engine::{EngineConfig, StorageAdapter};
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::types::PeerId;
 use anamnesis::graph::{EdgeType, ScopePath, Timestamp};
 use anamnesis::peer::SourceKind;
-use anamnesis::{Engine, EngineConfig, StorageAdapter};
 
 fn default_origin() -> Origin {
     Origin {

@@ -8,8 +8,8 @@
 //! - more-surprising input → higher initial `A_i`;
 //! - familiar input routes-and-reinforces, never rejects (ADR-0009).
 
-use anamnesis::StorageAdapter;
 use anamnesis::api::{Engine, EngineConfig, IngestResult, Observation};
+use anamnesis::engine::StorageAdapter;
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::types::PeerId;
 use anamnesis::graph::{EdgeType, KnowledgeType, NodeId, ScopePath, Timestamp};

@@ -28,11 +28,12 @@ use std::time::{Duration, Instant};
 
 use criterion::Criterion;
 
+use anamnesis::Engine;
 use anamnesis::api::Observation;
+use anamnesis::engine::EngineConfig;
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{KnowledgeType, ScopePath, Timestamp};
 use anamnesis::query::SearchInput;
-use anamnesis::{Engine, EngineConfig};
 
 /// Total nodes ingested into the latency fixture.
 const NUM_NODES: usize = 100_000;

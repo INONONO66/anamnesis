@@ -3,10 +3,11 @@
 //! Verifies that ingest() returns the correct IngestResult variant
 //! and that the enum can be pattern-matched correctly.
 
+use anamnesis::Engine;
 use anamnesis::api::Observation;
+use anamnesis::engine::IngestResult;
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{KnowledgeType, Timestamp};
-use anamnesis::{Engine, IngestResult};
 
 fn make_obs(name: &str) -> Observation {
     Observation {
