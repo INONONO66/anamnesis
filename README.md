@@ -304,6 +304,10 @@ When a new agent session starts, it inherits not rules but *judgment*.
 
 ```
 src/
+├── memory/         Memory — the Framework API (bench-proven recipe: add/search/used/tick)
+├── engine.rs       anamnesis::engine — the curated Kernel API namespace
+│
+├── api/            Engine implementation (ingest, query, commit, tick, …)
 ├── graph/          Node, Edge, Origin, scope, time, types — data + reservoirs
 ├── mechanics/      Pure cognitive functions, no side effects
 │   ├── perception     Surprise gating — novelty, confidence, budget
@@ -314,10 +318,14 @@ src/
 │   ├── projection     Reservoir ↔ bounded projection (logistic / logit)
 │   └── priors         Calibrated irreducible priors (d, L, N, k, …)
 ├── query/          Additive directed RWR, potential field, 7-term readout, search
+├── peer/           Peer identity, trust levels, source attribution
 ├── storage/        StorageAdapter trait + SqliteStorage
 ├── embedding/      EmbeddingProvider trait + optional FastEmbedProvider
-├── snapshot/       Clone-based snapshot storage
-└── api/            Engine — public interface (ingest, query, commit, tick, …)
+└── snapshot/       Clone-based snapshot storage
+
+Public surface: `anamnesis::{Memory, Engine, Error}` at the root,
+`anamnesis::memory` (Framework) and `anamnesis::engine` (Kernel) namespaces.
+Everything below the first two lines is implementation reached through them.
 ```
 
 <details>
