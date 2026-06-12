@@ -9,8 +9,8 @@ mod eval_common;
 
 use std::path::Path;
 
-use anamnesis::FastEmbedProvider;
 use anamnesis::embedding::EmbeddingProvider;
+use anamnesis::engine::FastEmbedProvider;
 use eval_common::real_bench::dataset::{BenchDatasetName, load_benchmark_dataset};
 
 const BGE_QUERY_PREFIX: &str = "Represent this sentence for searching relevant passages: ";

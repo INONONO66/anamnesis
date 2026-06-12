@@ -280,8 +280,8 @@ fn run_ingestion_phase(
     let embed_start = Instant::now();
 
     #[cfg(feature = "embed")]
-    let provider =
-        anamnesis::FastEmbedProvider::new().map_err(|e| format!("FastEmbed init failed: {e}"))?;
+    let provider = anamnesis::engine::FastEmbedProvider::new()
+        .map_err(|e| format!("FastEmbed init failed: {e}"))?;
 
     #[cfg(not(feature = "embed"))]
     compile_error!(

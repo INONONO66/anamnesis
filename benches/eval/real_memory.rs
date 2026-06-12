@@ -212,7 +212,7 @@ fn run() -> BenchResult<()> {
 }
 
 #[cfg(feature = "embed")]
-fn make_provider() -> BenchResult<anamnesis::FastEmbedProvider> {
-    anamnesis::FastEmbedProvider::new()
+fn make_provider() -> BenchResult<anamnesis::engine::FastEmbedProvider> {
+    anamnesis::engine::FastEmbedProvider::new()
         .map_err(|err| BenchError::Embedding(format!("FastEmbed init failed: {err}")))
 }
