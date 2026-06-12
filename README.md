@@ -133,7 +133,8 @@ anamnesis = { version = "0.7", features = ["embed"] }
 ```
 
 ```rust,no_run
-use anamnesis::{Memory, Timestamp};
+use anamnesis::Memory;
+use anamnesis::engine::Timestamp;
 
 // 1. Open a persistent Memory (feature = "embed" wires in bge-base-en-v1.5)
 let mut mem = Memory::open("my-memory.db").unwrap();
@@ -359,6 +360,35 @@ Commit ── write-back for used memories ──►
 <br>
 
 ```rust
+// ── Framework API (anamnesis::memory) — the front door ──────────────────────
+impl Memory {
+    // Construction
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, Error>;            // feature = "embed"
+    pub fn in_memory() -> Result<Self, Error>;                             // feature = "embed"
+    pub fn with_provider(path: impl AsRef<Path>, provider: Arc<dyn EmbeddingProvider>) -> Result<Self, Error>;
+    pub fn in_memory_with_provider(provider: Arc<dyn EmbeddingProvider>) -> Result<Self, Error>;
+
+    // Ingest (bench recipe: episodic turn + windowed semantic view)
+    pub fn add(&mut self, session: &str, speaker: &str, text: &str, at: Timestamp) -> Result<AddReceipt, Error>;
+    pub fn add_note(&mut self, text: &str, at: Timestamp) -> Result<AddReceipt, Error>;
+    pub fn flush_session(&mut self, session: &str) -> Result<Option<NodeId>, Error>;
+    pub fn flush_all(&mut self) -> Result<(), Error>;
+
+    // Retrieval (readout surface — what the benchmarks measure)
+    pub fn search(&mut self, query: &str, limit: usize) -> Result<Recall, Error>;
+    pub fn search_at(&mut self, query: &str, limit: usize, now: Timestamp) -> Result<Recall, Error>;
+    pub fn search_result_at_with(&mut self, query: &str, limit: usize, now: Timestamp, tuning: &SearchTuning) -> Result<SearchResult, Error>;
+
+    // Reinforcement & time
+    pub fn used(&mut self, recall: Recall) -> Result<CommitReport, Error>;
+    pub fn tick(&mut self, now: Timestamp) -> Result<TickReport, Error>;
+
+    // Escape hatch — drop to the kernel on the same store
+    pub fn engine(&self) -> &Engine;
+    pub fn engine_mut(&mut self) -> &mut Engine;
+}
+
+// ── Kernel API (anamnesis::engine) — the raw substrate ──────────────────────
 impl Engine {
     // Construction
     pub fn new() -> Self;
@@ -574,6 +604,8 @@ Node strength is now decomposed as `A_i = B_i + P_i` ([ADR-0008](docs/adr/0008-p
 
 ## References
 
+- Pavlik & Anderson — *Practice and Forgetting Effects on Vocabulary Memory: An Activation-Based Model of the Spacing Effect* (2005)
+- Anderson & Schooler — *Reflections of the Environment in Memory* (1991)
 - Collins & Loftus — *A Spreading-Activation Theory of Semantic Processing* (1975)
 - Tulving — *Episodic and Semantic Memory* (1972)
 - Stanford ACE — *Agentic Context Engineering* (ICLR 2026)
