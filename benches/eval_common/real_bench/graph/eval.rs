@@ -96,10 +96,14 @@ pub fn run_warmup(
     let mut report = WarmupReport::default();
     for question in questions {
         let result = search_question(graph, question, opts)?;
-        let (_, commit) = graph
+        // Commit through the framework path so the warmup measures the shipped
+        // reinforcement semantics (confidence default lives in Memory::used).
+        let commit = graph
             .memory
-            .engine_mut()
-            .commit(result.package, Some(ConfidenceLevel::Medium))
+            .used(anamnesis::memory::Recall {
+                hits: Vec::new(),
+                package: result.package,
+            })
             .map_err(|err| BenchError::Engine(err.to_string()))?;
         report.questions += 1;
         report.sites_accessed += commit.sites_accessed;

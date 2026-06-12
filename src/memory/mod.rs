@@ -52,7 +52,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::Engine;
-use crate::api::{EngineConfig, IngestResult, Observation, TickReport};
+use crate::api::{CommitReport, EngineConfig, IngestResult, Observation, TickReport};
 use crate::embedding::EmbeddingProvider;
 use crate::error::Error;
 use crate::graph::node::Origin;
@@ -648,10 +648,11 @@ impl<S: StorageAdapter + Clone> Memory<S> {
     /// (`search_at` with a synthetic `now`) should be aware that the decay
     /// applied to committed nodes is wall-clock anchored, not logical-time
     /// anchored.
-    pub fn used(&mut self, recall: Recall) -> Result<(), Error> {
-        self.engine
+    pub fn used(&mut self, recall: Recall) -> Result<CommitReport, Error> {
+        let (_, report) = self
+            .engine
             .commit(recall.package, Some(ConfidenceLevel::Medium))?;
-        Ok(())
+        Ok(report)
     }
 
     /// Advance the engine's decay clock to `now`.
