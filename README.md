@@ -73,7 +73,7 @@ One cue activates related fragments, which activate further fragments — recons
 
 ### Engine vs Consumer
 
-Anamnesis exposes two API surfaces: the **Framework API** ([`Memory`](https://docs.rs/anamnesis/latest/anamnesis/struct.Memory.html)) and the **Kernel API** ([`Engine`](https://docs.rs/anamnesis/latest/anamnesis/api/struct.Engine.html)). `Memory` is the official consumer-layer default, built entirely on `Engine`'s public API.
+Anamnesis exposes two API surfaces: the **Framework API** ([`anamnesis::memory::Memory`](https://docs.rs/anamnesis/latest/anamnesis/memory/struct.Memory.html)) and the **Kernel API** ([`anamnesis::engine`](https://docs.rs/anamnesis/latest/anamnesis/engine/index.html)). `Memory` is the official consumer-layer default, built entirely on `Engine`'s public API. Root shortcuts `Memory` and `Engine` are re-exported at the crate root for convenience.
 
 Anamnesis is a **library — a memory kernel**, not a service. It owns the *physics of memory* (storage, spreading activation, dissipation, reinforcement, frustration, temporal validity) and deliberately leaves the *sensory/motor* layer to you. Unlike hosted memory APIs (Mem0, Zep, Supermemory) that bundle extraction + embeddings + serving, Anamnesis stays a deterministic, local-first, embeddable core that you drive.
 
@@ -154,6 +154,14 @@ mem.used(recall).unwrap();
 ```
 
 **Use `Memory`** unless you need custom node/edge types, your own ingest representation, custom packaging policy, peer/trust control, or the debug lifecycle — then drop to **`Engine`** (the kernel API). `Memory` is built entirely on `Engine`'s public API: anything it does, you can do.
+
+```rust,no_run
+// Framework API (default)
+use anamnesis::Memory;
+
+// Kernel API (custom encoding / raw control)
+use anamnesis::engine::{Engine, EngineConfig, Observation, ConfidenceLevel};
+```
 
 For direct `Engine` usage see the [Kernel API section](#engine-vs-consumer) and [`docs/`](docs/README.md).
 

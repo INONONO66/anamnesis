@@ -8,8 +8,8 @@ The Framework Layer is the official consumer-layer implementation of the Anamnes
 
 **Vocabulary:**
 
-- **Framework API** — `Memory`: the validated consumer layer, ready to use.
-- **Kernel API** — `Engine`: the raw substrate; all mechanics, no encoding opinion.
+- **Framework API** — `Memory`: the validated consumer layer, ready to use. Namespace: `anamnesis::memory`.
+- **Kernel API** — `Engine`: the raw substrate; all mechanics, no encoding opinion. Namespace: `anamnesis::engine`.
 
 ## The Recipe
 

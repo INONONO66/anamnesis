@@ -58,9 +58,22 @@
 //! depends on your encoding choices — the validated recipe is [`Memory`].
 //! See [`docs/`](https://github.com/INONONO66/anamnesis/tree/main/docs) for the
 //! full technical specification.
+//!
+//! ## Namespaces
+//!
+//! | Namespace | Purpose |
+//! |:----------|:--------|
+//! | [`anamnesis::memory`](crate::memory) | Framework API — `Memory`, `Hit`, `Recall`, `SearchTuning`, `AddReceipt` |
+//! | [`anamnesis::engine`](crate::engine) | Kernel API — `Engine`, `EngineConfig`, graph types, storage, embeddings |
+//!
+//! Root shortcuts: [`Memory`] and [`Engine`] are re-exported at the crate root
+//! as the two entry points. All pre-existing `0.6.0` paths (`anamnesis::query::*`,
+//! `anamnesis::graph::*`, `anamnesis::api::*`, root `ConfidenceLevel`,
+//! `SqliteStorage`, etc.) remain valid.
 
 pub mod api;
 pub mod embedding;
+pub mod engine;
 pub mod error;
 pub mod graph;
 pub mod mechanics;
@@ -71,11 +84,7 @@ pub mod snapshot;
 pub mod storage;
 
 // Framework API — the validated consumer layer.
-pub use memory::AddReceipt;
-pub use memory::Hit;
 pub use memory::Memory;
-pub use memory::Recall;
-pub use memory::SearchTuning;
 
 // Core re-exports
 pub use api::{

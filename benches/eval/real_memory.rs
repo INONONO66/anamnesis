@@ -5,7 +5,7 @@ mod real_memory_cli;
 use std::process;
 use std::sync::Arc;
 
-use anamnesis::EmbeddingProvider;
+use anamnesis::engine::EmbeddingProvider;
 
 use eval_common::real_bench::dataset::{
     BenchDatasetName, load_benchmark_dataset, restrict_to_questions, split_by_sample,
@@ -98,7 +98,7 @@ fn run() -> BenchResult<()> {
             eval_common::real_bench::embed_cache::EmbedCache::open(path, inner.model_name())
         })
         .transpose()?;
-    let provider: Arc<dyn anamnesis::EmbeddingProvider> =
+    let provider: Arc<dyn anamnesis::engine::EmbeddingProvider> =
         Arc::new(CachingProvider::new(inner.clone(), cache));
     let opts = EvalOptions {
         top_k: args.top_k,

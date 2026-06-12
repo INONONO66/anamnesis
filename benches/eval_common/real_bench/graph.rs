@@ -3,8 +3,8 @@ use std::sync::{Arc, Mutex};
 
 use anamnesis::Error;
 use anamnesis::Memory;
-use anamnesis::SqliteStorage;
 use anamnesis::embedding::EmbeddingProvider;
+use anamnesis::engine::SqliteStorage;
 use anamnesis::graph::{NodeId, Timestamp};
 use serde::{Deserialize, Serialize};
 
