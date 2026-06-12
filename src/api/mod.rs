@@ -3194,7 +3194,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
     ///      base-level sum), then refresh its salience cache;
     ///    - `FeedbackReceived` — Rescorla-Wagner `dP_i = eta*(lambda - P_i)` on each
     ///      packaged site's decay-exempt evidence prior, with `lambda` mapped from
-    ///      `feedback` ([`ConfidenceLevel`](crate::ConfidenceLevel) → `lambda_reward`).
+    ///      `feedback` ([`ConfidenceLevel`](crate::mechanics::social::ConfidenceLevel) → `lambda_reward`).
     ///      `None` feedback records use without a feedback signal;
     ///    - `PathUsed` — bounded Hebbian-Oja `dC_ij = eta*flux*(1 - project_weight(C))`
     ///      on each edge that carried committed path current `I_ij`;

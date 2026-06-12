@@ -1,7 +1,8 @@
+use anamnesis::Engine;
 use anamnesis::api::Observation;
+use anamnesis::engine::{EngineConfig, KnowledgeType, SearchInput};
 use anamnesis::graph::Timestamp;
 use anamnesis::graph::node::Origin;
-use anamnesis::{Engine, EngineConfig, KnowledgeType, SearchInput};
 
 #[test]
 fn english_who_is_pattern() {

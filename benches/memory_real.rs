@@ -1,7 +1,8 @@
+use anamnesis::Engine;
 use anamnesis::api::Observation;
+use anamnesis::engine::EngineConfig;
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{EdgeType, KnowledgeType, NodeId, ScopePath, Timestamp};
-use anamnesis::{Engine, EngineConfig};
 
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;

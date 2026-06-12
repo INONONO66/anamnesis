@@ -46,7 +46,17 @@ jobs:
     name: Test (nextest + doctest)
     needs: [gatekeeper, msrv]
     runs-on: ubuntu-latest
+    env:
+      # Full DWARF on ~40 --all-features test binaries exceeds the runner's
+      # disk (ld SIGBUS / "No space left on device"). Line tables keep
+      # backtraces useful at a fraction of the size.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
+      - name: Free runner disk space (preinstalled toolchains we never use)
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL
+          df -h / | tail -1
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2

@@ -5,8 +5,9 @@
 //!
 //! Run: `cargo run --example debug_session`
 
+use anamnesis::engine::{DebugOutcome, EvidenceResult, Timestamp};
 use anamnesis::graph::node::Origin;
-use anamnesis::{DebugOutcome, Engine, Error, EvidenceResult, Timestamp};
+use anamnesis::{Engine, Error};
 
 fn origin() -> Origin {
     Origin {

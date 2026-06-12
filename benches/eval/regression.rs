@@ -25,7 +25,7 @@ mod composed_fixtures;
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
-use anamnesis::NodeId;
+use anamnesis::engine::NodeId;
 use anamnesis::query::SearchInput;
 
 use composed_fixtures::{AGENT_PEER_ID, ComposedTier, build_composed_tiers};

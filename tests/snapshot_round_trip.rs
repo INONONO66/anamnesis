@@ -5,11 +5,12 @@
 //! T3 decay_checkpoint, ID recycling, hot-field SoA coherence)
 //! depend on.
 
+use anamnesis::Engine;
 use anamnesis::api::{IngestResult, Observation};
+use anamnesis::engine::EngineConfig;
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{KnowledgeType, NodeId, ScopePath, Timestamp};
 use anamnesis::storage::StorageAdapter;
-use anamnesis::{Engine, EngineConfig};
 
 const DAY_MS: u64 = 86_400_000;
 const DEFAULT_SCOPE: &str = "project/default";

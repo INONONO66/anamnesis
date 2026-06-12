@@ -20,11 +20,12 @@
 
 use std::collections::HashMap;
 
+use anamnesis::Engine;
 use anamnesis::api::{IngestResult, Observation};
+use anamnesis::engine::{EngineConfig, NodeId};
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{EdgeType, KnowledgeType, ScopePath, Timestamp};
 use anamnesis::storage::SqliteStorage;
-use anamnesis::{Engine, EngineConfig, NodeId};
 
 /// Captured fixture state — engine plus a symbolic name → NodeId lookup.
 ///

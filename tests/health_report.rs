@@ -1,11 +1,12 @@
 //! Tests for Engine::health() and HealthReport (T11).
 
+use anamnesis::Engine;
 use anamnesis::api::{HealthGrade, IngestResult, Observation};
+use anamnesis::engine::EngineConfig;
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::types::PeerId;
 use anamnesis::graph::{EdgeType, KnowledgeType, ScopePath, Timestamp};
 use anamnesis::peer::SourceKind;
-use anamnesis::{Engine, EngineConfig};
 
 fn obs(name: &str) -> Observation {
     Observation {

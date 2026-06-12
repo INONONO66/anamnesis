@@ -1,8 +1,9 @@
 //! Tests for PeerRegistry SQLite persistence — peers survive Engine restart.
 
+use anamnesis::Engine;
+use anamnesis::engine::EngineConfig;
 use anamnesis::peer::TrustLevel;
 use anamnesis::storage::SqliteStorage;
-use anamnesis::{Engine, EngineConfig};
 
 #[test]
 fn peers_persist_across_engine_restart_file_backed() {

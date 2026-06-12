@@ -56,7 +56,7 @@ pub fn rescorla_wagner(predicted: f64, lambda: f64, eta: f64) -> f64 {
     clamp_reservoir(predicted + eta * (lambda - predicted))
 }
 
-/// Map a consumer [`crate::FeedbackSignal`] to a Rescorla-Wagner reward target `lambda`
+/// Map a consumer [`crate::mechanics::social::FeedbackSignal`] to a Rescorla-Wagner reward target `lambda`
 /// in log-odds units ([`crate::mechanics::priors::REWARD_LOG_ODDS_SCALE`]).
 ///
 /// CALIBRATED PRIOR mapping — a `Useful` signal of strength `s` sets the target to

@@ -15,7 +15,8 @@ use eval_common::real_bench::dataset::{
     BenchDatasetName, load_benchmark_dataset, parse_benchmark_dataset, stratify_questions,
 };
 use eval_common::real_bench::graph::{
-    EvalOptions, build_memory_graph, evaluate_questions, run_warmup, speaker_cue_tags,
+    CachingProvider, EvalOptions, build_memory_graph, evaluate_questions, run_warmup,
+    speaker_cue_tags,
 };
 
 #[derive(Clone, Default)]
@@ -177,11 +178,15 @@ fn graph_build_warmup_and_evaluation_use_embeddings_and_commit() {
     .expect("LoCoMo JSON should parse");
 
     let embedder = CountingEmbedder::default();
-    let mut built = build_memory_graph(&loaded, &embedder, None).expect("graph builds");
+    let mut built = build_memory_graph(
+        &loaded,
+        Arc::new(CachingProvider::new(Arc::new(embedder.clone()), None)),
+    )
+    .expect("graph builds");
 
     assert_eq!(built.stats.nodes_created, 4);
     assert_eq!(built.stats.extracted_edges_created, 2);
-    assert_eq!(built.engine.graph().node_count(), 4);
+    assert_eq!(built.memory.engine().graph().node_count(), 4);
     assert_eq!(
         built.stats.embedded_texts, 4,
         "each turn embeds a speaker-prefixed view and a context-window view"
@@ -193,7 +198,12 @@ fn graph_build_warmup_and_evaluation_use_embeddings_and_commit() {
     let mut episodic_contents = Vec::new();
     let mut semantic_contents = Vec::new();
     for (&node_id, provenance) in &built.provenance_by_node {
-        let node = built.engine.graph().get_node(node_id).expect("node exists");
+        let node = built
+            .memory
+            .engine()
+            .graph()
+            .get_node(node_id)
+            .expect("node exists");
         assert!(
             !provenance.content.contains(':'),
             "provenance content must stay the raw turn text"
@@ -232,7 +242,12 @@ fn graph_build_warmup_and_evaluation_use_embeddings_and_commit() {
     // the recent past.
     let now = anamnesis::graph::Timestamp::now().0;
     for &node_id in built.provenance_by_node.keys() {
-        let node = built.engine.graph().get_node(node_id).expect("node exists");
+        let node = built
+            .memory
+            .engine()
+            .graph()
+            .get_node(node_id)
+            .expect("node exists");
         assert!(
             node.created_at.0 <= now,
             "ingest timestamps must be in the past"
@@ -245,13 +260,15 @@ fn graph_build_warmup_and_evaluation_use_embeddings_and_commit() {
     }
 
     let temporal_edges = built
-        .engine
+        .memory
+        .engine()
         .graph()
         .all_edge_ids()
         .into_iter()
         .filter(|edge_id| {
             built
-                .engine
+                .memory
+                .engine()
                 .graph()
                 .get_edge(*edge_id)
                 .is_ok_and(|edge| edge.edge_type == EdgeType::Temporal)
@@ -262,7 +279,6 @@ fn graph_build_warmup_and_evaluation_use_embeddings_and_commit() {
     let warmup = run_warmup(
         &mut built,
         &loaded.questions[..1],
-        &embedder,
         &EvalOptions {
             top_k: 3,
             ..Default::default()
@@ -273,9 +289,8 @@ fn graph_build_warmup_and_evaluation_use_embeddings_and_commit() {
     assert!(warmup.sites_accessed > 0);
 
     let evaluated = evaluate_questions(
-        &built,
+        &mut built,
         &loaded.questions[1..],
-        &embedder,
         &EvalOptions {
             top_k: 3,
             ..Default::default()
@@ -485,7 +500,14 @@ fn embed_cache_second_build_makes_zero_provider_calls() {
     // First build — populates the cache.
     let embedder1 = CountingEmbedder::default();
     let cache1 = EmbedCache::open(&cache_path, embedder1.model_name()).unwrap();
-    build_memory_graph(&loaded, &embedder1, Some(&cache1)).expect("first graph builds");
+    build_memory_graph(
+        &loaded,
+        Arc::new(CachingProvider::new(
+            Arc::new(embedder1.clone()),
+            Some(cache1),
+        )),
+    )
+    .expect("first graph builds");
     let calls_after_first_build = embedder1.calls();
     assert!(
         calls_after_first_build > 0,
@@ -495,7 +517,14 @@ fn embed_cache_second_build_makes_zero_provider_calls() {
     // Second build — all embeddings are already cached, provider must not be called.
     let embedder2 = CountingEmbedder::default();
     let cache2 = EmbedCache::open(&cache_path, embedder2.model_name()).unwrap();
-    build_memory_graph(&loaded, &embedder2, Some(&cache2)).expect("second graph builds");
+    build_memory_graph(
+        &loaded,
+        Arc::new(CachingProvider::new(
+            Arc::new(embedder2.clone()),
+            Some(cache2),
+        )),
+    )
+    .expect("second graph builds");
     assert_eq!(
         embedder2.calls(),
         0,
@@ -526,12 +555,15 @@ fn dump_features_populates_matched_units_and_total_relevant() {
     .expect("LoCoMo JSON should parse");
 
     let embedder = CountingEmbedder::default();
-    let built = build_memory_graph(&loaded, &embedder, None).expect("graph builds");
+    let mut built = build_memory_graph(
+        &loaded,
+        Arc::new(CachingProvider::new(Arc::new(embedder.clone()), None)),
+    )
+    .expect("graph builds");
 
     let evaluated = evaluate_questions(
-        &built,
+        &mut built,
         &loaded.questions,
-        &embedder,
         &EvalOptions {
             top_k: 10,
             dump_features: true,

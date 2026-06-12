@@ -1,9 +1,8 @@
 use anamnesis::api::Observation;
+use anamnesis::engine::{CrystallizeRequest, CrystallizeResult, IngestResult, StorageAdapter};
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{EdgeType, KnowledgeType, NodeId, Timestamp};
-use anamnesis::{
-    CrystallizeRequest, CrystallizeResult, Engine, Error, IngestResult, StorageAdapter,
-};
+use anamnesis::{Engine, Error};
 
 fn origin() -> Origin {
     Origin {

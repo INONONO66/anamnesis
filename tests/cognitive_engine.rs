@@ -6,11 +6,12 @@
 //! Unlike unit tests in `src/api/mod.rs`, these exercise multi-step
 //! interactions across the entire cognitive pipeline.
 
+use anamnesis::Engine;
 use anamnesis::api::Observation;
+use anamnesis::engine::{EngineConfig, IngestResult, StorageAdapter};
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{EdgeType, KnowledgeType, ScopePath, Timestamp};
 use anamnesis::query::{Query, QueryConfig};
-use anamnesis::{Engine, EngineConfig, IngestResult, StorageAdapter};
 
 fn make_origin(_agent: &str, project: Option<&str>) -> Origin {
     let scope = project

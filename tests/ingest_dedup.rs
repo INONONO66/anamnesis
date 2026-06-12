@@ -1,7 +1,8 @@
+use anamnesis::Engine;
 use anamnesis::api::Observation;
+use anamnesis::engine::{EngineConfig, IngestResult};
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{KnowledgeType, Timestamp};
-use anamnesis::{Engine, EngineConfig, IngestResult};
 
 fn make_obs(name: &str, embedding: Vec<f64>) -> Observation {
     Observation {

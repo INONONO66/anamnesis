@@ -1,9 +1,10 @@
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 
+use anamnesis::Engine;
 use anamnesis::api::Observation;
+use anamnesis::engine::{EngineConfig, IngestResult, KnowledgeType, Timestamp};
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{MemoryTier, ScopePath};
-use anamnesis::{Engine, EngineConfig, IngestResult, KnowledgeType, Timestamp};
 
 // KPI targets: 10K nodes < 10ms, 50K nodes < 50ms
 

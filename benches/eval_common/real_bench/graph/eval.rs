@@ -1,22 +1,21 @@
 use std::collections::HashSet;
 use std::time::Instant;
 
-use anamnesis::embedding::EmbeddingProvider;
-use anamnesis::query::{ContextPackage, Fragment, ReadoutCandidate, SearchInput, SearchResult};
-use anamnesis::{ConfidenceLevel, SqliteStorage};
+use anamnesis::graph::Timestamp;
+use anamnesis::memory::SearchTuning;
+use anamnesis::query::{ContextPackage, Fragment, SearchResult};
 use serde::{Deserialize, Serialize};
 
 use super::super::dataset::BenchQuestion;
 use super::super::error::{BenchError, BenchResult};
 use super::super::metrics::{RankedRetrieval, RetrievalMetrics, first_hit_rank, retrieval_metrics};
-use super::{BuiltMemoryGraph, embed_texts};
+use super::BuiltMemoryGraph;
 
 /// Knobs for warmup/evaluation runs, bundled to keep call sites readable.
 #[derive(Clone, Copy, Default)]
-pub struct EvalOptions<'a> {
+pub struct EvalOptions {
     pub top_k: usize,
     pub seed_limit: Option<usize>,
-    pub cache: Option<&'a super::super::embed_cache::EmbedCache>,
     pub dump_features: bool,
     /// Inject speaker entity-tag cues parsed from the question text.
     /// Default OFF: with a single speaker tag matching ~half a conversation,
@@ -92,15 +91,19 @@ pub struct RetrievedMemory {
 pub fn run_warmup(
     graph: &mut BuiltMemoryGraph,
     questions: &[BenchQuestion],
-    provider: &dyn EmbeddingProvider,
-    opts: &EvalOptions<'_>,
+    opts: &EvalOptions,
 ) -> BenchResult<WarmupReport> {
     let mut report = WarmupReport::default();
     for question in questions {
-        let result = search_question(&*graph, question, provider, opts)?;
-        let (_, commit) = graph
-            .engine
-            .commit(result.package, Some(ConfidenceLevel::Medium))
+        let result = search_question(graph, question, opts)?;
+        // Commit through the framework path so the warmup measures the shipped
+        // reinforcement semantics (confidence default lives in Memory::used).
+        let commit = graph
+            .memory
+            .used(anamnesis::memory::Recall {
+                hits: Vec::new(),
+                package: result.package,
+            })
             .map_err(|err| BenchError::Engine(err.to_string()))?;
         report.questions += 1;
         report.sites_accessed += commit.sites_accessed;
@@ -110,25 +113,23 @@ pub fn run_warmup(
 }
 
 pub fn evaluate_questions(
-    graph: &BuiltMemoryGraph,
+    graph: &mut BuiltMemoryGraph,
     questions: &[BenchQuestion],
-    provider: &dyn EmbeddingProvider,
-    opts: &EvalOptions<'_>,
+    opts: &EvalOptions,
 ) -> BenchResult<Vec<QuestionEvaluation>> {
     questions
         .iter()
-        .map(|question| evaluate_question(graph, question, provider, opts))
+        .map(|question| evaluate_question(graph, question, opts))
         .collect()
 }
 
 fn evaluate_question(
-    graph: &BuiltMemoryGraph,
+    graph: &mut BuiltMemoryGraph,
     question: &BenchQuestion,
-    provider: &dyn EmbeddingProvider,
-    opts: &EvalOptions<'_>,
+    opts: &EvalOptions,
 ) -> BenchResult<QuestionEvaluation> {
     let start = Instant::now();
-    let result = search_question(graph, question, provider, opts)?;
+    let result = search_question(graph, question, opts)?;
     let search_latency_ms = start.elapsed().as_secs_f64() * 1000.0;
 
     // Primary surface: pre-package readout candidates
@@ -208,44 +209,30 @@ fn evaluate_question(
 }
 
 fn search_question(
-    graph: &BuiltMemoryGraph,
+    graph: &mut BuiltMemoryGraph,
     question: &BenchQuestion,
-    provider: &dyn EmbeddingProvider,
-    opts: &EvalOptions<'_>,
+    opts: &EvalOptions,
 ) -> BenchResult<SearchResult> {
-    let embedding = embed_texts(
-        provider,
-        opts.cache,
-        std::slice::from_ref(&question.question),
-    )?
-    .into_iter()
-    .next()
-    .ok_or_else(|| BenchError::Embedding("provider returned no query embedding".to_string()))?;
-    let entity_tags = if opts.speaker_cues {
-        super::speaker_cue_tags(&graph.speakers, &question.question)
-    } else {
-        Vec::new()
+    let now = question
+        .question_date
+        .map(Timestamp)
+        .unwrap_or(Timestamp(0));
+    let tuning = SearchTuning {
+        seed_limit: opts.seed_limit,
+        entity_tags: if opts.speaker_cues {
+            super::speaker_cue_tags(&graph.speakers, &question.question)
+        } else {
+            vec![]
+        },
     };
-    let result = graph
-        .engine
-        .search(SearchInput {
-            text: question.question.clone(),
-            query_embedding: Some(embedding),
-            limit: opts.top_k,
-            seed_limit: Some(opts.seed_limit.unwrap_or(opts.top_k).max(1)),
-            entity_tags,
-            now: question
-                .question_date
-                .map(anamnesis::graph::Timestamp)
-                .unwrap_or(anamnesis::graph::Timestamp(0)),
-            ..SearchInput::default()
-        })
-        .map_err(|err| BenchError::Engine(err.to_string()))?;
-    Ok(result)
+    graph
+        .memory
+        .search_result_at_with(&question.question, opts.top_k, now, &tuning)
+        .map_err(|err| BenchError::Engine(err.to_string()))
 }
 
 fn readout_retrievals(
-    readout: &[ReadoutCandidate],
+    readout: &[anamnesis::query::ReadoutCandidate],
     graph: &BuiltMemoryGraph,
     question: &BenchQuestion,
     top_k: usize,

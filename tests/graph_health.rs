@@ -3,11 +3,12 @@
 //! now reported as ratios/entropies/distributions over the reservoirs and their
 //! projections, never as the legacy force-model counts.
 
+use anamnesis::Engine;
 use anamnesis::api::Observation;
+use anamnesis::engine::{EngineConfig, IngestResult, OperationalWarning, StorageAdapter};
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{EdgeType, KnowledgeType, ScopePath, Timestamp};
 use anamnesis::mechanics::observability::InvariantCheck;
-use anamnesis::{Engine, EngineConfig, IngestResult, OperationalWarning, StorageAdapter};
 
 fn make_origin(scope: &str) -> Origin {
     Origin {
@@ -40,7 +41,7 @@ fn ingest_in(
     name: &str,
     node_type: KnowledgeType,
     scope: &str,
-) -> anamnesis::NodeId {
+) -> anamnesis::engine::NodeId {
     let result = engine
         .ingest(make_observation_in(name, node_type, scope))
         .unwrap();
@@ -50,7 +51,11 @@ fn ingest_in(
     }
 }
 
-fn ingest_node(engine: &mut Engine, name: &str, node_type: KnowledgeType) -> anamnesis::NodeId {
+fn ingest_node(
+    engine: &mut Engine,
+    name: &str,
+    node_type: KnowledgeType,
+) -> anamnesis::engine::NodeId {
     ingest_in(engine, name, node_type, "project-a")
 }
 
@@ -363,7 +368,7 @@ fn determinism_invariant_holds_for_repeated_query() {
     let n2 = ingest_node(&mut engine, "factory pattern note", KnowledgeType::Semantic);
     engine.link(n1, n2, EdgeType::Semantic).unwrap();
 
-    let probe = anamnesis::SearchInput {
+    let probe = anamnesis::engine::SearchInput {
         text: "factory".to_string(),
         scope: ScopePath::new("project-a").unwrap(),
         now: Timestamp(2000),

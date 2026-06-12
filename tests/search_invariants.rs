@@ -1,8 +1,8 @@
 use anamnesis::api::{Engine, EngineConfig, IngestResult, Observation};
+use anamnesis::engine::{NodeId, StorageAdapter};
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{EdgeType, KnowledgeType, ScopePath, ScopeRelation, Timestamp};
 use anamnesis::query::SearchInput;
-use anamnesis::{NodeId, StorageAdapter};
 
 fn engine() -> Engine {
     Engine::with_config(

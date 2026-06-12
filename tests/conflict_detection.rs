@@ -8,12 +8,13 @@
 //! only ever allocates a new site (`Created`) or routes to an existing one
 //! (`Reinforced`); it never fabricates a contradiction.
 
+use anamnesis::Engine;
 use anamnesis::api::{IngestResult, Observation};
+use anamnesis::engine::{EdgeType, EngineConfig, StorageAdapter};
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::types::PeerId;
 use anamnesis::graph::{KnowledgeType, ScopePath, Timestamp};
 use anamnesis::peer::SourceKind;
-use anamnesis::{EdgeType, Engine, EngineConfig, StorageAdapter};
 
 fn obs(name: &str, embedding: Vec<f64>) -> Observation {
     Observation {

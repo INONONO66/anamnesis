@@ -3,14 +3,17 @@ mod eval_common;
 mod real_memory_cli;
 
 use std::process;
+use std::sync::Arc;
 
-use anamnesis::EmbeddingProvider;
+use anamnesis::engine::EmbeddingProvider;
+
 use eval_common::real_bench::dataset::{
     BenchDatasetName, load_benchmark_dataset, restrict_to_questions, split_by_sample,
     stratify_questions,
 };
 use eval_common::real_bench::graph::{
-    EvalOptions, GraphBuildStats, build_memory_graph, evaluate_questions, run_warmup,
+    CachingProvider, EvalOptions, GraphBuildStats, build_memory_graph, evaluate_questions,
+    run_warmup,
 };
 use eval_common::real_bench::graph::{QuestionEvaluation, WarmupReport};
 use eval_common::real_bench::report::{
@@ -81,25 +84,25 @@ fn run() -> BenchResult<()> {
                 .to_string(),
         ));
     }
-    let provider = make_provider()?;
+    let inner = Arc::new(make_provider()?);
     eprintln!(
         "EMBED model={} dimensions={}",
-        provider.model_name(),
-        provider.dimensions()
+        inner.model_name(),
+        inner.dimensions()
     );
 
     let cache = args
         .embed_cache
         .as_deref()
         .map(|path| {
-            eval_common::real_bench::embed_cache::EmbedCache::open(path, provider.model_name())
+            eval_common::real_bench::embed_cache::EmbedCache::open(path, inner.model_name())
         })
         .transpose()?;
-    let cache_ref = cache.as_ref();
+    let provider: Arc<dyn anamnesis::engine::EmbeddingProvider> =
+        Arc::new(CachingProvider::new(inner.clone(), cache));
     let opts = EvalOptions {
         top_k: args.top_k,
         seed_limit: args.seed_limit,
-        cache: cache_ref,
         dump_features: args.dump_features.is_some(),
         speaker_cues: args.speaker_cues,
     };
@@ -134,10 +137,10 @@ fn run() -> BenchResult<()> {
 
     for group in &groups {
         let sample_index = group.questions[0].sample_index;
-        let mut graph = build_memory_graph(group, &provider, cache_ref)?;
+        let mut graph = build_memory_graph(group, provider.clone())?;
         let (warmup_questions, eval_questions) = group.questions.split_at(args.warmup);
-        let warmup = run_warmup(&mut graph, warmup_questions, &provider, &opts)?;
-        let sample_evals = evaluate_questions(&graph, eval_questions, &provider, &opts)?;
+        let warmup = run_warmup(&mut graph, warmup_questions, &opts)?;
+        let sample_evals = evaluate_questions(&mut graph, eval_questions, &opts)?;
         eprintln!(
             "SAMPLE {} sessions={} warmup={} eval={}",
             sample_index,
@@ -146,8 +149,8 @@ fn run() -> BenchResult<()> {
             sample_evals.len()
         );
 
-        node_count += graph.engine.graph().node_count();
-        edge_count += graph.engine.graph().edge_count();
+        node_count += graph.memory.engine().graph().node_count();
+        edge_count += graph.memory.engine().graph().edge_count();
         graph_stats.nodes_created += graph.stats.nodes_created;
         graph_stats.temporal_edges_created += graph.stats.temporal_edges_created;
         graph_stats.extracted_edges_created += graph.stats.extracted_edges_created;
@@ -185,8 +188,8 @@ fn run() -> BenchResult<()> {
 
     let report = build_report(ReportInput {
         dataset: args.dataset,
-        embedding_model: provider.model_name().to_string(),
-        embedding_dimensions: provider.dimensions(),
+        embedding_model: inner.model_name().to_string(),
+        embedding_dimensions: inner.dimensions(),
         sample_limit: args.samples,
         top_k: args.top_k,
         node_count,
@@ -209,7 +212,7 @@ fn run() -> BenchResult<()> {
 }
 
 #[cfg(feature = "embed")]
-fn make_provider() -> BenchResult<anamnesis::FastEmbedProvider> {
-    anamnesis::FastEmbedProvider::new()
+fn make_provider() -> BenchResult<anamnesis::engine::FastEmbedProvider> {
+    anamnesis::engine::FastEmbedProvider::new()
         .map_err(|err| BenchError::Embedding(format!("FastEmbed init failed: {err}")))
 }

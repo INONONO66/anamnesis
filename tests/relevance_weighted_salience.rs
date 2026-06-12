@@ -12,10 +12,11 @@
 //! When all relevances are zero (weight_sum <= EPSILON) the weighting falls back to
 //! the uniform mean of the source reservoirs.
 
+use anamnesis::Engine;
 use anamnesis::api::Observation;
+use anamnesis::engine::{CrystallizeRequest, IngestResult, NodeId, StorageAdapter};
 use anamnesis::graph::node::Origin;
-use anamnesis::graph::{KnowledgeType, NodeId, Timestamp};
-use anamnesis::{CrystallizeRequest, Engine, IngestResult, StorageAdapter};
+use anamnesis::graph::{KnowledgeType, Timestamp};
 
 /// Calibrated prior `REWARD_LOG_ODDS_SCALE` (mechanics::priors).
 const REWARD_LOG_ODDS_SCALE: f64 = 4.0;

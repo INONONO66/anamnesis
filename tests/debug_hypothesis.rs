@@ -1,6 +1,7 @@
+use anamnesis::engine::{DebugOutcome, EvidenceResult};
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{EdgeType, KnowledgeType, NodeId, Timestamp};
-use anamnesis::{DebugOutcome, Engine, Error, EvidenceResult};
+use anamnesis::{Engine, Error};
 
 fn origin() -> Origin {
     Origin {

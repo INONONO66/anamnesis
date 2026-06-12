@@ -1,8 +1,9 @@
+use anamnesis::Engine;
 use anamnesis::api::Observation;
+use anamnesis::engine::{EngineConfig, IngestResult, StorageAdapter};
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{KnowledgeType, Timestamp};
 use anamnesis::query::{Query, QueryConfig};
-use anamnesis::{Engine, EngineConfig, IngestResult, StorageAdapter};
 
 fn make_obs_typed(name: &str, node_type: KnowledgeType) -> Observation {
     Observation {
@@ -26,7 +27,7 @@ fn make_obs_typed(name: &str, node_type: KnowledgeType) -> Observation {
     }
 }
 
-fn created_id(result: IngestResult) -> anamnesis::NodeId {
+fn created_id(result: IngestResult) -> anamnesis::engine::NodeId {
     match result {
         IngestResult::Created(ids) => ids[0],
         IngestResult::Reinforced { existing_id, .. } => existing_id,

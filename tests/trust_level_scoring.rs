@@ -1,12 +1,13 @@
 //! Tests for TrustLevel → scope_weight bonus integration (T13).
 
+use anamnesis::Engine;
 use anamnesis::api::{IngestResult, Observation};
+use anamnesis::engine::EngineConfig;
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::types::PeerId;
 use anamnesis::graph::{KnowledgeType, ScopePath, Timestamp};
 use anamnesis::peer::{SourceKind, TrustLevel};
 use anamnesis::query::SearchInput;
-use anamnesis::{Engine, EngineConfig};
 
 fn obs_with_peer(name: &str, peer_id: PeerId) -> Observation {
     Observation {

@@ -3,11 +3,12 @@ use std::time::Duration;
 
 use criterion::Criterion;
 
+use anamnesis::Engine;
 use anamnesis::api::Observation;
+use anamnesis::engine::EngineConfig;
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{KnowledgeType, ScopePath, Timestamp};
 use anamnesis::query::SearchInput;
-use anamnesis::{Engine, EngineConfig};
 
 const NUM_NODES: usize = 100_000;
 

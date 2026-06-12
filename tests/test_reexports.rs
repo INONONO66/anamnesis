@@ -1,4 +1,5 @@
-//! Test that all public types are accessible from crate root
+//! Test that the public API surface is accessible at the documented paths.
+//! Root: Memory / Engine / Error.  Kernel types: anamnesis::engine::*.
 
 #[test]
 fn test_engine_import() {
@@ -7,8 +8,10 @@ fn test_engine_import() {
 }
 
 #[test]
-fn test_core_types_import() {
-    use anamnesis::{Edge, EdgeId, EdgeType, KnowledgeType, Node, NodeId, Origin, Timestamp};
+fn test_engine_namespace_types() {
+    use anamnesis::engine::{
+        Edge, EdgeId, EdgeType, KnowledgeType, Node, NodeId, Origin, Timestamp,
+    };
     let _ = (
         NodeId(0),
         EdgeId(0),
@@ -20,8 +23,8 @@ fn test_core_types_import() {
 }
 
 #[test]
-fn test_query_types_import() {
-    use anamnesis::{ContextPackage, Fragment, Query, QueryConfig, Tension, TokenBudget};
+fn test_engine_namespace_query_types() {
+    use anamnesis::engine::{ContextPackage, Fragment, Query, QueryConfig, Tension, TokenBudget};
     let _ = QueryConfig::default();
     let _ = ContextPackage::empty();
     let _ = TokenBudget::default();
@@ -33,8 +36,8 @@ fn test_query_types_import() {
 }
 
 #[test]
-fn test_api_types_import() {
-    use anamnesis::{EngineConfig, Observation, ReflectReport, SessionSummary, TickReport};
+fn test_engine_namespace_api_types() {
+    use anamnesis::engine::{EngineConfig, Observation, ReflectReport, SessionSummary, TickReport};
     let _ = EngineConfig::default();
     let _ = TickReport::default();
     let _ = ReflectReport::default();
@@ -42,8 +45,8 @@ fn test_api_types_import() {
 }
 
 #[test]
-fn test_storage_import() {
-    use anamnesis::{SqliteStorage, StorageAdapter};
+fn test_engine_namespace_storage() {
+    use anamnesis::engine::{SqliteStorage, StorageAdapter};
     let _ = SqliteStorage::new().unwrap();
     let _ = std::any::type_name::<dyn StorageAdapter>();
 }
@@ -52,4 +55,10 @@ fn test_storage_import() {
 fn test_error_import() {
     use anamnesis::Error;
     let _ = Error::NodeNotFound;
+}
+
+#[test]
+fn test_memory_import() {
+    use anamnesis::Memory;
+    let _ = std::any::type_name::<Memory>();
 }

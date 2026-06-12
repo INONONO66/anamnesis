@@ -1,9 +1,9 @@
+use anamnesis::engine::{EdgeType, KnowledgeType};
 use anamnesis::mechanics::priors::{
     DECAY_INTERCEPT, DECAY_SCALE, decay_multiplier_for_type, edge_type_factor,
 };
 use anamnesis::query::assembly::{is_identity_type, is_memory_type};
 use anamnesis::query::identity::pi_tier;
-use anamnesis::{EdgeType, KnowledgeType};
 
 fn debug_node_types() -> [KnowledgeType; 3] {
     [

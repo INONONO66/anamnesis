@@ -1,8 +1,9 @@
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 
+use anamnesis::Engine;
 use anamnesis::api::Observation;
+use anamnesis::engine::{EdgeType, EngineConfig, IngestResult, KnowledgeType, Timestamp};
 use anamnesis::graph::node::Origin;
-use anamnesis::{EdgeType, Engine, EngineConfig, IngestResult, KnowledgeType, Timestamp};
 
 fn make_bench_engine() -> Engine {
     // Disable novelty/dedup gating so benchmarks can focus on operation cost.

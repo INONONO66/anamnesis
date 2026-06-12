@@ -1,8 +1,9 @@
+use anamnesis::Engine;
 use anamnesis::api::Observation;
+use anamnesis::engine::{EngineConfig, IngestResult, NodeId};
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{EdgeType, KnowledgeType, Timestamp};
 use anamnesis::query::SearchInput;
-use anamnesis::{Engine, EngineConfig, IngestResult, NodeId};
 
 fn origin() -> Origin {
     Origin {

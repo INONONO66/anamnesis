@@ -5,11 +5,12 @@
 
 use std::collections::HashMap;
 
+use anamnesis::Engine;
 use anamnesis::api::Observation;
+use anamnesis::engine::{EngineConfig, IngestResult, NodeId};
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{EdgeType, KnowledgeType, ScopePath, Timestamp};
 use anamnesis::query::additive_rwr;
-use anamnesis::{Engine, EngineConfig, IngestResult, NodeId};
 
 pub const DAY_MS: u64 = 86_400_000;
 pub const T0: u64 = 1000;

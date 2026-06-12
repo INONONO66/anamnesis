@@ -12,11 +12,12 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+use anamnesis::Engine;
 use anamnesis::api::{IngestResult, Observation};
 use anamnesis::embedding::{EmbeddingProvider, widen};
+use anamnesis::engine::{EngineConfig, SqliteStorage};
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{EdgeType, KnowledgeType, NodeId, ScopePath, Timestamp};
-use anamnesis::{Engine, EngineConfig, SqliteStorage};
 use serde::{Deserialize, Serialize};
 
 use eval_common::datasets::{
@@ -279,8 +280,8 @@ fn run_ingestion_phase(
     let embed_start = Instant::now();
 
     #[cfg(feature = "embed")]
-    let provider =
-        anamnesis::FastEmbedProvider::new().map_err(|e| format!("FastEmbed init failed: {e}"))?;
+    let provider = anamnesis::engine::FastEmbedProvider::new()
+        .map_err(|e| format!("FastEmbed init failed: {e}"))?;
 
     #[cfg(not(feature = "embed"))]
     compile_error!(

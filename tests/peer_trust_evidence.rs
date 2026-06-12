@@ -12,7 +12,9 @@
 //! - commit feedback nudges the originating peer's trust;
 //! - the moved trust reservoir feeds the readout `trust_weight` term.
 
+use anamnesis::Engine;
 use anamnesis::api::{GraphEvent, Observation};
+use anamnesis::engine::{ConfidenceLevel, EngineConfig, IngestResult, SessionSummary};
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::types::PeerId;
 use anamnesis::graph::{KnowledgeType, NodeId, ScopePath, Timestamp};
@@ -22,7 +24,6 @@ use anamnesis::mechanics::priors::{
 };
 use anamnesis::peer::{SourceKind, TrustLevel};
 use anamnesis::query::{Query, QueryConfig};
-use anamnesis::{ConfidenceLevel, Engine, EngineConfig, IngestResult, SessionSummary};
 
 fn observation(name: &str, peer_id: PeerId, session_id: &str, tags: &[&str]) -> Observation {
     Observation {

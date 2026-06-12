@@ -6,16 +6,17 @@
 //! - Conversation: ingest_conversation → extraction → peer profile update → entity_tags search
 //! - Cross-feature: peer_filter + retract + conflict + valid_from/valid_until
 
+use anamnesis::Engine;
 use anamnesis::api::{
     ActivityInput, ConversationInput, DocumentInput, ExtractedFact, IngestResult, LearnInput,
     Observation, PeerProfileInput, ScheduleInput,
 };
+use anamnesis::engine::{EngineConfig, StorageAdapter};
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::types::PeerId;
 use anamnesis::graph::{EdgeType, KnowledgeType, ScopePath, Timestamp};
 use anamnesis::peer::{SourceKind, TrustLevel};
 use anamnesis::query::SearchInput;
-use anamnesis::{Engine, EngineConfig, StorageAdapter};
 
 fn engine() -> Engine {
     Engine::with_config(

@@ -20,13 +20,14 @@ The core must remain deterministic for the same graph state and query input. Opt
 
 | Module | Responsibility |
 |---|---|
+| `memory` | **Framework API** (`Memory`) — bench-proven ingest recipe; see [framework-layer.md](framework-layer.md) |
 | `graph` | Site, edge, id, origin, scope, time, and type definitions |
 | `storage` | `StorageAdapter` trait and default SQLite adapter |
 | `mechanics` | Pure scoring, decay, conductance, and interaction functions |
 | `query` | Activation flow, readout, packaging, and trace assembly |
 | `snapshot` | Clone-based snapshot storage |
 | `embedding` | Provider trait and optional local provider |
-| `api` | Public `Engine` surface and request/result types |
+| `api` | Public `Engine` surface and request/result types (**Kernel API**) |
 
 ## Three Loops
 

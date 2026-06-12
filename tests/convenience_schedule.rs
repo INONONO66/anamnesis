@@ -1,9 +1,10 @@
 //! Tests for schedule() convenience method (T16).
 
+use anamnesis::Engine;
 use anamnesis::api::ScheduleInput;
+use anamnesis::engine::EngineConfig;
 use anamnesis::graph::{KnowledgeType, Timestamp};
 use anamnesis::peer::TrustLevel;
-use anamnesis::{Engine, EngineConfig};
 
 fn engine() -> Engine {
     Engine::with_config(EngineConfig::new().with_novelty_threshold(0.0))
@@ -31,8 +32,8 @@ fn schedule_sets_valid_from() {
         })
         .unwrap();
     let node_id = match result {
-        anamnesis::IngestResult::Created(ids) => ids[0],
-        anamnesis::IngestResult::Reinforced { existing_id, .. } => existing_id,
+        anamnesis::engine::IngestResult::Created(ids) => ids[0],
+        anamnesis::engine::IngestResult::Reinforced { existing_id, .. } => existing_id,
     };
     let node = e.graph().get_node(node_id).unwrap();
     assert_eq!(node.valid_from, Some(valid_from));

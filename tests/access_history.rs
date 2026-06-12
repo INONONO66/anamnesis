@@ -1,7 +1,8 @@
+use anamnesis::Engine;
 use anamnesis::api::Observation;
+use anamnesis::engine::{EngineConfig, IngestResult, Node};
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{AccessTrace, KnowledgeType, MemoryTier, NodeId, Timestamp};
-use anamnesis::{Engine, EngineConfig, IngestResult, Node};
 use std::collections::{HashMap, VecDeque};
 
 /// A test access trace at `at` with an arbitrary (non-load-bearing) decay.

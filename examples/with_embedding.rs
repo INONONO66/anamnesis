@@ -12,11 +12,10 @@ fn main() {
 
 #[cfg(feature = "embed")]
 fn main() -> Result<(), anamnesis::Error> {
-    use anamnesis::embedding::EmbeddingProvider;
-    use anamnesis::graph::node::Origin;
-    use anamnesis::{
-        EdgeType, Engine, EngineConfig, FastEmbedProvider, IngestResult, KnowledgeType,
-        Observation, Query, QueryConfig, Timestamp,
+    use anamnesis::Engine;
+    use anamnesis::engine::{
+        EdgeType, EmbeddingProvider, EngineConfig, FastEmbedProvider, IngestResult, KnowledgeType,
+        Observation, Origin, Query, QueryConfig, Timestamp,
     };
 
     println!("Initializing FastEmbedProvider (may download model on first run)...");
