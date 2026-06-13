@@ -2,7 +2,7 @@
 name = "anamnesis"
 version = "0.7.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "Cognitive memory engine for LLMs — Bayesian conductive-network recall with perception, dissipation, and frustration"
 license = "MIT"
 repository = "https://github.com/INONONO66/anamnesis"

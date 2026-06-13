@@ -34,17 +34,16 @@ jobs:
       - run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
 
   msrv:
-    name: MSRV (Rust 1.85)
+    name: MSRV (Rust 1.88)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.85
+      - uses: dtolnay/rust-toolchain@1.88
       - uses: Swatinem/rust-cache@v2
-      # MSRV 1.85 is the published *library*'s compatibility promise. The
-      # anamnesis-mcp binary is shipped as prebuilt npm binaries (users never
-      # compile it), and its rmcp/schemars dep tree pulls darling 0.23 which
-      # requires rustc 1.88 — so scope the MSRV gate to the library crate.
-      - run: cargo check -p anamnesis --all-targets --all-features
+      # Unified workspace MSRV. 1.88 is forced by anamnesis-mcp's rmcp/schemars
+      # dep tree (darling 0.23 requires rustc 1.88); the library builds on less
+      # but the whole workspace tracks one MSRV.
+      - run: cargo check --all-targets --all-features
 
   test:
     name: Test (nextest + doctest)

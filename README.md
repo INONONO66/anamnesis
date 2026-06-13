@@ -569,7 +569,7 @@ cargo test --all-targets --all-features --no-run
 
 CI installs `cargo-nextest` before running the test gate. If `cargo-nextest` is not available locally, use `cargo test --all-features` as the local functional-test equivalent.
 
-CI also runs the MSRV check (`cargo check --all-targets --all-features` on Rust 1.85), `cargo deny`, and PR semver checks. Run those locally when the corresponding tools are installed, especially before publishing a release.
+CI also runs the MSRV check (`cargo check --all-targets --all-features` on Rust 1.88), `cargo deny`, and PR semver checks. Run those locally when the corresponding tools are installed, especially before publishing a release.
 
 `cargo test --all-targets` intentionally is not a release gate because this crate has `harness = false` benchmark binaries that execute long-running benchmarks when invoked as test targets. Use `cargo bench` or the manual benchmark workflow for performance runs.
 

@@ -2,9 +2,8 @@
 name = "anamnesis-mcp"
 version = "0.7.0"
 edition = "2024"
-# Higher than the library's 1.85: the rmcp/schemars dep tree pulls darling 0.23,
-# which requires rustc 1.88. The server ships as prebuilt npm binaries, so this
-# does not affect the published library's MSRV promise.
+# Workspace MSRV. 1.88 is forced by this crate's rmcp/schemars dep tree
+# (darling 0.23 requires rustc 1.88); the workspace tracks a single MSRV.
 rust-version = "1.88"
 license = "MIT"
 description = "Anamnesis cognitive-memory MCP server (stdio) and one-shot CLI"
