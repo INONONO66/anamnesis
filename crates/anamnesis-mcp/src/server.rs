@@ -82,7 +82,9 @@ impl AnamnesisServer {
         let registry = self.registry.clone();
         let limit = p.limit.unwrap_or(20) as usize;
         let hits = tokio::task::spawn_blocking(move || {
-            let mut g = registry.lock().expect("registry mutex poisoned");
+            // Recover from poisoning so one panicking handler doesn't brick the
+            // server for the rest of its lifetime.
+            let mut g = registry.lock().unwrap_or_else(|e| e.into_inner());
             g.recall(&p.query, limit, p.namespace.as_deref())
         })
         .await
@@ -111,7 +113,9 @@ impl AnamnesisServer {
     ) -> Result<CallToolResult, ErrorData> {
         let registry = self.registry.clone();
         let id = tokio::task::spawn_blocking(move || {
-            let mut g = registry.lock().expect("registry mutex poisoned");
+            // Recover from poisoning so one panicking handler doesn't brick the
+            // server for the rest of its lifetime.
+            let mut g = registry.lock().unwrap_or_else(|e| e.into_inner());
             g.remember(&p.content, p.namespace.as_deref())
         })
         .await
@@ -140,7 +144,9 @@ impl AnamnesisServer {
                     at_ms: t.at_ms,
                 })
                 .collect();
-            let mut g = registry.lock().expect("registry mutex poisoned");
+            // Recover from poisoning so one panicking handler doesn't brick the
+            // server for the rest of its lifetime.
+            let mut g = registry.lock().unwrap_or_else(|e| e.into_inner());
             g.ingest_conversation(&p.session, &turns, p.namespace.as_deref())
         })
         .await

@@ -202,7 +202,8 @@ impl MemoryRegistry {
     }
 
     /// Search; on success optionally auto-commit (reinforce) the returned package.
-    /// A lazy `tick(now)` keeps forgetting current without a background thread.
+    /// A lazy `tick(now)` keeps forgetting current without a background thread and
+    /// persists the reinforcement.
     pub fn recall(
         &mut self,
         query: &str,
@@ -211,12 +212,17 @@ impl MemoryRegistry {
     ) -> Result<Vec<Hit>, Error> {
         let reinforce = self.reinforce_on_recall;
         let mem = self.get(ns)?;
-        mem.tick(Timestamp::now())?;
         let recall = mem.search(query, limit)?;
         let hits = recall.hits.clone();
         if reinforce {
             mem.used(recall)?;
         }
+        // Lazy tick AFTER the reinforcing commit. `Engine::commit` does not flush
+        // storage; `tick` does. Ticking here both applies forgetting and persists
+        // the reinforcement to SQLite — without it, CLI one-shot `recall` would
+        // always lose its reinforcement and `serve` would lose the last recall
+        // before shutdown. Decay is one recall behind, which is negligible.
+        mem.tick(Timestamp::now())?;
         Ok(hits)
     }
 
