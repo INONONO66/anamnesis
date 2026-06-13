@@ -2,7 +2,10 @@
 name = "anamnesis-mcp"
 version = "0.7.0"
 edition = "2024"
-rust-version = "1.85"
+# Higher than the library's 1.85: the rmcp/schemars dep tree pulls darling 0.23,
+# which requires rustc 1.88. The server ships as prebuilt npm binaries, so this
+# does not affect the published library's MSRV promise.
+rust-version = "1.88"
 license = "MIT"
 description = "Anamnesis cognitive-memory MCP server (stdio) and one-shot CLI"
 repository = "https://github.com/INONONO66/anamnesis"
