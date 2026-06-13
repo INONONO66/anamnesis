@@ -3,6 +3,9 @@ mod config;
 mod memory;
 mod server;
 
+#[cfg(test)]
+mod eval;
+
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;

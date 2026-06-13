@@ -4,7 +4,7 @@
 //! embedding provider that is built lazily on first use. All access is
 //! single-threaded by construction (the server holds this behind a Mutex).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -212,8 +212,14 @@ impl MemoryRegistry {
     ) -> Result<Vec<Hit>, Error> {
         let reinforce = self.reinforce_on_recall;
         let mem = self.get(ns)?;
+        // `seed_limit` tracks `limit` inside `search`, and the RWR is noisier with
+        // more seeds, so do NOT oversample to refill the top-k — that measurably
+        // hurts ranking. Instead search `limit`, then collapse the Episodic+Semantic
+        // copies `add_note` creates. This collapse alone lifts insight Recall@5 from
+        // 0.375 to 0.94 (see src/eval.rs); the trade-off is that a heavily-duplicated
+        // result can return fewer than `limit` distinct hits.
         let recall = mem.search(query, limit)?;
-        let hits = recall.hits.clone();
+        let raw = recall.hits.clone();
         if reinforce {
             mem.used(recall)?;
         }
@@ -223,6 +229,13 @@ impl MemoryRegistry {
         // always lose its reinforcement and `serve` would lose the last recall
         // before shutdown. Decay is one recall behind, which is negligible.
         mem.tick(Timestamp::now())?;
+        // Collapse duplicate-text nodes (Episodic+Semantic of one note), keeping
+        // the highest-scored occurrence.
+        let mut seen = HashSet::new();
+        let hits: Vec<Hit> = raw
+            .into_iter()
+            .filter(|h| seen.insert(h.text.clone()))
+            .collect();
         Ok(hits)
     }
 
@@ -307,6 +320,28 @@ mod tests {
             .unwrap();
         let hits = reg.recall("auth race condition", 5, None).unwrap();
         assert!(!hits.is_empty(), "expected at least one hit after remember");
+    }
+
+    #[test]
+    fn recall_collapses_duplicate_text_nodes() {
+        let mut reg = registry(false);
+        // One note = an Episodic + a Semantic node with identical text. recall must
+        // return that text once, not twice.
+        reg.remember("the cache key omitted the lockfile hash", None)
+            .unwrap();
+        let hits = reg.recall("cache key lockfile", 5, None).unwrap();
+        let mut texts: Vec<&str> = hits.iter().map(|h| h.text.as_str()).collect();
+        texts.sort_unstable();
+        let unique = {
+            let mut t = texts.clone();
+            t.dedup();
+            t.len()
+        };
+        assert_eq!(
+            texts.len(),
+            unique,
+            "recall returned duplicate-text hits: {texts:?}"
+        );
     }
 
     #[test]
