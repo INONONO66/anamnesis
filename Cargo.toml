@@ -6,3 +6,6 @@ resolver = "3"
 # anamnesis package manifest.
 [profile.bench]
 debug = true
+
+[profile.release]
+strip = true

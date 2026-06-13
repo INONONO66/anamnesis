@@ -1,0 +1,18 @@
+{
+  "name": "anamnesis-mcp",
+  "version": "0.7.0",
+  "description": "Anamnesis cognitive memory MCP server (stdio) — native Rust binary",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "git+https://github.com/INONONO66/anamnesis.git" },
+  "bin": { "anamnesis-mcp": "bin/anamnesis-mcp.js" },
+  "files": ["bin/anamnesis-mcp.js", "README.md"],
+  "engines": { "node": ">=16" },
+  "publishConfig": { "access": "public", "provenance": true },
+  "optionalDependencies": {
+    "@anamnesis/mcp-darwin-arm64": "0.7.0",
+    "@anamnesis/mcp-darwin-x64": "0.7.0",
+    "@anamnesis/mcp-linux-x64": "0.7.0",
+    "@anamnesis/mcp-linux-arm64": "0.7.0",
+    "@anamnesis/mcp-win32-x64": "0.7.0"
+  }
+}
