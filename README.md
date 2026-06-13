@@ -85,6 +85,13 @@ Anamnesis is a **library — a memory kernel**, not a service. It owns the *phys
 | Snapshots, SQLite storage, health/invariants | **Queries & commit**: `search` auto-flushes; `used` commits reinforcement | Yes — use `engine().search()` / `engine_mut().commit()` |
 | Pure mechanics, no LLM calls, no background tasks | **`tick` scheduling**, no serving opinion | `tick(now)` — caller schedules; retrieval quality depends on encoding; the validated recipe is `Memory` |
 
+### MCP server
+
+`anamnesis-mcp` wraps the `Memory` front door as an MCP **stdio** server
+(`recall` / `remember` / `ingest_conversation`) with auto-reinforced reads.
+See [`crates/anamnesis-mcp`](crates/anamnesis-mcp/README.md). Install via
+`npx anamnesis-mcp serve` (v1.5) or `cargo run -p anamnesis-mcp -- serve`.
+
 ## Benchmarks
 
 Long-term conversational memory benchmarks, **retrieval-only dry runs**: no LLM
