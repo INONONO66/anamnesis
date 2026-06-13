@@ -4,8 +4,26 @@ version = "0.7.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
+description = "Anamnesis cognitive-memory MCP server (stdio) and one-shot CLI"
+repository = "https://github.com/INONONO66/anamnesis"
 publish = false
 
 [[bin]]
 name = "anamnesis-mcp"
 path = "src/main.rs"
+
+[dependencies]
+anamnesis = { path = "../anamnesis", features = ["embed"] }
+rmcp = { version = "1.7", features = ["server", "macros", "transport-io"] }
+schemars = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
+clap = { version = "4", features = ["derive"] }
+dirs = "5"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+[dev-dependencies]
+tempfile = "3"
