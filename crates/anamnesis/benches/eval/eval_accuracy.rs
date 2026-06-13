@@ -445,18 +445,18 @@ fn load_dataset(
 }
 
 fn load_or_create_checkpoint(args: &Args, path: &Path) -> Result<Checkpoint, DynError> {
-    if args.resume {
-        if let Some(checkpoint) = checkpoint::load(path).map_err(format_checkpoint_error)? {
-            if checkpoint.dataset == args.dataset.as_str() {
-                eprintln!("Resuming checkpoint {}", path.display());
-                return Ok(checkpoint);
-            }
-            eprintln!(
-                "Ignoring checkpoint for dataset {}; current dataset is {}",
-                checkpoint.dataset,
-                args.dataset.as_str()
-            );
+    if args.resume
+        && let Some(checkpoint) = checkpoint::load(path).map_err(format_checkpoint_error)?
+    {
+        if checkpoint.dataset == args.dataset.as_str() {
+            eprintln!("Resuming checkpoint {}", path.display());
+            return Ok(checkpoint);
         }
+        eprintln!(
+            "Ignoring checkpoint for dataset {}; current dataset is {}",
+            checkpoint.dataset,
+            args.dataset.as_str()
+        );
     }
 
     Ok(Checkpoint {

@@ -245,21 +245,20 @@ pub fn check_storage_invariants<S: StorageAdapter>(storage: &S) -> Vec<Invariant
             // (`Disjoint`) when neither side is universal. Such an edge would let
             // private knowledge in one scope light up a node a query in the other,
             // disjoint scope can reach.
-            if !matches!(edge.edge_type, EdgeType::Contradicts) {
-                if let (Ok(src), Ok(tgt)) =
+            if !matches!(edge.edge_type, EdgeType::Contradicts)
+                && let (Ok(src), Ok(tgt)) =
                     (storage.get_node(edge.source), storage.get_node(edge.target))
+            {
+                let src_scope = &src.origin.scope;
+                let tgt_scope = &tgt.origin.scope;
+                if !src_scope.is_universal()
+                    && !tgt_scope.is_universal()
+                    && src_scope.relation_to(tgt_scope) == ScopeRelation::Disjoint
                 {
-                    let src_scope = &src.origin.scope;
-                    let tgt_scope = &tgt.origin.scope;
-                    if !src_scope.is_universal()
-                        && !tgt_scope.is_universal()
-                        && src_scope.relation_to(tgt_scope) == ScopeRelation::Disjoint
-                    {
-                        scope_leakage.push(format!(
-                            "edge {eid:?} bridges disjoint scopes {} <-> {}",
-                            src_scope, tgt_scope
-                        ));
-                    }
+                    scope_leakage.push(format!(
+                        "edge {eid:?} bridges disjoint scopes {} <-> {}",
+                        src_scope, tgt_scope
+                    ));
                 }
             }
         }

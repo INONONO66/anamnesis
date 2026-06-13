@@ -224,7 +224,7 @@ fn run_extraction_phase(
                     }
 
                     let done = processed.fetch_add(1, Ordering::Relaxed) + 1;
-                    if done % 100 == 0 || done == total {
+                    if done.is_multiple_of(100) || done == total {
                         eprintln!(
                             "  phase 1 [{done}/{total}] turns processed ({:.1}s)",
                             start.elapsed().as_secs_f64()
@@ -429,7 +429,7 @@ fn run_ingestion_phase(
         }
 
         total_sessions += 1;
-        if total_sessions % 100 == 0 || total_sessions == sessions.len() {
+        if total_sessions.is_multiple_of(100) || total_sessions == sessions.len() {
             eprintln!(
                 "  phase 2 [{}/{}] sessions, {} nodes, {} edges from {} turns ({:.1}s)",
                 total_sessions,
@@ -632,10 +632,10 @@ fn order_session_results(
 ) -> Vec<Vec<ExtractionResult>> {
     let mut ordered = Vec::new();
     for session in sessions {
-        if let Some(results) = grouped.remove(&session.session_id) {
-            if !results.is_empty() {
-                ordered.push(results);
-            }
+        if let Some(results) = grouped.remove(&session.session_id)
+            && !results.is_empty()
+        {
+            ordered.push(results);
         }
     }
     for (_session_id, results) in grouped {

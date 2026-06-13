@@ -156,10 +156,10 @@ fn assemble_graph_recall_package<S: StorageAdapter + Clone>(
             Err(_) => continue,
         };
 
-        if let Some(ref peer_filter) = input.peer_filter {
-            if !peer_filter.contains(&node.origin.peer_id) {
-                continue;
-            }
+        if let Some(ref peer_filter) = input.peer_filter
+            && !peer_filter.contains(&node.origin.peer_id)
+        {
+            continue;
         }
         if node.metadata.get("retracted").is_some_and(|v| v == "true") {
             continue;

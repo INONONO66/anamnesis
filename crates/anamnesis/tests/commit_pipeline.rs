@@ -333,10 +333,10 @@ fn commit_conductance_update_is_deterministic_for_same_graph_and_trace() {
     // The committed conductance is finite and rose from the cold-start seed (positive
     // flux strengthens the path); it equals the closed-form bounded Hebbian-Oja step.
     let seeded = fixture().0.graph().storage().get_conductance(edge).unwrap();
-    if let Some(flux) = flux1 {
-        if flux > 0.0 {
-            assert!(c1 > seeded, "positive flux must raise conductance");
-        }
+    if let Some(flux) = flux1
+        && flux > 0.0
+    {
+        assert!(c1 > seeded, "positive flux must raise conductance");
     }
     assert!(c1.is_finite() && c2.is_finite());
 }

@@ -37,10 +37,11 @@ fn build_engine_with_nodes(n: usize, core_pct: usize) -> Engine {
             valid_until: None,
         };
 
-        if let Ok(IngestResult::Created(ids)) = engine.ingest(obs) {
-            if core_pct > 0 && i * 100 / n < core_pct {
-                let _ = engine.set_tier(ids[0], MemoryTier::Core);
-            }
+        if let Ok(IngestResult::Created(ids)) = engine.ingest(obs)
+            && core_pct > 0
+            && i * 100 / n < core_pct
+        {
+            let _ = engine.set_tier(ids[0], MemoryTier::Core);
         }
     }
 

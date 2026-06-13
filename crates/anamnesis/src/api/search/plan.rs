@@ -73,17 +73,17 @@ pub(crate) fn decompose_query(query: &str) -> Vec<String> {
     }
 
     // English: "how does X work" → extract X
-    if results.is_empty() {
-        if let Some(rest) = strip_prefix_ci(q, "how does ") {
-            let subject = rest
-                .trim_end_matches('?')
-                .trim()
-                .strip_suffix(" work")
-                .unwrap_or(rest.trim_end_matches('?').trim())
-                .trim();
-            if !subject.is_empty() {
-                results.push(subject.to_string());
-            }
+    if results.is_empty()
+        && let Some(rest) = strip_prefix_ci(q, "how does ")
+    {
+        let subject = rest
+            .trim_end_matches('?')
+            .trim()
+            .strip_suffix(" work")
+            .unwrap_or(rest.trim_end_matches('?').trim())
+            .trim();
+        if !subject.is_empty() {
+            results.push(subject.to_string());
         }
     }
 
@@ -118,17 +118,17 @@ pub(crate) fn decompose_query(query: &str) -> Vec<String> {
     }
 
     // Korean: "X의 Y" → extract X and Y
-    if results.is_empty() {
-        if let Some(idx) = q.find("의 ") {
-            let x = q[..idx].trim();
-            let rest = &q[idx + "의 ".len()..];
-            let y = strip_korean_suffixes(rest.trim_end_matches('?').trim());
-            if !x.is_empty() {
-                results.push(x.to_string());
-            }
-            if !y.is_empty() && y != x {
-                results.push(y.to_string());
-            }
+    if results.is_empty()
+        && let Some(idx) = q.find("의 ")
+    {
+        let x = q[..idx].trim();
+        let rest = &q[idx + "의 ".len()..];
+        let y = strip_korean_suffixes(rest.trim_end_matches('?').trim());
+        if !x.is_empty() {
+            results.push(x.to_string());
+        }
+        if !y.is_empty() && y != x {
+            results.push(y.to_string());
         }
     }
 

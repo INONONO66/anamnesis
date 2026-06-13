@@ -11,11 +11,10 @@ pub struct EmbedCache {
 
 impl EmbedCache {
     pub fn open(path: &std::path::Path, model: &str) -> BenchResult<Self> {
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| BenchError::InvalidInput(e.to_string()))?;
-            }
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent).map_err(|e| BenchError::InvalidInput(e.to_string()))?;
         }
         let conn = Connection::open(path).map_err(|e| BenchError::Engine(e.to_string()))?;
         // WAL + relaxed sync: cold-cache population writes hundreds of

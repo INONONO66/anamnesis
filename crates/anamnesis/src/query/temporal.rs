@@ -117,13 +117,12 @@ pub(crate) fn parse_time_cues(text: &str, now: u64) -> Vec<TimeRange> {
                     parts.next().map(str::parse::<i64>),
                     parts.next().map(str::parse::<u32>),
                     parts.next().map(str::parse::<u32>),
-                ) {
-                    if let Some(start) = day_epoch(y, m, d) {
-                        ranges.push(TimeRange {
-                            start,
-                            end: start + DAY_SECS - 1,
-                        });
-                    }
+                ) && let Some(start) = day_epoch(y, m, d)
+                {
+                    ranges.push(TimeRange {
+                        start,
+                        end: start + DAY_SECS - 1,
+                    });
                 }
             }
         }

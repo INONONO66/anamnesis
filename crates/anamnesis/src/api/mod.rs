@@ -2205,12 +2205,12 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         let id = self.graph.next_node_id();
         let now = observation.timestamp;
 
-        if let (Some(vf), Some(vu)) = (observation.valid_from, observation.valid_until) {
-            if vu <= vf {
-                return Err(Error::InvalidInput(
-                    "valid_until must be greater than valid_from".to_string(),
-                ));
-            }
+        if let (Some(vf), Some(vu)) = (observation.valid_from, observation.valid_until)
+            && vu <= vf
+        {
+            return Err(Error::InvalidInput(
+                "valid_until must be greater than valid_from".to_string(),
+            ));
         }
 
         // Seed the creation trace so B_i is finite at birth (compute_base_level
@@ -2435,19 +2435,19 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             let storage = self.graph.storage();
             for &src in &source_ids {
                 for &eid in storage.edges_from(src) {
-                    if let Ok(edge) = storage.get_edge(eid) {
-                        if source_set.contains(&edge.target) {
-                            edges_between += 1;
-                            match edge.edge_type {
-                                EdgeType::Contradicts => contradicts_count += 1,
-                                EdgeType::Supports
-                                | EdgeType::ReinforcedBy
-                                | EdgeType::ConsolidatedFrom
-                                | EdgeType::ExtractedFrom
-                                | EdgeType::Entity
-                                | EdgeType::Reason => supportive_count += 1,
-                                _ => {}
-                            }
+                    if let Ok(edge) = storage.get_edge(eid)
+                        && source_set.contains(&edge.target)
+                    {
+                        edges_between += 1;
+                        match edge.edge_type {
+                            EdgeType::Contradicts => contradicts_count += 1,
+                            EdgeType::Supports
+                            | EdgeType::ReinforcedBy
+                            | EdgeType::ConsolidatedFrom
+                            | EdgeType::ExtractedFrom
+                            | EdgeType::Entity
+                            | EdgeType::Reason => supportive_count += 1,
+                            _ => {}
                         }
                     }
                 }
@@ -2944,17 +2944,17 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             // de-duplicated and stably ordered for determinism.
             let mut edge_ids: BTreeSet<EdgeId> = BTreeSet::new();
             for &eid in self.graph.edges_from(site_i) {
-                if let Ok(edge) = self.graph.get_edge(eid) {
-                    if edge.target == site_j {
-                        edge_ids.insert(eid);
-                    }
+                if let Ok(edge) = self.graph.get_edge(eid)
+                    && edge.target == site_j
+                {
+                    edge_ids.insert(eid);
                 }
             }
             for &eid in self.graph.edges_from(site_j) {
-                if let Ok(edge) = self.graph.get_edge(eid) {
-                    if edge.target == site_i {
-                        edge_ids.insert(eid);
-                    }
+                if let Ok(edge) = self.graph.get_edge(eid)
+                    && edge.target == site_i
+                {
+                    edge_ids.insert(eid);
                 }
             }
 
@@ -4159,10 +4159,10 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                 if node.created_at < since {
                     return None;
                 }
-                if let Some(types) = node_types {
-                    if !types.iter().any(|node_type| node_type == &node.node_type) {
-                        return None;
-                    }
+                if let Some(types) = node_types
+                    && !types.iter().any(|node_type| node_type == &node.node_type)
+                {
+                    return None;
                 }
                 let salience = storage.get_salience(nid).unwrap_or(0.0);
                 Some((
@@ -4242,22 +4242,22 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             }
 
             for &eid in storage.edges_from(nid) {
-                if let Ok(edge) = storage.get_edge(eid) {
-                    if visited.insert(edge.target) {
-                        let next_depth = depth + 1;
-                        depths.insert(edge.target, next_depth);
-                        queue.push_back((edge.target, next_depth));
-                    }
+                if let Ok(edge) = storage.get_edge(eid)
+                    && visited.insert(edge.target)
+                {
+                    let next_depth = depth + 1;
+                    depths.insert(edge.target, next_depth);
+                    queue.push_back((edge.target, next_depth));
                 }
             }
 
             for &eid in storage.edges_to(nid) {
-                if let Ok(edge) = storage.get_edge(eid) {
-                    if visited.insert(edge.source) {
-                        let next_depth = depth + 1;
-                        depths.insert(edge.source, next_depth);
-                        queue.push_back((edge.source, next_depth));
-                    }
+                if let Ok(edge) = storage.get_edge(eid)
+                    && visited.insert(edge.source)
+                {
+                    let next_depth = depth + 1;
+                    depths.insert(edge.source, next_depth);
+                    queue.push_back((edge.source, next_depth));
                 }
             }
         }

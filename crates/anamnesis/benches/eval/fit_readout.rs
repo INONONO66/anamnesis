@@ -209,7 +209,7 @@ fn main() {
             continue;
         }
         let row: Row = serde_json::from_str(&line).expect("parse row");
-        let bucket = if row.sample_index % 2 == 0 {
+        let bucket = if row.sample_index.is_multiple_of(2) {
             &mut train
         } else {
             &mut dev

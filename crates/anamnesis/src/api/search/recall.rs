@@ -41,11 +41,11 @@ pub(crate) fn run_graph_recalls<S: StorageAdapter>(
     for seed in fused_seeds {
         let retained_action = storage.get_retained_action(seed.node_id).unwrap_or(0.0);
         let mut signals = field_signals(seed, retained_action);
-        if !time_cues.is_empty() {
-            if let Ok(node) = storage.get_node(seed.node_id) {
-                signals.temporal_score =
-                    crate::query::temporal::temporal_proximity(node.created_at.0, time_cues);
-            }
+        if !time_cues.is_empty()
+            && let Ok(node) = storage.get_node(seed.node_id)
+        {
+            signals.temporal_score =
+                crate::query::temporal::temporal_proximity(node.created_at.0, time_cues);
         }
         field.set(seed.node_id, signals);
     }

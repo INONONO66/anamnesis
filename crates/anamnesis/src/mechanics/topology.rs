@@ -117,10 +117,10 @@ pub fn bridge_score<S: StorageAdapter>(
     // Compute scope diversity: unique scopes / total neighbors
     let mut unique_scopes = std::collections::HashSet::new();
     for neighbor_id in &neighbor_ids {
-        if let Ok(neighbor) = storage.get_node(*neighbor_id) {
-            if neighbor.origin.scope != *node_scope {
-                unique_scopes.insert(neighbor.origin.scope.clone());
-            }
+        if let Ok(neighbor) = storage.get_node(*neighbor_id)
+            && neighbor.origin.scope != *node_scope
+        {
+            unique_scopes.insert(neighbor.origin.scope.clone());
         }
     }
     let scope_diversity = (unique_scopes.len() as f64) / (neighbor_ids.len() as f64) * 0.25;
@@ -165,10 +165,10 @@ pub fn support_score<S: StorageAdapter>(storage: &S, id: NodeId) -> Result<f64, 
 
     let mut supportive_count = 0;
     for edge_id in incoming_edges {
-        if let Ok(edge) = storage.get_edge(*edge_id) {
-            if is_supportive_edge(&edge.edge_type) {
-                supportive_count += 1;
-            }
+        if let Ok(edge) = storage.get_edge(*edge_id)
+            && is_supportive_edge(&edge.edge_type)
+        {
+            supportive_count += 1;
         }
     }
 

@@ -48,10 +48,10 @@ pub(super) fn parse_locomo(
         map
     };
     for question in &mut questions {
-        if question.question_date.is_none() {
-            if let Some(&max_ts) = max_session_ts_by_sample.get(&question.sample_index) {
-                question.question_date = Some(max_ts + 86_400);
-            }
+        if question.question_date.is_none()
+            && let Some(&max_ts) = max_session_ts_by_sample.get(&question.sample_index)
+        {
+            question.question_date = Some(max_ts + 86_400);
         }
     }
 
@@ -159,10 +159,10 @@ fn ordered_session_keys(sample: &Value) -> Vec<String> {
 fn evidence_sessions(turn_ids: &[String]) -> Vec<String> {
     let mut sessions = BTreeSet::new();
     for turn_id in turn_ids {
-        if let Some(prefix) = turn_id.split(':').next() {
-            if let Some(number) = prefix.strip_prefix('D') {
-                sessions.insert(format!("session_{number}"));
-            }
+        if let Some(prefix) = turn_id.split(':').next()
+            && let Some(number) = prefix.strip_prefix('D')
+        {
+            sessions.insert(format!("session_{number}"));
         }
     }
     sessions.into_iter().collect()

@@ -694,10 +694,10 @@ fn upgrade_cost_from_data(
     }
 
     let mut cost = estimate_tokens(&frag.name, chars_per_token);
-    if matches!(target, Resolution::L1 | Resolution::L2) {
-        if let Some(ref summary) = data.summary {
-            cost += estimate_tokens(summary, chars_per_token);
-        }
+    if matches!(target, Resolution::L1 | Resolution::L2)
+        && let Some(ref summary) = data.summary
+    {
+        cost += estimate_tokens(summary, chars_per_token);
     }
     if matches!(target, Resolution::L2) {
         cost += estimate_tokens(&data.content, chars_per_token);

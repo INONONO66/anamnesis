@@ -88,12 +88,11 @@ pub fn parse_locomo_date_time(value: &str) -> Option<u64> {
         if let Some(position) = MONTHS.iter().position(|m| m == token) {
             month = Some(position as u32 + 1);
             for neighbor in [index.wrapping_sub(1), index + 1] {
-                if let Some(t) = tokens.get(neighbor) {
-                    if let Ok(d) = t.parse::<u32>() {
-                        if (1..=31).contains(&d) {
-                            day = Some(d);
-                        }
-                    }
+                if let Some(t) = tokens.get(neighbor)
+                    && let Ok(d) = t.parse::<u32>()
+                    && (1..=31).contains(&d)
+                {
+                    day = Some(d);
                 }
             }
         } else if let Ok(value) = token.parse::<i64>() {
