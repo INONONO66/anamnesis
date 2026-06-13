@@ -51,7 +51,11 @@ pub fn run_oneshot(cli: &Cli) -> Result<bool> {
     let cfg = Config::from_env();
     match &cli.command {
         None | Some(Commands::Serve) => Ok(false),
-        Some(Commands::Recall { query, limit, namespace }) => {
+        Some(Commands::Recall {
+            query,
+            limit,
+            namespace,
+        }) => {
             let mut reg = registry(&cfg);
             let hits = reg.recall(query, *limit, namespace.as_deref())?;
             let body = serde_json::json!({

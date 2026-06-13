@@ -29,7 +29,11 @@ impl Config {
             Ok(v) => !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no"),
             Err(_) => true,
         };
-        Self { default_db, default_namespace, reinforce_on_recall }
+        Self {
+            default_db,
+            default_namespace,
+            reinforce_on_recall,
+        }
     }
 
     /// Directory that holds per-namespace sibling DB files.
@@ -73,7 +77,11 @@ mod tests {
     fn reinforce_defaults_true_and_can_disable() {
         // No assertions on process env (avoid global mutation in parallel tests);
         // test the parsing helper directly via a constructed Config instead.
-        let cfg = Config { default_db: "x".into(), default_namespace: "default".into(), reinforce_on_recall: true };
+        let cfg = Config {
+            default_db: "x".into(),
+            default_namespace: "default".into(),
+            reinforce_on_recall: true,
+        };
         assert!(cfg.reinforce_on_recall);
         assert_eq!(cfg.db_dir(), PathBuf::from("."));
     }

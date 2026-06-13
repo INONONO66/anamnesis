@@ -16,7 +16,10 @@ use crate::memory::MemoryRegistry;
 use crate::server::AnamnesisServer;
 
 fn main() -> Result<()> {
-    tracing_subscriber::fmt().with_writer(std::io::stderr).with_ansi(false).init();
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_ansi(false)
+        .init();
 
     let cli = Cli::parse();
     // One-shot CLI commands run synchronously (cold model load) and exit.

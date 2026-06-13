@@ -59,7 +59,10 @@ pub struct AnamnesisServer {
 
 impl AnamnesisServer {
     pub fn new(registry: Arc<Mutex<MemoryRegistry>>) -> Self {
-        Self { registry, tool_router: Self::tool_router() }
+        Self {
+            registry,
+            tool_router: Self::tool_router(),
+        }
     }
 }
 
@@ -69,7 +72,9 @@ fn internal(msg: impl std::fmt::Display) -> ErrorData {
 
 #[tool_router]
 impl AnamnesisServer {
-    #[tool(description = "Search memory for relevant prior knowledge. ALWAYS call before answering. Reading reinforces what it returns.")]
+    #[tool(
+        description = "Search memory for relevant prior knowledge. ALWAYS call before answering. Reading reinforces what it returns."
+    )]
     async fn recall(
         &self,
         Parameters(p): Parameters<RecallParams>,
@@ -112,10 +117,14 @@ impl AnamnesisServer {
         .await
         .map_err(internal)?
         .map_err(internal)?;
-        Ok(CallToolResult::success(vec![Content::text(format!("stored node {id}"))]))
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "stored node {id}"
+        ))]))
     }
 
-    #[tool(description = "Ingest a full conversation transcript (ordered turns) via the windowing recipe.")]
+    #[tool(
+        description = "Ingest a full conversation transcript (ordered turns) via the windowing recipe."
+    )]
     async fn ingest_conversation(
         &self,
         Parameters(p): Parameters<IngestParams>,
@@ -125,7 +134,11 @@ impl AnamnesisServer {
             let turns: Vec<Turn> = p
                 .turns
                 .into_iter()
-                .map(|t| Turn { speaker: t.speaker, text: t.text, at_ms: t.at_ms })
+                .map(|t| Turn {
+                    speaker: t.speaker,
+                    text: t.text,
+                    at_ms: t.at_ms,
+                })
                 .collect();
             let mut g = registry.lock().expect("registry mutex poisoned");
             g.ingest_conversation(&p.session, &turns, p.namespace.as_deref())
@@ -140,7 +153,7 @@ impl AnamnesisServer {
     }
 }
 
-#[tool_handler]
+#[tool_handler(router = self.tool_router)]
 impl ServerHandler for AnamnesisServer {
     fn get_info(&self) -> ServerInfo {
         // `ServerInfo`/`Implementation` are `#[non_exhaustive]` in rmcp 1.7, so

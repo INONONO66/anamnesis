@@ -8,7 +8,10 @@ fn lists_three_tools_over_stdio() {
     let bin = env!("CARGO_BIN_EXE_anamnesis-mcp");
     let mut child = Command::new(bin)
         .arg("serve")
-        .env("ANAMNESIS_DB", std::env::temp_dir().join("anamnesis-smoke/memory.db"))
+        .env(
+            "ANAMNESIS_DB",
+            std::env::temp_dir().join("anamnesis-smoke/memory.db"),
+        )
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -31,36 +34,51 @@ fn lists_three_tools_over_stdio() {
     };
 
     // initialize
-    send(&mut stdin, serde_json::json!({
-        "jsonrpc": "2.0", "id": 1, "method": "initialize",
-        "params": {
-            "protocolVersion": "2025-06-18",
-            "capabilities": {},
-            "clientInfo": { "name": "smoke", "version": "0" }
-        }
-    }));
+    send(
+        &mut stdin,
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": { "name": "smoke", "version": "0" }
+            }
+        }),
+    );
     let init = read(&mut stdout);
     assert_eq!(init["id"], 1, "initialize response: {init}");
 
     // initialized notification (no id)
-    send(&mut stdin, serde_json::json!({
-        "jsonrpc": "2.0", "method": "notifications/initialized"
-    }));
+    send(
+        &mut stdin,
+        serde_json::json!({
+            "jsonrpc": "2.0", "method": "notifications/initialized"
+        }),
+    );
 
     // tools/list
-    send(&mut stdin, serde_json::json!({
-        "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}
-    }));
+    send(
+        &mut stdin,
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}
+        }),
+    );
     let listed = read(&mut stdout);
     let names: Vec<String> = listed["result"]["tools"]
-        .as_array().expect("tools array")
+        .as_array()
+        .expect("tools array")
         .iter()
         .map(|t| t["name"].as_str().unwrap().to_string())
         .collect();
 
     assert!(names.contains(&"recall".to_string()), "tools: {names:?}");
     assert!(names.contains(&"remember".to_string()), "tools: {names:?}");
-    assert!(names.contains(&"ingest_conversation".to_string()), "tools: {names:?}");
+    assert!(
+        names.contains(&"ingest_conversation".to_string()),
+        "tools: {names:?}"
+    );
 
     let _ = child.kill();
+    // Reap the child so it does not linger as a zombie after kill().
+    let _ = child.wait();
 }
