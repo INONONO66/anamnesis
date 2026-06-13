@@ -75,6 +75,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "anamnesis-mcp"
+version = "0.7.0"
+
+[[package]]
 name = "anes"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"

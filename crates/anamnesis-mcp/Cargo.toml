@@ -1,0 +1,11 @@
+[package]
+name = "anamnesis-mcp"
+version = "0.7.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "anamnesis-mcp"
+path = "src/main.rs"

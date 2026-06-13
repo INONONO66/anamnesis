@@ -1,0 +1,124 @@
+[package]
+name = "anamnesis"
+version = "0.7.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Cognitive memory engine for LLMs — Bayesian conductive-network recall with perception, dissipation, and frustration"
+license = "MIT"
+repository = "https://github.com/INONONO66/anamnesis"
+readme = "README.md"
+
+[lib]
+name = "anamnesis"
+crate-type = ["lib"]
+
+[features]
+embed = ["dep:fastembed"]
+
+[dependencies]
+fastembed = { version = "4", optional = true }
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+[dev-dependencies]
+proptest = "1.6"
+criterion = { version = "0.5", features = ["html_reports"] }
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", features = ["json", "blocking"] }
+dhat = "0.3"
+libc = "0.2"
+
+[[bench]]
+name = "ingestion"
+harness = false
+
+[[bench]]
+name = "graph_crud"
+harness = false
+
+[[bench]]
+name = "storage"
+harness = false
+
+[[bench]]
+name = "memory_usage"
+harness = false
+
+[[bench]]
+name = "engine_ops"
+harness = false
+
+[[bench]]
+name = "tick_scaling"
+harness = false
+
+[[bench]]
+name = "search_breakdown"
+harness = false
+
+[[bench]]
+name = "vector_similarity"
+harness = false
+
+[[bench]]
+name = "memory_real"
+harness = false
+
+[[bench]]
+name = "eval_accuracy"
+path = "benches/eval/eval_accuracy.rs"
+harness = false
+
+[[bench]]
+name = "search_latency"
+path = "benches/eval/search_latency.rs"
+harness = false
+
+[[bench]]
+name = "download_datasets"
+path = "benches/eval/download.rs"
+harness = false
+
+[[bench]]
+name = "pre_ingest"
+path = "benches/eval/pre_ingest.rs"
+harness = false
+required-features = ["embed"]
+
+[[bench]]
+name = "real_memory"
+path = "benches/eval/real_memory.rs"
+harness = false
+required-features = ["embed"]
+
+[[bench]]
+name = "fit_readout"
+path = "benches/eval/fit_readout.rs"
+harness = false
+
+[[bench]]
+name = "query_spreading"
+harness = false
+
+[[bench]]
+name = "fidelity_report"
+path = "benches/fidelity_report.rs"
+harness = false
+
+[[bench]]
+name = "fidelity_showcase"
+path = "benches/fidelity_showcase.rs"
+harness = false
+
+[[test]]
+name = "eval_golden"
+path = "benches/eval/golden.rs"
+
+[[test]]
+name = "eval_regression"
+path = "benches/eval/regression.rs"
+
+[[test]]
+name = "eval_common"
+path = "benches/eval_common/mod.rs"
