@@ -22,7 +22,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt --check
 ```
 
-**Minimum Rust version:** 1.85 (2024 edition)
+**Minimum Rust version:** 1.88 (2024 edition)
 
 ## Making Changes
 

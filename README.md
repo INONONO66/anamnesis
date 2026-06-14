@@ -85,6 +85,13 @@ Anamnesis is a **library — a memory kernel**, not a service. It owns the *phys
 | Snapshots, SQLite storage, health/invariants | **Queries & commit**: `search` auto-flushes; `used` commits reinforcement | Yes — use `engine().search()` / `engine_mut().commit()` |
 | Pure mechanics, no LLM calls, no background tasks | **`tick` scheduling**, no serving opinion | `tick(now)` — caller schedules; retrieval quality depends on encoding; the validated recipe is `Memory` |
 
+### MCP server
+
+`anamnesis-mcp` wraps the `Memory` front door as an MCP **stdio** server
+(`recall` / `remember` / `ingest_conversation`) with auto-reinforced reads.
+See [`crates/anamnesis-mcp`](crates/anamnesis-mcp/README.md). Install via
+`npx anamnesis-mcp serve` (v1.5) or `cargo run -p anamnesis-mcp -- serve`.
+
 ## Benchmarks
 
 Long-term conversational memory benchmarks, **retrieval-only dry runs**: no LLM
@@ -562,7 +569,7 @@ cargo test --all-targets --all-features --no-run
 
 CI installs `cargo-nextest` before running the test gate. If `cargo-nextest` is not available locally, use `cargo test --all-features` as the local functional-test equivalent.
 
-CI also runs the MSRV check (`cargo check --all-targets --all-features` on Rust 1.85), `cargo deny`, and PR semver checks. Run those locally when the corresponding tools are installed, especially before publishing a release.
+CI also runs the MSRV check (`cargo check --all-targets --all-features` on Rust 1.88), `cargo deny`, and PR semver checks. Run those locally when the corresponding tools are installed, especially before publishing a release.
 
 `cargo test --all-targets` intentionally is not a release gate because this crate has `harness = false` benchmark binaries that execute long-running benchmarks when invoked as test targets. Use `cargo bench` or the manual benchmark workflow for performance runs.
 

@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`IngestResult` enum** — new variant `CreatedWithConflict { node_ids, conflict }`. Update match arms.
 - **`Engine::health()`** — now returns `HealthReport` (was `GraphHealth`). Use `Engine::graph_health()` for the old behavior.
 - **SQLite schema** — migrated from v1 to v2. Existing databases are auto-migrated on open.
+- **Minimum Supported Rust Version raised 1.85 → 1.88** — required by the new `anamnesis-mcp` crate's `rmcp`/`schemars` dependency tree (`darling 0.23` requires rustc 1.88); the workspace now tracks a single MSRV.
 
 ### Added
 

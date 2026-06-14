@@ -5,7 +5,7 @@
 .sisyphus/
 longmemeval*.json
 .fastembed_cache/
-benches/eval/data/
-benches/eval/results/
+crates/anamnesis/benches/eval/data/
+crates/anamnesis/benches/eval/results/
 docs/superpowers/
 target/fidelity/
