@@ -59,6 +59,10 @@ pub struct MemoryRegistry {
     reinforce_on_recall: bool,
     open: HashMap<String, Memory<SqliteStorage>>,
     default_namespace: String,
+    /// Exclusive locks on each opened file-backed DB. Held for the process
+    /// lifetime so a second process can't open the same database; the OS
+    /// releases them automatically on exit or crash.
+    locks: Vec<std::fs::File>,
 }
 
 impl MemoryRegistry {
@@ -80,6 +84,7 @@ impl MemoryRegistry {
             reinforce_on_recall,
             open: HashMap::new(),
             default_namespace,
+            locks: Vec::new(),
         }
     }
 
@@ -93,6 +98,31 @@ impl MemoryRegistry {
             reinforce_on_recall,
             open: HashMap::new(),
             default_namespace: "default".to_string(),
+            locks: Vec::new(),
+        }
+    }
+
+    /// Test constructor: file-backed (exercises real locking) with a supplied provider.
+    #[cfg(test)]
+    pub fn file_backed_with(
+        provider: Arc<dyn EmbeddingProvider>,
+        default_db: PathBuf,
+        dir: PathBuf,
+        default_namespace: String,
+        reinforce_on_recall: bool,
+    ) -> Self {
+        Self {
+            provider: Some(provider.clone()),
+            source: ProviderSource::Ready(provider),
+            backend: Backend::File {
+                default_db,
+                dir,
+                default_namespace: default_namespace.clone(),
+            },
+            reinforce_on_recall,
+            open: HashMap::new(),
+            default_namespace,
+            locks: Vec::new(),
         }
     }
 
@@ -159,16 +189,19 @@ impl MemoryRegistry {
 
     fn open_namespace(&mut self, ns: &str) -> Result<Memory<SqliteStorage>, Error> {
         let provider = self.provider()?;
-        match &self.backend {
+        // Resolve where this namespace lives WITHOUT holding a borrow of
+        // `self.backend`, so we can push to `self.locks` below. `None` = the
+        // in-memory test backend.
+        let path: Option<PathBuf> = match &self.backend {
             #[cfg(test)]
-            Backend::Memory => Memory::in_memory_with_provider(provider),
+            Backend::Memory => None,
             Backend::File {
                 default_db,
                 dir,
                 default_namespace,
             } => {
-                let path = if ns == default_namespace {
-                    default_db.clone()
+                if ns == default_namespace {
+                    Some(default_db.clone())
                 } else {
                     let path = dir.join(format!("{}.db", Self::sanitize(ns)));
                     // A non-default namespace whose sanitized file resolves to the
@@ -180,15 +213,46 @@ impl MemoryRegistry {
                              choose a different namespace name"
                         )));
                     }
-                    path
-                };
-                if let Some(parent) = path.parent() {
-                    std::fs::create_dir_all(parent)
-                        .map_err(|e| Error::StorageError(format!("create db dir: {e}")))?;
+                    Some(path)
                 }
-                Memory::with_provider(path, provider)
             }
+        };
+
+        let Some(path) = path else {
+            return Memory::in_memory_with_provider(provider);
+        };
+
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| Error::StorageError(format!("create db dir: {e}")))?;
         }
+
+        // Take an exclusive lock on a sibling `<db>.lock` so a second
+        // anamnesis-mcp process can't open the same database (two processes =>
+        // two in-memory caches over one file => corruption). The OS releases the
+        // lock when this process exits or is killed.
+        let mut lock_path = path.clone().into_os_string();
+        lock_path.push(".lock");
+        let lock_path = PathBuf::from(lock_path);
+        let lock_file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)
+            .map_err(|e| Error::StorageError(format!("open lock file {lock_path:?}: {e}")))?;
+        // UFCS: on rustc >= 1.89 `File` has an inherent `try_lock` (different
+        // signature) that would shadow the trait method; pin to fs4's so the
+        // behavior is identical on our 1.88 MSRV and on newer toolchains.
+        if fs4::FileExt::try_lock(&lock_file).is_err() {
+            return Err(Error::StorageError(format!(
+                "database {path:?} is already in use by another anamnesis-mcp process; \
+                 use a different ANAMNESIS_DB or namespace"
+            )));
+        }
+
+        let mem = Memory::with_provider(path, provider)?;
+        self.locks.push(lock_file);
+        Ok(mem)
     }
 
     fn get(&mut self, ns: Option<&str>) -> Result<&mut Memory<SqliteStorage>, Error> {
@@ -199,6 +263,15 @@ impl MemoryRegistry {
             self.open.insert(key.clone(), mem);
         }
         Ok(self.open.get_mut(&key).expect("just inserted"))
+    }
+
+    /// Flush every open namespace's pending state to disk. Called on graceful
+    /// shutdown (SIGTERM), where `process::exit` would otherwise skip `Drop`.
+    pub fn flush_all_open(&mut self) -> Result<(), Error> {
+        for mem in self.open.values_mut() {
+            mem.flush_all()?;
+        }
+        Ok(())
     }
 
     /// Search; on success optionally auto-commit (reinforce) the returned package.
@@ -308,6 +381,33 @@ mod tests {
 
     fn registry(reinforce: bool) -> MemoryRegistry {
         MemoryRegistry::in_memory_with(Arc::new(StubProvider), reinforce)
+    }
+
+    #[test]
+    fn second_registry_on_same_db_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("m.db");
+        let mut a = MemoryRegistry::file_backed_with(
+            Arc::new(StubProvider),
+            db.clone(),
+            dir.path().to_path_buf(),
+            "default".into(),
+            false,
+        );
+        a.remember("first writer holds the lock", None).unwrap();
+
+        let mut b = MemoryRegistry::file_backed_with(
+            Arc::new(StubProvider),
+            db,
+            dir.path().to_path_buf(),
+            "default".into(),
+            false,
+        );
+        let err = b.remember("second writer must be rejected", None);
+        assert!(
+            err.is_err(),
+            "a second registry on the same DB file must be rejected by the lock"
+        );
     }
 
     #[test]
