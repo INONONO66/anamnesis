@@ -285,6 +285,10 @@ impl MemoryRegistry {
     ) -> Result<Vec<Hit>, Error> {
         let reinforce = self.reinforce_on_recall;
         let mem = self.get(ns)?;
+        // Tick BEFORE searching so a cold recall after a long idle gap ranks on
+        // current decay, not stale cached salience: `search` reads the cached
+        // `salience` projection, which is only refreshed by a write or `tick`.
+        mem.tick(Timestamp::now())?;
         // `seed_limit` tracks `limit` inside `search`, and the RWR is noisier with
         // more seeds, so do NOT oversample to refill the top-k — that measurably
         // hurts ranking. Instead search `limit`, then collapse the Episodic+Semantic
@@ -296,11 +300,11 @@ impl MemoryRegistry {
         if reinforce {
             mem.used(recall)?;
         }
-        // Lazy tick AFTER the reinforcing commit. `Engine::commit` does not flush
-        // storage; `tick` does. Ticking here both applies forgetting and persists
-        // the reinforcement to SQLite — without it, CLI one-shot `recall` would
-        // always lose its reinforcement and `serve` would lose the last recall
-        // before shutdown. Decay is one recall behind, which is negligible.
+        // Tick again AFTER the reinforcing commit: `Engine::commit` does not flush
+        // storage, so this `tick` persists the reinforcement to SQLite (without it
+        // a CLI one-shot `recall`, or `serve`'s last recall before shutdown, would
+        // lose it). The pre-search tick handles ranking freshness; this one handles
+        // durability.
         mem.tick(Timestamp::now())?;
         // Collapse duplicate-text nodes (Episodic+Semantic of one note), keeping
         // the highest-scored occurrence.
