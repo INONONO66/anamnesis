@@ -9,8 +9,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anamnesis::embedding::EmbeddingProvider;
-use anamnesis::graph::Timestamp;
-use anamnesis::memory::Hit;
+use anamnesis::graph::{NodeId, Timestamp};
+use anamnesis::memory::{Hit, MemoryStats, Relation};
 use anamnesis::storage::SqliteStorage;
 use anamnesis::{Error, Memory};
 
@@ -28,6 +28,61 @@ pub struct Turn {
 pub struct IngestSummary {
     pub episodic: usize,
     pub semantic: usize,
+}
+
+/// Output of [`MemoryRegistry::recall_packaged`].
+///
+/// `context` is the human-readable context block rendered from the assembled
+/// package (the primary `recall` payload); `hits` is the compact, de-duplicated
+/// ranked list whose `node_id`s the agent can feed back to `relate`.
+#[derive(Debug, Clone)]
+pub struct PackagedRecall {
+    /// Readable context block from `Recall::as_context()`.
+    pub context: String,
+    /// De-duplicated ranked hits (id reference for `relate`).
+    pub hits: Vec<Hit>,
+}
+
+/// Map an agent-facing relation label to the curated [`Relation`] vocabulary.
+///
+/// Accepts the canonical names (case-insensitive, `-`/`_`/space-insensitive).
+/// An unrecognized label is **not** silently coerced to `Custom`: it returns a
+/// clear error listing the accepted relations, so an agent typo surfaces instead
+/// of quietly authoring a `Custom("typo")` edge. Use an explicit `custom:<label>`
+/// prefix to author a consumer-defined relation on purpose.
+pub fn parse_relation(label: &str) -> Result<Relation, Error> {
+    let norm = label.trim().to_ascii_lowercase().replace([' ', '_'], "-");
+    if let Some(custom) = norm.strip_prefix("custom:") {
+        let custom = custom.trim();
+        if custom.is_empty() {
+            return Err(Error::InvalidInput(
+                "relation \"custom:\" requires a non-empty label (e.g. \"custom:blocks\")"
+                    .to_string(),
+            ));
+        }
+        // Preserve the caller's original (untrimmed-of-case) custom label after
+        // the prefix, rather than the normalized form, so labels are faithful.
+        let original = label.trim();
+        let original_custom = original[original.find(':').map(|i| i + 1).unwrap_or(0)..].trim();
+        return Ok(Relation::Custom(original_custom.to_string()));
+    }
+    let relation = match norm.as_str() {
+        "causes" | "causal" => Relation::Causes,
+        "contradicts" => Relation::Contradicts,
+        "supports" => Relation::Supports,
+        "refutes" => Relation::Refutes,
+        "reason" => Relation::Reason,
+        "rejected-alternative" | "rejectedalternative" => Relation::RejectedAlternative,
+        "belongs-to" | "belongsto" => Relation::BelongsTo,
+        "related" | "semantic" => Relation::Related,
+        _ => {
+            return Err(Error::InvalidInput(format!(
+                "unknown relation {label:?}; expected one of: causes, contradicts, supports, \
+                 refutes, reason, rejected-alternative, belongs-to, related (or \"custom:<label>\")"
+            )));
+        }
+    };
+    Ok(relation)
 }
 
 /// How the shared embedding provider is obtained.
@@ -285,6 +340,10 @@ impl MemoryRegistry {
     ) -> Result<Vec<Hit>, Error> {
         let reinforce = self.reinforce_on_recall;
         let mem = self.get(ns)?;
+        // Tick BEFORE searching so a cold recall after a long idle gap ranks on
+        // current decay, not stale cached salience: `search` reads the cached
+        // `salience` projection, which is only refreshed by a write or `tick`.
+        mem.tick(Timestamp::now())?;
         // `seed_limit` tracks `limit` inside `search`, and the RWR is noisier with
         // more seeds, so do NOT oversample to refill the top-k — that measurably
         // hurts ranking. Instead search `limit`, then collapse the Episodic+Semantic
@@ -296,20 +355,74 @@ impl MemoryRegistry {
         if reinforce {
             mem.used(recall)?;
         }
-        // Lazy tick AFTER the reinforcing commit. `Engine::commit` does not flush
-        // storage; `tick` does. Ticking here both applies forgetting and persists
-        // the reinforcement to SQLite — without it, CLI one-shot `recall` would
-        // always lose its reinforcement and `serve` would lose the last recall
-        // before shutdown. Decay is one recall behind, which is negligible.
+        // Tick again AFTER the reinforcing commit: `Engine::commit` does not flush
+        // storage, so this `tick` persists the reinforcement to SQLite (without it
+        // a CLI one-shot `recall`, or `serve`'s last recall before shutdown, would
+        // lose it). The pre-search tick handles ranking freshness; this one handles
+        // durability.
         mem.tick(Timestamp::now())?;
-        // Collapse duplicate-text nodes (Episodic+Semantic of one note), keeping
-        // the highest-scored occurrence.
-        let mut seen = HashSet::new();
-        let hits: Vec<Hit> = raw
-            .into_iter()
-            .filter(|h| seen.insert(h.text.clone()))
-            .collect();
-        Ok(hits)
+        Ok(dedup_hits(raw))
+    }
+
+    /// Like [`recall`](Self::recall), but also returns the readable context block
+    /// rendered from the assembled package (`Recall::as_context`).
+    ///
+    /// The `context` string is the primary, human-readable `recall` payload; the
+    /// `hits` carry the same de-duplicated ranked list so the agent can pass
+    /// `node_id`s on to `relate`. Reinforcement / tick semantics are identical to
+    /// [`recall`](Self::recall).
+    pub fn recall_packaged(
+        &mut self,
+        query: &str,
+        limit: usize,
+        ns: Option<&str>,
+    ) -> Result<PackagedRecall, Error> {
+        let reinforce = self.reinforce_on_recall;
+        let mem = self.get(ns)?;
+        // Tick BEFORE searching so a cold recall after a long idle gap ranks on
+        // current decay (same rationale as `recall`).
+        mem.tick(Timestamp::now())?;
+        let recall = mem.search(query, limit)?;
+        // Render the context block from the package BEFORE `used` consumes it.
+        let context = recall.as_context();
+        let raw = recall.hits.clone();
+        if reinforce {
+            mem.used(recall)?;
+        }
+        // Persist the reinforcement (see `recall` for why a post-commit tick).
+        mem.tick(Timestamp::now())?;
+        let hits = dedup_hits(raw);
+        Ok(PackagedRecall { context, hits })
+    }
+
+    /// Author a typed reasoning-chain edge between two existing nodes.
+    ///
+    /// `relation` is parsed via [`parse_relation`] (unknown labels error clearly).
+    /// The node ids typically come from a prior `recall`. Returns the new edge id.
+    pub fn relate(
+        &mut self,
+        from_id: u64,
+        to_id: u64,
+        relation: &str,
+        ns: Option<&str>,
+    ) -> Result<u64, Error> {
+        let relation = parse_relation(relation)?;
+        let mem = self.get(ns)?;
+        // Flush so a just-added turn (its semantic still buffered) is a valid
+        // endpoint, mirroring `consolidate`/`search`.
+        mem.flush_all()?;
+        let edge = mem.relate(NodeId(from_id), NodeId(to_id), relation)?;
+        mem.flush_all()?;
+        Ok(edge.0)
+    }
+
+    /// Read-only health/size snapshot for a namespace (`Memory::stats`).
+    ///
+    /// Flushes pending buffers first so the counts reflect live state.
+    pub fn stats(&mut self, ns: Option<&str>) -> Result<MemoryStats, Error> {
+        let mem = self.get(ns)?;
+        mem.flush_all()?;
+        mem.stats()
     }
 
     /// Store one distilled insight (`add_note`). Returns the episodic node id.
@@ -351,6 +464,16 @@ impl MemoryRegistry {
         provider.embed_single("warm")?;
         Ok(())
     }
+}
+
+/// Collapse duplicate-text hits (the Episodic + Semantic copy `add_note` creates),
+/// keeping the first (highest-scored, since `hits` is already rank-ordered)
+/// occurrence of each distinct text.
+fn dedup_hits(hits: Vec<Hit>) -> Vec<Hit> {
+    let mut seen = HashSet::new();
+    hits.into_iter()
+        .filter(|h| seen.insert(h.text.clone()))
+        .collect()
 }
 
 #[cfg(test)]
@@ -523,5 +646,142 @@ mod tests {
         );
         // Exactly one open instance for both raw spellings.
         assert_eq!(reg.open.len(), 1, "Alpha and alpha must share one instance");
+    }
+
+    // ── parse_relation ────────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_relation_canonical_and_aliases() {
+        use anamnesis::memory::Relation;
+        assert_eq!(parse_relation("causes").unwrap(), Relation::Causes);
+        assert_eq!(parse_relation("CAUSAL").unwrap(), Relation::Causes);
+        assert_eq!(
+            parse_relation("contradicts").unwrap(),
+            Relation::Contradicts
+        );
+        assert_eq!(parse_relation("supports").unwrap(), Relation::Supports);
+        assert_eq!(parse_relation("refutes").unwrap(), Relation::Refutes);
+        assert_eq!(parse_relation("reason").unwrap(), Relation::Reason);
+        assert_eq!(
+            parse_relation("rejected-alternative").unwrap(),
+            Relation::RejectedAlternative
+        );
+        // space/underscore are normalized to `-`.
+        assert_eq!(
+            parse_relation("Rejected Alternative").unwrap(),
+            Relation::RejectedAlternative
+        );
+        assert_eq!(parse_relation("belongs_to").unwrap(), Relation::BelongsTo);
+        assert_eq!(parse_relation("related").unwrap(), Relation::Related);
+        assert_eq!(parse_relation("semantic").unwrap(), Relation::Related);
+    }
+
+    #[test]
+    fn parse_relation_custom_preserves_label() {
+        use anamnesis::memory::Relation;
+        // Custom label keeps its original case after the `custom:` prefix.
+        assert_eq!(
+            parse_relation("custom:Blocks").unwrap(),
+            Relation::Custom("Blocks".to_string())
+        );
+        assert_eq!(
+            parse_relation("  custom:depends-on ").unwrap(),
+            Relation::Custom("depends-on".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_relation_rejects_unknown_and_empty_custom() {
+        let err = parse_relation("frobnicate").unwrap_err();
+        assert!(matches!(err, Error::InvalidInput(_)), "got {err:?}");
+        let err = parse_relation("custom:").unwrap_err();
+        assert!(matches!(err, Error::InvalidInput(_)), "got {err:?}");
+    }
+
+    // ── relate ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn relate_links_two_remembered_nodes() {
+        let mut reg = registry(false);
+        let a = reg.remember("the deploy failed", None).unwrap();
+        let b = reg.remember("the disk was full", None).unwrap();
+        // b causes a. Returns a valid (non-panicking) edge id.
+        let _edge = reg.relate(b, a, "causes", None).unwrap();
+        // A contradiction edge must show up in stats.
+        let _edge2 = reg.relate(a, b, "contradicts", None).unwrap();
+        let stats = reg.stats(None).unwrap();
+        assert!(
+            stats.contradiction_count >= 1,
+            "expected a contradiction edge, got {}",
+            stats.contradiction_count
+        );
+    }
+
+    #[test]
+    fn relate_unknown_relation_errors() {
+        let mut reg = registry(false);
+        let a = reg.remember("x", None).unwrap();
+        let b = reg.remember("y", None).unwrap();
+        let err = reg.relate(a, b, "not-a-relation", None).unwrap_err();
+        assert!(matches!(err, Error::InvalidInput(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn relate_missing_endpoint_errors() {
+        let mut reg = registry(false);
+        let a = reg.remember("only node", None).unwrap();
+        // u64::MAX is not a real node id.
+        let result = reg.relate(a, u64::MAX, "related", None);
+        assert!(
+            result.is_err(),
+            "linking to a missing node must error: {result:?}"
+        );
+    }
+
+    // ── recall_packaged ───────────────────────────────────────────────────────
+
+    #[test]
+    fn recall_packaged_returns_context_and_dedup_hits() {
+        let mut reg = registry(true);
+        reg.remember("the auth bug was a race in the middleware", None)
+            .unwrap();
+        let packaged = reg.recall_packaged("auth race condition", 5, None).unwrap();
+        // hits are de-duplicated (the Episodic+Semantic copies collapse).
+        let mut texts: Vec<&str> = packaged.hits.iter().map(|h| h.text.as_str()).collect();
+        texts.sort_unstable();
+        let mut unique = texts.clone();
+        unique.dedup();
+        assert_eq!(
+            texts.len(),
+            unique.len(),
+            "packaged hits had duplicate text"
+        );
+        // Context is a string (may be empty if nothing packaged, but with a hit it
+        // should carry a section header).
+        if !packaged.hits.is_empty() {
+            assert!(
+                packaged.context.contains("##"),
+                "expected a section header in context:\n{}",
+                packaged.context
+            );
+        }
+    }
+
+    // ── stats ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn stats_counts_remembered_nodes() {
+        let mut reg = registry(false);
+        let empty = reg.stats(None).unwrap();
+        assert_eq!(empty.node_count, 0);
+        reg.remember("one fact", None).unwrap();
+        reg.remember("another fact", None).unwrap();
+        let s = reg.stats(None).unwrap();
+        // Each `remember` is an Episodic + Semantic node (2 per note).
+        assert!(
+            s.node_count >= 4,
+            "expected >= 4 nodes, got {}",
+            s.node_count
+        );
     }
 }

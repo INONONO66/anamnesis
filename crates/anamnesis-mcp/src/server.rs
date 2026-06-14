@@ -51,6 +51,21 @@ pub struct IngestParams {
     pub namespace: Option<String>,
 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct RelateParams {
+    /// Source node id (the `node_id` from a prior `recall`).
+    pub from_id: u64,
+    /// Target node id (the `node_id` from a prior `recall`).
+    pub to_id: u64,
+    /// Relation type. One of: `causes`, `contradicts`, `supports`, `refutes`,
+    /// `reason`, `rejected-alternative`, `belongs-to`, `related`. Use
+    /// `custom:<label>` for a consumer-defined relation. Unknown labels error.
+    pub relation: String,
+    /// Isolated memory namespace (default: the server default).
+    #[serde(default)]
+    pub namespace: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct AnamnesisServer {
     registry: Arc<Mutex<MemoryRegistry>>,
@@ -70,10 +85,18 @@ fn internal(msg: impl std::fmt::Display) -> ErrorData {
     ErrorData::internal_error(msg.to_string(), None)
 }
 
+/// A caller-facing error (bad relation label, missing node id, etc.).
+fn invalid_params(msg: impl std::fmt::Display) -> ErrorData {
+    ErrorData::invalid_params(msg.to_string(), None)
+}
+
 #[tool_router]
 impl AnamnesisServer {
     #[tool(
-        description = "Search memory for relevant prior knowledge. ALWAYS call before answering. Reading reinforces what it returns."
+        description = "Search memory for relevant prior knowledge. ALWAYS call before answering. \
+                       Returns a readable context block (identity / knowledge / memories / tensions \
+                       with provenance) plus a compact ranked list of {node_id, score} — pass those \
+                       node_ids to `relate` to link reasoning. Reading reinforces what it returns."
     )]
     async fn recall(
         &self,
@@ -81,29 +104,40 @@ impl AnamnesisServer {
     ) -> Result<CallToolResult, ErrorData> {
         let registry = self.registry.clone();
         let limit = p.limit.unwrap_or(20) as usize;
-        let hits = tokio::task::spawn_blocking(move || {
+        let packaged = tokio::task::spawn_blocking(move || {
             // Recover from poisoning so one panicking handler doesn't brick the
             // server for the rest of its lifetime.
             let mut g = registry.lock().unwrap_or_else(|e| e.into_inner());
-            g.recall(&p.query, limit, p.namespace.as_deref())
+            g.recall_packaged(&p.query, limit, p.namespace.as_deref())
         })
         .await
         .map_err(internal)?
         .map_err(internal)?;
 
-        let body = serde_json::json!({
-            "hits": hits.iter().map(|h| serde_json::json!({
-                "node_id": h.node_id.0,
-                "text": h.text,
-                "score": h.score,
-                "at_ms": h.at.0,
-                "speaker": h.speaker,
-                "session": h.session,
-            })).collect::<Vec<_>>()
-        });
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&body).map_err(internal)?,
-        )]))
+        // Compact id reference so the agent can feed node_ids to `relate`.
+        let refs: Vec<_> = packaged
+            .hits
+            .iter()
+            .map(|h| {
+                serde_json::json!({
+                    "node_id": h.node_id.0,
+                    "score": h.score,
+                })
+            })
+            .collect();
+        let refs_json = serde_json::to_string(&refs).map_err(internal)?;
+
+        // Primary text = the readable context block; then a compact id reference
+        // block. The context block is empty when nothing packaged — fall back to a
+        // clear "no relevant memory" note so the text is never blank.
+        let context = if packaged.context.trim().is_empty() {
+            "(no relevant memory)\n".to_string()
+        } else {
+            packaged.context
+        };
+        let text = format!("{context}## NODES (for `relate`)\n{refs_json}");
+
+        Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
     #[tool(description = "Store a distilled insight, decision, or lesson for future recall.")]
@@ -155,6 +189,36 @@ impl AnamnesisServer {
         Ok(CallToolResult::success(vec![Content::text(format!(
             "ingested {} turns ({} semantic nodes)",
             summary.episodic, summary.semantic
+        ))]))
+    }
+
+    #[tool(
+        description = "Link two remembered nodes with a typed reasoning relation. Pass node_ids from \
+                       a prior `recall` (the NODES list) and a relation: causes, contradicts, \
+                       supports, refutes, reason, rejected-alternative, belongs-to, related (or \
+                       custom:<label>). Use this to record WHY: cause→effect, supporting/refuting \
+                       evidence, decision rationale, or a conflict between two memories."
+    )]
+    async fn relate(
+        &self,
+        Parameters(p): Parameters<RelateParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let registry = self.registry.clone();
+        // Keep the endpoints/label for the success message after `p` is moved.
+        let (from_id, to_id, relation) = (p.from_id, p.to_id, p.relation.clone());
+        let edge = tokio::task::spawn_blocking(move || {
+            // Recover from poisoning so one panicking handler doesn't brick the
+            // server for the rest of its lifetime.
+            let mut g = registry.lock().unwrap_or_else(|e| e.into_inner());
+            g.relate(p.from_id, p.to_id, &p.relation, p.namespace.as_deref())
+        })
+        .await
+        .map_err(internal)?
+        // A bad relation label / missing endpoint is a caller error, not an
+        // internal fault — surface it as an invalid-params error.
+        .map_err(invalid_params)?;
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "linked node {from_id} -> node {to_id} ({relation}) as edge {edge}"
         ))]))
     }
 }

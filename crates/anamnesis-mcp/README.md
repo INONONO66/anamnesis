@@ -7,9 +7,20 @@ cognitive memory for LLM agents.
 
 | Tool | When the agent should call it |
 |------|-------------------------------|
-| `recall` | **Before answering** — surfaces prior decisions/lessons. Reading auto-reinforces what it returns. |
+| `recall` | **Before answering** — surfaces prior decisions/lessons as a readable context block plus a compact `{node_id, score}` list. Reading auto-reinforces what it returns. |
 | `remember` | **After any decision or lesson worth keeping** — stores one distilled insight. |
 | `ingest_conversation` | Hand off a full transcript (ordered turns) for the windowing recipe. |
+| `relate` | Link two recalled nodes with a typed reasoning relation (`causes`, `contradicts`, `supports`, `refutes`, `reason`, `rejected-alternative`, `belongs-to`, `related`, or `custom:<label>`). Pass `node_id`s from a prior `recall`. |
+
+## CLI subcommands
+
+`anamnesis-mcp <cmd>` also runs one-shot commands (cold model load) and exits:
+`recall` / `remember` / `prewarm`, plus:
+
+| Command | What it does |
+|---------|--------------|
+| `doctor` | Print a setup checklist — resolved DB path, lock availability, model cache dir, config. Does **not** load the embedding model. |
+| `stats` | Open the registry and print graph health/size stats (`Memory::stats`) for the default namespace. Loads the model. |
 
 ## Install (Claude Desktop)
 

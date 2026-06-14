@@ -98,6 +98,15 @@ pub fn ensure_model_cache_dir() {
     }
 }
 
+/// The resolved fastembed model cache directory (`FASTEMBED_CACHE_DIR`, or the
+/// `~/.anamnesis/models` default). Read after [`ensure_model_cache_dir`] so the
+/// env var reflects the default when the operator did not set one.
+pub fn model_cache_dir() -> PathBuf {
+    std::env::var_os("FASTEMBED_CACHE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| anamnesis_home().join("models"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
