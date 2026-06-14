@@ -4,7 +4,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 
 #[test]
-fn lists_three_tools_over_stdio() {
+fn lists_tools_over_stdio() {
     let bin = env!("CARGO_BIN_EXE_anamnesis-mcp");
     let mut child = Command::new(bin)
         .arg("serve")
@@ -77,6 +77,7 @@ fn lists_three_tools_over_stdio() {
         names.contains(&"ingest_conversation".to_string()),
         "tools: {names:?}"
     );
+    assert!(names.contains(&"relate".to_string()), "tools: {names:?}");
 
     let _ = child.kill();
     // Reap the child so it does not linger as a zombie after kill().
