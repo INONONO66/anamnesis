@@ -42,9 +42,19 @@ call the tools. Paste this into your system/project instructions so it does:
 
 | Env var | Default | Meaning |
 |---------|---------|---------|
-| `ANAMNESIS_DB` | `<data_dir>/anamnesis/memory.db` | SQLite file for the default namespace. |
+| `ANAMNESIS_DB` | `~/.anamnesis/memory.db` | SQLite file for the default namespace. |
 | `ANAMNESIS_NAMESPACE` | `default` | Namespace when a call omits one. |
 | `ANAMNESIS_REINFORCE` | `true` | Auto-commit (reinforce) recalled results. Set `false` for receipt mode. |
-| `FASTEMBED_CACHE_DIR` | `<cache_dir>/anamnesis/models` | Where the bge model is cached. |
+| `FASTEMBED_CACHE_DIR` | `~/.anamnesis/models` | Where the bge model is cached (~400 MB). |
 
-Namespaces are isolated by separate SQLite files (`<db_dir>/<namespace>.db`).
+Everything anamnesis lives under `~/.anamnesis/` by default — the global memory DB
+plus the model cache. **Scope is auto-selected**, the way git finds `.git`: walking
+up from the launch directory, the nearest ancestor containing a `.anamnesis/`
+directory wins (project scope → `<project>/.anamnesis/memory.db`); with none, the
+global `~/.anamnesis/memory.db` is used. Opt a project in with `mkdir .anamnesis`
+at its root.
+
+Auto-detection needs the client to launch the server with the project as its
+working directory (Claude Code / Cursor do; Claude Desktop has no project CWD, so
+it is always global). `ANAMNESIS_DB` overrides everything; a `namespace` per call
+isolates logically within one store (sibling `<db_dir>/<namespace>.db`).
