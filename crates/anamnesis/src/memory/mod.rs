@@ -47,20 +47,26 @@
 //! embedding approach) **do not apply** — you are responsible for correctness.
 //! Mix framework calls and raw engine calls only if you know what you are doing.
 
+use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::path::Path;
 use std::sync::Arc;
 
 use crate::Engine;
-use crate::api::{CommitReport, EngineConfig, IngestResult, Observation, TickReport};
+use crate::api::{
+    CommitReport, CrystallizeRequest, EngineConfig, HealthGrade, IngestResult, Observation,
+    TickReport,
+};
 use crate::embedding::EmbeddingProvider;
 use crate::error::Error;
 use crate::graph::node::Origin;
-use crate::graph::types::PeerId;
+use crate::graph::scope::ScopeRelation;
+use crate::graph::types::{EdgeId, PeerId};
 use crate::graph::{EdgeType, KnowledgeType, NodeId, ScopePath, Timestamp};
 use crate::mechanics::social::ConfidenceLevel;
 use crate::peer::SourceKind;
-use crate::query::{ContextPackage, SearchInput, SearchResult};
+use crate::query::{ContextPackage, Fragment, SearchInput, SearchResult, Tension};
 use crate::storage::{SqliteStorage, StorageAdapter};
 
 /// Per-session state for incremental window finalization.
@@ -125,6 +131,208 @@ pub struct Memory<S: StorageAdapter + Clone = SqliteStorage> {
     engine: Engine<S>,
     provider: Arc<dyn EmbeddingProvider>,
     sessions: HashMap<String, SessionBuffer>,
+}
+
+// ── Agent-facing relations ───────────────────────────────────────────────────
+
+/// A curated, agent-facing subset of the engine's [`EdgeType`] relations.
+///
+/// This is the relation vocabulary exposed at the [`Memory`] front door for
+/// hand-authoring typed reasoning-chain edges via [`Memory::relate`]. It
+/// deliberately excludes engine-internal edge types (`Temporal`, `ExtractedFrom`,
+/// `ConsolidatedFrom`, `ReinforcedBy`, `Entity`) — those are wired automatically
+/// by the recipe and should not be authored by hand — and `Supersedes`, which is
+/// directional *and* mutates the validity window of its endpoints. Reach for
+/// [`Memory::engine_mut`] if you genuinely need those.
+///
+/// Each variant maps to exactly one engine [`EdgeType`]:
+///
+/// | `Relation`           | engine [`EdgeType`]            | meaning                         |
+/// |----------------------|--------------------------------|---------------------------------|
+/// | [`Causes`]           | [`EdgeType::Causal`]           | cause → effect                  |
+/// | [`Contradicts`]      | [`EdgeType::Contradicts`]      | conflicting assertions          |
+/// | [`Supports`]         | [`EdgeType::Supports`]         | positive evidential support     |
+/// | [`Refutes`]          | [`EdgeType::Refutes`]          | refuting evidence (weak)        |
+/// | [`Reason`]           | [`EdgeType::Reason`]           | decision rationale              |
+/// | [`RejectedAlternative`] | [`EdgeType::RejectedAlternative`] | considered & discarded option |
+/// | [`BelongsTo`]        | [`EdgeType::BelongsTo`]        | hierarchical / containment      |
+/// | [`Related`]          | [`EdgeType::Semantic`]         | generic conceptual relationship |
+/// | [`Custom`]           | [`EdgeType::Custom`]           | consumer-defined relation       |
+///
+/// [`Causes`]: Relation::Causes
+/// [`Contradicts`]: Relation::Contradicts
+/// [`Supports`]: Relation::Supports
+/// [`Refutes`]: Relation::Refutes
+/// [`Reason`]: Relation::Reason
+/// [`RejectedAlternative`]: Relation::RejectedAlternative
+/// [`BelongsTo`]: Relation::BelongsTo
+/// [`Related`]: Relation::Related
+/// [`Custom`]: Relation::Custom
+///
+/// # Note on `Contradicts`
+///
+/// `Contradicts` is a *constraint* edge: it is excluded from spreading-activation
+/// propagation and instead surfaces query-local frustration stress between its
+/// active endpoints (ADR-0006). It is never inhibitory and is never auto-deleted.
+/// `Refutes`, despite the name, *is* a weak supportive propagating edge.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Relation {
+    /// Cause → effect ([`EdgeType::Causal`]).
+    Causes,
+    /// Conflicting assertions ([`EdgeType::Contradicts`]). Surfaces frustration
+    /// stress rather than propagating activation; never inhibitory.
+    Contradicts,
+    /// Positive evidential support ([`EdgeType::Supports`]).
+    Supports,
+    /// Refuting evidence ([`EdgeType::Refutes`]). Weak supportive propagation,
+    /// *not* inhibitory despite the name.
+    Refutes,
+    /// Decision rationale ([`EdgeType::Reason`]).
+    Reason,
+    /// A considered-and-discarded option ([`EdgeType::RejectedAlternative`]).
+    RejectedAlternative,
+    /// Hierarchical / containment relationship ([`EdgeType::BelongsTo`]).
+    BelongsTo,
+    /// Generic conceptual relationship ([`EdgeType::Semantic`]).
+    Related,
+    /// A consumer-defined relation, carrying its label through to
+    /// [`EdgeType::Custom`].
+    Custom(String),
+}
+
+impl Relation {
+    /// Map this agent-facing relation to the engine's [`EdgeType`].
+    fn to_edge_type(&self) -> EdgeType {
+        match self {
+            Relation::Causes => EdgeType::Causal,
+            Relation::Contradicts => EdgeType::Contradicts,
+            Relation::Supports => EdgeType::Supports,
+            Relation::Refutes => EdgeType::Refutes,
+            Relation::Reason => EdgeType::Reason,
+            Relation::RejectedAlternative => EdgeType::RejectedAlternative,
+            Relation::BelongsTo => EdgeType::BelongsTo,
+            Relation::Related => EdgeType::Semantic,
+            Relation::Custom(label) => EdgeType::Custom(label.clone()),
+        }
+    }
+}
+
+impl From<Relation> for EdgeType {
+    fn from(relation: Relation) -> Self {
+        relation.to_edge_type()
+    }
+}
+
+/// Direction of an edge relative to the node it was read from.
+///
+/// Returned as part of a [`Neighbor`] by [`Memory::neighbors`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Direction {
+    /// The edge points *away* from the queried node (queried node is the source).
+    Outgoing,
+    /// The edge points *toward* the queried node (queried node is the target).
+    Incoming,
+}
+
+/// A typed neighbor of a node, as returned by [`Memory::neighbors`].
+///
+/// Carries the other endpoint, the edge id and type, the edge weight, and the
+/// direction of the edge relative to the queried node. The `edge_type` is the
+/// raw engine [`EdgeType`] (so engine-internal edges like `Temporal` /
+/// `ExtractedFrom` are visible) — agents can map the agent-facing subset back to
+/// [`Relation`] themselves if desired.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Neighbor {
+    /// The other endpoint of the edge (not the queried node).
+    pub node: NodeId,
+    /// The edge connecting the two nodes.
+    pub edge: EdgeId,
+    /// The engine relationship type of the edge.
+    pub edge_type: EdgeType,
+    /// Edge strength [0, 1] (the bounded projection of conductance).
+    pub weight: f64,
+    /// Direction of the edge relative to the queried node.
+    pub direction: Direction,
+}
+
+// ── Consolidation report ─────────────────────────────────────────────────────
+
+/// Compact report returned by [`Memory::consolidate`] / [`Memory::consolidate_at`].
+///
+/// A small owned summary of a crystallization pass — deliberately *not* the full
+/// engine `CrystallizeResult` (which leaks dedup scores, attraction edges, and
+/// raw support/contradiction rates). Surfaces only what a front-door caller
+/// needs to judge the outcome.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConsolidateReport {
+    /// The synthesis node created by this consolidation.
+    pub node_id: NodeId,
+    /// Number of sources the synthesis was consolidated from (derived from the
+    /// `ConsolidatedFrom` provenance edges actually created — may be fewer than
+    /// the input ids if any source's cold-start conductance was non-finite).
+    pub source_count: usize,
+    /// Number of `ConsolidatedFrom` provenance edges created (== `source_count`).
+    pub edges_created: usize,
+    /// Initial salience assigned to the crystal.
+    pub salience: f64,
+    /// Source agreement `[0, 1]` = `clamp(support_density - contradiction_rate)`.
+    pub consistency: f64,
+    /// `true` if the sources may be circular (one is already consolidated from)
+    /// or single-source (all share one peer + session). Treat the synthesis as
+    /// lower-confidence.
+    pub low_confidence: bool,
+}
+
+// ── Stats / health snapshot ──────────────────────────────────────────────────
+
+/// Strongly-typed read-only snapshot of graph size, structure, and decay/health,
+/// returned by [`Memory::stats`].
+///
+/// Combines the engine's structural grade report ([`Engine::health`]) and its
+/// nine-metric observability report ([`Engine::graph_health`]) into one summary.
+///
+/// # Buffering caveat
+///
+/// `stats` reflects only **flushed** (persisted) graph state. Pending per-session
+/// buffers (the not-yet-finalized last turn of each open session) are *not*
+/// counted. Call [`Memory::flush_all`] first if exact live counts matter.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MemoryStats {
+    /// Total number of live nodes.
+    pub node_count: usize,
+    /// Total number of live edges.
+    pub edge_count: usize,
+    /// Number of nodes with no edges (orphans).
+    pub orphan_count: usize,
+    /// Fraction of nodes that are orphans `[0, 1]` (fragmentation signal).
+    pub orphan_ratio: f64,
+    /// Number of `Contradicts` edges (knowledge conflicts).
+    pub contradiction_count: usize,
+    /// Fraction of edges that are `Contradicts` `[0, 1]`.
+    pub contradiction_ratio: f64,
+    /// Number of `Supersedes` edges.
+    pub supersede_count: usize,
+    /// Number of retracted nodes.
+    pub retracted_count: usize,
+    /// Number of nodes without an embedding vector.
+    pub missing_embedding_count: usize,
+    /// Average salience across all nodes.
+    pub avg_salience: f64,
+    /// Mean graph degree `2 * edge_count / node_count`.
+    pub average_degree: f64,
+    /// Fraction of nodes not accessed within the 30-day stale window `[0, 1]` —
+    /// the closest structural signal to a "forgetting"/decay summary the engine
+    /// exposes.
+    pub stale_ratio: f64,
+    /// Shannon entropy (bits) of the salience distribution (diagnostic; diversity
+    /// of salience across nodes).
+    pub salience_entropy: f64,
+    /// Node count by origin scope (`"universal"` keys the universal scope).
+    pub scope_distribution: BTreeMap<String, usize>,
+    /// Number of registered peers.
+    pub peer_count: usize,
+    /// Overall structural health grade (A/B/C/D).
+    pub grade: HealthGrade,
 }
 
 // ── Engine config used by Memory (bench defaults) ────────────────────────────
@@ -481,6 +689,218 @@ impl<S: StorageAdapter + Clone> Memory<S> {
     }
 }
 
+// ── Relate / neighbors — typed reasoning-chain edges ─────────────────────────
+
+impl<S: StorageAdapter + Clone> Memory<S> {
+    /// Author a typed edge between two existing nodes.
+    ///
+    /// This is the front-door path for filling typed reasoning-chain edges — the
+    /// agent passes node ids (e.g. from a prior [`recall`](Memory::search)) and a
+    /// curated [`Relation`]. The relation maps to an engine [`EdgeType`] and the
+    /// edge is created via [`Engine::link`].
+    ///
+    /// Returns the new [`EdgeId`].
+    ///
+    /// # Edge strength
+    ///
+    /// The edge's strength is **not** caller-supplied: the engine derives a
+    /// cold-start conductance seed and projects the weight itself (ADR-0002). You
+    /// cannot hand-author edge strength through this API.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if either endpoint does not exist in the graph
+    /// ([`Engine::link`] resolves both up front).
+    ///
+    /// # Note
+    ///
+    /// [`Relation::Contradicts`] creates a constraint edge that surfaces
+    /// query-local frustration stress rather than propagating activation; it is
+    /// never inhibitory. Engine-internal edge types (`Temporal`, `ExtractedFrom`,
+    /// etc.) and the time-mutating `Supersedes` are intentionally *not* reachable
+    /// here — use [`engine_mut`](Memory::engine_mut) if you genuinely need them.
+    pub fn relate(
+        &mut self,
+        from: NodeId,
+        to: NodeId,
+        relation: Relation,
+    ) -> Result<EdgeId, Error> {
+        self.engine.link(from, to, relation.into())
+    }
+
+    /// Read a node's typed edges (both outgoing and incoming).
+    ///
+    /// Returns a [`Neighbor`] for every edge touching `node`: outgoing edges first
+    /// (where `node` is the source, neighbor is the target), then incoming edges
+    /// (where `node` is the target, neighbor is the source). Each carries the
+    /// other endpoint, edge id, engine [`EdgeType`], weight, and [`Direction`].
+    ///
+    /// This is a read-only view supporting future graph-expansion use-cases.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any edge referenced by the node cannot be resolved (a
+    /// storage inconsistency). A node with no edges yields an empty vector.
+    pub fn neighbors(&self, node: NodeId) -> Result<Vec<Neighbor>, Error> {
+        let graph = self.engine.graph();
+        // edges_from/edges_to borrow `graph`, and get_edge also borrows it
+        // immutably — both are shared borrows, so iterating the slices while
+        // calling get_edge inside the loop compiles without a double-borrow.
+        let mut out = Vec::with_capacity(graph.edges_from(node).len() + graph.edges_to(node).len());
+        for &edge_id in graph.edges_from(node) {
+            let edge = graph.get_edge(edge_id)?;
+            out.push(Neighbor {
+                node: edge.target,
+                edge: edge_id,
+                edge_type: edge.edge_type.clone(),
+                weight: edge.weight,
+                direction: Direction::Outgoing,
+            });
+        }
+        for &edge_id in graph.edges_to(node) {
+            let edge = graph.get_edge(edge_id)?;
+            out.push(Neighbor {
+                node: edge.source,
+                edge: edge_id,
+                edge_type: edge.edge_type.clone(),
+                weight: edge.weight,
+                direction: Direction::Incoming,
+            });
+        }
+        Ok(out)
+    }
+}
+
+// ── Consolidate — caller-triggered crystallization ───────────────────────────
+
+impl<S: StorageAdapter + Clone> Memory<S> {
+    /// Synthesize `source_ids` into a higher-level knowledge node at wall clock.
+    ///
+    /// Equivalent to [`consolidate_at`](Memory::consolidate_at) with
+    /// `now = Timestamp::now()`. For deterministic / time-travel consolidation,
+    /// use `consolidate_at` directly.
+    pub fn consolidate(
+        &mut self,
+        name: &str,
+        content: &str,
+        source_ids: Vec<NodeId>,
+    ) -> Result<ConsolidateReport, Error> {
+        self.consolidate_at(name, content, source_ids, Timestamp::now())
+    }
+
+    /// Synthesize `source_ids` into a higher-level `Semantic` knowledge node at an
+    /// explicit `now`.
+    ///
+    /// Flushes pending session buffers first (so freshly-added turns are valid
+    /// crystallize sources), embeds the synthesis `content` (enabling the engine's
+    /// dedup + attraction paths), and crystallizes via [`Engine::crystallize`].
+    /// Returns a compact [`ConsolidateReport`].
+    ///
+    /// # Errors
+    ///
+    /// - Requires **at least two** sources — fewer returns [`Error::InvalidInput`].
+    /// - Every `source_id` must exist, else [`Error::NodeNotFound`].
+    /// - If the synthesis embedding is a near-duplicate of an existing crystal
+    ///   beyond the engine's dedup threshold, returns [`Error::Rejected`].
+    pub fn consolidate_at(
+        &mut self,
+        name: &str,
+        content: &str,
+        source_ids: Vec<NodeId>,
+        now: Timestamp,
+    ) -> Result<ConsolidateReport, Error> {
+        // Surface the hard precondition early with a clear message rather than
+        // relying solely on the engine's generic InvalidInput.
+        if source_ids.len() < 2 {
+            return Err(Error::InvalidInput(
+                "consolidate requires at least two source nodes".to_string(),
+            ));
+        }
+
+        // Flush buffers so recently-added turns are persisted (and thus valid
+        // crystallize sources) — same pattern as search_at.
+        self.flush_all()?;
+
+        // Embed the synthesis content so dedup + attraction edges can fire.
+        let embedding = embed_one(&*self.provider, content)?;
+
+        let request = CrystallizeRequest {
+            name: make_name(name),
+            summary: None,
+            content: content.to_string(),
+            embedding: Some(embedding),
+            source_relevances: None, // engine defaults each source weight to 1.0
+            node_type: KnowledgeType::Semantic,
+            confidence: 0.9,
+            origin: Origin {
+                peer_id: PeerId(0),
+                source_kind: SourceKind::AgentObservation,
+                session_id: "consolidation".to_string(),
+                scope: ScopePath::universal(),
+                confidence: 0.9,
+            },
+            entity_tags: Vec::new(),
+            timestamp: now,
+            source_ids, // moved last; len already validated >= 2
+        };
+
+        let result = self.engine.crystallize(request)?;
+
+        Ok(ConsolidateReport {
+            node_id: result.node_id,
+            source_count: result.consolidation_edges.len(),
+            edges_created: result.consolidation_edges.len(),
+            salience: result.initial_salience,
+            consistency: result.consistency_score,
+            low_confidence: result.circular_evidence_warning || result.single_source_warning,
+        })
+    }
+}
+
+// ── Stats — read-only health snapshot ────────────────────────────────────────
+
+impl<S: StorageAdapter + Clone> Memory<S> {
+    /// Read-only snapshot of graph size, structure, and decay/health.
+    ///
+    /// Combines [`Engine::health`] (structural grade) and [`Engine::graph_health`]
+    /// (nine-metric observability) into one [`MemoryStats`]. This is a pure read;
+    /// it does **not** flush pending session buffers, so buffered-but-unflushed
+    /// turns are not counted (call [`flush_all`](Memory::flush_all) first if exact
+    /// live counts matter).
+    ///
+    /// `Ok` is always returned — both underlying reports are infallible — but the
+    /// `Result` is kept for API forward-compatibility.
+    pub fn stats(&self) -> Result<MemoryStats, Error> {
+        self.stats_at(Timestamp::now())
+    }
+
+    /// Deterministic variant of [`stats`](Memory::stats): the `stale_ratio`
+    /// 30-day window is measured against the supplied `now` instead of the wall
+    /// clock, so the snapshot is reproducible.
+    pub fn stats_at(&self, now: Timestamp) -> Result<MemoryStats, Error> {
+        let health = self.engine.health();
+        let graph = self.engine.graph_health_at(now);
+        Ok(MemoryStats {
+            node_count: graph.node_count,
+            edge_count: graph.edge_count,
+            orphan_count: health.orphan_count,
+            orphan_ratio: graph.orphan_ratio,
+            contradiction_count: health.contradiction_count,
+            contradiction_ratio: graph.contradiction_ratio,
+            supersede_count: health.supersede_count,
+            retracted_count: health.retracted_count,
+            missing_embedding_count: health.missing_embedding_count,
+            avg_salience: health.avg_salience,
+            average_degree: graph.average_degree,
+            stale_ratio: graph.stale_ratio,
+            salience_entropy: graph.salience_entropy,
+            scope_distribution: graph.scope_distribution,
+            peer_count: health.peer_count,
+            grade: health.grade,
+        })
+    }
+}
+
 // ── Search / recall / used / tick ─────────────────────────────────────────────
 
 /// Optional tuning knobs for [`Memory::search_result_at_with`].
@@ -530,6 +950,96 @@ pub struct Recall {
     pub hits: Vec<Hit>,
     /// Assembled context package — consume via [`Memory::used`] to reinforce.
     pub package: ContextPackage,
+}
+
+impl Recall {
+    /// Render the assembled [`ContextPackage`] into a readable, agent-consumable
+    /// context block.
+    ///
+    /// The block is grouped into `## IDENTITY` / `## KNOWLEDGE` / `## MEMORIES` /
+    /// `## TENSIONS` sections. Empty sections are skipped. Each fragment shows its
+    /// knowledge type, name, relevance, body (full content if present, else
+    /// summary), and a provenance line (peer, source kind, session, scope,
+    /// confidence, scope relation). Tensions render as `#A ⟂ #B` lines with the
+    /// optional description and the query-local stress.
+    ///
+    /// This is a pure read over [`Recall::package`] — it never mutates and never
+    /// fails (writing into a `String` is infallible).
+    pub fn as_context(&self) -> String {
+        let pkg = &self.package;
+        let mut out = String::new();
+
+        render_section(&mut out, "IDENTITY", &pkg.identity);
+        render_section(&mut out, "KNOWLEDGE", &pkg.knowledge);
+        render_section(&mut out, "MEMORIES", &pkg.memories);
+
+        if !pkg.tensions.is_empty() {
+            out.push_str("## TENSIONS\n");
+            for tension in &pkg.tensions {
+                render_tension(&mut out, tension);
+            }
+            out.push('\n');
+        }
+
+        out
+    }
+}
+
+/// Render one titled fragment section (skipped entirely if `frags` is empty).
+fn render_section(out: &mut String, title: &str, frags: &[Fragment]) {
+    if frags.is_empty() {
+        return;
+    }
+    let _ = writeln!(out, "## {title}");
+    for f in frags {
+        // Header: type (Debug — KnowledgeType has no Display), name, relevance.
+        let _ = writeln!(
+            out,
+            "- [{:?}] {} (relevance {:.2})",
+            f.node_type, f.name, f.relevance
+        );
+        // Body: prefer full content (L2), fall back to summary (L1); name is
+        // already shown in the header.
+        if let Some(content) = &f.content {
+            let _ = writeln!(out, "    {content}");
+        } else if let Some(summary) = &f.summary {
+            let _ = writeln!(out, "    {summary}");
+        }
+        // Provenance line. ScopePath (origin.scope) HAS Display; SourceKind and
+        // ScopeRelation need {:?} / a label helper.
+        let _ = writeln!(
+            out,
+            "    └ origin: peer #{}, {:?}, session \"{}\", scope {} (conf {:.2}); relation {}",
+            f.origin.peer_id.0,
+            f.origin.source_kind,
+            f.origin.session_id,
+            f.origin.scope,
+            f.origin.confidence,
+            scope_relation_label(f.scope),
+        );
+    }
+    out.push('\n');
+}
+
+/// Render one tension line: `#A ⟂ #B [— description] (stress N.NN)`.
+fn render_tension(out: &mut String, tension: &Tension) {
+    let _ = write!(out, "- #{} ⟂ #{}", tension.node_a.0, tension.node_b.0);
+    if let Some(desc) = &tension.description {
+        let _ = write!(out, " — {desc}");
+    }
+    let _ = writeln!(out, " (stress {:.2})", tension.stress);
+}
+
+/// A friendly label for a [`ScopeRelation`] (it has no `Display` impl).
+fn scope_relation_label(relation: ScopeRelation) -> &'static str {
+    match relation {
+        ScopeRelation::Equal => "equal",
+        ScopeRelation::Ancestor => "ancestor",
+        ScopeRelation::Descendant => "descendant",
+        ScopeRelation::Sibling => "sibling",
+        ScopeRelation::Universal => "universal",
+        ScopeRelation::Disjoint => "disjoint",
+    }
 }
 
 impl<S: StorageAdapter + Clone> Memory<S> {
@@ -769,5 +1279,329 @@ fn ingest_node<S: StorageAdapter + Clone>(
             .copied()
             .ok_or_else(|| Error::InvalidInput("ingest created no node".to_string())),
         IngestResult::Reinforced { existing_id, .. } => Ok(existing_id),
+    }
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Deterministic, model-free embedding provider.
+    ///
+    /// Produces a fixed-dimension unit-ish vector seeded by a per-text hash so
+    /// that distinct texts get distinct (low-similarity) embeddings — enough to
+    /// avoid crystallize's dedup rejection — while being fully reproducible. No
+    /// network / model download.
+    struct HashEmbedProvider {
+        dim: usize,
+    }
+
+    impl HashEmbedProvider {
+        fn new() -> Self {
+            Self { dim: 8 }
+        }
+    }
+
+    impl EmbeddingProvider for HashEmbedProvider {
+        fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, Error> {
+            Ok(texts
+                .iter()
+                .map(|text| {
+                    // FNV-1a-ish seed from the text bytes.
+                    let mut seed: u64 = 0xcbf2_9ce4_8422_2325;
+                    for b in text.bytes() {
+                        seed ^= b as u64;
+                        seed = seed.wrapping_mul(0x0000_0100_0000_01b3);
+                    }
+                    // Spread the seed across the dimensions deterministically.
+                    (0..self.dim)
+                        .map(|i| {
+                            let mut x = seed.wrapping_add(i as u64).wrapping_mul(2_654_435_761);
+                            x ^= x >> 13;
+                            // Map to [-1, 1].
+                            ((x % 2000) as f32) / 1000.0 - 1.0
+                        })
+                        .collect()
+                })
+                .collect())
+        }
+
+        fn dimensions(&self) -> usize {
+            self.dim
+        }
+
+        fn model_name(&self) -> &str {
+            "hash-stub"
+        }
+    }
+
+    fn mem() -> Memory<SqliteStorage> {
+        let provider: Arc<dyn EmbeddingProvider> = Arc::new(HashEmbedProvider::new());
+        Memory::in_memory_with_provider(provider).expect("in-memory Memory")
+    }
+
+    fn t(ms: u64) -> Timestamp {
+        Timestamp(ms)
+    }
+
+    // ── Relation mapping ──────────────────────────────────────────────────────
+
+    #[test]
+    fn relation_maps_to_edge_type() {
+        assert_eq!(EdgeType::from(Relation::Causes), EdgeType::Causal);
+        assert_eq!(EdgeType::from(Relation::Contradicts), EdgeType::Contradicts);
+        assert_eq!(EdgeType::from(Relation::Supports), EdgeType::Supports);
+        assert_eq!(EdgeType::from(Relation::Refutes), EdgeType::Refutes);
+        assert_eq!(EdgeType::from(Relation::Reason), EdgeType::Reason);
+        assert_eq!(
+            EdgeType::from(Relation::RejectedAlternative),
+            EdgeType::RejectedAlternative
+        );
+        assert_eq!(EdgeType::from(Relation::BelongsTo), EdgeType::BelongsTo);
+        // `Related` deliberately maps to the generic Semantic edge.
+        assert_eq!(EdgeType::from(Relation::Related), EdgeType::Semantic);
+        assert_eq!(
+            EdgeType::from(Relation::Custom("foo".to_string())),
+            EdgeType::Custom("foo".to_string())
+        );
+    }
+
+    // ── relate ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn relate_creates_typed_edge() {
+        let mut m = mem();
+        let a = m
+            .add("s", "alice", "the deploy failed", t(1))
+            .unwrap()
+            .episodic;
+        let b = m
+            .add("s", "alice", "the disk was full", t(2))
+            .unwrap()
+            .episodic;
+        m.flush_all().unwrap();
+
+        let edge = m.relate(b, a, Relation::Causes).unwrap();
+
+        // The edge shows up as an outgoing neighbor of `b` with the Causal type.
+        let neighbors = m.neighbors(b).unwrap();
+        let causal = neighbors
+            .iter()
+            .find(|n| n.edge == edge)
+            .expect("relate edge present in neighbors");
+        assert_eq!(causal.node, a);
+        assert_eq!(causal.edge_type, EdgeType::Causal);
+        assert_eq!(causal.direction, Direction::Outgoing);
+    }
+
+    #[test]
+    fn relate_custom_relation_roundtrips() {
+        let mut m = mem();
+        let a = m.add("s", "a", "x", t(1)).unwrap().episodic;
+        let b = m.add("s", "a", "y", t(2)).unwrap().episodic;
+        m.flush_all().unwrap();
+        let edge = m
+            .relate(a, b, Relation::Custom("blocks".to_string()))
+            .unwrap();
+        let n = m.neighbors(a).unwrap();
+        let found = n.iter().find(|n| n.edge == edge).unwrap();
+        assert_eq!(found.edge_type, EdgeType::Custom("blocks".to_string()));
+    }
+
+    #[test]
+    fn relate_missing_endpoint_errors() {
+        let mut m = mem();
+        let a = m.add("s", "a", "x", t(1)).unwrap().episodic;
+        m.flush_all().unwrap();
+        // NodeId(9999) does not exist.
+        let result = m.relate(a, NodeId(9999), Relation::Related);
+        assert!(result.is_err(), "linking to a missing node must error");
+    }
+
+    // ── neighbors ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn neighbors_reports_direction() {
+        let mut m = mem();
+        let a = m.add("s", "a", "alpha", t(1)).unwrap().episodic;
+        let b = m.add("s", "a", "beta", t(2)).unwrap().episodic;
+        m.flush_all().unwrap();
+        let edge = m.relate(a, b, Relation::Supports).unwrap();
+
+        // Outgoing from a.
+        let out = m.neighbors(a).unwrap();
+        let out_hit = out.iter().find(|n| n.edge == edge).unwrap();
+        assert_eq!(out_hit.node, b);
+        assert_eq!(out_hit.direction, Direction::Outgoing);
+
+        // Incoming to b.
+        let inc = m.neighbors(b).unwrap();
+        let inc_hit = inc.iter().find(|n| n.edge == edge).unwrap();
+        assert_eq!(inc_hit.node, a);
+        assert_eq!(inc_hit.direction, Direction::Incoming);
+    }
+
+    #[test]
+    fn neighbors_includes_recipe_edges() {
+        let mut m = mem();
+        // Two turns produce an episodic→episodic Temporal edge and a
+        // semantic→episodic ExtractedFrom edge from the recipe.
+        let a = m.add("s", "a", "first", t(1)).unwrap().episodic;
+        let _ = m.add("s", "a", "second", t(2)).unwrap();
+        m.flush_all().unwrap();
+
+        let n = m.neighbors(a).unwrap();
+        // `a` has at least one Temporal (outgoing to the next episodic) edge and
+        // is the target of an ExtractedFrom edge (incoming).
+        assert!(
+            n.iter().any(|x| x.edge_type == EdgeType::Temporal),
+            "expected a Temporal recipe edge among neighbors: {n:?}"
+        );
+        assert!(
+            n.iter().any(|x| x.edge_type == EdgeType::ExtractedFrom),
+            "expected an ExtractedFrom recipe edge among neighbors: {n:?}"
+        );
+    }
+
+    // ── consolidate ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn consolidate_synthesizes_from_sources() {
+        let mut m = mem();
+        let a = m
+            .add("s", "a", "auth uses a factory", t(1))
+            .unwrap()
+            .episodic;
+        let b = m
+            .add("s", "a", "factory builds the client", t(2))
+            .unwrap()
+            .episodic;
+        m.flush_all().unwrap();
+
+        let report = m
+            .consolidate_at(
+                "auth construction",
+                "Auth is constructed via a factory that builds the client.",
+                vec![a, b],
+                t(10),
+            )
+            .unwrap();
+
+        assert_eq!(report.source_count, 2);
+        assert_eq!(report.edges_created, 2);
+        assert!(report.salience >= 0.0);
+        assert!((0.0..=1.0).contains(&report.consistency));
+
+        // The crystal must be a real, reachable node with ConsolidatedFrom edges
+        // back to both sources.
+        let n = m.neighbors(report.node_id).unwrap();
+        let consolidated: Vec<_> = n
+            .iter()
+            .filter(|x| x.edge_type == EdgeType::ConsolidatedFrom)
+            .collect();
+        assert_eq!(consolidated.len(), 2);
+    }
+
+    #[test]
+    fn consolidate_requires_two_sources() {
+        let mut m = mem();
+        let a = m.add("s", "a", "only one", t(1)).unwrap().episodic;
+        m.flush_all().unwrap();
+        let result = m.consolidate_at("x", "single", vec![a], t(2));
+        assert!(
+            matches!(result, Err(Error::InvalidInput(_))),
+            "single-source consolidate must be InvalidInput, got {result:?}"
+        );
+    }
+
+    // ── stats ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn stats_counts_nodes_and_edges() {
+        let mut m = mem();
+        // Empty graph first.
+        let empty = m.stats_at(t(0)).unwrap();
+        assert_eq!(empty.node_count, 0);
+        assert_eq!(empty.edge_count, 0);
+
+        m.add("s", "a", "one", t(1)).unwrap();
+        m.add("s", "a", "two", t(2)).unwrap();
+        m.flush_all().unwrap();
+
+        let s = m.stats_at(t(100)).unwrap();
+        // 2 episodic + 2 semantic nodes from the recipe.
+        assert!(
+            s.node_count >= 4,
+            "expected >= 4 nodes, got {}",
+            s.node_count
+        );
+        assert!(
+            s.edge_count >= 1,
+            "expected recipe edges, got {}",
+            s.edge_count
+        );
+        assert!((0.0..=1.0).contains(&s.orphan_ratio));
+        assert!((0.0..=1.0).contains(&s.stale_ratio));
+        // grade is a valid letter; just confirm it is set (no panic / valid copy).
+        let _ = s.grade;
+    }
+
+    #[test]
+    fn stats_counts_contradiction_edges() {
+        let mut m = mem();
+        let a = m.add("s", "a", "claim x is true", t(1)).unwrap().episodic;
+        let b = m.add("s", "a", "claim x is false", t(2)).unwrap().episodic;
+        m.flush_all().unwrap();
+        m.relate(a, b, Relation::Contradicts).unwrap();
+
+        let s = m.stats_at(t(10)).unwrap();
+        assert!(
+            s.contradiction_count >= 1,
+            "expected a contradiction, got {}",
+            s.contradiction_count
+        );
+    }
+
+    // ── as_context ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn as_context_renders_sections() {
+        let mut m = mem();
+        m.add("s", "alice", "we deploy on fridays", t(1)).unwrap();
+        m.add("s", "bob", "but fridays are risky", t(2)).unwrap();
+        m.flush_all().unwrap();
+
+        let recall = m.search_at("deploy fridays", 5, t(100)).unwrap();
+        let block = recall.as_context();
+
+        // The block should be a readable string. With recipe content it will
+        // contain at least one section header and the relevance annotation.
+        assert!(
+            block.contains("## KNOWLEDGE")
+                || block.contains("## MEMORIES")
+                || block.contains("## IDENTITY"),
+            "expected at least one section header, got:\n{block}"
+        );
+        if recall.package.total_fragments() > 0 {
+            assert!(
+                block.contains("relevance"),
+                "rendered fragments must show relevance, got:\n{block}"
+            );
+            assert!(
+                block.contains("origin: peer #"),
+                "rendered fragments must show provenance, got:\n{block}"
+            );
+        }
+    }
+
+    #[test]
+    fn as_context_empty_package_is_empty_string() {
+        let recall = Recall {
+            hits: Vec::new(),
+            package: ContextPackage::empty(),
+        };
+        assert_eq!(recall.as_context(), "");
     }
 }
