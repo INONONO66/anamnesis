@@ -167,16 +167,16 @@ fn probe_lock(db: &std::path::Path) -> (bool, String) {
     let mut lock_path = db.to_path_buf().into_os_string();
     lock_path.push(".lock");
     let lock_path = std::path::PathBuf::from(lock_path);
-    if let Some(parent) = lock_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let file = match std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(false)
-        .open(&lock_path)
-    {
+    // Read-only probe: do NOT create the lock file. Its absence means no `serve`
+    // has ever held it, so the DB is free.
+    let file = match std::fs::OpenOptions::new().write(true).open(&lock_path) {
         Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return (
+                true,
+                format!("{} (free — no lock file yet)", lock_path.display()),
+            );
+        }
         Err(e) => return (false, format!("cannot open {}: {e}", lock_path.display())),
     };
     // UFCS to fs4's `try_lock` for the same reason as memory.rs (avoid the

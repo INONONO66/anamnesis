@@ -176,6 +176,7 @@ pub struct Memory<S: StorageAdapter + Clone = SqliteStorage> {
 /// active endpoints (ADR-0006). It is never inhibitory and is never auto-deleted.
 /// `Refutes`, despite the name, *is* a weak supportive propagating edge.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive] // deliberately-growable vocabulary; future relations stay additive
 pub enum Relation {
     /// Cause → effect ([`EdgeType::Causal`]).
     Causes,
@@ -242,6 +243,7 @@ pub enum Direction {
 /// `ExtractedFrom` are visible) — agents can map the agent-facing subset back to
 /// [`Relation`] themselves if desired.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive] // may gain fields (e.g. validity window); keep additive
 pub struct Neighbor {
     /// The other endpoint of the edge (not the queried node).
     pub node: NodeId,
@@ -264,6 +266,7 @@ pub struct Neighbor {
 /// raw support/contradiction rates). Surfaces only what a front-door caller
 /// needs to judge the outcome.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive] // report may gain metrics; keep additive
 pub struct ConsolidateReport {
     /// The synthesis node created by this consolidation.
     pub node_id: NodeId,
@@ -297,6 +300,7 @@ pub struct ConsolidateReport {
 /// buffers (the not-yet-finalized last turn of each open session) are *not*
 /// counted. Call [`Memory::flush_all`] first if exact live counts matter.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive] // report may gain metrics; keep additive
 pub struct MemoryStats {
     /// Total number of live nodes.
     pub node_count: usize,
@@ -719,6 +723,13 @@ impl<S: StorageAdapter + Clone> Memory<S> {
     /// never inhibitory. Engine-internal edge types (`Temporal`, `ExtractedFrom`,
     /// etc.) and the time-mutating `Supersedes` are intentionally *not* reachable
     /// here — use [`engine_mut`](Memory::engine_mut) if you genuinely need them.
+    ///
+    /// # Additive
+    ///
+    /// `relate` does not de-duplicate: calling it twice for the same
+    /// `(from, to, relation)` creates two distinct edges (and inflates
+    /// [`stats`](Memory::stats)'s `edge_count`). Re-asserting a known relation
+    /// stacks edges; the caller owns idempotency.
     pub fn relate(
         &mut self,
         from: NodeId,
