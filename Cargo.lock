@@ -83,6 +83,7 @@ dependencies = [
  "clap",
  "dirs 5.0.1",
  "fs4",
+ "libc",
  "rmcp",
  "schemars",
  "serde",

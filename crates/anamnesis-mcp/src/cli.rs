@@ -16,7 +16,17 @@ pub struct Cli {
 #[derive(Subcommand)]
 pub enum Commands {
     /// Run the MCP server over stdio (default when no subcommand is given).
-    Serve,
+    ///
+    /// Default mode is the *launcher*: ensure the shared daemon is up and act as
+    /// a transparent stdio↔socket proxy. `--embedded` (or `ANAMNESIS_NO_DAEMON=1`)
+    /// runs the old in-process server that owns the DB directly — a fallback for
+    /// debugging or environments without Unix sockets / detached spawns.
+    Serve {
+        /// Run in-process (own the DB directly) instead of proxying to the shared
+        /// daemon. Equivalent to setting `ANAMNESIS_NO_DAEMON=1`.
+        #[arg(long)]
+        embedded: bool,
+    },
     /// Run the shared on-demand daemon: own the resolved DB and serve MCP over a
     /// per-DB Unix socket to many clients. Auto-spawned; not usually run by hand.
     Daemon,
@@ -67,7 +77,7 @@ pub fn run_oneshot(cli: &Cli) -> Result<bool> {
         // `Serve`/no-subcommand → start the async stdio server. `Daemon` is
         // intercepted earlier in `main` (it runs the async socket daemon, not a
         // synchronous one-shot); it lands here only via the exhaustiveness check.
-        None | Some(Commands::Serve) | Some(Commands::Daemon) => Ok(false),
+        None | Some(Commands::Serve { .. }) | Some(Commands::Daemon) => Ok(false),
         Some(Commands::Recall {
             query,
             limit,
