@@ -51,7 +51,7 @@ pub async fn ensure_daemon(resolved_db: &Path) -> Result<UnixStream> {
     // No daemon yet — spawn a detached one and retry until its socket is ready.
     let exe = std::env::current_exe().context("resolve current executable for daemon spawn")?;
     tracing::info!(socket = %socket.display(), "no daemon; spawning detached anamnesis-mcp daemon");
-    spawn_daemon_detached(&exe).with_context(|| format!("spawn daemon {exe:?}"))?;
+    spawn_daemon_detached(&exe, resolved_db).with_context(|| format!("spawn daemon {exe:?}"))?;
 
     connect_with_retry(&socket).await.with_context(|| {
         format!(
@@ -103,11 +103,17 @@ async fn connect_with_retry(path: &Path) -> io::Result<UnixStream> {
 /// - All three stdio fds → `/dev/null` so the daemon never holds the MCP host's
 ///   pipe open or writes into a dead pipe after the launcher exits.
 #[cfg(unix)]
-fn spawn_daemon_detached(exe: &Path) -> io::Result<()> {
+fn spawn_daemon_detached(exe: &Path, db: &Path) -> io::Result<()> {
     use std::os::unix::process::CommandExt;
 
+    // Pin the daemon to the launcher's resolved, ABSOLUTE db path so both sides
+    // derive the SAME socket — independent of the daemon's inherited CWD/env
+    // (a detached setsid child, or a Claude Desktop host with a different CWD,
+    // must not re-resolve a project `.anamnesis/` to a different socket).
+    let db = std::path::absolute(db).unwrap_or_else(|_| db.to_path_buf());
     let mut cmd = StdCommand::new(exe);
     cmd.arg("daemon")
+        .env("ANAMNESIS_DB", &db)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -133,9 +139,11 @@ fn spawn_daemon_detached(exe: &Path) -> io::Result<()> {
 /// Non-unix fallback: spawn detached with null stdio in a new process group.
 /// (Anamnesis is unix-only in practice; this keeps the code portable.)
 #[cfg(not(unix))]
-fn spawn_daemon_detached(exe: &Path) -> io::Result<()> {
+fn spawn_daemon_detached(exe: &Path, db: &Path) -> io::Result<()> {
+    let db = std::path::absolute(db).unwrap_or_else(|_| db.to_path_buf());
     StdCommand::new(exe)
         .arg("daemon")
+        .env("ANAMNESIS_DB", &db)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
