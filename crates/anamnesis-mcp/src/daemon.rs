@@ -17,7 +17,7 @@ use std::io;
 use std::os::unix::net::UnixListener as StdUnixListener;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -315,6 +315,12 @@ impl DaemonBind {
 /// created before a `notify_*` still fire.
 pub struct ClientTracker {
     count: AtomicUsize,
+    /// Latches `true` the first time any client connects. The idle-grace window
+    /// is "idle SINCE THE LAST CLIENT LEFT", so it must NOT arm on the
+    /// never-had-a-client startup state (count==0 at daemon birth). Without this
+    /// latch, `grace=0` would let a freshly-spawned daemon exit before the
+    /// launcher's first `connect()` even lands.
+    served: AtomicBool,
     idle: Notify,
 }
 
@@ -322,6 +328,7 @@ impl ClientTracker {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             count: AtomicUsize::new(0),
+            served: AtomicBool::new(false),
             idle: Notify::new(),
         })
     }
@@ -331,6 +338,9 @@ impl ClientTracker {
     /// daemon alive forever.
     pub fn connect(self: &Arc<Self>) -> ClientGuard {
         self.count.fetch_add(1, Ordering::SeqCst);
+        // Latch "we have served at least one client" so the grace window can
+        // only fire on a real 1→0 transition, never on startup.
+        self.served.store(true, Ordering::SeqCst);
         // A fresh connection is exactly the cancel signal for a pending grace
         // window — wake the loop so it re-reads the (now non-zero) count.
         self.idle.notify_one();
@@ -339,6 +349,14 @@ impl ClientTracker {
 
     fn current(&self) -> usize {
         self.count.load(Ordering::SeqCst)
+    }
+
+    /// Whether at least one client has ever connected. Used to gate the
+    /// idle-grace shutdown so a just-spawned daemon survives until its first
+    /// client lands (otherwise `grace=0` would exit before the launcher's
+    /// initial `connect()` arrives).
+    fn has_served(&self) -> bool {
+        self.served.load(Ordering::SeqCst)
     }
 }
 
@@ -373,8 +391,18 @@ pub async fn wait_for_idle_grace(tracker: Arc<ClientTracker>, grace: Duration) {
             continue;
         }
 
-        // Idle right now. Start the grace window, cancelable by any notify
-        // (a new connect calls notify_one).
+        // Idle, but if NO client has ever connected we're in the startup state,
+        // not a real 1→0 idle transition. Arming the grace window here would let
+        // a just-spawned daemon (especially with grace=0) exit before the
+        // launcher's first `connect()` lands. Wait for the first connect instead;
+        // `ClientTracker::connect` pokes `idle`, which wakes us to re-evaluate.
+        if !tracker.has_served() {
+            notified.await;
+            continue;
+        }
+
+        // Idle right now after having served. Start the grace window, cancelable
+        // by any notify (a new connect calls notify_one).
         tokio::select! {
             _ = notified => {
                 // Activity within the window → re-evaluate (cancels shutdown).
@@ -449,18 +477,46 @@ pub(crate) async fn serve_loop(
     let server = AnamnesisServer::new(registry.clone());
     let tracker = ClientTracker::new();
 
-    let shutdown = async {
+    // Distinguish the two shutdown causes: an explicit signal terminates
+    // unconditionally, whereas the idle-grace path must first DRAIN the kernel
+    // accept backlog (a connect() can complete in the kernel — handshake done,
+    // connection queued — between the grace re-check and our observing shutdown)
+    // before committing to exit, so no in-flight client is dropped.
+    enum Stop {
+        Signal,
+        Grace,
+    }
+    // Build a fresh shutdown future that races the signal against the idle-grace
+    // window. Re-armed after a drain so both shutdown causes stay live for the
+    // whole daemon lifetime.
+    async fn build_shutdown(tracker: Arc<ClientTracker>, grace: Duration) -> Stop {
         tokio::select! {
-            _ = crate::shutdown_signal() => tracing::info!("shutdown signal received"),
-            _ = wait_for_idle_grace(tracker.clone(), grace) => {
+            _ = crate::shutdown_signal() => {
+                tracing::info!("shutdown signal received");
+                Stop::Signal
+            }
+            _ = wait_for_idle_grace(tracker, grace) => {
                 tracing::info!("idle for {grace:?} with no clients; shutting down");
+                Stop::Grace
             }
         }
-    };
+    }
+    let shutdown = build_shutdown(tracker.clone(), grace);
     tokio::pin!(shutdown);
 
-    loop {
-        tokio::select! {
+    'serve: loop {
+        let stop = tokio::select! {
+            // `biased;` + accept FIRST closes the DECREMENT-THEN-NEW-CONNECT /
+            // accept-queue race: a client's `connect()` completes in the KERNEL
+            // (handshake done, connection queued in the listen backlog) before
+            // `accept()` runs in userspace, so the grace timer — which keys off
+            // `tracker.count`, bumped only AFTER `accept()` — can resolve
+            // `shutdown` while a connection already sits in the queue. With both
+            // branches ready, an unbiased `select!` would drop that queued
+            // connection ~50% of the time (ECONNRESET mid-handshake). Biasing to
+            // accept before observing shutdown prevents that.
+            biased;
+
             accepted = bind.listener.accept() => {
                 let (stream, _addr) = match accepted {
                     Ok(pair) => pair,
@@ -468,7 +524,7 @@ pub(crate) async fn serve_loop(
                     // daemon — log and keep serving.
                     Err(e) => {
                         tracing::warn!("accept failed: {e}");
-                        continue;
+                        continue 'serve;
                     }
                 };
                 // Bump the count (and cancel any pending grace) BEFORE spawning,
@@ -479,8 +535,42 @@ pub(crate) async fn serve_loop(
                     let _g = guard; // drop on task end → decrement.
                     serve_connection(server, stream).await;
                 });
+                continue 'serve;
             }
-            _ = &mut shutdown => break,
+            stop = &mut shutdown => stop,
+        };
+
+        match stop {
+            // An explicit signal terminates now — established connections are
+            // torn down with the process; no draining.
+            Stop::Signal => break 'serve,
+            // Idle-grace: drain anything already queued in the kernel backlog
+            // before committing to exit. Each drained connection re-registers via
+            // `tracker.connect()` (count → non-zero), so we loop back into serving
+            // and only re-enter the grace window once the listener is truly empty.
+            Stop::Grace => {
+                let mut drained = false;
+                while let Ok(Ok((stream, _addr))) =
+                    tokio::time::timeout(Duration::ZERO, bind.listener.accept()).await
+                {
+                    drained = true;
+                    let guard = tracker.connect();
+                    let server = server.clone();
+                    tokio::spawn(async move {
+                        let _g = guard;
+                        serve_connection(server, stream).await;
+                    });
+                }
+                if drained {
+                    // We accepted queued clients; the shutdown future is consumed,
+                    // so rebuild it (now gated on the non-zero count) and keep
+                    // serving — both the signal and grace causes stay live.
+                    shutdown.set(build_shutdown(tracker.clone(), grace));
+                    continue 'serve;
+                }
+                // Listener is truly drained and idle → commit to shutdown.
+                break 'serve;
+            }
         }
     }
 
@@ -582,11 +672,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn idle_grace_returns_after_window_when_zero_clients() {
+    async fn idle_grace_returns_after_window_once_a_client_has_left() {
         let tracker = ClientTracker::new();
+        // The grace window is "idle SINCE THE LAST CLIENT LEFT" — so a client must
+        // have connected and gone before it can arm. Simulate that 1→0 transition.
+        drop(tracker.connect());
         let start = std::time::Instant::now();
         wait_for_idle_grace(tracker, Duration::from_millis(50)).await;
         assert!(start.elapsed() >= Duration::from_millis(50));
+    }
+
+    #[tokio::test]
+    async fn idle_grace_does_not_arm_before_any_client_connects() {
+        // REGRESSION: with grace=0 a freshly-spawned daemon (count==0, never
+        // served) must NOT exit before its first client lands. The grace window
+        // may only fire on a real 1→0 transition, never on the startup state.
+        let tracker = ClientTracker::new();
+        let res = tokio::time::timeout(
+            Duration::from_millis(100),
+            wait_for_idle_grace(tracker.clone(), Duration::ZERO),
+        )
+        .await;
+        assert!(
+            res.is_err(),
+            "grace=0 must not fire on the never-had-a-client startup state"
+        );
     }
 
     #[tokio::test]
@@ -667,6 +777,64 @@ mod tests {
         assert!(
             exited.is_ok(),
             "daemon did not exit within the grace window after the last client left"
+        );
+        exited.unwrap().expect("serve loop task panicked");
+        assert!(
+            !bound_socket.exists(),
+            "socket file {bound_socket:?} must be unlinked on graceful shutdown"
+        );
+    }
+
+    /// REGRESSION (GRACE=0 startup race + accept-queue race): with grace=0 a
+    /// freshly-spawned daemon must still serve a client that connects *after* the
+    /// serve loop starts — it must not exit on the never-had-a-client startup
+    /// state — and only shut down once that client leaves.
+    #[tokio::test]
+    async fn daemon_with_zero_grace_serves_a_late_first_client_then_exits() {
+        use rmcp::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("memory.db");
+        let socket = socket_path_for_db(&db).unwrap();
+
+        let bind = acquire_daemon(&db, &socket)
+            .unwrap()
+            .expect("first daemon wins the lock");
+        let bound_socket = bind.socket_path.clone();
+
+        let registry = std::sync::Arc::new(std::sync::Mutex::new(
+            MemoryRegistry::file_backed_unlocked_with(
+                Arc::new(crate::memory::StubProvider),
+                db.clone(),
+                dir.path().to_path_buf(),
+                "default".to_string(),
+                false,
+            ),
+        ));
+
+        // grace=0: the daemon must NOT exit before its first client connects.
+        let loop_handle = tokio::spawn(serve_loop(bind, registry, Duration::ZERO));
+
+        // Connect only after a delay — long enough that a daemon which armed the
+        // grace window on startup (the bug) would already have exited and unlinked
+        // the socket, making this connect fail.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let stream = tokio::net::UnixStream::connect(&bound_socket)
+            .await
+            .expect("late first client must still reach a grace=0 daemon");
+        let client = ().serve(stream).await.expect("MCP initialize handshake");
+        let tools = client.peer().list_all_tools().await.expect("tools/list");
+        assert!(
+            tools.iter().any(|t| t.name.as_ref() == "recall"),
+            "daemon should be serving tools to the late first client"
+        );
+
+        // Now the client leaves → with grace=0 the daemon exits promptly.
+        client.cancel().await.expect("client disconnect");
+        let exited = tokio::time::timeout(Duration::from_secs(5), loop_handle).await;
+        assert!(
+            exited.is_ok(),
+            "grace=0 daemon did not exit after its only client left"
         );
         exited.unwrap().expect("serve loop task panicked");
         assert!(
