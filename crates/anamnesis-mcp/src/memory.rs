@@ -391,6 +391,11 @@ impl MemoryRegistry {
     /// Search; on success optionally auto-commit (reinforce) the returned package.
     /// A lazy `tick(now)` keeps forgetting current without a background thread and
     /// persists the reinforcement.
+    ///
+    /// Returns the raw de-duplicated [`Hit`] list. The CLI/server paths use
+    /// [`recall_packaged`](Self::recall_packaged) (which also renders the context
+    /// block), so in a non-test build this primitive has only test consumers.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn recall(
         &mut self,
         query: &str,

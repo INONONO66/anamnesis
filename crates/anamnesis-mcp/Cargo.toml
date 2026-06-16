@@ -18,6 +18,9 @@ path = "src/main.rs"
 anamnesis = { path = "../anamnesis", features = ["embed"] }
 rmcp = { version = "1.7", features = [
     "server",
+    # `client` drives the CLI one-shots: they connect to the shared daemon over
+    # the Unix socket and issue a single tools/call as MCP clients.
+    "client",
     "macros",
     "transport-io",
     "transport-async-rw",
@@ -46,6 +49,7 @@ libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
-# Client side of rmcp drives the in-process daemon over the unix socket in the
-# lifecycle integration test (initialize + tools/list, then disconnect).
-rmcp = { version = "1.7", features = ["client", "transport-async-rw"] }
+# The rmcp `client`/`transport-async-rw` features the lifecycle + e2e tests rely
+# on (drive the daemon over the Unix socket: initialize + tools/list, then
+# disconnect) are now enabled on the main `rmcp` dependency above, since the CLI
+# one-shots act as daemon clients in production too.

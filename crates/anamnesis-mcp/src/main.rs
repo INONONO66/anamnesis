@@ -1,4 +1,5 @@
 mod cli;
+mod client;
 mod config;
 mod daemon;
 mod launcher;
@@ -15,7 +16,7 @@ use clap::Parser;
 use rmcp::ServiceExt;
 use rmcp::transport::stdio;
 
-use crate::cli::{Cli, Commands};
+use crate::cli::{Cli, Commands, Oneshot};
 use crate::config::Config;
 use crate::memory::MemoryRegistry;
 use crate::server::AnamnesisServer;
@@ -32,9 +33,13 @@ fn main() -> Result<()> {
     if matches!(cli.command, Some(Commands::Daemon)) {
         return run_daemon();
     }
-    // One-shot CLI commands run synchronously (cold model load) and exit.
-    if cli::run_oneshot(&cli)? {
-        return Ok(());
+    // One-shot CLI commands. The synchronous path handles `prewarm`/`doctor` and
+    // the `--embedded` (DB-direct) variants of the daemon-routed commands; the
+    // default daemon-routed commands run as async MCP clients.
+    match cli::run_oneshot(&cli)? {
+        Oneshot::Done => return Ok(()),
+        Oneshot::Client => return run_oneshot_client(&cli),
+        Oneshot::Serve => {}
     }
     // `serve` (or no subcommand) → the async stdio entry point. By default this
     // is the *launcher* (ensure the shared daemon, then proxy stdio↔socket). The
@@ -51,7 +56,7 @@ fn main() -> Result<()> {
 
 /// `true` when `var` is set to a truthy value (anything other than unset/empty/
 /// `0`/`false`/`no`).
-fn env_flag(var: &str) -> bool {
+pub(crate) fn env_flag(var: &str) -> bool {
     match std::env::var(var) {
         Ok(v) => !matches!(
             v.trim().to_ascii_lowercase().as_str(),
@@ -66,6 +71,14 @@ async fn run_daemon() -> Result<()> {
     config::ensure_model_cache_dir();
     let cfg = Config::from_env();
     daemon::run(cfg).await
+}
+
+/// Drive a daemon-routed one-shot (`recall`/`remember`/`relate`/`stats` in their
+/// default mode) as an MCP client on a tokio runtime: ensure the daemon, issue
+/// one `tools/call`, print, disconnect.
+#[tokio::main]
+async fn run_oneshot_client(cli: &Cli) -> Result<()> {
+    cli::run_oneshot_client(cli).await
 }
 
 /// Launcher: ensure the shared daemon for the resolved DB is up, then run a

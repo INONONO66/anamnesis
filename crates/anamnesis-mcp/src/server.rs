@@ -52,6 +52,13 @@ pub struct IngestParams {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct StatsParams {
+    /// Isolated memory namespace (default: the server default).
+    #[serde(default)]
+    pub namespace: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct RelateParams {
     /// Source node id (the `node_id` from a prior `recall`).
     pub from_id: u64,
@@ -221,6 +228,70 @@ impl AnamnesisServer {
             "linked node {from_id} -> node {to_id} ({relation}) as edge {edge}"
         ))]))
     }
+
+    #[tool(
+        description = "Report graph health/size stats for a namespace: node/edge counts, orphan and \
+                       contradiction ratios, average salience/degree, staleness, and an overall \
+                       health grade. Read-only."
+    )]
+    async fn stats(
+        &self,
+        Parameters(p): Parameters<StatsParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let registry = self.registry.clone();
+        let stats = tokio::task::spawn_blocking(move || {
+            // Recover from poisoning so one panicking handler doesn't brick the
+            // server for the rest of its lifetime.
+            let mut g = registry.lock().unwrap_or_else(|e| e.into_inner());
+            g.stats(p.namespace.as_deref())
+        })
+        .await
+        .map_err(internal)?
+        .map_err(internal)?;
+        // The readable text block IS the payload: the CLI `stats` one-shot prints
+        // it verbatim, so the daemon-backed and `--embedded` paths render identically.
+        Ok(CallToolResult::success(vec![Content::text(format_stats(
+            &stats,
+        ))]))
+    }
+}
+
+/// Render a [`MemoryStats`](anamnesis::memory::MemoryStats) snapshot to the same
+/// human-readable block the CLI prints. Shared so the `stats` MCP tool and the
+/// `--embedded` CLI path produce byte-identical output.
+pub fn format_stats(s: &anamnesis::memory::MemoryStats) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let _ = writeln!(out, "nodes:                {}", s.node_count);
+    let _ = writeln!(out, "edges:                {}", s.edge_count);
+    let _ = writeln!(
+        out,
+        "orphans:              {} ({:.1}%)",
+        s.orphan_count,
+        s.orphan_ratio * 100.0
+    );
+    let _ = writeln!(
+        out,
+        "contradictions:       {} ({:.1}%)",
+        s.contradiction_count,
+        s.contradiction_ratio * 100.0
+    );
+    let _ = writeln!(out, "supersedes:           {}", s.supersede_count);
+    let _ = writeln!(out, "retracted:            {}", s.retracted_count);
+    let _ = writeln!(out, "missing embeddings:   {}", s.missing_embedding_count);
+    let _ = writeln!(out, "avg salience:         {:.3}", s.avg_salience);
+    let _ = writeln!(out, "avg degree:           {:.2}", s.average_degree);
+    let _ = writeln!(out, "stale (>30d):         {:.1}%", s.stale_ratio * 100.0);
+    let _ = writeln!(out, "salience entropy:     {:.3} bits", s.salience_entropy);
+    let _ = writeln!(out, "peers:                {}", s.peer_count);
+    let _ = writeln!(out, "health grade:         {:?}", s.grade);
+    if !s.scope_distribution.is_empty() {
+        let _ = writeln!(out, "scope distribution:");
+        for (scope, count) in &s.scope_distribution {
+            let _ = writeln!(out, "  {scope}: {count}");
+        }
+    }
+    out
 }
 
 #[tool_handler(router = self.tool_router)]
