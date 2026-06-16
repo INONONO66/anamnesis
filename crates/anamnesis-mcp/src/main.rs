@@ -1,5 +1,6 @@
 mod cli;
 mod config;
+mod daemon;
 mod memory;
 mod server;
 
@@ -13,7 +14,7 @@ use clap::Parser;
 use rmcp::ServiceExt;
 use rmcp::transport::stdio;
 
-use crate::cli::Cli;
+use crate::cli::{Cli, Commands};
 use crate::config::Config;
 use crate::memory::MemoryRegistry;
 use crate::server::AnamnesisServer;
@@ -25,12 +26,24 @@ fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
+    // The shared daemon runs the rmcp server over a Unix socket (async, long-
+    // lived). It is NOT a one-shot, so dispatch it before the synchronous CLI.
+    if matches!(cli.command, Some(Commands::Daemon)) {
+        return run_daemon();
+    }
     // One-shot CLI commands run synchronously (cold model load) and exit.
     if cli::run_oneshot(&cli)? {
         return Ok(());
     }
     // Otherwise start the async stdio server.
     serve()
+}
+
+#[tokio::main]
+async fn run_daemon() -> Result<()> {
+    config::ensure_model_cache_dir();
+    let cfg = Config::from_env();
+    daemon::run(cfg).await
 }
 
 #[tokio::main]
@@ -65,7 +78,7 @@ async fn serve() -> Result<()> {
 }
 
 /// Resolves when the process receives SIGTERM (or Ctrl-C / SIGINT).
-async fn shutdown_signal() {
+pub(crate) async fn shutdown_signal() {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{SignalKind, signal};

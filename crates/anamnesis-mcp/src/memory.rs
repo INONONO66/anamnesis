@@ -118,10 +118,21 @@ pub struct MemoryRegistry {
     /// lifetime so a second process can't open the same database; the OS
     /// releases them automatically on exit or crash.
     locks: Vec<std::fs::File>,
+    /// Whether `open_namespace` takes the per-namespace `<db>.lock`.
+    ///
+    /// `true` for the embedded one-shot/stdio path (each process owns the DB and
+    /// must guard it). `false` for the **daemon**, which already holds the single
+    /// exclusive lock on the resolved DB and is the only process that opens it —
+    /// re-locking each namespace there would be redundant (and the daemon's own
+    /// lock would otherwise deadlock the default namespace against itself).
+    lock_on_open: bool,
 }
 
 impl MemoryRegistry {
     /// Production constructor: file-backed, FastEmbed provider built lazily.
+    ///
+    /// Each opened namespace takes its own `<db>.lock` (single-writer guard for
+    /// the embedded one-shot / stdio path, where this process owns the DB).
     pub fn file_backed(
         default_db: PathBuf,
         dir: PathBuf,
@@ -140,6 +151,26 @@ impl MemoryRegistry {
             open: HashMap::new(),
             default_namespace,
             locks: Vec::new(),
+            lock_on_open: true,
+        }
+    }
+
+    /// Daemon constructor: file-backed, FastEmbed provider built lazily, but the
+    /// registry does **not** take per-namespace locks.
+    ///
+    /// The daemon already holds the single exclusive lock on the resolved DB (via
+    /// [`crate::daemon::acquire_daemon`]) and is the sole process that opens it,
+    /// so re-locking inside the registry is both redundant and would deadlock the
+    /// default namespace against the daemon's own held lock.
+    pub fn file_backed_unlocked(
+        default_db: PathBuf,
+        dir: PathBuf,
+        default_namespace: String,
+        reinforce_on_recall: bool,
+    ) -> Self {
+        Self {
+            lock_on_open: false,
+            ..Self::file_backed(default_db, dir, default_namespace, reinforce_on_recall)
         }
     }
 
@@ -154,6 +185,7 @@ impl MemoryRegistry {
             open: HashMap::new(),
             default_namespace: "default".to_string(),
             locks: Vec::new(),
+            lock_on_open: true,
         }
     }
 
@@ -178,6 +210,29 @@ impl MemoryRegistry {
             open: HashMap::new(),
             default_namespace,
             locks: Vec::new(),
+            lock_on_open: true,
+        }
+    }
+
+    /// Test constructor: file-backed but UNLOCKED (daemon mode) with a supplied
+    /// provider — exercises the real socket/file path with a stub embedder.
+    #[cfg(test)]
+    pub fn file_backed_unlocked_with(
+        provider: Arc<dyn EmbeddingProvider>,
+        default_db: PathBuf,
+        dir: PathBuf,
+        default_namespace: String,
+        reinforce_on_recall: bool,
+    ) -> Self {
+        Self {
+            lock_on_open: false,
+            ..Self::file_backed_with(
+                provider,
+                default_db,
+                dir,
+                default_namespace,
+                reinforce_on_recall,
+            )
         }
     }
 
@@ -282,31 +337,35 @@ impl MemoryRegistry {
                 .map_err(|e| Error::StorageError(format!("create db dir: {e}")))?;
         }
 
-        // Take an exclusive lock on a sibling `<db>.lock` so a second
-        // anamnesis-mcp process can't open the same database (two processes =>
-        // two in-memory caches over one file => corruption). The OS releases the
-        // lock when this process exits or is killed.
-        let mut lock_path = path.clone().into_os_string();
-        lock_path.push(".lock");
-        let lock_path = PathBuf::from(lock_path);
-        let lock_file = std::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(false)
-            .open(&lock_path)
-            .map_err(|e| Error::StorageError(format!("open lock file {lock_path:?}: {e}")))?;
-        // UFCS: on rustc >= 1.89 `File` has an inherent `try_lock` (different
-        // signature) that would shadow the trait method; pin to fs4's so the
-        // behavior is identical on our 1.88 MSRV and on newer toolchains.
-        if fs4::FileExt::try_lock(&lock_file).is_err() {
-            return Err(Error::StorageError(format!(
-                "database {path:?} is already in use by another anamnesis-mcp process; \
-                 use a different ANAMNESIS_DB or namespace"
-            )));
+        // The daemon already holds the single exclusive lock on the resolved DB
+        // and is the sole opener, so it skips the per-namespace lock entirely.
+        // Every other path takes an exclusive lock on a sibling `<db>.lock` so a
+        // second anamnesis-mcp process can't open the same database (two
+        // processes => two in-memory caches over one file => corruption). The OS
+        // releases the lock when this process exits or is killed.
+        if self.lock_on_open {
+            let mut lock_path = path.clone().into_os_string();
+            lock_path.push(".lock");
+            let lock_path = PathBuf::from(lock_path);
+            let lock_file = std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(false)
+                .open(&lock_path)
+                .map_err(|e| Error::StorageError(format!("open lock file {lock_path:?}: {e}")))?;
+            // UFCS: on rustc >= 1.89 `File` has an inherent `try_lock` (different
+            // signature) that would shadow the trait method; pin to fs4's so the
+            // behavior is identical on our 1.88 MSRV and on newer toolchains.
+            if fs4::FileExt::try_lock(&lock_file).is_err() {
+                return Err(Error::StorageError(format!(
+                    "database {path:?} is already in use by another anamnesis-mcp process; \
+                     use a different ANAMNESIS_DB or namespace"
+                )));
+            }
+            self.locks.push(lock_file);
         }
 
         let mem = Memory::with_provider(path, provider)?;
-        self.locks.push(lock_file);
         Ok(mem)
     }
 
@@ -466,6 +525,32 @@ impl MemoryRegistry {
     }
 }
 
+/// Deterministic 64-dim embedding provider for tests — no network, no model
+/// download. Shared by this module's tests and the daemon lifecycle test.
+#[cfg(test)]
+pub(crate) struct StubProvider;
+
+#[cfg(test)]
+impl EmbeddingProvider for StubProvider {
+    fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, Error> {
+        Ok(texts
+            .iter()
+            .map(|t| {
+                let len = t.len() as f32;
+                (0..64)
+                    .map(|i| ((len * (i as f32 + 1.0)) % 100.0) / 100.0)
+                    .collect()
+            })
+            .collect())
+    }
+    fn dimensions(&self) -> usize {
+        64
+    }
+    fn model_name(&self) -> &str {
+        "stub-64"
+    }
+}
+
 /// Collapse duplicate-text hits (the Episodic + Semantic copy `add_note` creates),
 /// keeping the first (highest-scored, since `hits` is already rank-ordered)
 /// occurrence of each distinct text.
@@ -479,28 +564,6 @@ fn dedup_hits(hits: Vec<Hit>) -> Vec<Hit> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Deterministic 64-dim provider — no network, no model download.
-    struct StubProvider;
-    impl EmbeddingProvider for StubProvider {
-        fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, Error> {
-            Ok(texts
-                .iter()
-                .map(|t| {
-                    let len = t.len() as f32;
-                    (0..64)
-                        .map(|i| ((len * (i as f32 + 1.0)) % 100.0) / 100.0)
-                        .collect()
-                })
-                .collect())
-        }
-        fn dimensions(&self) -> usize {
-            64
-        }
-        fn model_name(&self) -> &str {
-            "stub-64"
-        }
-    }
 
     fn registry(reinforce: bool) -> MemoryRegistry {
         MemoryRegistry::in_memory_with(Arc::new(StubProvider), reinforce)

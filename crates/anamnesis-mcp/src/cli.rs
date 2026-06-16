@@ -17,6 +17,9 @@ pub struct Cli {
 pub enum Commands {
     /// Run the MCP server over stdio (default when no subcommand is given).
     Serve,
+    /// Run the shared on-demand daemon: own the resolved DB and serve MCP over a
+    /// per-DB Unix socket to many clients. Auto-spawned; not usually run by hand.
+    Daemon,
     /// Search memory and print JSON hits.
     Recall {
         query: String,
@@ -61,7 +64,10 @@ pub fn run_oneshot(cli: &Cli) -> Result<bool> {
     crate::config::ensure_model_cache_dir();
     let cfg = Config::from_env();
     match &cli.command {
-        None | Some(Commands::Serve) => Ok(false),
+        // `Serve`/no-subcommand → start the async stdio server. `Daemon` is
+        // intercepted earlier in `main` (it runs the async socket daemon, not a
+        // synchronous one-shot); it lands here only via the exhaustiveness check.
+        None | Some(Commands::Serve) | Some(Commands::Daemon) => Ok(false),
         Some(Commands::Recall {
             query,
             limit,
