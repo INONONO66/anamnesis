@@ -3,7 +3,8 @@
   "version": "0.7.0",
   "description": "Activation-gated associative memory recall injection for Claude Code, backed by anamnesis.",
   "author": {
-    "name": "CHAEWAN KIM"
+    "name": "amsminn & INONONO66",
+    "url": "https://github.com/INONONO66/anamnesis"
   },
   "homepage": "https://github.com/INONONO66/anamnesis",
   "repository": "https://github.com/INONONO66/anamnesis",
