@@ -1,4 +1,11 @@
-//! Spawns `anamnesis-mcp serve` and verifies the MCP handshake + tool list.
+//! Spawns `anamnesis-mcp serve --embedded` and verifies the MCP handshake + tool
+//! list over stdio.
+//!
+//! `--embedded` runs the in-process stdio server directly (this process owns the
+//! DB). We use it here so the smoke test is self-contained — the default
+//! launcher mode would spawn a detached daemon that outlives the test process,
+//! leaving a stray daemon behind. The launcher's connect-reuse guarantee is
+//! covered by the `launcher` unit test instead.
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
@@ -8,6 +15,7 @@ fn lists_tools_over_stdio() {
     let bin = env!("CARGO_BIN_EXE_anamnesis-mcp");
     let mut child = Command::new(bin)
         .arg("serve")
+        .arg("--embedded")
         .env(
             "ANAMNESIS_DB",
             std::env::temp_dir().join("anamnesis-smoke/memory.db"),

@@ -16,17 +16,40 @@ path = "src/main.rs"
 
 [dependencies]
 anamnesis = { path = "../anamnesis", features = ["embed"] }
-rmcp = { version = "1.7", features = ["server", "macros", "transport-io"] }
+rmcp = { version = "1.7", features = [
+    "server",
+    # `client` drives the CLI one-shots: they connect to the shared daemon over
+    # the Unix socket and issue a single tools/call as MCP clients.
+    "client",
+    "macros",
+    "transport-io",
+    "transport-async-rw",
+] }
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync"] }
+tokio = { version = "1", features = [
+    "macros",
+    "rt-multi-thread",
+    "signal",
+    "sync",
+    "net",
+    "time",
+    "io-std",
+    "io-util",
+] }
 clap = { version = "4", features = ["derive"] }
 dirs = "5"
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 fs4 = "1.1.0"
+# `setsid()` in the detached-daemon spawn (launcher.rs pre_exec hook).
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
+# The rmcp `client`/`transport-async-rw` features the lifecycle + e2e tests rely
+# on (drive the daemon over the Unix socket: initialize + tools/list, then
+# disconnect) are now enabled on the main `rmcp` dependency above, since the CLI
+# one-shots act as daemon clients in production too.
