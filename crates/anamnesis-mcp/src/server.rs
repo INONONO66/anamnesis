@@ -20,6 +20,15 @@ pub struct RecallParams {
     /// Isolated memory namespace (default: the server default).
     #[serde(default)]
     pub namespace: Option<String>,
+    /// When `false`, skip the reinforcing `used()` commit (a pure read). Omitted
+    /// ⇒ the server's configured `reinforce_on_recall` default — existing callers
+    /// are unchanged. The hook recall path passes `false`.
+    #[serde(default)]
+    pub reinforce: Option<bool>,
+    /// Need-odds gate `τ`: if there are no hits or the top hit's score is `< τ`,
+    /// return an empty context block (inject nothing). Omitted ⇒ no gate.
+    #[serde(default)]
+    pub gate_threshold: Option<f64>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -115,7 +124,13 @@ impl AnamnesisServer {
             // Recover from poisoning so one panicking handler doesn't brick the
             // server for the rest of its lifetime.
             let mut g = registry.lock().unwrap_or_else(|e| e.into_inner());
-            g.recall_packaged(&p.query, limit, p.namespace.as_deref())
+            g.recall_packaged_gated(
+                &p.query,
+                limit,
+                p.namespace.as_deref(),
+                p.reinforce,
+                p.gate_threshold,
+            )
         })
         .await
         .map_err(internal)?

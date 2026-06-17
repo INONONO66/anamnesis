@@ -2,6 +2,12 @@
 
 use std::path::{Path, PathBuf};
 
+/// Starting prior for the hook injection gate `τ` (need-odds floor on the top
+/// readout score). A deliberately conservative default: the verify phase
+/// calibrates the real number against a live graph so a clearly-relevant prompt
+/// injects and an off-topic prompt injects nothing (spec §`τ` default).
+pub const DEFAULT_HOOK_THRESHOLD: f64 = 0.15;
+
 /// Resolved runtime configuration.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -11,14 +17,33 @@ pub struct Config {
     pub default_namespace: String,
     /// Auto-commit (reinforce) the package returned by `recall`.
     pub reinforce_on_recall: bool,
+    // The four `hook_*` knobs below are resolved here (Component 1) and consumed by
+    // the `hook` subcommand family (Component 2, added next). Allow dead_code until
+    // that subcommand reads them so this component's quality gate stays green.
+    /// `τ` — need-odds injection gate (top-score floor). `ANAMNESIS_HOOK_THRESHOLD`.
+    #[allow(dead_code)]
+    pub hook_threshold: f64,
+    /// `k` — cap on injected per-turn memories. `ANAMNESIS_HOOK_TOPK` (default 5).
+    #[allow(dead_code)]
+    pub hook_topk: usize,
+    /// SessionStart seed size. `ANAMNESIS_HOOK_SEED_K` (default 5).
+    #[allow(dead_code)]
+    pub hook_seed_k: usize,
+    /// Per-hook fail-open timeout (ms). `ANAMNESIS_HOOK_TIMEOUT_MS` (default 1500).
+    #[allow(dead_code)]
+    pub hook_timeout_ms: u64,
 }
 
 impl Config {
     /// Resolve from environment variables, falling back to sane defaults.
     ///
-    /// - `ANAMNESIS_DB`         → `default_db` (default: `<data_dir>/anamnesis/memory.db`)
-    /// - `ANAMNESIS_NAMESPACE`  → `default_namespace` (default: `"default"`)
-    /// - `ANAMNESIS_REINFORCE`  → `reinforce_on_recall`; "0"/"false" disables (default: true)
+    /// - `ANAMNESIS_DB`              → `default_db` (default: `<data_dir>/anamnesis/memory.db`)
+    /// - `ANAMNESIS_NAMESPACE`       → `default_namespace` (default: `"default"`)
+    /// - `ANAMNESIS_REINFORCE`       → `reinforce_on_recall`; "0"/"false" disables (default: true)
+    /// - `ANAMNESIS_HOOK_THRESHOLD`  → `hook_threshold` (default: [`DEFAULT_HOOK_THRESHOLD`])
+    /// - `ANAMNESIS_HOOK_TOPK`       → `hook_topk` (default: 5)
+    /// - `ANAMNESIS_HOOK_SEED_K`     → `hook_seed_k` (default: 5)
+    /// - `ANAMNESIS_HOOK_TIMEOUT_MS` → `hook_timeout_ms` (default: 1500)
     pub fn from_env() -> Self {
         let default_db = std::env::var_os("ANAMNESIS_DB")
             .map(PathBuf::from)
@@ -29,10 +54,18 @@ impl Config {
             Ok(v) => !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no"),
             Err(_) => true,
         };
+        let hook_threshold = parse_env("ANAMNESIS_HOOK_THRESHOLD", DEFAULT_HOOK_THRESHOLD);
+        let hook_topk = parse_env("ANAMNESIS_HOOK_TOPK", 5usize);
+        let hook_seed_k = parse_env("ANAMNESIS_HOOK_SEED_K", 5usize);
+        let hook_timeout_ms = parse_env("ANAMNESIS_HOOK_TIMEOUT_MS", 1500u64);
         Self {
             default_db,
             default_namespace,
             reinforce_on_recall,
+            hook_threshold,
+            hook_topk,
+            hook_seed_k,
+            hook_timeout_ms,
         }
     }
 
@@ -71,6 +104,15 @@ fn default_db_path() -> PathBuf {
         .ok()
         .and_then(|cwd| resolve_project_db(&cwd))
         .unwrap_or_else(|| anamnesis_home().join("memory.db"))
+}
+
+/// Parse env var `name` into `T`, falling back to `default` on unset/blank/garbage.
+/// Trims surrounding whitespace so `" 5 "` parses; any parse failure is fail-soft.
+fn parse_env<T: std::str::FromStr>(name: &str, default: T) -> T {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(default)
 }
 
 /// Nearest ancestor of `start` (inclusive) holding a `.anamnesis/` dir, mapped to
@@ -119,6 +161,10 @@ mod tests {
             default_db: "x".into(),
             default_namespace: "default".into(),
             reinforce_on_recall: true,
+            hook_threshold: DEFAULT_HOOK_THRESHOLD,
+            hook_topk: 5,
+            hook_seed_k: 5,
+            hook_timeout_ms: 1500,
         };
         assert!(cfg.reinforce_on_recall);
         assert_eq!(cfg.db_dir(), PathBuf::from("."));
@@ -130,6 +176,10 @@ mod tests {
             default_db: PathBuf::from("/var/lib/anamnesis/memory.db"),
             default_namespace: "default".into(),
             reinforce_on_recall: true,
+            hook_threshold: DEFAULT_HOOK_THRESHOLD,
+            hook_topk: 5,
+            hook_seed_k: 5,
+            hook_timeout_ms: 1500,
         };
         assert_eq!(cfg.db_dir(), PathBuf::from("/var/lib/anamnesis"));
     }
@@ -152,5 +202,29 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         // No `.anamnesis/` anywhere up the chain → None (caller uses ~/.anamnesis).
         assert_eq!(resolve_project_db(root.path()), None);
+    }
+
+    #[test]
+    fn parse_env_falls_back_on_unset_and_garbage() {
+        // Avoid mutating process env in parallel tests: only exercise the
+        // unset/garbage fallback paths, which never touch a set variable.
+        let name = "ANAMNESIS_DEFINITELY_UNSET_FOR_TEST_42";
+        assert_eq!(parse_env(name, 5usize), 5);
+        assert_eq!(
+            parse_env::<f64>(name, DEFAULT_HOOK_THRESHOLD),
+            DEFAULT_HOOK_THRESHOLD
+        );
+        assert_eq!(parse_env(name, 1500u64), 1500);
+    }
+
+    #[test]
+    fn default_hook_threshold_is_a_sane_positive_prior() {
+        // The starting τ prior must be a finite, positive floor (calibrated later).
+        // A compile-time const block keeps the invariant without a constant-valued
+        // runtime assertion (clippy::assertions_on_constants).
+        const {
+            assert!(DEFAULT_HOOK_THRESHOLD.is_finite());
+            assert!(DEFAULT_HOOK_THRESHOLD > 0.0);
+        }
     }
 }

@@ -441,12 +441,56 @@ impl MemoryRegistry {
         limit: usize,
         ns: Option<&str>,
     ) -> Result<PackagedRecall, Error> {
-        let reinforce = self.reinforce_on_recall;
+        // The classic path: reinforce per the registry default, no gate.
+        self.recall_packaged_gated(query, limit, ns, None, None)
+    }
+
+    /// Gated, optionally read-only variant of [`recall_packaged`](Self::recall_packaged)
+    /// for the Claude Code hook path.
+    ///
+    /// - `reinforce`: `None` ⇒ use the registry's configured default; `Some(false)`
+    ///   ⇒ a pure read (skip the reinforcing `used()` commit); `Some(true)` ⇒ force
+    ///   reinforcement.
+    /// - `gate`: the need-odds threshold `τ`. After ranking, if there are no hits OR
+    ///   the top hit's score is `< τ`, return an **empty** [`PackagedRecall`] (empty
+    ///   `context`, empty `hits`) so the caller injects nothing. `None` ⇒ no gate.
+    ///
+    /// Tick semantics match [`recall_packaged`](Self::recall_packaged): a tick before
+    /// the search (ranking freshness) and one after (durability of any reinforcement).
+    /// When the gate trips, the read is pure (never reinforces) regardless of
+    /// `reinforce`, since there is nothing relevant to mark as used.
+    pub fn recall_packaged_gated(
+        &mut self,
+        query: &str,
+        limit: usize,
+        ns: Option<&str>,
+        reinforce: Option<bool>,
+        gate: Option<f64>,
+    ) -> Result<PackagedRecall, Error> {
+        let reinforce = reinforce.unwrap_or(self.reinforce_on_recall);
         let mem = self.get(ns)?;
         // Tick BEFORE searching so a cold recall after a long idle gap ranks on
         // current decay (same rationale as `recall`).
         mem.tick(Timestamp::now())?;
         let recall = mem.search(query, limit)?;
+
+        // Gate on the top readout score (hits are rank-ordered, highest first).
+        // No hits ⇒ below any threshold. Below `τ` ⇒ inject nothing.
+        let gated_out = match (gate, recall.hits.first().map(|h| h.score)) {
+            (Some(tau), Some(top)) => top < tau,
+            (Some(_), None) => true,
+            (None, _) => false,
+        };
+        if gated_out {
+            // Pure read, no reinforcement, nothing to inject. Still tick for
+            // durability of the pre-search decay refresh.
+            mem.tick(Timestamp::now())?;
+            return Ok(PackagedRecall {
+                context: String::new(),
+                hits: Vec::new(),
+            });
+        }
+
         // Render the context block from the package BEFORE `used` consumes it.
         let context = recall.as_context();
         let raw = recall.hits.clone();
@@ -833,6 +877,168 @@ mod tests {
                 packaged.context
             );
         }
+    }
+
+    // ── recall_packaged_gated (the hook recall path) ───────────────────────────
+
+    /// A gate `τ` above the top hit's score ⇒ empty context AND empty hits
+    /// (the hook injects nothing).
+    #[test]
+    fn gated_recall_below_threshold_is_empty() {
+        let mut reg = registry(false);
+        reg.remember("the auth bug was a race in the middleware", None)
+            .unwrap();
+        // First read the true top score with no gate, then set τ just above it.
+        let ungated = reg
+            .recall_packaged_gated("auth race condition", 5, None, Some(false), None)
+            .unwrap();
+        let top = ungated
+            .hits
+            .first()
+            .map(|h| h.score)
+            .expect("a relevant hit exists");
+        let tau = top + 1.0; // strictly above the best score ⇒ gate trips.
+
+        let gated = reg
+            .recall_packaged_gated("auth race condition", 5, None, Some(false), Some(tau))
+            .unwrap();
+        assert!(
+            gated.context.is_empty(),
+            "above-τ gate must yield empty context, got:\n{}",
+            gated.context
+        );
+        assert!(
+            gated.hits.is_empty(),
+            "above-τ gate must yield no hits, got {} hits",
+            gated.hits.len()
+        );
+    }
+
+    /// No hits at all ⇒ gated out (treated as below any threshold).
+    #[test]
+    fn gated_recall_with_no_hits_is_empty() {
+        let mut reg = registry(false);
+        // Empty graph: nothing to retrieve, so any gate (even 0.0) yields empty.
+        let gated = reg
+            .recall_packaged_gated("nothing here", 5, None, Some(false), Some(0.0))
+            .unwrap();
+        assert!(gated.context.is_empty());
+        assert!(gated.hits.is_empty());
+    }
+
+    /// A gate `τ` at/below the top score ⇒ the rendered top-k context block.
+    #[test]
+    fn gated_recall_at_or_above_threshold_renders_top_k() {
+        let mut reg = registry(false);
+        reg.remember("the auth bug was a race in the middleware", None)
+            .unwrap();
+        // τ = 0.0 admits every positive-scored hit.
+        let gated = reg
+            .recall_packaged_gated("auth race condition", 5, None, Some(false), Some(0.0))
+            .unwrap();
+        assert!(!gated.hits.is_empty(), "τ=0.0 must admit the relevant hit");
+        assert!(
+            gated.context.contains("##"),
+            "expected a rendered section header, got:\n{}",
+            gated.context
+        );
+    }
+
+    /// `gate = None` means no gating: the rendered block comes back even with a
+    /// huge would-be threshold, exactly as the classic `recall_packaged`.
+    #[test]
+    fn gated_recall_none_gate_never_filters() {
+        let mut reg = registry(false);
+        reg.remember("postgres was chosen for jsonb", None).unwrap();
+        let gated = reg
+            .recall_packaged_gated("postgres jsonb", 5, None, Some(false), None)
+            .unwrap();
+        assert!(!gated.hits.is_empty());
+        assert!(gated.context.contains("##"));
+    }
+
+    /// `reinforce = false` is a pure read: repeated reads never lift base-level
+    /// salience (it only decays under the ticks), while `reinforce = true` does
+    /// lift it via the `used()` commit.
+    #[test]
+    fn read_only_recall_does_not_reinforce_but_reinforcing_does() {
+        // Read-only: salience must not climb across repeated reads.
+        let mut ro = registry(false);
+        ro.remember("the auth bug was a race in the middleware", None)
+            .unwrap();
+        let ro_before = ro.stats(None).unwrap().avg_salience;
+        for _ in 0..3 {
+            let pkg = ro
+                .recall_packaged_gated("auth race condition", 5, None, Some(false), None)
+                .unwrap();
+            assert!(
+                !pkg.hits.is_empty(),
+                "each read should still return the hit"
+            );
+        }
+        let ro_after = ro.stats(None).unwrap().avg_salience;
+        assert!(
+            ro_after <= ro_before,
+            "read-only recall must not increase salience: {ro_before} -> {ro_after}"
+        );
+
+        // Reinforcing: salience should climb under the same reads.
+        let mut rw = registry(false);
+        rw.remember("the auth bug was a race in the middleware", None)
+            .unwrap();
+        let rw_before = rw.stats(None).unwrap().avg_salience;
+        for _ in 0..3 {
+            rw.recall_packaged_gated("auth race condition", 5, None, Some(true), None)
+                .unwrap();
+        }
+        let rw_after = rw.stats(None).unwrap().avg_salience;
+        assert!(
+            rw_after > rw_before,
+            "reinforcing recall must increase salience: {rw_before} -> {rw_after}"
+        );
+    }
+
+    /// A gated read-out that trips `τ` is a pure read regardless of `reinforce`:
+    /// nothing relevant ⇒ nothing reinforced.
+    #[test]
+    fn gated_out_recall_never_reinforces_even_when_asked() {
+        let mut reg = registry(false);
+        reg.remember("the auth bug was a race in the middleware", None)
+            .unwrap();
+        let before = reg.stats(None).unwrap().avg_salience;
+        // τ astronomically high ⇒ always gated out, even with reinforce=true.
+        for _ in 0..3 {
+            let pkg = reg
+                .recall_packaged_gated("auth race condition", 5, None, Some(true), Some(1e9))
+                .unwrap();
+            assert!(pkg.hits.is_empty(), "gate must trip at τ=1e9");
+        }
+        let after = reg.stats(None).unwrap().avg_salience;
+        assert!(
+            after <= before,
+            "a gated-out recall must not reinforce: {before} -> {after}"
+        );
+    }
+
+    /// `recall_packaged` (the classic entry) still behaves exactly as before:
+    /// it delegates to the gated method with the registry's reinforce default
+    /// and no gate. With `reinforce_on_recall = true` it lifts salience.
+    #[test]
+    fn recall_packaged_preserves_classic_reinforcing_behavior() {
+        let mut reg = registry(true); // reinforce_on_recall = true
+        reg.remember("the auth bug was a race in the middleware", None)
+            .unwrap();
+        let before = reg.stats(None).unwrap().avg_salience;
+        for _ in 0..3 {
+            let pkg = reg.recall_packaged("auth race condition", 5, None).unwrap();
+            assert!(!pkg.hits.is_empty());
+            assert!(pkg.context.contains("##"));
+        }
+        let after = reg.stats(None).unwrap().avg_salience;
+        assert!(
+            after > before,
+            "classic recall_packaged with reinforce default on must lift salience: {before} -> {after}"
+        );
     }
 
     // ── stats ─────────────────────────────────────────────────────────────────
