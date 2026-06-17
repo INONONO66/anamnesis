@@ -65,6 +65,7 @@ These documents are not a code status table or an audit log. Each chapter descri
 ### 05 - Context Retrieval
 - [activation-flow.md](05-context-retrieval/activation-flow.md) - activation current under a query field
 - [pipeline.md](05-context-retrieval/pipeline.md) - candidate collection, flow, packaging
+- [hook-triggering.md](05-context-retrieval/hook-triggering.md) - making the agent use memory: activation-gated hook strategy
 
 ### 07 - Quality Gates
 - [observability.md](07-quality-gates/observability.md) - health, trace, invariant telemetry
@@ -81,6 +82,7 @@ These documents are not a code status table or an audit log. Each chapter descri
 - [0008-powerlaw-dissipation.md](adr/0008-powerlaw-dissipation.md) - forgetting is power-law base-level dissipation
 - [0009-surprise-gated-perception.md](adr/0009-surprise-gated-perception.md) - ingest magnitude is Bayesian surprise
 - [0010-calibrated-priors-not-laws.md](adr/0010-calibrated-priors-not-laws.md) - constants are calibrated priors, not physical laws
+- [0011-activation-gated-triggering.md](adr/0011-activation-gated-triggering.md) - activation-gated hook triggering, not flat-profile injection
 
 ## Reading Order
 
