@@ -88,6 +88,27 @@ pub enum Commands {
         #[arg(long)]
         embedded: bool,
     },
+    /// Claude Code hook entrypoint: read the hook JSON on stdin, do a gated,
+    /// read-only recall via the warm daemon, and emit the hook JSON on stdout.
+    ///
+    /// Always exits 0 (fail-open): any error injects nothing rather than blocking
+    /// or erasing the user's prompt. Always routes through the shared daemon (no
+    /// `--embedded` mode) so it shares the warm model.
+    Hook {
+        #[command(subcommand)]
+        event: HookEvent,
+    },
+}
+
+/// The Claude Code hook events anamnesis handles (v1). clap renders these as
+/// `hook session-start` / `hook user-prompt` (kebab-cased), matching the plugin's
+/// `hooks.json` commands.
+#[derive(Subcommand, Clone, Debug)]
+pub enum HookEvent {
+    /// `SessionStart`: seed the session with high-salience project memories.
+    SessionStart,
+    /// `UserPromptSubmit`: activation-gated, read-only recall on the prompt.
+    UserPrompt,
 }
 
 fn registry(cfg: &Config) -> MemoryRegistry {
@@ -139,6 +160,10 @@ pub fn run_oneshot(cli: &Cli) -> Result<Oneshot> {
         // intercepted earlier in `main` (it runs the async socket daemon, not a
         // synchronous one-shot); it lands here only via the exhaustiveness check.
         None | Some(Commands::Serve { .. }) | Some(Commands::Daemon) => Ok(Oneshot::Serve),
+
+        // The `hook` family always talks to the warm daemon as an async client
+        // (there is no embedded hook mode); defer to `run_oneshot_client`.
+        Some(Commands::Hook { .. }) => Ok(Oneshot::Client),
 
         // Daemon-routed one-shots: default mode defers to the async client; only
         // the embedded/no-daemon mode runs here against the DB directly.
@@ -206,6 +231,12 @@ pub fn run_oneshot(cli: &Cli) -> Result<Oneshot> {
 pub async fn run_oneshot_client(cli: &Cli) -> Result<()> {
     use crate::client::{args, call_tool_oneshot};
     use serde_json::Value;
+
+    // The `hook` family has a different flow (read stdin, gated read-only recall,
+    // emit hook JSON, fail-open) and never bails — handle it up front.
+    if let Some(Commands::Hook { event }) = &cli.command {
+        return crate::hook::run(event).await;
+    }
 
     let cfg = Config::from_env();
     let (tool, arguments): (&'static str, _) = match &cli.command {

@@ -2,6 +2,7 @@ mod cli;
 mod client;
 mod config;
 mod daemon;
+mod hook;
 mod launcher;
 mod memory;
 mod server;
