@@ -1,0 +1,18 @@
+{
+  "name": "anamnesis-plugins",
+  "owner": {
+    "name": "CHAEWAN KIM"
+  },
+  "metadata": {
+    "description": "anamnesis plugins for Claude Code — activation-gated associative memory recall injection."
+  },
+  "plugins": [
+    {
+      "name": "anamnesis",
+      "source": "./",
+      "description": "Activation-gated associative memory recall injection for Claude Code, backed by anamnesis.",
+      "category": "productivity",
+      "keywords": ["memory", "mcp", "context", "recall", "claude-code"]
+    }
+  ]
+}

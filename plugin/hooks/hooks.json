@@ -1,0 +1,28 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "anamnesis-mcp",
+            "args": ["hook", "session-start"],
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "anamnesis-mcp",
+            "args": ["hook", "user-prompt"],
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
