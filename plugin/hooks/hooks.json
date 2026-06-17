@@ -5,8 +5,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "anamnesis-mcp",
-            "args": ["hook", "session-start"],
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/anamnesis-hook.sh",
+            "args": ["session-start"],
             "timeout": 10
           }
         ]
@@ -17,8 +17,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "anamnesis-mcp",
-            "args": ["hook", "user-prompt"],
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/anamnesis-hook.sh",
+            "args": ["user-prompt"],
             "timeout": 5
           }
         ]

@@ -14,22 +14,38 @@ erased. See `docs/adr/0011-activation-gated-triggering.md` for the rationale.
 
 ## How it works
 
-Each hook spawns `anamnesis-mcp hook <event>`, which reads the Claude Code hook JSON on stdin,
-talks to the warm shared anamnesis daemon over a Unix socket (auto-spawned on first call, reused
-thereafter), and prints the hook output JSON on stdout:
+Each hook runs `hooks/anamnesis-hook.sh <event>` (a guard wrapper), which calls
+`anamnesis-mcp hook <event>`. The binary reads the Claude Code hook JSON on stdin, talks to the
+warm shared anamnesis daemon over a Unix socket (auto-spawned on first call, reused thereafter),
+and prints the hook output JSON on stdout:
 
 | Event | Subcommand | Behavior |
 |--|--|--|
 | `SessionStart` | `anamnesis-mcp hook session-start` | Ungated read-only recall seeded by the project cue (cwd basename), up to `ANAMNESIS_HOOK_SEED_K` memories. |
 | `UserPromptSubmit` | `anamnesis-mcp hook user-prompt` | Activation-**gated** read-only recall on the prompt (`τ` floor, top-`k` cap); below `τ` injects nothing. |
 
+### The guard wrapper (why hooks don't call the binary directly)
+
+`anamnesis-mcp` is installed out-of-band (`cargo install`), so on a given machine it may be
+**missing** or an **older build without the `hook` subcommand**. In that case `clap` exits `2` —
+and a `UserPromptSubmit` hook that exits `2` **erases the user's prompt**. To make that impossible,
+`hooks.json` points at `hooks/anamnesis-hook.sh`, a three-line shim that no-ops when the binary is
+absent and **always exits 0**, so a wrong/old binary can never block or erase a prompt. All real
+logic stays in the Rust binary (`crates/anamnesis-mcp/src/hook.rs`); the shim only neutralizes the
+exit-2 footgun.
+
 ## Install
 
-1. Install the binary so `anamnesis-mcp` is on your PATH:
+1. Install the binary so a **hook-capable** `anamnesis-mcp` is on your PATH. Use `--force` — an
+   older `anamnesis-mcp` (pre-`hook`) may already be installed, and the plugin needs the build that
+   has the `hook` subcommand:
 
    ```sh
-   cargo install --path crates/anamnesis-mcp
+   cargo install --path crates/anamnesis-mcp --force
    ```
+
+   Confirm with `anamnesis-mcp hook --help`. (If you skip this, the guard wrapper keeps prompts
+   safe — it just injects nothing until the right binary is on PATH.)
 
 2. Add this directory as a local marketplace, then install the plugin:
 
@@ -53,6 +69,17 @@ GUI launches frequently do **not** include `~/.cargo/bin`. If the hook silently 
 the most likely cause is the binary not being found: confirm with `which anamnesis-mcp` from the
 same shell Claude Code was launched from, and put `~/.cargo/bin` on that PATH (or symlink the
 binary into a directory already on PATH).
+
+### Distribution (current + planned)
+
+Today the plugin depends on `anamnesis-mcp` being installed separately (via `cargo install`); it is
+**not self-contained**. The guard wrapper makes a missing/old binary *safe* (no-op), but it does
+not make the plugin work on its own.
+
+**TODO — bundle the binary so the plugin is self-contained.** Ship a per-platform `anamnesis-mcp`
+with the plugin (a prebuilt-binary release, or an npm package with a `postinstall` that fetches the
+right build) so `/plugin install` alone is sufficient and PATH/version mismatch is impossible. The
+`npm/` packaging is the intended vehicle for this and is **not yet published**.
 
 ### Versioning
 
