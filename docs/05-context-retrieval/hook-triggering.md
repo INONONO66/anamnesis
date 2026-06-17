@@ -44,7 +44,7 @@ can **self-gate**. The full argument + citations: [ADR-0011](../adr/0011-activat
 | hook | action |
 |:--|:--|
 | `SessionStart` | Seed: inject top high-**base-level** (recently/frequently used) memories scoped to the resolved project/global graph — the "what I know about this work" prime. Capped to top-`k`. |
-| `UserPromptSubmit` | **Activation-gated recall.** Spread activation seeded by the prompt; inject the readout **only if top activation > `τ`** (need-odds threshold), ranked, top-`k` capped. Below `τ` → inject nothing (no bloat). If the activated set holds a `Contradicts` tension or a causal/decision chain, surface it first (`⚠️ contradicts prior X`). |
+| `UserPromptSubmit` | **Activation-gated recall.** Spread activation seeded by the prompt; inject the readout **only if top activation ≥ `τ`** (need-odds threshold), ranked, top-`k` capped. Below `τ` → inject nothing (no bloat). If the activated set holds a `Contradicts` tension or a causal/decision chain, surface it first (`⚠️ contradicts prior X`). |
 | `PostToolUse` | Incremental capture of significant tool effects (Edit/Write/Bash/Task), signal-gated, via `remember` (insight) — conversation flow may go through `ingest_conversation` to build temporal chains. |
 | `Stop` | Capture the turn's distilled outcome (`remember`), signal-gated. **Reinforce** (`used`) only the retrievals the turn actually consumed. |
 | `PreCompact` | Safety capture of session state before the window collapses. |

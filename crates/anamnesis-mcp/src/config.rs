@@ -2,11 +2,21 @@
 
 use std::path::{Path, PathBuf};
 
-/// Starting prior for the hook injection gate `τ` (need-odds floor on the top
-/// readout score). A deliberately conservative default: the verify phase
-/// calibrates the real number against a live graph so a clearly-relevant prompt
-/// injects and an off-topic prompt injects nothing (spec §`τ` default).
-pub const DEFAULT_HOOK_THRESHOLD: f64 = 0.15;
+/// Calibrated prior for the hook injection gate `τ`: a floor on the **top recall
+/// score**, which is the **unnormalized ACT-R activation** of the strongest hit
+/// (base-level + spreading log-odds), NOT a 0..1 similarity. On a typical graph
+/// the top activation lands around ~8–16, so `τ` belongs on that scale — a sub-1
+/// value silently disables the gate (everything injects). The gate keeps a hit
+/// when `top >= τ`.
+///
+/// `13.0` was calibrated live against the real global graph (verify phase): it
+/// sits below the typical relevant band (~14–16) and above the bulk of the
+/// off-topic band (~8–10), so a clearly-relevant prompt injects and an
+/// obviously-off-topic one injects nothing. The bands overlap (a strong off-topic
+/// hit can exceed a weak-but-relevant one), so `13.0` favors precision; it stays
+/// env-tunable via `ANAMNESIS_HOOK_THRESHOLD` and should be **recalibrated
+/// per-graph**, since activation magnitude scales with graph density/recency.
+pub const DEFAULT_HOOK_THRESHOLD: f64 = 13.0;
 
 /// Resolved runtime configuration.
 #[derive(Debug, Clone)]
@@ -20,7 +30,9 @@ pub struct Config {
     // The four `hook_*` knobs below are resolved here (Component 1) and consumed by
     // the `hook` subcommand family (Component 2, added next). Allow dead_code until
     // that subcommand reads them so this component's quality gate stays green.
-    /// `τ` — need-odds injection gate (top-score floor). `ANAMNESIS_HOOK_THRESHOLD`.
+    /// `τ` — need-odds injection gate: a floor on the top recall score (raw
+    /// ACT-R activation, ~8–16 on a typical graph — NOT a 0..1 similarity).
+    /// `ANAMNESIS_HOOK_THRESHOLD`; see [`DEFAULT_HOOK_THRESHOLD`].
     #[allow(dead_code)]
     pub hook_threshold: f64,
     /// `k` — cap on injected per-turn memories. `ANAMNESIS_HOOK_TOPK` (default 5).
@@ -219,12 +231,15 @@ mod tests {
 
     #[test]
     fn default_hook_threshold_is_a_sane_positive_prior() {
-        // The starting τ prior must be a finite, positive floor (calibrated later).
+        // The τ prior must be a finite, positive floor on the *activation* scale.
+        // The comparison is against the raw ACT-R recall score (~8–16 on a typical
+        // graph), so a sub-1 default would silently disable the gate (everything
+        // injects) — assert `> 1.0` to catch a future normalized-0..1 regression.
         // A compile-time const block keeps the invariant without a constant-valued
         // runtime assertion (clippy::assertions_on_constants).
         const {
             assert!(DEFAULT_HOOK_THRESHOLD.is_finite());
-            assert!(DEFAULT_HOOK_THRESHOLD > 0.0);
+            assert!(DEFAULT_HOOK_THRESHOLD > 1.0);
         }
     }
 }

@@ -52,13 +52,23 @@ pub async fn run(event: &HookEvent) -> Result<()> {
     // `output` is `Some(json)` only when there is something to inject; `None` is
     // the below-`τ` / error / empty no-op (print nothing, exit 0).
     if let Some(json) = output {
-        println!("{json}");
+        // `writeln!` (not `println!`) so a broken pipe — Claude Code closing the
+        // hook's stdout before reading — is swallowed instead of panicking (Rust
+        // ignores SIGPIPE). The recall work is already complete; a failed write
+        // must not turn into a non-zero exit on the fail-open path.
+        use std::io::Write;
+        let _ = writeln!(std::io::stdout(), "{json}");
     }
     Ok(())
 }
 
 /// Read ALL of stdin to a string. stdin can only be consumed once; an I/O error
 /// (or no stdin at all) yields an empty string, which the parsers tolerate.
+///
+/// This blocking read is NOT under `ANAMNESIS_HOOK_TIMEOUT_MS` (that bounds only
+/// the recall). It relies on Claude Code writing the hook JSON and closing stdin,
+/// which makes it return promptly at EOF; the `hooks.json` OS-level timeout is the
+/// backstop for a hypothetical never-closed stdin.
 fn read_stdin() -> String {
     let mut buf = String::new();
     let _ = std::io::stdin().read_to_string(&mut buf);
@@ -457,7 +467,7 @@ mod tests {
             default_db: std::path::PathBuf::from("/dev/null/anamnesis-never-reached.db"),
             default_namespace: "default".into(),
             reinforce_on_recall: false,
-            hook_threshold: 0.15,
+            hook_threshold: 13.0,
             hook_topk: 5,
             hook_seed_k: 5,
             hook_timeout_ms: 1,

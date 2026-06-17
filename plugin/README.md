@@ -41,6 +41,11 @@ thereafter), and prints the hook output JSON on stdout:
    `./plugin` is the path to the directory containing `.claude-plugin/marketplace.json`;
    `anamnesis-plugins` is the marketplace `name`, not a path.
 
+   This local-directory flow works because the marketplace entry uses `source: "./"`, which
+   resolves against the local marketplace root (the checked-out directory). The same relative
+   `source` can fail if a marketplace is added by a direct **URL** to `marketplace.json`; for
+   URL-based distribution, use a git/github `source` in the marketplace entry instead.
+
 ### PATH requirement
 
 The hooks invoke the bare name `anamnesis-mcp`, so it must be on the **PATH Claude Code sees**.
@@ -49,6 +54,12 @@ the most likely cause is the binary not being found: confirm with `which anamnes
 same shell Claude Code was launched from, and put `~/.cargo/bin` on that PATH (or symlink the
 binary into a directory already on PATH).
 
+### Versioning
+
+The plugin's `version` (in `.claude-plugin/plugin.json`) **tracks the `anamnesis-mcp` crate
+version** — they are released together. Claude Code uses this version as the cache key to detect
+plugin updates, so it is bumped whenever the crate is.
+
 ## Configuration (environment variables)
 
 All knobs are read from the environment at hook time; the defaults are calibrated priors, not
@@ -56,10 +67,19 @@ laws (ADR-0010).
 
 | Var | Meaning | Default |
 |--|--|--|
-| `ANAMNESIS_HOOK_THRESHOLD` | `τ` — need-odds injection gate (top-score floor) for `UserPromptSubmit`. | `0.15` |
+| `ANAMNESIS_HOOK_THRESHOLD` | `τ` — need-odds injection gate (top-score floor) for `UserPromptSubmit`. | `13.0` |
 | `ANAMNESIS_HOOK_TOPK` | `k` — cap on injected per-turn memories. | `5` |
 | `ANAMNESIS_HOOK_SEED_K` | `SessionStart` seed size. | `5` |
 | `ANAMNESIS_HOOK_TIMEOUT_MS` | Per-hook fail-open timeout (ms); on elapse, inject nothing. | `1500` |
+
+> **`τ` is on the raw activation scale, not 0..1.** The gate compares the **top recall
+> score** — the unnormalized ACT-R activation of the strongest hit — against `τ`. On a typical
+> graph that score lands around **~8–16**, so `τ` must be set on that scale; a sub-1 value
+> silently disables the gate and injects on every prompt. `13.0` was calibrated against a real
+> 240-node graph (relevant prompts ~14–16, off-topic ~8–10). Because activation magnitude scales
+> with graph density and recency, **recalibrate `τ` per-graph**: pick a relevant and an off-topic
+> prompt, run `anamnesis-mcp recall <prompt>` to read the top score for each, and set `τ` between
+> the two bands. Raise it toward precision (suppress more), lower it toward recall (inject more).
 
 The general anamnesis knobs apply to the hook too, since it talks to the same daemon:
 
