@@ -87,6 +87,47 @@ The plugin's `version` (in `.claude-plugin/plugin.json`) **tracks the `anamnesis
 version** — they are released together. Claude Code uses this version as the cache key to detect
 plugin updates, so it is bumped whenever the crate is.
 
+## Codex (OpenAI Codex CLI)
+
+Codex adopted Claude Code's hook contract, so the **same `anamnesis-mcp hook` subcommand and the
+same guard wrapper drive Codex**. This repo ships a Codex plugin alongside the Claude Code one:
+`plugin/.codex-plugin/plugin.json` + `plugin/hooks/codex-hooks.json`, and a Codex marketplace
+manifest at `.agents/plugins/marketplace.json` (repo root) pointing at `./plugin`.
+
+Install (uses the PATH `anamnesis-mcp` binary, exactly like the Claude Code plugin):
+
+```sh
+# add this repo as a local marketplace (or `amsminn/anamnesis` once pushed), then install
+codex plugin marketplace add /path/to/anamnesis
+codex plugin add anamnesis@anamnesis-plugins
+# restart Codex (or start a new session) to apply the hooks
+```
+
+Codex copies the plugin into its own cache (`~/.codex/plugins/cache/...`), so — like Claude Code —
+it keeps working after you switch git branches.
+
+Prefer no marketplace? Wire it manually in **user-level** `~/.codex/config.toml` (repo-local
+`.codex/config.toml` hooks do not fire in interactive sessions):
+
+```toml
+[[hooks.UserPromptSubmit.hooks]]
+type = "command"
+command = "anamnesis-mcp hook user-prompt"
+timeout = 5
+
+[[hooks.SessionStart.hooks]]
+type = "command"
+command = "anamnesis-mcp hook session-start"
+timeout = 10
+```
+
+> **Visibility caveat — the one real difference from Claude Code.** Claude Code injects
+> `additionalContext` *silently*; Codex's TUI currently *renders* the injected recall block on
+> screen as a `hook context:` message (open Codex issues #16933 / #16486 — Codex's behavior, not
+> anamnesis's). Everything else — the `τ` gate, read-only recall, agent-driven reinforcement,
+> fail-open, the warm daemon — is identical, and the env knobs below apply unchanged. When Codex
+> makes hook context silent upstream, anamnesis needs no change.
+
 ## Configuration (environment variables)
 
 All knobs are read from the environment at hook time; the defaults are calibrated priors, not
