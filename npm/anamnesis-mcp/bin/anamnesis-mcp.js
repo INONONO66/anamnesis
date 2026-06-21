@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 "use strict";
-const { platform, arch, env, argv } = process;
+const fs = require("fs");
+const path = require("path");
+const { arch, env, argv, platform } = process;
 const { spawnSync, execSync } = require("child_process");
 
 function isMusl() {
@@ -12,27 +14,32 @@ function isMusl() {
   }
 }
 
-const PLATFORMS = {
-  "darwin-arm64": "@anamnesis/mcp-darwin-arm64/anamnesis-mcp",
-  "darwin-x64": "@anamnesis/mcp-darwin-x64/anamnesis-mcp",
-  "linux-x64": "@anamnesis/mcp-linux-x64/anamnesis-mcp",
-  "linux-arm64": "@anamnesis/mcp-linux-arm64/anamnesis-mcp",
-  "win32-x64": "@anamnesis/mcp-win32-x64/anamnesis-mcp.exe",
-};
+function platformKey() {
+  return platform === "linux" && isMusl() ? `linux-${arch}-musl` : `${platform}-${arch}`;
+}
 
-const key =
-  platform === "linux" && isMusl() ? `linux-${arch}-musl` : `${platform}-${arch}`;
-const subpath = env.ANAMNESIS_MCP_BINARY ? null : PLATFORMS[key];
+function executableName(key) {
+  switch (key) {
+    case "darwin-arm64":
+    case "darwin-x64":
+    case "linux-x64":
+    case "linux-arm64":
+      return "anamnesis-mcp";
+    default:
+      return null;
+  }
+}
 
-let binaryPath;
-try {
-  binaryPath = env.ANAMNESIS_MCP_BINARY || require.resolve(subpath);
-} catch (e) {
+const key = platformKey();
+const executable = executableName(key);
+const binaryPath = env.ANAMNESIS_MCP_BINARY || (executable && path.join(__dirname, "native", executable));
+
+if (!binaryPath || !fs.existsSync(binaryPath)) {
   process.stderr.write(
     `anamnesis-mcp: no prebuilt binary for ${key}.\n` +
-      `The matching optional dependency was not installed (a known npm bug can prune it).\n` +
-      `Try: rm -rf node_modules package-lock.json && npm install\n` +
-      `Supported: ${Object.keys(PLATFORMS).join(", ")}\n`
+      `Expected the GitHub Release binary at: ${binaryPath || "(unsupported platform)"}\n` +
+      `Try reinstalling the package, or set ANAMNESIS_MCP_BINARY to a local binary.\n` +
+      `Supported: darwin-arm64, darwin-x64, linux-x64, linux-arm64\n`
   );
   process.exit(1);
 }
