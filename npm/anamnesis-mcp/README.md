@@ -29,6 +29,11 @@ cognitive memory for LLM agents.
 First run downloads the embedding model (~400 MB) to a per-user cache. Pre-warm
 interactively with `npx anamnesis-mcp prewarm`.
 
+The npm package is a small launcher. During install it downloads the matching
+native `anamnesis-mcp` binary from the GitHub Release for the package version.
+Set `ANAMNESIS_MCP_BINARY` to use a locally built binary instead, or
+`ANAMNESIS_MCP_SKIP_DOWNLOAD=1` when packaging without downloading.
+
 ## Make memory reliable (the important part)
 
 This is a general MCP server — there are no hooks, so the agent must *choose* to
