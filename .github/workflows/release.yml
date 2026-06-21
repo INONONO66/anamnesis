@@ -1,21 +1,25 @@
 name: release
+
 on:
   push:
     tags: ["v*"]
+
+concurrency: ${{ github.workflow }}-${{ github.ref }}
+
 permissions:
   contents: read
   id-token: write
+
 jobs:
   build:
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { os: macos-14,         target: aarch64-apple-darwin,      pkg: mcp-darwin-arm64, ext: "" }
-          - { os: macos-13,         target: x86_64-apple-darwin,       pkg: mcp-darwin-x64,   ext: "" }
-          - { os: ubuntu-22.04,     target: x86_64-unknown-linux-gnu,  pkg: mcp-linux-x64,    ext: "" }
-          - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu, pkg: mcp-linux-arm64,  ext: "" }
-          - { os: windows-2022,     target: x86_64-pc-windows-msvc,    pkg: mcp-win32-x64,    ext: ".exe" }
+          - { os: macos-14,         target: aarch64-apple-darwin,      asset: anamnesis-mcp-darwin-arm64, ext: "" }
+          - { os: macos-14,         target: x86_64-apple-darwin,       asset: anamnesis-mcp-darwin-x64,   ext: "" }
+          - { os: ubuntu-22.04,     target: x86_64-unknown-linux-gnu,  asset: anamnesis-mcp-linux-x64,    ext: "" }
+          - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu, asset: anamnesis-mcp-linux-arm64,  ext: "" }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -23,36 +27,46 @@ jobs:
         with: { targets: "${{ matrix.target }}" }
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release --bin anamnesis-mcp --target ${{ matrix.target }}
-      - name: stage binary
+      - name: stage release asset
         shell: bash
         run: |
-          dst="npm/@anamnesis/${{ matrix.pkg }}"
-          cp "target/${{ matrix.target }}/release/anamnesis-mcp${{ matrix.ext }}" "$dst/"
-          chmod 755 "$dst/anamnesis-mcp${{ matrix.ext }}" || true
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/anamnesis-mcp${{ matrix.ext }}" "dist/${{ matrix.asset }}${{ matrix.ext }}"
+          chmod 755 "dist/${{ matrix.asset }}${{ matrix.ext }}" || true
       - uses: actions/upload-artifact@v4
-        with: { name: "${{ matrix.pkg }}", path: "npm/@anamnesis/${{ matrix.pkg }}/anamnesis-mcp*" }
+        with: { name: "${{ matrix.asset }}", path: "dist/${{ matrix.asset }}${{ matrix.ext }}" }
 
   publish:
     needs: build
     runs-on: ubuntu-latest
-    permissions: { contents: read, id-token: write }
+    permissions: { contents: write, id-token: write }
+    env:
+      HAS_NPM_BOOTSTRAP_TOKEN: ${{ secrets.NPM_BOOTSTRAP_TOKEN != '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with: { path: artifacts }
+      - name: upload GitHub release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "$TAG" --notes "Release $TAG"
+          gh release upload "$TAG" artifacts/*/anamnesis-mcp-* --clobber
       - uses: actions/setup-node@v4
-        with: { node-version: 22, registry-url: "https://registry.npmjs.org" }
-      - name: place binaries + fix exec bit
-        shell: bash
-        run: |
-          for p in mcp-darwin-arm64 mcp-darwin-x64 mcp-linux-x64 mcp-linux-arm64 mcp-win32-x64; do
-            cp artifacts/$p/anamnesis-mcp* "npm/@anamnesis/$p/"
-            chmod 755 "npm/@anamnesis/$p/anamnesis-mcp"* 2>/dev/null || true
-          done
-      - name: publish per-platform first, then wrapper
-        shell: bash
-        run: |
-          for p in mcp-darwin-arm64 mcp-darwin-x64 mcp-linux-x64 mcp-linux-arm64 mcp-win32-x64; do
-            (cd "npm/@anamnesis/$p" && npm publish --access public --provenance)
-          done
-          (cd npm/anamnesis-mcp && npm publish --access public --provenance)
+        with:
+          node-version: 22
+          check-latest: true
+          registry-url: "https://registry.npmjs.org"
+      - run: npm install -g npm@latest
+      - name: publish npm wrapper with bootstrap token
+        if: env.HAS_NPM_BOOTSTRAP_TOKEN == 'true'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_BOOTSTRAP_TOKEN }}
+        run: npm publish --access public
+        working-directory: npm/anamnesis-mcp
+      - name: publish npm wrapper with OIDC
+        if: env.HAS_NPM_BOOTSTRAP_TOKEN != 'true'
+        run: npm publish --access public
+        working-directory: npm/anamnesis-mcp
