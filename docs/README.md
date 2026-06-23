@@ -83,6 +83,7 @@ These documents are not a code status table or an audit log. Each chapter descri
 - [0009-surprise-gated-perception.md](adr/0009-surprise-gated-perception.md) - ingest magnitude is Bayesian surprise
 - [0010-calibrated-priors-not-laws.md](adr/0010-calibrated-priors-not-laws.md) - constants are calibrated priors, not physical laws
 - [0011-activation-gated-triggering.md](adr/0011-activation-gated-triggering.md) - activation-gated hook triggering, not flat-profile injection
+- [0012-daemon-core-mcp-plugin-clients.md](adr/0012-daemon-core-mcp-plugin-clients.md) - daemon is the shared core; MCP and plugin are distinct clients of it
 
 ## Reading Order
 
