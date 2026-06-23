@@ -95,7 +95,7 @@ async fn serve_launcher() -> Result<()> {
     config::ensure_model_cache_dir();
     let cfg = Config::from_env();
     let daemon_client = client::DaemonClient::connect(&cfg).await?;
-    tracing::info!("anamnesis-mcp: MCP adapter over stdio → shared daemon");
+    tracing::info!("anamnesis: MCP adapter over stdio → shared daemon");
     let service = AnamnesisServer::daemon(daemon_client)
         .serve(stdio())
         .await?;
@@ -122,7 +122,7 @@ async fn serve_embedded() -> Result<()> {
         cfg.reinforce_on_recall,
     )));
     let server = AnamnesisServer::local(registry.clone());
-    tracing::info!("anamnesis-mcp serving over stdio (embedded mode)");
+    tracing::info!("anamnesis serving over stdio (embedded mode)");
     let service = server.serve(stdio()).await?;
 
     // Run until the client disconnects (stdin EOF) OR a shutdown signal arrives.

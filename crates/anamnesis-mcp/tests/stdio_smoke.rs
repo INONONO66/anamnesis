@@ -12,7 +12,7 @@ use std::process::{Command, Stdio};
 
 #[test]
 fn lists_tools_over_stdio() {
-    let bin = env!("CARGO_BIN_EXE_anamnesis-mcp");
+    let bin = env!("CARGO_BIN_EXE_anamnesis");
     let mut child = Command::new(bin)
         .arg("serve")
         .arg("--embedded")

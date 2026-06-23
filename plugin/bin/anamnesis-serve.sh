@@ -6,7 +6,7 @@
 # then ~/.cargo/bin. `exec` replaces this shell with the binary so the MCP
 # server's stdio (JSON-RPC) passes straight through untouched.
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-BIN="$HERE/anamnesis-mcp"
-[ -x "$BIN" ] || BIN=$(command -v anamnesis-mcp 2>/dev/null) || BIN=
-[ -n "$BIN" ] || BIN="${HOME}/.cargo/bin/anamnesis-mcp"
+BIN="$HERE/anamnesis"
+[ -x "$BIN" ] || BIN=$(command -v anamnesis 2>/dev/null) || BIN=
+[ -n "$BIN" ] || BIN="${HOME}/.cargo/bin/anamnesis"
 exec "$BIN" serve

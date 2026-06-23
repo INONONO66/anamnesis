@@ -358,7 +358,7 @@ impl MemoryRegistry {
             // behavior is identical on our 1.88 MSRV and on newer toolchains.
             if fs4::FileExt::try_lock(&lock_file).is_err() {
                 return Err(Error::StorageError(format!(
-                    "database {path:?} is already in use by another anamnesis-mcp process; \
+                    "database {path:?} is already in use by another anamnesis process; \
                      use a different ANAMNESIS_DB or namespace"
                 )));
             }

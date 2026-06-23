@@ -30,7 +30,7 @@ impl Launcher {
     /// Spawn `anamnesis-mcp serve` (launcher mode → ensures/starts the shared
     /// daemon and proxies stdio↔socket) against `db`, with a 1s grace window.
     fn spawn(db: &Path) -> Self {
-        let bin = env!("CARGO_BIN_EXE_anamnesis-mcp");
+        let bin = env!("CARGO_BIN_EXE_anamnesis");
         let mut child = Command::new(bin)
             .arg("serve")
             .env("ANAMNESIS_DB", db)

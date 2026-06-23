@@ -27,13 +27,13 @@ function platformKey() {
 function assetName(key) {
   switch (key) {
     case "darwin-arm64":
-      return { file: "anamnesis-mcp-darwin-arm64", executable: "anamnesis-mcp" };
+      return { file: "anamnesis-darwin-arm64", executable: "anamnesis" };
     case "darwin-x64":
-      return { file: "anamnesis-mcp-darwin-x64", executable: "anamnesis-mcp" };
+      return { file: "anamnesis-darwin-x64", executable: "anamnesis" };
     case "linux-x64":
-      return { file: "anamnesis-mcp-linux-x64", executable: "anamnesis-mcp" };
+      return { file: "anamnesis-linux-x64", executable: "anamnesis" };
     case "linux-arm64":
-      return { file: "anamnesis-mcp-linux-arm64", executable: "anamnesis-mcp" };
+      return { file: "anamnesis-linux-arm64", executable: "anamnesis" };
     default:
       return null;
   }
@@ -84,7 +84,7 @@ function download(url, destination, redirects) {
 }
 
 function fail(message) {
-  process.stderr.write(`anamnesis-mcp postinstall: ${message}\n`);
+  process.stderr.write(`anamnesis postinstall: ${message}\n`);
   process.exit(1);
 }
 

@@ -449,7 +449,7 @@ pub async fn run(cfg: Config) -> Result<()> {
         );
         return Ok(()); // RACE loser: exit immediately, zero side effects.
     };
-    tracing::info!(socket = %bind.socket_path.display(), "anamnesis-mcp daemon serving");
+    tracing::info!(socket = %bind.socket_path.display(), "anamnesis daemon serving");
 
     // The daemon holds the DB lock and is the sole opener → unlocked registry.
     let registry =

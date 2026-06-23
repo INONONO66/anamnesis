@@ -24,7 +24,7 @@ function executableName(key) {
     case "darwin-x64":
     case "linux-x64":
     case "linux-arm64":
-      return "anamnesis-mcp";
+      return "anamnesis";
     default:
       return null;
   }
@@ -32,13 +32,13 @@ function executableName(key) {
 
 const key = platformKey();
 const executable = executableName(key);
-const binaryPath = env.ANAMNESIS_MCP_BINARY || (executable && path.join(__dirname, "native", executable));
+const binaryPath = env.ANAMNESIS_BINARY || (executable && path.join(__dirname, "native", executable));
 
 if (!binaryPath || !fs.existsSync(binaryPath)) {
   process.stderr.write(
-    `anamnesis-mcp: no prebuilt binary for ${key}.\n` +
+    `anamnesis: no prebuilt binary for ${key}.\n` +
       `Expected the GitHub Release binary at: ${binaryPath || "(unsupported platform)"}\n` +
-      `Try reinstalling the package, or set ANAMNESIS_MCP_BINARY to a local binary.\n` +
+      `Try reinstalling the package, or set ANAMNESIS_BINARY to a local binary.\n` +
       `Supported: darwin-arm64, darwin-x64, linux-x64, linux-arm64\n`
   );
   process.exit(1);
@@ -54,7 +54,7 @@ if (result.error) {
   const code = result.error.code;
   const hint =
     code === "EACCES" ? " (binary lost its +x bit on publish)" : code === "ENOENT" ? " (binary missing)" : "";
-  process.stderr.write(`anamnesis-mcp: ${result.error.message}${hint}\n`);
+  process.stderr.write(`anamnesis: ${result.error.message}${hint}\n`);
   process.exit(1);
 }
 if (result.signal) process.kill(process.pid, result.signal);

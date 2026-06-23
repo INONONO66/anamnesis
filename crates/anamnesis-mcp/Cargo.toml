@@ -11,7 +11,7 @@ repository = "https://github.com/INONONO66/anamnesis"
 publish = false
 
 [[bin]]
-name = "anamnesis-mcp"
+name = "anamnesis"
 path = "src/main.rs"
 
 [dependencies]

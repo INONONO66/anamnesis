@@ -15,19 +15,19 @@ erased. See `docs/adr/0011-activation-gated-triggering.md` for the rationale.
 ## How it works
 
 Each hook runs `hooks/anamnesis-hook.sh <event>` (a guard wrapper), which calls
-`anamnesis-mcp hook <event>`. The binary reads the Claude Code hook JSON on stdin, talks to the
+`anamnesis hook <event>`. The binary reads the Claude Code hook JSON on stdin, talks to the
 warm shared anamnesis daemon over a Unix socket (auto-spawned on first call, reused thereafter),
 and prints the hook output JSON on stdout:
 
 | Event | Subcommand | Behavior |
 |--|--|--|
-| `SessionStart` | `anamnesis-mcp hook session-start` | Ungated read-only recall seeded by the project cue (cwd basename), up to `ANAMNESIS_HOOK_SEED_K` memories. |
-| `UserPromptSubmit` | `anamnesis-mcp hook user-prompt` | Activation-**gated** read-only recall on the prompt (`τ` floor, top-`k` cap); below `τ` injects nothing. |
+| `SessionStart` | `anamnesis hook session-start` | Ungated read-only recall seeded by the project cue (cwd basename), up to `ANAMNESIS_HOOK_SEED_K` memories. |
+| `UserPromptSubmit` | `anamnesis hook user-prompt` | Activation-**gated** read-only recall on the prompt (`τ` floor, top-`k` cap); below `τ` injects nothing. |
 
 ### The guard wrapper (why hooks don't call the binary directly)
 
-`anamnesis-mcp` is resolved at run time — the binary bundled in the plugin first, else a PATH
-`anamnesis-mcp` (npm/cargo) — so on a given machine it may be **missing** or an **older build without the `hook` subcommand**. In that case `clap` exits `2` —
+`anamnesis` is resolved at run time — the binary bundled in the plugin first, else a PATH
+`anamnesis` (npm/cargo) — so on a given machine it may be **missing** or an **older build without the `hook` subcommand**. In that case `clap` exits `2` —
 and a `UserPromptSubmit` hook that exits `2` **erases the user's prompt**. To make that impossible,
 `hooks.json` points at `hooks/anamnesis-hook.sh`, a three-line shim that no-ops when the binary is
 absent and **always exits 0**, so a wrong/old binary can never block or erase a prompt. All real
@@ -36,19 +36,19 @@ exit-2 footgun.
 
 ## Install
 
-The plugin is **self-contained**: it bundles the `anamnesis-mcp` binary (`plugin/bin/`) and declares
+The plugin is **self-contained**: it bundles the `anamnesis` binary (`plugin/bin/`) and declares
 *both* the hooks *and* the agent MCP server, so **one install + reload gives you everything** — no
 separate `claude mcp add`, no global binary on PATH.
 
 1. Put the binary in `plugin/bin/` (gitignored — never committed). Building from source:
 
    ```sh
-   cargo build --release -p anamnesis-mcp && cp target/release/anamnesis-mcp plugin/bin/
+   cargo build --release -p anamnesis-mcp && cp target/release/anamnesis plugin/bin/
    ```
 
    A published release fetches the matching prebuilt binary into `plugin/bin/` for you, so this
-   step is only for building from source. If `plugin/bin/anamnesis-mcp` is absent, the guard and
-   serve wrappers fall back to a PATH `anamnesis-mcp` (`npm install -g anamnesis-mcp` /
+   step is only for building from source. If `plugin/bin/anamnesis` is absent, the guard and
+   serve wrappers fall back to a PATH `anamnesis` (`npm install -g anamnesis-mcp` /
    `cargo install`) — the plugin still works, just not self-contained.
 
 2. Add the marketplace, install, reload:
@@ -68,23 +68,23 @@ separate `claude mcp add`, no global binary on PATH.
 
 ### PATH (only the fallback)
 
-When the plugin bundles `plugin/bin/anamnesis-mcp` (the default), **no PATH is needed** — the guard
+When the plugin bundles `plugin/bin/anamnesis` (the default), **no PATH is needed** — the guard
 and serve wrappers resolve the bundled binary by their own location. PATH matters only for the
-**fallback** (no bundled binary): then `anamnesis-mcp` must be on the **PATH Claude Code sees**, and
+**fallback** (no bundled binary): then `anamnesis` must be on the **PATH Claude Code sees**, and
 GUI launches frequently do **not** include the npm-global bin (or `~/.cargo/bin`). If recall
-silently injects nothing in that mode, confirm `which anamnesis-mcp` from the shell Claude Code was
+silently injects nothing in that mode, confirm `which anamnesis` from the shell Claude Code was
 launched from and put the install dir on that PATH (or symlink the binary onto it).
 
 ### Distribution
 
 The binary ships via **npm**: `anamnesis-mcp` is a thin wrapper whose `postinstall` downloads the
 matching prebuilt binary from the GitHub Release (`v<version>`), so `npm install -g anamnesis-mcp`
-needs no Rust toolchain. The plugin stays tiny (hooks + guard) and runs whatever `anamnesis-mcp` is
+needs no Rust toolchain. The plugin stays tiny (hooks + guard) and runs whatever `anamnesis` is
 on PATH — npm-global or `cargo install`, either works.
 
 The binary and the plugin install separately (the plugin is **not fully self-contained**), but the
 guard wrapper makes a missing/old binary *safe* (no-op), so a version mismatch never breaks a prompt.
-The `hook` subcommand requires **`anamnesis-mcp >= 0.8.0`** (the first published release that has it).
+The `hook` subcommand requires **`anamnesis >= 0.8.0`** (the first published release that has it).
 
 ### Versioning
 
@@ -94,12 +94,12 @@ plugin updates, so it is bumped whenever the crate is.
 
 ## Codex (OpenAI Codex CLI)
 
-Codex adopted Claude Code's hook contract, so the **same `anamnesis-mcp hook` subcommand and the
+Codex adopted Claude Code's hook contract, so the **same `anamnesis hook` subcommand and the
 same guard wrapper drive Codex**. This repo ships a Codex plugin alongside the Claude Code one:
 `plugin/.codex-plugin/plugin.json` + `plugin/hooks/codex-hooks.json`, and a Codex marketplace
 manifest at `.agents/plugins/marketplace.json` (repo root) pointing at `./plugin`.
 
-Install (uses the PATH `anamnesis-mcp` binary, exactly like the Claude Code plugin):
+Install (uses the bundled / PATH `anamnesis` binary, exactly like the Claude Code plugin):
 
 ```sh
 # add this repo as a local marketplace (or `amsminn/anamnesis` once pushed), then install
@@ -117,12 +117,12 @@ Prefer no marketplace? Wire it manually in **user-level** `~/.codex/config.toml`
 ```toml
 [[hooks.UserPromptSubmit.hooks]]
 type = "command"
-command = "anamnesis-mcp hook user-prompt"
+command = "anamnesis hook user-prompt"
 timeout = 5
 
 [[hooks.SessionStart.hooks]]
 type = "command"
-command = "anamnesis-mcp hook session-start"
+command = "anamnesis hook session-start"
 timeout = 10
 ```
 
@@ -151,7 +151,7 @@ laws (ADR-0010).
 > silently disables the gate and injects on every prompt. `13.0` was calibrated against a real
 > 240-node graph (relevant prompts ~14–16, off-topic ~8–10). Because activation magnitude scales
 > with graph density and recency, **recalibrate `τ` per-graph**: pick a relevant and an off-topic
-> prompt, run `anamnesis-mcp recall <prompt>` to read the top score for each, and set `τ` between
+> prompt, run `anamnesis recall <prompt>` to read the top score for each, and set `τ` between
 > the two bands. Raise it toward precision (suppress more), lower it toward recall (inject more).
 
 The general anamnesis knobs apply to the hook too, since it talks to the same daemon:
@@ -173,13 +173,13 @@ Pipe a real `UserPromptSubmit` payload into the hook and confirm you get valid h
 
 ```sh
 echo '{"hook_event_name":"UserPromptSubmit","prompt":"what did we decide about the recall gate?","cwd":"'"$PWD"'"}' \
-  | anamnesis-mcp hook user-prompt
+  | anamnesis hook user-prompt
 ```
 
 A clearly off-topic prompt should inject nothing:
 
 ```sh
 echo '{"hook_event_name":"UserPromptSubmit","prompt":"zxqv wrrn plugh","cwd":"'"$PWD"'"}' \
-  | anamnesis-mcp hook user-prompt
+  | anamnesis hook user-prompt
 # (no output, exit 0)
 ```

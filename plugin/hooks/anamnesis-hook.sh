@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 # anamnesis hook guard — shared by the Claude Code and Codex plugins.
 #
-# Hooks invoke `anamnesis-mcp hook <event>`, but the binary is installed
+# Hooks invoke `anamnesis hook <event>`, but the binary is installed
 # out-of-band (`cargo install`, later npm) and may be MISSING, an OLD build
 # without the `hook` subcommand, or simply off the hook's PATH (GUI and Codex
 # launches often have a minimal PATH). clap then exits 2 — and a UserPromptSubmit
@@ -18,9 +18,9 @@
 # Resolve the binary: bundled next to this script (self-contained plugin) first,
 # then PATH (npm/cargo), then ~/.cargo/bin.
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-BIN="$HERE/../bin/anamnesis-mcp"
-[ -x "$BIN" ] || BIN=$(command -v anamnesis-mcp 2>/dev/null) || BIN=
-[ -n "$BIN" ] || BIN="${HOME}/.cargo/bin/anamnesis-mcp"
+BIN="$HERE/../bin/anamnesis"
+[ -x "$BIN" ] || BIN=$(command -v anamnesis 2>/dev/null) || BIN=
+[ -n "$BIN" ] || BIN="${HOME}/.cargo/bin/anamnesis"
 [ -x "$BIN" ] || exit 0
 "$BIN" hook "$@" 2>/dev/null
 exit 0

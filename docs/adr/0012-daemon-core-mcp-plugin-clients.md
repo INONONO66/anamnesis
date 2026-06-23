@@ -17,9 +17,9 @@ Two questions this ADR settles: (1) how do these surfaces reach the engine, and 
 
 Adopt a **three-layer split** where one daemon is the core and the other two surfaces are *clients* of it:
 
-1. **daemon — the core.** `anamnesis-mcp daemon` owns the DB + in-memory graph + the embedding model (loaded once). It is **on-demand** (the first client auto-spawns it), **ref-counted** (grace-exits when idle, `ANAMNESIS_DAEMON_GRACE_SECS`), and serves N clients over a **per-DB unix socket**. The single-writer lock lives on the daemon, so it is the *only* process that opens the DB.
-2. **MCP — a daemon client.** `anamnesis-mcp serve` is the rmcp adapter the agent's MCP client speaks to over stdio; it translates each tool call into a bespoke daemon request. It carries the agent-judged **capture + reinforcement** half (`remember`/`relate`, and deliberate `recall` whose call *is* the "used" signal).
-3. **plugin — a daemon client.** `anamnesis-mcp hook <event>` reads the hook JSON, does a gated read-only recall over the socket, and emits `additionalContext`. It carries the **proactive recall** half.
+1. **daemon — the core.** `anamnesis daemon` owns the DB + in-memory graph + the embedding model (loaded once). It is **on-demand** (the first client auto-spawns it), **ref-counted** (grace-exits when idle, `ANAMNESIS_DAEMON_GRACE_SECS`), and serves N clients over a **per-DB unix socket**. The single-writer lock lives on the daemon, so it is the *only* process that opens the DB.
+2. **MCP — a daemon client.** `anamnesis serve` is the rmcp adapter the agent's MCP client speaks to over stdio; it translates each tool call into a bespoke daemon request. It carries the agent-judged **capture + reinforcement** half (`remember`/`relate`, and deliberate `recall` whose call *is* the "used" signal).
+3. **plugin — a daemon client.** `anamnesis hook <event>` reads the hook JSON, does a gated read-only recall over the socket, and emits `additionalContext`. It carries the **proactive recall** half.
 
 **MCP and plugin are distinct clients of the same daemon.** The daemon's socket protocol is a **bespoke newline-delimited request/response** (`proto`); MCP (rmcp) is **confined to the `serve` adapter** — the one place an external agent (Claude Code / Codex) forces it. The hook and the CLI are therefore MCP-free: they speak only the bespoke wire. The plugin **does not bundle/embed the MCP server**, and **neither client opens the DB directly** (the lock would reject it). There is no `--embedded` hook mode.
 

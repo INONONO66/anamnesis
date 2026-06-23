@@ -7,7 +7,11 @@ use crate::config::Config;
 use crate::memory::MemoryRegistry;
 
 #[derive(Parser)]
-#[command(name = "anamnesis-mcp", version, about = "Anamnesis MCP server + CLI")]
+#[command(
+    name = "anamnesis",
+    version,
+    about = "Anamnesis cognitive memory — daemon, MCP server, hooks, CLI"
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Commands>,
@@ -214,7 +218,7 @@ pub fn run_oneshot(cli: &Cli) -> Result<Oneshot> {
         Some(Commands::Prewarm) => {
             let mut reg = registry(&cfg);
             reg.prewarm()?;
-            eprintln!("anamnesis-mcp: embedding model ready");
+            eprintln!("anamnesis: embedding model ready");
             Ok(Oneshot::Done)
         }
         Some(Commands::Doctor) => {
@@ -294,7 +298,7 @@ fn check(label: &str, ok: bool, detail: impl std::fmt::Display) {
 /// that the sibling `<db>.lock` can be acquired (no other process holding it);
 /// the model cache directory; and the resolved config values.
 fn doctor(cfg: &Config) {
-    println!("anamnesis-mcp doctor");
+    println!("anamnesis doctor");
     println!("====================");
 
     // Config.
@@ -317,7 +321,7 @@ fn doctor(cfg: &Config) {
     );
 
     // Lock availability: try to acquire the sibling `<db>.lock` exclusively, then
-    // release immediately. A failure means another anamnesis-mcp process holds it.
+    // release immediately. A failure means another anamnesis process holds it.
     let (lock_ok, lock_detail) = probe_lock(db);
     check("db lock available", lock_ok, lock_detail);
 
@@ -364,7 +368,7 @@ fn probe_lock(db: &std::path::Path) -> (bool, String) {
         return (
             false,
             format!(
-                "{} is held by another anamnesis-mcp process",
+                "{} is held by another anamnesis process",
                 lock_path.display()
             ),
         );
