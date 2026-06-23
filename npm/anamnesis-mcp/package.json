@@ -1,6 +1,6 @@
 {
   "name": "anamnesis-mcp",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Anamnesis cognitive memory MCP server (stdio) — native Rust binary",
   "license": "MIT",
   "repository": { "type": "git", "url": "git+https://github.com/INONONO66/anamnesis.git" },

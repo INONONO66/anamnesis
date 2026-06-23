@@ -26,8 +26,8 @@ and prints the hook output JSON on stdout:
 
 ### The guard wrapper (why hooks don't call the binary directly)
 
-`anamnesis-mcp` is installed out-of-band (`cargo install`), so on a given machine it may be
-**missing** or an **older build without the `hook` subcommand**. In that case `clap` exits `2` —
+`anamnesis-mcp` is installed out-of-band (`npm install -g anamnesis-mcp`, or `cargo install`), so on
+a given machine it may be **missing** or an **older build without the `hook` subcommand**. In that case `clap` exits `2` —
 and a `UserPromptSubmit` hook that exits `2` **erases the user's prompt**. To make that impossible,
 `hooks.json` points at `hooks/anamnesis-hook.sh`, a three-line shim that no-ops when the binary is
 absent and **always exits 0**, so a wrong/old binary can never block or erase a prompt. All real
@@ -36,16 +36,17 @@ exit-2 footgun.
 
 ## Install
 
-1. Install the binary so a **hook-capable** `anamnesis-mcp` is on your PATH. Use `--force` — an
-   older `anamnesis-mcp` (pre-`hook`) may already be installed, and the plugin needs the build that
-   has the `hook` subcommand:
+1. Install the `anamnesis-mcp` binary so it is on your PATH. The published npm package fetches the
+   matching prebuilt binary for your platform on `postinstall` — no Rust toolchain required:
 
    ```sh
-   cargo install --path crates/anamnesis-mcp --force
+   npm install -g anamnesis-mcp        # needs >= 0.8.0 (first release with the `hook` subcommand)
    ```
 
-   Confirm with `anamnesis-mcp hook --help`. (If you skip this, the guard wrapper keeps prompts
-   safe — it just injects nothing until the right binary is on PATH.)
+   Confirm with `anamnesis-mcp hook --help`. Building from source also works (for development):
+   `cargo install --path crates/anamnesis-mcp --force`. If the binary is missing or older than
+   0.8.0, the guard wrapper keeps prompts safe — it just injects nothing until a `hook`-capable
+   binary is on PATH.
 
 2. Add this directory as a local marketplace, then install the plugin:
 
@@ -65,21 +66,22 @@ exit-2 footgun.
 ### PATH requirement
 
 The hooks invoke the bare name `anamnesis-mcp`, so it must be on the **PATH Claude Code sees**.
-GUI launches frequently do **not** include `~/.cargo/bin`. If the hook silently injects nothing,
-the most likely cause is the binary not being found: confirm with `which anamnesis-mcp` from the
-same shell Claude Code was launched from, and put `~/.cargo/bin` on that PATH (or symlink the
-binary into a directory already on PATH).
+GUI launches frequently do **not** include the npm-global bin (or `~/.cargo/bin`). If the hook
+silently injects nothing, the most likely cause is the binary not being found: confirm with
+`which anamnesis-mcp` from the same shell Claude Code was launched from, and put the install dir on
+that PATH (npm global prefix `bin` — see `npm prefix -g` — or `~/.cargo/bin`), or symlink the binary
+into a directory already on PATH.
 
-### Distribution (current + planned)
+### Distribution
 
-Today the plugin depends on `anamnesis-mcp` being installed separately (via `cargo install`); it is
-**not self-contained**. The guard wrapper makes a missing/old binary *safe* (no-op), but it does
-not make the plugin work on its own.
+The binary ships via **npm**: `anamnesis-mcp` is a thin wrapper whose `postinstall` downloads the
+matching prebuilt binary from the GitHub Release (`v<version>`), so `npm install -g anamnesis-mcp`
+needs no Rust toolchain. The plugin stays tiny (hooks + guard) and runs whatever `anamnesis-mcp` is
+on PATH — npm-global or `cargo install`, either works.
 
-**TODO — bundle the binary so the plugin is self-contained.** Ship a per-platform `anamnesis-mcp`
-with the plugin (a prebuilt-binary release, or an npm package with a `postinstall` that fetches the
-right build) so `/plugin install` alone is sufficient and PATH/version mismatch is impossible. The
-`npm/` packaging is the intended vehicle for this and is **not yet published**.
+The binary and the plugin install separately (the plugin is **not fully self-contained**), but the
+guard wrapper makes a missing/old binary *safe* (no-op), so a version mismatch never breaks a prompt.
+The `hook` subcommand requires **`anamnesis-mcp >= 0.8.0`** (the first published release that has it).
 
 ### Versioning
 
