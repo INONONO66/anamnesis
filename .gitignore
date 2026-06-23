@@ -9,3 +9,7 @@ crates/anamnesis/benches/eval/data/
 crates/anamnesis/benches/eval/results/
 docs/superpowers/
 target/fidelity/
+# Bundled per-platform binary for the self-contained plugin (built locally /
+# fetched by npm postinstall; never committed — the guard + serve wrapper fall
+# back to PATH when it is absent).
+plugin/bin/anamnesis-mcp

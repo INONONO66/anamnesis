@@ -11,6 +11,7 @@
   "license": "MIT",
   "keywords": ["memory", "mcp", "context", "recall", "codex"],
   "hooks": "./hooks/codex-hooks.json",
+  "mcpServers": "./.codex-mcp.json",
   "interface": {
     "displayName": "anamnesis",
     "shortDescription": "Activation-gated associative memory recall for Codex.",

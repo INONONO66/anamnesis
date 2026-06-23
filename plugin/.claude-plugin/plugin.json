@@ -9,5 +9,6 @@
   "homepage": "https://github.com/INONONO66/anamnesis",
   "repository": "https://github.com/INONONO66/anamnesis",
   "license": "MIT",
-  "keywords": ["memory", "mcp", "context", "recall", "claude-code"]
+  "keywords": ["memory", "mcp", "context", "recall", "claude-code"],
+  "mcpServers": "./.mcp.json"
 }
