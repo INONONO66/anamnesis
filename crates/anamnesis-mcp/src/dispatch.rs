@@ -1,5 +1,5 @@
-//! The shared op→text core. One pure function maps a [`proto::Request`] to a
-//! [`proto::Response`] by calling the registry and formatting the result exactly
+//! The shared op→text core. One pure function maps a [`proto::Request`](crate::proto::Request) to a
+//! [`proto::Response`](crate::proto::Response) by calling the registry and formatting the result exactly
 //! as the MCP tools used to — so every path (the daemon serving the bespoke
 //! socket, and the `--embedded serve` in-process path) produces byte-identical
 //! output. This module has NO rmcp dependency; MCP lives only in `server.rs`.
