@@ -43,7 +43,7 @@ proactive recall (hooks) **and** the `recall`/`remember`/`relate`/`ingest_conver
 tools (MCP) — with **no separate `claude mcp add`, no `npm`/`cargo`, no global binary**.
 
 ```
-/plugin marketplace add amsminn/anamnesis     # git repo (or `./plugin` for a local checkout)
+/plugin marketplace add INONONO66/anamnesis     # git repo (or `./plugin` for a local checkout)
 /plugin install anamnesis@anamnesis-plugins
 /reload-plugins
 ```
@@ -103,7 +103,7 @@ manifest at `.agents/plugins/marketplace.json` (repo root) pointing at `./plugin
 Install (uses the bundled / PATH `anamnesis` binary, exactly like the Claude Code plugin):
 
 ```sh
-# add this repo as a local marketplace (or `amsminn/anamnesis` once pushed), then install
+# add this repo as a local marketplace (or `INONONO66/anamnesis` once pushed), then install
 codex plugin marketplace add /path/to/anamnesis
 codex plugin add anamnesis@anamnesis-plugins
 # restart Codex (or start a new session) to apply the hooks
