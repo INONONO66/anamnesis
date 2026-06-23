@@ -34,57 +34,58 @@ absent and **always exits 0**, so a wrong/old binary can never block or erase a 
 logic stays in the Rust binary (`crates/anamnesis-mcp/src/hook.rs`); the shim only neutralizes the
 exit-2 footgun.
 
-## Install
+## Install (install-and-go — nothing else)
 
-The plugin is **self-contained**: it bundles the `anamnesis` binary (`plugin/bin/`) and declares
-*both* the hooks *and* the agent MCP server, so **one install + reload gives you everything** — no
-separate `claude mcp add`, no global binary on PATH.
+The plugin is **self-contained for everyone**: it declares *both* the hooks *and* the agent MCP
+server, and its wrappers **fetch the matching `anamnesis` binary from the GitHub Release on first
+use** (`bin/ensure-anamnesis.sh`). So a plain plugin install + reload gives you everything —
+proactive recall (hooks) **and** the `recall`/`remember`/`relate`/`ingest_conversation`/`stats`
+tools (MCP) — with **no separate `claude mcp add`, no `npm`/`cargo`, no global binary**.
 
-1. Put the binary in `plugin/bin/` (gitignored — never committed). Building from source:
+```
+/plugin marketplace add amsminn/anamnesis     # git repo (or `./plugin` for a local checkout)
+/plugin install anamnesis@anamnesis-plugins
+/reload-plugins
+```
 
-   ```sh
-   cargo build --release -p anamnesis-mcp && cp target/release/anamnesis plugin/bin/
-   ```
+On first use the serve wrapper / SessionStart hook downloads the platform binary into the plugin's
+cached `bin/` — a one-time, few-second fetch; later sessions are instant. This needs a **published
+GitHub Release `v<plugin-version>`** carrying the `anamnesis-<platform>` assets (built by the release
+CI). The `hook` subcommand requires the binary **`>= 0.8.0`**.
 
-   A published release fetches the matching prebuilt binary into `plugin/bin/` for you, so this
-   step is only for building from source. If `plugin/bin/anamnesis` is absent, the guard and
-   serve wrappers fall back to a PATH `anamnesis` (`npm install -g anamnesis-mcp` /
-   `cargo install`) — the plugin still works, just not self-contained.
+(`./plugin` is the dir with `.claude-plugin/marketplace.json`; `anamnesis-plugins` is the marketplace
+`name`. `source: "./"` resolves against a local-dir or git marketplace.)
 
-2. Add the marketplace, install, reload:
+### Local development — pre-bundle to skip the fetch
 
-   ```
-   /plugin marketplace add ./plugin
-   /plugin install anamnesis@anamnesis-plugins
-   /reload-plugins
-   ```
+While hacking on anamnesis, drop a freshly-built binary into `plugin/bin/` so the wrappers use it
+directly (no download — `ensure-anamnesis.sh` sees it present):
 
-   Installing copies the plugin — *including the bundled binary* — into Claude Code's cache; reload
-   activates the hooks and the MCP server. You now have proactive recall injection (hooks) **and**
-   the `recall`/`remember`/`relate`/`ingest_conversation`/`stats` tools (MCP), both backed by the one
-   bundled binary. (`./plugin` is the dir containing `.claude-plugin/marketplace.json`;
-   `anamnesis-plugins` is the marketplace `name`. The relative `source: "./"` resolves against a
-   local-dir or git marketplace; a direct **URL** to `marketplace.json` would need a git `source`.)
+```sh
+cargo build --release -p anamnesis-mcp && cp target/release/anamnesis plugin/bin/
+```
 
-### PATH (only the fallback)
+`plugin/bin/anamnesis` is **gitignored** (never committed); the shipped plugin contains only the
+wrappers + `VERSION` and fetches the binary on first use.
 
-When the plugin bundles `plugin/bin/anamnesis` (the default), **no PATH is needed** — the guard
-and serve wrappers resolve the bundled binary by their own location. PATH matters only for the
-**fallback** (no bundled binary): then `anamnesis` must be on the **PATH Claude Code sees**, and
-GUI launches frequently do **not** include the npm-global bin (or `~/.cargo/bin`). If recall
-silently injects nothing in that mode, confirm `which anamnesis` from the shell Claude Code was
-launched from and put the install dir on that PATH (or symlink the binary onto it).
+### Binary resolution & PATH fallback
 
-### Distribution
+The wrappers resolve the binary in order: **bundled/fetched** (`plugin/bin/anamnesis`, next to the
+wrapper) → **PATH** `anamnesis` (`npm install -g anamnesis-mcp` / `cargo install`) → `~/.cargo/bin`.
+The first-use fetch makes PATH unnecessary for most users; PATH only matters if the fetch can't run
+(offline / unsupported platform) and you installed the binary yourself. If recall silently injects
+nothing and no binary was fetched, check `which anamnesis` from the shell Claude Code launched from.
 
-The binary ships via **npm**: `anamnesis-mcp` is a thin wrapper whose `postinstall` downloads the
-matching prebuilt binary from the GitHub Release (`v<version>`), so `npm install -g anamnesis-mcp`
-needs no Rust toolchain. The plugin stays tiny (hooks + guard) and runs whatever `anamnesis` is
-on PATH — npm-global or `cargo install`, either works.
+### Distribution channels
 
-The binary and the plugin install separately (the plugin is **not fully self-contained**), but the
-guard wrapper makes a missing/old binary *safe* (no-op), so a version mismatch never breaks a prompt.
-The `hook` subcommand requires **`anamnesis >= 0.8.0`** (the first published release that has it).
+- **Plugin (recommended, install-and-go):** `ensure-anamnesis.sh` fetches the binary from the Release
+  on first use, so `/plugin install` is all an end user needs.
+- **npm (`anamnesis-mcp`):** a thin wrapper whose `postinstall` downloads the same release binary and
+  exposes the `anamnesis` command — for the CLI/MCP without the plugin.
+
+Both pull the same `anamnesis-<platform>` asset from Release `v<version>`; the binary is never
+committed to git. The guard makes a missing/old binary *safe* (no-op), so a version mismatch never
+breaks a prompt. Requires the binary **`>= 0.8.0`**.
 
 ### Versioning
 
