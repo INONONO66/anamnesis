@@ -2,10 +2,12 @@
 //! every Claude Code session over a per-DB Unix socket.
 //!
 //! The daemon binds a Unix socket derived from the *resolved* DB path, holds the
-//! single `<db>.lock` (so it is the only process that opens the DB), and runs the
-//! rmcp `AnamnesisServer` over the socket — one MCP session per accepted
-//! connection, all sharing ONE `MemoryRegistry`. It ref-counts connected clients
-//! and grace-shuts-down when the last client leaves.
+//! single `<db>.lock` (so it is the only process that opens the DB), and serves
+//! the **bespoke [`crate::proto`] protocol** over the socket — newline-delimited
+//! request→response dispatched to ONE shared `MemoryRegistry`. MCP never reaches
+//! here: the agent's MCP lives only in the `serve` adapter, which is itself just
+//! another bespoke client (ADR-0012). It ref-counts connected clients and
+//! grace-shuts-down when the last client leaves.
 //!
 //! Lock-then-bind is load-bearing: the `<db>.lock` is the single race arbiter
 //! (byte-identical to the lock [`crate::memory::MemoryRegistry`] takes), so a
@@ -21,14 +23,13 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use rmcp::ServiceExt;
-use rmcp::service::QuitReason;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 use tokio::sync::Notify;
 
 use crate::config::Config;
 use crate::memory::MemoryRegistry;
-use crate::server::AnamnesisServer;
+use crate::proto;
 
 /// Unix `sun_path` is the binding constraint: 104 bytes on macOS/BSD, 108 on
 /// Linux — INCLUDING the NUL terminator. Bind to the smaller limit everywhere so
@@ -448,7 +449,7 @@ pub async fn run(cfg: Config) -> Result<()> {
         );
         return Ok(()); // RACE loser: exit immediately, zero side effects.
     };
-    tracing::info!(socket = %bind.socket_path.display(), "anamnesis-mcp daemon serving");
+    tracing::info!(socket = %bind.socket_path.display(), "anamnesis daemon serving");
 
     // The daemon holds the DB lock and is the sole opener → unlocked registry.
     let registry =
@@ -474,7 +475,6 @@ pub(crate) async fn serve_loop(
     registry: std::sync::Arc<std::sync::Mutex<MemoryRegistry>>,
     grace: Duration,
 ) {
-    let server = AnamnesisServer::new(registry.clone());
     let tracker = ClientTracker::new();
 
     // Distinguish the two shutdown causes: an explicit signal terminates
@@ -530,10 +530,10 @@ pub(crate) async fn serve_loop(
                 // Bump the count (and cancel any pending grace) BEFORE spawning,
                 // so a connect racing the grace window is never missed.
                 let guard = tracker.connect();
-                let server = server.clone(); // cheap Arc clone → SHARED registry.
+                let registry = registry.clone(); // cheap Arc clone → SHARED registry.
                 tokio::spawn(async move {
                     let _g = guard; // drop on task end → decrement.
-                    serve_connection(server, stream).await;
+                    serve_connection(registry, stream).await;
                 });
                 continue 'serve;
             }
@@ -555,10 +555,10 @@ pub(crate) async fn serve_loop(
                 {
                     drained = true;
                     let guard = tracker.connect();
-                    let server = server.clone();
+                    let registry = registry.clone();
                     tokio::spawn(async move {
                         let _g = guard;
-                        serve_connection(server, stream).await;
+                        serve_connection(registry, stream).await;
                     });
                 }
                 if drained {
@@ -584,20 +584,60 @@ pub(crate) async fn serve_loop(
     bind.release(); // unlink socket + release lock
 }
 
-/// Run one MCP session over an accepted `UnixStream`. The `UnixStream` is a valid
-/// rmcp transport via the `transport-async-rw` blanket impl (newline-delimited
-/// JSON-RPC, identical framing to stdio). `waiting()` resolves when the peer
-/// disconnects (transport receive yields None → `QuitReason::Closed`).
-async fn serve_connection(server: AnamnesisServer, stream: tokio::net::UnixStream) {
-    match server.serve(stream).await {
-        Ok(running) => match running.waiting().await {
-            Ok(QuitReason::Closed) => tracing::debug!("client disconnected"),
-            Ok(QuitReason::Cancelled) => tracing::debug!("connection cancelled"),
-            Ok(other) => tracing::debug!(?other, "connection ended"),
-            Err(e) => tracing::error!("serve loop join error: {e}"),
-        },
-        Err(e) => tracing::error!("initialize handshake failed: {e}"),
+/// Serve one client connection over the bespoke [`proto`] protocol: read
+/// newline-delimited [`proto::Request`]s and write one [`proto::Response`] per
+/// request until the peer disconnects (read yields EOF). A persistent connection
+/// carries many sequential requests (the `serve` adapter holds one for the whole
+/// agent session); a one-shot CLI/hook sends one then closes.
+///
+/// Each request runs on `spawn_blocking` under the shared registry `Mutex`
+/// (single-writer safety preserved), with poison recovery so one panicking op
+/// can't brick the daemon. A malformed line gets an `invalid_params` reply and
+/// the connection keeps serving.
+async fn serve_connection(
+    registry: Arc<std::sync::Mutex<MemoryRegistry>>,
+    stream: tokio::net::UnixStream,
+) {
+    let (rd, mut wr) = stream.into_split();
+    let mut lines = BufReader::new(rd).lines();
+    loop {
+        let line = match lines.next_line().await {
+            Ok(Some(line)) => line,
+            Ok(None) => break, // peer closed the connection (EOF)
+            Err(e) => {
+                tracing::debug!("connection read error: {e}");
+                break;
+            }
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
+        let resp = match proto::decode_line::<proto::Request>(&line) {
+            Ok(req) => {
+                let registry = registry.clone();
+                tokio::task::spawn_blocking(move || {
+                    let mut g = registry.lock().unwrap_or_else(|e| e.into_inner());
+                    crate::dispatch::dispatch(&mut g, req)
+                })
+                .await
+                .unwrap_or_else(|e| {
+                    proto::Response::internal(format!("dispatch task panicked: {e}"))
+                })
+            }
+            Err(e) => proto::Response::invalid_params(format!("malformed request: {e}")),
+        };
+        let encoded = match proto::encode_line(&resp) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!("failed to encode response: {e}");
+                break;
+            }
+        };
+        if wr.write_all(encoded.as_bytes()).await.is_err() || wr.flush().await.is_err() {
+            break; // peer hung up mid-write — normal teardown
+        }
     }
+    tracing::debug!("client disconnected");
 }
 
 #[cfg(test)]
@@ -722,7 +762,7 @@ mod tests {
     /// socket file is gone within a few seconds.
     #[tokio::test]
     async fn daemon_serves_then_grace_exits_and_unlinks_socket() {
-        use rmcp::ServiceExt;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("memory.db");
@@ -750,26 +790,35 @@ mod tests {
         // Run the serve loop with a 1s grace window.
         let loop_handle = tokio::spawn(serve_loop(bind, registry, Duration::from_secs(1)));
 
-        // Connect a client over the unix socket and drive a real MCP session.
+        // Connect a client over the unix socket and drive one bespoke request.
         let stream = tokio::net::UnixStream::connect(&bound_socket)
             .await
             .expect("client connects to the daemon socket");
-        let client = ().serve(stream).await.expect("MCP initialize handshake");
+        let (rd, mut wr) = stream.into_split();
+        let mut lines = BufReader::new(rd).lines();
 
-        // tools/list must surface the four anamnesis tools.
-        let tools = client.peer().list_all_tools().await.expect("tools/list");
-        let names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
+        // A `stats` request comes back Ok — proves the daemon serves the bespoke
+        // protocol over the socket (no rmcp/MCP on this path).
+        let req = crate::proto::Request::Stats { namespace: None };
+        wr.write_all(crate::proto::encode_line(&req).unwrap().as_bytes())
+            .await
+            .unwrap();
+        wr.flush().await.unwrap();
+        let resp_line = lines
+            .next_line()
+            .await
+            .unwrap()
+            .expect("daemon responds to the request");
+        let resp: crate::proto::Response = crate::proto::decode_line(&resp_line).unwrap();
         assert!(
-            names.contains(&"recall")
-                && names.contains(&"remember")
-                && names.contains(&"relate")
-                && names.contains(&"ingest_conversation"),
-            "expected the anamnesis tools, got {names:?}"
+            matches!(resp, crate::proto::Response::Ok { .. }),
+            "daemon should serve the bespoke protocol: {resp:?}"
         );
 
         // Disconnect → the daemon's per-connection serve resolves, count → 0,
         // and the 1s grace window starts.
-        client.cancel().await.expect("client disconnect");
+        drop(lines);
+        drop(wr);
 
         // The serve loop must exit within the grace window plus slack, and the
         // socket file must be unlinked on the way out.
@@ -791,7 +840,7 @@ mod tests {
     /// state — and only shut down once that client leaves.
     #[tokio::test]
     async fn daemon_with_zero_grace_serves_a_late_first_client_then_exits() {
-        use rmcp::ServiceExt;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("memory.db");
@@ -822,15 +871,27 @@ mod tests {
         let stream = tokio::net::UnixStream::connect(&bound_socket)
             .await
             .expect("late first client must still reach a grace=0 daemon");
-        let client = ().serve(stream).await.expect("MCP initialize handshake");
-        let tools = client.peer().list_all_tools().await.expect("tools/list");
+        let (rd, mut wr) = stream.into_split();
+        let mut lines = BufReader::new(rd).lines();
+        let req = crate::proto::Request::Stats { namespace: None };
+        wr.write_all(crate::proto::encode_line(&req).unwrap().as_bytes())
+            .await
+            .unwrap();
+        wr.flush().await.unwrap();
+        let resp_line = lines
+            .next_line()
+            .await
+            .unwrap()
+            .expect("daemon serves the late first client");
+        let resp: crate::proto::Response = crate::proto::decode_line(&resp_line).unwrap();
         assert!(
-            tools.iter().any(|t| t.name.as_ref() == "recall"),
-            "daemon should be serving tools to the late first client"
+            matches!(resp, crate::proto::Response::Ok { .. }),
+            "daemon should be serving the late first client: {resp:?}"
         );
 
         // Now the client leaves → with grace=0 the daemon exits promptly.
-        client.cancel().await.expect("client disconnect");
+        drop(lines);
+        drop(wr);
         let exited = tokio::time::timeout(Duration::from_secs(5), loop_handle).await;
         assert!(
             exited.is_ok(),

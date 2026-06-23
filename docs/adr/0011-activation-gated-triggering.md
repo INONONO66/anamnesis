@@ -21,7 +21,7 @@ The question this ADR settles: **should anamnesis copy that flat-profile pattern
 
 **No.** anamnesis is an associative / spreading-activation store, not a flat key-value profile, so it uses **activation-gated triggering**:
 
-1. **Recall = activation-gated per-turn.** On each prompt, run a spreading-activation pass seeded by the prompt and **inject the readout only when the top activation exceeds a need-odds threshold `τ`** (ranked, capped to top-`k` to bound tokens). Seed `SessionStart` with high-base-level (frequently/recently used) project-scoped memories.
+1. **Recall = activation-gated per-turn.** On each prompt, run a spreading-activation pass seeded by the prompt and **inject the readout only when the top activation clears a need-odds threshold `τ`** (`top ≥ τ`; ranked, capped to top-`k` to bound tokens). Seed `SessionStart` with high-base-level (frequently/recently used) project-scoped memories.
 2. **Reinforce on use, never on every recall.** Hebbian co-activation strengthening (`commit`/`used`) fires **only when a recall was actually relevant/used**, not on every retrieval.
 3. **Surface tension and reasoning chains.** When the activated set contains a `Contradicts` tension or a causal/decision chain, surface it proactively (`⚠️ contradicts prior X`; the *why*, not just the *what*).
 4. **Capture incrementally** at `Stop` / `PostToolUse` / `PreCompact` — adopt the ecosystem's capture cadence as-is (this part is not flat-store-specific).

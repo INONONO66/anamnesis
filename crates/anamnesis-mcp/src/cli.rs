@@ -7,7 +7,11 @@ use crate::config::Config;
 use crate::memory::MemoryRegistry;
 
 #[derive(Parser)]
-#[command(name = "anamnesis-mcp", version, about = "Anamnesis MCP server + CLI")]
+#[command(
+    name = "anamnesis",
+    version,
+    about = "Anamnesis cognitive memory — daemon, MCP server, hooks, CLI"
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Commands>,
@@ -88,6 +92,27 @@ pub enum Commands {
         #[arg(long)]
         embedded: bool,
     },
+    /// Claude Code hook entrypoint: read the hook JSON on stdin, do a gated,
+    /// read-only recall via the warm daemon, and emit the hook JSON on stdout.
+    ///
+    /// Always exits 0 (fail-open): any error injects nothing rather than blocking
+    /// or erasing the user's prompt. Always routes through the shared daemon (no
+    /// `--embedded` mode) so it shares the warm model.
+    Hook {
+        #[command(subcommand)]
+        event: HookEvent,
+    },
+}
+
+/// The Claude Code hook events anamnesis handles (v1). clap renders these as
+/// `hook session-start` / `hook user-prompt` (kebab-cased), matching the plugin's
+/// `hooks.json` commands.
+#[derive(Subcommand, Clone, Debug)]
+pub enum HookEvent {
+    /// `SessionStart`: seed the session with high-salience project memories.
+    SessionStart,
+    /// `UserPromptSubmit`: activation-gated, read-only recall on the prompt.
+    UserPrompt,
 }
 
 fn registry(cfg: &Config) -> MemoryRegistry {
@@ -140,6 +165,10 @@ pub fn run_oneshot(cli: &Cli) -> Result<Oneshot> {
         // synchronous one-shot); it lands here only via the exhaustiveness check.
         None | Some(Commands::Serve { .. }) | Some(Commands::Daemon) => Ok(Oneshot::Serve),
 
+        // The `hook` family always talks to the warm daemon as an async client
+        // (there is no embedded hook mode); defer to `run_oneshot_client`.
+        Some(Commands::Hook { .. }) => Ok(Oneshot::Client),
+
         // Daemon-routed one-shots: default mode defers to the async client; only
         // the embedded/no-daemon mode runs here against the DB directly.
         Some(Commands::Recall { .. } | Commands::Remember { .. })
@@ -183,13 +212,13 @@ pub fn run_oneshot(cli: &Cli) -> Result<Oneshot> {
         Some(Commands::Stats { namespace, .. }) => {
             let mut reg = registry(&cfg);
             let stats = reg.stats(namespace.as_deref())?;
-            print!("{}", crate::server::format_stats(&stats));
+            print!("{}", crate::dispatch::format_stats(&stats));
             Ok(Oneshot::Done)
         }
         Some(Commands::Prewarm) => {
             let mut reg = registry(&cfg);
             reg.prewarm()?;
-            eprintln!("anamnesis-mcp: embedding model ready");
+            eprintln!("anamnesis: embedding model ready");
             Ok(Oneshot::Done)
         }
         Some(Commands::Doctor) => {
@@ -204,57 +233,55 @@ pub fn run_oneshot(cli: &Cli) -> Result<Oneshot> {
 /// `Daemon`-routed commands reach here (the dispatcher sends everything else to
 /// the synchronous path); other variants are unreachable by construction.
 pub async fn run_oneshot_client(cli: &Cli) -> Result<()> {
-    use crate::client::{args, call_tool_oneshot};
-    use serde_json::Value;
+    use crate::client::call_oneshot;
+    use crate::proto::Request;
+
+    // The `hook` family has a different flow (read stdin, gated read-only recall,
+    // emit hook JSON, fail-open) and never bails — handle it up front.
+    if let Some(Commands::Hook { event }) = &cli.command {
+        return crate::hook::run(event).await;
+    }
 
     let cfg = Config::from_env();
-    let (tool, arguments): (&'static str, _) = match &cli.command {
+    let req = match &cli.command {
         Some(Commands::Recall {
             query,
             limit,
             namespace,
             ..
-        }) => (
-            "recall",
-            args([
-                ("query", Some(Value::from(query.clone()))),
-                ("limit", Some(Value::from(*limit as u64))),
-                ("namespace", namespace.clone().map(Value::from)),
-            ]),
-        ),
+        }) => Request::Recall {
+            query: query.clone(),
+            limit: Some(*limit as u32),
+            namespace: namespace.clone(),
+            reinforce: None,
+            gate_threshold: None,
+        },
         Some(Commands::Remember {
             text, namespace, ..
-        }) => (
-            "remember",
-            args([
-                ("content", Some(Value::from(text.clone()))),
-                ("namespace", namespace.clone().map(Value::from)),
-            ]),
-        ),
+        }) => Request::Remember {
+            content: text.clone(),
+            namespace: namespace.clone(),
+        },
         Some(Commands::Relate {
             from_id,
             to_id,
             relation,
             namespace,
             ..
-        }) => (
-            "relate",
-            args([
-                ("from_id", Some(Value::from(*from_id))),
-                ("to_id", Some(Value::from(*to_id))),
-                ("relation", Some(Value::from(relation.clone()))),
-                ("namespace", namespace.clone().map(Value::from)),
-            ]),
-        ),
-        Some(Commands::Stats { namespace, .. }) => (
-            "stats",
-            args([("namespace", namespace.clone().map(Value::from))]),
-        ),
+        }) => Request::Relate {
+            from_id: *from_id,
+            to_id: *to_id,
+            relation: relation.clone(),
+            namespace: namespace.clone(),
+        },
+        Some(Commands::Stats { namespace, .. }) => Request::Stats {
+            namespace: namespace.clone(),
+        },
         // The dispatcher only routes the four commands above here.
         _ => unreachable!("run_oneshot_client dispatched for a non-daemon-routed command"),
     };
 
-    let text = call_tool_oneshot(&cfg, tool, arguments).await?;
+    let text = call_oneshot(&cfg, req).await?;
     println!("{text}");
     Ok(())
 }
@@ -271,7 +298,7 @@ fn check(label: &str, ok: bool, detail: impl std::fmt::Display) {
 /// that the sibling `<db>.lock` can be acquired (no other process holding it);
 /// the model cache directory; and the resolved config values.
 fn doctor(cfg: &Config) {
-    println!("anamnesis-mcp doctor");
+    println!("anamnesis doctor");
     println!("====================");
 
     // Config.
@@ -294,7 +321,7 @@ fn doctor(cfg: &Config) {
     );
 
     // Lock availability: try to acquire the sibling `<db>.lock` exclusively, then
-    // release immediately. A failure means another anamnesis-mcp process holds it.
+    // release immediately. A failure means another anamnesis process holds it.
     let (lock_ok, lock_detail) = probe_lock(db);
     check("db lock available", lock_ok, lock_detail);
 
@@ -341,7 +368,7 @@ fn probe_lock(db: &std::path::Path) -> (bool, String) {
         return (
             false,
             format!(
-                "{} is held by another anamnesis-mcp process",
+                "{} is held by another anamnesis process",
                 lock_path.display()
             ),
         );

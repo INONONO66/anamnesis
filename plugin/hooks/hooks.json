@@ -1,0 +1,28 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/anamnesis-hook.sh",
+            "args": ["session-start"],
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/anamnesis-hook.sh",
+            "args": ["user-prompt"],
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

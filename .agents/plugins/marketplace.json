@@ -1,0 +1,16 @@
+{
+  "name": "anamnesis-plugins",
+  "interface": {
+    "displayName": "anamnesis plugins"
+  },
+  "plugins": [
+    {
+      "name": "anamnesis",
+      "source": {
+        "source": "local",
+        "path": "./plugin"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

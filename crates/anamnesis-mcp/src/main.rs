@@ -2,8 +2,11 @@ mod cli;
 mod client;
 mod config;
 mod daemon;
+mod dispatch;
+mod hook;
 mod launcher;
 mod memory;
+mod proto;
 mod server;
 
 #[cfg(test)]
@@ -28,8 +31,8 @@ fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
-    // The shared daemon runs the rmcp server over a Unix socket (async, long-
-    // lived). It is NOT a one-shot, so dispatch it before the synchronous CLI.
+    // The shared daemon serves the bespoke protocol over a Unix socket (async,
+    // long-lived). It is NOT a one-shot, so dispatch it before the synchronous CLI.
     if matches!(cli.command, Some(Commands::Daemon)) {
         return run_daemon();
     }
@@ -42,9 +45,9 @@ fn main() -> Result<()> {
         Oneshot::Serve => {}
     }
     // `serve` (or no subcommand) → the async stdio entry point. By default this
-    // is the *launcher* (ensure the shared daemon, then proxy stdio↔socket). The
-    // `--embedded` flag or `ANAMNESIS_NO_DAEMON=1` selects the old in-process
-    // server that owns the DB directly.
+    // is the MCP adapter: serve MCP over stdio and forward every tool call to the
+    // shared daemon over the bespoke client. The `--embedded` flag or
+    // `ANAMNESIS_NO_DAEMON=1` selects the in-process server that owns the DB directly.
     let embedded = matches!(cli.command, Some(Commands::Serve { embedded: true }))
         || env_flag("ANAMNESIS_NO_DAEMON");
     if embedded {
@@ -74,26 +77,35 @@ async fn run_daemon() -> Result<()> {
 }
 
 /// Drive a daemon-routed one-shot (`recall`/`remember`/`relate`/`stats` in their
-/// default mode) as an MCP client on a tokio runtime: ensure the daemon, issue
-/// one `tools/call`, print, disconnect.
+/// default mode) as a bespoke daemon client on a tokio runtime: ensure the daemon,
+/// issue one request, print the reply, disconnect.
 #[tokio::main]
 async fn run_oneshot_client(cli: &Cli) -> Result<()> {
     cli::run_oneshot_client(cli).await
 }
 
-/// Launcher: ensure the shared daemon for the resolved DB is up, then run a
-/// transparent stdio↔socket proxy. Does NO engine work — Claude speaks MCP over
-/// stdio to us, we relay the bytes to/from the daemon. Once the proxy returns
-/// (either side closed) we exit immediately, because `tokio::io::stdin()` does an
-/// uncancelable blocking read on a hidden thread that could otherwise hang a
-/// graceful runtime drain.
+/// The MCP adapter (default `serve`): the agent speaks MCP over stdio to this
+/// `AnamnesisServer`, whose every tool call is forwarded to the shared daemon over
+/// the bespoke client. MCP lives here and in `server.rs` ONLY — the daemon, hook,
+/// and CLI clients are MCP-free (ADR-0012). We exit hard once the session ends
+/// because `tokio::io::stdin()` does an uncancelable blocking read on a hidden
+/// thread that could otherwise hang a graceful runtime drain.
 #[tokio::main]
 async fn serve_launcher() -> Result<()> {
     config::ensure_model_cache_dir();
     let cfg = Config::from_env();
-    let stream = launcher::ensure_daemon(&cfg.default_db).await?;
-    tracing::info!("anamnesis-mcp launcher: proxying stdio to the shared daemon");
-    launcher::proxy_stdio(stream).await?;
+    let daemon_client = client::DaemonClient::connect(&cfg).await?;
+    tracing::info!("anamnesis: MCP adapter over stdio → shared daemon");
+    let service = AnamnesisServer::daemon(daemon_client)
+        .serve(stdio())
+        .await?;
+    // The daemon owns the registry (and flushes on its own shutdown); we just
+    // relay, so there is nothing to flush here. Run until the agent disconnects
+    // (stdin EOF) or a shutdown signal arrives.
+    tokio::select! {
+        res = service.waiting() => { res?; }
+        _ = shutdown_signal() => { tracing::info!("shutdown signal received"); }
+    }
     std::process::exit(0);
 }
 
@@ -109,8 +121,8 @@ async fn serve_embedded() -> Result<()> {
         cfg.default_namespace.clone(),
         cfg.reinforce_on_recall,
     )));
-    let server = AnamnesisServer::new(registry.clone());
-    tracing::info!("anamnesis-mcp serving over stdio (embedded mode)");
+    let server = AnamnesisServer::local(registry.clone());
+    tracing::info!("anamnesis serving over stdio (embedded mode)");
     let service = server.serve(stdio()).await?;
 
     // Run until the client disconnects (stdin EOF) OR a shutdown signal arrives.

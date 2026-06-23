@@ -1,0 +1,19 @@
+{
+  "name": "anamnesis-plugins",
+  "owner": {
+    "name": "amsminn & INONONO66",
+    "url": "https://github.com/INONONO66/anamnesis"
+  },
+  "metadata": {
+    "description": "anamnesis plugins for Claude Code — activation-gated associative memory recall injection."
+  },
+  "plugins": [
+    {
+      "name": "anamnesis",
+      "source": "./",
+      "description": "Activation-gated associative memory recall injection for Claude Code, backed by anamnesis.",
+      "category": "productivity",
+      "keywords": ["memory", "mcp", "context", "recall", "claude-code"]
+    }
+  ]
+}

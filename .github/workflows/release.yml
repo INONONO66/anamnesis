@@ -16,22 +16,22 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: macos-14,         target: aarch64-apple-darwin,      asset: anamnesis-mcp-darwin-arm64, ext: "" }
-          - { os: macos-14,         target: x86_64-apple-darwin,       asset: anamnesis-mcp-darwin-x64,   ext: "" }
-          - { os: ubuntu-22.04,     target: x86_64-unknown-linux-gnu,  asset: anamnesis-mcp-linux-x64,    ext: "" }
-          - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu, asset: anamnesis-mcp-linux-arm64,  ext: "" }
+          - { os: macos-14,         target: aarch64-apple-darwin,      asset: anamnesis-darwin-arm64, ext: "" }
+          - { os: macos-14,         target: x86_64-apple-darwin,       asset: anamnesis-darwin-x64,   ext: "" }
+          - { os: ubuntu-22.04,     target: x86_64-unknown-linux-gnu,  asset: anamnesis-linux-x64,    ext: "" }
+          - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu, asset: anamnesis-linux-arm64,  ext: "" }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with: { targets: "${{ matrix.target }}" }
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release --bin anamnesis-mcp --target ${{ matrix.target }}
+      - run: cargo build --release --bin anamnesis --target ${{ matrix.target }}
       - name: stage release asset
         shell: bash
         run: |
           mkdir -p dist
-          cp "target/${{ matrix.target }}/release/anamnesis-mcp${{ matrix.ext }}" "dist/${{ matrix.asset }}${{ matrix.ext }}"
+          cp "target/${{ matrix.target }}/release/anamnesis${{ matrix.ext }}" "dist/${{ matrix.asset }}${{ matrix.ext }}"
           chmod 755 "dist/${{ matrix.asset }}${{ matrix.ext }}" || true
       - uses: actions/upload-artifact@v4
         with: { name: "${{ matrix.asset }}", path: "dist/${{ matrix.asset }}${{ matrix.ext }}" }
@@ -53,7 +53,7 @@ jobs:
         shell: bash
         run: |
           gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "$TAG" --notes "Release $TAG"
-          gh release upload "$TAG" artifacts/*/anamnesis-mcp-* --clobber
+          gh release upload "$TAG" artifacts/*/anamnesis-* --clobber
       - uses: actions/setup-node@v4
         with:
           node-version: 22

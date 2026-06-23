@@ -1,0 +1,212 @@
+//! Bespoke daemon wire protocol — the MCP-free internal request/response the
+//! daemon speaks over its unix socket.
+//!
+//! MCP (rmcp) is the *agent's* protocol; the `serve` adapter translates it to
+//! these requests. Everything else on the socket path (the daemon itself, the
+//! hook, the CLI one-shots) speaks only `proto` and never touches rmcp.
+//!
+//! Framing: one JSON object per line, `\n`-terminated. A connection is
+//! persistent and carries sequential request→response pairs (no correlation
+//! ids: calls are serialized, and the daemon serializes at its single registry
+//! mutex anyway). See `docs/adr/0012-daemon-core-mcp-plugin-clients.md`.
+
+use serde::{Deserialize, Serialize};
+
+/// One conversation turn for [`Request::Ingest`] (serde-only mirror of the
+/// engine's `Turn`; kept here so `proto` has no rmcp/schemars dependency).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TurnInput {
+    pub speaker: String,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at_ms: Option<u64>,
+}
+
+/// A single operation sent to the daemon. Tagged by `op` so the wire is a flat
+/// self-describing JSON object, e.g. `{"op":"recall","query":"…"}`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum Request {
+    Recall {
+        query: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        namespace: Option<String>,
+        /// `false` ⇒ pure read (no reinforcing commit). The hook path passes `false`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reinforce: Option<bool>,
+        /// Need-odds gate `τ`: below it, recall returns nothing.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        gate_threshold: Option<f64>,
+    },
+    Remember {
+        content: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        namespace: Option<String>,
+    },
+    Relate {
+        from_id: u64,
+        to_id: u64,
+        relation: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        namespace: Option<String>,
+    },
+    Ingest {
+        session: String,
+        turns: Vec<TurnInput>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        namespace: Option<String>,
+    },
+    Stats {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        namespace: Option<String>,
+    },
+}
+
+/// Whether a failed request is the caller's fault (e.g. a bad relation label or
+/// missing node id) or an internal fault. Mirrors the MCP `invalid_params` vs
+/// `internal_error` split so the `serve` adapter can re-map it faithfully.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrKind {
+    Internal,
+    InvalidParams,
+}
+
+/// The daemon's reply. `text` is the fully-formatted, consumer-ready output
+/// (identical to what the current MCP tools return), so every client — the
+/// `serve` adapter, the hook, the CLI — uses it verbatim.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum Response {
+    Ok { text: String },
+    Err { kind: ErrKind, message: String },
+}
+
+impl Response {
+    pub fn ok(text: impl Into<String>) -> Self {
+        Response::Ok { text: text.into() }
+    }
+    pub fn internal(message: impl std::fmt::Display) -> Self {
+        Response::Err {
+            kind: ErrKind::Internal,
+            message: message.to_string(),
+        }
+    }
+    pub fn invalid_params(message: impl std::fmt::Display) -> Self {
+        Response::Err {
+            kind: ErrKind::InvalidParams,
+            message: message.to_string(),
+        }
+    }
+}
+
+/// Encode a value as one wire line: compact JSON followed by `\n`.
+pub fn encode_line<T: Serialize>(value: &T) -> Result<String, serde_json::Error> {
+    let mut s = serde_json::to_string(value)?;
+    s.push('\n');
+    Ok(s)
+}
+
+/// Decode one wire line (the trailing `\n` may be present or already stripped).
+pub fn decode_line<T: for<'de> Deserialize<'de>>(line: &str) -> Result<T, serde_json::Error> {
+    serde_json::from_str(line.trim_end_matches(['\n', '\r']))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn round_trip_request(req: Request) {
+        let line = encode_line(&req).expect("encode");
+        assert!(line.ends_with('\n'), "line must be newline-terminated");
+        assert!(!line[..line.len() - 1].contains('\n'), "exactly one line");
+        let back: Request = decode_line(&line).expect("decode");
+        assert_eq!(req, back);
+    }
+
+    #[test]
+    fn request_variants_round_trip() {
+        round_trip_request(Request::Recall {
+            query: "how does the gate work".into(),
+            limit: Some(5),
+            namespace: None,
+            reinforce: Some(false),
+            gate_threshold: Some(13.0),
+        });
+        round_trip_request(Request::Remember {
+            content: "a lesson".into(),
+            namespace: Some("proj".into()),
+        });
+        round_trip_request(Request::Relate {
+            from_id: 1,
+            to_id: 2,
+            relation: "supports".into(),
+            namespace: None,
+        });
+        round_trip_request(Request::Ingest {
+            session: "s1".into(),
+            turns: vec![
+                TurnInput {
+                    speaker: "user".into(),
+                    text: "hi".into(),
+                    at_ms: Some(1000),
+                },
+                TurnInput {
+                    speaker: "assistant".into(),
+                    text: "hello".into(),
+                    at_ms: None,
+                },
+            ],
+            namespace: None,
+        });
+        round_trip_request(Request::Stats { namespace: None });
+    }
+
+    #[test]
+    fn recall_omits_none_fields_on_the_wire() {
+        let line = encode_line(&Request::Recall {
+            query: "q".into(),
+            limit: None,
+            namespace: None,
+            reinforce: None,
+            gate_threshold: None,
+        })
+        .unwrap();
+        assert!(line.contains("\"op\":\"recall\""), "tagged by op: {line}");
+        assert!(line.contains("\"query\":\"q\""));
+        assert!(!line.contains("limit"), "None optionals omitted: {line}");
+        assert!(!line.contains("namespace"));
+        assert!(!line.contains("gate_threshold"));
+    }
+
+    #[test]
+    fn response_round_trips_and_distinguishes_error_kind() {
+        for resp in [
+            Response::ok("stored node 5"),
+            Response::internal("boom"),
+            Response::invalid_params("unknown relation label"),
+        ] {
+            let line = encode_line(&resp).unwrap();
+            let back: Response = decode_line(&line).unwrap();
+            assert_eq!(resp, back);
+        }
+        // The kind is preserved across the wire (serve re-maps it to MCP).
+        let line = encode_line(&Response::invalid_params("bad")).unwrap();
+        let back: Response = decode_line(&line).unwrap();
+        assert!(matches!(
+            back,
+            Response::Err {
+                kind: ErrKind::InvalidParams,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn decode_tolerates_crlf_and_trailing_newline() {
+        let r: Response = decode_line("{\"status\":\"ok\",\"text\":\"hi\"}\r\n").unwrap();
+        assert_eq!(r, Response::ok("hi"));
+    }
+}

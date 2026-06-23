@@ -1,0 +1,29 @@
+{
+  "name": "anamnesis",
+  "version": "0.8.0",
+  "description": "Activation-gated associative memory recall injection for Codex, backed by anamnesis.",
+  "author": {
+    "name": "amsminn & INONONO66",
+    "url": "https://github.com/INONONO66/anamnesis"
+  },
+  "homepage": "https://github.com/INONONO66/anamnesis",
+  "repository": "https://github.com/INONONO66/anamnesis",
+  "license": "MIT",
+  "keywords": ["memory", "mcp", "context", "recall", "codex"],
+  "hooks": "./hooks/codex-hooks.json",
+  "mcpServers": "./.codex-mcp.json",
+  "interface": {
+    "displayName": "anamnesis",
+    "shortDescription": "Activation-gated associative memory recall for Codex.",
+    "longDescription": "anamnesis injects, on each prompt, only the memories whose spreading-activation clears a need-odds threshold (read-only, top-k capped), and seeds session start with high-salience project memory. Reinforcement is agent-driven. Backed by the anamnesis cognitive memory engine over a warm on-demand daemon.",
+    "developerName": "amsminn & INONONO66",
+    "category": "Productivity",
+    "capabilities": ["Interactive", "Read"],
+    "websiteURL": "https://github.com/INONONO66/anamnesis",
+    "defaultPrompt": [
+      "Recall what we already decided in this project before I start.",
+      "What prior context is relevant to what I'm working on now?"
+    ],
+    "brandColor": "#7C3AED"
+  }
+}

@@ -9,7 +9,7 @@
 //! Run it (the model lives in the repo cache):
 //! ```sh
 //! FASTEMBED_CACHE_DIR=$PWD/.fastembed_cache \
-//!   cargo test -p anamnesis-mcp --bin anamnesis-mcp -- --ignored insight_recall
+//!   cargo test -p anamnesis-mcp --bin anamnesis -- --ignored insight_recall
 //! ```
 
 use crate::memory::MemoryRegistry;

@@ -1,0 +1,30 @@
+{
+  "description": "anamnesis Codex hooks — activation-gated read-only recall injection via the warm daemon (fail-open). Same guard wrapper as the Claude Code plugin.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${PLUGIN_ROOT}/hooks/anamnesis-hook.sh session-start",
+            "timeout": 10,
+            "statusMessage": "Loading anamnesis context"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${PLUGIN_ROOT}/hooks/anamnesis-hook.sh user-prompt",
+            "timeout": 5,
+            "statusMessage": "Recalling relevant memory"
+          }
+        ]
+      }
+    ]
+  }
+}

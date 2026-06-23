@@ -1,0 +1,14 @@
+{
+  "name": "anamnesis",
+  "version": "0.8.0",
+  "description": "Activation-gated associative memory recall injection for Claude Code, backed by anamnesis.",
+  "author": {
+    "name": "amsminn & INONONO66",
+    "url": "https://github.com/INONONO66/anamnesis"
+  },
+  "homepage": "https://github.com/INONONO66/anamnesis",
+  "repository": "https://github.com/INONONO66/anamnesis",
+  "license": "MIT",
+  "keywords": ["memory", "mcp", "context", "recall", "claude-code"],
+  "mcpServers": "./.mcp.json"
+}
