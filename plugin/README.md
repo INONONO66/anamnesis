@@ -26,8 +26,8 @@ and prints the hook output JSON on stdout:
 
 ### The guard wrapper (why hooks don't call the binary directly)
 
-`anamnesis-mcp` is installed out-of-band (`npm install -g anamnesis-mcp`, or `cargo install`), so on
-a given machine it may be **missing** or an **older build without the `hook` subcommand**. In that case `clap` exits `2` —
+`anamnesis-mcp` is resolved at run time — the binary bundled in the plugin first, else a PATH
+`anamnesis-mcp` (npm/cargo) — so on a given machine it may be **missing** or an **older build without the `hook` subcommand**. In that case `clap` exits `2` —
 and a `UserPromptSubmit` hook that exits `2` **erases the user's prompt**. To make that impossible,
 `hooks.json` points at `hooks/anamnesis-hook.sh`, a three-line shim that no-ops when the binary is
 absent and **always exits 0**, so a wrong/old binary can never block or erase a prompt. All real
@@ -36,41 +36,44 @@ exit-2 footgun.
 
 ## Install
 
-1. Install the `anamnesis-mcp` binary so it is on your PATH. The published npm package fetches the
-   matching prebuilt binary for your platform on `postinstall` — no Rust toolchain required:
+The plugin is **self-contained**: it bundles the `anamnesis-mcp` binary (`plugin/bin/`) and declares
+*both* the hooks *and* the agent MCP server, so **one install + reload gives you everything** — no
+separate `claude mcp add`, no global binary on PATH.
+
+1. Put the binary in `plugin/bin/` (gitignored — never committed). Building from source:
 
    ```sh
-   npm install -g anamnesis-mcp        # needs >= 0.8.0 (first release with the `hook` subcommand)
+   cargo build --release -p anamnesis-mcp && cp target/release/anamnesis-mcp plugin/bin/
    ```
 
-   Confirm with `anamnesis-mcp hook --help`. Building from source also works (for development):
-   `cargo install --path crates/anamnesis-mcp --force`. If the binary is missing or older than
-   0.8.0, the guard wrapper keeps prompts safe — it just injects nothing until a `hook`-capable
-   binary is on PATH.
+   A published release fetches the matching prebuilt binary into `plugin/bin/` for you, so this
+   step is only for building from source. If `plugin/bin/anamnesis-mcp` is absent, the guard and
+   serve wrappers fall back to a PATH `anamnesis-mcp` (`npm install -g anamnesis-mcp` /
+   `cargo install`) — the plugin still works, just not self-contained.
 
-2. Add this directory as a local marketplace, then install the plugin:
+2. Add the marketplace, install, reload:
 
    ```
    /plugin marketplace add ./plugin
    /plugin install anamnesis@anamnesis-plugins
+   /reload-plugins
    ```
 
-   `./plugin` is the path to the directory containing `.claude-plugin/marketplace.json`;
-   `anamnesis-plugins` is the marketplace `name`, not a path.
+   Installing copies the plugin — *including the bundled binary* — into Claude Code's cache; reload
+   activates the hooks and the MCP server. You now have proactive recall injection (hooks) **and**
+   the `recall`/`remember`/`relate`/`ingest_conversation`/`stats` tools (MCP), both backed by the one
+   bundled binary. (`./plugin` is the dir containing `.claude-plugin/marketplace.json`;
+   `anamnesis-plugins` is the marketplace `name`. The relative `source: "./"` resolves against a
+   local-dir or git marketplace; a direct **URL** to `marketplace.json` would need a git `source`.)
 
-   This local-directory flow works because the marketplace entry uses `source: "./"`, which
-   resolves against the local marketplace root (the checked-out directory). The same relative
-   `source` can fail if a marketplace is added by a direct **URL** to `marketplace.json`; for
-   URL-based distribution, use a git/github `source` in the marketplace entry instead.
+### PATH (only the fallback)
 
-### PATH requirement
-
-The hooks invoke the bare name `anamnesis-mcp`, so it must be on the **PATH Claude Code sees**.
-GUI launches frequently do **not** include the npm-global bin (or `~/.cargo/bin`). If the hook
-silently injects nothing, the most likely cause is the binary not being found: confirm with
-`which anamnesis-mcp` from the same shell Claude Code was launched from, and put the install dir on
-that PATH (npm global prefix `bin` — see `npm prefix -g` — or `~/.cargo/bin`), or symlink the binary
-into a directory already on PATH.
+When the plugin bundles `plugin/bin/anamnesis-mcp` (the default), **no PATH is needed** — the guard
+and serve wrappers resolve the bundled binary by their own location. PATH matters only for the
+**fallback** (no bundled binary): then `anamnesis-mcp` must be on the **PATH Claude Code sees**, and
+GUI launches frequently do **not** include the npm-global bin (or `~/.cargo/bin`). If recall
+silently injects nothing in that mode, confirm `which anamnesis-mcp` from the shell Claude Code was
+launched from and put the install dir on that PATH (or symlink the binary onto it).
 
 ### Distribution
 
