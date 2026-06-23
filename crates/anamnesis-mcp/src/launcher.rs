@@ -1,21 +1,17 @@
-//! The `serve` launcher: a transparent stdio↔socket proxy in front of the shared
-//! daemon.
+//! `ensure_daemon`: bring up (or connect to) the shared daemon for a resolved DB.
 //!
-//! What Claude Code spawns is `anamnesis-mcp serve`. Instead of owning the DB,
-//! the launcher does the minimum to connect a session to the one shared daemon:
+//! Every client of the daemon goes through here — the `serve` MCP adapter, the
+//! CLI one-shots, and the hook (all via [`crate::client::DaemonClient`]). This
+//! module does NO engine work; it only guarantees a connected socket:
 //!
 //! 1. [`ensure_daemon`] — derive the per-DB socket, try to `connect()`. If the
 //!    daemon is up, return the stream. If not, spawn a **fully detached**
 //!    `anamnesis-mcp daemon` (new session via `setsid`, null stdio, never waited
 //!    on) and retry-connect with a short backoff until it binds.
-//! 2. [`proxy_stdio`] — relay this process's stdin↔socket and socket↔stdout with
-//!    two independent copy tasks, exiting as soon as *either* side EOFs. The
-//!    launcher does NO engine work: Claude speaks MCP-stdio to it, it relays
-//!    bytes to the daemon, which is the real MCP server.
 //!
-//! Lock-then-bind in the daemon makes concurrent starts safe: two launchers that
+//! Lock-then-bind in the daemon makes concurrent starts safe: two clients that
 //! both miss the daemon each spawn one, the DB lock picks a single winner, the
-//! loser exits, and both launchers connect to the one survivor.
+//! loser exits, and both end up connected to the one survivor.
 
 use std::io;
 use std::path::Path;
@@ -23,7 +19,6 @@ use std::process::{Command as StdCommand, Stdio};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
 
 use crate::daemon::socket_path_for_db;
@@ -149,71 +144,6 @@ fn spawn_daemon_detached(exe: &Path, db: &Path) -> io::Result<()> {
         .stderr(Stdio::null())
         .spawn()
         .map(|_child| ())
-}
-
-/// Transparent proxy: relay this process's stdin↔socket and socket↔stdout, then
-/// exit as soon as EITHER direction finishes (clean EOF on either side).
-///
-/// We deliberately do NOT use `tokio::io::copy_bidirectional`: it needs a single
-/// `AsyncRead + AsyncWrite` object, but our two ends are stdin (read-only) and
-/// stdout (write-only) — separate half-duplex handles — and it only returns once
-/// BOTH directions shut down, which is the wrong "session over" semantics. Two
-/// independent `copy` tasks raced with `select!` give us exit-on-either-EOF.
-pub async fn proxy_stdio(stream: UnixStream) -> io::Result<()> {
-    let (mut sock_rd, mut sock_wr) = stream.into_split();
-
-    // stdin → socket. On client EOF, half-close the socket's write side so the
-    // daemon sees EOF on its read.
-    let up = tokio::spawn(async move {
-        let mut stdin = tokio::io::stdin();
-        let res = tokio::io::copy(&mut stdin, &mut sock_wr).await;
-        let _ = sock_wr.shutdown().await;
-        res
-    });
-
-    // socket → stdout. Flush so buffered bytes hit the host's pipe before we go.
-    let down = tokio::spawn(async move {
-        let mut stdout = tokio::io::stdout();
-        let res = tokio::io::copy(&mut sock_rd, &mut stdout).await;
-        let _ = stdout.flush().await;
-        res
-    });
-
-    // Exit when EITHER side EOFs. The daemon closing its end (`down` completes)
-    // is the real "session over" signal; stdin EOF (`up`) means the MCP host went
-    // away. We surface a copy error but treat a broken pipe / reset as a normal
-    // teardown rather than a hard failure.
-    tokio::select! {
-        r = down => squash_disconnect(flatten(r))?,
-        r = up   => squash_disconnect(flatten(r))?,
-    }
-    Ok(())
-}
-
-/// Flatten a `JoinHandle` result of an inner `io::Result`. A task panic is
-/// reported as a generic I/O error (the proxy tasks don't panic in practice).
-fn flatten(joined: Result<io::Result<u64>, tokio::task::JoinError>) -> io::Result<u64> {
-    match joined {
-        Ok(inner) => inner,
-        Err(e) => Err(io::Error::other(format!("proxy task panicked: {e}"))),
-    }
-}
-
-/// A peer hanging up mid-stream (`BrokenPipe`/`ConnectionReset`) is a normal end
-/// of session, not a launcher failure — swallow it; surface anything else.
-fn squash_disconnect(res: io::Result<u64>) -> io::Result<()> {
-    match res {
-        Ok(_) => Ok(()),
-        Err(e)
-            if matches!(
-                e.kind(),
-                io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset
-            ) =>
-        {
-            Ok(())
-        }
-        Err(e) => Err(e),
-    }
 }
 
 #[cfg(test)]

@@ -208,7 +208,7 @@ pub fn run_oneshot(cli: &Cli) -> Result<Oneshot> {
         Some(Commands::Stats { namespace, .. }) => {
             let mut reg = registry(&cfg);
             let stats = reg.stats(namespace.as_deref())?;
-            print!("{}", crate::server::format_stats(&stats));
+            print!("{}", crate::dispatch::format_stats(&stats));
             Ok(Oneshot::Done)
         }
         Some(Commands::Prewarm) => {
@@ -229,8 +229,8 @@ pub fn run_oneshot(cli: &Cli) -> Result<Oneshot> {
 /// `Daemon`-routed commands reach here (the dispatcher sends everything else to
 /// the synchronous path); other variants are unreachable by construction.
 pub async fn run_oneshot_client(cli: &Cli) -> Result<()> {
-    use crate::client::{args, call_tool_oneshot};
-    use serde_json::Value;
+    use crate::client::call_oneshot;
+    use crate::proto::Request;
 
     // The `hook` family has a different flow (read stdin, gated read-only recall,
     // emit hook JSON, fail-open) and never bails — handle it up front.
@@ -239,53 +239,45 @@ pub async fn run_oneshot_client(cli: &Cli) -> Result<()> {
     }
 
     let cfg = Config::from_env();
-    let (tool, arguments): (&'static str, _) = match &cli.command {
+    let req = match &cli.command {
         Some(Commands::Recall {
             query,
             limit,
             namespace,
             ..
-        }) => (
-            "recall",
-            args([
-                ("query", Some(Value::from(query.clone()))),
-                ("limit", Some(Value::from(*limit as u64))),
-                ("namespace", namespace.clone().map(Value::from)),
-            ]),
-        ),
+        }) => Request::Recall {
+            query: query.clone(),
+            limit: Some(*limit as u32),
+            namespace: namespace.clone(),
+            reinforce: None,
+            gate_threshold: None,
+        },
         Some(Commands::Remember {
             text, namespace, ..
-        }) => (
-            "remember",
-            args([
-                ("content", Some(Value::from(text.clone()))),
-                ("namespace", namespace.clone().map(Value::from)),
-            ]),
-        ),
+        }) => Request::Remember {
+            content: text.clone(),
+            namespace: namespace.clone(),
+        },
         Some(Commands::Relate {
             from_id,
             to_id,
             relation,
             namespace,
             ..
-        }) => (
-            "relate",
-            args([
-                ("from_id", Some(Value::from(*from_id))),
-                ("to_id", Some(Value::from(*to_id))),
-                ("relation", Some(Value::from(relation.clone()))),
-                ("namespace", namespace.clone().map(Value::from)),
-            ]),
-        ),
-        Some(Commands::Stats { namespace, .. }) => (
-            "stats",
-            args([("namespace", namespace.clone().map(Value::from))]),
-        ),
+        }) => Request::Relate {
+            from_id: *from_id,
+            to_id: *to_id,
+            relation: relation.clone(),
+            namespace: namespace.clone(),
+        },
+        Some(Commands::Stats { namespace, .. }) => Request::Stats {
+            namespace: namespace.clone(),
+        },
         // The dispatcher only routes the four commands above here.
         _ => unreachable!("run_oneshot_client dispatched for a non-daemon-routed command"),
     };
 
-    let text = call_tool_oneshot(&cfg, tool, arguments).await?;
+    let text = call_oneshot(&cfg, req).await?;
     println!("{text}");
     Ok(())
 }

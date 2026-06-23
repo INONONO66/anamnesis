@@ -1,4 +1,11 @@
-//! rmcp stdio server exposing recall / remember / ingest_conversation.
+//! The rmcp/MCP adapter — the ONE place MCP lives.
+//!
+//! `AnamnesisServer` is the agent-facing MCP surface (`recall`/`remember`/
+//! `relate`/`ingest_conversation`/`stats`). It owns no engine state: each tool
+//! call builds a [`proto::Request`] and runs it against a [`Backend`] —
+//! `Local` (in-process `dispatch`, the `--embedded serve` path) or `Daemon` (the
+//! bespoke client to the shared daemon, the default path). Everything off this
+//! file (daemon, hook, CLI clients) is MCP-free; see ADR-0012.
 
 use std::sync::{Arc, Mutex};
 
@@ -7,7 +14,10 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, Content, Implementation, ServerCapabilities, ServerInfo};
 use rmcp::{ErrorData, ServerHandler, schemars, tool, tool_handler, tool_router};
 
-use crate::memory::{MemoryRegistry, Turn};
+use crate::client::DaemonClient;
+use crate::dispatch;
+use crate::memory::MemoryRegistry;
+use crate::proto::{self, ErrKind, Request, Response};
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct RecallParams {
@@ -82,28 +92,84 @@ pub struct RelateParams {
     pub namespace: Option<String>,
 }
 
+/// Where an [`AnamnesisServer`] sends its requests.
 #[derive(Clone)]
-pub struct AnamnesisServer {
-    registry: Arc<Mutex<MemoryRegistry>>,
-    tool_router: ToolRouter<Self>,
+pub enum Backend {
+    /// In-process: own the registry and run `dispatch` directly (the
+    /// `--embedded serve` path — no daemon, no socket).
+    Local(Arc<Mutex<MemoryRegistry>>),
+    /// Forward to the shared daemon over the bespoke client (the default path).
+    /// `tokio::sync::Mutex` because the connection is held across `.await` and
+    /// calls must be serialized over the single connection.
+    Daemon(Arc<tokio::sync::Mutex<DaemonClient>>),
 }
 
-impl AnamnesisServer {
-    pub fn new(registry: Arc<Mutex<MemoryRegistry>>) -> Self {
-        Self {
-            registry,
-            tool_router: Self::tool_router(),
+impl Backend {
+    /// Run one request and return the daemon-shaped reply (transport failures on
+    /// the daemon path, and dispatch-task panics on the local path, map to an
+    /// internal error so a single bad call never breaks the session).
+    async fn call(&self, req: Request) -> Response {
+        match self {
+            Backend::Local(registry) => {
+                let registry = registry.clone();
+                tokio::task::spawn_blocking(move || {
+                    // Recover from poisoning so one panicking dispatch doesn't
+                    // brick the server for the rest of its lifetime.
+                    let mut g = registry.lock().unwrap_or_else(|e| e.into_inner());
+                    dispatch::dispatch(&mut g, req)
+                })
+                .await
+                .unwrap_or_else(|e| Response::internal(format!("dispatch task panicked: {e}")))
+            }
+            Backend::Daemon(client) => {
+                let mut c = client.lock().await;
+                match c.call(&req).await {
+                    Ok(resp) => resp,
+                    Err(e) => Response::internal(e),
+                }
+            }
         }
     }
 }
 
-fn internal(msg: impl std::fmt::Display) -> ErrorData {
-    ErrorData::internal_error(msg.to_string(), None)
+/// Map a daemon [`Response`] back to the MCP `CallToolResult` / `ErrorData`,
+/// preserving the caller-vs-internal error distinction.
+fn to_result(resp: Response) -> Result<CallToolResult, ErrorData> {
+    match resp {
+        Response::Ok { text } => Ok(CallToolResult::success(vec![Content::text(text)])),
+        Response::Err {
+            kind: ErrKind::InvalidParams,
+            message,
+        } => Err(ErrorData::invalid_params(message, None)),
+        Response::Err {
+            kind: ErrKind::Internal,
+            message,
+        } => Err(ErrorData::internal_error(message, None)),
+    }
 }
 
-/// A caller-facing error (bad relation label, missing node id, etc.).
-fn invalid_params(msg: impl std::fmt::Display) -> ErrorData {
-    ErrorData::invalid_params(msg.to_string(), None)
+#[derive(Clone)]
+pub struct AnamnesisServer {
+    backend: Backend,
+    tool_router: ToolRouter<Self>,
+}
+
+impl AnamnesisServer {
+    /// In-process server that owns the DB directly (`--embedded serve`).
+    pub fn local(registry: Arc<Mutex<MemoryRegistry>>) -> Self {
+        Self {
+            backend: Backend::Local(registry),
+            tool_router: Self::tool_router(),
+        }
+    }
+
+    /// Adapter that forwards every tool call to the shared daemon (default).
+    pub fn daemon(client: DaemonClient) -> Self {
+        Self {
+            backend: Backend::Daemon(Arc::new(tokio::sync::Mutex::new(client))),
+            tool_router: Self::tool_router(),
+        }
+    }
 }
 
 #[tool_router]
@@ -118,48 +184,14 @@ impl AnamnesisServer {
         &self,
         Parameters(p): Parameters<RecallParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let registry = self.registry.clone();
-        let limit = p.limit.unwrap_or(20) as usize;
-        let packaged = tokio::task::spawn_blocking(move || {
-            // Recover from poisoning so one panicking handler doesn't brick the
-            // server for the rest of its lifetime.
-            let mut g = registry.lock().unwrap_or_else(|e| e.into_inner());
-            g.recall_packaged_gated(
-                &p.query,
-                limit,
-                p.namespace.as_deref(),
-                p.reinforce,
-                p.gate_threshold,
-            )
-        })
-        .await
-        .map_err(internal)?
-        .map_err(internal)?;
-
-        // Compact id reference so the agent can feed node_ids to `relate`.
-        let refs: Vec<_> = packaged
-            .hits
-            .iter()
-            .map(|h| {
-                serde_json::json!({
-                    "node_id": h.node_id.0,
-                    "score": h.score,
-                })
-            })
-            .collect();
-        let refs_json = serde_json::to_string(&refs).map_err(internal)?;
-
-        // Primary text = the readable context block; then a compact id reference
-        // block. The context block is empty when nothing packaged — fall back to a
-        // clear "no relevant memory" note so the text is never blank.
-        let context = if packaged.context.trim().is_empty() {
-            "(no relevant memory)\n".to_string()
-        } else {
-            packaged.context
+        let req = Request::Recall {
+            query: p.query,
+            limit: p.limit,
+            namespace: p.namespace,
+            reinforce: p.reinforce,
+            gate_threshold: p.gate_threshold,
         };
-        let text = format!("{context}## NODES (for `relate`)\n{refs_json}");
-
-        Ok(CallToolResult::success(vec![Content::text(text)]))
+        to_result(self.backend.call(req).await)
     }
 
     #[tool(description = "Store a distilled insight, decision, or lesson for future recall.")]
@@ -167,19 +199,11 @@ impl AnamnesisServer {
         &self,
         Parameters(p): Parameters<RememberParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let registry = self.registry.clone();
-        let id = tokio::task::spawn_blocking(move || {
-            // Recover from poisoning so one panicking handler doesn't brick the
-            // server for the rest of its lifetime.
-            let mut g = registry.lock().unwrap_or_else(|e| e.into_inner());
-            g.remember(&p.content, p.namespace.as_deref())
-        })
-        .await
-        .map_err(internal)?
-        .map_err(internal)?;
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "stored node {id}"
-        ))]))
+        let req = Request::Remember {
+            content: p.content,
+            namespace: p.namespace,
+        };
+        to_result(self.backend.call(req).await)
     }
 
     #[tool(
@@ -189,29 +213,21 @@ impl AnamnesisServer {
         &self,
         Parameters(p): Parameters<IngestParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let registry = self.registry.clone();
-        let summary = tokio::task::spawn_blocking(move || {
-            let turns: Vec<Turn> = p
-                .turns
-                .into_iter()
-                .map(|t| Turn {
-                    speaker: t.speaker,
-                    text: t.text,
-                    at_ms: t.at_ms,
-                })
-                .collect();
-            // Recover from poisoning so one panicking handler doesn't brick the
-            // server for the rest of its lifetime.
-            let mut g = registry.lock().unwrap_or_else(|e| e.into_inner());
-            g.ingest_conversation(&p.session, &turns, p.namespace.as_deref())
-        })
-        .await
-        .map_err(internal)?
-        .map_err(internal)?;
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "ingested {} turns ({} semantic nodes)",
-            summary.episodic, summary.semantic
-        ))]))
+        let turns = p
+            .turns
+            .into_iter()
+            .map(|t| proto::TurnInput {
+                speaker: t.speaker,
+                text: t.text,
+                at_ms: t.at_ms,
+            })
+            .collect();
+        let req = Request::Ingest {
+            session: p.session,
+            turns,
+            namespace: p.namespace,
+        };
+        to_result(self.backend.call(req).await)
     }
 
     #[tool(
@@ -225,23 +241,13 @@ impl AnamnesisServer {
         &self,
         Parameters(p): Parameters<RelateParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let registry = self.registry.clone();
-        // Keep the endpoints/label for the success message after `p` is moved.
-        let (from_id, to_id, relation) = (p.from_id, p.to_id, p.relation.clone());
-        let edge = tokio::task::spawn_blocking(move || {
-            // Recover from poisoning so one panicking handler doesn't brick the
-            // server for the rest of its lifetime.
-            let mut g = registry.lock().unwrap_or_else(|e| e.into_inner());
-            g.relate(p.from_id, p.to_id, &p.relation, p.namespace.as_deref())
-        })
-        .await
-        .map_err(internal)?
-        // A bad relation label / missing endpoint is a caller error, not an
-        // internal fault — surface it as an invalid-params error.
-        .map_err(invalid_params)?;
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "linked node {from_id} -> node {to_id} ({relation}) as edge {edge}"
-        ))]))
+        let req = Request::Relate {
+            from_id: p.from_id,
+            to_id: p.to_id,
+            relation: p.relation,
+            namespace: p.namespace,
+        };
+        to_result(self.backend.call(req).await)
     }
 
     #[tool(
@@ -253,60 +259,11 @@ impl AnamnesisServer {
         &self,
         Parameters(p): Parameters<StatsParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let registry = self.registry.clone();
-        let stats = tokio::task::spawn_blocking(move || {
-            // Recover from poisoning so one panicking handler doesn't brick the
-            // server for the rest of its lifetime.
-            let mut g = registry.lock().unwrap_or_else(|e| e.into_inner());
-            g.stats(p.namespace.as_deref())
-        })
-        .await
-        .map_err(internal)?
-        .map_err(internal)?;
-        // The readable text block IS the payload: the CLI `stats` one-shot prints
-        // it verbatim, so the daemon-backed and `--embedded` paths render identically.
-        Ok(CallToolResult::success(vec![Content::text(format_stats(
-            &stats,
-        ))]))
+        let req = Request::Stats {
+            namespace: p.namespace,
+        };
+        to_result(self.backend.call(req).await)
     }
-}
-
-/// Render a [`MemoryStats`](anamnesis::memory::MemoryStats) snapshot to the same
-/// human-readable block the CLI prints. Shared so the `stats` MCP tool and the
-/// `--embedded` CLI path produce byte-identical output.
-pub fn format_stats(s: &anamnesis::memory::MemoryStats) -> String {
-    use std::fmt::Write as _;
-    let mut out = String::new();
-    let _ = writeln!(out, "nodes:                {}", s.node_count);
-    let _ = writeln!(out, "edges:                {}", s.edge_count);
-    let _ = writeln!(
-        out,
-        "orphans:              {} ({:.1}%)",
-        s.orphan_count,
-        s.orphan_ratio * 100.0
-    );
-    let _ = writeln!(
-        out,
-        "contradictions:       {} ({:.1}%)",
-        s.contradiction_count,
-        s.contradiction_ratio * 100.0
-    );
-    let _ = writeln!(out, "supersedes:           {}", s.supersede_count);
-    let _ = writeln!(out, "retracted:            {}", s.retracted_count);
-    let _ = writeln!(out, "missing embeddings:   {}", s.missing_embedding_count);
-    let _ = writeln!(out, "avg salience:         {:.3}", s.avg_salience);
-    let _ = writeln!(out, "avg degree:           {:.2}", s.average_degree);
-    let _ = writeln!(out, "stale (>30d):         {:.1}%", s.stale_ratio * 100.0);
-    let _ = writeln!(out, "salience entropy:     {:.3} bits", s.salience_entropy);
-    let _ = writeln!(out, "peers:                {}", s.peer_count);
-    let _ = writeln!(out, "health grade:         {:?}", s.grade);
-    if !s.scope_distribution.is_empty() {
-        let _ = writeln!(out, "scope distribution:");
-        for (scope, count) in &s.scope_distribution {
-            let _ = writeln!(out, "  {scope}: {count}");
-        }
-    }
-    out
 }
 
 #[tool_handler(router = self.tool_router)]

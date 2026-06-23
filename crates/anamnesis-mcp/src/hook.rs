@@ -21,11 +21,11 @@ use std::io::Read;
 use std::time::Duration;
 
 use anyhow::Result;
-use serde_json::Value;
 
 use crate::cli::HookEvent;
-use crate::client::{args, call_tool_oneshot};
+use crate::client::call_oneshot;
 use crate::config::Config;
+use crate::proto::Request;
 
 /// One-line nudge prepended to a `user-prompt` injection so the agent reinforces
 /// memory it actually uses (hook recall is read-only; reinforcement is deliberate).
@@ -127,14 +127,15 @@ async fn gated_recall(
     reinforce: Option<bool>,
     gate: Option<f64>,
 ) -> Option<String> {
-    let arguments = args([
-        ("query", Some(Value::from(query.to_string()))),
-        ("limit", Some(Value::from(limit as u64))),
-        ("reinforce", reinforce.map(Value::from)),
-        ("gate_threshold", gate.map(Value::from)),
-    ]);
+    let req = Request::Recall {
+        query: query.to_string(),
+        limit: Some(limit as u32),
+        namespace: None,
+        reinforce,
+        gate_threshold: gate,
+    };
     let timeout = Duration::from_millis(cfg.hook_timeout_ms);
-    let outcome = tokio::time::timeout(timeout, call_tool_oneshot(cfg, "recall", arguments)).await;
+    let outcome = tokio::time::timeout(timeout, call_oneshot(cfg, req)).await;
     interpret_recall(outcome)
 }
 
@@ -253,6 +254,7 @@ fn parse_user_prompt(stdin: &str) -> Option<UserPromptInput> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
 
     // --- stdin parsing: tolerate the real shapes + unknown fields, fail-open on junk ---
 
@@ -354,7 +356,7 @@ mod tests {
 
     #[test]
     fn session_start_output_shape_is_exact() {
-        let out = render_session_start("## KNOWLEDGE\n- uses rmcp");
+        let out = render_session_start("## KNOWLEDGE\n- uses the warm daemon");
         let v: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(
             v["hookSpecificOutput"]["hookEventName"],
@@ -362,7 +364,7 @@ mod tests {
         );
         assert_eq!(
             v["hookSpecificOutput"]["additionalContext"],
-            Value::from("## KNOWLEDGE\n- uses rmcp")
+            Value::from("## KNOWLEDGE\n- uses the warm daemon")
         );
         // Only the one envelope key.
         assert_eq!(v.as_object().unwrap().len(), 1);

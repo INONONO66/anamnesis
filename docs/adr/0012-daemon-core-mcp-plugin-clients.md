@@ -18,10 +18,10 @@ Two questions this ADR settles: (1) how do these surfaces reach the engine, and 
 Adopt a **three-layer split** where one daemon is the core and the other two surfaces are *clients* of it:
 
 1. **daemon — the core.** `anamnesis-mcp daemon` owns the DB + in-memory graph + the embedding model (loaded once). It is **on-demand** (the first client auto-spawns it), **ref-counted** (grace-exits when idle, `ANAMNESIS_DAEMON_GRACE_SECS`), and serves N clients over a **per-DB unix socket**. The single-writer lock lives on the daemon, so it is the *only* process that opens the DB.
-2. **MCP — a daemon client.** `anamnesis-mcp serve` is a thin stdio↔socket proxy the agent's MCP client speaks to; it carries the agent-judged **capture + reinforcement** half (`remember`/`relate`, and deliberate `recall` whose call *is* the "used" signal).
+2. **MCP — a daemon client.** `anamnesis-mcp serve` is the rmcp adapter the agent's MCP client speaks to over stdio; it translates each tool call into a bespoke daemon request. It carries the agent-judged **capture + reinforcement** half (`remember`/`relate`, and deliberate `recall` whose call *is* the "used" signal).
 3. **plugin — a daemon client.** `anamnesis-mcp hook <event>` reads the hook JSON, does a gated read-only recall over the socket, and emits `additionalContext`. It carries the **proactive recall** half.
 
-**MCP and plugin are distinct clients of the same daemon.** The hook does not use MCP *semantics* — it only needs a recall against the warm engine; reusing the MCP wire over the socket is incidental, not required. The plugin **does not bundle/embed the MCP server**, and **neither client opens the DB directly** (the lock would reject it). There is no `--embedded` hook mode.
+**MCP and plugin are distinct clients of the same daemon.** The daemon's socket protocol is a **bespoke newline-delimited request/response** (`proto`); MCP (rmcp) is **confined to the `serve` adapter** — the one place an external agent (Claude Code / Codex) forces it. The hook and the CLI are therefore MCP-free: they speak only the bespoke wire. The plugin **does not bundle/embed the MCP server**, and **neither client opens the DB directly** (the lock would reject it). There is no `--embedded` hook mode.
 
 ## Why this shape
 
@@ -33,8 +33,8 @@ Adopt a **three-layer split** where one daemon is the core and the other two sur
 ## Consequences
 
 - The daemon is **non-removable** while the local-model + in-memory-graph design holds. If embeddings were ever offloaded to a remote service, this layer could collapse into stateless clients — a hypothetical, not a plan.
-- The hook path stays a daemon client (no embedded mode) for warm-model + lock safety; both clients must tolerate the daemon being absent or restarting (the hook is fail-open; the MCP launcher respawns the daemon).
-- The socket protocol is MCP today (reused for the agent path). A bespoke lightweight hook protocol would shave the MCP handshake off the hook path, but adds a second daemon surface for marginal latency — **explicitly deferred**.
+- The hook path stays a daemon client (no embedded mode) for warm-model + lock safety; both clients must tolerate the daemon being absent or restarting (the hook is fail-open; `ensure_daemon` respawns a detached daemon on connect).
+- The daemon's socket protocol is the bespoke `proto` (newline-delimited request→response); rmcp/MCP lives **only** in the `serve` adapter (`server.rs` + the `serve` entrypoint). This is what makes the hook, the CLI, and the daemon itself MCP-free, so the agent's MCP can never leak into the proactive-recall path. `serve` (daemon-backed or `--embedded`) and the bespoke clients share one `dispatch` core, so all paths produce byte-identical output.
 - New work must respect this split: reach the engine *through the daemon*; new agent capabilities go on the MCP client, new proactive/automatic behaviors go on the plugin client, and shared state lives in the daemon — never a second DB opener.
 
 ## References

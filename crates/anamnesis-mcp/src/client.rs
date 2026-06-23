@@ -1,131 +1,78 @@
-//! Thin MCP-over-Unix-socket client for the CLI one-shots.
+//! Bespoke daemon client — the MCP-free wire to the shared daemon.
 //!
-//! Once the shared daemon owns the DB (and its `<db>.lock`), a CLI one-shot can
-//! no longer open the DB directly — the lock would reject it. So `recall`,
-//! `remember`, `relate`, and `stats` become **clients** of the daemon instead:
-//!
-//! 1. [`crate::launcher::ensure_daemon`] — derive the per-DB socket, connect, and
-//!    (if no daemon is up yet) spawn a detached one and retry-connect.
-//! 2. `()` (the unit client handler) `.serve(stream)` — run the MCP `initialize`
-//!    handshake over the socket, exactly like a real MCP host would.
-//! 3. one `tools/call` for the requested tool, then read the result.
-//! 4. extract the result's text payload, print it, and disconnect (`cancel`).
-//!
-//! This reuses all of rmcp's client machinery (framing, handshake, request
-//! correlation) rather than hand-rolling JSON-RPC, so the wire protocol is
-//! guaranteed identical to what the daemon's server side expects.
+//! The daemon speaks [`crate::proto`] (newline-delimited JSON, one
+//! request→response per line) over its per-DB unix socket. This connects (via the
+//! launcher's spawn/retry) and issues requests. The `serve` adapter holds one
+//! persistent [`DaemonClient`] for the whole agent session and forwards each MCP
+//! tool call; the CLI one-shots and the hook use [`call_oneshot`]. No rmcp here —
+//! MCP lives only in `server.rs` (see ADR-0012).
 
-use anyhow::{Context, Result, anyhow, bail};
-use rmcp::ServiceExt;
-use rmcp::model::{CallToolRequestParams, CallToolResult};
-use serde_json::{Map, Value};
+use anyhow::{Context, Result, anyhow};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
+use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 
 use crate::config::Config;
 use crate::launcher::ensure_daemon;
+use crate::proto::{self, Request, Response};
 
-/// Run one tool against the shared daemon for `cfg`'s resolved DB and return the
-/// joined text payload of the result.
+/// A connected, persistent client of the shared daemon.
 ///
-/// Ensures the daemon is up, performs the MCP `initialize` handshake, issues a
-/// single `tools/call`, then disconnects cleanly. `arguments` is the tool's
-/// parameter object (already shaped to the tool's input schema).
-pub async fn call_tool_oneshot(
-    cfg: &Config,
-    tool: &'static str,
-    arguments: Map<String, Value>,
-) -> Result<String> {
-    // 1) ensure the daemon and connect (reuses the launcher's spawn/retry logic).
-    let stream = ensure_daemon(&cfg.default_db)
-        .await
-        .context("connect to the anamnesis daemon")?;
-
-    // 2) MCP initialize handshake. `()` is rmcp's no-capability client handler;
-    //    `serve` drives initialize and returns a running client session.
-    let client = ().serve(stream).await.context("MCP initialize handshake with the daemon")?;
-
-    // 3) one tools/call.
-    let result = client
-        .peer()
-        .call_tool(CallToolRequestParams::new(tool).with_arguments(arguments))
-        .await
-        .with_context(|| format!("tools/call {tool}"));
-
-    // 4) always disconnect, even if the call failed, so we don't pin the daemon's
-    //    grace timer open. Then surface the call's outcome.
-    let disconnect = client.cancel().await;
-    let result = result?;
-    if let Err(e) = disconnect {
-        tracing::debug!("client disconnect returned: {e}");
-    }
-
-    text_payload(result)
+/// Calls are serialized — one request→response at a time over the single
+/// connection. That loses no throughput because the daemon serializes every op
+/// at its one registry `Mutex` regardless, and it lets the wire stay correlation-
+/// id-free (a reply always belongs to the most recent request).
+pub struct DaemonClient {
+    reader: Lines<BufReader<OwnedReadHalf>>,
+    writer: OwnedWriteHalf,
 }
 
-/// Join a [`CallToolResult`]'s text content blocks into a single string.
-///
-/// A tool that reports `is_error` surfaces as a Rust error carrying that text, so
-/// a CLI one-shot exits non-zero with the daemon's message (e.g. an unknown
-/// relation label) rather than printing it as if it were a success.
-fn text_payload(result: CallToolResult) -> Result<String> {
-    let text: String = result
-        .content
-        .iter()
-        .filter_map(|c| c.as_text().map(|t| t.text.as_str()))
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    if result.is_error.unwrap_or(false) {
-        if text.is_empty() {
-            bail!("daemon returned a tool error with no message");
-        }
-        return Err(anyhow!(text));
-    }
-    Ok(text)
-}
-
-/// Build a `tools/call` argument object from `(key, value)` pairs, skipping any
-/// `None` values so an omitted optional (e.g. `namespace`) is left off entirely
-/// rather than sent as JSON `null`.
-pub fn args<I>(pairs: I) -> Map<String, Value>
-where
-    I: IntoIterator<Item = (&'static str, Option<Value>)>,
-{
-    pairs
-        .into_iter()
-        .filter_map(|(k, v)| v.map(|v| (k.to_string(), v)))
-        .collect()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn args_skips_none_keeps_some() {
-        let m = args([
-            ("query", Some(Value::String("hello".into()))),
-            ("namespace", None),
-            ("limit", Some(Value::from(5u32))),
-        ]);
-        assert_eq!(m.get("query").and_then(|v| v.as_str()), Some("hello"));
-        assert_eq!(m.get("limit").and_then(|v| v.as_u64()), Some(5));
-        assert!(
-            !m.contains_key("namespace"),
-            "a None optional must be omitted, not sent as null"
-        );
+impl DaemonClient {
+    /// Ensure the daemon for `cfg`'s resolved DB is up and connect to it.
+    pub async fn connect(cfg: &Config) -> Result<Self> {
+        let stream = ensure_daemon(&cfg.default_db)
+            .await
+            .context("connect to the anamnesis daemon")?;
+        let (rd, wr) = stream.into_split();
+        Ok(Self {
+            reader: BufReader::new(rd).lines(),
+            writer: wr,
+        })
     }
 
-    #[test]
-    fn text_payload_joins_content_and_errors_on_is_error() {
-        use rmcp::model::Content;
-        let ok = CallToolResult::success(vec![Content::text("a"), Content::text("b")]);
-        assert_eq!(text_payload(ok).unwrap(), "a\nb");
+    /// Send one request and read its reply.
+    ///
+    /// Transport failures (write/read/EOF) are `Err`. A daemon-level error comes
+    /// back as `Ok(Response::Err{..})` — NOT collapsed — so the caller can re-map
+    /// the [`proto::ErrKind`] faithfully (the `serve` adapter turns it back into
+    /// an MCP `invalid_params` vs `internal_error`).
+    pub async fn call(&mut self, req: &Request) -> Result<Response> {
+        let line = proto::encode_line(req).context("encode request")?;
+        self.writer
+            .write_all(line.as_bytes())
+            .await
+            .context("send request to daemon")?;
+        self.writer
+            .flush()
+            .await
+            .context("flush request to daemon")?;
+        let resp_line = self
+            .reader
+            .next_line()
+            .await
+            .context("read daemon response")?
+            .ok_or_else(|| anyhow!("daemon closed the connection without responding"))?;
+        proto::decode_line::<Response>(&resp_line).context("decode daemon response")
+    }
+}
 
-        let err = CallToolResult::error(vec![Content::text("unknown relation")]);
-        let e = text_payload(err).unwrap_err();
-        assert!(
-            e.to_string().contains("unknown relation"),
-            "tool error text must propagate: {e}"
-        );
+/// Connect, issue one request, return its `Ok` text (or the daemon's error as an
+/// `anyhow` error), and disconnect — the CLI one-shot / hook path. Dropping the
+/// client closes the connection, so the daemon's client ref-count falls and its
+/// grace timer can start.
+pub async fn call_oneshot(cfg: &Config, req: Request) -> Result<String> {
+    let mut client = DaemonClient::connect(cfg).await?;
+    match client.call(&req).await? {
+        Response::Ok { text } => Ok(text),
+        Response::Err { message, .. } => Err(anyhow!(message)),
     }
 }
