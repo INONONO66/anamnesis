@@ -112,7 +112,13 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-semver-checks
-      - run: cargo semver-checks --package anamnesis --baseline-rev origin/main
+      - name: semver check (skip when the package is new to the baseline)
+        run: |
+          if git show origin/main:crates/anamnesis/Cargo.toml 2>/dev/null | grep -q 'name = "anamnesis-engine"'; then
+            cargo semver-checks --package anamnesis-engine --baseline-rev origin/main
+          else
+            echo "::notice::anamnesis-engine is new to the baseline (package rename); skipping semver this run"
+          fi
 
   deny:
     name: Cargo deny

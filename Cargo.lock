@@ -59,7 +59,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "anamnesis"
+name = "anamnesis-engine"
 version = "0.8.0"
 dependencies = [
  "criterion",
@@ -78,7 +78,7 @@ dependencies = [
 name = "anamnesis-mcp"
 version = "0.8.0"
 dependencies = [
- "anamnesis",
+ "anamnesis-engine",
  "anyhow",
  "clap",
  "dirs 5.0.1",

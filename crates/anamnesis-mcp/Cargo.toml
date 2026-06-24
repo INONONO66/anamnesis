@@ -15,7 +15,7 @@ name = "anamnesis"
 path = "src/main.rs"
 
 [dependencies]
-anamnesis = { path = "../anamnesis", features = ["embed"] }
+anamnesis = { path = "../anamnesis", package = "anamnesis-engine", features = ["embed"] }
 rmcp = { version = "1.7", features = [
     "server",
     # `client` drives the CLI one-shots: they connect to the shared daemon over
