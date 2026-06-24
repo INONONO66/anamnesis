@@ -610,6 +610,8 @@ CI also runs the MSRV check (`cargo check --all-targets --all-features` on Rust 
 
 ## Status
 
+**v0.8.1** — plugin/packaging fixes, no library API change: first-run install-and-go hardening — background binary prefetch so the MCP startup doesn't race the one-time fetch, and the Codex MCP `command` now uses a plugin-root-relative path instead of the unexpanded `${PLUGIN_ROOT}` (Codex doesn't expand it in MCP commands); Codex hook config fix (Codex 0.142 rejects a stray top-level `description`); crates.io publishing as `anamnesis-engine`.
+
 **v0.8.0** — published to crates.io as **`anamnesis-engine`** (the bare `anamnesis` name belongs to an unrelated crate); the library crate name stays `anamnesis`, so `use anamnesis::…` is unchanged. Ships the Claude Code & Codex plugin (activation-gated recall) and the MCP-free internal transport ([ADR-0012](docs/adr/0012-daemon-core-mcp-plugin-clients.md)). No library API changes vs 0.7.
 
 **v0.7.0** — two-door public API surface: root re-exports exactly `Memory`, `Engine`, `Error`; `anamnesis::engine::*` is the full kernel namespace; `anamnesis::memory::*` is the framework namespace. Legacy top-level modules (`api`, `graph`, `mechanics`, `peer`, `query`, `snapshot`, `storage`, `embedding`, `error`) are doc-hidden but remain compilable for migration. Breaking vs 0.6: all root shortcuts beyond the three named types are removed.
