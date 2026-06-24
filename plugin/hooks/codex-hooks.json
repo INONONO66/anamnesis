@@ -1,5 +1,4 @@
 {
-  "description": "anamnesis Codex hooks — activation-gated read-only recall injection via the warm daemon (fail-open). Same guard wrapper as the Claude Code plugin.",
   "hooks": {
     "SessionStart": [
       {
