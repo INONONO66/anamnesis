@@ -23,6 +23,21 @@ if [ -x "$BIN" ]; then
   exit 0
 fi
 
+# Drop stale partial downloads from killed runs so they don't make us wait below.
+find "$HERE" -maxdepth 1 -name '.anamnesis.download.*' -mmin +5 -delete 2>/dev/null || true
+
+# If another invocation (typically the SessionStart background prefetch) is
+# mid-download, wait for it to land instead of racing a second ~24MB fetch. This
+# is what lets the MCP server's launcher reuse the prefetch and come up inside the
+# ~30s startup window. Bounded, so a stalled peer can never hang us.
+i=0
+while [ -n "$(ls "$HERE"/.anamnesis.download.* 2>/dev/null)" ] && [ "$i" -lt 25 ]; do
+  if [ -x "$BIN" ]; then printf '%s\n' "$BIN"; exit 0; fi
+  sleep 1
+  i=$((i + 1))
+done
+if [ -x "$BIN" ]; then printf '%s\n' "$BIN"; exit 0; fi
+
 # Map uname → the release asset name (matches .github/workflows/release.yml).
 os=$(uname -s 2>/dev/null || echo unknown)
 arch=$(uname -m 2>/dev/null || echo unknown)

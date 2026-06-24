@@ -16,16 +16,20 @@
 #   e.g. user-prompt | session-start. stdin/stdout pass through unchanged.
 
 # Resolve the binary: bundled/fetched next to the plugin first, then PATH, then
-# ~/.cargo/bin. SessionStart (not prompt-blocking) fetches it on first use via
-# `ensure-anamnesis.sh` (install-and-go); UserPromptSubmit must never block on a
-# download, so it only USES an already-present binary and no-ops otherwise.
+# ~/.cargo/bin. The binary is fetched on first use (install-and-go), but that
+# ~24MB download must NEVER block a hook — SessionStart's timeout is short and a
+# UserPromptSubmit hook must stay instant. So SessionStart kicks the fetch off in
+# the BACKGROUND (detached via nohup, so it survives this hook returning) to get
+# it in flight before the MCP server's ~30s startup window; both hooks then USE
+# the binary only if it is ALREADY present and no-op otherwise — neither ever
+# waits on the download. (The MCP server's own launcher reuses this same in-flight
+# fetch, so startup does not race a second download.)
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-if [ "$1" = "session-start" ]; then
-  BIN=$("$HERE/../bin/ensure-anamnesis.sh" 2>/dev/null) || BIN=
-else
-  BIN="$HERE/../bin/anamnesis"
-  [ -x "$BIN" ] || BIN=
+if [ "$1" = "session-start" ] && [ ! -x "$HERE/../bin/anamnesis" ]; then
+  nohup "$HERE/../bin/ensure-anamnesis.sh" >/dev/null 2>&1 &
 fi
+BIN="$HERE/../bin/anamnesis"
+[ -x "$BIN" ] || BIN=
 [ -n "$BIN" ] || BIN=$(command -v anamnesis 2>/dev/null) || BIN=
 [ -n "$BIN" ] || BIN="${HOME}/.cargo/bin/anamnesis"
 [ -x "$BIN" ] || exit 0

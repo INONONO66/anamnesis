@@ -48,10 +48,18 @@ tools (MCP) — with **no separate `claude mcp add`, no `npm`/`cargo`, no global
 /reload-plugins
 ```
 
-On first use the serve wrapper / SessionStart hook downloads the platform binary into the plugin's
-cached `bin/` — a one-time, few-second fetch; later sessions are instant. This needs a **published
-GitHub Release `v<plugin-version>`** carrying the `anamnesis-<platform>` assets (built by the release
-CI). The `hook` subcommand requires the binary **`>= 0.8.0`**.
+On first use the SessionStart hook kicks off a **background** fetch of the platform binary into the
+plugin's cached `bin/`, and the MCP server's launcher reuses that same in-flight download (rather
+than racing a second one) — a one-time, few-second fetch; later sessions are instant. This needs a
+**published GitHub Release `v<plugin-version>`** carrying the `anamnesis-<platform>` assets (built by
+the release CI). The `hook` subcommand requires the binary **`>= 0.8.0`**.
+
+> **First-run note (slow networks).** Claude Code's MCP startup timeout is **30 s**. On a slow link
+> the ~24 MB binary may not land within that window, so the **first** session can show a one-time
+> `MCP client for anamnesis failed to start` warning. The download still completes in the background —
+> just `/reload-plugins` (or open the next session) and the MCP server attaches instantly. To avoid
+> the warning entirely, raise the limit once with `MCP_TIMEOUT=120000 claude`. The hooks (proactive
+> recall) are unaffected — they never block on the fetch.
 
 (`./plugin` is the dir with `.claude-plugin/marketplace.json`; `anamnesis-plugins` is the marketplace
 `name`. `source: "./"` resolves against a local-dir or git marketplace.)
