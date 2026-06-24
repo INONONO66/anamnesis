@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  <a href="#quick-start">Quick Start</a> · <a href="docs/README.md">Docs</a> · <a href="docs/00-foundation/vision.md">Vision</a> · <a href="docs/01-system-architecture/overview.md">Architecture</a>
+  <a href="#use-in-claude-code--codex">Claude Code &amp; Codex</a> · <a href="#quick-start">Quick Start</a> · <a href="docs/README.md">Docs</a> · <a href="docs/00-foundation/vision.md">Vision</a> · <a href="docs/01-system-architecture/overview.md">Architecture</a>
 </p>
 
 ---
@@ -85,12 +85,45 @@ Anamnesis is a **library — a memory kernel**, not a service. It owns the *phys
 | Snapshots, SQLite storage, health/invariants | **Queries & commit**: `search` auto-flushes; `used` commits reinforcement | Yes — use `engine().search()` / `engine_mut().commit()` |
 | Pure mechanics, no LLM calls, no background tasks | **`tick` scheduling**, no serving opinion | `tick(now)` — caller schedules; retrieval quality depends on encoding; the validated recipe is `Memory` |
 
-### MCP server
+## Use in Claude Code & Codex
 
-`anamnesis-mcp` wraps the `Memory` front door as an MCP **stdio** server
-(`recall` / `remember` / `ingest_conversation`) with auto-reinforced reads.
-See [`crates/anamnesis-mcp`](crates/anamnesis-mcp/README.md). Install via
-`npx anamnesis-mcp serve` (v1.5) or `cargo run -p anamnesis-mcp -- serve`.
+The most common way to run Anamnesis: **persistent associative memory for a
+coding agent.** The plugin wires Anamnesis into Claude Code (and Codex) as
+**activation-gated recall** — `SessionStart` seeds a few high-salience project
+memories, and every `UserPromptSubmit` injects a read-only spreading-activation
+recall **only when the top activation clears a threshold**, so an off-topic
+prompt injects nothing. It is **install-and-go**: the plugin carries both the
+hooks and the agent MCP tools and fetches the matching native binary from the
+GitHub Release on first use — no `cargo`, no `npm`, no separate binary step.
+
+**Claude Code** — add the marketplace, install, reload:
+
+```text
+/plugin marketplace add INONONO66/anamnesis
+/plugin install anamnesis@anamnesis-plugins
+/reload-plugins
+```
+
+That is the whole setup. You get proactive recall (hooks) **and** the
+`recall` / `remember` / `relate` / `ingest_conversation` / `stats` tools (MCP).
+
+**Codex** — same hook contract, same binary:
+
+```text
+codex plugin marketplace add INONONO66/anamnesis
+codex plugin add anamnesis@anamnesis-plugins
+```
+
+Configuration (the `τ` recall gate, top-`k`, timeouts), the guard-wrapper
+rationale, and the Codex visibility caveat live in
+**[`plugin/README.md`](plugin/README.md)**.
+
+> **Just the MCP server / CLI** (no plugin): the same binary ships on npm as
+> [`anamnesis-mcp`](https://www.npmjs.com/package/anamnesis-mcp), exposing the
+> `anamnesis` command — run `npx -p anamnesis-mcp anamnesis serve` for a stdio
+> MCP server (`recall` / `remember` / `relate` / `ingest_conversation` /
+> `stats`), or `cargo run -p anamnesis-mcp -- serve` from a checkout. See
+> [`crates/anamnesis-mcp`](crates/anamnesis-mcp/README.md).
 
 ## Benchmarks
 
