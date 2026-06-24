@@ -112,7 +112,7 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-semver-checks
-      - run: cargo semver-checks --package anamnesis --baseline-rev origin/main
+      - run: cargo semver-checks --package anamnesis-engine --baseline-rev origin/main
 
   deny:
     name: Cargo deny
