@@ -1,7 +1,8 @@
 {
   "mcpServers": {
     "anamnesis": {
-      "command": "${PLUGIN_ROOT}/bin/anamnesis-serve.sh"
+      "command": "sh",
+      "args": ["./bin/anamnesis-serve.sh"]
     }
   }
 }
