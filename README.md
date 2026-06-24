@@ -11,9 +11,9 @@
   <a href="https://github.com/INONONO66/anamnesis/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/INONONO66/anamnesis/ci.yml?style=flat-square&label=CI" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="License: MIT"></a>
   <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/rust-2024_edition-orange?style=flat-square&logo=rust" alt="Rust 2024"></a>
-  <a href="https://crates.io/crates/anamnesis"><img src="https://img.shields.io/crates/v/anamnesis?style=flat-square" alt="crates.io"></a>
+  <a href="https://crates.io/crates/anamnesis-engine"><img src="https://img.shields.io/crates/v/anamnesis-engine?style=flat-square" alt="crates.io"></a>
   <a href="https://codecov.io/gh/INONONO66/anamnesis"><img src="https://img.shields.io/codecov/c/github/INONONO66/anamnesis?style=flat-square&label=coverage" alt="Coverage"></a>
-  <a href="https://docs.rs/anamnesis"><img src="https://img.shields.io/docsrs/anamnesis?style=flat-square" alt="docs.rs"></a>
+  <a href="https://docs.rs/anamnesis-engine"><img src="https://img.shields.io/docsrs/anamnesis-engine?style=flat-square" alt="docs.rs"></a>
 </p>
 
 <p align="center">
@@ -73,7 +73,7 @@ One cue activates related fragments, which activate further fragments — recons
 
 ### Engine vs Consumer
 
-Anamnesis exposes two API surfaces: the **Framework API** ([`anamnesis::memory::Memory`](https://docs.rs/anamnesis/latest/anamnesis/memory/struct.Memory.html)) and the **Kernel API** ([`anamnesis::engine`](https://docs.rs/anamnesis/latest/anamnesis/engine/index.html)). `Memory` is the official consumer-layer default, built entirely on `Engine`'s public API. The crate root re-exports exactly three symbols — `Memory`, `Engine`, and `Error` — and nothing else; legacy module paths (`anamnesis::api`, `anamnesis::graph`, etc.) remain compilable for migration but are hidden from documentation and slated for removal in a future major.
+Anamnesis exposes two API surfaces: the **Framework API** ([`anamnesis::memory::Memory`](https://docs.rs/anamnesis-engine/latest/anamnesis/memory/struct.Memory.html)) and the **Kernel API** ([`anamnesis::engine`](https://docs.rs/anamnesis-engine/latest/anamnesis/engine/index.html)). `Memory` is the official consumer-layer default, built entirely on `Engine`'s public API. The crate root re-exports exactly three symbols — `Memory`, `Engine`, and `Error` — and nothing else; legacy module paths (`anamnesis::api`, `anamnesis::graph`, etc.) remain compilable for migration but are hidden from documentation and slated for removal in a future major.
 
 Anamnesis is a **library — a memory kernel**, not a service. It owns the *physics of memory* (storage, spreading activation, dissipation, reinforcement, frustration, temporal validity) and deliberately leaves the *sensory/motor* layer to you. Unlike hosted memory APIs (Mem0, Zep, Supermemory) that bundle extraction + embeddings + serving, Anamnesis stays a deterministic, local-first, embeddable core that you drive.
 
@@ -168,8 +168,10 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
+# Published as `anamnesis-engine` — the crates.io name `anamnesis` belongs to an
+# unrelated crate. The library is still imported as `anamnesis` (`use anamnesis::…`).
 # Optional: local embedding provider (downloads model on first use, ~100-500 MB)
-anamnesis = { version = "0.7", features = ["embed"] }
+anamnesis-engine = { version = "0.8", features = ["embed"] }
 ```
 
 ```rust,no_run
@@ -607,6 +609,8 @@ CI also runs the MSRV check (`cargo check --all-targets --all-features` on Rust 
 `cargo test --all-targets` intentionally is not a release gate because this crate has `harness = false` benchmark binaries that execute long-running benchmarks when invoked as test targets. Use `cargo bench` or the manual benchmark workflow for performance runs.
 
 ## Status
+
+**v0.8.0** — published to crates.io as **`anamnesis-engine`** (the bare `anamnesis` name belongs to an unrelated crate); the library crate name stays `anamnesis`, so `use anamnesis::…` is unchanged. Ships the Claude Code & Codex plugin (activation-gated recall) and the MCP-free internal transport ([ADR-0012](docs/adr/0012-daemon-core-mcp-plugin-clients.md)). No library API changes vs 0.7.
 
 **v0.7.0** — two-door public API surface: root re-exports exactly `Memory`, `Engine`, `Error`; `anamnesis::engine::*` is the full kernel namespace; `anamnesis::memory::*` is the framework namespace. Legacy top-level modules (`api`, `graph`, `mechanics`, `peer`, `query`, `snapshot`, `storage`, `embedding`, `error`) are doc-hidden but remain compilable for migration. Breaking vs 0.6: all root shortcuts beyond the three named types are removed.
 
