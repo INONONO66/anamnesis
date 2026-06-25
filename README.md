@@ -610,6 +610,8 @@ CI also runs the MSRV check (`cargo check --all-targets --all-features` on Rust 
 
 ## Status
 
+**v0.8.2** — Codex MCP fix, no library API change: the Codex MCP server `command` now uses **`npx`** (cwd-independent, auto-fetching the binary) instead of a plugin-relative path. Codex spawns MCP servers from the **user's cwd** (not the plugin root) and does **not** expand `${PLUGIN_ROOT}` in an MCP command, so the plugin had no way to point at its own bundled binary — every user hit "MCP failed to start: connection closed". `npx` matches the official Codex MCP convention (a PATH command) and keeps it install-and-go. Claude Code is unaffected (it expands `${CLAUDE_PLUGIN_ROOT}`).
+
 **v0.8.1** — plugin/packaging fixes, no library API change: first-run install-and-go hardening — background binary prefetch so the MCP startup doesn't race the one-time fetch, and the Codex MCP `command` now uses a plugin-root-relative path instead of the unexpanded `${PLUGIN_ROOT}` (Codex doesn't expand it in MCP commands); Codex hook config fix (Codex 0.142 rejects a stray top-level `description`); crates.io publishing as `anamnesis-engine`.
 
 **v0.8.0** — published to crates.io as **`anamnesis-engine`** (the bare `anamnesis` name belongs to an unrelated crate); the library crate name stays `anamnesis`, so `use anamnesis::…` is unchanged. Ships the Claude Code & Codex plugin (activation-gated recall) and the MCP-free internal transport ([ADR-0012](docs/adr/0012-daemon-core-mcp-plugin-clients.md)). No library API changes vs 0.7.
