@@ -691,6 +691,18 @@ impl<S: StorageAdapter + Clone> Memory<S> {
     pub fn engine_mut(&mut self) -> &mut Engine<S> {
         &mut self.engine
     }
+
+    /// Set one metadata key on an existing node and persist it durably.
+    ///
+    /// Metadata is written via `set_node` (INSERT OR REPLACE) — a bare
+    /// `get_node_mut` + `flush` would only persist hot fields, so the value
+    /// would silently vanish on reopen. Used by the capture pipeline to stamp
+    /// `anamnesis:turn_key` / `anamnesis:extracted` on Episodic nodes.
+    pub fn set_metadata(&mut self, id: NodeId, key: &str, value: &str) -> Result<(), Error> {
+        let mut node = self.engine.graph().get_node(id)?.clone();
+        node.metadata.insert(key.to_string(), value.to_string());
+        self.engine.graph_mut().storage_mut().set_node(node)
+    }
 }
 
 // ── Relate / neighbors — typed reasoning-chain edges ─────────────────────────
@@ -1614,5 +1626,23 @@ mod tests {
             package: ContextPackage::empty(),
         };
         assert_eq!(recall.as_context(), "");
+    }
+
+    #[test]
+    fn set_metadata_persists_through_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("meta.db");
+        let provider: Arc<dyn EmbeddingProvider> = Arc::new(HashEmbedProvider::new());
+        let id = {
+            let mut m = Memory::with_provider(&path, provider.clone()).unwrap();
+            let id = m.add("s", "user", "we chose sqlite", t(1)).unwrap().episodic;
+            m.flush_all().unwrap();
+            m.set_metadata(id, "anamnesis:extracted", "false").unwrap();
+            id
+        };
+        // Reopen: metadata must survive (only set_node writes it, not flush).
+        let m2 = Memory::with_provider(&path, provider).unwrap();
+        let node = m2.engine().graph().get_node(id).unwrap();
+        assert_eq!(node.metadata.get("anamnesis:extracted").map(String::as_str), Some("false"));
     }
 }
