@@ -1635,7 +1635,10 @@ mod tests {
         let provider: Arc<dyn EmbeddingProvider> = Arc::new(HashEmbedProvider::new());
         let id = {
             let mut m = Memory::with_provider(&path, provider.clone()).unwrap();
-            let id = m.add("s", "user", "we chose sqlite", t(1)).unwrap().episodic;
+            let id = m
+                .add("s", "user", "we chose sqlite", t(1))
+                .unwrap()
+                .episodic;
             m.flush_all().unwrap();
             m.set_metadata(id, "anamnesis:extracted", "false").unwrap();
             id
@@ -1643,6 +1646,9 @@ mod tests {
         // Reopen: metadata must survive (only set_node writes it, not flush).
         let m2 = Memory::with_provider(&path, provider).unwrap();
         let node = m2.engine().graph().get_node(id).unwrap();
-        assert_eq!(node.metadata.get("anamnesis:extracted").map(String::as_str), Some("false"));
+        assert_eq!(
+            node.metadata.get("anamnesis:extracted").map(String::as_str),
+            Some("false")
+        );
     }
 }

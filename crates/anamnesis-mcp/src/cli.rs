@@ -414,7 +414,12 @@ mod tests {
         use clap::Parser;
         // The binary name + `hook stop` must parse to HookEvent::Stop.
         let cli = Cli::try_parse_from(["anamnesis", "hook", "stop"]).unwrap();
-        assert!(matches!(cli.command, Some(Commands::Hook { event: HookEvent::Stop })));
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Hook {
+                event: HookEvent::Stop
+            })
+        ));
         assert!(Cli::try_parse_from(["anamnesis", "hook", "pre-compact"]).is_ok());
         assert!(Cli::try_parse_from(["anamnesis", "hook", "session-end"]).is_ok());
     }

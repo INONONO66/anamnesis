@@ -72,7 +72,12 @@ pub fn dispatch(reg: &mut MemoryRegistry, req: Request) -> Response {
                     at_ms: t.at_ms,
                 })
                 .collect();
-            match reg.ingest_conversation(&session, &turns, namespace.as_deref(), capture.unwrap_or(false)) {
+            match reg.ingest_conversation(
+                &session,
+                &turns,
+                namespace.as_deref(),
+                capture.unwrap_or(false),
+            ) {
                 Ok(summary) => Response::ok(format!(
                     "ingested {} turns ({} semantic nodes)",
                     summary.episodic, summary.semantic

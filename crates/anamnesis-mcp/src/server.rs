@@ -288,7 +288,10 @@ impl AnamnesisServer {
         &self,
         Parameters(p): Parameters<ExtractPendingParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let req = Request::PullPending { limit: p.limit, namespace: p.namespace };
+        let req = Request::PullPending {
+            limit: p.limit,
+            namespace: p.namespace,
+        };
         to_result(self.backend.call(req).await)
     }
 }

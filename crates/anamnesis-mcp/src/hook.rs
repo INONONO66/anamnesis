@@ -26,7 +26,7 @@ use crate::cli::HookEvent;
 use crate::client::call_oneshot;
 use crate::config::Config;
 use crate::proto::{Request, TurnInput};
-use crate::transcript::{parse_transcript, resolve_transcript, ParsedTurn};
+use crate::transcript::{ParsedTurn, parse_transcript, resolve_transcript};
 
 /// One-line nudge prepended to a `user-prompt` injection so the agent reinforces
 /// memory it actually uses (hook recall is read-only; reinforcement is deliberate).
@@ -96,7 +96,10 @@ fn extraction_signal(pending: usize, threshold: usize) -> Option<String> {
 async fn session_extraction_signal(cfg: &Config) -> Option<String> {
     let req = Request::ExtractionStatus { namespace: None };
     let timeout = Duration::from_millis(cfg.hook_timeout_ms);
-    let text = tokio::time::timeout(timeout, call_oneshot(cfg, req)).await.ok()?.ok()?;
+    let text = tokio::time::timeout(timeout, call_oneshot(cfg, req))
+        .await
+        .ok()?
+        .ok()?;
     let v: serde_json::Value = serde_json::from_str(&text).ok()?;
     let pending = v.get("pending")?.as_u64()? as usize;
     extraction_signal(pending, cfg.extract_threshold_n)
@@ -342,9 +345,18 @@ async fn run_capture(cfg: &Config, stdin: &str, event: &HookEvent) -> Option<Str
     let session = input.session_id.unwrap_or_else(|| "capture".to_string());
     let turns: Vec<TurnInput> = selected
         .iter()
-        .map(|t| TurnInput { speaker: t.speaker.clone(), text: t.text.clone(), at_ms: t.at_ms })
+        .map(|t| TurnInput {
+            speaker: t.speaker.clone(),
+            text: t.text.clone(),
+            at_ms: t.at_ms,
+        })
         .collect();
-    let req = Request::Ingest { session, turns, namespace: None, capture: Some(true) };
+    let req = Request::Ingest {
+        session,
+        turns,
+        namespace: None,
+        capture: Some(true),
+    };
     // Fire-and-forget under the fail-open timeout; ignore the result (silent).
     let timeout = Duration::from_millis(cfg.hook_timeout_ms);
     let _ = tokio::time::timeout(timeout, call_oneshot(cfg, req)).await;
@@ -572,10 +584,17 @@ mod tests {
 
     #[test]
     fn stop_selects_recent_window_others_select_tail() {
-        let turns: Vec<crate::transcript::ParsedTurn> = (0..60).map(|i| crate::transcript::ParsedTurn {
-            speaker: if i % 2 == 0 { "user".into() } else { "assistant".into() },
-            text: format!("t{i}"), at_ms: Some(1000 + i),
-        }).collect();
+        let turns: Vec<crate::transcript::ParsedTurn> = (0..60)
+            .map(|i| crate::transcript::ParsedTurn {
+                speaker: if i % 2 == 0 {
+                    "user".into()
+                } else {
+                    "assistant".into()
+                },
+                text: format!("t{i}"),
+                at_ms: Some(1000 + i),
+            })
+            .collect();
         // Stop ⇒ a small recent window (≤8) including the latest turn.
         let stop = select_turns(&turns, &HookEvent::Stop);
         assert!(stop.len() <= 8 && stop.last().unwrap().text == "t59");
@@ -589,7 +608,10 @@ mod tests {
 
     #[test]
     fn extraction_signal_only_over_threshold() {
-        assert!(extraction_signal(25, 20).is_some(), "over threshold ⇒ signal");
+        assert!(
+            extraction_signal(25, 20).is_some(),
+            "over threshold ⇒ signal"
+        );
         assert!(extraction_signal(20, 20).is_some(), "at threshold ⇒ signal");
         assert!(extraction_signal(3, 20).is_none(), "under ⇒ none");
         let s = extraction_signal(25, 20).unwrap();

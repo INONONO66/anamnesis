@@ -225,8 +225,14 @@ mod tests {
 
     #[test]
     fn pull_and_status_round_trip() {
-        let a = Request::PullPending { limit: Some(10), namespace: None };
-        assert_eq!(decode_line::<Request>(&encode_line(&a).unwrap()).unwrap(), a);
+        let a = Request::PullPending {
+            limit: Some(10),
+            namespace: None,
+        };
+        assert_eq!(
+            decode_line::<Request>(&encode_line(&a).unwrap()).unwrap(),
+            a
+        );
         let b = Request::ExtractionStatus { namespace: None };
         let line = encode_line(&b).unwrap();
         assert!(line.contains("\"op\":\"extraction_status\""), "got: {line}");
@@ -243,7 +249,10 @@ mod tests {
             capture: None,
         };
         let line = encode_line(&req).unwrap();
-        assert!(!line.contains("capture"), "None capture must be omitted: {line}");
+        assert!(
+            !line.contains("capture"),
+            "None capture must be omitted: {line}"
+        );
         let back: Request = decode_line(&line).unwrap();
         assert_eq!(back, req);
 

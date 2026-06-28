@@ -5,10 +5,10 @@ mod daemon;
 mod dispatch;
 mod hook;
 mod launcher;
-mod transcript;
 mod memory;
 mod proto;
 mod server;
+mod transcript;
 
 #[cfg(test)]
 mod eval;

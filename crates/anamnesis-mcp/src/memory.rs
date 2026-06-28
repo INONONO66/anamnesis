@@ -601,9 +601,10 @@ impl MemoryRegistry {
                 let key = capture.then(|| turn_key(session, &turn.speaker, &turn.text, at.0));
                 // Dedup gate: skip turns already seen in this capture stream.
                 if let Some(k) = &key
-                    && self.seen_turn_keys.contains(k) {
-                        return None; // deduplicated
-                    }
+                    && self.seen_turn_keys.contains(k)
+                {
+                    return None; // deduplicated
+                }
                 Some((turn.speaker.clone(), turn.text.clone(), at, key))
             })
             .collect();
@@ -647,14 +648,25 @@ impl MemoryRegistry {
     /// always read from and marked in the **default** namespace, consistent with
     /// `extraction_status` and the capture hook (which always captures into the
     /// default namespace with `namespace: None`).
-    pub fn pull_pending(&mut self, limit: Option<usize>, _ns: Option<&str>) -> Result<String, Error> {
-        let take = limit.unwrap_or(self.unextracted.len()).min(self.unextracted.len());
+    pub fn pull_pending(
+        &mut self,
+        limit: Option<usize>,
+        _ns: Option<&str>,
+    ) -> Result<String, Error> {
+        let take = limit
+            .unwrap_or(self.unextracted.len())
+            .min(self.unextracted.len());
         let ids: Vec<NodeId> = self.unextracted.drain(0..take).collect();
         let mut items = Vec::with_capacity(ids.len());
         for id in ids {
             // Always operate on the default namespace — the queue is global.
             let mem = self.get(None)?;
-            let content = mem.engine().graph().get_node(id).map(|n| n.content.clone()).unwrap_or_default();
+            let content = mem
+                .engine()
+                .graph()
+                .get_node(id)
+                .map(|n| n.content.clone())
+                .unwrap_or_default();
             mem.set_metadata(id, META_EXTRACTED, "true")?;
             items.push(serde_json::json!({ "node_id": id.0, "content": content }));
         }
@@ -1200,18 +1212,42 @@ mod tests {
         let b = super::turn_key("s1", "user", "hello", 1000);
         assert_eq!(a, b, "same inputs ⇒ same key");
         assert_eq!(a.len(), 64, "sha256 hex is 64 chars");
-        assert_ne!(a, super::turn_key("s1", "user", "hello", 1001), "at_ms matters");
-        assert_ne!(a, super::turn_key("s1", "assistant", "hello", 1000), "speaker matters");
-        assert_ne!(a, super::turn_key("s2", "user", "hello", 1000), "session matters");
-        assert_ne!(a, super::turn_key("s1", "user", "HELLO-DIFFERENT", 1000), "text matters");
+        assert_ne!(
+            a,
+            super::turn_key("s1", "user", "hello", 1001),
+            "at_ms matters"
+        );
+        assert_ne!(
+            a,
+            super::turn_key("s1", "assistant", "hello", 1000),
+            "speaker matters"
+        );
+        assert_ne!(
+            a,
+            super::turn_key("s2", "user", "hello", 1000),
+            "session matters"
+        );
+        assert_ne!(
+            a,
+            super::turn_key("s1", "user", "HELLO-DIFFERENT", 1000),
+            "text matters"
+        );
     }
 
     #[test]
     fn pull_pending_returns_once_and_marks_extracted() {
         let mut reg = registry(true);
         let turns = vec![
-            Turn { speaker: "user".into(), text: "why x".into(), at_ms: Some(10) },
-            Turn { speaker: "assistant".into(), text: "because y".into(), at_ms: Some(20) },
+            Turn {
+                speaker: "user".into(),
+                text: "why x".into(),
+                at_ms: Some(10),
+            },
+            Turn {
+                speaker: "assistant".into(),
+                text: "because y".into(),
+                at_ms: Some(20),
+            },
         ];
         reg.ingest_conversation("s", &turns, None, true).unwrap();
         assert_eq!(reg.unextracted_len(), 2);
@@ -1230,34 +1266,54 @@ mod tests {
     #[test]
     fn pull_pending_ignores_namespace_param() {
         let mut reg = registry(true);
-        let turns = vec![
-            Turn { speaker: "user".into(), text: "ns-scope test".into(), at_ms: Some(1) },
-        ];
+        let turns = vec![Turn {
+            speaker: "user".into(),
+            text: "ns-scope test".into(),
+            at_ms: Some(1),
+        }];
         // Capture into the default namespace (as the hook always does).
         reg.ingest_conversation("s", &turns, None, true).unwrap();
         assert_eq!(reg.unextracted_len(), 1, "one turn queued");
         // Pull with a DIFFERENT namespace — must still drain the default-ns queue.
         let json = reg.pull_pending(None, Some("other")).unwrap();
         assert!(json.contains("\"node_id\""), "got: {json}");
-        assert!(json.contains("ns-scope test"), "real content returned: {json}");
-        assert_eq!(reg.unextracted_len(), 0, "queue drained despite foreign ns arg");
+        assert!(
+            json.contains("ns-scope test"),
+            "real content returned: {json}"
+        );
+        assert_eq!(
+            reg.unextracted_len(),
+            0,
+            "queue drained despite foreign ns arg"
+        );
     }
 
     #[test]
     fn extraction_status_reports_pending() {
         let mut reg = registry(true);
-        let turns = vec![Turn { speaker: "user".into(), text: "z".into(), at_ms: Some(99) }];
+        let turns = vec![Turn {
+            speaker: "user".into(),
+            text: "z".into(),
+            at_ms: Some(99),
+        }];
         reg.ingest_conversation("s", &turns, None, true).unwrap();
         let s = reg.extraction_status(None).unwrap();
         assert!(s.contains("\"pending\":1"), "got: {s}");
         // threshold field is intentionally absent — the hook reads only `pending`.
-        assert!(!s.contains("\"threshold\""), "threshold must be absent: {s}");
+        assert!(
+            !s.contains("\"threshold\""),
+            "threshold must be absent: {s}"
+        );
     }
 
     #[test]
     fn capture_dedups_identical_turns() {
         let mut reg = registry(true);
-        let turns = vec![Turn { speaker: "user".into(), text: "ship it".into(), at_ms: Some(1000) }];
+        let turns = vec![Turn {
+            speaker: "user".into(),
+            text: "ship it".into(),
+            at_ms: Some(1000),
+        }];
         let s1 = reg.ingest_conversation("sess", &turns, None, true).unwrap();
         assert_eq!(s1.episodic, 1, "first capture creates one episodic");
         // Same turn again (multi-hook) ⇒ deduped, no new node.
@@ -1268,10 +1324,22 @@ mod tests {
     #[test]
     fn capture_enqueues_unextracted_but_plain_ingest_does_not() {
         let mut reg = registry(true);
-        let turns = vec![Turn { speaker: "user".into(), text: "a decision".into(), at_ms: Some(2000) }];
+        let turns = vec![Turn {
+            speaker: "user".into(),
+            text: "a decision".into(),
+            at_ms: Some(2000),
+        }];
         reg.ingest_conversation("s", &turns, None, false).unwrap();
-        assert_eq!(reg.unextracted_len(), 0, "non-capture ingest does not enqueue");
-        let turns2 = vec![Turn { speaker: "user".into(), text: "another".into(), at_ms: Some(3000) }];
+        assert_eq!(
+            reg.unextracted_len(),
+            0,
+            "non-capture ingest does not enqueue"
+        );
+        let turns2 = vec![Turn {
+            speaker: "user".into(),
+            text: "another".into(),
+            at_ms: Some(3000),
+        }];
         reg.ingest_conversation("s", &turns2, None, true).unwrap();
         assert_eq!(reg.unextracted_len(), 1, "capture ingest enqueues");
     }
@@ -1280,22 +1348,43 @@ mod tests {
     fn extraction_state_rebuilds_from_metadata_on_reopen() {
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("memory.db");
-        let turns = vec![Turn { speaker: "user".into(), text: "persist me".into(), at_ms: Some(5000) }];
+        let turns = vec![Turn {
+            speaker: "user".into(),
+            text: "persist me".into(),
+            at_ms: Some(5000),
+        }];
         {
             let mut reg = MemoryRegistry::file_backed_with(
-                Arc::new(StubProvider), db.clone(), dir.path().to_path_buf(), "default".into(), false);
+                Arc::new(StubProvider),
+                db.clone(),
+                dir.path().to_path_buf(),
+                "default".into(),
+                false,
+            );
             reg.ingest_conversation("s", &turns, None, true).unwrap();
             assert_eq!(reg.unextracted_len(), 1);
         } // drop → releases lock
         // Fresh registry on the same DB: index empty until loaded.
         let mut reg2 = MemoryRegistry::file_backed_with(
-            Arc::new(StubProvider), db.clone(), dir.path().to_path_buf(), "default".into(), false);
+            Arc::new(StubProvider),
+            db.clone(),
+            dir.path().to_path_buf(),
+            "default".into(),
+            false,
+        );
         assert_eq!(reg2.unextracted_len(), 0, "index empty before load");
         reg2.load_extraction_state(None).unwrap();
-        assert_eq!(reg2.unextracted_len(), 1, "unextracted rebuilt from metadata");
+        assert_eq!(
+            reg2.unextracted_len(),
+            1,
+            "unextracted rebuilt from metadata"
+        );
         // And dedup still holds after reload (same turn is skipped).
         let s = reg2.ingest_conversation("s", &turns, None, true).unwrap();
-        assert_eq!(s.episodic, 0, "turn_key reloaded ⇒ dedup holds across restart");
+        assert_eq!(
+            s.episodic, 0,
+            "turn_key reloaded ⇒ dedup holds across restart"
+        );
     }
 
     #[test]
@@ -1303,8 +1392,16 @@ mod tests {
         let mut reg = registry(true);
         // Stage 1: capture two reasoning-bearing turns.
         let turns = vec![
-            Turn { speaker: "user".into(), text: "deploy failed".into(), at_ms: Some(1) },
-            Turn { speaker: "assistant".into(), text: "because the disk was full".into(), at_ms: Some(2) },
+            Turn {
+                speaker: "user".into(),
+                text: "deploy failed".into(),
+                at_ms: Some(1),
+            },
+            Turn {
+                speaker: "assistant".into(),
+                text: "because the disk was full".into(),
+                at_ms: Some(2),
+            },
         ];
         reg.ingest_conversation("s", &turns, None, true).unwrap();
         // Status reports pending.

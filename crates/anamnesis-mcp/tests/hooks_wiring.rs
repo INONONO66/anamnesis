@@ -11,7 +11,13 @@ fn load(rel: &str) -> Value {
 fn cc_hooks_have_all_capture_events() {
     let v = load("plugin/hooks/hooks.json");
     let hooks = v["hooks"].as_object().unwrap();
-    for e in ["SessionStart", "UserPromptSubmit", "Stop", "PreCompact", "SessionEnd"] {
+    for e in [
+        "SessionStart",
+        "UserPromptSubmit",
+        "Stop",
+        "PreCompact",
+        "SessionEnd",
+    ] {
         assert!(hooks.contains_key(e), "CC hooks.json missing {e}");
     }
 }
@@ -23,6 +29,12 @@ fn codex_hooks_have_capture_but_no_session_end() {
     for e in ["SessionStart", "UserPromptSubmit", "Stop", "PreCompact"] {
         assert!(hooks.contains_key(e), "codex-hooks.json missing {e}");
     }
-    assert!(!hooks.contains_key("SessionEnd"), "Codex MUST NOT have SessionEnd (#79 strict parser)");
-    assert!(v.get("description").is_none(), "no top-level description (#79)");
+    assert!(
+        !hooks.contains_key("SessionEnd"),
+        "Codex MUST NOT have SessionEnd (#79 strict parser)"
+    );
+    assert!(
+        v.get("description").is_none(),
+        "no top-level description (#79)"
+    );
 }

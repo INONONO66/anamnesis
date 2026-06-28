@@ -462,7 +462,11 @@ pub async fn run(cfg: Config) -> Result<()> {
 
     // Rebuild the capture queue + dedup set from node metadata before serving,
     // so Stage-2 extraction survives daemon restarts (best-effort; fail-open).
-    if let Err(e) = registry.lock().unwrap_or_else(|p| p.into_inner()).load_extraction_state(None) {
+    if let Err(e) = registry
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .load_extraction_state(None)
+    {
         tracing::warn!("load_extraction_state failed (capture queue starts empty): {e}");
     }
 
