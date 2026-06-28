@@ -5,7 +5,78 @@
 //! - Codex rollout: `{"timestamp":ISO,"type":"response_item","payload":{"type":"message","role","content":[{"text"}]}}`
 //! Both reduce to user+assistant `ParsedTurn`s; all other line/role kinds are dropped.
 
+use std::path::PathBuf;
+
 use serde_json::Value;
+
+/// Resolve transcript contents: `transcript_path` if readable, else locate by
+/// `session_id` (Codex `~/.codex/sessions/**/rollout-*<sid>*.jsonl`, then CC
+/// `~/.claude/projects/<cwd-slug>/<sid>.jsonl`). Returns None if nothing found.
+pub fn resolve_transcript(
+    transcript_path: Option<&str>,
+    session_id: Option<&str>,
+    cwd: Option<&str>,
+) -> Option<String> {
+    if let Some(p) = transcript_path {
+        if let Ok(s) = std::fs::read_to_string(p) {
+            return Some(s);
+        }
+    }
+    let sid = session_id?;
+    if let Some(p) = newest_codex_rollout(sid) {
+        if let Ok(s) = std::fs::read_to_string(p) {
+            return Some(s);
+        }
+    }
+    if let Some(p) = cc_transcript_path(sid, cwd) {
+        if let Ok(s) = std::fs::read_to_string(p) {
+            return Some(s);
+        }
+    }
+    None
+}
+
+fn home() -> Option<PathBuf> {
+    dirs::home_dir()
+}
+
+/// Newest `rollout-*<sid>*.jsonl` under ~/.codex/sessions (recursive walk).
+fn newest_codex_rollout(sid: &str) -> Option<PathBuf> {
+    let root = home()?.join(".codex/sessions");
+    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+    let mut stack = vec![root];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in rd.flatten() {
+            let path = e.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
+                if name.starts_with("rollout-") && name.ends_with(".jsonl") && name.contains(sid) {
+                    if let Ok(mtime) = e.metadata().and_then(|m| m.modified()) {
+                        if best.as_ref().map_or(true, |(t, _)| mtime > *t) {
+                            best = Some((mtime, path));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    best.map(|(_, p)| p)
+}
+
+/// CC transcript: ~/.claude/projects/<cwd-with-slashes-as-dashes>/<sid>.jsonl.
+fn cc_transcript_path(sid: &str, cwd: Option<&str>) -> Option<PathBuf> {
+    let cwd = cwd?;
+    let slug = cwd.replace(['/', '.'], "-"); // matches CC's project-dir slugging
+    let p = home()?
+        .join(".claude/projects")
+        .join(slug)
+        .join(format!("{sid}.jsonl"));
+    p.exists().then_some(p)
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParsedTurn {
@@ -123,6 +194,21 @@ fn parse_iso8601_to_ms(s: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolve_prefers_transcript_path_when_readable() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("t.jsonl");
+        std::fs::write(&f, "hello").unwrap();
+        let got = resolve_transcript(Some(f.to_str().unwrap()), None, None);
+        assert_eq!(got.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn resolve_none_when_path_missing_and_no_session() {
+        assert!(resolve_transcript(Some("/no/such/file.jsonl"), None, None).is_none());
+        assert!(resolve_transcript(None, None, None).is_none());
+    }
 
     const CC: &str = r#"{"type":"mode","mode":"normal","sessionId":"x"}
 {"type":"file-history-snapshot","messageId":"m"}
