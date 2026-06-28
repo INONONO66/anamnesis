@@ -14,6 +14,11 @@ use anamnesis::memory::{Hit, MemoryStats, Relation};
 use anamnesis::storage::SqliteStorage;
 use anamnesis::{Error, Memory};
 
+/// Metadata key: the stable dedup hash stored on each captured episodic node.
+const META_TURN_KEY: &str = "anamnesis:turn_key";
+/// Metadata key: whether a captured episodic node has been reasoning-extracted.
+const META_EXTRACTED: &str = "anamnesis:extracted";
+
 /// One conversational turn for `ingest_conversation`.
 #[derive(Debug, Clone)]
 pub struct Turn {
@@ -143,6 +148,11 @@ pub struct MemoryRegistry {
     /// re-locking each namespace there would be redundant (and the daemon's own
     /// lock would otherwise deadlock the default namespace against itself).
     lock_on_open: bool,
+    /// Persisted-turn dedup keys seen for the default-namespace capture stream.
+    /// Loaded from node metadata at daemon start; gates multi-hook duplicates.
+    seen_turn_keys: HashSet<String>,
+    /// Episodic node ids captured but not yet reasoning-extracted (the queue).
+    unextracted: Vec<NodeId>,
 }
 
 impl MemoryRegistry {
@@ -169,6 +179,8 @@ impl MemoryRegistry {
             default_namespace,
             locks: Vec::new(),
             lock_on_open: true,
+            seen_turn_keys: HashSet::new(),
+            unextracted: Vec::new(),
         }
     }
 
@@ -203,6 +215,8 @@ impl MemoryRegistry {
             default_namespace: "default".to_string(),
             locks: Vec::new(),
             lock_on_open: true,
+            seen_turn_keys: HashSet::new(),
+            unextracted: Vec::new(),
         }
     }
 
@@ -228,6 +242,8 @@ impl MemoryRegistry {
             default_namespace,
             locks: Vec::new(),
             lock_on_open: true,
+            seen_turn_keys: HashSet::new(),
+            unextracted: Vec::new(),
         }
     }
 
@@ -559,28 +575,75 @@ impl MemoryRegistry {
     }
 
     /// Ingest a batch of conversational turns via the bench windowing recipe.
+    ///
+    /// When `capture` is `true`, each turn is deduplicated by a stable content hash
+    /// (`seen_turn_keys`), stamped with `anamnesis:turn_key` and `anamnesis:extracted`
+    /// metadata, and enqueued in `unextracted` for downstream reasoning extraction.
+    /// When `capture` is `false`, the path is unchanged from the pre-capture behaviour.
     pub fn ingest_conversation(
         &mut self,
         session: &str,
         turns: &[Turn],
         ns: Option<&str>,
+        capture: bool,
     ) -> Result<IngestSummary, Error> {
-        let mem = self.get(ns)?;
         let base = Timestamp::now().0;
         let mut episodic = 0usize;
         let mut semantic = 0usize;
-        for (i, turn) in turns.iter().enumerate() {
-            let at = Timestamp(turn.at_ms.unwrap_or(base + i as u64));
-            let receipt = mem.add(session, &turn.speaker, &turn.text, at)?;
+        // Collect (speaker, text, at, Option<key>) decisions BEFORE any mem borrow,
+        // so the dedup gate (which reads self.seen_turn_keys) and the mem borrow
+        // do not overlap — the borrow checker would reject the interleaved pattern.
+        let decisions: Vec<(String, String, Timestamp, Option<String>)> = turns
+            .iter()
+            .enumerate()
+            .filter_map(|(i, turn)| {
+                let at = Timestamp(turn.at_ms.unwrap_or(base + i as u64));
+                let key = capture.then(|| turn_key(session, &turn.speaker, &turn.text, at.0));
+                // Dedup gate: skip turns already seen in this capture stream.
+                if let Some(k) = &key {
+                    if self.seen_turn_keys.contains(k) {
+                        return None; // deduplicated
+                    }
+                }
+                Some((turn.speaker.clone(), turn.text.clone(), at, key))
+            })
+            .collect();
+
+        // Now do all mem.add calls (borrows &mut Memory from self).
+        let mut newly_captured: Vec<(NodeId, String)> = Vec::new();
+        for (speaker, text, at, key) in decisions {
+            let mem = self.get(ns)?;
+            let receipt = mem.add(session, &speaker, &text, at)?;
             episodic += 1;
             if receipt.finalized_semantic.is_some() {
                 semantic += 1;
             }
+            if let Some(k) = key {
+                newly_captured.push((receipt.episodic, k));
+            }
         }
-        if mem.flush_session(session)?.is_some() {
+
+        if self.get(ns)?.flush_session(session)?.is_some() {
             semantic += 1;
         }
+
+        // Stamp + enqueue captured turns (after flush so nodes are durable).
+        for (epi_id, key) in newly_captured {
+            let mem = self.get(ns)?;
+            mem.set_metadata(epi_id, META_TURN_KEY, &key)?;
+            mem.set_metadata(epi_id, META_EXTRACTED, "false")?;
+            self.seen_turn_keys.insert(key);
+            self.unextracted.push(epi_id);
+        }
+
         Ok(IngestSummary { episodic, semantic })
+    }
+
+    /// Number of captured episodic nodes awaiting reasoning extraction.
+    /// Test accessor — production code uses the field directly.
+    #[cfg(test)]
+    pub(crate) fn unextracted_len(&self) -> usize {
+        self.unextracted.len()
     }
 
     /// Force the embedding provider to build (download the model). For `prewarm`.
@@ -717,7 +780,7 @@ mod tests {
             },
         ];
         let summary = reg
-            .ingest_conversation("design-chat", &turns, None)
+            .ingest_conversation("design-chat", &turns, None, false)
             .unwrap();
         assert_eq!(summary.episodic, 3);
         assert!(summary.semantic >= 1);
@@ -1085,5 +1148,27 @@ mod tests {
         assert_ne!(a, super::turn_key("s1", "user", "hello", 1001), "at_ms matters");
         assert_ne!(a, super::turn_key("s1", "assistant", "hello", 1000), "speaker matters");
         assert_ne!(a, super::turn_key("s2", "user", "hello", 1000), "session matters");
+    }
+
+    #[test]
+    fn capture_dedups_identical_turns() {
+        let mut reg = registry(true);
+        let turns = vec![Turn { speaker: "user".into(), text: "ship it".into(), at_ms: Some(1000) }];
+        let s1 = reg.ingest_conversation("sess", &turns, None, true).unwrap();
+        assert_eq!(s1.episodic, 1, "first capture creates one episodic");
+        // Same turn again (multi-hook) ⇒ deduped, no new node.
+        let s2 = reg.ingest_conversation("sess", &turns, None, true).unwrap();
+        assert_eq!(s2.episodic, 0, "identical turn is skipped");
+    }
+
+    #[test]
+    fn capture_enqueues_unextracted_but_plain_ingest_does_not() {
+        let mut reg = registry(true);
+        let turns = vec![Turn { speaker: "user".into(), text: "a decision".into(), at_ms: Some(2000) }];
+        reg.ingest_conversation("s", &turns, None, false).unwrap();
+        assert_eq!(reg.unextracted_len(), 0, "non-capture ingest does not enqueue");
+        let turns2 = vec![Turn { speaker: "user".into(), text: "another".into(), at_ms: Some(3000) }];
+        reg.ingest_conversation("s", &turns2, None, true).unwrap();
+        assert_eq!(reg.unextracted_len(), 1, "capture ingest enqueues");
     }
 }
