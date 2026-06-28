@@ -646,6 +646,31 @@ impl MemoryRegistry {
         self.unextracted.len()
     }
 
+    /// Rebuild the capture indexes (`seen_turn_keys`, `unextracted`) from node
+    /// metadata. Called once at daemon startup so the queue + dedup survive
+    /// restarts. Idempotent: clears then repopulates.
+    pub fn load_extraction_state(&mut self, ns: Option<&str>) -> Result<(), Error> {
+        self.seen_turn_keys.clear();
+        self.unextracted.clear();
+        let mem = self.get(ns)?;
+        let graph = mem.engine().graph();
+        let mut keys = Vec::new();
+        let mut pending = Vec::new();
+        for id in graph.all_node_ids() {
+            if let Ok(node) = graph.get_node(id) {
+                if let Some(k) = node.metadata.get(META_TURN_KEY) {
+                    keys.push(k.clone());
+                }
+                if node.metadata.get(META_EXTRACTED).map(String::as_str) == Some("false") {
+                    pending.push(id);
+                }
+            }
+        }
+        self.seen_turn_keys.extend(keys);
+        self.unextracted = pending;
+        Ok(())
+    }
+
     /// Force the embedding provider to build (download the model). For `prewarm`.
     pub fn prewarm(&mut self) -> Result<(), Error> {
         let provider = self.provider()?;
@@ -1170,5 +1195,27 @@ mod tests {
         let turns2 = vec![Turn { speaker: "user".into(), text: "another".into(), at_ms: Some(3000) }];
         reg.ingest_conversation("s", &turns2, None, true).unwrap();
         assert_eq!(reg.unextracted_len(), 1, "capture ingest enqueues");
+    }
+
+    #[test]
+    fn extraction_state_rebuilds_from_metadata_on_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("memory.db");
+        let turns = vec![Turn { speaker: "user".into(), text: "persist me".into(), at_ms: Some(5000) }];
+        {
+            let mut reg = MemoryRegistry::file_backed_with(
+                Arc::new(StubProvider), db.clone(), dir.path().to_path_buf(), "default".into(), false);
+            reg.ingest_conversation("s", &turns, None, true).unwrap();
+            assert_eq!(reg.unextracted_len(), 1);
+        } // drop → releases lock
+        // Fresh registry on the same DB: index empty until loaded.
+        let mut reg2 = MemoryRegistry::file_backed_with(
+            Arc::new(StubProvider), db.clone(), dir.path().to_path_buf(), "default".into(), false);
+        assert_eq!(reg2.unextracted_len(), 0, "index empty before load");
+        reg2.load_extraction_state(None).unwrap();
+        assert_eq!(reg2.unextracted_len(), 1, "unextracted rebuilt from metadata");
+        // And dedup still holds after reload (same turn is skipped).
+        let s = reg2.ingest_conversation("s", &turns, None, true).unwrap();
+        assert_eq!(s.episodic, 0, "turn_key reloaded ⇒ dedup holds across restart");
     }
 }
