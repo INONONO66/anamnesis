@@ -482,6 +482,8 @@ mod tests {
             hook_topk: 5,
             hook_seed_k: 5,
             hook_timeout_ms: 1,
+            capture_enabled: true,
+            extract_threshold_n: 20,
         }
     }
 
