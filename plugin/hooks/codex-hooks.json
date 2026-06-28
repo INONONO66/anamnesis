@@ -24,6 +24,30 @@
           }
         ]
       }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${PLUGIN_ROOT}/hooks/anamnesis-hook.sh stop",
+            "timeout": 5,
+            "statusMessage": "Capturing turn"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${PLUGIN_ROOT}/hooks/anamnesis-hook.sh pre-compact",
+            "timeout": 10,
+            "statusMessage": "Flushing capture"
+          }
+        ]
+      }
     ]
   }
 }

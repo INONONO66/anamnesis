@@ -25,7 +25,8 @@ use anyhow::Result;
 use crate::cli::HookEvent;
 use crate::client::call_oneshot;
 use crate::config::Config;
-use crate::proto::Request;
+use crate::proto::{Request, TurnInput};
+use crate::transcript::{ParsedTurn, parse_transcript, resolve_transcript};
 
 /// One-line nudge prepended to a `user-prompt` injection so the agent reinforces
 /// memory it actually uses (hook recall is read-only; reinforcement is deliberate).
@@ -48,6 +49,9 @@ pub async fn run(event: &HookEvent) -> Result<()> {
     let output = match event {
         HookEvent::SessionStart => run_session_start(&cfg, &stdin).await,
         HookEvent::UserPrompt => run_user_prompt(&cfg, &stdin).await,
+        HookEvent::Stop | HookEvent::PreCompact | HookEvent::SessionEnd => {
+            run_capture(&cfg, &stdin, event).await
+        }
     };
     // `output` is `Some(json)` only when there is something to inject; `None` is
     // the below-`τ` / error / empty no-op (print nothing, exit 0).
@@ -75,16 +79,45 @@ fn read_stdin() -> String {
     buf
 }
 
+/// The agent-facing extraction nudge, or None when the queue is below threshold.
+fn extraction_signal(pending: usize, threshold: usize) -> Option<String> {
+    if pending >= threshold && threshold > 0 {
+        Some(format!(
+            "🧠 {pending} captured turns await reasoning extraction. Call `extract_pending` to \
+             pull them and record decisions / cause→effect / contradictions via `relate`/`remember`."
+        ))
+    } else {
+        None
+    }
+}
+
+/// Query the daemon's extraction status and return the signal if over threshold.
+/// Best-effort: any failure (timeout, daemon down, parse error) ⇒ None.
+async fn session_extraction_signal(cfg: &Config) -> Option<String> {
+    let req = Request::ExtractionStatus { namespace: None };
+    let timeout = Duration::from_millis(cfg.hook_timeout_ms);
+    let text = tokio::time::timeout(timeout, call_oneshot(cfg, req))
+        .await
+        .ok()?
+        .ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let pending = v.get("pending")?.as_u64()? as usize;
+    extraction_signal(pending, cfg.extract_threshold_n)
+}
+
 /// `SessionStart`: seed the session with project memories.
 ///
 /// Parses `{ source, cwd, ... }`, derives the project cue from the cwd basename,
 /// and does an **ungated, read-only** recall (`reinforce = false`, no gate, limit
 /// = `hook_seed_k`). Returns the SessionStart output JSON, or `None` when there is
 /// nothing to inject (no cue, empty recall, or any failure).
+///
+/// If the un-extracted queue exceeds `cfg.extract_threshold_n`, a one-line nudge is
+/// appended to the block (additive — does NOT gate the seed injection).
 async fn run_session_start(cfg: &Config, stdin: &str) -> Option<String> {
     let parsed = parse_session_start(stdin);
     let cue = parsed.and_then(|p| project_cue(p.cwd.as_deref()))?;
-    let block = gated_recall(
+    let mut block = gated_recall(
         cfg,
         &cue,
         cfg.hook_seed_k,
@@ -92,6 +125,10 @@ async fn run_session_start(cfg: &Config, stdin: &str) -> Option<String> {
         /* gate = */ None,
     )
     .await?;
+    // Best-effort extraction signal (does not gate the seed injection).
+    if let Some(sig) = session_extraction_signal(cfg).await {
+        block = format!("{block}\n\n{sig}");
+    }
     Some(render_session_start(&block))
 }
 
@@ -249,6 +286,81 @@ fn parse_session_start(stdin: &str) -> Option<SessionStartInput> {
 /// Parse `UserPromptSubmit` stdin tolerantly. Malformed/empty JSON ⇒ `None` (fail-open).
 fn parse_user_prompt(stdin: &str) -> Option<UserPromptInput> {
     serde_json::from_str(stdin.trim()).ok()
+}
+
+/// Parsed `Stop`/`PreCompact`/`SessionEnd` stdin. Only the three fields the
+/// capture handler needs are load-bearing; unknown keys are ignored so the parse
+/// tolerates schema drift.
+#[derive(Debug, Default, serde::Deserialize)]
+struct CaptureInput {
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    transcript_path: Option<String>,
+    #[serde(default)]
+    cwd: Option<String>,
+}
+
+/// Parse capture stdin tolerantly. Malformed/empty JSON ⇒ `None` (fail-open).
+fn parse_capture_input(stdin: &str) -> Option<CaptureInput> {
+    serde_json::from_str(stdin.trim()).ok()
+}
+
+/// Select the turns to ingest based on the hook event.
+///
+/// `Stop` ⇒ a small recent window (≤8 turns; cheap, fires per turn). The window
+/// is wider than a bare user+assistant pair because tool-use / tool-result turns
+/// are filtered out by the transcript parser, which means the last 2 text-bearing
+/// turns can both be `assistant` (e.g. when a tool_use/tool_result exchange
+/// intervened). Dedup in the daemon makes the overlap between successive `Stop`
+/// events free. `PreCompact`/`SessionEnd` ⇒ a wide tail (cap 50) that acts as
+/// the real backstop, flushing everything before the context window is compacted
+/// or the session ends.
+fn select_turns<'a>(turns: &'a [ParsedTurn], event: &HookEvent) -> Vec<&'a ParsedTurn> {
+    let take = match event {
+        HookEvent::Stop => 8,
+        _ => 50,
+    };
+    let start = turns.len().saturating_sub(take);
+    turns[start..].iter().collect()
+}
+
+/// Capture handler: read the transcript, send selected turns as raw Episodic
+/// (capture=true ⇒ dedup + enqueue). Silent (returns None); fail-open.
+async fn run_capture(cfg: &Config, stdin: &str, event: &HookEvent) -> Option<String> {
+    if !cfg.capture_enabled {
+        return None;
+    }
+    let input = parse_capture_input(stdin)?;
+    let contents = resolve_transcript(
+        input.transcript_path.as_deref(),
+        input.session_id.as_deref(),
+        input.cwd.as_deref(),
+    )?;
+    let all = parse_transcript(&contents);
+    if all.is_empty() {
+        return None;
+    }
+    let selected = select_turns(&all, event);
+    let session = input.session_id.unwrap_or_else(|| "capture".to_string());
+    let turns: Vec<TurnInput> = selected
+        .iter()
+        .map(|t| TurnInput {
+            speaker: t.speaker.clone(),
+            text: t.text.clone(),
+            at_ms: t.at_ms,
+        })
+        .collect();
+    let req = Request::Ingest {
+        session,
+        turns,
+        namespace: None,
+        capture: Some(true),
+    };
+    // Fire-and-forget under the fail-open timeout; ignore the result (silent).
+    let timeout = Duration::from_millis(cfg.hook_timeout_ms);
+    let _ = tokio::time::timeout(timeout, call_oneshot(cfg, req)).await;
+    None
 }
 
 #[cfg(test)]
@@ -459,6 +571,53 @@ mod tests {
         assert!(block.contains("a prior lesson"));
     }
 
+    // --- capture: parse_capture_input + select_turns (hermetic, no daemon) ---
+
+    #[test]
+    fn parses_capture_stdin_fields() {
+        let json = r#"{"session_id":"abc","transcript_path":"/x/y.jsonl","cwd":"/d/anamnesis","hook_event_name":"Stop"}"#;
+        let p = parse_capture_input(json).unwrap();
+        assert_eq!(p.session_id.as_deref(), Some("abc"));
+        assert_eq!(p.transcript_path.as_deref(), Some("/x/y.jsonl"));
+        assert_eq!(p.cwd.as_deref(), Some("/d/anamnesis"));
+    }
+
+    #[test]
+    fn stop_selects_recent_window_others_select_tail() {
+        let turns: Vec<crate::transcript::ParsedTurn> = (0..60)
+            .map(|i| crate::transcript::ParsedTurn {
+                speaker: if i % 2 == 0 {
+                    "user".into()
+                } else {
+                    "assistant".into()
+                },
+                text: format!("t{i}"),
+                at_ms: Some(1000 + i),
+            })
+            .collect();
+        // Stop ⇒ a small recent window (≤8) including the latest turn.
+        let stop = select_turns(&turns, &HookEvent::Stop);
+        assert!(stop.len() <= 8 && stop.last().unwrap().text == "t59");
+        // PreCompact ⇒ wider tail (cap 50).
+        let pc = select_turns(&turns, &HookEvent::PreCompact);
+        assert_eq!(pc.len(), 50);
+        assert_eq!(pc.last().unwrap().text, "t59");
+    }
+
+    // --- extraction_signal: pure helper, no daemon ---
+
+    #[test]
+    fn extraction_signal_only_over_threshold() {
+        assert!(
+            extraction_signal(25, 20).is_some(),
+            "over threshold ⇒ signal"
+        );
+        assert!(extraction_signal(20, 20).is_some(), "at threshold ⇒ signal");
+        assert!(extraction_signal(3, 20).is_none(), "under ⇒ none");
+        let s = extraction_signal(25, 20).unwrap();
+        assert!(s.contains("extract_pending"), "names the tool: {s}");
+    }
+
     // --- handler short-circuits: these return BEFORE any daemon call (hermetic) ---
 
     /// A config whose recall would fail-open if reached — but these inputs never
@@ -473,6 +632,8 @@ mod tests {
             hook_topk: 5,
             hook_seed_k: 5,
             hook_timeout_ms: 1,
+            capture_enabled: true,
+            extract_threshold_n: 20,
         }
     }
 

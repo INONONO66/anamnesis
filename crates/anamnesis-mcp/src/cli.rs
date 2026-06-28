@@ -113,6 +113,14 @@ pub enum HookEvent {
     SessionStart,
     /// `UserPromptSubmit`: activation-gated, read-only recall on the prompt.
     UserPrompt,
+    /// `Stop`: capture the just-finished turn (user+assistant) as raw Episodic.
+    Stop,
+    /// `PreCompact`: flush recent turns before context compaction; emit the
+    /// extraction signal if the queue is over threshold.
+    PreCompact,
+    /// `SessionEnd`: flush remaining turns at session close (Claude Code only;
+    /// omitted from codex-hooks.json — Codex lacks this event).
+    SessionEnd,
 }
 
 fn registry(cfg: &Config) -> MemoryRegistry {
@@ -395,4 +403,24 @@ fn print_recall(packaged: &crate::memory::PackagedRecall) {
         packaged.context.clone()
     };
     println!("{context}## NODES (for `relate`)\n{refs_json}");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hook_capture_events_parse() {
+        use clap::Parser;
+        // The binary name + `hook stop` must parse to HookEvent::Stop.
+        let cli = Cli::try_parse_from(["anamnesis", "hook", "stop"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Hook {
+                event: HookEvent::Stop
+            })
+        ));
+        assert!(Cli::try_parse_from(["anamnesis", "hook", "pre-compact"]).is_ok());
+        assert!(Cli::try_parse_from(["anamnesis", "hook", "session-end"]).is_ok());
+    }
 }

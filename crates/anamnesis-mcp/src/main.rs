@@ -8,6 +8,7 @@ mod launcher;
 mod memory;
 mod proto;
 mod server;
+mod transcript;
 
 #[cfg(test)]
 mod eval;

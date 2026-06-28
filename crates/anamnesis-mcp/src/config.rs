@@ -44,6 +44,11 @@ pub struct Config {
     /// Per-hook fail-open timeout (ms). `ANAMNESIS_HOOK_TIMEOUT_MS` (default 1500).
     #[allow(dead_code)]
     pub hook_timeout_ms: u64,
+    /// Global capture kill-switch. `ANAMNESIS_CAPTURE_ENABLED` (default true).
+    pub capture_enabled: bool,
+    /// Un-extracted queue size that triggers the extraction signal.
+    /// `ANAMNESIS_EXTRACT_THRESHOLD_N` (default 20).
+    pub extract_threshold_n: usize,
 }
 
 impl Config {
@@ -70,6 +75,11 @@ impl Config {
         let hook_topk = parse_env("ANAMNESIS_HOOK_TOPK", 5usize);
         let hook_seed_k = parse_env("ANAMNESIS_HOOK_SEED_K", 5usize);
         let hook_timeout_ms = parse_env("ANAMNESIS_HOOK_TIMEOUT_MS", 1500u64);
+        let capture_enabled = match std::env::var("ANAMNESIS_CAPTURE_ENABLED") {
+            Ok(v) => !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no"),
+            Err(_) => true,
+        };
+        let extract_threshold_n = parse_env("ANAMNESIS_EXTRACT_THRESHOLD_N", 20usize);
         Self {
             default_db,
             default_namespace,
@@ -78,6 +88,8 @@ impl Config {
             hook_topk,
             hook_seed_k,
             hook_timeout_ms,
+            capture_enabled,
+            extract_threshold_n,
         }
     }
 
@@ -177,6 +189,8 @@ mod tests {
             hook_topk: 5,
             hook_seed_k: 5,
             hook_timeout_ms: 1500,
+            capture_enabled: true,
+            extract_threshold_n: 20,
         };
         assert!(cfg.reinforce_on_recall);
         assert_eq!(cfg.db_dir(), PathBuf::from("."));
@@ -192,6 +206,8 @@ mod tests {
             hook_topk: 5,
             hook_seed_k: 5,
             hook_timeout_ms: 1500,
+            capture_enabled: true,
+            extract_threshold_n: 20,
         };
         assert_eq!(cfg.db_dir(), PathBuf::from("/var/lib/anamnesis"));
     }
@@ -227,6 +243,23 @@ mod tests {
             DEFAULT_HOOK_THRESHOLD
         );
         assert_eq!(parse_env(name, 1500u64), 1500);
+    }
+
+    #[test]
+    fn capture_knobs_have_sane_defaults() {
+        let cfg = Config {
+            default_db: "x".into(),
+            default_namespace: "default".into(),
+            reinforce_on_recall: true,
+            hook_threshold: DEFAULT_HOOK_THRESHOLD,
+            hook_topk: 5,
+            hook_seed_k: 5,
+            hook_timeout_ms: 1500,
+            capture_enabled: true,
+            extract_threshold_n: 20,
+        };
+        assert!(cfg.capture_enabled);
+        assert_eq!(cfg.extract_threshold_n, 20);
     }
 
     #[test]

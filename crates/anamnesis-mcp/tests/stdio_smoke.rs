@@ -86,6 +86,10 @@ fn lists_tools_over_stdio() {
         "tools: {names:?}"
     );
     assert!(names.contains(&"relate".to_string()), "tools: {names:?}");
+    assert!(
+        names.contains(&"extract_pending".to_string()),
+        "extract_pending tool must be listed: {names:?}"
+    );
 
     let _ = child.kill();
     // Reap the child so it does not linger as a zombie after kill().

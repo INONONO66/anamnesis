@@ -138,9 +138,20 @@ timeout = 10
 > **Visibility caveat — the one real difference from Claude Code.** Claude Code injects
 > `additionalContext` *silently*; Codex's TUI currently *renders* the injected recall block on
 > screen as a `hook context:` message (open Codex issues #16933 / #16486 — Codex's behavior, not
-> anamnesis's). Everything else — the `τ` gate, read-only recall, agent-driven reinforcement,
+> anamnesis's). Capture hooks (see below) fire silently in both; the extraction signal appears
+> only in SessionStart context (visible in Codex's TUI). Everything else — the `τ` gate, read-only recall, agent-driven reinforcement,
 > fail-open, the warm daemon — is identical, and the env knobs below apply unchanged. When Codex
 > makes hook context silent upstream, anamnesis needs no change.
+
+## Capture hooks (Stage 1 & 2)
+
+Both Claude Code and Codex can automatically ingest your turn transcripts into anamnesis as raw episodic memories, then surface them back to you for distillation into project knowledge.
+
+**Stage 1 (Capture):** The hooks fire on each turn-end event and stream the transcript to anamnesis as raw `Episodic` memories. Claude Code fires three events: `Stop` (mid-turn), `PreCompact` (post-turn), and `SessionEnd` (session close). Codex fires two: `Stop` and `PreCompact` (it lacks `SessionEnd` in its binary; its strict schema parser would reject it, as noted in #79). Each turn is idempotently deduped by a content hash, so overlap between multi-hook firing is harmless. Capture is a fire-and-forget, read-only pipe — it cannot fail and never blocks a prompt.
+
+**Stage 2 (Extraction):** The daemon holds an un-extracted queue of ingested turns. When the queue crosses `ANAMNESIS_EXTRACT_THRESHOLD_N` (default 20), the next `SessionStart` hook injects a one-line nudge into the context, asking the agent to call the `extract_pending` MCP tool. That tool returns the raw turns and marks them extracted, so the agent can distill them into reasoning or project lessons using `relate` and `remember`. Extraction is agent-driven and best-effort — the nudge is advisory only, and there is no guarantee the agent will call the tool or that extraction will be immediate.
+
+Enable or disable capture entirely with `ANAMNESIS_CAPTURE_ENABLED` (default `true`).
 
 ## Configuration (environment variables)
 
@@ -153,6 +164,8 @@ laws (ADR-0010).
 | `ANAMNESIS_HOOK_TOPK` | `k` — cap on injected per-turn memories. | `5` |
 | `ANAMNESIS_HOOK_SEED_K` | `SessionStart` seed size. | `5` |
 | `ANAMNESIS_HOOK_TIMEOUT_MS` | Per-hook fail-open timeout (ms); on elapse, inject nothing. | `1500` |
+| `ANAMNESIS_CAPTURE_ENABLED` | Enable/disable capture hooks (Stage 1 & 2) entirely. | `true` |
+| `ANAMNESIS_EXTRACT_THRESHOLD_N` | Queue size threshold; when crossed, `SessionStart` injects extraction nudge to call `extract_pending`. | `20` |
 
 > **`τ` is on the raw activation scale, not 0..1.** The gate compares the **top recall
 > score** — the unnormalized ACT-R activation of the strongest hit — against `τ`. On a typical

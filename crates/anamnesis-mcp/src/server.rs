@@ -78,6 +78,18 @@ pub struct StatsParams {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ExtractPendingParams {
+    /// Max turns to pull this batch (default: all pending).
+    #[serde(default)]
+    pub limit: Option<u32>,
+    /// Reserved for a future per-namespace queue. Currently ignored — the
+    /// un-extracted queue is a default-namespace global, so this field has no
+    /// effect. Pass `null` or omit it.
+    #[serde(default)]
+    pub namespace: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct RelateParams {
     /// Source node id (the `node_id` from a prior `recall`).
     pub from_id: u64,
@@ -226,6 +238,7 @@ impl AnamnesisServer {
             session: p.session,
             turns,
             namespace: p.namespace,
+            capture: None,
         };
         to_result(self.backend.call(req).await)
     }
@@ -260,6 +273,23 @@ impl AnamnesisServer {
         Parameters(p): Parameters<StatsParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let req = Request::Stats {
+            namespace: p.namespace,
+        };
+        to_result(self.backend.call(req).await)
+    }
+
+    #[tool(
+        description = "Pull un-extracted raw conversation turns awaiting reasoning extraction. \
+                       Returns a JSON array of {node_id, content}. For each, distill decisions, \
+                       cause→effect, contradictions, and problem→resolution, then record them with \
+                       `relate` (use the node_ids) and `remember`. Turns are marked extracted on pull."
+    )]
+    async fn extract_pending(
+        &self,
+        Parameters(p): Parameters<ExtractPendingParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let req = Request::PullPending {
+            limit: p.limit,
             namespace: p.namespace,
         };
         to_result(self.backend.call(req).await)

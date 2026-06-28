@@ -44,16 +44,19 @@ Hook event matrix (measured against CC and the Codex 0.142 binary):
 
 | event       | Claude Code | Codex | role |
 |-------------|:--:|:--:|--|
-| `Stop`         | ✅ | ✅ | per-turn raw ingest |
+| `Stop`         | ✅ | ✅ | per-turn recent-window ingest (≤8 turns; best-effort) |
 | `PreCompact`   | ✅ | ✅ | flush + extraction trigger before context compaction |
 | `SessionEnd`   | ✅ | ❌ | end-of-session flush (CC only) |
 
-`Stop` guarantees every turn's raw is captured. `PreCompact` / `SessionEnd` flush any not-yet-
-ingested turns before the window is compacted or closed. **Codex does not support `SessionEnd`**
-(absent from the binary; `PreCompact`/`PostCompact` are present) — it MUST be omitted from
-`codex-hooks.json`, because Codex's strict hook parser rejects unknown event keys and that
-kills the whole hook file (cf. the `description`-field bug, #79). On Codex the `SessionEnd` gap
-is covered by `Stop` (every turn) + `PreCompact` (long sessions).
+`Stop` captures a recent window (≤8 turns) every turn; `PreCompact` / `SessionEnd` flush a
+wider tail (≤50) before the window is compacted or closed. Dedup in the daemon makes the
+per-`Stop` overlap harmless. **`Stop` capture is best-effort given tool-turn filtering** (the
+transcript parser drops `tool_use`/`tool_result` entries, so the last 2 text-bearing turns may
+both be `assistant`); `PreCompact` / `SessionEnd` are the real backstop for full coverage.
+**Codex does not support `SessionEnd`** (absent from the binary; `PreCompact`/`PostCompact` are
+present) — it MUST be omitted from `codex-hooks.json`, because Codex's strict hook parser rejects
+unknown event keys and kills the whole hook file (cf. the `description`-field bug, #79). On Codex
+the `SessionEnd` gap is covered by `Stop` (recent window each turn) + `PreCompact` (long sessions).
 
 ### Stage 2 — agent-side batch extraction (client LLM)
 
