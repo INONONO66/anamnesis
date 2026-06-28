@@ -85,6 +85,23 @@ pub fn parse_relation(label: &str) -> Result<Relation, Error> {
     Ok(relation)
 }
 
+/// Stable dedup key for a captured turn: lowercase hex Sha256 of
+/// `session \0 speaker \0 text \0 at_ms`. Sha256 (not DefaultHasher) because the
+/// key is persisted in `node.metadata` and re-derived after daemon restarts /
+/// rebuilds — it must be identical across runs and toolchain versions.
+pub(crate) fn turn_key(session: &str, speaker: &str, text: &str, at_ms: u64) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(session.as_bytes());
+    h.update([0u8]);
+    h.update(speaker.as_bytes());
+    h.update([0u8]);
+    h.update(text.as_bytes());
+    h.update([0u8]);
+    h.update(at_ms.to_le_bytes());
+    format!("{:x}", h.finalize())
+}
+
 /// How the shared embedding provider is obtained.
 enum ProviderSource {
     /// Pre-built provider (tests, or a caller-supplied embedder).
@@ -1057,5 +1074,16 @@ mod tests {
             "expected >= 4 nodes, got {}",
             s.node_count
         );
+    }
+
+    #[test]
+    fn turn_key_is_deterministic_and_field_sensitive() {
+        let a = super::turn_key("s1", "user", "hello", 1000);
+        let b = super::turn_key("s1", "user", "hello", 1000);
+        assert_eq!(a, b, "same inputs ⇒ same key");
+        assert_eq!(a.len(), 64, "sha256 hex is 64 chars");
+        assert_ne!(a, super::turn_key("s1", "user", "hello", 1001), "at_ms matters");
+        assert_ne!(a, super::turn_key("s1", "assistant", "hello", 1000), "speaker matters");
+        assert_ne!(a, super::turn_key("s2", "user", "hello", 1000), "session matters");
     }
 }
