@@ -25,7 +25,8 @@ use anyhow::Result;
 use crate::cli::HookEvent;
 use crate::client::call_oneshot;
 use crate::config::Config;
-use crate::proto::Request;
+use crate::proto::{Request, TurnInput};
+use crate::transcript::{parse_transcript, resolve_transcript, ParsedTurn};
 
 /// One-line nudge prepended to a `user-prompt` injection so the agent reinforces
 /// memory it actually uses (hook recall is read-only; reinforcement is deliberate).
@@ -254,9 +255,64 @@ fn parse_user_prompt(stdin: &str) -> Option<UserPromptInput> {
     serde_json::from_str(stdin.trim()).ok()
 }
 
-/// Temporary stub for capture events (`Stop`, `PreCompact`, `SessionEnd`).
-/// A9 replaces this with the real handler.
-async fn run_capture(_cfg: &Config, _stdin: &str, _event: &HookEvent) -> Option<String> {
+/// Parsed `Stop`/`PreCompact`/`SessionEnd` stdin. Only the three fields the
+/// capture handler needs are load-bearing; unknown keys are ignored so the parse
+/// tolerates schema drift.
+#[derive(Debug, Default, serde::Deserialize)]
+struct CaptureInput {
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    transcript_path: Option<String>,
+    #[serde(default)]
+    cwd: Option<String>,
+}
+
+/// Parse capture stdin tolerantly. Malformed/empty JSON ⇒ `None` (fail-open).
+fn parse_capture_input(stdin: &str) -> Option<CaptureInput> {
+    serde_json::from_str(stdin.trim()).ok()
+}
+
+/// Select the turns to ingest based on the hook event.
+///
+/// `Stop` ⇒ the last user+assistant pair (cheap, fires per turn; dedup in the
+/// daemon makes overlap harmless). `PreCompact`/`SessionEnd` ⇒ a wider recent
+/// tail (flush; cap 50).
+fn select_turns<'a>(turns: &'a [ParsedTurn], event: &HookEvent) -> Vec<&'a ParsedTurn> {
+    let take = match event {
+        HookEvent::Stop => 2,
+        _ => 50,
+    };
+    let start = turns.len().saturating_sub(take);
+    turns[start..].iter().collect()
+}
+
+/// Capture handler: read the transcript, send selected turns as raw Episodic
+/// (capture=true ⇒ dedup + enqueue). Silent (returns None); fail-open.
+async fn run_capture(cfg: &Config, stdin: &str, event: &HookEvent) -> Option<String> {
+    if !cfg.capture_enabled {
+        return None;
+    }
+    let input = parse_capture_input(stdin)?;
+    let contents = resolve_transcript(
+        input.transcript_path.as_deref(),
+        input.session_id.as_deref(),
+        input.cwd.as_deref(),
+    )?;
+    let all = parse_transcript(&contents);
+    if all.is_empty() {
+        return None;
+    }
+    let selected = select_turns(&all, event);
+    let session = input.session_id.unwrap_or_else(|| "capture".to_string());
+    let turns: Vec<TurnInput> = selected
+        .iter()
+        .map(|t| TurnInput { speaker: t.speaker.clone(), text: t.text.clone(), at_ms: t.at_ms })
+        .collect();
+    let req = Request::Ingest { session, turns, namespace: None, capture: Some(true) };
+    // Fire-and-forget under the fail-open timeout; ignore the result (silent).
+    let timeout = Duration::from_millis(cfg.hook_timeout_ms);
+    let _ = tokio::time::timeout(timeout, call_oneshot(cfg, req)).await;
     None
 }
 
@@ -466,6 +522,32 @@ mod tests {
         ));
         let block = interpret_recall(outcome).expect("a real payload injects");
         assert!(block.contains("a prior lesson"));
+    }
+
+    // --- capture: parse_capture_input + select_turns (hermetic, no daemon) ---
+
+    #[test]
+    fn parses_capture_stdin_fields() {
+        let json = r#"{"session_id":"abc","transcript_path":"/x/y.jsonl","cwd":"/d/anamnesis","hook_event_name":"Stop"}"#;
+        let p = parse_capture_input(json).unwrap();
+        assert_eq!(p.session_id.as_deref(), Some("abc"));
+        assert_eq!(p.transcript_path.as_deref(), Some("/x/y.jsonl"));
+        assert_eq!(p.cwd.as_deref(), Some("/d/anamnesis"));
+    }
+
+    #[test]
+    fn stop_selects_last_pair_others_select_tail() {
+        let turns: Vec<crate::transcript::ParsedTurn> = (0..60).map(|i| crate::transcript::ParsedTurn {
+            speaker: if i % 2 == 0 { "user".into() } else { "assistant".into() },
+            text: format!("t{i}"), at_ms: Some(1000 + i),
+        }).collect();
+        // Stop ⇒ last user+assistant pair (<=2).
+        let stop = select_turns(&turns, &HookEvent::Stop);
+        assert!(stop.len() <= 2 && stop.last().unwrap().text == "t59");
+        // PreCompact ⇒ wider tail (cap 50).
+        let pc = select_turns(&turns, &HookEvent::PreCompact);
+        assert_eq!(pc.len(), 50);
+        assert_eq!(pc.last().unwrap().text, "t59");
     }
 
     // --- handler short-circuits: these return BEFORE any daemon call (hermetic) ---
