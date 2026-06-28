@@ -1269,4 +1269,27 @@ mod tests {
         let s = reg2.ingest_conversation("s", &turns, None, true).unwrap();
         assert_eq!(s.episodic, 0, "turn_key reloaded ⇒ dedup holds across restart");
     }
+
+    #[test]
+    fn capture_to_extract_full_loop() {
+        let mut reg = registry(true);
+        // Stage 1: capture two reasoning-bearing turns.
+        let turns = vec![
+            Turn { speaker: "user".into(), text: "deploy failed".into(), at_ms: Some(1) },
+            Turn { speaker: "assistant".into(), text: "because the disk was full".into(), at_ms: Some(2) },
+        ];
+        reg.ingest_conversation("s", &turns, None, true).unwrap();
+        // Status reports pending.
+        let st = reg.extraction_status(None).unwrap();
+        assert!(st.contains("\"pending\":2"));
+        // Stage 2: pull drains and marks extracted.
+        let pulled = reg.pull_pending(None, None).unwrap();
+        assert!(pulled.contains("disk was full"));
+        assert_eq!(reg.unextracted_len(), 0);
+        // Re-ingesting the same turns (multi-hook) adds nothing (dedup holds).
+        let again = reg.ingest_conversation("s", &turns, None, true).unwrap();
+        assert_eq!(again.episodic, 0);
+        // Queue stays drained (already extracted, deduped).
+        assert_eq!(reg.unextracted_len(), 0);
+    }
 }
