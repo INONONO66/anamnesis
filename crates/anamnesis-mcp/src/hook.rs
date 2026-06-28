@@ -48,6 +48,9 @@ pub async fn run(event: &HookEvent) -> Result<()> {
     let output = match event {
         HookEvent::SessionStart => run_session_start(&cfg, &stdin).await,
         HookEvent::UserPrompt => run_user_prompt(&cfg, &stdin).await,
+        HookEvent::Stop | HookEvent::PreCompact | HookEvent::SessionEnd => {
+            run_capture(&cfg, &stdin, event).await
+        }
     };
     // `output` is `Some(json)` only when there is something to inject; `None` is
     // the below-`τ` / error / empty no-op (print nothing, exit 0).
@@ -249,6 +252,12 @@ fn parse_session_start(stdin: &str) -> Option<SessionStartInput> {
 /// Parse `UserPromptSubmit` stdin tolerantly. Malformed/empty JSON ⇒ `None` (fail-open).
 fn parse_user_prompt(stdin: &str) -> Option<UserPromptInput> {
     serde_json::from_str(stdin.trim()).ok()
+}
+
+/// Temporary stub for capture events (`Stop`, `PreCompact`, `SessionEnd`).
+/// A9 replaces this with the real handler.
+async fn run_capture(_cfg: &Config, _stdin: &str, _event: &HookEvent) -> Option<String> {
+    None
 }
 
 #[cfg(test)]
