@@ -62,6 +62,7 @@ pub fn dispatch(reg: &mut MemoryRegistry, req: Request) -> Response {
             session,
             turns,
             namespace,
+            capture,
         } => {
             let turns: Vec<Turn> = turns
                 .into_iter()
@@ -71,7 +72,7 @@ pub fn dispatch(reg: &mut MemoryRegistry, req: Request) -> Response {
                     at_ms: t.at_ms,
                 })
                 .collect();
-            match reg.ingest_conversation(&session, &turns, namespace.as_deref()) {
+            match reg.ingest_conversation(&session, &turns, namespace.as_deref(), capture.unwrap_or(false)) {
                 Ok(summary) => Response::ok(format!(
                     "ingested {} turns ({} semantic nodes)",
                     summary.episodic, summary.semantic
@@ -283,6 +284,7 @@ mod tests {
                     },
                 ],
                 namespace: None,
+                capture: None,
             },
         ));
         assert!(text.starts_with("ingested "), "got: {text}");

@@ -57,6 +57,8 @@ pub enum Request {
         turns: Vec<TurnInput>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         namespace: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        capture: Option<bool>,
     },
     Stats {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -160,6 +162,7 @@ mod tests {
                 },
             ],
             namespace: None,
+            capture: None,
         });
         round_trip_request(Request::Stats { namespace: None });
     }
@@ -208,5 +211,31 @@ mod tests {
     fn decode_tolerates_crlf_and_trailing_newline() {
         let r: Response = decode_line("{\"status\":\"ok\",\"text\":\"hi\"}\r\n").unwrap();
         assert_eq!(r, Response::ok("hi"));
+    }
+
+    #[test]
+    fn ingest_capture_flag_round_trips_and_defaults_absent() {
+        // capture omitted ⇒ absent on the wire (skip_serializing_if = None).
+        let req = Request::Ingest {
+            session: "s".into(),
+            turns: vec![],
+            namespace: None,
+            capture: None,
+        };
+        let line = encode_line(&req).unwrap();
+        assert!(!line.contains("capture"), "None capture must be omitted: {line}");
+        let back: Request = decode_line(&line).unwrap();
+        assert_eq!(back, req);
+
+        // capture=true ⇒ present and round-trips.
+        let req2 = Request::Ingest {
+            session: "s".into(),
+            turns: vec![],
+            namespace: None,
+            capture: Some(true),
+        };
+        let line2 = encode_line(&req2).unwrap();
+        assert!(line2.contains("\"capture\":true"), "got: {line2}");
+        assert_eq!(decode_line::<Request>(&line2).unwrap(), req2);
     }
 }

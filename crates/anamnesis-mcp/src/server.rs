@@ -226,6 +226,7 @@ impl AnamnesisServer {
             session: p.session,
             turns,
             namespace: p.namespace,
+            capture: None,
         };
         to_result(self.backend.call(req).await)
     }
