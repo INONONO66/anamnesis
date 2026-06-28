@@ -84,6 +84,18 @@ pub fn dispatch(reg: &mut MemoryRegistry, req: Request) -> Response {
             Ok(stats) => Response::ok(format_stats(&stats)),
             Err(e) => Response::internal(e),
         },
+        Request::PullPending { limit, namespace } => {
+            match reg.pull_pending(limit.map(|l| l as usize), namespace.as_deref()) {
+                Ok(text) => Response::ok(text),
+                Err(e) => Response::internal(e),
+            }
+        }
+        Request::ExtractionStatus { namespace } => {
+            match reg.extraction_status(namespace.as_deref()) {
+                Ok(text) => Response::ok(text),
+                Err(e) => Response::internal(e),
+            }
+        }
     }
 }
 

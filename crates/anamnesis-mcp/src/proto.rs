@@ -64,6 +64,16 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         namespace: Option<String>,
     },
+    PullPending {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        namespace: Option<String>,
+    },
+    ExtractionStatus {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        namespace: Option<String>,
+    },
 }
 
 /// Whether a failed request is the caller's fault (e.g. a bad relation label or
@@ -211,6 +221,16 @@ mod tests {
     fn decode_tolerates_crlf_and_trailing_newline() {
         let r: Response = decode_line("{\"status\":\"ok\",\"text\":\"hi\"}\r\n").unwrap();
         assert_eq!(r, Response::ok("hi"));
+    }
+
+    #[test]
+    fn pull_and_status_round_trip() {
+        let a = Request::PullPending { limit: Some(10), namespace: None };
+        assert_eq!(decode_line::<Request>(&encode_line(&a).unwrap()).unwrap(), a);
+        let b = Request::ExtractionStatus { namespace: None };
+        let line = encode_line(&b).unwrap();
+        assert!(line.contains("\"op\":\"extraction_status\""), "got: {line}");
+        assert_eq!(decode_line::<Request>(&line).unwrap(), b);
     }
 
     #[test]
