@@ -79,16 +79,42 @@ fn read_stdin() -> String {
     buf
 }
 
+/// The agent-facing extraction nudge, or None when the queue is below threshold.
+fn extraction_signal(pending: usize, threshold: usize) -> Option<String> {
+    if pending >= threshold && threshold > 0 {
+        Some(format!(
+            "🧠 {pending} captured turns await reasoning extraction. Call `extract_pending` to \
+             pull them and record decisions / cause→effect / contradictions via `relate`/`remember`."
+        ))
+    } else {
+        None
+    }
+}
+
+/// Query the daemon's extraction status and return the signal if over threshold.
+/// Best-effort: any failure (timeout, daemon down, parse error) ⇒ None.
+async fn session_extraction_signal(cfg: &Config) -> Option<String> {
+    let req = Request::ExtractionStatus { namespace: None };
+    let timeout = Duration::from_millis(cfg.hook_timeout_ms);
+    let text = tokio::time::timeout(timeout, call_oneshot(cfg, req)).await.ok()?.ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let pending = v.get("pending")?.as_u64()? as usize;
+    extraction_signal(pending, cfg.extract_threshold_n)
+}
+
 /// `SessionStart`: seed the session with project memories.
 ///
 /// Parses `{ source, cwd, ... }`, derives the project cue from the cwd basename,
 /// and does an **ungated, read-only** recall (`reinforce = false`, no gate, limit
 /// = `hook_seed_k`). Returns the SessionStart output JSON, or `None` when there is
 /// nothing to inject (no cue, empty recall, or any failure).
+///
+/// If the un-extracted queue exceeds `cfg.extract_threshold_n`, a one-line nudge is
+/// appended to the block (additive — does NOT gate the seed injection).
 async fn run_session_start(cfg: &Config, stdin: &str) -> Option<String> {
     let parsed = parse_session_start(stdin);
     let cue = parsed.and_then(|p| project_cue(p.cwd.as_deref()))?;
-    let block = gated_recall(
+    let mut block = gated_recall(
         cfg,
         &cue,
         cfg.hook_seed_k,
@@ -96,6 +122,10 @@ async fn run_session_start(cfg: &Config, stdin: &str) -> Option<String> {
         /* gate = */ None,
     )
     .await?;
+    // Best-effort extraction signal (does not gate the seed injection).
+    if let Some(sig) = session_extraction_signal(cfg).await {
+        block = format!("{block}\n\n{sig}");
+    }
     Some(render_session_start(&block))
 }
 
@@ -548,6 +578,17 @@ mod tests {
         let pc = select_turns(&turns, &HookEvent::PreCompact);
         assert_eq!(pc.len(), 50);
         assert_eq!(pc.last().unwrap().text, "t59");
+    }
+
+    // --- extraction_signal: pure helper, no daemon ---
+
+    #[test]
+    fn extraction_signal_only_over_threshold() {
+        assert!(extraction_signal(25, 20).is_some(), "over threshold ⇒ signal");
+        assert!(extraction_signal(20, 20).is_some(), "at threshold ⇒ signal");
+        assert!(extraction_signal(3, 20).is_none(), "under ⇒ none");
+        let s = extraction_signal(25, 20).unwrap();
+        assert!(s.contains("extract_pending"), "names the tool: {s}");
     }
 
     // --- handler short-circuits: these return BEFORE any daemon call (hermetic) ---
