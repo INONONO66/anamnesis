@@ -146,6 +146,7 @@ fn two_launchers_share_one_daemon_then_grace_exits() {
             "relate",
             "stats",
             "ingest_conversation",
+            "extract_pending",
         ] {
             assert!(
                 names.iter().any(|n| n == t),
