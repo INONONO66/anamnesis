@@ -639,6 +639,29 @@ impl MemoryRegistry {
         Ok(IngestSummary { episodic, semantic })
     }
 
+    /// Drain up to `limit` un-extracted turns, optimistically marking each
+    /// `extracted=true` (fail-open: raw survives even if the agent never emits).
+    /// Returns a JSON array `[{"node_id":N,"content":"..."}]` for the agent.
+    pub fn pull_pending(&mut self, limit: Option<usize>, ns: Option<&str>) -> Result<String, Error> {
+        let take = limit.unwrap_or(self.unextracted.len()).min(self.unextracted.len());
+        let ids: Vec<NodeId> = self.unextracted.drain(0..take).collect();
+        let mut items = Vec::with_capacity(ids.len());
+        for id in ids {
+            let mem = self.get(ns)?;
+            let content = mem.engine().graph().get_node(id).map(|n| n.content.clone()).unwrap_or_default();
+            mem.set_metadata(id, META_EXTRACTED, "true")?;
+            items.push(serde_json::json!({ "node_id": id.0, "content": content }));
+        }
+        Ok(serde_json::to_string(&items).unwrap_or_else(|_| "[]".to_string()))
+    }
+
+    /// Pending-queue size + the configured threshold (read by the hook signal).
+    pub fn extraction_status(&mut self, _ns: Option<&str>) -> Result<String, Error> {
+        let threshold: usize = std::env::var("ANAMNESIS_EXTRACT_THRESHOLD_N")
+            .ok().and_then(|v| v.trim().parse().ok()).unwrap_or(20);
+        Ok(serde_json::json!({ "pending": self.unextracted.len(), "threshold": threshold }).to_string())
+    }
+
     /// Number of captured episodic nodes awaiting reasoning extraction.
     /// Test accessor — production code uses the field directly.
     #[cfg(test)]
@@ -1173,6 +1196,34 @@ mod tests {
         assert_ne!(a, super::turn_key("s1", "user", "hello", 1001), "at_ms matters");
         assert_ne!(a, super::turn_key("s1", "assistant", "hello", 1000), "speaker matters");
         assert_ne!(a, super::turn_key("s2", "user", "hello", 1000), "session matters");
+    }
+
+    #[test]
+    fn pull_pending_returns_once_and_marks_extracted() {
+        let mut reg = registry(true);
+        let turns = vec![
+            Turn { speaker: "user".into(), text: "why x".into(), at_ms: Some(10) },
+            Turn { speaker: "assistant".into(), text: "because y".into(), at_ms: Some(20) },
+        ];
+        reg.ingest_conversation("s", &turns, None, true).unwrap();
+        assert_eq!(reg.unextracted_len(), 2);
+        let json = reg.pull_pending(None, None).unwrap();
+        assert!(json.contains("\"node_id\""), "got: {json}");
+        assert!(json.contains("because y"), "content included: {json}");
+        assert_eq!(reg.unextracted_len(), 0, "drained");
+        // Second pull is empty (optimistic mark held).
+        let json2 = reg.pull_pending(None, None).unwrap();
+        assert_eq!(json2.trim(), "[]");
+    }
+
+    #[test]
+    fn extraction_status_reports_pending_and_threshold() {
+        let mut reg = registry(true);
+        let turns = vec![Turn { speaker: "user".into(), text: "z".into(), at_ms: Some(99) }];
+        reg.ingest_conversation("s", &turns, None, true).unwrap();
+        let s = reg.extraction_status(None).unwrap();
+        assert!(s.contains("\"pending\":1"), "got: {s}");
+        assert!(s.contains("\"threshold\":"), "got: {s}");
     }
 
     #[test]
