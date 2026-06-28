@@ -1,6 +1,6 @@
 [package]
 name = "anamnesis-engine"
-version = "0.8.2"
+version = "0.9.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Cognitive memory engine for LLMs — Bayesian conductive-network recall with perception, dissipation, and frustration"
