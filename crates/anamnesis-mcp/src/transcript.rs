@@ -3,6 +3,7 @@
 //! Two structurally different schemas (measured):
 //! - Claude Code: `{"type":"user"|"assistant","message":{"role","content"},"timestamp":ISO}`
 //! - Codex rollout: `{"timestamp":ISO,"type":"response_item","payload":{"type":"message","role","content":[{"text"}]}}`
+//!
 //! Both reduce to user+assistant `ParsedTurn`s; all other line/role kinds are dropped.
 
 use std::path::PathBuf;
@@ -17,22 +18,19 @@ pub fn resolve_transcript(
     session_id: Option<&str>,
     cwd: Option<&str>,
 ) -> Option<String> {
-    if let Some(p) = transcript_path {
-        if let Ok(s) = std::fs::read_to_string(p) {
+    if let Some(p) = transcript_path
+        && let Ok(s) = std::fs::read_to_string(p) {
             return Some(s);
         }
-    }
     let sid = session_id?;
-    if let Some(p) = newest_codex_rollout(sid) {
-        if let Ok(s) = std::fs::read_to_string(p) {
+    if let Some(p) = newest_codex_rollout(sid)
+        && let Ok(s) = std::fs::read_to_string(p) {
             return Some(s);
         }
-    }
-    if let Some(p) = cc_transcript_path(sid, cwd) {
-        if let Ok(s) = std::fs::read_to_string(p) {
+    if let Some(p) = cc_transcript_path(sid, cwd)
+        && let Ok(s) = std::fs::read_to_string(p) {
             return Some(s);
         }
-    }
     None
 }
 
@@ -53,15 +51,12 @@ fn newest_codex_rollout(sid: &str) -> Option<PathBuf> {
             let path = e.path();
             if path.is_dir() {
                 stack.push(path);
-            } else if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
-                if name.starts_with("rollout-") && name.ends_with(".jsonl") && name.contains(sid) {
-                    if let Ok(mtime) = e.metadata().and_then(|m| m.modified()) {
-                        if best.as_ref().map_or(true, |(t, _)| mtime > *t) {
+            } else if let Some(name) = path.file_name().and_then(|s| s.to_str())
+                && name.starts_with("rollout-") && name.ends_with(".jsonl") && name.contains(sid)
+                    && let Ok(mtime) = e.metadata().and_then(|m| m.modified())
+                        && best.as_ref().is_none_or(|(t, _)| mtime > *t) {
                             best = Some((mtime, path));
                         }
-                    }
-                }
-            }
         }
     }
     best.map(|(_, p)| p)

@@ -600,11 +600,10 @@ impl MemoryRegistry {
                 let at = Timestamp(turn.at_ms.unwrap_or(base + i as u64));
                 let key = capture.then(|| turn_key(session, &turn.speaker, &turn.text, at.0));
                 // Dedup gate: skip turns already seen in this capture stream.
-                if let Some(k) = &key {
-                    if self.seen_turn_keys.contains(k) {
+                if let Some(k) = &key
+                    && self.seen_turn_keys.contains(k) {
                         return None; // deduplicated
                     }
-                }
                 Some((turn.speaker.clone(), turn.text.clone(), at, key))
             })
             .collect();
