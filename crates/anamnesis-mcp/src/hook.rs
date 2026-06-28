@@ -305,12 +305,17 @@ fn parse_capture_input(stdin: &str) -> Option<CaptureInput> {
 
 /// Select the turns to ingest based on the hook event.
 ///
-/// `Stop` ⇒ the last user+assistant pair (cheap, fires per turn; dedup in the
-/// daemon makes overlap harmless). `PreCompact`/`SessionEnd` ⇒ a wider recent
-/// tail (flush; cap 50).
+/// `Stop` ⇒ a small recent window (≤8 turns; cheap, fires per turn). The window
+/// is wider than a bare user+assistant pair because tool-use / tool-result turns
+/// are filtered out by the transcript parser, which means the last 2 text-bearing
+/// turns can both be `assistant` (e.g. when a tool_use/tool_result exchange
+/// intervened). Dedup in the daemon makes the overlap between successive `Stop`
+/// events free. `PreCompact`/`SessionEnd` ⇒ a wide tail (cap 50) that acts as
+/// the real backstop, flushing everything before the context window is compacted
+/// or the session ends.
 fn select_turns<'a>(turns: &'a [ParsedTurn], event: &HookEvent) -> Vec<&'a ParsedTurn> {
     let take = match event {
-        HookEvent::Stop => 2,
+        HookEvent::Stop => 8,
         _ => 50,
     };
     let start = turns.len().saturating_sub(take);
@@ -566,14 +571,14 @@ mod tests {
     }
 
     #[test]
-    fn stop_selects_last_pair_others_select_tail() {
+    fn stop_selects_recent_window_others_select_tail() {
         let turns: Vec<crate::transcript::ParsedTurn> = (0..60).map(|i| crate::transcript::ParsedTurn {
             speaker: if i % 2 == 0 { "user".into() } else { "assistant".into() },
             text: format!("t{i}"), at_ms: Some(1000 + i),
         }).collect();
-        // Stop ⇒ last user+assistant pair (<=2).
+        // Stop ⇒ a small recent window (≤8) including the latest turn.
         let stop = select_turns(&turns, &HookEvent::Stop);
-        assert!(stop.len() <= 2 && stop.last().unwrap().text == "t59");
+        assert!(stop.len() <= 8 && stop.last().unwrap().text == "t59");
         // PreCompact ⇒ wider tail (cap 50).
         let pc = select_turns(&turns, &HookEvent::PreCompact);
         assert_eq!(pc.len(), 50);

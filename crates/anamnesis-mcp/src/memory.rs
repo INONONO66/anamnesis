@@ -641,12 +641,19 @@ impl MemoryRegistry {
     /// Drain up to `limit` un-extracted turns, optimistically marking each
     /// `extracted=true` (fail-open: raw survives even if the agent never emits).
     /// Returns a JSON array `[{"node_id":N,"content":"..."}]` for the agent.
-    pub fn pull_pending(&mut self, limit: Option<usize>, ns: Option<&str>) -> Result<String, Error> {
+    ///
+    /// **The un-extracted queue is a default-namespace global.** The `ns` param is
+    /// intentionally ignored (reserved for a future per-namespace queue). Nodes are
+    /// always read from and marked in the **default** namespace, consistent with
+    /// `extraction_status` and the capture hook (which always captures into the
+    /// default namespace with `namespace: None`).
+    pub fn pull_pending(&mut self, limit: Option<usize>, _ns: Option<&str>) -> Result<String, Error> {
         let take = limit.unwrap_or(self.unextracted.len()).min(self.unextracted.len());
         let ids: Vec<NodeId> = self.unextracted.drain(0..take).collect();
         let mut items = Vec::with_capacity(ids.len());
         for id in ids {
-            let mem = self.get(ns)?;
+            // Always operate on the default namespace — the queue is global.
+            let mem = self.get(None)?;
             let content = mem.engine().graph().get_node(id).map(|n| n.content.clone()).unwrap_or_default();
             mem.set_metadata(id, META_EXTRACTED, "true")?;
             items.push(serde_json::json!({ "node_id": id.0, "content": content }));
@@ -654,11 +661,12 @@ impl MemoryRegistry {
         Ok(serde_json::to_string(&items).unwrap_or_else(|_| "[]".to_string()))
     }
 
-    /// Pending-queue size + the configured threshold (read by the hook signal).
+    /// Pending-queue size for the hook signal.
+    ///
+    /// **The un-extracted queue is a default-namespace global.** The `_ns` param is
+    /// intentionally ignored — the queue is not per-namespace (reserved for future).
     pub fn extraction_status(&mut self, _ns: Option<&str>) -> Result<String, Error> {
-        let threshold: usize = std::env::var("ANAMNESIS_EXTRACT_THRESHOLD_N")
-            .ok().and_then(|v| v.trim().parse().ok()).unwrap_or(20);
-        Ok(serde_json::json!({ "pending": self.unextracted.len(), "threshold": threshold }).to_string())
+        Ok(serde_json::json!({ "pending": self.unextracted.len() }).to_string())
     }
 
     /// Number of captured episodic nodes awaiting reasoning extraction.
@@ -1195,6 +1203,7 @@ mod tests {
         assert_ne!(a, super::turn_key("s1", "user", "hello", 1001), "at_ms matters");
         assert_ne!(a, super::turn_key("s1", "assistant", "hello", 1000), "speaker matters");
         assert_ne!(a, super::turn_key("s2", "user", "hello", 1000), "session matters");
+        assert_ne!(a, super::turn_key("s1", "user", "HELLO-DIFFERENT", 1000), "text matters");
     }
 
     #[test]
@@ -1215,14 +1224,34 @@ mod tests {
         assert_eq!(json2.trim(), "[]");
     }
 
+    /// `pull_pending` ignores the `ns` argument — the un-extracted queue is a
+    /// default-namespace global.  Calling with a foreign namespace must still drain
+    /// the default-ns queue and return the real content, not an empty list.
     #[test]
-    fn extraction_status_reports_pending_and_threshold() {
+    fn pull_pending_ignores_namespace_param() {
+        let mut reg = registry(true);
+        let turns = vec![
+            Turn { speaker: "user".into(), text: "ns-scope test".into(), at_ms: Some(1) },
+        ];
+        // Capture into the default namespace (as the hook always does).
+        reg.ingest_conversation("s", &turns, None, true).unwrap();
+        assert_eq!(reg.unextracted_len(), 1, "one turn queued");
+        // Pull with a DIFFERENT namespace — must still drain the default-ns queue.
+        let json = reg.pull_pending(None, Some("other")).unwrap();
+        assert!(json.contains("\"node_id\""), "got: {json}");
+        assert!(json.contains("ns-scope test"), "real content returned: {json}");
+        assert_eq!(reg.unextracted_len(), 0, "queue drained despite foreign ns arg");
+    }
+
+    #[test]
+    fn extraction_status_reports_pending() {
         let mut reg = registry(true);
         let turns = vec![Turn { speaker: "user".into(), text: "z".into(), at_ms: Some(99) }];
         reg.ingest_conversation("s", &turns, None, true).unwrap();
         let s = reg.extraction_status(None).unwrap();
         assert!(s.contains("\"pending\":1"), "got: {s}");
-        assert!(s.contains("\"threshold\":"), "got: {s}");
+        // threshold field is intentionally absent — the hook reads only `pending`.
+        assert!(!s.contains("\"threshold\""), "threshold must be absent: {s}");
     }
 
     #[test]
