@@ -66,15 +66,18 @@
 //! |:----------|:--------|
 //! | [`anamnesis::memory`](crate::memory) | Framework API — `Memory`, `Hit`, `Recall`, `SearchTuning`, `AddReceipt` |
 //! | [`anamnesis::engine`](crate::engine) | Kernel API — `Engine`, `EngineConfig`, graph types, storage, embeddings |
+//! | [`anamnesis::schema`](crate::schema) | Stable graph schema vocabulary shared across engines, storage, and tools |
 //!
 //! ## Public API contract
 //!
-//! The public API consists of exactly three root symbols and two namespaces:
+//! The public API consists of exactly three root symbols and three namespaces:
 //!
 //! - **Root**: [`Memory`], [`Engine`], [`Error`]
 //! - **Framework**: [`anamnesis::memory`](crate::memory) — `Memory`, `Hit`, `Recall`, `SearchTuning`, `AddReceipt`
 //! - **Kernel**: [`anamnesis::engine`](crate::engine) — `Engine`, `EngineConfig`, graph types, query types,
 //!   peer/trust types, observability, storage, and embeddings
+//! - **Schema**: [`anamnesis::schema`](crate::schema) — stable `NodeKind`, `MemoryKind`,
+//!   `EntityKind`, and `EdgeKind` vocabulary
 //!
 //! Legacy module paths (`anamnesis::api`, `anamnesis::graph`, `anamnesis::query`,
 //! `anamnesis::mechanics`, `anamnesis::peer`, `anamnesis::snapshot`,
@@ -107,6 +110,9 @@ pub mod storage;
 pub mod engine;
 /// Framework API — bench-proven ingest recipe with two-door entry.
 pub mod memory;
+pub mod schema {
+    pub use anamnesis_core::{EdgeKind, EntityKind, MemoryKind, NodeKind};
+}
 
 // Root re-exports — exactly three symbols.
 pub use api::Engine;

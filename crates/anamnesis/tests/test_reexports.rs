@@ -23,6 +23,18 @@ fn test_engine_namespace_types() {
 }
 
 #[test]
+fn test_schema_namespace_types() {
+    use anamnesis::schema::{EdgeKind, EntityKind, MemoryKind, NodeKind};
+
+    let _ = (
+        NodeKind::Memory,
+        MemoryKind::Fact,
+        EntityKind::Agent,
+        EdgeKind::Associates,
+    );
+}
+
+#[test]
 fn test_engine_namespace_query_types() {
     use anamnesis::engine::{ContextPackage, Fragment, Query, QueryConfig, Tension, TokenBudget};
     let _ = QueryConfig::default();

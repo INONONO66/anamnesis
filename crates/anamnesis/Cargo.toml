@@ -16,6 +16,7 @@ crate-type = ["lib"]
 embed = ["dep:fastembed"]
 
 [dependencies]
+anamnesis-core = { version = "0.1", path = "../anamnesis-core" }
 fastembed = { version = "4", optional = true }
 rusqlite = { version = "0.32", features = ["bundled"] }
 
