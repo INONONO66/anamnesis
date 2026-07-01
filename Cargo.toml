@@ -1,5 +1,9 @@
 [workspace]
-members = ["crates/anamnesis", "crates/anamnesis-mcp"]
+members = [
+    "crates/anamnesis",
+    "crates/anamnesis-core",
+    "crates/anamnesis-mcp",
+]
 resolver = "3"
 
 # Profiles are only honored at the workspace root. Relocated from the

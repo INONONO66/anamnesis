@@ -2,12 +2,14 @@
 
 pub mod edge;
 pub mod node;
+pub mod schema;
 pub mod scope;
 pub mod temporal;
 pub mod types;
 
 pub use edge::Edge;
 pub use node::{Node, Origin};
+pub use schema::{EdgeKind, EntityKind, MemoryKind, NodeKind};
 pub use scope::{ScopePath, ScopeRelation};
 pub use temporal::valid_at;
 pub use types::{
