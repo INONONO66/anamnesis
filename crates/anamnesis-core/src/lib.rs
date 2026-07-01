@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum NodeKind {
@@ -22,6 +23,7 @@ impl NodeKind {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum MemoryKind {
@@ -59,6 +61,7 @@ impl MemoryKind {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum EntityKind {
@@ -90,6 +93,7 @@ impl EntityKind {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum EdgeKind {
@@ -126,5 +130,26 @@ mod tests {
         assert_eq!(MemoryKind::Decision.as_str(), "decision");
         assert_eq!(EntityKind::Agent.as_str(), "agent");
         assert_eq!(EdgeKind::Sequence.as_str(), "sequence");
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn serde_uses_stable_schema_keys() {
+        assert_eq!(
+            serde_json::to_string(&NodeKind::Memory).unwrap(),
+            "\"memory\""
+        );
+        assert_eq!(
+            serde_json::to_string(&MemoryKind::Decision).unwrap(),
+            "\"decision\""
+        );
+        assert_eq!(
+            serde_json::to_string(&EntityKind::Agent).unwrap(),
+            "\"agent\""
+        );
+        assert_eq!(
+            serde_json::to_string(&EdgeKind::Sequence).unwrap(),
+            "\"sequence\""
+        );
     }
 }
