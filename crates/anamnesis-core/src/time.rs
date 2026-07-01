@@ -29,10 +29,10 @@ impl TemporalValidity {
         valid_from: Option<Timestamp>,
         valid_until: Option<Timestamp>,
     ) -> Result<Self, TemporalError> {
-        if let (Some(start), Some(end)) = (valid_from, valid_until) {
-            if start.as_millis() >= end.as_millis() {
-                return Err(TemporalError::InvertedRange);
-            }
+        if let (Some(start), Some(end)) = (valid_from, valid_until)
+            && start.as_millis() >= end.as_millis()
+        {
+            return Err(TemporalError::InvertedRange);
         }
         Ok(Self {
             valid_from,
@@ -55,15 +55,15 @@ pub enum TemporalError {
 }
 
 pub const fn valid_at(validity: TemporalValidity, timestamp: Timestamp) -> bool {
-    if let Some(start) = validity.valid_from() {
-        if timestamp.as_millis() < start.as_millis() {
-            return false;
-        }
+    if let Some(start) = validity.valid_from()
+        && timestamp.as_millis() < start.as_millis()
+    {
+        return false;
     }
-    if let Some(end) = validity.valid_until() {
-        if timestamp.as_millis() >= end.as_millis() {
-            return false;
-        }
+    if let Some(end) = validity.valid_until()
+        && timestamp.as_millis() >= end.as_millis()
+    {
+        return false;
     }
     true
 }
