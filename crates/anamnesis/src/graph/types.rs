@@ -111,20 +111,24 @@ pub enum KnowledgeType {
     Custom(String),
 }
 
-/// Explicit memory tier override for a node.
+/// A node's memory tier — a salience-derived display label.
 ///
-/// When set to anything other than `Auto`, the tier overrides the natural
-/// salience-based tier assignment. `Core` nodes are protected from decay.
+/// The manual tier-override mechanism was removed: a node's stored `tier` is
+/// always `Auto` in production, and the descriptive tier (`Core`/`Recall`/
+/// `Archival`) is derived from the salience band for `TierTransition` reporting.
+/// The four variants are retained for storage decode-compatibility (legacy DBs may
+/// have persisted any of them) and for that display mapping. Decay protection is
+/// identity-based, not tier-based.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub enum MemoryTier {
-    /// No override — tier is determined by salience range (default).
+    /// Salience-determined tier (the stored default for every node).
     #[default]
     Auto,
-    /// Pinned to core memory — protected from decay.
+    /// Core memory band (highest-salience display label).
     Core,
-    /// Pinned to recall tier — moderate decay.
+    /// Recall band (moderate-salience display label).
     Recall,
-    /// Pinned to archival tier — fast decay.
+    /// Archival band (lowest-salience display label).
     Archival,
 }
 

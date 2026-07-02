@@ -2055,31 +2055,6 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         Ok(touched)
     }
 
-    /// Set the explicit memory tier for a node.
-    ///
-    /// `Core` tier nodes are protected from decay in `tick()`.
-    /// `Auto` restores natural salience-based tier assignment.
-    pub fn set_tier(&mut self, node_id: NodeId, tier: MemoryTier) -> Result<(), Error> {
-        let node = self.graph.get_node_mut(node_id)?;
-        let old_tier = node.tier.clone();
-        node.tier = tier;
-        let new_tier = node.tier.clone();
-        if old_tier != new_tier {
-            self.emit_event(GraphEvent::TierTransition {
-                node_id,
-                from_tier: old_tier,
-                to_tier: new_tier,
-            });
-        }
-        Ok(())
-    }
-
-    /// Get the current memory tier of a node.
-    pub fn get_tier(&self, node_id: NodeId) -> Result<MemoryTier, Error> {
-        let node = self.graph.get_node(node_id)?;
-        Ok(node.tier.clone())
-    }
-
     /// Read-only observability getter for a node's authoritative retained-action
     /// reservoir `A_i` (log need-odds — ADR-0002/0003).
     ///
@@ -2470,7 +2445,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
     /// `accessed_at` is left untouched, preserving last user-access semantics. Idle
     /// edges still leak their conductance.
     ///
-    /// Core tier and `Identity` are protected (never decay under ordinary tick).
+    /// `Identity` nodes are protected (never decay under ordinary tick).
     /// Non-finite values are rejected at the boundary.
     pub fn tick(&mut self, now: Timestamp) -> Result<TickReport, Error> {
         use crate::mechanics::priors::project_salience;
@@ -2483,15 +2458,6 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         let mut total_conductance_delta = 0.0_f64;
 
         for id in node_ids {
-            let node_tier = match self.graph.get_node(id) {
-                Ok(node) => node.tier.clone(),
-                Err(_) => continue,
-            };
-            // Core tier is protected from ordinary decay.
-            if node_tier == MemoryTier::Core {
-                continue;
-            }
-
             let current_salience = match self.graph.storage().get_salience(id) {
                 Ok(s) => s,
                 Err(_) => continue,
@@ -2500,7 +2466,9 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                 Ok(kt) => kt.clone(),
                 Err(_) => continue,
             };
-            // Identity is protected regardless of tier.
+            // Identity nodes are protected from ordinary decay (identity-based
+            // protection, ADR/B4). Manual Core-tier pinning was removed — `tier`
+            // is always `Auto` in production, so there is no tier-override branch.
             if node_type == KnowledgeType::Identity {
                 continue;
             }
@@ -2560,7 +2528,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         // (conductance.md post-commit plasticity / interactions.md `TimeElapsed`).
         // Unused weak coupling drains over time (density control). Idle time is
         // `now - edge.accessed_at` (the committed-use timestamp). Edges incident to
-        // a protected node (Core tier / `Identity`) are exempt, mirroring node
+        // a protected node (`Identity`) are exempt, mirroring node
         // decay; `Contradicts` edges are excluded (routed to frustration, not
         // propagation — ADR-0005/0006). Edges are never deleted (ADR-0008/0006).
         {
@@ -2625,13 +2593,14 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         })
     }
 
-    /// True when a node is protected from ordinary `tick` dissipation — Core tier
-    /// or `Identity` type (dissipation.md "Memory Tier" / priors decay policy).
-    /// Used to exempt protected edges from idle-edge leakage. A missing node is
-    /// treated as protected (no leak applied) so a dangling edge is never mutated.
+    /// True when a node is protected from ordinary `tick` dissipation — an
+    /// `Identity`-type node (identity-based protection; dissipation.md / priors
+    /// decay policy). Used to exempt protected edges from idle-edge leakage. A
+    /// missing node is treated as protected (no leak applied) so a dangling edge is
+    /// never mutated.
     fn is_protected_node(&self, id: NodeId) -> bool {
         match self.graph.get_node(id) {
-            Ok(node) => node.tier == MemoryTier::Core || node.node_type == KnowledgeType::Identity,
+            Ok(node) => node.node_type == KnowledgeType::Identity,
             Err(_) => true,
         }
     }

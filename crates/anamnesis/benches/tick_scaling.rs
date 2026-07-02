@@ -2,13 +2,13 @@ use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_ma
 
 use anamnesis::Engine;
 use anamnesis::api::Observation;
-use anamnesis::engine::{EngineConfig, IngestResult, KnowledgeType, Timestamp};
+use anamnesis::engine::{EngineConfig, KnowledgeType, Timestamp};
 use anamnesis::graph::node::Origin;
-use anamnesis::graph::{MemoryTier, ScopePath};
+use anamnesis::graph::ScopePath;
 
 // KPI targets: 10K nodes < 10ms, 50K nodes < 50ms
 
-fn build_engine_with_nodes(n: usize, core_pct: usize) -> Engine {
+fn build_engine_with_nodes(n: usize) -> Engine {
     let config = EngineConfig::new()
         .with_max_nodes(n * 2)
         .with_novelty_threshold(0.0)
@@ -37,12 +37,7 @@ fn build_engine_with_nodes(n: usize, core_pct: usize) -> Engine {
             valid_until: None,
         };
 
-        if let Ok(IngestResult::Created(ids)) = engine.ingest(obs)
-            && core_pct > 0
-            && i * 100 / n < core_pct
-        {
-            let _ = engine.set_tier(ids[0], MemoryTier::Core);
-        }
+        let _ = engine.ingest(obs);
     }
 
     engine
@@ -50,25 +45,18 @@ fn build_engine_with_nodes(n: usize, core_pct: usize) -> Engine {
 
 fn bench_tick_scaling(c: &mut Criterion) {
     let sizes = [1_000usize, 10_000, 50_000, 100_000];
-    let core_pcts = [0usize, 25, 50];
 
     let mut group = c.benchmark_group("tick_scaling");
 
     for &size in &sizes {
-        for &pct in &core_pcts {
-            group.bench_with_input(
-                BenchmarkId::new(format!("tick_{size}_core{pct}"), pct),
-                &(size, pct),
-                |b, &(size, pct)| {
-                    let mut engine = build_engine_with_nodes(size, pct);
-                    let mut ts: u64 = 2_000_000;
-                    b.iter(|| {
-                        ts += 86_400_000;
-                        engine.tick(black_box(Timestamp(ts))).unwrap();
-                    });
-                },
-            );
-        }
+        group.bench_with_input(BenchmarkId::new("tick", size), &size, |b, &size| {
+            let mut engine = build_engine_with_nodes(size);
+            let mut ts: u64 = 2_000_000;
+            b.iter(|| {
+                ts += 86_400_000;
+                engine.tick(black_box(Timestamp(ts))).unwrap();
+            });
+        });
     }
 
     group.finish();
