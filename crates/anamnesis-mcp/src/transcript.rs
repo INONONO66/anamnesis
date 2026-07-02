@@ -10,47 +10,92 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 
+/// Only the transcript TAIL is ever read (a hook needs the last ≤50 turns, not
+/// the whole session): bounds per-`Stop` I/O to a constant instead of O(session)
+/// — which would otherwise compound to O(n²) over a long session — and caps
+/// memory for arbitrarily large transcripts.
+const TRANSCRIPT_TAIL_BYTES: u64 = 256 * 1024;
+
+/// Hard cap on directory entries visited when searching `~/.codex/sessions` —
+/// a huge session tree must never blow the hook's time budget.
+const ROLLOUT_WALK_CAP: usize = 4096;
+
 /// Resolve transcript contents: `transcript_path` if readable, else locate by
 /// `session_id` (Codex `~/.codex/sessions/**/rollout-*<sid>*.jsonl`, then CC
 /// `~/.claude/projects/<cwd-slug>/<sid>.jsonl`). Returns None if nothing found.
+///
+/// Reads only the last [`TRANSCRIPT_TAIL_BYTES`] of the file (bounded I/O).
 pub fn resolve_transcript(
     transcript_path: Option<&str>,
     session_id: Option<&str>,
     cwd: Option<&str>,
 ) -> Option<String> {
     if let Some(p) = transcript_path
-        && let Ok(s) = std::fs::read_to_string(p)
+        && let Some(s) = read_transcript_tail(std::path::Path::new(p), TRANSCRIPT_TAIL_BYTES)
     {
         return Some(s);
     }
     let sid = session_id?;
     if let Some(p) = newest_codex_rollout(sid)
-        && let Ok(s) = std::fs::read_to_string(p)
+        && let Some(s) = read_transcript_tail(&p, TRANSCRIPT_TAIL_BYTES)
     {
         return Some(s);
     }
     if let Some(p) = cc_transcript_path(sid, cwd)
-        && let Ok(s) = std::fs::read_to_string(p)
+        && let Some(s) = read_transcript_tail(&p, TRANSCRIPT_TAIL_BYTES)
     {
         return Some(s);
     }
     None
 }
 
+/// Read at most the last `max_bytes` of a file as UTF-8 (lossy). When the
+/// window starts mid-file, everything through the first `\n` is dropped so the
+/// result begins on a whole JSONL line. `None` on any I/O error (fail-open).
+fn read_transcript_tail(path: &std::path::Path, max_bytes: u64) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    let truncated = len > max_bytes;
+    if truncated {
+        f.seek(SeekFrom::Start(len - max_bytes)).ok()?;
+    }
+    let mut buf = Vec::with_capacity(len.min(max_bytes) as usize);
+    f.read_to_end(&mut buf).ok()?;
+    let s = String::from_utf8_lossy(&buf);
+    if truncated {
+        // Drop the partial first line so parsing starts on a line boundary; a
+        // window that is one giant partial line has nothing parseable (None).
+        s.find('\n').map(|i| s[i + 1..].to_string())
+    } else {
+        Some(s.into_owned())
+    }
+}
+
 fn home() -> Option<PathBuf> {
     dirs::home_dir()
 }
 
-/// Newest `rollout-*<sid>*.jsonl` under ~/.codex/sessions (recursive walk).
+/// Newest `rollout-*<sid>*.jsonl` under ~/.codex/sessions (bounded walk:
+/// at most [`ROLLOUT_WALK_CAP`] entries are visited; best-so-far wins).
 fn newest_codex_rollout(sid: &str) -> Option<PathBuf> {
     let root = home()?.join(".codex/sessions");
+    newest_rollout_under(&root, sid, ROLLOUT_WALK_CAP)
+}
+
+fn newest_rollout_under(root: &std::path::Path, sid: &str, cap: usize) -> Option<PathBuf> {
     let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
-    let mut stack = vec![root];
+    let mut visited = 0usize;
+    let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let Ok(rd) = std::fs::read_dir(&dir) else {
             continue;
         };
         for e in rd.flatten() {
+            visited += 1;
+            if visited > cap {
+                return best.map(|(_, p)| p);
+            }
             let path = e.path();
             if path.is_dir() {
                 stack.push(path);
@@ -217,6 +262,59 @@ mod tests {
     fn resolve_none_when_path_missing_and_no_session() {
         assert!(resolve_transcript(Some("/no/such/file.jsonl"), None, None).is_none());
         assert!(resolve_transcript(None, None, None).is_none());
+    }
+
+    #[test]
+    fn tail_read_small_file_reads_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("small.jsonl");
+        std::fs::write(&f, "hello").unwrap();
+        assert_eq!(read_transcript_tail(&f, 1024).as_deref(), Some("hello"));
+    }
+
+    /// A file larger than the window: the partial first line inside the window
+    /// is dropped, and the remaining whole lines still parse.
+    #[test]
+    fn tail_read_drops_partial_first_line_and_parses() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("big.jsonl");
+        let line1 = format!(
+            "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"{}\"}}}}\n",
+            "x".repeat(300)
+        );
+        let line2 = "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":\"tail ok\"}}\n";
+        std::fs::write(&f, format!("{line1}{line2}")).unwrap();
+        // Window covers line2 plus a slice of line1's tail — cuts mid-line-1.
+        let tail = read_transcript_tail(&f, (line2.len() + 20) as u64).unwrap();
+        assert!(!tail.contains("xxx"), "partial first line dropped: {tail}");
+        let turns = parse_transcript(&tail);
+        assert_eq!(turns.len(), 1, "only the whole line parses: {turns:?}");
+        assert_eq!(turns[0].text, "tail ok");
+    }
+
+    /// The rollout walk finds the newest matching file in nested dirs and never
+    /// exceeds its visit cap (cap-1 walk returns without hanging).
+    #[test]
+    fn rollout_walk_finds_newest_and_respects_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("2026/07/01");
+        std::fs::create_dir_all(&sub).unwrap();
+        let old = sub.join("rollout-a-sid1.jsonl");
+        let newer = sub.join("rollout-b-sid1.jsonl");
+        std::fs::write(&old, "old").unwrap();
+        std::fs::write(&newer, "new").unwrap();
+        // Deterministic mtimes (no sleeps): old ← now-10s.
+        let past = std::time::SystemTime::now() - std::time::Duration::from_secs(10);
+        std::fs::File::options()
+            .write(true)
+            .open(&old)
+            .unwrap()
+            .set_modified(past)
+            .unwrap();
+        let found = newest_rollout_under(dir.path(), "sid1", 4096).unwrap();
+        assert_eq!(found, newer, "newest mtime wins");
+        // Tiny cap: returns best-so-far (possibly None) without hanging.
+        let _ = newest_rollout_under(dir.path(), "sid1", 1);
     }
 
     const CC: &str = r#"{"type":"mode","mode":"normal","sessionId":"x"}
