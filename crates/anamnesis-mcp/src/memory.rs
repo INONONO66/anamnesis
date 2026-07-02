@@ -534,7 +534,7 @@ impl MemoryRegistry {
         let relation = parse_relation(relation)?;
         let mem = self.get(ns)?;
         // Flush so a just-added turn (its semantic still buffered) is a valid
-        // endpoint, mirroring `consolidate`/`search`.
+        // endpoint, mirroring `search`.
         mem.flush_all()?;
         let edge = mem.relate(NodeId(from_id), NodeId(to_id), relation)?;
         mem.flush_all()?;

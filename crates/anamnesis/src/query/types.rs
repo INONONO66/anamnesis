@@ -292,11 +292,11 @@ impl TokenBudget {
 /// - tensions → warning block
 #[derive(Debug, Clone, PartialEq)]
 pub struct ContextPackage {
-    /// Agent persona traits (IdentityCore, IdentityLearned, IdentityState nodes).
+    /// Agent persona traits (Identity nodes).
     pub identity: Vec<Fragment>,
-    /// Query-relevant knowledge (Semantic, Decision, Convention, etc. nodes).
+    /// Query-relevant knowledge (Semantic and Custom nodes).
     pub knowledge: Vec<Fragment>,
-    /// Supporting episodic evidence (Episodic, Event nodes).
+    /// Supporting episodic evidence (Episodic nodes).
     pub memories: Vec<Fragment>,
     /// Active contradictions between retrieved nodes.
     pub tensions: Vec<Tension>,
