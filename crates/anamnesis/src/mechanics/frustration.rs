@@ -19,23 +19,26 @@
 //! stress. All functions are pure: no side effects, no storage access.
 
 use crate::graph::Timestamp;
-use crate::graph::scope::{ScopePath, ScopeRelation};
+use crate::graph::scope::ScopePath;
 
 /// Scope-overlap gate `scope_overlap` for a contradiction pair (frustration.md).
 ///
 /// Two claims can only frustrate each other when their scopes actually overlap.
-/// The gate is the visibility weight of the two scopes' relationship, in `[0, 1]`:
-/// identical or universal scopes overlap fully (`1.0`); ancestor/descendant scopes
-/// overlap on their shared path; siblings overlap weakly; disjoint scopes do not
-/// overlap at all (`0.0`), so a private contradiction cannot leak across
-/// unauthorized scopes (the frustration.md safety rule).
+/// Scopes are flat opaque paths (the hierarchy was removed — all production nodes
+/// are universal), so the gate is a two-branch **safety** gate in `{0.0, 1.0}`:
+/// identical or universal scopes overlap fully (`1.0`); two different concrete
+/// scopes do not overlap at all (`0.0`), so a private contradiction cannot leak
+/// across unauthorized scopes (the frustration.md safety rule). This is the
+/// conservative closed-gate choice: unlike the readout `scope_weight` (a ranking
+/// weight that only *attenuates*), this gate must *hide* cross-scope tensions, not
+/// merely down-weight them. In production the compared scopes are always
+/// universal, so this always yields `1.0` — bit-identical to the previous
+/// hierarchical table's `Equal`/`Universal` rows for that case.
 pub fn scope_overlap(a: &ScopePath, b: &ScopePath) -> f64 {
-    match a.relation_to(b) {
-        ScopeRelation::Equal | ScopeRelation::Universal => 1.0,
-        ScopeRelation::Ancestor | ScopeRelation::Descendant => 0.85,
-        ScopeRelation::Sibling => 0.50,
-        // Disjoint scopes never frustrate — the gate is fully closed.
-        ScopeRelation::Disjoint => 0.0,
+    if a == b || a.is_universal() || b.is_universal() {
+        1.0
+    } else {
+        0.0
     }
 }
 
@@ -133,15 +136,15 @@ mod tests {
     }
 
     #[test]
-    fn disjoint_scope_no_overlap() {
-        // Disjoint scopes never frustrate — private contradictions do not leak.
+    fn different_concrete_scopes_no_overlap() {
+        // Two different concrete scopes (neither universal) do not overlap — the
+        // safety gate is fully closed so private contradictions never leak,
+        // regardless of any former hierarchical relationship (the hierarchy is gone).
         assert_eq!(scope_overlap(&scope("proj-a"), &scope("proj-b")), 0.0);
-    }
-
-    #[test]
-    fn ancestor_partial_overlap() {
-        let g = scope_overlap(&scope("proj-a"), &scope("proj-a/feature"));
-        assert!(g > 0.0 && g < 1.0);
+        assert_eq!(
+            scope_overlap(&scope("proj-a"), &scope("proj-a/feature")),
+            0.0
+        );
     }
 
     // ── temporal overlap gate ─────────────────────────────────────────────────

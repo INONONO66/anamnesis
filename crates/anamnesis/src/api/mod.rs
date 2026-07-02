@@ -2829,7 +2829,6 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             &HashMap::new(),
             config.token_budget,
             config.chars_per_token,
-            &config.scope,
             &ModeContext::default(),
         ))
     }
@@ -2901,7 +2900,6 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             &HashMap::new(),
             config.token_budget,
             config.chars_per_token,
-            &config.scope,
             &ModeContext::default(),
         ))
     }
@@ -2979,7 +2977,6 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             &HashMap::new(),
             config.token_budget,
             config.chars_per_token,
-            &config.scope,
             &ModeContext::default(),
         ))
     }
@@ -3065,7 +3062,6 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             &HashMap::new(),
             config.token_budget,
             config.chars_per_token,
-            &config.scope,
             &ModeContext { adjacent_ids },
         ))
     }
@@ -3172,7 +3168,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                 (Some(qe), Some(ne)) => cosine_similarity(qe, ne),
                 _ => 0.0,
             };
-            let sw = scope_weight(&config.scope, &node.origin.scope, 0);
+            let sw = scope_weight(&config.scope, &node.origin.scope);
             // Trust reservoir removed with the peer subsystem; term is neutral
             // pending a real trust source.
             let trust_weight = 1.0;
@@ -3235,7 +3231,6 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             activations,
             config.token_budget,
             config.chars_per_token,
-            &config.scope,
             &crate::query::assembly::ModeContext::default(),
         );
 

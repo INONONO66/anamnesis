@@ -52,7 +52,6 @@ fn temporal_query_elevates_memories_to_l1() {
         &HashMap::new(),
         10000,
         4,
-        &ScopePath::universal(),
         &ModeContext::default(),
     );
 
@@ -101,7 +100,6 @@ fn neighborhood_shows_adjacent_at_l2() {
         &HashMap::new(),
         10000,
         4,
-        &ScopePath::universal(),
         &ModeContext { adjacent_ids },
     );
 
@@ -168,7 +166,6 @@ fn tension_involved_nodes_include_provenance() {
         &activations,
         10000,
         4,
-        &ScopePath::universal(),
         &ModeContext::default(),
     );
 
@@ -235,7 +232,6 @@ fn budget_partitioned_correctly() {
         &HashMap::new(),
         token_budget,
         4,
-        &ScopePath::universal(),
         &ModeContext::default(),
     );
 
@@ -283,7 +279,7 @@ fn associative_behavior_preserved() {
     ];
 
     let base_pkg =
-        assemble_context_package(nodes_clone, &[], &[], 10000, 4, &ScopePath::universal());
+        assemble_context_package(nodes_clone, &[], &[], 10000, 4);
 
     let mode_pkg = assemble_context_package_for_mode(
         nodes,
@@ -293,7 +289,6 @@ fn associative_behavior_preserved() {
         &HashMap::new(),
         10000,
         4,
-        &ScopePath::universal(),
         &ModeContext::default(),
     );
 
@@ -338,7 +333,6 @@ fn type_filtered_shows_target_type_at_l2() {
         &HashMap::new(),
         10000,
         4,
-        &ScopePath::universal(),
         &ModeContext::default(),
     );
 
@@ -381,7 +375,6 @@ fn salience_conditional_memory_elevation() {
         &activations,
         10000,
         4,
-        &ScopePath::universal(),
         &ModeContext::default(),
     );
 
@@ -426,7 +419,6 @@ fn list_mode_preserves_base_behavior() {
         &HashMap::new(),
         10000,
         4,
-        &ScopePath::universal(),
         &ModeContext::default(),
     );
 

@@ -1,7 +1,7 @@
 use anamnesis::api::{Engine, EngineConfig, IngestResult, Observation};
 use anamnesis::engine::{NodeId, StorageAdapter};
 use anamnesis::graph::node::Origin;
-use anamnesis::graph::{EdgeType, KnowledgeType, ScopePath, ScopeRelation, Timestamp};
+use anamnesis::graph::{EdgeType, KnowledgeType, ScopePath, Timestamp};
 use anamnesis::query::SearchInput;
 
 fn engine() -> Engine {
@@ -439,7 +439,6 @@ fn source_fragment_carries_source_scope() {
         .unwrap();
 
     assert_eq!(source_fragment.origin.scope.as_str(), "project/main");
-    assert_eq!(source_fragment.scope, ScopeRelation::Equal);
 }
 
 /// Protects empty-candidate search from panicking or fabricating fragments.

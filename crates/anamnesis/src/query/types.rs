@@ -1,7 +1,7 @@
 //! Query types for the Anamnesis cognitive graph engine.
 
 use crate::graph::Origin;
-use crate::graph::scope::{ScopePath, ScopeRelation};
+use crate::graph::scope::ScopePath;
 use crate::graph::{EdgeId, EdgeType, KnowledgeType, NodeId, Timestamp};
 
 /// Query modes for different retrieval patterns.
@@ -128,10 +128,8 @@ pub struct Fragment {
     pub node_type: KnowledgeType,
     /// Final relevance score R_i from the query pipeline [0, 1].
     pub relevance: f64,
-    /// Provenance of the source node.
+    /// Provenance of the source node (carries the node's origin `ScopePath`).
     pub origin: Origin,
-    /// Scope of this fragment relative to the query context.
-    pub scope: ScopeRelation,
 }
 
 /// An active contradiction between two nodes, surfaced as query-local stress.
@@ -555,15 +553,6 @@ mod tests {
     }
 
     #[test]
-    fn scope_variants() {
-        let s1 = ScopeRelation::Equal;
-        let s2 = ScopeRelation::Universal;
-        let s3 = ScopeRelation::Disjoint;
-        assert_ne!(s1, s2);
-        assert_ne!(s2, s3);
-    }
-
-    #[test]
     fn query_config_default() {
         let config = QueryConfig::default();
         assert_eq!(config.budget, 500);
@@ -615,7 +604,6 @@ mod tests {
             node_type: KnowledgeType::Semantic,
             relevance: 0.85,
             origin: make_origin(),
-            scope: ScopeRelation::Universal,
         };
         assert_eq!(frag.relevance, 0.85);
         assert!(frag.content.is_none());

@@ -276,14 +276,18 @@ fn healthy_graph_passes_all_structural_invariants() {
 }
 
 #[test]
-fn private_scope_leakage_is_clean_for_hierarchical_scopes() {
+fn private_scope_leakage_is_clean_for_same_scope() {
     let config = EngineConfig::new().with_novelty_threshold(0.0);
     let mut engine = Engine::with_config(config);
 
-    // Two nodes in related (parent/child) scopes linked: not a leak.
-    let parent = ingest_in(&mut engine, "parent", KnowledgeType::Semantic, "org");
-    let child = ingest_in(&mut engine, "child", KnowledgeType::Semantic, "org/team");
-    engine.link(parent, child, EdgeType::Semantic).unwrap();
+    // Scopes are flat opaque paths (hierarchy removed): a propagating edge only
+    // leaks when it bridges two *different* non-universal scopes. Two endpoints in
+    // the exact same concrete scope share visibility, so linking them is not a leak
+    // (a former parent/child hierarchical pair like "org" ↔ "org/team" is now two
+    // distinct private scopes and WOULD leak — see the disjoint-bridge test).
+    let a = ingest_in(&mut engine, "org note a", KnowledgeType::Semantic, "org");
+    let b = ingest_in(&mut engine, "org note b", KnowledgeType::Semantic, "org");
+    engine.link(a, b, EdgeType::Semantic).unwrap();
 
     let report = engine.check_invariants(None);
     assert!(

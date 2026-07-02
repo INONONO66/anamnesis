@@ -24,7 +24,6 @@
 //! `[0, 1]`; flow never crosses disjoint private scopes. A violation is surfaced,
 //! not silently repaired.
 
-use crate::graph::scope::ScopeRelation;
 use crate::graph::{EdgeType, NodeId};
 use crate::storage::StorageAdapter;
 
@@ -241,20 +240,18 @@ pub fn check_storage_invariants<S: StorageAdapter>(storage: &S) -> Vec<Invariant
 
             // Private-scope leakage: a *propagating* edge (one that carries flow —
             // i.e. not `Contradicts`, which is excluded from propagation) must not
-            // bridge two sites whose origin scopes are mutually disjoint
-            // (`Disjoint`) when neither side is universal. Such an edge would let
-            // private knowledge in one scope light up a node a query in the other,
-            // disjoint scope can reach.
+            // bridge two sites in different private scopes when neither side is
+            // universal. Scopes are flat opaque paths (the hierarchy was removed),
+            // so any two distinct non-universal scopes are mutually private — such
+            // an edge would let private knowledge in one scope light up a node a
+            // query in the other scope can reach.
             if !matches!(edge.edge_type, EdgeType::Contradicts)
                 && let (Ok(src), Ok(tgt)) =
                     (storage.get_node(edge.source), storage.get_node(edge.target))
             {
                 let src_scope = &src.origin.scope;
                 let tgt_scope = &tgt.origin.scope;
-                if !src_scope.is_universal()
-                    && !tgt_scope.is_universal()
-                    && src_scope.relation_to(tgt_scope) == ScopeRelation::Disjoint
-                {
+                if !src_scope.is_universal() && !tgt_scope.is_universal() && src_scope != tgt_scope {
                     scope_leakage.push(format!(
                         "edge {eid:?} bridges disjoint scopes {} <-> {}",
                         src_scope, tgt_scope

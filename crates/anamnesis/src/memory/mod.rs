@@ -58,7 +58,6 @@ use crate::api::{CommitReport, EngineConfig, HealthGrade, IngestResult, Observat
 use crate::embedding::EmbeddingProvider;
 use crate::error::Error;
 use crate::graph::node::Origin;
-use crate::graph::scope::ScopeRelation;
 use crate::graph::types::SourceKind;
 use crate::graph::types::{EdgeId, PeerId};
 use crate::graph::{EdgeType, KnowledgeType, NodeId, ScopePath, Timestamp};
@@ -938,17 +937,17 @@ fn render_section(out: &mut String, title: &str, frags: &[Fragment]) {
         } else if let Some(summary) = &f.summary {
             let _ = writeln!(out, "    {summary}");
         }
-        // Provenance line. ScopePath (origin.scope) HAS Display; SourceKind and
-        // ScopeRelation need {:?} / a label helper.
+        // Provenance line. ScopePath (origin.scope) HAS Display; SourceKind needs
+        // {:?}. Scopes are flat opaque paths (hierarchy removed), so the origin
+        // scope string is the whole story — there is no query-relative relation.
         let _ = writeln!(
             out,
-            "    └ origin: peer #{}, {:?}, session \"{}\", scope {} (conf {:.2}); relation {}",
+            "    └ origin: peer #{}, {:?}, session \"{}\", scope {} (conf {:.2})",
             f.origin.peer_id.0,
             f.origin.source_kind,
             f.origin.session_id,
             f.origin.scope,
             f.origin.confidence,
-            scope_relation_label(f.scope),
         );
     }
     out.push('\n');
@@ -961,18 +960,6 @@ fn render_tension(out: &mut String, tension: &Tension) {
         let _ = write!(out, " — {desc}");
     }
     let _ = writeln!(out, " (stress {:.2})", tension.stress);
-}
-
-/// A friendly label for a [`ScopeRelation`] (it has no `Display` impl).
-fn scope_relation_label(relation: ScopeRelation) -> &'static str {
-    match relation {
-        ScopeRelation::Equal => "equal",
-        ScopeRelation::Ancestor => "ancestor",
-        ScopeRelation::Descendant => "descendant",
-        ScopeRelation::Sibling => "sibling",
-        ScopeRelation::Universal => "universal",
-        ScopeRelation::Disjoint => "disjoint",
-    }
 }
 
 impl<S: StorageAdapter + Clone> Memory<S> {

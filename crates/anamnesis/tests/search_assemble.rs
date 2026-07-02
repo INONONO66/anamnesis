@@ -1,6 +1,6 @@
 use anamnesis::api::{Engine, EngineConfig, IngestResult, Observation};
 use anamnesis::graph::node::Origin;
-use anamnesis::graph::{EdgeType, KnowledgeType, NodeId, ScopePath, ScopeRelation, Timestamp};
+use anamnesis::graph::{EdgeType, KnowledgeType, NodeId, ScopePath, Timestamp};
 use anamnesis::query::SearchInput;
 
 fn origin(_agent: &str, session: &str, scope: Option<&str>) -> Origin {
@@ -266,7 +266,6 @@ fn source_fragment_carries_source_scope() {
         .find(|fragment| fragment.node_id == source)
         .expect("source memory should be packaged");
     assert_eq!(fragment.origin.scope.as_str(), "source-project");
-    assert_eq!(fragment.scope, ScopeRelation::Equal);
 }
 
 #[test]

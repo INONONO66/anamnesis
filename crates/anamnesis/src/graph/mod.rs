@@ -8,7 +8,7 @@ pub mod types;
 
 pub use edge::Edge;
 pub use node::{Node, Origin};
-pub use scope::{ScopePath, ScopeRelation};
+pub use scope::ScopePath;
 pub use temporal::valid_at;
 pub use types::{
     AccessTrace, EdgeId, EdgeType, KnowledgeType, MemoryTier, NodeId, PeerId, SourceKind, Timestamp,

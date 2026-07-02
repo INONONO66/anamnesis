@@ -25,7 +25,7 @@ pub use crate::api::{
 
 pub use crate::graph::{
     AccessTrace, Edge, EdgeId, EdgeType, KnowledgeType, MemoryTier, Node, NodeId, Origin, PeerId,
-    ScopePath, ScopeRelation, SourceKind, Timestamp,
+    ScopePath, SourceKind, Timestamp,
 };
 
 // ── Query types ───────────────────────────────────────────────────────────────
