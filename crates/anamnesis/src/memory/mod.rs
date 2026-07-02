@@ -903,6 +903,19 @@ impl Recall {
     }
 }
 
+/// Human-readable label for a node type in rendered context output.
+///
+/// `KnowledgeType` has no `Display`; the fixed variants render via `{:?}`
+/// (`Identity`/`Semantic`/`Episodic`), but `Custom("gotcha")` would render as the
+/// noisy `Custom("gotcha")`. Render `Custom` as its bare inner label instead so a
+/// legacy/consumer type reads as `[gotcha]` rather than `[Custom("gotcha")]`.
+fn node_type_label(kt: &KnowledgeType) -> String {
+    match kt {
+        KnowledgeType::Custom(label) => label.clone(),
+        other => format!("{other:?}"),
+    }
+}
+
 /// Render one titled fragment section (skipped entirely if `frags` is empty).
 fn render_section(out: &mut String, title: &str, frags: &[Fragment]) {
     if frags.is_empty() {
@@ -910,11 +923,13 @@ fn render_section(out: &mut String, title: &str, frags: &[Fragment]) {
     }
     let _ = writeln!(out, "## {title}");
     for f in frags {
-        // Header: type (Debug — KnowledgeType has no Display), name, relevance.
+        // Header: type label (KnowledgeType has no Display), name, relevance.
         let _ = writeln!(
             out,
-            "- [{:?}] {} (relevance {:.2})",
-            f.node_type, f.name, f.relevance
+            "- [{}] {} (relevance {:.2})",
+            node_type_label(&f.node_type),
+            f.name,
+            f.relevance
         );
         // Body: prefer full content (L2), fall back to summary (L1); name is
         // already shown in the header.

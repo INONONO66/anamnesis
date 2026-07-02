@@ -9,24 +9,16 @@ use anamnesis::query::{ContextPackage, TokenBudget};
 
 #[test]
 fn all_knowledge_types() {
-    let types = vec![
-        KnowledgeType::IdentityCore,
-        KnowledgeType::IdentityLearned,
-        KnowledgeType::IdentityState,
+    // Contract: the collapsed 4-variant taxonomy (Episodic/Semantic/Identity/Custom).
+    // Finer consumer labels ride `Custom(String)`; there are no dedicated
+    // procedural/entity/convention/decision/gotcha/event/… variants anymore.
+    let types = [
+        KnowledgeType::Identity,
         KnowledgeType::Semantic,
-        KnowledgeType::Procedural,
-        KnowledgeType::Entity,
-        KnowledgeType::Convention,
-        KnowledgeType::Decision,
-        KnowledgeType::Gotcha,
-        KnowledgeType::Hypothesis,
-        KnowledgeType::Evidence,
-        KnowledgeType::DebugSession,
         KnowledgeType::Episodic,
-        KnowledgeType::Event,
         KnowledgeType::Custom("my-type".to_string()),
     ];
-    assert_eq!(types.len(), 15);
+    assert_eq!(types.len(), 4);
 }
 
 #[test]
@@ -59,7 +51,7 @@ fn all_query_variants() {
             budget: 100,
         },
         Query::TypeFiltered {
-            node_type: KnowledgeType::Convention,
+            node_type: KnowledgeType::Semantic,
             limit: 10,
         },
         Query::Neighborhood {
@@ -68,7 +60,7 @@ fn all_query_variants() {
         },
         Query::Temporal {
             since: Timestamp(1000),
-            node_types: Some(vec![KnowledgeType::Decision]),
+            node_types: Some(vec![KnowledgeType::Semantic]),
             limit: 20,
         },
         Query::List {

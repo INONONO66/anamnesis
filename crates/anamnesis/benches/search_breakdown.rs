@@ -33,7 +33,7 @@ fn build_fixture() -> Engine {
             30_000,
             "travel japan city",
             &["japan", "city"],
-            KnowledgeType::Entity,
+            KnowledgeType::Custom("entity".to_string()),
         ),
         (
             "research/llm",

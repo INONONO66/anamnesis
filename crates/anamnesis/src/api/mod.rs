@@ -2470,7 +2470,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
     /// `accessed_at` is left untouched, preserving last user-access semantics. Idle
     /// edges still leak their conductance.
     ///
-    /// Core tier and `IdentityCore` are protected (never decay under ordinary tick).
+    /// Core tier and `Identity` are protected (never decay under ordinary tick).
     /// Non-finite values are rejected at the boundary.
     pub fn tick(&mut self, now: Timestamp) -> Result<TickReport, Error> {
         use crate::mechanics::priors::project_salience;
@@ -2500,8 +2500,8 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                 Ok(kt) => kt.clone(),
                 Err(_) => continue,
             };
-            // IdentityCore is protected regardless of tier.
-            if node_type == KnowledgeType::IdentityCore {
+            // Identity is protected regardless of tier.
+            if node_type == KnowledgeType::Identity {
                 continue;
             }
 
@@ -2560,7 +2560,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         // (conductance.md post-commit plasticity / interactions.md `TimeElapsed`).
         // Unused weak coupling drains over time (density control). Idle time is
         // `now - edge.accessed_at` (the committed-use timestamp). Edges incident to
-        // a protected node (Core tier / `IdentityCore`) are exempt, mirroring node
+        // a protected node (Core tier / `Identity`) are exempt, mirroring node
         // decay; `Contradicts` edges are excluded (routed to frustration, not
         // propagation — ADR-0005/0006). Edges are never deleted (ADR-0008/0006).
         {
@@ -2626,14 +2626,12 @@ impl<S: StorageAdapter + Clone> Engine<S> {
     }
 
     /// True when a node is protected from ordinary `tick` dissipation — Core tier
-    /// or `IdentityCore` type (dissipation.md "Memory Tier" / priors decay policy).
+    /// or `Identity` type (dissipation.md "Memory Tier" / priors decay policy).
     /// Used to exempt protected edges from idle-edge leakage. A missing node is
     /// treated as protected (no leak applied) so a dangling edge is never mutated.
     fn is_protected_node(&self, id: NodeId) -> bool {
         match self.graph.get_node(id) {
-            Ok(node) => {
-                node.tier == MemoryTier::Core || node.node_type == KnowledgeType::IdentityCore
-            }
+            Ok(node) => node.tier == MemoryTier::Core || node.node_type == KnowledgeType::Identity,
             Err(_) => true,
         }
     }
@@ -3108,12 +3106,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                 let Ok(node) = storage.get_node(nid) else {
                     continue;
                 };
-                let is_identity = matches!(
-                    node.node_type,
-                    KnowledgeType::IdentityCore
-                        | KnowledgeType::IdentityLearned
-                        | KnowledgeType::IdentityState
-                );
+                let is_identity = matches!(node.node_type, KnowledgeType::Identity);
                 if !is_identity {
                     continue;
                 }
@@ -3222,12 +3215,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             .iter()
             .filter_map(|(&nid, &act)| {
                 let node = storage.get_node(nid).ok()?;
-                let is_identity = matches!(
-                    node.node_type,
-                    KnowledgeType::IdentityCore
-                        | KnowledgeType::IdentityLearned
-                        | KnowledgeType::IdentityState
-                );
+                let is_identity = matches!(node.node_type, KnowledgeType::Identity);
                 let is_agent = match &config.agent_id {
                     Some(aid) => node.origin.peer_id.0.to_string() == *aid,
                     None => false,
@@ -3673,7 +3661,7 @@ mod tests {
         let mut engine = Engine::new();
         // Identity-core endpoint is protected from ordinary dissipation.
         let mut core_obs = make_observation("identity");
-        core_obs.node_type = KnowledgeType::IdentityCore;
+        core_obs.node_type = KnowledgeType::Identity;
         let IngestResult::Created(core) = engine.ingest(core_obs).unwrap() else {
             panic!()
         };
@@ -3770,7 +3758,7 @@ mod tests {
         let mut engine = Engine::new();
         let cos = 0.67_f64;
         let mut o1 = make_observation("identity");
-        o1.node_type = KnowledgeType::IdentityLearned;
+        o1.node_type = KnowledgeType::Identity;
         o1.embedding = Some(vec![1.0, 0.0]);
         o1.entity_tags = vec!["shared".to_string()];
         let mut o2 = make_observation("knowledge");
@@ -3972,7 +3960,7 @@ mod tests {
         let mut engine = Engine::new();
 
         let identity_obs = Observation {
-            node_type: KnowledgeType::IdentityCore,
+            node_type: KnowledgeType::Identity,
             timestamp: Timestamp(0),
             ..make_observation("identity")
         };
@@ -3990,7 +3978,7 @@ mod tests {
         let salience = engine.graph().storage().get_salience(id).unwrap();
         assert_eq!(
             salience, initial_salience,
-            "IdentityCore should not decay (salience unchanged after a year)"
+            "Identity should not decay (salience unchanged after a year)"
         );
     }
 
@@ -4247,7 +4235,7 @@ mod tests {
         let mut engine = Engine::with_config(config);
 
         let identity_obs = Observation {
-            node_type: KnowledgeType::IdentityCore,
+            node_type: KnowledgeType::Identity,
             embedding: Some(vec![1.0, 0.0]),
             origin: Origin {
                 peer_id: crate::graph::types::PeerId(0),

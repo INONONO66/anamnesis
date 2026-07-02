@@ -158,15 +158,12 @@ pub fn determine_scope(query_scope: &ScopePath, node_scope: &ScopePath) -> Scope
 
 /// Determines whether a node type belongs to the identity partition.
 pub fn is_identity_type(kt: &KnowledgeType) -> bool {
-    matches!(
-        kt,
-        KnowledgeType::IdentityCore | KnowledgeType::IdentityLearned | KnowledgeType::IdentityState
-    )
+    matches!(kt, KnowledgeType::Identity)
 }
 
 /// Determines whether a node type belongs to the memories partition.
 pub fn is_memory_type(kt: &KnowledgeType) -> bool {
-    matches!(kt, KnowledgeType::Episodic | KnowledgeType::Event)
+    matches!(kt, KnowledgeType::Episodic)
 }
 
 /// Estimates the token count for a string.
@@ -798,7 +795,7 @@ mod tests {
     #[test]
     fn identity_nodes_go_to_identity_partition() {
         let nodes = vec![
-            make_node(0, KnowledgeType::IdentityCore, "I am an architect", 0.9),
+            make_node(0, KnowledgeType::Identity, "I am an architect", 0.9),
             make_node(1, KnowledgeType::Semantic, "auth uses factory", 0.8),
         ];
         let pkg = assemble_context_package(
@@ -818,7 +815,7 @@ mod tests {
     fn episodic_nodes_go_to_memories_partition() {
         let nodes = vec![
             make_node(0, KnowledgeType::Episodic, "session note", 0.7),
-            make_node(1, KnowledgeType::Event, "deployment event", 0.6),
+            make_node(1, KnowledgeType::Episodic, "deployment event", 0.6),
         ];
         let pkg = assemble_context_package(nodes, &[], &[], 10000, 4, &ScopePath::universal());
         assert_eq!(pkg.memories.len(), 2);
@@ -910,7 +907,7 @@ mod tests {
     fn agent_tension_nonzero_with_identity_contradiction() {
         let identity_id = NodeId(0);
 
-        let identity_acts = vec![(identity_id, KnowledgeType::IdentityCore, 0.9)];
+        let identity_acts = vec![(identity_id, KnowledgeType::Identity, 0.9)];
         let contradicts = vec![pair(0, 1, 0.72)];
 
         let tension = compute_agent_tension(&identity_acts, &contradicts);
@@ -924,7 +921,7 @@ mod tests {
     fn agent_tension_ignores_unrelated_contradictions() {
         let identity_id = NodeId(0);
 
-        let identity_acts = vec![(identity_id, KnowledgeType::IdentityCore, 0.9)];
+        let identity_acts = vec![(identity_id, KnowledgeType::Identity, 0.9)];
         let contradicts = vec![pair(5, 6, 0.9)];
 
         let tension = compute_agent_tension(&identity_acts, &contradicts);

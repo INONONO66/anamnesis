@@ -534,7 +534,7 @@ mod tests {
                 budget: 100,
             },
             Query::TypeFiltered {
-                node_type: KnowledgeType::Convention,
+                node_type: KnowledgeType::Semantic,
                 limit: 10,
             },
             Query::Neighborhood {
@@ -543,7 +543,7 @@ mod tests {
             },
             Query::Temporal {
                 since: Timestamp(1000),
-                node_types: Some(vec![KnowledgeType::Decision]),
+                node_types: Some(vec![KnowledgeType::Semantic]),
                 limit: 20,
             },
             Query::List {
@@ -612,7 +612,7 @@ mod tests {
             name: "auth uses factory pattern".to_string(),
             summary: Some("Confirmed in sessions 5, 12, 23".to_string()),
             content: None,
-            node_type: KnowledgeType::Convention,
+            node_type: KnowledgeType::Semantic,
             relevance: 0.85,
             origin: make_origin(),
             scope: ScopeRelation::Universal,

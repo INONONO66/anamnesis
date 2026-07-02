@@ -1,7 +1,11 @@
-//! Tests for SQLite schema migration infrastructure (v1 → v2 → v3 → v4 → v5 → v6).
+//! Tests for SQLite schema migration infrastructure (v1 → … → v6 → v7).
 //!
 //! v6 dropped the `peers` / `peer_aliases` tables with the peer/trust subsystem;
 //! nodes' own `peer_id` / `source_kind` columns and `idx_nodes_peer` STAY.
+//! v7 normalizes `nodes.node_type` for the KnowledgeType 15→4 collapse (legacy
+//! identity tiers → `identity`, removed knowledge/memory strings → `custom:*`);
+//! the dedicated normalization + `nodes_by_type` regression lives in the sqlite
+//! unit tests (`migration_v7_normalizes_legacy_node_types_for_nodes_by_type`).
 
 use anamnesis::storage::SqliteStorage;
 use rusqlite::{Connection, OptionalExtension};
@@ -79,7 +83,7 @@ fn fresh_db_gets_current_schema_version() {
     assert_eq!(storage.node_count(), 0);
 
     let conn = Connection::open(&tmp).expect("reopen");
-    assert_eq!(schema_version(&conn), 6, "fresh DB should be at schema v6");
+    assert_eq!(schema_version(&conn), 7, "fresh DB should be at schema v7");
 
     // v6 removed the peer/trust subsystem: a fresh DB has no peers tables.
     assert!(
@@ -225,8 +229,8 @@ fn existing_db_migrates_from_v1_to_current() {
 
         assert_eq!(
             schema_version(&conn),
-            6,
-            "schema_version should be 6 after full v1 -> v6 migration"
+            7,
+            "schema_version should be 7 after full v1 -> v7 migration"
         );
 
         // Nodes' peer_id column (inside the Origin encoding) STAYS after the chain.
@@ -355,8 +359,8 @@ fn fresh_schema_equals_migrated_schema() {
     let fresh = Connection::open(&fresh_path).expect("reopen fresh");
     let migrated = Connection::open(&migrated_path).expect("reopen migrated");
 
-    assert_eq!(schema_version(&fresh), 6);
-    assert_eq!(schema_version(&migrated), 6);
+    assert_eq!(schema_version(&fresh), 7);
+    assert_eq!(schema_version(&migrated), 7);
 
     // Both the fresh-create and migration paths must converge on a nodes table that
     // carries the v5 evidence_prior column (legacy v1->v2 ALTERs leave the rest of
@@ -572,7 +576,7 @@ fn v5_db_with_planted_peers_reopens_clean_at_v6() {
     //    (with its peer_id / source_kind) is intact.
     {
         let conn = Connection::open(&tmp).expect("reopen after migration");
-        assert_eq!(schema_version(&conn), 6, "DB should be at v6 after reopen");
+        assert_eq!(schema_version(&conn), 7, "DB should be at v7 after reopen");
         assert!(
             !table_exists(&conn, "peers"),
             "peers table must be dropped at v6"

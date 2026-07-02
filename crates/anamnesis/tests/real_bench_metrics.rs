@@ -76,7 +76,7 @@ fn retrieval_metrics_count_multiple_unique_units_at_one_rank() {
 #[test]
 fn retrieval_ranking_sorts_across_context_buckets_by_score() {
     let mut package = ContextPackage::empty();
-    package.identity = vec![fragment(1, KnowledgeType::IdentityCore, 0.1)];
+    package.identity = vec![fragment(1, KnowledgeType::Identity, 0.1)];
     package.knowledge = vec![fragment(2, KnowledgeType::Semantic, 0.9)];
     package.memories = vec![fragment(3, KnowledgeType::Episodic, 0.8)];
 

@@ -1404,16 +1404,28 @@ mod tests {
     #[test]
     fn unknown_node_types_decode_as_custom_on_reopen() {
         let path = temp_db_path("legacy-node-types");
-        // Bare strings unknown to this build (a superset of "will-be-deleted"
-        // wire strings and never-were-variants). None carry the `custom:` prefix.
+        // Bare strings unknown to this build. Two classes, both must land as
+        // `Custom(<original>)`, none carry the `custom:` prefix:
+        //   1. now-REAL legacy wire strings of variants deleted in the 0.10.0
+        //      KnowledgeType 15→4 collapse — these are exactly the strings the
+        //      v6→v7 migration rewrites to `custom:<string>` on reopen, and which
+        //      the decode fallback would also catch on any un-migrated row;
+        //   2. never-were-variant consumer strings from another schema, caught
+        //      purely by the decode fallback (no migration arm touches them).
         let legacy = [
-            "hypothesis_v2",
-            "evidence_bundle",
-            "debug_trace",
-            "workspace",
+            // (1) deleted-variant wire strings, now legacy:
+            "gotcha",
+            "decision",
+            "procedural",
+            "entity",
+            "convention",
+            "event",
+            "hypothesis",
+            "evidence",
+            "debug_session",
+            // (2) never-were-variant consumer strings:
             "coding_standard",
             "footgun",
-            "milestone",
             "identity_snapshot",
         ];
 
@@ -1468,36 +1480,55 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
-    /// Requirement 3 guard: adding the unknown-string fallback must NOT change how
-    /// any currently-known `node_type` decodes. Each known wire string still maps
-    /// to its exact variant (not `Custom`), and the existing `custom:` prefix path
-    /// is unaffected. This is the invariant that keeps the guard safe to land
-    /// before any variant is deleted.
+    /// Decode contract for the collapsed 4-variant `KnowledgeType`
+    /// (Episodic/Semantic/Identity/Custom):
+    /// - the three surviving fixed wire strings decode to their exact variant;
+    /// - the three legacy identity tiers keep identity semantics — explicit arms
+    ///   fold `identity_core`/`identity_learned`/`identity_state` into `Identity`
+    ///   rather than letting them ride the generic `Custom` fallback;
+    /// - every removed knowledge/memory wire string now falls through the B0
+    ///   fallback to `Custom(<original>)` (no explicit arm), which the v6→v7
+    ///   migration mirrors by rewriting the stored string to `custom:<string>`;
+    /// - the explicit `custom:` prefix path is unaffected.
     #[test]
     fn known_node_types_are_untouched_by_fallback() {
-        let cases = [
-            ("identity_core", KnowledgeType::IdentityCore),
-            ("identity_learned", KnowledgeType::IdentityLearned),
-            ("identity_state", KnowledgeType::IdentityState),
+        // Surviving fixed variants + the two legacy-identity classes that decode to
+        // their exact (merged) variant, never `Custom`.
+        let exact = [
+            ("identity", KnowledgeType::Identity),
+            ("identity_core", KnowledgeType::Identity),
+            ("identity_learned", KnowledgeType::Identity),
+            ("identity_state", KnowledgeType::Identity),
             ("semantic", KnowledgeType::Semantic),
-            ("procedural", KnowledgeType::Procedural),
-            ("entity", KnowledgeType::Entity),
-            ("convention", KnowledgeType::Convention),
-            ("decision", KnowledgeType::Decision),
-            ("gotcha", KnowledgeType::Gotcha),
-            ("hypothesis", KnowledgeType::Hypothesis),
-            ("evidence", KnowledgeType::Evidence),
-            ("debug_session", KnowledgeType::DebugSession),
             ("episodic", KnowledgeType::Episodic),
-            ("event", KnowledgeType::Event),
         ];
-        for (wire, expected) in cases {
+        for (wire, expected) in exact {
             assert_eq!(
                 decode_knowledge_type(wire).expect("known type decodes"),
                 expected,
-                "known wire string {wire:?} must keep its exact variant",
+                "wire string {wire:?} must decode to its exact variant",
             );
         }
+
+        // Removed-variant wire strings now decode to Custom via the B0 fallback.
+        for wire in [
+            "procedural",
+            "entity",
+            "convention",
+            "decision",
+            "gotcha",
+            "hypothesis",
+            "evidence",
+            "debug_session",
+            "event",
+        ] {
+            assert_eq!(
+                decode_knowledge_type(wire).expect("removed type decodes"),
+                KnowledgeType::Custom(wire.to_string()),
+                "removed wire string {wire:?} must fall back to Custom",
+            );
+        }
+
         // The explicit custom encoding still round-trips (and is NOT confused with
         // the bare-string fallback).
         assert_eq!(
@@ -1590,12 +1621,123 @@ mod tests {
         assert_eq!(decode_memory_tier("legacy_tier").unwrap(), MemoryTier::Auto);
         assert_eq!(decode_memory_tier("").unwrap(), MemoryTier::Auto);
     }
+
+    /// Carried B0 finding + option (a) resolution: the v6→v7 normalization migration
+    /// must rewrite legacy `node_type` strings on reopen so `nodes_by_type` — which
+    /// filters SQL by the *encoded* query string — finds them immediately, with no
+    /// eventual-consistency gap.
+    ///
+    /// Plants a v6-era DB carrying a bare `gotcha` (a removed variant's wire string)
+    /// and the three legacy identity tiers, reopens through the normal migration
+    /// path, and asserts both the on-disk normalization and the lookup:
+    ///   - `gotcha`  → stored as `custom:gotcha`, found by `nodes_by_type(Custom("gotcha"))`;
+    ///   - `identity_core|learned|state` → stored as `identity`, found by `nodes_by_type(Identity)`.
+    #[test]
+    fn migration_v7_normalizes_legacy_node_types_for_nodes_by_type() {
+        let path = temp_db_path("v7-normalize-nodes-by-type");
+
+        // Seed well-formed rows through the normal path, then flush so the rows
+        // exist in the `nodes` table.
+        let (gotcha_id, identity_ids) = {
+            let mut storage = SqliteStorage::open(&path).expect("sqlite storage opens");
+            let gotcha_id = storage.next_node_id();
+            storage
+                .set_node(make_node(gotcha_id, 0.5))
+                .expect("gotcha node stored");
+            let identity_ids: Vec<NodeId> = (0..3)
+                .map(|_| {
+                    let id = storage.next_node_id();
+                    storage
+                        .set_node(make_node(id, 0.5))
+                        .expect("id node stored");
+                    id
+                })
+                .collect();
+            storage.flush().expect("flush");
+            (gotcha_id, identity_ids)
+        };
+
+        // Rewind to a v6-era DB: plant the legacy bare wire strings directly and set
+        // the recorded schema version back to 6, so reopening runs the v6→v7 step.
+        {
+            let conn = Connection::open(&path).expect("raw conn opens");
+            conn.execute(
+                "UPDATE nodes SET node_type = 'gotcha' WHERE id = ?1",
+                params![gotcha_id.0],
+            )
+            .expect("planted legacy gotcha");
+            let legacy_identity = ["identity_core", "identity_learned", "identity_state"];
+            for (id, ty) in identity_ids.iter().zip(legacy_identity.iter()) {
+                conn.execute(
+                    "UPDATE nodes SET node_type = ?2 WHERE id = ?1",
+                    params![id.0, *ty],
+                )
+                .expect("planted legacy identity tier");
+            }
+            conn.execute_batch("UPDATE schema_version SET version = 6;")
+                .expect("rewind schema_version to 6");
+        }
+
+        // Reopen: the v6→v7 migration normalizes the column in place.
+        let reopened = SqliteStorage::open(&path).expect("reopen runs v6->v7 migration");
+
+        // On-disk column is normalized to the canonical encodings.
+        {
+            let conn = Connection::open(&path).expect("raw conn opens");
+            let gotcha_enc: String = conn
+                .query_row(
+                    "SELECT node_type FROM nodes WHERE id = ?1",
+                    params![gotcha_id.0],
+                    |row| row.get(0),
+                )
+                .expect("read gotcha node_type");
+            assert_eq!(gotcha_enc, "custom:gotcha", "gotcha row normalized");
+            for id in &identity_ids {
+                let enc: String = conn
+                    .query_row(
+                        "SELECT node_type FROM nodes WHERE id = ?1",
+                        params![id.0],
+                        |row| row.get(0),
+                    )
+                    .expect("read identity node_type");
+                assert_eq!(
+                    enc, "identity",
+                    "identity tier row normalized to bare identity"
+                );
+            }
+        }
+
+        // The carried finding: nodes_by_type now FINDS the normalized rows.
+        assert_eq!(
+            reopened.nodes_by_type(&KnowledgeType::Custom("gotcha".to_string())),
+            vec![gotcha_id],
+            "nodes_by_type(Custom(\"gotcha\")) must find the normalized legacy row",
+        );
+        let mut found_identity = reopened.nodes_by_type(&KnowledgeType::Identity);
+        found_identity.sort();
+        let mut expected_identity = identity_ids.clone();
+        expected_identity.sort();
+        assert_eq!(
+            found_identity, expected_identity,
+            "nodes_by_type(Identity) must find all normalized legacy identity rows",
+        );
+
+        // In-memory decode agrees with storage.
+        assert_eq!(
+            reopened
+                .get_node_type(gotcha_id)
+                .expect("gotcha type present"),
+            &KnowledgeType::Custom("gotcha".to_string()),
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 /// Current on-disk schema version. The fresh-DB `create_schema` path and the
 /// incremental migration chain must converge on an IDENTICAL schema at this
 /// version (same columns, same indexes).
-const SCHEMA_VERSION: u32 = 6;
+const SCHEMA_VERSION: u32 = 7;
 
 /// Run schema migrations to bring the database up to the current version.
 ///
@@ -1607,10 +1749,22 @@ const SCHEMA_VERSION: u32 = 6;
 /// - v4: peer evidence-trust columns `trust_reservoir REAL` +
 ///   `trust_evidence_count INTEGER` (social.md "Peer Trust"); seeded from the coarse
 ///   `trust_level` prior for existing peers
-/// - v6 (current): DROP the `peers` / `peer_aliases` tables — the peer/trust
+/// - v6: DROP the `peers` / `peer_aliases` tables — the peer/trust
 ///   subsystem was removed (production is single-peer, `PeerId(0)`). Nodes' own
 ///   `peer_id` / `source_kind` columns (inside the Origin encoding) STAY; the
 ///   `idx_nodes_peer` index STAYS. No node data is touched.
+/// - v7 (current): normalize `nodes.node_type` for the KnowledgeType 15→4 collapse
+///   (Episodic/Semantic/Identity/Custom). The three legacy identity wire strings
+///   (`identity_core`/`identity_learned`/`identity_state`) are rewritten to bare
+///   `identity`, and every deleted knowledge/memory wire string (`procedural`,
+///   `entity`, `convention`, `decision`, `gotcha`, `hypothesis`, `evidence`,
+///   `debug_session`, `event`) is rewritten to its canonical `custom:<string>`
+///   form. This makes on-disk storage match the new decode immediately, closing the
+///   eventual-consistency gap where a bare legacy string decoded in-memory to
+///   `Custom(...)`/`Identity` but `nodes_by_type` (which filters by the raw encoded
+///   string) would miss the un-normalized row until it was re-saved. Idempotent: the
+///   `IN (...)` filters only match the legacy bare strings, never the post-migration
+///   `identity` / `custom:*` values. No schema/column change — data only.
 /// - v5: `nodes.evidence_prior REAL NOT NULL DEFAULT 0` — the persistent,
 ///   decay-exempt evidence prior `P_i` of the `A_i = B_i + P_i` decomposition
 ///   (ADR-0008). Backfilled to `0.0`: the base-level `B_i` is recomputed from
@@ -1663,8 +1817,9 @@ fn migrate_schema(conn: &Connection) -> Result<(), Error> {
                 migrate_v3_to_v4(conn)?;
                 migrate_v4_to_v5(conn)?;
                 migrate_v5_to_v6(conn)?;
+                migrate_v6_to_v7(conn)?;
             } else {
-                // Brand new database — create the current (v6) schema directly.
+                // Brand new database — create the current (v7) schema directly.
                 create_schema(conn)?;
             }
             conn.execute_batch(&format!(
@@ -1678,6 +1833,7 @@ fn migrate_schema(conn: &Connection) -> Result<(), Error> {
             migrate_v3_to_v4(conn)?;
             migrate_v4_to_v5(conn)?;
             migrate_v5_to_v6(conn)?;
+            migrate_v6_to_v7(conn)?;
             conn.execute_batch(&format!(
                 "UPDATE schema_version SET version = {SCHEMA_VERSION};"
             ))
@@ -1688,6 +1844,7 @@ fn migrate_schema(conn: &Connection) -> Result<(), Error> {
             migrate_v3_to_v4(conn)?;
             migrate_v4_to_v5(conn)?;
             migrate_v5_to_v6(conn)?;
+            migrate_v6_to_v7(conn)?;
             conn.execute_batch(&format!(
                 "UPDATE schema_version SET version = {SCHEMA_VERSION};"
             ))
@@ -1697,6 +1854,7 @@ fn migrate_schema(conn: &Connection) -> Result<(), Error> {
             migrate_v3_to_v4(conn)?;
             migrate_v4_to_v5(conn)?;
             migrate_v5_to_v6(conn)?;
+            migrate_v6_to_v7(conn)?;
             conn.execute_batch(&format!(
                 "UPDATE schema_version SET version = {SCHEMA_VERSION};"
             ))
@@ -1705,6 +1863,7 @@ fn migrate_schema(conn: &Connection) -> Result<(), Error> {
         Some(4) => {
             migrate_v4_to_v5(conn)?;
             migrate_v5_to_v6(conn)?;
+            migrate_v6_to_v7(conn)?;
             conn.execute_batch(&format!(
                 "UPDATE schema_version SET version = {SCHEMA_VERSION};"
             ))
@@ -1712,12 +1871,20 @@ fn migrate_schema(conn: &Connection) -> Result<(), Error> {
         }
         Some(5) => {
             migrate_v5_to_v6(conn)?;
+            migrate_v6_to_v7(conn)?;
             conn.execute_batch(&format!(
                 "UPDATE schema_version SET version = {SCHEMA_VERSION};"
             ))
             .map_err(sqlite_error)?;
         }
         Some(6) => {
+            migrate_v6_to_v7(conn)?;
+            conn.execute_batch(&format!(
+                "UPDATE schema_version SET version = {SCHEMA_VERSION};"
+            ))
+            .map_err(sqlite_error)?;
+        }
+        Some(7) => {
             // Already at current version — ensure schema is complete (idempotent
             // CREATE IF NOT EXISTS only; no bare ALTER that would fail twice).
             create_schema(conn)?;
@@ -1939,6 +2106,71 @@ fn migrate_v5_to_v6(conn: &Connection) -> Result<(), Error> {
         ",
     )
     .map_err(sqlite_error)
+}
+
+/// Migrate a v6 database to v7: normalize `nodes.node_type` for the KnowledgeType
+/// 15→4 collapse (Episodic/Semantic/Identity/Custom).
+///
+/// Rewrites the on-disk wire strings of the removed variants so storage matches the
+/// new decode immediately:
+/// - the three legacy identity tiers (`identity_core`/`identity_learned`/
+///   `identity_state`) become the bare merged `identity`;
+/// - every removed knowledge/memory string (`procedural`, `entity`, `convention`,
+///   `decision`, `gotcha`, `hypothesis`, `evidence`, `debug_session`, `event`)
+///   becomes its canonical `custom:<string>` form.
+///
+/// This closes the carried eventual-consistency gap (B0 review): without it, a
+/// legacy row with a bare `gotcha` decodes in-memory to `Custom("gotcha")`, but
+/// [`nodes_by_type`](SqliteStorage::nodes_by_type) filters SQL by the *encoded*
+/// query string `custom:gotcha` and would miss the un-normalized row until it was
+/// re-saved. After this migration the row's stored string is `custom:gotcha`, so the
+/// lookup matches deterministically.
+///
+/// Runs in one transaction. Idempotent: the `IN (...)` filters only ever match the
+/// legacy bare strings, never the post-migration `identity` / `custom:*` values, so
+/// re-running is a no-op. The `custom:` rewrite assumes the removed wire strings
+/// contain no `escape_text` metacharacters (they are all fixed ASCII identifiers),
+/// so a literal `'custom:' || node_type` yields the same bytes `encode_knowledge_type`
+/// would produce for `Custom(<string>)`.
+fn migrate_v6_to_v7(conn: &Connection) -> Result<(), Error> {
+    conn.execute_batch("BEGIN IMMEDIATE;")
+        .map_err(sqlite_error)?;
+
+    let result = (|| -> Result<(), Error> {
+        // Legacy identity tiers -> merged bare `identity`.
+        conn.execute_batch(
+            "
+            UPDATE nodes SET node_type = 'identity'
+            WHERE node_type IN ('identity_core', 'identity_learned', 'identity_state');
+            ",
+        )
+        .map_err(sqlite_error)?;
+
+        // Removed knowledge/memory variants -> canonical `custom:<string>`.
+        conn.execute_batch(
+            "
+            UPDATE nodes SET node_type = 'custom:' || node_type
+            WHERE node_type IN (
+                'procedural', 'entity', 'convention', 'decision', 'gotcha',
+                'hypothesis', 'evidence', 'debug_session', 'event'
+            );
+            ",
+        )
+        .map_err(sqlite_error)?;
+
+        Ok(())
+    })();
+
+    match result {
+        Ok(()) => {
+            conn.execute_batch("COMMIT;").map_err(sqlite_error)?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK;");
+            Err(e)
+        }
+    }
 }
 
 /// Migrate a v1 database (agent_id TEXT) to v2 (peer_id INTEGER + source_kind TEXT).
@@ -2359,53 +2591,41 @@ fn unique_strings(values: &[String]) -> Vec<&str> {
 
 fn encode_knowledge_type(value: &KnowledgeType) -> String {
     match value {
-        KnowledgeType::IdentityCore => "identity_core".to_string(),
-        KnowledgeType::IdentityLearned => "identity_learned".to_string(),
-        KnowledgeType::IdentityState => "identity_state".to_string(),
+        KnowledgeType::Identity => "identity".to_string(),
         KnowledgeType::Semantic => "semantic".to_string(),
-        KnowledgeType::Procedural => "procedural".to_string(),
-        KnowledgeType::Entity => "entity".to_string(),
-        KnowledgeType::Convention => "convention".to_string(),
-        KnowledgeType::Decision => "decision".to_string(),
-        KnowledgeType::Gotcha => "gotcha".to_string(),
-        KnowledgeType::Hypothesis => "hypothesis".to_string(),
-        KnowledgeType::Evidence => "evidence".to_string(),
-        KnowledgeType::DebugSession => "debug_session".to_string(),
         KnowledgeType::Episodic => "episodic".to_string(),
-        KnowledgeType::Event => "event".to_string(),
         KnowledgeType::Custom(name) => format!("custom:{}", escape_text(name)),
     }
 }
 
 fn decode_knowledge_type(value: &str) -> Result<KnowledgeType, Error> {
     Ok(match value {
-        "identity_core" => KnowledgeType::IdentityCore,
-        "identity_learned" => KnowledgeType::IdentityLearned,
-        "identity_state" => KnowledgeType::IdentityState,
+        "identity" => KnowledgeType::Identity,
+        // Legacy identity tiers (pre-0.10.0 three-tier ladder) keep their slow-decay
+        // identity semantics: explicit arms fold them into the merged `Identity`
+        // rather than letting them ride the generic fallback into `Custom`. The
+        // v6→v7 normalization migration rewrites these rows to bare `"identity"`
+        // on open, but these arms still guard any row that predates it.
+        "identity_core" | "identity_learned" | "identity_state" => KnowledgeType::Identity,
         "semantic" => KnowledgeType::Semantic,
-        "procedural" => KnowledgeType::Procedural,
-        "entity" => KnowledgeType::Entity,
-        "convention" => KnowledgeType::Convention,
-        "decision" => KnowledgeType::Decision,
-        "gotcha" => KnowledgeType::Gotcha,
-        "hypothesis" => KnowledgeType::Hypothesis,
-        "evidence" => KnowledgeType::Evidence,
-        "debug_session" => KnowledgeType::DebugSession,
         "episodic" => KnowledgeType::Episodic,
-        "event" => KnowledgeType::Event,
         custom if custom.starts_with("custom:") => {
             KnowledgeType::Custom(unescape_text(&custom[7..])?)
         }
         // Legacy-DB compat guard (ADR / task B0): any bare string this build does
         // not recognize — a consumer type from another schema, or the wire string
-        // of a variant deleted in a later 0.10.0 shrink — decodes to
-        // `Custom(<original>)` instead of erroring, so the node loads and the DB
-        // opens. This is a one-way normalization: re-encoding the result writes
-        // the canonical `custom:<original>` form (see `encode_knowledge_type`),
-        // which decodes right back to the same `Custom`, so open/save cycles are a
-        // fixed point and never corrupt the value further. Known variants and the
-        // explicit `custom:` prefix are matched by the arms above and are
-        // unaffected.
+        // of a variant deleted in the 0.10.0 shrink (`procedural`, `entity`,
+        // `convention`, `decision`, `gotcha`, `hypothesis`, `evidence`,
+        // `debug_session`, `event`) — decodes to `Custom(<original>)` instead of
+        // erroring, so the node loads and the DB opens. This is a one-way
+        // normalization: re-encoding the result writes the canonical
+        // `custom:<original>` form (see `encode_knowledge_type`), which decodes
+        // right back to the same `Custom`, so open/save cycles are a fixed point
+        // and never corrupt the value further. The v6→v7 migration rewrites these
+        // rows to the canonical `custom:<original>` on open so `nodes_by_type`
+        // matches them immediately; these arms still guard any un-migrated row.
+        // Known variants and the explicit `custom:` prefix are matched by the arms
+        // above and are unaffected.
         other => KnowledgeType::Custom(other.to_string()),
     })
 }

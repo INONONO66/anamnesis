@@ -145,7 +145,7 @@ fn priority_queue_bfs_uses_identity_prior_without_dropping_seed() {
     let identity = match engine
         .ingest(observation_with_type(
             "persona anchor only",
-            KnowledgeType::IdentityCore,
+            KnowledgeType::Identity,
         ))
         .expect("ingest should succeed")
     {

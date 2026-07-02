@@ -419,10 +419,7 @@ fn push_source_memory_fragment<S: StorageAdapter + Clone>(
     let Ok(node) = storage.get_node(source_id) else {
         return;
     };
-    if !matches!(
-        node.node_type,
-        KnowledgeType::Episodic | KnowledgeType::Event
-    ) {
+    if !matches!(node.node_type, KnowledgeType::Episodic) {
         return;
     }
 
@@ -564,10 +561,7 @@ fn node_is_valid_at<S: StorageAdapter + Clone>(
 }
 
 fn is_identity_type(node_type: &KnowledgeType) -> bool {
-    matches!(
-        node_type,
-        KnowledgeType::IdentityCore | KnowledgeType::IdentityLearned | KnowledgeType::IdentityState
-    )
+    matches!(node_type, KnowledgeType::Identity)
 }
 
 #[cfg(test)]

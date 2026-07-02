@@ -20,20 +20,10 @@ use std::collections::VecDeque;
 
 fn knowledge_type_strategy() -> impl Strategy<Value = KnowledgeType> {
     prop_oneof![
-        Just(KnowledgeType::IdentityCore),
-        Just(KnowledgeType::IdentityLearned),
-        Just(KnowledgeType::IdentityState),
+        Just(KnowledgeType::Identity),
         Just(KnowledgeType::Semantic),
-        Just(KnowledgeType::Procedural),
-        Just(KnowledgeType::Entity),
-        Just(KnowledgeType::Convention),
-        Just(KnowledgeType::Decision),
-        Just(KnowledgeType::Gotcha),
-        Just(KnowledgeType::Hypothesis),
-        Just(KnowledgeType::Evidence),
-        Just(KnowledgeType::DebugSession),
         Just(KnowledgeType::Episodic),
-        Just(KnowledgeType::Event),
+        Just(KnowledgeType::Custom("consumer".to_string())),
     ]
 }
 

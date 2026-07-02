@@ -129,7 +129,7 @@ fn identity_tension_preserved() {
     let identity = ingest(
         &mut engine,
         "agent prefers safe rust",
-        KnowledgeType::IdentityCore,
+        KnowledgeType::Identity,
         "dev/rust",
     );
     let conflicting = ingest(
@@ -162,7 +162,7 @@ fn rwr_consults_identity_and_kappa() {
     let identity = ingest(
         &mut engine,
         "identity rust safety",
-        KnowledgeType::IdentityCore,
+        KnowledgeType::Identity,
         "dev/rust",
     );
     let seed = ingest(

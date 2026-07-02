@@ -40,7 +40,7 @@ fn engine_full_lifecycle() {
     let IngestResult::Created(ids1) = engine
         .ingest(make_observation(
             "auth uses factory pattern",
-            KnowledgeType::Convention,
+            KnowledgeType::Semantic,
         ))
         .unwrap()
     else {
@@ -121,7 +121,7 @@ fn node_fields_preserved_after_ingest() {
         content: "Full discussion...".to_string(),
         embedding: Some(vec![0.7, 0.3, 0.1]),
         confidence: 0.95,
-        node_type: KnowledgeType::Decision,
+        node_type: KnowledgeType::Custom("decision".to_string()),
         entity_tags: vec!["physics".to_string(), "anamnesis".to_string()],
         origin: Origin {
             peer_id: anamnesis::graph::types::PeerId(0),
@@ -145,7 +145,10 @@ fn node_fields_preserved_after_ingest() {
         node.summary.as_deref(),
         Some("Force-directed simulation rejected")
     );
-    assert_eq!(node.node_type, KnowledgeType::Decision);
+    assert_eq!(
+        node.node_type,
+        KnowledgeType::Custom("decision".to_string())
+    );
     assert_eq!(node.entity_tags, vec!["physics", "anamnesis"]);
     assert_eq!(node.origin.scope.as_str(), "anamnesis");
     // Salience is the projection of the surprise-gated retained-action reservoir
@@ -164,7 +167,7 @@ fn node_fields_preserved_after_ingest() {
 fn multiple_edge_types() {
     let mut engine = Engine::new();
     let IngestResult::Created(ids1) = engine
-        .ingest(make_observation("decision", KnowledgeType::Decision))
+        .ingest(make_observation("decision", KnowledgeType::Semantic))
         .unwrap()
     else {
         panic!("expected Created");
@@ -198,7 +201,7 @@ fn multiple_edge_types() {
 fn query_all_modes_compile() {
     let mut engine = Engine::new();
     let IngestResult::Created(ids) = engine
-        .ingest(make_observation("entity", KnowledgeType::Entity))
+        .ingest(make_observation("entity", KnowledgeType::Semantic))
         .unwrap()
     else {
         panic!("expected Created");
@@ -208,7 +211,7 @@ fn query_all_modes_compile() {
     // Non-Associative modes return Ok(empty). Associative needs a real seed.
     let queries = vec![
         Query::TypeFiltered {
-            node_type: KnowledgeType::Convention,
+            node_type: KnowledgeType::Semantic,
             limit: 5,
         },
         Query::Neighborhood {

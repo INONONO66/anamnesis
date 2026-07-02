@@ -165,7 +165,7 @@ mod tests {
     fn node_all_fields() {
         let node = Node {
             id: NodeId(1),
-            node_type: KnowledgeType::Decision,
+            node_type: KnowledgeType::Semantic,
             name: "physics = edge weight dynamics".to_string(),
             summary: Some(
                 "Force-directed simulation rejected in favor of edge weight dynamics".to_string(),

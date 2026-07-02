@@ -112,21 +112,16 @@ pub const REWARD_LOG_ODDS_SCALE: f64 = 4.0;
 pub fn decay_multiplier_for_type(kt: &crate::graph::KnowledgeType) -> f64 {
     use crate::graph::KnowledgeType;
     match kt {
-        // Core identity — protected from ordinary decay.
-        KnowledgeType::IdentityCore => 0.0,
-        // Slow-decaying identity / convention layers (Working-like).
-        KnowledgeType::IdentityLearned => 0.10,
-        KnowledgeType::Convention | KnowledgeType::Decision => 0.30,
-        KnowledgeType::IdentityState => 0.60,
-        // Ordinary semantic / procedural knowledge.
-        KnowledgeType::Semantic | KnowledgeType::Procedural | KnowledgeType::Entity => 0.40,
-        KnowledgeType::Gotcha => 0.40,
-        KnowledgeType::Event => 0.60,
+        // Identity / self-knowledge — protected from ordinary decay.
+        KnowledgeType::Identity => 0.0,
+        // Ordinary knowledge (extracted facts and consumer-labelled types) decays
+        // slowly. `Custom` folds in the former convention/decision/entity/gotcha/
+        // event knowledge variants at this same rate (Event was 0.60 pre-shrink; it
+        // now decays at the ordinary 0.40 knowledge rate — an acceptable coarsening
+        // of a policy input, not a dynamics change).
+        KnowledgeType::Semantic | KnowledgeType::Custom(_) => 0.40,
         // Episodic decays at the full nominal rate.
         KnowledgeType::Episodic => 1.0,
-        // Debug-lifecycle nodes are inert: they do not decay under maintenance.
-        KnowledgeType::Hypothesis | KnowledgeType::Evidence | KnowledgeType::DebugSession => 0.0,
-        KnowledgeType::Custom(_) => 0.40,
     }
 }
 

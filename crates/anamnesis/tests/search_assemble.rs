@@ -78,12 +78,7 @@ fn identity_tension_preserved() {
     let mut engine = engine();
     let identity = ingest(
         &mut engine,
-        observation(
-            "identity-tension anchor",
-            KnowledgeType::IdentityCore,
-            None,
-            0,
-        ),
+        observation("identity-tension anchor", KnowledgeType::Identity, None, 0),
     );
     let fact = ingest(
         &mut engine,

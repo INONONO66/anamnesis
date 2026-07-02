@@ -9,12 +9,13 @@ use crate::graph::KnowledgeType;
 
 /// Returns the tier weight (pi) for an identity node type.
 ///
-/// L0 (IdentityCore) has the highest weight, L2 (IdentityState) the lowest.
+/// With the three former identity tiers collapsed into a single `Identity`
+/// partition, we take the top-of-ladder Core coefficient (1.0) rather than the mid
+/// (0.6): `Identity` is now the single decay-exempt/protected partition, so identity
+/// nodes should exert their full prior weight with no tier attenuation.
 pub fn pi_tier(kt: &KnowledgeType) -> f64 {
     match kt {
-        KnowledgeType::IdentityCore => 1.0,
-        KnowledgeType::IdentityLearned => 0.6,
-        KnowledgeType::IdentityState => 0.3,
+        KnowledgeType::Identity => 1.0,
         _ => 0.0, // Non-identity types have no identity prior
     }
 }
@@ -71,42 +72,27 @@ mod tests {
 
     #[test]
     fn empty_node_embedding_returns_zero() {
-        let identity = vec![(vec![1.0, 0.0], KnowledgeType::IdentityCore, 0.9)];
+        let identity = vec![(vec![1.0, 0.0], KnowledgeType::Identity, 0.9)];
         let result = compute_identity_prior(&[], &identity, cosine_similarity);
         assert_eq!(result, 0.0);
     }
 
     #[test]
-    fn identity_core_identical_embedding_returns_one() {
-        let identity = vec![(vec![1.0, 0.0], KnowledgeType::IdentityCore, 0.9)];
+    fn identity_identical_embedding_returns_one() {
+        let identity = vec![(vec![1.0, 0.0], KnowledgeType::Identity, 0.9)];
         let result = compute_identity_prior(&[1.0, 0.0], &identity, cosine_similarity);
         assert!((result - 1.0).abs() < 1e-10, "expected 1.0, got {result}");
-    }
-
-    #[test]
-    fn identity_learned_has_lower_weight() {
-        let identity_core = vec![(vec![1.0, 0.0], KnowledgeType::IdentityCore, 0.9)];
-        let identity_learned = vec![(vec![1.0, 0.0], KnowledgeType::IdentityLearned, 0.9)];
-        let node_emb = &[1.0, 0.0];
-
-        let core_prior = compute_identity_prior(node_emb, &identity_core, cosine_similarity);
-        let learned_prior = compute_identity_prior(node_emb, &identity_learned, cosine_similarity);
-
-        assert!(
-            core_prior > learned_prior,
-            "IdentityCore ({core_prior}) should have higher prior than IdentityLearned ({learned_prior})"
-        );
     }
 
     #[test]
     fn top_3_selection_by_salience() {
         // 5 identity nodes, only top-3 by salience should be used
         let identity = vec![
-            (vec![0.0, 1.0], KnowledgeType::IdentityCore, 0.1), // low salience
-            (vec![0.0, 1.0], KnowledgeType::IdentityCore, 0.2), // low salience
-            (vec![1.0, 0.0], KnowledgeType::IdentityCore, 0.9), // high salience, matches node
-            (vec![1.0, 0.0], KnowledgeType::IdentityCore, 0.8), // high salience, matches node
-            (vec![1.0, 0.0], KnowledgeType::IdentityCore, 0.7), // high salience, matches node
+            (vec![0.0, 1.0], KnowledgeType::Identity, 0.1), // low salience
+            (vec![0.0, 1.0], KnowledgeType::Identity, 0.2), // low salience
+            (vec![1.0, 0.0], KnowledgeType::Identity, 0.9), // high salience, matches node
+            (vec![1.0, 0.0], KnowledgeType::Identity, 0.8), // high salience, matches node
+            (vec![1.0, 0.0], KnowledgeType::Identity, 0.7), // high salience, matches node
         ];
         let node_emb = &[1.0, 0.0];
         let result = compute_identity_prior(node_emb, &identity, cosine_similarity);
@@ -116,22 +102,22 @@ mod tests {
 
     #[test]
     fn empty_embedding_identity_nodes_filtered() {
+        // The empty-embedding identity node is skipped; the remaining `Identity`
+        // node (weight 1.0) drives the prior.
         let identity = vec![
-            (vec![], KnowledgeType::IdentityCore, 0.9),
-            (vec![1.0, 0.0], KnowledgeType::IdentityLearned, 0.8),
+            (vec![], KnowledgeType::Identity, 0.9),
+            (vec![1.0, 0.0], KnowledgeType::Identity, 0.8),
         ];
         let result = compute_identity_prior(&[1.0, 0.0], &identity, cosine_similarity);
         assert!(
-            (result - 0.6).abs() < 1e-10,
-            "should use IdentityLearned (0.6 weight), got {result}"
+            (result - 1.0).abs() < 1e-10,
+            "should use the non-empty Identity node (1.0 weight), got {result}"
         );
     }
 
     #[test]
     fn pi_tier_values() {
-        assert_eq!(pi_tier(&KnowledgeType::IdentityCore), 1.0);
-        assert_eq!(pi_tier(&KnowledgeType::IdentityLearned), 0.6);
-        assert_eq!(pi_tier(&KnowledgeType::IdentityState), 0.3);
+        assert_eq!(pi_tier(&KnowledgeType::Identity), 1.0);
         assert_eq!(pi_tier(&KnowledgeType::Semantic), 0.0);
     }
 }

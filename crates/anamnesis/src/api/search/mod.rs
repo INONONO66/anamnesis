@@ -163,8 +163,5 @@ fn identity_prior_for_search<S: StorageAdapter>(
 }
 
 fn is_identity_type(node_type: &KnowledgeType) -> bool {
-    matches!(
-        node_type,
-        KnowledgeType::IdentityCore | KnowledgeType::IdentityLearned | KnowledgeType::IdentityState
-    )
+    matches!(node_type, KnowledgeType::Identity)
 }

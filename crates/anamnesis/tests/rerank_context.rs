@@ -110,14 +110,14 @@ fn rerank_works_with_type_filtered() {
 
     let conv_auth = created_id(
         e.ingest(Observation {
-            node_type: KnowledgeType::Convention,
+            node_type: KnowledgeType::Semantic,
             ..make_obs_tagged("auth_convention", vec!["auth"])
         })
         .unwrap(),
     );
     created_id(
         e.ingest(Observation {
-            node_type: KnowledgeType::Convention,
+            node_type: KnowledgeType::Semantic,
             ..make_obs_tagged("logging_convention", vec!["logging"])
         })
         .unwrap(),
@@ -130,7 +130,7 @@ fn rerank_works_with_type_filtered() {
     let pkg = e
         .query(
             &Query::TypeFiltered {
-                node_type: KnowledgeType::Convention,
+                node_type: KnowledgeType::Semantic,
                 limit: 10,
             },
             &config,

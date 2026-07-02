@@ -79,50 +79,35 @@ pub struct AccessTrace {
 /// coupling priors, not an independent dynamics knob:
 /// - decay: it selects the per-type multiplier on the single free decay prior `d`
 ///   ([`crate::mechanics::priors::decay_multiplier_for_type`], dissipation.md) —
-///   Core is protected (≈0), identity/convention layers decay slowly, episodic at
-///   the full rate, debug-lifecycle nodes are inert;
+///   `Identity` is protected (≈0), ordinary knowledge (`Semantic`/`Custom`) decays
+///   slowly, `Episodic` at the full rate;
 /// - coupling: it contributes the edge-type-affinity feature to the cold-start
 ///   coupling seed (conductance.md). It supplies no separate decay rate or weight.
 ///
-/// Tiers below group the variants by how strongly they resist dissipation
-/// (slow-decaying identity, ordinary knowledge, fast-decaying memory).
+/// The three partitions are identity (slow-decaying self-knowledge), ordinary
+/// knowledge (`Semantic`/`Custom`), and fast-decaying episodic memory. This is a
+/// deliberately small policy vocabulary: only the distinctions the dissipation and
+/// coupling priors actually discriminate are variants; every finer consumer label
+/// rides `Custom(String)`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum KnowledgeType {
-    // Identity — slow / protected decay.
-    /// L0: Immutable core trait. No decay. ("I am a code architect")
-    IdentityCore,
-    /// L1: Experience-formed trait. Very slow decay. ("prefers factory pattern")
-    IdentityLearned,
-    /// L2: Current state. Normal decay. ("refactoring auth module")
-    IdentityState,
+    /// Identity / self-knowledge (merged from the former three identity tiers).
+    /// Slowest decay — protected from ordinary dissipation. Legacy DBs' three
+    /// identity wire strings (`identity_core`/`identity_learned`/`identity_state`)
+    /// decode here, preserving their slow-decay semantics.
+    Identity,
 
-    // Knowledge — moderate decay.
-    /// Extracted fact from conversation or document.
+    /// Extracted fact or ordinary knowledge from conversation or document.
+    /// Moderate decay.
     Semantic,
-    /// How-to or execution pattern.
-    Procedural,
-    /// Named concept, module, person, or service.
-    Entity,
-    /// Project rule or convention.
-    Convention,
-    /// Decision with rationale.
-    Decision,
-    /// Pitfall or warning.
-    Gotcha,
-    /// Unverified claim or proposed explanation awaiting evidence.
-    Hypothesis,
-    /// Supporting or refuting observation gathered during investigation.
-    Evidence,
-    /// Debugging session or investigation trace that should remain inert.
-    DebugSession,
 
-    // Memory — fast decay.
-    /// Raw conversation turn or session text.
+    /// Raw conversation turn or session text. Fast decay (full nominal rate).
     Episodic,
-    /// Time-bound occurrence or event.
-    Event,
 
-    /// Consumer-defined type.
+    /// Consumer-defined type. Carries any label outside the fixed policy
+    /// vocabulary (including the wire strings of variants removed in the 0.10.0
+    /// shrink, which decode here via the storage compat fallback). Decays at the
+    /// ordinary-knowledge rate.
     Custom(String),
 }
 
@@ -217,24 +202,13 @@ mod tests {
 
     #[test]
     fn all_knowledge_types_constructable() {
-        let types = vec![
-            KnowledgeType::IdentityCore,
-            KnowledgeType::IdentityLearned,
-            KnowledgeType::IdentityState,
+        let types = [
+            KnowledgeType::Identity,
             KnowledgeType::Semantic,
-            KnowledgeType::Procedural,
-            KnowledgeType::Entity,
-            KnowledgeType::Convention,
-            KnowledgeType::Decision,
-            KnowledgeType::Gotcha,
-            KnowledgeType::Hypothesis,
-            KnowledgeType::Evidence,
-            KnowledgeType::DebugSession,
             KnowledgeType::Episodic,
-            KnowledgeType::Event,
             KnowledgeType::Custom("my-type".to_string()),
         ];
-        assert_eq!(types.len(), 15);
+        assert_eq!(types.len(), 4);
     }
 
     #[test]

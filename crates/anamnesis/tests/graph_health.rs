@@ -122,7 +122,7 @@ fn orphan_ratio_and_average_degree_star_topology() {
     let config = EngineConfig::new().with_novelty_threshold(0.0);
     let mut engine = Engine::with_config(config);
 
-    let center = ingest_node(&mut engine, "center", KnowledgeType::Entity);
+    let center = ingest_node(&mut engine, "center", KnowledgeType::Semantic);
     let leaf1 = ingest_node(&mut engine, "leaf-1", KnowledgeType::Semantic);
     let leaf2 = ingest_node(&mut engine, "leaf-2", KnowledgeType::Semantic);
     let leaf3 = ingest_node(&mut engine, "leaf-3", KnowledgeType::Semantic);
@@ -217,7 +217,7 @@ fn node_and_edge_counts_match_graph() {
 
     let n1 = ingest_node(&mut engine, "n1", KnowledgeType::Semantic);
     let n2 = ingest_node(&mut engine, "n2", KnowledgeType::Episodic);
-    let n3 = ingest_node(&mut engine, "n3", KnowledgeType::Entity);
+    let n3 = ingest_node(&mut engine, "n3", KnowledgeType::Semantic);
 
     engine.link(n1, n2, EdgeType::Semantic).unwrap();
     engine.link(n2, n3, EdgeType::Causal).unwrap();

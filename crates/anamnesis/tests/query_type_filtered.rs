@@ -39,7 +39,10 @@ fn type_filtered_returns_only_matching_type() {
     let mut engine = Engine::new();
 
     engine
-        .ingest(make_obs_typed("convention", KnowledgeType::Convention))
+        .ingest(make_obs_typed(
+            "convention",
+            KnowledgeType::Custom("convention".to_string()),
+        ))
         .unwrap();
     engine
         .ingest(make_obs_typed("semantic", KnowledgeType::Semantic))
@@ -48,7 +51,7 @@ fn type_filtered_returns_only_matching_type() {
     let package = engine
         .query(
             &Query::TypeFiltered {
-                node_type: KnowledgeType::Convention,
+                node_type: KnowledgeType::Custom("convention".to_string()),
                 limit: 10,
             },
             &QueryConfig::default(),
@@ -56,7 +59,10 @@ fn type_filtered_returns_only_matching_type() {
         .unwrap();
 
     assert_eq!(package.knowledge.len(), 1);
-    assert_eq!(package.knowledge[0].node_type, KnowledgeType::Convention);
+    assert_eq!(
+        package.knowledge[0].node_type,
+        KnowledgeType::Custom("convention".to_string())
+    );
 }
 
 #[test]
@@ -64,16 +70,22 @@ fn type_filtered_applies_limit() {
     let mut engine = Engine::new();
 
     engine
-        .ingest(make_obs_typed("first", KnowledgeType::Gotcha))
+        .ingest(make_obs_typed(
+            "first",
+            KnowledgeType::Custom("gotcha".to_string()),
+        ))
         .unwrap();
     engine
-        .ingest(make_obs_typed("second", KnowledgeType::Gotcha))
+        .ingest(make_obs_typed(
+            "second",
+            KnowledgeType::Custom("gotcha".to_string()),
+        ))
         .unwrap();
 
     let package = engine
         .query(
             &Query::TypeFiltered {
-                node_type: KnowledgeType::Gotcha,
+                node_type: KnowledgeType::Custom("gotcha".to_string()),
                 limit: 1,
             },
             &QueryConfig::default(),
