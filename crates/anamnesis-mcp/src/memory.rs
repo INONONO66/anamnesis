@@ -16,8 +16,62 @@ use anamnesis::{Error, Memory};
 
 /// Metadata key: the stable dedup hash stored on each captured episodic node.
 const META_TURN_KEY: &str = "anamnesis:turn_key";
-/// Metadata key: whether a captured episodic node has been reasoning-extracted.
+/// Metadata key: extraction state of a captured episodic node.
+///
+/// Values: `"false"` (queued, never pulled) → `"pending:<epoch-ms>:<attempt>"`
+/// (pulled; awaiting the agent's relate/remember) → `"true"` (done/exhausted).
+/// A pull marks `pending` durably BEFORE the turn leaves the in-memory queue;
+/// an abandoned pull (agent crashed before emitting) is re-queued at daemon
+/// start once [`extract_redelivery_ms`] elapses, up to
+/// [`EXTRACT_MAX_PULL_ATTEMPTS`] total deliveries — after that it is `"true"`.
 const META_EXTRACTED: &str = "anamnesis:extracted";
+
+/// Total deliveries a captured turn gets before it is considered extracted.
+/// 2 = one normal pull + one redelivery after an abandoned pull.
+const EXTRACT_MAX_PULL_ATTEMPTS: u32 = 2;
+
+/// Default redelivery TTL: an abandoned `pending` pull re-queues after 6h.
+/// Long enough that a live agent mid-extraction is never redelivered into a
+/// concurrent session (duplicate `relate` calls would create duplicate edges).
+const DEFAULT_EXTRACT_REDELIVERY_MS: u64 = 21_600_000;
+
+/// Default batch cap when `extract_pending` is called without a limit.
+const DEFAULT_PULL_LIMIT: usize = 50;
+
+/// `ANAMNESIS_EXTRACT_REDELIVERY_MS` env override for the redelivery TTL.
+fn extract_redelivery_ms() -> u64 {
+    std::env::var("ANAMNESIS_EXTRACT_REDELIVERY_MS")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(DEFAULT_EXTRACT_REDELIVERY_MS)
+}
+
+/// Parsed [`META_EXTRACTED`] state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExtractedState {
+    /// `"false"` — queued, never pulled.
+    New,
+    /// `"pending:<epoch-ms>:<attempt>"` — pulled, awaiting the agent's output.
+    Pending { at_ms: u64, attempt: u32 },
+    /// `"true"` (or unrecognized — conservative: never re-queue garbage).
+    Done,
+}
+
+fn parse_extracted_state(v: Option<&str>) -> ExtractedState {
+    match v {
+        Some("false") => ExtractedState::New,
+        Some(s) => {
+            if let Some(rest) = s.strip_prefix("pending:")
+                && let Some((ts, attempt)) = rest.split_once(':')
+                && let (Ok(at_ms), Ok(attempt)) = (ts.parse::<u64>(), attempt.parse::<u32>())
+            {
+                return ExtractedState::Pending { at_ms, attempt };
+            }
+            ExtractedState::Done
+        }
+        None => ExtractedState::Done,
+    }
+}
 
 /// One conversational turn for `ingest_conversation`.
 #[derive(Debug, Clone)]
@@ -628,10 +682,12 @@ impl MemoryRegistry {
         }
 
         // Stamp + enqueue captured turns (after flush so nodes are durable).
+        // Both keys go in ONE durable write (`set_metadata_pairs`): a turn can
+        // never end up deduped (turn_key present) but invisible to the
+        // extraction queue (extracted missing) via a partial failure.
         for (epi_id, key) in newly_captured {
             let mem = self.get(ns)?;
-            mem.set_metadata(epi_id, META_TURN_KEY, &key)?;
-            mem.set_metadata(epi_id, META_EXTRACTED, "false")?;
+            mem.set_metadata_pairs(epi_id, &[(META_TURN_KEY, &key), (META_EXTRACTED, "false")])?;
             self.seen_turn_keys.insert(key);
             self.unextracted.push(epi_id);
         }
@@ -639,9 +695,15 @@ impl MemoryRegistry {
         Ok(IngestSummary { episodic, semantic })
     }
 
-    /// Drain up to `limit` un-extracted turns, optimistically marking each
-    /// `extracted=true` (fail-open: raw survives even if the agent never emits).
-    /// Returns a JSON array `[{"node_id":N,"content":"..."}]` for the agent.
+    /// Deliver up to `limit` (default [`DEFAULT_PULL_LIMIT`]) un-extracted turns
+    /// as a JSON array `[{"node_id":N,"content":"..."}]` for the agent.
+    ///
+    /// **At-least-once with a cap**: each delivered turn is durably marked
+    /// `pending:<now>:<attempt>` BEFORE it leaves the in-memory queue — a failed
+    /// mark leaves the turn queued (delivered ⟺ marked, never lost to a write
+    /// error), and an abandoned pull re-queues at daemon start after the TTL.
+    /// On the final allowed attempt the turn is marked `"true"` and delivered
+    /// one last time. Raw episodic nodes always survive regardless (fail-open).
     ///
     /// **The un-extracted queue is a default-namespace global.** The `ns` param is
     /// intentionally ignored (reserved for a future per-namespace queue). Nodes are
@@ -651,23 +713,51 @@ impl MemoryRegistry {
     pub fn pull_pending(
         &mut self,
         limit: Option<usize>,
+        ns: Option<&str>,
+    ) -> Result<String, Error> {
+        self.pull_pending_at(limit, ns, Timestamp::now().0)
+    }
+
+    /// [`pull_pending`](Self::pull_pending) with an injected clock (testable).
+    fn pull_pending_at(
+        &mut self,
+        limit: Option<usize>,
         _ns: Option<&str>,
+        now_ms: u64,
     ) -> Result<String, Error> {
         let take = limit
-            .unwrap_or(self.unextracted.len())
+            .unwrap_or(DEFAULT_PULL_LIMIT)
             .min(self.unextracted.len());
-        let ids: Vec<NodeId> = self.unextracted.drain(0..take).collect();
-        let mut items = Vec::with_capacity(ids.len());
-        for id in ids {
+        let mut items = Vec::with_capacity(take);
+        while items.len() < take {
+            let Some(&id) = self.unextracted.first() else {
+                break;
+            };
             // Always operate on the default namespace — the queue is global.
             let mem = self.get(None)?;
-            let content = mem
-                .engine()
-                .graph()
-                .get_node(id)
-                .map(|n| n.content.clone())
-                .unwrap_or_default();
-            mem.set_metadata(id, META_EXTRACTED, "true")?;
+            let (content, state) = match mem.engine().graph().get_node(id) {
+                Ok(n) => (
+                    n.content.clone(),
+                    parse_extracted_state(n.metadata.get(META_EXTRACTED).map(String::as_str)),
+                ),
+                Err(_) => (String::new(), ExtractedState::New),
+            };
+            let attempt = match state {
+                ExtractedState::Pending { attempt, .. } => attempt + 1,
+                _ => 1,
+            };
+            let mark = if attempt >= EXTRACT_MAX_PULL_ATTEMPTS {
+                "true".to_string()
+            } else {
+                format!("pending:{now_ms}:{attempt}")
+            };
+            // Durable mark FIRST; dequeue only after it succeeds. On a write
+            // error, return the partial batch — everything delivered is marked,
+            // everything unmarked stays queued for the next pull.
+            if mem.set_metadata(id, META_EXTRACTED, &mark).is_err() {
+                break;
+            }
+            self.unextracted.remove(0);
             items.push(serde_json::json!({ "node_id": id.0, "content": content }));
         }
         Ok(serde_json::to_string(&items).unwrap_or_else(|_| "[]".to_string()))
@@ -691,7 +781,18 @@ impl MemoryRegistry {
     /// Rebuild the capture indexes (`seen_turn_keys`, `unextracted`) from node
     /// metadata. Called once at daemon startup so the queue + dedup survive
     /// restarts. Idempotent: clears then repopulates.
+    ///
+    /// Re-queues never-pulled turns (`"false"`) AND abandoned pulls — `pending`
+    /// marks older than the redelivery TTL with attempts remaining (an agent
+    /// that pulled and crashed before emitting relate/remember).
     pub fn load_extraction_state(&mut self, ns: Option<&str>) -> Result<(), Error> {
+        self.load_extraction_state_at(ns, Timestamp::now().0)
+    }
+
+    /// [`load_extraction_state`](Self::load_extraction_state) with an injected
+    /// clock (testable).
+    fn load_extraction_state_at(&mut self, ns: Option<&str>, now_ms: u64) -> Result<(), Error> {
+        let ttl = extract_redelivery_ms();
         self.seen_turn_keys.clear();
         self.unextracted.clear();
         let mem = self.get(ns)?;
@@ -703,8 +804,15 @@ impl MemoryRegistry {
                 if let Some(k) = node.metadata.get(META_TURN_KEY) {
                     keys.push(k.clone());
                 }
-                if node.metadata.get(META_EXTRACTED).map(String::as_str) == Some("false") {
-                    pending.push(id);
+                match parse_extracted_state(node.metadata.get(META_EXTRACTED).map(String::as_str)) {
+                    ExtractedState::New => pending.push(id),
+                    ExtractedState::Pending { at_ms, attempt }
+                        if attempt < EXTRACT_MAX_PULL_ATTEMPTS
+                            && now_ms.saturating_sub(at_ms) > ttl =>
+                    {
+                        pending.push(id)
+                    }
+                    _ => {}
                 }
             }
         }
@@ -1255,9 +1363,99 @@ mod tests {
         assert!(json.contains("\"node_id\""), "got: {json}");
         assert!(json.contains("because y"), "content included: {json}");
         assert_eq!(reg.unextracted_len(), 0, "drained");
-        // Second pull is empty (optimistic mark held).
+        // Second pull is empty (pending mark held).
         let json2 = reg.pull_pending(None, None).unwrap();
         assert_eq!(json2.trim(), "[]");
+    }
+
+    /// Redelivery: an abandoned pull (pending mark, agent never emitted) is
+    /// re-queued after the TTL, delivered ONE more time (attempt cap 2), then
+    /// treated as done — never an infinite redelivery loop.
+    #[test]
+    fn abandoned_pull_redelivers_once_then_done() {
+        let mut reg = registry(true);
+        let turns = vec![Turn {
+            speaker: "user".into(),
+            text: "abandoned insight".into(),
+            at_ms: Some(10),
+        }];
+        reg.ingest_conversation("s", &turns, None, true).unwrap();
+        let t0 = 1_000u64;
+        let ttl = super::DEFAULT_EXTRACT_REDELIVERY_MS;
+
+        // First pull → pending:t0:1, queue drained.
+        let j1 = reg.pull_pending_at(None, None, t0).unwrap();
+        assert!(j1.contains("abandoned insight"), "delivered: {j1}");
+        assert_eq!(reg.unextracted_len(), 0);
+
+        // Restart BEFORE the TTL: still pending, NOT re-queued.
+        reg.load_extraction_state_at(None, t0 + 1).unwrap();
+        assert_eq!(reg.unextracted_len(), 0, "fresh pending is not redelivered");
+
+        // Restart AFTER the TTL: abandoned → re-queued once.
+        reg.load_extraction_state_at(None, t0 + ttl + 1).unwrap();
+        assert_eq!(reg.unextracted_len(), 1, "abandoned pull re-queued");
+
+        // Final delivery (attempt 2 = cap) → marked done.
+        let j2 = reg.pull_pending_at(None, None, t0 + ttl + 2).unwrap();
+        assert!(j2.contains("abandoned insight"), "redelivered: {j2}");
+
+        // Even long after another TTL, it never comes back.
+        reg.load_extraction_state_at(None, t0 + ttl * 10).unwrap();
+        assert_eq!(reg.unextracted_len(), 0, "attempt cap reached ⇒ done");
+    }
+
+    /// The pending mark is durable BEFORE the turn leaves the queue: after a
+    /// pull + daemon restart, the turn is not double-queued (mark survived).
+    #[test]
+    fn pull_mark_is_durable_across_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("memory.db");
+        let turns = vec![Turn {
+            speaker: "user".into(),
+            text: "durable pending".into(),
+            at_ms: Some(7),
+        }];
+        {
+            let mut reg = MemoryRegistry::file_backed_with(
+                Arc::new(StubProvider),
+                db.clone(),
+                dir.path().to_path_buf(),
+                "default".into(),
+                false,
+            );
+            reg.ingest_conversation("s", &turns, None, true).unwrap();
+            let _ = reg.pull_pending_at(None, None, 5_000).unwrap();
+        } // drop → release lock (simulated daemon exit right after the pull)
+        let mut reg2 = MemoryRegistry::file_backed_with(
+            Arc::new(StubProvider),
+            db,
+            dir.path().to_path_buf(),
+            "default".into(),
+            false,
+        );
+        // Fresh-pending (within TTL) must NOT re-queue — the mark was durable.
+        reg2.load_extraction_state_at(None, 5_001).unwrap();
+        assert_eq!(reg2.unextracted_len(), 0, "pending mark survived restart");
+    }
+
+    /// The `limit` param caps a batch; the remainder stays queued.
+    #[test]
+    fn pull_pending_respects_limit() {
+        let mut reg = registry(true);
+        let turns: Vec<Turn> = (0..3)
+            .map(|i| Turn {
+                speaker: "user".into(),
+                text: format!("turn {i}"),
+                at_ms: Some(100 + i),
+            })
+            .collect();
+        reg.ingest_conversation("s", &turns, None, true).unwrap();
+        assert_eq!(reg.unextracted_len(), 3);
+        let j = reg.pull_pending(Some(2), None).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&j).unwrap();
+        assert_eq!(parsed.as_array().unwrap().len(), 2, "batch capped at 2");
+        assert_eq!(reg.unextracted_len(), 1, "remainder stays queued");
     }
 
     /// `pull_pending` ignores the `ns` argument — the un-extracted queue is a

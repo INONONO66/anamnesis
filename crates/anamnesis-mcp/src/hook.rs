@@ -109,27 +109,41 @@ async fn session_extraction_signal(cfg: &Config) -> Option<String> {
 ///
 /// Parses `{ source, cwd, ... }`, derives the project cue from the cwd basename,
 /// and does an **ungated, read-only** recall (`reinforce = false`, no gate, limit
-/// = `hook_seed_k`). Returns the SessionStart output JSON, or `None` when there is
-/// nothing to inject (no cue, empty recall, or any failure).
+/// = `hook_seed_k`).
 ///
-/// If the un-extracted queue exceeds `cfg.extract_threshold_n`, a one-line nudge is
-/// appended to the block (additive — does NOT gate the seed injection).
+/// The extraction nudge is **independent of the seed**: a session with pending
+/// captured turns but no cwd cue (or an empty recall) still gets the nudge —
+/// otherwise the Stage-2 trigger would silently vanish exactly when it matters.
+/// Seed and signal are assembled by [`assemble_session_block`]; `None` only when
+/// BOTH are absent.
 async fn run_session_start(cfg: &Config, stdin: &str) -> Option<String> {
-    let parsed = parse_session_start(stdin);
-    let cue = parsed.and_then(|p| project_cue(p.cwd.as_deref()))?;
-    let mut block = gated_recall(
-        cfg,
-        &cue,
-        cfg.hook_seed_k,
-        /* reinforce = */ Some(false),
-        /* gate = */ None,
-    )
-    .await?;
-    // Best-effort extraction signal (does not gate the seed injection).
-    if let Some(sig) = session_extraction_signal(cfg).await {
-        block = format!("{block}\n\n{sig}");
+    let cue = parse_session_start(stdin).and_then(|p| project_cue(p.cwd.as_deref()));
+    let seed = match cue {
+        Some(cue) => {
+            gated_recall(
+                cfg,
+                &cue,
+                cfg.hook_seed_k,
+                /* reinforce = */ Some(false),
+                /* gate = */ None,
+            )
+            .await
+        }
+        None => None,
+    };
+    let signal = session_extraction_signal(cfg).await;
+    assemble_session_block(seed, signal).map(|block| render_session_start(&block))
+}
+
+/// Combine the seed recall and the extraction signal into one injectable block.
+/// Either alone injects; both join with a blank line; neither ⇒ `None`.
+fn assemble_session_block(seed: Option<String>, signal: Option<String>) -> Option<String> {
+    match (seed, signal) {
+        (Some(seed), Some(sig)) => Some(format!("{seed}\n\n{sig}")),
+        (Some(seed), None) => Some(seed),
+        (None, Some(sig)) => Some(sig),
+        (None, None) => None,
     }
-    Some(render_session_start(&block))
 }
 
 /// `UserPromptSubmit`: activation-gated recall on the submitted prompt.
@@ -327,39 +341,54 @@ fn select_turns<'a>(turns: &'a [ParsedTurn], event: &HookEvent) -> Vec<&'a Parse
 
 /// Capture handler: read the transcript, send selected turns as raw Episodic
 /// (capture=true ⇒ dedup + enqueue). Silent (returns None); fail-open.
+///
+/// The ENTIRE capture — transcript discovery + parse (blocking fs work, moved
+/// off the async thread) AND the daemon call — runs under ONE
+/// `hook_timeout_ms` budget, so a slow disk / large session tree can never
+/// block the hook past its deadline.
 async fn run_capture(cfg: &Config, stdin: &str, event: &HookEvent) -> Option<String> {
     if !cfg.capture_enabled {
         return None;
     }
     let input = parse_capture_input(stdin)?;
-    let contents = resolve_transcript(
-        input.transcript_path.as_deref(),
-        input.session_id.as_deref(),
-        input.cwd.as_deref(),
-    )?;
-    let all = parse_transcript(&contents);
-    if all.is_empty() {
-        return None;
-    }
-    let selected = select_turns(&all, event);
-    let session = input.session_id.unwrap_or_else(|| "capture".to_string());
-    let turns: Vec<TurnInput> = selected
-        .iter()
-        .map(|t| TurnInput {
-            speaker: t.speaker.clone(),
-            text: t.text.clone(),
-            at_ms: t.at_ms,
+    let event = event.clone();
+    let budget = Duration::from_millis(cfg.hook_timeout_ms);
+    let _ = tokio::time::timeout(budget, async move {
+        // Blocking fs walk + read + parse on the blocking pool.
+        let prepared = tokio::task::spawn_blocking(move || {
+            let contents = resolve_transcript(
+                input.transcript_path.as_deref(),
+                input.session_id.as_deref(),
+                input.cwd.as_deref(),
+            )?;
+            let all = parse_transcript(&contents);
+            if all.is_empty() {
+                return None;
+            }
+            let selected = select_turns(&all, &event);
+            let session = input.session_id.unwrap_or_else(|| "capture".to_string());
+            let turns: Vec<TurnInput> = selected
+                .iter()
+                .map(|t| TurnInput {
+                    speaker: t.speaker.clone(),
+                    text: t.text.clone(),
+                    at_ms: t.at_ms,
+                })
+                .collect();
+            Some((session, turns))
         })
-        .collect();
-    let req = Request::Ingest {
-        session,
-        turns,
-        namespace: None,
-        capture: Some(true),
-    };
-    // Fire-and-forget under the fail-open timeout; ignore the result (silent).
-    let timeout = Duration::from_millis(cfg.hook_timeout_ms);
-    let _ = tokio::time::timeout(timeout, call_oneshot(cfg, req)).await;
+        .await
+        .ok()??;
+        let (session, turns) = prepared;
+        let req = Request::Ingest {
+            session,
+            turns,
+            namespace: None,
+            capture: Some(true),
+        };
+        call_oneshot(cfg, req).await.ok()
+    })
+    .await;
     None
 }
 
@@ -614,8 +643,34 @@ mod tests {
         );
         assert!(extraction_signal(20, 20).is_some(), "at threshold ⇒ signal");
         assert!(extraction_signal(3, 20).is_none(), "under ⇒ none");
+        assert!(
+            extraction_signal(5, 0).is_none(),
+            "zero threshold ⇒ disabled"
+        );
         let s = extraction_signal(25, 20).unwrap();
         assert!(s.contains("extract_pending"), "names the tool: {s}");
+    }
+
+    /// Seed and signal are independent: either alone injects — a pending queue
+    /// must surface the nudge even when there is no cwd cue / empty recall.
+    #[test]
+    fn assemble_session_block_covers_all_cases() {
+        assert_eq!(
+            assemble_session_block(None, None),
+            None,
+            "nothing ⇒ inject nothing"
+        );
+        assert_eq!(
+            assemble_session_block(Some("SEED".into()), None).as_deref(),
+            Some("SEED")
+        );
+        assert_eq!(
+            assemble_session_block(None, Some("SIG".into())).as_deref(),
+            Some("SIG"),
+            "signal alone must inject (no seed gating)"
+        );
+        let both = assemble_session_block(Some("SEED".into()), Some("SIG".into())).unwrap();
+        assert_eq!(both, "SEED\n\nSIG");
     }
 
     // --- handler short-circuits: these return BEFORE any daemon call (hermetic) ---
