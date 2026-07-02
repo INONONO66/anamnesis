@@ -278,8 +278,7 @@ fn associative_behavior_preserved() {
         make_scored_node(2, KnowledgeType::Episodic, "memory", 0.75),
     ];
 
-    let base_pkg =
-        assemble_context_package(nodes_clone, &[], &[], 10000, 4);
+    let base_pkg = assemble_context_package(nodes_clone, &[], &[], 10000, 4);
 
     let mode_pkg = assemble_context_package_for_mode(
         nodes,

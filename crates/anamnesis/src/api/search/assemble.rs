@@ -337,7 +337,14 @@ fn source_memory_fragments<S: StorageAdapter + Clone>(
         }) else {
             continue;
         };
-        push_source_memory_fragment(engine, fragment, source_id, weight, &mut seen, &mut fragments);
+        push_source_memory_fragment(
+            engine,
+            fragment,
+            source_id,
+            weight,
+            &mut seen,
+            &mut fragments,
+        );
     }
 
     for &edge_id in storage.edges_from(fragment.node_id) {
@@ -346,7 +353,14 @@ fn source_memory_fragments<S: StorageAdapter + Clone>(
         }) else {
             continue;
         };
-        push_source_memory_fragment(engine, fragment, source_id, weight, &mut seen, &mut fragments);
+        push_source_memory_fragment(
+            engine,
+            fragment,
+            source_id,
+            weight,
+            &mut seen,
+            &mut fragments,
+        );
     }
 
     fragments

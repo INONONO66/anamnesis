@@ -251,7 +251,8 @@ pub fn check_storage_invariants<S: StorageAdapter>(storage: &S) -> Vec<Invariant
             {
                 let src_scope = &src.origin.scope;
                 let tgt_scope = &tgt.origin.scope;
-                if !src_scope.is_universal() && !tgt_scope.is_universal() && src_scope != tgt_scope {
+                if !src_scope.is_universal() && !tgt_scope.is_universal() && src_scope != tgt_scope
+                {
                     scope_leakage.push(format!(
                         "edge {eid:?} bridges disjoint scopes {} <-> {}",
                         src_scope, tgt_scope

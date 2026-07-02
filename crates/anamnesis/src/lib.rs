@@ -69,21 +69,22 @@
 //!
 //! ## Public API contract
 //!
-//! The public API consists of exactly three root symbols and two namespaces:
+//! The documented public API consists of exactly three root symbols and two
+//! namespaces:
 //!
 //! - **Root**: [`Memory`], [`Engine`], [`Error`]
 //! - **Framework**: [`anamnesis::memory`](crate::memory) — `Memory`, `Hit`, `Recall`, `SearchTuning`, `AddReceipt`
 //! - **Kernel**: [`anamnesis::engine`](crate::engine) — `Engine`, `EngineConfig`, graph types, query types,
 //!   observability, storage, and embeddings
 //!
-//! Legacy module paths (`anamnesis::api`, `anamnesis::graph`, `anamnesis::query`,
-//! `anamnesis::mechanics`, `anamnesis::snapshot`,
-//! `anamnesis::storage`, `anamnesis::embedding`, `anamnesis::error`) **compile** for
-//! backward compatibility but are hidden from documentation and slated for removal in
-//! a future major release. Migrate to `anamnesis::engine::*` or `anamnesis::memory::*`.
+//! The implementation modules (`api`, `graph`, `query`, `mechanics`, `snapshot`,
+//! `storage`, `embedding`, `error`) are the crate's internal structure. They are
+//! `pub` so the two namespaces above can re-export from them, but are hidden from
+//! documentation: build against `anamnesis::engine::*` / `anamnesis::memory::*`.
 
-// Legacy paths — kept compiling for migration; use anamnesis::engine / anamnesis::memory.
-// Removal planned for a future major.
+// Internal implementation modules — the two documented namespaces (`engine`,
+// `memory`) re-export from these. Hidden from docs; not part of the documented
+// surface.
 #[doc(hidden)]
 pub mod api;
 #[doc(hidden)]
