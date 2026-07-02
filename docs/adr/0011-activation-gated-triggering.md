@@ -1,6 +1,6 @@
 # 0011. Activation-Gated Hook Triggering, Not Flat-Profile Injection
 
-- Status: Proposed
+- Status: Accepted (implemented 2026-06-23, v0.8.0)
 - Date: 2026-06-17
 - Related: [0004 query-as-field-and-commit](0004-query-as-field-and-commit.md), [0006 frustration-not-deletion](0006-frustration-not-deletion.md), [0008 power-law dissipation](0008-powerlaw-dissipation.md), [0010 calibrated priors](0010-calibrated-priors-not-laws.md), [hook-triggering design](../05-context-retrieval/hook-triggering.md)
 

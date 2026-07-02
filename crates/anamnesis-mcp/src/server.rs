@@ -282,7 +282,8 @@ impl AnamnesisServer {
         description = "Pull un-extracted raw conversation turns awaiting reasoning extraction. \
                        Returns a JSON array of {node_id, content}. For each, distill decisions, \
                        cause→effect, contradictions, and problem→resolution, then record them with \
-                       `relate` (use the node_ids) and `remember`. Turns are marked extracted on pull."
+                       `relate` (use the node_ids) and `remember` — promptly: pulled turns are \
+                       marked pending and are redelivered only once if a pull is abandoned."
     )]
     async fn extract_pending(
         &self,

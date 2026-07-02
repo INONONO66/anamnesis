@@ -115,8 +115,9 @@ pub enum HookEvent {
     UserPrompt,
     /// `Stop`: capture the just-finished turn (user+assistant) as raw Episodic.
     Stop,
-    /// `PreCompact`: flush recent turns before context compaction; emit the
-    /// extraction signal if the queue is over threshold.
+    /// `PreCompact`: flush recent turns before context compaction. (The
+    /// extraction signal is emitted by `SessionStart` only — PreCompact stdout
+    /// is not injected into context by the host.)
     PreCompact,
     /// `SessionEnd`: flush remaining turns at session close (Claude Code only;
     /// omitted from codex-hooks.json — Codex lacks this event).
