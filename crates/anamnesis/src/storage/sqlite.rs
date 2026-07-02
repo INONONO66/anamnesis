@@ -1517,6 +1517,211 @@ mod tests {
 
         let _ = std::fs::remove_file(path);
     }
+
+    /// Legacy-DB compat guard: a database written by another build may carry
+    /// `node_type` strings that are not known variants in THIS build — either
+    /// consumer strings from an older/newer schema, or (after the 0.10.0
+    /// KnowledgeType shrink) the wire strings of variants this build has since
+    /// deleted. Reopening such a DB must NOT fail: every unrecognized bare string
+    /// decodes to `KnowledgeType::Custom(<original>)` so the node loads and the
+    /// graph opens.
+    ///
+    /// The planted strings here are deliberately ones NOT in the current match
+    /// arms (this task deletes no variants, so a currently-known string like
+    /// `hypothesis` would still decode to its own variant — see
+    /// `known_node_types_are_untouched_by_fallback`). They stand in for exactly
+    /// the class of strings a later deletion will move from a known arm into the
+    /// fallback; the guard's behavior on them is identical before and after that
+    /// deletion.
+    #[test]
+    fn unknown_node_types_decode_as_custom_on_reopen() {
+        let path = temp_db_path("legacy-node-types");
+        // Bare strings unknown to this build (a superset of "will-be-deleted"
+        // wire strings and never-were-variants). None carry the `custom:` prefix.
+        let legacy = [
+            "hypothesis_v2",
+            "evidence_bundle",
+            "debug_trace",
+            "workspace",
+            "coding_standard",
+            "footgun",
+            "milestone",
+            "identity_snapshot",
+        ];
+
+        // Seed real, well-formed nodes through the normal path, then flush so the
+        // rows exist in the `nodes` table.
+        let ids: Vec<NodeId> = {
+            let mut storage = SqliteStorage::open(&path).expect("sqlite storage opens");
+            let ids: Vec<NodeId> = legacy
+                .iter()
+                .map(|_| {
+                    let id = storage.next_node_id();
+                    storage.set_node(make_node(id, 0.5)).expect("node stored");
+                    id
+                })
+                .collect();
+            storage.flush().expect("flush");
+            ids
+        };
+
+        // Plant the legacy type strings directly via raw SQL, bypassing encode.
+        {
+            let conn = Connection::open(&path).expect("raw conn opens");
+            for (id, ty) in ids.iter().zip(legacy.iter()) {
+                conn.execute(
+                    "UPDATE nodes SET node_type = ?2 WHERE id = ?1",
+                    params![id.0, *ty],
+                )
+                .expect("planted legacy node_type");
+            }
+        }
+
+        // Reopen through the normal path: this must succeed despite unknown types.
+        let reopened = SqliteStorage::open(&path).expect("reopen tolerates legacy node types");
+
+        // Every planted node loads as Custom(<original string>).
+        for (id, ty) in ids.iter().zip(legacy.iter()) {
+            let node_type = reopened.get_node_type(*id).expect("node type present");
+            assert_eq!(
+                node_type,
+                &KnowledgeType::Custom((*ty).to_string()),
+                "legacy type {ty:?} should decode to Custom",
+            );
+        }
+
+        // Full node sweep must not error on any node.
+        for id in reopened.all_node_ids() {
+            reopened
+                .get_node(id)
+                .expect("get_node clean over full sweep");
+        }
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// Requirement 3 guard: adding the unknown-string fallback must NOT change how
+    /// any currently-known `node_type` decodes. Each known wire string still maps
+    /// to its exact variant (not `Custom`), and the existing `custom:` prefix path
+    /// is unaffected. This is the invariant that keeps the guard safe to land
+    /// before any variant is deleted.
+    #[test]
+    fn known_node_types_are_untouched_by_fallback() {
+        let cases = [
+            ("identity_core", KnowledgeType::IdentityCore),
+            ("identity_learned", KnowledgeType::IdentityLearned),
+            ("identity_state", KnowledgeType::IdentityState),
+            ("semantic", KnowledgeType::Semantic),
+            ("procedural", KnowledgeType::Procedural),
+            ("entity", KnowledgeType::Entity),
+            ("convention", KnowledgeType::Convention),
+            ("decision", KnowledgeType::Decision),
+            ("gotcha", KnowledgeType::Gotcha),
+            ("hypothesis", KnowledgeType::Hypothesis),
+            ("evidence", KnowledgeType::Evidence),
+            ("debug_session", KnowledgeType::DebugSession),
+            ("episodic", KnowledgeType::Episodic),
+            ("event", KnowledgeType::Event),
+        ];
+        for (wire, expected) in cases {
+            assert_eq!(
+                decode_knowledge_type(wire).expect("known type decodes"),
+                expected,
+                "known wire string {wire:?} must keep its exact variant",
+            );
+        }
+        // The explicit custom encoding still round-trips (and is NOT confused with
+        // the bare-string fallback).
+        assert_eq!(
+            decode_knowledge_type(&encode_knowledge_type(&KnowledgeType::Custom(
+                "my type".to_string()
+            )))
+            .expect("custom decodes"),
+            KnowledgeType::Custom("my type".to_string()),
+        );
+    }
+
+    /// A fallback-decoded legacy node must survive a further open/save cycle
+    /// without further corruption. The first reopen normalizes a bare unknown
+    /// string (`retired_type`) into the canonical `Custom("retired_type")`, which
+    /// re-encodes as `custom:retired_type`; a second flush + reopen is then a
+    /// fixed point (bare -> Custom is a one-way normalization; every later cycle
+    /// is stable). This is the property that makes the guard safe: re-saving a
+    /// DB opened via the fallback never mangles the type further.
+    #[test]
+    fn fallback_decoded_node_type_round_trips_stably() {
+        let path = temp_db_path("legacy-node-types-roundtrip");
+        let id = {
+            let mut storage = SqliteStorage::open(&path).expect("sqlite storage opens");
+            let id = storage.next_node_id();
+            storage.set_node(make_node(id, 0.5)).expect("node stored");
+            storage.flush().expect("flush");
+            id
+        };
+        {
+            let conn = Connection::open(&path).expect("raw conn opens");
+            conn.execute(
+                "UPDATE nodes SET node_type = 'retired_type' WHERE id = ?1",
+                params![id.0],
+            )
+            .expect("planted legacy node_type");
+        }
+
+        // First reopen: bare "retired_type" -> Custom("retired_type"). Re-persist
+        // it (re-encode now writes `custom:retired_type`).
+        {
+            let mut storage = SqliteStorage::open(&path).expect("first reopen tolerates legacy");
+            assert_eq!(
+                storage.get_node_type(id).expect("type present"),
+                &KnowledgeType::Custom("retired_type".to_string()),
+            );
+            // Force a rewrite of the node row via the normal persistence path.
+            let mut node = storage.get_node(id).expect("node present").clone();
+            node.content = "touched".to_string();
+            storage.set_node(node).expect("node re-stored");
+            storage.flush().expect("flush re-encoded node");
+        }
+
+        // Confirm the on-disk encoding is now the canonical custom form.
+        {
+            let conn = Connection::open(&path).expect("raw conn opens");
+            let encoded: String = conn
+                .query_row(
+                    "SELECT node_type FROM nodes WHERE id = ?1",
+                    params![id.0],
+                    |row| row.get(0),
+                )
+                .expect("read encoded node_type");
+            assert_eq!(encoded, "custom:retired_type");
+        }
+
+        // Second reopen is a fixed point: still Custom("retired_type").
+        let reopened = SqliteStorage::open(&path).expect("second reopen");
+        assert_eq!(
+            reopened.get_node_type(id).expect("type present"),
+            &KnowledgeType::Custom("retired_type".to_string()),
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// `decode_memory_tier` must tolerate unknown/legacy tier strings by falling
+    /// back to `MemoryTier::Auto`, mirroring the node-type compat guard, so a
+    /// legacy DB with a dropped tier string still opens.
+    #[test]
+    fn decode_memory_tier_falls_back_to_auto_on_unknown() {
+        // Known strings keep their exact meaning.
+        assert_eq!(decode_memory_tier("auto").unwrap(), MemoryTier::Auto);
+        assert_eq!(decode_memory_tier("core").unwrap(), MemoryTier::Core);
+        assert_eq!(decode_memory_tier("recall").unwrap(), MemoryTier::Recall);
+        assert_eq!(
+            decode_memory_tier("archival").unwrap(),
+            MemoryTier::Archival
+        );
+        // Unknown strings fall back to Auto instead of erroring.
+        assert_eq!(decode_memory_tier("legacy_tier").unwrap(), MemoryTier::Auto);
+        assert_eq!(decode_memory_tier("").unwrap(), MemoryTier::Auto);
+    }
 }
 
 /// Current on-disk schema version. The fresh-DB `create_schema` path and the
@@ -2293,11 +2498,17 @@ fn decode_knowledge_type(value: &str) -> Result<KnowledgeType, Error> {
         custom if custom.starts_with("custom:") => {
             KnowledgeType::Custom(unescape_text(&custom[7..])?)
         }
-        other => {
-            return Err(Error::StorageError(format!(
-                "unknown knowledge type: {other}"
-            )));
-        }
+        // Legacy-DB compat guard (ADR / task B0): any bare string this build does
+        // not recognize — a consumer type from another schema, or the wire string
+        // of a variant deleted in a later 0.10.0 shrink — decodes to
+        // `Custom(<original>)` instead of erroring, so the node loads and the DB
+        // opens. This is a one-way normalization: re-encoding the result writes
+        // the canonical `custom:<original>` form (see `encode_knowledge_type`),
+        // which decodes right back to the same `Custom`, so open/save cycles are a
+        // fixed point and never corrupt the value further. Known variants and the
+        // explicit `custom:` prefix are matched by the arms above and are
+        // unaffected.
+        other => KnowledgeType::Custom(other.to_string()),
     })
 }
 
@@ -2357,7 +2568,12 @@ fn decode_memory_tier(value: &str) -> Result<MemoryTier, Error> {
         "core" => MemoryTier::Core,
         "recall" => MemoryTier::Recall,
         "archival" => MemoryTier::Archival,
-        other => return Err(Error::StorageError(format!("unknown memory tier: {other}"))),
+        // Legacy-DB compat guard (task B0): an unrecognized tier string falls back
+        // to `Auto` (the `MemoryTier::default()`) rather than erroring, mirroring
+        // the node-type guard so a DB carrying a dropped/foreign tier string still
+        // opens. `Auto` means "no override — tier follows salience", the safe
+        // neutral choice.
+        _ => MemoryTier::Auto,
     })
 }
 
