@@ -32,7 +32,7 @@ fn make_node(id: NodeId, node_type: KnowledgeType, name: &str) -> Node {
         entity_tags: vec!["tag1".to_string(), "tag2".to_string()],
         origin: Origin {
             peer_id: anamnesis::graph::types::PeerId(0),
-            source_kind: anamnesis::peer::SourceKind::AgentObservation,
+            source_kind: anamnesis::engine::SourceKind::AgentObservation,
             session_id: "session-1".to_string(),
             scope: anamnesis::graph::ScopePath::new("project-1").expect("valid scope"),
             confidence: 0.9,

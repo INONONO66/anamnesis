@@ -59,10 +59,10 @@ use crate::embedding::EmbeddingProvider;
 use crate::error::Error;
 use crate::graph::node::Origin;
 use crate::graph::scope::ScopeRelation;
+use crate::graph::types::SourceKind;
 use crate::graph::types::{EdgeId, PeerId};
 use crate::graph::{EdgeType, KnowledgeType, NodeId, ScopePath, Timestamp};
 use crate::mechanics::social::ConfidenceLevel;
-use crate::peer::SourceKind;
 use crate::query::{ContextPackage, Fragment, SearchInput, SearchResult, Tension};
 use crate::storage::{SqliteStorage, StorageAdapter};
 

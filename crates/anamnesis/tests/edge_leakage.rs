@@ -38,7 +38,7 @@ fn observation(name: &str) -> Observation {
         entity_tags: vec![],
         origin: Origin {
             peer_id: anamnesis::graph::types::PeerId(0),
-            source_kind: anamnesis::peer::SourceKind::AgentObservation,
+            source_kind: anamnesis::engine::SourceKind::AgentObservation,
             session_id: "s".to_string(),
             scope: ScopePath::new("project-1").expect("valid scope"),
             confidence: 0.9,

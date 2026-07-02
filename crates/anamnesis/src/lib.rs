@@ -48,8 +48,8 @@
 //! ```
 //!
 //! **Use `Memory`** unless you need custom node/edge types, your own ingest
-//! representation, custom packaging policy, peer/trust control, or the debug
-//! lifecycle — then drop to **`Engine`** (the kernel API). `Memory` is built
+//! representation, or custom packaging policy — then drop to **`Engine`** (the
+//! kernel API). `Memory` is built
 //! entirely on `Engine`'s public API: anything it does, you can do.
 //!
 //! ## Kernel API — `Engine`
@@ -74,10 +74,10 @@
 //! - **Root**: [`Memory`], [`Engine`], [`Error`]
 //! - **Framework**: [`anamnesis::memory`](crate::memory) — `Memory`, `Hit`, `Recall`, `SearchTuning`, `AddReceipt`
 //! - **Kernel**: [`anamnesis::engine`](crate::engine) — `Engine`, `EngineConfig`, graph types, query types,
-//!   peer/trust types, observability, storage, and embeddings
+//!   observability, storage, and embeddings
 //!
 //! Legacy module paths (`anamnesis::api`, `anamnesis::graph`, `anamnesis::query`,
-//! `anamnesis::mechanics`, `anamnesis::peer`, `anamnesis::snapshot`,
+//! `anamnesis::mechanics`, `anamnesis::snapshot`,
 //! `anamnesis::storage`, `anamnesis::embedding`, `anamnesis::error`) **compile** for
 //! backward compatibility but are hidden from documentation and slated for removal in
 //! a future major release. Migrate to `anamnesis::engine::*` or `anamnesis::memory::*`.
@@ -94,8 +94,6 @@ pub mod error;
 pub mod graph;
 #[doc(hidden)]
 pub mod mechanics;
-#[doc(hidden)]
-pub mod peer;
 #[doc(hidden)]
 pub mod query;
 #[doc(hidden)]

@@ -34,7 +34,7 @@ fn observation_at(name: &str, scope: &str, ts: Timestamp) -> Observation {
         entity_tags: Vec::new(),
         origin: Origin {
             peer_id: anamnesis::graph::types::PeerId(0),
-            source_kind: anamnesis::peer::SourceKind::AgentObservation,
+            source_kind: anamnesis::engine::SourceKind::AgentObservation,
             session_id: "session-1".to_string(),
             scope: ScopePath::new(scope).expect("valid scope"),
             confidence: 0.9,
@@ -406,7 +406,7 @@ fn snapshot_preserves_reservoirs() {
             tier: MemoryTier::Auto,
             origin: Origin {
                 peer_id: anamnesis::graph::types::PeerId(0),
-                source_kind: anamnesis::peer::SourceKind::AgentObservation,
+                source_kind: anamnesis::engine::SourceKind::AgentObservation,
                 session_id: "s".to_string(),
                 scope: ScopePath::universal(),
                 confidence: 0.9,

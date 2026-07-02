@@ -142,7 +142,7 @@ mod tests {
             tier: MemoryTier::Auto,
             origin: Origin {
                 peer_id: crate::graph::types::PeerId(0),
-                source_kind: crate::peer::SourceKind::AgentObservation,
+                source_kind: crate::graph::types::SourceKind::AgentObservation,
                 session_id: "session-1".into(),
                 scope: crate::graph::ScopePath::universal(),
                 confidence: 0.9,

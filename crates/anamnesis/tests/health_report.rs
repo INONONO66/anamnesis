@@ -3,10 +3,10 @@
 use anamnesis::Engine;
 use anamnesis::api::{HealthGrade, IngestResult, Observation};
 use anamnesis::engine::EngineConfig;
+use anamnesis::engine::SourceKind;
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::types::PeerId;
 use anamnesis::graph::{EdgeType, KnowledgeType, ScopePath, Timestamp};
-use anamnesis::peer::SourceKind;
 
 fn obs(name: &str) -> Observation {
     Observation {
@@ -98,14 +98,4 @@ fn retracted_nodes_counted() {
     e.retract(ids[0], "wrong", Timestamp::now()).unwrap();
     let report = e.health();
     assert_eq!(report.retracted_count, 1);
-}
-
-#[test]
-fn peer_count_in_report() {
-    let mut e = engine();
-    use anamnesis::peer::TrustLevel;
-    e.register_peer("alice", TrustLevel::Owner).unwrap();
-    e.register_peer("bob", TrustLevel::Member).unwrap();
-    let report = e.health();
-    assert_eq!(report.peer_count, 2);
 }

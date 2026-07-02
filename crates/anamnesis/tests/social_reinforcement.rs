@@ -22,7 +22,7 @@ fn observation(name: &str, _agent_id: &str, session_id: &str, tags: &[&str]) -> 
         entity_tags: tags.iter().map(|tag| (*tag).to_string()).collect(),
         origin: Origin {
             peer_id,
-            source_kind: anamnesis::peer::SourceKind::AgentObservation,
+            source_kind: anamnesis::engine::SourceKind::AgentObservation,
             session_id: session_id.to_string(),
             scope: ScopePath::new("project-1").expect("valid scope"),
             confidence: 0.9,

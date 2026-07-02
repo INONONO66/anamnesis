@@ -1,4 +1,7 @@
-//! Tests for SQLite schema migration infrastructure (v1 → v2 → v3 → v4).
+//! Tests for SQLite schema migration infrastructure (v1 → v2 → v3 → v4 → v5 → v6).
+//!
+//! v6 dropped the `peers` / `peer_aliases` tables with the peer/trust subsystem;
+//! nodes' own `peer_id` / `source_kind` columns and `idx_nodes_peer` STAY.
 
 use anamnesis::storage::SqliteStorage;
 use rusqlite::{Connection, OptionalExtension};
@@ -52,6 +55,18 @@ fn schema_version(conn: &Connection) -> u32 {
     .expect("schema_version")
 }
 
+/// Whether a table with the given name exists in the database.
+fn table_exists(conn: &Connection, table: &str) -> bool {
+    conn.query_row(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?1 LIMIT 1",
+        [table],
+        |_| Ok(()),
+    )
+    .optional()
+    .expect("query table existence")
+    .is_some()
+}
+
 // ── Fresh DB gets the current version ─────────────────────────────────────────
 
 #[test]
@@ -64,15 +79,17 @@ fn fresh_db_gets_current_schema_version() {
     assert_eq!(storage.node_count(), 0);
 
     let conn = Connection::open(&tmp).expect("reopen");
-    assert_eq!(schema_version(&conn), 5, "fresh DB should be at schema v5");
+    assert_eq!(schema_version(&conn), 6, "fresh DB should be at schema v6");
 
-    // The v4 peer evidence-trust columns are present on a fresh DB.
-    let peer_cols: Vec<String> = table_columns(&conn, "peers")
-        .into_iter()
-        .map(|(name, _, _, _)| name)
-        .collect();
-    assert!(peer_cols.iter().any(|c| c == "trust_reservoir"));
-    assert!(peer_cols.iter().any(|c| c == "trust_evidence_count"));
+    // v6 removed the peer/trust subsystem: a fresh DB has no peers tables.
+    assert!(
+        !table_exists(&conn, "peers"),
+        "fresh v6 DB must not create the peers table"
+    );
+    assert!(
+        !table_exists(&conn, "peer_aliases"),
+        "fresh v6 DB must not create the peer_aliases table"
+    );
 
     // The v5 evidence-prior column P_i is present on the nodes table.
     let node_cols: Vec<String> = table_columns(&conn, "nodes")
@@ -93,10 +110,10 @@ fn fresh_db_has_peer_id_column() {
     // We do this by ingesting a node and checking it round-trips correctly.
     use anamnesis::Engine;
     use anamnesis::api::Observation;
+    use anamnesis::engine::SourceKind;
     use anamnesis::graph::node::Origin;
     use anamnesis::graph::types::PeerId;
     use anamnesis::graph::{KnowledgeType, ScopePath, Timestamp};
-    use anamnesis::peer::SourceKind;
 
     let mut engine = Engine::new();
     let peer_id = PeerId(0); // Use default peer_id (no registry needed yet)
@@ -178,19 +195,18 @@ fn existing_db_migrates_from_v1_to_current() {
     let storage = SqliteStorage::open(&tmp);
     assert!(storage.is_ok(), "migration should succeed");
 
-    // Verify migration ran: peers table should exist
+    // Verify migration ran through v6: the peers tables were created by the
+    // v1->v2 step and then DROPPED by the v5->v6 step, so they must be absent.
     {
         let conn = Connection::open(&tmp).expect("reopen");
-        let peers_exist: bool = conn
-            .query_row(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='peers' LIMIT 1",
-                [],
-                |_| Ok(()),
-            )
-            .optional()
-            .expect("query")
-            .is_some();
-        assert!(peers_exist, "peers table should exist after migration");
+        assert!(
+            !table_exists(&conn, "peers"),
+            "peers table must be dropped by the v5->v6 migration"
+        );
+        assert!(
+            !table_exists(&conn, "peer_aliases"),
+            "peer_aliases table must be dropped by the v5->v6 migration"
+        );
 
         // retained_action reservoir table should exist after the v2 -> v3 step.
         let reservoir_exists: bool = conn
@@ -209,17 +225,19 @@ fn existing_db_migrates_from_v1_to_current() {
 
         assert_eq!(
             schema_version(&conn),
-            5,
-            "schema_version should be 5 after full v1 -> v5 migration"
+            6,
+            "schema_version should be 6 after full v1 -> v6 migration"
         );
 
-        // The v4 peer evidence-trust columns exist after the full chain too.
-        let peer_cols: Vec<String> = table_columns(&conn, "peers")
+        // Nodes' peer_id column (inside the Origin encoding) STAYS after the chain.
+        let node_cols_peer: Vec<String> = table_columns(&conn, "nodes")
             .into_iter()
             .map(|(name, _, _, _)| name)
             .collect();
-        assert!(peer_cols.iter().any(|c| c == "trust_reservoir"));
-        assert!(peer_cols.iter().any(|c| c == "trust_evidence_count"));
+        assert!(
+            node_cols_peer.iter().any(|c| c == "peer_id"),
+            "nodes.peer_id must survive the peer-subsystem removal"
+        );
 
         // The v5 evidence-prior column exists after the full chain too.
         let node_cols: Vec<String> = table_columns(&conn, "nodes")
@@ -337,8 +355,8 @@ fn fresh_schema_equals_migrated_schema() {
     let fresh = Connection::open(&fresh_path).expect("reopen fresh");
     let migrated = Connection::open(&migrated_path).expect("reopen migrated");
 
-    assert_eq!(schema_version(&fresh), 5);
-    assert_eq!(schema_version(&migrated), 5);
+    assert_eq!(schema_version(&fresh), 6);
+    assert_eq!(schema_version(&migrated), 6);
 
     // Both the fresh-create and migration paths must converge on a nodes table that
     // carries the v5 evidence_prior column (legacy v1->v2 ALTERs leave the rest of
@@ -365,13 +383,18 @@ fn fresh_schema_equals_migrated_schema() {
         table_columns(&migrated, "retained_action"),
         "fresh and migrated retained_action columns must be identical"
     );
-    // peers table columns (the v4-touched table) must match column-for-column,
-    // including the evidence-trust columns and their defaults.
-    assert_eq!(
-        table_columns(&fresh, "peers"),
-        table_columns(&migrated, "peers"),
-        "fresh and migrated peers columns must be identical"
-    );
+    // The peers tables must be absent on BOTH the fresh-create and migrated paths
+    // after the v6 drop (schema convergence: neither path leaves them behind).
+    for table in ["peers", "peer_aliases"] {
+        assert!(
+            !table_exists(&fresh, table),
+            "fresh v6 schema must not contain {table}"
+        );
+        assert!(
+            !table_exists(&migrated, table),
+            "migrated v6 schema must not contain {table}"
+        );
+    }
 
     // Index lists must match for every reservoir-touched table.
     for table in ["nodes", "edges", "salience"] {
@@ -446,6 +469,154 @@ fn v3_backfill_is_deterministic_and_complete() {
         accessed_at, created_at,
         "edge accessed_at must be backfilled from created_at"
     );
+
+    let _ = std::fs::remove_file(&tmp);
+}
+
+// ── v5 -> v6: peer/trust subsystem removal ─────────────────────────────────────
+
+#[test]
+fn v5_db_with_planted_peers_reopens_clean_at_v6() {
+    use anamnesis::engine::{SourceKind, StorageAdapter};
+    use anamnesis::graph::node::{Node, Origin};
+    use anamnesis::graph::types::PeerId;
+    use anamnesis::graph::{KnowledgeType, MemoryTier, ScopePath, Timestamp};
+    use std::collections::{HashMap, VecDeque};
+
+    let tmp =
+        std::env::temp_dir().join(format!("anamnesis_test_v5_to_v6_{}.db", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+
+    // 1. Build a real, fully-populated DB via write-through `set_node` (correct
+    //    nodes schema), planting a node whose Origin carries a non-zero peer_id +
+    //    source_kind (those columns live on `nodes` and must survive the drop).
+    let node_id = {
+        let mut s = SqliteStorage::open(&tmp).expect("open fresh db");
+        let id = s.next_node_id();
+        let node = Node {
+            id,
+            node_type: KnowledgeType::Semantic,
+            name: "survivor".into(),
+            summary: None,
+            content: "node that must survive the peer-table drop".into(),
+            embedding: None,
+            created_at: Timestamp(1000),
+            updated_at: Timestamp(1000),
+            accessed_at: Timestamp(1000),
+            valid_from: None,
+            valid_until: None,
+            salience: 0.8,
+            retained_action: 0.0,
+            evidence_prior: 0.0,
+            access_count: 0,
+            access_history: VecDeque::new(),
+            tier: MemoryTier::Auto,
+            origin: Origin {
+                peer_id: PeerId(7),
+                source_kind: SourceKind::HumanInput,
+                session_id: "s1".into(),
+                scope: ScopePath::universal(),
+                confidence: 0.9,
+            },
+            entity_tags: vec!["keep".into()],
+            metadata: HashMap::new(),
+        };
+        s.set_node(node).expect("plant survivor node");
+        id
+    };
+
+    // 2. Downgrade the on-disk DB to the pre-drop v5 shape via raw rusqlite:
+    //    re-create the v5 peers / peer_aliases tables, plant peer rows (the exact
+    //    rows a real multi-peer v5 DB would carry), and reset schema_version to 5.
+    {
+        let conn = Connection::open(&tmp).expect("open for downgrade");
+        conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS peers (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                trust_level TEXT NOT NULL DEFAULT 'agent',
+                trust_reservoir REAL NOT NULL DEFAULT 0,
+                trust_evidence_count INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS peer_aliases (
+                peer_id INTEGER NOT NULL,
+                alias TEXT NOT NULL,
+                alias_type TEXT NOT NULL DEFAULT 'alias',
+                PRIMARY KEY (peer_id, alias)
+            );
+            INSERT INTO peers (id, name, trust_level, trust_reservoir, trust_evidence_count)
+                VALUES (7, 'alice', 'owner', 4.0, 3);
+            INSERT INTO peer_aliases (peer_id, alias, alias_type)
+                VALUES (7, 'alice', 'name'), (7, 'ali', 'alias');
+            UPDATE schema_version SET version = 5;
+            ",
+        )
+        .expect("downgrade to v5 with planted peers");
+
+        // Sanity: the fixture really is at v5 with populated peers tables.
+        assert_eq!(schema_version(&conn), 5, "fixture must be at v5");
+        let planted: i64 = conn
+            .query_row("SELECT COUNT(*) FROM peers", [], |r| r.get(0))
+            .expect("count planted peers");
+        assert_eq!(planted, 1, "fixture must have a planted peer row");
+    }
+
+    // 3. Reopen with the current code — the v5 -> v6 migration must run and succeed.
+    {
+        let storage = SqliteStorage::open(&tmp);
+        assert!(storage.is_ok(), "v5 -> v6 migration should succeed");
+    }
+
+    // 4. Assertions: version is v6, both peer tables are dropped, and the node
+    //    (with its peer_id / source_kind) is intact.
+    {
+        let conn = Connection::open(&tmp).expect("reopen after migration");
+        assert_eq!(schema_version(&conn), 6, "DB should be at v6 after reopen");
+        assert!(
+            !table_exists(&conn, "peers"),
+            "peers table must be dropped at v6"
+        );
+        assert!(
+            !table_exists(&conn, "peer_aliases"),
+            "peer_aliases table must be dropped at v6"
+        );
+
+        // The node survived with its Origin peer_id / source_kind columns intact.
+        let (name, peer_id, source_kind): (String, i64, String) = conn
+            .query_row(
+                "SELECT name, peer_id, source_kind FROM nodes WHERE id = ?1",
+                [node_id.0],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("survivor node must still exist");
+        assert_eq!(name, "survivor");
+        assert_eq!(peer_id, 7, "nodes.peer_id must survive the peer-table drop");
+        assert_eq!(source_kind, "human_input");
+
+        // idx_nodes_peer (used by nodes_by_peer) must still be present.
+        assert!(
+            table_indexes(&conn, "nodes")
+                .iter()
+                .any(|i| i == "idx_nodes_peer"),
+            "idx_nodes_peer must survive the peer-subsystem removal"
+        );
+    }
+
+    // 5. The reopened storage can still load and query the node.
+    {
+        let storage = SqliteStorage::open(&tmp).expect("final reopen");
+        assert_eq!(
+            storage.node_count(),
+            1,
+            "the node must load after migration"
+        );
+        assert_eq!(
+            storage.nodes_by_peer(PeerId(7)),
+            vec![node_id],
+            "nodes_by_peer must still resolve the survivor by origin peer_id"
+        );
+    }
 
     let _ = std::fs::remove_file(&tmp);
 }

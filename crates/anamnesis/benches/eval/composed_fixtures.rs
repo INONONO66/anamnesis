@@ -25,11 +25,11 @@ use std::collections::HashMap;
 
 use anamnesis::Engine;
 use anamnesis::api::{IngestResult, Observation};
+use anamnesis::engine::SourceKind;
 use anamnesis::engine::{EngineConfig, NodeId};
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::types::PeerId;
 use anamnesis::graph::{EdgeType, KnowledgeType, ScopePath, Timestamp};
-use anamnesis::peer::SourceKind;
 use anamnesis::storage::SqliteStorage;
 
 /// The agent peer id whose identity sites are addressed by the quality judge.

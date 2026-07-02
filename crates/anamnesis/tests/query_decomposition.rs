@@ -23,7 +23,7 @@ fn english_who_is_pattern() {
             entity_tags: vec![],
             origin: Origin {
                 peer_id: anamnesis::graph::types::PeerId(0),
-                source_kind: anamnesis::peer::SourceKind::AgentObservation,
+                source_kind: anamnesis::engine::SourceKind::AgentObservation,
                 session_id: "test".into(),
                 scope: anamnesis::graph::ScopePath::universal(),
                 confidence: 0.9,
@@ -71,7 +71,7 @@ fn english_what_is_pattern() {
             entity_tags: vec![],
             origin: Origin {
                 peer_id: anamnesis::graph::types::PeerId(0),
-                source_kind: anamnesis::peer::SourceKind::AgentObservation,
+                source_kind: anamnesis::engine::SourceKind::AgentObservation,
                 session_id: "test".into(),
                 scope: anamnesis::graph::ScopePath::universal(),
                 confidence: 0.9,
@@ -119,7 +119,7 @@ fn english_of_pattern() {
             entity_tags: vec![],
             origin: Origin {
                 peer_id: anamnesis::graph::types::PeerId(0),
-                source_kind: anamnesis::peer::SourceKind::AgentObservation,
+                source_kind: anamnesis::engine::SourceKind::AgentObservation,
                 session_id: "test".into(),
                 scope: anamnesis::graph::ScopePath::universal(),
                 confidence: 0.9,
@@ -167,7 +167,7 @@ fn english_how_does_pattern() {
             entity_tags: vec![],
             origin: Origin {
                 peer_id: anamnesis::graph::types::PeerId(0),
-                source_kind: anamnesis::peer::SourceKind::AgentObservation,
+                source_kind: anamnesis::engine::SourceKind::AgentObservation,
                 session_id: "test".into(),
                 scope: anamnesis::graph::ScopePath::universal(),
                 confidence: 0.9,
@@ -215,7 +215,7 @@ fn korean_eui_pattern() {
             entity_tags: vec![],
             origin: Origin {
                 peer_id: anamnesis::graph::types::PeerId(0),
-                source_kind: anamnesis::peer::SourceKind::AgentObservation,
+                source_kind: anamnesis::engine::SourceKind::AgentObservation,
                 session_id: "test".into(),
                 scope: anamnesis::graph::ScopePath::universal(),
                 confidence: 0.9,
@@ -263,7 +263,7 @@ fn korean_nugu_pattern() {
             entity_tags: vec![],
             origin: Origin {
                 peer_id: anamnesis::graph::types::PeerId(0),
-                source_kind: anamnesis::peer::SourceKind::AgentObservation,
+                source_kind: anamnesis::engine::SourceKind::AgentObservation,
                 session_id: "test".into(),
                 scope: anamnesis::graph::ScopePath::universal(),
                 confidence: 0.9,
@@ -311,7 +311,7 @@ fn korean_mwo_pattern() {
             entity_tags: vec![],
             origin: Origin {
                 peer_id: anamnesis::graph::types::PeerId(0),
-                source_kind: anamnesis::peer::SourceKind::AgentObservation,
+                source_kind: anamnesis::engine::SourceKind::AgentObservation,
                 session_id: "test".into(),
                 scope: anamnesis::graph::ScopePath::universal(),
                 confidence: 0.9,
@@ -359,7 +359,7 @@ fn no_match_returns_original() {
             entity_tags: vec![],
             origin: Origin {
                 peer_id: anamnesis::graph::types::PeerId(0),
-                source_kind: anamnesis::peer::SourceKind::AgentObservation,
+                source_kind: anamnesis::engine::SourceKind::AgentObservation,
                 session_id: "test".into(),
                 scope: anamnesis::graph::ScopePath::universal(),
                 confidence: 0.9,
@@ -407,7 +407,7 @@ fn case_insensitive_english() {
             entity_tags: vec![],
             origin: Origin {
                 peer_id: anamnesis::graph::types::PeerId(0),
-                source_kind: anamnesis::peer::SourceKind::AgentObservation,
+                source_kind: anamnesis::engine::SourceKind::AgentObservation,
                 session_id: "test".into(),
                 scope: anamnesis::graph::ScopePath::universal(),
                 confidence: 0.9,

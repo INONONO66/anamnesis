@@ -18,14 +18,14 @@
 pub use crate::api::{
     CommitReport, ConversationInput, ConversationResult, CrystallizeRequest, CrystallizeResult,
     DocumentInput, Engine, EngineConfig, ExtractedFact, GraphEvent, HealthGrade, HealthReport,
-    IngestResult, Observation, PeerProfileInput, TickReport,
+    IngestResult, Observation, TickReport,
 };
 
 // ── Graph types ───────────────────────────────────────────────────────────────
 
 pub use crate::graph::{
     AccessTrace, Edge, EdgeId, EdgeType, KnowledgeType, MemoryTier, Node, NodeId, Origin, PeerId,
-    ScopePath, ScopeRelation, Timestamp,
+    ScopePath, ScopeRelation, SourceKind, Timestamp,
 };
 
 // ── Query types ───────────────────────────────────────────────────────────────
@@ -37,10 +37,6 @@ pub use crate::query::{
     ReadoutCandidate, SearchCandidate, SearchInput, SearchResult, SearchTrace, SearchTraceLevel,
     Tension, TokenBudget, additive_rwr, additive_rwr_with_alpha, scope_weight,
 };
-
-// ── Peer / trust types ────────────────────────────────────────────────────────
-
-pub use crate::peer::{PeerProfile, PeerRegistry, SourceKind, TrustLevel};
 
 // ── Observability / mechanics ─────────────────────────────────────────────────
 

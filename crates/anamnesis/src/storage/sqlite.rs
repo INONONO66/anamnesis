@@ -3,11 +3,11 @@
 use crate::error::Error;
 use crate::graph::node::Origin;
 use crate::graph::types::PeerId;
+use crate::graph::types::SourceKind;
 use crate::graph::{
     AccessTrace, Edge, EdgeId, EdgeType, KnowledgeType, MemoryTier, Node, NodeId, ScopePath,
     Timestamp,
 };
-use crate::peer::SourceKind;
 use crate::storage::StorageAdapter;
 use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::{HashMap, VecDeque};
@@ -1030,138 +1030,6 @@ impl StorageAdapter for SqliteStorage {
 
         self.text_search_inner(query, limit).unwrap_or_default()
     }
-
-    fn store_peer(&mut self, profile: &crate::peer::PeerProfile) -> Result<(), Error> {
-        let conn = self.lock_conn()?;
-        conn.execute(
-            "INSERT OR REPLACE INTO peers \
-             (id, name, trust_level, trust_reservoir, trust_evidence_count) \
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                profile.id.0,
-                profile.name,
-                encode_trust_level(&profile.trust_level),
-                profile.trust_reservoir,
-                profile.trust_evidence_count,
-            ],
-        )
-        .map_err(sqlite_error)?;
-        conn.execute(
-            "DELETE FROM peer_aliases WHERE peer_id = ?1",
-            [profile.id.0],
-        )
-        .map_err(sqlite_error)?;
-        conn.execute(
-            "INSERT OR IGNORE INTO peer_aliases (peer_id, alias, alias_type) VALUES (?1, ?2, 'name')",
-            params![profile.id.0, profile.name],
-        )
-        .map_err(sqlite_error)?;
-        for alias in &profile.aliases {
-            conn.execute(
-                "INSERT OR IGNORE INTO peer_aliases (peer_id, alias, alias_type) VALUES (?1, ?2, 'alias')",
-                params![profile.id.0, alias],
-            )
-            .map_err(sqlite_error)?;
-        }
-        for (platform, username) in &profile.platforms {
-            let alias_type = format!("platform:{platform}");
-            conn.execute(
-                "INSERT OR IGNORE INTO peer_aliases (peer_id, alias, alias_type) VALUES (?1, ?2, ?3)",
-                params![profile.id.0, username, alias_type],
-            )
-            .map_err(sqlite_error)?;
-        }
-        Ok(())
-    }
-
-    fn store_peer_alias(
-        &mut self,
-        peer_id: PeerId,
-        alias: &str,
-        alias_type: &str,
-    ) -> Result<(), Error> {
-        let conn = self.lock_conn()?;
-        conn.execute(
-            "INSERT OR IGNORE INTO peer_aliases (peer_id, alias, alias_type) VALUES (?1, ?2, ?3)",
-            params![peer_id.0, alias, alias_type],
-        )
-        .map_err(sqlite_error)?;
-        Ok(())
-    }
-
-    fn load_peers(&self) -> Result<crate::peer::PeerRegistry, Error> {
-        let conn = self.lock_conn()?;
-        let mut registry = crate::peer::PeerRegistry::new();
-
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, name, trust_level, trust_reservoir, trust_evidence_count \
-                 FROM peers ORDER BY id",
-            )
-            .map_err(sqlite_error)?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, u64>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, f64>(3)?,
-                    row.get::<_, u64>(4)?,
-                ))
-            })
-            .map_err(sqlite_error)?;
-
-        for row in rows {
-            let (id, name, trust_str, trust_reservoir, trust_evidence_count) =
-                row.map_err(sqlite_error)?;
-            let trust_level = decode_trust_level(&trust_str);
-            let peer_id = PeerId(id);
-            registry
-                .register_peer_with_id(peer_id, &name, trust_level)
-                .map_err(|e| Error::StorageError(format!("loading peer {id}: {e}")))?;
-            // Restore the persisted evidence trust state (corroboration/feedback
-            // moved the reservoir; do not re-seed from the coarse level).
-            registry
-                .set_trust_state(peer_id, trust_reservoir, trust_evidence_count)
-                .map_err(|e| Error::StorageError(format!("loading peer trust {id}: {e}")))?;
-        }
-
-        let mut alias_stmt = conn
-            .prepare("SELECT peer_id, alias, alias_type FROM peer_aliases ORDER BY peer_id")
-            .map_err(sqlite_error)?;
-        let alias_rows = alias_stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, u64>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            })
-            .map_err(sqlite_error)?;
-
-        for row in alias_rows {
-            let (peer_id_raw, alias, alias_type) = row.map_err(sqlite_error)?;
-            let peer_id = PeerId(peer_id_raw);
-            if alias_type == "name" {
-                continue;
-            } else if alias_type == "alias" {
-                let _ = registry.add_alias(peer_id, &alias);
-            } else if let Some(platform) = alias_type.strip_prefix("platform:") {
-                let _ = registry.add_platform(peer_id, platform, &alias);
-            }
-        }
-
-        Ok(registry)
-    }
-
-    fn delete_peer(&mut self, peer_id: PeerId) -> Result<(), Error> {
-        let conn = self.lock_conn()?;
-        conn.execute("DELETE FROM peer_aliases WHERE peer_id = ?1", [peer_id.0])
-            .map_err(sqlite_error)?;
-        conn.execute("DELETE FROM peers WHERE id = ?1", [peer_id.0])
-            .map_err(sqlite_error)?;
-        Ok(())
-    }
 }
 
 impl SqliteStorage {
@@ -1253,7 +1121,7 @@ mod tests {
             tier: MemoryTier::Auto,
             origin: Origin {
                 peer_id: crate::graph::types::PeerId(0),
-                source_kind: crate::peer::SourceKind::AgentObservation,
+                source_kind: crate::graph::types::SourceKind::AgentObservation,
                 session_id: "test-session".to_string(),
                 scope: ScopePath::universal(),
                 confidence: 0.9,
@@ -1727,7 +1595,7 @@ mod tests {
 /// Current on-disk schema version. The fresh-DB `create_schema` path and the
 /// incremental migration chain must converge on an IDENTICAL schema at this
 /// version (same columns, same indexes).
-const SCHEMA_VERSION: u32 = 5;
+const SCHEMA_VERSION: u32 = 6;
 
 /// Run schema migrations to bring the database up to the current version.
 ///
@@ -1739,7 +1607,11 @@ const SCHEMA_VERSION: u32 = 5;
 /// - v4: peer evidence-trust columns `trust_reservoir REAL` +
 ///   `trust_evidence_count INTEGER` (social.md "Peer Trust"); seeded from the coarse
 ///   `trust_level` prior for existing peers
-/// - v5 (current): `nodes.evidence_prior REAL NOT NULL DEFAULT 0` — the persistent,
+/// - v6 (current): DROP the `peers` / `peer_aliases` tables — the peer/trust
+///   subsystem was removed (production is single-peer, `PeerId(0)`). Nodes' own
+///   `peer_id` / `source_kind` columns (inside the Origin encoding) STAY; the
+///   `idx_nodes_peer` index STAYS. No node data is touched.
+/// - v5: `nodes.evidence_prior REAL NOT NULL DEFAULT 0` — the persistent,
 ///   decay-exempt evidence prior `P_i` of the `A_i = B_i + P_i` decomposition
 ///   (ADR-0008). Backfilled to `0.0`: the base-level `B_i` is recomputed from
 ///   `access_history`, so persistent strength comes purely from `B_i` at first
@@ -1790,8 +1662,9 @@ fn migrate_schema(conn: &Connection) -> Result<(), Error> {
                 migrate_v2_to_v3(conn)?;
                 migrate_v3_to_v4(conn)?;
                 migrate_v4_to_v5(conn)?;
+                migrate_v5_to_v6(conn)?;
             } else {
-                // Brand new database — create the current (v5) schema directly.
+                // Brand new database — create the current (v6) schema directly.
                 create_schema(conn)?;
             }
             conn.execute_batch(&format!(
@@ -1804,6 +1677,7 @@ fn migrate_schema(conn: &Connection) -> Result<(), Error> {
             migrate_v2_to_v3(conn)?;
             migrate_v3_to_v4(conn)?;
             migrate_v4_to_v5(conn)?;
+            migrate_v5_to_v6(conn)?;
             conn.execute_batch(&format!(
                 "UPDATE schema_version SET version = {SCHEMA_VERSION};"
             ))
@@ -1813,6 +1687,7 @@ fn migrate_schema(conn: &Connection) -> Result<(), Error> {
             migrate_v2_to_v3(conn)?;
             migrate_v3_to_v4(conn)?;
             migrate_v4_to_v5(conn)?;
+            migrate_v5_to_v6(conn)?;
             conn.execute_batch(&format!(
                 "UPDATE schema_version SET version = {SCHEMA_VERSION};"
             ))
@@ -1821,6 +1696,7 @@ fn migrate_schema(conn: &Connection) -> Result<(), Error> {
         Some(3) => {
             migrate_v3_to_v4(conn)?;
             migrate_v4_to_v5(conn)?;
+            migrate_v5_to_v6(conn)?;
             conn.execute_batch(&format!(
                 "UPDATE schema_version SET version = {SCHEMA_VERSION};"
             ))
@@ -1828,12 +1704,20 @@ fn migrate_schema(conn: &Connection) -> Result<(), Error> {
         }
         Some(4) => {
             migrate_v4_to_v5(conn)?;
+            migrate_v5_to_v6(conn)?;
             conn.execute_batch(&format!(
                 "UPDATE schema_version SET version = {SCHEMA_VERSION};"
             ))
             .map_err(sqlite_error)?;
         }
         Some(5) => {
+            migrate_v5_to_v6(conn)?;
+            conn.execute_batch(&format!(
+                "UPDATE schema_version SET version = {SCHEMA_VERSION};"
+            ))
+            .map_err(sqlite_error)?;
+        }
+        Some(6) => {
             // Already at current version — ensure schema is complete (idempotent
             // CREATE IF NOT EXISTS only; no bare ALTER that would fail twice).
             create_schema(conn)?;
@@ -1971,7 +1855,10 @@ fn migrate_v3_to_v4(conn: &Connection) -> Result<(), Error> {
         .map_err(sqlite_error)?;
 
         // Seed the reservoir from the coarse level prior (computed in Rust — the
-        // mapping is a small lookup, SQLite has no helper for it).
+        // mapping is a small lookup, SQLite has no helper for it). The peer/trust
+        // subsystem was removed and this whole table is dropped at v6; the mapping
+        // is inlined here so the historical chain no longer depends on the deleted
+        // `TrustLevel` type while still producing a faithful intermediate v4 state.
         let peer_rows: Vec<(u64, String)> = {
             let mut stmt = conn
                 .prepare("SELECT id, trust_level FROM peers")
@@ -1984,7 +1871,15 @@ fn migrate_v3_to_v4(conn: &Connection) -> Result<(), Error> {
             rows.collect::<Result<Vec<_>, _>>().map_err(sqlite_error)?
         };
         for (id, trust_str) in peer_rows {
-            let prior = decode_trust_level(&trust_str).prior_trust_reservoir();
+            // Historical coarse-level → prior-reservoir mapping (log trust-odds).
+            let prior: f64 = match trust_str.as_str() {
+                "owner" => 4.0,
+                "admin" => 2.0,
+                "member" => 1.0,
+                "untrusted" => -2.0,
+                // "agent" / "observer" / unknown → neutral (no-evidence) prior.
+                _ => 0.0,
+            };
             conn.execute(
                 "UPDATE peers SET trust_reservoir = ?2 WHERE id = ?1",
                 params![id, prior],
@@ -2023,6 +1918,24 @@ fn migrate_v4_to_v5(conn: &Connection) -> Result<(), Error> {
     conn.execute_batch(
         "
         ALTER TABLE nodes ADD COLUMN evidence_prior REAL NOT NULL DEFAULT 0;
+        ",
+    )
+    .map_err(sqlite_error)
+}
+
+/// Migrate a v5 database to v6: DROP the `peers` and `peer_aliases` tables.
+///
+/// The peer/trust subsystem was removed (production is single-peer, `PeerId(0)`;
+/// non-zero peers existed only in tests). This drops the two peer-only tables and
+/// their trust columns. Nodes are untouched: their `peer_id` / `source_kind`
+/// columns live inside the Origin encoding on the `nodes` table and STAY, and the
+/// `idx_nodes_peer` index (used by `nodes_by_peer` for the identity-prior search
+/// bias) STAYS. `DROP TABLE IF EXISTS` is idempotent, so re-running is safe.
+fn migrate_v5_to_v6(conn: &Connection) -> Result<(), Error> {
+    conn.execute_batch(
+        "
+        DROP TABLE IF EXISTS peer_aliases;
+        DROP TABLE IF EXISTS peers;
         ",
     )
     .map_err(sqlite_error)
@@ -2140,21 +2053,6 @@ fn create_schema(conn: &Connection) -> Result<(), Error> {
             id_type TEXT NOT NULL,
             id_value INTEGER NOT NULL,
             PRIMARY KEY (id_type, id_value)
-        );
-
-        CREATE TABLE IF NOT EXISTS peers (
-            id INTEGER PRIMARY KEY,
-            name TEXT NOT NULL,
-            trust_level TEXT NOT NULL DEFAULT 'agent',
-            trust_reservoir REAL NOT NULL DEFAULT 0,
-            trust_evidence_count INTEGER NOT NULL DEFAULT 0
-        );
-
-        CREATE TABLE IF NOT EXISTS peer_aliases (
-            peer_id INTEGER NOT NULL,
-            alias TEXT NOT NULL,
-            alias_type TEXT NOT NULL DEFAULT 'alias',
-            PRIMARY KEY (peer_id, alias)
         );
 
         CREATE INDEX IF NOT EXISTS idx_nodes_type ON nodes(node_type);
@@ -2737,29 +2635,6 @@ fn decode_source_kind(value: &str) -> Result<SourceKind, Error> {
         "inferred" => Ok(SourceKind::Inferred),
         "external" => Ok(SourceKind::External),
         other => Err(Error::StorageError(format!("unknown source_kind: {other}"))),
-    }
-}
-
-fn encode_trust_level(level: &crate::peer::TrustLevel) -> &'static str {
-    match level {
-        crate::peer::TrustLevel::Owner => "owner",
-        crate::peer::TrustLevel::Admin => "admin",
-        crate::peer::TrustLevel::Member => "member",
-        crate::peer::TrustLevel::Agent => "agent",
-        crate::peer::TrustLevel::Observer => "observer",
-        crate::peer::TrustLevel::Untrusted => "untrusted",
-    }
-}
-
-fn decode_trust_level(value: &str) -> crate::peer::TrustLevel {
-    match value {
-        "owner" => crate::peer::TrustLevel::Owner,
-        "admin" => crate::peer::TrustLevel::Admin,
-        "member" => crate::peer::TrustLevel::Member,
-        "agent" => crate::peer::TrustLevel::Agent,
-        "observer" => crate::peer::TrustLevel::Observer,
-        "untrusted" => crate::peer::TrustLevel::Untrusted,
-        _ => crate::peer::TrustLevel::Agent,
     }
 }
 

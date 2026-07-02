@@ -7,7 +7,7 @@ use anamnesis::graph::{EdgeType, KnowledgeType, MemoryTier, ScopePath, Timestamp
 fn origin() -> Origin {
     Origin {
         peer_id: anamnesis::graph::types::PeerId(0),
-        source_kind: anamnesis::peer::SourceKind::AgentObservation,
+        source_kind: anamnesis::engine::SourceKind::AgentObservation,
         session_id: "session-1".to_string(),
         scope: ScopePath::universal(),
         confidence: 0.9,

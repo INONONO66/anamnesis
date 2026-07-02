@@ -21,7 +21,7 @@ fn make_observation(name: &str, node_type: KnowledgeType) -> Observation {
         entity_tags: vec!["test-entity".to_string()],
         origin: Origin {
             peer_id: anamnesis::graph::types::PeerId(0),
-            source_kind: anamnesis::peer::SourceKind::AgentObservation,
+            source_kind: anamnesis::engine::SourceKind::AgentObservation,
             session_id: "session-1".to_string(),
             scope: anamnesis::graph::ScopePath::new("anamnesis").expect("valid scope"),
             confidence: 0.9,
@@ -125,7 +125,7 @@ fn node_fields_preserved_after_ingest() {
         entity_tags: vec!["physics".to_string(), "anamnesis".to_string()],
         origin: Origin {
             peer_id: anamnesis::graph::types::PeerId(0),
-            source_kind: anamnesis::peer::SourceKind::AgentObservation,
+            source_kind: anamnesis::engine::SourceKind::AgentObservation,
             session_id: "design-session".to_string(),
             scope: anamnesis::graph::ScopePath::new("anamnesis").expect("valid scope"),
             confidence: 0.95,

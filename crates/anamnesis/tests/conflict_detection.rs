@@ -10,11 +10,11 @@
 
 use anamnesis::Engine;
 use anamnesis::api::{IngestResult, Observation};
+use anamnesis::engine::SourceKind;
 use anamnesis::engine::{EdgeType, EngineConfig, StorageAdapter};
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::types::PeerId;
 use anamnesis::graph::{KnowledgeType, ScopePath, Timestamp};
-use anamnesis::peer::SourceKind;
 
 fn obs(name: &str, embedding: Vec<f64>) -> Observation {
     Observation {

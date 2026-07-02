@@ -29,7 +29,7 @@ fn main() -> Result<(), anamnesis::Error> {
     fn origin() -> Origin {
         Origin {
             peer_id: anamnesis::graph::types::PeerId(0),
-            source_kind: anamnesis::peer::SourceKind::AgentObservation,
+            source_kind: anamnesis::engine::SourceKind::AgentObservation,
             session_id: "session-1".into(),
             scope: anamnesis::graph::ScopePath::new("demo").expect("valid scope"),
             confidence: 0.9,

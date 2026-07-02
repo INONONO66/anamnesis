@@ -16,7 +16,7 @@ fn setup_engine_with_nodes() -> (Engine, NodeId, NodeId) {
 
     let origin = Origin {
         peer_id: anamnesis::graph::types::PeerId(0),
-        source_kind: anamnesis::peer::SourceKind::AgentObservation,
+        source_kind: anamnesis::engine::SourceKind::AgentObservation,
         session_id: "test-session".into(),
         scope: anamnesis::graph::ScopePath::universal(),
         confidence: 0.9,
@@ -134,7 +134,7 @@ fn link_seed_grows_with_endpoint_coupling() {
     let mut engine = Engine::new();
     let origin = Origin {
         peer_id: anamnesis::graph::types::PeerId(0),
-        source_kind: anamnesis::peer::SourceKind::AgentObservation,
+        source_kind: anamnesis::engine::SourceKind::AgentObservation,
         session_id: "test-session".into(),
         scope: anamnesis::graph::ScopePath::universal(),
         confidence: 0.9,

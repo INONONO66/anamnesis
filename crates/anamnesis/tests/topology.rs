@@ -7,7 +7,7 @@ use anamnesis::storage::{SqliteStorage, StorageAdapter};
 fn make_origin(_agent: &str, session: &str, scope: &str) -> Origin {
     Origin {
         peer_id: anamnesis::graph::types::PeerId(0),
-        source_kind: anamnesis::peer::SourceKind::AgentObservation,
+        source_kind: anamnesis::engine::SourceKind::AgentObservation,
         session_id: session.to_string(),
         scope: ScopePath::new(scope).expect("valid scope"),
         confidence: 0.9,

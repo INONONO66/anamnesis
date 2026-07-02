@@ -16,7 +16,7 @@ fn make_obs_tagged(name: &str, tags: Vec<&str>) -> Observation {
         entity_tags: tags.into_iter().map(|s| s.to_string()).collect(),
         origin: Origin {
             peer_id: anamnesis::graph::types::PeerId(0),
-            source_kind: anamnesis::peer::SourceKind::AgentObservation,
+            source_kind: anamnesis::engine::SourceKind::AgentObservation,
             session_id: "session-1".to_string(),
             scope: anamnesis::graph::ScopePath::universal(),
             confidence: 0.9,

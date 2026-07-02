@@ -694,7 +694,7 @@ fn ingest_observation(
 fn make_origin(session_id: &str, confidence: f64) -> Origin {
     Origin {
         peer_id: anamnesis::graph::types::PeerId(0),
-        source_kind: anamnesis::peer::SourceKind::AgentObservation,
+        source_kind: anamnesis::engine::SourceKind::AgentObservation,
         session_id: session_id.to_string(),
         scope: ScopePath::universal(),
         confidence,

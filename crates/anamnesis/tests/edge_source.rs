@@ -2,12 +2,12 @@
 
 use anamnesis::Engine;
 use anamnesis::api::Observation;
+use anamnesis::engine::SourceKind;
 use anamnesis::engine::{EngineConfig, IngestResult, StorageAdapter};
 use anamnesis::graph::edge::EdgeSource;
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::types::PeerId;
 use anamnesis::graph::{EdgeType, KnowledgeType, ScopePath, Timestamp};
-use anamnesis::peer::SourceKind;
 
 fn make_obs(name: &str, embedding: Option<Vec<f64>>) -> Observation {
     Observation {

@@ -10,7 +10,7 @@ const DAY_MS: u64 = 86_400_000;
 fn origin(_agent_id: &str, session_id: &str) -> Origin {
     Origin {
         peer_id: anamnesis::graph::types::PeerId(0),
-        source_kind: anamnesis::peer::SourceKind::AgentObservation,
+        source_kind: anamnesis::engine::SourceKind::AgentObservation,
         session_id: session_id.to_string(),
         scope: anamnesis::graph::ScopePath::new("agent-memory-project").expect("valid scope"),
         confidence: 0.95,

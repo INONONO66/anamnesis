@@ -26,7 +26,7 @@ fn make_node(id: NodeId, salience: f64) -> Node {
         tier: MemoryTier::Auto,
         origin: Origin {
             peer_id: anamnesis::graph::types::PeerId(0),
-            source_kind: anamnesis::peer::SourceKind::AgentObservation,
+            source_kind: anamnesis::engine::SourceKind::AgentObservation,
             session_id: "test-session".to_string(),
             scope: ScopePath::universal(),
             confidence: 0.9,
@@ -84,7 +84,7 @@ fn make_node_indexed(
         tier: MemoryTier::Auto,
         origin: Origin {
             peer_id: anamnesis::graph::types::PeerId(0),
-            source_kind: anamnesis::peer::SourceKind::AgentObservation,
+            source_kind: anamnesis::engine::SourceKind::AgentObservation,
             session_id: "session".to_string(),
             scope,
             confidence: 0.9,
@@ -472,8 +472,8 @@ fn nodes_by_type_returns_correct_set() {
 
 #[test]
 fn nodes_by_agent_returns_correct_set() {
+    use anamnesis::engine::SourceKind;
     use anamnesis::graph::types::PeerId;
-    use anamnesis::peer::SourceKind;
     let mut s = storage();
     let id1 = s.next_node_id();
     let id2 = s.next_node_id();

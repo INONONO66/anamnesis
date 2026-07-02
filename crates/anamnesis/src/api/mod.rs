@@ -5,7 +5,7 @@ use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use crate::error::Error;
 use crate::graph::node::Origin;
 use crate::graph::{AccessTrace, Edge, Graph, Node};
-use crate::graph::{EdgeId, EdgeType, KnowledgeType, MemoryTier, NodeId, ScopePath, Timestamp};
+use crate::graph::{EdgeId, EdgeType, KnowledgeType, MemoryTier, NodeId, Timestamp};
 use crate::query::{ContextPackage, Query, QueryConfig, SearchInput, SearchResult};
 use crate::snapshot::{SnapshotId, SnapshotStore};
 use crate::storage::{SqliteStorage, StorageAdapter};
@@ -618,16 +618,6 @@ pub enum GraphEvent {
         node_id: NodeId,
         new_salience: f64,
     },
-    /// A peer's evidence trust reservoir moved through `update_peer_trust`
-    /// (social.md "Peer Trust": "Trust updates must leave traces"). The coarse
-    /// `trust_level` and origin are unchanged — only the evidence estimate moved.
-    PeerTrustChanged {
-        peer_id: crate::graph::types::PeerId,
-        /// Trust reservoir (log trust-odds) before the evidence update.
-        old: f64,
-        /// Trust reservoir (log trust-odds) after the evidence update.
-        new: f64,
-    },
 }
 
 /// Result of an ingest operation.
@@ -810,37 +800,14 @@ pub struct HealthReport {
     pub retracted_count: usize,
     /// Number of nodes without an embedding vector.
     pub missing_embedding_count: usize,
-    /// Number of registered peers.
+    /// Number of registered peers. Always `0` since the peer/trust subsystem was
+    /// removed (production is single-peer, `PeerId(0)`); retained for the stats
+    /// render surface.
     pub peer_count: usize,
     /// Average salience across all nodes.
     pub avg_salience: f64,
     /// Overall health grade.
     pub grade: HealthGrade,
-}
-
-/// Input for `Engine::remember_peer()` — peer profile recording.
-#[derive(Debug, Clone)]
-pub struct PeerProfileInput {
-    /// Primary display name of the peer (used for auto-registration).
-    pub peer_name: String,
-    /// L0: One-liner label for this profile entry.
-    pub name: String,
-    /// L1: Optional summary.
-    pub summary: Option<String>,
-    /// L2: Full content.
-    pub content: String,
-    /// Optional embedding vector.
-    pub embedding: Option<Vec<f64>>,
-    /// Confidence [0, 1]. Default: 0.9.
-    pub confidence: Option<f64>,
-    /// Entity tags (peer name is added automatically).
-    pub entity_tags: Vec<String>,
-    /// Source kind. Default: `HumanInput`.
-    pub source_kind: Option<crate::peer::SourceKind>,
-    /// Session ID. Default: "profile".
-    pub session_id: Option<String>,
-    /// Timestamp. Default: now.
-    pub timestamp: Option<Timestamp>,
 }
 
 /// Input for `Engine::ingest_document()` — document chunk ingestion.
@@ -896,8 +863,6 @@ pub struct ConversationInput {
     pub origin: Origin,
     /// Timestamp. Default: now.
     pub timestamp: Option<Timestamp>,
-    /// If set, extracted facts are also stored in this peer's profile scope.
-    pub about_peer: Option<String>,
 }
 
 /// Result of `Engine::ingest_conversation()`.
@@ -918,34 +883,26 @@ pub struct Engine<S: StorageAdapter + Clone = SqliteStorage> {
     config: EngineConfig,
     snapshots: SnapshotStore<S>,
     events: Vec<GraphEvent>,
-    /// Peer registry — maps PeerId to PeerProfile (name, trust, aliases, platforms).
-    peers: crate::peer::PeerRegistry,
 }
 
 impl Engine<SqliteStorage> {
     /// Create a new engine with default configuration and in-memory SQLite storage.
     pub fn new() -> Self {
-        let graph = Graph::new();
-        let peers = graph.storage().load_peers().unwrap_or_default();
         Engine {
-            graph,
+            graph: Graph::new(),
             config: EngineConfig::default(),
             snapshots: SnapshotStore::new(),
             events: Vec::new(),
-            peers,
         }
     }
 
     /// Create a new engine with custom configuration.
     pub fn with_config(config: EngineConfig) -> Self {
-        let graph = Graph::new();
-        let peers = graph.storage().load_peers().unwrap_or_default();
         Engine {
-            graph,
+            graph: Graph::new(),
             config,
             snapshots: SnapshotStore::new(),
             events: Vec::new(),
-            peers,
         }
     }
 }
@@ -959,206 +916,15 @@ impl Default for Engine<SqliteStorage> {
 impl<S: StorageAdapter + Clone> Engine<S> {
     /// Create an engine with a custom storage backend.
     pub fn with_storage(config: EngineConfig, storage: S) -> Self {
-        let graph = Graph::with_storage(storage);
-        let peers = graph.storage().load_peers().unwrap_or_default();
         Engine {
-            graph,
+            graph: Graph::with_storage(storage),
             config,
             snapshots: SnapshotStore::new(),
             events: Vec::new(),
-            peers,
         }
-    }
-
-    fn register_peer_internal(
-        &mut self,
-        name: &str,
-        trust_level: crate::peer::TrustLevel,
-    ) -> Result<crate::graph::types::PeerId, Error> {
-        let id = self.peers.register_peer(name, trust_level)?;
-        let profile = self.peers.get_peer(id).cloned();
-        if let Some(p) = profile {
-            self.graph.storage_mut().store_peer(&p)?;
-        }
-        Ok(id)
-    }
-
-    // ── Peer registry API ─────────────────────────────────────────────────────
-
-    /// Register a new peer and return its assigned `PeerId`.
-    ///
-    /// Returns `Err(Error::DuplicateAlias)` if the name is already taken.
-    pub fn register_peer(
-        &mut self,
-        name: impl Into<String>,
-        trust_level: crate::peer::TrustLevel,
-    ) -> Result<crate::graph::types::PeerId, Error> {
-        self.register_peer_internal(&name.into(), trust_level)
-    }
-
-    /// Resolve any identifier (name, alias, platform username) to a `PeerId`.
-    pub fn resolve_peer(&self, identifier: &str) -> Option<crate::graph::types::PeerId> {
-        self.peers.resolve_peer(identifier)
-    }
-
-    /// Get a peer profile by `PeerId`.
-    pub fn get_peer(&self, id: crate::graph::types::PeerId) -> Option<&crate::peer::PeerProfile> {
-        self.peers.get_peer(id)
-    }
-
-    /// Set the coarse trust level of an existing peer — an explicit policy decision.
-    ///
-    /// The coarse `TrustLevel` is the *prior* for the evidence trust reservoir
-    /// (social.md "Peer Trust"). Re-labelling re-seeds the reservoir to the new
-    /// level's prior ONLY when no evidence has yet moved it; once corroboration or
-    /// feedback has accumulated, the learned estimate is preserved (never silently
-    /// erased). For evidence-driven movement use
-    /// [`update_peer_trust_evidence`](Engine::update_peer_trust_evidence).
-    pub fn update_peer_trust(
-        &mut self,
-        id: crate::graph::types::PeerId,
-        trust_level: crate::peer::TrustLevel,
-    ) -> Result<(), Error> {
-        self.peers.update_trust(id, trust_level)?;
-        if let Some(profile) = self.peers.get_peer(id) {
-            self.graph.storage_mut().store_peer(profile)?;
-        }
-        Ok(())
-    }
-
-    /// Move a peer's evidence trust reservoir toward a signed evidence target —
-    /// the single traceable trust-evidence update path (social.md "Peer Trust").
-    ///
-    /// `signed_strength ∈ [-1, 1]`: positive is corroboration / useful feedback
-    /// (raises trust), negative is contradiction / not-useful feedback (lowers it).
-    /// The reservoir moves a fraction
-    /// [`TRUST_LEARNING_RATE`](crate::mechanics::priors::TRUST_LEARNING_RATE) — the
-    /// slow peer-reliability rate — toward
-    /// [`trust_evidence_target`](crate::mechanics::priors::trust_evidence_target),
-    /// the Rescorla-Wagner form shared with site feedback. The move is **traceable**
-    /// (a [`GraphEvent::PeerTrustChanged`] is emitted and the moved reservoir is
-    /// persisted) and **non-destructive**: the coarse `trust_level`, name, aliases,
-    /// and every site origin are untouched — only the evidence estimate moves
-    /// (social.md: "Peer trust never erases origin"). Returns the new reservoir.
-    pub fn update_peer_trust_evidence(
-        &mut self,
-        id: crate::graph::types::PeerId,
-        signed_strength: f64,
-    ) -> Result<f64, Error> {
-        use crate::mechanics::priors::{TRUST_LEARNING_RATE, trust_evidence_target};
-
-        let target = trust_evidence_target(signed_strength);
-        let (old, new) = self.peers.nudge_trust(id, target, TRUST_LEARNING_RATE)?;
-        if let Some(profile) = self.peers.get_peer(id) {
-            self.graph.storage_mut().store_peer(profile)?;
-        }
-        if (new - old).abs() > f64::EPSILON {
-            self.emit_event(GraphEvent::PeerTrustChanged {
-                peer_id: id,
-                old,
-                new,
-            });
-        }
-        Ok(new)
-    }
-
-    /// Add an alias to an existing peer.
-    pub fn add_peer_alias(
-        &mut self,
-        id: crate::graph::types::PeerId,
-        alias: impl Into<String>,
-    ) -> Result<(), Error> {
-        let alias = alias.into();
-        self.peers.add_alias(id, &alias)?;
-        self.graph
-            .storage_mut()
-            .store_peer_alias(id, &alias, "alias")?;
-        Ok(())
-    }
-
-    /// Add a platform username mapping to an existing peer.
-    pub fn add_peer_platform(
-        &mut self,
-        id: crate::graph::types::PeerId,
-        platform: impl Into<String>,
-        username: impl Into<String>,
-    ) -> Result<(), Error> {
-        let platform = platform.into();
-        let username = username.into();
-        self.peers.add_platform(id, &platform, &username)?;
-        let alias_type = format!("platform:{platform}");
-        self.graph
-            .storage_mut()
-            .store_peer_alias(id, &username, &alias_type)?;
-        Ok(())
-    }
-
-    /// List all registered peers.
-    pub fn list_peers(&self) -> Vec<&crate::peer::PeerProfile> {
-        self.peers.list_peers()
-    }
-
-    /// Returns the number of registered peers.
-    pub fn peer_count(&self) -> usize {
-        self.peers.peer_count()
     }
 
     // ── Convenience API ───────────────────────────────────────────────────────
-
-    /// Record a peer profile — who this person is, what they know, their preferences.
-    ///
-    /// Stores the profile under `scope: peer/{peer_id}/profile` with
-    /// `node_type: IdentityLearned`. If `peer_name` is not yet registered,
-    /// the peer is auto-registered with `TrustLevel::Member`.
-    pub fn remember_peer(
-        &mut self,
-        input: PeerProfileInput,
-    ) -> Result<(crate::graph::types::PeerId, IngestResult), Error> {
-        let peer_id = match self.peers.resolve_peer(&input.peer_name) {
-            Some(id) => id,
-            None => {
-                self.register_peer_internal(&input.peer_name, crate::peer::TrustLevel::Member)?
-            }
-        };
-
-        let scope_str = format!("peer/{}/profile", peer_id.0);
-        let scope = ScopePath::new(&scope_str).unwrap_or_else(|_| ScopePath::universal());
-
-        let mut entity_tags = input.entity_tags;
-        if !entity_tags.contains(&input.peer_name) {
-            entity_tags.push(input.peer_name.clone());
-        }
-        // Add all peer aliases as entity tags
-        for alias in self.peers.all_identifiers(peer_id) {
-            if !entity_tags.contains(&alias) {
-                entity_tags.push(alias);
-            }
-        }
-
-        let result = self.ingest(Observation {
-            name: input.name,
-            summary: input.summary,
-            content: input.content,
-            embedding: input.embedding,
-            confidence: input.confidence.unwrap_or(0.9),
-            node_type: KnowledgeType::IdentityLearned,
-            entity_tags,
-            origin: Origin {
-                peer_id,
-                source_kind: input
-                    .source_kind
-                    .unwrap_or(crate::peer::SourceKind::HumanInput),
-                session_id: input.session_id.unwrap_or_else(|| "profile".to_string()),
-                scope,
-                confidence: input.confidence.unwrap_or(0.9),
-            },
-            timestamp: input.timestamp.unwrap_or_else(Timestamp::now),
-            valid_from: None,
-            valid_until: None,
-        })?;
-
-        Ok((peer_id, result))
-    }
 
     /// Ingest a document as a sequence of chunks.
     ///
@@ -1224,9 +990,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
     /// Ingest a conversation — raw episode + extracted knowledge.
     ///
     /// The raw text becomes an `Episodic` node. Each extracted fact becomes
-    /// a `Semantic` node linked to the episode via `ExtractedFrom`. If
-    /// `about_peer` is set, extracted facts are also stored in the peer's
-    /// profile scope.
+    /// a `Semantic` node linked to the episode via `ExtractedFrom`.
     pub fn ingest_conversation(
         &mut self,
         input: ConversationInput,
@@ -1297,43 +1061,6 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                 self.graph.add_edge(edge)?;
             }
 
-            // If about_peer is set, also store in peer profile
-            if let Some(ref peer_name) = input.about_peer {
-                let peer_id = match self.peers.resolve_peer(peer_name) {
-                    Some(id) => id,
-                    None => {
-                        self.register_peer_internal(peer_name, crate::peer::TrustLevel::Member)?
-                    }
-                };
-                let scope_str = format!("peer/{}/profile", peer_id.0);
-                let scope = ScopePath::new(&scope_str).unwrap_or_else(|_| ScopePath::universal());
-
-                let mut profile_tags = fact.entity_tags.clone();
-                if !profile_tags.contains(peer_name) {
-                    profile_tags.push(peer_name.clone());
-                }
-
-                self.ingest(Observation {
-                    name: fact.name,
-                    summary: fact.summary,
-                    content: fact.content,
-                    embedding: fact.embedding,
-                    confidence: fact.confidence.unwrap_or(0.8),
-                    node_type: KnowledgeType::IdentityLearned,
-                    entity_tags: profile_tags,
-                    origin: Origin {
-                        peer_id,
-                        source_kind: crate::peer::SourceKind::HumanInput,
-                        session_id: input.origin.session_id.clone(),
-                        scope,
-                        confidence: fact.confidence.unwrap_or(0.8),
-                    },
-                    timestamp: input.timestamp.unwrap_or_else(Timestamp::now),
-                    valid_from: None,
-                    valid_until: None,
-                })?;
-            }
-
             extracted_ids.push(fact_id);
         }
 
@@ -1341,21 +1068,6 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             episode_id,
             extracted_ids,
         })
-    }
-
-    /// Create an engine with a default peer pre-registered.
-    ///
-    /// Convenience constructor for quick-start scenarios.
-    pub fn with_default_peer(
-        name: impl Into<String>,
-        trust_level: crate::peer::TrustLevel,
-    ) -> Result<Self, Error>
-    where
-        S: Default,
-    {
-        let mut engine = Self::with_storage(EngineConfig::default(), S::default());
-        engine.register_peer(name, trust_level)?;
-        Ok(engine)
     }
 
     fn emit_event(&mut self, event: GraphEvent) {
@@ -2542,14 +2254,6 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         if let Some(level) = feedback {
             let signal: crate::mechanics::social::FeedbackSignal = level.into();
             let lambda = lambda_reward(&signal);
-            // Same feedback also nudges the reliability of the peers who originated
-            // the used sites (social.md: "positive feedback reinforces peer
-            // reliability; negative feedback lowers trust through prediction error").
-            // Each distinct origin peer is nudged once, in stable order, so a multi-
-            // site package does not over-credit one peer.
-            let feedback_strength = signal.signed_strength();
-            let mut peers_to_nudge: Vec<crate::graph::types::PeerId> = Vec::new();
-            let mut peer_seen: HashSet<crate::graph::types::PeerId> = HashSet::new();
             for site in &trace.accessed {
                 if self.is_retracted(site.node_id)? {
                     continue;
@@ -2586,20 +2290,10 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                         new: new_salience,
                     });
                 }
-                if let Ok(node) = self.graph.get_node(site.node_id) {
-                    let peer_id = node.origin.peer_id;
-                    if self.peers.get_peer(peer_id).is_some() && peer_seen.insert(peer_id) {
-                        peers_to_nudge.push(peer_id);
-                    }
-                }
                 report.feedback_applied += 1;
                 if committed_set.insert(site.node_id) {
                     committed.push(site.node_id);
                 }
-            }
-            // Route every peer trust move through the single traceable evidence path.
-            for peer_id in peers_to_nudge {
-                self.update_peer_trust_evidence(peer_id, feedback_strength)?;
             }
         }
 
@@ -3029,7 +2723,10 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             supersede_rate,
             retracted_count,
             missing_embedding_count,
-            peer_count: self.peers.peer_count(),
+            // Peer registry removed with the peer/trust subsystem; production is
+            // always single-peer (PeerId(0)). Field retained at 0 for the stats
+            // render surface.
+            peer_count: 0,
             avg_salience,
             grade,
         }
@@ -3483,15 +3180,9 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                 _ => 0.0,
             };
             let sw = scope_weight(&config.scope, &node.origin.scope, 0);
-            // Coarse-level prior bonus + evidence-driven trust projection (social.md
-            // "Retrieval Effects"); mirrors the assemble readout path.
-            let trust_weight = self
-                .get_peer(node.origin.peer_id)
-                .map(|p| {
-                    p.trust_level.scope_weight_bonus()
-                        + crate::mechanics::priors::project_trust(p.trust_reservoir)
-                })
-                .unwrap_or(0.0);
+            // Trust reservoir removed with the peer subsystem; term is neutral
+            // pending a real trust source.
+            let trust_weight = 1.0;
 
             let stress = node_stress.get(&nid).copied().unwrap_or(0.0);
             let score = readout_score(&ReadoutInputs {
@@ -3715,7 +3406,7 @@ mod tests {
             entity_tags: vec!["test".to_string()],
             origin: Origin {
                 peer_id: crate::graph::types::PeerId(0),
-                source_kind: crate::peer::SourceKind::AgentObservation,
+                source_kind: crate::graph::types::SourceKind::AgentObservation,
                 session_id: "session-1".to_string(),
                 scope: crate::graph::ScopePath::universal(),
                 confidence: 0.9,
@@ -4560,7 +4251,7 @@ mod tests {
             embedding: Some(vec![1.0, 0.0]),
             origin: Origin {
                 peer_id: crate::graph::types::PeerId(0),
-                source_kind: crate::peer::SourceKind::AgentObservation,
+                source_kind: crate::graph::types::SourceKind::AgentObservation,
                 session_id: "session-1".to_string(),
                 scope: crate::graph::ScopePath::universal(),
                 confidence: 1.0,

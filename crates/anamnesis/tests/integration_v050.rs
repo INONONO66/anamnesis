@@ -1,17 +1,16 @@
 //! v0.5.0 integration test suite (T22).
 //!
 //! End-to-end scenarios covering:
-//! - Peer registration → ingest → conflict → retract → search → health
-//! - Conversation: ingest_conversation → extraction → peer profile update → entity_tags search
-//! - Cross-feature: peer_filter + retract + conflict + valid_from/valid_until
+//! - Multi-origin ingest → conflict → retract → search → health
+//! - Document ingestion → temporal chain
+//! - Cross-feature: peer_filter (origin peer_id) + retract + conflict
 
 use anamnesis::Engine;
-use anamnesis::api::{ConversationInput, DocumentInput, ExtractedFact, IngestResult, Observation};
-use anamnesis::engine::{EngineConfig, StorageAdapter};
+use anamnesis::api::{DocumentInput, IngestResult, Observation};
+use anamnesis::engine::{EngineConfig, SourceKind, StorageAdapter};
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::types::PeerId;
 use anamnesis::graph::{EdgeType, KnowledgeType, ScopePath, Timestamp};
-use anamnesis::peer::{SourceKind, TrustLevel};
 use anamnesis::query::SearchInput;
 
 fn engine() -> Engine {
@@ -32,15 +31,16 @@ fn origin(peer_id: PeerId) -> Origin {
     }
 }
 
-// ── Scenario 1: Full peer lifecycle ──────────────────────────────────────────
+// ── Scenario 1: Multi-origin ingest lifecycle ────────────────────────────────
 
 #[test]
 fn scenario_peer_registration_and_ingest() {
     let mut e = engine();
 
-    // Register peers
-    let alice_id = e.register_peer("alice", TrustLevel::Owner).unwrap();
-    let bob_id = e.register_peer("bob", TrustLevel::Member).unwrap();
+    // Two distinct origin peers (production is single-peer; non-zero ids exercise
+    // the origin/peer_filter paths).
+    let alice_id = PeerId(1);
+    let bob_id = PeerId(2);
 
     // Ingest knowledge from alice
     let IngestResult::Created(alice_ids) = e
@@ -89,7 +89,6 @@ fn scenario_peer_registration_and_ingest() {
     // Health check
     let report = e.health();
     assert_eq!(report.total_nodes, 2);
-    assert_eq!(report.peer_count, 2);
     assert_eq!(report.contradiction_count, 1);
 
     // Retract alice's node
@@ -150,51 +149,13 @@ fn scenario_document_ingestion_with_temporal_chain() {
     assert!(has_temporal_2_3);
 }
 
-// ── Scenario 4: Conversation with peer profile update ────────────────────────
-
-#[test]
-fn scenario_conversation_updates_peer_profile() {
-    let mut e = engine();
-    let peer_id = e.register_peer("alice", TrustLevel::Owner).unwrap();
-
-    let result = e
-        .ingest_conversation(ConversationInput {
-            name: "session about alice".to_string(),
-            summary: None,
-            raw_text: "Alice mentioned she prefers functional programming".to_string(),
-            extracted_facts: vec![ExtractedFact {
-                name: "alice prefers functional programming".to_string(),
-                summary: None,
-                content: "Alice has a strong preference for functional programming style"
-                    .to_string(),
-                embedding: None,
-                confidence: Some(0.9),
-                entity_tags: vec!["alice".to_string(), "functional".to_string()],
-            }],
-            confidence: None,
-            entity_tags: vec![],
-            origin: origin(PeerId(0)),
-            timestamp: None,
-            about_peer: Some("alice".to_string()),
-        })
-        .unwrap();
-
-    assert_eq!(result.extracted_ids.len(), 1);
-
-    // Profile node should be in peer/{id}/profile scope
-    let expected_scope = format!("peer/{}/profile", peer_id.0);
-    let profile_scope = ScopePath::new(&expected_scope).unwrap();
-    let profile_nodes = e.graph().storage().nodes_by_scope(&profile_scope);
-    assert!(!profile_nodes.is_empty(), "profile node should exist");
-}
-
 // ── Scenario 5: peer_filter + retract combination ────────────────────────────
 
 #[test]
 fn scenario_peer_filter_with_retract() {
     let mut e = engine();
-    let alice_id = e.register_peer("alice", TrustLevel::Owner).unwrap();
-    let bob_id = e.register_peer("bob", TrustLevel::Member).unwrap();
+    let alice_id = PeerId(1);
+    let bob_id = PeerId(2);
 
     let IngestResult::Created(alice_ids) = e
         .ingest(Observation {
@@ -273,7 +234,7 @@ fn scenario_peer_filter_with_retract() {
 fn scenario_health_grade_a_for_clean_graph() {
     use anamnesis::api::HealthGrade;
     let mut e = engine();
-    let peer_id = e.register_peer("alice", TrustLevel::Owner).unwrap();
+    let peer_id = PeerId(1);
 
     // Create a clean graph with edges (no orphans)
     let IngestResult::Created(ids1) = e
@@ -318,5 +279,4 @@ fn scenario_health_grade_a_for_clean_graph() {
     assert_eq!(report.grade, HealthGrade::A);
     assert_eq!(report.orphan_count, 0);
     assert_eq!(report.contradiction_count, 0);
-    assert_eq!(report.peer_count, 1);
 }
