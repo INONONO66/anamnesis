@@ -107,6 +107,17 @@ GitHub Release on first use — no `cargo`, no `npm`, no separate binary step.
 That is the whole setup. You get proactive recall (hooks) **and** the
 `recall` / `remember` / `relate` / `ingest_conversation` / `stats` tools (MCP).
 
+**Automatic capture (0.9.x).** Beyond on-demand `remember`, the plugin captures
+the session on its own in two stages. **Stage 1** is passive: `Stop`,
+`PreCompact`, and `SessionEnd` hooks stream each turn to Anamnesis as raw
+`Episodic` memories — fire-and-forget, content-hash-deduped, and it never blocks
+a prompt. **Stage 2** is agent-driven extraction: once the un-extracted queue
+crosses a threshold, the next `SessionStart` injects a one-line nudge asking the
+agent to call the `extract_pending` MCP tool, which hands back the raw turns to
+distill into reasoning and lessons via `relate` / `remember`. Both stages are
+best-effort and configurable; see **[`plugin/README.md`](plugin/README.md)** for
+the hook contract, thresholds, and env-var toggles.
+
 **Codex** — same hook contract, same binary:
 
 ```text
@@ -207,6 +218,54 @@ use anamnesis::engine::{Engine, EngineConfig, Observation, ConfidenceLevel};
 ```
 
 For direct `Engine` usage see the [Kernel API section](#engine-vs-consumer) and [`docs/`](docs/README.md).
+
+## See it reason
+
+Vector search returns *a list*. The thing a flat store cannot represent is the
+*structure between* the results — that turn A was **reversed** by turn B, and
+**why** each was chosen. The [`reasoning_demo`](crates/anamnesis/examples/reasoning_demo.rs)
+example makes that concrete: a short conversation decides on Postgres (recording
+the reason with a `Reason` edge), then reverses to SQLite (a `Contradicts` edge
+back to the decision). One query — *"why did we switch databases?"* — is then
+answered two ways over the **same nodes**.
+
+```text
+cargo run -p anamnesis-engine --example reasoning_demo
+```
+
+Graph recall surfaces the contradiction as a **tension** and walks the reasoning
+chain by typed edge:
+
+```text
+=== graph recall (structure: tensions + reasons) ===
+
+tensions (contradictions surfaced, never suppressed):
+  #5 ⟂ #11  (stress 0.02)
+    ↳ assistant: Decision: we go with Postgres.
+    ↳ assistant: We are reverting to SQLite — the ops overhead is too high ...
+
+why-chain from the reversal (typed edges):
+  reversal --because--> assistant: SQLite keeps the single-node deploy simple ...
+  reversal --contradicts--> assistant: Decision: we go with Postgres.
+```
+
+Ranking the same turns by raw cosine to the query gives a bare list — the
+conflict and the why-chain are gone:
+
+```text
+=== flat vector ranking (cosine to the query) ===
+
+a list with no structure — the contradiction and the why-chain are invisible:
+
+  1.000  assistant: Postgres because we need JSONB and row-level security.
+  1.000  assistant: We are reverting to SQLite — the ops overhead is too high ...
+  0.999  assistant: SQLite keeps the single-node deploy simple ...
+```
+
+The claim is narrow: **typed reasoning edges plus contradiction-as-tension
+expose structure a flat store cannot.** The demo runs offline with a
+deterministic stub embedder (no model download); the same behaviour is asserted
+end-to-end in [`tests/reasoning_advantage.rs`](crates/anamnesis/tests/reasoning_advantage.rs).
 
 ## Core Concepts
 
