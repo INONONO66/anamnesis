@@ -699,8 +699,21 @@ impl<S: StorageAdapter + Clone> Memory<S> {
     /// would silently vanish on reopen. Used by the capture pipeline to stamp
     /// `anamnesis:turn_key` / `anamnesis:extracted` on Episodic nodes.
     pub fn set_metadata(&mut self, id: NodeId, key: &str, value: &str) -> Result<(), Error> {
+        self.set_metadata_pairs(id, &[(key, value)])
+    }
+
+    /// Set several metadata keys on an existing node in **one** durable write.
+    ///
+    /// A single `set_node` (one `INSERT OR REPLACE` row write) carries all pairs,
+    /// so callers that must stamp related keys together (e.g. the capture
+    /// pipeline's `anamnesis:turn_key` + `anamnesis:extracted`) cannot be split
+    /// by a partial failure between two writes.
+    pub fn set_metadata_pairs(&mut self, id: NodeId, pairs: &[(&str, &str)]) -> Result<(), Error> {
         let mut node = self.engine.graph().get_node(id)?.clone();
-        node.metadata.insert(key.to_string(), value.to_string());
+        for (key, value) in pairs {
+            node.metadata
+                .insert((*key).to_string(), (*value).to_string());
+        }
         self.engine.graph_mut().storage_mut().set_node(node)
     }
 }
@@ -1646,6 +1659,38 @@ mod tests {
         // Reopen: metadata must survive (only set_node writes it, not flush).
         let m2 = Memory::with_provider(&path, provider).unwrap();
         let node = m2.engine().graph().get_node(id).unwrap();
+        assert_eq!(
+            node.metadata.get("anamnesis:extracted").map(String::as_str),
+            Some("false")
+        );
+    }
+
+    #[test]
+    fn set_metadata_pairs_persists_both_keys_through_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("meta-pairs.db");
+        let provider: Arc<dyn EmbeddingProvider> = Arc::new(HashEmbedProvider::new());
+        let id = {
+            let mut m = Memory::with_provider(&path, provider.clone()).unwrap();
+            let id = m.add("s", "user", "one write", t(1)).unwrap().episodic;
+            m.flush_all().unwrap();
+            // Both keys land in ONE set_node write — no partial-failure window.
+            m.set_metadata_pairs(
+                id,
+                &[
+                    ("anamnesis:turn_key", "abc123"),
+                    ("anamnesis:extracted", "false"),
+                ],
+            )
+            .unwrap();
+            id
+        };
+        let m2 = Memory::with_provider(&path, provider).unwrap();
+        let node = m2.engine().graph().get_node(id).unwrap();
+        assert_eq!(
+            node.metadata.get("anamnesis:turn_key").map(String::as_str),
+            Some("abc123")
+        );
         assert_eq!(
             node.metadata.get("anamnesis:extracted").map(String::as_str),
             Some("false")
