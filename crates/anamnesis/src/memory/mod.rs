@@ -54,10 +54,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::Engine;
-use crate::api::{
-    CommitReport, CrystallizeRequest, EngineConfig, HealthGrade, IngestResult, Observation,
-    TickReport,
-};
+use crate::api::{CommitReport, EngineConfig, HealthGrade, IngestResult, Observation, TickReport};
 use crate::embedding::EmbeddingProvider;
 use crate::error::Error;
 use crate::graph::node::Origin;
@@ -255,35 +252,6 @@ pub struct Neighbor {
     pub weight: f64,
     /// Direction of the edge relative to the queried node.
     pub direction: Direction,
-}
-
-// ── Consolidation report ─────────────────────────────────────────────────────
-
-/// Compact report returned by [`Memory::consolidate`] / [`Memory::consolidate_at`].
-///
-/// A small owned summary of a crystallization pass — deliberately *not* the full
-/// engine `CrystallizeResult` (which leaks dedup scores, attraction edges, and
-/// raw support/contradiction rates). Surfaces only what a front-door caller
-/// needs to judge the outcome.
-#[derive(Debug, Clone, PartialEq)]
-#[non_exhaustive] // report may gain metrics; keep additive
-pub struct ConsolidateReport {
-    /// The synthesis node created by this consolidation.
-    pub node_id: NodeId,
-    /// Number of sources the synthesis was consolidated from (derived from the
-    /// `ConsolidatedFrom` provenance edges actually created — may be fewer than
-    /// the input ids if any source's cold-start conductance was non-finite).
-    pub source_count: usize,
-    /// Number of `ConsolidatedFrom` provenance edges created (== `source_count`).
-    pub edges_created: usize,
-    /// Initial salience assigned to the crystal.
-    pub salience: f64,
-    /// Source agreement `[0, 1]` = `clamp(support_density - contradiction_rate)`.
-    pub consistency: f64,
-    /// `true` if the sources may be circular (one is already consolidated from)
-    /// or single-source (all share one peer + session). Treat the synthesis as
-    /// lower-confidence.
-    pub low_confidence: bool,
 }
 
 // ── Stats / health snapshot ──────────────────────────────────────────────────
@@ -804,92 +772,6 @@ impl<S: StorageAdapter + Clone> Memory<S> {
             });
         }
         Ok(out)
-    }
-}
-
-// ── Consolidate — caller-triggered crystallization ───────────────────────────
-
-impl<S: StorageAdapter + Clone> Memory<S> {
-    /// Synthesize `source_ids` into a higher-level knowledge node at wall clock.
-    ///
-    /// Equivalent to [`consolidate_at`](Memory::consolidate_at) with
-    /// `now = Timestamp::now()`. For deterministic / time-travel consolidation,
-    /// use `consolidate_at` directly.
-    pub fn consolidate(
-        &mut self,
-        name: &str,
-        content: &str,
-        source_ids: Vec<NodeId>,
-    ) -> Result<ConsolidateReport, Error> {
-        self.consolidate_at(name, content, source_ids, Timestamp::now())
-    }
-
-    /// Synthesize `source_ids` into a higher-level `Semantic` knowledge node at an
-    /// explicit `now`.
-    ///
-    /// Flushes pending session buffers first (so freshly-added turns are valid
-    /// crystallize sources), embeds the synthesis `content` (enabling the engine's
-    /// dedup + attraction paths), and crystallizes via [`Engine::crystallize`].
-    /// Returns a compact [`ConsolidateReport`].
-    ///
-    /// # Errors
-    ///
-    /// - Requires **at least two** sources — fewer returns [`Error::InvalidInput`].
-    /// - Every `source_id` must exist, else [`Error::NodeNotFound`].
-    /// - If the synthesis embedding is a near-duplicate of an existing crystal
-    ///   beyond the engine's dedup threshold, returns [`Error::Rejected`].
-    pub fn consolidate_at(
-        &mut self,
-        name: &str,
-        content: &str,
-        source_ids: Vec<NodeId>,
-        now: Timestamp,
-    ) -> Result<ConsolidateReport, Error> {
-        // Surface the hard precondition early with a clear message rather than
-        // relying solely on the engine's generic InvalidInput.
-        if source_ids.len() < 2 {
-            return Err(Error::InvalidInput(
-                "consolidate requires at least two source nodes".to_string(),
-            ));
-        }
-
-        // Flush buffers so recently-added turns are persisted (and thus valid
-        // crystallize sources) — same pattern as search_at.
-        self.flush_all()?;
-
-        // Embed the synthesis content so dedup + attraction edges can fire.
-        let embedding = embed_one(&*self.provider, content)?;
-
-        let request = CrystallizeRequest {
-            name: make_name(name),
-            summary: None,
-            content: content.to_string(),
-            embedding: Some(embedding),
-            source_relevances: None, // engine defaults each source weight to 1.0
-            node_type: KnowledgeType::Semantic,
-            confidence: 0.9,
-            origin: Origin {
-                peer_id: PeerId(0),
-                source_kind: SourceKind::AgentObservation,
-                session_id: "consolidation".to_string(),
-                scope: ScopePath::universal(),
-                confidence: 0.9,
-            },
-            entity_tags: Vec::new(),
-            timestamp: now,
-            source_ids, // moved last; len already validated >= 2
-        };
-
-        let result = self.engine.crystallize(request)?;
-
-        Ok(ConsolidateReport {
-            node_id: result.node_id,
-            source_count: result.consolidation_edges.len(),
-            edges_created: result.consolidation_edges.len(),
-            salience: result.initial_salience,
-            consistency: result.consistency_score,
-            low_confidence: result.circular_evidence_warning || result.single_source_warning,
-        })
     }
 }
 
@@ -1498,57 +1380,6 @@ mod tests {
         assert!(
             n.iter().any(|x| x.edge_type == EdgeType::ExtractedFrom),
             "expected an ExtractedFrom recipe edge among neighbors: {n:?}"
-        );
-    }
-
-    // ── consolidate ───────────────────────────────────────────────────────────
-
-    #[test]
-    fn consolidate_synthesizes_from_sources() {
-        let mut m = mem();
-        let a = m
-            .add("s", "a", "auth uses a factory", t(1))
-            .unwrap()
-            .episodic;
-        let b = m
-            .add("s", "a", "factory builds the client", t(2))
-            .unwrap()
-            .episodic;
-        m.flush_all().unwrap();
-
-        let report = m
-            .consolidate_at(
-                "auth construction",
-                "Auth is constructed via a factory that builds the client.",
-                vec![a, b],
-                t(10),
-            )
-            .unwrap();
-
-        assert_eq!(report.source_count, 2);
-        assert_eq!(report.edges_created, 2);
-        assert!(report.salience >= 0.0);
-        assert!((0.0..=1.0).contains(&report.consistency));
-
-        // The crystal must be a real, reachable node with ConsolidatedFrom edges
-        // back to both sources.
-        let n = m.neighbors(report.node_id).unwrap();
-        let consolidated: Vec<_> = n
-            .iter()
-            .filter(|x| x.edge_type == EdgeType::ConsolidatedFrom)
-            .collect();
-        assert_eq!(consolidated.len(), 2);
-    }
-
-    #[test]
-    fn consolidate_requires_two_sources() {
-        let mut m = mem();
-        let a = m.add("s", "a", "only one", t(1)).unwrap().episodic;
-        m.flush_all().unwrap();
-        let result = m.consolidate_at("x", "single", vec![a], t(2));
-        assert!(
-            matches!(result, Err(Error::InvalidInput(_))),
-            "single-source consolidate must be InvalidInput, got {result:?}"
         );
     }
 

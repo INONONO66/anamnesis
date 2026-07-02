@@ -1,10 +1,10 @@
 //! Integration tests for the Phase 1 skeleton.
 //!
 //! These tests verify the full Engine lifecycle:
-//! ingest → link → touch → tick → query → reflect_batch
+//! ingest → link → touch → tick → query
 
 use anamnesis::Engine;
-use anamnesis::api::{Observation, SessionSummary};
+use anamnesis::api::Observation;
 use anamnesis::engine::{EngineConfig, IngestResult};
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{EdgeType, KnowledgeType, Timestamp};
@@ -93,15 +93,6 @@ fn engine_full_lifecycle() {
         pkg.total_fragments() > 0,
         "Associative query should return results"
     );
-
-    // 6. Reflect batch (placeholder)
-    let sessions = vec![SessionSummary {
-        peer_id: anamnesis::graph::types::PeerId(0),
-        session_id: "session-1".to_string(),
-        node_ids: vec![ids1[0], ids2[0]],
-    }];
-    let reflect_report = engine.reflect_batch(&sessions).unwrap();
-    assert_eq!(reflect_report.entity_edges_created, 0);
 }
 
 #[test]

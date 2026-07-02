@@ -8,13 +8,12 @@
 //! - evidence raises/lowers the trust reservoir a bounded, slow fraction per event;
 //! - the move is traceable (a `PeerTrustChanged` event + the persisted reservoir);
 //! - origin/provenance is never erased (coarse `trust_level`, name, count intact);
-//! - `reflect_batch` corroboration raises the trust of registered peers;
 //! - commit feedback nudges the originating peer's trust;
 //! - the moved trust reservoir feeds the readout `trust_weight` term.
 
 use anamnesis::Engine;
 use anamnesis::api::{GraphEvent, Observation};
-use anamnesis::engine::{ConfidenceLevel, EngineConfig, IngestResult, SessionSummary};
+use anamnesis::engine::{ConfidenceLevel, EngineConfig, IngestResult};
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::types::PeerId;
 use anamnesis::graph::{KnowledgeType, NodeId, ScopePath, Timestamp};
@@ -161,94 +160,6 @@ fn single_event_is_a_slow_durable_nudge_not_a_swing() {
         saturated < CORROBORATION_LOG_ODDS + 1e-9,
         "bounded — never overshoots"
     );
-}
-
-// ── reflect_batch corroboration raises the corroborating peers' trust ────────
-
-#[test]
-fn reflect_batch_corroboration_raises_registered_peer_trust_traceably() {
-    let mut engine = Engine::new();
-
-    // Two registered agents independently observe the same entity "auth".
-    let a = engine.register_peer("agent-a", TrustLevel::Agent).unwrap();
-    let b = engine.register_peer("agent-b", TrustLevel::Agent).unwrap();
-
-    let trust_a_before = engine.get_peer(a).unwrap().trust_reservoir;
-    let trust_b_before = engine.get_peer(b).unwrap().trust_reservoir;
-
-    let n1 = insert_node(&mut engine, "auth fact A", a, "s1", &["auth"]);
-    let n2 = insert_node(&mut engine, "auth fact B", b, "s2", &["auth"]);
-
-    let _ = engine.drain_events();
-    let report = engine
-        .reflect_batch(&[
-            SessionSummary {
-                peer_id: a,
-                session_id: "s1".into(),
-                node_ids: vec![n1],
-            },
-            SessionSummary {
-                peer_id: b,
-                session_id: "s2".into(),
-                node_ids: vec![n2],
-            },
-        ])
-        .unwrap();
-
-    // Cross-agent agreement linked the entity AND raised both peers' trust.
-    assert!(report.entity_edges_created >= 1);
-    let trust_a_after = engine.get_peer(a).unwrap().trust_reservoir;
-    let trust_b_after = engine.get_peer(b).unwrap().trust_reservoir;
-    assert!(
-        trust_a_after > trust_a_before,
-        "corroboration raises peer a's trust"
-    );
-    assert!(
-        trust_b_after > trust_b_before,
-        "corroboration raises peer b's trust"
-    );
-
-    // Traceable: a PeerTrustChanged event was emitted for each corroborated peer.
-    let events = engine.drain_events();
-    let nudged: Vec<PeerId> = events
-        .iter()
-        .filter_map(|e| match e {
-            GraphEvent::PeerTrustChanged { peer_id, .. } => Some(*peer_id),
-            _ => None,
-        })
-        .collect();
-    assert!(nudged.contains(&a));
-    assert!(nudged.contains(&b));
-}
-
-#[test]
-fn reflect_batch_single_agent_repeats_do_not_corroborate_trust() {
-    let mut engine = Engine::new();
-    let a = engine.register_peer("agent-a", TrustLevel::Agent).unwrap();
-
-    let trust_before = engine.get_peer(a).unwrap().trust_reservoir;
-    let n1 = insert_node(&mut engine, "auth fact A", a, "s1", &["auth"]);
-    let n2 = insert_node(&mut engine, "auth fact A2", a, "s2", &["auth"]);
-
-    engine
-        .reflect_batch(&[
-            SessionSummary {
-                peer_id: a,
-                session_id: "s1".into(),
-                node_ids: vec![n1],
-            },
-            SessionSummary {
-                peer_id: a,
-                session_id: "s2".into(),
-                node_ids: vec![n2],
-            },
-        ])
-        .unwrap();
-
-    // Same agent twice is NOT cross-agent corroboration — trust does not move
-    // (automatic truth judgment from one source's repetition is forbidden).
-    let trust_after = engine.get_peer(a).unwrap().trust_reservoir;
-    assert_eq!(trust_after, trust_before);
 }
 
 // ── commit feedback nudges the originating peer's trust ──────────────────────

@@ -16,11 +16,9 @@
 // ── Core engine types ─────────────────────────────────────────────────────────
 
 pub use crate::api::{
-    ActivityInput, CommitReport, ConversationInput, ConversationResult, CrystallizeRequest,
-    CrystallizeResult, DebugOutcome, DocumentInput, Engine, EngineConfig, EvidenceResult,
-    ExtractedFact, GraphEvent, HealthGrade, HealthReport, IngestResult, LearnInput, Observation,
-    ObservedRef, PeerProfileInput, PerspectiveKey, ReflectReport, ScheduleInput, SessionSummary,
-    SupportReport, TickReport,
+    CommitReport, ConversationInput, ConversationResult, CrystallizeRequest, CrystallizeResult,
+    DocumentInput, Engine, EngineConfig, ExtractedFact, GraphEvent, HealthGrade, HealthReport,
+    IngestResult, Observation, PeerProfileInput, TickReport,
 };
 
 // ── Graph types ───────────────────────────────────────────────────────────────

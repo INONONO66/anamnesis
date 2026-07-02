@@ -7,7 +7,6 @@ use anamnesis::graph::node::Origin;
 use anamnesis::graph::types::PeerId;
 use anamnesis::graph::{KnowledgeType, ScopePath, Timestamp};
 use anamnesis::peer::SourceKind;
-use anamnesis::query::Query;
 
 fn obs_with_validity(
     name: &str,
@@ -81,47 +80,7 @@ fn none_valid_from_preserves_existing_behavior() {
     assert_eq!(node.valid_until, None);
 }
 
-#[test]
-fn fact_at_filters_by_valid_from_valid_until() {
-    use anamnesis::query::QueryConfig;
-    let mut e = engine();
-    let t1 = Timestamp(1_000_000);
-    let t2 = Timestamp(2_000_000);
-    let t3 = Timestamp(3_000_000);
-
-    // Node valid from t1 to t2
-    let IngestResult::Created(ids) = e
-        .ingest(obs_with_validity("time-bounded", Some(t1), Some(t2)))
-        .unwrap()
-    else {
-        panic!("expected Created");
-    };
-
-    // fact_at(t1) -> should find the node
-    let q = Query::List {
-        min_salience: 0.0,
-        limit: 10,
-    };
-    let config = QueryConfig::default();
-    let pkg_at_t1 = e.fact_at(&q, t1).unwrap();
-    let found_at_t1 = pkg_at_t1
-        .knowledge
-        .iter()
-        .chain(pkg_at_t1.memories.iter())
-        .any(|f| f.node_id == ids[0]);
-    assert!(found_at_t1, "node should be found at t1");
-
-    // fact_at(t3) -> should NOT find the node (expired)
-    let pkg_at_t3 = e.fact_at(&q, t3).unwrap();
-    let found_at_t3 = pkg_at_t3
-        .knowledge
-        .iter()
-        .chain(pkg_at_t3.memories.iter())
-        .any(|f| f.node_id == ids[0]);
-    assert!(
-        !found_at_t3,
-        "node should not be found at t3 (after valid_until)"
-    );
-
-    let _ = config;
-}
+// NOTE: valid_from/valid_until temporal *filtering* at query time was exercised
+// through the removed `Engine::fact_at` convenience API (0.10.0 shrink). The
+// bitemporal *storage* invariants above (fields round-trip on ingest) are the
+// surviving contract.
