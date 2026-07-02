@@ -1,9 +1,9 @@
 //! Kernel API — the raw substrate, gathered in one namespace.
 //!
-//! `anamnesis::engine` re-exports the full kernel surface. The original module
-//! paths (`crate::api`, `crate::query`, `crate::graph`, …) remain valid but are
-//! hidden from documentation; they are scheduled for removal in a future major
-//! release. The validated consumer layer built on this API is [`crate::memory`].
+//! `anamnesis::engine` re-exports the full kernel surface from the crate's
+//! internal implementation modules (`crate::api`, `crate::query`, `crate::graph`,
+//! …), which are hidden from documentation. Build against this namespace. The
+//! validated consumer layer built on this API is [`crate::memory`].
 //!
 //! # Public API contract
 //!
@@ -16,18 +16,16 @@
 // ── Core engine types ─────────────────────────────────────────────────────────
 
 pub use crate::api::{
-    ActivityInput, CommitReport, ConversationInput, ConversationResult, CrystallizeRequest,
-    CrystallizeResult, DebugOutcome, DocumentInput, Engine, EngineConfig, EvidenceResult,
-    ExtractedFact, GraphEvent, HealthGrade, HealthReport, IngestResult, LearnInput, Observation,
-    ObservedRef, PeerProfileInput, PerspectiveKey, ReflectReport, ScheduleInput, SessionSummary,
-    SupportReport, TickReport,
+    CommitReport, ConversationInput, ConversationResult, CrystallizeRequest, CrystallizeResult,
+    DocumentInput, Engine, EngineConfig, ExtractedFact, GraphEvent, HealthGrade, HealthReport,
+    IngestResult, Observation, TickReport,
 };
 
 // ── Graph types ───────────────────────────────────────────────────────────────
 
 pub use crate::graph::{
     AccessTrace, Edge, EdgeId, EdgeType, KnowledgeType, MemoryTier, Node, NodeId, Origin, PeerId,
-    ScopePath, ScopeRelation, Timestamp,
+    ScopePath, SourceKind, Timestamp,
 };
 
 // ── Query types ───────────────────────────────────────────────────────────────
@@ -39,10 +37,6 @@ pub use crate::query::{
     ReadoutCandidate, SearchCandidate, SearchInput, SearchResult, SearchTrace, SearchTraceLevel,
     Tension, TokenBudget, additive_rwr, additive_rwr_with_alpha, scope_weight,
 };
-
-// ── Peer / trust types ────────────────────────────────────────────────────────
-
-pub use crate::peer::{PeerProfile, PeerRegistry, SourceKind, TrustLevel};
 
 // ── Observability / mechanics ─────────────────────────────────────────────────
 

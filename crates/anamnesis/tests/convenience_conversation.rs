@@ -2,11 +2,11 @@
 
 use anamnesis::Engine;
 use anamnesis::api::{ConversationInput, ExtractedFact};
+use anamnesis::engine::SourceKind;
 use anamnesis::engine::{EngineConfig, StorageAdapter};
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::types::PeerId;
 use anamnesis::graph::{EdgeType, ScopePath, Timestamp};
-use anamnesis::peer::SourceKind;
 
 fn default_origin() -> Origin {
     Origin {
@@ -42,7 +42,6 @@ fn ingest_conversation_creates_episode_and_facts() {
             entity_tags: vec![],
             origin: default_origin(),
             timestamp: Some(Timestamp::now()),
-            about_peer: None,
         })
         .unwrap();
     assert!(result.episode_id.0 < u64::MAX);
@@ -69,7 +68,6 @@ fn ingest_conversation_links_fact_to_episode() {
             entity_tags: vec![],
             origin: default_origin(),
             timestamp: None,
-            about_peer: None,
         })
         .unwrap();
     // Verify ExtractedFrom edge: fact -> episode
@@ -83,42 +81,4 @@ fn ingest_conversation_links_fact_to_episode() {
             })
         });
     assert!(has_extracted_from, "ExtractedFrom edge should exist");
-}
-
-#[test]
-fn ingest_conversation_with_about_peer_updates_profile() {
-    use anamnesis::peer::TrustLevel;
-    let mut e = engine();
-    let peer_id = e.register_peer("김철수", TrustLevel::Member).unwrap();
-    let result = e
-        .ingest_conversation(ConversationInput {
-            name: "conversation about 김철수".to_string(),
-            summary: None,
-            raw_text: "김철수 is a developer".to_string(),
-            extracted_facts: vec![ExtractedFact {
-                name: "김철수 is a developer".to_string(),
-                summary: None,
-                content: "김철수 works as a software developer".to_string(),
-                embedding: None,
-                confidence: Some(0.9),
-                entity_tags: vec!["김철수".to_string()],
-            }],
-            confidence: None,
-            entity_tags: vec![],
-            origin: default_origin(),
-            timestamp: None,
-            about_peer: Some("김철수".to_string()),
-        })
-        .unwrap();
-    assert_eq!(result.extracted_ids.len(), 1);
-    // Profile node should be in peer/{id}/profile scope
-    let expected_scope = format!("peer/{}/profile", peer_id.0);
-    // Check that a node with this scope exists
-    let storage = e.graph().storage();
-    let profile_scope = ScopePath::new(&expected_scope).unwrap();
-    let profile_nodes = storage.nodes_by_scope(&profile_scope);
-    assert!(
-        !profile_nodes.is_empty(),
-        "profile node should exist in peer scope"
-    );
 }

@@ -44,27 +44,16 @@ pub fn cosine_similarity(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Used in equation (3) to boost or dampen attraction based on node types.
 pub fn tau_type(a: &KnowledgeType, b: &KnowledgeType) -> f64 {
-    let a_is_identity = matches!(
-        a,
-        KnowledgeType::IdentityCore | KnowledgeType::IdentityLearned | KnowledgeType::IdentityState
-    );
-    let b_is_identity = matches!(
-        b,
-        KnowledgeType::IdentityCore | KnowledgeType::IdentityLearned | KnowledgeType::IdentityState
-    );
-    let a_is_knowledge =
-        !a_is_identity && !matches!(a, KnowledgeType::Episodic | KnowledgeType::Event);
-    let b_is_knowledge =
-        !b_is_identity && !matches!(b, KnowledgeType::Episodic | KnowledgeType::Event);
+    let a_is_identity = matches!(a, KnowledgeType::Identity);
+    let b_is_identity = matches!(b, KnowledgeType::Identity);
+    // Ordinary knowledge is anything that is neither identity nor episodic memory
+    // (`Semantic` and consumer-labelled `Custom`).
+    let a_is_knowledge = !a_is_identity && !matches!(a, KnowledgeType::Episodic);
+    let b_is_knowledge = !b_is_identity && !matches!(b, KnowledgeType::Episodic);
 
     // Identity <-> Knowledge: 1.25
     if (a_is_identity && b_is_knowledge) || (b_is_identity && a_is_knowledge) {
         return 1.25;
-    }
-
-    // Entity <-> Entity (same type): 1.15
-    if matches!(a, KnowledgeType::Entity) && matches!(b, KnowledgeType::Entity) {
-        return 1.15;
     }
 
     // Episodic <-> Episodic: 0.70
@@ -95,13 +84,8 @@ pub fn attraction_score(similarity: f64, tau: f64) -> f64 {
 /// Identity pairs use a lower threshold (0.65) to encourage identity-knowledge linking.
 /// All other pairs use the standard threshold (0.72).
 pub fn edge_threshold(a: &KnowledgeType, b: &KnowledgeType) -> f64 {
-    let either_is_identity = matches!(
-        a,
-        KnowledgeType::IdentityCore | KnowledgeType::IdentityLearned | KnowledgeType::IdentityState
-    ) || matches!(
-        b,
-        KnowledgeType::IdentityCore | KnowledgeType::IdentityLearned | KnowledgeType::IdentityState
-    );
+    let either_is_identity =
+        matches!(a, KnowledgeType::Identity) || matches!(b, KnowledgeType::Identity);
 
     if either_is_identity { 0.65 } else { 0.72 }
 }
@@ -167,20 +151,12 @@ mod tests {
     #[test]
     fn tau_identity_knowledge() {
         assert_eq!(
-            tau_type(&KnowledgeType::IdentityCore, &KnowledgeType::Semantic),
+            tau_type(&KnowledgeType::Identity, &KnowledgeType::Semantic),
             1.25
         );
         assert_eq!(
-            tau_type(&KnowledgeType::Semantic, &KnowledgeType::IdentityLearned),
+            tau_type(&KnowledgeType::Semantic, &KnowledgeType::Identity),
             1.25
-        );
-    }
-
-    #[test]
-    fn tau_entity_entity() {
-        assert_eq!(
-            tau_type(&KnowledgeType::Entity, &KnowledgeType::Entity),
-            1.15
         );
     }
 
@@ -199,7 +175,10 @@ mod tests {
             1.00
         );
         assert_eq!(
-            tau_type(&KnowledgeType::Decision, &KnowledgeType::Gotcha),
+            tau_type(
+                &KnowledgeType::Custom("decision".into()),
+                &KnowledgeType::Custom("gotcha".into())
+            ),
             1.00
         );
     }
@@ -209,7 +188,7 @@ mod tests {
     #[test]
     fn threshold_identity_pair_lower() {
         assert_eq!(
-            edge_threshold(&KnowledgeType::IdentityCore, &KnowledgeType::Semantic),
+            edge_threshold(&KnowledgeType::Identity, &KnowledgeType::Semantic),
             0.65
         );
     }
@@ -245,7 +224,7 @@ mod tests {
         // 0.66 is below general threshold (0.72) but above identity threshold (0.65)
         assert!(should_create_edge(
             0.66,
-            &KnowledgeType::IdentityCore,
+            &KnowledgeType::Identity,
             &KnowledgeType::Semantic
         ));
         assert!(!should_create_edge(

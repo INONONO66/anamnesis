@@ -25,7 +25,7 @@ use anamnesis::query::SearchInput;
 fn origin(session: &str) -> Origin {
     Origin {
         peer_id: anamnesis::graph::types::PeerId(0),
-        source_kind: anamnesis::peer::SourceKind::AgentObservation,
+        source_kind: anamnesis::engine::SourceKind::AgentObservation,
         session_id: session.into(),
         scope: anamnesis::graph::ScopePath::universal(),
         confidence: 0.9,
@@ -882,10 +882,10 @@ mod memory_framework {
     #[test]
     fn engine_mut_escape_hatch_allows_raw_ingest() {
         use anamnesis::api::Observation;
+        use anamnesis::engine::SourceKind;
         use anamnesis::graph::ScopePath;
         use anamnesis::graph::node::Origin;
         use anamnesis::graph::types::PeerId;
-        use anamnesis::peer::SourceKind;
 
         let provider: Arc<dyn EmbeddingProvider> = Arc::new(TestEmbedder::default());
         let mut mem = Memory::in_memory_with_provider(provider).expect("in_memory_with_provider");

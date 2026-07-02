@@ -33,7 +33,7 @@ fn build_fixture() -> Engine {
             30_000,
             "travel japan city",
             &["japan", "city"],
-            KnowledgeType::Entity,
+            KnowledgeType::Custom("entity".to_string()),
         ),
         (
             "research/llm",
@@ -60,7 +60,7 @@ fn build_fixture() -> Engine {
                 entity_tags: entity_tags.clone(),
                 origin: Origin {
                     peer_id: anamnesis::graph::types::PeerId(0),
-                    source_kind: anamnesis::peer::SourceKind::AgentObservation,
+                    source_kind: anamnesis::engine::SourceKind::AgentObservation,
                     session_id: session_id.clone(),
                     scope: scope.clone(),
                     confidence: 0.9,

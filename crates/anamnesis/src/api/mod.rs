@@ -1,11 +1,11 @@
 //! Public API surface for the Anamnesis cognitive graph engine.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
 use crate::error::Error;
 use crate::graph::node::Origin;
 use crate::graph::{AccessTrace, Edge, Graph, Node};
-use crate::graph::{EdgeId, EdgeType, KnowledgeType, MemoryTier, NodeId, ScopePath, Timestamp};
+use crate::graph::{EdgeId, EdgeType, KnowledgeType, MemoryTier, NodeId, Timestamp};
 use crate::query::{ContextPackage, Query, QueryConfig, SearchInput, SearchResult};
 use crate::snapshot::{SnapshotId, SnapshotStore};
 use crate::storage::{SqliteStorage, StorageAdapter};
@@ -468,13 +468,13 @@ pub struct Observation {
     pub timestamp: Timestamp,
     /// When the fact represented by this observation became valid. None = always valid.
     ///
-    /// Passed through to `Node.valid_from` during ingest. Used by `fact_at()` for
-    /// bitemporal filtering.
+    /// Passed through to `Node.valid_from` during ingest, recording the fact's
+    /// bitemporal validity window on the node.
     pub valid_from: Option<Timestamp>,
     /// When the fact represented by this observation became invalid. None = still valid.
     ///
-    /// Passed through to `Node.valid_until` during ingest. Used by `fact_at()` for
-    /// bitemporal filtering.
+    /// Passed through to `Node.valid_until` during ingest, recording the fact's
+    /// bitemporal validity window on the node.
     pub valid_until: Option<Timestamp>,
 }
 
@@ -540,30 +540,6 @@ pub struct CrystallizeResult {
     pub single_source_warning: bool,
 }
 
-/// Classification for evidence logged against a debugging hypothesis.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EvidenceResult {
-    /// Evidence supports the hypothesis.
-    Supports,
-    /// Evidence contradicts the hypothesis.
-    Contradicts,
-    /// Evidence is relevant but does not clearly support or refute.
-    Neutral,
-    /// Evidence could not be interpreted conclusively.
-    Inconclusive,
-}
-
-/// Final state recorded for a debugging session.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DebugOutcome {
-    /// The investigation resolved with the given conclusion.
-    Resolved(String),
-    /// The investigation ended unresolved with the given reason.
-    Unresolved(String),
-    /// The investigation was abandoned without a conclusion.
-    Abandoned,
-}
-
 /// Report returned by [`Engine::tick`] — the dissipation volume and projection
 /// deltas of one maintenance pass (observability.md).
 ///
@@ -612,23 +588,6 @@ pub struct CommitReport {
     pub tensions_recorded: usize,
 }
 
-/// Summary of a completed agent session for reflect_batch().
-#[derive(Debug, Clone)]
-pub struct SessionSummary {
-    pub peer_id: crate::graph::types::PeerId,
-    pub session_id: String,
-    pub node_ids: Vec<NodeId>,
-}
-
-/// Report returned by Engine::reflect_batch().
-#[derive(Debug, Clone, Default)]
-pub struct ReflectReport {
-    /// Number of Entity edges created between cross-agent nodes.
-    pub entity_edges_created: usize,
-    /// Number of entity clusters found.
-    pub clusters_found: usize,
-}
-
 /// Event emitted by graph mutation methods.
 #[derive(Debug, Clone, PartialEq)]
 pub enum GraphEvent {
@@ -659,33 +618,6 @@ pub enum GraphEvent {
         node_id: NodeId,
         new_salience: f64,
     },
-    /// A peer's evidence trust reservoir moved through `update_peer_trust`
-    /// (social.md "Peer Trust": "Trust updates must leave traces"). The coarse
-    /// `trust_level` and origin are unchanged — only the evidence estimate moved.
-    PeerTrustChanged {
-        peer_id: crate::graph::types::PeerId,
-        /// Trust reservoir (log trust-odds) before the evidence update.
-        old: f64,
-        /// Trust reservoir (log trust-odds) after the evidence update.
-        new: f64,
-    },
-}
-
-/// Report of supporting and contradicting evidence for a node.
-///
-/// Returned by `Engine::support_report()`. Traverses only direct edges (1-hop)
-/// from the target node to assess evidence quality and independence.
-#[derive(Debug, Clone, Default)]
-pub struct SupportReport {
-    /// Number of nodes connected via supporting edges (ConsolidatedFrom, ReinforcedBy, Supports).
-    pub supporting_sources: usize,
-    /// Number of nodes connected via contradicting edges (Contradicts, Refutes).
-    pub contradicting_sources: usize,
-    /// Number of distinct (peer_id, session_id) pairs among all source nodes.
-    /// Same-peer repetitions in different sessions count as independent.
-    pub independent_origins: usize,
-    /// Sum of salience values of all supporting source nodes.
-    pub total_support_salience: f64,
 }
 
 /// Result of an ingest operation.
@@ -702,38 +634,6 @@ pub enum IngestResult {
         /// Similarity score [0, 1] between the new observation and the existing node.
         similarity: f64,
     },
-}
-
-/// Reference to what is being observed in a perspective query.
-///
-/// Determines how candidate nodes (owned by the observer) are filtered
-/// before spreading activation.
-#[derive(Debug, Clone, PartialEq)]
-pub enum ObservedRef {
-    /// Observe knowledge related to another peer's contributions.
-    /// Filters to observer nodes that are connected (via edges) to nodes produced by this peer.
-    Agent(crate::graph::types::PeerId),
-    /// Observe knowledge about an entity tag.
-    /// Filters to observer nodes that carry this entity tag.
-    EntityTag(String),
-    /// Observe knowledge about a specific node.
-    /// Filters to observer nodes that are connected (via edges) to this node.
-    Node(NodeId),
-}
-
-/// Perspective query key — retrieves what one agent knows about a subject.
-///
-/// Combines observer identity, observed target, and scope to produce a
-/// perspective-filtered view of the graph. Non-retroactive: the observer
-/// cannot recall events created before their first contribution.
-#[derive(Debug, Clone)]
-pub struct PerspectiveKey {
-    /// The peer whose perspective we are querying from.
-    pub observer_peer_id: crate::graph::types::PeerId,
-    /// What the observer is looking at.
-    pub observed: ObservedRef,
-    /// Scope filter — only nodes matching this scope (or universal) are included.
-    pub scope: ScopePath,
 }
 
 /// Return the top-N `(NodeId, score)` pairs by score descending.
@@ -836,34 +736,6 @@ fn crystallized_action(source_actions: &[f64], relevance_weights: &[f64], confid
     (source_average + confidence_offset).clamp(-clamp, clamp)
 }
 
-/// Seed the strength state for a freshly created node under `A_i = B_i + P_i`.
-///
-/// Returns `(salience, retained_action, access_history)` for a node whose evidence
-/// prior is `prior` and whose creation trace is stamped at `now` (ADR-0008). The
-/// lone creation trace floors to 1ms at `now`, so `B_i ≈ ln(1) = 0` and the cached
-/// `salience = logistic(B_i + prior)`; the trace keeps `B_i` finite for a node that
-/// is never accessed (`compute_base_level` returns `NEG_INFINITY` on empty history).
-fn seed_node_strength(
-    node_type: &KnowledgeType,
-    prior: f64,
-    now: Timestamp,
-) -> (f64, f64, VecDeque<AccessTrace>) {
-    // The creation trace is the first trace, so its activation-dependent decay is the
-    // floor `d_j = m_type·α` (Pavlik & Anderson 2005; equals `compute_trace_decay`
-    // on an empty history).
-    let m_type = crate::mechanics::priors::decay_multiplier_for_type(node_type);
-    let creation_decay = m_type * crate::mechanics::priors::DECAY_INTERCEPT;
-    let mut access_history = VecDeque::new();
-    access_history.push_back(AccessTrace {
-        at: now,
-        decay: creation_decay,
-    });
-    let base_level = crate::mechanics::forgetting::compute_base_level(&access_history, now);
-    let retained_action = base_level + prior;
-    let salience = crate::mechanics::priors::project_salience(retained_action);
-    (salience, retained_action, access_history)
-}
-
 /// Entity-overlap NPMI feature `entity_npmi` — Jaccard of the two tag sets.
 ///
 /// Returns `0.0` when either node has no tags. The overlap is a coupling cue: the
@@ -928,120 +800,14 @@ pub struct HealthReport {
     pub retracted_count: usize,
     /// Number of nodes without an embedding vector.
     pub missing_embedding_count: usize,
-    /// Number of registered peers.
+    /// Number of registered peers. Always `0` since the peer/trust subsystem was
+    /// removed (production is single-peer, `PeerId(0)`); retained for the stats
+    /// render surface.
     pub peer_count: usize,
     /// Average salience across all nodes.
     pub avg_salience: f64,
     /// Overall health grade.
     pub grade: HealthGrade,
-}
-
-/// Input for `Engine::learn()` — project knowledge injection.
-#[derive(Debug, Clone)]
-pub struct LearnInput {
-    /// L0: One-liner label.
-    pub name: String,
-    /// L1: Optional summary.
-    pub summary: Option<String>,
-    /// L2: Full content.
-    pub content: String,
-    /// Optional embedding vector.
-    pub embedding: Option<Vec<f64>>,
-    /// Confidence [0, 1]. Default: 0.9.
-    pub confidence: Option<f64>,
-    /// Knowledge type. Default: `Semantic`.
-    pub node_type: Option<KnowledgeType>,
-    /// Entity tags.
-    pub entity_tags: Vec<String>,
-    /// Provenance.
-    pub origin: Origin,
-    /// Timestamp. Default: now.
-    pub timestamp: Option<Timestamp>,
-}
-
-/// Input for `Engine::remember_peer()` — peer profile recording.
-#[derive(Debug, Clone)]
-pub struct PeerProfileInput {
-    /// Primary display name of the peer (used for auto-registration).
-    pub peer_name: String,
-    /// L0: One-liner label for this profile entry.
-    pub name: String,
-    /// L1: Optional summary.
-    pub summary: Option<String>,
-    /// L2: Full content.
-    pub content: String,
-    /// Optional embedding vector.
-    pub embedding: Option<Vec<f64>>,
-    /// Confidence [0, 1]. Default: 0.9.
-    pub confidence: Option<f64>,
-    /// Entity tags (peer name is added automatically).
-    pub entity_tags: Vec<String>,
-    /// Source kind. Default: `HumanInput`.
-    pub source_kind: Option<crate::peer::SourceKind>,
-    /// Session ID. Default: "profile".
-    pub session_id: Option<String>,
-    /// Timestamp. Default: now.
-    pub timestamp: Option<Timestamp>,
-}
-
-/// Input for `Engine::log_activity()` — peer activity recording.
-#[derive(Debug, Clone)]
-pub struct ActivityInput {
-    /// Primary display name of the peer.
-    pub peer_name: String,
-    /// L0: One-liner label.
-    pub name: String,
-    /// L1: Optional summary.
-    pub summary: Option<String>,
-    /// L2: Full content.
-    pub content: String,
-    /// Optional embedding vector.
-    pub embedding: Option<Vec<f64>>,
-    /// Confidence [0, 1]. Default: 0.8.
-    pub confidence: Option<f64>,
-    /// Knowledge type. Default: `Episodic`.
-    pub node_type: Option<KnowledgeType>,
-    /// Entity tags.
-    pub entity_tags: Vec<String>,
-    /// Source kind. Default: `HumanInput`.
-    pub source_kind: Option<crate::peer::SourceKind>,
-    /// Session ID. Default: "activity".
-    pub session_id: Option<String>,
-    /// Timestamp. Default: now.
-    pub timestamp: Option<Timestamp>,
-    /// When the activity started (bitemporal).
-    pub valid_from: Option<Timestamp>,
-    /// When the activity ended (bitemporal).
-    pub valid_until: Option<Timestamp>,
-}
-
-/// Input for `Engine::schedule()` — event scheduling.
-#[derive(Debug, Clone)]
-pub struct ScheduleInput {
-    /// Primary display name of the peer organizing the event.
-    pub peer_name: String,
-    /// L0: One-liner label.
-    pub name: String,
-    /// L1: Optional summary.
-    pub summary: Option<String>,
-    /// L2: Full content.
-    pub content: String,
-    /// Optional embedding vector.
-    pub embedding: Option<Vec<f64>>,
-    /// Confidence [0, 1]. Default: 0.9.
-    pub confidence: Option<f64>,
-    /// Participants — converted to entity tags automatically.
-    pub participants: Vec<String>,
-    /// Additional entity tags.
-    pub entity_tags: Vec<String>,
-    /// Session ID. Default: "schedule".
-    pub session_id: Option<String>,
-    /// Timestamp. Default: now.
-    pub timestamp: Option<Timestamp>,
-    /// When the event starts (required).
-    pub valid_from: Timestamp,
-    /// When the event ends (optional).
-    pub valid_until: Option<Timestamp>,
 }
 
 /// Input for `Engine::ingest_document()` — document chunk ingestion.
@@ -1097,8 +863,6 @@ pub struct ConversationInput {
     pub origin: Origin,
     /// Timestamp. Default: now.
     pub timestamp: Option<Timestamp>,
-    /// If set, extracted facts are also stored in this peer's profile scope.
-    pub about_peer: Option<String>,
 }
 
 /// Result of `Engine::ingest_conversation()`.
@@ -1119,34 +883,26 @@ pub struct Engine<S: StorageAdapter + Clone = SqliteStorage> {
     config: EngineConfig,
     snapshots: SnapshotStore<S>,
     events: Vec<GraphEvent>,
-    /// Peer registry — maps PeerId to PeerProfile (name, trust, aliases, platforms).
-    peers: crate::peer::PeerRegistry,
 }
 
 impl Engine<SqliteStorage> {
     /// Create a new engine with default configuration and in-memory SQLite storage.
     pub fn new() -> Self {
-        let graph = Graph::new();
-        let peers = graph.storage().load_peers().unwrap_or_default();
         Engine {
-            graph,
+            graph: Graph::new(),
             config: EngineConfig::default(),
             snapshots: SnapshotStore::new(),
             events: Vec::new(),
-            peers,
         }
     }
 
     /// Create a new engine with custom configuration.
     pub fn with_config(config: EngineConfig) -> Self {
-        let graph = Graph::new();
-        let peers = graph.storage().load_peers().unwrap_or_default();
         Engine {
-            graph,
+            graph: Graph::new(),
             config,
             snapshots: SnapshotStore::new(),
             events: Vec::new(),
-            peers,
         }
     }
 }
@@ -1160,323 +916,15 @@ impl Default for Engine<SqliteStorage> {
 impl<S: StorageAdapter + Clone> Engine<S> {
     /// Create an engine with a custom storage backend.
     pub fn with_storage(config: EngineConfig, storage: S) -> Self {
-        let graph = Graph::with_storage(storage);
-        let peers = graph.storage().load_peers().unwrap_or_default();
         Engine {
-            graph,
+            graph: Graph::with_storage(storage),
             config,
             snapshots: SnapshotStore::new(),
             events: Vec::new(),
-            peers,
         }
-    }
-
-    fn register_peer_internal(
-        &mut self,
-        name: &str,
-        trust_level: crate::peer::TrustLevel,
-    ) -> Result<crate::graph::types::PeerId, Error> {
-        let id = self.peers.register_peer(name, trust_level)?;
-        let profile = self.peers.get_peer(id).cloned();
-        if let Some(p) = profile {
-            self.graph.storage_mut().store_peer(&p)?;
-        }
-        Ok(id)
-    }
-
-    // ── Peer registry API ─────────────────────────────────────────────────────
-
-    /// Register a new peer and return its assigned `PeerId`.
-    ///
-    /// Returns `Err(Error::DuplicateAlias)` if the name is already taken.
-    pub fn register_peer(
-        &mut self,
-        name: impl Into<String>,
-        trust_level: crate::peer::TrustLevel,
-    ) -> Result<crate::graph::types::PeerId, Error> {
-        self.register_peer_internal(&name.into(), trust_level)
-    }
-
-    /// Resolve any identifier (name, alias, platform username) to a `PeerId`.
-    pub fn resolve_peer(&self, identifier: &str) -> Option<crate::graph::types::PeerId> {
-        self.peers.resolve_peer(identifier)
-    }
-
-    /// Get a peer profile by `PeerId`.
-    pub fn get_peer(&self, id: crate::graph::types::PeerId) -> Option<&crate::peer::PeerProfile> {
-        self.peers.get_peer(id)
-    }
-
-    /// Set the coarse trust level of an existing peer — an explicit policy decision.
-    ///
-    /// The coarse `TrustLevel` is the *prior* for the evidence trust reservoir
-    /// (social.md "Peer Trust"). Re-labelling re-seeds the reservoir to the new
-    /// level's prior ONLY when no evidence has yet moved it; once corroboration or
-    /// feedback has accumulated, the learned estimate is preserved (never silently
-    /// erased). For evidence-driven movement use
-    /// [`update_peer_trust_evidence`](Engine::update_peer_trust_evidence).
-    pub fn update_peer_trust(
-        &mut self,
-        id: crate::graph::types::PeerId,
-        trust_level: crate::peer::TrustLevel,
-    ) -> Result<(), Error> {
-        self.peers.update_trust(id, trust_level)?;
-        if let Some(profile) = self.peers.get_peer(id) {
-            self.graph.storage_mut().store_peer(profile)?;
-        }
-        Ok(())
-    }
-
-    /// Move a peer's evidence trust reservoir toward a signed evidence target —
-    /// the single traceable trust-evidence update path (social.md "Peer Trust").
-    ///
-    /// `signed_strength ∈ [-1, 1]`: positive is corroboration / useful feedback
-    /// (raises trust), negative is contradiction / not-useful feedback (lowers it).
-    /// The reservoir moves a fraction
-    /// [`TRUST_LEARNING_RATE`](crate::mechanics::priors::TRUST_LEARNING_RATE) — the
-    /// slow peer-reliability rate — toward
-    /// [`trust_evidence_target`](crate::mechanics::priors::trust_evidence_target),
-    /// the Rescorla-Wagner form shared with site feedback. The move is **traceable**
-    /// (a [`GraphEvent::PeerTrustChanged`] is emitted and the moved reservoir is
-    /// persisted) and **non-destructive**: the coarse `trust_level`, name, aliases,
-    /// and every site origin are untouched — only the evidence estimate moves
-    /// (social.md: "Peer trust never erases origin"). Returns the new reservoir.
-    pub fn update_peer_trust_evidence(
-        &mut self,
-        id: crate::graph::types::PeerId,
-        signed_strength: f64,
-    ) -> Result<f64, Error> {
-        use crate::mechanics::priors::{TRUST_LEARNING_RATE, trust_evidence_target};
-
-        let target = trust_evidence_target(signed_strength);
-        let (old, new) = self.peers.nudge_trust(id, target, TRUST_LEARNING_RATE)?;
-        if let Some(profile) = self.peers.get_peer(id) {
-            self.graph.storage_mut().store_peer(profile)?;
-        }
-        if (new - old).abs() > f64::EPSILON {
-            self.emit_event(GraphEvent::PeerTrustChanged {
-                peer_id: id,
-                old,
-                new,
-            });
-        }
-        Ok(new)
-    }
-
-    /// Add an alias to an existing peer.
-    pub fn add_peer_alias(
-        &mut self,
-        id: crate::graph::types::PeerId,
-        alias: impl Into<String>,
-    ) -> Result<(), Error> {
-        let alias = alias.into();
-        self.peers.add_alias(id, &alias)?;
-        self.graph
-            .storage_mut()
-            .store_peer_alias(id, &alias, "alias")?;
-        Ok(())
-    }
-
-    /// Add a platform username mapping to an existing peer.
-    pub fn add_peer_platform(
-        &mut self,
-        id: crate::graph::types::PeerId,
-        platform: impl Into<String>,
-        username: impl Into<String>,
-    ) -> Result<(), Error> {
-        let platform = platform.into();
-        let username = username.into();
-        self.peers.add_platform(id, &platform, &username)?;
-        let alias_type = format!("platform:{platform}");
-        self.graph
-            .storage_mut()
-            .store_peer_alias(id, &username, &alias_type)?;
-        Ok(())
-    }
-
-    /// List all registered peers.
-    pub fn list_peers(&self) -> Vec<&crate::peer::PeerProfile> {
-        self.peers.list_peers()
-    }
-
-    /// Returns the number of registered peers.
-    pub fn peer_count(&self) -> usize {
-        self.peers.peer_count()
     }
 
     // ── Convenience API ───────────────────────────────────────────────────────
-
-    /// Ingest project knowledge — a semantic fact, convention, or decision.
-    ///
-    /// Convenience wrapper around `ingest()` for structured knowledge injection.
-    /// The consumer specifies the scope; the engine sets `node_type` to `Semantic`
-    /// by default (override via `node_type` field).
-    pub fn learn(&mut self, input: LearnInput) -> Result<IngestResult, Error> {
-        self.ingest(Observation {
-            name: input.name,
-            summary: input.summary,
-            content: input.content,
-            embedding: input.embedding,
-            confidence: input.confidence.unwrap_or(0.9),
-            node_type: input.node_type.unwrap_or(KnowledgeType::Semantic),
-            entity_tags: input.entity_tags,
-            origin: input.origin,
-            timestamp: input.timestamp.unwrap_or_else(Timestamp::now),
-            valid_from: None,
-            valid_until: None,
-        })
-    }
-
-    /// Record a peer profile — who this person is, what they know, their preferences.
-    ///
-    /// Stores the profile under `scope: peer/{peer_id}/profile` with
-    /// `node_type: IdentityLearned`. If `peer_name` is not yet registered,
-    /// the peer is auto-registered with `TrustLevel::Member`.
-    pub fn remember_peer(
-        &mut self,
-        input: PeerProfileInput,
-    ) -> Result<(crate::graph::types::PeerId, IngestResult), Error> {
-        let peer_id = match self.peers.resolve_peer(&input.peer_name) {
-            Some(id) => id,
-            None => {
-                self.register_peer_internal(&input.peer_name, crate::peer::TrustLevel::Member)?
-            }
-        };
-
-        let scope_str = format!("peer/{}/profile", peer_id.0);
-        let scope = ScopePath::new(&scope_str).unwrap_or_else(|_| ScopePath::universal());
-
-        let mut entity_tags = input.entity_tags;
-        if !entity_tags.contains(&input.peer_name) {
-            entity_tags.push(input.peer_name.clone());
-        }
-        // Add all peer aliases as entity tags
-        for alias in self.peers.all_identifiers(peer_id) {
-            if !entity_tags.contains(&alias) {
-                entity_tags.push(alias);
-            }
-        }
-
-        let result = self.ingest(Observation {
-            name: input.name,
-            summary: input.summary,
-            content: input.content,
-            embedding: input.embedding,
-            confidence: input.confidence.unwrap_or(0.9),
-            node_type: KnowledgeType::IdentityLearned,
-            entity_tags,
-            origin: Origin {
-                peer_id,
-                source_kind: input
-                    .source_kind
-                    .unwrap_or(crate::peer::SourceKind::HumanInput),
-                session_id: input.session_id.unwrap_or_else(|| "profile".to_string()),
-                scope,
-                confidence: input.confidence.unwrap_or(0.9),
-            },
-            timestamp: input.timestamp.unwrap_or_else(Timestamp::now),
-            valid_from: None,
-            valid_until: None,
-        })?;
-
-        Ok((peer_id, result))
-    }
-
-    /// Record a peer activity — what they did, said, or experienced.
-    ///
-    /// Stores the activity under `scope: peer/{peer_id}/activity` with
-    /// `node_type: Episodic`. Supports `valid_from`/`valid_until` for
-    /// time-bounded activities.
-    pub fn log_activity(
-        &mut self,
-        input: ActivityInput,
-    ) -> Result<(crate::graph::types::PeerId, IngestResult), Error> {
-        // Auto-register peer if not found
-        let peer_id = match self.peers.resolve_peer(&input.peer_name) {
-            Some(id) => id,
-            None => {
-                self.register_peer_internal(&input.peer_name, crate::peer::TrustLevel::Member)?
-            }
-        };
-
-        let scope_str = format!("peer/{}/activity", peer_id.0);
-        let scope = ScopePath::new(&scope_str).unwrap_or_else(|_| ScopePath::universal());
-
-        let result = self.ingest(Observation {
-            name: input.name,
-            summary: input.summary,
-            content: input.content,
-            embedding: input.embedding,
-            confidence: input.confidence.unwrap_or(0.8),
-            node_type: input.node_type.unwrap_or(KnowledgeType::Episodic),
-            entity_tags: input.entity_tags,
-            origin: Origin {
-                peer_id,
-                source_kind: input
-                    .source_kind
-                    .unwrap_or(crate::peer::SourceKind::HumanInput),
-                session_id: input.session_id.unwrap_or_else(|| "activity".to_string()),
-                scope,
-                confidence: input.confidence.unwrap_or(0.8),
-            },
-            timestamp: input.timestamp.unwrap_or_else(Timestamp::now),
-            valid_from: input.valid_from,
-            valid_until: input.valid_until,
-        })?;
-
-        Ok((peer_id, result))
-    }
-
-    /// Schedule an event — a time-bounded activity with participants.
-    ///
-    /// Stores the event under `scope: peer/{peer_id}/activity` with
-    /// `node_type: Event`. Participants are converted to entity tags.
-    /// `valid_from` is required.
-    pub fn schedule(
-        &mut self,
-        input: ScheduleInput,
-    ) -> Result<(crate::graph::types::PeerId, IngestResult), Error> {
-        // Auto-register peer if not found
-        let peer_id = match self.peers.resolve_peer(&input.peer_name) {
-            Some(id) => id,
-            None => {
-                self.register_peer_internal(&input.peer_name, crate::peer::TrustLevel::Member)?
-            }
-        };
-
-        let scope_str = format!("peer/{}/activity", peer_id.0);
-        let scope = ScopePath::new(&scope_str).unwrap_or_else(|_| ScopePath::universal());
-
-        // Convert participants to entity tags
-        let mut entity_tags = input.entity_tags;
-        for participant in &input.participants {
-            if !entity_tags.contains(participant) {
-                entity_tags.push(participant.clone());
-            }
-        }
-
-        let result = self.ingest(Observation {
-            name: input.name,
-            summary: input.summary,
-            content: input.content,
-            embedding: input.embedding,
-            confidence: input.confidence.unwrap_or(0.9),
-            node_type: KnowledgeType::Event,
-            entity_tags,
-            origin: Origin {
-                peer_id,
-                source_kind: crate::peer::SourceKind::HumanInput,
-                session_id: input.session_id.unwrap_or_else(|| "schedule".to_string()),
-                scope,
-                confidence: input.confidence.unwrap_or(0.9),
-            },
-            timestamp: input.timestamp.unwrap_or_else(Timestamp::now),
-            valid_from: Some(input.valid_from),
-            valid_until: input.valid_until,
-        })?;
-
-        Ok((peer_id, result))
-    }
 
     /// Ingest a document as a sequence of chunks.
     ///
@@ -1542,9 +990,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
     /// Ingest a conversation — raw episode + extracted knowledge.
     ///
     /// The raw text becomes an `Episodic` node. Each extracted fact becomes
-    /// a `Semantic` node linked to the episode via `ExtractedFrom`. If
-    /// `about_peer` is set, extracted facts are also stored in the peer's
-    /// profile scope.
+    /// a `Semantic` node linked to the episode via `ExtractedFrom`.
     pub fn ingest_conversation(
         &mut self,
         input: ConversationInput,
@@ -1615,43 +1061,6 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                 self.graph.add_edge(edge)?;
             }
 
-            // If about_peer is set, also store in peer profile
-            if let Some(ref peer_name) = input.about_peer {
-                let peer_id = match self.peers.resolve_peer(peer_name) {
-                    Some(id) => id,
-                    None => {
-                        self.register_peer_internal(peer_name, crate::peer::TrustLevel::Member)?
-                    }
-                };
-                let scope_str = format!("peer/{}/profile", peer_id.0);
-                let scope = ScopePath::new(&scope_str).unwrap_or_else(|_| ScopePath::universal());
-
-                let mut profile_tags = fact.entity_tags.clone();
-                if !profile_tags.contains(peer_name) {
-                    profile_tags.push(peer_name.clone());
-                }
-
-                self.ingest(Observation {
-                    name: fact.name,
-                    summary: fact.summary,
-                    content: fact.content,
-                    embedding: fact.embedding,
-                    confidence: fact.confidence.unwrap_or(0.8),
-                    node_type: KnowledgeType::IdentityLearned,
-                    entity_tags: profile_tags,
-                    origin: Origin {
-                        peer_id,
-                        source_kind: crate::peer::SourceKind::HumanInput,
-                        session_id: input.origin.session_id.clone(),
-                        scope,
-                        confidence: fact.confidence.unwrap_or(0.8),
-                    },
-                    timestamp: input.timestamp.unwrap_or_else(Timestamp::now),
-                    valid_from: None,
-                    valid_until: None,
-                })?;
-            }
-
             extracted_ids.push(fact_id);
         }
 
@@ -1659,21 +1068,6 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             episode_id,
             extracted_ids,
         })
-    }
-
-    /// Create an engine with a default peer pre-registered.
-    ///
-    /// Convenience constructor for quick-start scenarios.
-    pub fn with_default_peer(
-        name: impl Into<String>,
-        trust_level: crate::peer::TrustLevel,
-    ) -> Result<Self, Error>
-    where
-        S: Default,
-    {
-        let mut engine = Self::with_storage(EngineConfig::default(), S::default());
-        engine.register_peer(name, trust_level)?;
-        Ok(engine)
     }
 
     fn emit_event(&mut self, event: GraphEvent) {
@@ -1716,377 +1110,6 @@ impl<S: StorageAdapter + Clone> Engine<S> {
     /// List stored snapshot metadata in insertion order.
     pub fn list_snapshots(&self) -> Vec<(SnapshotId, String, Timestamp)> {
         self.snapshots.list()
-    }
-
-    /// Start a debugging session for a problem statement.
-    pub fn start_debug(
-        &mut self,
-        problem: &str,
-        origin: Origin,
-        timestamp: Timestamp,
-    ) -> Result<NodeId, Error> {
-        if problem.trim().is_empty() {
-            return Err(Error::InvalidInput(
-                "debug problem must not be empty".to_string(),
-            ));
-        }
-
-        let id = self.graph.next_node_id();
-        let mut metadata = HashMap::new();
-        metadata.insert("debug_kind".to_string(), "session".to_string());
-        metadata.insert("debug_started_at".to_string(), timestamp.0.to_string());
-        metadata.insert("debug_problem".to_string(), problem.to_string());
-
-        // Debug-lifecycle node: decay-exempt (m_type = 0). The flat prior enters as
-        // the evidence prior P_i; a creation trace seeds B_i (ADR-0008).
-        let (salience, retained_action, access_history) = seed_node_strength(
-            &KnowledgeType::DebugSession,
-            crate::mechanics::priors::INITIAL_RETAINED_ACTION,
-            timestamp,
-        );
-        let node = Node {
-            id,
-            node_type: KnowledgeType::DebugSession,
-            name: problem.to_string(),
-            summary: None,
-            content: problem.to_string(),
-            embedding: None,
-            created_at: timestamp,
-            updated_at: timestamp,
-            accessed_at: timestamp,
-            valid_from: None,
-            valid_until: None,
-            salience,
-            retained_action,
-            evidence_prior: crate::mechanics::priors::INITIAL_RETAINED_ACTION,
-            access_count: 0,
-            access_history,
-            tier: MemoryTier::Auto,
-            origin,
-            entity_tags: Vec::new(),
-            metadata,
-        };
-
-        self.graph.add_node(node)?;
-        self.emit_event(GraphEvent::NodeCreated {
-            node_id: id,
-            node_type: KnowledgeType::DebugSession,
-        });
-
-        Ok(id)
-    }
-
-    /// Log a hypothesis inside an existing debugging session.
-    pub fn log_hypothesis(
-        &mut self,
-        session: NodeId,
-        text: &str,
-        origin: Origin,
-        timestamp: Timestamp,
-    ) -> Result<NodeId, Error> {
-        if text.trim().is_empty() {
-            return Err(Error::InvalidInput(
-                "hypothesis text must not be empty".to_string(),
-            ));
-        }
-        let session_node = self.graph.get_node(session)?;
-        if session_node.node_type != KnowledgeType::DebugSession {
-            return Err(Error::InvalidInput(
-                "log_hypothesis requires a DebugSession node".to_string(),
-            ));
-        }
-
-        let id = self.graph.next_node_id();
-        let mut metadata = HashMap::new();
-        metadata.insert("debug_kind".to_string(), "hypothesis".to_string());
-        metadata.insert("debug_session_id".to_string(), session.0.to_string());
-        metadata.insert("hypothesis_status".to_string(), "open".to_string());
-        metadata.insert("hypothesis_logged_at".to_string(), timestamp.0.to_string());
-
-        // Debug-lifecycle node: decay-exempt (m_type = 0). The flat prior enters as
-        // the evidence prior P_i; a creation trace seeds B_i (ADR-0008).
-        let (salience, retained_action, access_history) = seed_node_strength(
-            &KnowledgeType::Hypothesis,
-            crate::mechanics::priors::INITIAL_RETAINED_ACTION,
-            timestamp,
-        );
-        let node = Node {
-            id,
-            node_type: KnowledgeType::Hypothesis,
-            name: text.to_string(),
-            summary: None,
-            content: text.to_string(),
-            embedding: None,
-            created_at: timestamp,
-            updated_at: timestamp,
-            accessed_at: timestamp,
-            valid_from: None,
-            valid_until: None,
-            salience,
-            retained_action,
-            evidence_prior: crate::mechanics::priors::INITIAL_RETAINED_ACTION,
-            access_count: 0,
-            access_history,
-            tier: MemoryTier::Auto,
-            origin,
-            entity_tags: Vec::new(),
-            metadata,
-        };
-        self.graph.add_node(node)?;
-        self.emit_event(GraphEvent::NodeCreated {
-            node_id: id,
-            node_type: KnowledgeType::Hypothesis,
-        });
-
-        let mut edge_metadata = HashMap::new();
-        edge_metadata.insert(
-            "debug_relation".to_string(),
-            "hypothesis_session".to_string(),
-        );
-        // Conductance is the cold-start coupling log-LR prior; weight is its bounded
-        // projection, never authored (conductance.md / ADR-0002).
-        let hypothesis_node = self.graph.get_node(id)?.clone();
-        let session_node = self.graph.get_node(session)?.clone();
-        let conductance =
-            self.cold_start_conductance(&hypothesis_node, &session_node, &EdgeType::BelongsTo);
-        if conductance.is_finite() {
-            let edge_id = self.graph.next_edge_id();
-            let edge = Edge::seeded(
-                edge_id,
-                id,
-                session,
-                EdgeType::BelongsTo,
-                conductance,
-                crate::graph::edge::EdgeSource::Auto,
-                timestamp,
-                timestamp,
-                edge_metadata,
-            );
-            self.graph.add_edge(edge)?;
-            self.emit_event(GraphEvent::EdgeCreated {
-                edge_id,
-                source: id,
-                target: session,
-                edge_type: EdgeType::BelongsTo,
-            });
-        }
-
-        Ok(id)
-    }
-
-    /// Log evidence against an existing hypothesis.
-    pub fn log_evidence(
-        &mut self,
-        hypothesis: NodeId,
-        text: &str,
-        result: EvidenceResult,
-        origin: Origin,
-        timestamp: Timestamp,
-    ) -> Result<NodeId, Error> {
-        if text.trim().is_empty() {
-            return Err(Error::InvalidInput(
-                "evidence text must not be empty".to_string(),
-            ));
-        }
-        let hypothesis_node = self.graph.get_node(hypothesis)?;
-        if hypothesis_node.node_type != KnowledgeType::Hypothesis {
-            return Err(Error::InvalidInput(
-                "log_evidence requires a Hypothesis node".to_string(),
-            ));
-        }
-
-        let id = self.graph.next_node_id();
-        let result_label = match result {
-            EvidenceResult::Supports => "supports",
-            EvidenceResult::Contradicts => "contradicts",
-            EvidenceResult::Neutral => "neutral",
-            EvidenceResult::Inconclusive => "inconclusive",
-        };
-        let mut metadata = HashMap::new();
-        metadata.insert("debug_kind".to_string(), "evidence".to_string());
-        metadata.insert("debug_hypothesis_id".to_string(), hypothesis.0.to_string());
-        metadata.insert("evidence_result".to_string(), result_label.to_string());
-        metadata.insert("evidence_logged_at".to_string(), timestamp.0.to_string());
-        if matches!(
-            result,
-            EvidenceResult::Neutral | EvidenceResult::Inconclusive
-        ) {
-            metadata.insert(
-                "automatic_hypothesis_action".to_string(),
-                "none".to_string(),
-            );
-        }
-
-        // Debug-lifecycle node: decay-exempt (m_type = 0). The flat prior enters as
-        // the evidence prior P_i; a creation trace seeds B_i (ADR-0008).
-        let (salience, retained_action, access_history) = seed_node_strength(
-            &KnowledgeType::Evidence,
-            crate::mechanics::priors::INITIAL_RETAINED_ACTION,
-            timestamp,
-        );
-        let node = Node {
-            id,
-            node_type: KnowledgeType::Evidence,
-            name: text.to_string(),
-            summary: None,
-            content: text.to_string(),
-            embedding: None,
-            created_at: timestamp,
-            updated_at: timestamp,
-            accessed_at: timestamp,
-            valid_from: None,
-            valid_until: None,
-            salience,
-            retained_action,
-            evidence_prior: crate::mechanics::priors::INITIAL_RETAINED_ACTION,
-            access_count: 0,
-            access_history,
-            tier: MemoryTier::Auto,
-            origin,
-            entity_tags: Vec::new(),
-            metadata,
-        };
-        self.graph.add_node(node)?;
-        self.emit_event(GraphEvent::NodeCreated {
-            node_id: id,
-            node_type: KnowledgeType::Evidence,
-        });
-
-        let edge_type = match result {
-            EvidenceResult::Supports => Some(EdgeType::Supports),
-            EvidenceResult::Contradicts => Some(EdgeType::Refutes),
-            EvidenceResult::Neutral | EvidenceResult::Inconclusive => None,
-        };
-
-        if let Some(edge_type) = edge_type {
-            let event_edge_type = edge_type.clone();
-            let mut edge_metadata = HashMap::new();
-            edge_metadata.insert(
-                "debug_relation".to_string(),
-                "evidence_hypothesis".to_string(),
-            );
-            edge_metadata.insert("evidence_result".to_string(), result_label.to_string());
-            // Conductance is the cold-start coupling log-LR prior; weight is its
-            // bounded projection, never authored (conductance.md / ADR-0002).
-            let evidence_node = self.graph.get_node(id)?.clone();
-            let hypothesis_node = self.graph.get_node(hypothesis)?.clone();
-            let conductance =
-                self.cold_start_conductance(&evidence_node, &hypothesis_node, &edge_type);
-            if conductance.is_finite() {
-                let edge_id = self.graph.next_edge_id();
-                let edge = Edge::seeded(
-                    edge_id,
-                    id,
-                    hypothesis,
-                    edge_type,
-                    conductance,
-                    crate::graph::edge::EdgeSource::Auto,
-                    timestamp,
-                    timestamp,
-                    edge_metadata,
-                );
-                self.graph.add_edge(edge)?;
-                self.emit_event(GraphEvent::EdgeCreated {
-                    edge_id,
-                    source: id,
-                    target: hypothesis,
-                    edge_type: event_edge_type,
-                });
-            }
-        }
-
-        Ok(id)
-    }
-
-    /// Mark a hypothesis as rejected with a reason.
-    pub fn reject_hypothesis(
-        &mut self,
-        hypothesis: NodeId,
-        reason: &str,
-        timestamp: Timestamp,
-    ) -> Result<(), Error> {
-        let node = self.graph.get_node_mut(hypothesis)?;
-        if node.node_type != KnowledgeType::Hypothesis {
-            return Err(Error::InvalidInput(
-                "reject_hypothesis requires a Hypothesis node".to_string(),
-            ));
-        }
-
-        node.metadata
-            .insert("hypothesis_status".to_string(), "rejected".to_string());
-        node.metadata
-            .insert("rejection_reason".to_string(), reason.to_string());
-        node.metadata
-            .insert("rejected_at".to_string(), timestamp.0.to_string());
-        node.updated_at = timestamp;
-
-        Ok(())
-    }
-
-    /// Mark a hypothesis as confirmed with a conclusion.
-    pub fn confirm_hypothesis(
-        &mut self,
-        hypothesis: NodeId,
-        conclusion: &str,
-        timestamp: Timestamp,
-    ) -> Result<(), Error> {
-        let node = self.graph.get_node_mut(hypothesis)?;
-        if node.node_type != KnowledgeType::Hypothesis {
-            return Err(Error::InvalidInput(
-                "confirm_hypothesis requires a Hypothesis node".to_string(),
-            ));
-        }
-
-        node.metadata
-            .insert("hypothesis_status".to_string(), "confirmed".to_string());
-        node.metadata.insert(
-            "confirmation_conclusion".to_string(),
-            conclusion.to_string(),
-        );
-        node.metadata
-            .insert("confirmed_at".to_string(), timestamp.0.to_string());
-        node.updated_at = timestamp;
-
-        Ok(())
-    }
-
-    /// End a debugging session and record its final outcome.
-    pub fn end_debug(
-        &mut self,
-        session: NodeId,
-        outcome: DebugOutcome,
-        timestamp: Timestamp,
-    ) -> Result<(), Error> {
-        let node = self.graph.get_node_mut(session)?;
-        if node.node_type != KnowledgeType::DebugSession {
-            return Err(Error::InvalidInput(
-                "end_debug requires a DebugSession node".to_string(),
-            ));
-        }
-
-        match outcome {
-            DebugOutcome::Resolved(conclusion) => {
-                node.metadata
-                    .insert("debug_outcome".to_string(), "resolved".to_string());
-                node.metadata
-                    .insert("debug_resolution".to_string(), conclusion);
-            }
-            DebugOutcome::Unresolved(reason) => {
-                node.metadata
-                    .insert("debug_outcome".to_string(), "unresolved".to_string());
-                node.metadata
-                    .insert("debug_unresolved_reason".to_string(), reason);
-            }
-            DebugOutcome::Abandoned => {
-                node.metadata
-                    .insert("debug_outcome".to_string(), "abandoned".to_string());
-            }
-        }
-        node.metadata
-            .insert("debug_ended_at".to_string(), timestamp.0.to_string());
-        node.updated_at = timestamp;
-
-        Ok(())
     }
 
     /// Ingest a new observation into the graph.
@@ -3032,31 +2055,6 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         Ok(touched)
     }
 
-    /// Set the explicit memory tier for a node.
-    ///
-    /// `Core` tier nodes are protected from decay in `tick()`.
-    /// `Auto` restores natural salience-based tier assignment.
-    pub fn set_tier(&mut self, node_id: NodeId, tier: MemoryTier) -> Result<(), Error> {
-        let node = self.graph.get_node_mut(node_id)?;
-        let old_tier = node.tier.clone();
-        node.tier = tier;
-        let new_tier = node.tier.clone();
-        if old_tier != new_tier {
-            self.emit_event(GraphEvent::TierTransition {
-                node_id,
-                from_tier: old_tier,
-                to_tier: new_tier,
-            });
-        }
-        Ok(())
-    }
-
-    /// Get the current memory tier of a node.
-    pub fn get_tier(&self, node_id: NodeId) -> Result<MemoryTier, Error> {
-        let node = self.graph.get_node(node_id)?;
-        Ok(node.tier.clone())
-    }
-
     /// Read-only observability getter for a node's authoritative retained-action
     /// reservoir `A_i` (log need-odds — ADR-0002/0003).
     ///
@@ -3110,68 +2108,6 @@ impl<S: StorageAdapter + Clone> Engine<S> {
     pub fn is_retracted(&self, node_id: NodeId) -> Result<bool, Error> {
         let node = self.graph.get_node(node_id)?;
         Ok(node.metadata.get("retracted").is_some_and(|v| v == "true"))
-    }
-
-    /// Apply a consumer feedback signal — a `FeedbackReceived` interaction.
-    ///
-    /// Rescorla-Wagner prediction error on the decay-exempt evidence prior `P_i`
-    /// (ADR-0008): `dP_i = eta * (lambda - predicted)` where `lambda` is the reward
-    /// target derived from the signal and `predicted` is the current `P_i`
-    /// (interactions.md). Feedback moves the persistent prior, NOT the base level:
-    /// already-well-predicted sites move less; negative feedback lowers `P_i` but
-    /// preserves provenance and source content. The `salience`/`retained_action`
-    /// cache is then refreshed from `B_i(now) + P_i_new`.
-    pub fn apply_feedback(
-        &mut self,
-        node_id: NodeId,
-        signal: crate::mechanics::social::FeedbackSignal,
-    ) -> Result<(), Error> {
-        use crate::mechanics::interactions::{lambda_reward, rescorla_wagner};
-        use crate::mechanics::priors::{TARGET_COACTIVATION_N, learning_rate, project_salience};
-
-        let current_salience = self.graph.storage().get_salience(node_id)?;
-        let current_prior = self.graph.storage().get_evidence_prior(node_id)?;
-        let now = self.graph.get_node(node_id)?.accessed_at;
-
-        let eta = learning_rate(TARGET_COACTIVATION_N);
-        let new_prior = rescorla_wagner(current_prior, lambda_reward(&signal), eta);
-        if !new_prior.is_finite() {
-            return Err(Error::NonFinite(format!(
-                "evidence prior for node {node_id:?}"
-            )));
-        }
-        self.graph
-            .storage_mut()
-            .set_evidence_prior(node_id, new_prior)?;
-
-        // Refresh the composite cache from B_i(now) + P_i_new.
-        let new_action = self.recompute_composite_action(node_id, now)?;
-        if !new_action.is_finite() {
-            return Err(Error::NonFinite(format!(
-                "retained action for node {node_id:?}"
-            )));
-        }
-        self.graph
-            .storage_mut()
-            .set_retained_action(node_id, new_action)?;
-        let new_salience = project_salience(new_action);
-
-        if (new_salience - current_salience).abs() > SALIENCE_CHANGE_EPSILON {
-            self.emit_event(GraphEvent::SalienceChanged {
-                node_id,
-                old: current_salience,
-                new: new_salience,
-            });
-            if current_salience < ARCHIVE_SALIENCE_THRESHOLD
-                && new_salience >= ARCHIVE_SALIENCE_THRESHOLD
-            {
-                self.emit_event(GraphEvent::NodeRevived {
-                    node_id,
-                    new_salience,
-                });
-            }
-        }
-        Ok(())
     }
 
     /// Commit a retrieved [`ContextPackage`] — the only reservoir-mutation path
@@ -3293,14 +2229,6 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         if let Some(level) = feedback {
             let signal: crate::mechanics::social::FeedbackSignal = level.into();
             let lambda = lambda_reward(&signal);
-            // Same feedback also nudges the reliability of the peers who originated
-            // the used sites (social.md: "positive feedback reinforces peer
-            // reliability; negative feedback lowers trust through prediction error").
-            // Each distinct origin peer is nudged once, in stable order, so a multi-
-            // site package does not over-credit one peer.
-            let feedback_strength = signal.signed_strength();
-            let mut peers_to_nudge: Vec<crate::graph::types::PeerId> = Vec::new();
-            let mut peer_seen: HashSet<crate::graph::types::PeerId> = HashSet::new();
             for site in &trace.accessed {
                 if self.is_retracted(site.node_id)? {
                     continue;
@@ -3337,20 +2265,10 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                         new: new_salience,
                     });
                 }
-                if let Ok(node) = self.graph.get_node(site.node_id) {
-                    let peer_id = node.origin.peer_id;
-                    if self.peers.get_peer(peer_id).is_some() && peer_seen.insert(peer_id) {
-                        peers_to_nudge.push(peer_id);
-                    }
-                }
                 report.feedback_applied += 1;
                 if committed_set.insert(site.node_id) {
                     committed.push(site.node_id);
                 }
-            }
-            // Route every peer trust move through the single traceable evidence path.
-            for peer_id in peers_to_nudge {
-                self.update_peer_trust_evidence(peer_id, feedback_strength)?;
             }
         }
 
@@ -3527,7 +2445,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
     /// `accessed_at` is left untouched, preserving last user-access semantics. Idle
     /// edges still leak their conductance.
     ///
-    /// Core tier and `IdentityCore` are protected (never decay under ordinary tick).
+    /// `Identity` nodes are protected (never decay under ordinary tick).
     /// Non-finite values are rejected at the boundary.
     pub fn tick(&mut self, now: Timestamp) -> Result<TickReport, Error> {
         use crate::mechanics::priors::project_salience;
@@ -3540,15 +2458,6 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         let mut total_conductance_delta = 0.0_f64;
 
         for id in node_ids {
-            let node_tier = match self.graph.get_node(id) {
-                Ok(node) => node.tier.clone(),
-                Err(_) => continue,
-            };
-            // Core tier is protected from ordinary decay.
-            if node_tier == MemoryTier::Core {
-                continue;
-            }
-
             let current_salience = match self.graph.storage().get_salience(id) {
                 Ok(s) => s,
                 Err(_) => continue,
@@ -3557,8 +2466,10 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                 Ok(kt) => kt.clone(),
                 Err(_) => continue,
             };
-            // IdentityCore is protected regardless of tier.
-            if node_type == KnowledgeType::IdentityCore {
+            // Identity nodes are protected from ordinary decay (identity-based
+            // protection, ADR/B4). Manual Core-tier pinning was removed — `tier`
+            // is always `Auto` in production, so there is no tier-override branch.
+            if node_type == KnowledgeType::Identity {
                 continue;
             }
 
@@ -3617,7 +2528,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         // (conductance.md post-commit plasticity / interactions.md `TimeElapsed`).
         // Unused weak coupling drains over time (density control). Idle time is
         // `now - edge.accessed_at` (the committed-use timestamp). Edges incident to
-        // a protected node (Core tier / `IdentityCore`) are exempt, mirroring node
+        // a protected node (`Identity`) are exempt, mirroring node
         // decay; `Contradicts` edges are excluded (routed to frustration, not
         // propagation — ADR-0005/0006). Edges are never deleted (ADR-0008/0006).
         {
@@ -3682,15 +2593,14 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         })
     }
 
-    /// True when a node is protected from ordinary `tick` dissipation — Core tier
-    /// or `IdentityCore` type (dissipation.md "Memory Tier" / priors decay policy).
-    /// Used to exempt protected edges from idle-edge leakage. A missing node is
-    /// treated as protected (no leak applied) so a dangling edge is never mutated.
+    /// True when a node is protected from ordinary `tick` dissipation — an
+    /// `Identity`-type node (identity-based protection; dissipation.md / priors
+    /// decay policy). Used to exempt protected edges from idle-edge leakage. A
+    /// missing node is treated as protected (no leak applied) so a dangling edge is
+    /// never mutated.
     fn is_protected_node(&self, id: NodeId) -> bool {
         match self.graph.get_node(id) {
-            Ok(node) => {
-                node.tier == MemoryTier::Core || node.node_type == KnowledgeType::IdentityCore
-            }
+            Ok(node) => node.node_type == KnowledgeType::Identity,
             Err(_) => true,
         }
     }
@@ -3780,7 +2690,10 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             supersede_rate,
             retracted_count,
             missing_embedding_count,
-            peer_count: self.peers.peer_count(),
+            // Peer registry removed with the peer/trust subsystem; production is
+            // always single-peer (PeerId(0)). Field retained at 0 for the stats
+            // render surface.
+            peer_count: 0,
             avg_salience,
             grade,
         }
@@ -3819,183 +2732,6 @@ impl<S: StorageAdapter + Clone> Engine<S> {
     /// Returns `Err(Error::InvalidInput)` if both `text` is empty and `query_embedding` is `None`.
     pub fn search(&self, input: SearchInput) -> Result<SearchResult, Error> {
         search::search(self, input)
-    }
-
-    /// Query the graph for facts valid at a specific point in time.
-    ///
-    /// Returns a `ContextPackage` containing only nodes that were valid at `as_of`:
-    /// - nodes with `valid_from <= as_of`, or no `valid_from` bound
-    /// - nodes with `valid_until > as_of`, or no `valid_until` bound
-    ///
-    /// This currently runs the standard query pipeline with default configuration,
-    /// then filters retrieved fragments by their bitemporal validity window.
-    pub fn fact_at(&self, query: &Query, as_of: Timestamp) -> Result<ContextPackage, Error> {
-        let config = QueryConfig {
-            now: Some(as_of),
-            ..QueryConfig::default()
-        };
-        let mut package = self.query(query, &config)?;
-
-        package
-            .identity
-            .retain(|fragment| self.node_is_valid_at(fragment.node_id, as_of));
-        package
-            .knowledge
-            .retain(|fragment| self.node_is_valid_at(fragment.node_id, as_of));
-        package
-            .memories
-            .retain(|fragment| self.node_is_valid_at(fragment.node_id, as_of));
-        package.tensions.retain(|tension| {
-            self.node_is_valid_at(tension.node_a, as_of)
-                && self.node_is_valid_at(tension.node_b, as_of)
-        });
-
-        Ok(package)
-    }
-
-    /// Query the graph from a specific agent's perspective about a subject.
-    ///
-    /// Returns a `ContextPackage` containing only what the observer agent knows
-    /// about the observed reference, filtered by scope and temporal validity.
-    /// Non-retroactive: excludes nodes created before the observer's first contribution.
-    pub fn query_perspective(
-        &self,
-        perspective: PerspectiveKey,
-        config: &QueryConfig,
-    ) -> Result<ContextPackage, Error> {
-        use crate::query::Fragment;
-
-        let storage = self.graph.storage();
-        let now = config.now.unwrap_or_else(Timestamp::now);
-
-        // Stage 1: Collect all observer nodes and find observer's earliest timestamp
-        let observer_node_ids = storage.nodes_by_peer(perspective.observer_peer_id);
-        if observer_node_ids.is_empty() {
-            return Ok(ContextPackage::empty());
-        }
-
-        let observer_earliest = observer_node_ids
-            .iter()
-            .filter_map(|&nid| storage.get_node(nid).ok())
-            .map(|node| node.created_at)
-            .min()
-            .unwrap_or(Timestamp(0));
-
-        // Stage 2: Filter by observed reference
-        let observer_set: HashSet<NodeId> = observer_node_ids.iter().copied().collect();
-        let filtered_ids: Vec<NodeId> =
-            match &perspective.observed {
-                ObservedRef::EntityTag(tag) => {
-                    let tagged = storage.nodes_by_entity_tag(tag);
-                    tagged
-                        .into_iter()
-                        .filter(|nid| observer_set.contains(nid))
-                        .collect()
-                }
-                ObservedRef::Agent(target_peer_id) => {
-                    let target_nodes: HashSet<NodeId> =
-                        storage.nodes_by_peer(*target_peer_id).into_iter().collect();
-                    observer_node_ids
-                        .iter()
-                        .copied()
-                        .filter(|&nid| {
-                            storage.edges_from(nid).iter().any(|&eid| {
-                                storage
-                                    .get_edge(eid)
-                                    .is_ok_and(|e| target_nodes.contains(&e.target))
-                            }) || storage.edges_to(nid).iter().any(|&eid| {
-                                storage
-                                    .get_edge(eid)
-                                    .is_ok_and(|e| target_nodes.contains(&e.source))
-                            })
-                        })
-                        .collect()
-                }
-                ObservedRef::Node(target_nid) => observer_node_ids
-                    .iter()
-                    .copied()
-                    .filter(|&nid| {
-                        if nid == *target_nid {
-                            return true;
-                        }
-                        storage.edges_from(nid).iter().any(|&eid| {
-                            storage.get_edge(eid).is_ok_and(|e| e.target == *target_nid)
-                        }) || storage.edges_to(nid).iter().any(|&eid| {
-                            storage.get_edge(eid).is_ok_and(|e| e.source == *target_nid)
-                        })
-                    })
-                    .collect(),
-            };
-
-        if filtered_ids.is_empty() {
-            return Ok(ContextPackage::empty());
-        }
-
-        // Stage 3: Apply scope filtering
-        let scope_filtered: Vec<NodeId> = if perspective.scope.is_universal() {
-            filtered_ids
-        } else {
-            filtered_ids
-                .into_iter()
-                .filter(|&nid| {
-                    storage.get_node(nid).is_ok_and(|node| {
-                        let rel = perspective.scope.relation_to(&node.origin.scope);
-                        matches!(
-                            rel,
-                            crate::graph::ScopeRelation::Equal
-                                | crate::graph::ScopeRelation::Ancestor
-                                | crate::graph::ScopeRelation::Universal
-                        )
-                    })
-                })
-                .collect()
-        };
-
-        if scope_filtered.is_empty() {
-            return Ok(ContextPackage::empty());
-        }
-
-        // Stage 4: Build the query potential field from filtered candidates.
-        // Retained action enters phi with unit coefficient (potential-landscape.md).
-        let mut field = crate::query::QueryField::new();
-        for &nid in &scope_filtered {
-            let salience = storage.get_salience(nid).unwrap_or(0.0);
-            let retained_action = storage.get_retained_action(nid).unwrap_or(0.0);
-            field.set(
-                nid,
-                crate::query::FieldSignals {
-                    text_score: salience,
-                    retained_action,
-                    ..Default::default()
-                },
-            );
-        }
-
-        // Stage 5: Additive directed RWR over conductance (read-only).
-        let seed_distribution = field.seed_distribution();
-        let response = crate::query::additive_rwr(&seed_distribution, storage, now);
-
-        // Stage 6: Score with the readout score, applying the non-retroactive filter.
-        let scoped_config = QueryConfig {
-            scope: perspective.scope.clone(),
-            ..config.clone()
-        };
-        let mut package = self.assemble_readout_package(&response, &scoped_config);
-        let retain_recent = |frag: &Fragment| match self.graph.get_node(frag.node_id) {
-            Ok(node) => node.created_at >= observer_earliest,
-            Err(_) => false,
-        };
-        package.identity.retain(retain_recent);
-        package.knowledge.retain(retain_recent);
-        package.memories.retain(retain_recent);
-
-        Ok(package)
-    }
-
-    fn node_is_valid_at(&self, node_id: NodeId, as_of: Timestamp) -> bool {
-        self.graph
-            .get_node(node_id)
-            .is_ok_and(|node| crate::graph::valid_at(node.valid_from, node.valid_until, as_of))
     }
 
     fn query_type_filtered(
@@ -4062,7 +2798,6 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             &HashMap::new(),
             config.token_budget,
             config.chars_per_token,
-            &config.scope,
             &ModeContext::default(),
         ))
     }
@@ -4134,7 +2869,6 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             &HashMap::new(),
             config.token_budget,
             config.chars_per_token,
-            &config.scope,
             &ModeContext::default(),
         ))
     }
@@ -4212,7 +2946,6 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             &HashMap::new(),
             config.token_budget,
             config.chars_per_token,
-            &config.scope,
             &ModeContext::default(),
         ))
     }
@@ -4298,7 +3031,6 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             &HashMap::new(),
             config.token_budget,
             config.chars_per_token,
-            &config.scope,
             &ModeContext { adjacent_ids },
         ))
     }
@@ -4339,12 +3071,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                 let Ok(node) = storage.get_node(nid) else {
                     continue;
                 };
-                let is_identity = matches!(
-                    node.node_type,
-                    KnowledgeType::IdentityCore
-                        | KnowledgeType::IdentityLearned
-                        | KnowledgeType::IdentityState
-                );
+                let is_identity = matches!(node.node_type, KnowledgeType::Identity);
                 if !is_identity {
                     continue;
                 }
@@ -4410,16 +3137,10 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                 (Some(qe), Some(ne)) => cosine_similarity(qe, ne),
                 _ => 0.0,
             };
-            let sw = scope_weight(&config.scope, &node.origin.scope, 0);
-            // Coarse-level prior bonus + evidence-driven trust projection (social.md
-            // "Retrieval Effects"); mirrors the assemble readout path.
-            let trust_weight = self
-                .get_peer(node.origin.peer_id)
-                .map(|p| {
-                    p.trust_level.scope_weight_bonus()
-                        + crate::mechanics::priors::project_trust(p.trust_reservoir)
-                })
-                .unwrap_or(0.0);
+            let sw = scope_weight(&config.scope, &node.origin.scope);
+            // Trust reservoir removed with the peer subsystem; term is neutral
+            // pending a real trust source.
+            let trust_weight = 1.0;
 
             let stress = node_stress.get(&nid).copied().unwrap_or(0.0);
             let score = readout_score(&ReadoutInputs {
@@ -4459,12 +3180,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             .iter()
             .filter_map(|(&nid, &act)| {
                 let node = storage.get_node(nid).ok()?;
-                let is_identity = matches!(
-                    node.node_type,
-                    KnowledgeType::IdentityCore
-                        | KnowledgeType::IdentityLearned
-                        | KnowledgeType::IdentityState
-                );
+                let is_identity = matches!(node.node_type, KnowledgeType::Identity);
                 let is_agent = match &config.agent_id {
                     Some(aid) => node.origin.peer_id.0.to_string() == *aid,
                     None => false,
@@ -4484,7 +3200,6 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             activations,
             config.token_budget,
             config.chars_per_token,
-            &config.scope,
             &crate::query::assembly::ModeContext::default(),
         );
 
@@ -4494,194 +3209,6 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         // actually used. Retrieval stays read-only.
         package.commit_trace = build_commit_trace(storage, response, &package);
         package
-    }
-
-    fn has_entity_edge_between(&self, a: NodeId, b: NodeId) -> bool {
-        self.graph.edges_from(a).iter().any(|&edge_id| {
-            self.graph
-                .get_edge(edge_id)
-                .is_ok_and(|edge| edge.target == b && edge.edge_type == EdgeType::Entity)
-        }) || self.graph.edges_from(b).iter().any(|&edge_id| {
-            self.graph
-                .get_edge(edge_id)
-                .is_ok_and(|edge| edge.target == a && edge.edge_type == EdgeType::Entity)
-        })
-    }
-
-    /// Cross-agent entity linking after parallel execution round.
-    ///
-    /// Creates Entity edges between nodes from different agents sharing entity tags.
-    /// No LLM calls — metadata matching only.
-    pub fn reflect_batch(&mut self, sessions: &[SessionSummary]) -> Result<ReflectReport, Error> {
-        let mut input_node_ids = BTreeSet::new();
-        for session in sessions {
-            for &node_id in &session.node_ids {
-                input_node_ids.insert(node_id);
-            }
-        }
-
-        let mut nodes_by_tag: BTreeMap<String, Vec<(NodeId, crate::graph::types::PeerId)>> =
-            BTreeMap::new();
-        for node_id in input_node_ids {
-            let Ok(node) = self.graph.get_node(node_id) else {
-                continue;
-            };
-
-            let mut seen_tags = BTreeSet::new();
-            for tag in &node.entity_tags {
-                if seen_tags.insert(tag.as_str()) {
-                    nodes_by_tag
-                        .entry(tag.clone())
-                        .or_default()
-                        .push((node_id, node.origin.peer_id));
-                }
-            }
-        }
-
-        let mut candidate_pairs = BTreeSet::new();
-        let mut clusters_found = 0usize;
-        // Distinct peers whose claims were corroborated by ≥1 other agent on a
-        // shared entity. Corroboration raises trust (social.md "Peer Trust"); each
-        // such peer is nudged once per reflect_batch via the traceable evidence path.
-        let mut corroborated_peers: BTreeSet<crate::graph::types::PeerId> = BTreeSet::new();
-        for nodes in nodes_by_tag.values() {
-            let mut has_cross_agent_pair = false;
-            for i in 0..nodes.len() {
-                for j in (i + 1)..nodes.len() {
-                    let (left_id, left_agent) = &nodes[i];
-                    let (right_id, right_agent) = &nodes[j];
-                    if left_agent == right_agent {
-                        continue;
-                    }
-
-                    has_cross_agent_pair = true;
-                    // Both peers agreed on this entity — corroboration evidence.
-                    corroborated_peers.insert(*left_agent);
-                    corroborated_peers.insert(*right_agent);
-                    let pair = if left_id < right_id {
-                        (*left_id, *right_id)
-                    } else {
-                        (*right_id, *left_id)
-                    };
-                    candidate_pairs.insert(pair);
-                }
-            }
-
-            if has_cross_agent_pair {
-                clusters_found += 1;
-            }
-        }
-
-        let mut entity_edges_created = 0usize;
-        let now = Timestamp::now();
-        for (source, target) in candidate_pairs {
-            if self.has_entity_edge_between(source, target) {
-                continue;
-            }
-
-            // Conductance is the cold-start coupling log-LR prior; weight is its
-            // bounded projection, never authored (conductance.md / ADR-0002).
-            let (Ok(source_node), Ok(target_node)) = (
-                self.graph.get_node(source).cloned(),
-                self.graph.get_node(target).cloned(),
-            ) else {
-                continue;
-            };
-            let conductance =
-                self.cold_start_conductance(&source_node, &target_node, &EdgeType::Entity);
-            if !conductance.is_finite() {
-                continue;
-            }
-            let edge_id = self.graph.next_edge_id();
-            let edge = Edge::seeded(
-                edge_id,
-                source,
-                target,
-                EdgeType::Entity,
-                conductance,
-                crate::graph::edge::EdgeSource::Auto,
-                now,
-                now,
-                HashMap::new(),
-            );
-            self.graph.add_edge(edge)?;
-            self.emit_event(GraphEvent::EdgeCreated {
-                edge_id,
-                source,
-                target,
-                edge_type: EdgeType::Entity,
-            });
-            entity_edges_created += 1;
-        }
-
-        // Corroboration trust update: every peer corroborated by another agent on a
-        // shared entity gets a full-strength positive trust nudge through the single
-        // traceable evidence path (social.md "Peer Trust": corroboration raises
-        // trust). Only registered peers move; origin and the coarse level are intact.
-        for peer_id in corroborated_peers {
-            if self.peers.get_peer(peer_id).is_some() {
-                self.update_peer_trust_evidence(peer_id, 1.0)?;
-            }
-        }
-
-        Ok(ReflectReport {
-            entity_edges_created,
-            clusters_found,
-        })
-    }
-
-    /// Search for rejected hypotheses matching a query string.
-    ///
-    /// Returns `NodeId`s of `KnowledgeType::Hypothesis` nodes whose metadata contains
-    /// `hypothesis_status = "rejected"` and whose name, content, or `rejection_reason`
-    /// contains the query substring (case-insensitive). If `limit` is 0 an empty vector
-    /// is returned immediately.
-    pub fn search_rejected_hypotheses(
-        &self,
-        query: &str,
-        limit: usize,
-    ) -> Result<Vec<NodeId>, Error> {
-        if limit == 0 {
-            return Ok(Vec::new());
-        }
-
-        let storage = self.graph.storage();
-        let hypothesis_ids = storage.nodes_by_type(&KnowledgeType::Hypothesis);
-        let query_lower = query.to_lowercase();
-
-        let mut results = Vec::new();
-        for nid in hypothesis_ids {
-            let node = storage.get_node(nid)?;
-
-            let is_rejected = node
-                .metadata
-                .get("hypothesis_status")
-                .is_some_and(|status| status == "rejected");
-            if !is_rejected {
-                continue;
-            }
-
-            if query_lower.is_empty() {
-                results.push(nid);
-            } else {
-                let name_match = node.name.to_lowercase().contains(&query_lower);
-                let content_match = node.content.to_lowercase().contains(&query_lower);
-                let reason_match = node
-                    .metadata
-                    .get("rejection_reason")
-                    .is_some_and(|reason| reason.to_lowercase().contains(&query_lower));
-
-                if name_match || content_match || reason_match {
-                    results.push(nid);
-                }
-            }
-
-            if results.len() >= limit {
-                break;
-            }
-        }
-
-        Ok(results)
     }
 
     /// Compute the nine-metric read-only [`GraphHealth`] for the graph
@@ -4803,99 +3330,6 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         crate::mechanics::observability::derive_warnings(&self.graph_health_at(now))
     }
 
-    /// Generate a support report for a node.
-    ///
-    /// Traverses only direct edges (1-hop) from the target node to count supporting
-    /// and contradicting sources, measure evidence independence, and sum support salience.
-    ///
-    /// Supporting edges: `ConsolidatedFrom`, `ReinforcedBy`, `Supports`.
-    /// Contradicting edges: `Contradicts`, `Refutes` (the debug-lifecycle
-    /// counter-evidence edge created by `log_evidence`).
-    ///
-    /// Returns an error if the node does not exist.
-    pub fn support_report(&self, node_id: NodeId) -> Result<SupportReport, Error> {
-        let storage = self.graph.storage();
-        let _node = storage.get_node(node_id)?; // Verify node exists
-
-        let mut supporting_sources = 0;
-        let mut contradicting_sources = 0;
-        let mut origins = std::collections::HashSet::new();
-        let mut total_support_salience = 0.0;
-        let mut visited = std::collections::HashSet::new();
-
-        // Traverse outgoing edges (node_id -> target)
-        for &edge_id in storage.edges_from(node_id) {
-            let edge = storage.get_edge(edge_id)?;
-            let target_id = edge.target;
-
-            // Skip if already visited (prevent circular evidence inflation)
-            if visited.contains(&target_id) {
-                continue;
-            }
-            visited.insert(target_id);
-
-            match edge.edge_type {
-                EdgeType::ConsolidatedFrom | EdgeType::ReinforcedBy | EdgeType::Supports => {
-                    supporting_sources += 1;
-                    let target_node = storage.get_node(target_id)?;
-                    total_support_salience += target_node.salience;
-                    origins.insert((
-                        target_node.origin.peer_id,
-                        target_node.origin.session_id.clone(),
-                    ));
-                }
-                EdgeType::Contradicts | EdgeType::Refutes => {
-                    contradicting_sources += 1;
-                    let target_node = storage.get_node(target_id)?;
-                    origins.insert((
-                        target_node.origin.peer_id,
-                        target_node.origin.session_id.clone(),
-                    ));
-                }
-                _ => {}
-            }
-        }
-
-        // Traverse incoming edges (source -> node_id)
-        for &edge_id in storage.edges_to(node_id) {
-            let edge = storage.get_edge(edge_id)?;
-            let source_id = edge.source;
-
-            // Skip if already visited (prevent circular evidence inflation)
-            if visited.contains(&source_id) {
-                continue;
-            }
-            visited.insert(source_id);
-
-            match edge.edge_type {
-                EdgeType::ConsolidatedFrom | EdgeType::ReinforcedBy | EdgeType::Supports => {
-                    supporting_sources += 1;
-                    let source_node = storage.get_node(source_id)?;
-                    total_support_salience += source_node.salience;
-                    origins.insert((
-                        source_node.origin.peer_id,
-                        source_node.origin.session_id.clone(),
-                    ));
-                }
-                EdgeType::Contradicts | EdgeType::Refutes => {
-                    contradicting_sources += 1;
-                    let source_node = storage.get_node(source_id)?;
-                    origins.insert((
-                        source_node.origin.peer_id,
-                        source_node.origin.session_id.clone(),
-                    ));
-                }
-                _ => {}
-            }
-        }
-
-        Ok(SupportReport {
-            supporting_sources,
-            contradicting_sources,
-            independent_origins: origins.len(),
-            total_support_salience,
-        })
-    }
     /// Read-only access to the underlying graph.
     pub fn graph(&self) -> &Graph<S> {
         &self.graph
@@ -4924,7 +3358,7 @@ mod tests {
             entity_tags: vec!["test".to_string()],
             origin: Origin {
                 peer_id: crate::graph::types::PeerId(0),
-                source_kind: crate::peer::SourceKind::AgentObservation,
+                source_kind: crate::graph::types::SourceKind::AgentObservation,
                 session_id: "session-1".to_string(),
                 scope: crate::graph::ScopePath::universal(),
                 confidence: 0.9,
@@ -5191,7 +3625,7 @@ mod tests {
         let mut engine = Engine::new();
         // Identity-core endpoint is protected from ordinary dissipation.
         let mut core_obs = make_observation("identity");
-        core_obs.node_type = KnowledgeType::IdentityCore;
+        core_obs.node_type = KnowledgeType::Identity;
         let IngestResult::Created(core) = engine.ingest(core_obs).unwrap() else {
             panic!()
         };
@@ -5288,7 +3722,7 @@ mod tests {
         let mut engine = Engine::new();
         let cos = 0.67_f64;
         let mut o1 = make_observation("identity");
-        o1.node_type = KnowledgeType::IdentityLearned;
+        o1.node_type = KnowledgeType::Identity;
         o1.embedding = Some(vec![1.0, 0.0]);
         o1.entity_tags = vec!["shared".to_string()];
         let mut o2 = make_observation("knowledge");
@@ -5351,13 +3785,6 @@ mod tests {
         let pkg = engine.query(&q, &QueryConfig::default()).unwrap();
         assert_eq!(pkg.total_fragments(), 0);
         assert_eq!(pkg.agent_tension, 0.0);
-    }
-
-    #[test]
-    fn reflect_batch_returns_report() {
-        let mut engine = Engine::new();
-        let report = engine.reflect_batch(&[]).unwrap();
-        assert_eq!(report.entity_edges_created, 0);
     }
 
     #[test]
@@ -5497,7 +3924,7 @@ mod tests {
         let mut engine = Engine::new();
 
         let identity_obs = Observation {
-            node_type: KnowledgeType::IdentityCore,
+            node_type: KnowledgeType::Identity,
             timestamp: Timestamp(0),
             ..make_observation("identity")
         };
@@ -5515,7 +3942,7 @@ mod tests {
         let salience = engine.graph().storage().get_salience(id).unwrap();
         assert_eq!(
             salience, initial_salience,
-            "IdentityCore should not decay (salience unchanged after a year)"
+            "Identity should not decay (salience unchanged after a year)"
         );
     }
 
@@ -5772,11 +4199,11 @@ mod tests {
         let mut engine = Engine::with_config(config);
 
         let identity_obs = Observation {
-            node_type: KnowledgeType::IdentityCore,
+            node_type: KnowledgeType::Identity,
             embedding: Some(vec![1.0, 0.0]),
             origin: Origin {
                 peer_id: crate::graph::types::PeerId(0),
-                source_kind: crate::peer::SourceKind::AgentObservation,
+                source_kind: crate::graph::types::SourceKind::AgentObservation,
                 session_id: "session-1".to_string(),
                 scope: crate::graph::ScopePath::universal(),
                 confidence: 1.0,

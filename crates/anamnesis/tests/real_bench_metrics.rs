@@ -5,7 +5,6 @@ use eval_common::real_bench::dataset::GoldEvidence;
 use eval_common::real_bench::graph::ranked_fragments_for_test;
 use eval_common::real_bench::metrics::{RankedRetrieval, first_hit_rank, retrieval_metrics};
 
-use anamnesis::graph::scope::ScopeRelation;
 use anamnesis::graph::{KnowledgeType, NodeId, Origin, PeerId};
 use anamnesis::query::{ContextPackage, Fragment};
 
@@ -76,7 +75,7 @@ fn retrieval_metrics_count_multiple_unique_units_at_one_rank() {
 #[test]
 fn retrieval_ranking_sorts_across_context_buckets_by_score() {
     let mut package = ContextPackage::empty();
-    package.identity = vec![fragment(1, KnowledgeType::IdentityCore, 0.1)];
+    package.identity = vec![fragment(1, KnowledgeType::Identity, 0.1)];
     package.knowledge = vec![fragment(2, KnowledgeType::Semantic, 0.9)];
     package.memories = vec![fragment(3, KnowledgeType::Episodic, 0.8)];
 
@@ -149,6 +148,5 @@ fn fragment(id: u64, node_type: KnowledgeType, relevance: f64) -> Fragment {
         node_type,
         relevance,
         origin: Origin::test_default(PeerId(1)),
-        scope: ScopeRelation::Universal,
     }
 }

@@ -37,11 +37,10 @@ fn test_engine_namespace_query_types() {
 
 #[test]
 fn test_engine_namespace_api_types() {
-    use anamnesis::engine::{EngineConfig, Observation, ReflectReport, SessionSummary, TickReport};
+    use anamnesis::engine::{EngineConfig, Observation, TickReport};
     let _ = EngineConfig::default();
     let _ = TickReport::default();
-    let _ = ReflectReport::default();
-    let _ = std::any::type_name::<(Observation, SessionSummary)>();
+    let _ = std::any::type_name::<Observation>();
 }
 
 #[test]

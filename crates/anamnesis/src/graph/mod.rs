@@ -8,10 +8,10 @@ pub mod types;
 
 pub use edge::Edge;
 pub use node::{Node, Origin};
-pub use scope::{ScopePath, ScopeRelation};
+pub use scope::ScopePath;
 pub use temporal::valid_at;
 pub use types::{
-    AccessTrace, EdgeId, EdgeType, KnowledgeType, MemoryTier, NodeId, PeerId, Timestamp,
+    AccessTrace, EdgeId, EdgeType, KnowledgeType, MemoryTier, NodeId, PeerId, SourceKind, Timestamp,
 };
 
 use crate::error::Error;
@@ -185,7 +185,7 @@ mod tests {
             tier: MemoryTier::Auto,
             origin: Origin {
                 peer_id: crate::graph::types::PeerId(0),
-                source_kind: crate::peer::SourceKind::AgentObservation,
+                source_kind: crate::graph::types::SourceKind::AgentObservation,
                 session_id: "session-1".to_string(),
                 scope: crate::graph::ScopePath::universal(),
                 confidence: 0.9,

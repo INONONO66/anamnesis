@@ -17,7 +17,6 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::graph::node::Origin;
-use crate::graph::scope::{ScopePath, ScopeRelation};
 use crate::graph::{KnowledgeType, NodeId};
 use crate::query::types::{ContextPackage, Fragment, Query, Tension, TokenBudget};
 
@@ -151,22 +150,14 @@ pub fn collect_contradiction_pairs<S: crate::storage::StorageAdapter>(
     (pairs, node_stress)
 }
 
-/// Determines the scope of a node relative to the query context.
-pub fn determine_scope(query_scope: &ScopePath, node_scope: &ScopePath) -> ScopeRelation {
-    query_scope.relation_to(node_scope)
-}
-
 /// Determines whether a node type belongs to the identity partition.
 pub fn is_identity_type(kt: &KnowledgeType) -> bool {
-    matches!(
-        kt,
-        KnowledgeType::IdentityCore | KnowledgeType::IdentityLearned | KnowledgeType::IdentityState
-    )
+    matches!(kt, KnowledgeType::Identity)
 }
 
 /// Determines whether a node type belongs to the memories partition.
 pub fn is_memory_type(kt: &KnowledgeType) -> bool {
-    matches!(kt, KnowledgeType::Episodic | KnowledgeType::Event)
+    matches!(kt, KnowledgeType::Episodic)
 }
 
 /// Estimates the token count for a string.
@@ -189,7 +180,10 @@ pub enum Resolution {
 }
 
 /// Builds a [`Fragment`] from a scored node at the specified resolution.
-pub fn build_fragment(node: &ScoredNode, scope: ScopeRelation, resolution: Resolution) -> Fragment {
+///
+/// The node's scope travels with the fragment via `origin.scope` (scopes are flat
+/// opaque paths since the hierarchy was removed).
+pub fn build_fragment(node: &ScoredNode, resolution: Resolution) -> Fragment {
     Fragment {
         node_id: node.node_id,
         name: node.name.clone(),
@@ -204,7 +198,6 @@ pub fn build_fragment(node: &ScoredNode, scope: ScopeRelation, resolution: Resol
         node_type: node.node_type.clone(),
         relevance: node.relevance,
         origin: node.origin.clone(),
-        scope,
     }
 }
 
@@ -284,7 +277,6 @@ pub fn assemble_context_package(
     contradiction_pairs: &[ContradictionPair],
     token_budget: usize,
     chars_per_token: usize,
-    query_scope: &ScopePath,
 ) -> ContextPackage {
     scored_nodes.sort_by(|a, b| {
         b.relevance
@@ -315,7 +307,6 @@ pub fn assemble_context_package(
             break; // No budget left even for L0
         }
 
-        let scope = determine_scope(query_scope, &node.origin.scope);
         let (resolution, tokens_used) = if remaining >= l2_tokens {
             (Resolution::L2, l2_tokens)
         } else if remaining >= l1_tokens {
@@ -325,7 +316,7 @@ pub fn assemble_context_package(
         };
 
         if is_identity_type(&node.node_type) {
-            let frag = build_fragment(node, scope, resolution);
+            let frag = build_fragment(node, resolution);
             budget.used += tokens_used;
             budget.identity_used += tokens_used;
             identity_frags.push(frag);
@@ -341,12 +332,12 @@ pub fn assemble_context_package(
                 _ => name_tokens,
             };
 
-            let frag = build_fragment(node, scope, resolution);
+            let frag = build_fragment(node, resolution);
             budget.used += tokens_used;
             budget.memories_used += tokens_used;
             memory_frags.push(frag);
         } else {
-            let frag = build_fragment(node, scope, resolution);
+            let frag = build_fragment(node, resolution);
             budget.used += tokens_used;
             budget.knowledge_used += tokens_used;
             knowledge_frags.push(frag);
@@ -450,7 +441,6 @@ pub fn assemble_context_package_for_mode(
     activations: &HashMap<NodeId, f64>,
     token_budget: usize,
     chars_per_token: usize,
-    query_scope: &ScopePath,
     mode_context: &ModeContext,
 ) -> ContextPackage {
     let upgrade_data: HashMap<NodeId, NodeUpgradeData> = scored_nodes
@@ -480,7 +470,6 @@ pub fn assemble_context_package_for_mode(
         contradiction_pairs,
         token_budget,
         chars_per_token,
-        query_scope,
     );
 
     if matches!(query, Query::Associative { .. } | Query::List { .. }) {
@@ -761,11 +750,12 @@ impl Ord for Resolution {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph::scope::ScopePath;
 
     fn make_origin() -> Origin {
         Origin {
             peer_id: crate::graph::types::PeerId(0),
-            source_kind: crate::peer::SourceKind::AgentObservation,
+            source_kind: crate::graph::types::SourceKind::AgentObservation,
             session_id: "session-1".to_string(),
             scope: ScopePath::new("proj-a").expect("valid scope"),
             confidence: 0.9,
@@ -798,17 +788,10 @@ mod tests {
     #[test]
     fn identity_nodes_go_to_identity_partition() {
         let nodes = vec![
-            make_node(0, KnowledgeType::IdentityCore, "I am an architect", 0.9),
+            make_node(0, KnowledgeType::Identity, "I am an architect", 0.9),
             make_node(1, KnowledgeType::Semantic, "auth uses factory", 0.8),
         ];
-        let pkg = assemble_context_package(
-            nodes,
-            &[],
-            &[],
-            10000,
-            4,
-            &ScopePath::new("proj-a").expect("valid scope"),
-        );
+        let pkg = assemble_context_package(nodes, &[], &[], 10000, 4);
         assert_eq!(pkg.identity.len(), 1);
         assert_eq!(pkg.knowledge.len(), 1);
         assert_eq!(pkg.memories.len(), 0);
@@ -818,9 +801,9 @@ mod tests {
     fn episodic_nodes_go_to_memories_partition() {
         let nodes = vec![
             make_node(0, KnowledgeType::Episodic, "session note", 0.7),
-            make_node(1, KnowledgeType::Event, "deployment event", 0.6),
+            make_node(1, KnowledgeType::Episodic, "deployment event", 0.6),
         ];
-        let pkg = assemble_context_package(nodes, &[], &[], 10000, 4, &ScopePath::universal());
+        let pkg = assemble_context_package(nodes, &[], &[], 10000, 4);
         assert_eq!(pkg.memories.len(), 2);
         assert_eq!(pkg.identity.len(), 0);
         assert_eq!(pkg.knowledge.len(), 0);
@@ -833,7 +816,7 @@ mod tests {
             make_node(1, KnowledgeType::Semantic, &"b".repeat(100), 0.8),
             make_node(2, KnowledgeType::Semantic, &"c".repeat(100), 0.7),
         ];
-        let pkg = assemble_context_package(nodes, &[], &[], 10, 4, &ScopePath::universal());
+        let pkg = assemble_context_package(nodes, &[], &[], 10, 4);
         assert!(
             pkg.token_usage.used <= 10 + 1,
             "used {} tokens, budget was 10",
@@ -847,7 +830,7 @@ mod tests {
         node.summary = Some("summary".to_string());
         node.content = "c".to_string();
 
-        let pkg = assemble_context_package(vec![node], &[], &[], 2, 1, &ScopePath::universal());
+        let pkg = assemble_context_package(vec![node], &[], &[], 2, 1);
 
         assert_eq!(pkg.memories.len(), 1);
         assert_eq!(pkg.memories[0].summary, None);
@@ -862,7 +845,7 @@ mod tests {
         node.summary = None;
         node.content = "cc".to_string();
 
-        let pkg = assemble_context_package(vec![node], &[], &[], 3, 1, &ScopePath::universal());
+        let pkg = assemble_context_package(vec![node], &[], &[], 3, 1);
 
         assert_eq!(pkg.memories.len(), 1);
         assert_eq!(pkg.memories[0].summary, None);
@@ -875,8 +858,7 @@ mod tests {
     fn tensions_populated_for_activated_contradictions() {
         // Pairs are surfaced with their precomputed stress and gates.
         let contradicts = vec![pair(0, 1, 0.48)];
-        let pkg =
-            assemble_context_package(vec![], &[], &contradicts, 10000, 4, &ScopePath::universal());
+        let pkg = assemble_context_package(vec![], &[], &contradicts, 10000, 4);
         assert_eq!(pkg.tensions.len(), 1);
         assert_eq!(pkg.tensions[0].node_a, NodeId(0));
         assert_eq!(pkg.tensions[0].node_b, NodeId(1));
@@ -893,8 +875,7 @@ mod tests {
             make_node(1, KnowledgeType::Semantic, "claim B", 0.85),
         ];
         let contradicts = vec![pair(0, 1, 0.5)];
-        let pkg =
-            assemble_context_package(nodes, &[], &contradicts, 10000, 4, &ScopePath::universal());
+        let pkg = assemble_context_package(nodes, &[], &contradicts, 10000, 4);
         assert_eq!(pkg.knowledge.len(), 2, "both contradicting claims survive");
         assert_eq!(pkg.tensions.len(), 1);
         assert!(pkg.tensions[0].stress > 0.0);
@@ -902,7 +883,7 @@ mod tests {
 
     #[test]
     fn agent_tension_zero_without_contradictions() {
-        let pkg = assemble_context_package(vec![], &[], &[], 10000, 4, &ScopePath::universal());
+        let pkg = assemble_context_package(vec![], &[], &[], 10000, 4);
         assert_eq!(pkg.agent_tension, 0.0);
     }
 
@@ -910,7 +891,7 @@ mod tests {
     fn agent_tension_nonzero_with_identity_contradiction() {
         let identity_id = NodeId(0);
 
-        let identity_acts = vec![(identity_id, KnowledgeType::IdentityCore, 0.9)];
+        let identity_acts = vec![(identity_id, KnowledgeType::Identity, 0.9)];
         let contradicts = vec![pair(0, 1, 0.72)];
 
         let tension = compute_agent_tension(&identity_acts, &contradicts);
@@ -924,7 +905,7 @@ mod tests {
     fn agent_tension_ignores_unrelated_contradictions() {
         let identity_id = NodeId(0);
 
-        let identity_acts = vec![(identity_id, KnowledgeType::IdentityCore, 0.9)];
+        let identity_acts = vec![(identity_id, KnowledgeType::Identity, 0.9)];
         let contradicts = vec![pair(5, 6, 0.9)];
 
         let tension = compute_agent_tension(&identity_acts, &contradicts);
@@ -941,32 +922,9 @@ mod tests {
             make_node(1, KnowledgeType::Semantic, "high relevance", 0.9),
             make_node(2, KnowledgeType::Semantic, "medium relevance", 0.6),
         ];
-        let pkg = assemble_context_package(nodes, &[], &[], 10000, 4, &ScopePath::universal());
+        let pkg = assemble_context_package(nodes, &[], &[], 10000, 4);
         assert_eq!(pkg.knowledge.len(), 3);
         assert!(pkg.knowledge[0].relevance >= pkg.knowledge[1].relevance);
         assert!(pkg.knowledge[1].relevance >= pkg.knowledge[2].relevance);
-    }
-
-    #[test]
-    fn determine_scope_same_project() {
-        let query_scope = ScopePath::new("proj-a").expect("valid scope");
-        let node_scope = ScopePath::new("proj-a").expect("valid scope");
-        let scope = determine_scope(&query_scope, &node_scope);
-        assert_eq!(scope, ScopeRelation::Equal);
-    }
-
-    #[test]
-    fn determine_scope_universal() {
-        let query_scope = ScopePath::new("proj-a").expect("valid scope");
-        let scope = determine_scope(&query_scope, &ScopePath::universal());
-        assert_eq!(scope, ScopeRelation::Universal);
-    }
-
-    #[test]
-    fn determine_scope_other_project() {
-        let query_scope = ScopePath::new("proj-a").expect("valid scope");
-        let node_scope = ScopePath::new("proj-b").expect("valid scope");
-        let scope = determine_scope(&query_scope, &node_scope);
-        assert_eq!(scope, ScopeRelation::Disjoint);
     }
 }

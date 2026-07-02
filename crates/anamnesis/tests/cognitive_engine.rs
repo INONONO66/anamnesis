@@ -19,7 +19,7 @@ fn make_origin(_agent: &str, project: Option<&str>) -> Origin {
         .unwrap_or_else(ScopePath::universal);
     Origin {
         peer_id: anamnesis::graph::types::PeerId(0),
-        source_kind: anamnesis::peer::SourceKind::AgentObservation,
+        source_kind: anamnesis::engine::SourceKind::AgentObservation,
         session_id: "session-1".to_string(),
         scope,
         confidence: 0.9,
@@ -60,7 +60,7 @@ fn full_cognitive_lifecycle() {
 
     let identity_obs = make_obs(
         "I am a code architect",
-        KnowledgeType::IdentityCore,
+        KnowledgeType::Identity,
         vec![1.0, 0.0, 0.0],
         Some("proj-a"),
     );
@@ -78,7 +78,7 @@ fn full_cognitive_lifecycle() {
     );
     let decision_obs = make_obs(
         "use factory not DI",
-        KnowledgeType::Decision,
+        KnowledgeType::Semantic,
         vec![0.6, 0.4, 0.0],
         Some("proj-a"),
     );

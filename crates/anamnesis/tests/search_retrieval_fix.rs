@@ -17,7 +17,7 @@ fn make_obs(name: &str, node_type: KnowledgeType) -> Observation {
         entity_tags: vec![],
         origin: Origin {
             peer_id: anamnesis::graph::types::PeerId(0),
-            source_kind: anamnesis::peer::SourceKind::AgentObservation,
+            source_kind: anamnesis::engine::SourceKind::AgentObservation,
             session_id: "session-1".to_string(),
             scope: anamnesis::graph::ScopePath::universal(),
             confidence: 0.9,
@@ -116,7 +116,7 @@ fn test_l2_budget_exhaustion_degrades_gracefully() {
             entity_tags: vec![],
             origin: Origin {
                 peer_id: anamnesis::graph::types::PeerId(0),
-                source_kind: anamnesis::peer::SourceKind::AgentObservation,
+                source_kind: anamnesis::engine::SourceKind::AgentObservation,
                 session_id: "session-1".to_string(),
                 scope: anamnesis::graph::ScopePath::universal(),
                 confidence: 0.9,
@@ -177,7 +177,7 @@ fn test_search_episodic_content_preserved() {
             entity_tags: vec!["auth".to_string()],
             origin: Origin {
                 peer_id: anamnesis::graph::types::PeerId(0),
-                source_kind: anamnesis::peer::SourceKind::AgentObservation,
+                source_kind: anamnesis::engine::SourceKind::AgentObservation,
                 session_id: "session-knowledge".to_string(),
                 scope: anamnesis::graph::ScopePath::universal(),
                 confidence: 0.9,
@@ -208,7 +208,7 @@ fn test_search_episodic_content_preserved() {
             entity_tags: vec!["auth".to_string()],
             origin: Origin {
                 peer_id: anamnesis::graph::types::PeerId(0),
-                source_kind: anamnesis::peer::SourceKind::AgentObservation,
+                source_kind: anamnesis::engine::SourceKind::AgentObservation,
                 session_id: format!("session-{}", i),
                 scope: anamnesis::graph::ScopePath::universal(),
                 confidence: 0.9,
@@ -240,7 +240,7 @@ fn test_search_episodic_content_preserved() {
             entity_tags: vec!["auth".to_string()],
             origin: Origin {
                 peer_id: anamnesis::graph::types::PeerId(0),
-                source_kind: anamnesis::peer::SourceKind::AgentObservation,
+                source_kind: anamnesis::engine::SourceKind::AgentObservation,
                 session_id: "session-contradiction".to_string(),
                 scope: anamnesis::graph::ScopePath::universal(),
                 confidence: 0.9,

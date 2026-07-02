@@ -31,8 +31,8 @@ impl Paradigm for Interference {
         // (1) Contradiction graph: shared cue A -> B, A -> D, with Contradicts(B,D).
         let mut e = scenario_engine();
         let a = ingest(&mut e, "A", KnowledgeType::Semantic);
-        let b = ingest(&mut e, "B", KnowledgeType::Decision);
-        let d = ingest(&mut e, "D", KnowledgeType::Decision);
+        let b = ingest(&mut e, "B", KnowledgeType::Custom("decision".to_string()));
+        let d = ingest(&mut e, "D", KnowledgeType::Custom("decision".to_string()));
         e.link(a, b, EdgeType::Semantic).unwrap();
         e.link(a, d, EdgeType::Semantic).unwrap();
         e.link(b, d, EdgeType::Contradicts).unwrap();
@@ -45,8 +45,8 @@ impl Paradigm for Interference {
         // by the Contradicts edge, not by the shared-cue fan.
         let mut c = scenario_engine();
         let a2 = ingest(&mut c, "A2", KnowledgeType::Semantic);
-        let b2 = ingest(&mut c, "B2", KnowledgeType::Decision);
-        let d2 = ingest(&mut c, "D2", KnowledgeType::Decision);
+        let b2 = ingest(&mut c, "B2", KnowledgeType::Custom("decision".to_string()));
+        let d2 = ingest(&mut c, "D2", KnowledgeType::Custom("decision".to_string()));
         c.link(a2, b2, EdgeType::Semantic).unwrap();
         c.link(a2, d2, EdgeType::Semantic).unwrap();
         c.link(b2, d2, EdgeType::Semantic).unwrap();
@@ -59,7 +59,7 @@ impl Paradigm for Interference {
         let ab_competed = activation_from(&e, a, b);
         let mut s = scenario_engine();
         let a3 = ingest(&mut s, "A3", KnowledgeType::Semantic);
-        let b3 = ingest(&mut s, "B3", KnowledgeType::Decision);
+        let b3 = ingest(&mut s, "B3", KnowledgeType::Custom("decision".to_string()));
         s.link(a3, b3, EdgeType::Semantic).unwrap();
         let ab_alone = activation_from(&s, a3, b3);
         let cue_competition = ab_competed < ab_alone;

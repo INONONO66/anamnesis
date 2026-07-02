@@ -114,7 +114,7 @@ impl FixtureBuilder {
             entity_tags: entity_tags.iter().map(|tag| (*tag).to_string()).collect(),
             origin: Origin {
                 peer_id: anamnesis::graph::types::PeerId(0),
-                source_kind: anamnesis::peer::SourceKind::AgentObservation,
+                source_kind: anamnesis::engine::SourceKind::AgentObservation,
                 session_id: "golden".to_string(),
                 scope: ScopePath::new(scope).expect("valid scope path"),
                 confidence: 0.9,
@@ -161,7 +161,7 @@ fn seed_dev_rust(b: &mut FixtureBuilder) {
         "rust.result.unwrap",
         "avoid unwrap in libraries",
         "rust Result errors unwrap library discouraged",
-        KnowledgeType::Convention,
+        KnowledgeType::Custom("convention".to_string()),
         "dev/rust",
         &["rust", "errors"],
     );
@@ -169,7 +169,7 @@ fn seed_dev_rust(b: &mut FixtureBuilder) {
         "rust.result.panic",
         "panic for unrecoverable errors",
         "rust Result errors panic unrecoverable invariants",
-        KnowledgeType::Decision,
+        KnowledgeType::Custom("decision".to_string()),
         "dev/rust",
         &["rust", "errors"],
     );
@@ -177,7 +177,7 @@ fn seed_dev_rust(b: &mut FixtureBuilder) {
         "rust.result.question",
         "question mark operator threading errors",
         "rust Result errors question mark operator early return",
-        KnowledgeType::Procedural,
+        KnowledgeType::Custom("procedural".to_string()),
         "dev/rust",
         &["rust", "errors"],
     );
@@ -185,7 +185,7 @@ fn seed_dev_rust(b: &mut FixtureBuilder) {
         "rust.result.anyhow",
         "anyhow context for application errors",
         "rust Result errors anyhow context application boundary",
-        KnowledgeType::Convention,
+        KnowledgeType::Custom("convention".to_string()),
         "dev/rust",
         &["rust", "errors"],
     );
@@ -195,7 +195,7 @@ fn seed_dev_rust(b: &mut FixtureBuilder) {
         "rust.tokio.runtime",
         "tokio runtime executor",
         "rust tokio executor async runtime preferred default",
-        KnowledgeType::Decision,
+        KnowledgeType::Custom("decision".to_string()),
         "dev/rust",
         &["rust", "tokio"],
     );
@@ -203,7 +203,7 @@ fn seed_dev_rust(b: &mut FixtureBuilder) {
         "rust.tokio.async_std",
         "async-std rejected for tokio",
         "rust tokio executor async-std rejected unmaintained",
-        KnowledgeType::Decision,
+        KnowledgeType::Custom("decision".to_string()),
         "dev/rust",
         &["rust", "tokio"],
     );
@@ -269,7 +269,7 @@ fn seed_dev_rust(b: &mut FixtureBuilder) {
         "rust.types.interior",
         "interior mutability cells",
         "rust ownership borrow interior mutability cell pattern",
-        KnowledgeType::Gotcha,
+        KnowledgeType::Custom("gotcha".to_string()),
         "dev/rust",
         &["rust", "ownership"],
     );
@@ -285,7 +285,7 @@ fn seed_travel_japan(b: &mut FixtureBuilder) {
         "japan.city.tokyo",
         "tokyo metropolis",
         "tokyo city prefecture metropolis japan capital",
-        KnowledgeType::Entity,
+        KnowledgeType::Custom("entity".to_string()),
         "travel/japan",
         &["japan", "city"],
     );
@@ -293,7 +293,7 @@ fn seed_travel_japan(b: &mut FixtureBuilder) {
         "japan.city.kyoto",
         "kyoto former capital",
         "kyoto city prefecture former capital japan culture",
-        KnowledgeType::Entity,
+        KnowledgeType::Custom("entity".to_string()),
         "travel/japan",
         &["japan", "city"],
     );
@@ -301,7 +301,7 @@ fn seed_travel_japan(b: &mut FixtureBuilder) {
         "japan.city.osaka",
         "osaka commercial hub",
         "osaka city prefecture commercial hub japan kansai",
-        KnowledgeType::Entity,
+        KnowledgeType::Custom("entity".to_string()),
         "travel/japan",
         &["japan", "city"],
     );
@@ -309,7 +309,7 @@ fn seed_travel_japan(b: &mut FixtureBuilder) {
         "japan.city.sapporo",
         "sapporo northern hub",
         "sapporo city prefecture northern hub japan hokkaido",
-        KnowledgeType::Entity,
+        KnowledgeType::Custom("entity".to_string()),
         "travel/japan",
         &["japan", "city"],
     );
@@ -317,7 +317,7 @@ fn seed_travel_japan(b: &mut FixtureBuilder) {
         "japan.city.fukuoka",
         "fukuoka kyushu gateway",
         "fukuoka city prefecture kyushu gateway japan",
-        KnowledgeType::Entity,
+        KnowledgeType::Custom("entity".to_string()),
         "travel/japan",
         &["japan", "city"],
     );
@@ -335,7 +335,7 @@ fn seed_travel_japan(b: &mut FixtureBuilder) {
         "japan.transport.jrpass.tourist",
         "JR pass for tourists",
         "shinkansen rail JR pass tourist japan unlimited",
-        KnowledgeType::Convention,
+        KnowledgeType::Custom("convention".to_string()),
         "travel/japan",
         &["japan", "transport"],
     );
@@ -343,7 +343,7 @@ fn seed_travel_japan(b: &mut FixtureBuilder) {
         "japan.transport.jrpass.abroad",
         "buy JR pass abroad",
         "shinkansen rail JR pass abroad japan cheaper before arrival",
-        KnowledgeType::Convention,
+        KnowledgeType::Custom("convention".to_string()),
         "travel/japan",
         &["japan", "transport"],
     );
@@ -377,7 +377,7 @@ fn seed_travel_japan(b: &mut FixtureBuilder) {
         "japan.cuisine.sushi",
         "sushi etiquette tips",
         "sushi cuisine dish japan etiquette omakase counter",
-        KnowledgeType::Convention,
+        KnowledgeType::Custom("convention".to_string()),
         "travel/japan",
         &["japan", "food"],
     );
@@ -385,7 +385,7 @@ fn seed_travel_japan(b: &mut FixtureBuilder) {
         "japan.cuisine.tempura",
         "tempura preparation",
         "tempura cuisine dish japan preparation light batter",
-        KnowledgeType::Procedural,
+        KnowledgeType::Custom("procedural".to_string()),
         "travel/japan",
         &["japan", "food"],
     );
@@ -441,7 +441,7 @@ fn seed_research_llm(b: &mut FixtureBuilder) {
         "llm.transformer.vaswani",
         "attention is all you need 2017",
         "transformer attention vaswani 2017 paper foundation",
-        KnowledgeType::Entity,
+        KnowledgeType::Custom("entity".to_string()),
         "research/llm",
         &["llm", "transformer"],
     );
@@ -501,7 +501,7 @@ fn seed_research_llm(b: &mut FixtureBuilder) {
         "llm.align.rlhf",
         "RLHF reinforcement from human feedback",
         "RLHF alignment human feedback reinforcement learning",
-        KnowledgeType::Procedural,
+        KnowledgeType::Custom("procedural".to_string()),
         "research/llm",
         &["llm", "alignment"],
     );
@@ -509,7 +509,7 @@ fn seed_research_llm(b: &mut FixtureBuilder) {
         "llm.align.dpo",
         "DPO direct preference optimization",
         "DPO alignment human preference optimization simpler",
-        KnowledgeType::Decision,
+        KnowledgeType::Custom("decision".to_string()),
         "research/llm",
         &["llm", "alignment"],
     );
@@ -517,7 +517,7 @@ fn seed_research_llm(b: &mut FixtureBuilder) {
         "llm.align.constitutional",
         "constitutional AI principles",
         "constitutional alignment human AI principles anthropic",
-        KnowledgeType::Procedural,
+        KnowledgeType::Custom("procedural".to_string()),
         "research/llm",
         &["llm", "alignment"],
     );
@@ -525,7 +525,7 @@ fn seed_research_llm(b: &mut FixtureBuilder) {
         "llm.align.sft",
         "supervised fine-tuning",
         "SFT alignment human supervised fine tuning labeled",
-        KnowledgeType::Procedural,
+        KnowledgeType::Custom("procedural".to_string()),
         "research/llm",
         &["llm", "alignment"],
     );
@@ -533,7 +533,7 @@ fn seed_research_llm(b: &mut FixtureBuilder) {
         "llm.align.rlaif",
         "RLAIF feedback from AI evaluator",
         "RLAIF alignment human feedback synthetic AI evaluator",
-        KnowledgeType::Procedural,
+        KnowledgeType::Custom("procedural".to_string()),
         "research/llm",
         &["llm", "alignment"],
     );
@@ -543,7 +543,7 @@ fn seed_research_llm(b: &mut FixtureBuilder) {
         "llm.open.llama2",
         "llama 2 open weights",
         "llama 2 open weights model meta release",
-        KnowledgeType::Entity,
+        KnowledgeType::Custom("entity".to_string()),
         "research/llm",
         &["llm", "open-weights"],
     );
@@ -551,7 +551,7 @@ fn seed_research_llm(b: &mut FixtureBuilder) {
         "llm.open.llama3",
         "llama 3 open weights",
         "llama 3 open weights model meta successor",
-        KnowledgeType::Entity,
+        KnowledgeType::Custom("entity".to_string()),
         "research/llm",
         &["llm", "open-weights"],
     );
@@ -559,7 +559,7 @@ fn seed_research_llm(b: &mut FixtureBuilder) {
         "llm.open.mistral",
         "mistral 7b open weights",
         "mistral 7b open weights model dense",
-        KnowledgeType::Entity,
+        KnowledgeType::Custom("entity".to_string()),
         "research/llm",
         &["llm", "open-weights"],
     );
@@ -567,7 +567,7 @@ fn seed_research_llm(b: &mut FixtureBuilder) {
         "llm.open.mixtral",
         "mixtral mixture of experts open",
         "mixtral mixture experts open weights model sparse",
-        KnowledgeType::Entity,
+        KnowledgeType::Custom("entity".to_string()),
         "research/llm",
         &["llm", "open-weights"],
     );
@@ -575,7 +575,7 @@ fn seed_research_llm(b: &mut FixtureBuilder) {
         "llm.open.qwen",
         "qwen 2 open weights",
         "qwen 2 open weights model alibaba multilingual",
-        KnowledgeType::Entity,
+        KnowledgeType::Custom("entity".to_string()),
         "research/llm",
         &["llm", "open-weights"],
     );

@@ -10,7 +10,7 @@ const DAY_MS: u64 = 86_400_000;
 fn origin(_agent_id: &str, session_id: &str) -> Origin {
     Origin {
         peer_id: anamnesis::graph::types::PeerId(0),
-        source_kind: anamnesis::peer::SourceKind::AgentObservation,
+        source_kind: anamnesis::engine::SourceKind::AgentObservation,
         session_id: session_id.to_string(),
         scope: anamnesis::graph::ScopePath::new("agent-memory-project").expect("valid scope"),
         confidence: 0.95,
@@ -94,7 +94,7 @@ fn agent_session_simulation_retrieves_relevant_conventions() {
     engine
         .ingest(observation(
             "auth module uses factory pattern",
-            KnowledgeType::Convention,
+            KnowledgeType::Semantic,
             Some(vec![1.0, 0.0, 0.0]),
             &["auth", "factory-pattern"],
             "session-1",
@@ -104,7 +104,7 @@ fn agent_session_simulation_retrieves_relevant_conventions() {
     engine
         .ingest(observation(
             "database uses repository pattern",
-            KnowledgeType::Convention,
+            KnowledgeType::Semantic,
             Some(vec![0.0, 1.0, 0.0]),
             &["database", "repository-pattern"],
             "session-1",
@@ -114,7 +114,7 @@ fn agent_session_simulation_retrieves_relevant_conventions() {
     engine
         .ingest(observation(
             "prefer composition over inheritance",
-            KnowledgeType::Convention,
+            KnowledgeType::Semantic,
             Some(vec![0.0, 0.0, 1.0]),
             &["design"],
             "session-1",
@@ -148,7 +148,7 @@ fn agent_session_simulation_retrieves_relevant_conventions() {
     let auth_conventions = engine
         .query(
             &Query::TypeFiltered {
-                node_type: KnowledgeType::Convention,
+                node_type: KnowledgeType::Semantic,
                 limit: 1,
             },
             &auth_config,
@@ -665,7 +665,7 @@ fn end_to_end_agent_memory_pipeline_surfaces_identity_and_relevant_context() {
         engine
             .ingest(observation(
                 "I am a code architect",
-                KnowledgeType::IdentityCore,
+                KnowledgeType::Identity,
                 Some(vec![0.9, 0.1, 0.0]),
                 &["identity"],
                 "session-1",
@@ -677,7 +677,7 @@ fn end_to_end_agent_memory_pipeline_surfaces_identity_and_relevant_context() {
         engine
             .ingest(observation(
                 "prefer factory pattern",
-                KnowledgeType::Convention,
+                KnowledgeType::Semantic,
                 Some(vec![0.9, 0.1, 0.0]),
                 &["factory", "pattern"],
                 "session-1",

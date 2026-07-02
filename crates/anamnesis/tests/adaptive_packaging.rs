@@ -11,7 +11,7 @@ use anamnesis::query::types::Query;
 fn make_origin() -> Origin {
     Origin {
         peer_id: anamnesis::graph::types::PeerId(0),
-        source_kind: anamnesis::peer::SourceKind::AgentObservation,
+        source_kind: anamnesis::engine::SourceKind::AgentObservation,
         session_id: "session-1".to_string(),
         scope: ScopePath::new("proj-a").expect("valid scope"),
         confidence: 0.9,
@@ -34,7 +34,7 @@ fn make_scored_node(id: u64, kt: KnowledgeType, name: &str, relevance: f64) -> S
 fn temporal_query_elevates_memories_to_l1() {
     let nodes = vec![
         make_scored_node(0, KnowledgeType::Episodic, "recent event", 0.9),
-        make_scored_node(1, KnowledgeType::Event, "deploy event", 0.8),
+        make_scored_node(1, KnowledgeType::Episodic, "deploy event", 0.8),
         make_scored_node(2, KnowledgeType::Semantic, "a fact", 0.7),
     ];
 
@@ -52,7 +52,6 @@ fn temporal_query_elevates_memories_to_l1() {
         &HashMap::new(),
         10000,
         4,
-        &ScopePath::universal(),
         &ModeContext::default(),
     );
 
@@ -80,7 +79,7 @@ fn neighborhood_shows_adjacent_at_l2() {
     let distant_id = NodeId(2);
 
     let nodes = vec![
-        make_scored_node(0, KnowledgeType::Entity, "auth module", 1.0),
+        make_scored_node(0, KnowledgeType::Semantic, "auth module", 1.0),
         make_scored_node(1, KnowledgeType::Semantic, "adjacent fact", 0.8),
         make_scored_node(2, KnowledgeType::Semantic, "distant fact", 0.5),
     ];
@@ -101,7 +100,6 @@ fn neighborhood_shows_adjacent_at_l2() {
         &HashMap::new(),
         10000,
         4,
-        &ScopePath::universal(),
         &ModeContext { adjacent_ids },
     );
 
@@ -168,7 +166,6 @@ fn tension_involved_nodes_include_provenance() {
         &activations,
         10000,
         4,
-        &ScopePath::universal(),
         &ModeContext::default(),
     );
 
@@ -199,7 +196,7 @@ fn budget_partitioned_correctly() {
     for i in 0..5 {
         nodes.push(make_scored_node(
             i,
-            KnowledgeType::IdentityCore,
+            KnowledgeType::Identity,
             &format!("identity-{i}"),
             0.9 - i as f64 * 0.1,
         ));
@@ -235,7 +232,6 @@ fn budget_partitioned_correctly() {
         &HashMap::new(),
         token_budget,
         4,
-        &ScopePath::universal(),
         &ModeContext::default(),
     );
 
@@ -266,7 +262,7 @@ fn budget_partitioned_correctly() {
 #[test]
 fn associative_behavior_preserved() {
     let nodes = vec![
-        make_scored_node(0, KnowledgeType::IdentityCore, "identity", 0.95),
+        make_scored_node(0, KnowledgeType::Identity, "identity", 0.95),
         make_scored_node(1, KnowledgeType::Semantic, "knowledge", 0.85),
         make_scored_node(2, KnowledgeType::Episodic, "memory", 0.75),
     ];
@@ -277,13 +273,12 @@ fn associative_behavior_preserved() {
     };
 
     let nodes_clone = vec![
-        make_scored_node(0, KnowledgeType::IdentityCore, "identity", 0.95),
+        make_scored_node(0, KnowledgeType::Identity, "identity", 0.95),
         make_scored_node(1, KnowledgeType::Semantic, "knowledge", 0.85),
         make_scored_node(2, KnowledgeType::Episodic, "memory", 0.75),
     ];
 
-    let base_pkg =
-        assemble_context_package(nodes_clone, &[], &[], 10000, 4, &ScopePath::universal());
+    let base_pkg = assemble_context_package(nodes_clone, &[], &[], 10000, 4);
 
     let mode_pkg = assemble_context_package_for_mode(
         nodes,
@@ -293,7 +288,6 @@ fn associative_behavior_preserved() {
         &HashMap::new(),
         10000,
         4,
-        &ScopePath::universal(),
         &ModeContext::default(),
     );
 
@@ -310,10 +304,15 @@ fn associative_behavior_preserved() {
 #[test]
 fn type_filtered_shows_target_type_at_l2() {
     let nodes = vec![
-        make_scored_node(0, KnowledgeType::Convention, "naming convention", 0.9),
+        make_scored_node(
+            0,
+            KnowledgeType::Custom("convention".to_string()),
+            "naming convention",
+            0.9,
+        ),
         make_scored_node(
             1,
-            KnowledgeType::Convention,
+            KnowledgeType::Custom("convention".to_string()),
             "error handling convention",
             0.8,
         ),
@@ -321,7 +320,7 @@ fn type_filtered_shows_target_type_at_l2() {
     ];
 
     let query = Query::TypeFiltered {
-        node_type: KnowledgeType::Convention,
+        node_type: KnowledgeType::Custom("convention".to_string()),
         limit: 10,
     };
 
@@ -333,12 +332,11 @@ fn type_filtered_shows_target_type_at_l2() {
         &HashMap::new(),
         10000,
         4,
-        &ScopePath::universal(),
         &ModeContext::default(),
     );
 
     for frag in &pkg.knowledge {
-        if frag.node_type == KnowledgeType::Convention {
+        if frag.node_type == KnowledgeType::Custom("convention".to_string()) {
             assert!(
                 frag.content.is_some(),
                 "TypeFiltered: target type Convention should have L2 content"
@@ -376,7 +374,6 @@ fn salience_conditional_memory_elevation() {
         &activations,
         10000,
         4,
-        &ScopePath::universal(),
         &ModeContext::default(),
     );
 
@@ -421,7 +418,6 @@ fn list_mode_preserves_base_behavior() {
         &HashMap::new(),
         10000,
         4,
-        &ScopePath::universal(),
         &ModeContext::default(),
     );
 

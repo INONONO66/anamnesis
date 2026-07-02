@@ -9,11 +9,11 @@
 
 use anamnesis::Engine;
 use anamnesis::api::Observation;
+use anamnesis::engine::SourceKind;
 use anamnesis::engine::{EdgeType, EngineConfig, IngestResult, NodeId};
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::types::PeerId;
 use anamnesis::graph::{KnowledgeType, ScopePath, Timestamp};
-use anamnesis::peer::SourceKind;
 use anamnesis::query::SearchInput;
 
 fn engine() -> Engine {
@@ -68,7 +68,7 @@ fn energy_is_computed_over_a_nonempty_result() {
         &mut e,
         "warm cache",
         "caching procedure warm cache preload steps",
-        KnowledgeType::Procedural,
+        KnowledgeType::Semantic,
         &["cache"],
     );
     e.link(a, b, EdgeType::Causal).expect("link");
@@ -107,14 +107,14 @@ fn surfaced_contradiction_raises_frustration_penalty() {
         &mut e,
         "logging sync",
         "logging decision synchronous blocking inline",
-        KnowledgeType::Decision,
+        KnowledgeType::Semantic,
         &["logging"],
     );
     let new = ingest(
         &mut e,
         "logging async",
         "logging decision asynchronous non-blocking queue",
-        KnowledgeType::Decision,
+        KnowledgeType::Semantic,
         &["logging"],
     );
     // A Contradicts edge between two co-valid, co-active claims must surface a
@@ -154,7 +154,7 @@ fn energy_is_query_local_and_not_stored() {
         &mut e,
         "warm cache",
         "caching procedure warm cache preload",
-        KnowledgeType::Procedural,
+        KnowledgeType::Semantic,
         &["cache"],
     );
     e.link(a, b, EdgeType::Causal).expect("link");

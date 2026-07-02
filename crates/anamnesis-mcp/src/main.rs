@@ -1,3 +1,4 @@
+mod capture;
 mod cli;
 mod client;
 mod config;

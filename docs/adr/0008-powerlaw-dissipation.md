@@ -1,5 +1,7 @@
 # 0008. Forgetting Is Multi-Trace Base-Level Decay With A Separate Evidence Prior
 
+*Superseded in part by [ADR-0014](0014-shrink-to-product.md) (v0.10.0 shrink): "peer trust" is listed below as one component of the decay-exempt evidence prior `P_i`; the peer/trust subsystem that fed it was removed (readout trust term now a neutral `1.0`), so `P_i` carries only encoding surprise and feedback. ADR-0014 also discloses the by-design decay-rate coarsenings that adjusted per-type `m_type` multipliers. The multi-trace base-level model itself stands.*
+
 - Status: Accepted
 - Date: 2026-06-05
 - Related: [dissipation](../04-cognitive-dynamics/dissipation.md), [temporal-model](../02-knowledge-model/temporal-model.md), [surprise-gated-perception](0009-surprise-gated-perception.md)

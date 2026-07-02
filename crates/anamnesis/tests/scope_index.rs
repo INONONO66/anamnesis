@@ -25,7 +25,7 @@ fn node(id: NodeId, scope: &str) -> Node {
         tier: MemoryTier::Auto,
         origin: Origin {
             peer_id: anamnesis::graph::types::PeerId(0),
-            source_kind: anamnesis::peer::SourceKind::AgentObservation,
+            source_kind: anamnesis::engine::SourceKind::AgentObservation,
             session_id: "session".to_string(),
             scope: ScopePath::new(scope).expect("valid scope"),
             confidence: 0.9,

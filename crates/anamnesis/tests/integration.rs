@@ -1,10 +1,10 @@
 //! Integration tests for the Phase 1 skeleton.
 //!
 //! These tests verify the full Engine lifecycle:
-//! ingest → link → touch → tick → query → reflect_batch
+//! ingest → link → touch → tick → query
 
 use anamnesis::Engine;
-use anamnesis::api::{Observation, SessionSummary};
+use anamnesis::api::Observation;
 use anamnesis::engine::{EngineConfig, IngestResult};
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{EdgeType, KnowledgeType, Timestamp};
@@ -21,7 +21,7 @@ fn make_observation(name: &str, node_type: KnowledgeType) -> Observation {
         entity_tags: vec!["test-entity".to_string()],
         origin: Origin {
             peer_id: anamnesis::graph::types::PeerId(0),
-            source_kind: anamnesis::peer::SourceKind::AgentObservation,
+            source_kind: anamnesis::engine::SourceKind::AgentObservation,
             session_id: "session-1".to_string(),
             scope: anamnesis::graph::ScopePath::new("anamnesis").expect("valid scope"),
             confidence: 0.9,
@@ -40,7 +40,7 @@ fn engine_full_lifecycle() {
     let IngestResult::Created(ids1) = engine
         .ingest(make_observation(
             "auth uses factory pattern",
-            KnowledgeType::Convention,
+            KnowledgeType::Semantic,
         ))
         .unwrap()
     else {
@@ -93,15 +93,6 @@ fn engine_full_lifecycle() {
         pkg.total_fragments() > 0,
         "Associative query should return results"
     );
-
-    // 6. Reflect batch (placeholder)
-    let sessions = vec![SessionSummary {
-        peer_id: anamnesis::graph::types::PeerId(0),
-        session_id: "session-1".to_string(),
-        node_ids: vec![ids1[0], ids2[0]],
-    }];
-    let reflect_report = engine.reflect_batch(&sessions).unwrap();
-    assert_eq!(reflect_report.entity_edges_created, 0);
 }
 
 #[test]
@@ -130,11 +121,11 @@ fn node_fields_preserved_after_ingest() {
         content: "Full discussion...".to_string(),
         embedding: Some(vec![0.7, 0.3, 0.1]),
         confidence: 0.95,
-        node_type: KnowledgeType::Decision,
+        node_type: KnowledgeType::Custom("decision".to_string()),
         entity_tags: vec!["physics".to_string(), "anamnesis".to_string()],
         origin: Origin {
             peer_id: anamnesis::graph::types::PeerId(0),
-            source_kind: anamnesis::peer::SourceKind::AgentObservation,
+            source_kind: anamnesis::engine::SourceKind::AgentObservation,
             session_id: "design-session".to_string(),
             scope: anamnesis::graph::ScopePath::new("anamnesis").expect("valid scope"),
             confidence: 0.95,
@@ -154,7 +145,10 @@ fn node_fields_preserved_after_ingest() {
         node.summary.as_deref(),
         Some("Force-directed simulation rejected")
     );
-    assert_eq!(node.node_type, KnowledgeType::Decision);
+    assert_eq!(
+        node.node_type,
+        KnowledgeType::Custom("decision".to_string())
+    );
     assert_eq!(node.entity_tags, vec!["physics", "anamnesis"]);
     assert_eq!(node.origin.scope.as_str(), "anamnesis");
     // Salience is the projection of the surprise-gated retained-action reservoir
@@ -173,7 +167,7 @@ fn node_fields_preserved_after_ingest() {
 fn multiple_edge_types() {
     let mut engine = Engine::new();
     let IngestResult::Created(ids1) = engine
-        .ingest(make_observation("decision", KnowledgeType::Decision))
+        .ingest(make_observation("decision", KnowledgeType::Semantic))
         .unwrap()
     else {
         panic!("expected Created");
@@ -207,7 +201,7 @@ fn multiple_edge_types() {
 fn query_all_modes_compile() {
     let mut engine = Engine::new();
     let IngestResult::Created(ids) = engine
-        .ingest(make_observation("entity", KnowledgeType::Entity))
+        .ingest(make_observation("entity", KnowledgeType::Semantic))
         .unwrap()
     else {
         panic!("expected Created");
@@ -217,7 +211,7 @@ fn query_all_modes_compile() {
     // Non-Associative modes return Ok(empty). Associative needs a real seed.
     let queries = vec![
         Query::TypeFiltered {
-            node_type: KnowledgeType::Convention,
+            node_type: KnowledgeType::Semantic,
             limit: 5,
         },
         Query::Neighborhood {

@@ -1,8 +1,9 @@
 //! Node and Origin types for the Anamnesis graph.
 
 use crate::graph::scope::ScopePath;
-use crate::graph::types::{AccessTrace, KnowledgeType, MemoryTier, NodeId, PeerId, Timestamp};
-use crate::peer::SourceKind;
+use crate::graph::types::{
+    AccessTrace, KnowledgeType, MemoryTier, NodeId, PeerId, SourceKind, Timestamp,
+};
 use std::collections::{HashMap, VecDeque};
 
 /// Provenance and scope of a knowledge fragment.
@@ -135,7 +136,7 @@ mod tests {
     fn make_origin() -> Origin {
         Origin {
             peer_id: crate::graph::types::PeerId(0),
-            source_kind: crate::peer::SourceKind::AgentObservation,
+            source_kind: crate::graph::types::SourceKind::AgentObservation,
             session_id: "session-1".to_string(),
             scope: ScopePath::new("anamnesis").expect("valid scope"),
             confidence: 0.9,
@@ -146,7 +147,7 @@ mod tests {
     fn origin_universal() {
         let o = Origin {
             peer_id: crate::graph::types::PeerId(0),
-            source_kind: crate::peer::SourceKind::AgentObservation,
+            source_kind: crate::graph::types::SourceKind::AgentObservation,
             session_id: "session-1".to_string(),
             scope: ScopePath::universal(),
             confidence: 0.8,
@@ -164,7 +165,7 @@ mod tests {
     fn node_all_fields() {
         let node = Node {
             id: NodeId(1),
-            node_type: KnowledgeType::Decision,
+            node_type: KnowledgeType::Semantic,
             name: "physics = edge weight dynamics".to_string(),
             summary: Some(
                 "Force-directed simulation rejected in favor of edge weight dynamics".to_string(),
@@ -214,7 +215,7 @@ mod tests {
             tier: MemoryTier::Auto,
             origin: Origin {
                 peer_id: crate::graph::types::PeerId(0),
-                source_kind: crate::peer::SourceKind::AgentObservation,
+                source_kind: crate::graph::types::SourceKind::AgentObservation,
                 session_id: "session-2".to_string(),
                 scope: ScopePath::universal(),
                 confidence: 0.7,

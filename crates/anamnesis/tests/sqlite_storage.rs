@@ -26,7 +26,7 @@ fn make_node(id: NodeId, salience: f64) -> Node {
         tier: MemoryTier::Auto,
         origin: Origin {
             peer_id: anamnesis::graph::types::PeerId(0),
-            source_kind: anamnesis::peer::SourceKind::AgentObservation,
+            source_kind: anamnesis::engine::SourceKind::AgentObservation,
             session_id: "test-session".to_string(),
             scope: ScopePath::universal(),
             confidence: 0.9,
@@ -84,7 +84,7 @@ fn make_node_indexed(
         tier: MemoryTier::Auto,
         origin: Origin {
             peer_id: anamnesis::graph::types::PeerId(0),
-            source_kind: anamnesis::peer::SourceKind::AgentObservation,
+            source_kind: anamnesis::engine::SourceKind::AgentObservation,
             session_id: "session".to_string(),
             scope,
             confidence: 0.9,
@@ -114,7 +114,7 @@ fn set_node_populates_indexed_queries() {
     let node = make_node_indexed(
         id,
         vec!["auth"],
-        KnowledgeType::Convention,
+        KnowledgeType::Custom("convention".to_string()),
         "agent-A",
         Some("proj-P"),
     );
@@ -122,7 +122,10 @@ fn set_node_populates_indexed_queries() {
     s.set_node(node).expect("node stored");
 
     assert_eq!(s.nodes_by_entity_tag("auth"), vec![id]);
-    assert_eq!(s.nodes_by_type(&KnowledgeType::Convention), vec![id]);
+    assert_eq!(
+        s.nodes_by_type(&KnowledgeType::Custom("convention".to_string())),
+        vec![id]
+    );
     assert_eq!(
         s.nodes_by_peer(anamnesis::graph::types::PeerId(0)),
         vec![id]
@@ -140,7 +143,7 @@ fn delete_node_removes_from_indexed_queries() {
     s.set_node(make_node_indexed(
         id,
         vec!["auth"],
-        KnowledgeType::Convention,
+        KnowledgeType::Custom("convention".to_string()),
         "A",
         Some("P"),
     ))
@@ -149,7 +152,10 @@ fn delete_node_removes_from_indexed_queries() {
     s.delete_node(id).expect("node deleted");
 
     assert!(s.nodes_by_entity_tag("auth").is_empty());
-    assert!(s.nodes_by_type(&KnowledgeType::Convention).is_empty());
+    assert!(
+        s.nodes_by_type(&KnowledgeType::Custom("convention".to_string()))
+            .is_empty()
+    );
     assert!(
         s.nodes_by_peer(anamnesis::graph::types::PeerId(0))
             .is_empty()
@@ -436,7 +442,7 @@ fn nodes_by_entity_tag_returns_correct_set() {
     s.set_node(make_node_indexed(
         id3,
         vec!["db"],
-        KnowledgeType::Convention,
+        KnowledgeType::Custom("convention".to_string()),
         "B",
         None,
     ))
@@ -462,7 +468,7 @@ fn nodes_by_type_returns_correct_set() {
     s.set_node(make_node_indexed(
         id2,
         vec![],
-        KnowledgeType::Convention,
+        KnowledgeType::Custom("convention".to_string()),
         "A",
         None,
     ))
@@ -472,8 +478,8 @@ fn nodes_by_type_returns_correct_set() {
 
 #[test]
 fn nodes_by_agent_returns_correct_set() {
+    use anamnesis::engine::SourceKind;
     use anamnesis::graph::types::PeerId;
-    use anamnesis::peer::SourceKind;
     let mut s = storage();
     let id1 = s.next_node_id();
     let id2 = s.next_node_id();

@@ -1,7 +1,7 @@
 use anamnesis::api::{Engine, EngineConfig, IngestResult, Observation};
 use anamnesis::engine::{NodeId, StorageAdapter};
 use anamnesis::graph::node::Origin;
-use anamnesis::graph::{EdgeType, KnowledgeType, ScopePath, ScopeRelation, Timestamp};
+use anamnesis::graph::{EdgeType, KnowledgeType, ScopePath, Timestamp};
 use anamnesis::query::SearchInput;
 
 fn engine() -> Engine {
@@ -21,7 +21,7 @@ fn rwr_engine() -> Engine {
 fn origin(_agent: &str, scope: &str) -> Origin {
     Origin {
         peer_id: anamnesis::graph::types::PeerId(0),
-        source_kind: anamnesis::peer::SourceKind::AgentObservation,
+        source_kind: anamnesis::engine::SourceKind::AgentObservation,
         session_id: "session".to_string(),
         scope: ScopePath::new(scope).expect("valid scope"),
         confidence: 0.9,
@@ -129,7 +129,7 @@ fn identity_tension_preserved() {
     let identity = ingest(
         &mut engine,
         "agent prefers safe rust",
-        KnowledgeType::IdentityCore,
+        KnowledgeType::Identity,
         "dev/rust",
     );
     let conflicting = ingest(
@@ -162,7 +162,7 @@ fn rwr_consults_identity_and_kappa() {
     let identity = ingest(
         &mut engine,
         "identity rust safety",
-        KnowledgeType::IdentityCore,
+        KnowledgeType::Identity,
         "dev/rust",
     );
     let seed = ingest(
@@ -439,7 +439,6 @@ fn source_fragment_carries_source_scope() {
         .unwrap();
 
     assert_eq!(source_fragment.origin.scope.as_str(), "project/main");
-    assert_eq!(source_fragment.scope, ScopeRelation::Equal);
 }
 
 /// Protects empty-candidate search from panicking or fabricating fragments.

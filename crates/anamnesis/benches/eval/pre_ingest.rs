@@ -694,7 +694,7 @@ fn ingest_observation(
 fn make_origin(session_id: &str, confidence: f64) -> Origin {
     Origin {
         peer_id: anamnesis::graph::types::PeerId(0),
-        source_kind: anamnesis::peer::SourceKind::AgentObservation,
+        source_kind: anamnesis::engine::SourceKind::AgentObservation,
         session_id: session_id.to_string(),
         scope: ScopePath::universal(),
         confidence,
@@ -711,14 +711,18 @@ fn make_name(content: &str) -> String {
 }
 
 fn parse_node_type(s: &str) -> KnowledgeType {
+    // After the KnowledgeType 15→4 collapse, the golden set's finer knowledge labels
+    // (decision/entity/convention/procedural/gotcha/event) no longer have dedicated
+    // variants; preserve each label distinctly via `Custom(<lowercase>)` (all decay
+    // at the ordinary-knowledge rate). Identity/Semantic/Episodic map to their fixed
+    // variants.
     match s {
         "Semantic" => KnowledgeType::Semantic,
-        "Decision" => KnowledgeType::Decision,
-        "Entity" => KnowledgeType::Entity,
-        "Convention" => KnowledgeType::Convention,
-        "Procedural" => KnowledgeType::Procedural,
-        "Gotcha" => KnowledgeType::Gotcha,
-        "Event" => KnowledgeType::Event,
+        "Identity" => KnowledgeType::Identity,
+        "Episodic" => KnowledgeType::Episodic,
+        "Decision" | "Entity" | "Convention" | "Procedural" | "Gotcha" | "Event" => {
+            KnowledgeType::Custom(s.to_lowercase())
+        }
         _ => KnowledgeType::Semantic,
     }
 }

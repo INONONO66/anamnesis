@@ -32,7 +32,7 @@ fn make_node(id: NodeId, node_type: KnowledgeType, name: &str) -> Node {
         entity_tags: vec!["tag1".to_string(), "tag2".to_string()],
         origin: Origin {
             peer_id: anamnesis::graph::types::PeerId(0),
-            source_kind: anamnesis::peer::SourceKind::AgentObservation,
+            source_kind: anamnesis::engine::SourceKind::AgentObservation,
             session_id: "session-1".to_string(),
             scope: anamnesis::graph::ScopePath::new("project-1").expect("valid scope"),
             confidence: 0.9,
@@ -64,7 +64,11 @@ fn clone_independence_nodes() {
     // Create original storage with nodes
     let mut original = SqliteStorage::new().unwrap();
     let node1 = make_node(NodeId(0), KnowledgeType::Semantic, "node1");
-    let node2 = make_node(NodeId(1), KnowledgeType::Decision, "node2");
+    let node2 = make_node(
+        NodeId(1),
+        KnowledgeType::Custom("decision".to_string()),
+        "node2",
+    );
 
     original.set_node(node1).unwrap();
     original.set_node(node2).unwrap();
@@ -95,7 +99,11 @@ fn clone_independence_edges() {
     // Create original storage with nodes and edges
     let mut original = SqliteStorage::new().unwrap();
     let node1 = make_node(NodeId(0), KnowledgeType::Semantic, "node1");
-    let node2 = make_node(NodeId(1), KnowledgeType::Decision, "node2");
+    let node2 = make_node(
+        NodeId(1),
+        KnowledgeType::Custom("decision".to_string()),
+        "node2",
+    );
 
     original.set_node(node1).unwrap();
     original.set_node(node2).unwrap();
@@ -189,7 +197,11 @@ fn clone_adjacency_index_preservation() {
     // Create original storage with nodes and edges
     let mut original = SqliteStorage::new().unwrap();
     let node1 = make_node(NodeId(0), KnowledgeType::Semantic, "node1");
-    let node2 = make_node(NodeId(1), KnowledgeType::Decision, "node2");
+    let node2 = make_node(
+        NodeId(1),
+        KnowledgeType::Custom("decision".to_string()),
+        "node2",
+    );
     let node3 = make_node(NodeId(2), KnowledgeType::Episodic, "node3");
 
     original.set_node(node1).unwrap();
@@ -239,7 +251,11 @@ fn clone_secondary_indexes_preservation() {
     node1.origin.peer_id = anamnesis::graph::types::PeerId(1);
     node1.origin.scope = anamnesis::graph::ScopePath::new("project-1").expect("valid scope");
 
-    let mut node2 = make_node(NodeId(1), KnowledgeType::Decision, "node2");
+    let mut node2 = make_node(
+        NodeId(1),
+        KnowledgeType::Custom("decision".to_string()),
+        "node2",
+    );
     node2.entity_tags = vec!["auth".to_string()];
     node2.origin.peer_id = anamnesis::graph::types::PeerId(2);
     node2.origin.scope = anamnesis::graph::ScopePath::new("project-1").expect("valid scope");
@@ -272,7 +288,7 @@ fn clone_secondary_indexes_preservation() {
     assert!(semantic_nodes.contains(&NodeId(0)));
     assert!(semantic_nodes.contains(&NodeId(2)));
 
-    let decision_nodes = cloned.nodes_by_type(&KnowledgeType::Decision);
+    let decision_nodes = cloned.nodes_by_type(&KnowledgeType::Custom("decision".to_string()));
     assert_eq!(decision_nodes.len(), 1);
     assert!(decision_nodes.contains(&NodeId(1)));
 
@@ -305,7 +321,11 @@ fn clone_text_search_preservation() {
     let mut node1 = make_node(NodeId(0), KnowledgeType::Semantic, "authentication system");
     node1.content = "The authentication system uses OAuth2 for security".to_string();
 
-    let mut node2 = make_node(NodeId(1), KnowledgeType::Decision, "database choice");
+    let mut node2 = make_node(
+        NodeId(1),
+        KnowledgeType::Custom("decision".to_string()),
+        "database choice",
+    );
     node2.content = "We chose PostgreSQL for the database".to_string();
 
     original.set_node(node1).unwrap();
@@ -369,7 +389,11 @@ fn clone_with_deleted_nodes_and_edges() {
     let mut original = SqliteStorage::new().unwrap();
 
     let node1 = make_node(NodeId(0), KnowledgeType::Semantic, "node1");
-    let node2 = make_node(NodeId(1), KnowledgeType::Decision, "node2");
+    let node2 = make_node(
+        NodeId(1),
+        KnowledgeType::Custom("decision".to_string()),
+        "node2",
+    );
     let node3 = make_node(NodeId(2), KnowledgeType::Episodic, "node3");
 
     original.set_node(node1).unwrap();

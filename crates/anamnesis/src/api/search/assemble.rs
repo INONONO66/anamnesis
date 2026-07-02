@@ -11,11 +11,9 @@ use std::collections::HashSet;
 
 use crate::api::Engine;
 use crate::error::Error;
-use crate::graph::{EdgeType, KnowledgeType, NodeId, ScopePath, Timestamp};
+use crate::graph::{EdgeType, KnowledgeType, NodeId, Timestamp};
 use crate::mechanics::attraction::cosine_similarity;
-use crate::query::assembly::{
-    ScoredNode, assemble_context_package, determine_scope, estimate_tokens,
-};
+use crate::query::assembly::{ScoredNode, assemble_context_package, estimate_tokens};
 use crate::query::rwr::ActivationResponse;
 use crate::query::scoring::{ReadoutInputs, TieBreakKey, rank, readout_score, scope_weight};
 use crate::query::types::SearchPlan;
@@ -66,7 +64,6 @@ pub(crate) fn assemble_search_result<S: StorageAdapter + Clone>(
     let (mut package, readout_candidates) = assemble_graph_recall_package(
         engine,
         request.response,
-        request.seed_ids,
         request.config,
         request.input,
         request.field,
@@ -74,12 +71,7 @@ pub(crate) fn assemble_search_result<S: StorageAdapter + Clone>(
     let packaging_mode =
         crate::query::decide_packaging(&package.tensions, request.plan, &request.input.text);
 
-    apply_packaging_mode(
-        engine,
-        packaging_mode.clone(),
-        &request.config.scope,
-        &mut package,
-    );
+    apply_packaging_mode(engine, packaging_mode.clone(), &mut package);
 
     if request.input.now.0 > 0 {
         apply_validity_filter(engine, &mut package, request.input.now);
@@ -117,7 +109,6 @@ pub(crate) fn assemble_search_result<S: StorageAdapter + Clone>(
 fn assemble_graph_recall_package<S: StorageAdapter + Clone>(
     engine: &Engine<S>,
     response: &ActivationResponse,
-    seed_ids: &[NodeId],
     config: &QueryConfig,
     input: &crate::query::SearchInput,
     field: &crate::query::field::QueryField,
@@ -125,12 +116,6 @@ fn assemble_graph_recall_package<S: StorageAdapter + Clone>(
     let storage = engine.graph.storage();
     let now = config.now.unwrap_or_else(Timestamp::now);
     let activations = &response.activation;
-
-    let seed_entity_tags: Vec<Vec<String>> = seed_ids
-        .iter()
-        .filter_map(|node_id| storage.get_node(*node_id).ok())
-        .map(|node| node.entity_tags.clone())
-        .collect();
 
     // Surface Contradicts edges between *active* sites as frustration tensions
     // (frustration.md / ADR-0006). Stress is the multiplicative gate product
@@ -173,29 +158,10 @@ fn assemble_graph_recall_package<S: StorageAdapter + Clone>(
             .copied()
             .unwrap_or_default();
 
-        let shared_entities = seed_entity_tags
-            .iter()
-            .map(|tags| {
-                node.entity_tags
-                    .iter()
-                    .filter(|tag| tags.contains(tag))
-                    .count()
-            })
-            .max()
-            .unwrap_or(0);
-        let base_scope_weight = scope_weight(&config.scope, &node.origin.scope, shared_entities);
-        // trust_weight = coarse-level prior bonus + evidence-driven projection
-        // (social.md "Retrieval Effects": ranking through trust-weighted readout).
-        // The coarse `TrustLevel` is the declared prior offset; the evidence trust
-        // reservoir, moved by corroboration/feedback, projects to a bounded
-        // (-0.5, 0.5) term so a peer with no evidence contributes only its prior.
-        let trust_weight = engine
-            .get_peer(node.origin.peer_id)
-            .map(|p| {
-                p.trust_level.scope_weight_bonus()
-                    + crate::mechanics::priors::project_trust(p.trust_reservoir)
-            })
-            .unwrap_or(0.0);
+        let base_scope_weight = scope_weight(&config.scope, &node.origin.scope);
+        // Trust reservoir removed with the peer subsystem; term is neutral pending
+        // a real trust source.
+        let trust_weight = 1.0;
 
         // phi_i: query-ALIGNMENT potential bias (potential-landscape.md).
         // Seeded sites keep their collected text/entity signals; the embedding
@@ -303,7 +269,6 @@ fn assemble_graph_recall_package<S: StorageAdapter + Clone>(
         &contradiction_pairs,
         config.token_budget,
         config.chars_per_token,
-        &config.scope,
     );
     (package, readout_candidates)
 }
@@ -311,7 +276,6 @@ fn assemble_graph_recall_package<S: StorageAdapter + Clone>(
 fn apply_packaging_mode<S: StorageAdapter + Clone>(
     engine: &Engine<S>,
     packaging_mode: PackagingMode,
-    query_scope: &ScopePath,
     package: &mut ContextPackage,
 ) {
     match packaging_mode {
@@ -325,12 +289,7 @@ fn apply_packaging_mode<S: StorageAdapter + Clone>(
             package.memories.clear();
         }
         PackagingMode::KnowledgeWithProvenance => {
-            include_source_memories(
-                engine,
-                query_scope,
-                &package.knowledge,
-                &mut package.memories,
-            );
+            include_source_memories(engine, &package.knowledge, &mut package.memories);
         }
         PackagingMode::PersonaWeighted => {
             package.identity.sort_by(|a, b| {
@@ -350,14 +309,13 @@ fn apply_packaging_mode<S: StorageAdapter + Clone>(
 
 fn include_source_memories<S: StorageAdapter + Clone>(
     engine: &Engine<S>,
-    query_scope: &ScopePath,
     knowledge: &[Fragment],
     memories: &mut Vec<Fragment>,
 ) {
     let mut existing: HashSet<NodeId> = memories.iter().map(|fragment| fragment.node_id).collect();
 
     for fragment in knowledge {
-        for source_fragment in source_memory_fragments(engine, query_scope, fragment) {
+        for source_fragment in source_memory_fragments(engine, fragment) {
             if existing.insert(source_fragment.node_id) {
                 memories.push(source_fragment);
             }
@@ -367,7 +325,6 @@ fn include_source_memories<S: StorageAdapter + Clone>(
 
 fn source_memory_fragments<S: StorageAdapter + Clone>(
     engine: &Engine<S>,
-    query_scope: &ScopePath,
     fragment: &Fragment,
 ) -> Vec<Fragment> {
     let storage = engine.graph.storage();
@@ -382,7 +339,6 @@ fn source_memory_fragments<S: StorageAdapter + Clone>(
         };
         push_source_memory_fragment(
             engine,
-            query_scope,
             fragment,
             source_id,
             weight,
@@ -399,7 +355,6 @@ fn source_memory_fragments<S: StorageAdapter + Clone>(
         };
         push_source_memory_fragment(
             engine,
-            query_scope,
             fragment,
             source_id,
             weight,
@@ -413,7 +368,6 @@ fn source_memory_fragments<S: StorageAdapter + Clone>(
 
 fn push_source_memory_fragment<S: StorageAdapter + Clone>(
     engine: &Engine<S>,
-    query_scope: &ScopePath,
     parent: &Fragment,
     source_id: NodeId,
     edge_weight: f64,
@@ -428,10 +382,7 @@ fn push_source_memory_fragment<S: StorageAdapter + Clone>(
     let Ok(node) = storage.get_node(source_id) else {
         return;
     };
-    if !matches!(
-        node.node_type,
-        KnowledgeType::Episodic | KnowledgeType::Event
-    ) {
+    if !matches!(node.node_type, KnowledgeType::Episodic) {
         return;
     }
 
@@ -443,7 +394,6 @@ fn push_source_memory_fragment<S: StorageAdapter + Clone>(
         node_type: node.node_type.clone(),
         relevance: (parent.relevance * edge_weight).clamp(0.0, 1.0),
         origin: node.origin.clone(),
-        scope: determine_scope(query_scope, &node.origin.scope),
     });
 }
 
@@ -573,10 +523,7 @@ fn node_is_valid_at<S: StorageAdapter + Clone>(
 }
 
 fn is_identity_type(node_type: &KnowledgeType) -> bool {
-    matches!(
-        node_type,
-        KnowledgeType::IdentityCore | KnowledgeType::IdentityLearned | KnowledgeType::IdentityState
-    )
+    matches!(node_type, KnowledgeType::Identity)
 }
 
 #[cfg(test)]
@@ -589,7 +536,6 @@ mod tests {
 
     fn make_memory_fragment() -> Fragment {
         use crate::graph::node::Origin;
-        use crate::graph::scope::ScopeRelation;
         Fragment {
             node_id: crate::graph::NodeId(1),
             name: "episode".into(),
@@ -599,12 +545,11 @@ mod tests {
             relevance: 0.8,
             origin: Origin {
                 peer_id: crate::graph::types::PeerId(0),
-                source_kind: crate::peer::SourceKind::AgentObservation,
+                source_kind: crate::graph::types::SourceKind::AgentObservation,
                 session_id: "s1".into(),
                 scope: ScopePath::universal(),
                 confidence: 0.9,
             },
-            scope: ScopeRelation::Universal,
         }
     }
 
@@ -612,7 +557,6 @@ mod tests {
     #[test]
     fn knowledge_only_clears_memories_and_adjusts_tokens() {
         let engine: Engine<_> = Engine::with_config(EngineConfig::default());
-        let scope = ScopePath::universal();
         let fragment = make_memory_fragment();
         // Estimate tokens contributed by this fragment.
         let fragment_tokens = {
@@ -644,7 +588,7 @@ mod tests {
             committed_ids: vec![],
         };
 
-        apply_packaging_mode(&engine, PackagingMode::KnowledgeOnly, &scope, &mut package);
+        apply_packaging_mode(&engine, PackagingMode::KnowledgeOnly, &mut package);
 
         assert!(
             package.memories.is_empty(),

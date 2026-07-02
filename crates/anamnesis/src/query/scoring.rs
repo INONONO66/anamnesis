@@ -23,42 +23,27 @@
 use std::cmp::Ordering;
 
 use crate::graph::ScopePath;
-use crate::graph::scope::ScopeRelation;
 use crate::graph::{NodeId, Timestamp};
 use crate::mechanics::priors::{
     READOUT_W_A, READOUT_W_PHI, READOUT_W_S, READOUT_W_SCOPE, READOUT_W_STRESS, READOUT_W_TRUST,
     READOUT_W_Z,
 };
 
-/// Maximum shared-entity bonus added to the Disjoint base weight.
-const DISJOINT_BONUS_CAP: f64 = 0.20;
-
 /// Computes the scope weight for a node relative to the query context.
 ///
-/// Hierarchical weighting based on `ScopeRelation` (locked):
-/// - Equal: 1.0
-/// - Universal: 0.95
-/// - Ancestor / Descendant: 0.85
-/// - Sibling: 0.50
-/// - Disjoint: 0.05 + shared-entity bonus capped at +0.20
-pub fn scope_weight(
-    query_scope: &ScopePath,
-    node_scope: &ScopePath,
-    shared_entity_count: usize,
-) -> f64 {
-    match query_scope.relation_to(node_scope) {
-        ScopeRelation::Equal => 1.0,
-        ScopeRelation::Universal => 0.95,
-        ScopeRelation::Ancestor | ScopeRelation::Descendant => 0.85,
-        ScopeRelation::Sibling => 0.50,
-        ScopeRelation::Disjoint => {
-            let bonus = match shared_entity_count {
-                0 => 0.0,
-                1 => 0.10,
-                _ => DISJOINT_BONUS_CAP,
-            };
-            0.05 + bonus.min(DISJOINT_BONUS_CAP)
-        }
+/// Scopes are flat opaque paths (the hierarchy was removed — all production
+/// nodes are universal). The weight is a two-branch visibility gate:
+/// - identical scopes, or either scope universal: `1.0` (fully visible);
+/// - two different concrete scopes: `0.5` (attenuated).
+///
+/// In production the query scope is always universal, so this always yields
+/// `1.0` — bit-identical to the previous hierarchical table's `Equal`/`Universal`
+/// rows for the universal-query case.
+pub fn scope_weight(query_scope: &ScopePath, node_scope: &ScopePath) -> f64 {
+    if query_scope == node_scope || query_scope.is_universal() || node_scope.is_universal() {
+        1.0
+    } else {
+        0.5
     }
 }
 
@@ -181,43 +166,38 @@ mod tests {
         ScopePath::new(s).expect("valid scope")
     }
 
-    // ── scope weight ─────────────────────────────────────────────────────────
+    // ── scope weight (2-branch: equal-or-universal ⇒ 1.0, else 0.5) ────────────
 
     #[test]
-    fn same_project_full_weight() {
-        assert_eq!(scope_weight(&proj("proj-a"), &proj("proj-a"), 0), 1.0);
+    fn same_scope_full_weight() {
+        assert_eq!(scope_weight(&proj("proj-a"), &proj("proj-a")), 1.0);
+    }
+
+    /// PRODUCTION INVARIANT: every production node is universal and the query
+    /// scope is always universal, so the weight must be exactly 1.0 — bit-identical
+    /// to the pre-shrink hierarchical table (which returned `Equal` ⇒ 1.0 for the
+    /// universal-vs-universal case). This pins the shrink's zero-behavior-change
+    /// guarantee for the only scope pair that occurs in production.
+    #[test]
+    fn universal_query_and_universal_node_is_exactly_one() {
+        let u = ScopePath::universal();
+        assert_eq!(scope_weight(&u, &u), 1.0);
     }
 
     #[test]
-    fn universal_node_weight() {
-        assert_eq!(
-            scope_weight(&proj("proj-a"), &ScopePath::universal(), 0),
-            0.95
-        );
+    fn either_universal_full_weight() {
+        // Universal on either side ⇒ fully visible (1.0).
+        assert_eq!(scope_weight(&proj("proj-a"), &ScopePath::universal()), 1.0);
+        assert_eq!(scope_weight(&ScopePath::universal(), &proj("proj-a")), 1.0);
     }
 
     #[test]
-    fn ancestor_weight() {
-        assert_eq!(
-            scope_weight(&proj("proj-a"), &proj("proj-a/feature"), 0),
-            0.85
-        );
-    }
-
-    #[test]
-    fn sibling_weight() {
-        assert_eq!(scope_weight(&proj("proj-a/x"), &proj("proj-a/y"), 0), 0.50);
-    }
-
-    #[test]
-    fn disjoint_base_weight() {
-        assert_eq!(scope_weight(&proj("proj-a"), &proj("proj-b"), 0), 0.05);
-    }
-
-    #[test]
-    fn disjoint_bonus_capped() {
-        let w = scope_weight(&proj("proj-a"), &proj("proj-b"), 100);
-        assert!((w - 0.25).abs() < 1e-10);
+    fn different_concrete_scopes_attenuated() {
+        // Two different concrete scopes ⇒ attenuated (0.5), regardless of any
+        // former hierarchical relationship (ancestor/sibling/disjoint all collapse).
+        assert_eq!(scope_weight(&proj("proj-a"), &proj("proj-b")), 0.5);
+        assert_eq!(scope_weight(&proj("proj-a"), &proj("proj-a/feature")), 0.5);
+        assert_eq!(scope_weight(&proj("proj-a/x"), &proj("proj-a/y")), 0.5);
     }
 
     // ── readout score ────────────────────────────────────────────────────────

@@ -367,9 +367,9 @@ mod tests {
     use super::*;
     use crate::graph::edge::EdgeSource;
     use crate::graph::node::Origin;
+    use crate::graph::types::SourceKind;
     use crate::graph::{Edge, KnowledgeType, MemoryTier, Node, ScopePath};
     use crate::mechanics::priors::project_weight;
-    use crate::peer::SourceKind;
     use crate::storage::SqliteStorage;
 
     fn origin() -> Origin {

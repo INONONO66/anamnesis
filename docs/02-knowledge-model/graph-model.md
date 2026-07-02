@@ -38,15 +38,16 @@ Every site carries origin. Provenance is not optional.
 
 ## Node Types
 
-| Class | Types | Dynamics Role |
-|---|---|---|
-| Identity | `IdentityCore`, `IdentityLearned`, `IdentityState` | Retrieval priors and agent-state context |
-| Knowledge | `Semantic`, `Procedural`, `Entity`, `Convention`, `Decision`, `Gotcha` | Reusable facts and operating knowledge |
-| Debug | `DebugSession`, `Hypothesis`, `Evidence` | Inert debug lifecycle records |
-| Memory | `Episodic`, `Event` | Raw or time-bound fragments |
-| Custom | `Custom(String)` | Consumer-defined type |
+`KnowledgeType` collapsed from 15 variants to 4 in the [v0.10.0 shrink](../adr/0014-shrink-to-product.md); the v6→v7 migration normalizes legacy rows into these.
 
-Type affects decay prior, packaging bucket, readout treatment, and conductance priors. The decay prior is the `node_type` policy multiplier `m_type` applied during per-trace `d_j` computation: it is the outer multiplier in `d_j = m_type · ( c · e^{m_j} + α )`, not an independent rate. A type with `m_type = 0` (e.g. `IdentityCore`, `Hypothesis`, `Evidence`, `DebugSession`) yields `d_j = 0` for every trace and never decays. It must not be replaced by free-form strings at the engine boundary except through `Custom`.
+| Variant | Dynamics Role |
+|---|---|
+| `Episodic` | Raw or time-bound fragment — a specific event or conversation turn |
+| `Semantic` | Reusable fact or generalization; target of consolidation |
+| `Identity` | Retrieval prior; routed to a dedicated context partition |
+| `Custom(String)` | Consumer-defined type (renders by its bare label) |
+
+Type affects decay prior, packaging bucket, readout treatment, and conductance priors. The decay prior is the `node_type` policy multiplier `m_type` applied during per-trace `d_j` computation: it is the outer multiplier in `d_j = m_type · ( c · e^{m_j} + α )`, not an independent rate. A type with `m_type = 0` (`Identity`) yields `d_j = 0` for every trace and never decays. It must not be replaced by free-form strings at the engine boundary except through `Custom`. (The pre-0.10.0 finer taxonomy — the `IdentityCore`/`IdentityLearned`/`IdentityState` split, `Procedural`/`Convention`/`Decision`/`Gotcha`/`Entity`/`Event`, and the inert `DebugSession`/`Hypothesis`/`Evidence` debug family — is historical; ADR-0014 records the by-design decay coarsenings applied to their former `m_type` values.)
 
 ## Edges
 
@@ -127,7 +128,7 @@ Packaging may downgrade resolution to fit budget, but the original content remai
 
 ## SessionSummary
 
-`SessionSummary` is the metadata-only input for cross-agent reflection. It carries agent id, session id, and node ids. `reflect_batch` links sites sharing entity tags across agents without calling an LLM.
+> **Removed in [v0.10.0](../adr/0014-shrink-to-product.md).** `SessionSummary` and `reflect_batch` (metadata-only cross-agent reflection that linked sites sharing entity tags without calling an LLM) had no consumer and were removed with the peer/trust subsystem. Cross-agent linking is [roadmap](peer-identity.md), gated on a real multi-peer deployment.
 
 ## Graph Invariants
 

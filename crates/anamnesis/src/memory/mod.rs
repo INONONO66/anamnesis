@@ -54,18 +54,14 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::Engine;
-use crate::api::{
-    CommitReport, CrystallizeRequest, EngineConfig, HealthGrade, IngestResult, Observation,
-    TickReport,
-};
+use crate::api::{CommitReport, EngineConfig, HealthGrade, IngestResult, Observation, TickReport};
 use crate::embedding::EmbeddingProvider;
 use crate::error::Error;
 use crate::graph::node::Origin;
-use crate::graph::scope::ScopeRelation;
+use crate::graph::types::SourceKind;
 use crate::graph::types::{EdgeId, PeerId};
 use crate::graph::{EdgeType, KnowledgeType, NodeId, ScopePath, Timestamp};
 use crate::mechanics::social::ConfidenceLevel;
-use crate::peer::SourceKind;
 use crate::query::{ContextPackage, Fragment, SearchInput, SearchResult, Tension};
 use crate::storage::{SqliteStorage, StorageAdapter};
 
@@ -255,35 +251,6 @@ pub struct Neighbor {
     pub weight: f64,
     /// Direction of the edge relative to the queried node.
     pub direction: Direction,
-}
-
-// ── Consolidation report ─────────────────────────────────────────────────────
-
-/// Compact report returned by [`Memory::consolidate`] / [`Memory::consolidate_at`].
-///
-/// A small owned summary of a crystallization pass — deliberately *not* the full
-/// engine `CrystallizeResult` (which leaks dedup scores, attraction edges, and
-/// raw support/contradiction rates). Surfaces only what a front-door caller
-/// needs to judge the outcome.
-#[derive(Debug, Clone, PartialEq)]
-#[non_exhaustive] // report may gain metrics; keep additive
-pub struct ConsolidateReport {
-    /// The synthesis node created by this consolidation.
-    pub node_id: NodeId,
-    /// Number of sources the synthesis was consolidated from (derived from the
-    /// `ConsolidatedFrom` provenance edges actually created — may be fewer than
-    /// the input ids if any source's cold-start conductance was non-finite).
-    pub source_count: usize,
-    /// Number of `ConsolidatedFrom` provenance edges created (== `source_count`).
-    pub edges_created: usize,
-    /// Initial salience assigned to the crystal.
-    pub salience: f64,
-    /// Source agreement `[0, 1]` = `clamp(support_density - contradiction_rate)`.
-    pub consistency: f64,
-    /// `true` if the sources may be circular (one is already consolidated from)
-    /// or single-source (all share one peer + session). Treat the synthesis as
-    /// lower-confidence.
-    pub low_confidence: bool,
 }
 
 // ── Stats / health snapshot ──────────────────────────────────────────────────
@@ -807,92 +774,6 @@ impl<S: StorageAdapter + Clone> Memory<S> {
     }
 }
 
-// ── Consolidate — caller-triggered crystallization ───────────────────────────
-
-impl<S: StorageAdapter + Clone> Memory<S> {
-    /// Synthesize `source_ids` into a higher-level knowledge node at wall clock.
-    ///
-    /// Equivalent to [`consolidate_at`](Memory::consolidate_at) with
-    /// `now = Timestamp::now()`. For deterministic / time-travel consolidation,
-    /// use `consolidate_at` directly.
-    pub fn consolidate(
-        &mut self,
-        name: &str,
-        content: &str,
-        source_ids: Vec<NodeId>,
-    ) -> Result<ConsolidateReport, Error> {
-        self.consolidate_at(name, content, source_ids, Timestamp::now())
-    }
-
-    /// Synthesize `source_ids` into a higher-level `Semantic` knowledge node at an
-    /// explicit `now`.
-    ///
-    /// Flushes pending session buffers first (so freshly-added turns are valid
-    /// crystallize sources), embeds the synthesis `content` (enabling the engine's
-    /// dedup + attraction paths), and crystallizes via [`Engine::crystallize`].
-    /// Returns a compact [`ConsolidateReport`].
-    ///
-    /// # Errors
-    ///
-    /// - Requires **at least two** sources — fewer returns [`Error::InvalidInput`].
-    /// - Every `source_id` must exist, else [`Error::NodeNotFound`].
-    /// - If the synthesis embedding is a near-duplicate of an existing crystal
-    ///   beyond the engine's dedup threshold, returns [`Error::Rejected`].
-    pub fn consolidate_at(
-        &mut self,
-        name: &str,
-        content: &str,
-        source_ids: Vec<NodeId>,
-        now: Timestamp,
-    ) -> Result<ConsolidateReport, Error> {
-        // Surface the hard precondition early with a clear message rather than
-        // relying solely on the engine's generic InvalidInput.
-        if source_ids.len() < 2 {
-            return Err(Error::InvalidInput(
-                "consolidate requires at least two source nodes".to_string(),
-            ));
-        }
-
-        // Flush buffers so recently-added turns are persisted (and thus valid
-        // crystallize sources) — same pattern as search_at.
-        self.flush_all()?;
-
-        // Embed the synthesis content so dedup + attraction edges can fire.
-        let embedding = embed_one(&*self.provider, content)?;
-
-        let request = CrystallizeRequest {
-            name: make_name(name),
-            summary: None,
-            content: content.to_string(),
-            embedding: Some(embedding),
-            source_relevances: None, // engine defaults each source weight to 1.0
-            node_type: KnowledgeType::Semantic,
-            confidence: 0.9,
-            origin: Origin {
-                peer_id: PeerId(0),
-                source_kind: SourceKind::AgentObservation,
-                session_id: "consolidation".to_string(),
-                scope: ScopePath::universal(),
-                confidence: 0.9,
-            },
-            entity_tags: Vec::new(),
-            timestamp: now,
-            source_ids, // moved last; len already validated >= 2
-        };
-
-        let result = self.engine.crystallize(request)?;
-
-        Ok(ConsolidateReport {
-            node_id: result.node_id,
-            source_count: result.consolidation_edges.len(),
-            edges_created: result.consolidation_edges.len(),
-            salience: result.initial_salience,
-            consistency: result.consistency_score,
-            low_confidence: result.circular_evidence_warning || result.single_source_warning,
-        })
-    }
-}
-
 // ── Stats — read-only health snapshot ────────────────────────────────────────
 
 impl<S: StorageAdapter + Clone> Memory<S> {
@@ -1021,6 +902,19 @@ impl Recall {
     }
 }
 
+/// Human-readable label for a node type in rendered context output.
+///
+/// `KnowledgeType` has no `Display`; the fixed variants render via `{:?}`
+/// (`Identity`/`Semantic`/`Episodic`), but `Custom("gotcha")` would render as the
+/// noisy `Custom("gotcha")`. Render `Custom` as its bare inner label instead so a
+/// legacy/consumer type reads as `[gotcha]` rather than `[Custom("gotcha")]`.
+fn node_type_label(kt: &KnowledgeType) -> String {
+    match kt {
+        KnowledgeType::Custom(label) => label.clone(),
+        other => format!("{other:?}"),
+    }
+}
+
 /// Render one titled fragment section (skipped entirely if `frags` is empty).
 fn render_section(out: &mut String, title: &str, frags: &[Fragment]) {
     if frags.is_empty() {
@@ -1028,11 +922,13 @@ fn render_section(out: &mut String, title: &str, frags: &[Fragment]) {
     }
     let _ = writeln!(out, "## {title}");
     for f in frags {
-        // Header: type (Debug — KnowledgeType has no Display), name, relevance.
+        // Header: type label (KnowledgeType has no Display), name, relevance.
         let _ = writeln!(
             out,
-            "- [{:?}] {} (relevance {:.2})",
-            f.node_type, f.name, f.relevance
+            "- [{}] {} (relevance {:.2})",
+            node_type_label(&f.node_type),
+            f.name,
+            f.relevance
         );
         // Body: prefer full content (L2), fall back to summary (L1); name is
         // already shown in the header.
@@ -1041,17 +937,17 @@ fn render_section(out: &mut String, title: &str, frags: &[Fragment]) {
         } else if let Some(summary) = &f.summary {
             let _ = writeln!(out, "    {summary}");
         }
-        // Provenance line. ScopePath (origin.scope) HAS Display; SourceKind and
-        // ScopeRelation need {:?} / a label helper.
+        // Provenance line. ScopePath (origin.scope) HAS Display; SourceKind needs
+        // {:?}. Scopes are flat opaque paths (hierarchy removed), so the origin
+        // scope string is the whole story — there is no query-relative relation.
         let _ = writeln!(
             out,
-            "    └ origin: peer #{}, {:?}, session \"{}\", scope {} (conf {:.2}); relation {}",
+            "    └ origin: peer #{}, {:?}, session \"{}\", scope {} (conf {:.2})",
             f.origin.peer_id.0,
             f.origin.source_kind,
             f.origin.session_id,
             f.origin.scope,
             f.origin.confidence,
-            scope_relation_label(f.scope),
         );
     }
     out.push('\n');
@@ -1064,18 +960,6 @@ fn render_tension(out: &mut String, tension: &Tension) {
         let _ = write!(out, " — {desc}");
     }
     let _ = writeln!(out, " (stress {:.2})", tension.stress);
-}
-
-/// A friendly label for a [`ScopeRelation`] (it has no `Display` impl).
-fn scope_relation_label(relation: ScopeRelation) -> &'static str {
-    match relation {
-        ScopeRelation::Equal => "equal",
-        ScopeRelation::Ancestor => "ancestor",
-        ScopeRelation::Descendant => "descendant",
-        ScopeRelation::Sibling => "sibling",
-        ScopeRelation::Universal => "universal",
-        ScopeRelation::Disjoint => "disjoint",
-    }
 }
 
 impl<S: StorageAdapter + Clone> Memory<S> {
@@ -1498,57 +1382,6 @@ mod tests {
         assert!(
             n.iter().any(|x| x.edge_type == EdgeType::ExtractedFrom),
             "expected an ExtractedFrom recipe edge among neighbors: {n:?}"
-        );
-    }
-
-    // ── consolidate ───────────────────────────────────────────────────────────
-
-    #[test]
-    fn consolidate_synthesizes_from_sources() {
-        let mut m = mem();
-        let a = m
-            .add("s", "a", "auth uses a factory", t(1))
-            .unwrap()
-            .episodic;
-        let b = m
-            .add("s", "a", "factory builds the client", t(2))
-            .unwrap()
-            .episodic;
-        m.flush_all().unwrap();
-
-        let report = m
-            .consolidate_at(
-                "auth construction",
-                "Auth is constructed via a factory that builds the client.",
-                vec![a, b],
-                t(10),
-            )
-            .unwrap();
-
-        assert_eq!(report.source_count, 2);
-        assert_eq!(report.edges_created, 2);
-        assert!(report.salience >= 0.0);
-        assert!((0.0..=1.0).contains(&report.consistency));
-
-        // The crystal must be a real, reachable node with ConsolidatedFrom edges
-        // back to both sources.
-        let n = m.neighbors(report.node_id).unwrap();
-        let consolidated: Vec<_> = n
-            .iter()
-            .filter(|x| x.edge_type == EdgeType::ConsolidatedFrom)
-            .collect();
-        assert_eq!(consolidated.len(), 2);
-    }
-
-    #[test]
-    fn consolidate_requires_two_sources() {
-        let mut m = mem();
-        let a = m.add("s", "a", "only one", t(1)).unwrap().episodic;
-        m.flush_all().unwrap();
-        let result = m.consolidate_at("x", "single", vec![a], t(2));
-        assert!(
-            matches!(result, Err(Error::InvalidInput(_))),
-            "single-source consolidate must be InvalidInput, got {result:?}"
         );
     }
 

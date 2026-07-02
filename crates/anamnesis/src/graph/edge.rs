@@ -9,7 +9,7 @@ use std::collections::HashMap;
 /// attraction auto-links (`Auto`) and `link()` calls (`Manual`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EdgeSource {
-    /// Created automatically by the engine (attraction, reflect_batch).
+    /// Created automatically by the engine (attraction).
     Auto,
     /// Created explicitly by the consumer via `Engine::link()`.
     Manual,

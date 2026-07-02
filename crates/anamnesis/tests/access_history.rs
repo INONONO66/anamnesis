@@ -34,7 +34,7 @@ fn make_test_node() -> Node {
         tier: MemoryTier::Auto,
         origin: Origin {
             peer_id: anamnesis::graph::types::PeerId(0),
-            source_kind: anamnesis::peer::SourceKind::AgentObservation,
+            source_kind: anamnesis::engine::SourceKind::AgentObservation,
             session_id: "s".to_string(),
             scope: anamnesis::graph::ScopePath::universal(),
             confidence: 1.0,
@@ -72,7 +72,7 @@ fn ingest_seeds_creation_trace() {
         entity_tags: vec![],
         origin: Origin {
             peer_id: anamnesis::graph::types::PeerId(0),
-            source_kind: anamnesis::peer::SourceKind::AgentObservation,
+            source_kind: anamnesis::engine::SourceKind::AgentObservation,
             session_id: "s".to_string(),
             scope: anamnesis::graph::ScopePath::universal(),
             confidence: 0.9,

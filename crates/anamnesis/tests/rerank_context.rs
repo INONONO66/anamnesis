@@ -16,7 +16,7 @@ fn make_obs_tagged(name: &str, tags: Vec<&str>) -> Observation {
         entity_tags: tags.into_iter().map(|s| s.to_string()).collect(),
         origin: Origin {
             peer_id: anamnesis::graph::types::PeerId(0),
-            source_kind: anamnesis::peer::SourceKind::AgentObservation,
+            source_kind: anamnesis::engine::SourceKind::AgentObservation,
             session_id: "session-1".to_string(),
             scope: anamnesis::graph::ScopePath::universal(),
             confidence: 0.9,
@@ -110,14 +110,14 @@ fn rerank_works_with_type_filtered() {
 
     let conv_auth = created_id(
         e.ingest(Observation {
-            node_type: KnowledgeType::Convention,
+            node_type: KnowledgeType::Semantic,
             ..make_obs_tagged("auth_convention", vec!["auth"])
         })
         .unwrap(),
     );
     created_id(
         e.ingest(Observation {
-            node_type: KnowledgeType::Convention,
+            node_type: KnowledgeType::Semantic,
             ..make_obs_tagged("logging_convention", vec!["logging"])
         })
         .unwrap(),
@@ -130,7 +130,7 @@ fn rerank_works_with_type_filtered() {
     let pkg = e
         .query(
             &Query::TypeFiltered {
-                node_type: KnowledgeType::Convention,
+                node_type: KnowledgeType::Semantic,
                 limit: 10,
             },
             &config,

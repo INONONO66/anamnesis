@@ -7,7 +7,7 @@ use anamnesis::graph::{EdgeType, KnowledgeType, NodeId, ScopePath, Timestamp};
 fn origin(_agent: &str, session: &str) -> Origin {
     Origin {
         peer_id: anamnesis::graph::types::PeerId(0),
-        source_kind: anamnesis::peer::SourceKind::AgentObservation,
+        source_kind: anamnesis::engine::SourceKind::AgentObservation,
         session_id: session.to_string(),
         scope: ScopePath::new("project-1").expect("valid scope"),
         confidence: 0.9,

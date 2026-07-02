@@ -46,15 +46,18 @@ total activation    = (B_i + P_i) + sum_j W_j * S_ji
 | origin | Provenance tuple identifying peer, session, source kind, scope, and confidence |
 | crystallize | Create a synthesis site from selected source sites without overwriting them |
 
-## Type Families
+## Knowledge Types
 
-| Family | Examples | Role |
-|---|---|---|
-| Identity | `IdentityCore`, `IdentityLearned`, `IdentityState` | Stable or current agent traits |
-| Knowledge | `Semantic`, `Procedural`, `Entity`, `Convention`, `Decision`, `Gotcha` | Reusable facts and operating knowledge |
-| Debug | `DebugSession`, `Hypothesis`, `Evidence` | Structured debugging lifecycle |
-| Memory | `Episodic`, `Event` | Raw or time-bound fragments |
-| Custom | `Custom(String)` | Consumer-defined taxonomy |
+`KnowledgeType` was collapsed from 15 variants to 4 in the [v0.10.0 shrink](../adr/0014-shrink-to-product.md); the v6→v7 migration normalizes legacy rows into these.
+
+| Variant | Role |
+|---|---|
+| `Episodic` | Raw or time-bound fragment — a specific event or conversation turn |
+| `Semantic` | Reusable fact or generalization; the target of consolidation |
+| `Identity` | Stable retrieval anchor / operating principle; routed to a dedicated context partition and used as a retrieval prior |
+| `Custom(String)` | Consumer-defined taxonomy (renders by its bare label) |
+
+> The pre-0.10.0 finer taxonomy (`IdentityCore`/`IdentityLearned`/`IdentityState`, `Procedural`/`Convention`/`Decision`/`Gotcha`/`Entity`/`Event`, and the `DebugSession`/`Hypothesis`/`Evidence` debug family) is historical — legacy databases decode those rows as `Semantic`, `Identity`, or `Custom`. Re-introducing finer types is [roadmap](../adr/0014-shrink-to-product.md), gated on a real consumer.
 
 ## Symbols
 

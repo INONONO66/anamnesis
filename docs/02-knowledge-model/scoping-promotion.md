@@ -1,5 +1,7 @@
 # Scope And Promotion
 
+> **Scope hierarchy is roadmap (as of [v0.10.0](../adr/0014-shrink-to-product.md)).** The `ScopeRelation` model below — `Ancestor` / `Descendant` / `Sibling` / `Disjoint` / `Equal` / `Universal` with per-relation retrieval handling — was **removed in the v0.10.0 shrink**. What ships is the reduced form: `ScopePath` is an opaque, canonicalized string with an `is_universal()` flag, and scope scoring is a **two-branch** weight (universal vs. non-matching). Promotion (`crystallize` + `ConsolidatedFrom`) still works, but without ancestor-aware upward routing. Read the multi-relation hierarchy here as **design intent** for a future scope layer, not current behavior.
+
 Scope expresses where knowledge is valid and who may see it. Promotion moves repeatedly confirmed narrow-scope knowledge into a broader scope by adding synthesis, not by overwriting the source fragment.
 
 ## Scope Path

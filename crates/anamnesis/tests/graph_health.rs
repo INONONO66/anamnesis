@@ -13,7 +13,7 @@ use anamnesis::mechanics::observability::InvariantCheck;
 fn make_origin(scope: &str) -> Origin {
     Origin {
         peer_id: anamnesis::graph::types::PeerId(0),
-        source_kind: anamnesis::peer::SourceKind::AgentObservation,
+        source_kind: anamnesis::engine::SourceKind::AgentObservation,
         session_id: "session-1".to_string(),
         scope: ScopePath::new(scope).expect("valid scope"),
         confidence: 0.9,
@@ -122,7 +122,7 @@ fn orphan_ratio_and_average_degree_star_topology() {
     let config = EngineConfig::new().with_novelty_threshold(0.0);
     let mut engine = Engine::with_config(config);
 
-    let center = ingest_node(&mut engine, "center", KnowledgeType::Entity);
+    let center = ingest_node(&mut engine, "center", KnowledgeType::Semantic);
     let leaf1 = ingest_node(&mut engine, "leaf-1", KnowledgeType::Semantic);
     let leaf2 = ingest_node(&mut engine, "leaf-2", KnowledgeType::Semantic);
     let leaf3 = ingest_node(&mut engine, "leaf-3", KnowledgeType::Semantic);
@@ -217,7 +217,7 @@ fn node_and_edge_counts_match_graph() {
 
     let n1 = ingest_node(&mut engine, "n1", KnowledgeType::Semantic);
     let n2 = ingest_node(&mut engine, "n2", KnowledgeType::Episodic);
-    let n3 = ingest_node(&mut engine, "n3", KnowledgeType::Entity);
+    let n3 = ingest_node(&mut engine, "n3", KnowledgeType::Semantic);
 
     engine.link(n1, n2, EdgeType::Semantic).unwrap();
     engine.link(n2, n3, EdgeType::Causal).unwrap();
@@ -276,14 +276,18 @@ fn healthy_graph_passes_all_structural_invariants() {
 }
 
 #[test]
-fn private_scope_leakage_is_clean_for_hierarchical_scopes() {
+fn private_scope_leakage_is_clean_for_same_scope() {
     let config = EngineConfig::new().with_novelty_threshold(0.0);
     let mut engine = Engine::with_config(config);
 
-    // Two nodes in related (parent/child) scopes linked: not a leak.
-    let parent = ingest_in(&mut engine, "parent", KnowledgeType::Semantic, "org");
-    let child = ingest_in(&mut engine, "child", KnowledgeType::Semantic, "org/team");
-    engine.link(parent, child, EdgeType::Semantic).unwrap();
+    // Scopes are flat opaque paths (hierarchy removed): a propagating edge only
+    // leaks when it bridges two *different* non-universal scopes. Two endpoints in
+    // the exact same concrete scope share visibility, so linking them is not a leak
+    // (a former parent/child hierarchical pair like "org" ↔ "org/team" is now two
+    // distinct private scopes and WOULD leak — see the disjoint-bridge test).
+    let a = ingest_in(&mut engine, "org note a", KnowledgeType::Semantic, "org");
+    let b = ingest_in(&mut engine, "org note b", KnowledgeType::Semantic, "org");
+    engine.link(a, b, EdgeType::Semantic).unwrap();
 
     let report = engine.check_invariants(None);
     assert!(

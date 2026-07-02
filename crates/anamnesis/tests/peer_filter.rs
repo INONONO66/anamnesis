@@ -3,10 +3,10 @@
 use anamnesis::Engine;
 use anamnesis::api::{IngestResult, Observation};
 use anamnesis::engine::EngineConfig;
+use anamnesis::engine::SourceKind;
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::types::PeerId;
 use anamnesis::graph::{KnowledgeType, ScopePath, Timestamp};
-use anamnesis::peer::SourceKind;
 use anamnesis::query::SearchInput;
 
 fn obs_with_peer(name: &str, peer_id: PeerId) -> Observation {

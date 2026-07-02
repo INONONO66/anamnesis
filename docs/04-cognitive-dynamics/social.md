@@ -1,5 +1,7 @@
 # Social Dynamics
 
+> **Partly removed / roadmap (as of [v0.10.0](../adr/0014-shrink-to-product.md)).** The peer-trust half of this document — the trust reservoir, corroboration/contradiction trust updates, trust-weighted readout, and `reflect_batch` cross-agent reflection — was **removed in the v0.10.0 shrink** (no consumer; production ran single-peer, readout trust term now a neutral `1.0`). What **survives** is the feedback + evidence-prior physics: `Origin` provenance storage (`peer_id`/`source_kind`), and the decay-exempt evidence prior `P_i` that still absorbs encoding surprise and consumer feedback (the "Feedback-Based Work" section below). Read the peer-trust and cross-agent-reflection sections as **design intent** for a future multi-peer layer, not current behavior.
+
 Social dynamics integrate peer provenance, corroboration, contradiction, and feedback. They do not replace graph dynamics; they provide evidence that affects coupling, trust, and readout.
 
 ## Origin
@@ -32,7 +34,7 @@ Trust updates must leave traces. The engine must not silently rewrite provenance
 
 ## Cross-Agent Reflection
 
-`reflect_batch` receives session summaries from multiple agents and links sites that share entity tags:
+`reflect_batch` (removed in v0.10.0 — see the banner above; kept here as design intent) received session summaries from multiple agents and linked sites that shared entity tags:
 
 ```mermaid
 flowchart LR

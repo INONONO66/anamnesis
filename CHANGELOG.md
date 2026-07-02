@@ -5,7 +5,46 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — v0.5.0
+## [0.10.0] — Shrink to product
+
+Breaking release. An audit found ~85% of the Engine's public surface had zero
+consumers; this release deletes the consumer-less surface so the map matches the
+territory. See [ADR-0014](docs/adr/0014-shrink-to-product.md) for the full record,
+the by-design decay coarsenings, what survives and why, and the re-add conditions.
+
+### Breaking Changes
+
+- **Debug/hypothesis lifecycle removed** — `start_debug`, `log_hypothesis`, `log_evidence`, `reject_hypothesis`, `confirm_hypothesis`, `end_debug`, `search_rejected_hypotheses`, the `EvidenceResult` / `DebugOutcome` types, and the `DebugSession` / `Hypothesis` / `Evidence` node types. No consumer.
+- **Convenience API removed** — `learn`, `log_activity`, `schedule`, `apply_feedback`, `query_perspective`, `reflect_batch`, `support_report`, `Memory::consolidate` / `consolidate_at`, and their input types. No consumer.
+- **Peer/trust subsystem removed** — `PeerRegistry`, `PeerProfile`, `TrustLevel`, `Engine::register_peer` and the other engine peer methods, and the trust reservoir. Readout's trust term is now a neutral `1.0`. `PeerId` and `SourceKind` remain on `Origin` (storage-level provenance survives).
+- **`KnowledgeType` collapsed 15 → 4** — now `Episodic`, `Semantic`, `Identity`, `Custom(String)`. The removed variants' stored rows are normalized to these on open.
+- **`ScopeRelation` hierarchy removed** — `ScopePath` is now an opaque canonical string plus `is_universal()`; scope scoring is a two-branch weight (all production scopes were `universal`).
+- **`MemoryTier` manual override removed** — `Engine::set_tier` / `get_tier`. The `MemoryTier` enum and the salience→label display mapping remain.
+
+### Changed — by-design decay/tau coarsenings (disclosed)
+
+Collapsing the type taxonomy coarsened several per-type decay *policy inputs* (the dynamics of [ADR-0008](docs/adr/0008-powerlaw-dissipation.md) are unchanged):
+
+- `Event` decay multiplier `m_type` `0.60 → 0.40` (folds into the ordinary-knowledge rate).
+- `Convention` / `Decision` `m_type` `0.30 → 0.40`.
+- ex-inert `Hypothesis` / `Evidence` / `DebugSession` legacy rows: `0.0` (never decayed) → `0.40` when decoded as `Custom`.
+- `IdentityLearned` / `IdentityState` merged into `Identity`: now `0.0` (tick-protected, never decays).
+- Entity↔Entity seed-`tau` special-case dropped (Entity pairs use the ordinary seed distribution).
+
+### Migrations
+
+- **v5 → v6** — drops the `peers` / `peer_aliases` tables.
+- **v6 → v7** — normalizes legacy `node_type` rows to `Episodic` / `Semantic` / `Identity` / `Custom(<original>)` in place; old databases open with no data loss (the original label is preserved as `Custom`).
+
+Both run automatically on `SqliteStorage::open`.
+
+### Added (recent releases folded in)
+
+- **Automatic capture pipeline** (0.9.x, [ADR-0013](docs/adr/0013-reasoning-capture-pipeline.md)): `Stop` / `PreCompact` / `SessionEnd` hooks stream turns to Anamnesis as raw `Episodic` memories (content-hash deduped, fire-and-forget); a Stage-2 nudge asks the agent to distill the un-extracted queue via the `extract_pending` MCP tool. Capture hardening (queue durability, nudge ungating, bounded I/O) in 0.9.1.
+- **Reasoning-advantage demo** (PR-A): `examples/reasoning_demo.rs` + `tests/reasoning_advantage.rs` — the why-query a flat vector list cannot answer, showing contradiction-as-tension and typed why-chains over the same nodes.
+- **`capture.rs`** — the MCP capture/extraction pipeline extracted into its own module (move-only).
+
+## [0.5.0]
 
 ### Breaking Changes
 

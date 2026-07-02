@@ -2,11 +2,11 @@
 
 use anamnesis::Engine;
 use anamnesis::api::DocumentInput;
+use anamnesis::engine::SourceKind;
 use anamnesis::engine::{EngineConfig, StorageAdapter};
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::types::PeerId;
 use anamnesis::graph::{EdgeType, ScopePath};
-use anamnesis::peer::SourceKind;
 
 fn default_origin() -> Origin {
     Origin {

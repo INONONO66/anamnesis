@@ -3,11 +3,11 @@
 use crate::error::Error;
 use crate::graph::node::Origin;
 use crate::graph::types::PeerId;
+use crate::graph::types::SourceKind;
 use crate::graph::{
     AccessTrace, Edge, EdgeId, EdgeType, KnowledgeType, MemoryTier, Node, NodeId, ScopePath,
     Timestamp,
 };
-use crate::peer::SourceKind;
 use crate::storage::StorageAdapter;
 use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::{HashMap, VecDeque};
@@ -1030,138 +1030,6 @@ impl StorageAdapter for SqliteStorage {
 
         self.text_search_inner(query, limit).unwrap_or_default()
     }
-
-    fn store_peer(&mut self, profile: &crate::peer::PeerProfile) -> Result<(), Error> {
-        let conn = self.lock_conn()?;
-        conn.execute(
-            "INSERT OR REPLACE INTO peers \
-             (id, name, trust_level, trust_reservoir, trust_evidence_count) \
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                profile.id.0,
-                profile.name,
-                encode_trust_level(&profile.trust_level),
-                profile.trust_reservoir,
-                profile.trust_evidence_count,
-            ],
-        )
-        .map_err(sqlite_error)?;
-        conn.execute(
-            "DELETE FROM peer_aliases WHERE peer_id = ?1",
-            [profile.id.0],
-        )
-        .map_err(sqlite_error)?;
-        conn.execute(
-            "INSERT OR IGNORE INTO peer_aliases (peer_id, alias, alias_type) VALUES (?1, ?2, 'name')",
-            params![profile.id.0, profile.name],
-        )
-        .map_err(sqlite_error)?;
-        for alias in &profile.aliases {
-            conn.execute(
-                "INSERT OR IGNORE INTO peer_aliases (peer_id, alias, alias_type) VALUES (?1, ?2, 'alias')",
-                params![profile.id.0, alias],
-            )
-            .map_err(sqlite_error)?;
-        }
-        for (platform, username) in &profile.platforms {
-            let alias_type = format!("platform:{platform}");
-            conn.execute(
-                "INSERT OR IGNORE INTO peer_aliases (peer_id, alias, alias_type) VALUES (?1, ?2, ?3)",
-                params![profile.id.0, username, alias_type],
-            )
-            .map_err(sqlite_error)?;
-        }
-        Ok(())
-    }
-
-    fn store_peer_alias(
-        &mut self,
-        peer_id: PeerId,
-        alias: &str,
-        alias_type: &str,
-    ) -> Result<(), Error> {
-        let conn = self.lock_conn()?;
-        conn.execute(
-            "INSERT OR IGNORE INTO peer_aliases (peer_id, alias, alias_type) VALUES (?1, ?2, ?3)",
-            params![peer_id.0, alias, alias_type],
-        )
-        .map_err(sqlite_error)?;
-        Ok(())
-    }
-
-    fn load_peers(&self) -> Result<crate::peer::PeerRegistry, Error> {
-        let conn = self.lock_conn()?;
-        let mut registry = crate::peer::PeerRegistry::new();
-
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, name, trust_level, trust_reservoir, trust_evidence_count \
-                 FROM peers ORDER BY id",
-            )
-            .map_err(sqlite_error)?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, u64>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, f64>(3)?,
-                    row.get::<_, u64>(4)?,
-                ))
-            })
-            .map_err(sqlite_error)?;
-
-        for row in rows {
-            let (id, name, trust_str, trust_reservoir, trust_evidence_count) =
-                row.map_err(sqlite_error)?;
-            let trust_level = decode_trust_level(&trust_str);
-            let peer_id = PeerId(id);
-            registry
-                .register_peer_with_id(peer_id, &name, trust_level)
-                .map_err(|e| Error::StorageError(format!("loading peer {id}: {e}")))?;
-            // Restore the persisted evidence trust state (corroboration/feedback
-            // moved the reservoir; do not re-seed from the coarse level).
-            registry
-                .set_trust_state(peer_id, trust_reservoir, trust_evidence_count)
-                .map_err(|e| Error::StorageError(format!("loading peer trust {id}: {e}")))?;
-        }
-
-        let mut alias_stmt = conn
-            .prepare("SELECT peer_id, alias, alias_type FROM peer_aliases ORDER BY peer_id")
-            .map_err(sqlite_error)?;
-        let alias_rows = alias_stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, u64>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            })
-            .map_err(sqlite_error)?;
-
-        for row in alias_rows {
-            let (peer_id_raw, alias, alias_type) = row.map_err(sqlite_error)?;
-            let peer_id = PeerId(peer_id_raw);
-            if alias_type == "name" {
-                continue;
-            } else if alias_type == "alias" {
-                let _ = registry.add_alias(peer_id, &alias);
-            } else if let Some(platform) = alias_type.strip_prefix("platform:") {
-                let _ = registry.add_platform(peer_id, platform, &alias);
-            }
-        }
-
-        Ok(registry)
-    }
-
-    fn delete_peer(&mut self, peer_id: PeerId) -> Result<(), Error> {
-        let conn = self.lock_conn()?;
-        conn.execute("DELETE FROM peer_aliases WHERE peer_id = ?1", [peer_id.0])
-            .map_err(sqlite_error)?;
-        conn.execute("DELETE FROM peers WHERE id = ?1", [peer_id.0])
-            .map_err(sqlite_error)?;
-        Ok(())
-    }
 }
 
 impl SqliteStorage {
@@ -1253,7 +1121,7 @@ mod tests {
             tier: MemoryTier::Auto,
             origin: Origin {
                 peer_id: crate::graph::types::PeerId(0),
-                source_kind: crate::peer::SourceKind::AgentObservation,
+                source_kind: crate::graph::types::SourceKind::AgentObservation,
                 session_id: "test-session".to_string(),
                 scope: ScopePath::universal(),
                 confidence: 0.9,
@@ -1517,12 +1385,359 @@ mod tests {
 
         let _ = std::fs::remove_file(path);
     }
+
+    /// Legacy-DB compat guard: a database written by another build may carry
+    /// `node_type` strings that are not known variants in THIS build — either
+    /// consumer strings from an older/newer schema, or (after the 0.10.0
+    /// KnowledgeType shrink) the wire strings of variants this build has since
+    /// deleted. Reopening such a DB must NOT fail: every unrecognized bare string
+    /// decodes to `KnowledgeType::Custom(<original>)` so the node loads and the
+    /// graph opens.
+    ///
+    /// The planted strings here are deliberately ones NOT in the current match
+    /// arms (this task deletes no variants, so a currently-known string like
+    /// `hypothesis` would still decode to its own variant — see
+    /// `known_node_types_are_untouched_by_fallback`). They stand in for exactly
+    /// the class of strings a later deletion will move from a known arm into the
+    /// fallback; the guard's behavior on them is identical before and after that
+    /// deletion.
+    #[test]
+    fn unknown_node_types_decode_as_custom_on_reopen() {
+        let path = temp_db_path("legacy-node-types");
+        // Bare strings unknown to this build. Two classes, both must land as
+        // `Custom(<original>)`, none carry the `custom:` prefix:
+        //   1. now-REAL legacy wire strings of variants deleted in the 0.10.0
+        //      KnowledgeType 15→4 collapse — these are exactly the strings the
+        //      v6→v7 migration rewrites to `custom:<string>` on reopen, and which
+        //      the decode fallback would also catch on any un-migrated row;
+        //   2. never-were-variant consumer strings from another schema, caught
+        //      purely by the decode fallback (no migration arm touches them).
+        let legacy = [
+            // (1) deleted-variant wire strings, now legacy:
+            "gotcha",
+            "decision",
+            "procedural",
+            "entity",
+            "convention",
+            "event",
+            "hypothesis",
+            "evidence",
+            "debug_session",
+            // (2) never-were-variant consumer strings:
+            "coding_standard",
+            "footgun",
+            "identity_snapshot",
+        ];
+
+        // Seed real, well-formed nodes through the normal path, then flush so the
+        // rows exist in the `nodes` table.
+        let ids: Vec<NodeId> = {
+            let mut storage = SqliteStorage::open(&path).expect("sqlite storage opens");
+            let ids: Vec<NodeId> = legacy
+                .iter()
+                .map(|_| {
+                    let id = storage.next_node_id();
+                    storage.set_node(make_node(id, 0.5)).expect("node stored");
+                    id
+                })
+                .collect();
+            storage.flush().expect("flush");
+            ids
+        };
+
+        // Plant the legacy type strings directly via raw SQL, bypassing encode.
+        {
+            let conn = Connection::open(&path).expect("raw conn opens");
+            for (id, ty) in ids.iter().zip(legacy.iter()) {
+                conn.execute(
+                    "UPDATE nodes SET node_type = ?2 WHERE id = ?1",
+                    params![id.0, *ty],
+                )
+                .expect("planted legacy node_type");
+            }
+        }
+
+        // Reopen through the normal path: this must succeed despite unknown types.
+        let reopened = SqliteStorage::open(&path).expect("reopen tolerates legacy node types");
+
+        // Every planted node loads as Custom(<original string>).
+        for (id, ty) in ids.iter().zip(legacy.iter()) {
+            let node_type = reopened.get_node_type(*id).expect("node type present");
+            assert_eq!(
+                node_type,
+                &KnowledgeType::Custom((*ty).to_string()),
+                "legacy type {ty:?} should decode to Custom",
+            );
+        }
+
+        // Full node sweep must not error on any node.
+        for id in reopened.all_node_ids() {
+            reopened
+                .get_node(id)
+                .expect("get_node clean over full sweep");
+        }
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// Decode contract for the collapsed 4-variant `KnowledgeType`
+    /// (Episodic/Semantic/Identity/Custom):
+    /// - the three surviving fixed wire strings decode to their exact variant;
+    /// - the three legacy identity tiers keep identity semantics — explicit arms
+    ///   fold `identity_core`/`identity_learned`/`identity_state` into `Identity`
+    ///   rather than letting them ride the generic `Custom` fallback;
+    /// - every removed knowledge/memory wire string now falls through the B0
+    ///   fallback to `Custom(<original>)` (no explicit arm), which the v6→v7
+    ///   migration mirrors by rewriting the stored string to `custom:<string>`;
+    /// - the explicit `custom:` prefix path is unaffected.
+    #[test]
+    fn known_node_types_are_untouched_by_fallback() {
+        // Surviving fixed variants + the two legacy-identity classes that decode to
+        // their exact (merged) variant, never `Custom`.
+        let exact = [
+            ("identity", KnowledgeType::Identity),
+            ("identity_core", KnowledgeType::Identity),
+            ("identity_learned", KnowledgeType::Identity),
+            ("identity_state", KnowledgeType::Identity),
+            ("semantic", KnowledgeType::Semantic),
+            ("episodic", KnowledgeType::Episodic),
+        ];
+        for (wire, expected) in exact {
+            assert_eq!(
+                decode_knowledge_type(wire).expect("known type decodes"),
+                expected,
+                "wire string {wire:?} must decode to its exact variant",
+            );
+        }
+
+        // Removed-variant wire strings now decode to Custom via the B0 fallback.
+        for wire in [
+            "procedural",
+            "entity",
+            "convention",
+            "decision",
+            "gotcha",
+            "hypothesis",
+            "evidence",
+            "debug_session",
+            "event",
+        ] {
+            assert_eq!(
+                decode_knowledge_type(wire).expect("removed type decodes"),
+                KnowledgeType::Custom(wire.to_string()),
+                "removed wire string {wire:?} must fall back to Custom",
+            );
+        }
+
+        // The explicit custom encoding still round-trips (and is NOT confused with
+        // the bare-string fallback).
+        assert_eq!(
+            decode_knowledge_type(&encode_knowledge_type(&KnowledgeType::Custom(
+                "my type".to_string()
+            )))
+            .expect("custom decodes"),
+            KnowledgeType::Custom("my type".to_string()),
+        );
+    }
+
+    /// A fallback-decoded legacy node must survive a further open/save cycle
+    /// without further corruption. The first reopen normalizes a bare unknown
+    /// string (`retired_type`) into the canonical `Custom("retired_type")`, which
+    /// re-encodes as `custom:retired_type`; a second flush + reopen is then a
+    /// fixed point (bare -> Custom is a one-way normalization; every later cycle
+    /// is stable). This is the property that makes the guard safe: re-saving a
+    /// DB opened via the fallback never mangles the type further.
+    #[test]
+    fn fallback_decoded_node_type_round_trips_stably() {
+        let path = temp_db_path("legacy-node-types-roundtrip");
+        let id = {
+            let mut storage = SqliteStorage::open(&path).expect("sqlite storage opens");
+            let id = storage.next_node_id();
+            storage.set_node(make_node(id, 0.5)).expect("node stored");
+            storage.flush().expect("flush");
+            id
+        };
+        {
+            let conn = Connection::open(&path).expect("raw conn opens");
+            conn.execute(
+                "UPDATE nodes SET node_type = 'retired_type' WHERE id = ?1",
+                params![id.0],
+            )
+            .expect("planted legacy node_type");
+        }
+
+        // First reopen: bare "retired_type" -> Custom("retired_type"). Re-persist
+        // it (re-encode now writes `custom:retired_type`).
+        {
+            let mut storage = SqliteStorage::open(&path).expect("first reopen tolerates legacy");
+            assert_eq!(
+                storage.get_node_type(id).expect("type present"),
+                &KnowledgeType::Custom("retired_type".to_string()),
+            );
+            // Force a rewrite of the node row via the normal persistence path.
+            let mut node = storage.get_node(id).expect("node present").clone();
+            node.content = "touched".to_string();
+            storage.set_node(node).expect("node re-stored");
+            storage.flush().expect("flush re-encoded node");
+        }
+
+        // Confirm the on-disk encoding is now the canonical custom form.
+        {
+            let conn = Connection::open(&path).expect("raw conn opens");
+            let encoded: String = conn
+                .query_row(
+                    "SELECT node_type FROM nodes WHERE id = ?1",
+                    params![id.0],
+                    |row| row.get(0),
+                )
+                .expect("read encoded node_type");
+            assert_eq!(encoded, "custom:retired_type");
+        }
+
+        // Second reopen is a fixed point: still Custom("retired_type").
+        let reopened = SqliteStorage::open(&path).expect("second reopen");
+        assert_eq!(
+            reopened.get_node_type(id).expect("type present"),
+            &KnowledgeType::Custom("retired_type".to_string()),
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// `decode_memory_tier` must tolerate unknown/legacy tier strings by falling
+    /// back to `MemoryTier::Auto`, mirroring the node-type compat guard, so a
+    /// legacy DB with a dropped tier string still opens.
+    #[test]
+    fn decode_memory_tier_falls_back_to_auto_on_unknown() {
+        // Known strings keep their exact meaning.
+        assert_eq!(decode_memory_tier("auto").unwrap(), MemoryTier::Auto);
+        assert_eq!(decode_memory_tier("core").unwrap(), MemoryTier::Core);
+        assert_eq!(decode_memory_tier("recall").unwrap(), MemoryTier::Recall);
+        assert_eq!(
+            decode_memory_tier("archival").unwrap(),
+            MemoryTier::Archival
+        );
+        // Unknown strings fall back to Auto instead of erroring.
+        assert_eq!(decode_memory_tier("legacy_tier").unwrap(), MemoryTier::Auto);
+        assert_eq!(decode_memory_tier("").unwrap(), MemoryTier::Auto);
+    }
+
+    /// Carried B0 finding + option (a) resolution: the v6→v7 normalization migration
+    /// must rewrite legacy `node_type` strings on reopen so `nodes_by_type` — which
+    /// filters SQL by the *encoded* query string — finds them immediately, with no
+    /// eventual-consistency gap.
+    ///
+    /// Plants a v6-era DB carrying a bare `gotcha` (a removed variant's wire string)
+    /// and the three legacy identity tiers, reopens through the normal migration
+    /// path, and asserts both the on-disk normalization and the lookup:
+    ///   - `gotcha`  → stored as `custom:gotcha`, found by `nodes_by_type(Custom("gotcha"))`;
+    ///   - `identity_core|learned|state` → stored as `identity`, found by `nodes_by_type(Identity)`.
+    #[test]
+    fn migration_v7_normalizes_legacy_node_types_for_nodes_by_type() {
+        let path = temp_db_path("v7-normalize-nodes-by-type");
+
+        // Seed well-formed rows through the normal path, then flush so the rows
+        // exist in the `nodes` table.
+        let (gotcha_id, identity_ids) = {
+            let mut storage = SqliteStorage::open(&path).expect("sqlite storage opens");
+            let gotcha_id = storage.next_node_id();
+            storage
+                .set_node(make_node(gotcha_id, 0.5))
+                .expect("gotcha node stored");
+            let identity_ids: Vec<NodeId> = (0..3)
+                .map(|_| {
+                    let id = storage.next_node_id();
+                    storage
+                        .set_node(make_node(id, 0.5))
+                        .expect("id node stored");
+                    id
+                })
+                .collect();
+            storage.flush().expect("flush");
+            (gotcha_id, identity_ids)
+        };
+
+        // Rewind to a v6-era DB: plant the legacy bare wire strings directly and set
+        // the recorded schema version back to 6, so reopening runs the v6→v7 step.
+        {
+            let conn = Connection::open(&path).expect("raw conn opens");
+            conn.execute(
+                "UPDATE nodes SET node_type = 'gotcha' WHERE id = ?1",
+                params![gotcha_id.0],
+            )
+            .expect("planted legacy gotcha");
+            let legacy_identity = ["identity_core", "identity_learned", "identity_state"];
+            for (id, ty) in identity_ids.iter().zip(legacy_identity.iter()) {
+                conn.execute(
+                    "UPDATE nodes SET node_type = ?2 WHERE id = ?1",
+                    params![id.0, *ty],
+                )
+                .expect("planted legacy identity tier");
+            }
+            conn.execute_batch("UPDATE schema_version SET version = 6;")
+                .expect("rewind schema_version to 6");
+        }
+
+        // Reopen: the v6→v7 migration normalizes the column in place.
+        let reopened = SqliteStorage::open(&path).expect("reopen runs v6->v7 migration");
+
+        // On-disk column is normalized to the canonical encodings.
+        {
+            let conn = Connection::open(&path).expect("raw conn opens");
+            let gotcha_enc: String = conn
+                .query_row(
+                    "SELECT node_type FROM nodes WHERE id = ?1",
+                    params![gotcha_id.0],
+                    |row| row.get(0),
+                )
+                .expect("read gotcha node_type");
+            assert_eq!(gotcha_enc, "custom:gotcha", "gotcha row normalized");
+            for id in &identity_ids {
+                let enc: String = conn
+                    .query_row(
+                        "SELECT node_type FROM nodes WHERE id = ?1",
+                        params![id.0],
+                        |row| row.get(0),
+                    )
+                    .expect("read identity node_type");
+                assert_eq!(
+                    enc, "identity",
+                    "identity tier row normalized to bare identity"
+                );
+            }
+        }
+
+        // The carried finding: nodes_by_type now FINDS the normalized rows.
+        assert_eq!(
+            reopened.nodes_by_type(&KnowledgeType::Custom("gotcha".to_string())),
+            vec![gotcha_id],
+            "nodes_by_type(Custom(\"gotcha\")) must find the normalized legacy row",
+        );
+        let mut found_identity = reopened.nodes_by_type(&KnowledgeType::Identity);
+        found_identity.sort();
+        let mut expected_identity = identity_ids.clone();
+        expected_identity.sort();
+        assert_eq!(
+            found_identity, expected_identity,
+            "nodes_by_type(Identity) must find all normalized legacy identity rows",
+        );
+
+        // In-memory decode agrees with storage.
+        assert_eq!(
+            reopened
+                .get_node_type(gotcha_id)
+                .expect("gotcha type present"),
+            &KnowledgeType::Custom("gotcha".to_string()),
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 /// Current on-disk schema version. The fresh-DB `create_schema` path and the
 /// incremental migration chain must converge on an IDENTICAL schema at this
 /// version (same columns, same indexes).
-const SCHEMA_VERSION: u32 = 5;
+const SCHEMA_VERSION: u32 = 7;
 
 /// Run schema migrations to bring the database up to the current version.
 ///
@@ -1534,7 +1749,23 @@ const SCHEMA_VERSION: u32 = 5;
 /// - v4: peer evidence-trust columns `trust_reservoir REAL` +
 ///   `trust_evidence_count INTEGER` (social.md "Peer Trust"); seeded from the coarse
 ///   `trust_level` prior for existing peers
-/// - v5 (current): `nodes.evidence_prior REAL NOT NULL DEFAULT 0` — the persistent,
+/// - v6: DROP the `peers` / `peer_aliases` tables — the peer/trust
+///   subsystem was removed (production is single-peer, `PeerId(0)`). Nodes' own
+///   `peer_id` / `source_kind` columns (inside the Origin encoding) STAY; the
+///   `idx_nodes_peer` index STAYS. No node data is touched.
+/// - v7 (current): normalize `nodes.node_type` for the KnowledgeType 15→4 collapse
+///   (Episodic/Semantic/Identity/Custom). The three legacy identity wire strings
+///   (`identity_core`/`identity_learned`/`identity_state`) are rewritten to bare
+///   `identity`, and every deleted knowledge/memory wire string (`procedural`,
+///   `entity`, `convention`, `decision`, `gotcha`, `hypothesis`, `evidence`,
+///   `debug_session`, `event`) is rewritten to its canonical `custom:<string>`
+///   form. This makes on-disk storage match the new decode immediately, closing the
+///   eventual-consistency gap where a bare legacy string decoded in-memory to
+///   `Custom(...)`/`Identity` but `nodes_by_type` (which filters by the raw encoded
+///   string) would miss the un-normalized row until it was re-saved. Idempotent: the
+///   `IN (...)` filters only match the legacy bare strings, never the post-migration
+///   `identity` / `custom:*` values. No schema/column change — data only.
+/// - v5: `nodes.evidence_prior REAL NOT NULL DEFAULT 0` — the persistent,
 ///   decay-exempt evidence prior `P_i` of the `A_i = B_i + P_i` decomposition
 ///   (ADR-0008). Backfilled to `0.0`: the base-level `B_i` is recomputed from
 ///   `access_history`, so persistent strength comes purely from `B_i` at first
@@ -1585,8 +1816,10 @@ fn migrate_schema(conn: &Connection) -> Result<(), Error> {
                 migrate_v2_to_v3(conn)?;
                 migrate_v3_to_v4(conn)?;
                 migrate_v4_to_v5(conn)?;
+                migrate_v5_to_v6(conn)?;
+                migrate_v6_to_v7(conn)?;
             } else {
-                // Brand new database — create the current (v5) schema directly.
+                // Brand new database — create the current (v7) schema directly.
                 create_schema(conn)?;
             }
             conn.execute_batch(&format!(
@@ -1599,6 +1832,8 @@ fn migrate_schema(conn: &Connection) -> Result<(), Error> {
             migrate_v2_to_v3(conn)?;
             migrate_v3_to_v4(conn)?;
             migrate_v4_to_v5(conn)?;
+            migrate_v5_to_v6(conn)?;
+            migrate_v6_to_v7(conn)?;
             conn.execute_batch(&format!(
                 "UPDATE schema_version SET version = {SCHEMA_VERSION};"
             ))
@@ -1608,6 +1843,8 @@ fn migrate_schema(conn: &Connection) -> Result<(), Error> {
             migrate_v2_to_v3(conn)?;
             migrate_v3_to_v4(conn)?;
             migrate_v4_to_v5(conn)?;
+            migrate_v5_to_v6(conn)?;
+            migrate_v6_to_v7(conn)?;
             conn.execute_batch(&format!(
                 "UPDATE schema_version SET version = {SCHEMA_VERSION};"
             ))
@@ -1616,6 +1853,8 @@ fn migrate_schema(conn: &Connection) -> Result<(), Error> {
         Some(3) => {
             migrate_v3_to_v4(conn)?;
             migrate_v4_to_v5(conn)?;
+            migrate_v5_to_v6(conn)?;
+            migrate_v6_to_v7(conn)?;
             conn.execute_batch(&format!(
                 "UPDATE schema_version SET version = {SCHEMA_VERSION};"
             ))
@@ -1623,12 +1862,29 @@ fn migrate_schema(conn: &Connection) -> Result<(), Error> {
         }
         Some(4) => {
             migrate_v4_to_v5(conn)?;
+            migrate_v5_to_v6(conn)?;
+            migrate_v6_to_v7(conn)?;
             conn.execute_batch(&format!(
                 "UPDATE schema_version SET version = {SCHEMA_VERSION};"
             ))
             .map_err(sqlite_error)?;
         }
         Some(5) => {
+            migrate_v5_to_v6(conn)?;
+            migrate_v6_to_v7(conn)?;
+            conn.execute_batch(&format!(
+                "UPDATE schema_version SET version = {SCHEMA_VERSION};"
+            ))
+            .map_err(sqlite_error)?;
+        }
+        Some(6) => {
+            migrate_v6_to_v7(conn)?;
+            conn.execute_batch(&format!(
+                "UPDATE schema_version SET version = {SCHEMA_VERSION};"
+            ))
+            .map_err(sqlite_error)?;
+        }
+        Some(7) => {
             // Already at current version — ensure schema is complete (idempotent
             // CREATE IF NOT EXISTS only; no bare ALTER that would fail twice).
             create_schema(conn)?;
@@ -1766,7 +2022,10 @@ fn migrate_v3_to_v4(conn: &Connection) -> Result<(), Error> {
         .map_err(sqlite_error)?;
 
         // Seed the reservoir from the coarse level prior (computed in Rust — the
-        // mapping is a small lookup, SQLite has no helper for it).
+        // mapping is a small lookup, SQLite has no helper for it). The peer/trust
+        // subsystem was removed and this whole table is dropped at v6; the mapping
+        // is inlined here so the historical chain no longer depends on the deleted
+        // `TrustLevel` type while still producing a faithful intermediate v4 state.
         let peer_rows: Vec<(u64, String)> = {
             let mut stmt = conn
                 .prepare("SELECT id, trust_level FROM peers")
@@ -1779,7 +2038,15 @@ fn migrate_v3_to_v4(conn: &Connection) -> Result<(), Error> {
             rows.collect::<Result<Vec<_>, _>>().map_err(sqlite_error)?
         };
         for (id, trust_str) in peer_rows {
-            let prior = decode_trust_level(&trust_str).prior_trust_reservoir();
+            // Historical coarse-level → prior-reservoir mapping (log trust-odds).
+            let prior: f64 = match trust_str.as_str() {
+                "owner" => 4.0,
+                "admin" => 2.0,
+                "member" => 1.0,
+                "untrusted" => -2.0,
+                // "agent" / "observer" / unknown → neutral (no-evidence) prior.
+                _ => 0.0,
+            };
             conn.execute(
                 "UPDATE peers SET trust_reservoir = ?2 WHERE id = ?1",
                 params![id, prior],
@@ -1821,6 +2088,89 @@ fn migrate_v4_to_v5(conn: &Connection) -> Result<(), Error> {
         ",
     )
     .map_err(sqlite_error)
+}
+
+/// Migrate a v5 database to v6: DROP the `peers` and `peer_aliases` tables.
+///
+/// The peer/trust subsystem was removed (production is single-peer, `PeerId(0)`;
+/// non-zero peers existed only in tests). This drops the two peer-only tables and
+/// their trust columns. Nodes are untouched: their `peer_id` / `source_kind`
+/// columns live inside the Origin encoding on the `nodes` table and STAY, and the
+/// `idx_nodes_peer` index (used by `nodes_by_peer` for the identity-prior search
+/// bias) STAYS. `DROP TABLE IF EXISTS` is idempotent, so re-running is safe.
+fn migrate_v5_to_v6(conn: &Connection) -> Result<(), Error> {
+    conn.execute_batch(
+        "
+        DROP TABLE IF EXISTS peer_aliases;
+        DROP TABLE IF EXISTS peers;
+        ",
+    )
+    .map_err(sqlite_error)
+}
+
+/// Migrate a v6 database to v7: normalize `nodes.node_type` for the KnowledgeType
+/// 15→4 collapse (Episodic/Semantic/Identity/Custom).
+///
+/// Rewrites the on-disk wire strings of the removed variants so storage matches the
+/// new decode immediately:
+/// - the three legacy identity tiers (`identity_core`/`identity_learned`/
+///   `identity_state`) become the bare merged `identity`;
+/// - every removed knowledge/memory string (`procedural`, `entity`, `convention`,
+///   `decision`, `gotcha`, `hypothesis`, `evidence`, `debug_session`, `event`)
+///   becomes its canonical `custom:<string>` form.
+///
+/// This closes the carried eventual-consistency gap (B0 review): without it, a
+/// legacy row with a bare `gotcha` decodes in-memory to `Custom("gotcha")`, but
+/// [`nodes_by_type`](SqliteStorage::nodes_by_type) filters SQL by the *encoded*
+/// query string `custom:gotcha` and would miss the un-normalized row until it was
+/// re-saved. After this migration the row's stored string is `custom:gotcha`, so the
+/// lookup matches deterministically.
+///
+/// Runs in one transaction. Idempotent: the `IN (...)` filters only ever match the
+/// legacy bare strings, never the post-migration `identity` / `custom:*` values, so
+/// re-running is a no-op. The `custom:` rewrite assumes the removed wire strings
+/// contain no `escape_text` metacharacters (they are all fixed ASCII identifiers),
+/// so a literal `'custom:' || node_type` yields the same bytes `encode_knowledge_type`
+/// would produce for `Custom(<string>)`.
+fn migrate_v6_to_v7(conn: &Connection) -> Result<(), Error> {
+    conn.execute_batch("BEGIN IMMEDIATE;")
+        .map_err(sqlite_error)?;
+
+    let result = (|| -> Result<(), Error> {
+        // Legacy identity tiers -> merged bare `identity`.
+        conn.execute_batch(
+            "
+            UPDATE nodes SET node_type = 'identity'
+            WHERE node_type IN ('identity_core', 'identity_learned', 'identity_state');
+            ",
+        )
+        .map_err(sqlite_error)?;
+
+        // Removed knowledge/memory variants -> canonical `custom:<string>`.
+        conn.execute_batch(
+            "
+            UPDATE nodes SET node_type = 'custom:' || node_type
+            WHERE node_type IN (
+                'procedural', 'entity', 'convention', 'decision', 'gotcha',
+                'hypothesis', 'evidence', 'debug_session', 'event'
+            );
+            ",
+        )
+        .map_err(sqlite_error)?;
+
+        Ok(())
+    })();
+
+    match result {
+        Ok(()) => {
+            conn.execute_batch("COMMIT;").map_err(sqlite_error)?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK;");
+            Err(e)
+        }
+    }
 }
 
 /// Migrate a v1 database (agent_id TEXT) to v2 (peer_id INTEGER + source_kind TEXT).
@@ -1935,21 +2285,6 @@ fn create_schema(conn: &Connection) -> Result<(), Error> {
             id_type TEXT NOT NULL,
             id_value INTEGER NOT NULL,
             PRIMARY KEY (id_type, id_value)
-        );
-
-        CREATE TABLE IF NOT EXISTS peers (
-            id INTEGER PRIMARY KEY,
-            name TEXT NOT NULL,
-            trust_level TEXT NOT NULL DEFAULT 'agent',
-            trust_reservoir REAL NOT NULL DEFAULT 0,
-            trust_evidence_count INTEGER NOT NULL DEFAULT 0
-        );
-
-        CREATE TABLE IF NOT EXISTS peer_aliases (
-            peer_id INTEGER NOT NULL,
-            alias TEXT NOT NULL,
-            alias_type TEXT NOT NULL DEFAULT 'alias',
-            PRIMARY KEY (peer_id, alias)
         );
 
         CREATE INDEX IF NOT EXISTS idx_nodes_type ON nodes(node_type);
@@ -2256,48 +2591,42 @@ fn unique_strings(values: &[String]) -> Vec<&str> {
 
 fn encode_knowledge_type(value: &KnowledgeType) -> String {
     match value {
-        KnowledgeType::IdentityCore => "identity_core".to_string(),
-        KnowledgeType::IdentityLearned => "identity_learned".to_string(),
-        KnowledgeType::IdentityState => "identity_state".to_string(),
+        KnowledgeType::Identity => "identity".to_string(),
         KnowledgeType::Semantic => "semantic".to_string(),
-        KnowledgeType::Procedural => "procedural".to_string(),
-        KnowledgeType::Entity => "entity".to_string(),
-        KnowledgeType::Convention => "convention".to_string(),
-        KnowledgeType::Decision => "decision".to_string(),
-        KnowledgeType::Gotcha => "gotcha".to_string(),
-        KnowledgeType::Hypothesis => "hypothesis".to_string(),
-        KnowledgeType::Evidence => "evidence".to_string(),
-        KnowledgeType::DebugSession => "debug_session".to_string(),
         KnowledgeType::Episodic => "episodic".to_string(),
-        KnowledgeType::Event => "event".to_string(),
         KnowledgeType::Custom(name) => format!("custom:{}", escape_text(name)),
     }
 }
 
 fn decode_knowledge_type(value: &str) -> Result<KnowledgeType, Error> {
     Ok(match value {
-        "identity_core" => KnowledgeType::IdentityCore,
-        "identity_learned" => KnowledgeType::IdentityLearned,
-        "identity_state" => KnowledgeType::IdentityState,
+        "identity" => KnowledgeType::Identity,
+        // Legacy identity tiers (pre-0.10.0 three-tier ladder) keep their slow-decay
+        // identity semantics: explicit arms fold them into the merged `Identity`
+        // rather than letting them ride the generic fallback into `Custom`. The
+        // v6→v7 normalization migration rewrites these rows to bare `"identity"`
+        // on open, but these arms still guard any row that predates it.
+        "identity_core" | "identity_learned" | "identity_state" => KnowledgeType::Identity,
         "semantic" => KnowledgeType::Semantic,
-        "procedural" => KnowledgeType::Procedural,
-        "entity" => KnowledgeType::Entity,
-        "convention" => KnowledgeType::Convention,
-        "decision" => KnowledgeType::Decision,
-        "gotcha" => KnowledgeType::Gotcha,
-        "hypothesis" => KnowledgeType::Hypothesis,
-        "evidence" => KnowledgeType::Evidence,
-        "debug_session" => KnowledgeType::DebugSession,
         "episodic" => KnowledgeType::Episodic,
-        "event" => KnowledgeType::Event,
         custom if custom.starts_with("custom:") => {
             KnowledgeType::Custom(unescape_text(&custom[7..])?)
         }
-        other => {
-            return Err(Error::StorageError(format!(
-                "unknown knowledge type: {other}"
-            )));
-        }
+        // Legacy-DB compat guard (ADR / task B0): any bare string this build does
+        // not recognize — a consumer type from another schema, or the wire string
+        // of a variant deleted in the 0.10.0 shrink (`procedural`, `entity`,
+        // `convention`, `decision`, `gotcha`, `hypothesis`, `evidence`,
+        // `debug_session`, `event`) — decodes to `Custom(<original>)` instead of
+        // erroring, so the node loads and the DB opens. This is a one-way
+        // normalization: re-encoding the result writes the canonical
+        // `custom:<original>` form (see `encode_knowledge_type`), which decodes
+        // right back to the same `Custom`, so open/save cycles are a fixed point
+        // and never corrupt the value further. The v6→v7 migration rewrites these
+        // rows to the canonical `custom:<original>` on open so `nodes_by_type`
+        // matches them immediately; these arms still guard any un-migrated row.
+        // Known variants and the explicit `custom:` prefix are matched by the arms
+        // above and are unaffected.
+        other => KnowledgeType::Custom(other.to_string()),
     })
 }
 
@@ -2357,7 +2686,12 @@ fn decode_memory_tier(value: &str) -> Result<MemoryTier, Error> {
         "core" => MemoryTier::Core,
         "recall" => MemoryTier::Recall,
         "archival" => MemoryTier::Archival,
-        other => return Err(Error::StorageError(format!("unknown memory tier: {other}"))),
+        // Legacy-DB compat guard (task B0): an unrecognized tier string falls back
+        // to `Auto` (the `MemoryTier::default()`) rather than erroring, mirroring
+        // the node-type guard so a DB carrying a dropped/foreign tier string still
+        // opens. `Auto` means "no override — tier follows salience", the safe
+        // neutral choice.
+        _ => MemoryTier::Auto,
     })
 }
 
@@ -2521,29 +2855,6 @@ fn decode_source_kind(value: &str) -> Result<SourceKind, Error> {
         "inferred" => Ok(SourceKind::Inferred),
         "external" => Ok(SourceKind::External),
         other => Err(Error::StorageError(format!("unknown source_kind: {other}"))),
-    }
-}
-
-fn encode_trust_level(level: &crate::peer::TrustLevel) -> &'static str {
-    match level {
-        crate::peer::TrustLevel::Owner => "owner",
-        crate::peer::TrustLevel::Admin => "admin",
-        crate::peer::TrustLevel::Member => "member",
-        crate::peer::TrustLevel::Agent => "agent",
-        crate::peer::TrustLevel::Observer => "observer",
-        crate::peer::TrustLevel::Untrusted => "untrusted",
-    }
-}
-
-fn decode_trust_level(value: &str) -> crate::peer::TrustLevel {
-    match value {
-        "owner" => crate::peer::TrustLevel::Owner,
-        "admin" => crate::peer::TrustLevel::Admin,
-        "member" => crate::peer::TrustLevel::Member,
-        "agent" => crate::peer::TrustLevel::Agent,
-        "observer" => crate::peer::TrustLevel::Observer,
-        "untrusted" => crate::peer::TrustLevel::Untrusted,
-        _ => crate::peer::TrustLevel::Agent,
     }
 }
 

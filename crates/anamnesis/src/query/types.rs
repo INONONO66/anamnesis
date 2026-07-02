@@ -1,7 +1,7 @@
 //! Query types for the Anamnesis cognitive graph engine.
 
 use crate::graph::Origin;
-use crate::graph::scope::{ScopePath, ScopeRelation};
+use crate::graph::scope::ScopePath;
 use crate::graph::{EdgeId, EdgeType, KnowledgeType, NodeId, Timestamp};
 
 /// Query modes for different retrieval patterns.
@@ -128,10 +128,8 @@ pub struct Fragment {
     pub node_type: KnowledgeType,
     /// Final relevance score R_i from the query pipeline [0, 1].
     pub relevance: f64,
-    /// Provenance of the source node.
+    /// Provenance of the source node (carries the node's origin `ScopePath`).
     pub origin: Origin,
-    /// Scope of this fragment relative to the query context.
-    pub scope: ScopeRelation,
 }
 
 /// An active contradiction between two nodes, surfaced as query-local stress.
@@ -294,11 +292,11 @@ impl TokenBudget {
 /// - tensions → warning block
 #[derive(Debug, Clone, PartialEq)]
 pub struct ContextPackage {
-    /// Agent persona traits (IdentityCore, IdentityLearned, IdentityState nodes).
+    /// Agent persona traits (Identity nodes).
     pub identity: Vec<Fragment>,
-    /// Query-relevant knowledge (Semantic, Decision, Convention, etc. nodes).
+    /// Query-relevant knowledge (Semantic and Custom nodes).
     pub knowledge: Vec<Fragment>,
-    /// Supporting episodic evidence (Episodic, Event nodes).
+    /// Supporting episodic evidence (Episodic nodes).
     pub memories: Vec<Fragment>,
     /// Active contradictions between retrieved nodes.
     pub tensions: Vec<Tension>,
@@ -519,7 +517,7 @@ mod tests {
     fn make_origin() -> Origin {
         Origin {
             peer_id: crate::graph::types::PeerId(0),
-            source_kind: crate::peer::SourceKind::AgentObservation,
+            source_kind: crate::graph::types::SourceKind::AgentObservation,
             session_id: "session-1".to_string(),
             scope: ScopePath::universal(),
             confidence: 0.9,
@@ -534,7 +532,7 @@ mod tests {
                 budget: 100,
             },
             Query::TypeFiltered {
-                node_type: KnowledgeType::Convention,
+                node_type: KnowledgeType::Semantic,
                 limit: 10,
             },
             Query::Neighborhood {
@@ -543,7 +541,7 @@ mod tests {
             },
             Query::Temporal {
                 since: Timestamp(1000),
-                node_types: Some(vec![KnowledgeType::Decision]),
+                node_types: Some(vec![KnowledgeType::Semantic]),
                 limit: 20,
             },
             Query::List {
@@ -552,15 +550,6 @@ mod tests {
             },
         ];
         assert_eq!(queries.len(), 5);
-    }
-
-    #[test]
-    fn scope_variants() {
-        let s1 = ScopeRelation::Equal;
-        let s2 = ScopeRelation::Universal;
-        let s3 = ScopeRelation::Disjoint;
-        assert_ne!(s1, s2);
-        assert_ne!(s2, s3);
     }
 
     #[test]
@@ -612,10 +601,9 @@ mod tests {
             name: "auth uses factory pattern".to_string(),
             summary: Some("Confirmed in sessions 5, 12, 23".to_string()),
             content: None,
-            node_type: KnowledgeType::Convention,
+            node_type: KnowledgeType::Semantic,
             relevance: 0.85,
             origin: make_origin(),
-            scope: ScopeRelation::Universal,
         };
         assert_eq!(frag.relevance, 0.85);
         assert!(frag.content.is_none());

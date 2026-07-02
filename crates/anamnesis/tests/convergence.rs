@@ -11,7 +11,7 @@ fn convergence_enabled_stops_early() {
 
     let origin = Origin {
         peer_id: anamnesis::graph::types::PeerId(0),
-        source_kind: anamnesis::peer::SourceKind::AgentObservation,
+        source_kind: anamnesis::engine::SourceKind::AgentObservation,
         session_id: "test-session".into(),
         scope: ScopePath::universal(),
         confidence: 0.9,
@@ -77,7 +77,7 @@ fn convergence_disabled_default_behavior() {
 
     let origin = Origin {
         peer_id: anamnesis::graph::types::PeerId(0),
-        source_kind: anamnesis::peer::SourceKind::AgentObservation,
+        source_kind: anamnesis::engine::SourceKind::AgentObservation,
         session_id: "test-session".into(),
         scope: ScopePath::universal(),
         confidence: 0.9,
