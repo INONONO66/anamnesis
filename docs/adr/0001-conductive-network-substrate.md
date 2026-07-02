@@ -1,5 +1,7 @@
 # 0001. Adopt Spreading Activation As The Theory And Conductive Network As The Representation
 
+*Superseded in part by [ADR-0014](0014-shrink-to-product.md) (v0.10.0 shrink): the "peer trust" contribution to the evidence prior `P_i` referenced below is no longer a live signal — the peer/trust subsystem was removed and the readout trust term is a neutral `1.0`. The `B_i + P_i` decomposition itself stands.*
+
 - Status: Accepted
 - Date: 2026-06-05
 - Related: [overview](../04-cognitive-dynamics/overview.md), [activation-flow](../05-context-retrieval/activation-flow.md)

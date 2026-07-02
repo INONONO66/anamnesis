@@ -188,7 +188,7 @@ impl AnamnesisServer {
 impl AnamnesisServer {
     #[tool(
         description = "Search memory for relevant prior knowledge. ALWAYS call before answering. \
-                       Returns a readable context block (identity / knowledge / memories / tensions \
+                       Returns a readable context block (knowledge / memories / tensions \
                        with provenance) plus a compact ranked list of {node_id, score} — pass those \
                        node_ids to `relate` to link reasoning. Reading reinforces what it returns."
     )]

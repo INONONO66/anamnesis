@@ -1,5 +1,7 @@
 # 0002. Reservoir And Projection State
 
+*Superseded in part by [ADR-0014](0014-shrink-to-product.md) (v0.10.0 shrink): "peer trust" as a contributor to the evidence prior `P_i` no longer applies — the peer/trust subsystem was removed and the readout trust term is a neutral `1.0`. The reservoir/projection split and the access-trace base level are unchanged.*
+
 - Status: Accepted
 - Date: 2026-06-05
 - Related: [overview](../04-cognitive-dynamics/overview.md), [graph-model](../02-knowledge-model/graph-model.md)

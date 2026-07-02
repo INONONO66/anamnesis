@@ -1,5 +1,7 @@
 # Peer Identity
 
+> **Roadmap / not shipped (as of v0.10.0).** The multi-peer registry, trust levels, trust profiles, trust-weighted readout, and `reflect_batch` cross-agent linking described here were **removed in the [v0.10.0 shrink](../adr/0014-shrink-to-product.md)** — they had no consumer (production always ran with a single `PeerId(0)` and the readout trust term is now a neutral `1.0`). What **survives** is the storage-level provenance: `Origin` still carries `peer_id` and `source_kind`. This document is retained as the **design intent** for a future multi-peer/provenance layer (a re-add condition and the ADR-0015 schema-redesign track in ADR-0014); read it as future direction, not current behavior.
+
 Peer identity records who produced a fragment and how that source should affect retrieval. It is a provenance model, not an authorization system.
 
 ## Peer Model
@@ -57,7 +59,7 @@ Peer identity must not override scope visibility. A trusted private fragment sti
 
 ## Session Summary
 
-`SessionSummary` carries `peer_id`, `session_id`, and node ids produced in a session. `reflect_batch` uses this metadata to add entity links across agents. It does not merge nodes or call an LLM.
+`SessionSummary` carried `peer_id`, `session_id`, and node ids produced in a session; `reflect_batch` used this metadata to add entity links across agents (metadata only — it did not merge nodes or call an LLM). Both were removed in v0.10.0 (see the banner above); this section records the intended shape for a future multi-peer layer.
 
 ## Related Documents
 

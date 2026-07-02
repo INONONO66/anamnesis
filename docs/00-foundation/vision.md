@@ -22,7 +22,7 @@ Long-running agents need fragment-level memory with natural decay, reinforcement
 | Retrieval is associative | A cue should activate nearby memories, which can activate further memories through typed relations |
 | Use changes future recall | Access, commit, co-readout, and feedback leave measurable work behind |
 | Forgetting is graceful | Unused knowledge fades in salience but remains available for precise reactivation |
-| Provenance is first-class | Every site knows which peer, session, scope, and confidence produced it |
+| Provenance is first-class | Every site records the session, scope, and confidence that produced it, plus a `peer_id` / `source_kind` origin (multi-peer attribution and trust weighting are a roadmap goal, not yet shipped — see [ADR-0014](../adr/0014-shrink-to-product.md)) |
 | Contradiction is visible | Conflicting facts are returned as tensions instead of being silently merged |
 | Core is local and deterministic | The library performs graph storage and traversal, not LLM calls or network orchestration |
 

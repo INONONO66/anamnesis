@@ -87,8 +87,8 @@ Not all of these are calibrated priors. `max_nodes` and `dedup_enabled` are oper
 | `crystallize` | Adds a synthesis site and `ConsolidatedFrom` edges; never overwrites sources |
 | `snapshot` / `restore` | Captures and restores cloned storage state |
 | `fact_at` | Filters facts by valid-time interval |
-| debug lifecycle methods | Records sessions, hypotheses, evidence, rejection, confirmation, and outcome |
-| `reflect_batch` | Creates cross-agent entity links from metadata-only session summaries |
+
+The debug lifecycle methods and `reflect_batch` (cross-agent entity linking) were **removed in the [v0.10.0 shrink](../adr/0014-shrink-to-product.md)** — both had no consumer; see ADR-0014 for the re-add conditions.
 
 ## Embedding Boundary
 
@@ -107,16 +107,7 @@ The core must not:
 
 ## Debug Lifecycle
 
-Debugging is modeled as graph state:
-
-```mermaid
-flowchart LR
-    session["DebugSession"] --> hypothesis["Hypothesis"]
-    evidence["Evidence"] --> hypothesis
-    hypothesis --> outcome["Confirmed / Rejected"]
-```
-
-Hypotheses and evidence are inert against dissipation. Rejected hypotheses remain searchable so agents can avoid repeating failed explanations.
+> **Removed in [v0.10.0](../adr/0014-shrink-to-product.md).** Debugging was formerly modeled as first-class graph state (`DebugSession` → `Hypothesis` → `Evidence` → confirmed/rejected, inert against dissipation, with rejected hypotheses kept searchable). That lifecycle had no consumer and was removed in the shrink. A reasoning-session capture may return through the [capture pipeline](../adr/0013-reasoning-capture-pipeline.md); see ADR-0014 for the re-add condition.
 
 ## Data Flow
 

@@ -4,7 +4,7 @@
 
 <p align="center">
   <strong>Cognitive memory engine for LLMs</strong><br>
-  A conductive network with associative recall, power-law forgetting, and contradiction held as tension.
+  A graph of knowledge fragments with associative recall, power-law forgetting, and contradiction held as tension.
 </p>
 
 <p align="center">
@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  <a href="#use-in-claude-code--codex">Claude Code &amp; Codex</a> · <a href="#quick-start">Quick Start</a> · <a href="docs/README.md">Docs</a> · <a href="docs/00-foundation/vision.md">Vision</a> · <a href="docs/01-system-architecture/overview.md">Architecture</a>
+  <a href="#use-in-claude-code--codex">Claude Code &amp; Codex</a> · <a href="#see-it-reason">See it reason</a> · <a href="#quick-start">Quick Start</a> · <a href="docs/README.md">Docs</a> · <a href="docs/00-foundation/vision.md">Vision</a>
 </p>
 
 ---
@@ -26,64 +26,31 @@
 
 ## Why
 
-Every LLM agent session starts from zero. Agents repeat mistakes, rediscover conventions, and lose the reasoning behind past decisions. The industry has converged on solutions that don't solve this:
+Every LLM agent session starts from zero. Agents repeat mistakes, rediscover conventions, and lose the reasoning behind past decisions. The common answers each drop something:
 
-- **Vector stores** answer *"what was said"* but not *"why it was decided"*
-- **Tiered memory** archives conversations but loses cross-session connections
-- **Evolving playbooks** improve over time but suffer brevity bias — detail erodes with each rewrite
+- **Vector stores** answer *"what was said"* but not *"why it was decided"* — the structure between facts is gone.
+- **Tiered memory** archives conversations but loses cross-session connections.
+- **Evolving playbooks** improve over time but suffer brevity bias — detail erodes with each rewrite.
 
-None provide what a long-running agent actually needs: **fragment-level knowledge with associative retrieval, natural decay, and reasoning preservation.**
+Anamnesis stores memory as a **graph of fragments connected by typed edges** — so a decision keeps the reason it was made, and a reversal keeps the decision it overturned. Retrieval is a hybrid: alignment scoring (keyword / embedding) finds the entry points, and the graph surfaces the *structure* around them — reasoning chains and contradictions a flat list can't express — while power-law forgetting keeps the store from growing without bound.
 
 ## What
 
-Anamnesis gives LLM agents **associative memory**. It builds a graph of knowledge fragments connected by typed relationships — not summaries, not embeddings, not flat text.
+Anamnesis is a **Rust library — a memory kernel** — plus a ready-made **Claude Code / Codex plugin** that drives it for a coding agent. It is not a service: the core owns storage, retrieval, forgetting, and contradiction handling, and leaves extraction and serving to the consumer.
 
-**Not a database.** A conductive network with cognitive dynamics (the formal spec lives in [`docs/`](docs/README.md)):
-
-| Mechanic | What It Does |
+| Mechanic | What it does |
 |:---------|:-------------|
-| **Associative recall** | Additive directed **random-walk-with-restart (RWR)** spreads activation from query seeds along typed edges; converging evidence sums (never max). |
+| **Associative recall** | Additive directed **random-walk-with-restart (RWR)** spreads activation from query seeds along typed edges; converging evidence sums (never max), so a fragment reachable by several paths ranks above one reachable by one. |
 | **Conductance** | Edges hold an associative-strength reservoir (a log-likelihood-ratio); committed co-use strengthens links via an Oja-bounded Hebbian update. |
-| **Forgetting** | Memory strength `A_i = B_i + P_i`: `B_i` is the ACT-R **base-level** activation over the access-trace history, where each trace decays at an **activation-dependent rate** (Pavlik & Anderson 2005) — so spaced repetition outlasts massed (the **spacing effect**). `P_i` is a decay-exempt **evidence prior** (surprise, feedback, peer trust). Use raises `B_i`; disuse fades it — never deleted. |
-| **Perception** | **Surprise-gated** input: an observation charges memory in proportion to prediction error, then novelty/confidence/budget decide whether it allocates a new site or routes to the nearest one. |
+| **Forgetting** | Node strength `A_i = B_i + P_i`: `B_i` is the ACT-R **base-level** activation over the access-trace history, where each trace decays at an **activation-dependent rate** (Pavlik & Anderson 2005) — so spaced repetition outlasts massed (the **spacing effect**). `P_i` is a decay-exempt **evidence prior** (encoding surprise, feedback). Use raises `B_i`; disuse fades it — never deleted. |
+| **Perception** | **Surprise-gated** input: an observation charges memory in proportion to prediction error, then novelty / confidence / budget decide whether it allocates a new site or routes to the nearest one. |
 | **Frustration** | Contradictions are **excluded from propagation** and surfaced as tension (`sigma_ij`), never overwritten — both sides keep their provenance. |
 
-One cue activates related fragments, which activate further fragments — reconstructing understanding from partial cues the way human recall works. Keyword and embedding search find the first cue; the conductive network decides what comes back with it.
+The earned claim is narrow and real: **typed reasoning edges plus contradiction-as-tension expose structure a flat store cannot** — see [See it reason](#see-it-reason) below. Ranking itself is dominated by alignment scoring; the graph's contributions are structure surfacing and principled forgetting, not magic relevance.
 
 > **Reservoirs vs projections** ([ADR-0002](docs/adr/0002-reservoir-projection-state.md), [ADR-0008](docs/adr/0008-powerlaw-dissipation.md)): per node, the persistent state is the bounded access-trace history (which drives the base level `B_i`, recomputed on demand and never stored) plus a decay-exempt evidence prior `P_i`; per edge, `conductance` is an unbounded log-LR reservoir. The public `salience = logistic(B_i + P_i)` / `weight` in `[0, 1]` are bounded `logistic` projections, refreshed by the write paths (`ingest`, `link`, `touch`, `commit`, `crystallize`, `tick`). The invariant is that **read-only retrieval (`query` / `search` / `fact_at`) never mutates persistent state** — it changes only through explicit writes and time.
 
-> **See it work** → [Cognitive-fidelity results](docs/07-quality-gates/fidelity-results.md): charts of power-law forgetting, the spacing effect (with its retention-interval crossover), and the fan effect — produced by the engine itself, from the same paradigms the CI gate asserts.
-
-### How It Compares
-
-| | Storage Unit | Retrieval | Decay | Relationships | Reasoning |
-|:--|:--|:--|:--|:--|:--|
-| Mem0 | Extracted facts | Embedding similarity | None | None | Facts only |
-| Letta | Conversation history | Text search | Archive tier | Basic | Session recall |
-| Stanford ACE | Monolithic playbook | Full load | Curator rewrite | None | Strategy-level |
-| **Anamnesis** | **Fragments** | **Graph traversal** | **Decay + revival** | **Typed edges** | **Full chains** |
-
-### Positioning
-
-**vs RAG pipelines** — Anamnesis makes zero LLM calls in its core. Retrieval is deterministic graph traversal, not embedding similarity lookup. No embedding drift, no inference cost on every query.
-
-**vs LLM context documents** — Context docs require manual compilation, suffer brevity bias on every rewrite, and have no mechanism for forgetting or contradiction detection. Anamnesis handles all three automatically: power-law dissipation removes stale knowledge, spreading activation surfaces relevant fragments, and `Contradicts` edges surface tensions in query results.
-
-**vs vector-only stores** — Embedding similarity finds *similar* fragments. Spreading activation finds *related* fragments — following typed reasoning chains (causes, contradictions, decisions, confirmations) that embed alone cannot represent. Embeddings are useful cues, but they are not the memory itself.
-
-### Engine vs Consumer
-
-Anamnesis exposes two API surfaces: the **Framework API** ([`anamnesis::memory::Memory`](https://docs.rs/anamnesis-engine/latest/anamnesis/memory/struct.Memory.html)) and the **Kernel API** ([`anamnesis::engine`](https://docs.rs/anamnesis-engine/latest/anamnesis/engine/index.html)). `Memory` is the official consumer-layer default, built entirely on `Engine`'s public API. The crate root re-exports exactly three symbols — `Memory`, `Engine`, and `Error` — and nothing else; legacy module paths (`anamnesis::api`, `anamnesis::graph`, etc.) remain compilable for migration but are hidden from documentation and slated for removal in a future major.
-
-Anamnesis is a **library — a memory kernel**, not a service. It owns the *physics of memory* (storage, spreading activation, dissipation, reinforcement, frustration, temporal validity) and deliberately leaves the *sensory/motor* layer to you. Unlike hosted memory APIs (Mem0, Zep, Supermemory) that bundle extraction + embeddings + serving, Anamnesis stays a deterministic, local-first, embeddable core that you drive.
-
-| The kernel provides | Default consumer (`Memory`) handles | You can replace |
-|:--|:--|:--|
-| Graph + reservoirs, RWR retrieval, readout, packaging | **Encoding**: speaker-prefixed turns → Episodic + Semantic nodes, session/speaker tags | Yes — drop to `Engine` and provide your own `Observation`s |
-| Power-law dissipation, commit-gated reinforcement | **Embeddings**: wires in `EmbeddingProvider`; default uses `bge-base-en-v1.5` via `feature = "embed"` | Yes — supply any `Arc<dyn EmbeddingProvider>` |
-| Frustration, `fact_at` bitemporal validity | **Edge strategy**: `ExtractedFrom` + `Temporal` edges per recipe | Yes — call `engine_mut().link()` directly |
-| Snapshots, SQLite storage, health/invariants | **Queries & commit**: `search` auto-flushes; `used` commits reinforcement | Yes — use `engine().search()` / `engine_mut().commit()` |
-| Pure mechanics, no LLM calls, no background tasks | **`tick` scheduling**, no serving opinion | `tick(now)` — caller schedules; retrieval quality depends on encoding; the validated recipe is `Memory` |
+> **See it work** → [cognitive-fidelity results](docs/07-quality-gates/fidelity-results.md): charts of power-law forgetting, the spacing effect (with its retention-interval crossover), and the fan effect — produced by the engine itself, from the same paradigms the CI gate asserts.
 
 ## Use in Claude Code & Codex
 
@@ -104,10 +71,15 @@ GitHub Release on first use — no `cargo`, no `npm`, no separate binary step.
 /reload-plugins
 ```
 
-That is the whole setup. You get proactive recall (hooks) **and** the
-`recall` / `remember` / `relate` / `ingest_conversation` / `stats` tools (MCP).
+That is the whole setup. You get proactive recall (5 hooks) **and** the six
+agent MCP tools:
 
-**Automatic capture (0.9.x).** Beyond on-demand `remember`, the plugin captures
+| Surface | What ships |
+|:--|:--|
+| **Hooks** | `SessionStart` (seed recall + extraction nudge), `UserPromptSubmit` (gated recall), `Stop` / `PreCompact` / `SessionEnd` (passive turn capture) |
+| **MCP tools** | `recall`, `remember`, `relate`, `ingest_conversation`, `extract_pending`, `stats` |
+
+**Automatic capture.** Beyond on-demand `remember`, the plugin captures
 the session on its own in two stages. **Stage 1** is passive: `Stop`,
 `PreCompact`, and `SessionEnd` hooks stream each turn to Anamnesis as raw
 `Episodic` memories — fire-and-forget, content-hash-deduped, and it never blocks
@@ -132,92 +104,8 @@ rationale, and the Codex visibility caveat live in
 > **Just the MCP server / CLI** (no plugin): the same binary ships on npm as
 > [`anamnesis-mcp`](https://www.npmjs.com/package/anamnesis-mcp), exposing the
 > `anamnesis` command — run `npx -p anamnesis-mcp anamnesis serve` for a stdio
-> MCP server (`recall` / `remember` / `relate` / `ingest_conversation` /
-> `stats`), or `cargo run -p anamnesis-mcp -- serve` from a checkout. See
+> MCP server, or `cargo run -p anamnesis-mcp -- serve` from a checkout. See
 > [`crates/anamnesis-mcp`](crates/anamnesis-mcp/README.md).
-
-## Benchmarks
-
-Long-term conversational memory benchmarks, **retrieval-only dry runs**: no LLM
-anywhere — ingest is raw turns + embeddings (`bge-base-en-v1.5`), retrieval is
-the engine's deterministic pipeline. Reproducible via
-`cargo bench --features embed --bench real_memory` (see
-[calibration records](docs/07-quality-gates/calibration-records.md) for full
-provenance, ablations, and negative results). These numbers are measured through
-the `Memory` framework API exactly as shipped — the benchmark harness builds and
-queries via `Memory`.
-
-| Benchmark | Gold granularity | Recall@20 | MRR | NDCG@20 | p50 |
-|:--|:--|--:|--:|--:|--:|
-| **LongMemEval-S** (full official split, 500 q, all 6 types) | session-level | **93.7%** | **0.870** | 0.806 | ~17 ms |
-| **LoCoMo** (full non-adversarial, 1540 q) | turn-level strict | **77.7%** | **0.303** | 0.396 | ~21 ms |
-
-Read these numbers for what they are:
-
-- **Retrieval metrics, not answer accuracy.** Published memory-system scores
-  (Mem0, Zep, LangMem, …) are LLM-as-judge *answer* scores — a different
-  measurement. These numbers bound what an answer stage could see in context
-  (LoCoMo hit@20 = 84.7%; LongMemEval hit@1 = 82.4%, hit@20 = 98.0%).
-- **No usage learning is measured here.** Runs are cold-start (no `commit`
-  warmup), so the readout calibration intentionally zeroes the salience
-  coefficient (`w_s = 0`) — on unused memory, salience carries only
-  encoding-time noise. Deployments that accumulate real usage should refit it
-  per [ADR-0010](docs/adr/0010-calibrated-priors-not-laws.md); the
-  reinforcement dynamics themselves are validated by the
-  [cognitive-fidelity gates](docs/07-quality-gates/fidelity-results.md), not
-  by these benchmarks.
-- Readout coefficients were fit on the even-sample half of LoCoMo and
-  validated on the held-out half (Recall@20 77.8% / MRR 0.287 on unseen
-  conversations); LongMemEval numbers use the same weights with zero
-  dataset-specific tuning.
-
-## Quick Start
-
-> **Anamnesis is in active development.** The core engine is functional — mechanics, query pipeline, debug lifecycle, snapshots, and unified search are all operational. See [Status](#status) for the full breakdown.
-
-Add to your `Cargo.toml`:
-
-```toml
-[dependencies]
-# Published as `anamnesis-engine` — the crates.io name `anamnesis` belongs to an
-# unrelated crate. The library is still imported as `anamnesis` (`use anamnesis::…`).
-# Optional: local embedding provider (downloads model on first use, ~100-500 MB)
-anamnesis-engine = { version = "0.8", features = ["embed"] }
-```
-
-```rust,no_run
-use anamnesis::Memory;
-use anamnesis::engine::Timestamp;
-
-// 1. Open a persistent Memory (feature = "embed" wires in bge-base-en-v1.5)
-let mut mem = Memory::open("my-memory.db").unwrap();
-
-// 2. Add conversational turns — the bench recipe runs automatically
-let now = Timestamp::now();
-mem.add("session-1", "Alice", "I prefer dark mode", now).unwrap();
-mem.add("session-1", "Bob",   "Got it, dark mode it is", now).unwrap();
-
-// 3. Search (auto-flushes pending buffers before querying)
-let recall = mem.search("display preferences", 5).unwrap();
-for hit in &recall.hits {
-    println!("{:.3}  {}", hit.score, hit.text);
-}
-
-// 4. Reinforce what was actually used (commit-gated Hebbian strengthening)
-mem.used(recall).unwrap();
-```
-
-**Use `Memory`** unless you need custom node/edge types, your own ingest representation, custom packaging policy, peer/trust control, or the debug lifecycle — then drop to **`Engine`** (the kernel API). `Memory` is built entirely on `Engine`'s public API: anything it does, you can do.
-
-```rust,no_run
-// Framework API (default)
-use anamnesis::Memory;
-
-// Kernel API (custom encoding / raw control)
-use anamnesis::engine::{Engine, EngineConfig, Observation, ConfidenceLevel};
-```
-
-For direct `Engine` usage see the [Kernel API section](#engine-vs-consumer) and [`docs/`](docs/README.md).
 
 ## See it reason
 
@@ -267,6 +155,92 @@ expose structure a flat store cannot.** The demo runs offline with a
 deterministic stub embedder (no model download); the same behaviour is asserted
 end-to-end in [`tests/reasoning_advantage.rs`](crates/anamnesis/tests/reasoning_advantage.rs).
 
+## Benchmarks
+
+Long-term conversational memory benchmarks, **retrieval-only dry runs**: no LLM
+anywhere — ingest is raw turns + embeddings (`bge-base-en-v1.5`), retrieval is
+the engine's deterministic pipeline. Reproducible via
+`cargo bench --features embed --bench real_memory` (see
+[calibration records](docs/07-quality-gates/calibration-records.md) for full
+provenance, ablations, and negative results). These numbers are measured through
+the `Memory` framework API exactly as shipped — the benchmark harness builds and
+queries via `Memory`.
+
+| Benchmark | Gold granularity | Recall@20 | MRR | NDCG@20 | p50 |
+|:--|:--|--:|--:|--:|--:|
+| **LongMemEval-S** (full official split, 500 q, all 6 types) | session-level | **93.7%** | **0.870** | 0.806 | ~17 ms |
+| **LoCoMo** (full non-adversarial, 1540 q) | turn-level strict | **77.7%** | **0.303** | 0.396 | ~21 ms |
+
+Read these numbers for what they are — and, importantly, for what they are **not**. On these cold-start dry runs the ranking is carried by alignment scoring (keyword + embedding); the graph's spreading activation is a modest re-rank, not the source of the score. What the graph earns here is not measured by these tables — it is the [structure surfacing](#see-it-reason) and the [forgetting dynamics](docs/07-quality-gates/fidelity-results.md). No baselines or comparison tables are added; these are the shipped harness's own numbers.
+
+- **Retrieval metrics, not answer accuracy.** Published memory-system scores
+  (Mem0, Zep, LangMem, …) are LLM-as-judge *answer* scores — a different
+  measurement. These numbers bound what an answer stage could see in context
+  (LoCoMo hit@20 = 84.7%; LongMemEval hit@1 = 82.4%, hit@20 = 98.0%).
+- **No usage learning is measured here.** Runs are cold-start (no `commit`
+  warmup), so the readout calibration intentionally zeroes the salience
+  coefficient (`w_s = 0`) — on unused memory, salience carries only
+  encoding-time noise. Deployments that accumulate real usage should refit it
+  per [ADR-0010](docs/adr/0010-calibrated-priors-not-laws.md); the
+  reinforcement dynamics themselves are validated by the
+  [cognitive-fidelity gates](docs/07-quality-gates/fidelity-results.md), not
+  by these benchmarks.
+- Readout coefficients were fit on the even-sample half of LoCoMo and
+  validated on the held-out half (Recall@20 77.8% / MRR 0.287 on unseen
+  conversations); LongMemEval numbers use the same weights with zero
+  dataset-specific tuning.
+
+## Quick Start
+
+> **Anamnesis is in active development.** The core engine is functional — ingest, query pipeline, forgetting, snapshots, and unified search are all operational.
+
+Add to your `Cargo.toml`:
+
+```toml
+[dependencies]
+# Published as `anamnesis-engine` — the crates.io name `anamnesis` belongs to an
+# unrelated crate. The library is still imported as `anamnesis` (`use anamnesis::…`).
+# Optional: local embedding provider (downloads model on first use, ~100-500 MB)
+anamnesis-engine = { version = "0.10", features = ["embed"] }
+```
+
+```rust,no_run
+use anamnesis::Memory;
+use anamnesis::engine::Timestamp;
+
+// 1. Open a persistent Memory (feature = "embed" wires in bge-base-en-v1.5)
+let mut mem = Memory::open("my-memory.db").unwrap();
+
+// 2. Add conversational turns — the bench recipe runs automatically
+let now = Timestamp::now();
+mem.add("session-1", "Alice", "I prefer dark mode", now).unwrap();
+mem.add("session-1", "Bob",   "Got it, dark mode it is", now).unwrap();
+
+// 3. Search (auto-flushes pending buffers before querying)
+let recall = mem.search("display preferences", 5).unwrap();
+for hit in &recall.hits {
+    println!("{:.3}  {}", hit.score, hit.text);
+}
+
+// 4. Reinforce what was actually used (commit-gated Hebbian strengthening)
+mem.used(recall).unwrap();
+```
+
+**Use `Memory`** — it is the validated, bench-proven consumer recipe. Drop to
+**`Engine`** (the kernel API) only when you need custom node/edge types, your own
+ingest representation, or direct control over `link` / `crystallize` / `tick`.
+`Memory` is built entirely on `Engine`'s public API: anything it does, you can do.
+
+```rust,no_run
+// Framework API (default)
+use anamnesis::Memory;
+
+// Kernel API (custom encoding / raw control)
+use anamnesis::engine::{Engine, EngineConfig, Observation, ConfidenceLevel};
+```
+
+For direct `Engine` usage see the [API Surface](#api-surface) section and [`docs/`](docs/README.md).
+
 ## Core Concepts
 
 <details>
@@ -276,14 +250,14 @@ end-to-end in [`tests/reasoning_advantage.rs`](crates/anamnesis/tests/reasoning_
 
 Anamnesis separates retrieval cues from memory representation. Keyword search, BM25-style full-text search, entity tags, temporal filters, and optional embeddings are **trigger indexes**: they find candidate `NodeId`s that may start recall.
 
-The actual memory is the graph: nodes, typed edges, salience, timestamps, validity windows, and origin metadata. Once a cue finds a seed, spreading activation reconstructs the surrounding context: what happened, who produced it, when it was valid, what it supports or contradicts, and why a decision was made.
+The actual memory is the graph: nodes, typed edges, salience, timestamps, validity windows, and origin metadata. Once a cue finds a seed, spreading activation reconstructs the surrounding structure: what it supports or contradicts, and why a decision was made.
 
 ```text
 query
   -> keyword / BM25 / embedding / entity / time triggers
   -> candidate seed nodes
   -> graph spreading activation
-  -> identity + knowledge + memories + tensions
+  -> knowledge + memories + tensions
 ```
 
 This means indexes can be rebuilt or replaced without changing memory. The graph remains the source of truth.
@@ -302,19 +276,20 @@ Anamnesis preserves **individual conversation turns as nodes**. Each retains ori
 </details>
 
 <details>
-<summary><strong>Identity-Conditioned Recall</strong></summary>
+<summary><strong>Knowledge Types</strong></summary>
 
 <br>
 
-Identity is not a runtime behavior prompt. It is represented by high-salience identity nodes inside the same graph and acts as a retrieval prior:
+Every node carries a `KnowledgeType`. The set is deliberately small — four variants that the retrieval pipeline treats differently:
 
-| Type | Role | Dynamics |
-|:-----|:-----|:---------|
-| `IdentityCore` | Stable retrieval anchors and operating principles | No decay; high salience |
-| `IdentityLearned` | Experience-formed preferences and conventions | Very slow decay; reinforced by repeated success |
-| `IdentityState` | Current task or stance | Normal decay; scope-sensitive |
+| Type | Role |
+|:-----|:-----|
+| `Episodic` | A specific event or conversation turn — timestamped, high-fidelity. |
+| `Semantic` | A distilled fact or generalization — the windowed view over episodics, and the target of consolidation. |
+| `Identity` | Stable retrieval anchors and operating principles. Routed to a dedicated partition in the context package and used as a retrieval prior. |
+| `Custom(String)` | An open escape hatch for consumer-defined categories, rendered by its bare label. |
 
-Identity nodes bias recall, ranking, and tension detection. They do **not** hide contradictory facts, enforce behavior, or replace a system prompt; the consumer decides how retrieved identity fragments are exposed to an LLM.
+`Identity` nodes bias recall as a prior but do **not** hide contradictory facts or replace a system prompt; the consumer decides how retrieved identity fragments are exposed to an LLM. (The kernel populates the identity partition only when `Identity`-typed nodes exist; the default `Memory` recipe emits `Episodic` + `Semantic`, so most consumers never write one.)
 
 </details>
 
@@ -323,27 +298,13 @@ Identity nodes bias recall, ranking, and tension detection. They do **not** hide
 
 <br>
 
-Every node carries `Origin` metadata: `agent_id`, `session_id`, a hierarchical scope path, and `confidence`.
+Every node carries `Origin` metadata: `peer_id`, `session_id`, a `scope` path, and `confidence`.
 
-- `work/company-a` means the memory is scoped to a work domain or workspace.
-- `personal/daily-life` means the memory is scoped to a personal domain.
-- `personal-projects/anamnesis` means the memory is scoped to a specific personal project.
-- `universal` means the memory can participate across scopes.
-- Exact-scope memories receive the strongest query weight.
-- Ancestor/domain memories receive a medium boost.
-- Universal memories remain available across scopes.
-- Sibling or unrelated scopes are downweighted unless explicitly requested or strongly connected by entities.
+- A scope path such as `work/company-a` or `personal-projects/anamnesis` marks the domain a memory belongs to.
+- `universal` scope means the memory participates across scopes.
+- Scoped memories can be crystallized upward: session evidence can become project knowledge, which can become universal principles. The original scoped memories remain as evidence via `ConsolidatedFrom` edges; promotion is additive, not destructive.
 
-Scoped memories can be crystallized upward: session evidence can become project knowledge, project knowledge can become domain knowledge, and domain knowledge can become universal principles. The original scoped memories remain as evidence via `ConsolidatedFrom` edges; promotion is additive, not destructive.
-
-Examples of scope paths:
-
-```text
-universal
-work/company-a/backend-platform
-personal/daily-life
-personal-projects/anamnesis/search
-```
+`ScopePath` is an opaque string with a `universal` flag; scope scoring is a two-branch weight (universal vs. non-matching). A richer scope hierarchy is on the [roadmap](#roadmap), not in the shipped engine.
 
 </details>
 
@@ -370,7 +331,7 @@ A node at salience 0.03 is invisible to queries but **still exists** in the grap
 
 <br>
 
-Tiers are **salience ranges**, not separate stores. Reinforcement and dissipation naturally distribute nodes:
+Tiers are **salience ranges**, not separate stores. Reinforcement and dissipation naturally distribute nodes; the tier is a display label derived from salience, not a manual setting:
 
 | Tier | Salience | Role |
 |:-----|:---------|:-----|
@@ -401,7 +362,26 @@ When a new agent session starts, it inherits not rules but *judgment*.
 
 </details>
 
+### How It Compares
+
+| | Storage Unit | Retrieval | Decay | Relationships | Reasoning |
+|:--|:--|:--|:--|:--|:--|
+| Mem0 | Extracted facts | Embedding similarity | None | None | Facts only |
+| Letta | Conversation history | Text search | Archive tier | Basic | Session recall |
+| Stanford ACE | Monolithic playbook | Full load | Curator rewrite | None | Strategy-level |
+| **Anamnesis** | **Fragments** | **Alignment + graph** | **Decay + revival** | **Typed edges** | **Full chains** |
+
+### Positioning
+
+**vs RAG pipelines** — Anamnesis makes zero LLM calls in its core. Retrieval is deterministic (alignment scoring plus graph traversal), not an inference call on every query. No embedding drift on the graph itself; embeddings are cues, not the memory.
+
+**vs LLM context documents** — Context docs require manual compilation, suffer brevity bias on every rewrite, and have no mechanism for forgetting or contradiction detection. Anamnesis handles all three: power-law dissipation ages out stale knowledge, spreading activation surfaces related fragments, and `Contradicts` edges surface tensions in query results.
+
+**vs vector-only stores** — Embedding similarity finds *similar* fragments and does the heavy lifting on ranking. Anamnesis adds what similarity alone cannot represent: the typed reasoning chains (causes, contradictions, decisions, confirmations) *between* fragments, surfaced as structure in the result.
+
 ## Architecture
+
+Anamnesis exposes two API surfaces: the **Framework API** ([`anamnesis::memory::Memory`](https://docs.rs/anamnesis-engine/latest/anamnesis/memory/struct.Memory.html)) and the **Kernel API** ([`anamnesis::engine`](https://docs.rs/anamnesis-engine/latest/anamnesis/engine/index.html)). `Memory` is the official consumer-layer default, built entirely on `Engine`'s public API. The crate root re-exports exactly three symbols — `Memory`, `Engine`, and `Error` — and nothing else.
 
 ```
 src/
@@ -418,8 +398,7 @@ src/
 │   ├── energy         Query-local energy objective E(S | Q)
 │   ├── projection     Reservoir ↔ bounded projection (logistic / logit)
 │   └── priors         Calibrated irreducible priors (d, L, N, k, …)
-├── query/          Additive directed RWR, potential field, 7-term readout, search
-├── peer/           Peer identity, trust levels, source attribution
+├── query/          Additive directed RWR, potential field, readout, search
 ├── storage/        StorageAdapter trait + SqliteStorage
 ├── embedding/      EmbeddingProvider trait + optional FastEmbedProvider
 └── snapshot/       Clone-based snapshot storage
@@ -428,6 +407,8 @@ Public surface: `anamnesis::{Memory, Engine, Error}` at the root,
 `anamnesis::memory` (Framework) and `anamnesis::engine` (Kernel) namespaces.
 Everything below the first two lines is implementation reached through them.
 ```
+
+> The top-level module tree above (`api`, `graph`, `mechanics`, `query`, `storage`, …) is the **real implementation tree** — the crate compiles against it and it carries hundreds of internal references. What changed at the two-door boundary ([v0.7](#status)) is only what is *re-exported at the root*: exactly `Memory`, `Engine`, `Error`. The module paths remain internal, not a public API.
 
 <details>
 <summary><strong>Data Flow</strong></summary>
@@ -441,7 +422,7 @@ Observation
 Ingest ── allocate new site OR route to nearest ──► Graph (reservoirs)
   │  cold-start coupling may seed a Semantic edge (embedding/entity above threshold)
   ▼
-Query ── additive directed RWR from seeds ──► 7-term readout ──► budget-bounded ContextPackage
+Query ── additive directed RWR from seeds ──► readout ──► budget-bounded ContextPackage
   │       (read-only: reservoirs unchanged; Contradicts excluded, surfaced as frustration)
   ▼
 Commit ── write-back for used memories ──►
@@ -456,14 +437,14 @@ Commit ── write-back for used memories ──►
          └────────────────────────────────────────┘
 
          ┌────────────────────────────────────────┐
-         │  crystallize() / reflect_batch()       │
-         │  synthesis + cross-agent Entity links  │
+         │  crystallize()                         │
+         │  synthesis + cross-fragment Entity links│
          └────────────────────────────────────────┘
 ```
 
 </details>
 
-<details>
+<details id="api-surface">
 <summary><strong>API Surface</strong></summary>
 
 <br>
@@ -514,8 +495,6 @@ impl Engine {
     pub fn crystallize(&mut self, request: CrystallizeRequest) -> Result<CrystallizeResult, Error>;
     pub fn link(&mut self, from: NodeId, to: NodeId, edge_type: EdgeType) -> Result<EdgeId, Error>;
     pub fn touch(&mut self, node_id: NodeId, now: Timestamp) -> Result<(), Error>;
-    pub fn set_tier(&mut self, node_id: NodeId, tier: MemoryTier) -> Result<(), Error>;
-    pub fn get_tier(&self, node_id: NodeId) -> Result<MemoryTier, Error>;
     pub fn tick(&mut self, now: Timestamp) -> Result<TickReport, Error>;
 
     // Query — returns structured context for LLM consumption
@@ -523,27 +502,11 @@ impl Engine {
     pub fn search(&self, input: SearchInput) -> Result<SearchResult, Error>;
     pub fn fact_at(&self, query: &Query, as_of: Timestamp) -> Result<ContextPackage, Error>;
 
-    // Debug lifecycle
-    pub fn start_debug(&mut self, problem: &str, origin: Origin, timestamp: Timestamp) -> Result<NodeId, Error>;
-    pub fn log_hypothesis(&mut self, session: NodeId, text: &str, origin: Origin, timestamp: Timestamp) -> Result<NodeId, Error>;
-    pub fn log_evidence(&mut self, hypothesis: NodeId, text: &str, result: EvidenceResult, origin: Origin, timestamp: Timestamp) -> Result<NodeId, Error>;
-    pub fn reject_hypothesis(&mut self, hypothesis: NodeId, reason: &str, timestamp: Timestamp) -> Result<(), Error>;
-    pub fn confirm_hypothesis(&mut self, hypothesis: NodeId, conclusion: &str, timestamp: Timestamp) -> Result<(), Error>;
-    pub fn end_debug(&mut self, session: NodeId, outcome: DebugOutcome, timestamp: Timestamp) -> Result<(), Error>;
-    pub fn search_rejected_hypotheses(&self, query: &str, limit: usize) -> Result<Vec<NodeId>, Error>;
-
-    // Cross-agent
-    pub fn reflect_batch(&mut self, sessions: &[SessionSummary]) -> Result<ReflectReport, Error>;
-
     // Commit — write-back for the retrieval loop: reinforces the memories actually
     // used and strengthens co-used edges (commit-gated Hebbian). Read-only query
     // changes nothing; touch()/tick() also mutate reservoirs by other paths.
     pub fn commit(&mut self, package: ContextPackage, feedback: Option<ConfidenceLevel>)
         -> Result<(ContextPackage, CommitReport), Error>;
-
-    // Peers
-    pub fn register_peer(&mut self, name: impl Into<String>, trust_level: TrustLevel)
-        -> Result<PeerId, Error>;
 }
 ```
 
@@ -592,7 +555,6 @@ pub trait StorageAdapter: Send + Sync {
     // Default helpers (O(N) scan; override for O(1) index lookup)
     fn nodes_by_entity_tag(&self, tag: &str) -> Vec<NodeId>;
     fn nodes_by_type(&self, kt: &KnowledgeType) -> Vec<NodeId>;
-    fn nodes_by_agent(&self, agent_id: &str) -> Vec<NodeId>;
     fn nodes_by_scope(&self, scope: &ScopePath) -> Vec<NodeId>;
     fn node_ids_descending(&self) -> Vec<NodeId>;
     fn text_search(&self, query: &str, limit: usize) -> Vec<(NodeId, f64)>;
@@ -617,23 +579,6 @@ Ships with `SqliteStorage` (bundled SQLite via rusqlite, FTS5 full-text search, 
 - **No global state** — all state in `Engine` instances
 - **Salience as shared signal** — all mechanics read/write salience; tiers emerge naturally from salience ranges
 - **Indexes trigger; graph remembers** — keyword, BM25, embedding, and temporal indexes find entry points; graph nodes and edges remain the source of truth
-
-<details>
-<summary><strong>Three-Role Processing (Consumer Pattern)</strong></summary>
-
-<br>
-
-A recommended — but not enforced — processing pattern adapted from Stanford ACE:
-
-| Role | When | Engine Primitives |
-|:-----|:-----|:------------------|
-| **Generator** | During ingestion | `ingest()`, `link()` |
-| **Reflector** | Session completion | `link()`, `touch()` |
-| **Curator** | Periodic batch | `tick()`, `crystallize()` |
-
-The Generator extracts nodes from conversation turns. The Reflector reviews and creates cross-session reasoning edges. The Curator applies decay and consolidates patterns. These roles run **in the consumer** — the engine provides graph primitives only.
-
-</details>
 
 ## Development
 
@@ -667,55 +612,31 @@ CI also runs the MSRV check (`cargo check --all-targets --all-features` on Rust 
 
 `cargo test --all-targets` intentionally is not a release gate because this crate has `harness = false` benchmark binaries that execute long-running benchmarks when invoked as test targets. Use `cargo bench` or the manual benchmark workflow for performance runs.
 
+## Roadmap
+
+These are **not yet implemented**. They are recorded here so the map matches the territory; several were deliberately removed in the [v0.10.0 shrink](docs/adr/0014-shrink-to-product.md) because they had no consumer, and will return only behind a real one:
+
+- **Multi-peer provenance & trust** — the `PeerId` / `SourceKind` fields on `Origin` persist, but the peer registry, trust levels, and the readout trust term (now a neutral `1.0`) were removed. A multi-agent deployment that actually attributes and weights sources by trust is the re-add condition.
+- **Identity tiers** — the collapsed `KnowledgeType` keeps a single `Identity` variant; the `IdentityCore` / `IdentityLearned` / `IdentityState` split (with per-tier decay policy) is future work.
+- **Scope hierarchies** — `ScopePath` is currently an opaque string with a `universal` flag. Ancestor/sibling scope scoring and upward crystallization across a real hierarchy are roadmap.
+- **Debug / hypothesis lifecycle** — the start-debug / log-hypothesis / rejected-hypothesis machinery was removed as consumer-less; a first-class reasoning-session capture may return through the [capture pipeline](docs/adr/0013-reasoning-capture-pipeline.md).
+- **Per-namespace extraction queues** — Stage-2 extraction currently uses a single un-extracted queue; per-namespace queues are future work.
+
+See [ADR-0014](docs/adr/0014-shrink-to-product.md) for the full shrink record — what was removed, why, and the condition for each to return.
+
 ## Status
 
-**v0.8.2** — Codex MCP fix, no library API change: the Codex MCP server `command` now uses **`npx`** (cwd-independent, auto-fetching the binary) instead of a plugin-relative path. Codex spawns MCP servers from the **user's cwd** (not the plugin root) and does **not** expand `${PLUGIN_ROOT}` in an MCP command, so the plugin had no way to point at its own bundled binary — every user hit "MCP failed to start: connection closed". `npx` matches the official Codex MCP convention (a PATH command) and keeps it install-and-go. Claude Code is unaffected (it expands `${CLAUDE_PLUGIN_ROOT}`).
+**v0.10.0** — **shrink to product** ([ADR-0014](docs/adr/0014-shrink-to-product.md)). An audit found ~85% of the Engine's public surface had zero consumers — the map sold more than the territory walked. This release removes the debug/hypothesis lifecycle, the peer/trust subsystem, a large convenience API, manual memory-tier override, and the scope-relation hierarchy; collapses `KnowledgeType` from 15 variants to 4 (`Episodic` / `Semantic` / `Identity` / `Custom`); and discloses a set of by-design decay/tau coarsenings. `PeerId` storage, tier *display*, and the internal module tree survive. Breaking vs 0.9. Migrations run automatically on open (v5→v6 drops peers; v6→v7 normalizes legacy node types). See the [CHANGELOG](CHANGELOG.md) and ADR-0014.
 
-**v0.8.1** — plugin/packaging fixes, no library API change: first-run install-and-go hardening — background binary prefetch so the MCP startup doesn't race the one-time fetch, and the Codex MCP `command` now uses a plugin-root-relative path instead of the unexpanded `${PLUGIN_ROOT}` (Codex doesn't expand it in MCP commands); Codex hook config fix (Codex 0.142 rejects a stray top-level `description`); crates.io publishing as `anamnesis-engine`.
+**v0.9.x** — automatic capture pipeline ([ADR-0013](docs/adr/0013-reasoning-capture-pipeline.md)): `Stop` / `PreCompact` / `SessionEnd` hooks stream turns as raw `Episodic` memories; a Stage-2 nudge asks the agent to distill them via `extract_pending`. Capture hardening (queue durability, nudge ungating, bounded I/O) in 0.9.1.
 
-**v0.8.0** — published to crates.io as **`anamnesis-engine`** (the bare `anamnesis` name belongs to an unrelated crate); the library crate name stays `anamnesis`, so `use anamnesis::…` is unchanged. Ships the Claude Code & Codex plugin (activation-gated recall) and the MCP-free internal transport ([ADR-0012](docs/adr/0012-daemon-core-mcp-plugin-clients.md)). No library API changes vs 0.7.
+**v0.8.x** — published to crates.io as **`anamnesis-engine`**; ships the Claude Code & Codex plugin (activation-gated recall) and the MCP-free internal transport ([ADR-0012](docs/adr/0012-daemon-core-mcp-plugin-clients.md)). Codex MCP-launch fixes in 0.8.1 / 0.8.2.
 
-**v0.7.0** — two-door public API surface: root re-exports exactly `Memory`, `Engine`, `Error`; `anamnesis::engine::*` is the full kernel namespace; `anamnesis::memory::*` is the framework namespace. Legacy top-level modules (`api`, `graph`, `mechanics`, `peer`, `query`, `snapshot`, `storage`, `embedding`, `error`) are doc-hidden but remain compilable for migration. Breaking vs 0.6: all root shortcuts beyond the three named types are removed.
+**v0.7.0** — two-door public API surface: root re-exports exactly `Memory`, `Engine`, `Error`; `anamnesis::engine::*` is the full kernel namespace; `anamnesis::memory::*` is the framework namespace. The top-level modules (`api`, `graph`, `mechanics`, `query`, `snapshot`, `storage`, `embedding`, `error`) are the real internal tree, doc-hidden at the root boundary.
 
-**v0.6.0** — retrieval overhaul on the conductive-network model: alignment-only readout potential, ADR-0010 calibrated readout coefficients, `SearchTrace.readout` diagnostics, temporal query cues, and `Balanced` packaging (see [calibration records](docs/07-quality-gates/calibration-records.md)). Breaking vs 0.5: new public fields on `SearchTrace`/`FieldSignals`, new `PackagingMode` variant.
+**v0.6.0** — retrieval overhaul: alignment-only readout potential, ADR-0010 calibrated readout coefficients, `SearchTrace.readout` diagnostics, temporal query cues, and `Balanced` packaging.
 
-**v0.5.0** — migrated to the **conductive-network** model: additive directed RWR, log-odds reservoirs with bounded projections, power-law dissipation, commit-gated Hebbian learning, and frustration. Breaking redesign vs 0.4 (force/gravity/BFS/Hopfield models removed); the [techspec](docs/README.md) is the source of truth.
-
-Node strength is now decomposed as `A_i = B_i + P_i` ([ADR-0008](docs/adr/0008-powerlaw-dissipation.md)): the ACT-R base level `B_i` is recomputed on demand from the access-trace history (forgetting and use-driven reinforcement live here), and the persistent evidence prior `P_i` (encoding surprise, feedback, peer trust) is decay-exempt. Each access trace carries its own **activation-dependent decay rate** `d_j = m_type·(c·e^{m_j}+α)` (Pavlik & Anderson 2005), so the multi-trace base level genuinely reproduces the **spacing effect** (the human *testing* effect is not claimed). The edge `conductance` log-LR reservoir is unchanged.
-
-| Layer | Status | Notes |
-|:------|:-------|:------|
-| Graph (Node, Edge, CRUD) | ✅ | SQLite-backed storage with SoA hot fields and write-behind dirty tracking |
-| SQLite storage | ✅ | `SqliteStorage` with FTS5 full-text search, adjacency index, ID recycling, secondary indexes |
-| Engine API | ✅ | All method signatures finalized |
-| Cold-start coupling | ✅ | Embedding/entity/scope/type-weighted seed creates `Semantic` edges in `ingest()` |
-| Conductance learning | ✅ | Commit-gated Oja-bounded Hebbian edge strengthening |
-| Perception | ✅ | Surprise-gated, wired into `ingest()` — novelty, confidence, budget |
-| Forgetting (dissipation) | ✅ | ACT-R base level `B_i` recomputed from access traces with **per-trace activation-dependent decay** (Pavlik-Anderson; reproduces the spacing effect); `tick()` recomputes salience as `B_i(now)` falls; `touch()` appends an access trace (no scalar decay). Evidence prior `P_i` is decay-exempt |
-| Activation flow | ✅ | Additive directed random-walk-with-restart (RWR); BFS/force models removed |
-| Frustration | ✅ | `Contradicts` excluded from propagation, surfaced as tension (`sigma_ij`) |
-| Identity prior | ✅ | Top-3 identity nodes bias query activation |
-| Scope weighting | ✅ | Hierarchical scope-path scoring with entity overlap bonus |
-| ContextPackage | ✅ | Structured output: identity/knowledge/memories/tensions |
-| Agent tension | ✅ | Contradiction tension measurement in query results |
-| Multi-resolution content (L0/L1/L2) | ✅ | Token budget controls fragment detail level |
-| Typed edges | ✅ | Edge types with directional type factors (`Contradicts` excluded from flow) |
-| Embedding persistence | ✅ | Stored on Node, used for similarity operations |
-| Origin attribution | ✅ | agent_id, session_id, scope, confidence |
-| Non-Associative query modes | ✅ | TypeFiltered, Neighborhood, Temporal, List — all implemented |
-| `search()` unified text + graph | ✅ | Text search + vector similarity + spreading activation |
-| `crystallize()` post-session consolidation | ✅ | ConsolidatedFrom edges, salience promotion from sources |
-| `reflect_batch()` cross-agent linking | ✅ | Entity edges via entity tag matching, no LLM calls |
-| Debug lifecycle | ✅ | DebugSession, Hypothesis, Evidence nodes; start/log/reject/confirm/end APIs |
-| `search_rejected_hypotheses()` | ✅ | Case-insensitive search across rejected hypothesis nodes |
-| Clone-based snapshots | ✅ | `snapshot()`, `restore()`, `list_snapshots()` |
-| Bitemporal queries | ✅ | `fact_at()` — valid_from/valid_until filtering |
-| EmbeddingProvider trait | ✅ | Synchronous, Send + Sync; `embed()`, `dimensions()`, `model_name()`, `widen()` |
-| FastEmbedProvider | ✅ | Behind `feature = "embed"`; BAAI/bge-base-en-v1.5, 768 dims |
-| Memory tier control | ✅ | `set_tier()` / `get_tier()` — Core tier protected from decay |
-| Energy objective | ✅ | Query-local `E(S \| Q)` with symmetric-coupling caveat (Hopfield/force models removed) |
-| Commit pipeline | ✅ | `commit()` — write-back for query usage: access-trace append (`B_i`) + evidence-prior update (`P_i`) + Hebbian edge learning (read-only retrieval mutates nothing) |
-| Social reinforcement scoring | ✅ | Multi-agent corroboration scoring and consumer feedback reservoir updates |
+**v0.5.0** — migrated to the **conductive-network** model: additive directed RWR, log-odds reservoirs with bounded projections, power-law dissipation, commit-gated Hebbian learning, and frustration. Node strength decomposed as `A_i = B_i + P_i` ([ADR-0008](docs/adr/0008-powerlaw-dissipation.md)): the ACT-R base level `B_i` is recomputed on demand from the access-trace history, and the persistent evidence prior `P_i` is decay-exempt.
 
 ## References
 
