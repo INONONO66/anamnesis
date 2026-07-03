@@ -860,9 +860,14 @@ mod tests {
     /// stem must be rejected, not silently aliased onto the default file.
     #[test]
     fn namespace_colliding_with_default_db_file_is_rejected() {
-        let dir = std::env::temp_dir().join("anamnesis-ns-collision-test");
-        let default_db = dir.join("memory.db");
-        let mut reg = MemoryRegistry::file_backed(default_db, dir, "default".to_string(), false);
+        let dir = tempfile::tempdir().unwrap();
+        let default_db = dir.path().join("memory.db");
+        let mut reg = MemoryRegistry::file_backed(
+            default_db,
+            dir.path().to_path_buf(),
+            "default".to_string(),
+            false,
+        );
         reg.provider = Some(Arc::new(StubProvider));
         // ns "memory" sanitizes to "memory" → <dir>/memory.db == default_db.
         let err = reg.remember("leak attempt", Some("memory")).unwrap_err();
@@ -873,10 +878,14 @@ mod tests {
     /// instance over ONE file, not two instances racing over the same file.
     #[test]
     fn sanitize_equal_namespaces_share_one_instance() {
-        let dir = std::env::temp_dir().join("anamnesis-ns-canonical-test");
-        let _ = std::fs::remove_dir_all(&dir);
-        let default_db = dir.join("memory.db");
-        let mut reg = MemoryRegistry::file_backed(default_db, dir, "default".to_string(), false);
+        let dir = tempfile::tempdir().unwrap();
+        let default_db = dir.path().join("memory.db");
+        let mut reg = MemoryRegistry::file_backed(
+            default_db,
+            dir.path().to_path_buf(),
+            "default".to_string(),
+            false,
+        );
         reg.provider = Some(Arc::new(StubProvider));
         reg.remember("shared via Alpha", Some("Alpha")).unwrap();
         // "alpha" sanitizes to the same stem as "Alpha"; it must see the write.
