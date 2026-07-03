@@ -128,7 +128,7 @@ chain by typed edge:
 === graph recall (structure: tensions + reasons) ===
 
 tensions (contradictions surfaced, never suppressed):
-  #5 ⟂ #11  (stress 0.02)
+  #5 ⟂ #11  (stress 0.03)
     ↳ assistant: Decision: we go with Postgres.
     ↳ assistant: We are reverting to SQLite — the ops overhead is too high ...
 
