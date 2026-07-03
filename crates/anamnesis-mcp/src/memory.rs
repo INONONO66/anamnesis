@@ -901,11 +901,12 @@ pub(crate) fn mem_recall_packaged_gated(
     Ok(PackagedRecall { context, hits })
 }
 
-/// Like [`mem_recall_packaged_gated`], with a post-filter dropping hits whose
-/// node origin scope or entity tags don't match. Applied to the already
-/// gated/ranked/de-duplicated `hits` list — the readable `context` block is
-/// left as rendered (simplest correct approach; does not rewrite the
-/// activation pipeline).
+/// Like [`mem_recall_packaged_gated`], with a scope/tag filter applied to the
+/// [`ContextPackage`] BEFORE rendering — so an excluded node's content never
+/// reaches the rendered `context` block (identity/knowledge/memories/tensions),
+/// not just the compact `NODES` list. Re-implements the gate/render/reinforce
+/// sequence rather than delegating to `mem_recall_packaged_gated`, since that
+/// function renders before returning and the filter must run earlier.
 pub(crate) fn mem_recall_packaged_gated_filtered(
     mem: &mut Memory<SqliteStorage>,
     query: &str,
@@ -915,18 +916,88 @@ pub(crate) fn mem_recall_packaged_gated_filtered(
     scope: Option<&str>,
     tag: Option<&str>,
 ) -> Result<PackagedRecall, Error> {
-    let mut packaged = mem_recall_packaged_gated(mem, query, limit, reinforce, gate)?;
-    if scope.is_some() || tag.is_some() {
-        packaged.hits.retain(|h| {
-            let Ok(node) = mem.engine().graph().get_node(h.node_id) else {
-                return false;
-            };
-            let scope_ok = scope.is_none_or(|s| node.origin.scope.as_str() == s);
-            let tag_ok = tag.is_none_or(|t| node.entity_tags.iter().any(|et| et == t));
-            scope_ok && tag_ok
+    if scope.is_none() && tag.is_none() {
+        return mem_recall_packaged_gated(mem, query, limit, reinforce, gate);
+    }
+
+    let mut recall = mem.search(query, limit)?;
+
+    let gated_out = match (gate, recall.hits.first().map(|h| h.score)) {
+        (Some(tau), Some(top)) => top < tau,
+        (Some(_), None) => true,
+        (None, _) => false,
+    };
+    if gated_out {
+        mem.tick(Timestamp::now())?;
+        #[cfg(test)]
+        record_tick();
+        return Ok(PackagedRecall {
+            context: String::new(),
+            hits: Vec::new(),
         });
     }
-    Ok(packaged)
+
+    filter_context_package(mem, &mut recall.package, scope, tag);
+    recall
+        .hits
+        .retain(|h| node_matches_scope_tag(mem, h.node_id, scope, tag));
+
+    let context = recall.as_context();
+    let raw = recall.hits.clone();
+    if reinforce {
+        mem.used(recall)?;
+    }
+    mem.tick(Timestamp::now())?;
+    #[cfg(test)]
+    record_tick();
+    let hits = dedup_hits(raw);
+    Ok(PackagedRecall { context, hits })
+}
+
+/// Whether `node_id`'s origin scope and entity tags satisfy the requested
+/// `scope`/`tag` filters (`None` ⇒ that filter is not applied). A node lookup
+/// failure is treated as non-matching (excluded), never a panic.
+fn node_matches_scope_tag(
+    mem: &Memory<SqliteStorage>,
+    node_id: NodeId,
+    scope: Option<&str>,
+    tag: Option<&str>,
+) -> bool {
+    let Ok(node) = mem.engine().graph().get_node(node_id) else {
+        return false;
+    };
+    let scope_ok = scope.is_none_or(|s| node.origin.scope.as_str() == s);
+    let tag_ok = tag.is_none_or(|t| node.entity_tags.iter().any(|et| et == t));
+    scope_ok && tag_ok
+}
+
+/// Drop every fragment (identity/knowledge/memories) and tension in `package`
+/// whose referenced node doesn't satisfy the scope/tag filter. A tension is
+/// dropped if either endpoint was dropped, so a filtered-out node's existence
+/// never leaks through a surviving tension line either.
+fn filter_context_package(
+    mem: &Memory<SqliteStorage>,
+    package: &mut anamnesis::query::ContextPackage,
+    scope: Option<&str>,
+    tag: Option<&str>,
+) {
+    let retain_matching = |frags: &mut Vec<anamnesis::query::Fragment>| {
+        frags.retain(|f| node_matches_scope_tag(mem, f.node_id, scope, tag));
+    };
+    retain_matching(&mut package.identity);
+    retain_matching(&mut package.knowledge);
+    retain_matching(&mut package.memories);
+
+    let surviving: HashSet<NodeId> = package
+        .identity
+        .iter()
+        .chain(package.knowledge.iter())
+        .chain(package.memories.iter())
+        .map(|f| f.node_id)
+        .collect();
+    package
+        .tensions
+        .retain(|t| surviving.contains(&t.node_a) && surviving.contains(&t.node_b));
 }
 
 /// Namespace-locked body of [`MemoryRegistry::relate`].

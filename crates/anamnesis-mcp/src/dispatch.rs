@@ -1723,6 +1723,24 @@ mod tests {
                 "scope filter must exclude project B's hit, got node text: {view}"
             );
         }
+
+        // The RENDERED context block (## KNOWLEDGE / ## MEMORIES), not just the
+        // compact NODES list, must exclude the other-scope hit — an agent reads
+        // the rendered block, not the NODES list, so a leak there is the real bug.
+        assert!(
+            resp.contains("project A"),
+            "expected the projA content in the rendered reply: {resp}"
+        );
+        assert!(
+            !resp.contains("project B"),
+            "recall scope filter must exclude project B's content from the \
+             RENDERED reply (## KNOWLEDGE / ## MEMORIES), not just the NODES list: {resp}"
+        );
+        assert!(
+            !resp.to_lowercase().contains("scope projb"),
+            "recall scope filter must not leak project B's origin/scope line \
+             into the rendered reply: {resp}"
+        );
     }
 
     // ── adversarial: malformed_input (P1-T5) ────────────────────────────────
