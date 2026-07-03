@@ -86,9 +86,8 @@ Not all of these are calibrated priors. `max_nodes` and `dedup_enabled` are oper
 | `link` | Creates or strengthens an edge through a typed relationship |
 | `crystallize` | Adds a synthesis site and `ConsolidatedFrom` edges; never overwrites sources |
 | `snapshot` / `restore` | Captures and restores cloned storage state |
-| `fact_at` | Filters facts by valid-time interval |
 
-The debug lifecycle methods and `reflect_batch` (cross-agent entity linking) were **removed in the [v0.10.0 shrink](../adr/0014-shrink-to-product.md)** — both had no consumer; see ADR-0014 for the re-add conditions.
+The debug lifecycle methods, `reflect_batch` (cross-agent entity linking), and the `fact_at` convenience wrapper (valid-time filtering) were **removed in the [v0.10.0 shrink](../adr/0014-shrink-to-product.md)** — all had no consumer; see ADR-0014 for the re-add conditions. Valid-time filtering itself survives on the `search` path (see the [temporal model](../02-knowledge-model/temporal-model.md)).
 
 ## Embedding Boundary
 

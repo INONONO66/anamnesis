@@ -1,11 +1,14 @@
-//! Tests for SQLite schema migration infrastructure (v1 → … → v6 → v7).
+//! Tests for SQLite schema migration infrastructure (v1 → … → v7 → v8).
 //!
 //! v6 dropped the `peers` / `peer_aliases` tables with the peer/trust subsystem;
 //! nodes' own `peer_id` / `source_kind` columns and `idx_nodes_peer` STAY.
 //! v7 normalizes `nodes.node_type` for the KnowledgeType 15→4 collapse (legacy
-//! identity tiers → `identity`, removed knowledge/memory strings → `custom:*`);
-//! the dedicated normalization + `nodes_by_type` regression lives in the sqlite
-//! unit tests (`migration_v7_normalizes_legacy_node_types_for_nodes_by_type`).
+//! identity tiers → `identity`, removed knowledge/memory strings → `custom:*`).
+//! v8 extends that normalization to EVERY remaining bare non-canonical `node_type`
+//! (any foreign/future writer string, escaped via `encode_knowledge_type`). The
+//! dedicated normalization + `nodes_by_type` regressions live in the sqlite unit
+//! tests (`migration_v7_normalizes_legacy_node_types_for_nodes_by_type`,
+//! `migration_v8_normalizes_arbitrary_bare_node_types_for_nodes_by_type`).
 
 use anamnesis::storage::SqliteStorage;
 use rusqlite::{Connection, OptionalExtension};
@@ -83,7 +86,7 @@ fn fresh_db_gets_current_schema_version() {
     assert_eq!(storage.node_count(), 0);
 
     let conn = Connection::open(&tmp).expect("reopen");
-    assert_eq!(schema_version(&conn), 7, "fresh DB should be at schema v7");
+    assert_eq!(schema_version(&conn), 8, "fresh DB should be at schema v8");
 
     // v6 removed the peer/trust subsystem: a fresh DB has no peers tables.
     assert!(
@@ -229,8 +232,8 @@ fn existing_db_migrates_from_v1_to_current() {
 
         assert_eq!(
             schema_version(&conn),
-            7,
-            "schema_version should be 7 after full v1 -> v7 migration"
+            8,
+            "schema_version should be 8 after full v1 -> v8 migration"
         );
 
         // Nodes' peer_id column (inside the Origin encoding) STAYS after the chain.
@@ -359,8 +362,8 @@ fn fresh_schema_equals_migrated_schema() {
     let fresh = Connection::open(&fresh_path).expect("reopen fresh");
     let migrated = Connection::open(&migrated_path).expect("reopen migrated");
 
-    assert_eq!(schema_version(&fresh), 7);
-    assert_eq!(schema_version(&migrated), 7);
+    assert_eq!(schema_version(&fresh), 8);
+    assert_eq!(schema_version(&migrated), 8);
 
     // Both the fresh-create and migration paths must converge on a nodes table that
     // carries the v5 evidence_prior column (legacy v1->v2 ALTERs leave the rest of
@@ -576,7 +579,7 @@ fn v5_db_with_planted_peers_reopens_clean_at_v6() {
     //    (with its peer_id / source_kind) is intact.
     {
         let conn = Connection::open(&tmp).expect("reopen after migration");
-        assert_eq!(schema_version(&conn), 7, "DB should be at v7 after reopen");
+        assert_eq!(schema_version(&conn), 8, "DB should be at v8 after reopen");
         assert!(
             !table_exists(&conn, "peers"),
             "peers table must be dropped at v6"
@@ -621,6 +624,107 @@ fn v5_db_with_planted_peers_reopens_clean_at_v6() {
             "nodes_by_peer must still resolve the survivor by origin peer_id"
         );
     }
+
+    let _ = std::fs::remove_file(&tmp);
+}
+
+// ── v5 -> v8 full chain: bare node_type normalization rides every arm ───────────
+
+/// End-to-end: a v5 DB carrying a bare arbitrary `node_type` must, on a single
+/// reopen, run the WHOLE migration chain (v5→v6→v7→v8) and arrive normalized. This
+/// proves the v8 step is wired into the `Some(5)` chain arm (not just the fresh /
+/// `Some(7)` paths), and that the row is visible to `nodes_by_type` afterward.
+#[test]
+fn v5_db_with_bare_node_type_normalizes_through_full_chain_to_v8() {
+    use anamnesis::engine::{SourceKind, StorageAdapter};
+    use anamnesis::graph::node::{Node, Origin};
+    use anamnesis::graph::types::PeerId;
+    use anamnesis::graph::{KnowledgeType, MemoryTier, ScopePath, Timestamp};
+    use std::collections::{HashMap, VecDeque};
+
+    let tmp = std::env::temp_dir().join(format!(
+        "anamnesis_test_v5_to_v8_chain_{}.db",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&tmp);
+
+    // Seed a well-formed node through the normal path, then flush so the row exists.
+    let node_id = {
+        let mut s = SqliteStorage::open(&tmp).expect("open fresh db");
+        let id = s.next_node_id();
+        let node = Node {
+            id,
+            node_type: KnowledgeType::Semantic,
+            name: "arbitrary".into(),
+            summary: None,
+            content: "node carrying a foreign bare type".into(),
+            embedding: None,
+            created_at: Timestamp(1000),
+            updated_at: Timestamp(1000),
+            accessed_at: Timestamp(1000),
+            valid_from: None,
+            valid_until: None,
+            salience: 0.5,
+            retained_action: 0.0,
+            evidence_prior: 0.0,
+            access_count: 0,
+            access_history: VecDeque::new(),
+            tier: MemoryTier::Auto,
+            origin: Origin {
+                peer_id: PeerId(0),
+                source_kind: SourceKind::AgentObservation,
+                session_id: "s1".into(),
+                scope: ScopePath::universal(),
+                confidence: 0.9,
+            },
+            entity_tags: vec![],
+            metadata: HashMap::new(),
+        };
+        s.set_node(node).expect("plant node");
+        s.flush().expect("flush");
+        id
+    };
+
+    // Rewind to a v5-era DB: plant a bare arbitrary `node_type` (the exact form a
+    // foreign writer leaves) and reset schema_version to 5. The v6→v7 fixed list
+    // does NOT cover `future_writer_type`, so only the v8 step normalizes it.
+    {
+        let conn = Connection::open(&tmp).expect("open for downgrade");
+        conn.execute(
+            "UPDATE nodes SET node_type = 'future_writer_type' WHERE id = ?1",
+            [node_id.0],
+        )
+        .expect("plant bare arbitrary type");
+        conn.execute_batch("UPDATE schema_version SET version = 5;")
+            .expect("rewind to v5");
+        assert_eq!(schema_version(&conn), 5, "fixture must be at v5");
+    }
+
+    // Single reopen runs the whole v5→v8 chain.
+    let reopened = SqliteStorage::open(&tmp).expect("v5 -> v8 chain reopen");
+
+    {
+        let conn = Connection::open(&tmp).expect("reopen raw");
+        assert_eq!(schema_version(&conn), 8, "chain must land at v8");
+        let enc: String = conn
+            .query_row(
+                "SELECT node_type FROM nodes WHERE id = ?1",
+                [node_id.0],
+                |row| row.get(0),
+            )
+            .expect("read node_type");
+        assert_eq!(
+            enc, "custom:future_writer_type",
+            "v8 (via the Some(5) chain arm) must normalize the bare arbitrary type"
+        );
+    }
+
+    // And the normalized row is now findable by a type-filtered query.
+    assert_eq!(
+        reopened.nodes_by_type(&KnowledgeType::Custom("future_writer_type".to_string())),
+        vec![node_id],
+        "nodes_by_type must find the row after the full-chain v8 normalization"
+    );
 
     let _ = std::fs::remove_file(&tmp);
 }

@@ -9,7 +9,7 @@ Anamnesis separates record time, fact time, and access time. A memory can be rec
 | Record time | `created_at`, `updated_at` | When the engine stored or modified the site/edge |
 | Access time | `accessed_at`, `access_history` | Last committed access plus the bounded 32-trace window that is the persistent substrate of base-level `B_i` |
 | Fact time | `valid_from`, `valid_until` | When the content is true or applicable |
-| Query time | `as_of` | Time filter requested by `fact_at` or temporal query |
+| Query time | `as_of` | Time filter requested on the search path (`SearchInput::now`) or a temporal query |
 
 Record time is not fact time. A decision recorded today can describe a policy that became valid last month.
 
@@ -71,9 +71,19 @@ This intrinsically prevents stale sites from receiving a full reinforcement boos
 
 Core formulas use days for long-horizon memory decay unless a document explicitly states another unit. Query-local activation iterations are dimensionless and must not be mixed with between-query dissipation time.
 
-## `fact_at` Queries
+## Valid-Time Filtering (Search Path)
 
-`fact_at(query, as_of)` returns context filtered to facts valid at `as_of`. It must not traverse edges invalid at the requested time. Tensions are also time-filtered: a contradiction is active only if both sides and the constraint edge are valid together.
+Retrieval filters the packaged result to facts valid at the requested `as_of`: a
+site is dropped unless `valid_from <= as_of < valid_until`. This runs inside search
+assembly (`apply_validity_filter`, driven by `SearchInput::now` and evaluated by
+`node_is_valid_at`), so a query "as of" a past instant sees only what was valid
+then. Tensions are time-filtered on the same rule — a contradiction is surfaced only
+when *both* endpoints are valid together at `as_of`.
+
+The standalone `fact_at(query, as_of)` convenience wrapper was **removed in the
+[v0.10.0 shrink](../adr/0014-shrink-to-product.md)** (it had no consumer); the
+bitemporal validity mechanism it wrapped is unchanged and remains the authoritative
+temporal filter on the search path.
 
 ## Design Invariants
 

@@ -151,10 +151,11 @@ fn main() -> Result<(), anamnesis::Error> {
 
     let query = "why did we switch databases?";
 
-    // `limit` is sized to the recalled set so both contradicting turns survive
-    // result trimming and the tension reaches us (the readout keeps the top-`limit`
-    // fragments; a surfaced tension is retained only when both endpoints survive).
-    let recall = m.search_at(query, 25, Timestamp(2_000))?;
+    // A natural, modest `limit`. Tension endpoints are exempt from result-limit
+    // trimming (assemble.rs `apply_result_limit`), so the contradiction pair
+    // reaches us even when an endpoint ranks below the cut — no need to oversize
+    // `limit` to the whole recalled set.
+    let recall = m.search_at(query, 10, Timestamp(2_000))?;
 
     // ── View 1: graph recall — structure ─────────────────────────────────────
     // `recall.as_context()` renders the full IDENTITY/KNOWLEDGE/MEMORIES/TENSIONS
@@ -194,18 +195,15 @@ fn main() -> Result<(), anamnesis::Error> {
     }
 
     // ── View 2: flat cosine ranking — a bare list ────────────────────────────
+    // Rank the ENTIRE episodic corpus by cosine to the query, independently of the
+    // graph — exactly what a flat vector store does. We iterate every episodic node
+    // (not the graph-surfaced recall set), so the contrast is honest: the flat list
+    // finds the relevant turns, but nothing in it says they conflict or why.
     let q_embedding = query_provider.embed_f64(&[query])?.remove(0);
     let mut ranked: Vec<(f64, NodeId, String)> = Vec::new();
-    // Rank the episodic turns (the raw conversation) by cosine to the query.
-    for id in [decision, decision_why, reversal, reversal_why]
-        .into_iter()
-        .chain(recall.hits.iter().map(|h| h.node_id))
-    {
+    for id in m.engine().graph().all_node_ids() {
         let node = m.engine().graph().get_node(id)?;
         if !matches!(node.node_type, anamnesis::engine::KnowledgeType::Episodic) {
-            continue;
-        }
-        if ranked.iter().any(|(_, nid, _)| *nid == id) {
             continue;
         }
         let sim = node
@@ -215,7 +213,8 @@ fn main() -> Result<(), anamnesis::Error> {
             .unwrap_or(0.0);
         ranked.push((sim, id, one_line(&node.content)));
     }
-    ranked.sort_by(|a, b| b.0.total_cmp(&a.0));
+    // Deterministic order: cosine desc, then node id for ties.
+    ranked.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.0.cmp(&b.1.0)));
 
     println!("\n=== flat vector ranking (cosine to the query) ===\n");
     println!("a list with no structure — the contradiction and the why-chain are invisible:\n");

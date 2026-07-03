@@ -97,7 +97,7 @@ Hot fields may be folded into base tables for simple adapters, but implementatio
 | entity tag | Candidate generation and reflection |
 | scope | Visibility and ranking |
 | peer / origin | Provenance introspection |
-| valid interval | `fact_at` filtering |
+| valid interval | temporal validity filtering (search path) |
 | salience projection | List and packaging |
 | adjacency | Activation traversal |
 

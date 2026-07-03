@@ -47,7 +47,7 @@ Retrieval settles quickly inside a query and stores nothing. Maintenance and com
 | retained action | salience projection (`logistic(B_i + P_i)`), readout prior, maintenance; access-trace history feeds `B_i`, the evidence prior is `P_i` |
 | conductance | activation flow, path selection, consolidation |
 | origin | scope, trust, peer reflection |
-| valid interval | `fact_at` and temporal filtering |
+| valid interval | temporal validity filtering (search path) |
 | embedding | field alignment, surprise, cold-start coupling |
 
 ## Shared Invariants
