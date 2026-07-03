@@ -77,6 +77,18 @@ impl<S: StorageAdapter + Clone> Memory<S> {
                     .as_ref()
                     .is_none_or(|tag| node.entity_tags.iter().any(|t| t == tag))
             })
+            .filter(|node| {
+                filter
+                    .scope
+                    .as_ref()
+                    .is_none_or(|scope| node.origin.scope.as_str() == scope)
+            })
+            .filter(|node| {
+                filter
+                    .metadata
+                    .as_ref()
+                    .is_none_or(|(k, v)| node.metadata.get(k).is_some_and(|val| val == v))
+            })
             .map(node_to_view)
             .collect();
         views.sort_by(|a, b| {

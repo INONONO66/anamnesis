@@ -61,6 +61,8 @@ pub fn dispatch(registry: &Arc<Mutex<MemoryRegistry>>, req: Request) -> Response
             namespace,
             reinforce,
             gate_threshold,
+            scope,
+            tag,
         } => {
             let limit = limit.unwrap_or(20) as usize;
 
@@ -84,12 +86,14 @@ pub fn dispatch(registry: &Arc<Mutex<MemoryRegistry>>, req: Request) -> Response
             // Phase 2: namespace lock only — the expensive search/tick work.
             let result = {
                 let mut mem = handle.lock().unwrap_or_else(|p| p.into_inner());
-                memory::mem_recall_packaged_gated(
+                memory::mem_recall_packaged_gated_filtered(
                     &mut mem,
                     &query,
                     limit,
                     effective_reinforce,
                     gate_threshold,
+                    scope.as_deref(),
+                    tag.as_deref(),
                 )
             };
 
@@ -116,23 +120,39 @@ pub fn dispatch(registry: &Arc<Mutex<MemoryRegistry>>, req: Request) -> Response
                 }
             }
         }
-        Request::Remember { content, namespace } => {
-            // Phase 1: bump the intent counter, resolve the namespace handle.
+        Request::Remember {
+            content,
+            namespace,
+            tags,
+            metadata,
+            scope,
+        } => {
+            // Phase 1: bump the intent counter, parse tags/metadata/scope (a
+            // caller error here never touches any `Memory`), resolve the
+            // namespace handle.
             let handle = {
                 let mut reg = registry.lock().unwrap_or_else(|p| p.into_inner());
                 reg.ops.remembers += 1;
+                let opts = match memory::build_note_options(tags, metadata, scope) {
+                    Ok(o) => o,
+                    Err(e) => {
+                        reg.ops.dispatch_errors += 1;
+                        return Response::invalid_params(e);
+                    }
+                };
                 match reg.namespace_handle(namespace.as_deref()) {
-                    Ok(h) => h,
+                    Ok(h) => (h, opts),
                     Err(e) => {
                         reg.ops.dispatch_errors += 1;
                         return Response::internal(e);
                     }
                 }
             };
+            let (handle, opts) = handle;
             // Phase 2: namespace lock only.
             let result = {
                 let mut mem = handle.lock().unwrap_or_else(|p| p.into_inner());
-                memory::mem_remember(&mut mem, &content)
+                memory::mem_remember_with(&mut mem, &content, opts)
             };
             // Phase 3: commit / format.
             match result {
@@ -432,16 +452,25 @@ pub fn dispatch(registry: &Arc<Mutex<MemoryRegistry>>, req: Request) -> Response
             node_type,
             tag,
             namespace,
+            scope,
+            metadata,
         } => {
             let handle = match resolve_handle(registry, namespace.as_deref()) {
                 Ok(h) => h,
                 Err(e) => return e,
+            };
+            let metadata = match metadata.as_deref().map(memory::parse_metadata_filter) {
+                Some(Ok(kv)) => Some(kv),
+                Some(Err(e)) => return bump_and_classify(registry, e),
+                None => None,
             };
             let filter = ListFilter {
                 min_salience: min_salience.unwrap_or(0.0),
                 limit: limit.map(|l| l as usize).unwrap_or(100),
                 node_type: node_type.as_deref().map(memory::parse_knowledge_type),
                 tag,
+                scope,
+                metadata,
             };
             let result = {
                 let mut mem = handle.lock().unwrap_or_else(|p| p.into_inner());
@@ -685,6 +714,9 @@ mod tests {
                 Request::Remember {
                     content: "namespace b write while a is locked".into(),
                     namespace: Some("b".into()),
+                    tags: None,
+                    metadata: None,
+                    scope: None,
                 },
             );
             tx.send(resp).unwrap();
@@ -718,6 +750,9 @@ mod tests {
             Request::Remember {
                 content: "the gate is on raw activation scale".into(),
                 namespace: None,
+                tags: None,
+                metadata: None,
+                scope: None,
             },
         ));
         assert!(stored.starts_with("stored node "), "got: {stored}");
@@ -730,6 +765,8 @@ mod tests {
                 namespace: None,
                 reinforce: Some(false),
                 gate_threshold: None,
+                scope: None,
+                tag: None,
             },
         ));
         // Same shape the MCP tool produced: readable block + NODES trailer.
@@ -750,6 +787,8 @@ mod tests {
                 namespace: None,
                 reinforce: Some(false),
                 gate_threshold: None,
+                scope: None,
+                tag: None,
             },
         ));
         assert!(text.starts_with("(no relevant memory)"), "got: {text}");
@@ -765,6 +804,9 @@ mod tests {
             Request::Remember {
                 content: "node a".into(),
                 namespace: None,
+                tags: None,
+                metadata: None,
+                scope: None,
             },
         ));
         ok_text(dispatch(
@@ -772,6 +814,9 @@ mod tests {
             Request::Remember {
                 content: "node b".into(),
                 namespace: None,
+                tags: None,
+                metadata: None,
+                scope: None,
             },
         ));
         let resp = dispatch(
@@ -843,6 +888,9 @@ mod tests {
             Request::Remember {
                 content: content.into(),
                 namespace: None,
+                tags: None,
+                metadata: None,
+                scope: None,
             },
         ));
         text.strip_prefix("stored node ")
@@ -1081,6 +1129,8 @@ mod tests {
                     namespace: None,
                     reinforce: Some(true),
                     gate_threshold: None,
+                    scope: None,
+                    tag: None,
                 },
             ));
         }
@@ -1094,6 +1144,8 @@ mod tests {
                 node_type: None,
                 tag: None,
                 namespace: None,
+                scope: None,
+                metadata: None,
             },
         ));
         let items: Vec<serde_json::Value> =
@@ -1133,6 +1185,8 @@ mod tests {
                 node_type: Some("no-such-type-xyz".into()),
                 tag: Some("no-such-tag-xyz".into()),
                 namespace: None,
+                scope: None,
+                metadata: None,
             },
         ));
         let items: Vec<serde_json::Value> =
@@ -1180,6 +1234,9 @@ mod tests {
             Request::Remember {
                 content: "we use postgres for storage".into(),
                 namespace: None,
+                tags: None,
+                metadata: None,
+                scope: None,
             },
         ));
         println!("remember -> {stored}");
@@ -1212,6 +1269,9 @@ mod tests {
             Request::Remember {
                 content: "we now use sqlite for storage".into(),
                 namespace: None,
+                tags: None,
+                metadata: None,
+                scope: None,
             },
         ));
         println!("remember (second node) -> {new_id_stored}");
@@ -1228,6 +1288,8 @@ mod tests {
                 node_type: None,
                 tag: None,
                 namespace: None,
+                scope: None,
+                metadata: None,
             },
         ));
         println!("list -> {listed}");
@@ -1431,6 +1493,8 @@ mod tests {
                 namespace: None,
                 reinforce: Some(false),
                 gate_threshold: None,
+                scope: None,
+                tag: None,
             },
         ));
         assert!(
@@ -1445,6 +1509,9 @@ mod tests {
             Request::Remember {
                 content: "only node".into(),
                 namespace: None,
+                tags: None,
+                metadata: None,
+                scope: None,
             },
         ));
         assert!(stored.starts_with("stored node "), "got: {stored}");
@@ -1472,5 +1539,359 @@ mod tests {
             s1.contains("empty recalls: 1"),
             "one empty recall must be counted:\n{s1}"
         );
+    }
+
+    // ── P1-T5: metadata / tags / scope on remember + filtered list/recall ──
+
+    /// Helper mirroring [`remember_id`] with tags/metadata/scope set.
+    fn remember_with(
+        reg: &Arc<Mutex<MemoryRegistry>>,
+        content: &str,
+        tags: Option<Vec<String>>,
+        metadata: Option<std::collections::HashMap<String, String>>,
+        scope: Option<String>,
+    ) -> Response {
+        dispatch(
+            reg,
+            Request::Remember {
+                content: content.into(),
+                namespace: None,
+                tags,
+                metadata,
+                scope,
+            },
+        )
+    }
+
+    #[test]
+    fn remember_with_tags_then_list_filter_by_tag_returns_only_tagged() {
+        let (reg, _dir) = stub_registry();
+        // `add_note_with` stamps the tag on both the Episodic and Semantic
+        // nodes it creates, so the filtered list legitimately returns 2 items
+        // for the one tagged `remember` call — assert by content, not a
+        // single id.
+        remember_with(
+            &reg,
+            "the auth bug was a race in the middleware",
+            Some(vec!["auth".to_string()]),
+            None,
+            None,
+        );
+        remember_id(&reg, "an unrelated note about lunch");
+
+        let resp = ok_text(dispatch(
+            &reg,
+            Request::List {
+                min_salience: Some(0.0),
+                limit: Some(20),
+                node_type: None,
+                tag: Some("auth".to_string()),
+                namespace: None,
+                scope: None,
+                metadata: None,
+            },
+        ));
+        let items: Vec<serde_json::Value> =
+            serde_json::from_str(&resp).expect("list returns a JSON array");
+        assert!(!items.is_empty(), "expected the tagged node in the list");
+        for item in &items {
+            let preview = item["content_preview"].as_str().unwrap_or_default();
+            assert!(
+                preview.contains("the auth bug"),
+                "tag filter must exclude the untagged note: {items:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn remember_with_metadata_persists_and_get_shows_it() {
+        let (reg, _dir) = stub_registry();
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert("owner".to_string(), "alice".to_string());
+        let id = ok_text(remember_with(
+            &reg,
+            "the deploy runbook lives in ops/",
+            None,
+            Some(metadata),
+            None,
+        ))
+        .strip_prefix("stored node ")
+        .and_then(|s| s.parse::<u64>().ok())
+        .expect("stored node id");
+
+        let got = ok_text(dispatch(
+            &reg,
+            Request::Get {
+                id,
+                namespace: None,
+            },
+        ));
+        let view: serde_json::Value = serde_json::from_str(&got).expect("get returns JSON");
+        assert_eq!(view["metadata"]["owner"], "alice", "got: {view}");
+    }
+
+    #[test]
+    fn remember_with_scope_then_list_filter_by_scope() {
+        let (reg, _dir) = stub_registry();
+        remember_with(
+            &reg,
+            "projA-only fact",
+            None,
+            None,
+            Some("projA".to_string()),
+        );
+        remember_with(
+            &reg,
+            "projB-only fact",
+            None,
+            None,
+            Some("projB".to_string()),
+        );
+
+        let resp = ok_text(dispatch(
+            &reg,
+            Request::List {
+                min_salience: Some(0.0),
+                limit: Some(20),
+                node_type: None,
+                tag: None,
+                namespace: None,
+                scope: Some("projA".to_string()),
+                metadata: None,
+            },
+        ));
+        let items: Vec<serde_json::Value> =
+            serde_json::from_str(&resp).expect("list returns a JSON array");
+        assert!(!items.is_empty(), "expected projA's node in the list");
+        for item in &items {
+            let preview = item["content_preview"].as_str().unwrap_or_default();
+            assert!(
+                preview.contains("projA-only"),
+                "scope filter must exclude projB's note: {items:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn recall_filter_by_scope_excludes_other_scope() {
+        let (reg, _dir) = stub_registry();
+        remember_with(
+            &reg,
+            "the outage postmortem for project A",
+            None,
+            None,
+            Some("projA".to_string()),
+        );
+        remember_with(
+            &reg,
+            "the outage postmortem for project B",
+            None,
+            None,
+            Some("projB".to_string()),
+        );
+
+        let resp = ok_text(dispatch(
+            &reg,
+            Request::Recall {
+                query: "outage postmortem".into(),
+                limit: Some(20),
+                namespace: None,
+                reinforce: Some(true),
+                gate_threshold: None,
+                scope: Some("projA".to_string()),
+                tag: None,
+            },
+        ));
+        let nodes_json = resp
+            .split("## NODES (for `relate`)\n")
+            .nth(1)
+            .expect("recall reply has a NODES section");
+        let nodes: Vec<serde_json::Value> =
+            serde_json::from_str(nodes_json.trim()).expect("NODES section is a JSON array");
+        assert!(!nodes.is_empty(), "expected at least the projA hit: {resp}");
+        for node in &nodes {
+            let id = node["node_id"].as_u64().unwrap();
+            let view = ok_text(dispatch(
+                &reg,
+                Request::Get {
+                    id,
+                    namespace: None,
+                },
+            ));
+            assert!(
+                view.contains("project A"),
+                "scope filter must exclude project B's hit, got node text: {view}"
+            );
+        }
+    }
+
+    // ── adversarial: malformed_input (P1-T5) ────────────────────────────────
+
+    #[test]
+    fn list_with_malformed_metadata_filter_errors_cleanly_not_panic() {
+        let (reg, _dir) = stub_registry();
+        remember_id(&reg, "a note with no metadata");
+        let resp = dispatch(
+            &reg,
+            Request::List {
+                min_salience: Some(0.0),
+                limit: Some(20),
+                node_type: None,
+                tag: None,
+                namespace: None,
+                scope: None,
+                metadata: Some("no-equals-sign-here".to_string()),
+            },
+        );
+        assert!(
+            matches!(
+                resp,
+                Response::Err {
+                    kind: ErrKind::InvalidParams,
+                    ..
+                }
+            ),
+            "malformed \"key=value\" metadata filter must be a clean invalid_params error, \
+             not a panic: {resp:?}"
+        );
+    }
+
+    #[test]
+    fn remember_with_empty_tag_does_not_panic_and_is_dropped() {
+        let (reg, _dir) = stub_registry();
+        let resp = remember_with(
+            &reg,
+            "a note with a blank tag",
+            Some(vec![String::new(), "real-tag".to_string()]),
+            None,
+            None,
+        );
+        let id = ok_text(resp)
+            .strip_prefix("stored node ")
+            .and_then(|s| s.parse::<u64>().ok())
+            .expect("empty tag must not panic; note still stores cleanly");
+
+        let got = ok_text(dispatch(
+            &reg,
+            Request::Get {
+                id,
+                namespace: None,
+            },
+        ));
+        let view: serde_json::Value = serde_json::from_str(&got).unwrap();
+        let tags: Vec<&str> = view["entity_tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert!(!tags.contains(&""), "empty tag must be dropped: {tags:?}");
+        assert!(tags.contains(&"real-tag"), "got: {tags:?}");
+    }
+
+    #[test]
+    fn list_with_unknown_scope_returns_empty_not_panic() {
+        let (reg, _dir) = stub_registry();
+        remember_id(&reg, "a universally-scoped note");
+        let resp = ok_text(dispatch(
+            &reg,
+            Request::List {
+                min_salience: Some(0.0),
+                limit: Some(20),
+                node_type: None,
+                tag: None,
+                namespace: None,
+                scope: Some("no-such-scope-xyz".to_string()),
+                metadata: None,
+            },
+        ));
+        let items: Vec<serde_json::Value> =
+            serde_json::from_str(&resp).expect("still valid JSON, just empty");
+        assert!(items.is_empty(), "got: {items:?}");
+    }
+
+    /// Manual-QA artifact (P1-T5): remembers a tagged+scoped+metadata note,
+    /// `get`s it, `list`s it via a tag filter and a scope filter, and
+    /// `recall`s it via a scope filter — printing each real response. Run
+    /// with `cargo test -p anamnesis-mcp p1_t5_manual_qa_demo -- --nocapture`.
+    #[test]
+    fn p1_t5_manual_qa_demo() {
+        let (reg, _dir) = stub_registry();
+
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert("owner".to_string(), "alice".to_string());
+        let stored = ok_text(remember_with(
+            &reg,
+            "the on-call runbook lives in ops/oncall.md",
+            Some(vec!["ops".to_string()]),
+            Some(metadata),
+            Some("projA".to_string()),
+        ));
+        println!("remember (tagged+scoped+metadata) -> {stored}");
+        let id = stored
+            .strip_prefix("stored node ")
+            .and_then(|s| s.parse::<u64>().ok())
+            .expect("stored node id");
+
+        // Also store a distractor in a different scope/tag so the filters below
+        // demonstrably narrow the result set, not just echo everything.
+        remember_with(
+            &reg,
+            "an unrelated projB fact",
+            Some(vec!["misc".to_string()]),
+            None,
+            Some("projB".to_string()),
+        );
+
+        let got = ok_text(dispatch(
+            &reg,
+            Request::Get {
+                id,
+                namespace: None,
+            },
+        ));
+        println!("get -> {got}");
+
+        let listed_by_tag = ok_text(dispatch(
+            &reg,
+            Request::List {
+                min_salience: Some(0.0),
+                limit: Some(20),
+                node_type: None,
+                tag: Some("ops".to_string()),
+                namespace: None,
+                scope: None,
+                metadata: None,
+            },
+        ));
+        println!("list (tag=ops) -> {listed_by_tag}");
+
+        let listed_by_scope = ok_text(dispatch(
+            &reg,
+            Request::List {
+                min_salience: Some(0.0),
+                limit: Some(20),
+                node_type: None,
+                tag: None,
+                namespace: None,
+                scope: Some("projA".to_string()),
+                metadata: None,
+            },
+        ));
+        println!("list (scope=projA) -> {listed_by_scope}");
+
+        let recalled = ok_text(dispatch(
+            &reg,
+            Request::Recall {
+                query: "on-call runbook".into(),
+                limit: Some(20),
+                namespace: None,
+                reinforce: Some(true),
+                gate_threshold: None,
+                scope: Some("projA".to_string()),
+                tag: None,
+            },
+        ));
+        println!("recall (scope=projA) -> {recalled}");
     }
 }

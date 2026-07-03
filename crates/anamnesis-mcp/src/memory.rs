@@ -9,8 +9,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use anamnesis::embedding::EmbeddingProvider;
-use anamnesis::graph::{KnowledgeType, NodeId, Timestamp};
-use anamnesis::memory::{Hit, ListFilter, MemoryStats, MemoryView, Relation};
+use anamnesis::graph::{KnowledgeType, NodeId, ScopePath, Timestamp};
+use anamnesis::memory::{Hit, ListFilter, MemoryStats, MemoryView, NoteOptions, Relation};
 use anamnesis::storage::SqliteStorage;
 use anamnesis::{Error, Memory};
 
@@ -122,6 +122,47 @@ pub(crate) fn is_caller_error(err: &Error) -> bool {
         err,
         Error::NodeNotFound(_) | Error::EdgeNotFound(_) | Error::InvalidInput(_)
     )
+}
+
+/// Build [`NoteOptions`] for `remember` from the wire-level tags/metadata/scope.
+///
+/// Empty-string tags are dropped rather than stored (adversarial input, not a
+/// caller error). An invalid `scope` string (e.g. empty) surfaces
+/// [`ScopePath::new`]'s error so `dispatch` can map it to `invalid_params`.
+pub(crate) fn build_note_options(
+    tags: Option<Vec<String>>,
+    metadata: Option<HashMap<String, String>>,
+    scope: Option<String>,
+) -> Result<NoteOptions, Error> {
+    let tags = tags
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|t| !t.trim().is_empty())
+        .collect();
+    let metadata = metadata.unwrap_or_default().into_iter().collect();
+    let scope = scope.map(ScopePath::new).transpose()?;
+    Ok(NoteOptions {
+        scope,
+        tags,
+        metadata,
+    })
+}
+
+/// Parse a `list` metadata filter's `"key=value"` wire format into a
+/// `(key, value)` pair. Splits on the first `=`; a missing `=` or an empty
+/// key is a caller error.
+pub(crate) fn parse_metadata_filter(raw: &str) -> Result<(String, String), Error> {
+    let (key, value) = raw.split_once('=').ok_or_else(|| {
+        Error::InvalidInput(format!(
+            "malformed metadata filter {raw:?}; expected \"key=value\""
+        ))
+    })?;
+    if key.is_empty() {
+        return Err(Error::InvalidInput(format!(
+            "malformed metadata filter {raw:?}; key must not be empty"
+        )));
+    }
+    Ok((key.to_string(), value.to_string()))
 }
 
 /// How the shared embedding provider is obtained.
@@ -860,6 +901,34 @@ pub(crate) fn mem_recall_packaged_gated(
     Ok(PackagedRecall { context, hits })
 }
 
+/// Like [`mem_recall_packaged_gated`], with a post-filter dropping hits whose
+/// node origin scope or entity tags don't match. Applied to the already
+/// gated/ranked/de-duplicated `hits` list — the readable `context` block is
+/// left as rendered (simplest correct approach; does not rewrite the
+/// activation pipeline).
+pub(crate) fn mem_recall_packaged_gated_filtered(
+    mem: &mut Memory<SqliteStorage>,
+    query: &str,
+    limit: usize,
+    reinforce: bool,
+    gate: Option<f64>,
+    scope: Option<&str>,
+    tag: Option<&str>,
+) -> Result<PackagedRecall, Error> {
+    let mut packaged = mem_recall_packaged_gated(mem, query, limit, reinforce, gate)?;
+    if scope.is_some() || tag.is_some() {
+        packaged.hits.retain(|h| {
+            let Ok(node) = mem.engine().graph().get_node(h.node_id) else {
+                return false;
+            };
+            let scope_ok = scope.is_none_or(|s| node.origin.scope.as_str() == s);
+            let tag_ok = tag.is_none_or(|t| node.entity_tags.iter().any(|et| et == t));
+            scope_ok && tag_ok
+        });
+    }
+    Ok(packaged)
+}
+
 /// Namespace-locked body of [`MemoryRegistry::relate`].
 pub(crate) fn mem_relate(
     mem: &mut Memory<SqliteStorage>,
@@ -877,7 +946,17 @@ pub(crate) fn mem_relate(
 
 /// Namespace-locked body of [`MemoryRegistry::remember`].
 pub(crate) fn mem_remember(mem: &mut Memory<SqliteStorage>, text: &str) -> Result<u64, Error> {
-    let receipt = mem.add_note(text, Timestamp::now())?;
+    mem_remember_with(mem, text, NoteOptions::default())
+}
+
+/// Like [`mem_remember`], with scope/tags/metadata routed through
+/// [`Memory::add_note_with`].
+pub(crate) fn mem_remember_with(
+    mem: &mut Memory<SqliteStorage>,
+    text: &str,
+    opts: NoteOptions,
+) -> Result<u64, Error> {
+    let receipt = mem.add_note_with(text, Timestamp::now(), opts)?;
     mem.flush_all()?;
     Ok(receipt.episodic.0)
 }
@@ -1467,6 +1546,8 @@ mod tests {
             limit: 10,
             node_type: None,
             tag: None,
+            scope: None,
+            metadata: None,
         };
         let views = reg.list(&filter, None).unwrap();
         assert!(!views.is_empty());

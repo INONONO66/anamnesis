@@ -39,11 +39,23 @@ pub enum Request {
         /// Need-odds gate `τ`: below it, recall returns nothing.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         gate_threshold: Option<f64>,
+        /// Post-filter: drop hits whose node origin scope doesn't match.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<String>,
+        /// Post-filter: drop hits whose node doesn't carry this entity tag.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tag: Option<String>,
     },
     Remember {
         content: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         namespace: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tags: Option<Vec<String>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        metadata: Option<std::collections::HashMap<String, String>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<String>,
     },
     Relate {
         from_id: u64,
@@ -108,6 +120,11 @@ pub enum Request {
         tag: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         namespace: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<String>,
+        /// `"key=value"`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        metadata: Option<String>,
     },
     Get {
         id: u64,
@@ -186,10 +203,18 @@ mod tests {
             namespace: None,
             reinforce: Some(false),
             gate_threshold: Some(13.0),
+            scope: Some("projA".into()),
+            tag: Some("auth".into()),
         });
         round_trip_request(Request::Remember {
             content: "a lesson".into(),
             namespace: Some("proj".into()),
+            tags: Some(vec!["auth".into()]),
+            metadata: Some(std::collections::HashMap::from([(
+                "k".to_string(),
+                "v".to_string(),
+            )])),
+            scope: Some("projA".into()),
         });
         round_trip_request(Request::Relate {
             from_id: 1,
@@ -237,6 +262,8 @@ mod tests {
             node_type: Some("semantic".into()),
             tag: Some("auth".into()),
             namespace: None,
+            scope: Some("projA".into()),
+            metadata: Some("k=v".into()),
         });
         round_trip_request(Request::Get {
             id: 7,
@@ -252,6 +279,8 @@ mod tests {
             namespace: None,
             reinforce: None,
             gate_threshold: None,
+            scope: None,
+            tag: None,
         })
         .unwrap();
         assert!(line.contains("\"op\":\"recall\""), "tagged by op: {line}");

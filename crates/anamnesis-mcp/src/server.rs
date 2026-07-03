@@ -39,6 +39,12 @@ pub struct RecallParams {
     /// return an empty context block (inject nothing). Omitted ⇒ no gate.
     #[serde(default)]
     pub gate_threshold: Option<f64>,
+    /// Post-filter: drop hits whose node origin scope doesn't match.
+    #[serde(default)]
+    pub scope: Option<String>,
+    /// Post-filter: drop hits whose node doesn't carry this entity tag.
+    #[serde(default)]
+    pub tag: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -49,6 +55,15 @@ pub struct RememberParams {
     /// Isolated memory namespace (default: the server default).
     #[serde(default)]
     pub namespace: Option<String>,
+    /// Extra entity tags for this note, beyond the default recipe tags.
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
+    /// Consumer-defined metadata key-value pairs to stamp on the note.
+    #[serde(default)]
+    pub metadata: Option<std::collections::HashMap<String, String>>,
+    /// Origin scope for this note (default: universal).
+    #[serde(default)]
+    pub scope: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -160,6 +175,12 @@ pub struct ListParams {
     /// Isolated memory namespace (default: the server default).
     #[serde(default)]
     pub namespace: Option<String>,
+    /// Restrict to nodes whose origin scope matches exactly.
+    #[serde(default)]
+    pub scope: Option<String>,
+    /// Restrict to nodes carrying this metadata pair, formatted `"key=value"`.
+    #[serde(default)]
+    pub metadata: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -270,6 +291,8 @@ impl AnamnesisServer {
             namespace: p.namespace,
             reinforce: p.reinforce,
             gate_threshold: p.gate_threshold,
+            scope: p.scope,
+            tag: p.tag,
         };
         to_result(self.backend.call(req).await)
     }
@@ -282,6 +305,9 @@ impl AnamnesisServer {
         let req = Request::Remember {
             content: p.content,
             namespace: p.namespace,
+            tags: p.tags,
+            metadata: p.metadata,
+            scope: p.scope,
         };
         to_result(self.backend.call(req).await)
     }
@@ -430,6 +456,8 @@ impl AnamnesisServer {
             node_type: p.node_type,
             tag: p.tag,
             namespace: p.namespace,
+            scope: p.scope,
+            metadata: p.metadata,
         };
         to_result(self.backend.call(req).await)
     }

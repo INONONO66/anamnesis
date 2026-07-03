@@ -103,6 +103,22 @@ struct PendingTurn {
     turn_index: usize,
 }
 
+/// Options for [`Memory::add_note_with`] — optional scope, extra entity tags,
+/// and metadata applied to the ingested note beyond the default recipe.
+///
+/// Both nodes the note creates (Episodic + Semantic) receive the same
+/// `scope`, extra `tags`, and `metadata`.
+#[derive(Debug, Clone, Default)]
+pub struct NoteOptions {
+    /// Origin scope for the note. `None` (default) ⇒ universal scope — the
+    /// same default [`Memory::add_note`] uses.
+    pub scope: Option<ScopePath>,
+    /// Extra entity tags appended to the recipe's default session/speaker tags.
+    pub tags: Vec<String>,
+    /// Consumer-defined metadata key-value pairs stamped on both ingested nodes.
+    pub metadata: Vec<(String, String)>,
+}
+
 /// Receipt returned by [`Memory::add`] and [`Memory::add_note`].
 ///
 /// Contains the episodic [`NodeId`] of the current turn and, when the
@@ -466,6 +482,7 @@ impl<S: StorageAdapter + Clone> Memory<S> {
             entity_tags_for(session, speaker),
             Some(format!("{} turn {}", speaker, next_turn_index)),
             session,
+            ScopePath::universal(),
         )?;
 
         // (d) If pending: ingest its semantic, then wire ExtractedFrom + Temporal.
@@ -482,6 +499,7 @@ impl<S: StorageAdapter + Clone> Memory<S> {
                 entity_tags_for(&pending.session_id, &pending.speaker),
                 Some(format!("{} turn {}", pending.speaker, pending.turn_index)),
                 &pending.session_id,
+                ScopePath::universal(),
             )?;
             self.engine
                 .link(sem_id, pending.episodic_id, EdgeType::ExtractedFrom)?;
@@ -543,10 +561,34 @@ impl<S: StorageAdapter + Clone> Memory<S> {
     /// Creates both an `Episodic` and `Semantic` node, linked with
     /// `ExtractedFrom`. The `Semantic` window contains only the note text
     /// (no context neighbors). Returns an `AddReceipt` with both ids set.
+    ///
+    /// Equivalent to `add_note_with(text, at, NoteOptions::default())` —
+    /// universal scope, no extra tags, no metadata.
     pub fn add_note(&mut self, text: &str, at: Timestamp) -> Result<AddReceipt, Error> {
+        self.add_note_with(text, at, NoteOptions::default())
+    }
+
+    /// Like [`add_note`](Memory::add_note), with an optional scope, extra
+    /// entity tags, and metadata applied to both ingested nodes.
+    ///
+    /// `opts.scope` sets both nodes' `Origin.scope` (default: universal).
+    /// `opts.tags` are appended to the recipe's default session/speaker
+    /// entity tags. `opts.metadata` is stamped via
+    /// [`set_metadata_pairs`](Memory::set_metadata_pairs) after ingest (the
+    /// same durable write path `set_metadata`/`set_metadata_pairs` already use).
+    pub fn add_note_with(
+        &mut self,
+        text: &str,
+        at: Timestamp,
+        opts: NoteOptions,
+    ) -> Result<AddReceipt, Error> {
         let session_id = format!("note-{}", at.0);
         let speaker = "note";
         let speaker_text = text.to_string();
+        let scope = opts.scope.unwrap_or_else(ScopePath::universal);
+
+        let mut entity_tags = entity_tags_for(&session_id, speaker);
+        entity_tags.extend(opts.tags.iter().cloned());
 
         let epi_embedding = embed_one(&*self.provider, &speaker_text)?;
         let epi_id = ingest_node(
@@ -556,9 +598,10 @@ impl<S: StorageAdapter + Clone> Memory<S> {
             epi_embedding,
             KnowledgeType::Episodic,
             at,
-            entity_tags_for(&session_id, speaker),
+            entity_tags.clone(),
             None,
             &session_id,
+            scope.clone(),
         )?;
 
         // Window = just itself (no prev, no next).
@@ -571,11 +614,22 @@ impl<S: StorageAdapter + Clone> Memory<S> {
             sem_embedding,
             KnowledgeType::Semantic,
             at,
-            entity_tags_for(&session_id, speaker),
+            entity_tags,
             None,
             &session_id,
+            scope,
         )?;
         self.engine.link(sem_id, epi_id, EdgeType::ExtractedFrom)?;
+
+        if !opts.metadata.is_empty() {
+            let pairs: Vec<(&str, &str)> = opts
+                .metadata
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect();
+            self.set_metadata_pairs(epi_id, &pairs)?;
+            self.set_metadata_pairs(sem_id, &pairs)?;
+        }
 
         Ok(AddReceipt {
             episodic: epi_id,
@@ -625,6 +679,7 @@ impl<S: StorageAdapter + Clone> Memory<S> {
             entity_tags_for(&pending.session_id, &pending.speaker),
             Some(format!("{} turn {}", pending.speaker, pending.turn_index)),
             &pending.session_id,
+            ScopePath::universal(),
         )?;
         self.engine
             .link(sem_id, pending.episodic_id, EdgeType::ExtractedFrom)?;
@@ -1180,6 +1235,7 @@ fn ingest_node<S: StorageAdapter + Clone>(
     entity_tags: Vec<String>,
     summary: Option<String>,
     session_id: &str,
+    scope: ScopePath,
 ) -> Result<NodeId, Error> {
     let observation = Observation {
         name: make_name(content_for_name),
@@ -1193,7 +1249,7 @@ fn ingest_node<S: StorageAdapter + Clone>(
             peer_id: PeerId(0),
             source_kind: SourceKind::AgentObservation,
             session_id: session_id.to_string(),
-            scope: ScopePath::universal(),
+            scope,
             confidence: 0.95,
         },
         timestamp,

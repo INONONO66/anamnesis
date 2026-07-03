@@ -62,16 +62,25 @@ pub struct ListFilter {
     pub node_type: Option<KnowledgeType>,
     /// Restrict to nodes carrying this entity tag, if set.
     pub tag: Option<String>,
+    /// Restrict to nodes whose origin scope matches this string (compared
+    /// against the canonical `ScopePath::as_str()`), if set.
+    pub scope: Option<String>,
+    /// Restrict to nodes carrying this metadata `(key, value)` pair
+    /// (exact-match on both), if set.
+    pub metadata: Option<(String, String)>,
 }
 
 impl Default for ListFilter {
-    /// No salience floor, no type/tag narrowing, capped at 100 results.
+    /// No salience floor, no type/tag/scope/metadata narrowing, capped at
+    /// 100 results.
     fn default() -> Self {
         Self {
             min_salience: 0.0,
             limit: 100,
             node_type: None,
             tag: None,
+            scope: None,
+            metadata: None,
         }
     }
 }

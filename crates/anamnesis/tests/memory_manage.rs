@@ -15,9 +15,9 @@ use std::sync::Arc;
 
 use anamnesis::Error;
 use anamnesis::engine::{
-    EmbeddingProvider, KnowledgeType, MemoryTier, NodeId, StorageAdapter, Timestamp,
+    EmbeddingProvider, KnowledgeType, MemoryTier, NodeId, ScopePath, StorageAdapter, Timestamp,
 };
-use anamnesis::memory::{ListFilter, Memory};
+use anamnesis::memory::{ListFilter, Memory, NoteOptions};
 
 // ---------------------------------------------------------------------------
 // Deterministic, model-free embedder (mirrors tests/readout_behavior.rs).
@@ -218,6 +218,7 @@ fn list_orders_by_salience_and_filters() {
         limit: 10,
         node_type: Some(KnowledgeType::Episodic),
         tag: Some("speaker-vip".to_string()),
+        ..ListFilter::default()
     };
     let vip = m.list(&vip_filter).unwrap();
     let vip_ids: Vec<NodeId> = vip.iter().map(|v| v.node_id).collect();
@@ -234,6 +235,7 @@ fn list_orders_by_salience_and_filters() {
             limit: 10,
             node_type: Some(KnowledgeType::Episodic),
             tag: None,
+            ..ListFilter::default()
         })
         .unwrap();
     assert!(all.len() >= 3, "expected all 3 episodic nodes, got {all:?}");
@@ -248,6 +250,7 @@ fn list_orders_by_salience_and_filters() {
         limit: 10,
         node_type: Some(KnowledgeType::Episodic),
         tag: Some("speaker-other".to_string()),
+        ..ListFilter::default()
     };
     let other = m.list(&other_filter).unwrap();
     assert_eq!(other.len(), 1);
@@ -259,6 +262,7 @@ fn list_orders_by_salience_and_filters() {
         limit: 1,
         node_type: Some(KnowledgeType::Episodic),
         tag: Some("speaker-vip".to_string()),
+        ..ListFilter::default()
     };
     let capped = m.list(&capped_filter).unwrap();
     assert_eq!(capped.len(), 1);
@@ -294,6 +298,93 @@ fn view_tier_reflects_salience_band() {
         MemoryTier::Archival,
         "salience 0.02 must report the Archival display band"
     );
+}
+
+// ── add_note_with (scope / tags / metadata) ─────────────────────────────────
+
+#[test]
+fn add_note_with_sets_scope_tags_and_metadata_on_both_nodes() {
+    let mut m = mem();
+    let opts = NoteOptions {
+        scope: Some(ScopePath::new("projA").unwrap()),
+        tags: vec!["auth".to_string()],
+        metadata: vec![("k".to_string(), "v".to_string())],
+    };
+    let receipt = m.add_note_with("scoped tagged note", t(1), opts).unwrap();
+    m.flush_all().unwrap();
+    let sem_id = receipt.finalized_semantic.unwrap();
+
+    for id in [receipt.episodic, sem_id] {
+        let node = m.engine().graph().get_node(id).unwrap();
+        assert_eq!(node.origin.scope.as_str(), "projA");
+        assert!(node.entity_tags.iter().any(|tg| tg == "auth"));
+        assert_eq!(node.metadata.get("k").map(String::as_str), Some("v"));
+    }
+}
+
+#[test]
+fn add_note_delegates_to_add_note_with_default_options() {
+    let mut m = mem();
+    let receipt = m.add_note("plain note", t(1)).unwrap();
+    let node = m.engine().graph().get_node(receipt.episodic).unwrap();
+    assert!(node.origin.scope.is_universal());
+    assert!(node.metadata.is_empty());
+}
+
+// ── list filter — scope / metadata ──────────────────────────────────────────
+
+#[test]
+fn list_filters_by_scope_and_metadata() {
+    let mut m = mem();
+    let a = m
+        .add_note_with(
+            "in scope a",
+            t(1),
+            NoteOptions {
+                scope: Some(ScopePath::new("projA").unwrap()),
+                tags: vec![],
+                metadata: vec![("owner".to_string(), "alice".to_string())],
+            },
+        )
+        .unwrap()
+        .episodic;
+    let b = m
+        .add_note_with(
+            "in scope b",
+            t(2),
+            NoteOptions {
+                scope: Some(ScopePath::new("projB").unwrap()),
+                tags: vec![],
+                metadata: vec![("owner".to_string(), "bob".to_string())],
+            },
+        )
+        .unwrap()
+        .episodic;
+    m.flush_all().unwrap();
+
+    let scope_a = m
+        .list(&ListFilter {
+            limit: 10,
+            node_type: Some(KnowledgeType::Episodic),
+            scope: Some("projA".to_string()),
+            ..ListFilter::default()
+        })
+        .unwrap();
+    let scope_a_ids: Vec<NodeId> = scope_a.iter().map(|v| v.node_id).collect();
+    assert!(scope_a_ids.contains(&a));
+    assert!(!scope_a_ids.contains(&b));
+
+    let owner_bob = m
+        .list(&ListFilter {
+            limit: 10,
+            node_type: Some(KnowledgeType::Episodic),
+            metadata: Some(("owner".to_string(), "bob".to_string())),
+            ..ListFilter::default()
+        })
+        .unwrap();
+    let owner_bob_ids: Vec<NodeId> = owner_bob.iter().map(|v| v.node_id).collect();
+    assert!(owner_bob_ids.contains(&b));
+    assert!(!owner_bob_ids.contains(&a));
 }
 
 // ── adversarial: malformed_input (missing NodeId) ────────────────────────────
@@ -367,6 +458,7 @@ fn memory_manage_demo() {
             limit: 10,
             node_type: None,
             tag: None,
+            ..ListFilter::default()
         })
         .unwrap();
     println!("list_len={}", list.len());
