@@ -74,6 +74,46 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         namespace: Option<String>,
     },
+    Update {
+        id: u64,
+        new_content: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        namespace: Option<String>,
+    },
+    Forget {
+        id: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        /// `true` ⇒ permanently remove the node (irreversible); omitted/`false`
+        /// ⇒ soft-delete (reversible via `unforget`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hard: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        namespace: Option<String>,
+    },
+    Supersede {
+        new_id: u64,
+        old_id: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        namespace: Option<String>,
+    },
+    List {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        min_salience: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        node_type: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tag: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        namespace: Option<String>,
+    },
+    Get {
+        id: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        namespace: Option<String>,
+    },
 }
 
 /// Whether a failed request is the caller's fault (e.g. a bad relation label or
@@ -175,6 +215,33 @@ mod tests {
             capture: None,
         });
         round_trip_request(Request::Stats { namespace: None });
+        round_trip_request(Request::Update {
+            id: 7,
+            new_content: "revised content".into(),
+            namespace: Some("proj".into()),
+        });
+        round_trip_request(Request::Forget {
+            id: 7,
+            reason: Some("superseded".into()),
+            hard: Some(false),
+            namespace: None,
+        });
+        round_trip_request(Request::Supersede {
+            new_id: 9,
+            old_id: 7,
+            namespace: None,
+        });
+        round_trip_request(Request::List {
+            min_salience: Some(0.2),
+            limit: Some(10),
+            node_type: Some("semantic".into()),
+            tag: Some("auth".into()),
+            namespace: None,
+        });
+        round_trip_request(Request::Get {
+            id: 7,
+            namespace: None,
+        });
     }
 
     #[test]

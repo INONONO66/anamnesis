@@ -9,8 +9,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use anamnesis::embedding::EmbeddingProvider;
-use anamnesis::graph::{NodeId, Timestamp};
-use anamnesis::memory::{Hit, MemoryStats, Relation};
+use anamnesis::graph::{KnowledgeType, NodeId, Timestamp};
+use anamnesis::memory::{Hit, ListFilter, MemoryStats, MemoryView, Relation};
 use anamnesis::storage::SqliteStorage;
 use anamnesis::{Error, Memory};
 
@@ -77,14 +77,49 @@ pub fn parse_relation(label: &str) -> Result<Relation, Error> {
         "rejected-alternative" | "rejectedalternative" => Relation::RejectedAlternative,
         "belongs-to" | "belongsto" => Relation::BelongsTo,
         "related" | "semantic" => Relation::Related,
+        "supersedes" | "supersede" => Relation::Supersedes,
         _ => {
             return Err(Error::InvalidInput(format!(
                 "unknown relation {label:?}; expected one of: causes, contradicts, supports, \
-                 refutes, reason, rejected-alternative, belongs-to, related (or \"custom:<label>\")"
+                 refutes, reason, rejected-alternative, belongs-to, related, supersedes (or \
+                 \"custom:<label>\")"
             )));
         }
     };
     Ok(relation)
+}
+
+/// Render a [`KnowledgeType`] as the short label `list`/`get` use on the wire
+/// (the inverse of [`parse_knowledge_type`]).
+pub(crate) fn knowledge_type_label(kt: &KnowledgeType) -> String {
+    match kt {
+        KnowledgeType::Identity => "identity".to_string(),
+        KnowledgeType::Semantic => "semantic".to_string(),
+        KnowledgeType::Episodic => "episodic".to_string(),
+        KnowledgeType::Custom(label) => label.clone(),
+    }
+}
+
+/// Parse a `list` filter's `node_type` label into a [`KnowledgeType`]. Any
+/// label outside the fixed vocabulary becomes `Custom(label)` — `list`'s
+/// filter is advisory narrowing, not a validated enum, so an unrecognized
+/// label simply matches nothing rather than erroring the whole call.
+pub(crate) fn parse_knowledge_type(label: &str) -> KnowledgeType {
+    match label.trim().to_ascii_lowercase().as_str() {
+        "identity" => KnowledgeType::Identity,
+        "semantic" => KnowledgeType::Semantic,
+        "episodic" => KnowledgeType::Episodic,
+        _ => KnowledgeType::Custom(label.trim().to_string()),
+    }
+}
+
+/// Whether a [`Error`] is the caller's fault (bad/missing id) vs. an internal
+/// fault, for the management tools' `invalid_params` vs `internal` split.
+pub(crate) fn is_caller_error(err: &Error) -> bool {
+    matches!(
+        err,
+        Error::NodeNotFound(_) | Error::EdgeNotFound(_) | Error::InvalidInput(_)
+    )
 }
 
 /// How the shared embedding provider is obtained.
@@ -672,6 +707,61 @@ impl MemoryRegistry {
         phase2.outcome
     }
 
+    /// Replace a node's content and re-embed it. `pub(crate)` [`mem_update`]
+    /// does the namespace-locked work; `crate::dispatch` calls it directly.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn update(&mut self, id: u64, new_content: &str, ns: Option<&str>) -> Result<(), Error> {
+        let handle = self.namespace_handle(ns)?;
+        let mut mem = handle.lock().unwrap_or_else(|p| p.into_inner());
+        mem_update(&mut mem, NodeId(id), new_content)
+    }
+
+    /// Soft- (`hard = false`) or hard-delete (`hard = true`, irreversible) a node.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn forget(
+        &mut self,
+        id: u64,
+        reason: &str,
+        hard: bool,
+        ns: Option<&str>,
+    ) -> Result<(), Error> {
+        let handle = self.namespace_handle(ns)?;
+        let mut mem = handle.lock().unwrap_or_else(|p| p.into_inner());
+        if hard {
+            mem_forget_hard(&mut mem, NodeId(id))
+        } else {
+            mem_forget(&mut mem, NodeId(id), reason)
+        }
+    }
+
+    /// Mark `new_id` as superseding `old_id`. Returns the new edge id.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn supersede(&mut self, new_id: u64, old_id: u64, ns: Option<&str>) -> Result<u64, Error> {
+        let handle = self.namespace_handle(ns)?;
+        let mut mem = handle.lock().unwrap_or_else(|p| p.into_inner());
+        mem_supersede(&mut mem, NodeId(new_id), NodeId(old_id))
+    }
+
+    /// List nodes matching `filter`, ordered by salience (highest first).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn list(
+        &mut self,
+        filter: &ListFilter,
+        ns: Option<&str>,
+    ) -> Result<Vec<MemoryView>, Error> {
+        let handle = self.namespace_handle(ns)?;
+        let mut mem = handle.lock().unwrap_or_else(|p| p.into_inner());
+        mem_list(&mut mem, filter)
+    }
+
+    /// Read a single node as a [`MemoryView`].
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn get(&mut self, id: u64, ns: Option<&str>) -> Result<MemoryView, Error> {
+        let handle = self.namespace_handle(ns)?;
+        let mut mem = handle.lock().unwrap_or_else(|p| p.into_inner());
+        mem_get(&mut mem, NodeId(id))
+    }
+
     /// Force the embedding provider to build (download the model). For `prewarm`.
     pub fn prewarm(&mut self) -> Result<(), Error> {
         let provider = self.provider()?;
@@ -751,6 +841,68 @@ pub(crate) fn mem_remember(mem: &mut Memory<SqliteStorage>, text: &str) -> Resul
     let receipt = mem.add_note(text, Timestamp::now())?;
     mem.flush_all()?;
     Ok(receipt.episodic.0)
+}
+
+/// Namespace-locked body of [`MemoryRegistry::update`].
+pub(crate) fn mem_update(
+    mem: &mut Memory<SqliteStorage>,
+    id: NodeId,
+    new_content: &str,
+) -> Result<(), Error> {
+    // Flush so a just-added node (its semantic still buffered) is a valid
+    // target, mirroring `mem_relate`.
+    mem.flush_all()?;
+    mem.update_content(id, new_content, Timestamp::now())?;
+    mem.flush_all()?;
+    Ok(())
+}
+
+/// Namespace-locked body of [`MemoryRegistry::get`].
+pub(crate) fn mem_get(mem: &mut Memory<SqliteStorage>, id: NodeId) -> Result<MemoryView, Error> {
+    mem.flush_all()?;
+    mem.get(id)
+}
+
+/// Namespace-locked body of [`MemoryRegistry::list`].
+pub(crate) fn mem_list(
+    mem: &mut Memory<SqliteStorage>,
+    filter: &ListFilter,
+) -> Result<Vec<MemoryView>, Error> {
+    mem.flush_all()?;
+    mem.list(filter)
+}
+
+/// Namespace-locked soft-delete body of [`MemoryRegistry::forget`].
+pub(crate) fn mem_forget(
+    mem: &mut Memory<SqliteStorage>,
+    id: NodeId,
+    reason: &str,
+) -> Result<(), Error> {
+    mem.flush_all()?;
+    mem.forget(id, reason, Timestamp::now())?;
+    mem.flush_all()?;
+    Ok(())
+}
+
+/// Namespace-locked hard-delete body of [`MemoryRegistry::forget`] (`hard = true`).
+pub(crate) fn mem_forget_hard(mem: &mut Memory<SqliteStorage>, id: NodeId) -> Result<(), Error> {
+    mem.flush_all()?;
+    mem.delete_hard(id)?;
+    mem.flush_all()?;
+    Ok(())
+}
+
+/// Namespace-locked body of [`MemoryRegistry::supersede`]. Returns the new
+/// `Supersedes` edge id.
+pub(crate) fn mem_supersede(
+    mem: &mut Memory<SqliteStorage>,
+    new_id: NodeId,
+    old_id: NodeId,
+) -> Result<u64, Error> {
+    mem.flush_all()?;
+    let edge = mem.supersede(new_id, old_id)?;
+    mem.flush_all()?;
+    Ok(edge.0)
 }
 
 /// Namespace-scoped `(total_nodes, stale_nodes)` scan for the `usage_report`
@@ -1199,6 +1351,13 @@ mod tests {
     }
 
     #[test]
+    fn parse_relation_accepts_supersedes() {
+        assert_eq!(parse_relation("supersedes").unwrap(), Relation::Supersedes);
+        assert_eq!(parse_relation("supersede").unwrap(), Relation::Supersedes);
+        assert_eq!(parse_relation("SUPERSEDES").unwrap(), Relation::Supersedes);
+    }
+
+    #[test]
     fn parse_relation_custom_preserves_label() {
         use anamnesis::memory::Relation;
         // Custom label keeps its original case after the `custom:` prefix.
@@ -1218,6 +1377,59 @@ mod tests {
         assert!(matches!(err, Error::InvalidInput(_)), "got {err:?}");
         let err = parse_relation("custom:").unwrap_err();
         assert!(matches!(err, Error::InvalidInput(_)), "got {err:?}");
+    }
+
+    // ── management API (registry-level convenience wrappers) ───────────────────
+
+    #[test]
+    fn registry_update_edits_content() {
+        let mut reg = registry(false);
+        let id = reg.remember("the deploy script is bash", None).unwrap();
+        reg.update(id, "the deploy script is python", None).unwrap();
+        let view = reg.get(id, None).unwrap();
+        assert_eq!(view.content, "the deploy script is python");
+    }
+
+    #[test]
+    fn registry_forget_soft_then_hard() {
+        let mut reg = registry(false);
+        let id = reg.remember("a stale credential note", None).unwrap();
+        reg.forget(id, "rotated", false, None).unwrap();
+        let view = reg.get(id, None).unwrap();
+        assert!(view.retracted, "soft-forgotten node must show retracted");
+
+        reg.forget(id, "", true, None).unwrap();
+        assert!(
+            reg.get(id, None).is_err(),
+            "hard-forgotten node must no longer be readable"
+        );
+    }
+
+    #[test]
+    fn registry_supersede_sets_validity_window() {
+        let mut reg = registry(false);
+        let old = reg.remember("we use postgres", None).unwrap();
+        let new = reg.remember("we use sqlite", None).unwrap();
+        reg.supersede(new, old, None).unwrap();
+        let old_view = reg.get(old, None).unwrap();
+        assert!(old_view.valid_until.is_some());
+    }
+
+    #[test]
+    fn registry_list_orders_by_salience_and_filters() {
+        let mut reg = registry(false);
+        reg.remember("a note about apples", None).unwrap();
+        let filter = ListFilter {
+            min_salience: 0.0,
+            limit: 10,
+            node_type: None,
+            tag: None,
+        };
+        let views = reg.list(&filter, None).unwrap();
+        assert!(!views.is_empty());
+        for w in views.windows(2) {
+            assert!(w[0].salience >= w[1].salience);
+        }
     }
 
     // ── relate ────────────────────────────────────────────────────────────────
