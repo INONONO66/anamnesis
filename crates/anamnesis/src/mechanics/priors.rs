@@ -424,11 +424,20 @@ pub const CONTRADICTION_WEIGHT_DEFAULT: f64 = 1.0;
 /// alone. `eps` is the precision-weighted (Mahalanobis) embedding prediction
 /// error, a computable proxy for Bayesian surprise; absent a stored precision
 /// matrix `Sigma`, `k` absorbs both units and variance, so it must be declared and
-/// fit from encoder statistics and the target initial-charge magnitude. A new site
-/// with maximal surprise (`eps ≈ 1` under the isotropic fallback) lands near the
-/// flat-prior ceiling [`INITIAL_RETAINED_ACTION`]; a low-surprise allocate enters
-/// proportionally weaker. Replaces the old flat `salience = 1.0` initialization.
-pub const SURPRISE_GAIN_K: f64 = INITIAL_RETAINED_ACTION;
+/// fit from encoder statistics and the target initial-charge magnitude.
+///
+/// Calibrated at `12.0` and DECOUPLED from [`INITIAL_RETAINED_ACTION`] so the
+/// decay-EXEMPT prior `P_i = k * eps` does not pin `salience = logistic(B_i + P_i)`
+/// near `1.0` for ordinary captured turns. A typical distinct turn (`eps ≈ 0.6` at
+/// the encoder q95 cosine [`ENCODER_DISTINCT_PAIR_Q95`] `≈ 0.70`) enters at
+/// `P_i ≈ 7.2` and crosses the archive floor after ~6 months of disuse as `B_i`
+/// falls; a maximal-surprise site (`eps ≈ 1`) enters at `k = 12.0` and stays
+/// effectively persistent. The prior value `k = INITIAL_RETAINED_ACTION = 13.8`
+/// seeded even typical turns so high (`P_i ≈ 8.28`) that base-level forgetting
+/// could not reach the archive floor for years — `NodeArchived` never fired for
+/// the capture path. The no-prediction cold-start allocate still enters at
+/// [`INITIAL_RETAINED_ACTION`]. Replaces the old flat `salience = 1.0` init.
+pub const SURPRISE_GAIN_K: f64 = 12.0;
 
 /// Encoder distinct-pair cosine-similarity 95th percentile `q95`, the only input
 /// to the separation boundary [`theta_sep`] (perception.md).

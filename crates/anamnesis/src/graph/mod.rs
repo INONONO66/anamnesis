@@ -206,6 +206,7 @@ mod tests {
             edge_source: crate::graph::edge::EdgeSource::Auto,
             created_at: Timestamp(0),
             accessed_at: Timestamp(0),
+            leaked_at: Timestamp(0),
             valid_from: None,
             valid_until: None,
             metadata: HashMap::new(),

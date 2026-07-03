@@ -46,14 +46,29 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with: { path: artifacts }
+      - name: collect assets and compute SHA256SUMS.txt
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          # Flatten the per-artifact download dirs (artifacts/<asset>/<asset>) into dist/.
+          find artifacts -type f -name 'anamnesis-*' -exec cp -f {} dist/ \;
+          # Standard `sha256sum` output ("<hex>  <asset>") computed from within
+          # dist/, so each line names the bare asset filename the installer looks up.
+          ( cd dist && sha256sum anamnesis-* > SHA256SUMS.txt )
+          echo "== SHA256SUMS.txt =="
+          cat dist/SHA256SUMS.txt
       - name: upload GitHub release assets
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         shell: bash
         run: |
+          # Create the release if absent, then upload the platform binaries AND
+          # their SHA256SUMS.txt. No --clobber: a tagged asset must never be
+          # silently overwritten (supply-chain integrity — S1a).
           gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "$TAG" --notes "Release $TAG"
-          gh release upload "$TAG" artifacts/*/anamnesis-* --clobber
+          gh release upload "$TAG" dist/anamnesis-* dist/SHA256SUMS.txt
       - uses: actions/setup-node@v4
         with:
           node-version: 22

@@ -124,14 +124,15 @@ impl Backend {
         match self {
             Backend::Local(registry) => {
                 let registry = registry.clone();
-                tokio::task::spawn_blocking(move || {
-                    // Recover from poisoning so one panicking dispatch doesn't
-                    // brick the server for the rest of its lifetime.
-                    let mut g = registry.lock().unwrap_or_else(|e| e.into_inner());
-                    dispatch::dispatch(&mut g, req)
-                })
-                .await
-                .unwrap_or_else(|e| Response::internal(format!("dispatch task panicked: {e}")))
+                // Pass the `Arc` itself, not a held `MutexGuard`: `dispatch`
+                // applies its own two-phase locking (brief global lock to
+                // resolve a namespace handle, then only the per-namespace lock
+                // for the expensive work), the same registry-lock-starvation
+                // fix as the daemon's `serve_connection`. Poison recovery lives
+                // inside `dispatch`'s own lock sites now.
+                tokio::task::spawn_blocking(move || dispatch::dispatch(&registry, req))
+                    .await
+                    .unwrap_or_else(|e| Response::internal(format!("dispatch task panicked: {e}")))
             }
             Backend::Daemon(client) => {
                 let mut c = client.lock().await;

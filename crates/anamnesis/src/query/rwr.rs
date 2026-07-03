@@ -418,6 +418,7 @@ mod tests {
             edge_source: EdgeSource::Manual,
             created_at: Timestamp(0),
             accessed_at: Timestamp(0),
+            leaked_at: Timestamp(0),
             valid_from: None,
             valid_until: None,
             metadata: std::collections::HashMap::new(),

@@ -56,6 +56,10 @@ const SOCKET_PATH_BUDGET: usize = SUN_PATH_MAX - 1;
 /// disambiguated by a hash of the *full canonical DB path* — collision-safe
 /// because the hash covers the whole path, not just the stem.
 pub fn socket_path_for_db(db: &Path) -> Result<PathBuf> {
+    if let Some(override_path) = socket_override_from_env() {
+        return Ok(override_path);
+    }
+
     // Canonicalize the *directory* (the file may not exist yet) so two spellings
     // of the same DB (`./x/m.db` vs `/abs/x/m.db`, symlinks) hash identically and
     // land on one socket. Fall back to the raw path if the dir doesn't exist yet.
@@ -100,6 +104,18 @@ pub fn socket_path_for_db(db: &Path) -> Result<PathBuf> {
         return Ok(tmp);
     }
     Ok(hashed)
+}
+
+/// `ANAMNESIS_SOCKET` override: honored verbatim when set and non-empty, so a
+/// caller who hit the "path too long" bail-out (or just wants a fixed path)
+/// has a working escape hatch. Fail-soft — an empty value is treated the same
+/// as unset and falls through to the derivation below; this never errors.
+fn socket_override_from_env() -> Option<PathBuf> {
+    let raw = std::env::var_os("ANAMNESIS_SOCKET")?;
+    if raw.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(raw))
 }
 
 /// Byte length of the path as the kernel sees it (OS string is the source of
@@ -625,14 +641,19 @@ async fn serve_connection(
         let resp = match proto::decode_line::<proto::Request>(&line) {
             Ok(req) => {
                 let registry = registry.clone();
-                tokio::task::spawn_blocking(move || {
-                    let mut g = registry.lock().unwrap_or_else(|e| e.into_inner());
-                    crate::dispatch::dispatch(&mut g, req)
-                })
-                .await
-                .unwrap_or_else(|e| {
-                    proto::Response::internal(format!("dispatch task panicked: {e}"))
-                })
+                // Pass the `Arc` itself — NOT a held `MutexGuard` — so
+                // `dispatch` can apply its own two-phase locking (brief global
+                // lock to resolve a namespace handle, drop it, then only the
+                // per-namespace lock for the expensive work). Locking `registry`
+                // here and holding it across `dispatch` is exactly the
+                // registry-lock-starvation bug this fixes: a different
+                // namespace's request would otherwise queue behind this one's
+                // embed/ingest work for the whole call.
+                tokio::task::spawn_blocking(move || crate::dispatch::dispatch(&registry, req))
+                    .await
+                    .unwrap_or_else(|e| {
+                        proto::Response::internal(format!("dispatch task panicked: {e}"))
+                    })
             }
             Err(e) => proto::Response::invalid_params(format!("malformed request: {e}")),
         };
@@ -653,6 +674,54 @@ async fn serve_connection(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `ANAMNESIS_SOCKET` mutates process-global env state. No other test in
+    /// this module reads that var, but serialize on it anyway so this test's
+    /// own set → resolve → unset → resolve sequence can never interleave with
+    /// itself under a harness that reruns/retries tests.
+    static ENV_SOCKET_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn env_socket_override_wins() {
+        let _guard = ENV_SOCKET_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("memory.db");
+
+        let override_path = PathBuf::from(format!(
+            "/tmp/anamnesis-test-{}-env-override.sock",
+            std::process::id()
+        ));
+
+        // Safety: `set_var`/`remove_var` are unsafe in the 2024 edition because
+        // env mutation is process-global; the `ENV_SOCKET_LOCK` guard above
+        // scopes the mutation to this test's own critical section.
+        unsafe { std::env::set_var("ANAMNESIS_SOCKET", &override_path) };
+        let overridden = socket_path_for_db(&db);
+        unsafe { std::env::remove_var("ANAMNESIS_SOCKET") };
+        assert_eq!(
+            overridden.unwrap(),
+            override_path,
+            "ANAMNESIS_SOCKET must win verbatim over the derived path"
+        );
+
+        // Unset → falls back to the existing derivation.
+        let derived = socket_path_for_db(&db).unwrap();
+        assert_ne!(
+            derived, override_path,
+            "with ANAMNESIS_SOCKET unset, resolution must fall back to derivation"
+        );
+
+        // Empty value is fail-soft: treated as unset, never errors, never used
+        // verbatim as an empty path.
+        unsafe { std::env::set_var("ANAMNESIS_SOCKET", "") };
+        let empty_fallback = socket_path_for_db(&db);
+        unsafe { std::env::remove_var("ANAMNESIS_SOCKET") };
+        assert_eq!(
+            empty_fallback.unwrap(),
+            derived,
+            "an empty ANAMNESIS_SOCKET must fall back to derivation, not error"
+        );
+    }
 
     #[test]
     fn socket_path_is_sibling_of_db() {

@@ -34,6 +34,7 @@ pub struct SqliteStorage {
     decay_checkpoint: Vec<Timestamp>,
     edge_conductance: Vec<f64>,
     edge_accessed_at: Vec<Timestamp>,
+    edge_leaked_at: Vec<Timestamp>,
     dirty_salience: Vec<bool>,
     dirty_retained_action: Vec<bool>,
     dirty_evidence_prior: Vec<bool>,
@@ -41,6 +42,7 @@ pub struct SqliteStorage {
     dirty_decay_checkpoint: Vec<bool>,
     dirty_edge_conductance: Vec<bool>,
     dirty_edge_accessed_at: Vec<bool>,
+    dirty_edge_leaked_at: Vec<bool>,
     node_types: Vec<Option<KnowledgeType>>,
     adjacency_out: Vec<Vec<EdgeId>>,
     adjacency_in: Vec<Vec<EdgeId>>,
@@ -84,6 +86,7 @@ impl SqliteStorage {
             decay_checkpoint: Vec::new(),
             edge_conductance: Vec::new(),
             edge_accessed_at: Vec::new(),
+            edge_leaked_at: Vec::new(),
             dirty_salience: vec![false; capacity],
             dirty_retained_action: vec![false; capacity],
             dirty_evidence_prior: vec![false; capacity],
@@ -91,6 +94,7 @@ impl SqliteStorage {
             dirty_decay_checkpoint: vec![false; capacity],
             dirty_edge_conductance: vec![false; capacity],
             dirty_edge_accessed_at: vec![false; capacity],
+            dirty_edge_leaked_at: vec![false; capacity],
             node_types: Vec::new(),
             adjacency_out: Vec::new(),
             adjacency_in: Vec::new(),
@@ -137,8 +141,10 @@ impl SqliteStorage {
             self.edges.resize_with(new_len, || None);
             self.edge_conductance.resize(new_len, 0.0);
             self.edge_accessed_at.resize(new_len, Timestamp(0));
+            self.edge_leaked_at.resize(new_len, Timestamp(0));
             self.dirty_edge_conductance.resize(new_len, false);
             self.dirty_edge_accessed_at.resize(new_len, false);
+            self.dirty_edge_leaked_at.resize(new_len, false);
         }
     }
 
@@ -178,6 +184,7 @@ impl SqliteStorage {
             self.ensure_node_capacity(edge.target.0 as usize);
             self.edge_conductance[idx] = edge.conductance;
             self.edge_accessed_at[idx] = edge.accessed_at;
+            self.edge_leaked_at[idx] = edge.leaked_at;
             self.adjacency_out[edge.source.0 as usize].push(edge.id);
             self.adjacency_in[edge.target.0 as usize].push(edge.id);
             self.edges[idx] = Some(edge);
@@ -209,8 +216,10 @@ impl SqliteStorage {
         // Size edge SoA + reset edge dirty arrays to the final edge capacity.
         self.edge_conductance.resize(self.edges.len(), 0.0);
         self.edge_accessed_at.resize(self.edges.len(), Timestamp(0));
+        self.edge_leaked_at.resize(self.edges.len(), Timestamp(0));
         self.dirty_edge_conductance = vec![false; self.edges.len()];
         self.dirty_edge_accessed_at = vec![false; self.edges.len()];
+        self.dirty_edge_leaked_at = vec![false; self.edges.len()];
         Ok(())
     }
 
@@ -361,8 +370,8 @@ impl Clone for SqliteStorage {
 
                     conn.execute(
                         "INSERT OR REPLACE INTO edges (
-                            id, from_node, to_node, edge_type, weight, created_at, valid_from, valid_until, metadata, edge_source, conductance, accessed_at
-                        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                            id, from_node, to_node, edge_type, weight, created_at, valid_from, valid_until, metadata, edge_source, conductance, accessed_at, leaked_at
+                        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                         params![
                             edge.id.0,
                             edge.source.0,
@@ -376,6 +385,7 @@ impl Clone for SqliteStorage {
                             encode_edge_source(&edge.edge_source),
                             edge.conductance,
                             edge.accessed_at.0,
+                            edge.leaked_at.0,
                         ],
                     )
                     .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
@@ -567,8 +577,10 @@ impl StorageAdapter for SqliteStorage {
         }
         self.edge_conductance[idx] = edge.conductance;
         self.edge_accessed_at[idx] = edge.accessed_at;
+        self.edge_leaked_at[idx] = edge.leaked_at;
         self.dirty_edge_conductance[idx] = false;
         self.dirty_edge_accessed_at[idx] = false;
+        self.dirty_edge_leaked_at[idx] = false;
         self.adjacency_out[edge.source.0 as usize].push(edge.id);
         self.adjacency_in[edge.target.0 as usize].push(edge.id);
         self.edges[idx] = Some(edge);
@@ -617,8 +629,10 @@ impl StorageAdapter for SqliteStorage {
         self.edges[idx] = None;
         self.edge_conductance[idx] = 0.0;
         self.edge_accessed_at[idx] = Timestamp(0);
+        self.edge_leaked_at[idx] = Timestamp(0);
         self.dirty_edge_conductance[idx] = false;
         self.dirty_edge_accessed_at[idx] = false;
+        self.dirty_edge_leaked_at[idx] = false;
         self.live_edge_count -= 1;
         self.free_edge_ids.push(id);
         Ok(())
@@ -821,8 +835,36 @@ impl StorageAdapter for SqliteStorage {
         }
         self.edge_accessed_at[idx] = ts;
         self.dirty_edge_accessed_at[idx] = true;
+        // A committed use is, by definition, not idle: clear any outstanding
+        // idle-leak debt by resetting the leak checkpoint to the same instant
+        // (trait-level contract; keeps the two fields distinct but synced on
+        // every "use" event).
+        self.edge_leaked_at[idx] = ts;
+        self.dirty_edge_leaked_at[idx] = true;
         if let Some(edge) = self.edges[idx].as_mut() {
             edge.accessed_at = ts;
+            edge.leaked_at = ts;
+        }
+        Ok(())
+    }
+
+    fn get_edge_leaked_at(&self, id: EdgeId) -> Result<Timestamp, Error> {
+        let idx = id.0 as usize;
+        if idx >= self.edges.len() || self.edges[idx].is_none() {
+            return Err(Error::EdgeNotFound(id));
+        }
+        Ok(self.edge_leaked_at[idx])
+    }
+
+    fn set_edge_leaked_at(&mut self, id: EdgeId, ts: Timestamp) -> Result<(), Error> {
+        let idx = id.0 as usize;
+        if idx >= self.edges.len() || self.edges[idx].is_none() {
+            return Err(Error::EdgeNotFound(id));
+        }
+        self.edge_leaked_at[idx] = ts;
+        self.dirty_edge_leaked_at[idx] = true;
+        if let Some(edge) = self.edges[idx].as_mut() {
+            edge.leaked_at = ts;
         }
         Ok(())
     }
@@ -917,6 +959,16 @@ impl StorageAdapter for SqliteStorage {
                     }
                 }
 
+                for (idx, dirty) in self.dirty_edge_leaked_at.iter().enumerate() {
+                    if *dirty {
+                        conn.execute(
+                            "UPDATE edges SET leaked_at = ?2 WHERE id = ?1",
+                            params![idx as u64, self.edge_leaked_at[idx].0],
+                        )
+                        .map_err(sqlite_error)?;
+                    }
+                }
+
                 Ok(())
             })();
 
@@ -938,6 +990,7 @@ impl StorageAdapter for SqliteStorage {
         self.dirty_decay_checkpoint.fill(false);
         self.dirty_edge_conductance.fill(false);
         self.dirty_edge_accessed_at.fill(false);
+        self.dirty_edge_leaked_at.fill(false);
         Ok(())
     }
 
@@ -1223,6 +1276,7 @@ mod tests {
                     edge_source: crate::graph::edge::EdgeSource::Auto,
                     created_at: Timestamp(1000),
                     accessed_at: Timestamp(1000),
+                    leaked_at: Timestamp(1000),
                     valid_from: None,
                     valid_until: None,
                     metadata: HashMap::new(),
@@ -1840,12 +1894,69 @@ mod tests {
 
         let _ = std::fs::remove_file(path);
     }
+
+    /// Bug #5: SQLite FTS5 `bm25()` returns MORE-NEGATIVE values for BETTER
+    /// matches. `rank_to_score` must therefore be monotone-INCREASING in
+    /// `(-rank)` so a strong match (the query term dense in a short document)
+    /// outranks a weak match (the term appearing once amid a lot of filler),
+    /// bounded to `[0, 1]`. The old `1.0 / (1.0 + rank.abs())` formula treats
+    /// magnitude alone, so it inverts the ranking: the strong match's more
+    /// negative rank has the LARGER absolute value, which the old formula
+    /// scores LOWER.
+    #[test]
+    fn bm25_score_ranks_strong_match_above_weak_match() {
+        let mut storage = SqliteStorage::new().expect("sqlite storage initializes");
+
+        let strong_id = storage.next_node_id();
+        let mut strong = make_node(strong_id, 0.5);
+        strong.name = "Distributed consensus notes".to_string();
+        strong.content =
+            "raft raft raft raft raft raft leader election and log replication".to_string();
+        storage.set_node(strong).expect("strong node stored");
+
+        let weak_id = storage.next_node_id();
+        let mut weak = make_node(weak_id, 0.5);
+        weak.name = "Unrelated gardening notes".to_string();
+        weak.content = "a very long passage about gardening and cooking recipes that only \
+            mentions raft one single time somewhere deep inside a lot of filler padding \
+            text meant to dilute relevance across many many unrelated words of content \
+            that goes on and on and on for quite a while before finally trailing off"
+            .to_string();
+        storage.set_node(weak).expect("weak node stored");
+
+        let results = storage.text_search("raft", 10);
+        let strong_score = results
+            .iter()
+            .find(|(id, _)| *id == strong_id)
+            .map(|(_, score)| *score)
+            .expect("strong match must be found");
+        let weak_score = results
+            .iter()
+            .find(|(id, _)| *id == weak_id)
+            .map(|(_, score)| *score)
+            .expect("weak match must be found");
+
+        assert!(
+            (0.0..=1.0).contains(&strong_score),
+            "strong score must be in [0, 1], got {strong_score}"
+        );
+        assert!(
+            (0.0..=1.0).contains(&weak_score),
+            "weak score must be in [0, 1], got {weak_score}"
+        );
+        assert!(
+            strong_score > weak_score,
+            "a dense strong match ({strong_score}) must outrank a single-mention weak \
+             match ({weak_score}); bm25() is more-negative-is-better, so the score must be \
+             monotone-increasing in (-rank)"
+        );
+    }
 }
 
 /// Current on-disk schema version. The fresh-DB `create_schema` path and the
 /// incremental migration chain must converge on an IDENTICAL schema at this
 /// version (same columns, same indexes).
-const SCHEMA_VERSION: u32 = 8;
+const SCHEMA_VERSION: u32 = 10;
 
 /// Run schema migrations to bring the database up to the current version.
 ///
@@ -1873,7 +1984,7 @@ const SCHEMA_VERSION: u32 = 8;
 ///   string) would miss the un-normalized row until it was re-saved. Idempotent: the
 ///   `IN (...)` filters only match the legacy bare strings, never the post-migration
 ///   `identity` / `custom:*` values. No schema/column change — data only.
-/// - v8 (current): normalize EVERY remaining bare non-canonical `node_type` to its
+/// - v8: normalize EVERY remaining bare non-canonical `node_type` to its
 ///   canonical `custom:<escaped>` encoding, not just the fixed v7 legacy list. An
 ///   arbitrary bare string from a foreign/future writer loaded as `Custom(<raw>)`
 ///   but stayed invisible to `nodes_by_type` (which filters by the encoded
@@ -1881,6 +1992,17 @@ const SCHEMA_VERSION: u32 = 8;
 ///   `%`/tab/CR/LF are escaped via `encode_knowledge_type` (a raw `'custom:' ||
 ///   node_type` SQL concat could not). Idempotent: only bare non-canonical rows are
 ///   selected. No schema/column change — data only.
+/// - v9: backfill a creation `AccessTrace` for every node whose `access_history`
+///   is empty (`''`) — the shape a legacy pre-ACT-R row left on disk, which
+///   otherwise makes `compute_base_level` return `NEG_INFINITY`. Data only,
+///   idempotent (`WHERE access_history = ''`). See [`migrate_v8_to_v9`].
+/// - v10 (current): `edges.leaked_at INTEGER` — the per-edge leak checkpoint
+///   `Engine::tick`'s idle-edge leakage measures idle time from (flagship bug
+///   #2: without a checkpoint, `accessed_at` — a committed-USE marker, never
+///   advanced by leakage — made every repeated `tick` at a fixed idle window
+///   re-subtract the same idle-window leak again, collapsing an idle edge's
+///   conductance the more the graph was ticked). Backfilled to `accessed_at`
+///   for existing rows. See [`migrate_v9_to_v10`].
 /// - v5: `nodes.evidence_prior REAL NOT NULL DEFAULT 0` — the persistent,
 ///   decay-exempt evidence prior `P_i` of the `A_i = B_i + P_i` decomposition
 ///   (ADR-0008). Backfilled to `0.0`: the base-level `B_i` is recomputed from
@@ -1928,6 +2050,10 @@ fn migrate_schema(conn: &Connection) -> Result<(), Error> {
 
             if nodes_exist {
                 // Existing v1 database — migrate forward through the full chain.
+                // Each hop stamps its own `schema_version` on commit (see
+                // `migrate_v4_to_v5`), so no outer stamp is needed here; the last
+                // hop in the chain leaves the recorded version at
+                // `SCHEMA_VERSION`.
                 migrate_v1_to_v2(conn)?;
                 migrate_v2_to_v3(conn)?;
                 migrate_v3_to_v4(conn)?;
@@ -1935,15 +2061,23 @@ fn migrate_schema(conn: &Connection) -> Result<(), Error> {
                 migrate_v5_to_v6(conn)?;
                 migrate_v6_to_v7(conn)?;
                 migrate_v7_to_v8(conn)?;
+                migrate_v8_to_v9(conn)?;
+                migrate_v9_to_v10(conn)?;
             } else {
-                // Brand new database — create the current (v8) schema directly.
+                // Brand new database — create the current (v9) schema directly.
+                // No hop runs to stamp the version, so this arm stamps it itself.
                 create_schema(conn)?;
+                conn.execute_batch(&format!(
+                    "INSERT INTO schema_version (version) VALUES ({SCHEMA_VERSION});"
+                ))
+                .map_err(sqlite_error)?;
             }
-            conn.execute_batch(&format!(
-                "INSERT INTO schema_version (version) VALUES ({SCHEMA_VERSION});"
-            ))
-            .map_err(sqlite_error)?;
         }
+        // Every arm below resumes the chain from its recorded version. Each hop
+        // is transactional, idempotent, and stamps its own `schema_version` on
+        // commit (see `migrate_v4_to_v5`), so a crash between hops leaves the
+        // recorded version exactly at the last hop that actually committed —
+        // resuming here never replays an already-applied hop.
         Some(1) => {
             migrate_v1_to_v2(conn)?;
             migrate_v2_to_v3(conn)?;
@@ -1952,10 +2086,8 @@ fn migrate_schema(conn: &Connection) -> Result<(), Error> {
             migrate_v5_to_v6(conn)?;
             migrate_v6_to_v7(conn)?;
             migrate_v7_to_v8(conn)?;
-            conn.execute_batch(&format!(
-                "UPDATE schema_version SET version = {SCHEMA_VERSION};"
-            ))
-            .map_err(sqlite_error)?;
+            migrate_v8_to_v9(conn)?;
+            migrate_v9_to_v10(conn)?;
         }
         Some(2) => {
             migrate_v2_to_v3(conn)?;
@@ -1964,10 +2096,8 @@ fn migrate_schema(conn: &Connection) -> Result<(), Error> {
             migrate_v5_to_v6(conn)?;
             migrate_v6_to_v7(conn)?;
             migrate_v7_to_v8(conn)?;
-            conn.execute_batch(&format!(
-                "UPDATE schema_version SET version = {SCHEMA_VERSION};"
-            ))
-            .map_err(sqlite_error)?;
+            migrate_v8_to_v9(conn)?;
+            migrate_v9_to_v10(conn)?;
         }
         Some(3) => {
             migrate_v3_to_v4(conn)?;
@@ -1975,46 +2105,43 @@ fn migrate_schema(conn: &Connection) -> Result<(), Error> {
             migrate_v5_to_v6(conn)?;
             migrate_v6_to_v7(conn)?;
             migrate_v7_to_v8(conn)?;
-            conn.execute_batch(&format!(
-                "UPDATE schema_version SET version = {SCHEMA_VERSION};"
-            ))
-            .map_err(sqlite_error)?;
+            migrate_v8_to_v9(conn)?;
+            migrate_v9_to_v10(conn)?;
         }
         Some(4) => {
             migrate_v4_to_v5(conn)?;
             migrate_v5_to_v6(conn)?;
             migrate_v6_to_v7(conn)?;
             migrate_v7_to_v8(conn)?;
-            conn.execute_batch(&format!(
-                "UPDATE schema_version SET version = {SCHEMA_VERSION};"
-            ))
-            .map_err(sqlite_error)?;
+            migrate_v8_to_v9(conn)?;
+            migrate_v9_to_v10(conn)?;
         }
         Some(5) => {
             migrate_v5_to_v6(conn)?;
             migrate_v6_to_v7(conn)?;
             migrate_v7_to_v8(conn)?;
-            conn.execute_batch(&format!(
-                "UPDATE schema_version SET version = {SCHEMA_VERSION};"
-            ))
-            .map_err(sqlite_error)?;
+            migrate_v8_to_v9(conn)?;
+            migrate_v9_to_v10(conn)?;
         }
         Some(6) => {
             migrate_v6_to_v7(conn)?;
             migrate_v7_to_v8(conn)?;
-            conn.execute_batch(&format!(
-                "UPDATE schema_version SET version = {SCHEMA_VERSION};"
-            ))
-            .map_err(sqlite_error)?;
+            migrate_v8_to_v9(conn)?;
+            migrate_v9_to_v10(conn)?;
         }
         Some(7) => {
             migrate_v7_to_v8(conn)?;
-            conn.execute_batch(&format!(
-                "UPDATE schema_version SET version = {SCHEMA_VERSION};"
-            ))
-            .map_err(sqlite_error)?;
+            migrate_v8_to_v9(conn)?;
+            migrate_v9_to_v10(conn)?;
         }
         Some(8) => {
+            migrate_v8_to_v9(conn)?;
+            migrate_v9_to_v10(conn)?;
+        }
+        Some(9) => {
+            migrate_v9_to_v10(conn)?;
+        }
+        Some(10) => {
             // Already at current version — ensure schema is complete (idempotent
             // CREATE IF NOT EXISTS only; no bare ALTER that would fail twice).
             create_schema(conn)?;
@@ -2043,16 +2170,29 @@ fn migrate_v2_to_v3(conn: &Connection) -> Result<(), Error> {
 
     let result = (|| -> Result<(), Error> {
         // Schema changes: reservoir table + edge reservoir columns + indexes.
+        // The two ALTERs are guarded individually (SQLite has no `ADD COLUMN IF
+        // NOT EXISTS`); everything else here is already idempotent.
         conn.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS retained_action (
                 node_id INTEGER PRIMARY KEY,
                 value REAL NOT NULL
             );
-
-            ALTER TABLE edges ADD COLUMN conductance REAL NOT NULL DEFAULT 0;
-            ALTER TABLE edges ADD COLUMN accessed_at INTEGER NOT NULL DEFAULT 0;
-
+            ",
+        )
+        .map_err(sqlite_error)?;
+        if !column_exists(conn, "edges", "conductance")? {
+            conn.execute_batch("ALTER TABLE edges ADD COLUMN conductance REAL NOT NULL DEFAULT 0;")
+                .map_err(sqlite_error)?;
+        }
+        if !column_exists(conn, "edges", "accessed_at")? {
+            conn.execute_batch(
+                "ALTER TABLE edges ADD COLUMN accessed_at INTEGER NOT NULL DEFAULT 0;",
+            )
+            .map_err(sqlite_error)?;
+        }
+        conn.execute_batch(
+            "
             -- New v3 indexes (valid-interval + salience projection).
             CREATE INDEX IF NOT EXISTS idx_nodes_valid ON nodes(valid_from, valid_until);
             CREATE INDEX IF NOT EXISTS idx_edges_valid ON edges(valid_from, valid_until);
@@ -2118,7 +2258,7 @@ fn migrate_v2_to_v3(conn: &Connection) -> Result<(), Error> {
             .map_err(sqlite_error)?;
         }
 
-        Ok(())
+        stamp_version(conn, 3)
     })();
 
     if let Err(error) = result {
@@ -2143,13 +2283,19 @@ fn migrate_v3_to_v4(conn: &Connection) -> Result<(), Error> {
         .map_err(sqlite_error)?;
 
     let result = (|| -> Result<(), Error> {
-        conn.execute_batch(
-            "
-            ALTER TABLE peers ADD COLUMN trust_reservoir REAL NOT NULL DEFAULT 0;
-            ALTER TABLE peers ADD COLUMN trust_evidence_count INTEGER NOT NULL DEFAULT 0;
-            ",
-        )
-        .map_err(sqlite_error)?;
+        // Guarded individually: SQLite has no `ADD COLUMN IF NOT EXISTS`.
+        if !column_exists(conn, "peers", "trust_reservoir")? {
+            conn.execute_batch(
+                "ALTER TABLE peers ADD COLUMN trust_reservoir REAL NOT NULL DEFAULT 0;",
+            )
+            .map_err(sqlite_error)?;
+        }
+        if !column_exists(conn, "peers", "trust_evidence_count")? {
+            conn.execute_batch(
+                "ALTER TABLE peers ADD COLUMN trust_evidence_count INTEGER NOT NULL DEFAULT 0;",
+            )
+            .map_err(sqlite_error)?;
+        }
 
         // Seed the reservoir from the coarse level prior (computed in Rust — the
         // mapping is a small lookup, SQLite has no helper for it). The peer/trust
@@ -2184,7 +2330,7 @@ fn migrate_v3_to_v4(conn: &Connection) -> Result<(), Error> {
             .map_err(sqlite_error)?;
         }
 
-        Ok(())
+        stamp_version(conn, 4)
     })();
 
     if let Err(error) = result {
@@ -2211,13 +2357,37 @@ fn migrate_v3_to_v4(conn: &Connection) -> Result<(), Error> {
 /// zero prior is the doc-faithful choice and needs no Rust loop. The obsolete
 /// `retained_action` / `decay_checkpoint` tables are left in place for snapshot
 /// back-compat; they are no longer load-bearing for memory strength.
+///
+/// Runs in its own transaction and stamps `schema_version = 5` itself on commit,
+/// so a crash before this hop finishes can never leave the recorded version
+/// behind an already-applied `ALTER TABLE` (replay would otherwise collide with
+/// a duplicate column).
 fn migrate_v4_to_v5(conn: &Connection) -> Result<(), Error> {
-    conn.execute_batch(
-        "
-        ALTER TABLE nodes ADD COLUMN evidence_prior REAL NOT NULL DEFAULT 0;
-        ",
-    )
-    .map_err(sqlite_error)
+    conn.execute_batch("BEGIN IMMEDIATE;")
+        .map_err(sqlite_error)?;
+
+    let result = (|| -> Result<(), Error> {
+        // Guarded: SQLite has no `ADD COLUMN IF NOT EXISTS`.
+        if !column_exists(conn, "nodes", "evidence_prior")? {
+            conn.execute_batch(
+                "ALTER TABLE nodes ADD COLUMN evidence_prior REAL NOT NULL DEFAULT 0;",
+            )
+            .map_err(sqlite_error)?;
+        }
+
+        stamp_version(conn, 5)
+    })();
+
+    match result {
+        Ok(()) => {
+            conn.execute_batch("COMMIT;").map_err(sqlite_error)?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK;");
+            Err(e)
+        }
+    }
 }
 
 /// Migrate a v5 database to v6: DROP the `peers` and `peer_aliases` tables.
@@ -2228,14 +2398,35 @@ fn migrate_v4_to_v5(conn: &Connection) -> Result<(), Error> {
 /// columns live inside the Origin encoding on the `nodes` table and STAY, and the
 /// `idx_nodes_peer` index (used by `nodes_by_peer` for the identity-prior search
 /// bias) STAYS. `DROP TABLE IF EXISTS` is idempotent, so re-running is safe.
+///
+/// Runs in its own transaction and stamps `schema_version = 6` itself on commit
+/// (see `migrate_v4_to_v5` for the crash-safety rationale shared by every hop).
 fn migrate_v5_to_v6(conn: &Connection) -> Result<(), Error> {
-    conn.execute_batch(
-        "
-        DROP TABLE IF EXISTS peer_aliases;
-        DROP TABLE IF EXISTS peers;
-        ",
-    )
-    .map_err(sqlite_error)
+    conn.execute_batch("BEGIN IMMEDIATE;")
+        .map_err(sqlite_error)?;
+
+    let result = (|| -> Result<(), Error> {
+        conn.execute_batch(
+            "
+            DROP TABLE IF EXISTS peer_aliases;
+            DROP TABLE IF EXISTS peers;
+            ",
+        )
+        .map_err(sqlite_error)?;
+
+        stamp_version(conn, 6)
+    })();
+
+    match result {
+        Ok(()) => {
+            conn.execute_batch("COMMIT;").map_err(sqlite_error)?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK;");
+            Err(e)
+        }
+    }
 }
 
 /// Migrate a v6 database to v7: normalize `nodes.node_type` for the KnowledgeType
@@ -2288,7 +2479,7 @@ fn migrate_v6_to_v7(conn: &Connection) -> Result<(), Error> {
         )
         .map_err(sqlite_error)?;
 
-        Ok(())
+        stamp_version(conn, 7)
     })();
 
     match result {
@@ -2367,7 +2558,7 @@ fn migrate_v7_to_v8(conn: &Connection) -> Result<(), Error> {
             .map_err(sqlite_error)?;
         }
 
-        Ok(())
+        stamp_version(conn, 8)
     })();
 
     match result {
@@ -2382,36 +2573,234 @@ fn migrate_v7_to_v8(conn: &Connection) -> Result<(), Error> {
     }
 }
 
-/// Migrate a v1 database (agent_id TEXT) to v2 (peer_id INTEGER + source_kind TEXT).
-fn migrate_v1_to_v2(conn: &Connection) -> Result<(), Error> {
-    conn.execute_batch(
-        "
-        -- Add new columns to nodes (with defaults for existing rows)
-        ALTER TABLE nodes ADD COLUMN peer_id INTEGER NOT NULL DEFAULT 0;
-        ALTER TABLE nodes ADD COLUMN source_kind TEXT NOT NULL DEFAULT 'agent_observation';
+/// Migrate a v8 database to v9: backfill a creation [`AccessTrace`] for every
+/// node row whose `access_history` is empty (`''`).
+///
+/// A legacy row written before the ACT-R access-trace substrate existed decodes
+/// `access_history = ''` to an empty `VecDeque`
+/// ([`decode_access_history`]), which makes
+/// [`crate::mechanics::forgetting::compute_base_level`] return `NEG_INFINITY`.
+/// This backfills the exact creation trace [`Engine::ingest`] seeds for a brand
+/// new node (see `api/mod.rs`): one trace stamped at the row's `created_at`
+/// (falling back to `accessed_at`, matched via `COALESCE`), at the ingest floor
+/// decay `d_j = m_type * DECAY_INTERCEPT` for the row's own decoded `node_type`.
+///
+/// Runs in one transaction (`BEGIN IMMEDIATE`) and stamps its own
+/// `schema_version = 9` on commit (see `migrate_v8_to_v9`'s sibling hops for the
+/// per-hop crash-safety contract). Idempotent: the `WHERE access_history = ''`
+/// selector, repeated on both the `SELECT` and the `UPDATE`, only ever matches
+/// un-backfilled rows, so re-running is a no-op and a row that already carries a
+/// real trace is never touched.
+fn migrate_v8_to_v9(conn: &Connection) -> Result<(), Error> {
+    conn.execute_batch("BEGIN IMMEDIATE;")
+        .map_err(sqlite_error)?;
 
-        -- Add edge_source column to edges (with default for existing rows)
-        ALTER TABLE edges ADD COLUMN edge_source TEXT NOT NULL DEFAULT 'auto';
+    let result = (|| -> Result<(), Error> {
+        let empty_history_rows: Vec<(u64, String, u64)> = {
+            // `accessed_at` is a separate hot-field table (SoA), not a `nodes`
+            // column — LEFT JOIN it for the created_at fallback.
+            let mut stmt = conn
+                .prepare(
+                    "SELECT n.id, n.node_type, COALESCE(n.created_at, a.accessed_at)
+                     FROM nodes n
+                     LEFT JOIN accessed_at a ON a.node_id = n.id
+                     WHERE n.access_history = ''",
+                )
+                .map_err(sqlite_error)?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, u64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, u64>(2)?,
+                    ))
+                })
+                .map_err(sqlite_error)?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(sqlite_error)?
+        };
 
-        -- Create peers and peer_aliases tables
-        CREATE TABLE IF NOT EXISTS peers (
-            id INTEGER PRIMARY KEY,
-            name TEXT NOT NULL,
-            trust_level TEXT NOT NULL DEFAULT 'agent'
-        );
+        for (id, node_type_raw, at) in empty_history_rows {
+            let node_type = decode_knowledge_type(&node_type_raw)?;
+            let creation_decay = crate::mechanics::priors::decay_multiplier_for_type(&node_type)
+                * crate::mechanics::priors::DECAY_INTERCEPT;
+            let mut creation_history = VecDeque::new();
+            creation_history.push_back(AccessTrace {
+                at: Timestamp(at),
+                decay: creation_decay,
+            });
+            conn.execute(
+                "UPDATE nodes SET access_history = ?2 WHERE id = ?1 AND access_history = ''",
+                params![id, encode_access_history(&creation_history)],
+            )
+            .map_err(sqlite_error)?;
+        }
 
-        CREATE TABLE IF NOT EXISTS peer_aliases (
-            peer_id INTEGER NOT NULL,
-            alias TEXT NOT NULL,
-            alias_type TEXT NOT NULL DEFAULT 'alias',
-            PRIMARY KEY (peer_id, alias)
-        );
+        stamp_version(conn, 9)
+    })();
 
-        -- Create index on peer_id
-        CREATE INDEX IF NOT EXISTS idx_nodes_peer ON nodes(peer_id);
-        ",
-    )
+    match result {
+        Ok(()) => {
+            conn.execute_batch("COMMIT;").map_err(sqlite_error)?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK;");
+            Err(e)
+        }
+    }
+}
+
+/// Migrate a v9 database to v10: add the `edges.leaked_at INTEGER` column — the
+/// per-edge leak checkpoint [`Engine::tick`](crate::api::Engine::tick)'s
+/// idle-edge leakage now measures idle time from (flagship bug #2: without a
+/// checkpoint, `accessed_at` — which marks committed USE, not leak history, and
+/// is never advanced by a leak — made every repeated `tick` at a fixed idle
+/// window re-subtract the same idle-window leak again, so an idle edge's
+/// conductance collapsed toward zero the more the graph was ticked).
+///
+/// Backfill: `leaked_at = accessed_at` for every existing edge row.
+/// `accessed_at` is the closest available approximation of "last known
+/// non-idle instant" for a pre-migration edge — no earlier leak ever happened
+/// under the old scheme, so there is no genuine leak history to recover, and
+/// this matches the invariant production code maintains going forward
+/// (`set_edge_accessed_at` keeps `leaked_at` in sync with `accessed_at` on
+/// every committed use).
+///
+/// Runs in one transaction (`BEGIN IMMEDIATE`) and stamps its own
+/// `schema_version = 10` on commit (see `migrate_v8_to_v9`'s sibling hops for
+/// the per-hop crash-safety contract). Idempotent: the `ADD COLUMN` is guarded
+/// by [`column_exists`] (SQLite has no `ADD COLUMN IF NOT EXISTS`), and the
+/// backfill `UPDATE` deterministically sets every row's `leaked_at` from its
+/// own current `accessed_at` regardless of how many times it runs.
+fn migrate_v9_to_v10(conn: &Connection) -> Result<(), Error> {
+    conn.execute_batch("BEGIN IMMEDIATE;")
+        .map_err(sqlite_error)?;
+
+    let result = (|| -> Result<(), Error> {
+        if !column_exists(conn, "edges", "leaked_at")? {
+            conn.execute_batch(
+                "ALTER TABLE edges ADD COLUMN leaked_at INTEGER NOT NULL DEFAULT 0;",
+            )
+            .map_err(sqlite_error)?;
+        }
+
+        conn.execute_batch("UPDATE edges SET leaked_at = accessed_at;")
+            .map_err(sqlite_error)?;
+
+        stamp_version(conn, 10)
+    })();
+
+    match result {
+        Ok(()) => {
+            conn.execute_batch("COMMIT;").map_err(sqlite_error)?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK;");
+            Err(e)
+        }
+    }
+}
+
+/// Stamp `schema_version` to `version`, to be called inside the caller's own
+/// migration-hop transaction just before `COMMIT`.
+///
+/// The table holds exactly one row; `DELETE` then `INSERT` stamps the version
+/// whether or not a row already exists yet, so every hop can call this
+/// unconditionally instead of branching on `INSERT` vs `UPDATE`.
+fn stamp_version(conn: &Connection, version: u32) -> Result<(), Error> {
+    conn.execute_batch(&format!(
+        "DELETE FROM schema_version; INSERT INTO schema_version (version) VALUES ({version});"
+    ))
     .map_err(sqlite_error)
+}
+
+/// Whether `table` currently has a column named `column`, via `PRAGMA table_info`.
+///
+/// SQLite has no `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`, so every
+/// column-adding hop guards its `ALTER TABLE` with this check first. That makes
+/// resuming the chain from a stale recorded version safe even when the target
+/// column was already added by an earlier attempt at the same hop (per-hop
+/// stamping prevents new staleness going forward; this guard keeps a hop
+/// idempotent against a database left stale by a crash before the fix existed).
+fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool, Error> {
+    let mut stmt = conn
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(sqlite_error)?;
+    let names = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(sqlite_error)?;
+    for name in names {
+        if name.map_err(sqlite_error)? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Migrate a v1 database (agent_id TEXT) to v2 (peer_id INTEGER + source_kind TEXT).
+///
+/// Runs in its own transaction and stamps `schema_version = 2` itself on commit
+/// (see `migrate_v4_to_v5` for the crash-safety rationale shared by every hop).
+fn migrate_v1_to_v2(conn: &Connection) -> Result<(), Error> {
+    conn.execute_batch("BEGIN IMMEDIATE;")
+        .map_err(sqlite_error)?;
+
+    let result = (|| -> Result<(), Error> {
+        // Add new columns to nodes/edges (with defaults for existing rows).
+        // Guarded individually: SQLite has no `ADD COLUMN IF NOT EXISTS`.
+        if !column_exists(conn, "nodes", "peer_id")? {
+            conn.execute_batch("ALTER TABLE nodes ADD COLUMN peer_id INTEGER NOT NULL DEFAULT 0;")
+                .map_err(sqlite_error)?;
+        }
+        if !column_exists(conn, "nodes", "source_kind")? {
+            conn.execute_batch(
+                "ALTER TABLE nodes ADD COLUMN source_kind TEXT NOT NULL DEFAULT 'agent_observation';",
+            )
+            .map_err(sqlite_error)?;
+        }
+        if !column_exists(conn, "edges", "edge_source")? {
+            conn.execute_batch(
+                "ALTER TABLE edges ADD COLUMN edge_source TEXT NOT NULL DEFAULT 'auto';",
+            )
+            .map_err(sqlite_error)?;
+        }
+
+        conn.execute_batch(
+            "
+            -- Create peers and peer_aliases tables
+            CREATE TABLE IF NOT EXISTS peers (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                trust_level TEXT NOT NULL DEFAULT 'agent'
+            );
+
+            CREATE TABLE IF NOT EXISTS peer_aliases (
+                peer_id INTEGER NOT NULL,
+                alias TEXT NOT NULL,
+                alias_type TEXT NOT NULL DEFAULT 'alias',
+                PRIMARY KEY (peer_id, alias)
+            );
+
+            -- Create index on peer_id
+            CREATE INDEX IF NOT EXISTS idx_nodes_peer ON nodes(peer_id);
+            ",
+        )
+        .map_err(sqlite_error)?;
+
+        stamp_version(conn, 2)
+    })();
+
+    match result {
+        Ok(()) => {
+            conn.execute_batch("COMMIT;").map_err(sqlite_error)?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK;");
+            Err(e)
+        }
+    }
 }
 
 fn create_schema(conn: &Connection) -> Result<(), Error> {
@@ -2454,7 +2843,8 @@ fn create_schema(conn: &Connection) -> Result<(), Error> {
             metadata TEXT NOT NULL,
             edge_source TEXT NOT NULL DEFAULT 'auto',
             conductance REAL NOT NULL DEFAULT 0,
-            accessed_at INTEGER NOT NULL DEFAULT 0
+            accessed_at INTEGER NOT NULL DEFAULT 0,
+            leaked_at INTEGER NOT NULL DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS salience (
@@ -2608,8 +2998,8 @@ fn insert_edge_row(conn: &Connection, edge: &Edge) -> Result<(), Error> {
     let write_result = (|| -> Result<(), Error> {
         conn.execute(
             "INSERT OR REPLACE INTO edges (
-                id, from_node, to_node, edge_type, weight, created_at, valid_from, valid_until, metadata, edge_source, conductance, accessed_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                id, from_node, to_node, edge_type, weight, created_at, valid_from, valid_until, metadata, edge_source, conductance, accessed_at, leaked_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 edge.id.0,
                 edge.source.0,
@@ -2623,6 +3013,7 @@ fn insert_edge_row(conn: &Connection, edge: &Edge) -> Result<(), Error> {
                 encode_edge_source(&edge.edge_source),
                 edge.conductance,
                 edge.accessed_at.0,
+                edge.leaked_at.0,
             ],
         )
         .map_err(sqlite_error)?;
@@ -2749,7 +3140,7 @@ fn load_entity_tags(conn: &Connection, node_id: NodeId) -> Result<Vec<String>, E
 fn load_edges(conn: &Connection) -> Result<Vec<Edge>, Error> {
     let mut stmt = conn
         .prepare(
-            "SELECT id, from_node, to_node, edge_type, weight, created_at, valid_from, valid_until, metadata, edge_source, conductance, accessed_at
+            "SELECT id, from_node, to_node, edge_type, weight, created_at, valid_from, valid_until, metadata, edge_source, conductance, accessed_at, leaked_at
              FROM edges ORDER BY id",
         )
         .map_err(sqlite_error)?;
@@ -2765,6 +3156,7 @@ fn load_edges(conn: &Connection) -> Result<Vec<Edge>, Error> {
                 edge_source: decode_edge_source(&row.get::<_, String>(9)?).map_err(to_sql_error)?,
                 created_at: Timestamp(row.get(5)?),
                 accessed_at: Timestamp(row.get(11)?),
+                leaked_at: Timestamp(row.get(12)?),
                 valid_from: row.get::<_, Option<u64>>(6)?.map(Timestamp),
                 valid_until: row.get::<_, Option<u64>>(7)?.map(Timestamp),
                 metadata: decode_map(&row.get::<_, String>(8)?).map_err(to_sql_error)?,
@@ -3087,7 +3479,9 @@ fn make_fts_query(query: &str) -> String {
 }
 
 fn rank_to_score(rank: f64) -> f64 {
-    (1.0 / (1.0 + rank.abs())).clamp(0.0, 1.0)
+    // SQLite FTS5 `bm25()` is more-negative-is-better, so the score must be
+    // monotone-increasing in `(-rank)`: logistic(-rank) = 1 / (1 + e^rank).
+    (1.0 / (1.0 + rank.exp())).clamp(0.0, 1.0)
 }
 
 fn sqlite_error(error: rusqlite::Error) -> Error {
