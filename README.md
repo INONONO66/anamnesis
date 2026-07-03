@@ -48,7 +48,7 @@ Anamnesis is a **Rust library — a memory kernel** — plus a ready-made **Clau
 
 The earned claim is narrow and real: **typed reasoning edges plus contradiction-as-tension expose structure a flat store cannot** — see [See it reason](#see-it-reason) below. Ranking itself is dominated by alignment scoring; the graph's contributions are structure surfacing and principled forgetting, not magic relevance.
 
-> **Reservoirs vs projections** ([ADR-0002](docs/adr/0002-reservoir-projection-state.md), [ADR-0008](docs/adr/0008-powerlaw-dissipation.md)): per node, the persistent state is the bounded access-trace history (which drives the base level `B_i`, recomputed on demand and never stored) plus a decay-exempt evidence prior `P_i`; per edge, `conductance` is an unbounded log-LR reservoir. The public `salience = logistic(B_i + P_i)` / `weight` in `[0, 1]` are bounded `logistic` projections, refreshed by the write paths (`ingest`, `link`, `touch`, `commit`, `crystallize`, `tick`). The invariant is that **read-only retrieval (`query` / `search` / `fact_at`) never mutates persistent state** — it changes only through explicit writes and time.
+> **Reservoirs vs projections** ([ADR-0002](docs/adr/0002-reservoir-projection-state.md), [ADR-0008](docs/adr/0008-powerlaw-dissipation.md)): per node, the persistent state is the bounded access-trace history (which drives the base level `B_i`, recomputed on demand and never stored) plus a decay-exempt evidence prior `P_i`; per edge, `conductance` is an unbounded log-LR reservoir. The public `salience = logistic(B_i + P_i)` / `weight` in `[0, 1]` are bounded `logistic` projections, refreshed by the write paths (`ingest`, `link`, `touch`, `commit`, `crystallize`, `tick`). The invariant is that **read-only retrieval (`query` / `search`) never mutates persistent state** — it changes only through explicit writes and time.
 
 > **See it work** → [cognitive-fidelity results](docs/07-quality-gates/fidelity-results.md): charts of power-law forgetting, the spacing effect (with its retention-interval crossover), and the fan effect — produced by the engine itself, from the same paradigms the CI gate asserts.
 
@@ -486,7 +486,7 @@ impl Engine {
     pub fn with_storage<S: StorageAdapter + Clone>(config: EngineConfig, storage: S) -> Self;
 
     // Snapshots
-    pub fn snapshot(&mut self, label: &str) -> SnapshotId;
+    pub fn snapshot(&mut self, label: &str) -> Result<SnapshotId, Error>;
     pub fn restore(&mut self, id: &SnapshotId) -> Result<(), Error>;
     pub fn list_snapshots(&self) -> Vec<(SnapshotId, String, Timestamp)>;
 
@@ -500,7 +500,6 @@ impl Engine {
     // Query — returns structured context for LLM consumption
     pub fn query(&self, query: &Query, config: &QueryConfig) -> Result<ContextPackage, Error>;
     pub fn search(&self, input: SearchInput) -> Result<SearchResult, Error>;
-    pub fn fact_at(&self, query: &Query, as_of: Timestamp) -> Result<ContextPackage, Error>;
 
     // Commit — write-back for the retrieval loop: reinforces the memories actually
     // used and strengthens co-used edges (commit-gated Hebbian). Read-only query
