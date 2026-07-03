@@ -210,9 +210,13 @@ pub struct MemoryRegistry {
     /// Loaded from node metadata at daemon start; gates multi-hook duplicates.
     /// `pub(crate)` so the capture pipeline (`crate::capture`) can maintain it.
     pub(crate) seen_turn_keys: HashSet<String>,
-    /// Episodic node ids captured but not yet reasoning-extracted (the queue).
-    /// `pub(crate)` so the capture pipeline (`crate::capture`) can maintain it.
-    pub(crate) unextracted: Vec<NodeId>,
+    /// Episodic node ids captured but not yet reasoning-extracted (the
+    /// queue), keyed by the SAME canonical namespace key
+    /// [`canonical_key`](Self::canonical_key) uses for the `open` map — each
+    /// namespace's un-extracted turns are isolated from every other
+    /// namespace's. `pub(crate)` so the capture pipeline (`crate::capture`)
+    /// and `crate::dispatch` can maintain it.
+    pub(crate) unextracted: HashMap<String, Vec<NodeId>>,
     /// Daemon-lifetime op counters surfaced by [`usage_report`](Self::usage_report).
     /// `pub(crate)` so the capture pipeline (`crate::capture`) can increment
     /// `captured_turns` / `extraction_pulls` from its impl block there.
@@ -244,7 +248,7 @@ impl MemoryRegistry {
             locks: Vec::new(),
             lock_on_open: true,
             seen_turn_keys: HashSet::new(),
-            unextracted: Vec::new(),
+            unextracted: HashMap::new(),
             ops: OpCounters::default(),
         }
     }
@@ -281,7 +285,7 @@ impl MemoryRegistry {
             locks: Vec::new(),
             lock_on_open: true,
             seen_turn_keys: HashSet::new(),
-            unextracted: Vec::new(),
+            unextracted: HashMap::new(),
             ops: OpCounters::default(),
         }
     }
@@ -309,7 +313,7 @@ impl MemoryRegistry {
             locks: Vec::new(),
             lock_on_open: true,
             seen_turn_keys: HashSet::new(),
-            unextracted: Vec::new(),
+            unextracted: HashMap::new(),
             ops: OpCounters::default(),
         }
     }
@@ -395,6 +399,16 @@ impl MemoryRegistry {
             #[cfg(test)]
             Backend::Memory => ns.to_string(),
         }
+    }
+
+    /// [`canonical_key`](Self::canonical_key) for an `Option<&str>` namespace
+    /// arg, resolving `None` to the registry default first — the single key
+    /// every per-namespace collection (`open`, `unextracted`) is keyed by.
+    /// Pure/cheap (no I/O, no locking), so `crate::capture` and
+    /// `crate::dispatch` can call it as many times as needed without
+    /// affecting the two-phase locking discipline.
+    pub(crate) fn canonical_ns_key(&self, ns: Option<&str>) -> String {
+        self.canonical_key(self.resolve_namespace(ns))
     }
 
     fn open_namespace(&mut self, ns: &str) -> Result<Memory<SqliteStorage>, Error> {
@@ -648,6 +662,8 @@ impl MemoryRegistry {
     /// non-test build this convenience wrapper has only test consumers.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn usage_report(&mut self, ns: Option<&str>) -> Result<String, Error> {
+        let ns_key = self.canonical_ns_key(ns);
+        let backlog = self.unextracted.get(&ns_key).map(Vec::len).unwrap_or(0);
         let handle = self.namespace_handle(ns)?;
         let (total, stale) = {
             let mem = handle.lock().unwrap_or_else(|p| p.into_inner());
@@ -655,7 +671,7 @@ impl MemoryRegistry {
         };
         Ok(format_usage_report(
             &self.ops,
-            self.unextracted.len(),
+            backlog,
             self.seen_turn_keys.len(),
             total,
             stale,
@@ -689,6 +705,7 @@ impl MemoryRegistry {
         capture: bool,
     ) -> Result<IngestSummary, Error> {
         let decisions = filter_capture_decisions(&self.seen_turn_keys, session, turns, capture);
+        let ns_key = self.canonical_ns_key(ns);
         let handle = self.namespace_handle(ns)?;
         let phase2 = {
             let mut mem = handle.lock().unwrap_or_else(|p| p.into_inner());
@@ -699,10 +716,13 @@ impl MemoryRegistry {
         // errored (mirrors the pre-split behavior, where each turn's dedup key
         // and queue slot were committed immediately after its own successful
         // `set_metadata_pairs`, not gated on the whole batch succeeding).
+        // Enqueued under the SAME canonical key the ingest actually wrote
+        // into, so the backlog is isolated per namespace (P1-T4).
         self.ops.captured_turns += phase2.committed.len() as u64;
+        let queue = self.unextracted.entry(ns_key).or_default();
         for (epi_id, key) in phase2.committed {
             self.seen_turn_keys.insert(key);
-            self.unextracted.push(epi_id);
+            queue.push(epi_id);
         }
         phase2.outcome
     }
@@ -928,9 +948,13 @@ pub(crate) fn mem_usage_totals(mem: &Memory<SqliteStorage>) -> (usize, usize) {
 /// namespace's `(total, stale)` scan. Shared by [`MemoryRegistry::usage_report`]
 /// and `crate::dispatch`'s `Stats` phase-3 commit so both render byte-identical
 /// output.
+///
+/// `extraction_backlog` is the caller-resolved namespace's own queue length
+/// (see [`MemoryRegistry::canonical_ns_key`]) — the extraction backlog line is
+/// per-namespace, not a single count summed across every namespace.
 pub(crate) fn format_usage_report(
     ops: &OpCounters,
-    unextracted_len: usize,
+    extraction_backlog: usize,
     seen_turn_keys_len: usize,
     total: usize,
     stale: usize,
@@ -951,7 +975,7 @@ pub(crate) fn format_usage_report(
         ops.dispatch_errors,
         ops.ingest_errors,
         ops.empty_recalls,
-        unextracted_len,
+        extraction_backlog,
         seen_turn_keys_len,
         stale_ratio,
     )

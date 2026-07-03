@@ -233,13 +233,21 @@ pub fn dispatch(registry: &Arc<Mutex<MemoryRegistry>>, req: Request) -> Response
 
             // Phase 3: commit registry-shared state (captured_turns,
             // seen_turn_keys, unextracted) regardless of overall outcome, then
-            // format the reply.
+            // format the reply. The queue slot is enqueued under the SAME
+            // canonical key the ingest actually wrote into (P1-T4: isolated
+            // per namespace, not a single global queue).
             let mut reg = registry.lock().unwrap_or_else(|p| p.into_inner());
             reg.ops.captured_turns += phase2.committed.len() as u64;
+            let ns_key = reg.canonical_ns_key(namespace.as_deref());
+            let mut newly_queued = Vec::with_capacity(phase2.committed.len());
             for (epi_id, key) in phase2.committed {
                 reg.seen_turn_keys.insert(key);
-                reg.unextracted.push(epi_id);
+                newly_queued.push(epi_id);
             }
+            reg.unextracted
+                .entry(ns_key)
+                .or_default()
+                .extend(newly_queued);
             match phase2.outcome {
                 Ok(summary) => Response::ok(format!(
                     "ingested {} turns ({} semantic nodes)",
@@ -272,13 +280,17 @@ pub fn dispatch(registry: &Arc<Mutex<MemoryRegistry>>, req: Request) -> Response
                     (stats, total, stale)
                 })
             };
-            // Phase 3: commit / format using the registry's live counters.
+            // Phase 3: commit / format using the registry's live counters. The
+            // extraction backlog is THIS request's own namespace's queue
+            // length, not a count summed across every namespace.
             let mut reg = registry.lock().unwrap_or_else(|p| p.into_inner());
             match result {
                 Ok((stats, total, stale)) => {
+                    let ns_key = reg.canonical_ns_key(namespace.as_deref());
+                    let backlog = reg.unextracted.get(&ns_key).map(Vec::len).unwrap_or(0);
                     let usage = memory::format_usage_report(
                         &reg.ops,
-                        reg.unextracted.len(),
+                        backlog,
                         reg.seen_turn_keys.len(),
                         total,
                         stale,
@@ -291,26 +303,32 @@ pub fn dispatch(registry: &Arc<Mutex<MemoryRegistry>>, req: Request) -> Response
                 }
             }
         }
-        Request::PullPending {
-            limit,
-            namespace: _,
-        } => {
-            // Phase 1: bump the intent counter, CLAIM (drain) up to `limit` ids
-            // from the front of the shared queue, resolve the (always-default)
-            // namespace handle. Claiming here — not just peeking — means two
-            // concurrent pulls can never deliver the same node twice.
-            let (handle, claimed) = {
+        Request::PullPending { limit, namespace } => {
+            // Phase 1: bump the intent counter, resolve the REQUESTED
+            // namespace's canonical key, CLAIM (drain) up to `limit` ids from
+            // the front of THAT namespace's queue, then resolve its handle.
+            // Claiming here — not just peeking — means two concurrent pulls
+            // can never deliver the same node twice.
+            let (handle, ns_key, claimed) = {
                 let mut reg = registry.lock().unwrap_or_else(|p| p.into_inner());
                 reg.ops.extraction_pulls += 1;
+                let ns_key = reg.canonical_ns_key(namespace.as_deref());
                 let take = limit
                     .map(|l| l as usize)
                     .unwrap_or(crate::capture::DEFAULT_PULL_LIMIT)
-                    .min(reg.unextracted.len());
-                let claimed: Vec<_> = reg.unextracted.drain(..take).collect();
-                match reg.namespace_handle(None) {
-                    Ok(h) => (h, claimed),
+                    .min(reg.unextracted.get(&ns_key).map(Vec::len).unwrap_or(0));
+                let claimed: Vec<_> = reg
+                    .unextracted
+                    .get_mut(&ns_key)
+                    .map(|q| q.drain(..take).collect())
+                    .unwrap_or_default();
+                match reg.namespace_handle(namespace.as_deref()) {
+                    Ok(h) => (h, ns_key, claimed),
                     Err(e) => {
-                        reg.unextracted.splice(0..0, claimed);
+                        reg.unextracted
+                            .entry(ns_key)
+                            .or_default()
+                            .splice(0..0, claimed);
                         reg.ops.dispatch_errors += 1;
                         return Response::internal(e);
                     }
@@ -322,10 +340,14 @@ pub fn dispatch(registry: &Arc<Mutex<MemoryRegistry>>, req: Request) -> Response
                 let mut mem = handle.lock().unwrap_or_else(|p| p.into_inner());
                 crate::capture::pull_claimed(&mut mem, &claimed, now_ms)
             };
-            // Phase 3: restore anything not durably marked, format the reply.
+            // Phase 3: restore anything not durably marked, into the SAME
+            // namespace's queue, format the reply.
             if !unprocessed.is_empty() {
                 let mut reg = registry.lock().unwrap_or_else(|p| p.into_inner());
-                reg.unextracted.splice(0..0, unprocessed);
+                reg.unextracted
+                    .entry(ns_key)
+                    .or_default()
+                    .splice(0..0, unprocessed);
             }
             Response::ok(serde_json::to_string(&items).unwrap_or_else(|_| "[]".to_string()))
         }
@@ -1243,6 +1265,117 @@ mod tests {
         // Sanity: every response above actually succeeded (no panics reached
         // this line means all `ok_text` calls unwrapped an `Ok` response).
         assert!(updated.starts_with("updated node "));
+    }
+
+    /// Manual-QA artifact (P1-T4): proves the extraction queue is per-namespace
+    /// through the REAL `Request` → [`dispatch`] path (the same entry point
+    /// `server.rs` uses for `ingest_conversation` / `extract_pending` /
+    /// `extraction_status`). Captures a turn into "projA" and a different
+    /// turn into "projB", then pulls/status-checks each — the artifact must
+    /// visibly show A's turn NOT appearing in B's pull (and vice-versa).
+    /// Run with `cargo test -p anamnesis-mcp extraction_queue_per_namespace_demo -- --nocapture`.
+    #[test]
+    fn extraction_queue_per_namespace_demo() {
+        let (reg, _dir) = stub_registry();
+
+        let ingest_a = ok_text(dispatch(
+            &reg,
+            Request::Ingest {
+                session: "s-projA".into(),
+                turns: vec![TurnInput {
+                    speaker: "user".into(),
+                    text: "projA decided to use postgres".into(),
+                    at_ms: Some(1),
+                }],
+                namespace: Some("projA".into()),
+                capture: Some(true),
+            },
+        ));
+        println!("projA_ingest={ingest_a}");
+
+        let ingest_b = ok_text(dispatch(
+            &reg,
+            Request::Ingest {
+                session: "s-projB".into(),
+                turns: vec![TurnInput {
+                    speaker: "user".into(),
+                    text: "projB decided to use sqlite".into(),
+                    at_ms: Some(2),
+                }],
+                namespace: Some("projB".into()),
+                capture: Some(true),
+            },
+        ));
+        println!("projB_ingest={ingest_b}");
+
+        let status_a = ok_text(dispatch(
+            &reg,
+            Request::ExtractionStatus {
+                namespace: Some("projA".into()),
+            },
+        ));
+        println!("projA_status={status_a}");
+        let status_b = ok_text(dispatch(
+            &reg,
+            Request::ExtractionStatus {
+                namespace: Some("projB".into()),
+            },
+        ));
+        println!("projB_status={status_b}");
+        assert!(status_a.contains("\"pending\":1"), "got: {status_a}");
+        assert!(status_b.contains("\"pending\":1"), "got: {status_b}");
+
+        let projb_pull = ok_text(dispatch(
+            &reg,
+            Request::PullPending {
+                limit: None,
+                namespace: Some("projB".into()),
+            },
+        ));
+        println!("projB_pull={projb_pull}");
+        assert!(
+            projb_pull.contains("projB decided to use sqlite"),
+            "got: {projb_pull}"
+        );
+        assert!(
+            !projb_pull.contains("projA decided to use postgres"),
+            "LEAK: A appeared in B's pull: {projb_pull}"
+        );
+
+        let proja_pull = ok_text(dispatch(
+            &reg,
+            Request::PullPending {
+                limit: None,
+                namespace: Some("projA".into()),
+            },
+        ));
+        println!("projA_pull={proja_pull}");
+        assert!(
+            proja_pull.contains("projA decided to use postgres"),
+            "got: {proja_pull}"
+        );
+        assert!(
+            !proja_pull.contains("projB decided to use sqlite"),
+            "LEAK: B appeared in A's pull: {proja_pull}"
+        );
+
+        // Post-pull status: both namespaces drained to zero backlog.
+        let status_a2 = ok_text(dispatch(
+            &reg,
+            Request::ExtractionStatus {
+                namespace: Some("projA".into()),
+            },
+        ));
+        println!("projA_status_after_pull={status_a2}");
+        let status_b2 = ok_text(dispatch(
+            &reg,
+            Request::ExtractionStatus {
+                namespace: Some("projB".into()),
+            },
+        ));
+        println!("projB_status_after_pull={status_b2}");
+        assert!(status_a2.contains("\"pending\":0"), "got: {status_a2}");
+        assert!(status_b2.contains("\"pending\":0"), "got: {status_b2}");
     }
 
     #[test]
