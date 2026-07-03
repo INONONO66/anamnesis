@@ -2126,6 +2126,21 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         Ok(node.metadata.get("retracted").is_some_and(|v| v == "true"))
     }
 
+    /// Reverse a previous [`retract`](Engine::retract) — clear the retraction
+    /// markers so the node is visible to `search()` / `query()` again.
+    pub fn unretract(&mut self, node_id: NodeId, now: Timestamp) -> Result<(), Error> {
+        let node = self.graph.get_node_mut(node_id)?;
+        node.metadata.remove("retracted");
+        node.metadata.remove("retraction_reason");
+        node.metadata.remove("retracted_at");
+        node.updated_at = now;
+        // Persist the FULL node row: `flush()` only write-behinds hot fields, not
+        // `metadata`, so without this write-through the un-retraction is lost on reopen.
+        let snapshot = node.clone();
+        self.graph.storage_mut().set_node(snapshot)?;
+        Ok(())
+    }
+
     /// Commit a retrieved [`ContextPackage`] — the only reservoir-mutation path
     /// besides [`tick`](Engine::tick).
     ///

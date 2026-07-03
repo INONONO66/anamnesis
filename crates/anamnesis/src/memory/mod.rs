@@ -192,6 +192,8 @@ pub enum Relation {
     BelongsTo,
     /// Generic conceptual relationship ([`EdgeType::Semantic`]).
     Related,
+    /// Replaces outdated knowledge ([`EdgeType::Supersedes`]).
+    Supersedes,
     /// A consumer-defined relation, carrying its label through to
     /// [`EdgeType::Custom`].
     Custom(String),
@@ -209,6 +211,7 @@ impl Relation {
             Relation::RejectedAlternative => EdgeType::RejectedAlternative,
             Relation::BelongsTo => EdgeType::BelongsTo,
             Relation::Related => EdgeType::Semantic,
+            Relation::Supersedes => EdgeType::Supersedes,
             Relation::Custom(label) => EdgeType::Custom(label.clone()),
         }
     }
@@ -1286,6 +1289,11 @@ mod tests {
             EdgeType::from(Relation::Custom("foo".to_string())),
             EdgeType::Custom("foo".to_string())
         );
+    }
+
+    #[test]
+    fn relation_supersedes_maps_to_edge_type() {
+        assert_eq!(EdgeType::from(Relation::Supersedes), EdgeType::Supersedes);
     }
 
     // ── relate ────────────────────────────────────────────────────────────────
