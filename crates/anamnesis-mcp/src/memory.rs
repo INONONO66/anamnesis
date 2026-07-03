@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anamnesis::embedding::EmbeddingProvider;
 use anamnesis::graph::{NodeId, Timestamp};
@@ -123,14 +123,41 @@ pub(crate) struct OpCounters {
     pub(crate) relates: u64,
     pub(crate) captured_turns: u64,
     pub(crate) extraction_pulls: u64,
+    // ── Failure / anomaly counters (O1: silent-failure observability) ────────
+    // Bumped by `crate::dispatch` at the request boundary, via the same
+    // `pub(crate)` cross-module pattern as `extraction_pulls`. Counting is
+    // fail-open: a `u64 += 1` cannot fail, so it never alters request behavior
+    // or introduces a failure path.
+    //
+    // These cover ONLY failures the daemon directly observes at dispatch. The
+    // hook/client-process classes — daemon-call timeout, hook-side τ gate,
+    // transcript parse-fail (all in `hook.rs`), and the shell binary-fetch —
+    // occur in a SEPARATE process and are invisible here; surfacing them would
+    // need a cross-process reporting channel (a proto message or shared file).
+    // TODO(O1): add that channel + a `hook_*` counter set when a consumer needs it.
+    /// Requests that returned an error `Response` (any tool): total tool-call
+    /// failures the daemon handled.
+    pub(crate) dispatch_errors: u64,
+    /// Ingest (capture-path) requests that errored — the subset of
+    /// `dispatch_errors` that means captured turns were dropped.
+    pub(crate) ingest_errors: u64,
+    /// Recalls whose package was empty ("nothing to inject": τ-gate trip or no
+    /// hits) — a daemon-side proxy for the hook's `(no relevant memory)` no-op.
+    pub(crate) empty_recalls: u64,
 }
 
 pub struct MemoryRegistry {
     provider: Option<Arc<dyn EmbeddingProvider>>,
     source: ProviderSource,
     backend: Backend,
-    reinforce_on_recall: bool,
-    open: HashMap<String, Memory<SqliteStorage>>,
+    /// `pub(crate)` so `crate::dispatch`'s phase-1 (brief global lock) can read
+    /// the registry's default without needing a whole-registry method call.
+    pub(crate) reinforce_on_recall: bool,
+    /// One `Memory` per namespace, each behind its OWN `Mutex` so different
+    /// namespaces never block each other (registry-lock-starvation fix, O2).
+    /// See [`namespace_handle`](Self::namespace_handle) for the two-phase
+    /// locking discipline this enables.
+    open: HashMap<String, Arc<Mutex<Memory<SqliteStorage>>>>,
     default_namespace: String,
     /// Exclusive locks on each opened file-backed DB. Held for the process
     /// lifetime so a second process can't open the same database; the OS
@@ -407,34 +434,63 @@ impl MemoryRegistry {
         Ok(mem)
     }
 
-    /// Open-or-fetch the `Memory` for a namespace. `pub(crate)` so the capture
-    /// pipeline (`crate::capture`) can reach the default-namespace queue store.
-    pub(crate) fn get(&mut self, ns: Option<&str>) -> Result<&mut Memory<SqliteStorage>, Error> {
+    /// Open-or-fetch the per-namespace handle, returning a CLONED `Arc` so the
+    /// caller can release the registry's global lock before doing any
+    /// expensive `Memory` work (search/embed/ingest). `pub(crate)` so
+    /// `crate::dispatch` and `crate::capture` can drive the same two-phase
+    /// discipline this registry's own methods use below.
+    ///
+    /// LOCK-ORDERING INVARIANT (deadlock-freedom): always acquire the global
+    /// registry lock (the `Arc<Mutex<MemoryRegistry>>` a caller like
+    /// `dispatch`/`daemon` holds to call this) THEN a per-namespace lock
+    /// (`handle.lock()` on the returned `Arc`), NEVER the reverse, and NEVER
+    /// hold both locks across blocking work (embed/ingest/search). Every
+    /// caller in this crate resolves a handle, drops the global lock, THEN
+    /// locks the handle — so two requests against different namespaces can
+    /// never wait on each other, and the same namespace's `Mutex` still
+    /// serializes writers within it (single-writer-per-namespace).
+    pub(crate) fn namespace_handle(
+        &mut self,
+        ns: Option<&str>,
+    ) -> Result<Arc<Mutex<Memory<SqliteStorage>>>, Error> {
         let raw = self.resolve_namespace(ns).to_string();
         let key = self.canonical_key(&raw);
         if !self.open.contains_key(&key) {
             let mem = self.open_namespace(&key)?;
-            self.open.insert(key.clone(), mem);
+            self.open.insert(key.clone(), Arc::new(Mutex::new(mem)));
         }
-        Ok(self.open.get_mut(&key).expect("just inserted"))
+        Ok(self.open.get(&key).expect("just inserted").clone())
     }
 
     /// Flush every open namespace's pending state to disk. Called on graceful
     /// shutdown (SIGTERM), where `process::exit` would otherwise skip `Drop`.
+    /// Locks each namespace (poison-recovering) rather than assuming
+    /// exclusive access, so a flush during shutdown can never panic even if a
+    /// dispatch elsewhere left a namespace's lock poisoned.
     pub fn flush_all_open(&mut self) -> Result<(), Error> {
-        for mem in self.open.values_mut() {
-            mem.flush_all()?;
+        for mem in self.open.values() {
+            mem.lock().unwrap_or_else(|p| p.into_inner()).flush_all()?;
         }
         Ok(())
     }
 
     /// Search; on success optionally auto-commit (reinforce) the returned package.
-    /// A lazy `tick(now)` keeps forgetting current without a background thread and
-    /// persists the reinforcement.
+    /// A single lazy `tick(now)` after the search keeps forgetting current
+    /// without a background thread and persists the reinforcement.
     ///
     /// Returns the raw de-duplicated [`Hit`] list. The CLI/server paths use
     /// [`recall_packaged`](Self::recall_packaged) (which also renders the context
     /// block), so in a non-test build this primitive has only test consumers.
+    ///
+    /// Ticks the engine exactly ONCE (flagship bug #2): an earlier revision also
+    /// ticked before the search for same-call ranking freshness, but `tick` is
+    /// not a no-op to call twice per recall — idle-edge leakage and node decay
+    /// both key off elapsed time since the last tick, so a second tick a few
+    /// milliseconds later doubled decay/leak pressure on every single read (and
+    /// this method already runs on every recall, so the doubling compounded
+    /// per-call, not just per session). One tick per recall restores
+    /// call-frequency independence; the trade-off is that ranking for THIS
+    /// call's own `search` uses decay as of the previous tick, not this instant.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn recall(
         &mut self,
@@ -443,11 +499,8 @@ impl MemoryRegistry {
         ns: Option<&str>,
     ) -> Result<Vec<Hit>, Error> {
         let reinforce = self.reinforce_on_recall;
-        let mem = self.get(ns)?;
-        // Tick BEFORE searching so a cold recall after a long idle gap ranks on
-        // current decay, not stale cached salience: `search` reads the cached
-        // `salience` projection, which is only refreshed by a write or `tick`.
-        mem.tick(Timestamp::now())?;
+        let handle = self.namespace_handle(ns)?;
+        let mut mem = handle.lock().unwrap_or_else(|p| p.into_inner());
         // `seed_limit` tracks `limit` inside `search`, and the RWR is noisier with
         // more seeds, so do NOT oversample to refill the top-k — that measurably
         // hurts ranking. Instead search `limit`, then collapse the Episodic+Semantic
@@ -459,12 +512,13 @@ impl MemoryRegistry {
         if reinforce {
             mem.used(recall)?;
         }
-        // Tick again AFTER the reinforcing commit: `Engine::commit` does not flush
-        // storage, so this `tick` persists the reinforcement to SQLite (without it
-        // a CLI one-shot `recall`, or `serve`'s last recall before shutdown, would
-        // lose it). The pre-search tick handles ranking freshness; this one handles
-        // durability.
+        // `Engine::commit` does not flush storage, so this `tick` persists any
+        // reinforcement to SQLite (without it a CLI one-shot `recall`, or
+        // `serve`'s last recall before shutdown, would lose it) and advances the
+        // decay clock the NEXT recall's `search` will rank against.
         mem.tick(Timestamp::now())?;
+        #[cfg(test)]
+        record_tick();
         Ok(dedup_hits(raw))
     }
 
@@ -495,10 +549,12 @@ impl MemoryRegistry {
     ///   the top hit's score is `< τ`, return an **empty** [`PackagedRecall`] (empty
     ///   `context`, empty `hits`) so the caller injects nothing. `None` ⇒ no gate.
     ///
-    /// Tick semantics match [`recall_packaged`](Self::recall_packaged): a tick before
-    /// the search (ranking freshness) and one after (durability of any reinforcement).
-    /// When the gate trips, the read is pure (never reinforces) regardless of
-    /// `reinforce`, since there is nothing relevant to mark as used.
+    /// Tick semantics match [`recall`](Self::recall): exactly ONE tick per call
+    /// (see its doc for why not two), after the search, on every branch
+    /// (gated-out or not) — durability of any reinforcement (or of the gated-out
+    /// read) never depends on how the call resolved. When the gate trips, the
+    /// read is pure (never reinforces) regardless of `reinforce`, since there is
+    /// nothing relevant to mark as used.
     pub fn recall_packaged_gated(
         &mut self,
         query: &str,
@@ -516,39 +572,9 @@ impl MemoryRegistry {
             self.ops.reinforcing_recalls += 1;
         }
         let reinforce = reinforce.unwrap_or(self.reinforce_on_recall);
-        let mem = self.get(ns)?;
-        // Tick BEFORE searching so a cold recall after a long idle gap ranks on
-        // current decay (same rationale as `recall`).
-        mem.tick(Timestamp::now())?;
-        let recall = mem.search(query, limit)?;
-
-        // Gate on the top readout score (hits are rank-ordered, highest first).
-        // No hits ⇒ below any threshold. Below `τ` ⇒ inject nothing.
-        let gated_out = match (gate, recall.hits.first().map(|h| h.score)) {
-            (Some(tau), Some(top)) => top < tau,
-            (Some(_), None) => true,
-            (None, _) => false,
-        };
-        if gated_out {
-            // Pure read, no reinforcement, nothing to inject. Still tick for
-            // durability of the pre-search decay refresh.
-            mem.tick(Timestamp::now())?;
-            return Ok(PackagedRecall {
-                context: String::new(),
-                hits: Vec::new(),
-            });
-        }
-
-        // Render the context block from the package BEFORE `used` consumes it.
-        let context = recall.as_context();
-        let raw = recall.hits.clone();
-        if reinforce {
-            mem.used(recall)?;
-        }
-        // Persist the reinforcement (see `recall` for why a post-commit tick).
-        mem.tick(Timestamp::now())?;
-        let hits = dedup_hits(raw);
-        Ok(PackagedRecall { context, hits })
+        let handle = self.namespace_handle(ns)?;
+        let mut mem = handle.lock().unwrap_or_else(|p| p.into_inner());
+        mem_recall_packaged_gated(&mut mem, query, limit, reinforce, gate)
     }
 
     /// Author a typed reasoning-chain edge between two existing nodes.
@@ -564,67 +590,49 @@ impl MemoryRegistry {
     ) -> Result<u64, Error> {
         self.ops.relates += 1;
         let relation = parse_relation(relation)?;
-        let mem = self.get(ns)?;
-        // Flush so a just-added turn (its semantic still buffered) is a valid
-        // endpoint, mirroring `search`.
-        mem.flush_all()?;
-        let edge = mem.relate(NodeId(from_id), NodeId(to_id), relation)?;
-        mem.flush_all()?;
-        Ok(edge.0)
+        let handle = self.namespace_handle(ns)?;
+        let mut mem = handle.lock().unwrap_or_else(|p| p.into_inner());
+        mem_relate(&mut mem, from_id, to_id, relation)
     }
 
     /// Read-only health/size snapshot for a namespace (`Memory::stats`).
     ///
     /// Flushes pending buffers first so the counts reflect live state.
     pub fn stats(&mut self, ns: Option<&str>) -> Result<MemoryStats, Error> {
-        let mem = self.get(ns)?;
+        let handle = self.namespace_handle(ns)?;
+        let mut mem = handle.lock().unwrap_or_else(|p| p.into_inner());
         mem.flush_all()?;
         mem.stats()
     }
 
     /// Usage/capture section appended to the `stats` tool output.
     /// Counters are daemon-lifetime; backlog/captured/stale are live reads.
+    ///
+    /// `crate::dispatch`'s `Stats` arm reuses [`mem_usage_totals`] /
+    /// [`format_usage_report`] directly (its own phase split), so in a
+    /// non-test build this convenience wrapper has only test consumers.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn usage_report(&mut self, ns: Option<&str>) -> Result<String, Error> {
-        const STALE_MS: u64 = 14 * 24 * 60 * 60 * 1000; // 14 days
-        let now = Timestamp::now().0;
-        let mem = self.get(ns)?;
-        let graph = mem.engine().graph();
-        let mut total = 0usize;
-        let mut stale = 0usize;
-        for id in graph.all_node_ids() {
-            if let Ok(node) = graph.get_node(id) {
-                total += 1;
-                if now.saturating_sub(node.accessed_at.0) > STALE_MS {
-                    stale += 1;
-                }
-            }
-        }
-        let stale_ratio = if total == 0 {
-            0.0
-        } else {
-            stale as f64 / total as f64
+        let handle = self.namespace_handle(ns)?;
+        let (total, stale) = {
+            let mem = handle.lock().unwrap_or_else(|p| p.into_inner());
+            mem_usage_totals(&mem)
         };
-        Ok(format!(
-            "usage (this daemon):\n  recalls: {} ({} reinforcing)\n  remembers: {}\n  relates: {}\n  captured turns: {}\n  extraction pulls: {}\ncapture:\n  extraction backlog: {}\n  captured total: {}\n  stale ratio (14d): {:.2}",
-            self.ops.recalls,
-            self.ops.reinforcing_recalls,
-            self.ops.remembers,
-            self.ops.relates,
-            self.ops.captured_turns,
-            self.ops.extraction_pulls,
+        Ok(format_usage_report(
+            &self.ops,
             self.unextracted.len(),
             self.seen_turn_keys.len(),
-            stale_ratio,
+            total,
+            stale,
         ))
     }
 
     /// Store one distilled insight (`add_note`). Returns the episodic node id.
     pub fn remember(&mut self, text: &str, ns: Option<&str>) -> Result<u64, Error> {
         self.ops.remembers += 1;
-        let mem = self.get(ns)?;
-        let receipt = mem.add_note(text, Timestamp::now())?;
-        mem.flush_all()?;
-        Ok(receipt.episodic.0)
+        let handle = self.namespace_handle(ns)?;
+        let mut mem = handle.lock().unwrap_or_else(|p| p.into_inner());
+        mem_remember(&mut mem, text)
     }
 
     /// Ingest a batch of conversational turns via the bench windowing recipe.
@@ -633,6 +641,11 @@ impl MemoryRegistry {
     /// (`seen_turn_keys`), stamped with `anamnesis:turn_key` and `anamnesis:extracted`
     /// metadata, and enqueued in `unextracted` for downstream reasoning extraction.
     /// When `capture` is `false`, the path is unchanged from the pre-capture behaviour.
+    ///
+    /// `crate::dispatch`'s `Ingest` arm reuses [`filter_capture_decisions`] /
+    /// [`mem_ingest_conversation`] directly (its own phase split), so in a
+    /// non-test build this convenience wrapper has only test consumers.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn ingest_conversation(
         &mut self,
         session: &str,
@@ -640,59 +653,23 @@ impl MemoryRegistry {
         ns: Option<&str>,
         capture: bool,
     ) -> Result<IngestSummary, Error> {
-        let base = Timestamp::now().0;
-        let mut episodic = 0usize;
-        let mut semantic = 0usize;
-        // Collect (speaker, text, at, Option<key>) decisions BEFORE any mem borrow,
-        // so the dedup gate (which reads self.seen_turn_keys) and the mem borrow
-        // do not overlap — the borrow checker would reject the interleaved pattern.
-        let decisions: Vec<(String, String, Timestamp, Option<String>)> = turns
-            .iter()
-            .enumerate()
-            .filter_map(|(i, turn)| {
-                let at = Timestamp(turn.at_ms.unwrap_or(base + i as u64));
-                let key = capture.then(|| turn_key(session, &turn.speaker, &turn.text, at.0));
-                // Dedup gate: skip turns already seen in this capture stream.
-                if let Some(k) = &key
-                    && self.seen_turn_keys.contains(k)
-                {
-                    return None; // deduplicated
-                }
-                Some((turn.speaker.clone(), turn.text.clone(), at, key))
-            })
-            .collect();
-
-        // Now do all mem.add calls (borrows &mut Memory from self).
-        let mut newly_captured: Vec<(NodeId, String)> = Vec::new();
-        for (speaker, text, at, key) in decisions {
-            let mem = self.get(ns)?;
-            let receipt = mem.add(session, &speaker, &text, at)?;
-            episodic += 1;
-            if receipt.finalized_semantic.is_some() {
-                semantic += 1;
-            }
-            if let Some(k) = key {
-                newly_captured.push((receipt.episodic, k));
-            }
-        }
-
-        if self.get(ns)?.flush_session(session)?.is_some() {
-            semantic += 1;
-        }
-
-        // Stamp + enqueue captured turns (after flush so nodes are durable).
-        // Both keys go in ONE durable write (`set_metadata_pairs`): a turn can
-        // never end up deduped (turn_key present) but invisible to the
-        // extraction queue (extracted missing) via a partial failure.
-        self.ops.captured_turns += newly_captured.len() as u64;
-        for (epi_id, key) in newly_captured {
-            let mem = self.get(ns)?;
-            mem.set_metadata_pairs(epi_id, &[(META_TURN_KEY, &key), (META_EXTRACTED, "false")])?;
+        let decisions = filter_capture_decisions(&self.seen_turn_keys, session, turns, capture);
+        let handle = self.namespace_handle(ns)?;
+        let phase2 = {
+            let mut mem = handle.lock().unwrap_or_else(|p| p.into_inner());
+            mem_ingest_conversation(&mut mem, session, decisions)
+        };
+        // Commit the shared registry state for exactly the turns that were
+        // durably marked, regardless of whether the overall ingest ultimately
+        // errored (mirrors the pre-split behavior, where each turn's dedup key
+        // and queue slot were committed immediately after its own successful
+        // `set_metadata_pairs`, not gated on the whole batch succeeding).
+        self.ops.captured_turns += phase2.committed.len() as u64;
+        for (epi_id, key) in phase2.committed {
             self.seen_turn_keys.insert(key);
             self.unextracted.push(epi_id);
         }
-
-        Ok(IngestSummary { episodic, semantic })
+        phase2.outcome
     }
 
     /// Force the embedding provider to build (download the model). For `prewarm`.
@@ -701,6 +678,254 @@ impl MemoryRegistry {
         provider.embed_single("warm")?;
         Ok(())
     }
+}
+
+// ── Namespace-locked primitives (phase-2 work) ───────────────────────────────
+//
+// Each function below operates on an already-resolved `&mut Memory` — no
+// registry access, no global lock. `crate::dispatch` calls these directly
+// between acquiring and releasing a namespace's `Mutex`, and the
+// `MemoryRegistry` convenience methods above call the SAME functions after
+// locking their own resolved handle, so the two call paths can never diverge.
+
+/// Namespace-locked body of [`MemoryRegistry::recall_packaged_gated`].
+pub(crate) fn mem_recall_packaged_gated(
+    mem: &mut Memory<SqliteStorage>,
+    query: &str,
+    limit: usize,
+    reinforce: bool,
+    gate: Option<f64>,
+) -> Result<PackagedRecall, Error> {
+    let recall = mem.search(query, limit)?;
+
+    // Gate on the top readout score (hits are rank-ordered, highest first).
+    // No hits ⇒ below any threshold. Below `τ` ⇒ inject nothing.
+    let gated_out = match (gate, recall.hits.first().map(|h| h.score)) {
+        (Some(tau), Some(top)) => top < tau,
+        (Some(_), None) => true,
+        (None, _) => false,
+    };
+    if gated_out {
+        // Pure read, no reinforcement, nothing to inject. Still tick once for
+        // durability / decay-clock advancement (single tick per call).
+        mem.tick(Timestamp::now())?;
+        #[cfg(test)]
+        record_tick();
+        return Ok(PackagedRecall {
+            context: String::new(),
+            hits: Vec::new(),
+        });
+    }
+
+    // Render the context block from the package BEFORE `used` consumes it.
+    let context = recall.as_context();
+    let raw = recall.hits.clone();
+    if reinforce {
+        mem.used(recall)?;
+    }
+    // Single tick per call (see `MemoryRegistry::recall` for why not two).
+    mem.tick(Timestamp::now())?;
+    #[cfg(test)]
+    record_tick();
+    let hits = dedup_hits(raw);
+    Ok(PackagedRecall { context, hits })
+}
+
+/// Namespace-locked body of [`MemoryRegistry::relate`].
+pub(crate) fn mem_relate(
+    mem: &mut Memory<SqliteStorage>,
+    from_id: u64,
+    to_id: u64,
+    relation: Relation,
+) -> Result<u64, Error> {
+    // Flush so a just-added turn (its semantic still buffered) is a valid
+    // endpoint, mirroring `search`.
+    mem.flush_all()?;
+    let edge = mem.relate(NodeId(from_id), NodeId(to_id), relation)?;
+    mem.flush_all()?;
+    Ok(edge.0)
+}
+
+/// Namespace-locked body of [`MemoryRegistry::remember`].
+pub(crate) fn mem_remember(mem: &mut Memory<SqliteStorage>, text: &str) -> Result<u64, Error> {
+    let receipt = mem.add_note(text, Timestamp::now())?;
+    mem.flush_all()?;
+    Ok(receipt.episodic.0)
+}
+
+/// Namespace-scoped `(total_nodes, stale_nodes)` scan for the `usage_report`
+/// capture section (14-day staleness window). Read-only.
+pub(crate) fn mem_usage_totals(mem: &Memory<SqliteStorage>) -> (usize, usize) {
+    const STALE_MS: u64 = 14 * 24 * 60 * 60 * 1000; // 14 days
+    let now = Timestamp::now().0;
+    let graph = mem.engine().graph();
+    let mut total = 0usize;
+    let mut stale = 0usize;
+    for id in graph.all_node_ids() {
+        if let Ok(node) = graph.get_node(id) {
+            total += 1;
+            if now.saturating_sub(node.accessed_at.0) > STALE_MS {
+                stale += 1;
+            }
+        }
+    }
+    (total, stale)
+}
+
+/// Render the `usage_report` text from registry-wide counters plus a
+/// namespace's `(total, stale)` scan. Shared by [`MemoryRegistry::usage_report`]
+/// and `crate::dispatch`'s `Stats` phase-3 commit so both render byte-identical
+/// output.
+pub(crate) fn format_usage_report(
+    ops: &OpCounters,
+    unextracted_len: usize,
+    seen_turn_keys_len: usize,
+    total: usize,
+    stale: usize,
+) -> String {
+    let stale_ratio = if total == 0 {
+        0.0
+    } else {
+        stale as f64 / total as f64
+    };
+    format!(
+        "usage (this daemon):\n  recalls: {} ({} reinforcing)\n  remembers: {}\n  relates: {}\n  captured turns: {}\n  extraction pulls: {}\nfailures (this daemon):\n  dispatch errors: {} ({} ingest)\n  empty recalls: {}\ncapture:\n  extraction backlog: {}\n  captured total: {}\n  stale ratio (14d): {:.2}",
+        ops.recalls,
+        ops.reinforcing_recalls,
+        ops.remembers,
+        ops.relates,
+        ops.captured_turns,
+        ops.extraction_pulls,
+        ops.dispatch_errors,
+        ops.ingest_errors,
+        ops.empty_recalls,
+        unextracted_len,
+        seen_turn_keys_len,
+        stale_ratio,
+    )
+}
+
+/// Pre-lock (registry-state-only) dedup filter shared by
+/// [`MemoryRegistry::ingest_conversation`] and `crate::dispatch`'s `Ingest`
+/// phase-1: decide which turns are new against `seen_turn_keys` BEFORE any
+/// `Memory` access, so the global lock never overlaps the per-namespace one.
+pub(crate) fn filter_capture_decisions(
+    seen_turn_keys: &HashSet<String>,
+    session: &str,
+    turns: &[Turn],
+    capture: bool,
+) -> Vec<(String, String, Timestamp, Option<String>)> {
+    let base = Timestamp::now().0;
+    turns
+        .iter()
+        .enumerate()
+        .filter_map(|(i, turn)| {
+            let at = Timestamp(turn.at_ms.unwrap_or(base + i as u64));
+            let key = capture.then(|| turn_key(session, &turn.speaker, &turn.text, at.0));
+            // Dedup gate: skip turns already seen in this capture stream.
+            if let Some(k) = &key
+                && seen_turn_keys.contains(k)
+            {
+                return None; // deduplicated
+            }
+            Some((turn.speaker.clone(), turn.text.clone(), at, key))
+        })
+        .collect()
+}
+
+/// Outcome of the namespace-locked phase of `ingest_conversation`: the
+/// registry-state updates (`seen_turn_keys`/`unextracted`) a caller must
+/// commit, plus the overall result. `committed` is populated up to (but not
+/// including) the first `set_metadata_pairs` failure, and is returned
+/// regardless of whether `outcome` is `Ok` or `Err` — mirroring the pre-split
+/// code's interleaved per-turn commit (each turn's registry-state update
+/// happened immediately after its own successful durable write, not gated on
+/// the whole batch succeeding).
+pub(crate) struct IngestPhase2 {
+    pub(crate) committed: Vec<(NodeId, String)>,
+    pub(crate) outcome: Result<IngestSummary, Error>,
+}
+
+/// Namespace-locked body of [`MemoryRegistry::ingest_conversation`]: given the
+/// already dedup-filtered `decisions` (from [`filter_capture_decisions`]),
+/// add each turn, flush the session, and durably stamp the capture metadata.
+pub(crate) fn mem_ingest_conversation(
+    mem: &mut Memory<SqliteStorage>,
+    session: &str,
+    decisions: Vec<(String, String, Timestamp, Option<String>)>,
+) -> IngestPhase2 {
+    let mut episodic = 0usize;
+    let mut semantic = 0usize;
+    let mut newly_captured: Vec<(NodeId, String)> = Vec::new();
+
+    for (speaker, text, at, key) in decisions {
+        let receipt = match mem.add(session, &speaker, &text, at) {
+            Ok(r) => r,
+            Err(e) => {
+                return IngestPhase2 {
+                    committed: Vec::new(),
+                    outcome: Err(e),
+                };
+            }
+        };
+        episodic += 1;
+        if receipt.finalized_semantic.is_some() {
+            semantic += 1;
+        }
+        if let Some(k) = key {
+            newly_captured.push((receipt.episodic, k));
+        }
+    }
+
+    match mem.flush_session(session) {
+        Ok(Some(_)) => semantic += 1,
+        Ok(None) => {}
+        Err(e) => {
+            return IngestPhase2 {
+                committed: Vec::new(),
+                outcome: Err(e),
+            };
+        }
+    }
+
+    // Stamp captured turns (after flush so nodes are durable). Both keys go in
+    // ONE durable write (`set_metadata_pairs`): a turn can never end up
+    // deduped (turn_key present) but invisible to the extraction queue
+    // (extracted missing) via a partial failure.
+    let mut committed = Vec::with_capacity(newly_captured.len());
+    for (epi_id, key) in newly_captured {
+        if let Err(e) =
+            mem.set_metadata_pairs(epi_id, &[(META_TURN_KEY, &key), (META_EXTRACTED, "false")])
+        {
+            return IngestPhase2 {
+                committed,
+                outcome: Err(e),
+            };
+        }
+        committed.push((epi_id, key));
+    }
+
+    IngestPhase2 {
+        committed,
+        outcome: Ok(IngestSummary { episodic, semantic }),
+    }
+}
+
+// Test-only counter of internal `Memory::tick` invocations made by `recall` /
+// `recall_packaged_gated`. Lets tests assert the single-tick-per-recall
+// invariant (flagship bug #2: MCP `recall` ticked the engine TWICE per call,
+// doubling idle-edge leak/decay pressure on every read) directly, rather than
+// inferring it from a decay/leak side effect that the per-edge leak checkpoint
+// fix (`anamnesis::Engine::tick`) makes idempotent across near-simultaneous
+// ticks — and therefore unobservable that way.
+#[cfg(test)]
+thread_local! {
+    static TICK_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn record_tick() {
+    TICK_CALLS.with(|c| c.set(c.get() + 1));
 }
 
 /// Deterministic 64-dim embedding provider for tests — no network, no model
@@ -745,6 +970,53 @@ mod tests {
 
     fn registry(reinforce: bool) -> MemoryRegistry {
         MemoryRegistry::in_memory_with(Arc::new(StubProvider), reinforce)
+    }
+
+    // ── Single-tick-per-recall (flagship bug #2) ────────────────────────────
+
+    #[test]
+    fn recall_ticks_engine_exactly_once() {
+        let mut reg = registry(true);
+        reg.remember("the auth bug was a race in the middleware", None)
+            .unwrap();
+        let before = TICK_CALLS.with(|c| c.get());
+        reg.recall("auth race condition", 5, None).unwrap();
+        assert_eq!(
+            TICK_CALLS.with(|c| c.get()) - before,
+            1,
+            "recall must tick the engine exactly once, not twice"
+        );
+    }
+
+    #[test]
+    fn recall_packaged_gated_ticks_engine_exactly_once() {
+        let mut reg = registry(true);
+        reg.remember("the cache key omitted the lockfile hash", None)
+            .unwrap();
+        let before = TICK_CALLS.with(|c| c.get());
+        reg.recall_packaged_gated("cache key lockfile", 5, None, None, None)
+            .unwrap();
+        assert_eq!(
+            TICK_CALLS.with(|c| c.get()) - before,
+            1,
+            "recall_packaged_gated must tick the engine exactly once, not twice"
+        );
+    }
+
+    #[test]
+    fn recall_packaged_gated_gated_out_still_ticks_exactly_once() {
+        let mut reg = registry(true);
+        reg.remember("unrelated note", None).unwrap();
+        let before = TICK_CALLS.with(|c| c.get());
+        // An impossibly high gate threshold forces the gated-out early-return
+        // branch, which has its own tick call site.
+        reg.recall_packaged_gated("unrelated note", 5, None, None, Some(1_000.0))
+            .unwrap();
+        assert_eq!(
+            TICK_CALLS.with(|c| c.get()) - before,
+            1,
+            "the gated-out branch must also tick the engine exactly once"
+        );
     }
 
     #[test]

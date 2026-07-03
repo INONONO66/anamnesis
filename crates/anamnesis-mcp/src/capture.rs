@@ -10,7 +10,9 @@
 //! `seen_turn_keys` / `unextracted` fields and the capture-branch of
 //! `ingest_conversation` (which reuses [`turn_key`] and the `META_*` keys here).
 
-use anamnesis::graph::Timestamp;
+use anamnesis::Memory;
+use anamnesis::graph::{NodeId, Timestamp};
+use anamnesis::storage::SqliteStorage;
 
 use crate::memory::MemoryRegistry;
 
@@ -36,7 +38,9 @@ const EXTRACT_MAX_PULL_ATTEMPTS: u32 = 2;
 const DEFAULT_EXTRACT_REDELIVERY_MS: u64 = 21_600_000;
 
 /// Default batch cap when `extract_pending` is called without a limit.
-const DEFAULT_PULL_LIMIT: usize = 50;
+/// `pub(crate)` so `crate::dispatch`'s `PullPending` phase-1 claim uses the
+/// SAME default this module's own `pull_pending` uses.
+pub(crate) const DEFAULT_PULL_LIMIT: usize = 50;
 
 /// `ANAMNESIS_EXTRACT_REDELIVERY_MS` env override for the redelivery TTL.
 fn extract_redelivery_ms() -> u64 {
@@ -106,6 +110,11 @@ impl MemoryRegistry {
     /// always read from and marked in the **default** namespace, consistent with
     /// `extraction_status` and the capture hook (which always captures into the
     /// default namespace with `namespace: None`).
+    ///
+    /// `crate::dispatch`'s `PullPending` arm claims from `self.unextracted` and
+    /// calls [`pull_claimed`] directly (its own phase split), so in a non-test
+    /// build this convenience wrapper has only test consumers.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn pull_pending(
         &mut self,
         limit: Option<usize>,
@@ -116,6 +125,17 @@ impl MemoryRegistry {
     }
 
     /// [`pull_pending`](Self::pull_pending) with an injected clock (testable).
+    ///
+    /// Two-phase discipline: claim (drain) up to `limit` ids from the front of
+    /// `self.unextracted` FIRST — a brief, registry-state-only mutation — then
+    /// resolve the (always-default) namespace handle and do the actual
+    /// metadata get/set work while holding ONLY the namespace lock. Any
+    /// claimed ids [`pull_claimed`] didn't durably mark (a write failure, or
+    /// the handle failing to resolve at all) are spliced back onto the FRONT
+    /// of the queue, preserving both the original FIFO order and the
+    /// "everything unmarked stays queued" contract — and, unlike the
+    /// single-lock predecessor, claiming ELIMINATES the possibility of two
+    /// concurrent pulls delivering the same node twice.
     fn pull_pending_at(
         &mut self,
         limit: Option<usize>,
@@ -125,37 +145,21 @@ impl MemoryRegistry {
         let take = limit
             .unwrap_or(DEFAULT_PULL_LIMIT)
             .min(self.unextracted.len());
-        let mut items = Vec::with_capacity(take);
-        while items.len() < take {
-            let Some(&id) = self.unextracted.first() else {
-                break;
-            };
-            // Always operate on the default namespace — the queue is global.
-            let mem = self.get(None)?;
-            let (content, state) = match mem.engine().graph().get_node(id) {
-                Ok(n) => (
-                    n.content.clone(),
-                    parse_extracted_state(n.metadata.get(META_EXTRACTED).map(String::as_str)),
-                ),
-                Err(_) => (String::new(), ExtractedState::New),
-            };
-            let attempt = match state {
-                ExtractedState::Pending { attempt, .. } => attempt + 1,
-                _ => 1,
-            };
-            let mark = if attempt >= EXTRACT_MAX_PULL_ATTEMPTS {
-                "true".to_string()
-            } else {
-                format!("pending:{now_ms}:{attempt}")
-            };
-            // Durable mark FIRST; dequeue only after it succeeds. On a write
-            // error, return the partial batch — everything delivered is marked,
-            // everything unmarked stays queued for the next pull.
-            if mem.set_metadata(id, META_EXTRACTED, &mark).is_err() {
-                break;
+        let claimed: Vec<NodeId> = self.unextracted.drain(..take).collect();
+        // Always operate on the default namespace — the queue is global.
+        let handle = match self.namespace_handle(None) {
+            Ok(h) => h,
+            Err(e) => {
+                self.unextracted.splice(0..0, claimed);
+                return Err(e);
             }
-            self.unextracted.remove(0);
-            items.push(serde_json::json!({ "node_id": id.0, "content": content }));
+        };
+        let (items, unprocessed) = {
+            let mut mem = handle.lock().unwrap_or_else(|p| p.into_inner());
+            pull_claimed(&mut mem, &claimed, now_ms)
+        };
+        if !unprocessed.is_empty() {
+            self.unextracted.splice(0..0, unprocessed);
         }
         Ok(serde_json::to_string(&items).unwrap_or_else(|_| "[]".to_string()))
     }
@@ -188,39 +192,95 @@ impl MemoryRegistry {
 
     /// [`load_extraction_state`](Self::load_extraction_state) with an injected
     /// clock (testable).
+    ///
+    /// Resolves the namespace handle (brief global-lock-equivalent access via
+    /// `&mut self`), then does the full-graph scan under ONLY the namespace
+    /// lock; `self.seen_turn_keys`/`self.unextracted` are written last, once
+    /// the namespace lock has already been released.
     fn load_extraction_state_at(
         &mut self,
         ns: Option<&str>,
         now_ms: u64,
     ) -> Result<(), anamnesis::Error> {
         let ttl = extract_redelivery_ms();
+        let handle = self.namespace_handle(ns)?;
+        let (keys, pending) = {
+            let mem = handle.lock().unwrap_or_else(|p| p.into_inner());
+            scan_extraction_state(&mem, now_ms, ttl)
+        };
         self.seen_turn_keys.clear();
-        self.unextracted.clear();
-        let mem = self.get(ns)?;
-        let graph = mem.engine().graph();
-        let mut keys = Vec::new();
-        let mut pending = Vec::new();
-        for id in graph.all_node_ids() {
-            if let Ok(node) = graph.get_node(id) {
-                if let Some(k) = node.metadata.get(META_TURN_KEY) {
-                    keys.push(k.clone());
-                }
-                match parse_extracted_state(node.metadata.get(META_EXTRACTED).map(String::as_str)) {
-                    ExtractedState::New => pending.push(id),
-                    ExtractedState::Pending { at_ms, attempt }
-                        if attempt < EXTRACT_MAX_PULL_ATTEMPTS
-                            && now_ms.saturating_sub(at_ms) > ttl =>
-                    {
-                        pending.push(id)
-                    }
-                    _ => {}
-                }
-            }
-        }
         self.seen_turn_keys.extend(keys);
         self.unextracted = pending;
         Ok(())
     }
+}
+
+/// Namespace-locked batch of already-claimed node ids: read each node's
+/// content, compute + durably write its next `META_EXTRACTED` mark, and
+/// collect the delivered `{node_id, content}` payload. On the first write
+/// failure, stop and return the remaining (from that index onward, inclusive)
+/// claimed ids as `unprocessed` so the caller can restore them to the queue —
+/// "everything delivered is marked, everything unmarked stays queued".
+pub(crate) fn pull_claimed(
+    mem: &mut Memory<SqliteStorage>,
+    claimed: &[NodeId],
+    now_ms: u64,
+) -> (Vec<serde_json::Value>, Vec<NodeId>) {
+    let mut items = Vec::with_capacity(claimed.len());
+    for (i, &id) in claimed.iter().enumerate() {
+        let (content, state) = match mem.engine().graph().get_node(id) {
+            Ok(n) => (
+                n.content.clone(),
+                parse_extracted_state(n.metadata.get(META_EXTRACTED).map(String::as_str)),
+            ),
+            Err(_) => (String::new(), ExtractedState::New),
+        };
+        let attempt = match state {
+            ExtractedState::Pending { attempt, .. } => attempt + 1,
+            _ => 1,
+        };
+        let mark = if attempt >= EXTRACT_MAX_PULL_ATTEMPTS {
+            "true".to_string()
+        } else {
+            format!("pending:{now_ms}:{attempt}")
+        };
+        if mem.set_metadata(id, META_EXTRACTED, &mark).is_err() {
+            return (items, claimed[i..].to_vec());
+        }
+        items.push(serde_json::json!({ "node_id": id.0, "content": content }));
+    }
+    (items, Vec::new())
+}
+
+/// Namespace-locked, read-only full-graph scan for `load_extraction_state`:
+/// collects every `turn_key` metadata value (for dedup) and every node whose
+/// `META_EXTRACTED` state means it belongs back in the un-extracted queue.
+fn scan_extraction_state(
+    mem: &Memory<SqliteStorage>,
+    now_ms: u64,
+    ttl: u64,
+) -> (Vec<String>, Vec<NodeId>) {
+    let graph = mem.engine().graph();
+    let mut keys = Vec::new();
+    let mut pending = Vec::new();
+    for id in graph.all_node_ids() {
+        if let Ok(node) = graph.get_node(id) {
+            if let Some(k) = node.metadata.get(META_TURN_KEY) {
+                keys.push(k.clone());
+            }
+            match parse_extracted_state(node.metadata.get(META_EXTRACTED).map(String::as_str)) {
+                ExtractedState::New => pending.push(id),
+                ExtractedState::Pending { at_ms, attempt }
+                    if attempt < EXTRACT_MAX_PULL_ATTEMPTS
+                        && now_ms.saturating_sub(at_ms) > ttl =>
+                {
+                    pending.push(id)
+                }
+                _ => {}
+            }
+        }
+    }
+    (keys, pending)
 }
 
 #[cfg(test)]

@@ -143,11 +143,122 @@ pub fn parse_transcript(contents: &str) -> Vec<ParsedTurn> {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
             continue;
         };
-        if let Some(turn) = parse_codex_line(&v).or_else(|| parse_cc_line(&v)) {
+        if let Some(mut turn) = parse_codex_line(&v).or_else(|| parse_cc_line(&v)) {
+            // Scrub at the parse boundary so every consumer (capture-hook Ingest
+            // and any future reader) gets redacted text — plaintext keys never
+            // reach the daemon or the SQLite store.
+            turn.text = redact_secrets(&turn.text);
             out.push(turn);
         }
     }
     out
+}
+
+/// Redact obvious secrets (API keys, tokens) from a turn's text before it is
+/// persisted. Conservative by design — precision over recall: only unmistakable,
+/// prefix-anchored key shapes are replaced with `[REDACTED:<kind>]`. Pure and
+/// total: never panics; secret-free text is returned byte-for-byte unchanged.
+///
+/// A match is only attempted at a word boundary (start, or after a non-alnum
+/// byte), so a token embedded inside a longer identifier (e.g. `disk-…`) cannot
+/// trip the `sk-` rule. All recognized prefixes/bodies are ASCII, so byte
+/// lengths always land on a UTF-8 char boundary.
+pub fn redact_secrets(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0;
+    let mut prev_alnum = false;
+    while i < input.len() {
+        if !prev_alnum && let Some((len, kind)) = match_secret_at(&input[i..]) {
+            out.push_str("[REDACTED:");
+            out.push_str(kind);
+            out.push(']');
+            i += len;
+            prev_alnum = false;
+            continue;
+        }
+        let Some(ch) = input[i..].chars().next() else {
+            break;
+        };
+        out.push(ch);
+        prev_alnum = ch.is_ascii_alphanumeric();
+        i += ch.len_utf8();
+    }
+    out
+}
+
+/// Length of the leading run of bytes satisfying `allow`.
+fn secret_run_len(bytes: &[u8], allow: fn(u8) -> bool) -> usize {
+    let mut n = 0;
+    while n < bytes.len() && allow(bytes[n]) {
+        n += 1;
+    }
+    n
+}
+
+fn is_alnum(b: u8) -> bool {
+    b.is_ascii_alphanumeric()
+}
+
+/// Match one known secret shape anchored at the START of `s`; returns the byte
+/// length consumed and the kind label. Patterns are deliberately narrow.
+fn match_secret_at(s: &str) -> Option<(usize, &'static str)> {
+    // `sk-[A-Za-z0-9]{20,}` — OpenAI-style key.
+    if let Some(n) = match_run(s, "sk-", 20, is_alnum) {
+        return Some((n, "openai-key"));
+    }
+    // `gh[pousr]_[A-Za-z0-9]{20,}` — GitHub PAT / OAuth / refresh families.
+    if let Some(n) = match_github(s) {
+        return Some((n, "github-token"));
+    }
+    // `AKIA[0-9A-Z]{16,}` — AWS access key id.
+    if let Some(n) = match_aws(s) {
+        return Some((n, "aws-key"));
+    }
+    // `Bearer[ \t]+[A-Za-z0-9._-]{20,}` — bearer credential (often a JWT).
+    if let Some(n) = match_bearer(s) {
+        return Some((n, "bearer-token"));
+    }
+    None
+}
+
+/// `<prefix>` then a run of ≥ `min_body` bytes satisfying `allow`.
+fn match_run(s: &str, prefix: &str, min_body: usize, allow: fn(u8) -> bool) -> Option<usize> {
+    let rest = s.strip_prefix(prefix)?;
+    let n = secret_run_len(rest.as_bytes(), allow);
+    (n >= min_body).then_some(prefix.len() + n)
+}
+
+fn match_github(s: &str) -> Option<usize> {
+    let b = s.as_bytes();
+    if b.len() < 4
+        || &b[0..2] != b"gh"
+        || b[3] != b'_'
+        || !matches!(b[2], b'p' | b'o' | b'u' | b's' | b'r')
+    {
+        return None;
+    }
+    let n = secret_run_len(&b[4..], is_alnum);
+    (n >= 20).then_some(4 + n)
+}
+
+fn match_aws(s: &str) -> Option<usize> {
+    let rest = s.strip_prefix("AKIA")?;
+    let n = secret_run_len(rest.as_bytes(), |c| {
+        c.is_ascii_uppercase() || c.is_ascii_digit()
+    });
+    (n >= 16).then_some(4 + n)
+}
+
+fn match_bearer(s: &str) -> Option<usize> {
+    let rest = s.strip_prefix("Bearer")?;
+    let ws = secret_run_len(rest.as_bytes(), |c| c == b' ' || c == b'\t');
+    if ws == 0 {
+        return None;
+    }
+    let body = secret_run_len(&rest.as_bytes()[ws..], |c| {
+        c.is_ascii_alphanumeric() || c == b'.' || c == b'_' || c == b'-'
+    });
+    (body >= 20).then_some("Bearer".len() + ws + body)
 }
 
 /// Codex rollout: `type=="response_item"`, `payload.type=="message"`.
@@ -363,5 +474,57 @@ mod tests {
             parse_iso8601_to_ms("2026-06-26T06:20:56.351Z"),
             Some(1782454856351u64)
         );
+    }
+
+    #[test]
+    fn redacts_common_secret_shapes_but_not_prose() {
+        // Given: prose wrapping three unmistakable secret shapes.
+        let sk = "sk-ABCDEFGHIJKLMNOPQRSTUVWX1234567890";
+        let gh = "ghp_0123456789abcdefghijABCDEFGHIJ012345";
+        let aws = "AKIAIOSFODNN7EXAMPLE";
+        let input = format!("my key is {sk}, token {gh}, and aws {aws} done");
+
+        // When
+        let out = redact_secrets(&input);
+
+        // Then: no raw secret literal survives; each becomes a typed marker.
+        assert!(!out.contains(sk), "openai key must be scrubbed: {out}");
+        assert!(!out.contains(gh), "github token must be scrubbed: {out}");
+        assert!(!out.contains(aws), "aws key must be scrubbed: {out}");
+        assert!(out.contains("[REDACTED:openai-key]"), "{out}");
+        assert!(out.contains("[REDACTED:github-token]"), "{out}");
+        assert!(out.contains("[REDACTED:aws-key]"), "{out}");
+        // Surrounding prose is preserved verbatim.
+        assert!(out.starts_with("my key is "), "{out}");
+        assert!(out.ends_with(" done"), "{out}");
+    }
+
+    #[test]
+    fn redaction_leaves_ordinary_prose_unchanged() {
+        // Given: ordinary chat + a short word + normal code tokens, none key-shaped.
+        let prose = "Let's play basketball after we refactor parse_transcript(); \
+                     the sha was abc123 and PI is 3.14159.";
+        // When / Then: a no-op — precision means zero false positives on prose.
+        assert_eq!(redact_secrets(prose), prose);
+    }
+
+    #[test]
+    fn redaction_is_conservative_at_word_boundaries() {
+        // Given: a word ending in "sk" before a hyphen must NOT trip the sk- rule.
+        let disk = "the disk-usage-report-was-large-today-really";
+        // When / Then: unchanged (no 20+ alnum run, and not at a word boundary).
+        assert_eq!(redact_secrets(disk), disk);
+
+        // Given: a Bearer credential.
+        let bear = "Authorization: Bearer abcdefghijklmnopqrstuvwxyz012345";
+        // When
+        let out = redact_secrets(bear);
+        // Then: the token is scrubbed, the header prefix preserved.
+        assert!(
+            !out.contains("abcdefghijklmnopqrstuvwxyz012345"),
+            "bearer token must be scrubbed: {out}"
+        );
+        assert!(out.contains("[REDACTED:bearer-token]"), "{out}");
+        assert!(out.starts_with("Authorization: "), "{out}");
     }
 }
