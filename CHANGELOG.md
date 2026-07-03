@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.2]
+
+Ops hardening — the product-layer gaps from the post-0.10 assessment:
+
+- **stats**: new dogfood usage section — daemon-lifetime op counters (recalls/reinforcing, remembers, relates, captured turns, extraction pulls), live extraction backlog, captured total, and a 14-day stale ratio.
+- **docs**: product-definition SSOT in the README ("What it is not" + "Success criteria"); a new [operations contract](docs/06-operations/operations.md) (tool timing, failure/recovery semantics incl. redelivery, daemon lifecycle & version-skew workaround, all env knobs); a [migration policy](docs/03-persistence/migration-policy.md) codifying the no-data-loss guarantees and declaring the existing migration/fixture tests normative.
+- **tests**: killed two flake classes — capture drop-then-reopen flock races (retry helper) and fixed-tempdir namespace tests (unique tempdirs).
+
 ## [0.10.1]
 
 Fixes from post-0.10.0 external review (all four findings verified before fixing):

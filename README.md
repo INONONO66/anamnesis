@@ -644,6 +644,8 @@ See [ADR-0014](docs/adr/0014-shrink-to-product.md) for the full shrink record �
 
 ## Status
 
+**v0.10.x** — external-review fixes (0.10.1: doc drift, v8 bare-type normalization, tension-endpoint trimming exemption, corpus-independent demo baseline) and ops hardening (0.10.2: usage metrics in `stats`, [operations contract](docs/06-operations/operations.md), [migration policy](docs/03-persistence/migration-policy.md), flake-class fixes).
+
 **v0.10.0** — **shrink to product** ([ADR-0014](docs/adr/0014-shrink-to-product.md)). An audit found ~85% of the Engine's public surface had zero consumers — the map sold more than the territory walked. This release removes the debug/hypothesis lifecycle, the peer/trust subsystem, a large convenience API, manual memory-tier override, and the scope-relation hierarchy; collapses `KnowledgeType` from 15 variants to 4 (`Episodic` / `Semantic` / `Identity` / `Custom`); and discloses a set of by-design decay/tau coarsenings. `PeerId` storage, tier *display*, and the internal module tree survive. Breaking vs 0.9. Migrations run automatically on open (v5→v6 drops peers; v6→v7 normalizes legacy node types). See the [CHANGELOG](CHANGELOG.md) and ADR-0014.
 
 **v0.9.x** — automatic capture pipeline ([ADR-0013](docs/adr/0013-reasoning-capture-pipeline.md)): `Stop` / `PreCompact` / `SessionEnd` hooks stream turns as raw `Episodic` memories; a Stage-2 nudge asks the agent to distill them via `extract_pending`. Capture hardening (queue durability, nudge ungating, bounded I/O) in 0.9.1.
