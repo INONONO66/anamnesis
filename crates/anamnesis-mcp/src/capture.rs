@@ -111,6 +111,7 @@ impl MemoryRegistry {
         limit: Option<usize>,
         ns: Option<&str>,
     ) -> Result<String, anamnesis::Error> {
+        self.ops.extraction_pulls += 1;
         self.pull_pending_at(limit, ns, Timestamp::now().0)
     }
 
