@@ -82,9 +82,9 @@ pub struct ExtractPendingParams {
     /// Max turns to pull this batch (default: all pending).
     #[serde(default)]
     pub limit: Option<u32>,
-    /// Reserved for a future per-namespace queue. Currently ignored — the
-    /// un-extracted queue is a default-namespace global, so this field has no
-    /// effect. Pass `null` or omit it.
+    /// Selects which namespace's extraction queue to pull from — the
+    /// un-extracted queue is isolated per namespace. Omit (or pass `null`)
+    /// to use the registry default namespace.
     #[serde(default)]
     pub namespace: Option<String>,
 }

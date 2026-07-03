@@ -14,7 +14,9 @@ use anamnesis::memory::{Hit, ListFilter, MemoryStats, MemoryView, Relation};
 use anamnesis::storage::SqliteStorage;
 use anamnesis::{Error, Memory};
 
-use crate::capture::{META_EXTRACTED, META_TURN_KEY, turn_key};
+use crate::capture::{
+    META_EXTRACTED, META_TURN_KEY, extract_redelivery_ms, scan_extraction_state, turn_key,
+};
 
 /// One conversational turn for `ingest_conversation`.
 #[derive(Debug, Clone)]
@@ -506,6 +508,21 @@ impl MemoryRegistry {
         let key = self.canonical_key(&raw);
         if !self.open.contains_key(&key) {
             let mem = self.open_namespace(&key)?;
+            // First open of this namespace THIS process: rebuild its capture
+            // queue from durable node metadata, same scan `load_extraction_state`
+            // runs for the default namespace at daemon startup (daemon.rs).
+            // Only non-default namespaces need this here — the default is
+            // already rebuilt by that startup call before any handle is
+            // requested. Extend (never clear) the shared dedup set and this
+            // namespace's own queue bucket so concurrently-open namespaces'
+            // state is untouched.
+            let (keys, pending) =
+                scan_extraction_state(&mem, Timestamp::now().0, extract_redelivery_ms());
+            self.seen_turn_keys.extend(keys);
+            self.unextracted
+                .entry(key.clone())
+                .or_default()
+                .extend(pending);
             self.open.insert(key.clone(), Arc::new(Mutex::new(mem)));
         }
         Ok(self.open.get(&key).expect("just inserted").clone())
@@ -704,9 +721,11 @@ impl MemoryRegistry {
         ns: Option<&str>,
         capture: bool,
     ) -> Result<IngestSummary, Error> {
-        let decisions = filter_capture_decisions(&self.seen_turn_keys, session, turns, capture);
+        // Resolve the handle FIRST: on first open this rebuilds `seen_turn_keys`
+        // for this namespace, so the dedup filter below sees restart-durable state.
         let ns_key = self.canonical_ns_key(ns);
         let handle = self.namespace_handle(ns)?;
+        let decisions = filter_capture_decisions(&self.seen_turn_keys, session, turns, capture);
         let phase2 = {
             let mut mem = handle.lock().unwrap_or_else(|p| p.into_inner());
             mem_ingest_conversation(&mut mem, session, decisions)

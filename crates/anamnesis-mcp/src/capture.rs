@@ -43,7 +43,7 @@ const DEFAULT_EXTRACT_REDELIVERY_MS: u64 = 21_600_000;
 pub(crate) const DEFAULT_PULL_LIMIT: usize = 50;
 
 /// `ANAMNESIS_EXTRACT_REDELIVERY_MS` env override for the redelivery TTL.
-fn extract_redelivery_ms() -> u64 {
+pub(crate) fn extract_redelivery_ms() -> u64 {
     std::env::var("ANAMNESIS_EXTRACT_REDELIVERY_MS")
         .ok()
         .and_then(|v| v.trim().parse().ok())
@@ -143,6 +143,11 @@ impl MemoryRegistry {
         now_ms: u64,
     ) -> Result<String, anamnesis::Error> {
         let ns_key = self.canonical_ns_key(ns);
+        // Resolve the handle FIRST: on a namespace's first open this rebuilds
+        // its `unextracted` bucket from durable node metadata (see
+        // `MemoryRegistry::namespace_handle`), so the claim below sees the
+        // rebuilt queue rather than the empty post-restart default.
+        let handle = self.namespace_handle(ns)?;
         let take = limit
             .unwrap_or(DEFAULT_PULL_LIMIT)
             .min(self.unextracted.get(&ns_key).map(Vec::len).unwrap_or(0));
@@ -151,16 +156,6 @@ impl MemoryRegistry {
             .get_mut(&ns_key)
             .map(|q| q.drain(..take).collect())
             .unwrap_or_default();
-        let handle = match self.namespace_handle(ns) {
-            Ok(h) => h,
-            Err(e) => {
-                self.unextracted
-                    .entry(ns_key)
-                    .or_default()
-                    .splice(0..0, claimed);
-                return Err(e);
-            }
-        };
         let (items, unprocessed) = {
             let mut mem = handle.lock().unwrap_or_else(|p| p.into_inner());
             pull_claimed(&mut mem, &claimed, now_ms)
@@ -178,6 +173,9 @@ impl MemoryRegistry {
     /// (see [`MemoryRegistry::canonical_ns_key`]) — never a count summed
     /// across every namespace.
     pub fn extraction_status(&mut self, ns: Option<&str>) -> Result<String, anamnesis::Error> {
+        // Resolve first: on a namespace's first open this rebuilds its
+        // `unextracted` bucket (see `MemoryRegistry::namespace_handle`).
+        self.namespace_handle(ns)?;
         let ns_key = self.canonical_ns_key(ns);
         let pending = self.unextracted.get(&ns_key).map(Vec::len).unwrap_or(0);
         Ok(serde_json::json!({ "pending": pending }).to_string())
@@ -273,7 +271,7 @@ pub(crate) fn pull_claimed(
 /// Namespace-locked, read-only full-graph scan for `load_extraction_state`:
 /// collects every `turn_key` metadata value (for dedup) and every node whose
 /// `META_EXTRACTED` state means it belongs back in the un-extracted queue.
-fn scan_extraction_state(
+pub(crate) fn scan_extraction_state(
     mem: &Memory<SqliteStorage>,
     now_ms: u64,
     ttl: u64,
@@ -541,6 +539,70 @@ mod tests {
         assert!(
             !json_a.contains("projB-only turn"),
             "leaked B into A's pull: {json_a}"
+        );
+    }
+
+    /// Durability gap fix: only the DEFAULT namespace's queue was rebuilt at
+    /// daemon startup (`daemon.rs` calls `load_extraction_state(None)`); a
+    /// non-default namespace's queue silently stayed empty after a restart
+    /// until something explicitly called `load_extraction_state(Some(ns))`.
+    /// Captures into two non-default namespaces ("projA", "projB"), drops the
+    /// registry (simulating a daemon restart), reopens over the SAME db dir,
+    /// and — WITHOUT calling `load_extraction_state` at all — pulls "projB"
+    /// and confirms its turn is returned, while "projA" independently reports
+    /// its own backlog (isolation survives the restart too).
+    #[test]
+    fn nondefault_ns_queue_rebuilds_after_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("memory.db");
+        let turn_a = vec![Turn {
+            speaker: "user".into(),
+            text: "projA restart turn".into(),
+            at_ms: Some(1),
+        }];
+        let turn_b = vec![Turn {
+            speaker: "user".into(),
+            text: "projB restart turn".into(),
+            at_ms: Some(2),
+        }];
+        {
+            let mut reg = MemoryRegistry::file_backed_with(
+                Arc::new(StubProvider),
+                db.clone(),
+                dir.path().to_path_buf(),
+                "default".into(),
+                false,
+            );
+            reg.ingest_conversation("s", &turn_a, Some("projA"), true)
+                .unwrap();
+            reg.ingest_conversation("s", &turn_b, Some("projB"), true)
+                .unwrap();
+        } // drop → release lock, simulating a daemon restart
+
+        let mut reg2 = MemoryRegistry::file_backed_with(
+            Arc::new(StubProvider),
+            db,
+            dir.path().to_path_buf(),
+            "default".into(),
+            false,
+        );
+        // No `load_extraction_state` call anywhere — the fix must rebuild
+        // "projB"'s queue purely from `namespace_handle`'s first-open scan.
+        let json_b = retry_while_locked(|| reg2.pull_pending(None, Some("projB")));
+        assert!(
+            json_b.contains("projB restart turn"),
+            "projB's queue must survive the restart: {json_b}"
+        );
+        assert!(
+            !json_b.contains("projA restart turn"),
+            "projA must not leak into projB's pull: {json_b}"
+        );
+
+        // projA's own backlog independently rebuilt too.
+        let status_a = reg2.extraction_status(Some("projA")).unwrap();
+        assert!(
+            status_a.contains("\"pending\":1"),
+            "projA's queue must survive the restart: {status_a}"
         );
     }
 

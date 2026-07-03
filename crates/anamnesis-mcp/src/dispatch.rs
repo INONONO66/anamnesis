@@ -205,24 +205,27 @@ pub fn dispatch(registry: &Arc<Mutex<MemoryRegistry>>, req: Request) -> Response
                 .collect();
             let capture = capture.unwrap_or(false);
 
-            // Phase 1: dedup-filter against seen_turn_keys (registry state,
-            // read-only + fast), resolve the namespace handle.
+            // Phase 1: resolve the namespace handle FIRST — on first open this
+            // rebuilds `seen_turn_keys` for this namespace, so the dedup filter
+            // below sees restart-durable state — then dedup-filter against
+            // seen_turn_keys (registry state, read-only + fast).
             let (handle, decisions) = {
                 let mut reg = registry.lock().unwrap_or_else(|p| p.into_inner());
+                let handle = match reg.namespace_handle(namespace.as_deref()) {
+                    Ok(h) => h,
+                    Err(e) => {
+                        reg.ops.dispatch_errors += 1;
+                        reg.ops.ingest_errors += 1;
+                        return Response::internal(e);
+                    }
+                };
                 let decisions = memory::filter_capture_decisions(
                     &reg.seen_turn_keys,
                     &session,
                     &turns,
                     capture,
                 );
-                match reg.namespace_handle(namespace.as_deref()) {
-                    Ok(h) => (h, decisions),
-                    Err(e) => {
-                        reg.ops.dispatch_errors += 1;
-                        reg.ops.ingest_errors += 1;
-                        return Response::internal(e);
-                    }
-                }
+                (handle, decisions)
             };
 
             // Phase 2: namespace lock only — the expensive embed/ingest work.
@@ -305,13 +308,22 @@ pub fn dispatch(registry: &Arc<Mutex<MemoryRegistry>>, req: Request) -> Response
         }
         Request::PullPending { limit, namespace } => {
             // Phase 1: bump the intent counter, resolve the REQUESTED
-            // namespace's canonical key, CLAIM (drain) up to `limit` ids from
-            // the front of THAT namespace's queue, then resolve its handle.
-            // Claiming here — not just peeking — means two concurrent pulls
-            // can never deliver the same node twice.
+            // namespace's handle FIRST — on first open this rebuilds that
+            // namespace's `unextracted` bucket from durable node metadata —
+            // then CLAIM (drain) up to `limit` ids from the front of THAT
+            // namespace's (now rebuilt) queue. Claiming here — not just
+            // peeking — means two concurrent pulls can never deliver the same
+            // node twice.
             let (handle, ns_key, claimed) = {
                 let mut reg = registry.lock().unwrap_or_else(|p| p.into_inner());
                 reg.ops.extraction_pulls += 1;
+                let handle = match reg.namespace_handle(namespace.as_deref()) {
+                    Ok(h) => h,
+                    Err(e) => {
+                        reg.ops.dispatch_errors += 1;
+                        return Response::internal(e);
+                    }
+                };
                 let ns_key = reg.canonical_ns_key(namespace.as_deref());
                 let take = limit
                     .map(|l| l as usize)
@@ -322,17 +334,7 @@ pub fn dispatch(registry: &Arc<Mutex<MemoryRegistry>>, req: Request) -> Response
                     .get_mut(&ns_key)
                     .map(|q| q.drain(..take).collect())
                     .unwrap_or_default();
-                match reg.namespace_handle(namespace.as_deref()) {
-                    Ok(h) => (h, ns_key, claimed),
-                    Err(e) => {
-                        reg.unextracted
-                            .entry(ns_key)
-                            .or_default()
-                            .splice(0..0, claimed);
-                        reg.ops.dispatch_errors += 1;
-                        return Response::internal(e);
-                    }
-                }
+                (handle, ns_key, claimed)
             };
             // Phase 2: namespace lock only.
             let now_ms = Timestamp::now().0;
