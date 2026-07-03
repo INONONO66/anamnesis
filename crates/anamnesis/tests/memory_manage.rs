@@ -14,7 +14,9 @@
 use std::sync::Arc;
 
 use anamnesis::Error;
-use anamnesis::engine::{EmbeddingProvider, KnowledgeType, NodeId, Timestamp};
+use anamnesis::engine::{
+    EmbeddingProvider, KnowledgeType, MemoryTier, NodeId, StorageAdapter, Timestamp,
+};
 use anamnesis::memory::{ListFilter, Memory};
 
 // ---------------------------------------------------------------------------
@@ -260,6 +262,38 @@ fn list_orders_by_salience_and_filters() {
     };
     let capped = m.list(&capped_filter).unwrap();
     assert_eq!(capped.len(), 1);
+}
+
+// ── tier (salience-derived display band) ─────────────────────────────────────
+
+#[test]
+fn view_tier_reflects_salience_band() {
+    let mut m = mem();
+    let high = m.add_note("high salience note", t(1)).unwrap().episodic;
+    let low = m.add_note("low salience note", t(2)).unwrap().episodic;
+    m.flush_all().unwrap();
+
+    m.engine_mut()
+        .graph_mut()
+        .storage_mut()
+        .set_salience(high, 0.95)
+        .unwrap();
+    m.engine_mut()
+        .graph_mut()
+        .storage_mut()
+        .set_salience(low, 0.02)
+        .unwrap();
+
+    assert_eq!(
+        m.get(high).unwrap().tier,
+        MemoryTier::Core,
+        "salience 0.95 must report the Core display band, not the raw stored tier"
+    );
+    assert_eq!(
+        m.get(low).unwrap().tier,
+        MemoryTier::Archival,
+        "salience 0.02 must report the Archival display band"
+    );
 }
 
 // ── adversarial: malformed_input (missing NodeId) ────────────────────────────

@@ -754,7 +754,13 @@ fn entity_overlap_npmi(a: &[String], b: &[String]) -> f64 {
     intersection as f64 / union as f64
 }
 
-fn salience_tier(salience: f64) -> MemoryTier {
+/// Derive the salience-based display tier (Archival/Recall/Core) for a node.
+///
+/// The single source of truth for the salience-band thresholds — used both for
+/// `TierTransition` event reporting here and for [`crate::memory::MemoryView`]'s
+/// `tier` field, so a browsing consumer sees the same band the engine's own
+/// dynamics report internally.
+pub(crate) fn salience_tier(salience: f64) -> MemoryTier {
     if salience < ARCHIVE_SALIENCE_THRESHOLD {
         MemoryTier::Archival
     } else if salience > 0.80 {

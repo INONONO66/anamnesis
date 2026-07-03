@@ -28,8 +28,10 @@ pub struct MemoryView {
     pub entity_tags: Vec<String>,
     /// Current salience projection `[0, 1]`.
     pub salience: f64,
-    /// Stored memory tier (always `Auto` in production; salience determines
-    /// the display band — see [`crate::graph::MemoryTier`]).
+    /// Salience-derived display tier (Archival/Recall/Core) — the same band
+    /// the engine's own `TierTransition` reporting uses, computed fresh from
+    /// [`salience`](Self::salience) rather than the stored `node.tier` (which
+    /// is always `Auto` in production; see [`crate::graph::MemoryTier`]).
     pub tier: MemoryTier,
     /// Knowledge type classification.
     pub node_type: KnowledgeType,
@@ -82,7 +84,7 @@ pub(super) fn node_to_view(node: &Node) -> MemoryView {
         metadata: node.metadata.clone(),
         entity_tags: node.entity_tags.clone(),
         salience: node.salience,
-        tier: node.tier.clone(),
+        tier: crate::api::salience_tier(node.salience),
         node_type: node.node_type.clone(),
         created_at: node.created_at,
         updated_at: node.updated_at,
