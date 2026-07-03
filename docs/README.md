@@ -40,6 +40,7 @@ These documents are not a code status table or an audit log. Each chapter descri
 ### 01 - Architecture
 - [overview.md](01-system-architecture/overview.md) - system boundary, main flows, public surface
 - [framework-layer.md](01-system-architecture/framework-layer.md) - Framework API (`Memory`): recipe, buffering semantics, boundary rules, benchmark attribution
+- [ingestion-layers.md](01-system-architecture/ingestion-layers.md) - storage mechanism vs formation policy; ingestion granularity is a consumer-layer policy, not an engine property
 
 ### 02 - Knowledge Model
 - [graph-model.md](02-knowledge-model/graph-model.md) - nodes, edges, types, tiers
@@ -84,6 +85,8 @@ These documents are not a code status table or an audit log. Each chapter descri
 - [0010-calibrated-priors-not-laws.md](adr/0010-calibrated-priors-not-laws.md) - constants are calibrated priors, not physical laws
 - [0011-activation-gated-triggering.md](adr/0011-activation-gated-triggering.md) - activation-gated hook triggering, not flat-profile injection
 - [0012-daemon-core-mcp-plugin-clients.md](adr/0012-daemon-core-mcp-plugin-clients.md) - daemon is the shared core; MCP and plugin are distinct clients of it
+- [0013-reasoning-capture-pipeline.md](adr/0013-reasoning-capture-pipeline.md) - passive raw ingest + agent-side batch extraction
+- [0014-shrink-to-product.md](adr/0014-shrink-to-product.md) - delete the consumer-less surface; shrink the API to what the product walks
 
 ## Reading Order
 
