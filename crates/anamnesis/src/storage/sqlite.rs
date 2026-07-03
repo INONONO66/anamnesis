@@ -1732,12 +1732,120 @@ mod tests {
 
         let _ = std::fs::remove_file(path);
     }
+
+    /// v7→v8: the v6→v7 step only normalized the *fixed* legacy list, so an
+    /// ARBITRARY bare non-canonical `node_type` — a type string written by a
+    /// foreign/future writer, e.g. `foo_type` — still loaded as `Custom("foo_type")`
+    /// but stayed invisible to `nodes_by_type(Custom("foo_type"))` (which filters SQL
+    /// by the *encoded* `custom:foo_type`) until re-saved. The v8 migration rewrites
+    /// every such bare string to its canonical `custom:*` encoding on reopen.
+    ///
+    /// Both a plain (`foo_type`) and an adversarial (`weird%type`, carrying an
+    /// `escape_text` metacharacter) bare string are planted: the adversarial case
+    /// proves the rewrite goes through Rust `encode_knowledge_type` (which escapes
+    /// `%` → `%25`) rather than a literal SQL `'custom:' || node_type` concat, which
+    /// would produce `custom:weird%type` and never match the escaped query string.
+    #[test]
+    fn migration_v8_normalizes_arbitrary_bare_node_types_for_nodes_by_type() {
+        let path = temp_db_path("v8-normalize-arbitrary");
+
+        // Seed two well-formed rows through the normal path, then flush.
+        let (plain_id, adversarial_id) = {
+            let mut storage = SqliteStorage::open(&path).expect("sqlite storage opens");
+            let plain_id = storage.next_node_id();
+            storage
+                .set_node(make_node(plain_id, 0.5))
+                .expect("plain node stored");
+            let adversarial_id = storage.next_node_id();
+            storage
+                .set_node(make_node(adversarial_id, 0.5))
+                .expect("adversarial node stored");
+            storage.flush().expect("flush");
+            (plain_id, adversarial_id)
+        };
+
+        // Rewind to a v7-era DB: plant the arbitrary bare wire strings directly (the
+        // exact form a foreign writer would leave) and set schema_version back to 7,
+        // so reopening runs the v7→v8 step. The v6→v7 list does NOT cover these, so
+        // running the full chain to v7 leaves them untouched — only v8 rewrites them.
+        {
+            let conn = Connection::open(&path).expect("raw conn opens");
+            conn.execute(
+                "UPDATE nodes SET node_type = 'foo_type' WHERE id = ?1",
+                params![plain_id.0],
+            )
+            .expect("planted plain bare type");
+            conn.execute(
+                "UPDATE nodes SET node_type = 'weird%type' WHERE id = ?1",
+                params![adversarial_id.0],
+            )
+            .expect("planted adversarial bare type");
+            conn.execute_batch("UPDATE schema_version SET version = 7;")
+                .expect("rewind schema_version to 7");
+        }
+
+        // Reopen: the v7→v8 migration normalizes the column in place.
+        let reopened = SqliteStorage::open(&path).expect("reopen runs v7->v8 migration");
+
+        // On-disk column is normalized to the canonical `custom:*` encoding — with
+        // the metacharacter escaped for the adversarial row.
+        {
+            let conn = Connection::open(&path).expect("raw conn opens");
+            let plain_enc: String = conn
+                .query_row(
+                    "SELECT node_type FROM nodes WHERE id = ?1",
+                    params![plain_id.0],
+                    |row| row.get(0),
+                )
+                .expect("read plain node_type");
+            assert_eq!(plain_enc, "custom:foo_type", "plain bare row normalized");
+            let adversarial_enc: String = conn
+                .query_row(
+                    "SELECT node_type FROM nodes WHERE id = ?1",
+                    params![adversarial_id.0],
+                    |row| row.get(0),
+                )
+                .expect("read adversarial node_type");
+            assert_eq!(
+                adversarial_enc, "custom:weird%25type",
+                "adversarial bare row must be escaped via encode_knowledge_type, not raw concat"
+            );
+        }
+
+        // The finding: nodes_by_type now FINDS the normalized rows.
+        assert_eq!(
+            reopened.nodes_by_type(&KnowledgeType::Custom("foo_type".to_string())),
+            vec![plain_id],
+            "nodes_by_type(Custom(\"foo_type\")) must find the normalized row",
+        );
+        assert_eq!(
+            reopened.nodes_by_type(&KnowledgeType::Custom("weird%type".to_string())),
+            vec![adversarial_id],
+            "nodes_by_type(Custom(\"weird%type\")) must find the escaped normalized row",
+        );
+
+        // Decode is a fixed point: the canonical form still yields the original value.
+        assert_eq!(
+            reopened
+                .get_node_type(plain_id)
+                .expect("plain type present"),
+            &KnowledgeType::Custom("foo_type".to_string()),
+        );
+        assert_eq!(
+            reopened
+                .get_node_type(adversarial_id)
+                .expect("adversarial type present"),
+            &KnowledgeType::Custom("weird%type".to_string()),
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 /// Current on-disk schema version. The fresh-DB `create_schema` path and the
 /// incremental migration chain must converge on an IDENTICAL schema at this
 /// version (same columns, same indexes).
-const SCHEMA_VERSION: u32 = 7;
+const SCHEMA_VERSION: u32 = 8;
 
 /// Run schema migrations to bring the database up to the current version.
 ///
@@ -1753,7 +1861,7 @@ const SCHEMA_VERSION: u32 = 7;
 ///   subsystem was removed (production is single-peer, `PeerId(0)`). Nodes' own
 ///   `peer_id` / `source_kind` columns (inside the Origin encoding) STAY; the
 ///   `idx_nodes_peer` index STAYS. No node data is touched.
-/// - v7 (current): normalize `nodes.node_type` for the KnowledgeType 15→4 collapse
+/// - v7: normalize `nodes.node_type` for the KnowledgeType 15→4 collapse
 ///   (Episodic/Semantic/Identity/Custom). The three legacy identity wire strings
 ///   (`identity_core`/`identity_learned`/`identity_state`) are rewritten to bare
 ///   `identity`, and every deleted knowledge/memory wire string (`procedural`,
@@ -1765,6 +1873,14 @@ const SCHEMA_VERSION: u32 = 7;
 ///   string) would miss the un-normalized row until it was re-saved. Idempotent: the
 ///   `IN (...)` filters only match the legacy bare strings, never the post-migration
 ///   `identity` / `custom:*` values. No schema/column change — data only.
+/// - v8 (current): normalize EVERY remaining bare non-canonical `node_type` to its
+///   canonical `custom:<escaped>` encoding, not just the fixed v7 legacy list. An
+///   arbitrary bare string from a foreign/future writer loaded as `Custom(<raw>)`
+///   but stayed invisible to `nodes_by_type` (which filters by the encoded
+///   `custom:<escaped>` form) until re-saved. The rewrite runs in Rust per row so
+///   `%`/tab/CR/LF are escaped via `encode_knowledge_type` (a raw `'custom:' ||
+///   node_type` SQL concat could not). Idempotent: only bare non-canonical rows are
+///   selected. No schema/column change — data only.
 /// - v5: `nodes.evidence_prior REAL NOT NULL DEFAULT 0` — the persistent,
 ///   decay-exempt evidence prior `P_i` of the `A_i = B_i + P_i` decomposition
 ///   (ADR-0008). Backfilled to `0.0`: the base-level `B_i` is recomputed from
@@ -1818,8 +1934,9 @@ fn migrate_schema(conn: &Connection) -> Result<(), Error> {
                 migrate_v4_to_v5(conn)?;
                 migrate_v5_to_v6(conn)?;
                 migrate_v6_to_v7(conn)?;
+                migrate_v7_to_v8(conn)?;
             } else {
-                // Brand new database — create the current (v7) schema directly.
+                // Brand new database — create the current (v8) schema directly.
                 create_schema(conn)?;
             }
             conn.execute_batch(&format!(
@@ -1834,6 +1951,7 @@ fn migrate_schema(conn: &Connection) -> Result<(), Error> {
             migrate_v4_to_v5(conn)?;
             migrate_v5_to_v6(conn)?;
             migrate_v6_to_v7(conn)?;
+            migrate_v7_to_v8(conn)?;
             conn.execute_batch(&format!(
                 "UPDATE schema_version SET version = {SCHEMA_VERSION};"
             ))
@@ -1845,6 +1963,7 @@ fn migrate_schema(conn: &Connection) -> Result<(), Error> {
             migrate_v4_to_v5(conn)?;
             migrate_v5_to_v6(conn)?;
             migrate_v6_to_v7(conn)?;
+            migrate_v7_to_v8(conn)?;
             conn.execute_batch(&format!(
                 "UPDATE schema_version SET version = {SCHEMA_VERSION};"
             ))
@@ -1855,6 +1974,7 @@ fn migrate_schema(conn: &Connection) -> Result<(), Error> {
             migrate_v4_to_v5(conn)?;
             migrate_v5_to_v6(conn)?;
             migrate_v6_to_v7(conn)?;
+            migrate_v7_to_v8(conn)?;
             conn.execute_batch(&format!(
                 "UPDATE schema_version SET version = {SCHEMA_VERSION};"
             ))
@@ -1864,6 +1984,7 @@ fn migrate_schema(conn: &Connection) -> Result<(), Error> {
             migrate_v4_to_v5(conn)?;
             migrate_v5_to_v6(conn)?;
             migrate_v6_to_v7(conn)?;
+            migrate_v7_to_v8(conn)?;
             conn.execute_batch(&format!(
                 "UPDATE schema_version SET version = {SCHEMA_VERSION};"
             ))
@@ -1872,6 +1993,7 @@ fn migrate_schema(conn: &Connection) -> Result<(), Error> {
         Some(5) => {
             migrate_v5_to_v6(conn)?;
             migrate_v6_to_v7(conn)?;
+            migrate_v7_to_v8(conn)?;
             conn.execute_batch(&format!(
                 "UPDATE schema_version SET version = {SCHEMA_VERSION};"
             ))
@@ -1879,12 +2001,20 @@ fn migrate_schema(conn: &Connection) -> Result<(), Error> {
         }
         Some(6) => {
             migrate_v6_to_v7(conn)?;
+            migrate_v7_to_v8(conn)?;
             conn.execute_batch(&format!(
                 "UPDATE schema_version SET version = {SCHEMA_VERSION};"
             ))
             .map_err(sqlite_error)?;
         }
         Some(7) => {
+            migrate_v7_to_v8(conn)?;
+            conn.execute_batch(&format!(
+                "UPDATE schema_version SET version = {SCHEMA_VERSION};"
+            ))
+            .map_err(sqlite_error)?;
+        }
+        Some(8) => {
             // Already at current version — ensure schema is complete (idempotent
             // CREATE IF NOT EXISTS only; no bare ALTER that would fail twice).
             create_schema(conn)?;
@@ -2157,6 +2287,85 @@ fn migrate_v6_to_v7(conn: &Connection) -> Result<(), Error> {
             ",
         )
         .map_err(sqlite_error)?;
+
+        Ok(())
+    })();
+
+    match result {
+        Ok(()) => {
+            conn.execute_batch("COMMIT;").map_err(sqlite_error)?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK;");
+            Err(e)
+        }
+    }
+}
+
+/// Migrate a v7 database to v8: normalize EVERY remaining bare non-canonical
+/// `node_type` to its canonical `custom:<escaped>` encoding.
+///
+/// The v6→v7 step only normalized a *fixed* list of removed legacy strings. An
+/// arbitrary bare string — a `node_type` written by a foreign or future writer, or
+/// any consumer type this build does not recognize — still loaded as
+/// `Custom(<raw>)` via the decode fallback but stayed INVISIBLE to
+/// [`nodes_by_type`](SqliteStorage::nodes_by_type), which filters SQL by the
+/// *encoded* query string `encode_knowledge_type(&Custom(raw))` = `custom:<escaped>`.
+/// So a type-filtered query missed the un-normalized row until it happened to be
+/// re-saved. This migration closes that gap for all bare strings, not just the
+/// fixed legacy list.
+///
+/// The rewrite is done in Rust, per row, rather than as a single
+/// `UPDATE ... SET node_type = 'custom:' || node_type` in SQL: the canonical
+/// `Custom` encoding escapes `%`, tab, CR, and LF via [`escape_text`], which SQL
+/// cannot reproduce. A raw SQL concat would leave a bare `weird%type` as
+/// `custom:weird%type`, but `nodes_by_type(&Custom("weird%type"))` queries for the
+/// ESCAPED `custom:weird%25type` and would still miss it. Re-encoding each raw
+/// value through [`encode_knowledge_type`] guarantees the stored bytes match what
+/// the lookup produces for every input. Row counts here are tiny (only the
+/// un-normalized rows are touched).
+///
+/// Runs in one transaction (BEGIN IMMEDIATE). Idempotent: the SELECT filter
+/// excludes the three canonical bare variants (`episodic`/`semantic`/`identity`)
+/// and anything already carrying the `custom:` prefix, so once normalized a row is
+/// never rewritten again, and re-running is a no-op.
+fn migrate_v7_to_v8(conn: &Connection) -> Result<(), Error> {
+    conn.execute_batch("BEGIN IMMEDIATE;")
+        .map_err(sqlite_error)?;
+
+    let result = (|| -> Result<(), Error> {
+        // Collect the raw values of every bare non-canonical row. The three
+        // canonical bare variants and any already-`custom:`-prefixed row are
+        // excluded, so this only ever selects strings that decode via the
+        // `Custom(<raw>)` fallback and are therefore currently invisible to
+        // `nodes_by_type`.
+        let raw_types: Vec<String> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT DISTINCT node_type FROM nodes
+                     WHERE node_type NOT IN ('episodic', 'semantic', 'identity')
+                       AND node_type NOT LIKE 'custom:%'",
+                )
+                .map_err(sqlite_error)?;
+            let rows = stmt
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(sqlite_error)?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(sqlite_error)?
+        };
+
+        // Re-encode each raw value through the canonical Custom encoding (escaping
+        // metacharacters) and rewrite the matching rows. Matching on the exact raw
+        // string is safe: a raw value already equal to its canonical encoding cannot
+        // appear here (it would carry the `custom:` prefix and be filtered out).
+        for raw in raw_types {
+            let canonical = encode_knowledge_type(&KnowledgeType::Custom(raw.clone()));
+            conn.execute(
+                "UPDATE nodes SET node_type = ?1 WHERE node_type = ?2",
+                params![canonical, raw],
+            )
+            .map_err(sqlite_error)?;
+        }
 
         Ok(())
     })();
