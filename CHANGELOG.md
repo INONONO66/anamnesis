@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.1]
+
+Fixes from post-0.10.0 external review (all four findings verified before fixing):
+
+- **docs**: removed stale `fact_at` references (method deleted in 0.10.0) across README and docs; corrected `snapshot()` signature (`Result<SnapshotId, Error>`); full README API-block signature audit.
+- **storage (breaking-safe)**: v7→v8 migration normalizes ALL bare non-canonical `node_type` strings to the canonical `custom:` encoding (Rust-side re-encode, escape-correct), so foreign/future bare types are visible to `nodes_by_type` — closes the class, not just the fixed legacy list.
+- **query**: tension endpoints are exempt from result-limit trimming — the "why did we switch?" tension now survives small `limit`s (the demo/tests no longer need an oversized limit).
+- **demo**: the flat-cosine baseline now ranks the full episodic corpus independently of graph recall.
+
 ## [0.10.0] — Shrink to product
 
 Breaking release. An audit found ~85% of the Engine's public surface had zero
