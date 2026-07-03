@@ -400,6 +400,8 @@ When a new agent session starts, it inherits not rules but *judgment*.
 
 Anamnesis exposes two API surfaces: the **Framework API** ([`anamnesis::memory::Memory`](https://docs.rs/anamnesis-engine/latest/anamnesis/memory/struct.Memory.html)) and the **Kernel API** ([`anamnesis::engine`](https://docs.rs/anamnesis-engine/latest/anamnesis/engine/index.html)). `Memory` is the official consumer-layer default, built entirely on `Engine`'s public API. The crate root re-exports exactly three symbols — `Memory`, `Engine`, and `Error` — and nothing else.
 
+- [Operations](docs/06-operations/operations.md) — tool usage contract, failure/recovery semantics, daemon lifecycle, all env knobs.
+
 ```
 src/
 ├── memory/         Memory — the Framework API (bench-proven recipe: add/search/used/tick)
