@@ -86,7 +86,12 @@ pub fn dispatch(reg: &mut MemoryRegistry, req: Request) -> Response {
             }
         }
         Request::Stats { namespace } => match reg.stats(namespace.as_deref()) {
-            Ok(stats) => Response::ok(format_stats(&stats)),
+            Ok(stats) => {
+                let usage = reg
+                    .usage_report(namespace.as_deref())
+                    .unwrap_or_else(|e| format!("usage: unavailable ({e})"));
+                Response::ok(format!("{}\n{}", format_stats(&stats), usage))
+            }
             Err(e) => Response::internal(e),
         },
         Request::PullPending { limit, namespace } => {
@@ -279,6 +284,9 @@ mod tests {
         let text = ok_text(dispatch(&mut reg, Request::Stats { namespace: None }));
         assert!(text.contains("nodes:"));
         assert!(text.contains("health grade:"));
+        // The dogfood usage section is appended after the stats block.
+        assert!(text.contains("usage (this daemon)"), "got: {text}");
+        assert!(text.contains("extraction backlog:"), "got: {text}");
     }
 
     #[test]

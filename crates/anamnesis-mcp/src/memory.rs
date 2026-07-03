@@ -109,6 +109,22 @@ enum Backend {
     Memory,
 }
 
+/// Daemon-lifetime operation counters (in-memory; reset when the daemon
+/// exits). A working-session observability window, not a persisted metric.
+///
+/// Fields are `pub(crate)` so the capture pipeline (`crate::capture`) can bump
+/// `extraction_pulls` from `pull_pending`, mirroring the `seen_turn_keys` /
+/// `unextracted` cross-module field pattern.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct OpCounters {
+    pub(crate) recalls: u64,
+    pub(crate) reinforcing_recalls: u64,
+    pub(crate) remembers: u64,
+    pub(crate) relates: u64,
+    pub(crate) captured_turns: u64,
+    pub(crate) extraction_pulls: u64,
+}
+
 pub struct MemoryRegistry {
     provider: Option<Arc<dyn EmbeddingProvider>>,
     source: ProviderSource,
@@ -135,6 +151,10 @@ pub struct MemoryRegistry {
     /// Episodic node ids captured but not yet reasoning-extracted (the queue).
     /// `pub(crate)` so the capture pipeline (`crate::capture`) can maintain it.
     pub(crate) unextracted: Vec<NodeId>,
+    /// Daemon-lifetime op counters surfaced by [`usage_report`](Self::usage_report).
+    /// `pub(crate)` so the capture pipeline (`crate::capture`) can increment
+    /// `captured_turns` / `extraction_pulls` from its impl block there.
+    pub(crate) ops: OpCounters,
 }
 
 impl MemoryRegistry {
@@ -163,6 +183,7 @@ impl MemoryRegistry {
             lock_on_open: true,
             seen_turn_keys: HashSet::new(),
             unextracted: Vec::new(),
+            ops: OpCounters::default(),
         }
     }
 
@@ -199,6 +220,7 @@ impl MemoryRegistry {
             lock_on_open: true,
             seen_turn_keys: HashSet::new(),
             unextracted: Vec::new(),
+            ops: OpCounters::default(),
         }
     }
 
@@ -226,6 +248,7 @@ impl MemoryRegistry {
             lock_on_open: true,
             seen_turn_keys: HashSet::new(),
             unextracted: Vec::new(),
+            ops: OpCounters::default(),
         }
     }
 
@@ -484,6 +507,14 @@ impl MemoryRegistry {
         reinforce: Option<bool>,
         gate: Option<f64>,
     ) -> Result<PackagedRecall, Error> {
+        // Count every recall; a recall is "reinforcing" per the SAME resolution
+        // the method uses below (`reinforce.unwrap_or(self.reinforce_on_recall)`).
+        // Counted on intent, before the gate can turn a would-be reinforce into a
+        // pure read — the metric tracks how the caller asked to recall.
+        self.ops.recalls += 1;
+        if reinforce == Some(true) || (reinforce.is_none() && self.reinforce_on_recall) {
+            self.ops.reinforcing_recalls += 1;
+        }
         let reinforce = reinforce.unwrap_or(self.reinforce_on_recall);
         let mem = self.get(ns)?;
         // Tick BEFORE searching so a cold recall after a long idle gap ranks on
@@ -531,6 +562,7 @@ impl MemoryRegistry {
         relation: &str,
         ns: Option<&str>,
     ) -> Result<u64, Error> {
+        self.ops.relates += 1;
         let relation = parse_relation(relation)?;
         let mem = self.get(ns)?;
         // Flush so a just-added turn (its semantic still buffered) is a valid
@@ -550,8 +582,45 @@ impl MemoryRegistry {
         mem.stats()
     }
 
+    /// Usage/capture section appended to the `stats` tool output.
+    /// Counters are daemon-lifetime; backlog/captured/stale are live reads.
+    pub fn usage_report(&mut self, ns: Option<&str>) -> Result<String, Error> {
+        const STALE_MS: u64 = 14 * 24 * 60 * 60 * 1000; // 14 days
+        let now = Timestamp::now().0;
+        let mem = self.get(ns)?;
+        let graph = mem.engine().graph();
+        let mut total = 0usize;
+        let mut stale = 0usize;
+        for id in graph.all_node_ids() {
+            if let Ok(node) = graph.get_node(id) {
+                total += 1;
+                if now.saturating_sub(node.accessed_at.0) > STALE_MS {
+                    stale += 1;
+                }
+            }
+        }
+        let stale_ratio = if total == 0 {
+            0.0
+        } else {
+            stale as f64 / total as f64
+        };
+        Ok(format!(
+            "usage (this daemon):\n  recalls: {} ({} reinforcing)\n  remembers: {}\n  relates: {}\n  captured turns: {}\n  extraction pulls: {}\ncapture:\n  extraction backlog: {}\n  captured total: {}\n  stale ratio (14d): {:.2}",
+            self.ops.recalls,
+            self.ops.reinforcing_recalls,
+            self.ops.remembers,
+            self.ops.relates,
+            self.ops.captured_turns,
+            self.ops.extraction_pulls,
+            self.unextracted.len(),
+            self.seen_turn_keys.len(),
+            stale_ratio,
+        ))
+    }
+
     /// Store one distilled insight (`add_note`). Returns the episodic node id.
     pub fn remember(&mut self, text: &str, ns: Option<&str>) -> Result<u64, Error> {
+        self.ops.remembers += 1;
         let mem = self.get(ns)?;
         let receipt = mem.add_note(text, Timestamp::now())?;
         mem.flush_all()?;
@@ -615,6 +684,7 @@ impl MemoryRegistry {
         // Both keys go in ONE durable write (`set_metadata_pairs`): a turn can
         // never end up deduped (turn_key present) but invisible to the
         // extraction queue (extracted missing) via a partial failure.
+        self.ops.captured_turns += newly_captured.len() as u64;
         for (epi_id, key) in newly_captured {
             let mem = self.get(ns)?;
             mem.set_metadata_pairs(epi_id, &[(META_TURN_KEY, &key), (META_EXTRACTED, "false")])?;
@@ -790,9 +860,14 @@ mod tests {
     /// stem must be rejected, not silently aliased onto the default file.
     #[test]
     fn namespace_colliding_with_default_db_file_is_rejected() {
-        let dir = std::env::temp_dir().join("anamnesis-ns-collision-test");
-        let default_db = dir.join("memory.db");
-        let mut reg = MemoryRegistry::file_backed(default_db, dir, "default".to_string(), false);
+        let dir = tempfile::tempdir().unwrap();
+        let default_db = dir.path().join("memory.db");
+        let mut reg = MemoryRegistry::file_backed(
+            default_db,
+            dir.path().to_path_buf(),
+            "default".to_string(),
+            false,
+        );
         reg.provider = Some(Arc::new(StubProvider));
         // ns "memory" sanitizes to "memory" → <dir>/memory.db == default_db.
         let err = reg.remember("leak attempt", Some("memory")).unwrap_err();
@@ -803,10 +878,14 @@ mod tests {
     /// instance over ONE file, not two instances racing over the same file.
     #[test]
     fn sanitize_equal_namespaces_share_one_instance() {
-        let dir = std::env::temp_dir().join("anamnesis-ns-canonical-test");
-        let _ = std::fs::remove_dir_all(&dir);
-        let default_db = dir.join("memory.db");
-        let mut reg = MemoryRegistry::file_backed(default_db, dir, "default".to_string(), false);
+        let dir = tempfile::tempdir().unwrap();
+        let default_db = dir.path().join("memory.db");
+        let mut reg = MemoryRegistry::file_backed(
+            default_db,
+            dir.path().to_path_buf(),
+            "default".to_string(),
+            false,
+        );
         reg.provider = Some(Arc::new(StubProvider));
         reg.remember("shared via Alpha", Some("Alpha")).unwrap();
         // "alpha" sanitizes to the same stem as "Alpha"; it must see the write.
@@ -1116,5 +1195,45 @@ mod tests {
             "expected >= 4 nodes, got {}",
             s.node_count
         );
+    }
+
+    // ── usage_report (dogfood metrics) ─────────────────────────────────────────
+
+    #[test]
+    fn usage_report_counts_ops_and_backlog() {
+        let mut reg = registry(true);
+        // 1 remember, 1 relate, 2 recalls (1 reinforcing), 1 captured turn, 1 pull.
+        let a = reg.remember("the deploy failed", None).unwrap();
+        let b = reg.remember("the disk was full", None).unwrap();
+        reg.relate(b, a, "causes", None).unwrap();
+        let _ = reg
+            .recall_packaged_gated("deploy", 5, None, Some(false), None)
+            .unwrap();
+        let _ = reg
+            .recall_packaged_gated("deploy", 5, None, Some(true), None)
+            .unwrap();
+        let turns = vec![Turn {
+            speaker: "user".into(),
+            text: "capture me".into(),
+            at_ms: Some(1),
+        }];
+        reg.ingest_conversation("s", &turns, None, true).unwrap();
+        let _ = reg.pull_pending(Some(10), None).unwrap();
+
+        let report = reg.usage_report(None).unwrap();
+        assert!(
+            report.contains("recalls: 2 (1 reinforcing)"),
+            "got: {report}"
+        );
+        assert!(report.contains("remembers: 2"), "got: {report}");
+        assert!(report.contains("relates: 1"), "got: {report}");
+        assert!(report.contains("captured turns: 1"), "got: {report}");
+        assert!(report.contains("extraction pulls: 1"), "got: {report}");
+        assert!(
+            report.contains("extraction backlog: 0"),
+            "drained: {report}"
+        );
+        assert!(report.contains("captured total: 1"), "got: {report}");
+        assert!(report.contains("stale ratio"), "got: {report}");
     }
 }

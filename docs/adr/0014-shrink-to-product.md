@@ -63,6 +63,8 @@ Both run automatically on `SqliteStorage::open`:
 - **v5 → v6**: drops the `peers` / `peer_aliases` tables (the peer/trust subsystem is gone).
 - **v6 → v7**: normalizes legacy `node_type` rows — the removed variants' wire strings decode to `Semantic`, `Identity`, or `Custom(<original>)` and are rewritten in place, so an old database opens cleanly with no data loss (the original label survives as `Custom`).
 
+*Migration guarantees are codified in [the migration policy](../03-persistence/migration-policy.md).*
+
 ## Consequences
 
 - The public surface now matches the product. Every remaining Engine method has a consumer in `Memory`, the MCP server, the plugin, or the benchmarks. The docs can be kept honest against a surface that is actually exercised.

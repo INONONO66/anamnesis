@@ -52,6 +52,23 @@ The earned claim is narrow and real: **typed reasoning edges plus contradiction-
 
 > **See it work** → [cognitive-fidelity results](docs/07-quality-gates/fidelity-results.md): charts of power-law forgetting, the spacing effect (with its retention-interval crossover), and the fan effect — produced by the engine itself, from the same paradigms the CI gate asserts.
 
+## What it is not
+
+- **Not a vector database.** Retrieval uses hybrid alignment (text + embedding + entity + temporal) plus graph-surfaced structure; if you only need top-k similarity, use a vector store — it will be simpler and faster.
+- **Not a cloud memory API.** Local-first single binary; your memories live in a SQLite file you own. There is no hosted service and none is planned.
+- **Not a QA system.** The benchmark numbers are retrieval recall over the LongMemEval / LoCoMo corpora, not answer accuracy; anamnesis returns memories and structure, the agent does the answering.
+- **Not multi-tenant / multi-agent (yet).** One graph per namespace, one writer; peer provenance and trust weighting are roadmap (see [ADR-0014](docs/adr/0014-shrink-to-product.md)).
+- **Not a replacement for project files.** Conventions and specs that belong in your repo (CLAUDE.md, docs) should stay there; anamnesis holds what emerges from conversations — decisions, contradictions, lessons, context.
+
+## Success criteria
+
+What "working" means for a memory engine, in observable terms — check yours with the `stats` tool (usage section):
+
+1. **Recall earns its injection.** Session-start and per-prompt recalls surface prior decisions the agent actually builds on (the τ gate keeps irrelevant memory out; a reinforcing `recall` / `relate` after use is the signal it helped).
+2. **Capture keeps up.** The extraction backlog drains within a few sessions (`extraction backlog` low relative to `captured total`); raw turns are never lost (fail-open, redelivery).
+3. **The graph stays structured.** Contradictions surface as tensions instead of silently coexisting; `why`-chains are traceable (`relate` edges accumulate alongside captured turns).
+4. **Forgetting works.** Stale ratio stays bounded as the graph grows — old, unused memories sink (archival) instead of drowning recall.
+
 ## Use in Claude Code & Codex
 
 The most common way to run Anamnesis: **persistent associative memory for a
@@ -383,6 +400,8 @@ When a new agent session starts, it inherits not rules but *judgment*.
 
 Anamnesis exposes two API surfaces: the **Framework API** ([`anamnesis::memory::Memory`](https://docs.rs/anamnesis-engine/latest/anamnesis/memory/struct.Memory.html)) and the **Kernel API** ([`anamnesis::engine`](https://docs.rs/anamnesis-engine/latest/anamnesis/engine/index.html)). `Memory` is the official consumer-layer default, built entirely on `Engine`'s public API. The crate root re-exports exactly three symbols — `Memory`, `Engine`, and `Error` — and nothing else.
 
+- [Operations](docs/06-operations/operations.md) — tool usage contract, failure/recovery semantics, daemon lifecycle, all env knobs.
+
 ```
 src/
 ├── memory/         Memory — the Framework API (bench-proven recipe: add/search/used/tick)
@@ -624,6 +643,8 @@ These are **not yet implemented**. They are recorded here so the map matches the
 See [ADR-0014](docs/adr/0014-shrink-to-product.md) for the full shrink record — what was removed, why, and the condition for each to return.
 
 ## Status
+
+**v0.10.x** — external-review fixes (0.10.1: doc drift, v8 bare-type normalization, tension-endpoint trimming exemption, corpus-independent demo baseline) and ops hardening (0.10.2: usage metrics in `stats`, [operations contract](docs/06-operations/operations.md), [migration policy](docs/03-persistence/migration-policy.md), flake-class fixes).
 
 **v0.10.0** — **shrink to product** ([ADR-0014](docs/adr/0014-shrink-to-product.md)). An audit found ~85% of the Engine's public surface had zero consumers — the map sold more than the territory walked. This release removes the debug/hypothesis lifecycle, the peer/trust subsystem, a large convenience API, manual memory-tier override, and the scope-relation hierarchy; collapses `KnowledgeType` from 15 variants to 4 (`Episodic` / `Semantic` / `Identity` / `Custom`); and discloses a set of by-design decay/tau coarsenings. `PeerId` storage, tier *display*, and the internal module tree survive. Breaking vs 0.9. Migrations run automatically on open (v5→v6 drops peers; v6→v7 normalizes legacy node types). See the [CHANGELOG](CHANGELOG.md) and ADR-0014.
 
