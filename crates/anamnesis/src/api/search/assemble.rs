@@ -439,6 +439,24 @@ fn apply_validity_filter<S: StorageAdapter + Clone>(
     });
 }
 
+/// Trim the packaged fragments down to the top-`limit` by relevance, with one
+/// exemption: **the endpoints of any tension surfaced before trimming are always
+/// retained**.
+///
+/// A tension (a surfaced `Contradicts` pair, ADR-0006) is the product's
+/// differentiator — dropping it because one endpoint ranked just below the cut
+/// would silently discard the very structure the query surfaced. So after
+/// selecting the top-`limit` fragment ids, this unions in both endpoints of every
+/// tension present in `package.tensions` at entry (post-validity-filter), so the
+/// tension and its endpoint fragments survive the retains. The tension itself is
+/// kept only when BOTH endpoints are — which the union now guarantees for every
+/// pre-trim tension — so no tension is ever resurrected, only preserved.
+///
+/// Consequence: the packaged fragment count MAY exceed `limit` by the (typically
+/// few) exempted tension endpoints. This is intentional and bounded — at most two
+/// ids per surfaced tension, and only for tensions that were real before trimming.
+/// Non-tension trimming is otherwise unchanged: no re-ranking, the top-`limit`
+/// selection stands.
 fn apply_result_limit(package: &mut ContextPackage, limit: usize, chars_per_token: usize) {
     if package.total_fragments() <= limit {
         return;
@@ -456,11 +474,20 @@ fn apply_result_limit(package: &mut ContextPackage, limit: usize, chars_per_toke
             .total_cmp(left_score)
             .then_with(|| left_id.cmp(right_id))
     });
-    let allowed: HashSet<NodeId> = ranked
+    let mut allowed: HashSet<NodeId> = ranked
         .into_iter()
         .take(limit)
         .map(|(node_id, _)| node_id)
         .collect();
+
+    // Exempt tension endpoints from trimming: union in both endpoints of every
+    // tension surfaced before the cut, so a contradiction pair is never dropped
+    // just because one endpoint ranked below `limit`. Package size may exceed
+    // `limit` by these endpoints (documented above).
+    for tension in &package.tensions {
+        allowed.insert(tension.node_a);
+        allowed.insert(tension.node_b);
+    }
 
     package
         .identity

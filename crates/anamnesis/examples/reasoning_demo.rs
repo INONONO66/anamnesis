@@ -151,10 +151,11 @@ fn main() -> Result<(), anamnesis::Error> {
 
     let query = "why did we switch databases?";
 
-    // `limit` is sized to the recalled set so both contradicting turns survive
-    // result trimming and the tension reaches us (the readout keeps the top-`limit`
-    // fragments; a surfaced tension is retained only when both endpoints survive).
-    let recall = m.search_at(query, 25, Timestamp(2_000))?;
+    // A natural, modest `limit`. Tension endpoints are exempt from result-limit
+    // trimming (assemble.rs `apply_result_limit`), so the contradiction pair
+    // reaches us even when an endpoint ranks below the cut — no need to oversize
+    // `limit` to the whole recalled set.
+    let recall = m.search_at(query, 10, Timestamp(2_000))?;
 
     // ── View 1: graph recall — structure ─────────────────────────────────────
     // `recall.as_context()` renders the full IDENTITY/KNOWLEDGE/MEMORIES/TENSIONS

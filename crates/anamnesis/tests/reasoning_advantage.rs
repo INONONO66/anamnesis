@@ -167,7 +167,7 @@ fn without_edges_no_tension_surfaces() {
     let _sc = build_scenario(&mut m, false);
 
     let recall = m
-        .search_at("why did we switch databases?", 25, Timestamp(2_000))
+        .search_at("why did we switch databases?", 10, Timestamp(2_000))
         .unwrap();
 
     assert!(
@@ -189,12 +189,13 @@ fn why_query_surfaces_contradiction_tension() {
     let mut m = memory();
     let sc = build_scenario(&mut m, true);
 
-    // Query at a domain time when both facts are valid together. `limit` is sized
-    // to the recalled set so both contradicting turns survive result trimming and
-    // the pair reaches the caller (the readout keeps the top-`limit` fragments,
-    // and a surfaced tension is retained only when both endpoints survive).
+    // Query at a domain time when both facts are valid together. A natural, modest
+    // `limit`: tension endpoints are exempt from result-limit trimming, so the
+    // contradiction pair reaches the caller even if an endpoint ranks below the cut
+    // (the dedicated `small_limit_retains_tension_and_both_endpoints` test pins that
+    // exemption at an even tighter limit).
     let recall = m
-        .search_at("why did we switch databases?", 25, Timestamp(2_000))
+        .search_at("why did we switch databases?", 10, Timestamp(2_000))
         .unwrap();
 
     // Structured accessor (preferred): the Contradicts pair must be present as a
@@ -230,12 +231,21 @@ fn why_query_surfaces_contradiction_tension() {
         tension.evidence_sources
     );
 
-    // Both contradicting turns survive in the recalled memories (surfaced, never
-    // suppressed — ADR-0006).
-    let recalled: Vec<NodeId> = recall.hits.iter().map(|h| h.node_id).collect();
+    // Both contradicting turns survive as fragments in the assembled package
+    // (surfaced, never suppressed — ADR-0006). This is the LLM-facing result;
+    // tension endpoints are exempt from result-limit trimming, so both are retained
+    // even though the lower-ranked one falls outside the top-`limit` readout `hits`.
+    let fragment_ids: Vec<NodeId> = recall
+        .package
+        .identity
+        .iter()
+        .chain(recall.package.knowledge.iter())
+        .chain(recall.package.memories.iter())
+        .map(|f| f.node_id)
+        .collect();
     assert!(
-        recalled.contains(&sc.decision) && recalled.contains(&sc.reversal),
-        "both contradicting turns must survive in the recall; got {recalled:?}"
+        fragment_ids.contains(&sc.decision) && fragment_ids.contains(&sc.reversal),
+        "both contradicting turns must survive as package fragments; got {fragment_ids:?}"
     );
 
     // The human-readable context must render a TENSIONS section referencing both
@@ -249,6 +259,58 @@ fn why_query_surfaces_contradiction_tension() {
         context.contains(&format!("#{}", sc.decision.0))
             && context.contains(&format!("#{}", sc.reversal.0)),
         "TENSIONS block must reference both contradicting node ids:\n{context}"
+    );
+}
+
+/// A surfaced tension must survive result-limit trimming even when one of its
+/// endpoints would fall outside the top-`limit` fragments: tension endpoints are
+/// exempt from trimming (assemble.rs `apply_result_limit`). With a SMALL limit
+/// (5) the contradiction pair would previously be dropped whenever either endpoint
+/// ranked below the cut; after the exemption the tension and BOTH its endpoint
+/// fragments are retained.
+#[test]
+fn small_limit_retains_tension_and_both_endpoints() {
+    let mut m = memory();
+    let sc = build_scenario(&mut m, true);
+
+    // A limit well below the recalled-set size so trimming is forced to run.
+    let recall = m
+        .search_at("why did we switch databases?", 5, Timestamp(2_000))
+        .unwrap();
+
+    // The contradiction pair must still be present as a tension.
+    let tension_present = recall.package.tensions.iter().any(|t| {
+        (t.node_a == sc.decision && t.node_b == sc.reversal)
+            || (t.node_a == sc.reversal && t.node_b == sc.decision)
+    });
+    assert!(
+        tension_present,
+        "tension must survive a small limit; got tensions {:?}",
+        recall.package.tensions
+    );
+
+    // Both endpoint fragments must be retained across the buckets (the exemption
+    // unions their ids into the allowed set before the retains).
+    let fragment_ids: Vec<NodeId> = recall
+        .package
+        .identity
+        .iter()
+        .chain(recall.package.knowledge.iter())
+        .chain(recall.package.memories.iter())
+        .map(|f| f.node_id)
+        .collect();
+    assert!(
+        fragment_ids.contains(&sc.decision) && fragment_ids.contains(&sc.reversal),
+        "both tension endpoints must be retained as fragments; got {fragment_ids:?}"
+    );
+
+    // The exemption is minimal: the package may exceed `limit` only by the few
+    // exempted tension endpoints, never by the whole recalled set. Two endpoints
+    // here, so the package is at most limit + 2.
+    assert!(
+        recall.package.total_fragments() <= 5 + 2,
+        "non-tension trimming must still hold; package size {} exceeds limit + 2 endpoints",
+        recall.package.total_fragments()
     );
 }
 
