@@ -9,8 +9,8 @@
 //! `Month YYYY`.
 //!
 //! ## Relative cues
-//! Resolved against `now` (Unix epoch seconds). When `now == 0`, relative cues
-//! are skipped and explicit cues are still parsed.
+//! Resolved against `now` (Unix epoch milliseconds). When `now == 0`, relative
+//! cues are skipped and explicit cues are still parsed.
 //!
 //! Patterns: "yesterday", "last week", "last month", "last year",
 //! "N days/weeks/months ago" (N 1–99), "a week/month ago",
@@ -46,7 +46,7 @@ const MONTHS: [&str; 12] = [
     "november",
     "december",
 ];
-const DAY_SECS: u64 = 86_400;
+const DAY_MS: u64 = 86_400_000;
 
 fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
     let y = if month <= 2 { year - 1 } else { year };
@@ -80,7 +80,7 @@ fn day_epoch(year: i64, month: u32, day: u32) -> Option<u64> {
         return None;
     }
     let days = days_from_civil(year, month, day);
-    (days >= 0).then(|| days as u64 * DAY_SECS)
+    (days >= 0).then(|| days as u64 * DAY_MS)
 }
 
 fn month_range(year: i64, month: u32) -> Option<TimeRange> {
@@ -121,7 +121,7 @@ pub(crate) fn parse_time_cues(text: &str, now: u64) -> Vec<TimeRange> {
                 {
                     ranges.push(TimeRange {
                         start,
-                        end: start + DAY_SECS - 1,
+                        end: start + DAY_MS - 1,
                     });
                 }
             }
@@ -143,7 +143,7 @@ pub(crate) fn parse_time_cues(text: &str, now: u64) -> Vec<TimeRange> {
                 match day.and_then(|d| day_epoch(year, month, d)) {
                     Some(start) => ranges.push(TimeRange {
                         start,
-                        end: start + DAY_SECS - 1,
+                        end: start + DAY_MS - 1,
                     }),
                     None => {
                         if let Some(range) = month_range(year, month) {
@@ -156,7 +156,7 @@ pub(crate) fn parse_time_cues(text: &str, now: u64) -> Vec<TimeRange> {
     }
     // ---- relative cues (only when now != 0) ----
     if now != 0 {
-        let now_days = (now / DAY_SECS) as i64;
+        let now_days = (now / DAY_MS) as i64;
         let (now_year, now_month, _now_day_of_month) = civil_from_days(now_days);
 
         // Helper: inclusive TimeRange from start/end day counts (days since epoch).
@@ -165,8 +165,8 @@ pub(crate) fn parse_time_cues(text: &str, now: u64) -> Vec<TimeRange> {
                 return None;
             }
             Some(TimeRange {
-                start: start_days as u64 * DAY_SECS,
-                end: end_days as u64 * DAY_SECS + DAY_SECS - 1,
+                start: start_days as u64 * DAY_MS,
+                end: end_days as u64 * DAY_MS + DAY_MS - 1,
             })
         };
 
@@ -204,7 +204,7 @@ pub(crate) fn parse_time_cues(text: &str, now: u64) -> Vec<TimeRange> {
                     // day_epoch(next_y, next_m2, 1) - 1 gives last second of end month;
                     // convert to days then extract day-of-month.
                     let end_epoch = day_epoch(next_y, next_m2, 1)? - 1;
-                    let end_days_val = (end_epoch / DAY_SECS) as i64;
+                    let end_days_val = (end_epoch / DAY_MS) as i64;
                     let (_, _, d) = civil_from_days(end_days_val);
                     d
                 };
@@ -359,7 +359,7 @@ pub(crate) fn temporal_proximity(timestamp: u64, cues: &[TimeRange]) -> f64 {
                 } else {
                     timestamp - range.end
                 };
-                let days = distance as f64 / DAY_SECS as f64;
+                let days = distance as f64 / DAY_MS as f64;
                 (-days / crate::mechanics::priors::TEMPORAL_PROXIMITY_DECAY_DAYS).exp()
             }
         })
@@ -370,7 +370,22 @@ pub(crate) fn temporal_proximity(timestamp: u64, cues: &[TimeRange]) -> f64 {
 mod tests {
     use super::*;
 
-    const MAY_8_2023: u64 = 1_683_504_000; // 2023-05-08 00:00 UTC
+    const MAY_8_2023: u64 = 1_683_504_000_000; // 2023-05-08 00:00 UTC (ms)
+
+    #[test]
+    fn ms_native_yesterday_proximity() {
+        // Regression (#3): the temporal engine must be millisecond-native so a
+        // relative cue like "yesterday" matches a ms-scale node timestamp on the
+        // real query path (callers pass ms). Fails today (~0) due to s/ms mismatch.
+        let now = 1_720_000_000_000u64; // fixed ms epoch
+        let cues = parse_time_cues("what happened yesterday", now);
+        let node_ts = now - 86_400_000; // 1 day ago in MS
+        let score = temporal_proximity(node_ts, &cues);
+        assert!(
+            score > 0.5,
+            "ms-scale 'yesterday' node must score high, got {score}"
+        );
+    }
 
     #[test]
     fn parses_natural_language_date() {
@@ -382,7 +397,7 @@ mod tests {
         );
         assert_eq!(
             cues[0].end,
-            MAY_8_2023 + 86_400 - 1,
+            MAY_8_2023 + DAY_MS - 1,
             "end must be end of day"
         );
     }
@@ -398,12 +413,12 @@ mod tests {
     fn parses_month_year_range() {
         let cues = parse_time_cues("events in May 2023", 0);
         assert_eq!(cues.len(), 1, "expected one cue for month range");
-        // May 2023: 2023-05-01 00:00 UTC = 1682899200
-        assert_eq!(cues[0].start, 1_682_899_200, "start must be 2023-05-01");
-        // End must be 2023-05-31 23:59:59 = 1685577599
+        // May 2023: 2023-05-01 00:00 UTC = 1682899200 s = 1682899200000 ms
+        assert_eq!(cues[0].start, 1_682_899_200_000, "start must be 2023-05-01");
+        // End must be 2023-05-31 23:59:59.999 = 1685577599999 ms
         assert_eq!(
-            cues[0].end, 1_685_577_599,
-            "end must be last second of May 2023"
+            cues[0].end, 1_685_577_599_999,
+            "end must be last millisecond of May 2023"
         );
     }
 
@@ -435,9 +450,9 @@ mod tests {
     fn proximity_one_inside_range() {
         let range = TimeRange {
             start: MAY_8_2023,
-            end: MAY_8_2023 + 86_400 - 1,
+            end: MAY_8_2023 + DAY_MS - 1,
         };
-        let score = temporal_proximity(MAY_8_2023 + 3600, &[range]);
+        let score = temporal_proximity(MAY_8_2023 + 3_600_000, &[range]);
         assert_eq!(score, 1.0, "inside range must score 1.0");
     }
 
@@ -445,10 +460,10 @@ mod tests {
     fn proximity_decays_outside_range() {
         let range = TimeRange {
             start: MAY_8_2023,
-            end: MAY_8_2023 + 86_400 - 1,
+            end: MAY_8_2023 + DAY_MS - 1,
         };
         // 7 days before — should decay by exp(-7/7) = exp(-1)
-        let ts = MAY_8_2023 - 7 * 86_400;
+        let ts = MAY_8_2023 - 7 * DAY_MS;
         let score = temporal_proximity(ts, &[range]);
         let expected = (-7.0 / crate::mechanics::priors::TEMPORAL_PROXIMITY_DECAY_DAYS).exp();
         assert!(
@@ -461,7 +476,7 @@ mod tests {
     fn proximity_zero_for_zero_timestamp() {
         let range = TimeRange {
             start: MAY_8_2023,
-            end: MAY_8_2023 + 86_400 - 1,
+            end: MAY_8_2023 + DAY_MS - 1,
         };
         assert_eq!(temporal_proximity(0, &[range]), 0.0);
     }
@@ -508,7 +523,7 @@ mod tests {
     #[test]
     fn parse_time_cues_now_nonzero_explicit_still_works() {
         // now != 0 must still handle explicit ISO dates.
-        let now_sept_15 = 1_694_736_000u64; // 2023-09-15 00:00 UTC
+        let now_sept_15 = 1_694_736_000_000u64; // 2023-09-15 00:00 UTC (ms)
         let cues = parse_time_cues("event on 2023-05-08 was notable", now_sept_15);
         assert_eq!(cues.len(), 1);
         assert_eq!(cues[0].start, MAY_8_2023);
@@ -516,8 +531,8 @@ mod tests {
 
     // ---- relative time cues ----
 
-    // now = 2023-09-15 00:00 UTC
-    const NOW_SEPT_15_2023: u64 = 1_694_736_000;
+    // now = 2023-09-15 00:00 UTC (ms)
+    const NOW_SEPT_15_2023: u64 = 1_694_736_000_000;
 
     #[test]
     fn relative_yesterday() {
@@ -526,7 +541,7 @@ mod tests {
         assert_eq!(cues.len(), 1, "expected 1 cue, got {cues:?}");
         let sept_14 = day_epoch(2023, 9, 14).unwrap();
         assert_eq!(cues[0].start, sept_14);
-        assert_eq!(cues[0].end, sept_14 + DAY_SECS - 1);
+        assert_eq!(cues[0].end, sept_14 + DAY_MS - 1);
     }
 
     #[test]
@@ -535,7 +550,7 @@ mod tests {
         let cues = parse_time_cues("what happened last week", NOW_SEPT_15_2023);
         assert_eq!(cues.len(), 1, "expected 1 cue, got {cues:?}");
         let sept_8 = day_epoch(2023, 9, 8).unwrap();
-        let sept_14_end = day_epoch(2023, 9, 14).unwrap() + DAY_SECS - 1;
+        let sept_14_end = day_epoch(2023, 9, 14).unwrap() + DAY_MS - 1;
         assert_eq!(cues[0].start, sept_8);
         assert_eq!(cues[0].end, sept_14_end);
     }
@@ -569,7 +584,7 @@ mod tests {
         assert_eq!(cues.len(), 1, "expected 1 cue, got {cues:?}");
         let sept_13 = day_epoch(2023, 9, 13).unwrap();
         assert_eq!(cues[0].start, sept_13);
-        assert_eq!(cues[0].end, sept_13 + DAY_SECS - 1);
+        assert_eq!(cues[0].end, sept_13 + DAY_MS - 1);
     }
 
     #[test]
@@ -579,7 +594,7 @@ mod tests {
         let cues = parse_time_cues("what happened 2 weeks ago", NOW_SEPT_15_2023);
         assert_eq!(cues.len(), 1, "expected 1 cue, got {cues:?}");
         let aug_29 = day_epoch(2023, 8, 29).unwrap();
-        let sept_4_end = day_epoch(2023, 9, 4).unwrap() + DAY_SECS - 1;
+        let sept_4_end = day_epoch(2023, 9, 4).unwrap() + DAY_MS - 1;
         assert_eq!(cues[0].start, aug_29);
         assert_eq!(cues[0].end, sept_4_end);
     }
@@ -591,7 +606,7 @@ mod tests {
         let cues = parse_time_cues("what happened a week ago", NOW_SEPT_15_2023);
         assert_eq!(cues.len(), 1, "expected 1 cue, got {cues:?}");
         let sept_5 = day_epoch(2023, 9, 5).unwrap();
-        let sept_11_end = day_epoch(2023, 9, 11).unwrap() + DAY_SECS - 1;
+        let sept_11_end = day_epoch(2023, 9, 11).unwrap() + DAY_MS - 1;
         assert_eq!(cues[0].start, sept_5);
         assert_eq!(cues[0].end, sept_11_end);
     }
@@ -613,7 +628,7 @@ mod tests {
         let cues = parse_time_cues("What did we plan last summer?", NOW_SEPT_15_2023);
         assert_eq!(cues.len(), 1, "expected 1 cue, got {cues:?}");
         let summer_start = day_epoch(2023, 6, 1).unwrap();
-        let summer_end = day_epoch(2023, 8, 31).unwrap() + DAY_SECS - 1;
+        let summer_end = day_epoch(2023, 8, 31).unwrap() + DAY_MS - 1;
         assert_eq!(cues[0].start, summer_start, "summer start mismatch");
         assert_eq!(cues[0].end, summer_end, "summer end mismatch");
     }
@@ -625,7 +640,7 @@ mod tests {
         let cues = parse_time_cues("last summer we went hiking", now_july_10);
         assert_eq!(cues.len(), 1, "expected 1 cue, got {cues:?}");
         let summer_start_2022 = day_epoch(2022, 6, 1).unwrap();
-        let summer_end_2022 = day_epoch(2022, 8, 31).unwrap() + DAY_SECS - 1;
+        let summer_end_2022 = day_epoch(2022, 8, 31).unwrap() + DAY_MS - 1;
         assert_eq!(cues[0].start, summer_start_2022);
         assert_eq!(cues[0].end, summer_end_2022);
     }

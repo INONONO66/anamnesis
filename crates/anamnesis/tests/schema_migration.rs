@@ -86,7 +86,11 @@ fn fresh_db_gets_current_schema_version() {
     assert_eq!(storage.node_count(), 0);
 
     let conn = Connection::open(&tmp).expect("reopen");
-    assert_eq!(schema_version(&conn), 8, "fresh DB should be at schema v8");
+    assert_eq!(
+        schema_version(&conn),
+        10,
+        "fresh DB should be at schema v10"
+    );
 
     // v6 removed the peer/trust subsystem: a fresh DB has no peers tables.
     assert!(
@@ -232,8 +236,8 @@ fn existing_db_migrates_from_v1_to_current() {
 
         assert_eq!(
             schema_version(&conn),
-            8,
-            "schema_version should be 8 after full v1 -> v8 migration"
+            10,
+            "schema_version should be 10 after full v1 -> v10 migration"
         );
 
         // Nodes' peer_id column (inside the Origin encoding) STAYS after the chain.
@@ -362,8 +366,8 @@ fn fresh_schema_equals_migrated_schema() {
     let fresh = Connection::open(&fresh_path).expect("reopen fresh");
     let migrated = Connection::open(&migrated_path).expect("reopen migrated");
 
-    assert_eq!(schema_version(&fresh), 8);
-    assert_eq!(schema_version(&migrated), 8);
+    assert_eq!(schema_version(&fresh), 10);
+    assert_eq!(schema_version(&migrated), 10);
 
     // Both the fresh-create and migration paths must converge on a nodes table that
     // carries the v5 evidence_prior column (legacy v1->v2 ALTERs leave the rest of
@@ -579,7 +583,11 @@ fn v5_db_with_planted_peers_reopens_clean_at_v6() {
     //    (with its peer_id / source_kind) is intact.
     {
         let conn = Connection::open(&tmp).expect("reopen after migration");
-        assert_eq!(schema_version(&conn), 8, "DB should be at v8 after reopen");
+        assert_eq!(
+            schema_version(&conn),
+            10,
+            "DB should be at v10 after reopen"
+        );
         assert!(
             !table_exists(&conn, "peers"),
             "peers table must be dropped at v6"
@@ -705,7 +713,7 @@ fn v5_db_with_bare_node_type_normalizes_through_full_chain_to_v8() {
 
     {
         let conn = Connection::open(&tmp).expect("reopen raw");
-        assert_eq!(schema_version(&conn), 8, "chain must land at v8");
+        assert_eq!(schema_version(&conn), 10, "chain must land at v10");
         let enc: String = conn
             .query_row(
                 "SELECT node_type FROM nodes WHERE id = ?1",

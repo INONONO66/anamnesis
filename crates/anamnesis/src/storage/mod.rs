@@ -172,7 +172,21 @@ pub trait StorageAdapter: Send + Sync {
     fn get_edge_accessed_at(&self, id: EdgeId) -> Result<Timestamp, Error>;
 
     /// Set the last-accessed timestamp for an edge.
+    ///
+    /// A committed use is, by definition, not idle: implementations also reset
+    /// the edge's `leaked_at` checkpoint to the same instant, clearing any
+    /// outstanding idle-leak debt (the two fields stay distinct; this keeps
+    /// them synchronized on every "use" event, per interactions.md).
     fn set_edge_accessed_at(&mut self, id: EdgeId, ts: Timestamp) -> Result<(), Error>;
+
+    /// Get the per-edge leak checkpoint — the last `now` idle-edge leakage was
+    /// actually charged from (see [`Edge::leaked_at`]). O(1) direct array access.
+    fn get_edge_leaked_at(&self, id: EdgeId) -> Result<Timestamp, Error>;
+
+    /// Set the leak checkpoint for an edge. Called by `Engine::tick` after a
+    /// successful leak, so a fixed idle window is charged once regardless of
+    /// how many times `tick` runs at the same `now`.
+    fn set_edge_leaked_at(&mut self, id: EdgeId, ts: Timestamp) -> Result<(), Error>;
 
     /// Persist any buffered hot-field writes.
     ///

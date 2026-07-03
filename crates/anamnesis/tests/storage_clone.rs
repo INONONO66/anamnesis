@@ -53,6 +53,7 @@ fn make_edge(id: EdgeId, source: NodeId, target: NodeId) -> Edge {
         edge_source: anamnesis::graph::edge::EdgeSource::Auto,
         created_at: Timestamp(1000),
         accessed_at: Timestamp(1000),
+        leaked_at: Timestamp(1000),
         valid_from: None,
         valid_until: None,
         metadata: HashMap::new(),

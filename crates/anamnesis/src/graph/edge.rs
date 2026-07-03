@@ -40,8 +40,15 @@ pub struct Edge {
     pub edge_source: EdgeSource,
     /// When this edge was created.
     pub created_at: Timestamp,
-    /// When this edge was last accessed (committed). Used for idle-edge leakage.
+    /// When this edge was last accessed (committed use). Distinct from
+    /// `leaked_at` (never advanced by leakage itself — leakage is not a use).
     pub accessed_at: Timestamp,
+    /// Per-edge leak checkpoint: the last `now` idle-edge leakage was actually
+    /// charged from (`Engine::tick`, interactions.md `TimeElapsed`). Idle time
+    /// for leakage is `now - leaked_at`, NOT `now - accessed_at` — this keeps
+    /// repeated `tick` calls at the same `now` frequency-independent (a fixed
+    /// idle window is charged once, not once per call).
+    pub leaked_at: Timestamp,
     /// When this relationship becomes valid in domain time.
     pub valid_from: Option<Timestamp>,
     /// When this relationship stops being valid in domain time.
@@ -81,6 +88,7 @@ impl Edge {
             edge_source,
             created_at,
             accessed_at,
+            leaked_at: created_at,
             valid_from: None,
             valid_until: None,
             metadata,
@@ -105,6 +113,7 @@ mod tests {
             edge_source: EdgeSource::Manual,
             created_at: Timestamp(1000),
             accessed_at: Timestamp(1000),
+            leaked_at: Timestamp(1000),
             valid_from: None,
             valid_until: None,
             metadata: HashMap::new(),
@@ -126,6 +135,7 @@ mod tests {
             edge_source: EdgeSource::Auto,
             created_at: Timestamp(500),
             accessed_at: Timestamp(500),
+            leaked_at: Timestamp(500),
             valid_from: None,
             valid_until: None,
             metadata: HashMap::new(),

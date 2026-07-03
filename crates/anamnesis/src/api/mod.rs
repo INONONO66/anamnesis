@@ -1854,17 +1854,29 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             edge_source: crate::graph::edge::EdgeSource::Manual,
             created_at: now,
             accessed_at: now,
+            leaked_at: now,
             valid_from: None,
             valid_until: None,
             metadata: HashMap::new(),
         };
         self.graph.add_edge(edge)?;
         if is_supersedes {
-            if let Ok(target_node) = self.graph.get_node_mut(to) {
-                target_node.valid_until = Some(now);
+            // Set the validity windows, then write-through the FULL node rows:
+            // `flush()` does not persist `valid_from` / `valid_until`, so without
+            // this the supersede is lost on reopen.
+            let target_snapshot = self.graph.get_node_mut(to).ok().map(|n| {
+                n.valid_until = Some(now);
+                n.clone()
+            });
+            let source_snapshot = self.graph.get_node_mut(from).ok().map(|n| {
+                n.valid_from = Some(now);
+                n.clone()
+            });
+            if let Some(node) = target_snapshot {
+                let _ = self.graph.storage_mut().set_node(node);
             }
-            if let Ok(source_node) = self.graph.get_node_mut(from) {
-                source_node.valid_from = Some(now);
+            if let Some(node) = source_snapshot {
+                let _ = self.graph.storage_mut().set_node(node);
             }
         }
         self.emit_event(GraphEvent::EdgeCreated {
@@ -2101,6 +2113,10 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         node.metadata
             .insert("retracted_at".to_string(), timestamp.0.to_string());
         node.updated_at = timestamp;
+        // Persist the FULL node row: `flush()` only write-behinds hot fields, not
+        // `metadata`, so without this write-through the retraction is lost on reopen.
+        let snapshot = node.clone();
+        self.graph.storage_mut().set_node(snapshot)?;
         Ok(())
     }
 
@@ -2479,19 +2495,31 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                 Ok(a) => a,
                 Err(_) => continue,
             };
-            if !new_action.is_finite() {
-                return Err(Error::NonFinite(format!("retained action for node {id:?}")));
-            }
-            let new_salience = project_salience(new_action);
+            // Deliberate departure from dissipation.md ("non-finite is an
+            // error"): a trace-less legacy node (empty access_history ⇒ B_i =
+            // -inf) must degrade to the archive floor, NOT abort the batch —
+            // recall ticks every cycle, so one bad node would brick the session.
+            let new_salience = if new_action.is_finite() {
+                project_salience(new_action)
+            } else {
+                0.0
+            };
 
             if (new_salience - current_salience).abs() > SALIENCE_CHANGE_EPSILON {
-                // `set_retained_action` refreshes the composite cache + salience.
-                if self
-                    .graph
-                    .storage_mut()
-                    .set_retained_action(id, new_action)
-                    .is_err()
-                {
+                let persisted = if new_action.is_finite() {
+                    self.graph
+                        .storage_mut()
+                        .set_retained_action(id, new_action)
+                        .is_ok()
+                } else {
+                    // Non-finite reservoir: persist only the floored salience;
+                    // never store the invalid reservoir value.
+                    self.graph
+                        .storage_mut()
+                        .set_salience(id, new_salience)
+                        .is_ok()
+                };
+                if !persisted {
                     continue;
                 }
                 nodes_decayed += 1;
@@ -2527,10 +2555,14 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         // `C_ij' = C_ij - eta_leak * idle_edge_leakage(C_ij, idle_days)`
         // (conductance.md post-commit plasticity / interactions.md `TimeElapsed`).
         // Unused weak coupling drains over time (density control). Idle time is
-        // `now - edge.accessed_at` (the committed-use timestamp). Edges incident to
-        // a protected node (`Identity`) are exempt, mirroring node
-        // decay; `Contradicts` edges are excluded (routed to frustration, not
-        // propagation — ADR-0005/0006). Edges are never deleted (ADR-0008/0006).
+        // `now - edge.leaked_at` — a per-edge leak CHECKPOINT, distinct from
+        // `accessed_at` (the committed-use timestamp): repeated ticks at the same
+        // `now` must charge a fixed idle window only once, not once per call
+        // (flagship bug #2 — `accessed_at` never advances on leak, so without a
+        // checkpoint every call re-subtracted the same leak again). Edges incident
+        // to a protected node (`Identity`) are exempt, mirroring node decay;
+        // `Contradicts` edges are excluded (routed to frustration, not propagation
+        // — ADR-0005/0006). Edges are never deleted (ADR-0008/0006).
         {
             use crate::mechanics::interactions::leak_idle_edge_default;
             use crate::mechanics::priors::{ETA_LEAK, project_weight};
@@ -2538,9 +2570,9 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             if ETA_LEAK > 0.0 {
                 let edge_ids = self.graph.storage().all_edge_ids();
                 for eid in edge_ids {
-                    let (source, target, edge_type, accessed_at) =
+                    let (source, target, edge_type, leaked_at) =
                         match self.graph.storage().get_edge(eid) {
-                            Ok(e) => (e.source, e.target, e.edge_type.clone(), e.accessed_at),
+                            Ok(e) => (e.source, e.target, e.edge_type.clone(), e.leaked_at),
                             Err(_) => continue,
                         };
                     // Contradicts is excluded from conductance dynamics.
@@ -2556,7 +2588,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                         Ok(c) => c,
                         Err(_) => continue,
                     };
-                    let dt_ms = now.0.saturating_sub(accessed_at.0);
+                    let dt_ms = now.0.saturating_sub(leaked_at.0);
                     let idle_days = dt_ms as f64 / 86_400_000.0;
                     if idle_days <= 0.0 {
                         continue;
@@ -2572,7 +2604,17 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                         // `set_conductance` persists the leaked reservoir and
                         // re-projects `weight = project_weight(C_ij')`. `accessed_at`
                         // is NOT advanced — leakage is not a use (interactions.md).
+                        // The leak checkpoint DOES advance to `now`, so a later tick
+                        // at the same `now` sees a zero idle window and leaks ~0.
                         if self.graph.storage_mut().set_conductance(eid, next).is_err() {
+                            continue;
+                        }
+                        if self
+                            .graph
+                            .storage_mut()
+                            .set_edge_leaked_at(eid, now)
+                            .is_err()
+                        {
                             continue;
                         }
                         edges_leaked += 1;
@@ -3512,8 +3554,10 @@ mod tests {
 
     // ── Idle-edge leakage (TimeElapsed on conductance) ────────────────────────
 
-    /// Build an edge with a fixed conductance reservoir at a known `accessed_at`,
-    /// so leakage tests do not depend on cold-start coupling magnitudes.
+    /// Build an edge with a fixed conductance reservoir at a known `accessed_at`
+    /// (also used as `created_at`, so `leaked_at` — which `Edge::seeded` inits
+    /// to `created_at` — starts at the same known baseline), so leakage tests
+    /// do not depend on cold-start coupling magnitudes.
     fn seed_edge(
         engine: &mut Engine,
         from: NodeId,
@@ -3530,7 +3574,7 @@ mod tests {
             edge_type,
             conductance,
             crate::graph::edge::EdgeSource::Manual,
-            Timestamp(1000),
+            accessed_at,
             accessed_at,
             HashMap::new(),
         );
