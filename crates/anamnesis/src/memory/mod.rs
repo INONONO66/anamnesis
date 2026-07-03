@@ -53,6 +53,10 @@ use std::fmt::Write as _;
 use std::path::Path;
 use std::sync::Arc;
 
+mod manage;
+mod view;
+pub use view::{ListFilter, MemoryView};
+
 use crate::Engine;
 use crate::api::{CommitReport, EngineConfig, HealthGrade, IngestResult, Observation, TickReport};
 use crate::embedding::EmbeddingProvider;
