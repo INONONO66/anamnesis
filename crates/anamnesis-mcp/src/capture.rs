@@ -232,6 +232,25 @@ mod tests {
         MemoryRegistry::in_memory_with(Arc::new(StubProvider), reinforce)
     }
 
+    /// Retry `f` while it fails with the exclusive-lock error — the previous
+    /// registry in a drop-then-reopen test releases its `<db>.lock` flock
+    /// asynchronously under parallel test load. Any other error panics.
+    fn retry_while_locked<T>(mut f: impl FnMut() -> Result<T, anamnesis::Error>) -> T {
+        for _ in 0..200 {
+            match f() {
+                Ok(v) => return v,
+                Err(e)
+                    if e.to_string()
+                        .contains("already in use by another anamnesis process") =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(e) => panic!("unexpected error while reopening: {e}"),
+            }
+        }
+        panic!("<db>.lock never freed after 200 retries (~2s)");
+    }
+
     #[test]
     fn turn_key_is_deterministic_and_field_sensitive() {
         let a = super::turn_key("s1", "user", "hello", 1000);
@@ -353,7 +372,7 @@ mod tests {
             false,
         );
         // Fresh-pending (within TTL) must NOT re-queue — the mark was durable.
-        reg2.load_extraction_state_at(None, 5_001).unwrap();
+        retry_while_locked(|| reg2.load_extraction_state_at(None, 5_001));
         assert_eq!(reg2.unextracted_len(), 0, "pending mark survived restart");
     }
 
@@ -489,7 +508,10 @@ mod tests {
             false,
         );
         assert_eq!(reg2.unextracted_len(), 0, "index empty before load");
-        reg2.load_extraction_state(None).unwrap();
+        // First fallible op after reopen — retry while the dropped registry's
+        // flock release settles (the `unextracted_len` read above never touches
+        // the DB, so this `load` is what first takes the `<db>.lock`).
+        retry_while_locked(|| reg2.load_extraction_state(None));
         assert_eq!(
             reg2.unextracted_len(),
             1,
