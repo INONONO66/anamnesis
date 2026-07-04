@@ -15,6 +15,7 @@
 //! | `GET  /`                            | —         | embedded HTML             |
 //! | `GET  /api/memories`                | `List`    | JSON array (passthrough)  |
 //! | `GET  /api/memory/{id}`             | `Get`     | JSON object (passthrough) |
+//! | `GET  /api/graph`                   | `Graph`   | JSON object (passthrough) |
 //! | `GET  /api/stats`                   | `Stats`   | `{"stats": "<text>"}`     |
 //! | `POST /api/memory/{id}/forget`      | `Forget`  | `{"ok": true, ...}`       |
 //!
@@ -126,6 +127,29 @@ fn route(req: &Incoming, default_namespace: Option<&str>, daemon: &dyn Daemon) -
             }
         }),
 
+        ["api", "graph"] => require(method, "GET", || {
+            let seed = req.query.get("seed").and_then(|s| s.parse::<u64>().ok());
+            let seeds_csv = req.query.get("seeds").and_then(|s| parse_csv_ids(s));
+            let seeds = seed.map(|s| vec![s]).or(seeds_csv);
+            let query_text = req
+                .query
+                .get("q")
+                .map(String::as_str)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            if seeds.is_none() && query_text.is_none() {
+                return HttpReply::error(400, "graph requires seed(s) or q");
+            }
+            let graph = Request::Graph {
+                seeds,
+                query: query_text,
+                depth: req.query.get("depth").and_then(|s| s.parse().ok()),
+                limit: req.query.get("limit").and_then(|s| s.parse().ok()),
+                namespace,
+            };
+            json_passthrough(daemon.call(graph))
+        }),
+
         ["api", "memory", id] => require(method, "GET", || match parse_id(id) {
             Some(id) => json_passthrough(daemon.call(Request::Get { id, namespace })),
             None => HttpReply::error(400, "invalid node id"),
@@ -164,6 +188,16 @@ fn require(method: &str, allowed: &str, handler: impl FnOnce() -> HttpReply) -> 
 
 fn parse_id(s: &str) -> Option<u64> {
     s.parse::<u64>().ok()
+}
+
+/// Parse a comma-separated list of `u64` ids (`"1,2,3"`). Returns `None` if the
+/// string is empty or any entry fails to parse — a partially-malformed list is
+/// rejected wholesale rather than silently dropping the bad entries.
+fn parse_csv_ids(raw: &str) -> Option<Vec<u64>> {
+    if raw.is_empty() {
+        return None;
+    }
+    raw.split(',').map(|s| s.parse::<u64>().ok()).collect()
 }
 
 /// Pass a daemon reply straight through as JSON (`List`/`Get` already emit JSON),
@@ -552,6 +586,104 @@ mod tests {
     fn unknown_route_is_404() {
         let d = StubDaemon::new(Response::ok("unused"));
         assert_eq!(send(&d, "GET", "/api/nope").status, 404);
+    }
+
+    #[test]
+    fn get_graph_by_seed_calls_graph_op_and_passes_json_through() {
+        let d = StubDaemon::new(Response::ok(
+            "{\"schema\":1,\"seed_ids\":[5],\"truncated\":false,\"nodes\":[],\"edges\":[]}",
+        ));
+        let query = q(&[("seed", "5"), ("depth", "1"), ("limit", "100")]);
+        let r = route(
+            &Incoming {
+                method: "GET",
+                path: "/api/graph",
+                query: &query,
+            },
+            None,
+            &d,
+        );
+        assert_eq!(r.status, 200);
+        assert_eq!(r.content_type, "application/json");
+        assert_eq!(
+            r.body,
+            "{\"schema\":1,\"seed_ids\":[5],\"truncated\":false,\"nodes\":[],\"edges\":[]}"
+        );
+        match d.last() {
+            Request::Graph {
+                seeds,
+                query,
+                depth,
+                limit,
+                namespace,
+            } => {
+                assert_eq!(seeds, Some(vec![5]));
+                assert_eq!(query, None);
+                assert_eq!(depth, Some(1));
+                assert_eq!(limit, Some(100));
+                assert_eq!(namespace, None);
+            }
+            other => panic!("expected Graph, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn get_graph_by_query_passes_query() {
+        let d = StubDaemon::new(Response::ok("{\"schema\":1}"));
+        let query = q(&[("q", "wombat")]);
+        let r = route(
+            &Incoming {
+                method: "GET",
+                path: "/api/graph",
+                query: &query,
+            },
+            None,
+            &d,
+        );
+        assert_eq!(r.status, 200);
+        match d.last() {
+            Request::Graph { seeds, query, .. } => {
+                assert_eq!(seeds, None);
+                assert_eq!(query, Some("wombat".to_string()));
+            }
+            other => panic!("expected Graph, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn get_graph_without_seed_or_q_is_400() {
+        let d = StubDaemon::new(Response::ok("unused"));
+        let r = send(&d, "GET", "/api/graph");
+        assert_eq!(r.status, 400);
+        assert!(!d.called(), "no seed/q must never reach the daemon");
+    }
+
+    #[test]
+    fn get_graph_wrong_method_is_405() {
+        let d = StubDaemon::new(Response::ok("unused"));
+        let r = send(&d, "POST", "/api/graph");
+        assert_eq!(r.status, 405);
+        assert!(!d.called());
+    }
+
+    #[test]
+    fn graph_seeds_csv_parses() {
+        let d = StubDaemon::new(Response::ok("{\"schema\":1}"));
+        let query = q(&[("seeds", "1,2,3")]);
+        let r = route(
+            &Incoming {
+                method: "GET",
+                path: "/api/graph",
+                query: &query,
+            },
+            None,
+            &d,
+        );
+        assert_eq!(r.status, 200);
+        match d.last() {
+            Request::Graph { seeds, .. } => assert_eq!(seeds, Some(vec![1, 2, 3])),
+            other => panic!("expected Graph, got {other:?}"),
+        }
     }
 
     #[test]
