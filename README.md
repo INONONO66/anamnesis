@@ -218,7 +218,7 @@ Add to your `Cargo.toml`:
 # Published as `anamnesis-engine` — the crates.io name `anamnesis` belongs to an
 # unrelated crate. The library is still imported as `anamnesis` (`use anamnesis::…`).
 # Optional: local embedding provider (downloads model on first use, ~100-500 MB)
-anamnesis-engine = { version = "0.12", features = ["embed"] }
+anamnesis-engine = { version = "0.13", features = ["embed"] }
 ```
 
 ```rust,no_run
