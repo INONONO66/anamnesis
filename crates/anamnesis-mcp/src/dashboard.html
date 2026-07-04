@@ -583,12 +583,15 @@
 
   // Broad bootstrap probe: no "all nodes" endpoint exists, so we seed the view
   // with a common term. The backend query is UNGATED — even with no strong
-  // match it returns the nearest neighbors — so this reliably surfaces an
-  // initial cross-section of the graph regardless of its contents. The modest
-  // limit keeps the opening view a focused constellation the user grows outward
-  // by clicking (expand-on-click), rather than dumping the entire graph at once.
+  // match it returns the nearest neighbors (embedding similarity scores every
+  // node) — so this reliably surfaces a broad cross-section of the graph up to
+  // the limit. A HIGH limit makes the opening view read as a dense luminous
+  // star-cloud at real scale (hundreds of nodes) rather than a sparse handful;
+  // on a small graph it simply shows everything. The backend caps depth at 3
+  // but does NOT cap the node budget, so a few hundred is safe. Expand-on-click
+  // still pulls a clicked node's further neighbors on demand.
   const BOOTSTRAP_QUERY = "system";
-  const BOOTSTRAP_LIMIT = 22;
+  const BOOTSTRAP_LIMIT = 400;
   const SEARCH_LIMIT = 200;
 
   // ── Neon palette (color BY knowledge type) ───────────────────────────────
@@ -1343,14 +1346,22 @@
   // deferred, so the classic scripts above (window.__graph, __THREE__ clear)
   // have run. Fully guarded — any ESM/import-map/compat failure is caught, never
   // thrown, so the graph still renders (steps 2–4) even if bloom cannot attach.
+  //
+  // Density-tuned: with a dense bootstrap (hundreds of nodes) the per-node glows
+  // ACCUMULATE, so the original strength 1.35 / threshold 0.15 blew the dense
+  // core out to a featureless white disc. Lowering strength and raising the
+  // threshold (so only bright node cores bloom, not the mid-tone haze) yields the
+  // reference's luminous star-cloud — bright cores + glowing haze with individual
+  // nodes still legible — at scale, while a sparse graph still glows cleanly.
+  // Verified in-browser at 352 nodes.
   import { UnrealBloomPass } from "/static/three/examples/jsm/postprocessing/UnrealBloomPass.js";
   try {
     const g = window.__graph;
     if (g && typeof g.postProcessingComposer === "function") {
       const bloom = new UnrealBloomPass();
-      bloom.strength = 1.35;
-      bloom.radius = 0.8;
-      bloom.threshold = 0.15;
+      bloom.strength = 0.9;
+      bloom.radius = 0.7;
+      bloom.threshold = 0.28;
       g.postProcessingComposer().addPass(bloom);
       window.__bloom = bloom;
     }
