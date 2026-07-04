@@ -49,6 +49,8 @@
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::fmt::Write as _;
 use std::path::Path;
 use std::sync::Arc;
@@ -64,7 +66,7 @@ use crate::error::Error;
 use crate::graph::node::Origin;
 use crate::graph::types::SourceKind;
 use crate::graph::types::{EdgeId, PeerId};
-use crate::graph::{EdgeType, KnowledgeType, NodeId, ScopePath, Timestamp};
+use crate::graph::{Edge, EdgeType, KnowledgeType, Node, NodeId, ScopePath, Timestamp};
 use crate::mechanics::social::ConfidenceLevel;
 use crate::query::{ContextPackage, Fragment, SearchInput, SearchResult, Tension};
 use crate::storage::{SqliteStorage, StorageAdapter};
@@ -834,6 +836,141 @@ impl<S: StorageAdapter + Clone> Memory<S> {
         }
         Ok(out)
     }
+
+    /// Extract a bounded, multi-seed k-hop subgraph as owned snapshots.
+    ///
+    /// Runs an undirected breadth-first search from every id in `seeds`
+    /// simultaneously (each seed starts at depth 0; a node's recorded depth is
+    /// its distance from the *nearest* seed). Traversal follows both outgoing
+    /// and incoming edges, mirroring [`Memory::neighbors`]. Expansion stops
+    /// past `depth` hops, and once the visited-node count reaches
+    /// `node_budget` no further nodes are enqueued and
+    /// [`Subgraph::truncated`](Subgraph) is set.
+    ///
+    /// The returned edge set is **induced**: every edge whose endpoints are
+    /// both in the visited set is included exactly once, even if one endpoint
+    /// was only reached through a different seed's BFS branch.
+    ///
+    /// # Empty seeds
+    ///
+    /// `seeds == &[]` returns an empty, non-truncated [`Subgraph`] — there is
+    /// nothing to expand from, so no edges or nodes can qualify.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any id in `seeds` does not exist in the graph
+    /// (mirrors [`Memory::neighbors`] / [`Engine::link`] resolving endpoints
+    /// up front).
+    pub fn subgraph(
+        &self,
+        seeds: &[NodeId],
+        depth: usize,
+        node_budget: usize,
+    ) -> Result<Subgraph, Error> {
+        let graph = self.engine.graph();
+        for &seed in seeds {
+            graph.get_node(seed)?;
+        }
+
+        let depths = bfs_depths(graph, seeds, depth, node_budget);
+        let truncated = node_budget > 0 && depths.len() >= node_budget && depths.len() < graph.storage().node_count();
+        let visited: HashSet<NodeId> = depths.keys().copied().collect();
+
+        let mut edges: Vec<Edge> = Vec::new();
+        let mut seen_edges: HashSet<EdgeId> = HashSet::new();
+        for &nid in &visited {
+            for &eid in graph.edges_from(nid) {
+                if let Ok(edge) = graph.get_edge(eid)
+                    && visited.contains(&edge.target)
+                    && seen_edges.insert(eid)
+                {
+                    edges.push(edge.clone());
+                }
+            }
+        }
+
+        let nodes: Vec<Node> = depths
+            .keys()
+            .filter_map(|&nid| graph.get_node(nid).ok().cloned())
+            .collect();
+        let depth_pairs: Vec<(NodeId, usize)> = depths.into_iter().collect();
+
+        Ok(Subgraph {
+            nodes,
+            edges,
+            depths: depth_pairs,
+            truncated,
+        })
+    }
+}
+
+/// Undirected multi-seed BFS, bounded by `max_depth` and `node_budget`.
+///
+/// Returns each visited node's distance from the nearest seed. Stops
+/// enqueuing once `node_budget` nodes have been visited (a `node_budget` of 0
+/// visits nothing). Extracted from [`Memory::subgraph`] to keep that method
+/// within the file's LOC guidance.
+fn bfs_depths<S: StorageAdapter + Clone>(
+    graph: &crate::graph::Graph<S>,
+    seeds: &[NodeId],
+    max_depth: usize,
+    node_budget: usize,
+) -> HashMap<NodeId, usize> {
+    let mut depths = HashMap::new();
+    let mut queue = VecDeque::new();
+
+    for &seed in seeds {
+        if depths.len() >= node_budget {
+            break;
+        }
+        if depths.insert(seed, 0).is_none() {
+            queue.push_back((seed, 0));
+        }
+    }
+
+    while let Some((nid, dist)) = queue.pop_front() {
+        if dist >= max_depth {
+            continue;
+        }
+        let neighbor_ids = graph
+            .edges_from(nid)
+            .iter()
+            .filter_map(|&eid| graph.get_edge(eid).ok().map(|e| e.target))
+            .chain(
+                graph
+                    .edges_to(nid)
+                    .iter()
+                    .filter_map(|&eid| graph.get_edge(eid).ok().map(|e| e.source)),
+            );
+        for neighbor in neighbor_ids {
+            if depths.len() >= node_budget {
+                break;
+            }
+            if let std::collections::hash_map::Entry::Vacant(entry) = depths.entry(neighbor) {
+                entry.insert(dist + 1);
+                queue.push_back((neighbor, dist + 1));
+            }
+        }
+    }
+
+    depths
+}
+
+/// An owned, bounded k-hop subgraph snapshot returned by [`Memory::subgraph`].
+///
+/// All fields are clones detached from the live graph — mutating the
+/// `Memory` afterward does not affect a previously returned `Subgraph`.
+#[derive(Debug, Clone)]
+pub struct Subgraph {
+    /// Every node visited by the bounded BFS (seeds plus in-budget neighbors).
+    pub nodes: Vec<Node>,
+    /// The induced edge set: every edge whose both endpoints are in `nodes`.
+    pub edges: Vec<Edge>,
+    /// Each visited node's hop distance from the nearest seed (seeds = 0).
+    pub depths: Vec<(NodeId, usize)>,
+    /// `true` if `node_budget` was reached before the BFS frontier was
+    /// exhausted (i.e. the graph has more reachable nodes than were returned).
+    pub truncated: bool,
 }
 
 // ── Stats — read-only health snapshot ────────────────────────────────────────
@@ -1451,6 +1588,66 @@ mod tests {
             n.iter().any(|x| x.edge_type == EdgeType::ExtractedFrom),
             "expected an ExtractedFrom recipe edge among neighbors: {n:?}"
         );
+    }
+
+    // ── subgraph ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn subgraph_returns_seed_depth0_neighbors_depth1_with_induced_edges() {
+        let mut m = mem();
+        // Each `add` call is the first (and only) turn of its own session, so
+        // it produces exactly one Episodic node with no recipe side-edges
+        // (no Temporal, no buffered Semantic/ExtractedFrom).
+        let a = m.add("sA", "u", "node a", t(1)).unwrap().episodic;
+        let b = m.add("sB", "u", "node b", t(2)).unwrap().episodic;
+        let c = m.add("sC", "u", "node c", t(3)).unwrap().episodic;
+        let ab = m.relate(a, b, Relation::Related).unwrap();
+        let _bc = m.relate(b, c, Relation::Related).unwrap();
+
+        let sg = m.subgraph(&[a], 1, 100).unwrap();
+
+        let node_ids: std::collections::HashSet<NodeId> =
+            sg.nodes.iter().map(|n| n.id).collect();
+        assert_eq!(node_ids, std::collections::HashSet::from([a, b]));
+        assert!(!node_ids.contains(&c), "C is depth 2, must be excluded");
+
+        let depth_map: HashMap<NodeId, usize> = sg.depths.iter().cloned().collect();
+        assert_eq!(depth_map.get(&a), Some(&0));
+        assert_eq!(depth_map.get(&b), Some(&1));
+        assert_eq!(depth_map.get(&c), None);
+
+        let edge_ids: std::collections::HashSet<EdgeId> =
+            sg.edges.iter().map(|e| e.id).collect();
+        assert_eq!(edge_ids, std::collections::HashSet::from([ab]));
+        assert!(!sg.truncated);
+    }
+
+    #[test]
+    fn subgraph_respects_node_budget_sets_truncated() {
+        let mut m = mem();
+        // A 5-node chain: n0-n1-n2-n3-n4.
+        let ids: Vec<NodeId> = (0..5)
+            .map(|i| {
+                m.add(&format!("s{i}"), "u", &format!("node {i}"), t(i as u64 + 1))
+                    .unwrap()
+                    .episodic
+            })
+            .collect();
+        for w in ids.windows(2) {
+            m.relate(w[0], w[1], Relation::Related).unwrap();
+        }
+
+        let sg = m.subgraph(&[ids[0]], 10, 2).unwrap();
+
+        assert!(sg.nodes.len() <= 2, "budget must cap visited nodes");
+        assert!(sg.truncated, "hitting the budget must set truncated");
+    }
+
+    #[test]
+    fn subgraph_missing_seed_is_err() {
+        let m = mem();
+        let result = m.subgraph(&[NodeId(9999)], 1, 100);
+        assert!(result.is_err(), "a nonexistent seed must error");
     }
 
     // ── stats ─────────────────────────────────────────────────────────────────
