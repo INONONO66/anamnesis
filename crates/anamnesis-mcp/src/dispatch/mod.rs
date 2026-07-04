@@ -425,5 +425,8 @@ pub fn dispatch(registry: &Arc<Mutex<MemoryRegistry>>, req: Request) -> Response
             metadata,
         ),
         Request::Get { id, namespace } => mgmt::dispatch_get(registry, id, namespace.as_deref()),
+        // TODO(graph-viz): wire protocol only in this sub-task; dispatch logic
+        // (spreading activation / subgraph extraction) lands in a follow-up.
+        Request::Graph { .. } => Response::internal("graph op not yet implemented"),
     }
 }
