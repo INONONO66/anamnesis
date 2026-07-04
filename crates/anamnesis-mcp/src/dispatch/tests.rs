@@ -1526,9 +1526,17 @@ fn adversarial_probe_graph_edge_cases() {
 /// for — the helper IS what `dispatch_graph` calls for this computation.
 #[test]
 fn graph_budget_defaults_to_250_and_caps_at_2000() {
-    assert_eq!(mgmt::graph_budget(None), 250, "omitted limit must default to 250");
+    assert_eq!(
+        mgmt::graph_budget(None),
+        250,
+        "omitted limit must default to 250"
+    );
     assert_eq!(mgmt::graph_budget(Some(250)), 250);
-    assert_eq!(mgmt::graph_budget(Some(2000)), 2000, "2000 is in-bounds, not clamped");
+    assert_eq!(
+        mgmt::graph_budget(Some(2000)),
+        2000,
+        "2000 is in-bounds, not clamped"
+    );
     assert_eq!(
         mgmt::graph_budget(Some(2001)),
         2000,

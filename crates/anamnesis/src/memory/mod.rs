@@ -1676,7 +1676,11 @@ mod tests {
 
         let sg = m.subgraph(&[chain[0]], 2, 3).unwrap();
 
-        assert_eq!(sg.nodes.len(), 3, "the whole reachable chain must fit: {sg:?}");
+        assert_eq!(
+            sg.nodes.len(),
+            3,
+            "the whole reachable chain must fit: {sg:?}"
+        );
         assert!(
             !sg.truncated,
             "frontier fully exhausted; unrelated disconnected nodes must not \
@@ -1693,9 +1697,14 @@ mod tests {
         let hub = m.add("sHub", "u", "hub node", t(1)).unwrap().episodic;
         let leaves: Vec<NodeId> = (0..5)
             .map(|i| {
-                m.add(&format!("sLeaf{i}"), "u", &format!("leaf {i}"), t(i as u64 + 2))
-                    .unwrap()
-                    .episodic
+                m.add(
+                    &format!("sLeaf{i}"),
+                    "u",
+                    &format!("leaf {i}"),
+                    t(i as u64 + 2),
+                )
+                .unwrap()
+                .episodic
             })
             .collect();
         for &leaf in &leaves {
