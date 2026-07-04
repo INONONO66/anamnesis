@@ -430,9 +430,84 @@
   #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
   #toast.err { border-color: rgba(232,104,106,0.5); }
 
+  /* ── Timeline scrubber (dual-handle range over created_at) ───────────────── */
+  .tl-reset {
+    padding: 2px 8px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em;
+    background: var(--surface-2); border: 1px solid var(--border-2); color: var(--text-dim);
+    border-radius: 999px;
+  }
+  .tl-reset:hover { background: var(--surface-3); color: var(--text); border-color: var(--accent-line); }
+  .tl-range { position: relative; height: 26px; }
+  .tl-track {
+    position: absolute; top: 11px; left: 0; right: 0; height: 4px; border-radius: 2px;
+    background: var(--surface-3); border: 1px solid var(--border);
+  }
+  .tl-fill {
+    position: absolute; top: 11px; height: 4px; border-radius: 2px;
+    background: linear-gradient(90deg, var(--accent-2), var(--accent));
+    box-shadow: 0 0 8px var(--accent-line);
+  }
+  .tl-range input[type=range] {
+    position: absolute; top: 0; left: 0; width: 100%; height: 26px; margin: 0;
+    background: none; pointer-events: none; -webkit-appearance: none; appearance: none;
+  }
+  .tl-range input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none; pointer-events: auto;
+    width: 14px; height: 14px; border-radius: 50%; cursor: pointer; margin-top: 0;
+    background: var(--accent); border: 2px solid var(--space-bg); box-shadow: 0 0 8px var(--accent-line);
+  }
+  .tl-range input[type=range]::-moz-range-thumb {
+    pointer-events: auto; width: 14px; height: 14px; border-radius: 50%; cursor: pointer;
+    background: var(--accent); border: 2px solid var(--space-bg); box-shadow: 0 0 8px var(--accent-line);
+  }
+  .tl-range input[type=range]:focus-visible::-webkit-slider-thumb { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .tl-range input[type=range]::-webkit-slider-runnable-track { background: transparent; border: none; }
+  .tl-range input[type=range]::-moz-range-track { background: transparent; border: none; }
+  .tl-range input[type=range]:disabled::-webkit-slider-thumb { background: var(--text-muted); box-shadow: none; cursor: default; }
+  .tl-labels {
+    display: flex; justify-content: space-between; gap: var(--s2);
+    font-family: var(--font-mono); font-size: 10px; color: var(--text-muted); white-space: nowrap;
+  }
+
+  /* ── Saved views / presets ───────────────────────────────────────────────── */
+  .preset-save { display: flex; gap: var(--s2); }
+  .preset-save input {
+    flex: 1; min-width: 0; font-family: var(--font-ui); font-size: 13px; color: var(--text);
+    background: var(--surface-2); border: 1px solid var(--border-2); border-radius: var(--r1);
+    padding: 6px var(--s2); outline: none;
+    transition: border-color 0.15s var(--ease), box-shadow 0.15s var(--ease);
+  }
+  .preset-save input:focus { border-color: var(--accent-line); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .preset-save input::placeholder { color: var(--text-muted); }
+  .preset-save button { flex: none; }
+  .preset-list { display: flex; flex-direction: column; gap: 3px; }
+  .preset-row {
+    display: flex; align-items: center; gap: var(--s2);
+    padding: 4px 4px 4px var(--s2); border-radius: var(--r1); border: 1px solid transparent;
+    transition: background 0.12s var(--ease), border-color 0.12s var(--ease);
+  }
+  .preset-row:hover { background: var(--surface-2); border-color: var(--border); }
+  .preset-nm {
+    flex: 1; min-width: 0; font-size: 13px; color: var(--text);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer;
+  }
+  .preset-load { padding: 3px var(--s2); font-size: 11px; }
+  .preset-del { padding: 3px; flex: none; }
+  .preset-del svg { width: 13px; height: 13px; }
+
+  /* ── Mini-map (bottom-right inset: 2D top-down projection + camera marker) ── */
+  .minimap {
+    position: absolute; right: var(--s3); bottom: var(--s3); z-index: 8;
+    width: 176px; height: 140px; border-radius: var(--r2);
+    background: rgba(6, 10, 19, 0.60); border: 1px solid var(--border-2);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.42); backdrop-filter: blur(8px);
+    pointer-events: none; user-select: none;
+  }
+
   @media (max-width: 720px) {
     .sidebar { position: absolute; z-index: 15; height: 100%; box-shadow: 8px 0 30px rgba(0,0,0,0.5); }
     .search { min-width: 140px; }
+    .minimap { display: none; }
   }
 </style>
 </head>
@@ -508,11 +583,32 @@
       </div>
 
       <div class="side-sec">
+        <div class="side-title">timeline <button type="button" class="tl-reset" id="tl-reset" title="Reset timeline range">reset</button></div>
+        <div class="tl-range" id="tl-range">
+          <div class="tl-track"></div>
+          <div class="tl-fill" id="tl-fill"></div>
+          <input type="range" id="tl-start" min="0" max="1000" value="0" step="1" aria-label="timeline start" />
+          <input type="range" id="tl-end" min="0" max="1000" value="1000" step="1" aria-label="timeline end" />
+        </div>
+        <div class="tl-labels"><span id="tl-lo">—</span><span id="tl-hi">—</span></div>
+        <div class="side-hint">Drag the handles to scrub by creation time — nodes outside the window fade out (the layout stays put).</div>
+      </div>
+
+      <div class="side-sec">
         <div class="side-title">graph</div>
         <div class="metric-row">
           <div class="metric"><span class="v" id="m-nodes">0</span><span class="k">nodes</span></div>
           <div class="metric"><span class="v" id="m-edges">0</span><span class="k">edges</span></div>
         </div>
+      </div>
+
+      <div class="side-sec">
+        <div class="side-title">saved views <span class="n" id="preset-count"></span></div>
+        <form class="preset-save" id="preset-save">
+          <input type="text" id="preset-name" placeholder="name this view…" maxlength="40" autocomplete="off" aria-label="preset name" />
+          <button type="submit" id="preset-save-btn" title="Save current view">Save</button>
+        </form>
+        <div class="preset-list" id="preset-list"><div class="empty-filters">no saved views</div></div>
       </div>
     </aside>
 
@@ -554,6 +650,9 @@
 
       <div class="hint" id="hint"><span class="dot"></span><span id="hint-text"></span></div>
       <div class="stage-tip">drag to orbit · scroll to zoom · click a node to expand</div>
+
+      <!-- Mini-map: 2D top-down projection of all loaded node positions + camera marker -->
+      <canvas class="minimap" id="minimap" width="176" height="140" aria-hidden="true"></canvas>
     </main>
 
     <!-- ── Detail drawer ───────────────────────────────────────────────── -->
@@ -723,6 +822,11 @@
     showLabels: false,
     selected: null,       // selected node id
     lastQuery: null,      // {mode:'q'|'seed', q, depth}
+    timeline: {           // P3-T1 scrub window over created_at (ms epoch)
+      min: null, max: null,     // full data range across loaded nodes
+      start: null, end: null,   // current selection window
+      active: false,            // true once the window narrows the full range
+    },
   };
 
   // Endpoint id whether raw (pre-layout) or object (post-layout).
@@ -778,8 +882,10 @@
     state.links = toLinks(data.edges);
     state.byId = new Map(state.nodes.map((n) => [n.id, n]));
     state.linkKeys = new Set(state.links.map((l) => l.source + "->" + l.target + "->" + l.type));
+    recomputeTimeRange(true); // fresh query → reset the scrub window to the full span
     pendingFrame = true; // reframe the camera once this fresh layout settles
     render();
+    syncTimelineUI();
   }
 
   // Merge new nodes/links into the canonical arrays (dedup by id / endpoint ids).
@@ -804,7 +910,9 @@
         state.links.push({ id: e.id, source: e.source, target: e.target, type: e.type, weight: e.weight });
       }
     }
+    recomputeTimeRange(false); // expand bounds for new nodes, keep the active window
     render();
+    syncTimelineUI();
     return added;
   }
 
@@ -820,6 +928,7 @@
     recomputeScales();
     applyScaleTuning();
     wakeRender();                    // data changed → render until the new layout settles
+    kickMinimap();                   // ensure the minimap loop is running for the fresh data
     const vis = visibleNodes();
     const visIds = new Set(vis.map((n) => n.id));
     const links = state.links.filter((l) => visIds.has(endId(l.source)) && visIds.has(endId(l.target)));
@@ -835,11 +944,18 @@
   // ── Overview HUD (top-left of stage) ──────────────────────────────────────
   // Mirrors the sidebar metrics as an on-canvas glance + a live community count
   // (distinct Leiden cluster ids present in the current node set).
+  // HUD reflects the VISIBLE subset: nodes/links present in graphData AND inside
+  // the timeline window. The sidebar "graph" metrics keep the full loaded totals.
   function updateHud() {
-    const communities = new Set(state.nodes.map(clusterId)).size;
-    $("#hud-nodes").textContent = String(state.nodes.length);
-    $("#hud-edges").textContent = String(state.links.length);
-    $("#hud-comm").textContent = String(state.nodes.length ? communities : 0);
+    let gd; try { gd = Graph.graphData(); } catch (_e) { gd = null; }
+    const gnodes = (gd && gd.nodes) || [], glinks = (gd && gd.links) || [];
+    let vn = 0; const comm = new Set();
+    for (const n of gnodes) { if (!timelineVisible(n)) continue; vn++; comm.add(clusterId(n)); }
+    let ve = 0;
+    for (const l of glinks) { if (linkVisible(l)) ve++; }
+    $("#hud-nodes").textContent = String(vn);
+    $("#hud-edges").textContent = String(ve);
+    $("#hud-comm").textContent = String(vn ? comm.size : 0);
   }
   // Frame the whole galaxy; a no-op (guarded) until the first layout exists.
   function fitCamera() { wakeRender(); schedulePause(ENGINE_SETTLE_MS); try { Graph.zoomToFit(700, 120); } catch (_e) { /* no nodes yet */ } }
@@ -948,6 +1064,8 @@
     .nodeRelSize(5)
     .nodeColor(nodeColor)
     .nodeVal(nodeVal)
+    .nodeVisibility(timelineVisible)   // P3-T1: hide nodes outside the scrub window (no re-heat)
+    .linkVisibility(linkVisible)
     .nodeOpacity(1.0)
     .nodeResolution(18)
     .nodeLabel((n) => '<div style="font:12px ui-monospace,Menlo,monospace;color:#e7eaf0">' +
@@ -990,7 +1108,7 @@
   // resize while the render loop is paused must repaint (and reproject labels)
   // — otherwise the last frame is left stretched until the next interaction.
   // nudgeRender() is defined below (hoisted) and only runs on an actual resize.
-  window.addEventListener("resize", () => { sizeGraph(); nudgeRender(); });
+  window.addEventListener("resize", () => { sizeGraph(); setupMinimap(); nudgeRender(); });
 
   // ── Render-on-demand + adaptive cost at scale ─────────────────────────────
   // The bloom composite forces a full composited GPU frame EVERY tick — even a
@@ -1027,6 +1145,7 @@
     if (renderAwake) return;
     renderAwake = true;
     try { Graph.resumeAnimation(); } catch (_e) { /* no-op */ }
+    kickMinimap();               // restart the throttled minimap loop (stops again on idle-pause)
   }
   // A user interaction (or hover): resume now, re-arm the idle re-pause.
   function nudgeRender() { wakeRender(); if (state.showLabels) labelsDirty = true; schedulePause(IDLE_SETTLE_MS); }
@@ -1291,6 +1410,302 @@
     }
   }
 
+  // ── P3-T1 Timeline scrubbing ──────────────────────────────────────────────
+  // A dual-handle range over node created_at (ms epoch; falls back to valid_from).
+  // Scrubbing toggles node/link VISIBILITY only — never graphData — so the force
+  // layout does not re-heat. Handles map a 0..1000 slider scale onto [min,max].
+  function nodeTime(n) {
+    const c = Number(n && n.created_at);
+    if (Number.isFinite(c) && c > 0) return c;
+    const v = Number(n && n.valid_from);
+    if (Number.isFinite(v) && v > 0) return v;
+    return null;
+  }
+  function recomputeTimeRange(resetSelection) {
+    let min = Infinity, max = -Infinity;
+    for (const n of state.nodes) {
+      const t = nodeTime(n);
+      if (t == null) continue;
+      if (t < min) min = t;
+      if (t > max) max = t;
+    }
+    const tl = state.timeline;
+    if (min === Infinity) { tl.min = tl.max = tl.start = tl.end = null; tl.active = false; return; }
+    tl.min = min; tl.max = max;
+    if (resetSelection || tl.start == null || !tl.active) {
+      tl.start = min; tl.end = max; tl.active = false;
+    } else {
+      tl.start = Math.max(min, Math.min(max, tl.start));
+      tl.end = Math.max(min, Math.min(max, tl.end));
+      if (tl.start > tl.end) { tl.start = min; tl.end = max; tl.active = false; }
+    }
+  }
+  function tlPosToTs(pos) {
+    const tl = state.timeline;
+    if (tl.min == null || tl.max <= tl.min) return tl.min;
+    return tl.min + (pos / 1000) * (tl.max - tl.min);
+  }
+  function tlTsToPos(ts) {
+    const tl = state.timeline;
+    if (tl.min == null || tl.max <= tl.min || ts == null) return 0;
+    return Math.round(((ts - tl.min) / (tl.max - tl.min)) * 1000);
+  }
+  // Visibility predicates read by the ForceGraph3D accessors. Undated nodes stay
+  // visible (never blanked by the timeline); an inactive window shows everything.
+  function timelineVisible(n) {
+    const tl = state.timeline;
+    if (!tl.active || tl.start == null) return true;
+    const ts = nodeTime(n);
+    if (ts == null) return true;
+    return ts >= tl.start && ts <= tl.end;
+  }
+  function linkVisible(l) {
+    const s = (l && typeof l.source === "object") ? l.source : state.byId.get(l && l.source);
+    const t = (l && typeof l.target === "object") ? l.target : state.byId.get(l && l.target);
+    if (s && !timelineVisible(s)) return false;
+    if (t && !timelineVisible(t)) return false;
+    return true;
+  }
+  function fmtDate(ms) {
+    if (ms == null) return "—";
+    const d = new Date(Number(ms));
+    if (isNaN(d.getTime())) return "—";
+    const mon = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][d.getMonth()];
+    const hh = String(d.getHours()).padStart(2, "0");
+    const mm = String(d.getMinutes()).padStart(2, "0");
+    const ss = String(d.getSeconds()).padStart(2, "0");
+    return mon + " " + d.getDate() + " " + hh + ":" + mm + ":" + ss;
+  }
+  function updateTimelineFill() {
+    const s = Number($("#tl-start").value), e = Number($("#tl-end").value);
+    const fill = $("#tl-fill");
+    if (!fill) return;
+    fill.style.left = (s / 10) + "%";
+    fill.style.width = Math.max(0, (e - s) / 10) + "%";
+  }
+  function updateTimelineLabels() {
+    const tl = state.timeline;
+    $("#tl-lo").textContent = tl.active ? fmtDate(tl.start) : (tl.min != null ? fmtDate(tl.min) : "—");
+    $("#tl-hi").textContent = tl.active ? fmtDate(tl.end) : (tl.max != null ? fmtDate(tl.max) : "—");
+  }
+  // Mirror canonical timeline state into the slider DOM (after data load / preset).
+  function syncTimelineUI() {
+    const tl = state.timeline;
+    const sEl = $("#tl-start"), eEl = $("#tl-end");
+    const dead = (tl.min == null);
+    sEl.disabled = eEl.disabled = dead;
+    sEl.value = String(dead ? 0 : tlTsToPos(tl.start));
+    eEl.value = String(dead ? 1000 : tlTsToPos(tl.end));
+    updateTimelineFill();
+    updateTimelineLabels();
+  }
+  // Re-set the visibility accessors → ForceGraph3D refreshes without re-heating.
+  function applyTimeline() {
+    try { Graph.nodeVisibility(timelineVisible).linkVisibility(linkVisible); } catch (_e) { /* older builds */ }
+    updateTimelineFill();
+    updateTimelineLabels();
+    updateHud();
+    labelsDirty = true;
+    wakeRender(); schedulePause(IDLE_SETTLE_MS); // repaint the visibility change even if paused
+  }
+  function onTimelineInput(which) {
+    const tl = state.timeline;
+    if (tl.min == null) return;
+    const sEl = $("#tl-start"), eEl = $("#tl-end");
+    let s = Number(sEl.value), e = Number(eEl.value);
+    if (s > e) { // keep handles from crossing — the dragged one pushes the other
+      if (which === "start") { s = e; sEl.value = String(s); }
+      else { e = s; eEl.value = String(e); }
+    }
+    tl.start = tlPosToTs(s);
+    tl.end = tlPosToTs(e);
+    tl.active = (s > 0 || e < 1000);
+    applyTimeline();
+  }
+  function resetTimeline() {
+    const tl = state.timeline;
+    if (tl.min != null) { tl.start = tl.min; tl.end = tl.max; }
+    tl.active = false;
+    $("#tl-start").value = "0";
+    $("#tl-end").value = "1000";
+    applyTimeline();
+  }
+
+  // ── P3-T2 Saved views / presets (localStorage, namespaced) ────────────────
+  // All storage access is wrapped in try/catch so a disabled or malformed store
+  // degrades gracefully (empty list, toast) instead of throwing.
+  const PRESET_KEY = "anamnesis.galaxy.presets." + (NS || "default");
+  function loadPresets() {
+    try {
+      const raw = localStorage.getItem(PRESET_KEY);
+      if (!raw) return [];
+      const arr = JSON.parse(raw);
+      return Array.isArray(arr) ? arr : [];
+    } catch (_e) { return []; }
+  }
+  function savePresets(list) {
+    try { localStorage.setItem(PRESET_KEY, JSON.stringify(list)); return true; }
+    catch (_e) { return false; }
+  }
+  function captureState() {
+    const tl = state.timeline;
+    const dEl = $("#depth");
+    return {
+      colorMode: state.colorMode,
+      focusMode: !!state.focusMode,
+      showLabels: !!state.showLabels,
+      hidden: [...state.hidden],
+      hiddenClusters: [...state.hiddenClusters],
+      depth: dEl ? dEl.value : "2",
+      tlActive: !!tl.active,
+      tlStart: tl.active ? tl.start : null,
+      tlEnd: tl.active ? tl.end : null,
+    };
+  }
+  function applyPreset(p) {
+    if (!p) return;
+    // Hidden sets first so the render below reflects them.
+    state.hidden = new Set((p.hidden || []).map((s) => String(s)));
+    state.hiddenClusters = new Set((p.hiddenClusters || []).map((c) => Number(c)));
+    if (p.depth != null) { const d = $("#depth"); if (d) d.value = String(p.depth); }
+    setColorMode(p.colorMode === "cluster" ? "cluster" : "type");
+    const ft = $("#focus-toggle"); if (ft) ft.checked = !!p.focusMode;
+    state.focusMode = !!p.focusMode;
+    const lt = $("#labels-toggle"); if (lt) lt.checked = !!p.showLabels;
+    setLabels(!!p.showLabels);
+    const tl = state.timeline;
+    if (p.tlActive && tl.min != null && p.tlStart != null && p.tlEnd != null) {
+      tl.start = Math.max(tl.min, Math.min(tl.max, Number(p.tlStart)));
+      tl.end = Math.max(tl.min, Math.min(tl.max, Number(p.tlEnd)));
+      if (tl.start > tl.end) { const t = tl.start; tl.start = tl.end; tl.end = t; }
+      tl.active = true;
+    } else if (tl.min != null) {
+      tl.start = tl.min; tl.end = tl.max; tl.active = false;
+    }
+    syncTimelineUI();
+    render();              // apply hidden sets + rebuild graphData + legend
+    refreshNodeVisuals();  // recolor for the restored mode/focus
+    applyTimeline();       // re-apply timeline visibility + HUD counts
+  }
+  function renderPresetList() {
+    const host = $("#preset-list");
+    const list = loadPresets();
+    $("#preset-count").textContent = list.length ? String(list.length) : "";
+    if (!list.length) { host.innerHTML = '<div class="empty-filters">no saved views</div>'; return; }
+    host.innerHTML = list.map((p, i) =>
+      '<div class="preset-row" data-i="' + i + '">' +
+        '<span class="preset-nm" data-act="load" data-i="' + i + '" title="Load view">' + esc(p.name) + "</span>" +
+        '<button class="preset-load" data-act="load" data-i="' + i + '" title="Load view">load</button>' +
+        '<button class="preset-del ghost" data-act="del" data-i="' + i + '" title="Delete view" aria-label="Delete view">' +
+          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 6h18M8 6V4h8v2m-1 0v14H9V6"/></svg>' +
+        "</button>" +
+      "</div>").join("");
+  }
+  function saveCurrentView(name) {
+    const nm = String(name || "").trim();
+    if (!nm) { toast("name the view first", true); return; }
+    const list = loadPresets();
+    const snap = Object.assign({ name: nm }, captureState());
+    const idx = list.findIndex((p) => p && String(p.name).toLowerCase() === nm.toLowerCase());
+    if (idx >= 0) list[idx] = snap; else list.push(snap); // overwrite by name
+    if (savePresets(list)) {
+      renderPresetList();
+      $("#preset-name").value = "";
+      toast((idx >= 0 ? "updated view “" : "saved view “") + nm + "”");
+    } else {
+      toast("could not save (storage unavailable)", true);
+    }
+  }
+  function deletePreset(i) {
+    const list = loadPresets();
+    if (i < 0 || i >= list.length) return;
+    const nm = list[i] && list[i].name;
+    list.splice(i, 1);
+    if (savePresets(list)) { renderPresetList(); toast("deleted “" + nm + "”"); }
+    else toast("could not delete (storage unavailable)", true);
+  }
+  function loadPresetByIndex(i) {
+    const list = loadPresets();
+    if (i < 0 || i >= list.length) return;
+    applyPreset(list[i]);
+    toast("loaded “" + list[i].name + "”");
+  }
+  function onPresetListClick(ev) {
+    const btn = ev.target.closest("[data-act]");
+    if (!btn) return;
+    const i = Number(btn.dataset.i);
+    if (btn.dataset.act === "del") deletePreset(i); else loadPresetByIndex(i);
+  }
+
+  // ── P3-T3 Mini-map (2D top-down projection + camera indicator) ────────────
+  // Reads live node x/y from graphData and the camera/orbit target, throttled to
+  // ~10fps by a self-stopping setTimeout loop that runs ONLY while renderAwake —
+  // so it halts with the render loop on idle-pause and never defeats it.
+  const miniCanvas = $("#minimap");
+  const miniCtx = miniCanvas ? miniCanvas.getContext("2d") : null;
+  const MINI_W = 176, MINI_H = 140, MINI_PAD = 10, MINI_FPS = 10;
+  let miniTimer = 0, miniDpr = 1;
+  function setupMinimap() {
+    if (!miniCanvas) return;
+    miniDpr = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
+    miniCanvas.width = Math.round(MINI_W * miniDpr);
+    miniCanvas.height = Math.round(MINI_H * miniDpr);
+    miniCanvas.style.width = MINI_W + "px";
+    miniCanvas.style.height = MINI_H + "px";
+  }
+  function miniDotColor(n) {
+    if (n.retracted) return RETRACTED_COLOR;
+    return state.colorMode === "cluster" ? clusterCss(clusterId(n)) : colorForType(n.type);
+  }
+  function drawMinimap() {
+    if (!miniCtx) return;
+    const ctx = miniCtx;
+    ctx.setTransform(miniDpr, 0, 0, miniDpr, 0, 0);
+    ctx.clearRect(0, 0, MINI_W, MINI_H);
+    let gd; try { gd = Graph.graphData(); } catch (_e) { gd = null; }
+    const gnodes = (gd && gd.nodes) || [];
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, cnt = 0;
+    for (const n of gnodes) {
+      if (n.x == null || n.y == null || !timelineVisible(n)) continue;
+      if (n.x < minX) minX = n.x; if (n.x > maxX) maxX = n.x;
+      if (n.y < minY) minY = n.y; if (n.y > maxY) maxY = n.y;
+      cnt++;
+    }
+    if (!cnt) return; // guard empty graph
+    const spanX = (maxX - minX) || 1, spanY = (maxY - minY) || 1;
+    const iw = MINI_W - MINI_PAD * 2, ih = MINI_H - MINI_PAD * 2;
+    const sc = Math.min(iw / spanX, ih / spanY);
+    const ox = MINI_PAD + (iw - spanX * sc) / 2, oy = MINI_PAD + (ih - spanY * sc) / 2;
+    const px = (x) => ox + (x - minX) * sc, py = (y) => oy + (y - minY) * sc;
+    const clampX = (v) => Math.max(2, Math.min(MINI_W - 2, v));
+    const clampY = (v) => Math.max(2, Math.min(MINI_H - 2, v));
+    for (const n of gnodes) {
+      if (n.x == null || n.y == null || !timelineVisible(n)) continue;
+      ctx.fillStyle = miniDotColor(n);
+      ctx.fillRect(px(n.x) - 0.75, py(n.y) - 0.75, 1.6, 1.6);
+    }
+    // Camera indicator: project the camera + orbit target, clamp to the panel edge.
+    let cam = null; try { cam = Graph.cameraPosition(); } catch (_e) { cam = null; }
+    if (cam && Number.isFinite(cam.x) && Number.isFinite(cam.y)) {
+      const ctr = (Graph.controls && Graph.controls()) || null;
+      const tgt = (ctr && ctr.target) ? ctr.target : { x: (minX + maxX) / 2, y: (minY + maxY) / 2 };
+      const cxp = clampX(px(cam.x)), cyp = clampY(py(cam.y));
+      const txp = clampX(px(tgt.x)), typ = clampY(py(tgt.y));
+      ctx.strokeStyle = "rgba(240,184,102,0.45)"; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(cxp, cyp); ctx.lineTo(txp, typ); ctx.stroke();
+      ctx.strokeStyle = "rgba(240,184,102,0.7)";
+      ctx.beginPath(); ctx.arc(txp, typ, 2, 0, Math.PI * 2); ctx.stroke();
+      ctx.fillStyle = css("--accent");
+      ctx.beginPath(); ctx.arc(cxp, cyp, 3, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+  function miniLoop() {
+    if (!renderAwake) { miniTimer = 0; return; } // self-stopping: halts on idle-pause
+    drawMinimap();
+    miniTimer = setTimeout(miniLoop, 1000 / MINI_FPS);
+  }
+  function kickMinimap() { if (miniCanvas && !miniTimer) miniLoop(); }
+
   // ── Wiring ────────────────────────────────────────────────────────────────
   $("#search-form").addEventListener("submit", (ev) => {
     ev.preventDefault();
@@ -1339,7 +1754,17 @@
     if (e.key === "/" && !inField) { e.preventDefault(); $("#q").focus(); }
   });
 
+  // Timeline scrubber + saved-view presets.
+  $("#tl-start").addEventListener("input", () => onTimelineInput("start"));
+  $("#tl-end").addEventListener("input", () => onTimelineInput("end"));
+  $("#tl-reset").addEventListener("click", resetTimeline);
+  $("#preset-save").addEventListener("submit", (ev) => { ev.preventDefault(); saveCurrentView($("#preset-name").value); });
+  $("#preset-list").addEventListener("click", onPresetListClick);
+
   if (NS) $("#ns-label").textContent = NS;
+  renderPresetList();
+  setupMinimap();
+  syncTimelineUI();
   sizeGraph();
   bootstrap();
 })();
