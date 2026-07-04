@@ -16,7 +16,7 @@ use anamnesis::memory::ListFilter;
 use crate::memory::{self, MemoryRegistry};
 use crate::proto::Response;
 
-use super::render;
+use super::{graph, render};
 
 /// Phase 1 for the management tools (`update`/`forget`/`supersede`/`list`/
 /// `get`): resolve the namespace handle under a brief global lock, bumping
@@ -171,6 +171,70 @@ pub(crate) fn dispatch_get(
     };
     match result {
         Ok(view) => Response::ok(render::render_view(&view)),
+        Err(e) => bump_and_classify(registry, e),
+    }
+}
+
+/// Depth is capped at this many hops regardless of the caller-requested
+/// value — an unbounded BFS depth on a large graph is an easy way to make
+/// one request do O(graph) work.
+const GRAPH_MAX_DEPTH: usize = 3;
+/// Default hop depth when the caller omits `depth`.
+const GRAPH_DEFAULT_DEPTH: usize = 1;
+/// Default node budget when the caller omits `limit`.
+const GRAPH_DEFAULT_BUDGET: usize = 100;
+
+/// Body of `dispatch`'s `Request::Graph` arm.
+///
+/// `query` takes precedence over `seeds` when both are present: seeds are
+/// re-resolved by relevance rather than trusting caller-supplied ids
+/// verbatim. Neither present (or an explicitly empty `seeds` with no
+/// `query`) is `invalid_params`; a `seeds` id that doesn't exist in the
+/// graph is also `invalid_params` (bad id, not an internal fault); a
+/// `query` that matches nothing yields an empty (not an error) subgraph.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn dispatch_graph(
+    registry: &Arc<Mutex<MemoryRegistry>>,
+    seeds: Option<Vec<u64>>,
+    query: Option<String>,
+    depth: Option<u32>,
+    limit: Option<u32>,
+    namespace: Option<&str>,
+) -> Response {
+    let depth = depth
+        .map(|d| d as usize)
+        .unwrap_or(GRAPH_DEFAULT_DEPTH)
+        .min(GRAPH_MAX_DEPTH);
+    let budget = limit.map(|l| l as usize).unwrap_or(GRAPH_DEFAULT_BUDGET);
+
+    let explicit_seeds = match (&query, seeds) {
+        (Some(_), _) => None,
+        (None, Some(s)) if !s.is_empty() => Some(s),
+        (None, _) => {
+            return Response::invalid_params("graph requires a non-empty `seeds` or a `query`");
+        }
+    };
+
+    let handle = match resolve_handle(registry, namespace) {
+        Ok(h) => h,
+        Err(e) => return e,
+    };
+    let result = {
+        let mut mem = handle.lock().unwrap_or_else(|p| p.into_inner());
+        let seed_ids = match explicit_seeds {
+            Some(s) => Ok(s),
+            None => memory::resolve_seeds_from_query(
+                &mut mem,
+                query.as_deref().unwrap_or_default(),
+                budget,
+            ),
+        };
+        seed_ids.and_then(|seed_ids| {
+            memory::mem_graph(&mut mem, &seed_ids, depth, budget).map(|sub| (seed_ids, sub))
+        })
+    };
+    match result {
+        Ok((seed_ids, sub)) => Response::ok(graph::render_graph(&sub, &seed_ids)),
         Err(e) => bump_and_classify(registry, e),
     }
 }
