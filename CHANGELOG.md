@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.0] - 2026-07-05
+
+### Added
+- **Timeline scrubbing** in the graph dashboard — a dual-handle range slider over node `created_at` filters the galaxy to a chosen time window (nodes outside the window fade out via visibility, so the force layout stays put), with human-readable bounds and a reset.
+- **Saved views / presets** — persist the current view (color mode, focus, label toggle, category/community filters, timeline window, depth) to `localStorage` under named presets; load or delete them from the sidebar.
+- **Mini-map** — a corner inset projecting all loaded node positions with a live camera indicator, throttled and gated by the render-on-demand loop so it never defeats idle-pause.
+
+### Fixed
+- **`/api/graph` node-budget contract** — the `limit` node budget now defaults to 250 and is capped at 2000 (previously defaulted to 100 with no upper bound), matching the documented endpoint contract.
+- **`Memory::subgraph` truncation flag** — `truncated` is now set only when the BFS frontier is genuinely cut by the node budget, instead of being inferred from the global node count (which false-positived when the reachable set was fully collected but the graph held unrelated disconnected nodes).
+
+Dashboard features are additive UI; the `/api/graph` budget change is backward-compatible (larger default, new upper bound). Minor bump.
+
 ## [0.16.1] - 2026-07-05
 
 ### Fixed
