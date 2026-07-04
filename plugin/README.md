@@ -188,6 +188,101 @@ The `hooks.json` `timeout` (5–10 s) is only a backstop; the real fail-open bou
 `ANAMNESIS_HOOK_TIMEOUT_MS` (default 1500 ms), kept well under it so a hung daemon can never
 stall a prompt.
 
+## Use with other MCP clients
+
+The `hook` subcommand (proactive recall) is Claude-Code/Codex-specific, but the underlying
+`anamnesis serve` **stdio MCP server** — `recall` / `remember` / `relate` /
+`ingest_conversation` / `extract_pending` / `stats` — is a plain MCP server any
+MCP-compatible client can launch. No plugin, no daemon socket, no hooks required.
+
+### Generic (any MCP-compatible client)
+
+```json
+{
+  "mcpServers": {
+    "anamnesis": {
+      "command": "npx",
+      "args": ["-p", "anamnesis-mcp", "anamnesis", "serve"],
+      "env": {
+        "ANAMNESIS_DB": "/absolute/path/to/memory.db",
+        "ANAMNESIS_NAMESPACE": "default"
+      }
+    }
+  }
+}
+```
+
+`ANAMNESIS_DB` pins the SQLite file explicitly; omit it and the server auto-scopes
+by walking up from the client's launch **cwd** for a `.anamnesis/` directory (git-style),
+falling back to the global `~/.anamnesis/memory.db` — see
+[`crates/anamnesis-mcp/README.md`](../crates/anamnesis-mcp/README.md#configuration) for the
+full env-var table and scope-resolution rules. Adapt the `mcpServers` wrapper key to whatever
+your client expects (see below); the `command`/`args`/`env` triple stays the same everywhere.
+
+### Cursor — `.cursor/mcp.json` (project) or `~/.cursor/mcp.json` (global)
+
+Verified against [Cursor's MCP docs](https://cursor.com/docs/mcp): stdio servers take
+`type`/`command`/`args`/`env` under the same `mcpServers` key as above.
+
+```json
+{
+  "mcpServers": {
+    "anamnesis": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-p", "anamnesis-mcp", "anamnesis", "serve"],
+      "env": { "ANAMNESIS_NAMESPACE": "default" }
+    }
+  }
+}
+```
+
+### Windsurf — `~/.codeium/windsurf/mcp_config.json`
+
+Verified against [Windsurf's Cascade MCP docs](https://docs.windsurf.com/plugins/cascade/mcp):
+same `mcpServers` / `command` / `args` / `env` shape, no `type` field, global-only (no
+per-project config).
+
+```json
+{
+  "mcpServers": {
+    "anamnesis": {
+      "command": "npx",
+      "args": ["-p", "anamnesis-mcp", "anamnesis", "serve"],
+      "env": { "ANAMNESIS_NAMESPACE": "default" }
+    }
+  }
+}
+```
+
+### OpenCode — `opencode.json` (project) or `~/.config/opencode/opencode.json` (global)
+
+Verified against [OpenCode's MCP servers docs](https://opencode.ai/docs/mcp-servers/):
+the config key is `mcp` (not `mcpServers`), each entry needs `"type": "local"`, and
+`command` is a **single array** combining the executable and its args (the env key is
+`environment`, not `env`).
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "anamnesis": {
+      "type": "local",
+      "command": ["npx", "-p", "anamnesis-mcp", "anamnesis", "serve"],
+      "enabled": true,
+      "environment": { "ANAMNESIS_NAMESPACE": "default" }
+    }
+  }
+}
+```
+
+### Other clients (OpenClaw, Antigravity, …)
+
+Not verified against an official config schema at time of writing — use the
+generic stdio config above and consult the client's own MCP documentation for the
+exact wrapper key/field names (most MCP clients use a `command`/`args`/`env` triple
+under some `mcpServers`-style object).
+
 ## Verify it works
 
 Pipe a real `UserPromptSubmit` payload into the hook and confirm you get valid hook JSON out

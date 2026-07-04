@@ -40,6 +40,57 @@ cognitive memory for LLM agents.
 First run downloads the embedding model (~400 MB) to a per-user cache. Pre-warm
 interactively with `npx anamnesis-mcp prewarm`.
 
+## Use with other MCP clients
+
+Any MCP-compatible client can launch this the same way — generic stdio config:
+
+```json
+{
+  "mcpServers": {
+    "anamnesis": {
+      "command": "npx",
+      "args": ["-p", "anamnesis-mcp", "anamnesis", "serve"],
+      "env": {
+        "ANAMNESIS_DB": "/absolute/path/to/memory.db",
+        "ANAMNESIS_NAMESPACE": "default"
+      }
+    }
+  }
+}
+```
+
+Omit `ANAMNESIS_DB` and the server auto-scopes by walking up from the client's
+launch **cwd** for a `.anamnesis/` directory (git-style), falling back to the
+global `~/.anamnesis/memory.db` (see Configuration below).
+
+**Cursor** (`.cursor/mcp.json` or `~/.cursor/mcp.json`, verified against
+[Cursor's MCP docs](https://cursor.com/docs/mcp)): same `mcpServers` object, add
+`"type": "stdio"`.
+
+**Windsurf** (`~/.codeium/windsurf/mcp_config.json`, verified against
+[Windsurf's Cascade MCP docs](https://docs.windsurf.com/plugins/cascade/mcp)):
+same `mcpServers` / `command` / `args` / `env` shape, no `type` field.
+
+**OpenCode** (`opencode.json`, verified against
+[OpenCode's MCP servers docs](https://opencode.ai/docs/mcp-servers/)): config key
+is `mcp` (not `mcpServers`), `"type": "local"` required, `command` is a single
+array combining executable + args, env key is `environment`:
+
+```json
+{
+  "mcp": {
+    "anamnesis": {
+      "type": "local",
+      "command": ["npx", "-p", "anamnesis-mcp", "anamnesis", "serve"],
+      "environment": { "ANAMNESIS_NAMESPACE": "default" }
+    }
+  }
+}
+```
+
+Full worked examples for each client (plus a pointer for unverified clients like
+OpenClaw/Antigravity) live in [`plugin/README.md`](../../plugin/README.md#use-with-other-mcp-clients).
+
 ## Make memory reliable (the important part)
 
 This is a general MCP server — there are no hooks, so the agent must *choose* to
