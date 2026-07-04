@@ -3,6 +3,7 @@ mod cli;
 mod client;
 mod config;
 mod daemon;
+mod dashboard;
 mod dispatch;
 mod hook;
 mod launcher;
@@ -37,6 +38,12 @@ fn main() -> Result<()> {
     // long-lived). It is NOT a one-shot, so dispatch it before the synchronous CLI.
     if matches!(cli.command, Some(Commands::Daemon)) {
         return run_daemon();
+    }
+    // The dashboard is a long-lived daemon *client* serving a local web UI — also
+    // not a one-shot. Intercept it before the synchronous CLI so it drives its own
+    // blocking HTTP loop (with a private tokio runtime for the daemon client).
+    if let Some(Commands::Dashboard { port, namespace }) = &cli.command {
+        return run_dashboard(*port, namespace.clone());
     }
     // One-shot CLI commands. The synchronous path handles `prewarm`/`doctor` and
     // the `--embedded` (DB-direct) variants of the daemon-routed commands; the
@@ -76,6 +83,17 @@ async fn run_daemon() -> Result<()> {
     config::ensure_model_cache_dir();
     let cfg = Config::from_env();
     daemon::run(cfg).await
+}
+
+/// The `dashboard` subcommand: serve a local read-only web UI over HTTP,
+/// forwarding data reads to the shared daemon. Synchronous by design — the
+/// blocking `tiny_http` accept loop owns the thread and `dashboard::run` builds
+/// its own tokio runtime for the async daemon client (so this must NOT be
+/// `#[tokio::main]`, which would nest a runtime inside a runtime).
+fn run_dashboard(port: u16, namespace: Option<String>) -> Result<()> {
+    config::ensure_model_cache_dir();
+    let cfg = Config::from_env();
+    dashboard::run(&cfg, port, namespace)
 }
 
 /// Drive a daemon-routed one-shot (`recall`/`remember`/`relate`/`stats` in their

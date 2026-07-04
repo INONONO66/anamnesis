@@ -34,6 +34,21 @@ pub enum Commands {
     /// Run the shared on-demand daemon: own the resolved DB and serve MCP over a
     /// per-DB Unix socket to many clients. Auto-spawned; not usually run by hand.
     Daemon,
+    /// Serve a local read-only observability/management dashboard over HTTP.
+    ///
+    /// Binds `127.0.0.1:<port>` (local-only, no auth) and connects to the shared
+    /// daemon as a client — it never opens the DB directly. Browse memories, view
+    /// graph stats, and soft-retract nodes from a browser. Prints the URL on
+    /// startup; runs until interrupted.
+    Dashboard {
+        /// TCP port to bind on `127.0.0.1`. `0` (default) picks a free port.
+        #[arg(long, default_value_t = 0)]
+        port: u16,
+        /// Namespace to browse (defaults to the configured namespace). A
+        /// per-request `?namespace=` query can still override this.
+        #[arg(long)]
+        namespace: Option<String>,
+    },
     /// Search memory and print the recall context block.
     ///
     /// By default this connects to the shared daemon as a client (the daemon owns
@@ -169,10 +184,13 @@ pub fn run_oneshot(cli: &Cli) -> Result<Oneshot> {
     let cfg = Config::from_env();
     let embedded = wants_embedded(cli);
     match &cli.command {
-        // `Serve`/no-subcommand → start the async stdio server. `Daemon` is
-        // intercepted earlier in `main` (it runs the async socket daemon, not a
-        // synchronous one-shot); it lands here only via the exhaustiveness check.
-        None | Some(Commands::Serve { .. }) | Some(Commands::Daemon) => Ok(Oneshot::Serve),
+        // `Serve`/no-subcommand → start the async stdio server. `Daemon` and
+        // `Dashboard` are intercepted earlier in `main` (each runs its own
+        // long-lived server, not a synchronous one-shot); they land here only via
+        // the exhaustiveness check.
+        None | Some(Commands::Serve { .. } | Commands::Daemon | Commands::Dashboard { .. }) => {
+            Ok(Oneshot::Serve)
+        }
 
         // The `hook` family always talks to the warm daemon as an async client
         // (there is no embedded hook mode); defer to `run_oneshot_client`.
