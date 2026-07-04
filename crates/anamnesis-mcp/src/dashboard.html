@@ -986,7 +986,11 @@
     const r = stageEl.getBoundingClientRect();
     Graph.width(r.width).height(r.height);
   }
-  window.addEventListener("resize", sizeGraph);
+  // Resize changes the canvas size AND the graph2ScreenCoords projection, so a
+  // resize while the render loop is paused must repaint (and reproject labels)
+  // — otherwise the last frame is left stretched until the next interaction.
+  // nudgeRender() is defined below (hoisted) and only runs on an actual resize.
+  window.addEventListener("resize", () => { sizeGraph(); nudgeRender(); });
 
   // ── Render-on-demand + adaptive cost at scale ─────────────────────────────
   // The bloom composite forces a full composited GPU frame EVERY tick — even a
