@@ -754,7 +754,13 @@ fn entity_overlap_npmi(a: &[String], b: &[String]) -> f64 {
     intersection as f64 / union as f64
 }
 
-fn salience_tier(salience: f64) -> MemoryTier {
+/// Derive the salience-based display tier (Archival/Recall/Core) for a node.
+///
+/// The single source of truth for the salience-band thresholds — used both for
+/// `TierTransition` event reporting here and for [`crate::memory::MemoryView`]'s
+/// `tier` field, so a browsing consumer sees the same band the engine's own
+/// dynamics report internally.
+pub(crate) fn salience_tier(salience: f64) -> MemoryTier {
     if salience < ARCHIVE_SALIENCE_THRESHOLD {
         MemoryTier::Archival
     } else if salience > 0.80 {
@@ -2124,6 +2130,21 @@ impl<S: StorageAdapter + Clone> Engine<S> {
     pub fn is_retracted(&self, node_id: NodeId) -> Result<bool, Error> {
         let node = self.graph.get_node(node_id)?;
         Ok(node.metadata.get("retracted").is_some_and(|v| v == "true"))
+    }
+
+    /// Reverse a previous [`retract`](Engine::retract) — clear the retraction
+    /// markers so the node is visible to `search()` / `query()` again.
+    pub fn unretract(&mut self, node_id: NodeId, now: Timestamp) -> Result<(), Error> {
+        let node = self.graph.get_node_mut(node_id)?;
+        node.metadata.remove("retracted");
+        node.metadata.remove("retraction_reason");
+        node.metadata.remove("retracted_at");
+        node.updated_at = now;
+        // Persist the FULL node row: `flush()` only write-behinds hot fields, not
+        // `metadata`, so without this write-through the un-retraction is lost on reopen.
+        let snapshot = node.clone();
+        self.graph.storage_mut().set_node(snapshot)?;
+        Ok(())
     }
 
     /// Commit a retrieved [`ContextPackage`] — the only reservoir-mutation path

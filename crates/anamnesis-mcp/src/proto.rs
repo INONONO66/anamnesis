@@ -39,11 +39,23 @@ pub enum Request {
         /// Need-odds gate `τ`: below it, recall returns nothing.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         gate_threshold: Option<f64>,
+        /// Post-filter: drop hits whose node origin scope doesn't match.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<String>,
+        /// Post-filter: drop hits whose node doesn't carry this entity tag.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tag: Option<String>,
     },
     Remember {
         content: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         namespace: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tags: Option<Vec<String>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        metadata: Option<std::collections::HashMap<String, String>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<String>,
     },
     Relate {
         from_id: u64,
@@ -71,6 +83,51 @@ pub enum Request {
         namespace: Option<String>,
     },
     ExtractionStatus {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        namespace: Option<String>,
+    },
+    Update {
+        id: u64,
+        new_content: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        namespace: Option<String>,
+    },
+    Forget {
+        id: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        /// `true` ⇒ permanently remove the node (irreversible); omitted/`false`
+        /// ⇒ soft-delete (reversible via `unforget`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hard: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        namespace: Option<String>,
+    },
+    Supersede {
+        new_id: u64,
+        old_id: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        namespace: Option<String>,
+    },
+    List {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        min_salience: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        node_type: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tag: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        namespace: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<String>,
+        /// `"key=value"`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        metadata: Option<String>,
+    },
+    Get {
+        id: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         namespace: Option<String>,
     },
@@ -146,10 +203,18 @@ mod tests {
             namespace: None,
             reinforce: Some(false),
             gate_threshold: Some(13.0),
+            scope: Some("projA".into()),
+            tag: Some("auth".into()),
         });
         round_trip_request(Request::Remember {
             content: "a lesson".into(),
             namespace: Some("proj".into()),
+            tags: Some(vec!["auth".into()]),
+            metadata: Some(std::collections::HashMap::from([(
+                "k".to_string(),
+                "v".to_string(),
+            )])),
+            scope: Some("projA".into()),
         });
         round_trip_request(Request::Relate {
             from_id: 1,
@@ -175,6 +240,35 @@ mod tests {
             capture: None,
         });
         round_trip_request(Request::Stats { namespace: None });
+        round_trip_request(Request::Update {
+            id: 7,
+            new_content: "revised content".into(),
+            namespace: Some("proj".into()),
+        });
+        round_trip_request(Request::Forget {
+            id: 7,
+            reason: Some("superseded".into()),
+            hard: Some(false),
+            namespace: None,
+        });
+        round_trip_request(Request::Supersede {
+            new_id: 9,
+            old_id: 7,
+            namespace: None,
+        });
+        round_trip_request(Request::List {
+            min_salience: Some(0.2),
+            limit: Some(10),
+            node_type: Some("semantic".into()),
+            tag: Some("auth".into()),
+            namespace: None,
+            scope: Some("projA".into()),
+            metadata: Some("k=v".into()),
+        });
+        round_trip_request(Request::Get {
+            id: 7,
+            namespace: None,
+        });
     }
 
     #[test]
@@ -185,6 +279,8 @@ mod tests {
             namespace: None,
             reinforce: None,
             gate_threshold: None,
+            scope: None,
+            tag: None,
         })
         .unwrap();
         assert!(line.contains("\"op\":\"recall\""), "tagged by op: {line}");

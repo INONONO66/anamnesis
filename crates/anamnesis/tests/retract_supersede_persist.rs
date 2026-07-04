@@ -129,3 +129,104 @@ fn supersede_validity_windows_persist_across_reopen() {
 
     let _ = std::fs::remove_file(&path);
 }
+
+/// P1-T1 RED: `unretract()` must clear the retraction metadata and persist that
+/// removal through a drop + reopen cycle, mirroring `retract`'s write-through path.
+#[test]
+fn unretract_clears_metadata_and_persists() {
+    let path = temp_db_path("unretract-persist");
+
+    // Given: an ingested node that is retracted, then un-retracted, then flushed.
+    let node_id: NodeId = {
+        let storage = SqliteStorage::open(&path).expect("open file db");
+        let mut engine = Engine::with_storage(config(), storage);
+        let IngestResult::Created(ids) = engine.ingest(obs("reinstated")).unwrap() else {
+            panic!("expected Created");
+        };
+        let id = ids[0];
+
+        engine
+            .retract(id, "superseded by newer info", Timestamp(2_000))
+            .expect("retract ok");
+        assert!(
+            engine.is_retracted(id).expect("is_retracted ok"),
+            "node must be retracted before unretract"
+        );
+
+        engine
+            .unretract(id, Timestamp(3_000))
+            .expect("unretract ok");
+        assert!(
+            !engine.is_retracted(id).expect("is_retracted ok"),
+            "node must no longer be retracted after unretract"
+        );
+
+        engine.graph_mut().storage_mut().flush().expect("flush ok");
+        id
+    };
+
+    // When: the same path is reopened in a fresh storage.
+    let storage = SqliteStorage::open(&path).expect("reopen file db");
+
+    // Then: the un-retraction survives reopen — all three metadata keys are gone.
+    let node = storage.get_node(node_id).expect("node persisted");
+    assert!(
+        node.metadata.get("retracted").is_none_or(|v| v != "true"),
+        "retracted marker must be cleared after reopen"
+    );
+    assert!(
+        !node.metadata.contains_key("retraction_reason"),
+        "retraction_reason must be removed after reopen"
+    );
+    assert!(
+        !node.metadata.contains_key("retracted_at"),
+        "retracted_at must be removed after reopen"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+/// P1-T1 MANUAL-QA demo: prints the `is_retracted` state at each stage of the
+/// retract → unretract → reopen cycle for a hands-on DB-state-diff artifact.
+/// Run with `cargo test -p anamnesis-engine unretract_roundtrip_demo -- --nocapture`.
+#[test]
+fn unretract_roundtrip_demo() {
+    let path = temp_db_path("unretract-demo");
+
+    let node_id: NodeId = {
+        let storage = SqliteStorage::open(&path).expect("open file db");
+        let mut engine = Engine::with_storage(config(), storage);
+        let IngestResult::Created(ids) = engine.ingest(obs("demo-node")).unwrap() else {
+            panic!("expected Created");
+        };
+        let id = ids[0];
+
+        engine
+            .retract(id, "demo retraction", Timestamp(2_000))
+            .expect("retract ok");
+        println!(
+            "after_retract is_retracted={}",
+            engine.is_retracted(id).expect("is_retracted ok")
+        );
+
+        engine
+            .unretract(id, Timestamp(3_000))
+            .expect("unretract ok");
+        println!(
+            "after_unretract is_retracted={}",
+            engine.is_retracted(id).expect("is_retracted ok")
+        );
+
+        engine.graph_mut().storage_mut().flush().expect("flush ok");
+        id
+    };
+
+    let storage = SqliteStorage::open(&path).expect("reopen file db");
+    let engine = Engine::with_storage(config(), storage);
+    println!(
+        "after_reopen is_retracted={}",
+        engine.is_retracted(node_id).expect("is_retracted ok")
+    );
+
+    let _ = std::fs::remove_file(&path);
+}

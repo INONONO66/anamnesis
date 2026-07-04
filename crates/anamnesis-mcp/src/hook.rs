@@ -184,6 +184,8 @@ async fn gated_recall(
         namespace: None,
         reinforce,
         gate_threshold: gate,
+        scope: None,
+        tag: None,
     };
     let timeout = Duration::from_millis(cfg.hook_timeout_ms);
     let outcome = tokio::time::timeout(timeout, call_oneshot(cfg, req)).await;

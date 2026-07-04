@@ -185,15 +185,15 @@ queries via `Memory`.
 
 | Benchmark | Gold granularity | Recall@20 | MRR | NDCG@20 | p50 |
 |:--|:--|--:|--:|--:|--:|
-| **LongMemEval-S** (full official split, 500 q, all 6 types) | session-level | **93.7%** | **0.870** | 0.806 | ~17 ms |
-| **LoCoMo** (full non-adversarial, 1540 q) | turn-level strict | **77.7%** | **0.303** | 0.396 | ~21 ms |
+| **LongMemEval-S** (full official split, 500 q, all 6 types) | session-level | **93.8%** | **0.872** | 0.808 | ~17 ms |
+| **LoCoMo** (full non-adversarial, 1540 q) | turn-level strict | **77.6%** | **0.291** | 0.386 | ~21 ms |
 
 Read these numbers for what they are — and, importantly, for what they are **not**. On these cold-start dry runs the ranking is carried by alignment scoring (keyword + embedding); the graph's spreading activation is a modest re-rank, not the source of the score. What the graph earns here is not measured by these tables — it is the [structure surfacing](#see-it-reason) and the [forgetting dynamics](docs/07-quality-gates/fidelity-results.md). No baselines or comparison tables are added; these are the shipped harness's own numbers.
 
 - **Retrieval metrics, not answer accuracy.** Published memory-system scores
   (Mem0, Zep, LangMem, …) are LLM-as-judge *answer* scores — a different
   measurement. These numbers bound what an answer stage could see in context
-  (LoCoMo hit@20 = 84.7%; LongMemEval hit@1 = 82.4%, hit@20 = 98.0%).
+  (LoCoMo hit@20 = 84.6%; LongMemEval hit@1 = 82.6%, hit@20 = 98.0%).
 - **No usage learning is measured here.** Runs are cold-start (no `commit`
   warmup), so the readout calibration intentionally zeroes the salience
   coefficient (`w_s = 0`) — on unused memory, salience carries only
@@ -203,9 +203,9 @@ Read these numbers for what they are — and, importantly, for what they are **n
   [cognitive-fidelity gates](docs/07-quality-gates/fidelity-results.md), not
   by these benchmarks.
 - Readout coefficients were fit on the even-sample half of LoCoMo and
-  validated on the held-out half (Recall@20 77.8% / MRR 0.287 on unseen
-  conversations); LongMemEval numbers use the same weights with zero
-  dataset-specific tuning.
+  validated on the held-out half (dev-half, never seen by the fit: Recall@20 /
+  MRR 0.778 / 0.287 on unseen conversations); LongMemEval numbers use the same
+  weights with zero dataset-specific tuning.
 
 ## Quick Start
 
@@ -218,7 +218,7 @@ Add to your `Cargo.toml`:
 # Published as `anamnesis-engine` — the crates.io name `anamnesis` belongs to an
 # unrelated crate. The library is still imported as `anamnesis` (`use anamnesis::…`).
 # Optional: local embedding provider (downloads model on first use, ~100-500 MB)
-anamnesis-engine = { version = "0.11", features = ["embed"] }
+anamnesis-engine = { version = "0.12", features = ["embed"] }
 ```
 
 ```rust,no_run

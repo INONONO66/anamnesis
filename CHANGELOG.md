@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] - 2026-07-04
+
+### Added — agent-facing memory management
+- MCP tools `update`, `forget` (soft-retract, with a `hard` delete flag), `supersede`, `list`, `get`: the agent can now edit, forget/delete, mark-outdated, browse, and inspect memories. `relate` also accepts `supersedes`.
+- Kernel/framework: `Relation::Supersedes`, `Engine::unretract`, and a `Memory` management API (`update_content`, `get`, `list`, `forget`, `unforget`, `delete_hard`, `supersede`) with the `MemoryView` and `ListFilter` types.
+- `remember` accepts optional `tags`, `metadata`, and `scope`; `list` and `recall` support tag / metadata / scope filtering (recall filters the rendered context package, not just the relate-candidate ids).
+
+### Fixed
+- Extraction queue is now per-namespace instead of a single global queue: captured turns no longer leak across projects, and a non-default namespace's un-extracted backlog is rebuilt on first open after a daemon restart.
+- README benchmark numbers reconciled to the calibration-records SSOT (LoCoMo 77.6% / MRR 0.291, LongMemEval 93.8% / MRR 0.872).
+
+### Changed
+- Internal refactor: `dispatch.rs` and `memory.rs` split into submodules (behavior-preserving).
+
+Public API changes are purely additive (new types, methods, and a non-exhaustive enum variant); minor bump per policy.
+
 ## [0.11.0]
 
 External-review findings (round 2) — verified against source; only genuine bugs

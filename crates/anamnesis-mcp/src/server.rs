@@ -39,6 +39,12 @@ pub struct RecallParams {
     /// return an empty context block (inject nothing). Omitted ⇒ no gate.
     #[serde(default)]
     pub gate_threshold: Option<f64>,
+    /// Post-filter: drop hits whose node origin scope doesn't match.
+    #[serde(default)]
+    pub scope: Option<String>,
+    /// Post-filter: drop hits whose node doesn't carry this entity tag.
+    #[serde(default)]
+    pub tag: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -49,6 +55,15 @@ pub struct RememberParams {
     /// Isolated memory namespace (default: the server default).
     #[serde(default)]
     pub namespace: Option<String>,
+    /// Extra entity tags for this note, beyond the default recipe tags.
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
+    /// Consumer-defined metadata key-value pairs to stamp on the note.
+    #[serde(default)]
+    pub metadata: Option<std::collections::HashMap<String, String>>,
+    /// Origin scope for this note (default: universal).
+    #[serde(default)]
+    pub scope: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -82,9 +97,9 @@ pub struct ExtractPendingParams {
     /// Max turns to pull this batch (default: all pending).
     #[serde(default)]
     pub limit: Option<u32>,
-    /// Reserved for a future per-namespace queue. Currently ignored — the
-    /// un-extracted queue is a default-namespace global, so this field has no
-    /// effect. Pass `null` or omit it.
+    /// Selects which namespace's extraction queue to pull from — the
+    /// un-extracted queue is isolated per namespace. Omit (or pass `null`)
+    /// to use the registry default namespace.
     #[serde(default)]
     pub namespace: Option<String>,
 }
@@ -99,6 +114,79 @@ pub struct RelateParams {
     /// `reason`, `rejected-alternative`, `belongs-to`, `related`. Use
     /// `custom:<label>` for a consumer-defined relation. Unknown labels error.
     pub relation: String,
+    /// Isolated memory namespace (default: the server default).
+    #[serde(default)]
+    pub namespace: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct UpdateParams {
+    /// Node id to edit (from a prior `recall`/`list`/`get`).
+    pub id: u64,
+    /// Replacement content — the node is re-embedded from this text.
+    pub new_content: String,
+    /// Isolated memory namespace (default: the server default).
+    #[serde(default)]
+    pub namespace: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ForgetParams {
+    /// Node id to remove (from a prior `recall`/`list`/`get`).
+    pub id: u64,
+    /// Why it's being forgotten (stored on the retraction; default: a generic note).
+    #[serde(default)]
+    pub reason: Option<String>,
+    /// `true` ⇒ permanently delete (irreversible). Omitted/`false` ⇒ soft-delete
+    /// (hidden from recall, still readable via `get`).
+    #[serde(default)]
+    pub hard: Option<bool>,
+    /// Isolated memory namespace (default: the server default).
+    #[serde(default)]
+    pub namespace: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct SupersedeParams {
+    /// Node id that replaces the old one.
+    pub new_id: u64,
+    /// Node id being replaced (its validity window is closed).
+    pub old_id: u64,
+    /// Isolated memory namespace (default: the server default).
+    #[serde(default)]
+    pub namespace: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ListParams {
+    /// Minimum salience `[0, 1]` a node must have to be included (default: 0.0).
+    #[serde(default)]
+    pub min_salience: Option<f64>,
+    /// Max results (default 100).
+    #[serde(default)]
+    pub limit: Option<u32>,
+    /// Restrict to one knowledge type: `identity`, `semantic`, `episodic`, or a
+    /// consumer-defined label.
+    #[serde(default)]
+    pub node_type: Option<String>,
+    /// Restrict to nodes carrying this entity tag.
+    #[serde(default)]
+    pub tag: Option<String>,
+    /// Isolated memory namespace (default: the server default).
+    #[serde(default)]
+    pub namespace: Option<String>,
+    /// Restrict to nodes whose origin scope matches exactly.
+    #[serde(default)]
+    pub scope: Option<String>,
+    /// Restrict to nodes carrying this metadata pair, formatted `"key=value"`.
+    #[serde(default)]
+    pub metadata: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct GetParams {
+    /// Node id to read (from a prior `recall`/`list`).
+    pub id: u64,
     /// Isolated memory namespace (default: the server default).
     #[serde(default)]
     pub namespace: Option<String>,
@@ -203,6 +291,8 @@ impl AnamnesisServer {
             namespace: p.namespace,
             reinforce: p.reinforce,
             gate_threshold: p.gate_threshold,
+            scope: p.scope,
+            tag: p.tag,
         };
         to_result(self.backend.call(req).await)
     }
@@ -215,6 +305,9 @@ impl AnamnesisServer {
         let req = Request::Remember {
             content: p.content,
             namespace: p.namespace,
+            tags: p.tags,
+            metadata: p.metadata,
+            scope: p.scope,
         };
         to_result(self.backend.call(req).await)
     }
@@ -292,6 +385,87 @@ impl AnamnesisServer {
     ) -> Result<CallToolResult, ErrorData> {
         let req = Request::PullPending {
             limit: p.limit,
+            namespace: p.namespace,
+        };
+        to_result(self.backend.call(req).await)
+    }
+
+    #[tool(
+        description = "Edit an existing node's content in place (re-embeds it). Use to correct or \
+                       refine a memory rather than storing a near-duplicate."
+    )]
+    async fn update(
+        &self,
+        Parameters(p): Parameters<UpdateParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let req = Request::Update {
+            id: p.id,
+            new_content: p.new_content,
+            namespace: p.namespace,
+        };
+        to_result(self.backend.call(req).await)
+    }
+
+    #[tool(
+        description = "Remove a memory. Soft (default): hidden from recall/search but reversible \
+                       and auditable via `get`. Hard (`hard: true`): permanently erased, use only \
+                       for genuinely wrong or sensitive content."
+    )]
+    async fn forget(
+        &self,
+        Parameters(p): Parameters<ForgetParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let req = Request::Forget {
+            id: p.id,
+            reason: p.reason,
+            hard: p.hard,
+            namespace: p.namespace,
+        };
+        to_result(self.backend.call(req).await)
+    }
+
+    #[tool(
+        description = "Mark one memory as superseding another: closes the old node's validity \
+                       window and opens the new one's, so time-scoped queries prefer the current \
+                       fact while the history stays traceable."
+    )]
+    async fn supersede(
+        &self,
+        Parameters(p): Parameters<SupersedeParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let req = Request::Supersede {
+            new_id: p.new_id,
+            old_id: p.old_id,
+            namespace: p.namespace,
+        };
+        to_result(self.backend.call(req).await)
+    }
+
+    #[tool(
+        description = "List memories ranked by salience, optionally narrowed by minimum salience, \
+                       knowledge type, or entity tag. Returns a compact JSON array — use `get` for \
+                       a single node's full detail."
+    )]
+    async fn list(
+        &self,
+        Parameters(p): Parameters<ListParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let req = Request::List {
+            min_salience: p.min_salience,
+            limit: p.limit,
+            node_type: p.node_type,
+            tag: p.tag,
+            namespace: p.namespace,
+            scope: p.scope,
+            metadata: p.metadata,
+        };
+        to_result(self.backend.call(req).await)
+    }
+
+    #[tool(description = "Read one memory's full detail as JSON, by node id.")]
+    async fn get(&self, Parameters(p): Parameters<GetParams>) -> Result<CallToolResult, ErrorData> {
+        let req = Request::Get {
+            id: p.id,
             namespace: p.namespace,
         };
         to_result(self.backend.call(req).await)

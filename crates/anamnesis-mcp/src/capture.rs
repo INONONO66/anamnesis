@@ -43,7 +43,7 @@ const DEFAULT_EXTRACT_REDELIVERY_MS: u64 = 21_600_000;
 pub(crate) const DEFAULT_PULL_LIMIT: usize = 50;
 
 /// `ANAMNESIS_EXTRACT_REDELIVERY_MS` env override for the redelivery TTL.
-fn extract_redelivery_ms() -> u64 {
+pub(crate) fn extract_redelivery_ms() -> u64 {
     std::env::var("ANAMNESIS_EXTRACT_REDELIVERY_MS")
         .ok()
         .and_then(|v| v.trim().parse().ok())
@@ -105,15 +105,15 @@ impl MemoryRegistry {
     /// On the final allowed attempt the turn is marked `"true"` and delivered
     /// one last time. Raw episodic nodes always survive regardless (fail-open).
     ///
-    /// **The un-extracted queue is a default-namespace global.** The `ns` param is
-    /// intentionally ignored (reserved for a future per-namespace queue). Nodes are
-    /// always read from and marked in the **default** namespace, consistent with
-    /// `extraction_status` and the capture hook (which always captures into the
-    /// default namespace with `namespace: None`).
+    /// **The un-extracted queue is per-namespace**, keyed by
+    /// [`MemoryRegistry::canonical_ns_key`]: `ns` selects WHICH namespace's
+    /// queue is drained and marked, consistent with `extraction_status` and
+    /// the capture-enqueue side (`ingest_conversation`).
     ///
-    /// `crate::dispatch`'s `PullPending` arm claims from `self.unextracted` and
-    /// calls [`pull_claimed`] directly (its own phase split), so in a non-test
-    /// build this convenience wrapper has only test consumers.
+    /// `crate::dispatch`'s `PullPending` arm claims from `self.unextracted`
+    /// (the requested namespace's bucket) and calls [`pull_claimed`] directly
+    /// (its own phase split), so in a non-test build this convenience wrapper
+    /// has only test consumers.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn pull_pending(
         &mut self,
@@ -126,57 +126,68 @@ impl MemoryRegistry {
 
     /// [`pull_pending`](Self::pull_pending) with an injected clock (testable).
     ///
-    /// Two-phase discipline: claim (drain) up to `limit` ids from the front of
-    /// `self.unextracted` FIRST — a brief, registry-state-only mutation — then
-    /// resolve the (always-default) namespace handle and do the actual
-    /// metadata get/set work while holding ONLY the namespace lock. Any
-    /// claimed ids [`pull_claimed`] didn't durably mark (a write failure, or
-    /// the handle failing to resolve at all) are spliced back onto the FRONT
-    /// of the queue, preserving both the original FIFO order and the
-    /// "everything unmarked stays queued" contract — and, unlike the
-    /// single-lock predecessor, claiming ELIMINATES the possibility of two
-    /// concurrent pulls delivering the same node twice.
+    /// Two-phase discipline: resolve `ns`'s canonical key, claim (drain) up to
+    /// `limit` ids from the front of `self.unextracted[key]` FIRST — a brief,
+    /// registry-state-only mutation — then resolve THAT SAME namespace's
+    /// handle and do the actual metadata get/set work while holding ONLY the
+    /// namespace lock. Any claimed ids [`pull_claimed`] didn't durably mark (a
+    /// write failure, or the handle failing to resolve at all) are spliced
+    /// back onto the FRONT of that namespace's queue, preserving both the
+    /// original FIFO order and the "everything unmarked stays queued" contract
+    /// — and, unlike the single-lock predecessor, claiming ELIMINATES the
+    /// possibility of two concurrent pulls delivering the same node twice.
     fn pull_pending_at(
         &mut self,
         limit: Option<usize>,
-        _ns: Option<&str>,
+        ns: Option<&str>,
         now_ms: u64,
     ) -> Result<String, anamnesis::Error> {
+        let ns_key = self.canonical_ns_key(ns);
+        // Resolve the handle FIRST: on a namespace's first open this rebuilds
+        // its `unextracted` bucket from durable node metadata (see
+        // `MemoryRegistry::namespace_handle`), so the claim below sees the
+        // rebuilt queue rather than the empty post-restart default.
+        let handle = self.namespace_handle(ns)?;
         let take = limit
             .unwrap_or(DEFAULT_PULL_LIMIT)
-            .min(self.unextracted.len());
-        let claimed: Vec<NodeId> = self.unextracted.drain(..take).collect();
-        // Always operate on the default namespace — the queue is global.
-        let handle = match self.namespace_handle(None) {
-            Ok(h) => h,
-            Err(e) => {
-                self.unextracted.splice(0..0, claimed);
-                return Err(e);
-            }
-        };
+            .min(self.unextracted.get(&ns_key).map(Vec::len).unwrap_or(0));
+        let claimed: Vec<NodeId> = self
+            .unextracted
+            .get_mut(&ns_key)
+            .map(|q| q.drain(..take).collect())
+            .unwrap_or_default();
         let (items, unprocessed) = {
             let mut mem = handle.lock().unwrap_or_else(|p| p.into_inner());
             pull_claimed(&mut mem, &claimed, now_ms)
         };
         if !unprocessed.is_empty() {
-            self.unextracted.splice(0..0, unprocessed);
+            self.unextracted
+                .entry(ns_key)
+                .or_default()
+                .splice(0..0, unprocessed);
         }
         Ok(serde_json::to_string(&items).unwrap_or_else(|_| "[]".to_string()))
     }
 
-    /// Pending-queue size for the hook signal.
-    ///
-    /// **The un-extracted queue is a default-namespace global.** The `_ns` param is
-    /// intentionally ignored — the queue is not per-namespace (reserved for future).
-    pub fn extraction_status(&mut self, _ns: Option<&str>) -> Result<String, anamnesis::Error> {
-        Ok(serde_json::json!({ "pending": self.unextracted.len() }).to_string())
+    /// Pending-queue size for the hook signal, scoped to `ns`'s own queue
+    /// (see [`MemoryRegistry::canonical_ns_key`]) — never a count summed
+    /// across every namespace.
+    pub fn extraction_status(&mut self, ns: Option<&str>) -> Result<String, anamnesis::Error> {
+        // Resolve first: on a namespace's first open this rebuilds its
+        // `unextracted` bucket (see `MemoryRegistry::namespace_handle`).
+        self.namespace_handle(ns)?;
+        let ns_key = self.canonical_ns_key(ns);
+        let pending = self.unextracted.get(&ns_key).map(Vec::len).unwrap_or(0);
+        Ok(serde_json::json!({ "pending": pending }).to_string())
     }
 
-    /// Number of captured episodic nodes awaiting reasoning extraction.
-    /// Test accessor — production code uses the field directly.
+    /// Number of captured episodic nodes awaiting reasoning extraction in the
+    /// DEFAULT namespace. Test accessor — production code uses the field
+    /// directly.
     #[cfg(test)]
     pub(crate) fn unextracted_len(&self) -> usize {
-        self.unextracted.len()
+        let ns_key = self.canonical_ns_key(None);
+        self.unextracted.get(&ns_key).map(Vec::len).unwrap_or(0)
     }
 
     /// Rebuild the capture indexes (`seen_turn_keys`, `unextracted`) from node
@@ -196,13 +207,18 @@ impl MemoryRegistry {
     /// Resolves the namespace handle (brief global-lock-equivalent access via
     /// `&mut self`), then does the full-graph scan under ONLY the namespace
     /// lock; `self.seen_turn_keys`/`self.unextracted` are written last, once
-    /// the namespace lock has already been released.
+    /// the namespace lock has already been released. Only `ns`'s own bucket
+    /// of `self.unextracted` is replaced — every other namespace's queue is
+    /// untouched, so this is safe to call independently per namespace (and,
+    /// on upgrade from the old single-global-queue binary, replays exactly
+    /// into the DEFAULT namespace's bucket — no data loss).
     fn load_extraction_state_at(
         &mut self,
         ns: Option<&str>,
         now_ms: u64,
     ) -> Result<(), anamnesis::Error> {
         let ttl = extract_redelivery_ms();
+        let ns_key = self.canonical_ns_key(ns);
         let handle = self.namespace_handle(ns)?;
         let (keys, pending) = {
             let mem = handle.lock().unwrap_or_else(|p| p.into_inner());
@@ -210,7 +226,7 @@ impl MemoryRegistry {
         };
         self.seen_turn_keys.clear();
         self.seen_turn_keys.extend(keys);
-        self.unextracted = pending;
+        self.unextracted.insert(ns_key, pending);
         Ok(())
     }
 }
@@ -255,7 +271,7 @@ pub(crate) fn pull_claimed(
 /// Namespace-locked, read-only full-graph scan for `load_extraction_state`:
 /// collects every `turn_key` metadata value (for dedup) and every node whose
 /// `META_EXTRACTED` state means it belongs back in the un-extracted queue.
-fn scan_extraction_state(
+pub(crate) fn scan_extraction_state(
     mem: &Memory<SqliteStorage>,
     now_ms: u64,
     ttl: u64,
@@ -369,38 +385,68 @@ mod tests {
     /// Redelivery: an abandoned pull (pending mark, agent never emitted) is
     /// re-queued after the TTL, delivered ONE more time (attempt cap 2), then
     /// treated as done — never an infinite redelivery loop.
+    ///
+    /// Extended (P1-T4) to be namespace-scoped: captures into "projA" (not the
+    /// default namespace) and asserts a sibling namespace ("projB") stays at
+    /// zero backlog throughout — the redelivery machinery must operate on the
+    /// REQUESTED namespace's queue, not a single global one.
     #[test]
     fn abandoned_pull_redelivers_once_then_done() {
         let mut reg = registry(true);
+        let ns = Some("projA");
         let turns = vec![Turn {
             speaker: "user".into(),
             text: "abandoned insight".into(),
             at_ms: Some(10),
         }];
-        reg.ingest_conversation("s", &turns, None, true).unwrap();
+        reg.ingest_conversation("s", &turns, ns, true).unwrap();
+        // A sibling namespace was never captured into — must start empty.
+        let sibling_before = reg.extraction_status(Some("projB")).unwrap();
+        assert!(
+            sibling_before.contains("\"pending\":0"),
+            "projB must start empty: {sibling_before}"
+        );
+
         let t0 = 1_000u64;
         let ttl = super::DEFAULT_EXTRACT_REDELIVERY_MS;
 
         // First pull → pending:t0:1, queue drained.
-        let j1 = reg.pull_pending_at(None, None, t0).unwrap();
+        let j1 = reg.pull_pending_at(None, ns, t0).unwrap();
         assert!(j1.contains("abandoned insight"), "delivered: {j1}");
-        assert_eq!(reg.unextracted_len(), 0);
+        let status = reg.extraction_status(ns).unwrap();
+        assert!(status.contains("\"pending\":0"), "drained: {status}");
 
         // Restart BEFORE the TTL: still pending, NOT re-queued.
-        reg.load_extraction_state_at(None, t0 + 1).unwrap();
-        assert_eq!(reg.unextracted_len(), 0, "fresh pending is not redelivered");
+        reg.load_extraction_state_at(ns, t0 + 1).unwrap();
+        assert!(
+            reg.extraction_status(ns).unwrap().contains("\"pending\":0"),
+            "fresh pending is not redelivered"
+        );
 
         // Restart AFTER the TTL: abandoned → re-queued once.
-        reg.load_extraction_state_at(None, t0 + ttl + 1).unwrap();
-        assert_eq!(reg.unextracted_len(), 1, "abandoned pull re-queued");
+        reg.load_extraction_state_at(ns, t0 + ttl + 1).unwrap();
+        assert!(
+            reg.extraction_status(ns).unwrap().contains("\"pending\":1"),
+            "abandoned pull re-queued"
+        );
 
         // Final delivery (attempt 2 = cap) → marked done.
-        let j2 = reg.pull_pending_at(None, None, t0 + ttl + 2).unwrap();
+        let j2 = reg.pull_pending_at(None, ns, t0 + ttl + 2).unwrap();
         assert!(j2.contains("abandoned insight"), "redelivered: {j2}");
 
         // Even long after another TTL, it never comes back.
-        reg.load_extraction_state_at(None, t0 + ttl * 10).unwrap();
-        assert_eq!(reg.unextracted_len(), 0, "attempt cap reached ⇒ done");
+        reg.load_extraction_state_at(ns, t0 + ttl * 10).unwrap();
+        assert!(
+            reg.extraction_status(ns).unwrap().contains("\"pending\":0"),
+            "attempt cap reached ⇒ done"
+        );
+
+        // The sibling namespace was never touched by any of the above.
+        let sibling_after = reg.extraction_status(Some("projB")).unwrap();
+        assert!(
+            sibling_after.contains("\"pending\":0"),
+            "projB must remain empty throughout: {sibling_after}"
+        );
     }
 
     /// The pending mark is durable BEFORE the turn leaves the queue: after a
@@ -456,32 +502,213 @@ mod tests {
         assert_eq!(reg.unextracted_len(), 1, "remainder stays queued");
     }
 
-    /// `pull_pending` ignores the `ns` argument — the un-extracted queue is a
-    /// default-namespace global.  Calling with a foreign namespace must still drain
-    /// the default-ns queue and return the real content, not an empty list.
+    /// P1-T4 bug fix: capturing into "projA" and pulling "projB" must return
+    /// EMPTY — each namespace's un-extracted queue is isolated from every
+    /// other's — and vice-versa. Replaces the old
+    /// `pull_pending_ignores_namespace_param` test, which asserted the BUG
+    /// this fixes (that `pull_pending` ignores its `ns` argument entirely).
     #[test]
-    fn pull_pending_ignores_namespace_param() {
+    fn capture_into_ns_then_pull_same_ns_returns_it() {
         let mut reg = registry(true);
-        let turns = vec![Turn {
+        let turn_a = vec![Turn {
             speaker: "user".into(),
-            text: "ns-scope test".into(),
+            text: "projA-only turn".into(),
             at_ms: Some(1),
         }];
-        // Capture into the default namespace (as the hook always does).
-        reg.ingest_conversation("s", &turns, None, true).unwrap();
-        assert_eq!(reg.unextracted_len(), 1, "one turn queued");
-        // Pull with a DIFFERENT namespace — must still drain the default-ns queue.
-        let json = reg.pull_pending(None, Some("other")).unwrap();
-        assert!(json.contains("\"node_id\""), "got: {json}");
+        let turn_b = vec![Turn {
+            speaker: "user".into(),
+            text: "projB-only turn".into(),
+            at_ms: Some(2),
+        }];
+        reg.ingest_conversation("s", &turn_a, Some("projA"), true)
+            .unwrap();
+        reg.ingest_conversation("s", &turn_b, Some("projB"), true)
+            .unwrap();
+
+        // Pulling projB must return B's turn and must NOT leak A's.
+        let json_b = reg.pull_pending(None, Some("projB")).unwrap();
+        assert!(json_b.contains("projB-only turn"), "got: {json_b}");
         assert!(
-            json.contains("ns-scope test"),
-            "real content returned: {json}"
+            !json_b.contains("projA-only turn"),
+            "leaked A into B's pull: {json_b}"
         );
-        assert_eq!(
-            reg.unextracted_len(),
-            0,
-            "queue drained despite foreign ns arg"
+
+        // Vice-versa: pulling projA now must return A's turn, not B's.
+        let json_a = reg.pull_pending(None, Some("projA")).unwrap();
+        assert!(json_a.contains("projA-only turn"), "got: {json_a}");
+        assert!(
+            !json_a.contains("projB-only turn"),
+            "leaked B into A's pull: {json_a}"
         );
+    }
+
+    /// Durability gap fix: only the DEFAULT namespace's queue was rebuilt at
+    /// daemon startup (`daemon.rs` calls `load_extraction_state(None)`); a
+    /// non-default namespace's queue silently stayed empty after a restart
+    /// until something explicitly called `load_extraction_state(Some(ns))`.
+    /// Captures into two non-default namespaces ("projA", "projB"), drops the
+    /// registry (simulating a daemon restart), reopens over the SAME db dir,
+    /// and — WITHOUT calling `load_extraction_state` at all — pulls "projB"
+    /// and confirms its turn is returned, while "projA" independently reports
+    /// its own backlog (isolation survives the restart too).
+    #[test]
+    fn nondefault_ns_queue_rebuilds_after_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("memory.db");
+        let turn_a = vec![Turn {
+            speaker: "user".into(),
+            text: "projA restart turn".into(),
+            at_ms: Some(1),
+        }];
+        let turn_b = vec![Turn {
+            speaker: "user".into(),
+            text: "projB restart turn".into(),
+            at_ms: Some(2),
+        }];
+        {
+            let mut reg = MemoryRegistry::file_backed_with(
+                Arc::new(StubProvider),
+                db.clone(),
+                dir.path().to_path_buf(),
+                "default".into(),
+                false,
+            );
+            reg.ingest_conversation("s", &turn_a, Some("projA"), true)
+                .unwrap();
+            reg.ingest_conversation("s", &turn_b, Some("projB"), true)
+                .unwrap();
+        } // drop → release lock, simulating a daemon restart
+
+        let mut reg2 = MemoryRegistry::file_backed_with(
+            Arc::new(StubProvider),
+            db,
+            dir.path().to_path_buf(),
+            "default".into(),
+            false,
+        );
+        // No `load_extraction_state` call anywhere — the fix must rebuild
+        // "projB"'s queue purely from `namespace_handle`'s first-open scan.
+        let json_b = retry_while_locked(|| reg2.pull_pending(None, Some("projB")));
+        assert!(
+            json_b.contains("projB restart turn"),
+            "projB's queue must survive the restart: {json_b}"
+        );
+        assert!(
+            !json_b.contains("projA restart turn"),
+            "projA must not leak into projB's pull: {json_b}"
+        );
+
+        // projA's own backlog independently rebuilt too.
+        let status_a = reg2.extraction_status(Some("projA")).unwrap();
+        assert!(
+            status_a.contains("\"pending\":1"),
+            "projA's queue must survive the restart: {status_a}"
+        );
+    }
+
+    /// `extraction_status` backlog must reflect only the REQUESTED
+    /// namespace's queue, not a global count summed across every namespace.
+    #[test]
+    fn extraction_status_is_per_namespace() {
+        let mut reg = registry(true);
+        let turns_a = vec![Turn {
+            speaker: "user".into(),
+            text: "a1".into(),
+            at_ms: Some(1),
+        }];
+        let turns_b: Vec<Turn> = (0..3)
+            .map(|i| Turn {
+                speaker: "user".into(),
+                text: format!("b{i}"),
+                at_ms: Some(10 + i),
+            })
+            .collect();
+        reg.ingest_conversation("s", &turns_a, Some("projA"), true)
+            .unwrap();
+        reg.ingest_conversation("s", &turns_b, Some("projB"), true)
+            .unwrap();
+
+        let status_a = reg.extraction_status(Some("projA")).unwrap();
+        assert!(status_a.contains("\"pending\":1"), "got: {status_a}");
+        let status_b = reg.extraction_status(Some("projB")).unwrap();
+        assert!(status_b.contains("\"pending\":3"), "got: {status_b}");
+    }
+
+    /// malformed_input: a namespace name that NEEDS sanitizing (spaces,
+    /// punctuation, mixed case) must canonicalize to the SAME key for both
+    /// the capture-enqueue and the pull — a raw spelling requiring
+    /// sanitization must still see (and drain) its own queue.
+    #[test]
+    fn odd_namespace_name_canonicalizes_consistently_for_enqueue_and_pull() {
+        let dir = tempfile::tempdir().unwrap();
+        let default_db = dir.path().join("memory.db");
+        let mut reg = MemoryRegistry::file_backed_with(
+            Arc::new(StubProvider),
+            default_db,
+            dir.path().to_path_buf(),
+            "default".into(),
+            false,
+        );
+        let turns = vec![Turn {
+            speaker: "user".into(),
+            text: "needs sanitizing".into(),
+            at_ms: Some(1),
+        }];
+        // Capture under a raw namespace that needs sanitizing (space + punctuation).
+        reg.ingest_conversation("s", &turns, Some("Proj A!"), true)
+            .unwrap();
+        // A DIFFERENT raw spelling sanitizing to the SAME stem must pull it.
+        let pulled = reg.pull_pending(None, Some("PROJ A!")).unwrap();
+        assert!(pulled.contains("needs sanitizing"), "got: {pulled}");
+    }
+
+    /// BACK-COMPAT (stale_state): a queue rebuilt from persisted node metadata
+    /// in the DEFAULT namespace's DB — exactly what an upgrade from the old
+    /// single-global-queue binary leaves on disk, since the automatic capture
+    /// hook always captured with `namespace: None` — must load into the
+    /// DEFAULT namespace's bucket (addressable by both `None` and the literal
+    /// default name) and remain pullable there. No data loss on upgrade.
+    #[test]
+    fn back_compat_persisted_queue_loads_into_default_namespace_bucket() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("memory.db");
+        let turns = vec![Turn {
+            speaker: "user".into(),
+            text: "pre-fix persisted turn".into(),
+            at_ms: Some(42),
+        }];
+        {
+            let mut reg = MemoryRegistry::file_backed_with(
+                Arc::new(StubProvider),
+                db.clone(),
+                dir.path().to_path_buf(),
+                "default".into(),
+                false,
+            );
+            reg.ingest_conversation("s", &turns, None, true).unwrap();
+        } // drop → release lock (simulated upgrade: same DB, new binary)
+        let mut reg2 = MemoryRegistry::file_backed_with(
+            Arc::new(StubProvider),
+            db,
+            dir.path().to_path_buf(),
+            "default".into(),
+            false,
+        );
+        retry_while_locked(|| reg2.load_extraction_state(None));
+        let status = reg2.extraction_status(None).unwrap();
+        assert!(
+            status.contains("\"pending\":1"),
+            "old default-namespace state must rebuild into the default bucket: {status}"
+        );
+        // Addressable by the default namespace's literal name too.
+        let status_named = reg2.extraction_status(Some("default")).unwrap();
+        assert!(
+            status_named.contains("\"pending\":1"),
+            "got: {status_named}"
+        );
+        // And pullable there — no data loss on upgrade.
+        let pulled = reg2.pull_pending(None, Some("default")).unwrap();
+        assert!(pulled.contains("pre-fix persisted turn"), "got: {pulled}");
     }
 
     #[test]

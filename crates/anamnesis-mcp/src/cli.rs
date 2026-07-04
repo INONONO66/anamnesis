@@ -264,12 +264,17 @@ pub async fn run_oneshot_client(cli: &Cli) -> Result<()> {
             namespace: namespace.clone(),
             reinforce: None,
             gate_threshold: None,
+            scope: None,
+            tag: None,
         },
         Some(Commands::Remember {
             text, namespace, ..
         }) => Request::Remember {
             content: text.clone(),
             namespace: namespace.clone(),
+            tags: None,
+            metadata: None,
+            scope: None,
         },
         Some(Commands::Relate {
             from_id,
