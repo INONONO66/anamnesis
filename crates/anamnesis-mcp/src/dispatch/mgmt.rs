@@ -182,7 +182,21 @@ const GRAPH_MAX_DEPTH: usize = 3;
 /// Default hop depth when the caller omits `depth`.
 const GRAPH_DEFAULT_DEPTH: usize = 1;
 /// Default node budget when the caller omits `limit`.
-const GRAPH_DEFAULT_BUDGET: usize = 100;
+const GRAPH_DEFAULT_BUDGET: usize = 250;
+/// Node budget is capped at this many nodes regardless of the
+/// caller-requested value — an unbounded budget on a large graph is an easy
+/// way to make one request do O(graph) work.
+const GRAPH_MAX_BUDGET: usize = 2000;
+
+/// Resolve the caller-requested node budget: default when omitted, clamped
+/// to [`GRAPH_MAX_BUDGET`] otherwise. Extracted as a pure helper so the
+/// budget contract (default 250, cap 2000) is directly unit-testable.
+pub(crate) fn graph_budget(limit: Option<u32>) -> usize {
+    limit
+        .map(|l| l as usize)
+        .unwrap_or(GRAPH_DEFAULT_BUDGET)
+        .min(GRAPH_MAX_BUDGET)
+}
 
 /// Body of `dispatch`'s `Request::Graph` arm.
 ///
@@ -205,7 +219,7 @@ pub(crate) fn dispatch_graph(
         .map(|d| d as usize)
         .unwrap_or(GRAPH_DEFAULT_DEPTH)
         .min(GRAPH_MAX_DEPTH);
-    let budget = limit.map(|l| l as usize).unwrap_or(GRAPH_DEFAULT_BUDGET);
+    let budget = graph_budget(limit);
 
     let explicit_seeds = match (&query, seeds) {
         (Some(_), _) => None,
