@@ -170,7 +170,7 @@ pub(crate) fn mem_recall_packaged_gated(
 }
 
 /// Like [`mem_recall_packaged_gated`], with a scope/tag filter applied to the
-/// [`ContextPackage`] BEFORE rendering — so an excluded node's content never
+/// [`ContextPackage`](anamnesis::query::ContextPackage) BEFORE rendering — so an excluded node's content never
 /// reaches the rendered `context` block (identity/knowledge/memories/tensions),
 /// not just the compact `NODES` list. Re-implements the gate/render/reinforce
 /// sequence rather than delegating to `mem_recall_packaged_gated`, since that
