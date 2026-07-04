@@ -323,6 +323,24 @@ fn add_note_with_sets_scope_tags_and_metadata_on_both_nodes() {
 }
 
 #[test]
+fn memory_view_surfaces_origin_provenance() {
+    let mut m = mem();
+    let opts = NoteOptions {
+        scope: Some(ScopePath::new("projA").unwrap()),
+        tags: vec![],
+        metadata: vec![],
+    };
+    let receipt = m.add_note_with("provenance note", t(1), opts).unwrap();
+
+    let view = m.get(receipt.episodic).unwrap();
+
+    assert_eq!(view.session_id, "note-1");
+    assert_eq!(view.scope, "projA");
+    assert_eq!(view.peer_id, "0");
+    assert!((view.confidence - 0.95).abs() < 1e-9);
+}
+
+#[test]
 fn add_note_delegates_to_add_note_with_default_options() {
     let mut m = mem();
     let receipt = m.add_note("plain note", t(1)).unwrap();

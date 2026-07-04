@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.0] - 2026-07-04
+
+### Added
+- **Local dashboard** — `anamnesis dashboard [--port N] [--namespace ns]` serves a read-only localhost web UI to browse/manage memories and view stats. A daemon client (never opens the DB directly); binds 127.0.0.1 only.
+- **Origin provenance in `get`/`list`** — the MCP `get`/`list` output (and `MemoryView`) now surface `peer_id` / `session_id` / `scope` / `confidence`, so a consumer can see which writer/session/scope produced each memory.
+- Broadened MCP client docs — verified install configs for Cursor, Windsurf, OpenCode, plus a generic any-MCP-client stdio config.
+
+### Fixed
+- **`install.js` now verifies binary integrity** — the fetched native binary is checked against the release `SHA256SUMS.txt` before use (previously downloaded and executed with no integrity check); aborts on mismatch. Supply-chain hardening.
+
+### Changed
+- Strengthened the README differentiation narrative (evidence-linked).
+
+Additive public API (new `MemoryView` fields on a `#[non_exhaustive]` type, new subcommand); minor bump.
+
 ## [0.12.0] - 2026-07-04
 
 ### Added — agent-facing memory management

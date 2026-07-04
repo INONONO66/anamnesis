@@ -32,12 +32,17 @@ fn list_item_json(v: &MemoryView) -> serde_json::Value {
         "created_at": v.created_at.0,
         "retracted": v.retracted,
         "valid_until": v.valid_until.map(|t| t.0),
+        "peer_id": v.peer_id,
+        "session_id": v.session_id,
+        "scope": v.scope,
+        "confidence": v.confidence,
     })
 }
 
 /// Render `get`'s compact JSON object: the full [`MemoryView`] a management
 /// consumer needs, without the internal `Node` fields (access-history
-/// reservoirs, origin, …) `MemoryView` already omits.
+/// reservoirs, …) `MemoryView` already omits. Includes provenance
+/// (`peer_id`/`session_id`/`scope`/`confidence`).
 pub(crate) fn render_view(v: &MemoryView) -> String {
     let value = serde_json::json!({
         "node_id": v.node_id.0,
@@ -52,6 +57,10 @@ pub(crate) fn render_view(v: &MemoryView) -> String {
         "valid_from": v.valid_from.map(|t| t.0),
         "valid_until": v.valid_until.map(|t| t.0),
         "retracted": v.retracted,
+        "peer_id": v.peer_id,
+        "session_id": v.session_id,
+        "scope": v.scope,
+        "confidence": v.confidence,
     });
     serde_json::to_string(&value).unwrap_or_else(|_| "{}".to_string())
 }

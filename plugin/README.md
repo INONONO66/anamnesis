@@ -300,3 +300,19 @@ echo '{"hook_event_name":"UserPromptSubmit","prompt":"zxqv wrrn plugh","cwd":"'"
   | anamnesis hook user-prompt
 # (no output, exit 0)
 ```
+
+## Local dashboard
+
+`anamnesis dashboard` serves a **read-only** local web UI to browse memories
+and view graph stats — a thin client of the shared daemon, never opening the
+DB directly. Binds `127.0.0.1:<port>` only (local, **no auth**); prints the
+URL on startup and runs until interrupted.
+
+```bash
+npx -p anamnesis-mcp anamnesis dashboard [--port N] [--namespace ns]
+# or, from a checkout:
+cargo run -p anamnesis-mcp -- dashboard
+```
+
+`--port` defaults to `0` (pick a free port); `--namespace` defaults to the
+configured namespace.

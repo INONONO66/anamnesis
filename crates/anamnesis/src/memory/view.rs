@@ -14,7 +14,12 @@ use crate::graph::{KnowledgeType, MemoryTier, NodeId, Timestamp};
 /// Returned by [`Memory::get`](super::Memory::get) and
 /// [`Memory::list`](super::Memory::list). Exposes the fields a management
 /// consumer needs without handing out the full internal [`Node`]
-/// representation (access-history reservoirs, origin, etc. are omitted).
+/// representation (access-history reservoirs, etc. are omitted); provenance
+/// (`peer_id`/`session_id`/`scope`/`confidence`, projected from
+/// [`Origin`](crate::graph::Origin)) is surfaced so a consumer can attribute
+/// each memory to the agent/session/scope that produced it — the attribution
+/// foundation for multi-agent/team memory. Multi-writer merge and
+/// trust-weighting remain roadmap.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive] // may gain fields; keep additive
 pub struct MemoryView {
@@ -46,6 +51,14 @@ pub struct MemoryView {
     /// Whether the node is currently retracted (see
     /// [`Memory::forget`](super::Memory::forget)).
     pub retracted: bool,
+    /// Stringified `origin.peer_id` — the writer that produced this node.
+    pub peer_id: String,
+    /// `origin.session_id` — the session that produced this node.
+    pub session_id: String,
+    /// Canonical `origin.scope` string (`ScopePath::as_str()`).
+    pub scope: String,
+    /// `origin.confidence` `[0, 1]` at write time.
+    pub confidence: f64,
 }
 
 /// Filter and ordering knobs for [`Memory::list`](super::Memory::list).
@@ -100,5 +113,9 @@ pub(super) fn node_to_view(node: &Node) -> MemoryView {
         valid_from: node.valid_from,
         valid_until: node.valid_until,
         retracted: node.metadata.get("retracted").is_some_and(|v| v == "true"),
+        peer_id: node.origin.peer_id.0.to_string(),
+        session_id: node.origin.session_id.clone(),
+        scope: node.origin.scope.as_str().to_string(),
+        confidence: node.origin.confidence,
     }
 }
