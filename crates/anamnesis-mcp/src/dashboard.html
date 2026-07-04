@@ -818,6 +818,8 @@
   }
   function render() {
     recomputeScales();
+    applyScaleTuning();
+    wakeRender();                    // data changed → render until the new layout settles
     const vis = visibleNodes();
     const visIds = new Set(vis.map((n) => n.id));
     const links = state.links.filter((l) => visIds.has(endId(l.source)) && visIds.has(endId(l.target)));
@@ -826,6 +828,8 @@
     $("#m-edges").textContent = String(state.links.length);
     updateHud();
     renderFilters();
+    labelsDirty = true;
+    schedulePause(DATA_SETTLE_MS);   // safety; onEngineStop tightens this to ENGINE_SETTLE_MS
   }
 
   // ── Overview HUD (top-left of stage) ──────────────────────────────────────
@@ -838,7 +842,7 @@
     $("#hud-comm").textContent = String(state.nodes.length ? communities : 0);
   }
   // Frame the whole galaxy; a no-op (guarded) until the first layout exists.
-  function fitCamera() { try { Graph.zoomToFit(700, 120); } catch (_e) { /* no nodes yet */ } }
+  function fitCamera() { wakeRender(); schedulePause(ENGINE_SETTLE_MS); try { Graph.zoomToFit(700, 120); } catch (_e) { /* no nodes yet */ } }
 
   // ── Filter sidebar: categories present + counts ───────────────────────────
   function typeCounts() {
@@ -902,6 +906,8 @@
   function refreshNodeVisuals() {
     recomputeScales();
     Graph.nodeColor(nodeColor).nodeVal(nodeVal);
+    labelsDirty = true;
+    wakeRender(); schedulePause(IDLE_SETTLE_MS); // repaint the restyle even if paused
   }
   function setColorMode(mode) {
     const m = mode === "cluster" ? "cluster" : "type";
@@ -956,7 +962,10 @@
     .linkDirectionalParticleColor(linkColor)
     .onNodeClick((node) => onNodeClick(node))
     .onBackgroundClick(() => closeDetail())
-    .onEngineStop(() => { if (pendingFrame) { pendingFrame = false; try { Graph.zoomToFit(700, 120); } catch (_e) { /* no nodes yet */ } } });
+    .onEngineStop(() => {
+      if (pendingFrame) { pendingFrame = false; try { Graph.zoomToFit(700, 120); } catch (_e) { /* no nodes yet */ } }
+      schedulePause(ENGINE_SETTLE_MS); // sim settled → idle-pause after the framing tween
+    });
 
   // Exposed for the optional post-processing module (UnrealBloomPass), which
   // runs in a separate <script type="module"> after this classic script.
@@ -979,41 +988,149 @@
   }
   window.addEventListener("resize", sizeGraph);
 
-  // ── HTML label overlay (projected each frame via graph2ScreenCoords) ──────
+  // ── Render-on-demand + adaptive cost at scale ─────────────────────────────
+  // The bloom composite forces a full composited GPU frame EVERY tick — even a
+  // completely still galaxy repaints at the display refresh, burning GPU/power
+  // for nothing (and starving the main thread, which is what made the dense view
+  // feel janky). We drive the loop on demand: keep rendering while the force sim
+  // settles or the user interacts (orbit / zoom / drag / hover), then
+  // pauseAnimation() once the scene goes quiet. A static scene is pixel-identical
+  // paused, so the resting look (nebula, starfield, bloom) is untouched; it
+  // resumes instantly on the next interaction or data/color/filter change.
+  //
+  // Auto-pause engages ONLY for dense graphs. Small graphs render continuously
+  // (their flowing link particles must not freeze) — the sparse look is as before.
+  let renderAwake = true;        // is the ForceGraph3D animation loop running?
+  let autoPause = false;         // may we idle-pause? (dense graphs only)
+  let pauseTimer = 0;            // single pending re-pause, always rescheduled
+  let labelsDirty = false;       // recompute labels once more even while paused
+  const IDLE_SETTLE_MS = 1400;   // quiet window after interaction before pausing
+  const ENGINE_SETTLE_MS = 1600; // after the sim settles (covers the zoomToFit tween)
+  const DATA_SETTLE_MS = 9000;   // safety cap while a fresh layout is still settling
+
+  function doPause() {
+    pauseTimer = 0;
+    if (!renderAwake || !autoPause) return;
+    renderAwake = false;
+    labelsDirty = true;          // let the label loop draw one final resting frame
+    try { Graph.pauseAnimation(); } catch (_e) { /* older builds lack it — stays live */ }
+  }
+  function schedulePause(ms) {
+    if (pauseTimer) { clearTimeout(pauseTimer); pauseTimer = 0; }
+    if (autoPause) pauseTimer = setTimeout(doPause, ms);
+  }
+  function wakeRender() {
+    if (renderAwake) return;
+    renderAwake = true;
+    try { Graph.resumeAnimation(); } catch (_e) { /* no-op */ }
+  }
+  // A user interaction (or hover): resume now, re-arm the idle re-pause.
+  function nudgeRender() { wakeRender(); if (state.showLabels) labelsDirty = true; schedulePause(IDLE_SETTLE_MS); }
+  for (const ev of ["pointerdown", "pointermove", "wheel", "touchstart", "touchmove"]) {
+    stageEl.addEventListener(ev, nudgeRender, { passive: true });
+  }
+
+  // ── Adaptive per-frame cost by scale ──────────────────────────────────────
+  // Dense graphs get cheap geometry — low-poly spheres (8 segments still read as
+  // round orbs at galaxy scale) and NO per-link directional particles (hundreds
+  // of animated particles are a pure per-frame sink and visual mud). Sparse
+  // graphs keep the high-poly orbs (18) and the flowing particles they had.
+  let appliedRes = -1, appliedParticles = -1;
+  function applyScaleTuning() {
+    const nc = state.nodes.length, lc = state.links.length;
+    const res = nc > 200 ? 8 : (nc > 90 ? 12 : 18);
+    if (res !== appliedRes) { appliedRes = res; Graph.nodeResolution(res); }
+    const parts = lc > 180 ? 0 : 2;
+    if (parts !== appliedParticles) {
+      appliedParticles = parts;
+      Graph.linkDirectionalParticles((l) => (String(l.type).toLowerCase() === "contradicts" ? 0 : parts));
+    }
+    const wantPause = nc > 120 || lc > 180;
+    if (wantPause !== autoPause) {
+      autoPause = wantPause;
+      if (!autoPause) { if (pauseTimer) { clearTimeout(pauseTimer); pauseTimer = 0; } wakeRender(); }
+    }
+  }
+
+  // ── HTML label overlay — LOD: only near-camera, on-screen, top-N nodes ────
+  // Projecting + writing the DOM for every node every frame is what made "Show
+  // labels" bury the galaxy AND tank the framerate at scale. Instead we throttle
+  // to ~10fps and draw a label ONLY for nodes that are (1) in front of the
+  // camera, (2) within a scale-invariant "near" radius (so zoomed out shows
+  // nothing, zooming toward a cluster reveals it), (3) actually on-screen, and
+  // (4) among the LABEL_MAX nearest — a legible handful, never a wall of text.
   const labelHost = $("#labels");
   const labelEls = new Map();
-  let labelRAF = 0;
+  const LABEL_FPS = 10;             // overlay refresh rate (was every frame)
+  const LABEL_MAX = 24;             // hard cap on concurrent labels
+  const LABEL_NEAR_FACTOR = 0.9;    // "near" threshold = graph radius × this
+  let labelTimer = 0;
   function clearLabels() { labelHost.innerHTML = ""; labelEls.clear(); }
-  function labelTick() {
-    if (!state.showLabels) { labelRAF = 0; return; }
+  function updateLabels() {
+    const cam = Graph.camera();
+    if (!cam || !cam.position) return;
     const vis = visibleNodes();
-    const seen = new Set();
     const w = labelHost.clientWidth, h = labelHost.clientHeight;
+    // Graph bounding radius (from centroid) → a scale-invariant near threshold.
+    let cx = 0, cy = 0, cz = 0, cnt = 0;
+    for (const n of vis) { if (n.x == null) continue; cx += n.x; cy += n.y; cz += n.z; cnt++; }
+    if (!cnt) { if (labelEls.size) clearLabels(); return; }
+    cx /= cnt; cy /= cnt; cz /= cnt;
+    let radius = 0;
+    for (const n of vis) { if (n.x == null) continue; const d = Math.hypot(n.x - cx, n.y - cy, n.z - cz); if (d > radius) radius = d; }
+    const nearDist = (radius || 300) * LABEL_NEAR_FACTOR;
+    // Camera forward (toward the orbit target) for a reliable behind-camera cull.
+    const ctr = Graph.controls ? Graph.controls() : null;
+    const tgt = ctr && ctr.target ? ctr.target : { x: cx, y: cy, z: cz };
+    let fx = tgt.x - cam.position.x, fy = tgt.y - cam.position.y, fz = tgt.z - cam.position.z;
+    const fl = Math.hypot(fx, fy, fz) || 1; fx /= fl; fy /= fl; fz /= fl;
+    // Collect near, in-front, on-screen candidates.
+    const cand = [];
     for (const n of vis) {
       if (n.x == null) continue;
+      const vx = n.x - cam.position.x, vy = n.y - cam.position.y, vz = n.z - cam.position.z;
+      if (vx * fx + vy * fy + vz * fz <= 0) continue;             // behind the camera
+      const dist = Math.hypot(vx, vy, vz);
+      if (dist > nearDist) continue;                              // too far → hidden when zoomed out
       const c = Graph.graph2ScreenCoords(n.x, n.y, n.z);
+      if (!c || c.x < 0 || c.y < 0 || c.x > w || c.y > h) continue; // off-screen
+      cand.push({ n: n, dist: dist, c: c });
+    }
+    cand.sort((a, b) => a.dist - b.dist);
+    if (cand.length > LABEL_MAX) cand.length = LABEL_MAX;
+    // Draw the survivors, reusing DOM nodes; drop the rest.
+    const seen = new Set();
+    for (const item of cand) {
+      const n = item.n, c = item.c;
       let el = labelEls.get(n.id);
-      // Clip labels projected outside the viewport (also hides behind-camera artifacts).
-      if (!c || c.x < 0 || c.y < 0 || c.x > w || c.y > h) { if (el) el.style.display = "none"; continue; }
       if (!el) {
         el = document.createElement("div");
         el.className = "glabel";
+        el.textContent = n.label;
         labelHost.appendChild(el);
         labelEls.set(n.id, el);
       }
       seen.add(n.id);
-      el.style.display = "";
-      el.textContent = n.label;
       el.style.transform = "translate(-50%,-50%) translate(" + c.x.toFixed(1) + "px," + c.y.toFixed(1) + "px)";
     }
-    // Drop stale labels (filtered-out / removed nodes).
     for (const [id, el] of labelEls) if (!seen.has(id)) { el.remove(); labelEls.delete(id); }
-    labelRAF = requestAnimationFrame(labelTick);
+  }
+  function labelLoop() {
+    if (!state.showLabels) { labelTimer = 0; return; }
+    // Static + paused scene: the drawn labels are already correct, skip recompute.
+    if (renderAwake || labelsDirty) { labelsDirty = false; updateLabels(); }
+    labelTimer = setTimeout(labelLoop, 1000 / LABEL_FPS);
   }
   function setLabels(on) {
     state.showLabels = on;
-    if (on) { if (!labelRAF) labelRAF = requestAnimationFrame(labelTick); }
-    else { if (labelRAF) cancelAnimationFrame(labelRAF); labelRAF = 0; clearLabels(); }
+    if (on) {
+      labelsDirty = true;
+      nudgeRender();                 // ensure a live frame so positions are current
+      if (!labelTimer) labelLoop();
+    } else {
+      if (labelTimer) { clearTimeout(labelTimer); labelTimer = 0; }
+      clearLabels();
+    }
   }
 
   // ── Data loaders ──────────────────────────────────────────────────────────
