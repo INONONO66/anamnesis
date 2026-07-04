@@ -30,7 +30,10 @@ URL on startup and runs until interrupted. `/api/graph` nodes now carry
 `cluster` (Leiden community id) and `doi` (degree-of-interest) computed
 server-side; the dashboard has a **Type/Cluster color toggle** (color nodes by
 community) and a **Focus mode** (fades low-DOI context, highlights the
-relevant core).
+relevant core). The scene renders as a cinematic deep-space **galaxy** (nebula
+haze + starfield + overview HUD) that stays dense-but-legible at hundreds of
+nodes; **labels appear only as you zoom into a cluster** (not all at once), and
+the render loop pauses when idle so a large graph stays smooth.
 
 ```bash
 npx -p anamnesis-mcp anamnesis dashboard [--port N] [--namespace ns]

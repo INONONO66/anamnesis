@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.0] - 2026-07-05
+
+### Added
+- **Cinematic atmosphere** in the 3D graph dashboard — a deep-space backdrop with layered nebula haze, an in-scene WebGL starfield, and an overview HUD (node / edge / community counts) for the premium "memory galaxy" look.
+- **Dense-scale galaxy** — the dashboard bootstrap now loads a much denser neighborhood (up to 400 seeds) so the graph reads as a luminous star-cloud instead of a sparse scatter, with density-tuned bloom (strength/threshold/radius) that keeps individual nodes distinct at hundreds of nodes (no whiteout).
+
+### Changed
+- **Label level-of-detail** — "Show labels" now renders labels only for the nodes nearest the camera (revealed as you zoom into a cluster), with on-screen culling, a hard cap, and ~10 fps throttling, instead of projecting every node's label every frame. Zoomed out shows a clean graph; zoom in for a legible, bounded set.
+- **Render-on-demand & adaptive cost** — the render loop pauses once the layout settles and the camera is still (resuming on interaction or data change), and node geometry resolution + link particles scale down on large graphs. At ~350 nodes this lifts "Show labels" from ~14 fps to ~120 fps and drops idle GPU work to zero, while preserving the resting look.
+
+Dashboard-only (no engine / public-API change); the minor bump keeps the crate and plugin versions in lockstep with the graph-viz phase series (0.14 → 0.15 → 0.16).
+
 ## [0.15.0] - 2026-07-04
 
 ### Added
