@@ -43,6 +43,9 @@
     --space-2:     #0a1120;
     --nebula-purple: rgba(120, 80, 220, 0.10); /* nebula haze — violet bloom  */
     --nebula-blue:   rgba(40, 120, 220, 0.08); /* nebula haze — cobalt bloom  */
+    --nebula-core:   rgba(18, 12, 48, 0.42);   /* center-space ionized haze   */
+    --star-dim:      rgba(214, 229, 255, 0.36); /* CSS pin-stars above canvas  */
+    --vignette:      rgba(0, 0, 0, 0.62);       /* edge falloff to black       */
     --sidebar-w:   248px;
     --detail-w:    384px;
 
@@ -268,14 +271,44 @@
     background:
       radial-gradient(1100px 780px at 24% 16%, var(--nebula-purple), transparent 62%),
       radial-gradient(1000px 720px at 80% 84%, var(--nebula-blue), transparent 60%),
-      radial-gradient(1500px 1150px at 50% 46%, rgba(14, 10, 34, 0.55), transparent 78%),
+      radial-gradient(1500px 1150px at 50% 46%, var(--nebula-core), transparent 78%),
       var(--space-bg);
   }
-  #graph { position: absolute; inset: 0; }
+  .stage::before,
+  .stage::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+  }
+  /* Over-canvas atmosphere: visible even when WebGL clears opaque near-black.
+     The in-scene nebula/starfield below gives true parallax; this layer adds the
+     reference-grade edge vignette and faint pin-stars without new assets. */
+  .stage::before {
+    z-index: 1;
+    background:
+      radial-gradient(980px 680px at 28% 18%, rgba(120, 80, 220, 0.16), transparent 64%),
+      radial-gradient(900px 620px at 78% 78%, rgba(40, 120, 220, 0.13), transparent 66%),
+      radial-gradient(1300px 900px at 50% 48%, rgba(10, 16, 38, 0.26), transparent 74%);
+    mix-blend-mode: screen;
+    opacity: 0.78;
+  }
+  .stage::after {
+    z-index: 2;
+    background:
+      radial-gradient(circle at 16% 22%, var(--star-dim) 0 1px, transparent 1.5px),
+      radial-gradient(circle at 74% 18%, rgba(255, 242, 205, 0.28) 0 1px, transparent 1.4px),
+      radial-gradient(circle at 63% 72%, rgba(190, 218, 255, 0.24) 0 1px, transparent 1.5px),
+      radial-gradient(circle at 88% 58%, rgba(220, 230, 255, 0.24) 0 1px, transparent 1.4px),
+      radial-gradient(circle at 32% 82%, rgba(210, 226, 255, 0.22) 0 1px, transparent 1.4px),
+      radial-gradient(ellipse at center, transparent 38%, var(--vignette) 100%);
+    opacity: 0.86;
+  }
+  #graph { position: absolute; inset: 0; z-index: 0; }
   #graph canvas { display: block; }
 
   /* HTML label overlay — projected via ForceGraph3D.graph2ScreenCoords */
-  #labels { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+  #labels { position: absolute; inset: 0; z-index: 4; pointer-events: none; overflow: hidden; }
   .glabel {
     position: absolute; left: 0; top: 0; transform: translate(-50%, -50%);
     font-family: var(--font-mono); font-size: 11px; letter-spacing: -0.01em;
@@ -1241,11 +1274,9 @@
   // vendored-three pattern the bloom module below already relies on. Fully
   // guarded: any failure is caught and the Phase-1/2 galaxy still renders.
   //
-  // Depth cue: provided by starfield parallax + the layered nebula depth + the
-  // salience-driven node sizing. A scene.fog (FogExp2) depth fade was tried but
-  // is NOT applied by the bundled 3d-force-graph renderer across the two THREE
-  // instances (verified: node brightness unchanged at density 0.0016), so it is
-  // deliberately omitted rather than shipped as a silent no-op.
+  // Depth cue: starfield parallax + layered nebula depth + a guarded low-density
+  // FogExp2 fade. If the bundled renderer ignores the cross-instance fog object,
+  // the rest of the atmosphere remains fully functional.
   import * as THREE from "three";
 
   // ── Tunables ──────────────────────────────────────────────────────────────
@@ -1281,11 +1312,16 @@
   }
 
   let starfieldWorked = false;
+  let fogWorked = false;
   try {
     const g = window.__graph;
     if (g && typeof g.scene === "function") {
       const scene = g.scene();
       if (scene && typeof scene.add === "function") {
+        // ── Depth fog: low-density fade into cosmic black, crisp near camera ──
+        scene.fog = new THREE.FogExp2(0x02030a, 0.00042);
+        fogWorked = !!(scene.fog && scene.fog.isFogExp2);
+
         // ── Starfield: dim stars on a large spherical shell ───────────────────
         const pos = new Float32Array(STAR_COUNT * 3);
         const col = new Float32Array(STAR_COUNT * 3);
@@ -1333,7 +1369,7 @@
         ];
         for (const cloud of clouds) scene.add(cloud);
 
-        window.__atmosphere = { stars, clouds, starfieldWorked };
+        window.__atmosphere = { stars, clouds, fog: scene.fog, starfieldWorked, fogWorked };
       }
     }
   } catch (e) {
