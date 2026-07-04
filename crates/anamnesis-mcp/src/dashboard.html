@@ -234,7 +234,22 @@
   .switch input:checked ~ .knob { transform: translateX(16px); background: var(--accent); }
   .switch input:focus-visible ~ .track { outline: 2px solid var(--accent); outline-offset: 2px; }
 
+  /* Segmented control — "Color by: Type / Cluster" (reuses accent tokens) */
+  .seg {
+    display: flex; gap: 2px; padding: 2px;
+    background: var(--surface-2); border: 1px solid var(--border-2); border-radius: var(--r1);
+  }
+  .seg-btn {
+    flex: 1; justify-content: center;
+    background: transparent; border: 1px solid transparent; color: var(--text-dim);
+    font-size: 12px; padding: 5px var(--s2); border-radius: 4px;
+    transition: background 0.12s var(--ease), color 0.12s var(--ease), border-color 0.12s var(--ease);
+  }
+  .seg-btn:hover { background: var(--surface-3); color: var(--text); }
+  .seg-btn.on, .seg-btn.on:hover { background: var(--accent-soft); border-color: var(--accent-line); color: var(--accent); }
+
   .side-hint { font-size: 11px; color: var(--text-muted); line-height: 1.45; }
+  .side-hint em { color: var(--text-dim); font-style: normal; }
   .metric-row { display: flex; gap: var(--s4); }
   .metric { display: flex; flex-direction: column; gap: 2px; }
   .metric .v { font-family: var(--font-mono); font-size: 18px; color: var(--text); }
@@ -424,7 +439,12 @@
     <!-- ── Left filter sidebar ─────────────────────────────────────────── -->
     <aside class="sidebar" aria-label="filters">
       <div class="side-sec">
-        <div class="side-title">categories <span class="n" id="type-total"></span></div>
+        <div class="side-title">color by</div>
+        <div class="seg" id="color-mode" role="tablist" aria-label="Color nodes by">
+          <button type="button" class="seg-btn on" data-mode="type" role="tab" aria-selected="true">Type</button>
+          <button type="button" class="seg-btn" data-mode="cluster" role="tab" aria-selected="false">Cluster</button>
+        </div>
+        <div class="side-title" style="margin-top: var(--s2)"><span id="filter-title-label">categories</span> <span class="n" id="type-total"></span></div>
         <div class="filters" id="filters">
           <div class="empty-filters">—</div>
         </div>
@@ -439,7 +459,14 @@
             <span class="track"></span><span class="knob"></span>
           </span>
         </label>
-        <div class="side-hint">Nodes are colored by type and sized by salience. Click a node to inspect it and grow the graph.</div>
+        <label class="toggle">
+          <span>Focus mode</span>
+          <span class="switch">
+            <input type="checkbox" id="focus-toggle" />
+            <span class="track"></span><span class="knob"></span>
+          </span>
+        </label>
+        <div class="side-hint">Nodes are sized by salience and lit by relevance (DOI). Switch color to <em>Cluster</em> for communities; turn on <em>Focus</em> to spotlight the relevant core and dim the context.</div>
       </div>
 
       <div class="side-sec">
@@ -531,7 +558,96 @@
   const RETRACTED_COLOR = "#333a47";
 
   function colorForType(t) { return PALETTE[String(t || "").toLowerCase()] || PALETTE.default; }
-  function nodeColor(n) { return n.retracted ? RETRACTED_COLOR : colorForType(n.type); }
+
+  // ── Community coloring (color BY cluster) ─────────────────────────────────
+  // Golden-angle hue per community id → vivid, well-separated colors that bloom.
+  // A PURE function of the id, so no cluster→color map is ever persisted: the
+  // coloring is implicitly recomputed per /api/graph response (cluster ids are
+  // only response-stable, never stable across queries).
+  const GOLDEN_ANGLE = 137.508;
+  function clusterId(n) { const c = Number(n && n.cluster); return Number.isFinite(c) ? c : 0; }
+  function clusterHue(cid) { return (((cid * GOLDEN_ANGLE) % 360) + 360) % 360; }
+  function clusterCss(cid) { return "hsl(" + clusterHue(cid).toFixed(1) + ", 78%, 60%)"; }
+
+  // Solid, opaque color for the current color mode — used by legend swatches and
+  // the detail dot so the sidebar matches what the galaxy shows.
+  function nodeBaseCss(n) {
+    if (n.retracted) return RETRACTED_COLOR;
+    return state.colorMode === "cluster" ? clusterCss(clusterId(n)) : colorForType(n.type);
+  }
+
+  // Color-space helpers: hex "#rrggbb"/"#rgb" → {r,g,b}; hsl → {r,g,b} (0..255).
+  function hexToRgb(hex) {
+    let h = String(hex || "").trim().replace(/^#/, "");
+    if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2];
+    const num = parseInt(h, 16);
+    if (!Number.isFinite(num)) return { r: 166, g: 182, b: 208 };
+    return { r: (num >> 16) & 255, g: (num >> 8) & 255, b: num & 255 };
+  }
+  function hslToRgb(h, s, l) {
+    const c = (1 - Math.abs(2 * l - 1)) * s, hp = h / 60;
+    const x = c * (1 - Math.abs((hp % 2) - 1));
+    let r = 0, g = 0, b = 0;
+    if (hp < 1) { r = c; g = x; } else if (hp < 2) { r = x; g = c; }
+    else if (hp < 3) { g = c; b = x; } else if (hp < 4) { g = x; b = c; }
+    else if (hp < 5) { r = x; b = c; } else { r = c; b = x; }
+    const m = l - c / 2;
+    return { r: (r + m) * 255, g: (g + m) * 255, b: (b + m) * 255 };
+  }
+  function baseRgb(n) {
+    if (state.colorMode === "cluster") return hslToRgb(clusterHue(clusterId(n)), 0.78, 0.6);
+    return hexToRgb(colorForType(n.type));
+  }
+
+  // ── DOI focus+context ─────────────────────────────────────────────────────
+  // Degree-of-interest, normalized to [0,1] across the CURRENT node set. When
+  // every node scores alike (or the field is absent) all read as fully relevant,
+  // so the galaxy keeps its Phase-1 look.
+  function doiNorm(n) {
+    const r = state.doiRange, v = Number(n && n.doi);
+    if (!r || !Number.isFinite(v) || r.max <= r.min) return 1;
+    return (v - r.min) / (r.max - r.min);
+  }
+  function recomputeScales() {
+    let min = Infinity, max = -Infinity;
+    for (const n of state.nodes) {
+      const v = Number(n.doi);
+      if (!Number.isFinite(v)) continue;
+      if (v < min) min = v;
+      if (v > max) max = v;
+    }
+    state.doiRange = min === Infinity ? null : { min, max };
+  }
+
+  // DOI → node size: high-DOI grows, low-DOI shrinks; Focus widens the spread so
+  // the relevant core dominates the frame.
+  function nodeVal(n) {
+    if (n.retracted) return 2;
+    const base = 4 + (Number(n.salience) || 0) * 18;
+    const d = doiNorm(n);
+    const lo = state.focusMode ? 0.42 : 0.82;
+    const hi = state.focusMode ? 1.70 : 1.34;
+    return base * (lo + (hi - lo) * d);
+  }
+
+  // DOI → node color: dim + fade low-DOI (context), brighten + open up high-DOI
+  // (focus). Alpha rides the color string — 3d-force-graph multiplies its global
+  // nodeOpacity by the color's alpha, giving real per-node opacity for the fade.
+  function nodeColor(n) {
+    if (n.retracted) return RETRACTED_COLOR;
+    const d = doiNorm(n);
+    const rgb = baseRgb(n);
+    const dimLo = state.focusMode ? 0.40 : 0.70;
+    const f = dimLo + (1 - dimLo) * d;
+    let r = rgb.r * f, g = rgb.g * f, b = rgb.b * f;
+    if (d > 0.62) { // push the brightest toward white so bloom makes them pop
+      const t = ((d - 0.62) / 0.38) * (state.focusMode ? 0.42 : 0.30);
+      r += (255 - r) * t; g += (255 - g) * t; b += (255 - b) * t;
+    }
+    const aLo = state.focusMode ? 0.12 : 0.60;
+    const a = aLo + (1 - aLo) * (state.focusMode ? Math.pow(d, 1.4) : d);
+    return "rgba(" + (r | 0) + "," + (g | 0) + "," + (b | 0) + "," + a.toFixed(3) + ")";
+  }
   function linkColor(l) {
     const t = String(l.type || "").toLowerCase();
     return LINK_COLORS[t] || LINK_COLORS.default;
@@ -544,6 +660,10 @@
     byId: new Map(),      // id -> node
     linkKeys: new Set(),  // "src->tgt->type" dedup keys (numeric ids)
     hidden: new Set(),    // hidden type labels
+    hiddenClusters: new Set(), // hidden community ids (cluster mode only)
+    colorMode: "type",    // "type" | "cluster"
+    focusMode: false,     // DOI focus+context dimming
+    doiRange: null,       // {min,max} DOI normalization window (per response)
     showLabels: false,
     selected: null,       // selected node id
     lastQuery: null,      // {mode:'q'|'seed', q, depth}
@@ -633,8 +753,15 @@
   }
 
   // ── Render: push the VISIBLE subset to ForceGraph3D (preserves positions) ─
-  function visibleNodes() { return state.nodes.filter((n) => !state.hidden.has(String(n.type || "").toLowerCase())); }
+  function visibleNodes() {
+    return state.nodes.filter((n) => {
+      if (state.hidden.has(String(n.type || "").toLowerCase())) return false;
+      if (state.colorMode === "cluster" && state.hiddenClusters.has(clusterId(n))) return false;
+      return true;
+    });
+  }
   function render() {
+    recomputeScales();
     const vis = visibleNodes();
     const visIds = new Set(vis.map((n) => n.id));
     const links = state.links.filter((l) => visIds.has(endId(l.source)) && visIds.has(endId(l.target)));
@@ -653,23 +780,75 @@
     }
     return [...m.entries()].sort((a, b) => b[1] - a[1]);
   }
+  // Community counts (cluster mode legend), highest population first.
+  function clusterCounts() {
+    const m = new Map();
+    for (const n of state.nodes) {
+      const c = clusterId(n);
+      m.set(c, (m.get(c) || 0) + 1);
+    }
+    return [...m.entries()].sort((a, b) => b[1] - a[1]);
+  }
   function renderFilters() {
-    const counts = typeCounts();
     const host = $("#filters");
-    $("#type-total").textContent = counts.length ? String(counts.length) : "";
-    if (!counts.length) { host.innerHTML = '<div class="empty-filters">no nodes yet</div>'; return; }
-    host.innerHTML = counts.map(([t, c]) => {
-      const off = state.hidden.has(t) ? " off" : "";
-      const color = colorForType(t);
-      return '<div class="chip' + off + '" data-type="' + esc(t) + '" role="button" tabindex="0" title="Toggle ' + esc(t) + '">' +
-             '<span class="dot" style="color:' + color + '"></span>' +
-             '<span class="name">' + esc(t) + '</span>' +
-             '<span class="cnt">' + c + '</span></div>';
-    }).join("");
+    const label = $("#filter-title-label");
+    if (state.colorMode === "cluster") {
+      if (label) label.textContent = "communities";
+      const counts = clusterCounts();
+      $("#type-total").textContent = counts.length ? String(counts.length) : "";
+      if (!counts.length) { host.innerHTML = '<div class="empty-filters">no communities yet</div>'; return; }
+      host.innerHTML = counts.map(([cid, c]) => {
+        const off = state.hiddenClusters.has(cid) ? " off" : "";
+        return '<div class="chip' + off + '" data-cluster="' + cid + '" role="button" tabindex="0" title="Toggle community ' + cid + '">' +
+               '<span class="dot" style="color:' + clusterCss(cid) + '"></span>' +
+               '<span class="name">community ' + cid + '</span>' +
+               '<span class="cnt">' + c + '</span></div>';
+      }).join("");
+    } else {
+      if (label) label.textContent = "categories";
+      const counts = typeCounts();
+      $("#type-total").textContent = counts.length ? String(counts.length) : "";
+      if (!counts.length) { host.innerHTML = '<div class="empty-filters">no nodes yet</div>'; return; }
+      host.innerHTML = counts.map(([t, c]) => {
+        const off = state.hidden.has(t) ? " off" : "";
+        const color = colorForType(t);
+        return '<div class="chip' + off + '" data-type="' + esc(t) + '" role="button" tabindex="0" title="Toggle ' + esc(t) + '">' +
+               '<span class="dot" style="color:' + color + '"></span>' +
+               '<span class="name">' + esc(t) + '</span>' +
+               '<span class="cnt">' + c + '</span></div>';
+      }).join("");
+    }
   }
   function toggleType(t) {
     if (state.hidden.has(t)) state.hidden.delete(t); else state.hidden.add(t);
     render();
+  }
+  function toggleCluster(cid) {
+    const c = Number(cid);
+    if (state.hiddenClusters.has(c)) state.hiddenClusters.delete(c); else state.hiddenClusters.add(c);
+    render();
+  }
+  // Re-run the node visual accessors after a mode/focus toggle (no data change);
+  // re-setting the accessor is how 3d-force-graph restyles existing nodes.
+  function refreshNodeVisuals() {
+    recomputeScales();
+    Graph.nodeColor(nodeColor).nodeVal(nodeVal);
+  }
+  function setColorMode(mode) {
+    const m = mode === "cluster" ? "cluster" : "type";
+    if (state.colorMode === m) return;
+    state.colorMode = m;
+    for (const b of document.querySelectorAll("#color-mode .seg-btn")) {
+      const on = b.dataset.mode === m;
+      b.classList.toggle("on", on);
+      b.setAttribute("aria-selected", on ? "true" : "false");
+    }
+    render();             // visibility (cluster filters) + legend may change
+    refreshNodeVisuals(); // recolor nodes for the new mode
+  }
+  function setFocus(on) {
+    state.focusMode = !!on;
+    refreshNodeVisuals();
   }
 
   // ── Stage overlays ────────────────────────────────────────────────────────
@@ -693,7 +872,7 @@
     .showNavInfo(false)
     .nodeRelSize(5)
     .nodeColor(nodeColor)
-    .nodeVal((n) => (n.retracted ? 2 : 4 + (Number(n.salience) || 0) * 18))
+    .nodeVal(nodeVal)
     .nodeOpacity(1.0)
     .nodeResolution(18)
     .nodeLabel((n) => '<div style="font:12px ui-monospace,Menlo,monospace;color:#e7eaf0">' +
@@ -834,7 +1013,7 @@
     const d = $("#detail");
     d.classList.add("open");
     d.setAttribute("aria-hidden", "false");
-    $("#detail-dot").style.color = nodeColor(node);
+    $("#detail-dot").style.color = nodeBaseCss(node);
     $("#detail-kicker").textContent = node.type || "memory";
     $("#detail-body").innerHTML = '<div style="display:flex;gap:10px;align-items:center;color:var(--text-muted)"><span class="spinner"></span>loading #' + esc(node.id) + '…</div>';
     $("#detail-actions").innerHTML = "";
@@ -856,7 +1035,8 @@
         "<dt>confidence</dt><dd>" + (m.confidence != null ? Number(m.confidence).toFixed(2) : "—") + "</dd>" +
       "</dl>";
 
-    $("#detail-dot").style.color = colorForType(type);
+    const dotNode = state.byId.get(id) || state.byId.get(Number(id));
+    $("#detail-dot").style.color = dotNode ? nodeBaseCss(dotNode) : colorForType(type);
     $("#detail-kicker").textContent = type;
 
     $("#detail-body").innerHTML =
@@ -932,15 +1112,25 @@
     if (state.lastQuery && state.lastQuery.mode === "q" && $("#q").value.trim()) searchFocus($("#q").value.trim());
   });
   $("#filters").addEventListener("click", (ev) => {
-    const chip = ev.target.closest(".chip[data-type]");
-    if (chip) toggleType(chip.dataset.type);
+    const chip = ev.target.closest(".chip");
+    if (!chip) return;
+    if (chip.dataset.type != null) toggleType(chip.dataset.type);
+    else if (chip.dataset.cluster != null) toggleCluster(chip.dataset.cluster);
   });
   $("#filters").addEventListener("keydown", (ev) => {
     if (ev.key !== "Enter" && ev.key !== " ") return;
-    const chip = ev.target.closest(".chip[data-type]");
-    if (chip) { ev.preventDefault(); toggleType(chip.dataset.type); }
+    const chip = ev.target.closest(".chip");
+    if (!chip) return;
+    ev.preventDefault();
+    if (chip.dataset.type != null) toggleType(chip.dataset.type);
+    else if (chip.dataset.cluster != null) toggleCluster(chip.dataset.cluster);
   });
   $("#labels-toggle").addEventListener("change", (ev) => setLabels(ev.target.checked));
+  $("#color-mode").addEventListener("click", (ev) => {
+    const btn = ev.target.closest(".seg-btn[data-mode]");
+    if (btn) setColorMode(btn.dataset.mode);
+  });
+  $("#focus-toggle").addEventListener("change", (ev) => setFocus(ev.target.checked));
   $("#detail-close").addEventListener("click", closeDetail);
   $("#refresh").addEventListener("click", () => {
     const q = $("#q").value.trim();

@@ -10,7 +10,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use anamnesis::graph::NodeId;
+use anamnesis::graph::{NodeId, Timestamp};
 use anamnesis::memory::ListFilter;
 
 use crate::memory::{self, MemoryRegistry};
@@ -234,7 +234,9 @@ pub(crate) fn dispatch_graph(
         })
     };
     match result {
-        Ok((seed_ids, sub)) => Response::ok(graph::render_graph(&sub, &seed_ids)),
+        Ok((seed_ids, sub)) => {
+            Response::ok(graph::render_graph(&sub, &seed_ids, Timestamp::now().0))
+        }
         Err(e) => bump_and_classify(registry, e),
     }
 }

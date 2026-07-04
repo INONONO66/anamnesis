@@ -14,6 +14,8 @@ use serde::Serialize;
 
 use crate::memory;
 
+use super::enrich;
+
 /// Salience below which a node's display tier is [`MemoryTier::Archival`],
 /// mirroring the private threshold `anamnesis::api::salience_tier` uses
 /// (that function is `pub(crate)` to the engine crate, unreachable from
@@ -34,6 +36,13 @@ pub(crate) struct GraphNodeDto {
     pub created_at: u64,
     pub entity_tags: Vec<String>,
     pub retracted: bool,
+    /// Community id from Leiden clustering over the subgraph's induced
+    /// edges (see [`super::enrich::cluster_ids`]); `0` below the
+    /// hybrid-by-size threshold or on a solver error.
+    pub cluster: u32,
+    /// Degree-of-interest score (see [`super::enrich::doi_scores`]) — higher
+    /// means more likely to matter to the viewer right now.
+    pub doi: f64,
 }
 
 /// One edge in the canonical graph JSON payload.
@@ -81,8 +90,10 @@ fn tier_label(salience: f64) -> String {
 /// Never serializes `Node::embedding` or `Node::access_history` — only the
 /// display-oriented fields a graph-viz consumer needs (label, type, salience,
 /// depth, tier, timestamps, entity tags, retracted).
-pub(crate) fn render_graph(sub: &Subgraph, seed_ids: &[u64]) -> String {
+pub(crate) fn render_graph(sub: &Subgraph, seed_ids: &[u64], now_ms: u64) -> String {
     let depth_by_id: HashMap<NodeId, usize> = sub.depths.iter().copied().collect();
+    let clusters = enrich::cluster_ids(sub);
+    let dois = enrich::doi_scores(sub, now_ms);
 
     let nodes = sub
         .nodes
@@ -97,6 +108,8 @@ pub(crate) fn render_graph(sub: &Subgraph, seed_ids: &[u64]) -> String {
             created_at: n.created_at.0,
             entity_tags: n.entity_tags.clone(),
             retracted: n.metadata.get("retracted").is_some_and(|v| v == "true"),
+            cluster: clusters.get(&n.id).copied().unwrap_or(0),
+            doi: dois.get(&n.id).copied().unwrap_or(0.0),
         })
         .collect();
 
