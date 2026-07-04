@@ -42,6 +42,7 @@ use anamnesis::graph::Timestamp;
 use crate::memory::{self, MemoryRegistry, Turn};
 use crate::proto::{Request, Response};
 
+mod enrich;
 mod graph;
 mod mgmt;
 mod render;

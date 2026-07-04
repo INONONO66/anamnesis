@@ -1518,3 +1518,167 @@ fn adversarial_probe_graph_edge_cases() {
         "no-match query against an empty store: {body}"
     );
 }
+
+// ── graph-viz Phase 2: community `cluster` + `doi` enrichment ──────────────
+
+/// Every node in the `/api/graph` payload carries a numeric `cluster` and
+/// `doi` — the two Phase-2 derived fields, computed server-side.
+#[test]
+fn graph_json_includes_cluster_and_doi() {
+    let (reg, _dir) = stub_registry();
+    let a = remember_id(&reg, "enrich phase2 node alpha");
+    let b = remember_id(&reg, "enrich phase2 node beta");
+    ok_text(dispatch(
+        &reg,
+        Request::Relate {
+            from_id: a,
+            to_id: b,
+            relation: "causes".into(),
+            namespace: None,
+        },
+    ));
+
+    let resp = ok_text(dispatch(
+        &reg,
+        Request::Graph {
+            seeds: Some(vec![a]),
+            query: None,
+            depth: Some(1),
+            limit: Some(100),
+            namespace: None,
+        },
+    ));
+    let body: serde_json::Value = serde_json::from_str(&resp).expect("graph returns JSON");
+    let nodes = body["nodes"].as_array().expect("nodes array");
+    assert!(!nodes.is_empty(), "got: {body}");
+    for n in nodes {
+        assert!(n["cluster"].is_u64(), "cluster must be numeric: {n}");
+        assert!(n["doi"].is_number(), "doi must be numeric: {n}");
+    }
+}
+
+/// Leiden runs deterministically (fixed seed): the same fixture queried
+/// twice yields identical `{node_id: cluster}` assignments.
+#[test]
+fn clusters_are_stable() {
+    let (reg, _dir) = stub_registry();
+    let ids: Vec<u64> = (0..8)
+        .map(|i| remember_id(&reg, &format!("stability fixture node {i}")))
+        .collect();
+    for pair in ids.windows(2) {
+        ok_text(dispatch(
+            &reg,
+            Request::Relate {
+                from_id: pair[0],
+                to_id: pair[1],
+                relation: "causes".into(),
+                namespace: None,
+            },
+        ));
+    }
+
+    let request = || Request::Graph {
+        seeds: Some(vec![ids[0]]),
+        query: None,
+        depth: Some(3),
+        limit: Some(100),
+        namespace: None,
+    };
+    let first: serde_json::Value =
+        serde_json::from_str(&ok_text(dispatch(&reg, request()))).unwrap();
+    let second: serde_json::Value =
+        serde_json::from_str(&ok_text(dispatch(&reg, request()))).unwrap();
+
+    let clusters_by_id = |body: &serde_json::Value| -> std::collections::BTreeMap<u64, u64> {
+        body["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| (n["id"].as_u64().unwrap(), n["cluster"].as_u64().unwrap()))
+            .collect()
+    };
+    assert_eq!(
+        clusters_by_id(&first),
+        clusters_by_id(&second),
+        "leiden must be deterministic across identical calls: {first} vs {second}"
+    );
+}
+
+/// The seed (depth 0) outranks a 1-hop neighbor on `doi` — the seed bonus
+/// and zero depth penalty dominate.
+#[test]
+fn doi_ranks_seed_highest() {
+    let (reg, _dir) = stub_registry();
+    let a = remember_id(&reg, "doi ranking seed node");
+    let b = remember_id(&reg, "doi ranking neighbor node");
+    ok_text(dispatch(
+        &reg,
+        Request::Relate {
+            from_id: a,
+            to_id: b,
+            relation: "causes".into(),
+            namespace: None,
+        },
+    ));
+
+    let resp = ok_text(dispatch(
+        &reg,
+        Request::Graph {
+            seeds: Some(vec![a]),
+            query: None,
+            depth: Some(1),
+            limit: Some(100),
+            namespace: None,
+        },
+    ));
+    let body: serde_json::Value = serde_json::from_str(&resp).unwrap();
+    let nodes = body["nodes"].as_array().unwrap();
+    let doi_of = |id: u64| -> f64 {
+        nodes
+            .iter()
+            .find(|n| n["id"] == id)
+            .and_then(|n| n["doi"].as_f64())
+            .unwrap_or_else(|| panic!("node {id} missing doi: {body}"))
+    };
+    assert!(
+        doi_of(a) > doi_of(b),
+        "seed doi ({}) must exceed neighbor doi ({}): {body}",
+        doi_of(a),
+        doi_of(b)
+    );
+}
+
+/// Below the Leiden size threshold, every node gets `cluster == 0` — the
+/// hybrid-by-size cheap path, not a broken solver.
+#[test]
+fn tiny_graph_single_cluster() {
+    let (reg, _dir) = stub_registry();
+    let a = remember_id(&reg, "tiny graph node alpha");
+    let b = remember_id(&reg, "tiny graph node beta");
+    ok_text(dispatch(
+        &reg,
+        Request::Relate {
+            from_id: a,
+            to_id: b,
+            relation: "causes".into(),
+            namespace: None,
+        },
+    ));
+
+    let resp = ok_text(dispatch(
+        &reg,
+        Request::Graph {
+            seeds: Some(vec![a]),
+            query: None,
+            depth: Some(1),
+            limit: Some(100),
+            namespace: None,
+        },
+    ));
+    let body: serde_json::Value = serde_json::from_str(&resp).unwrap();
+    let nodes = body["nodes"].as_array().unwrap();
+    assert!(nodes.len() < 8, "fixture must stay under the threshold: {body}");
+    for n in nodes {
+        assert_eq!(n["cluster"], 0, "sub-threshold graph must be cluster 0: {n}");
+    }
+}
