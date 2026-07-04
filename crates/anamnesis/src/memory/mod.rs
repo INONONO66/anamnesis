@@ -844,8 +844,11 @@ impl<S: StorageAdapter + Clone> Memory<S> {
     /// its distance from the *nearest* seed). Traversal follows both outgoing
     /// and incoming edges, mirroring [`Memory::neighbors`]. Expansion stops
     /// past `depth` hops, and once the visited-node count reaches
-    /// `node_budget` no further nodes are enqueued and
-    /// [`Subgraph::truncated`](Subgraph) is set.
+    /// `node_budget` no further nodes are enqueued.
+    /// [`Subgraph::truncated`](Subgraph) is set **only** when that budget cutoff
+    /// actually discarded a still-unvisited node reachable within `depth` — a
+    /// fully-exhausted BFS frontier (nothing left to visit) never sets it, even
+    /// when the wider graph holds unrelated, unreachable nodes.
     ///
     /// The returned edge set is **induced**: every edge whose endpoints are
     /// both in the visited set is included exactly once, even if one endpoint
@@ -872,10 +875,7 @@ impl<S: StorageAdapter + Clone> Memory<S> {
             graph.get_node(seed)?;
         }
 
-        let depths = bfs_depths(graph, seeds, depth, node_budget);
-        let truncated = node_budget > 0
-            && depths.len() >= node_budget
-            && depths.len() < graph.storage().node_count();
+        let (depths, truncated) = bfs_depths(graph, seeds, depth, node_budget);
         let visited: HashSet<NodeId> = depths.keys().copied().collect();
 
         let mut edges: Vec<Edge> = Vec::new();
@@ -908,26 +908,34 @@ impl<S: StorageAdapter + Clone> Memory<S> {
 
 /// Undirected multi-seed BFS, bounded by `max_depth` and `node_budget`.
 ///
-/// Returns each visited node's distance from the nearest seed. Stops
-/// enqueuing once `node_budget` nodes have been visited (a `node_budget` of 0
-/// visits nothing). Extracted from [`Memory::subgraph`] to keep that method
-/// within the file's LOC guidance.
+/// Returns each visited node's distance from the nearest seed, plus whether
+/// the budget cutoff actually discarded a genuinely new (not-yet-visited)
+/// node that was still within `max_depth` — i.e. real truncation of the
+/// reachable set, not merely "the graph has more nodes than the budget."
+/// Stops enqueuing once `node_budget` nodes have been visited (a
+/// `node_budget` of 0 visits nothing, and is truncated iff there was a seed
+/// to visit). Extracted from [`Memory::subgraph`] to keep that method within
+/// the file's LOC guidance.
 fn bfs_depths<S: StorageAdapter + Clone>(
     graph: &crate::graph::Graph<S>,
     seeds: &[NodeId],
     max_depth: usize,
     node_budget: usize,
-) -> HashMap<NodeId, usize> {
+) -> (HashMap<NodeId, usize>, bool) {
     let mut depths = HashMap::new();
     let mut queue = VecDeque::new();
+    let mut truncated = false;
 
     for &seed in seeds {
+        if depths.contains_key(&seed) {
+            continue;
+        }
         if depths.len() >= node_budget {
+            truncated = true;
             break;
         }
-        if depths.insert(seed, 0).is_none() {
-            queue.push_back((seed, 0));
-        }
+        depths.insert(seed, 0);
+        queue.push_back((seed, 0));
     }
 
     while let Some((nid, dist)) = queue.pop_front() {
@@ -945,17 +953,19 @@ fn bfs_depths<S: StorageAdapter + Clone>(
                     .filter_map(|&eid| graph.get_edge(eid).ok().map(|e| e.source)),
             );
         for neighbor in neighbor_ids {
+            if depths.contains_key(&neighbor) {
+                continue;
+            }
             if depths.len() >= node_budget {
+                truncated = true;
                 break;
             }
-            if let std::collections::hash_map::Entry::Vacant(entry) = depths.entry(neighbor) {
-                entry.insert(dist + 1);
-                queue.push_back((neighbor, dist + 1));
-            }
+            depths.insert(neighbor, dist + 1);
+            queue.push_back((neighbor, dist + 1));
         }
     }
 
-    depths
+    (depths, truncated)
 }
 
 /// An owned, bounded k-hop subgraph snapshot returned by [`Memory::subgraph`].
@@ -1641,6 +1651,73 @@ mod tests {
 
         assert!(sg.nodes.len() <= 2, "budget must cap visited nodes");
         assert!(sg.truncated, "hitting the budget must set truncated");
+    }
+
+    #[test]
+    fn subgraph_truncated_false_when_reachable_set_fully_collected() {
+        let mut m = mem();
+        // A 3-node chain (n0-n1-n2) reachable from n0 within depth 2 is
+        // exactly 3 nodes; node_budget = 3 lets the BFS collect all of them
+        // and exhaust its frontier before the budget is ever hit. Two extra
+        // disconnected nodes push node_count above node_budget so the old
+        // (buggy) global-node-count check would false-positive here.
+        let chain: Vec<NodeId> = (0..3)
+            .map(|i| {
+                m.add(&format!("s{i}"), "u", &format!("node {i}"), t(i as u64 + 1))
+                    .unwrap()
+                    .episodic
+            })
+            .collect();
+        for w in chain.windows(2) {
+            m.relate(w[0], w[1], Relation::Related).unwrap();
+        }
+        let _extra1 = m.add("sX", "u", "disconnected x", t(100)).unwrap().episodic;
+        let _extra2 = m.add("sY", "u", "disconnected y", t(101)).unwrap().episodic;
+
+        let sg = m.subgraph(&[chain[0]], 2, 3).unwrap();
+
+        assert_eq!(
+            sg.nodes.len(),
+            3,
+            "the whole reachable chain must fit: {sg:?}"
+        );
+        assert!(
+            !sg.truncated,
+            "frontier fully exhausted; unrelated disconnected nodes must not \
+             mark this truncated: {sg:?}"
+        );
+    }
+
+    #[test]
+    fn subgraph_truncated_true_when_frontier_cut_by_budget() {
+        let mut m = mem();
+        // A star: hub connected to 5 leaves. Depth-1 reachable set from the
+        // hub is 6 nodes (hub + 5 leaves); a budget of 3 forces the BFS to
+        // cut the frontier while leaves remain unvisited.
+        let hub = m.add("sHub", "u", "hub node", t(1)).unwrap().episodic;
+        let leaves: Vec<NodeId> = (0..5)
+            .map(|i| {
+                m.add(
+                    &format!("sLeaf{i}"),
+                    "u",
+                    &format!("leaf {i}"),
+                    t(i as u64 + 2),
+                )
+                .unwrap()
+                .episodic
+            })
+            .collect();
+        for &leaf in &leaves {
+            m.relate(hub, leaf, Relation::Related).unwrap();
+        }
+
+        let sg = m.subgraph(&[hub], 1, 3).unwrap();
+
+        assert!(sg.nodes.len() <= 3, "budget must cap visited nodes: {sg:?}");
+        assert!(
+            sg.truncated,
+            "the frontier had unvisited in-depth leaves cut by the budget: {sg:?}"
+        );
     }
 
     #[test]

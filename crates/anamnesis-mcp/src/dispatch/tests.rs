@@ -1519,6 +1519,36 @@ fn adversarial_probe_graph_edge_cases() {
     );
 }
 
+/// Node-budget contract: omitted `limit` uses the 250 default, and any
+/// caller-supplied `limit` above 2000 is clamped rather than honored
+/// verbatim. Tested directly against the extracted pure helper, per the
+/// contract's own dispatch path being expensive to build a 2000+-node fixture
+/// for — the helper IS what `dispatch_graph` calls for this computation.
+#[test]
+fn graph_budget_defaults_to_250_and_caps_at_2000() {
+    assert_eq!(
+        mgmt::graph_budget(None),
+        250,
+        "omitted limit must default to 250"
+    );
+    assert_eq!(mgmt::graph_budget(Some(250)), 250);
+    assert_eq!(
+        mgmt::graph_budget(Some(2000)),
+        2000,
+        "2000 is in-bounds, not clamped"
+    );
+    assert_eq!(
+        mgmt::graph_budget(Some(2001)),
+        2000,
+        "over-cap limit must clamp to 2000"
+    );
+    assert_eq!(
+        mgmt::graph_budget(Some(u32::MAX)),
+        2000,
+        "an absurd limit must still clamp to 2000"
+    );
+}
+
 // ── graph-viz Phase 2: community `cluster` + `doi` enrichment ──────────────
 
 /// Every node in the `/api/graph` payload carries a numeric `cluster` and
