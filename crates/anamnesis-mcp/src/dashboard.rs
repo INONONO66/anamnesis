@@ -18,6 +18,7 @@
 //! | `GET  /api/graph`                   | `Graph`   | JSON object (passthrough) |
 //! | `GET  /api/stats`                   | `Stats`   | `{"stats": "<text>"}`     |
 //! | `POST /api/memory/{id}/forget`      | `Forget`  | `{"ok": true, ...}`       |
+//! | `GET  /static/{file}`               | —         | vendored asset (literal match) |
 //!
 //! `List`/`Get` already emit JSON from the daemon (see `dispatch::render`), so
 //! those responses pass through verbatim; only `Stats` (human text) is wrapped.
@@ -76,6 +77,15 @@ impl HttpReply {
         }
     }
 
+    /// A 200 reply for a vendored static JavaScript asset.
+    fn javascript(body: &'static str) -> Self {
+        Self {
+            status: 200,
+            content_type: "application/javascript",
+            body: body.to_string(),
+        }
+    }
+
     /// A JSON error envelope: `{"error": "<message>"}`.
     fn error(status: u16, message: &str) -> Self {
         let body = serde_json::json!({ "error": message }).to_string();
@@ -104,6 +114,13 @@ fn route(req: &Incoming, default_namespace: Option<&str>, daemon: &dyn Daemon) -
 
     match segments.as_slice() {
         [] => require(method, "GET", || HttpReply::html(DASHBOARD_HTML)),
+
+        ["static", file] => require(method, "GET", || match *file {
+            "3d-force-graph.min.js" => {
+                HttpReply::javascript(include_str!("static/3d-force-graph.min.js"))
+            }
+            _ => HttpReply::error(404, "not found"),
+        }),
 
         ["api", "memories"] => require(method, "GET", || {
             let list = Request::List {
@@ -684,6 +701,78 @@ mod tests {
             Request::Graph { seeds, .. } => assert_eq!(seeds, Some(vec![1, 2, 3])),
             other => panic!("expected Graph, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn get_static_3dfg_is_served_as_javascript() {
+        let d = StubDaemon::new(Response::ok("unused"));
+        let r = send(&d, "GET", "/static/3d-force-graph.min.js");
+        assert_eq!(r.status, 200);
+        assert_eq!(r.content_type, "application/javascript");
+        assert!(!r.body.is_empty(), "vendored asset body must be non-empty");
+        assert!(
+            r.body.contains("ForceGraph3D"),
+            "vendored asset must expose the ForceGraph3D global"
+        );
+        assert!(!d.called(), "a static asset must never hit the daemon");
+    }
+
+    #[test]
+    fn unknown_static_asset_is_404() {
+        let d = StubDaemon::new(Response::ok("unused"));
+        let r = send(&d, "GET", "/static/nope.js");
+        assert_eq!(r.status, 404);
+        assert!(!d.called());
+    }
+
+    #[test]
+    fn static_wrong_method_is_405() {
+        let d = StubDaemon::new(Response::ok("unused"));
+        let r = send(&d, "POST", "/static/3d-force-graph.min.js");
+        assert_eq!(r.status, 405);
+        assert!(!d.called());
+    }
+
+    /// Adversarial: `..` in the path never resolves to more than one segment
+    /// away from `static/` because the router matches on segment *count and
+    /// literal name*, never joins a filesystem path from `file`.
+    #[test]
+    fn static_path_traversal_dotdot_is_404() {
+        let d = StubDaemon::new(Response::ok("unused"));
+        let r = send(&d, "GET", "/static/../dashboard.rs");
+        assert_eq!(r.status, 404);
+        assert!(!d.called());
+    }
+
+    /// Adversarial: a percent-encoded `..%2f..%2f` sequence is never decoded
+    /// in the path (only the query string is percent-decoded), so it stays
+    /// one literal, non-matching segment.
+    #[test]
+    fn static_path_traversal_percent_encoded_is_404() {
+        let d = StubDaemon::new(Response::ok("unused"));
+        let r = send(&d, "GET", "/static/..%2f..%2fCargo.toml");
+        assert_eq!(r.status, 404);
+        assert!(!d.called());
+    }
+
+    /// Manual QA: drive the real vendored asset (not a stub body) through the
+    /// same `route()` surface the HTTP server uses, and print the reply shape
+    /// for human verification.
+    #[test]
+    fn manual_qa_static_reply_shape() {
+        let d = StubDaemon::new(Response::ok("unused"));
+        let r = send(&d, "GET", "/static/3d-force-graph.min.js");
+        let head: String = r.body.chars().take(80).collect();
+        println!(
+            "manual_qa: status={} content_type={} body_len={} head={head:?}",
+            r.status,
+            r.content_type,
+            r.body.len()
+        );
+        assert_eq!(r.status, 200);
+        assert_eq!(r.content_type, "application/javascript");
+        assert!(head.starts_with("/*! 3d-force-graph"));
+        assert!(!d.called(), "the daemon is never consulted for a static asset");
     }
 
     #[test]
