@@ -11,6 +11,24 @@ cognitive memory for LLM agents.
 | `remember` | **After any decision or lesson worth keeping** — stores one distilled insight. |
 | `ingest_conversation` | Hand off a full transcript (ordered turns) for the windowing recipe. |
 | `relate` | Link two recalled nodes with a typed reasoning relation (`causes`, `contradicts`, `supports`, `refutes`, `reason`, `rejected-alternative`, `belongs-to`, `related`, or `custom:<label>`). Pass `node_id`s from a prior `recall`. |
+| `get` / `list` | Read one node, or list nodes by salience/type/tag/scope/metadata filter, as JSON. Both now include per-memory **provenance** — `peer_id`, `session_id`, `scope`, `confidence` (projected from `Origin`) — so a consumer can see which agent/session/scope produced each memory. This is the attribution foundation for multi-agent/team memory; multi-writer merge and trust-weighting remain roadmap. |
+| `update` / `forget` / `supersede` | Edit a node's content, soft/hard-delete it, or mark one node as superseding another. |
+
+## Local dashboard
+
+`anamnesis dashboard` serves a **read-only** local web UI for browsing memories
+and graph stats — a thin daemon client, never opening the DB directly. Binds
+`127.0.0.1:<port>` only (local, **no auth**); prints the URL on startup and
+runs until interrupted.
+
+```bash
+npx -p anamnesis-mcp anamnesis dashboard [--port N] [--namespace ns]
+# or, from a checkout:
+cargo run -p anamnesis-mcp -- dashboard
+```
+
+`--port` defaults to `0` (pick a free port); `--namespace` defaults to the
+configured namespace (overridable per-request via `?namespace=`).
 
 ## CLI subcommands
 

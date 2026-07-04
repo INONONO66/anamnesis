@@ -587,6 +587,36 @@ fn get_returns_full_node_json() {
     assert_eq!(view["retracted"], false);
 }
 
+#[test]
+fn get_json_surfaces_origin_provenance() {
+    let (reg, _dir) = stub_registry();
+    let stored = ok_text(remember_with(
+        &reg,
+        "the outage postmortem is scoped to this project",
+        None,
+        None,
+        Some("projA".to_string()),
+    ));
+    let id = stored
+        .strip_prefix("stored node ")
+        .and_then(|s| s.parse::<u64>().ok())
+        .expect("stored node id");
+
+    let resp = ok_text(dispatch(
+        &reg,
+        Request::Get {
+            id,
+            namespace: None,
+        },
+    ));
+    let view: serde_json::Value = serde_json::from_str(&resp).expect("get returns JSON");
+    println!("get -> {view}");
+    assert_eq!(view["scope"], "projA");
+    assert!(view["peer_id"].is_string(), "got: {view}");
+    assert!(view["session_id"].is_string(), "got: {view}");
+    assert!(view["confidence"].is_number(), "got: {view}");
+}
+
 /// Manual-QA artifact: drives all 5 management tools through the real
 /// `Request` → [`dispatch`] path (the same entry point `server.rs` uses)
 /// against a real in-process registry, printing each actual response.
