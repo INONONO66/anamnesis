@@ -4,7 +4,7 @@
 //! bespoke daemon client: it NEVER opens the SQLite DB directly (the daemon
 //! holds the single-writer lock). It ensures the shared daemon is up
 //! ([`DaemonClient::connect`] → [`crate::launcher::ensure_daemon`]) and forwards
-//! browser requests to it as [`proto::Request`]s (`List`/`Get`/`Stats`/`Forget`).
+//! browser requests to it as [`crate::proto::Request`]s (`List`/`Get`/`Stats`/`Forget`).
 //!
 //! The HTTP surface is a MINIMAL, local-only [`tiny_http`] server bound to
 //! `127.0.0.1` (no auth — a personal, single-user inspector). One embedded HTML
@@ -22,7 +22,7 @@
 //! those responses pass through verbatim; only `Stats` (human text) is wrapped.
 //!
 //! The router ([`route`]) is a pure function over a [`Daemon`] abstraction so the
-//! request→[`proto::Request`]→HTTP-shape mapping is unit-tested with a stub, and
+//! request→[`crate::proto::Request`]→HTTP-shape mapping is unit-tested with a stub, and
 //! the real server bridges to the async [`DaemonClient`] through a small
 //! blocking [`DaemonBridge`].
 
@@ -92,7 +92,7 @@ struct Incoming<'a> {
     query: &'a HashMap<String, String>,
 }
 
-/// Route one request to a [`proto::Request`], call the daemon, and shape the
+/// Route one request to a [`crate::proto::Request`], call the daemon, and shape the
 /// reply. Pure over `daemon` — the whole HTTP contract is exercised in tests
 /// through a stub. `default_namespace` is the dashboard's `--namespace` flag; a
 /// per-request `?namespace=` query overrides it.
