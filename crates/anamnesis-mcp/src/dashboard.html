@@ -38,9 +38,11 @@
     --danger-soft: rgba(232, 104, 106, 0.13);
     --ok:          #6fc98a;
 
-    /* ── Galaxy — near-black space canvas + neon node palette ─────────────── */
-    --space-bg:    #060A13;
+    /* ── Galaxy — deep-black cosmic canvas + neon node palette ────────────── */
+    --space-bg:    #02030a;  /* near-black cosmic space (deepened from #060A13) */
     --space-2:     #0a1120;
+    --nebula-purple: rgba(120, 80, 220, 0.10); /* nebula haze — violet bloom  */
+    --nebula-blue:   rgba(40, 120, 220, 0.08); /* nebula haze — cobalt bloom  */
     --sidebar-w:   248px;
     --detail-w:    384px;
 
@@ -256,7 +258,19 @@
   .metric .k { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); }
 
   /* ── Stage (the galaxy) ────────────────────────────────────────────────── */
-  .stage { position: relative; flex: 1; min-width: 0; background: var(--space-bg); overflow: hidden; }
+  /* A deep-space backdrop: purple + cobalt nebula blooms over a central haze,
+     fading to near-black cosmic void. The WebGL galaxy (opaque near-black clear)
+     renders its own in-scene starfield + nebula on top; this CSS layer gives the
+     loading / empty / error overlays the same cosmic atmosphere, and cushions
+     the canvas edges. */
+  .stage {
+    position: relative; flex: 1; min-width: 0; overflow: hidden;
+    background:
+      radial-gradient(1100px 780px at 24% 16%, var(--nebula-purple), transparent 62%),
+      radial-gradient(1000px 720px at 80% 84%, var(--nebula-blue), transparent 60%),
+      radial-gradient(1500px 1150px at 50% 46%, rgba(14, 10, 34, 0.55), transparent 78%),
+      var(--space-bg);
+  }
   #graph { position: absolute; inset: 0; }
   #graph canvas { display: block; }
 
@@ -318,6 +332,30 @@
     font-size: 11px; color: var(--text-muted); font-family: var(--font-mono);
     pointer-events: none; user-select: none;
   }
+
+  /* Overview HUD — a glass pill in the stage's top-left with live graph counts
+     and a fit/reset-camera control. Sits below the detail drawer (z 12) so an
+     open detail never fights it; the galaxy owns the rest of the frame. */
+  .hud {
+    position: absolute; top: var(--s3); left: var(--s3); z-index: 8;
+    display: flex; align-items: center; gap: var(--s3);
+    padding: 5px 6px 5px var(--s3);
+    background: rgba(6, 10, 19, 0.60); border: 1px solid var(--border-2);
+    border-radius: 999px; backdrop-filter: blur(8px);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.42);
+    font-family: var(--font-mono); font-size: 12px; color: var(--text-dim);
+    user-select: none;
+  }
+  .hud .hud-stats { display: flex; align-items: center; gap: var(--s2); white-space: nowrap; }
+  .hud .hud-stats b { color: var(--text); font-weight: 650; font-variant-numeric: tabular-nums; }
+  .hud .hud-sep { color: var(--text-muted); }
+  .hud .hud-fit {
+    padding: 3px var(--s2); font-size: 11px; border-radius: 999px;
+    background: var(--surface-2); border: 1px solid var(--border-2); color: var(--text-dim);
+    gap: 5px;
+  }
+  .hud .hud-fit:hover { background: var(--surface-3); color: var(--text); border-color: var(--accent-line); }
+  .hud .hud-fit svg { width: 13px; height: 13px; }
 
   /* ── Detail drawer (right) ─────────────────────────────────────────────── */
   .detail {
@@ -483,6 +521,21 @@
       <div id="graph"></div>
       <div id="labels" aria-hidden="true"></div>
 
+      <!-- Overview HUD — live counts + fit/reset camera -->
+      <div class="hud" id="hud">
+        <div class="hud-stats">
+          <span><b id="hud-nodes">0</b> nodes</span>
+          <span class="hud-sep">·</span>
+          <span><b id="hud-edges">0</b> edges</span>
+          <span class="hud-sep">·</span>
+          <span><b id="hud-comm">0</b> communities</span>
+        </div>
+        <button class="hud-fit" id="hud-fit" title="Fit galaxy to view (f)" aria-label="Fit galaxy to view">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
+          Fit
+        </button>
+      </div>
+
       <div class="stage-overlay" id="ov-loading">
         <div class="spinner"></div>
         <div class="msg">Charting the memory galaxy…</div>
@@ -530,12 +583,15 @@
 
   // Broad bootstrap probe: no "all nodes" endpoint exists, so we seed the view
   // with a common term. The backend query is UNGATED — even with no strong
-  // match it returns the nearest neighbors — so this reliably surfaces an
-  // initial cross-section of the graph regardless of its contents. The modest
-  // limit keeps the opening view a focused constellation the user grows outward
-  // by clicking (expand-on-click), rather than dumping the entire graph at once.
+  // match it returns the nearest neighbors (embedding similarity scores every
+  // node) — so this reliably surfaces a broad cross-section of the graph up to
+  // the limit. A HIGH limit makes the opening view read as a dense luminous
+  // star-cloud at real scale (hundreds of nodes) rather than a sparse handful;
+  // on a small graph it simply shows everything. The backend caps depth at 3
+  // but does NOT cap the node budget, so a few hundred is safe. Expand-on-click
+  // still pulls a clicked node's further neighbors on demand.
   const BOOTSTRAP_QUERY = "system";
-  const BOOTSTRAP_LIMIT = 22;
+  const BOOTSTRAP_LIMIT = 400;
   const SEARCH_LIMIT = 200;
 
   // ── Neon palette (color BY knowledge type) ───────────────────────────────
@@ -762,14 +818,31 @@
   }
   function render() {
     recomputeScales();
+    applyScaleTuning();
+    wakeRender();                    // data changed → render until the new layout settles
     const vis = visibleNodes();
     const visIds = new Set(vis.map((n) => n.id));
     const links = state.links.filter((l) => visIds.has(endId(l.source)) && visIds.has(endId(l.target)));
     Graph.graphData({ nodes: vis, links });
     $("#m-nodes").textContent = String(state.nodes.length);
     $("#m-edges").textContent = String(state.links.length);
+    updateHud();
     renderFilters();
+    labelsDirty = true;
+    schedulePause(DATA_SETTLE_MS);   // safety; onEngineStop tightens this to ENGINE_SETTLE_MS
   }
+
+  // ── Overview HUD (top-left of stage) ──────────────────────────────────────
+  // Mirrors the sidebar metrics as an on-canvas glance + a live community count
+  // (distinct Leiden cluster ids present in the current node set).
+  function updateHud() {
+    const communities = new Set(state.nodes.map(clusterId)).size;
+    $("#hud-nodes").textContent = String(state.nodes.length);
+    $("#hud-edges").textContent = String(state.links.length);
+    $("#hud-comm").textContent = String(state.nodes.length ? communities : 0);
+  }
+  // Frame the whole galaxy; a no-op (guarded) until the first layout exists.
+  function fitCamera() { wakeRender(); schedulePause(ENGINE_SETTLE_MS); try { Graph.zoomToFit(700, 120); } catch (_e) { /* no nodes yet */ } }
 
   // ── Filter sidebar: categories present + counts ───────────────────────────
   function typeCounts() {
@@ -833,6 +906,8 @@
   function refreshNodeVisuals() {
     recomputeScales();
     Graph.nodeColor(nodeColor).nodeVal(nodeVal);
+    labelsDirty = true;
+    wakeRender(); schedulePause(IDLE_SETTLE_MS); // repaint the restyle even if paused
   }
   function setColorMode(mode) {
     const m = mode === "cluster" ? "cluster" : "type";
@@ -887,7 +962,10 @@
     .linkDirectionalParticleColor(linkColor)
     .onNodeClick((node) => onNodeClick(node))
     .onBackgroundClick(() => closeDetail())
-    .onEngineStop(() => { if (pendingFrame) { pendingFrame = false; try { Graph.zoomToFit(700, 120); } catch (_e) { /* no nodes yet */ } } });
+    .onEngineStop(() => {
+      if (pendingFrame) { pendingFrame = false; try { Graph.zoomToFit(700, 120); } catch (_e) { /* no nodes yet */ } }
+      schedulePause(ENGINE_SETTLE_MS); // sim settled → idle-pause after the framing tween
+    });
 
   // Exposed for the optional post-processing module (UnrealBloomPass), which
   // runs in a separate <script type="module"> after this classic script.
@@ -910,41 +988,149 @@
   }
   window.addEventListener("resize", sizeGraph);
 
-  // ── HTML label overlay (projected each frame via graph2ScreenCoords) ──────
+  // ── Render-on-demand + adaptive cost at scale ─────────────────────────────
+  // The bloom composite forces a full composited GPU frame EVERY tick — even a
+  // completely still galaxy repaints at the display refresh, burning GPU/power
+  // for nothing (and starving the main thread, which is what made the dense view
+  // feel janky). We drive the loop on demand: keep rendering while the force sim
+  // settles or the user interacts (orbit / zoom / drag / hover), then
+  // pauseAnimation() once the scene goes quiet. A static scene is pixel-identical
+  // paused, so the resting look (nebula, starfield, bloom) is untouched; it
+  // resumes instantly on the next interaction or data/color/filter change.
+  //
+  // Auto-pause engages ONLY for dense graphs. Small graphs render continuously
+  // (their flowing link particles must not freeze) — the sparse look is as before.
+  let renderAwake = true;        // is the ForceGraph3D animation loop running?
+  let autoPause = false;         // may we idle-pause? (dense graphs only)
+  let pauseTimer = 0;            // single pending re-pause, always rescheduled
+  let labelsDirty = false;       // recompute labels once more even while paused
+  const IDLE_SETTLE_MS = 1400;   // quiet window after interaction before pausing
+  const ENGINE_SETTLE_MS = 1600; // after the sim settles (covers the zoomToFit tween)
+  const DATA_SETTLE_MS = 9000;   // safety cap while a fresh layout is still settling
+
+  function doPause() {
+    pauseTimer = 0;
+    if (!renderAwake || !autoPause) return;
+    renderAwake = false;
+    labelsDirty = true;          // let the label loop draw one final resting frame
+    try { Graph.pauseAnimation(); } catch (_e) { /* older builds lack it — stays live */ }
+  }
+  function schedulePause(ms) {
+    if (pauseTimer) { clearTimeout(pauseTimer); pauseTimer = 0; }
+    if (autoPause) pauseTimer = setTimeout(doPause, ms);
+  }
+  function wakeRender() {
+    if (renderAwake) return;
+    renderAwake = true;
+    try { Graph.resumeAnimation(); } catch (_e) { /* no-op */ }
+  }
+  // A user interaction (or hover): resume now, re-arm the idle re-pause.
+  function nudgeRender() { wakeRender(); if (state.showLabels) labelsDirty = true; schedulePause(IDLE_SETTLE_MS); }
+  for (const ev of ["pointerdown", "pointermove", "wheel", "touchstart", "touchmove"]) {
+    stageEl.addEventListener(ev, nudgeRender, { passive: true });
+  }
+
+  // ── Adaptive per-frame cost by scale ──────────────────────────────────────
+  // Dense graphs get cheap geometry — low-poly spheres (8 segments still read as
+  // round orbs at galaxy scale) and NO per-link directional particles (hundreds
+  // of animated particles are a pure per-frame sink and visual mud). Sparse
+  // graphs keep the high-poly orbs (18) and the flowing particles they had.
+  let appliedRes = -1, appliedParticles = -1;
+  function applyScaleTuning() {
+    const nc = state.nodes.length, lc = state.links.length;
+    const res = nc > 200 ? 8 : (nc > 90 ? 12 : 18);
+    if (res !== appliedRes) { appliedRes = res; Graph.nodeResolution(res); }
+    const parts = lc > 180 ? 0 : 2;
+    if (parts !== appliedParticles) {
+      appliedParticles = parts;
+      Graph.linkDirectionalParticles((l) => (String(l.type).toLowerCase() === "contradicts" ? 0 : parts));
+    }
+    const wantPause = nc > 120 || lc > 180;
+    if (wantPause !== autoPause) {
+      autoPause = wantPause;
+      if (!autoPause) { if (pauseTimer) { clearTimeout(pauseTimer); pauseTimer = 0; } wakeRender(); }
+    }
+  }
+
+  // ── HTML label overlay — LOD: only near-camera, on-screen, top-N nodes ────
+  // Projecting + writing the DOM for every node every frame is what made "Show
+  // labels" bury the galaxy AND tank the framerate at scale. Instead we throttle
+  // to ~10fps and draw a label ONLY for nodes that are (1) in front of the
+  // camera, (2) within a scale-invariant "near" radius (so zoomed out shows
+  // nothing, zooming toward a cluster reveals it), (3) actually on-screen, and
+  // (4) among the LABEL_MAX nearest — a legible handful, never a wall of text.
   const labelHost = $("#labels");
   const labelEls = new Map();
-  let labelRAF = 0;
+  const LABEL_FPS = 10;             // overlay refresh rate (was every frame)
+  const LABEL_MAX = 24;             // hard cap on concurrent labels
+  const LABEL_NEAR_FACTOR = 0.9;    // "near" threshold = graph radius × this
+  let labelTimer = 0;
   function clearLabels() { labelHost.innerHTML = ""; labelEls.clear(); }
-  function labelTick() {
-    if (!state.showLabels) { labelRAF = 0; return; }
+  function updateLabels() {
+    const cam = Graph.camera();
+    if (!cam || !cam.position) return;
     const vis = visibleNodes();
-    const seen = new Set();
     const w = labelHost.clientWidth, h = labelHost.clientHeight;
+    // Graph bounding radius (from centroid) → a scale-invariant near threshold.
+    let cx = 0, cy = 0, cz = 0, cnt = 0;
+    for (const n of vis) { if (n.x == null) continue; cx += n.x; cy += n.y; cz += n.z; cnt++; }
+    if (!cnt) { if (labelEls.size) clearLabels(); return; }
+    cx /= cnt; cy /= cnt; cz /= cnt;
+    let radius = 0;
+    for (const n of vis) { if (n.x == null) continue; const d = Math.hypot(n.x - cx, n.y - cy, n.z - cz); if (d > radius) radius = d; }
+    const nearDist = (radius || 300) * LABEL_NEAR_FACTOR;
+    // Camera forward (toward the orbit target) for a reliable behind-camera cull.
+    const ctr = Graph.controls ? Graph.controls() : null;
+    const tgt = ctr && ctr.target ? ctr.target : { x: cx, y: cy, z: cz };
+    let fx = tgt.x - cam.position.x, fy = tgt.y - cam.position.y, fz = tgt.z - cam.position.z;
+    const fl = Math.hypot(fx, fy, fz) || 1; fx /= fl; fy /= fl; fz /= fl;
+    // Collect near, in-front, on-screen candidates.
+    const cand = [];
     for (const n of vis) {
       if (n.x == null) continue;
+      const vx = n.x - cam.position.x, vy = n.y - cam.position.y, vz = n.z - cam.position.z;
+      if (vx * fx + vy * fy + vz * fz <= 0) continue;             // behind the camera
+      const dist = Math.hypot(vx, vy, vz);
+      if (dist > nearDist) continue;                              // too far → hidden when zoomed out
       const c = Graph.graph2ScreenCoords(n.x, n.y, n.z);
+      if (!c || c.x < 0 || c.y < 0 || c.x > w || c.y > h) continue; // off-screen
+      cand.push({ n: n, dist: dist, c: c });
+    }
+    cand.sort((a, b) => a.dist - b.dist);
+    if (cand.length > LABEL_MAX) cand.length = LABEL_MAX;
+    // Draw the survivors, reusing DOM nodes; drop the rest.
+    const seen = new Set();
+    for (const item of cand) {
+      const n = item.n, c = item.c;
       let el = labelEls.get(n.id);
-      // Clip labels projected outside the viewport (also hides behind-camera artifacts).
-      if (!c || c.x < 0 || c.y < 0 || c.x > w || c.y > h) { if (el) el.style.display = "none"; continue; }
       if (!el) {
         el = document.createElement("div");
         el.className = "glabel";
+        el.textContent = n.label;
         labelHost.appendChild(el);
         labelEls.set(n.id, el);
       }
       seen.add(n.id);
-      el.style.display = "";
-      el.textContent = n.label;
       el.style.transform = "translate(-50%,-50%) translate(" + c.x.toFixed(1) + "px," + c.y.toFixed(1) + "px)";
     }
-    // Drop stale labels (filtered-out / removed nodes).
     for (const [id, el] of labelEls) if (!seen.has(id)) { el.remove(); labelEls.delete(id); }
-    labelRAF = requestAnimationFrame(labelTick);
+  }
+  function labelLoop() {
+    if (!state.showLabels) { labelTimer = 0; return; }
+    // Static + paused scene: the drawn labels are already correct, skip recompute.
+    if (renderAwake || labelsDirty) { labelsDirty = false; updateLabels(); }
+    labelTimer = setTimeout(labelLoop, 1000 / LABEL_FPS);
   }
   function setLabels(on) {
     state.showLabels = on;
-    if (on) { if (!labelRAF) labelRAF = requestAnimationFrame(labelTick); }
-    else { if (labelRAF) cancelAnimationFrame(labelRAF); labelRAF = 0; clearLabels(); }
+    if (on) {
+      labelsDirty = true;
+      nudgeRender();                 // ensure a live frame so positions are current
+      if (!labelTimer) labelLoop();
+    } else {
+      if (labelTimer) { clearTimeout(labelTimer); labelTimer = 0; }
+      clearLabels();
+    }
   }
 
   // ── Data loaders ──────────────────────────────────────────────────────────
@@ -1131,6 +1317,7 @@
     if (btn) setColorMode(btn.dataset.mode);
   });
   $("#focus-toggle").addEventListener("change", (ev) => setFocus(ev.target.checked));
+  $("#hud-fit").addEventListener("click", fitCamera);
   $("#detail-close").addEventListener("click", closeDetail);
   $("#refresh").addEventListener("click", () => {
     const q = $("#q").value.trim();
@@ -1144,6 +1331,7 @@
     if (e.key === "Escape") { closeDetail(); return; }
     const inField = ["INPUT", "SELECT", "TEXTAREA"].includes(document.activeElement.tagName);
     if (e.key === "r" && !e.metaKey && !e.ctrlKey && !inField) { const q = $("#q").value.trim(); q ? searchFocus(q) : bootstrap(); }
+    if (e.key === "f" && !e.metaKey && !e.ctrlKey && !inField) { fitCamera(); }
     if (e.key === "/" && !inField) { e.preventDefault(); $("#q").focus(); }
   });
 
@@ -1162,18 +1350,135 @@
 </script>
 
 <script type="module">
+  // ── Cinematic cosmic atmosphere (deferred module) ─────────────────────────
+  // Elevates the galaxy from "dark panel" to DEEP SPACE: an in-scene starfield
+  // (distant dim stars) + a purple/cobalt nebula haze (additive sprites) added
+  // to ForceGraph3D's own THREE.Scene. Rendered IN-SCENE (not CSS) so it survives
+  // the bloom composite and is itself bloom-lit — the same cross-instance
+  // vendored-three pattern the bloom module below already relies on. Fully
+  // guarded: any failure is caught and the Phase-1/2 galaxy still renders.
+  //
+  // Depth cue: provided by starfield parallax + the layered nebula depth + the
+  // salience-driven node sizing. A scene.fog (FogExp2) depth fade was tried but
+  // is NOT applied by the bundled 3d-force-graph renderer across the two THREE
+  // instances (verified: node brightness unchanged at density 0.0016), so it is
+  // deliberately omitted rather than shipped as a silent no-op.
+  import * as THREE from "three";
+
+  // ── Tunables ──────────────────────────────────────────────────────────────
+  const STAR_COUNT     = 1400;    // distant dim stars (Points)
+  const STAR_SHELL_MIN = 320;     // inner radius of the star shell
+  const STAR_SHELL_MAX = 1600;    // outer radius of the star shell
+  const STAR_SIZE      = 2.0;     // world-unit point size (size-attenuated)
+
+  // A soft radial-gradient sprite texture (opaque-ish core → transparent edge):
+  // the building block of the additive nebula haze.
+  function hazeTexture(rgb) {
+    const c = document.createElement("canvas");
+    c.width = c.height = 256;
+    const ctx = c.getContext("2d");
+    const grad = ctx.createRadialGradient(128, 128, 0, 128, 128, 128);
+    grad.addColorStop(0.00, "rgba(" + rgb + ",0.42)");
+    grad.addColorStop(0.35, "rgba(" + rgb + ",0.16)");
+    grad.addColorStop(1.00, "rgba(" + rgb + ",0)");
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, 256, 256);
+    return new THREE.CanvasTexture(c);
+  }
+  function nebulaSprite(tex, x, y, z, scale, opacity) {
+    const mat = new THREE.SpriteMaterial({
+      map: tex, transparent: true, opacity,
+      blending: THREE.AdditiveBlending, depthTest: false, depthWrite: false, fog: false,
+    });
+    const s = new THREE.Sprite(mat);
+    s.position.set(x, y, z);
+    s.scale.set(scale, scale, 1);
+    s.renderOrder = -2; // always behind the node galaxy
+    return s;
+  }
+
+  let starfieldWorked = false;
+  try {
+    const g = window.__graph;
+    if (g && typeof g.scene === "function") {
+      const scene = g.scene();
+      if (scene && typeof scene.add === "function") {
+        // ── Starfield: dim stars on a large spherical shell ───────────────────
+        const pos = new Float32Array(STAR_COUNT * 3);
+        const col = new Float32Array(STAR_COUNT * 3);
+        for (let i = 0; i < STAR_COUNT; i++) {
+          const r = STAR_SHELL_MIN + Math.random() * (STAR_SHELL_MAX - STAR_SHELL_MIN);
+          const theta = Math.random() * Math.PI * 2;
+          const phi = Math.acos(2 * Math.random() - 1);
+          const sp = Math.sin(phi);
+          pos[i * 3]     = r * sp * Math.cos(theta);
+          pos[i * 3 + 1] = r * sp * Math.sin(theta);
+          pos[i * 3 + 2] = r * Math.cos(phi);
+          if (Math.random() < 0.82) {            // cool white-blue majority
+            col[i * 3]     = 0.78 + 0.22 * Math.random();
+            col[i * 3 + 1] = 0.86 + 0.14 * Math.random();
+            col[i * 3 + 2] = 1.0;
+          } else {                                // a few warm accent stars
+            col[i * 3] = 1.0; col[i * 3 + 1] = 0.90; col[i * 3 + 2] = 0.72;
+          }
+        }
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+        geo.setAttribute("color", new THREE.Float32BufferAttribute(col, 3));
+        const starMat = new THREE.PointsMaterial({
+          size: STAR_SIZE, sizeAttenuation: true, vertexColors: true,
+          transparent: true, opacity: 0.9, depthTest: false, depthWrite: false,
+          fog: false, blending: THREE.AdditiveBlending,
+        });
+        const stars = new THREE.Points(geo, starMat);
+        stars.renderOrder = -3; // behind even the nebula — a stable backdrop
+        scene.add(stars);
+        starfieldWorked = true;
+
+        // ── Nebula haze: purple + cobalt additive sprites around the galaxy ───
+        // Positioned in the PERIPHERY (not stacked at the origin behind the dense
+        // node cluster) and kept dim + non-overlapping, so they read as a soft
+        // haze fading to black rather than blooming into a bright central disc.
+        const purple = hazeTexture("120,80,220");
+        const blue = hazeTexture("40,120,220");
+        const clouds = [
+          nebulaSprite(purple, -520,  340, -520, 1100, 0.50),
+          nebulaSprite(blue,    560, -380, -560, 1200, 0.42),
+          nebulaSprite(purple, -440, -300, -440,  820, 0.34),
+          nebulaSprite(blue,    440,  340, -380,  780, 0.34),
+          nebulaSprite(purple,    0,   40, -760, 1600, 0.20),
+        ];
+        for (const cloud of clouds) scene.add(cloud);
+
+        window.__atmosphere = { stars, clouds, starfieldWorked };
+      }
+    }
+  } catch (e) {
+    console.warn("atmosphere disabled:", (e && e.message) || e);
+  }
+</script>
+
+<script type="module">
   // Real bloom: the reference galaxy's glow IS UnrealBloomPass. This module is
   // deferred, so the classic scripts above (window.__graph, __THREE__ clear)
   // have run. Fully guarded — any ESM/import-map/compat failure is caught, never
   // thrown, so the graph still renders (steps 2–4) even if bloom cannot attach.
+  //
+  // Density-tuned: with a dense bootstrap (hundreds of nodes) the per-node glows
+  // ACCUMULATE, so the original strength 1.35 / threshold 0.15 blew the dense
+  // core out to a featureless white disc. Lowering strength and raising the
+  // threshold (so only bright node cores bloom, not the mid-tone haze) yields the
+  // reference's luminous star-cloud — bright cores + glowing haze with individual
+  // nodes still legible — at scale, while a sparse graph still glows cleanly.
+  // Verified in-browser at 352 nodes.
   import { UnrealBloomPass } from "/static/three/examples/jsm/postprocessing/UnrealBloomPass.js";
   try {
     const g = window.__graph;
     if (g && typeof g.postProcessingComposer === "function") {
       const bloom = new UnrealBloomPass();
-      bloom.strength = 1.35;
-      bloom.radius = 0.8;
-      bloom.threshold = 0.15;
+      bloom.strength = 0.9;
+      bloom.radius = 0.7;
+      bloom.threshold = 0.28;
       g.postProcessingComposer().addPass(bloom);
       window.__bloom = bloom;
     }
