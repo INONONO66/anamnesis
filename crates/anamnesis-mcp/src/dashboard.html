@@ -47,15 +47,15 @@
     /* Neon node palette — color BY knowledge type (emissive, saturated).
        Grouped aliases (method→episodic, class→identity, file→entity, …) so a
        richer future type vocabulary maps onto the same seven hues. */
-    --n-episodic:   #00E5D4;  /* episodic / method → cyan   */
-    --n-semantic:   #f0b866;  /* semantic          → amber  */
-    --n-identity:   #9B5CFF;  /* identity / class  → purple */
-    --n-entity:     #46A6FF;  /* entity / file     → blue   */
-    --n-convention: #3BEA7A;  /* convention/folder → green  */
-    --n-decision:   #FFE86A;  /* decision / route  → yellow */
-    --n-gotcha:     #FF5E57;  /* gotcha / project  → red    */
-    --n-default:    #8b9bb5;  /* other             → gray   */
-    --link-teal:    #00F5D4;  /* default link hue           */
+    --n-episodic:   #12FFE8;  /* episodic / method → cyan   */
+    --n-semantic:   #FFB43C;  /* semantic          → amber  */
+    --n-identity:   #B072FF;  /* identity / class  → purple */
+    --n-entity:     #38ABFF;  /* entity / file     → blue   */
+    --n-convention: #2BFF80;  /* convention/folder → green  */
+    --n-decision:   #FFE84D;  /* decision / route  → yellow */
+    --n-gotcha:     #FF5560;  /* gotcha / project  → red    */
+    --n-default:    #A6B6D0;  /* other             → gray   */
+    --link-teal:    #00FFDD;  /* default link hue           */
 
     /* Type */
     --font-ui:   -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
@@ -491,6 +491,7 @@
 
   <div id="toast" role="status" aria-live="polite"></div>
 
+<script type="importmap">{"imports":{"three":"/static/three/build/three.module.js"}}</script>
 <script src="/static/3d-force-graph.min.js"></script>
 <script>
 "use strict";
@@ -507,7 +508,7 @@
   // limit keeps the opening view a focused constellation the user grows outward
   // by clicking (expand-on-click), rather than dumping the entire graph at once.
   const BOOTSTRAP_QUERY = "system";
-  const BOOTSTRAP_LIMIT = 14;
+  const BOOTSTRAP_LIMIT = 22;
   const SEARCH_LIMIT = 200;
 
   // ── Neon palette (color BY knowledge type) ───────────────────────────────
@@ -523,11 +524,11 @@
     default: css("--n-default"),
   };
   const LINK_COLORS = {
-    contradicts: "#FF5E57",
-    reason: "#f0b866", supports: "#f0b866",
+    contradicts: "#FF5560",
+    reason: "#FFB43C", supports: "#FFB43C",
     default: css("--link-teal"),
   };
-  const RETRACTED_COLOR = "#3c4353";
+  const RETRACTED_COLOR = "#333a47";
 
   function colorForType(t) { return PALETTE[String(t || "").toLowerCase()] || PALETTE.default; }
   function nodeColor(n) { return n.retracted ? RETRACTED_COLOR : colorForType(n.type); }
@@ -690,23 +691,28 @@
   const Graph = new ForceGraph3D(document.getElementById("graph"))
     .backgroundColor(css("--space-bg"))
     .showNavInfo(false)
-    .nodeRelSize(4)
+    .nodeRelSize(5)
     .nodeColor(nodeColor)
-    .nodeVal((n) => (n.retracted ? 1.5 : 2 + (Number(n.salience) || 0) * 10))
-    .nodeOpacity(0.92)
-    .nodeResolution(16)
+    .nodeVal((n) => (n.retracted ? 2 : 4 + (Number(n.salience) || 0) * 18))
+    .nodeOpacity(1.0)
+    .nodeResolution(18)
     .nodeLabel((n) => '<div style="font:12px ui-monospace,Menlo,monospace;color:#e7eaf0">' +
         esc(n.label) + ' <span style="color:#8b9bb5">· ' + esc(n.type) +
         (n.retracted ? ' · retracted' : '') + '</span></div>')
     .linkColor(linkColor)
-    .linkWidth(0.6)
-    .linkOpacity(0.42)
-    .linkDirectionalParticles((l) => (String(l.type).toLowerCase() === "contradicts" ? 0 : 1))
-    .linkDirectionalParticleWidth(0.9)
+    .linkWidth(0.8)
+    .linkOpacity(0.5)
+    .linkDirectionalParticles((l) => (String(l.type).toLowerCase() === "contradicts" ? 0 : 2))
+    .linkDirectionalParticleWidth(1.4)
     .linkDirectionalParticleSpeed(0.006)
+    .linkDirectionalParticleColor(linkColor)
     .onNodeClick((node) => onNodeClick(node))
     .onBackgroundClick(() => closeDetail())
     .onEngineStop(() => { if (pendingFrame) { pendingFrame = false; try { Graph.zoomToFit(700, 120); } catch (_e) { /* no nodes yet */ } } });
+
+  // Exposed for the optional post-processing module (UnrealBloomPass), which
+  // runs in a separate <script type="module"> after this classic script.
+  window.__graph = Graph;
 
   // When true, frame the whole graph the next time the force sim settles.
   // Set on a full replace (bootstrap / search); left off on expand so the
@@ -955,6 +961,35 @@
   sizeGraph();
   bootstrap();
 })();
+</script>
+
+<script>
+  // 3d-force-graph bundles its own three and claims window.__THREE__. Clearing
+  // that marker before the vendored three (imported by the bloom module below)
+  // loads suppresses three's benign "Multiple instances" console warning. Two
+  // instances is inherent to the no-build path; only the noisy warning is gone.
+  try { if (window.__THREE__) delete window.__THREE__; } catch (_e) {}
+</script>
+
+<script type="module">
+  // Real bloom: the reference galaxy's glow IS UnrealBloomPass. This module is
+  // deferred, so the classic scripts above (window.__graph, __THREE__ clear)
+  // have run. Fully guarded — any ESM/import-map/compat failure is caught, never
+  // thrown, so the graph still renders (steps 2–4) even if bloom cannot attach.
+  import { UnrealBloomPass } from "/static/three/examples/jsm/postprocessing/UnrealBloomPass.js";
+  try {
+    const g = window.__graph;
+    if (g && typeof g.postProcessingComposer === "function") {
+      const bloom = new UnrealBloomPass();
+      bloom.strength = 1.35;
+      bloom.radius = 0.8;
+      bloom.threshold = 0.15;
+      g.postProcessingComposer().addPass(bloom);
+      window.__bloom = bloom;
+    }
+  } catch (e) {
+    console.warn("bloom disabled:", (e && e.message) || e);
+  }
 </script>
 </body>
 </html>

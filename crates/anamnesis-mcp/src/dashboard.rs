@@ -115,12 +115,7 @@ fn route(req: &Incoming, default_namespace: Option<&str>, daemon: &dyn Daemon) -
     match segments.as_slice() {
         [] => require(method, "GET", || HttpReply::html(DASHBOARD_HTML)),
 
-        ["static", file] => require(method, "GET", || match *file {
-            "3d-force-graph.min.js" => {
-                HttpReply::javascript(include_str!("static/3d-force-graph.min.js"))
-            }
-            _ => HttpReply::error(404, "not found"),
-        }),
+        ["static", rest @ ..] => require(method, "GET", || static_asset(&rest.join("/"))),
 
         ["api", "memories"] => require(method, "GET", || {
             let list = Request::List {
@@ -200,6 +195,37 @@ fn require(method: &str, allowed: &str, handler: impl FnOnce() -> HttpReply) -> 
         handler()
     } else {
         HttpReply::method_not_allowed()
+    }
+}
+
+/// Serve a vendored static asset by the exact `/`-joined sub-path under
+/// `static/`. Matching is on the literal path (never a filesystem join), so a
+/// `..` or percent-encoded traversal matches no arm and 404s. Each `three/**`
+/// module in the UnrealBloomPass import graph needs its own arm here.
+fn static_asset(path: &str) -> HttpReply {
+    match path {
+        "3d-force-graph.min.js" => {
+            HttpReply::javascript(include_str!("static/3d-force-graph.min.js"))
+        }
+        "three/build/three.module.js" => {
+            HttpReply::javascript(include_str!("static/three/build/three.module.js"))
+        }
+        "three/build/three.core.js" => {
+            HttpReply::javascript(include_str!("static/three/build/three.core.js"))
+        }
+        "three/examples/jsm/postprocessing/UnrealBloomPass.js" => HttpReply::javascript(
+            include_str!("static/three/examples/jsm/postprocessing/UnrealBloomPass.js"),
+        ),
+        "three/examples/jsm/postprocessing/Pass.js" => {
+            HttpReply::javascript(include_str!("static/three/examples/jsm/postprocessing/Pass.js"))
+        }
+        "three/examples/jsm/shaders/CopyShader.js" => {
+            HttpReply::javascript(include_str!("static/three/examples/jsm/shaders/CopyShader.js"))
+        }
+        "three/examples/jsm/shaders/LuminosityHighPassShader.js" => HttpReply::javascript(
+            include_str!("static/three/examples/jsm/shaders/LuminosityHighPassShader.js"),
+        ),
+        _ => HttpReply::error(404, "not found"),
     }
 }
 
@@ -718,6 +744,36 @@ mod tests {
     }
 
     #[test]
+    fn get_static_three_module_is_served() {
+        let d = StubDaemon::new(Response::ok("unused"));
+        let r = send(&d, "GET", "/static/three/build/three.module.js");
+        assert_eq!(r.status, 200);
+        assert_eq!(r.content_type, "application/javascript");
+        assert!(
+            r.body.contains("WebGLRenderer"),
+            "vendored three.module.js must expose a THREE export"
+        );
+        assert!(!d.called(), "a static asset must never hit the daemon");
+    }
+
+    #[test]
+    fn get_static_unreal_bloom_pass_is_served() {
+        let d = StubDaemon::new(Response::ok("unused"));
+        let r = send(
+            &d,
+            "GET",
+            "/static/three/examples/jsm/postprocessing/UnrealBloomPass.js",
+        );
+        assert_eq!(r.status, 200);
+        assert_eq!(r.content_type, "application/javascript");
+        assert!(
+            r.body.contains("UnrealBloomPass"),
+            "vendored bloom pass must export UnrealBloomPass"
+        );
+        assert!(!d.called(), "a static asset must never hit the daemon");
+    }
+
+    #[test]
     fn unknown_static_asset_is_404() {
         let d = StubDaemon::new(Response::ok("unused"));
         let r = send(&d, "GET", "/static/nope.js");
@@ -733,9 +789,9 @@ mod tests {
         assert!(!d.called());
     }
 
-    /// Adversarial: `..` in the path never resolves to more than one segment
-    /// away from `static/` because the router matches on segment *count and
-    /// literal name*, never joins a filesystem path from `file`.
+    /// Adversarial: a `..` tail joins to the literal string `"../dashboard.rs"`,
+    /// which matches no `static_asset` arm (it is a literal match, never a
+    /// filesystem join), so it 404s.
     #[test]
     fn static_path_traversal_dotdot_is_404() {
         let d = StubDaemon::new(Response::ok("unused"));
