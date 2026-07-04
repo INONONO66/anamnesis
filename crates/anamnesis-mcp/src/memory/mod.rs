@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use anamnesis::embedding::EmbeddingProvider;
-use anamnesis::graph::{KnowledgeType, NodeId, Timestamp};
+use anamnesis::graph::{EdgeType, KnowledgeType, NodeId, Timestamp};
 use anamnesis::memory::{Hit, MemoryStats};
 use anamnesis::storage::SqliteStorage;
 use anamnesis::{Error, Memory};
@@ -71,6 +71,28 @@ pub(crate) fn knowledge_type_label(kt: &KnowledgeType) -> String {
         KnowledgeType::Semantic => "semantic".to_string(),
         KnowledgeType::Episodic => "episodic".to_string(),
         KnowledgeType::Custom(label) => label.clone(),
+    }
+}
+
+/// Render an [`EdgeType`] as the wire label `graph` uses, mirroring
+/// [`knowledge_type_label`]'s snake_case convention.
+pub(crate) fn edge_type_label(et: &EdgeType) -> String {
+    match et {
+        EdgeType::Semantic => "semantic".to_string(),
+        EdgeType::Causal => "causal".to_string(),
+        EdgeType::Temporal => "temporal".to_string(),
+        EdgeType::Reason => "reason".to_string(),
+        EdgeType::ReinforcedBy => "reinforced_by".to_string(),
+        EdgeType::ConsolidatedFrom => "consolidated_from".to_string(),
+        EdgeType::ExtractedFrom => "extracted_from".to_string(),
+        EdgeType::Entity => "entity".to_string(),
+        EdgeType::Supersedes => "supersedes".to_string(),
+        EdgeType::RejectedAlternative => "rejected_alternative".to_string(),
+        EdgeType::Supports => "supports".to_string(),
+        EdgeType::Refutes => "refutes".to_string(),
+        EdgeType::BelongsTo => "belongs_to".to_string(),
+        EdgeType::Contradicts => "contradicts".to_string(),
+        EdgeType::Custom(label) => label.clone(),
     }
 }
 

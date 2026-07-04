@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.0] - 2026-07-04
+
+### Added
+- **3D graph visualization** in `anamnesis dashboard` — the dashboard is now an interactive force-directed **galaxy** of your memory graph (vendored `3d-force-graph` + three.js, offline/no-CDN): retrieval-seeded neighborhood, node color-by-type + size-by-salience with real `UnrealBloomPass` bloom, **search-to-focus**, **click-to-expand** (k-hop), a node **detail panel** (content, provenance, validity, forget), and a category **filter sidebar**. Replaces the previous read-only table view.
+- **`GET /api/graph`** MCP dashboard endpoint (seed/query-seeded bounded subgraph as canonical `{schema,nodes,edges}` JSON) + **`Memory::subgraph`** engine API (bounded k-hop export: nodes + induced edges + per-node depth).
+
+Additive public API (new engine method, new endpoint) → minor bump.
+
 ## [0.13.0] - 2026-07-04
 
 ### Added

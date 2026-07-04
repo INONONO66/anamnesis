@@ -16,10 +16,17 @@ cognitive memory for LLM agents.
 
 ## Local dashboard
 
-`anamnesis dashboard` serves a **read-only** local web UI for browsing memories
-and graph stats — a thin daemon client, never opening the DB directly. Binds
-`127.0.0.1:<port>` only (local, **no auth**); prints the URL on startup and
-runs until interrupted.
+`anamnesis dashboard` serves a **read-only** local web UI for exploring your
+memory graph as an interactive **3D force-directed galaxy** (vendored
+`3d-force-graph` + three.js, offline/no-CDN) — a thin daemon client, never
+opening the DB directly. Nodes are colored by knowledge type and sized by
+salience, with `UnrealBloomPass` bloom glow on the brightest ones. Retrieval
+seeds a starting neighborhood; **search-to-focus** re-centers the camera on a
+match, **click-to-expand** pulls in a node's k-hop neighbors on demand, a
+**detail panel** shows a selected node's content, provenance, and validity
+(with a `forget` action), and a category **filter sidebar** toggles knowledge
+types on/off. Binds `127.0.0.1:<port>` only (local, **no auth**); prints the
+URL on startup and runs until interrupted.
 
 ```bash
 npx -p anamnesis-mcp anamnesis dashboard [--port N] [--namespace ns]

@@ -42,6 +42,7 @@ use anamnesis::graph::Timestamp;
 use crate::memory::{self, MemoryRegistry, Turn};
 use crate::proto::{Request, Response};
 
+mod graph;
 mod mgmt;
 mod render;
 #[cfg(test)]
@@ -425,5 +426,12 @@ pub fn dispatch(registry: &Arc<Mutex<MemoryRegistry>>, req: Request) -> Response
             metadata,
         ),
         Request::Get { id, namespace } => mgmt::dispatch_get(registry, id, namespace.as_deref()),
+        Request::Graph {
+            seeds,
+            query,
+            depth,
+            limit,
+            namespace,
+        } => mgmt::dispatch_graph(registry, seeds, query, depth, limit, namespace.as_deref()),
     }
 }

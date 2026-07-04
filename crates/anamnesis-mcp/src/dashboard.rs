@@ -15,8 +15,10 @@
 //! | `GET  /`                            | —         | embedded HTML             |
 //! | `GET  /api/memories`                | `List`    | JSON array (passthrough)  |
 //! | `GET  /api/memory/{id}`             | `Get`     | JSON object (passthrough) |
+//! | `GET  /api/graph`                   | `Graph`   | JSON object (passthrough) |
 //! | `GET  /api/stats`                   | `Stats`   | `{"stats": "<text>"}`     |
 //! | `POST /api/memory/{id}/forget`      | `Forget`  | `{"ok": true, ...}`       |
+//! | `GET  /static/{file}`               | —         | vendored asset (literal match) |
 //!
 //! `List`/`Get` already emit JSON from the daemon (see `dispatch::render`), so
 //! those responses pass through verbatim; only `Stats` (human text) is wrapped.
@@ -75,6 +77,15 @@ impl HttpReply {
         }
     }
 
+    /// A 200 reply for a vendored static JavaScript asset.
+    fn javascript(body: &'static str) -> Self {
+        Self {
+            status: 200,
+            content_type: "application/javascript",
+            body: body.to_string(),
+        }
+    }
+
     /// A JSON error envelope: `{"error": "<message>"}`.
     fn error(status: u16, message: &str) -> Self {
         let body = serde_json::json!({ "error": message }).to_string();
@@ -104,6 +115,8 @@ fn route(req: &Incoming, default_namespace: Option<&str>, daemon: &dyn Daemon) -
     match segments.as_slice() {
         [] => require(method, "GET", || HttpReply::html(DASHBOARD_HTML)),
 
+        ["static", rest @ ..] => require(method, "GET", || static_asset(&rest.join("/"))),
+
         ["api", "memories"] => require(method, "GET", || {
             let list = Request::List {
                 min_salience: req.query.get("min_salience").and_then(|s| s.parse().ok()),
@@ -124,6 +137,29 @@ fn route(req: &Incoming, default_namespace: Option<&str>, daemon: &dyn Daemon) -
                 }
                 Response::Err { kind, message } => error_reply(kind, &message),
             }
+        }),
+
+        ["api", "graph"] => require(method, "GET", || {
+            let seed = req.query.get("seed").and_then(|s| s.parse::<u64>().ok());
+            let seeds_csv = req.query.get("seeds").and_then(|s| parse_csv_ids(s));
+            let seeds = seed.map(|s| vec![s]).or(seeds_csv);
+            let query_text = req
+                .query
+                .get("q")
+                .map(String::as_str)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            if seeds.is_none() && query_text.is_none() {
+                return HttpReply::error(400, "graph requires seed(s) or q");
+            }
+            let graph = Request::Graph {
+                seeds,
+                query: query_text,
+                depth: req.query.get("depth").and_then(|s| s.parse().ok()),
+                limit: req.query.get("limit").and_then(|s| s.parse().ok()),
+                namespace,
+            };
+            json_passthrough(daemon.call(graph))
         }),
 
         ["api", "memory", id] => require(method, "GET", || match parse_id(id) {
@@ -162,8 +198,49 @@ fn require(method: &str, allowed: &str, handler: impl FnOnce() -> HttpReply) -> 
     }
 }
 
+/// Serve a vendored static asset by the exact `/`-joined sub-path under
+/// `static/`. Matching is on the literal path (never a filesystem join), so a
+/// `..` or percent-encoded traversal matches no arm and 404s. Each `three/**`
+/// module in the UnrealBloomPass import graph needs its own arm here.
+fn static_asset(path: &str) -> HttpReply {
+    match path {
+        "3d-force-graph.min.js" => {
+            HttpReply::javascript(include_str!("static/3d-force-graph.min.js"))
+        }
+        "three/build/three.module.js" => {
+            HttpReply::javascript(include_str!("static/three/build/three.module.js"))
+        }
+        "three/build/three.core.js" => {
+            HttpReply::javascript(include_str!("static/three/build/three.core.js"))
+        }
+        "three/examples/jsm/postprocessing/UnrealBloomPass.js" => HttpReply::javascript(
+            include_str!("static/three/examples/jsm/postprocessing/UnrealBloomPass.js"),
+        ),
+        "three/examples/jsm/postprocessing/Pass.js" => HttpReply::javascript(include_str!(
+            "static/three/examples/jsm/postprocessing/Pass.js"
+        )),
+        "three/examples/jsm/shaders/CopyShader.js" => HttpReply::javascript(include_str!(
+            "static/three/examples/jsm/shaders/CopyShader.js"
+        )),
+        "three/examples/jsm/shaders/LuminosityHighPassShader.js" => HttpReply::javascript(
+            include_str!("static/three/examples/jsm/shaders/LuminosityHighPassShader.js"),
+        ),
+        _ => HttpReply::error(404, "not found"),
+    }
+}
+
 fn parse_id(s: &str) -> Option<u64> {
     s.parse::<u64>().ok()
+}
+
+/// Parse a comma-separated list of `u64` ids (`"1,2,3"`). Returns `None` if the
+/// string is empty or any entry fails to parse — a partially-malformed list is
+/// rejected wholesale rather than silently dropping the bad entries.
+fn parse_csv_ids(raw: &str) -> Option<Vec<u64>> {
+    if raw.is_empty() {
+        return None;
+    }
+    raw.split(',').map(|s| s.parse::<u64>().ok()).collect()
 }
 
 /// Pass a daemon reply straight through as JSON (`List`/`Get` already emit JSON),
@@ -552,6 +629,209 @@ mod tests {
     fn unknown_route_is_404() {
         let d = StubDaemon::new(Response::ok("unused"));
         assert_eq!(send(&d, "GET", "/api/nope").status, 404);
+    }
+
+    #[test]
+    fn get_graph_by_seed_calls_graph_op_and_passes_json_through() {
+        let d = StubDaemon::new(Response::ok(
+            "{\"schema\":1,\"seed_ids\":[5],\"truncated\":false,\"nodes\":[],\"edges\":[]}",
+        ));
+        let query = q(&[("seed", "5"), ("depth", "1"), ("limit", "100")]);
+        let r = route(
+            &Incoming {
+                method: "GET",
+                path: "/api/graph",
+                query: &query,
+            },
+            None,
+            &d,
+        );
+        assert_eq!(r.status, 200);
+        assert_eq!(r.content_type, "application/json");
+        assert_eq!(
+            r.body,
+            "{\"schema\":1,\"seed_ids\":[5],\"truncated\":false,\"nodes\":[],\"edges\":[]}"
+        );
+        match d.last() {
+            Request::Graph {
+                seeds,
+                query,
+                depth,
+                limit,
+                namespace,
+            } => {
+                assert_eq!(seeds, Some(vec![5]));
+                assert_eq!(query, None);
+                assert_eq!(depth, Some(1));
+                assert_eq!(limit, Some(100));
+                assert_eq!(namespace, None);
+            }
+            other => panic!("expected Graph, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn get_graph_by_query_passes_query() {
+        let d = StubDaemon::new(Response::ok("{\"schema\":1}"));
+        let query = q(&[("q", "wombat")]);
+        let r = route(
+            &Incoming {
+                method: "GET",
+                path: "/api/graph",
+                query: &query,
+            },
+            None,
+            &d,
+        );
+        assert_eq!(r.status, 200);
+        match d.last() {
+            Request::Graph { seeds, query, .. } => {
+                assert_eq!(seeds, None);
+                assert_eq!(query, Some("wombat".to_string()));
+            }
+            other => panic!("expected Graph, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn get_graph_without_seed_or_q_is_400() {
+        let d = StubDaemon::new(Response::ok("unused"));
+        let r = send(&d, "GET", "/api/graph");
+        assert_eq!(r.status, 400);
+        assert!(!d.called(), "no seed/q must never reach the daemon");
+    }
+
+    #[test]
+    fn get_graph_wrong_method_is_405() {
+        let d = StubDaemon::new(Response::ok("unused"));
+        let r = send(&d, "POST", "/api/graph");
+        assert_eq!(r.status, 405);
+        assert!(!d.called());
+    }
+
+    #[test]
+    fn graph_seeds_csv_parses() {
+        let d = StubDaemon::new(Response::ok("{\"schema\":1}"));
+        let query = q(&[("seeds", "1,2,3")]);
+        let r = route(
+            &Incoming {
+                method: "GET",
+                path: "/api/graph",
+                query: &query,
+            },
+            None,
+            &d,
+        );
+        assert_eq!(r.status, 200);
+        match d.last() {
+            Request::Graph { seeds, .. } => assert_eq!(seeds, Some(vec![1, 2, 3])),
+            other => panic!("expected Graph, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn get_static_3dfg_is_served_as_javascript() {
+        let d = StubDaemon::new(Response::ok("unused"));
+        let r = send(&d, "GET", "/static/3d-force-graph.min.js");
+        assert_eq!(r.status, 200);
+        assert_eq!(r.content_type, "application/javascript");
+        assert!(!r.body.is_empty(), "vendored asset body must be non-empty");
+        assert!(
+            r.body.contains("ForceGraph3D"),
+            "vendored asset must expose the ForceGraph3D global"
+        );
+        assert!(!d.called(), "a static asset must never hit the daemon");
+    }
+
+    #[test]
+    fn get_static_three_module_is_served() {
+        let d = StubDaemon::new(Response::ok("unused"));
+        let r = send(&d, "GET", "/static/three/build/three.module.js");
+        assert_eq!(r.status, 200);
+        assert_eq!(r.content_type, "application/javascript");
+        assert!(
+            r.body.contains("WebGLRenderer"),
+            "vendored three.module.js must expose a THREE export"
+        );
+        assert!(!d.called(), "a static asset must never hit the daemon");
+    }
+
+    #[test]
+    fn get_static_unreal_bloom_pass_is_served() {
+        let d = StubDaemon::new(Response::ok("unused"));
+        let r = send(
+            &d,
+            "GET",
+            "/static/three/examples/jsm/postprocessing/UnrealBloomPass.js",
+        );
+        assert_eq!(r.status, 200);
+        assert_eq!(r.content_type, "application/javascript");
+        assert!(
+            r.body.contains("UnrealBloomPass"),
+            "vendored bloom pass must export UnrealBloomPass"
+        );
+        assert!(!d.called(), "a static asset must never hit the daemon");
+    }
+
+    #[test]
+    fn unknown_static_asset_is_404() {
+        let d = StubDaemon::new(Response::ok("unused"));
+        let r = send(&d, "GET", "/static/nope.js");
+        assert_eq!(r.status, 404);
+        assert!(!d.called());
+    }
+
+    #[test]
+    fn static_wrong_method_is_405() {
+        let d = StubDaemon::new(Response::ok("unused"));
+        let r = send(&d, "POST", "/static/3d-force-graph.min.js");
+        assert_eq!(r.status, 405);
+        assert!(!d.called());
+    }
+
+    /// Adversarial: a `..` tail joins to the literal string `"../dashboard.rs"`,
+    /// which matches no `static_asset` arm (it is a literal match, never a
+    /// filesystem join), so it 404s.
+    #[test]
+    fn static_path_traversal_dotdot_is_404() {
+        let d = StubDaemon::new(Response::ok("unused"));
+        let r = send(&d, "GET", "/static/../dashboard.rs");
+        assert_eq!(r.status, 404);
+        assert!(!d.called());
+    }
+
+    /// Adversarial: a percent-encoded `..%2f..%2f` sequence is never decoded
+    /// in the path (only the query string is percent-decoded), so it stays
+    /// one literal, non-matching segment.
+    #[test]
+    fn static_path_traversal_percent_encoded_is_404() {
+        let d = StubDaemon::new(Response::ok("unused"));
+        let r = send(&d, "GET", "/static/..%2f..%2fCargo.toml");
+        assert_eq!(r.status, 404);
+        assert!(!d.called());
+    }
+
+    /// Manual QA: drive the real vendored asset (not a stub body) through the
+    /// same `route()` surface the HTTP server uses, and print the reply shape
+    /// for human verification.
+    #[test]
+    fn manual_qa_static_reply_shape() {
+        let d = StubDaemon::new(Response::ok("unused"));
+        let r = send(&d, "GET", "/static/3d-force-graph.min.js");
+        let head: String = r.body.chars().take(80).collect();
+        println!(
+            "manual_qa: status={} content_type={} body_len={} head={head:?}",
+            r.status,
+            r.content_type,
+            r.body.len()
+        );
+        assert_eq!(r.status, 200);
+        assert_eq!(r.content_type, "application/javascript");
+        assert!(head.starts_with("/*! 3d-force-graph"));
+        assert!(
+            !d.called(),
+            "the daemon is never consulted for a static asset"
+        );
     }
 
     #[test]

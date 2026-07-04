@@ -131,6 +131,18 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         namespace: Option<String>,
     },
+    Graph {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seeds: Option<Vec<u64>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        query: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        depth: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        namespace: Option<String>,
+    },
 }
 
 /// Whether a failed request is the caller's fault (e.g. a bad relation label or
@@ -269,6 +281,26 @@ mod tests {
             id: 7,
             namespace: None,
         });
+        round_trip_request(Request::Graph {
+            seeds: Some(vec![1, 2]),
+            query: Some("how does the gate work".into()),
+            depth: Some(2),
+            limit: Some(50),
+            namespace: Some("projA".into()),
+        });
+    }
+
+    #[test]
+    fn graph_omits_none_fields_on_the_wire() {
+        let line = encode_line(&Request::Graph {
+            seeds: None,
+            query: None,
+            depth: None,
+            limit: None,
+            namespace: None,
+        })
+        .unwrap();
+        assert_eq!(line, "{\"op\":\"graph\"}\n", "got: {line}");
     }
 
     #[test]

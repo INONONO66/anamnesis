@@ -1308,3 +1308,213 @@ fn p1_t5_manual_qa_demo() {
     ));
     println!("recall (scope=projA) -> {recalled}");
 }
+
+// ── graph-viz: `Request::Graph` dispatch (RED→GREEN, start-work Wave 2) ─────
+
+/// By-seed path: remember two nodes, relate them, then request the subgraph
+/// rooted at the first. Asserts the canonical wire shape (`schema`, `nodes`,
+/// `edges`) and that the seed + its related neighbor + the edge between them
+/// actually appear — real wired data, not a hardcoded shape.
+#[test]
+fn dispatch_graph_by_seed_returns_canonical_json() {
+    let (reg, _dir) = stub_registry();
+    let a = remember_id(&reg, "graph-viz seed node alpha");
+    let b = remember_id(&reg, "graph-viz seed node beta");
+    ok_text(dispatch(
+        &reg,
+        Request::Relate {
+            from_id: a,
+            to_id: b,
+            relation: "causes".into(),
+            namespace: None,
+        },
+    ));
+
+    let resp = ok_text(dispatch(
+        &reg,
+        Request::Graph {
+            seeds: Some(vec![a]),
+            query: None,
+            depth: Some(1),
+            limit: Some(100),
+            namespace: None,
+        },
+    ));
+    let body: serde_json::Value = serde_json::from_str(&resp).expect("graph returns JSON");
+
+    assert_eq!(body["schema"], 1, "got: {body}");
+    assert_eq!(body["seed_ids"], serde_json::json!([a]), "got: {body}");
+    let nodes = body["nodes"].as_array().expect("nodes array");
+    assert!(
+        nodes.iter().any(|n| n["id"] == a),
+        "seed node must appear in nodes: {body}"
+    );
+    assert!(
+        nodes.iter().any(|n| n["id"] == b),
+        "1-hop neighbor must appear in nodes: {body}"
+    );
+    let edges = body["edges"].as_array().expect("edges array");
+    assert!(
+        edges
+            .iter()
+            .any(|e| e["source"] == a && e["target"] == b && e["type"] == "causal"),
+        "the causes edge must appear: {body}"
+    );
+    for n in nodes {
+        assert!(n["salience"].is_number(), "got: {n}");
+        assert!(n["type"].is_string(), "got: {n}");
+        assert!(n["depth"].is_u64(), "got: {n}");
+        assert!(n["tier"].is_string(), "got: {n}");
+        assert!(n["created_at"].is_u64(), "got: {n}");
+        assert!(n["retracted"].is_boolean(), "got: {n}");
+    }
+}
+
+/// By-query path: a query resolves its own seed ids via search, without the
+/// caller supplying any `seeds`.
+#[test]
+fn dispatch_graph_by_query_resolves_seeds() {
+    let (reg, _dir) = stub_registry();
+    remember_id(&reg, "the wombat migration runbook is documented here");
+
+    let resp = ok_text(dispatch(
+        &reg,
+        Request::Graph {
+            seeds: None,
+            query: Some("wombat".into()),
+            depth: None,
+            limit: None,
+            namespace: None,
+        },
+    ));
+    let body: serde_json::Value = serde_json::from_str(&resp).expect("graph returns JSON");
+    assert_eq!(body["schema"], 1, "got: {body}");
+    let nodes = body["nodes"].as_array().expect("nodes array");
+    assert!(
+        !nodes.is_empty(),
+        "query-resolved seeds must yield a non-empty subgraph: {body}"
+    );
+}
+
+/// Neither `seeds` nor `query` is a caller error, not an internal one.
+#[test]
+fn dispatch_graph_without_seed_or_query_is_invalid_params() {
+    let (reg, _dir) = stub_registry();
+    let resp = dispatch(
+        &reg,
+        Request::Graph {
+            seeds: None,
+            query: None,
+            depth: None,
+            limit: None,
+            namespace: None,
+        },
+    );
+    match resp {
+        Response::Err { kind, .. } => assert_eq!(kind, ErrKind::InvalidParams),
+        other => panic!("expected invalid_params, got {other:?}"),
+    }
+}
+
+/// A seed id that doesn't exist in the graph is a caller error (bad id), not
+/// an internal one — mirrors `get`/`update`'s missing-id classification.
+#[test]
+fn dispatch_graph_missing_node_is_invalid_params() {
+    let (reg, _dir) = stub_registry();
+    let resp = dispatch(
+        &reg,
+        Request::Graph {
+            seeds: Some(vec![9999]),
+            query: None,
+            depth: None,
+            limit: None,
+            namespace: None,
+        },
+    );
+    match resp {
+        Response::Err { kind, .. } => assert_eq!(kind, ErrKind::InvalidParams),
+        other => panic!("expected invalid_params, got {other:?}"),
+    }
+}
+
+#[test]
+fn adversarial_probe_graph_edge_cases() {
+    let (reg, _dir) = stub_registry();
+    let a = remember_id(&reg, "adversarial probe alpha node");
+
+    // empty seeds vec, no query -> invalid_params (not silently empty-200).
+    let resp = dispatch(
+        &reg,
+        Request::Graph {
+            seeds: Some(vec![]),
+            query: None,
+            depth: None,
+            limit: None,
+            namespace: None,
+        },
+    );
+    assert!(
+        matches!(
+            resp,
+            Response::Err {
+                kind: ErrKind::InvalidParams,
+                ..
+            }
+        ),
+        "empty seeds: {resp:?}"
+    );
+
+    // both seeds + query present -> query wins (precedence).
+    let resp = ok_text(dispatch(
+        &reg,
+        Request::Graph {
+            seeds: Some(vec![9999]), // would 404 if used
+            query: Some("adversarial".into()),
+            depth: None,
+            limit: None,
+            namespace: None,
+        },
+    ));
+    let body: serde_json::Value = serde_json::from_str(&resp).unwrap();
+    assert!(
+        body["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n["id"] == a),
+        "query must win: {body}"
+    );
+
+    // depth over cap clamps to 3 (no error, no panic).
+    let resp = dispatch(
+        &reg,
+        Request::Graph {
+            seeds: Some(vec![a]),
+            query: None,
+            depth: Some(999),
+            limit: Some(100),
+            namespace: None,
+        },
+    );
+    assert!(matches!(resp, Response::Ok { .. }), "depth clamp: {resp:?}");
+
+    // query against an empty store -> 200 with an empty subgraph, not an
+    // error (no seeds resolve because there is nothing to search).
+    let (empty_reg, _dir2) = stub_registry();
+    let resp = ok_text(dispatch(
+        &empty_reg,
+        Request::Graph {
+            seeds: None,
+            query: Some("zzz_no_such_term_zzz".into()),
+            depth: None,
+            limit: None,
+            namespace: None,
+        },
+    ));
+    let body: serde_json::Value = serde_json::from_str(&resp).unwrap();
+    assert_eq!(
+        body["nodes"].as_array().unwrap().len(),
+        0,
+        "no-match query against an empty store: {body}"
+    );
+}

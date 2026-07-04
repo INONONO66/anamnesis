@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 
 use anamnesis::graph::{NodeId, ScopePath, Timestamp};
-use anamnesis::memory::{ListFilter, MemoryView, NoteOptions, Relation};
+use anamnesis::memory::{ListFilter, MemoryView, NoteOptions, Relation, Subgraph};
 use anamnesis::storage::SqliteStorage;
 use anamnesis::{Error, Memory};
 
@@ -281,4 +281,35 @@ pub(crate) fn mem_supersede(
     let edge = mem.supersede(new_id, old_id)?;
     mem.flush_all()?;
     Ok(edge.0)
+}
+
+/// Namespace-locked body of `dispatch`'s `Request::Graph` seed path: a
+/// bounded k-hop subgraph export rooted at `seeds`. Flushes first (like
+/// `mem_list`/`mem_get`) so a just-remembered node's still-buffered semantic
+/// is a valid seed/neighbor.
+pub(crate) fn mem_graph(
+    mem: &mut Memory<SqliteStorage>,
+    seeds: &[u64],
+    depth: usize,
+    budget: usize,
+) -> Result<Subgraph, Error> {
+    mem.flush_all()?;
+    let seed_ids: Vec<NodeId> = seeds.iter().copied().map(NodeId).collect();
+    mem.subgraph(&seed_ids, depth, budget)
+}
+
+/// Resolve `Request::Graph`'s `query` path into seed node ids: the same
+/// [`Memory::search`] the `recall` path calls (see
+/// [`crate::memory::mem_recall_packaged_gated`]), but a pure read — no
+/// reinforcement, no tick — since rendering a graph view is not a "use" of
+/// the returned memories. Returns ids in ranked (highest-score-first) order;
+/// no matches yields an empty vec (never an error), so a query with no hits
+/// renders an empty subgraph rather than failing the request.
+pub(crate) fn resolve_seeds_from_query(
+    mem: &mut Memory<SqliteStorage>,
+    query: &str,
+    k: usize,
+) -> Result<Vec<u64>, Error> {
+    let recall = mem.search(query, k)?;
+    Ok(recall.hits.iter().map(|h| h.node_id.0).collect())
 }
