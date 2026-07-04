@@ -218,7 +218,7 @@ Add to your `Cargo.toml`:
 # Published as `anamnesis-engine` — the crates.io name `anamnesis` belongs to an
 # unrelated crate. The library is still imported as `anamnesis` (`use anamnesis::…`).
 # Optional: local embedding provider (downloads model on first use, ~100-500 MB)
-anamnesis-engine = { version = "0.13", features = ["embed"] }
+anamnesis-engine = { version = "0.14", features = ["embed"] }
 ```
 
 ```rust,no_run
@@ -493,6 +493,9 @@ impl Memory {
     // Reinforcement & time
     pub fn used(&mut self, recall: Recall) -> Result<CommitReport, Error>;
     pub fn tick(&mut self, now: Timestamp) -> Result<TickReport, Error>;
+
+    // Bounded k-hop subgraph export (nodes + induced edges + per-node depth) — dashboard/graph-viz consumers
+    pub fn subgraph(&self, seeds: &[NodeId], depth: usize, node_budget: usize) -> Result<Subgraph, Error>;
 
     // Escape hatch — drop to the kernel on the same store
     pub fn engine(&self) -> &Engine;

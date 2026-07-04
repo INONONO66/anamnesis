@@ -216,12 +216,12 @@ fn static_asset(path: &str) -> HttpReply {
         "three/examples/jsm/postprocessing/UnrealBloomPass.js" => HttpReply::javascript(
             include_str!("static/three/examples/jsm/postprocessing/UnrealBloomPass.js"),
         ),
-        "three/examples/jsm/postprocessing/Pass.js" => {
-            HttpReply::javascript(include_str!("static/three/examples/jsm/postprocessing/Pass.js"))
-        }
-        "three/examples/jsm/shaders/CopyShader.js" => {
-            HttpReply::javascript(include_str!("static/three/examples/jsm/shaders/CopyShader.js"))
-        }
+        "three/examples/jsm/postprocessing/Pass.js" => HttpReply::javascript(include_str!(
+            "static/three/examples/jsm/postprocessing/Pass.js"
+        )),
+        "three/examples/jsm/shaders/CopyShader.js" => HttpReply::javascript(include_str!(
+            "static/three/examples/jsm/shaders/CopyShader.js"
+        )),
         "three/examples/jsm/shaders/LuminosityHighPassShader.js" => HttpReply::javascript(
             include_str!("static/three/examples/jsm/shaders/LuminosityHighPassShader.js"),
         ),
@@ -828,7 +828,10 @@ mod tests {
         assert_eq!(r.status, 200);
         assert_eq!(r.content_type, "application/javascript");
         assert!(head.starts_with("/*! 3d-force-graph"));
-        assert!(!d.called(), "the daemon is never consulted for a static asset");
+        assert!(
+            !d.called(),
+            "the daemon is never consulted for a static asset"
+        );
     }
 
     #[test]

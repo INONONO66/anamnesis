@@ -873,7 +873,9 @@ impl<S: StorageAdapter + Clone> Memory<S> {
         }
 
         let depths = bfs_depths(graph, seeds, depth, node_budget);
-        let truncated = node_budget > 0 && depths.len() >= node_budget && depths.len() < graph.storage().node_count();
+        let truncated = node_budget > 0
+            && depths.len() >= node_budget
+            && depths.len() < graph.storage().node_count();
         let visited: HashSet<NodeId> = depths.keys().copied().collect();
 
         let mut edges: Vec<Edge> = Vec::new();
@@ -1606,8 +1608,7 @@ mod tests {
 
         let sg = m.subgraph(&[a], 1, 100).unwrap();
 
-        let node_ids: std::collections::HashSet<NodeId> =
-            sg.nodes.iter().map(|n| n.id).collect();
+        let node_ids: std::collections::HashSet<NodeId> = sg.nodes.iter().map(|n| n.id).collect();
         assert_eq!(node_ids, std::collections::HashSet::from([a, b]));
         assert!(!node_ids.contains(&c), "C is depth 2, must be excluded");
 
@@ -1616,8 +1617,7 @@ mod tests {
         assert_eq!(depth_map.get(&b), Some(&1));
         assert_eq!(depth_map.get(&c), None);
 
-        let edge_ids: std::collections::HashSet<EdgeId> =
-            sg.edges.iter().map(|e| e.id).collect();
+        let edge_ids: std::collections::HashSet<EdgeId> = sg.edges.iter().map(|e| e.id).collect();
         assert_eq!(edge_ids, std::collections::HashSet::from([ab]));
         assert!(!sg.truncated);
     }

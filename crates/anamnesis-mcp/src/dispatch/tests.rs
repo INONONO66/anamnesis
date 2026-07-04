@@ -1453,7 +1453,16 @@ fn adversarial_probe_graph_edge_cases() {
             namespace: None,
         },
     );
-    assert!(matches!(resp, Response::Err { kind: ErrKind::InvalidParams, .. }), "empty seeds: {resp:?}");
+    assert!(
+        matches!(
+            resp,
+            Response::Err {
+                kind: ErrKind::InvalidParams,
+                ..
+            }
+        ),
+        "empty seeds: {resp:?}"
+    );
 
     // both seeds + query present -> query wins (precedence).
     let resp = ok_text(dispatch(
@@ -1467,7 +1476,14 @@ fn adversarial_probe_graph_edge_cases() {
         },
     ));
     let body: serde_json::Value = serde_json::from_str(&resp).unwrap();
-    assert!(body["nodes"].as_array().unwrap().iter().any(|n| n["id"] == a), "query must win: {body}");
+    assert!(
+        body["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n["id"] == a),
+        "query must win: {body}"
+    );
 
     // depth over cap clamps to 3 (no error, no panic).
     let resp = dispatch(
