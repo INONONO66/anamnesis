@@ -1677,8 +1677,14 @@ fn tiny_graph_single_cluster() {
     ));
     let body: serde_json::Value = serde_json::from_str(&resp).unwrap();
     let nodes = body["nodes"].as_array().unwrap();
-    assert!(nodes.len() < 8, "fixture must stay under the threshold: {body}");
+    assert!(
+        nodes.len() < 8,
+        "fixture must stay under the threshold: {body}"
+    );
     for n in nodes {
-        assert_eq!(n["cluster"], 0, "sub-threshold graph must be cluster 0: {n}");
+        assert_eq!(
+            n["cluster"], 0,
+            "sub-threshold graph must be cluster 0: {n}"
+        );
     }
 }

@@ -26,7 +26,11 @@ match, **click-to-expand** pulls in a node's k-hop neighbors on demand, a
 **detail panel** shows a selected node's content, provenance, and validity
 (with a `forget` action), and a category **filter sidebar** toggles knowledge
 types on/off. Binds `127.0.0.1:<port>` only (local, **no auth**); prints the
-URL on startup and runs until interrupted.
+URL on startup and runs until interrupted. `/api/graph` nodes now carry
+`cluster` (Leiden community id) and `doi` (degree-of-interest) computed
+server-side; the dashboard has a **Type/Cluster color toggle** (color nodes by
+community) and a **Focus mode** (fades low-DOI context, highlights the
+relevant core).
 
 ```bash
 npx -p anamnesis-mcp anamnesis dashboard [--port N] [--namespace ns]

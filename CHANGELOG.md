@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.0] - 2026-07-04
+
+### Added
+- **Community coloring & DOI focus+context** in the 3D graph dashboard — `/api/graph` nodes now carry `cluster` (Leiden community id) and `doi` (degree-of-interest = relevance + salience + recency − graph-distance), computed server-side; the dashboard adds a Type/Cluster color toggle (color-by-community, golden-angle hues) and a Focus mode that fades low-DOI context while enlarging/brightening the relevant core.
+
+Additive (new JSON fields, new mcp-only dependency) → minor bump.
+
 ## [0.14.0] - 2026-07-04
 
 ### Added

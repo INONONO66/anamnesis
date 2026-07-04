@@ -102,7 +102,10 @@ fn run_leiden(sub: &Subgraph, index_of: &HashMap<NodeId, usize>) -> Option<Parti
         seed: Some(LEIDEN_SEED),
         ..LeidenConfig::default()
     };
-    Leiden::new(config).run(&graph).ok().map(|out| out.partition)
+    Leiden::new(config)
+        .run(&graph)
+        .ok()
+        .map(|out| out.partition)
 }
 
 /// Degree-of-interest per node: `w_s*salience + w_r*recency - w_d*depth`,
