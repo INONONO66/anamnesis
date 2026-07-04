@@ -381,14 +381,16 @@ When a new agent session starts, it inherits not rules but *judgment*.
 
 ### How It Compares
 
-| | Storage Unit | Retrieval | Decay | Relationships | Reasoning |
-|:--|:--|:--|:--|:--|:--|
-| Mem0 | Extracted facts | Embedding similarity | None | None | Facts only |
-| Letta | Conversation history | Text search | Archive tier | Basic | Session recall |
-| Stanford ACE | Monolithic playbook | Full load | Curator rewrite | None | Strategy-level |
-| **Anamnesis** | **Fragments** | **Alignment + graph** | **Decay + revival** | **Typed edges** | **Full chains** |
+| | Storage Unit | Retrieval | Decay | Relationships | Reasoning | Management |
+|:--|:--|:--|:--|:--|:--|:--|
+| Mem0 | Extracted facts | Embedding similarity | None | None | Facts only | Add/update/delete (LLM-mediated) |
+| Letta | Conversation history | Text search | Archive tier | Basic | Session recall | — |
+| Stanford ACE | Monolithic playbook | Full load | Curator rewrite | None | Strategy-level | — |
+| **Anamnesis** | **[Fragments](docs/01-system-architecture/ingestion-layers.md)** | **Alignment + graph** | **[Decay + revival](docs/07-quality-gates/fidelity-results.md)** | **[Typed edges](crates/anamnesis/examples/reasoning_demo.rs)** | **Full chains** | **[update/forget/supersede/list/get](CHANGELOG.md#0120---2026-07-04)** |
 
 ### Positioning
+
+**vs mem0** — mem0 is add-only: memories accumulate with no time-based decay or salience mechanism, so a long-running store only grows. Anamnesis ages every node through power-law dissipation with reinforcement-driven revival — access resurrects a decayed node instead of it staying stale forever; see the [cognitive-fidelity results](docs/07-quality-gates/fidelity-results.md), produced by the engine itself. Retrieval and extraction are the second structural gap: Anamnesis makes no per-operation LLM calls in its core (see [Design Principles](#design-principles), "No LLM calls") — no API key, no per-query inference cost, no cloud round-trip; when extraction happens, it piggybacks on the *consumer agent's own* in-loop LLM call rather than a separate paid one (see [Use in Claude Code & Codex](#use-in-claude-code--codex), Stage 2). Conflicting facts are held as tension, not silently overwritten: the [`reasoning_demo`](crates/anamnesis/examples/reasoning_demo.rs) example and [ADR-0006](docs/adr/0006-frustration-not-deletion.md) show a reversed decision surfaced as a `Contradicts` edge, both sides keeping their provenance. Storage is local-first — a SQLite file you own, no hosted service (see [What it is not](#what-it-is-not)). Raw fragments are preserved rather than collapsed into an LLM summary at ingest — the storage mechanism is lossless and formation (what to distill, and when) is a swappable consumer-layer policy, not a step baked into the core (see [ingestion layers](docs/01-system-architecture/ingestion-layers.md)). **New in 0.12.0**: a full agent-facing memory-management surface — `update`, `forget` (soft-retract or hard delete), `supersede`, `list`, `get` — plus per-namespace extraction-queue isolation so captured turns from one project no longer leak into another's backlog (see [CHANGELOG 0.12.0](CHANGELOG.md#0120---2026-07-04)).
 
 **vs RAG pipelines** — Anamnesis makes zero LLM calls in its core. Retrieval is deterministic (alignment scoring plus graph traversal), not an inference call on every query. No embedding drift on the graph itself; embeddings are cues, not the memory.
 
@@ -638,7 +640,6 @@ These are **not yet implemented**. They are recorded here so the map matches the
 - **Identity tiers** — the collapsed `KnowledgeType` keeps a single `Identity` variant; the `IdentityCore` / `IdentityLearned` / `IdentityState` split (with per-tier decay policy) is future work.
 - **Scope hierarchies** — `ScopePath` is currently an opaque string with a `universal` flag. Ancestor/sibling scope scoring and upward crystallization across a real hierarchy are roadmap.
 - **Debug / hypothesis lifecycle** — the start-debug / log-hypothesis / rejected-hypothesis machinery was removed as consumer-less; a first-class reasoning-session capture may return through the [capture pipeline](docs/adr/0013-reasoning-capture-pipeline.md).
-- **Per-namespace extraction queues** — Stage-2 extraction currently uses a single un-extracted queue; per-namespace queues are future work.
 
 See [ADR-0014](docs/adr/0014-shrink-to-product.md) for the full shrink record — what was removed, why, and the condition for each to return.
 
