@@ -687,7 +687,7 @@
   // the limit. A HIGH limit makes the opening view read as a dense luminous
   // star-cloud at real scale (hundreds of nodes) rather than a sparse handful;
   // on a small graph it simply shows everything. The backend caps depth at 3
-  // but does NOT cap the node budget, so a few hundred is safe. Expand-on-click
+  // and the node budget at 2000 (GRAPH_MAX_BUDGET), so a few hundred is safe. Expand-on-click
   // still pulls a clicked node's further neighbors on demand.
   const BOOTSTRAP_QUERY = "system";
   const BOOTSTRAP_LIMIT = 400;
