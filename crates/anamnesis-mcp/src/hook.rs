@@ -157,14 +157,41 @@ async fn run_user_prompt(cfg: &Config, stdin: &str) -> Option<String> {
     if prompt.trim().is_empty() {
         return None;
     }
-    let block = gated_recall(
-        cfg,
-        &prompt,
-        cfg.hook_topk,
-        /* reinforce = */ Some(false),
-        /* gate = */ Some(cfg.hook_threshold),
-    )
-    .await?;
+    let cwd = parsed.cwd.clone();
+    let transcript_path = parsed.transcript_path.clone();
+    let session_id = parsed.session_id.clone();
+    let context_turns = cfg.hook_context_turns;
+    let budget = Duration::from_millis(cfg.hook_timeout_ms);
+    let block = tokio::time::timeout(budget, async {
+        let recent = if context_turns == 0 {
+            None
+        } else {
+            let cwd = cwd.clone();
+            tokio::task::spawn_blocking(move || {
+                let contents = resolve_transcript(
+                    transcript_path.as_deref(),
+                    session_id.as_deref(),
+                    cwd.as_deref(),
+                )?;
+                let turns = parse_transcript(&contents);
+                recent_context(&turns, context_turns, 500, 2000)
+            })
+            .await
+            .ok()
+            .flatten()
+        };
+        let query = user_prompt_query(&prompt, cwd.as_deref(), recent.as_deref());
+        gated_recall(
+            cfg,
+            &query,
+            cfg.hook_topk,
+            /* reinforce = */ Some(false),
+            /* gate = */ Some(cfg.hook_threshold),
+        )
+        .await
+    })
+    .await
+    .ok()??;
     Some(render_user_prompt(&block))
 }
 
@@ -221,6 +248,43 @@ fn project_cue(cwd: Option<&str>) -> Option<String> {
     } else {
         Some(base)
     }
+}
+
+fn recent_context(
+    turns: &[ParsedTurn],
+    take: usize,
+    per_turn_chars: usize,
+    total_chars: usize,
+) -> Option<String> {
+    if take == 0 || per_turn_chars == 0 || total_chars == 0 {
+        return None;
+    }
+    let start = turns.len().saturating_sub(take);
+    let mut lines: Vec<String> = turns[start..]
+        .iter()
+        .map(|t| {
+            let text: String = t.text.chars().take(per_turn_chars).collect();
+            format!("{}: {}", t.speaker, text)
+        })
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    while !lines.is_empty() && lines.join("\n").chars().count() > total_chars {
+        lines.remove(0);
+    }
+    let joined = lines.join("\n");
+    (!joined.trim().is_empty()).then_some(joined)
+}
+
+fn user_prompt_query(prompt: &str, cwd: Option<&str>, recent: Option<&str>) -> String {
+    let mut parts = Vec::new();
+    if let Some(cue) = project_cue(cwd) {
+        parts.push(format!("project: {cue}"));
+    }
+    if let Some(recent) = recent.map(str::trim).filter(|s| !s.is_empty()) {
+        parts.push(format!("recent conversation:\n{recent}"));
+    }
+    parts.push(format!("current user prompt: {prompt}"));
+    parts.join("\n")
 }
 
 /// Collapse a `recall` tool text payload into an injectable block, or `None` when
@@ -291,8 +355,11 @@ struct UserPromptInput {
     #[serde(default)]
     prompt: Option<String>,
     #[serde(default)]
-    #[allow(dead_code)]
     cwd: Option<String>,
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    transcript_path: Option<String>,
 }
 
 /// Parse `SessionStart` stdin tolerantly. Malformed/empty JSON ⇒ `None` (fail-open).
@@ -421,6 +488,7 @@ mod tests {
     fn parses_user_prompt_with_extra_fields() {
         let json = r#"{
             "session_id": "abc123",
+            "transcript_path": "/x/y.jsonl",
             "cwd": "/Users/me/dev/anamnesis",
             "permission_mode": "default",
             "hook_event_name": "UserPromptSubmit",
@@ -432,6 +500,8 @@ mod tests {
             Some("What files changed in the last commit?")
         );
         assert_eq!(p.cwd.as_deref(), Some("/Users/me/dev/anamnesis"));
+        assert_eq!(p.session_id.as_deref(), Some("abc123"));
+        assert_eq!(p.transcript_path.as_deref(), Some("/x/y.jsonl"));
     }
 
     #[test]
@@ -467,6 +537,39 @@ mod tests {
         assert!(project_cue(None).is_none());
         assert!(project_cue(Some("/")).is_none());
         assert!(project_cue(Some("")).is_none());
+    }
+
+    #[test]
+    fn recent_context_takes_tail_and_caps_by_chars() {
+        let turns: Vec<ParsedTurn> = (0..10)
+            .map(|i| ParsedTurn {
+                speaker: "user".into(),
+                text: format!("턴{i} 한국어내용"),
+                at_ms: None,
+            })
+            .collect();
+        let ctx = recent_context(&turns, 3, 500, 2000).expect("tail context");
+        assert!(ctx.contains("턴9") && ctx.contains("턴7") && !ctx.contains("턴6"));
+
+        let long = vec![ParsedTurn {
+            speaker: "user".into(),
+            text: "가".repeat(600),
+            at_ms: None,
+        }];
+        let capped = recent_context(&long, 3, 500, 2000).expect("capped context");
+        assert!(capped.chars().count() < 520);
+    }
+
+    #[test]
+    fn user_prompt_query_layers_project_recent_prompt() {
+        let q = user_prompt_query(
+            "다 별론데?",
+            Some("/Users/me/dev/anamnesis"),
+            Some("user: cosine 게이트 얘기"),
+        );
+        assert!(q.contains("project: anamnesis"));
+        assert!(q.contains("recent conversation:\nuser: cosine 게이트 얘기"));
+        assert!(q.ends_with("current user prompt: 다 별론데?"));
     }
 
     // --- injectable_block: gate the recall tool text into something or nothing ---
