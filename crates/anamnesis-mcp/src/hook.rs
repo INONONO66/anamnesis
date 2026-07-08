@@ -266,6 +266,22 @@ fn project_cue(cwd: Option<&str>) -> Option<String> {
     }
 }
 
+fn project_scope(cwd: Option<&str>) -> Option<String> {
+    let base = project_cue(cwd)?;
+    let normalized: String = base
+        .chars()
+        .map(|ch| {
+            let ch = ch.to_ascii_lowercase();
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-') {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    (!normalized.is_empty()).then(|| format!("project/{normalized}"))
+}
+
 fn recent_context(
     turns: &[ParsedTurn],
     take: usize,
@@ -442,6 +458,7 @@ async fn run_capture(cfg: &Config, stdin: &str, event: &HookEvent) -> Option<Str
     let _ = tokio::time::timeout(budget, async move {
         // Blocking fs walk + read + parse on the blocking pool.
         let prepared = tokio::task::spawn_blocking(move || {
+            let scope = project_scope(input.cwd.as_deref());
             let contents = resolve_transcript(
                 input.transcript_path.as_deref(),
                 input.session_id.as_deref(),
@@ -461,16 +478,17 @@ async fn run_capture(cfg: &Config, stdin: &str, event: &HookEvent) -> Option<Str
                     at_ms: t.at_ms,
                 })
                 .collect();
-            Some((session, turns))
+            Some((session, turns, scope))
         })
         .await
         .ok()??;
-        let (session, turns) = prepared;
+        let (session, turns, scope) = prepared;
         let req = Request::Ingest {
             session,
             turns,
             namespace: None,
             capture: Some(true),
+            scope,
         };
         call_oneshot(cfg, req).await.ok()
     })
@@ -553,6 +571,21 @@ mod tests {
         assert!(project_cue(None).is_none());
         assert!(project_cue(Some("/")).is_none());
         assert!(project_cue(Some("")).is_none());
+    }
+
+    #[test]
+    fn project_scope_normalizes_basename() {
+        assert_eq!(
+            project_scope(Some("/Users/me/dev/Anamnesis Hook")).as_deref(),
+            Some("project/anamnesis-hook")
+        );
+        assert_eq!(
+            project_scope(Some("/Users/me/dev/anamnesis.rs")).as_deref(),
+            Some("project/anamnesis.rs")
+        );
+        assert!(project_scope(None).is_none());
+        assert!(project_scope(Some("/")).is_none());
+        assert!(project_scope(Some("")).is_none());
     }
 
     #[test]

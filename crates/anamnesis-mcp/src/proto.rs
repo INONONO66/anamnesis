@@ -77,6 +77,8 @@ pub enum Request {
         namespace: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         capture: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<String>,
     },
     Stats {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -258,6 +260,7 @@ mod tests {
             ],
             namespace: None,
             capture: None,
+            scope: Some("project/anamnesis".into()),
         });
         round_trip_request(Request::Stats { namespace: None });
         round_trip_request(Request::Update {
@@ -387,6 +390,7 @@ mod tests {
             turns: vec![],
             namespace: None,
             capture: None,
+            scope: None,
         };
         let line = encode_line(&req).unwrap();
         assert!(
@@ -402,9 +406,40 @@ mod tests {
             turns: vec![],
             namespace: None,
             capture: Some(true),
+            scope: None,
         };
         let line2 = encode_line(&req2).unwrap();
         assert!(line2.contains("\"capture\":true"), "got: {line2}");
         assert_eq!(decode_line::<Request>(&line2).unwrap(), req2);
+    }
+
+    #[test]
+    fn ingest_scope_round_trips_and_defaults_absent() {
+        let req = Request::Ingest {
+            session: "s".into(),
+            turns: vec![],
+            namespace: None,
+            capture: None,
+            scope: None,
+        };
+        let line = encode_line(&req).unwrap();
+        assert!(
+            !line.contains("scope"),
+            "None scope must be omitted: {line}"
+        );
+
+        let scoped = Request::Ingest {
+            session: "s".into(),
+            turns: vec![],
+            namespace: None,
+            capture: Some(true),
+            scope: Some("project/anamnesis".into()),
+        };
+        let scoped_line = encode_line(&scoped).unwrap();
+        assert!(
+            scoped_line.contains("\"scope\":\"project/anamnesis\""),
+            "got: {scoped_line}"
+        );
+        assert_eq!(decode_line::<Request>(&scoped_line).unwrap(), scoped);
     }
 }

@@ -37,7 +37,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use anamnesis::graph::Timestamp;
+use anamnesis::graph::{ScopePath, Timestamp};
 
 use crate::memory::{self, MemoryRegistry, Turn};
 use crate::proto::{Request, Response};
@@ -228,6 +228,7 @@ pub fn dispatch(registry: &Arc<Mutex<MemoryRegistry>>, req: Request) -> Response
             turns,
             namespace,
             capture,
+            scope,
         } => {
             let turns: Vec<Turn> = turns
                 .into_iter()
@@ -238,6 +239,20 @@ pub fn dispatch(registry: &Arc<Mutex<MemoryRegistry>>, req: Request) -> Response
                 })
                 .collect();
             let capture = capture.unwrap_or(false);
+            let scope = match scope
+                .as_deref()
+                .map(ScopePath::new)
+                .transpose()
+                .map(|scope| scope.unwrap_or_else(ScopePath::universal))
+            {
+                Ok(scope) => scope,
+                Err(e) => {
+                    let mut reg = registry.lock().unwrap_or_else(|p| p.into_inner());
+                    reg.ops.dispatch_errors += 1;
+                    reg.ops.ingest_errors += 1;
+                    return Response::invalid_params(e);
+                }
+            };
 
             // Phase 1: resolve the namespace handle FIRST — on first open this
             // rebuilds `seen_turn_keys` for this namespace, so the dedup filter
@@ -258,6 +273,7 @@ pub fn dispatch(registry: &Arc<Mutex<MemoryRegistry>>, req: Request) -> Response
                     &session,
                     &turns,
                     capture,
+                    scope,
                 );
                 (handle, decisions)
             };

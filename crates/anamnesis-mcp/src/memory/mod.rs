@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use anamnesis::embedding::EmbeddingProvider;
-use anamnesis::graph::{EdgeType, KnowledgeType, NodeId, Timestamp};
+use anamnesis::graph::{EdgeType, KnowledgeType, NodeId, ScopePath, Timestamp};
 use anamnesis::memory::{Hit, MemoryStats};
 use anamnesis::storage::SqliteStorage;
 use anamnesis::{Error, Memory};
@@ -590,7 +590,13 @@ impl MemoryRegistry {
         // for this namespace, so the dedup filter below sees restart-durable state.
         let ns_key = self.canonical_ns_key(ns);
         let handle = self.namespace_handle(ns)?;
-        let decisions = filter_capture_decisions(&self.seen_turn_keys, session, turns, capture);
+        let decisions = filter_capture_decisions(
+            &self.seen_turn_keys,
+            session,
+            turns,
+            capture,
+            ScopePath::universal(),
+        );
         let phase2 = {
             let mut mem = handle.lock().unwrap_or_else(|p| p.into_inner());
             mem_ingest_conversation(&mut mem, session, decisions)
@@ -679,12 +685,21 @@ pub(crate) fn format_usage_report(
 /// [`MemoryRegistry::ingest_conversation`] and `crate::dispatch`'s `Ingest`
 /// phase-1: decide which turns are new against `seen_turn_keys` BEFORE any
 /// `Memory` access, so the global lock never overlaps the per-namespace one.
+pub(crate) struct IngestDecision {
+    pub(crate) speaker: String,
+    pub(crate) text: String,
+    pub(crate) at: Timestamp,
+    pub(crate) key: Option<String>,
+    pub(crate) scope: ScopePath,
+}
+
 pub(crate) fn filter_capture_decisions(
     seen_turn_keys: &HashSet<String>,
     session: &str,
     turns: &[Turn],
     capture: bool,
-) -> Vec<(String, String, Timestamp, Option<String>)> {
+    scope: ScopePath,
+) -> Vec<IngestDecision> {
     let base = Timestamp::now().0;
     turns
         .iter()
@@ -699,7 +714,13 @@ pub(crate) fn filter_capture_decisions(
             {
                 return None; // deduplicated
             }
-            Some((turn.speaker.clone(), turn.text.clone(), at, key))
+            Some(IngestDecision {
+                speaker: turn.speaker.clone(),
+                text: turn.text.clone(),
+                at,
+                key,
+                scope: scope.clone(),
+            })
         })
         .collect()
 }
@@ -723,16 +744,23 @@ pub(crate) struct IngestPhase2 {
 pub(crate) fn mem_ingest_conversation(
     mem: &mut Memory<SqliteStorage>,
     session: &str,
-    decisions: Vec<(String, String, Timestamp, Option<String>)>,
+    decisions: Vec<IngestDecision>,
 ) -> IngestPhase2 {
-    use crate::capture::{META_EXTRACTED, META_TURN_KEY};
+    use crate::capture::{META_CAPTURE, META_EXTRACTED, META_TURN_KEY};
 
     let mut episodic = 0usize;
     let mut semantic = 0usize;
     let mut newly_captured: Vec<(NodeId, String)> = Vec::new();
+    let mut capture_nodes: Vec<NodeId> = Vec::new();
 
-    for (speaker, text, at, key) in decisions {
-        let receipt = match mem.add(session, &speaker, &text, at) {
+    for decision in decisions {
+        let receipt = match mem.add_in_scope(
+            session,
+            &decision.speaker,
+            &decision.text,
+            decision.at,
+            decision.scope,
+        ) {
             Ok(r) => r,
             Err(e) => {
                 return IngestPhase2 {
@@ -742,18 +770,36 @@ pub(crate) fn mem_ingest_conversation(
             }
         };
         episodic += 1;
-        if receipt.finalized_semantic.is_some() {
+        if let Some(semantic_id) = receipt.finalized_semantic {
             semantic += 1;
+            if decision.key.is_some() {
+                capture_nodes.push(semantic_id);
+            }
         }
-        if let Some(k) = key {
+        if let Some(k) = decision.key {
+            capture_nodes.push(receipt.episodic);
             newly_captured.push((receipt.episodic, k));
         }
     }
 
     match mem.flush_session(session) {
-        Ok(Some(_)) => semantic += 1,
+        Ok(Some(semantic_id)) => {
+            semantic += 1;
+            if !newly_captured.is_empty() {
+                capture_nodes.push(semantic_id);
+            }
+        }
         Ok(None) => {}
         Err(e) => {
+            return IngestPhase2 {
+                committed: Vec::new(),
+                outcome: Err(e),
+            };
+        }
+    }
+
+    for id in capture_nodes {
+        if let Err(e) = mem.set_metadata(id, META_CAPTURE, "true") {
             return IngestPhase2 {
                 committed: Vec::new(),
                 outcome: Err(e),

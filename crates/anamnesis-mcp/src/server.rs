@@ -89,6 +89,8 @@ pub struct IngestParams {
     pub turns: Vec<TurnInput>,
     #[serde(default)]
     pub namespace: Option<String>,
+    #[serde(default)]
+    pub scope: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -341,6 +343,7 @@ impl AnamnesisServer {
             turns,
             namespace: p.namespace,
             capture: None,
+            scope: p.scope,
         };
         to_result(self.backend.call(req).await)
     }

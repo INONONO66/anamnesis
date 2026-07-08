@@ -252,9 +252,93 @@ fn ingest_reports_counts() {
             ],
             namespace: None,
             capture: None,
+            scope: None,
         },
     ));
     assert!(text.starts_with("ingested "), "got: {text}");
+}
+
+#[test]
+fn dispatch_capture_ingest_stamps_scope_and_capture_marker() {
+    let (reg, _dir) = stub_registry();
+    let text = ok_text(dispatch(
+        &reg,
+        Request::Ingest {
+            session: "scoped-capture".into(),
+            turns: vec![
+                TurnInput {
+                    speaker: "user".into(),
+                    text: "scoped capture alpha".into(),
+                    at_ms: Some(1),
+                },
+                TurnInput {
+                    speaker: "assistant".into(),
+                    text: "scoped capture beta".into(),
+                    at_ms: Some(2),
+                },
+            ],
+            namespace: None,
+            capture: Some(true),
+            scope: Some("project/anamnesis".into()),
+        },
+    ));
+    assert!(text.starts_with("ingested "), "got: {text}");
+
+    let handle = {
+        let mut registry = reg.lock().unwrap_or_else(|p| p.into_inner());
+        registry.namespace_handle(None).unwrap()
+    };
+    let mem = handle.lock().unwrap_or_else(|p| p.into_inner());
+    let graph = mem.engine().graph();
+    let nodes: Vec<_> = graph
+        .all_node_ids()
+        .into_iter()
+        .map(|id| graph.get_node(id).unwrap())
+        .filter(|node| {
+            matches!(
+                node.node_type,
+                anamnesis::graph::KnowledgeType::Episodic
+                    | anamnesis::graph::KnowledgeType::Semantic
+            )
+        })
+        .collect();
+    assert!(nodes.len() >= 4, "expected episodic + semantic nodes");
+    for node in nodes {
+        assert_eq!(node.origin.scope.as_str(), "project/anamnesis");
+        assert_eq!(
+            node.metadata.get("capture").map(String::as_str),
+            Some("true")
+        );
+    }
+}
+
+#[test]
+fn ingest_invalid_scope_returns_invalid_params() {
+    let (reg, _dir) = stub_registry();
+    let resp = dispatch(
+        &reg,
+        Request::Ingest {
+            session: "bad-scope".into(),
+            turns: vec![TurnInput {
+                speaker: "user".into(),
+                text: "bad scope".into(),
+                at_ms: Some(1),
+            }],
+            namespace: None,
+            capture: Some(true),
+            scope: Some("project//bad".into()),
+        },
+    );
+    assert!(
+        matches!(
+            resp,
+            Response::Err {
+                kind: ErrKind::InvalidParams,
+                ..
+            }
+        ),
+        "got: {resp:?}"
+    );
 }
 
 /// O1 (silent-failure observability): the `stats` usage surface must render
@@ -765,6 +849,7 @@ fn extraction_queue_per_namespace_demo() {
             }],
             namespace: Some("projA".into()),
             capture: Some(true),
+            scope: None,
         },
     ));
     println!("projA_ingest={ingest_a}");
@@ -780,6 +865,7 @@ fn extraction_queue_per_namespace_demo() {
             }],
             namespace: Some("projB".into()),
             capture: Some(true),
+            scope: None,
         },
     ));
     println!("projB_ingest={ingest_b}");
