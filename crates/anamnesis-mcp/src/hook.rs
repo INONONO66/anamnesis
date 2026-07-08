@@ -7,9 +7,10 @@
 //!
 //! Two events in v1:
 //! - `hook session-start` — seed the session with up to `ANAMNESIS_HOOK_SEED_K`
-//!   project memories (query = cwd basename; no gate — inject whatever it finds).
+//!   project memories (query = cwd basename; seed cosine gate decides whether to inject).
 //! - `hook user-prompt`   — activation-**gated** recall on the submitted prompt
-//!   (`gate = τ`, top-`k = ANAMNESIS_HOOK_TOPK`); below `τ` ⇒ inject nothing.
+//!   (`gate = τ`, cosine gate = `τ_cos`, top-`k = ANAMNESIS_HOOK_TOPK`);
+//!   below either gate ⇒ inject nothing.
 //!
 //! **Fail-open is mandatory.** Every error path (bad stdin, daemon down/unreachable,
 //! timeout, tool error) prints a valid *empty* output (nothing) and returns
@@ -126,6 +127,7 @@ async fn run_session_start(cfg: &Config, stdin: &str) -> Option<String> {
                 cfg.hook_seed_k,
                 /* reinforce = */ Some(false),
                 /* gate = */ None,
+                /* cosine_gate = */ Some(cfg.hook_seed_cosine_gate),
             )
             .await
         }
@@ -187,6 +189,7 @@ async fn run_user_prompt(cfg: &Config, stdin: &str) -> Option<String> {
             cfg.hook_topk,
             /* reinforce = */ Some(false),
             /* gate = */ Some(cfg.hook_threshold),
+            /* cosine_gate = */ Some(cfg.hook_cosine_gate),
         )
         .await
     })
@@ -204,21 +207,33 @@ async fn gated_recall(
     limit: usize,
     reinforce: Option<bool>,
     gate: Option<f64>,
+    cosine_gate: Option<f64>,
 ) -> Option<String> {
-    let req = Request::Recall {
+    let req = build_hook_recall_request(cfg, query, limit, reinforce, gate, cosine_gate);
+    let timeout = Duration::from_millis(cfg.hook_timeout_ms);
+    let outcome = tokio::time::timeout(timeout, call_oneshot(cfg, req)).await;
+    interpret_recall(outcome)
+}
+
+fn build_hook_recall_request(
+    _cfg: &Config,
+    query: &str,
+    limit: usize,
+    reinforce: Option<bool>,
+    gate: Option<f64>,
+    cosine_gate: Option<f64>,
+) -> Request {
+    Request::Recall {
         query: query.to_string(),
         limit: Some(limit as u32),
         namespace: None,
         reinforce,
         gate_threshold: gate,
-        cosine_gate: None,
-        knowledge_only: None,
+        cosine_gate,
+        knowledge_only: Some(true),
         scope: None,
         tag: None,
-    };
-    let timeout = Duration::from_millis(cfg.hook_timeout_ms);
-    let outcome = tokio::time::timeout(timeout, call_oneshot(cfg, req)).await;
-    interpret_recall(outcome)
+    }
 }
 
 /// Map a recall outcome (timeout-wrapped daemon call) to an injectable block.
@@ -571,6 +586,31 @@ mod tests {
         assert!(q.contains("project: anamnesis"));
         assert!(q.contains("recent conversation:\nuser: cosine 게이트 얘기"));
         assert!(q.ends_with("current user prompt: 다 별론데?"));
+    }
+
+    #[test]
+    fn hook_recall_request_sets_gates_and_knowledge_only() {
+        let cfg = short_circuit_cfg();
+        let req = build_hook_recall_request(
+            &cfg,
+            "q",
+            cfg.hook_topk,
+            Some(false),
+            Some(cfg.hook_threshold),
+            Some(cfg.hook_cosine_gate),
+        );
+        let Request::Recall {
+            cosine_gate,
+            knowledge_only,
+            limit,
+            ..
+        } = req
+        else {
+            panic!("expected recall request");
+        };
+        assert_eq!(cosine_gate, Some(crate::config::DEFAULT_HOOK_COSINE_GATE));
+        assert_eq!(knowledge_only, Some(true));
+        assert_eq!(limit, Some(3));
     }
 
     // --- injectable_block: gate the recall tool text into something or nothing ---
