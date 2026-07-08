@@ -42,33 +42,24 @@ pub struct Config {
     pub default_namespace: String,
     /// Auto-commit (reinforce) the package returned by `recall`.
     pub reinforce_on_recall: bool,
-    // The `hook_*` knobs below are resolved here and consumed by the `hook`
-    // subcommand family. Allow dead_code until follow-on tasks wire the new knobs.
     /// `τ` — need-odds injection gate: a floor on the top recall score (raw
     /// ACT-R activation, ~8–16 on a typical graph — NOT a 0..1 similarity).
     /// `ANAMNESIS_HOOK_THRESHOLD`; see [`DEFAULT_HOOK_THRESHOLD`].
-    #[allow(dead_code)]
     pub hook_threshold: f64,
     /// Query-embedding cosine floor for UserPrompt recall.
     /// `ANAMNESIS_HOOK_COSINE_GATE`; see [`DEFAULT_HOOK_COSINE_GATE`].
-    #[allow(dead_code)]
     pub hook_cosine_gate: f64,
     /// Query-embedding cosine floor for SessionStart seed recall.
     /// `ANAMNESIS_HOOK_SEED_COSINE_GATE`; see [`DEFAULT_HOOK_SEED_COSINE_GATE`].
-    #[allow(dead_code)]
     pub hook_seed_cosine_gate: f64,
     /// Recent transcript turns included in UserPrompt recall queries.
     /// `ANAMNESIS_HOOK_CONTEXT_TURNS`; see [`DEFAULT_HOOK_CONTEXT_TURNS`].
-    #[allow(dead_code)]
     pub hook_context_turns: usize,
     /// `k` — cap on injected per-turn memories. `ANAMNESIS_HOOK_TOPK` (default 3).
-    #[allow(dead_code)]
     pub hook_topk: usize,
     /// SessionStart seed size. `ANAMNESIS_HOOK_SEED_K` (default 5).
-    #[allow(dead_code)]
     pub hook_seed_k: usize,
     /// Per-hook fail-open timeout (ms). `ANAMNESIS_HOOK_TIMEOUT_MS` (default 1500).
-    #[allow(dead_code)]
     pub hook_timeout_ms: u64,
     /// Global capture kill-switch. `ANAMNESIS_CAPTURE_ENABLED` (default true).
     pub capture_enabled: bool,

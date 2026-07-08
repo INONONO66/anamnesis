@@ -161,7 +161,10 @@ laws (ADR-0010).
 | Var | Meaning | Default |
 |--|--|--|
 | `ANAMNESIS_HOOK_THRESHOLD` | `τ` — need-odds injection gate (top-score floor) for `UserPromptSubmit`. | `13.0` |
-| `ANAMNESIS_HOOK_TOPK` | `k` — cap on injected per-turn memories. | `5` |
+| `ANAMNESIS_HOOK_COSINE_GATE` | Minimum query-embedding cosine for `UserPromptSubmit` injection after scope/type filters. | `0.86` |
+| `ANAMNESIS_HOOK_SEED_COSINE_GATE` | Minimum query-embedding cosine for `SessionStart` seed injection after scope/type filters. | `0.80` |
+| `ANAMNESIS_HOOK_CONTEXT_TURNS` | Recent transcript turns folded into the `UserPromptSubmit` recall query. | `3` |
+| `ANAMNESIS_HOOK_TOPK` | `k` — cap on injected per-turn memories. | `3` |
 | `ANAMNESIS_HOOK_SEED_K` | `SessionStart` seed size. | `5` |
 | `ANAMNESIS_HOOK_TIMEOUT_MS` | Per-hook fail-open timeout (ms); on elapse, inject nothing. | `1500` |
 | `ANAMNESIS_CAPTURE_ENABLED` | Enable/disable capture hooks (Stage 1 & 2) entirely. | `true` |
@@ -176,6 +179,11 @@ laws (ADR-0010).
 > prompt, run `anamnesis recall <prompt>` to read the top score for each, and set `τ` between
 > the two bands. Raise it toward precision (suppress more), lower it toward recall (inject more).
 
+The cosine gates are 0..1 embedding-similarity floors layered on top of `τ`. Lower
+`ANAMNESIS_HOOK_COSINE_GATE` if prompt recall is too quiet; raise it if content-free project
+cues inject memories. `ANAMNESIS_HOOK_CONTEXT_TURNS` lets the hook include recent transcript
+context so short follow-up prompts can still match relevant memories.
+
 The general anamnesis knobs apply to the hook too, since it talks to the same daemon:
 
 | Var | Meaning | Default |
@@ -183,6 +191,7 @@ The general anamnesis knobs apply to the hook too, since it talks to the same da
 | `ANAMNESIS_DB` | Path to the memory DB (selects which daemon/graph the hook reads). | `<data_dir>/anamnesis/memory.db` |
 | `ANAMNESIS_NAMESPACE` | Namespace scoping recall. | `default` |
 | `ANAMNESIS_DAEMON_GRACE_SECS` | How long the shared daemon stays warm after the last client disconnects. | `30` |
+| `ANAMNESIS_EMBED_MODEL` | FastEmbed model for new embeddings. Supported: `multilingual-e5-small`, `multilingual-e5-base`, `multilingual-e5-large`, `bge-base-en-v1.5`. Use `bge-base-en-v1.5` for existing 768-d databases. | `multilingual-e5-small` |
 
 The `hooks.json` `timeout` (5–10 s) is only a backstop; the real fail-open bound is
 `ANAMNESIS_HOOK_TIMEOUT_MS` (default 1500 ms), kept well under it so a hung daemon can never
