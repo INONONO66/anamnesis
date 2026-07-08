@@ -1245,6 +1245,60 @@ fn recall_filter_by_scope_excludes_other_scope() {
     );
 }
 
+#[test]
+fn scope_filter_keeps_universal_and_matching_drops_foreign() {
+    let (reg, _dir) = stub_registry();
+    remember_with(
+        &reg,
+        "shared outage postmortem applies everywhere",
+        None,
+        None,
+        None,
+    );
+    remember_with(
+        &reg,
+        "project A outage postmortem detail",
+        None,
+        None,
+        Some("projA".to_string()),
+    );
+    remember_with(
+        &reg,
+        "project B outage postmortem detail",
+        None,
+        None,
+        Some("projB".to_string()),
+    );
+
+    let resp = ok_text(dispatch(
+        &reg,
+        Request::Recall {
+            query: "outage postmortem detail".into(),
+            limit: Some(20),
+            namespace: None,
+            reinforce: Some(false),
+            gate_threshold: None,
+            cosine_gate: None,
+            knowledge_only: None,
+            scope: Some("projA".to_string()),
+            tag: None,
+        },
+    ));
+
+    assert!(
+        resp.contains("shared outage postmortem"),
+        "universal memories must survive scoped recall: {resp}"
+    );
+    assert!(
+        resp.contains("project A outage postmortem"),
+        "same-scope memories must survive scoped recall: {resp}"
+    );
+    assert!(
+        !resp.contains("project B outage postmortem"),
+        "foreign-scope memories must be dropped: {resp}"
+    );
+}
+
 // ── adversarial: malformed_input (P1-T5) ────────────────────────────────
 
 #[test]

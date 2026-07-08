@@ -4,7 +4,7 @@
 
 use std::collections::HashSet;
 
-use anamnesis::graph::{NodeId, Timestamp};
+use anamnesis::graph::{NodeId, ScopePath, Timestamp};
 use anamnesis::memory::Hit;
 use anamnesis::storage::SqliteStorage;
 use anamnesis::{Error, Memory};
@@ -194,7 +194,11 @@ pub(crate) fn mem_recall_packaged_gated_filtered(
         );
     }
 
-    let mut recall = mem.search(query, limit)?;
+    let scope_path = filters.scope.map(ScopePath::new).transpose()?;
+    let mut recall = match scope_path {
+        Some(scope) => mem.search_scoped(query, limit, Some(scope))?,
+        None => mem.search(query, limit)?,
+    };
 
     if gated_out(filters.gate, filters.cosine_gate, &recall.hits) {
         mem.tick(Timestamp::now())?;
@@ -253,7 +257,8 @@ fn node_matches_scope_tag(
     let Ok(node) = mem.engine().graph().get_node(node_id) else {
         return false;
     };
-    let scope_ok = scope.is_none_or(|s| node.origin.scope.as_str() == s);
+    let scope_ok =
+        scope.is_none_or(|s| node.origin.scope.is_universal() || node.origin.scope.as_str() == s);
     let tag_ok = tag.is_none_or(|t| node.entity_tags.iter().any(|et| et == t));
     scope_ok && tag_ok
 }

@@ -118,7 +118,11 @@ async fn session_extraction_signal(cfg: &Config) -> Option<String> {
 /// Seed and signal are assembled by [`assemble_session_block`]; `None` only when
 /// BOTH are absent.
 async fn run_session_start(cfg: &Config, stdin: &str) -> Option<String> {
-    let cue = parse_session_start(stdin).and_then(|p| project_cue(p.cwd.as_deref()));
+    let parsed = parse_session_start(stdin);
+    let cue = parsed.as_ref().and_then(|p| project_cue(p.cwd.as_deref()));
+    let scope = parsed
+        .as_ref()
+        .and_then(|p| project_scope(p.cwd.as_deref()));
     let seed = match cue {
         Some(cue) => {
             gated_recall(
@@ -128,6 +132,7 @@ async fn run_session_start(cfg: &Config, stdin: &str) -> Option<String> {
                 /* reinforce = */ Some(false),
                 /* gate = */ None,
                 /* cosine_gate = */ Some(cfg.hook_seed_cosine_gate),
+                scope,
             )
             .await
         }
@@ -183,6 +188,7 @@ async fn run_user_prompt(cfg: &Config, stdin: &str) -> Option<String> {
             .flatten()
         };
         let query = user_prompt_query(&prompt, cwd.as_deref(), recent.as_deref());
+        let scope = project_scope(cwd.as_deref());
         gated_recall(
             cfg,
             &query,
@@ -190,6 +196,7 @@ async fn run_user_prompt(cfg: &Config, stdin: &str) -> Option<String> {
             /* reinforce = */ Some(false),
             /* gate = */ Some(cfg.hook_threshold),
             /* cosine_gate = */ Some(cfg.hook_cosine_gate),
+            scope,
         )
         .await
     })
@@ -208,8 +215,9 @@ async fn gated_recall(
     reinforce: Option<bool>,
     gate: Option<f64>,
     cosine_gate: Option<f64>,
+    scope: Option<String>,
 ) -> Option<String> {
-    let req = build_hook_recall_request(cfg, query, limit, reinforce, gate, cosine_gate);
+    let req = build_hook_recall_request(cfg, query, limit, reinforce, gate, cosine_gate, scope);
     let timeout = Duration::from_millis(cfg.hook_timeout_ms);
     let outcome = tokio::time::timeout(timeout, call_oneshot(cfg, req)).await;
     interpret_recall(outcome)
@@ -222,6 +230,7 @@ fn build_hook_recall_request(
     reinforce: Option<bool>,
     gate: Option<f64>,
     cosine_gate: Option<f64>,
+    scope: Option<String>,
 ) -> Request {
     Request::Recall {
         query: query.to_string(),
@@ -231,7 +240,7 @@ fn build_hook_recall_request(
         gate_threshold: gate,
         cosine_gate,
         knowledge_only: Some(true),
-        scope: None,
+        scope,
         tag: None,
     }
 }
@@ -631,11 +640,13 @@ mod tests {
             Some(false),
             Some(cfg.hook_threshold),
             Some(cfg.hook_cosine_gate),
+            Some("project/anamnesis".to_string()),
         );
         let Request::Recall {
             cosine_gate,
             knowledge_only,
             limit,
+            scope,
             ..
         } = req
         else {
@@ -644,6 +655,7 @@ mod tests {
         assert_eq!(cosine_gate, Some(crate::config::DEFAULT_HOOK_COSINE_GATE));
         assert_eq!(knowledge_only, Some(true));
         assert_eq!(limit, Some(3));
+        assert_eq!(scope.as_deref(), Some("project/anamnesis"));
     }
 
     // --- injectable_block: gate the recall tool text into something or nothing ---
