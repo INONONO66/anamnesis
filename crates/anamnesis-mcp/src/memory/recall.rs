@@ -16,6 +16,7 @@ pub(crate) struct RecallFilters<'a> {
     pub(crate) cosine_gate: Option<f64>,
     pub(crate) scope: Option<&'a str>,
     pub(crate) tag: Option<&'a str>,
+    pub(crate) knowledge_only: bool,
 }
 
 impl MemoryRegistry {
@@ -182,7 +183,7 @@ pub(crate) fn mem_recall_packaged_gated_filtered(
     reinforce: bool,
     filters: RecallFilters<'_>,
 ) -> Result<PackagedRecall, Error> {
-    if filters.scope.is_none() && filters.tag.is_none() {
+    if filters.scope.is_none() && filters.tag.is_none() && !filters.knowledge_only {
         return mem_recall_packaged_gated(
             mem,
             query,
@@ -209,6 +210,9 @@ pub(crate) fn mem_recall_packaged_gated_filtered(
     recall
         .hits
         .retain(|h| node_matches_scope_tag(mem, h.node_id, filters.scope, filters.tag));
+    if filters.knowledge_only {
+        apply_knowledge_only(mem, &mut recall.package, &mut recall.hits);
+    }
 
     let context = recall.as_context();
     let raw = recall.hits.clone();
@@ -281,4 +285,28 @@ fn filter_context_package(
     package
         .tensions
         .retain(|t| surviving.contains(&t.node_a) && surviving.contains(&t.node_b));
+}
+
+fn apply_knowledge_only(
+    mem: &Memory<SqliteStorage>,
+    package: &mut anamnesis::query::ContextPackage,
+    hits: &mut Vec<Hit>,
+) {
+    package.memories.clear();
+    package.tensions.clear();
+    package
+        .identity
+        .retain(|f| !is_capture_node(mem, f.node_id));
+    package
+        .knowledge
+        .retain(|f| !is_capture_node(mem, f.node_id));
+    hits.retain(|h| !is_capture_node(mem, h.node_id));
+}
+
+fn is_capture_node(mem: &Memory<SqliteStorage>, node_id: NodeId) -> bool {
+    mem.engine()
+        .graph()
+        .get_node(node_id)
+        .map(|n| n.metadata.get("capture").is_some_and(|v| v == "true"))
+        .unwrap_or(true)
 }

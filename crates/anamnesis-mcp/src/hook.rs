@@ -212,6 +212,7 @@ async fn gated_recall(
         reinforce,
         gate_threshold: gate,
         cosine_gate: None,
+        knowledge_only: None,
         scope: None,
         tag: None,
     };

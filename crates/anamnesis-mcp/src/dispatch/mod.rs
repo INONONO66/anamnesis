@@ -70,6 +70,7 @@ pub fn dispatch(registry: &Arc<Mutex<MemoryRegistry>>, req: Request) -> Response
             reinforce,
             gate_threshold,
             cosine_gate,
+            knowledge_only,
             scope,
             tag,
         } => {
@@ -105,6 +106,7 @@ pub fn dispatch(registry: &Arc<Mutex<MemoryRegistry>>, req: Request) -> Response
                         cosine_gate,
                         scope: scope.as_deref(),
                         tag: tag.as_deref(),
+                        knowledge_only: knowledge_only.unwrap_or(false),
                     },
                 )
             };

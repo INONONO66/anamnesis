@@ -42,6 +42,9 @@ pub struct RecallParams {
     /// Query-embedding cosine gate `τ_cos`: omitted ⇒ no cosine gate.
     #[serde(default)]
     pub cosine_gate: Option<f64>,
+    /// If true, render only durable knowledge and omit episodic/capture fragments.
+    #[serde(default)]
+    pub knowledge_only: Option<bool>,
     /// Post-filter: drop hits whose node origin scope doesn't match.
     #[serde(default)]
     pub scope: Option<String>,
@@ -295,6 +298,7 @@ impl AnamnesisServer {
             reinforce: p.reinforce,
             gate_threshold: p.gate_threshold,
             cosine_gate: p.cosine_gate,
+            knowledge_only: p.knowledge_only,
             scope: p.scope,
             tag: p.tag,
         };

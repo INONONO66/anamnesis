@@ -42,6 +42,9 @@ pub enum Request {
         /// Query-embedding cosine gate `τ_cos`: below it, recall returns nothing.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cosine_gate: Option<f64>,
+        /// Render only durable knowledge; omit episodic/capture fragments.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        knowledge_only: Option<bool>,
         /// Post-filter: drop hits whose node origin scope doesn't match.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         scope: Option<String>,
@@ -219,6 +222,7 @@ mod tests {
             reinforce: Some(false),
             gate_threshold: Some(13.0),
             cosine_gate: Some(0.83),
+            knowledge_only: Some(true),
             scope: Some("projA".into()),
             tag: Some("auth".into()),
         });
@@ -316,6 +320,7 @@ mod tests {
             reinforce: None,
             gate_threshold: None,
             cosine_gate: None,
+            knowledge_only: None,
             scope: None,
             tag: None,
         })
@@ -326,6 +331,7 @@ mod tests {
         assert!(!line.contains("namespace"));
         assert!(!line.contains("gate_threshold"));
         assert!(!line.contains("cosine_gate"));
+        assert!(!line.contains("knowledge_only"));
     }
 
     #[test]

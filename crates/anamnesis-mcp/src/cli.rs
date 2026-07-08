@@ -283,6 +283,7 @@ pub async fn run_oneshot_client(cli: &Cli) -> Result<()> {
             reinforce: None,
             gate_threshold: None,
             cosine_gate: None,
+            knowledge_only: None,
             scope: None,
             tag: None,
         },

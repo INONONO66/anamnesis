@@ -1,5 +1,5 @@
 use super::*;
-use anamnesis::memory::{ListFilter, Relation};
+use anamnesis::memory::{ListFilter, NoteOptions, Relation};
 
 fn registry(reinforce: bool) -> MemoryRegistry {
     MemoryRegistry::in_memory_with(Arc::new(StubProvider), reinforce)
@@ -475,6 +475,54 @@ fn cosine_gate_trips_when_top_cosine_below_threshold() {
         gated.hits.is_empty(),
         "above-cosine gate must yield no hits, got {} hits",
         gated.hits.len()
+    );
+}
+
+#[test]
+fn knowledge_only_drops_memories_tensions_and_capture_fragments() {
+    let mut reg = registry(false);
+    let handle = reg.namespace_handle(None).unwrap();
+    let mut mem = handle.lock().unwrap_or_else(|p| p.into_inner());
+
+    mem_remember(&mut mem, "distilled: recall gate is cosine-based").unwrap();
+    let mut opts = NoteOptions::default();
+    opts.metadata
+        .push(("capture".to_string(), "true".to_string()));
+    mem_remember_with(
+        &mut mem,
+        "captured conversation window about recall gate",
+        opts,
+    )
+    .unwrap();
+
+    let out = mem_recall_packaged_gated_filtered(
+        &mut mem,
+        "recall gate",
+        10,
+        false,
+        RecallFilters {
+            gate: None,
+            cosine_gate: None,
+            scope: None,
+            tag: None,
+            knowledge_only: true,
+        },
+    )
+    .unwrap();
+
+    assert!(out.context.contains("## KNOWLEDGE"));
+    assert!(
+        !out.context.contains("## MEMORIES"),
+        "episodic section must be dropped:\n{}",
+        out.context
+    );
+    assert!(!out.context.contains("captured conversation window"));
+    assert!(
+        out.hits
+            .iter()
+            .all(|h| !h.text.contains("captured conversation window")),
+        "capture hits must be dropped: {:?}",
+        out.hits
     );
 }
 
