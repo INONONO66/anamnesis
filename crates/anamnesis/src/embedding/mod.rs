@@ -47,6 +47,24 @@ pub trait EmbeddingProvider: Send + Sync {
             .ok_or_else(|| Error::InvalidInput("provider returned empty embedding".to_string()))
     }
 
+    /// Embed text for use as a retrieval query.
+    ///
+    /// Providers for asymmetric embedding models can override this to apply
+    /// query-specific formatting. The default preserves the existing symmetric
+    /// provider behavior.
+    fn embed_query(&self, text: &str) -> Result<Vec<f32>, Error> {
+        self.embed_single(text)
+    }
+
+    /// Embed text for storage as retrievable content.
+    ///
+    /// Providers for asymmetric embedding models can override this to apply
+    /// passage-specific formatting. The default preserves the existing
+    /// symmetric provider behavior.
+    fn embed_passage(&self, text: &str) -> Result<Vec<f32>, Error> {
+        self.embed_single(text)
+    }
+
     /// Embed multiple texts and convert to f64.
     ///
     /// Convenience method that calls `embed()` and converts each f32 vector to f64.

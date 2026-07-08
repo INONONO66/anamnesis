@@ -469,7 +469,7 @@ impl<S: StorageAdapter + Clone> Memory<S> {
         // ── Phase A: all fallible work (NO buffer mutation yet) ──────────────
 
         // (a) Embed the current turn's episodic text.
-        let epi_embedding = embed_one(&*self.provider, &speaker_text)?;
+        let epi_embedding = embed_one_passage(&*self.provider, &speaker_text)?;
 
         // (b) If pending: build window and embed it. Both are fallible.
         let pending_window_result: Option<(String, Vec<f64>)> =
@@ -479,7 +479,7 @@ impl<S: StorageAdapter + Clone> Memory<S> {
                     &pending.speaker_text,
                     Some(&speaker_text),
                 );
-                let sem_embedding = embed_one(&*self.provider, &window)?;
+                let sem_embedding = embed_one_passage(&*self.provider, &window)?;
                 Some((window, sem_embedding))
             } else {
                 None
@@ -608,7 +608,7 @@ impl<S: StorageAdapter + Clone> Memory<S> {
         let mut entity_tags = entity_tags_for(&session_id, speaker);
         entity_tags.extend(opts.tags.iter().cloned());
 
-        let epi_embedding = embed_one(&*self.provider, &speaker_text)?;
+        let epi_embedding = embed_one_passage(&*self.provider, &speaker_text)?;
         let epi_id = ingest_node(
             &mut self.engine,
             &speaker_text,
@@ -624,7 +624,7 @@ impl<S: StorageAdapter + Clone> Memory<S> {
 
         // Window = just itself (no prev, no next).
         let window = speaker_text.clone();
-        let sem_embedding = embed_one(&*self.provider, &window)?;
+        let sem_embedding = embed_one_passage(&*self.provider, &window)?;
         let sem_id = ingest_node(
             &mut self.engine,
             &window,
@@ -686,7 +686,7 @@ impl<S: StorageAdapter + Clone> Memory<S> {
             &pending.speaker_text,
             None,
         );
-        let sem_embedding = embed_one(&*self.provider, &window)?;
+        let sem_embedding = embed_one_passage(&*self.provider, &window)?;
         let sem_id = ingest_node(
             &mut self.engine,
             &window,
@@ -1240,7 +1240,7 @@ impl<S: StorageAdapter + Clone> Memory<S> {
         self.flush_all()?;
 
         // Embed the query via the provider.
-        let embedding = embed_one(&*self.provider, query)?;
+        let embedding = embed_one_query(&*self.provider, query)?;
 
         // Build bench-default SearchInput: text + query_embedding + limit +
         // seed_limit = Some(limit.max(1)); speaker cues OFF; now = explicit.
@@ -1304,7 +1304,7 @@ impl<S: StorageAdapter + Clone> Memory<S> {
     ) -> Result<SearchResult, Error> {
         self.flush_all()?;
 
-        let embedding = embed_one(&*self.provider, query)?;
+        let embedding = embed_one_query(&*self.provider, query)?;
         let seed_limit = tuning.seed_limit.unwrap_or_else(|| limit.max(1));
         let input = SearchInput {
             text: query.to_string(),
@@ -1403,13 +1403,12 @@ fn make_name(content: &str) -> String {
     }
 }
 
-/// Embed a single text string via the provider.
-fn embed_one(provider: &dyn EmbeddingProvider, text: &str) -> Result<Vec<f64>, Error> {
-    let results = provider.embed_f64(&[text])?;
-    results
-        .into_iter()
-        .next()
-        .ok_or_else(|| Error::InvalidInput("provider returned empty embedding".to_string()))
+fn embed_one_query(provider: &dyn EmbeddingProvider, text: &str) -> Result<Vec<f64>, Error> {
+    Ok(crate::embedding::widen(&provider.embed_query(text)?))
+}
+
+fn embed_one_passage(provider: &dyn EmbeddingProvider, text: &str) -> Result<Vec<f64>, Error> {
+    Ok(crate::embedding::widen(&provider.embed_passage(text)?))
 }
 
 /// Ingest a node via the public `Engine::ingest` API and return its `NodeId`.
@@ -1512,6 +1511,62 @@ mod tests {
     fn mem() -> Memory<SqliteStorage> {
         let provider: Arc<dyn EmbeddingProvider> = Arc::new(HashEmbedProvider::new());
         Memory::in_memory_with_provider(provider).expect("in-memory Memory")
+    }
+
+    type EmbedCalls = Arc<std::sync::Mutex<Vec<(&'static str, String)>>>;
+
+    struct RecordingProvider {
+        calls: EmbedCalls,
+    }
+
+    impl EmbeddingProvider for RecordingProvider {
+        fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, Error> {
+            Ok(texts.iter().map(|_| vec![0.25; 8]).collect())
+        }
+
+        fn embed_query(&self, text: &str) -> Result<Vec<f32>, Error> {
+            self.calls.lock().unwrap().push(("query", text.to_string()));
+            self.embed_single(text)
+        }
+
+        fn embed_passage(&self, text: &str) -> Result<Vec<f32>, Error> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(("passage", text.to_string()));
+            self.embed_single(text)
+        }
+
+        fn dimensions(&self) -> usize {
+            8
+        }
+
+        fn model_name(&self) -> &str {
+            "recording"
+        }
+    }
+
+    fn recording_mem() -> (Memory<SqliteStorage>, EmbedCalls) {
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let provider: Arc<dyn EmbeddingProvider> = Arc::new(RecordingProvider {
+            calls: calls.clone(),
+        });
+        (
+            Memory::in_memory_with_provider(provider).expect("in-memory Memory"),
+            calls,
+        )
+    }
+
+    #[test]
+    fn memory_uses_passage_for_add_and_query_for_search() {
+        let (mut m, calls) = recording_mem();
+        m.add("s", "user", "본문", t(1)).unwrap();
+        let _ = m.search("질의", 3).unwrap();
+
+        let calls = calls.lock().unwrap();
+        let kinds: Vec<&str> = calls.iter().map(|(kind, _)| *kind).collect();
+        assert!(kinds.contains(&"passage"), "{kinds:?}");
+        assert!(kinds.contains(&"query"), "{kinds:?}");
     }
 
     fn t(ms: u64) -> Timestamp {

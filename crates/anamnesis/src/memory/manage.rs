@@ -13,7 +13,7 @@ use crate::graph::{EdgeId, NodeId, Timestamp};
 use crate::storage::StorageAdapter;
 
 use super::view::{ListFilter, MemoryView, node_to_view};
-use super::{Memory, Relation, embed_one};
+use super::{Memory, Relation, embed_one_passage};
 
 impl<S: StorageAdapter + Clone> Memory<S> {
     /// Replace a node's content and re-embed it via the same provider
@@ -34,7 +34,7 @@ impl<S: StorageAdapter + Clone> Memory<S> {
         new_content: &str,
         at: Timestamp,
     ) -> Result<(), Error> {
-        let embedding = embed_one(&*self.provider, new_content)?;
+        let embedding = embed_one_passage(&*self.provider, new_content)?;
         let mut node = self.engine.graph().get_node(id)?.clone();
         node.content = new_content.to_string();
         node.embedding = Some(embedding);

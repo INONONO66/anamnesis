@@ -32,6 +32,23 @@ pub struct FastEmbedProvider {
     name: String,
 }
 
+#[derive(Clone, Copy)]
+enum PrefixKind {
+    Query,
+    Passage,
+}
+
+fn e5_prefix(model_code: &str, kind: PrefixKind, text: &str) -> String {
+    if model_code.starts_with("intfloat/multilingual-e5") {
+        match kind {
+            PrefixKind::Query => format!("query: {text}"),
+            PrefixKind::Passage => format!("passage: {text}"),
+        }
+    } else {
+        text.to_string()
+    }
+}
+
 impl FastEmbedProvider {
     /// Create a provider with the default model (BAAI/bge-base-en-v1.5, 768-d).
     ///
@@ -85,5 +102,38 @@ impl EmbeddingProvider for FastEmbedProvider {
 
     fn model_name(&self) -> &str {
         &self.name
+    }
+
+    fn embed_query(&self, text: &str) -> Result<Vec<f32>, Error> {
+        self.embed_single(&e5_prefix(&self.name, PrefixKind::Query, text))
+    }
+
+    fn embed_passage(&self, text: &str) -> Result<Vec<f32>, Error> {
+        self.embed_single(&e5_prefix(&self.name, PrefixKind::Passage, text))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn e5_prefix_applies_only_to_e5_models() {
+        assert_eq!(
+            e5_prefix("intfloat/multilingual-e5-small", PrefixKind::Query, "안녕"),
+            "query: 안녕"
+        );
+        assert_eq!(
+            e5_prefix(
+                "intfloat/multilingual-e5-small",
+                PrefixKind::Passage,
+                "안녕"
+            ),
+            "passage: 안녕"
+        );
+        assert_eq!(
+            e5_prefix("BAAI/bge-base-en-v1.5", PrefixKind::Query, "hi"),
+            "hi"
+        );
     }
 }
