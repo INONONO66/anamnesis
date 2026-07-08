@@ -38,7 +38,7 @@ const NO_MEMORY_SENTINEL: &str = "(no relevant memory)";
 
 /// Trailer the `recall` tool appends after the readable context block. Splitting
 /// on it lets us inspect the human-readable context independently of the compact
-/// `{node_id, score}` list the agent uses for `relate`.
+/// `{node_id, score, cosine}` list the agent uses for `relate`.
 const NODES_TRAILER: &str = "## NODES (for `relate`)";
 
 /// Run a hook event end-to-end. **Never returns `Err`** (fail-open): any failure
@@ -184,6 +184,7 @@ async fn gated_recall(
         namespace: None,
         reinforce,
         gate_threshold: gate,
+        cosine_gate: None,
         scope: None,
         tag: None,
     };
@@ -229,7 +230,7 @@ fn project_cue(cwd: Option<&str>) -> Option<String> {
 /// `## NODES` trailer to inspect the human-readable context: if it is empty or the
 /// `(no relevant memory)` sentinel, the gate tripped (or the recall was empty) ⇒
 /// `None`. Otherwise we keep the FULL payload (context + NODES) as the block, so
-/// the agent still gets the `{node_id, score}` list for `relate`.
+/// the agent still gets the `{node_id, score, cosine}` list for `relate`.
 fn injectable_block(text: &str) -> Option<String> {
     let context = match text.split_once(NODES_TRAILER) {
         Some((before, _)) => before,

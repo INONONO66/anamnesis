@@ -27,7 +27,7 @@ fn recall_packaged_gated_ticks_engine_exactly_once() {
     reg.remember("the cache key omitted the lockfile hash", None)
         .unwrap();
     let before = TICK_CALLS.with(|c| c.get());
-    reg.recall_packaged_gated("cache key lockfile", 5, None, None, None)
+    reg.recall_packaged_gated("cache key lockfile", 5, None, None, None, None)
         .unwrap();
     assert_eq!(
         TICK_CALLS.with(|c| c.get()) - before,
@@ -43,7 +43,7 @@ fn recall_packaged_gated_gated_out_still_ticks_exactly_once() {
     let before = TICK_CALLS.with(|c| c.get());
     // An impossibly high gate threshold forces the gated-out early-return
     // branch, which has its own tick call site.
-    reg.recall_packaged_gated("unrelated note", 5, None, None, Some(1_000.0))
+    reg.recall_packaged_gated("unrelated note", 5, None, None, Some(1_000.0), None)
         .unwrap();
     assert_eq!(
         TICK_CALLS.with(|c| c.get()) - before,
@@ -395,7 +395,7 @@ fn gated_recall_below_threshold_is_empty() {
         .unwrap();
     // First read the true top score with no gate, then set τ just above it.
     let ungated = reg
-        .recall_packaged_gated("auth race condition", 5, None, Some(false), None)
+        .recall_packaged_gated("auth race condition", 5, None, Some(false), None, None)
         .unwrap();
     let top = ungated
         .hits
@@ -405,7 +405,7 @@ fn gated_recall_below_threshold_is_empty() {
     let tau = top + 1.0; // strictly above the best score ⇒ gate trips.
 
     let gated = reg
-        .recall_packaged_gated("auth race condition", 5, None, Some(false), Some(tau))
+        .recall_packaged_gated("auth race condition", 5, None, Some(false), Some(tau), None)
         .unwrap();
     assert!(
         gated.context.is_empty(),
@@ -425,7 +425,7 @@ fn gated_recall_with_no_hits_is_empty() {
     let mut reg = registry(false);
     // Empty graph: nothing to retrieve, so any gate (even 0.0) yields empty.
     let gated = reg
-        .recall_packaged_gated("nothing here", 5, None, Some(false), Some(0.0))
+        .recall_packaged_gated("nothing here", 5, None, Some(false), Some(0.0), None)
         .unwrap();
     assert!(gated.context.is_empty());
     assert!(gated.hits.is_empty());
@@ -439,13 +439,42 @@ fn gated_recall_at_or_above_threshold_renders_top_k() {
         .unwrap();
     // τ = 0.0 admits every positive-scored hit.
     let gated = reg
-        .recall_packaged_gated("auth race condition", 5, None, Some(false), Some(0.0))
+        .recall_packaged_gated("auth race condition", 5, None, Some(false), Some(0.0), None)
         .unwrap();
     assert!(!gated.hits.is_empty(), "τ=0.0 must admit the relevant hit");
     assert!(
         gated.context.contains("##"),
         "expected a rendered section header, got:\n{}",
         gated.context
+    );
+}
+
+#[test]
+fn cosine_gate_trips_when_top_cosine_below_threshold() {
+    let mut reg = registry(false);
+    reg.remember("the auth bug was a race in the middleware", None)
+        .unwrap();
+
+    let gated = reg
+        .recall_packaged_gated(
+            "auth race condition",
+            5,
+            None,
+            Some(false),
+            None,
+            Some(1.01),
+        )
+        .unwrap();
+
+    assert!(
+        gated.context.is_empty(),
+        "above-cosine gate must yield empty context, got:\n{}",
+        gated.context
+    );
+    assert!(
+        gated.hits.is_empty(),
+        "above-cosine gate must yield no hits, got {} hits",
+        gated.hits.len()
     );
 }
 
@@ -456,7 +485,7 @@ fn gated_recall_none_gate_never_filters() {
     let mut reg = registry(false);
     reg.remember("postgres was chosen for jsonb", None).unwrap();
     let gated = reg
-        .recall_packaged_gated("postgres jsonb", 5, None, Some(false), None)
+        .recall_packaged_gated("postgres jsonb", 5, None, Some(false), None, None)
         .unwrap();
     assert!(!gated.hits.is_empty());
     assert!(gated.context.contains("##"));
@@ -474,7 +503,7 @@ fn read_only_recall_does_not_reinforce_but_reinforcing_does() {
     let ro_before = ro.stats(None).unwrap().avg_salience;
     for _ in 0..3 {
         let pkg = ro
-            .recall_packaged_gated("auth race condition", 5, None, Some(false), None)
+            .recall_packaged_gated("auth race condition", 5, None, Some(false), None, None)
             .unwrap();
         assert!(
             !pkg.hits.is_empty(),
@@ -493,7 +522,7 @@ fn read_only_recall_does_not_reinforce_but_reinforcing_does() {
         .unwrap();
     let rw_before = rw.stats(None).unwrap().avg_salience;
     for _ in 0..3 {
-        rw.recall_packaged_gated("auth race condition", 5, None, Some(true), None)
+        rw.recall_packaged_gated("auth race condition", 5, None, Some(true), None, None)
             .unwrap();
     }
     let rw_after = rw.stats(None).unwrap().avg_salience;
@@ -514,7 +543,7 @@ fn gated_out_recall_never_reinforces_even_when_asked() {
     // τ astronomically high ⇒ always gated out, even with reinforce=true.
     for _ in 0..3 {
         let pkg = reg
-            .recall_packaged_gated("auth race condition", 5, None, Some(true), Some(1e9))
+            .recall_packaged_gated("auth race condition", 5, None, Some(true), Some(1e9), None)
             .unwrap();
         assert!(pkg.hits.is_empty(), "gate must trip at τ=1e9");
     }
@@ -574,10 +603,10 @@ fn usage_report_counts_ops_and_backlog() {
     let b = reg.remember("the disk was full", None).unwrap();
     reg.relate(b, a, "causes", None).unwrap();
     let _ = reg
-        .recall_packaged_gated("deploy", 5, None, Some(false), None)
+        .recall_packaged_gated("deploy", 5, None, Some(false), None, None)
         .unwrap();
     let _ = reg
-        .recall_packaged_gated("deploy", 5, None, Some(true), None)
+        .recall_packaged_gated("deploy", 5, None, Some(true), None, None)
         .unwrap();
     let turns = vec![Turn {
         speaker: "user".into(),

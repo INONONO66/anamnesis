@@ -69,6 +69,7 @@ pub fn dispatch(registry: &Arc<Mutex<MemoryRegistry>>, req: Request) -> Response
             namespace,
             reinforce,
             gate_threshold,
+            cosine_gate,
             scope,
             tag,
         } => {
@@ -99,9 +100,12 @@ pub fn dispatch(registry: &Arc<Mutex<MemoryRegistry>>, req: Request) -> Response
                     &query,
                     limit,
                     effective_reinforce,
-                    gate_threshold,
-                    scope.as_deref(),
-                    tag.as_deref(),
+                    memory::RecallFilters {
+                        gate: gate_threshold,
+                        cosine_gate,
+                        scope: scope.as_deref(),
+                        tag: tag.as_deref(),
+                    },
                 )
             };
 

@@ -131,6 +131,7 @@ fn remember_then_recall_round_trips_through_dispatch() {
             namespace: None,
             reinforce: Some(false),
             gate_threshold: None,
+            cosine_gate: None,
             scope: None,
             tag: None,
         },
@@ -139,6 +140,16 @@ fn remember_then_recall_round_trips_through_dispatch() {
     assert!(
         recalled.contains("## NODES (for `relate`)"),
         "got: {recalled}"
+    );
+    let nodes_json = recalled
+        .split("## NODES (for `relate`)\n")
+        .nth(1)
+        .expect("recall reply has a NODES section");
+    let nodes: Vec<serde_json::Value> =
+        serde_json::from_str(nodes_json.trim()).expect("NODES section is a JSON array");
+    assert!(
+        nodes.iter().all(|node| node["cosine"].is_number()),
+        "NODES refs must include cosine for calibration: {nodes:?}"
     );
 }
 
@@ -153,6 +164,7 @@ fn recall_with_no_matches_renders_sentinel_and_empty_nodes() {
             namespace: None,
             reinforce: Some(false),
             gate_threshold: None,
+            cosine_gate: None,
             scope: None,
             tag: None,
         },
@@ -495,6 +507,7 @@ fn list_returns_ranked_json() {
                 namespace: None,
                 reinforce: Some(true),
                 gate_threshold: None,
+                cosine_gate: None,
                 scope: None,
                 tag: None,
             },
@@ -889,6 +902,7 @@ fn stats_renders_failure_counters_that_increment() {
             namespace: None,
             reinforce: Some(false),
             gate_threshold: None,
+            cosine_gate: None,
             scope: None,
             tag: None,
         },
@@ -1094,6 +1108,7 @@ fn recall_filter_by_scope_excludes_other_scope() {
             namespace: None,
             reinforce: Some(true),
             gate_threshold: None,
+            cosine_gate: None,
             scope: Some("projA".to_string()),
             tag: None,
         },
@@ -1302,6 +1317,7 @@ fn p1_t5_manual_qa_demo() {
             namespace: None,
             reinforce: Some(true),
             gate_threshold: None,
+            cosine_gate: None,
             scope: Some("projA".to_string()),
             tag: None,
         },

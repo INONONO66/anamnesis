@@ -39,6 +39,9 @@ pub struct RecallParams {
     /// return an empty context block (inject nothing). Omitted ⇒ no gate.
     #[serde(default)]
     pub gate_threshold: Option<f64>,
+    /// Query-embedding cosine gate `τ_cos`: omitted ⇒ no cosine gate.
+    #[serde(default)]
+    pub cosine_gate: Option<f64>,
     /// Post-filter: drop hits whose node origin scope doesn't match.
     #[serde(default)]
     pub scope: Option<String>,
@@ -278,7 +281,7 @@ impl AnamnesisServer {
     #[tool(
         description = "Search memory for relevant prior knowledge. ALWAYS call before answering. \
                        Returns a readable context block (knowledge / memories / tensions \
-                       with provenance) plus a compact ranked list of {node_id, score} — pass those \
+                       with provenance) plus a compact ranked list of {node_id, score, cosine} — pass those \
                        node_ids to `relate` to link reasoning. Reading reinforces what it returns."
     )]
     async fn recall(
@@ -291,6 +294,7 @@ impl AnamnesisServer {
             namespace: p.namespace,
             reinforce: p.reinforce,
             gate_threshold: p.gate_threshold,
+            cosine_gate: p.cosine_gate,
             scope: p.scope,
             tag: p.tag,
         };

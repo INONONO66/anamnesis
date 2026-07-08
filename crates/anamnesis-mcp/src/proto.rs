@@ -39,6 +39,9 @@ pub enum Request {
         /// Need-odds gate `τ`: below it, recall returns nothing.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         gate_threshold: Option<f64>,
+        /// Query-embedding cosine gate `τ_cos`: below it, recall returns nothing.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cosine_gate: Option<f64>,
         /// Post-filter: drop hits whose node origin scope doesn't match.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         scope: Option<String>,
@@ -215,6 +218,7 @@ mod tests {
             namespace: None,
             reinforce: Some(false),
             gate_threshold: Some(13.0),
+            cosine_gate: Some(0.83),
             scope: Some("projA".into()),
             tag: Some("auth".into()),
         });
@@ -311,6 +315,7 @@ mod tests {
             namespace: None,
             reinforce: None,
             gate_threshold: None,
+            cosine_gate: None,
             scope: None,
             tag: None,
         })
@@ -320,6 +325,7 @@ mod tests {
         assert!(!line.contains("limit"), "None optionals omitted: {line}");
         assert!(!line.contains("namespace"));
         assert!(!line.contains("gate_threshold"));
+        assert!(!line.contains("cosine_gate"));
     }
 
     #[test]
