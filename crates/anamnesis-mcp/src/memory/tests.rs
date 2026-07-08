@@ -58,6 +58,33 @@ impl EmbeddingProvider for FixedDimProvider {
     }
 }
 
+struct ScopeGateProvider;
+
+impl EmbeddingProvider for ScopeGateProvider {
+    fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, Error> {
+        Ok(texts
+            .iter()
+            .map(|text| {
+                if text.contains("scope gate query") || text.contains("scope gate high") {
+                    vec![1.0, 0.0]
+                } else if text.contains("scope gate local") {
+                    vec![0.2, 0.98]
+                } else {
+                    vec![0.5, 0.5]
+                }
+            })
+            .collect())
+    }
+
+    fn dimensions(&self) -> usize {
+        2
+    }
+
+    fn model_name(&self) -> &str {
+        "scope-gate"
+    }
+}
+
 #[test]
 fn verify_embedding_dim_allows_empty_and_matching_but_rejects_mismatch() {
     let provider: Arc<dyn EmbeddingProvider> = Arc::new(FixedDimProvider { dim: 384 });
@@ -597,6 +624,61 @@ fn knowledge_only_drops_memories_tensions_and_capture_fragments() {
             .iter()
             .all(|h| !h.text.contains("captured conversation window")),
         "capture hits must be dropped: {:?}",
+        out.hits
+    );
+}
+
+#[test]
+fn filtered_recall_gates_on_final_filtered_hits() {
+    let provider: Arc<dyn EmbeddingProvider> = Arc::new(ScopeGateProvider);
+    let mut mem = Memory::in_memory_with_provider(provider).unwrap();
+
+    let mut remote = NoteOptions {
+        scope: Some(anamnesis::graph::ScopePath::new("project/remote").unwrap()),
+        ..NoteOptions::default()
+    };
+    remote.tags.push("scope-gate".to_string());
+    mem.add_note_with(
+        "scope gate high remote note excluded by project scope",
+        anamnesis::graph::Timestamp(1),
+        remote,
+    )
+    .unwrap();
+
+    let local = NoteOptions {
+        scope: Some(anamnesis::graph::ScopePath::new("project/local").unwrap()),
+        ..NoteOptions::default()
+    };
+    mem.add_note_with(
+        "scope gate local note is visible but below cosine gate",
+        anamnesis::graph::Timestamp(2),
+        local,
+    )
+    .unwrap();
+
+    let out = mem_recall_packaged_gated_filtered(
+        &mut mem,
+        "scope gate query",
+        10,
+        false,
+        RecallFilters {
+            gate: None,
+            cosine_gate: Some(0.9),
+            scope: Some("project/local"),
+            tag: None,
+            knowledge_only: false,
+        },
+    )
+    .unwrap();
+
+    assert!(
+        out.context.is_empty(),
+        "excluded remote hits must not open the cosine gate:\n{}",
+        out.context
+    );
+    assert!(
+        out.hits.is_empty(),
+        "filtered below-gate hits must not be returned: {:?}",
         out.hits
     );
 }

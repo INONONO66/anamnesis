@@ -200,6 +200,14 @@ pub(crate) fn mem_recall_packaged_gated_filtered(
         None => mem.search(query, limit)?,
     };
 
+    filter_context_package(mem, &mut recall.package, filters.scope, filters.tag);
+    recall
+        .hits
+        .retain(|h| node_matches_scope_tag(mem, h.node_id, filters.scope, filters.tag));
+    if filters.knowledge_only {
+        apply_knowledge_only(mem, &mut recall.package, &mut recall.hits);
+    }
+
     if gated_out(filters.gate, filters.cosine_gate, &recall.hits) {
         mem.tick(Timestamp::now())?;
         #[cfg(test)]
@@ -208,14 +216,6 @@ pub(crate) fn mem_recall_packaged_gated_filtered(
             context: String::new(),
             hits: Vec::new(),
         });
-    }
-
-    filter_context_package(mem, &mut recall.package, filters.scope, filters.tag);
-    recall
-        .hits
-        .retain(|h| node_matches_scope_tag(mem, h.node_id, filters.scope, filters.tag));
-    if filters.knowledge_only {
-        apply_knowledge_only(mem, &mut recall.package, &mut recall.hits);
     }
 
     let context = recall.as_context();

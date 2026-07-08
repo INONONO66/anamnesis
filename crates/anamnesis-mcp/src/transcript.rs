@@ -202,6 +202,17 @@ fn is_alnum(b: u8) -> bool {
 /// Match one known secret shape anchored at the START of `s`; returns the byte
 /// length consumed and the kind label. Patterns are deliberately narrow.
 fn match_secret_at(s: &str) -> Option<(usize, &'static str)> {
+    if let Some(n) = match_private_key_block(s) {
+        return Some((n, "private-key"));
+    }
+    // `sk-ant-api03-...` — Anthropic API key family.
+    if let Some(n) = match_run(s, "sk-ant-api03-", 20, is_token_body) {
+        return Some((n, "anthropic-key"));
+    }
+    // `sk-proj-...` — OpenAI project-scoped key family.
+    if let Some(n) = match_run(s, "sk-proj-", 20, is_token_body) {
+        return Some((n, "openai-key"));
+    }
     // `sk-[A-Za-z0-9]{20,}` — OpenAI-style key.
     if let Some(n) = match_run(s, "sk-", 20, is_alnum) {
         return Some((n, "openai-key"));
@@ -214,9 +225,16 @@ fn match_secret_at(s: &str) -> Option<(usize, &'static str)> {
     if let Some(n) = match_aws(s) {
         return Some((n, "aws-key"));
     }
+    // `xox[baprs]-...` — Slack bot/app/user/refresh token families.
+    if let Some(n) = match_slack(s) {
+        return Some((n, "slack-token"));
+    }
     // `Bearer[ \t]+[A-Za-z0-9._-]{20,}` — bearer credential (often a JWT).
     if let Some(n) = match_bearer(s) {
         return Some((n, "bearer-token"));
+    }
+    if let Some(n) = match_assignment_secret(s) {
+        return Some((n, "assigned-secret"));
     }
     None
 }
@@ -226,6 +244,10 @@ fn match_run(s: &str, prefix: &str, min_body: usize, allow: fn(u8) -> bool) -> O
     let rest = s.strip_prefix(prefix)?;
     let n = secret_run_len(rest.as_bytes(), allow);
     (n >= min_body).then_some(prefix.len() + n)
+}
+
+fn is_token_body(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_' || b == b'-'
 }
 
 fn match_github(s: &str) -> Option<usize> {
@@ -249,6 +271,19 @@ fn match_aws(s: &str) -> Option<usize> {
     (n >= 16).then_some(4 + n)
 }
 
+fn match_slack(s: &str) -> Option<usize> {
+    let b = s.as_bytes();
+    if b.len() < 5
+        || &b[0..3] != b"xox"
+        || !matches!(b[3], b'b' | b'a' | b'p' | b'r' | b's')
+        || b[4] != b'-'
+    {
+        return None;
+    }
+    let n = secret_run_len(&b[5..], is_token_body);
+    (n >= 20).then_some(5 + n)
+}
+
 fn match_bearer(s: &str) -> Option<usize> {
     let rest = s.strip_prefix("Bearer")?;
     let ws = secret_run_len(rest.as_bytes(), |c| c == b' ' || c == b'\t');
@@ -259,6 +294,85 @@ fn match_bearer(s: &str) -> Option<usize> {
         c.is_ascii_alphanumeric() || c == b'.' || c == b'_' || c == b'-'
     });
     (body >= 20).then_some("Bearer".len() + ws + body)
+}
+
+fn match_private_key_block(s: &str) -> Option<usize> {
+    if !s.starts_with("-----BEGIN ") {
+        return None;
+    }
+    let first_line_end = s.find('\n').unwrap_or(s.len());
+    let first_line = s[..first_line_end].trim_end_matches('\r');
+    if !first_line.ends_with("PRIVATE KEY-----") {
+        return None;
+    }
+    let end_start = s.find("-----END ")?;
+    let rest = &s[end_start..];
+    let end_line_len = rest.find('\n').unwrap_or(rest.len());
+    let end_line = rest[..end_line_len].trim_end_matches('\r');
+    if !end_line.ends_with("PRIVATE KEY-----") {
+        return None;
+    }
+    Some(end_start + end_line_len)
+}
+
+fn match_assignment_secret(s: &str) -> Option<usize> {
+    let b = s.as_bytes();
+    let key_len = secret_run_len(b, |c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-');
+    if key_len == 0 {
+        return None;
+    }
+
+    let key = s[..key_len].to_ascii_lowercase();
+    let key_matches = key == "password"
+        || key == "passwd"
+        || key == "secret"
+        || key == "token"
+        || key == "api_key"
+        || key == "apikey"
+        || key.ends_with("_secret")
+        || key.ends_with("-secret")
+        || key.ends_with("_token")
+        || key.ends_with("-token")
+        || key.ends_with("_api_key")
+        || key.ends_with("-api-key");
+    if !key_matches {
+        return None;
+    }
+
+    let mut i = key_len;
+    while i < b.len() && matches!(b[i], b' ' | b'\t') {
+        i += 1;
+    }
+    if i >= b.len() || b[i] != b'=' {
+        return None;
+    }
+    i += 1;
+    while i < b.len() && matches!(b[i], b' ' | b'\t') {
+        i += 1;
+    }
+    if i >= b.len() {
+        return None;
+    }
+
+    let value_start = i;
+    let quote = matches!(b[i], b'\'' | b'"').then_some(b[i]);
+    if quote.is_some() {
+        i += 1;
+    }
+    while i < b.len() {
+        if let Some(q) = quote {
+            if b[i] == q {
+                i += 1;
+                break;
+            }
+        } else if matches!(b[i], b'\n' | b'\r' | b' ' | b'\t' | b',' | b';') {
+            break;
+        }
+        i += 1;
+    }
+
+    let value_len = i.saturating_sub(value_start);
+    (value_len >= 8).then_some(i)
 }
 
 /// Codex rollout: `type=="response_item"`, `payload.type=="message"`.
@@ -526,5 +640,89 @@ mod tests {
         );
         assert!(out.contains("[REDACTED:bearer-token]"), "{out}");
         assert!(out.starts_with("Authorization: "), "{out}");
+    }
+
+    #[test]
+    fn parse_boundary_redacts_modern_provider_and_assignment_secrets() {
+        let openai = [
+            "sk",
+            "-proj-",
+            "abcdefghijklmnopqrstuvwxyz0123456789",
+            "-ABCDEFGHIJKLMNOP",
+        ]
+        .concat();
+        let anthropic = [
+            "sk",
+            "-ant-api03-",
+            "abcdefghijklmnopqrstuvwxyz0123456789",
+            "-ABCDEFGHIJKLMNOP",
+        ]
+        .concat();
+        let slack = [
+            "xox",
+            "b-",
+            "123456789012-",
+            "123456789012-",
+            "abcdefghijklmnopqrstuvwxyz",
+        ]
+        .concat();
+        let password = "correct-horse-battery-staple";
+        let secret = "-----BEGIN PRIVATE KEY-----\nprivatekeybody\n-----END PRIVATE KEY-----";
+        let content = format!(
+            "openai {openai} anthropic {anthropic} slack {slack} password={password}\n{secret}"
+        );
+        let line = serde_json::json!({
+            "type": "user",
+            "message": { "role": "user", "content": content }
+        })
+        .to_string();
+
+        let turns = parse_transcript(&line);
+        assert_eq!(turns.len(), 1);
+        let out = &turns[0].text;
+        for raw in [
+            openai.as_str(),
+            anthropic.as_str(),
+            slack.as_str(),
+            password,
+            "BEGIN PRIVATE KEY",
+            "privatekeybody",
+        ] {
+            assert!(!out.contains(raw), "raw secret survived: {raw} in {out}");
+        }
+        assert!(out.contains("[REDACTED:openai-key]"), "{out}");
+        assert!(out.contains("[REDACTED:anthropic-key]"), "{out}");
+        assert!(out.contains("[REDACTED:slack-token]"), "{out}");
+        assert!(out.contains("[REDACTED:assigned-secret]"), "{out}");
+        assert!(out.contains("[REDACTED:private-key]"), "{out}");
+    }
+
+    #[test]
+    fn parse_boundary_redacts_crlf_pem_and_named_token_assignments() {
+        let access = "abcdefghijklmnopqrstuvwxyz123456";
+        let client = "correct-horse-battery-staple";
+        let pem_body = "crlfprivatekeybody";
+        let content = format!(
+            "ACCESS_TOKEN={access} CLIENT_SECRET=\"{client}\"\n-----BEGIN PRIVATE KEY-----\r\n{pem_body}\r\n-----END PRIVATE KEY-----"
+        );
+        let line = serde_json::json!({
+            "type": "user",
+            "message": { "role": "user", "content": content }
+        })
+        .to_string();
+
+        let turns = parse_transcript(&line);
+        assert_eq!(turns.len(), 1);
+        let out = &turns[0].text;
+        for raw in [access, client, "BEGIN PRIVATE KEY", pem_body] {
+            assert!(!out.contains(raw), "raw secret survived: {raw} in {out}");
+        }
+        assert!(out.contains("[REDACTED:assigned-secret]"), "{out}");
+        assert!(out.contains("[REDACTED:private-key]"), "{out}");
+
+        let prose = "access_tokenization=ordinary client_secretary=role secret-sauce=recipe";
+        assert_eq!(redact_secrets(prose), prose);
+        let labels = "compiler token: identifier secret: handshake password: reminder";
+        assert_eq!(redact_secrets(labels), labels);
     }
 }

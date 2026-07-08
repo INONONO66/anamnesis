@@ -19,7 +19,7 @@
 //! never propagate an error and never panic on the recall path.
 
 use std::io::Read;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 
@@ -169,39 +169,34 @@ async fn run_user_prompt(cfg: &Config, stdin: &str) -> Option<String> {
     let session_id = parsed.session_id.clone();
     let context_turns = cfg.hook_context_turns;
     let budget = Duration::from_millis(cfg.hook_timeout_ms);
-    let block = tokio::time::timeout(budget, async {
-        let recent = if context_turns == 0 {
-            None
-        } else {
-            let cwd = cwd.clone();
-            tokio::task::spawn_blocking(move || {
-                let contents = resolve_transcript(
-                    transcript_path.as_deref(),
-                    session_id.as_deref(),
-                    cwd.as_deref(),
-                )?;
-                let turns = parse_transcript(&contents);
-                recent_context(&turns, context_turns, 500, 2000)
-            })
-            .await
-            .ok()
-            .flatten()
-        };
-        let query = user_prompt_query(&prompt, cwd.as_deref(), recent.as_deref());
-        let scope = project_scope(cwd.as_deref());
-        gated_recall(
-            cfg,
-            &query,
-            cfg.hook_topk,
-            /* reinforce = */ Some(false),
-            /* gate = */ Some(cfg.hook_threshold),
-            /* cosine_gate = */ Some(cfg.hook_cosine_gate),
-            scope,
-        )
-        .await
-    })
-    .await
-    .ok()??;
+    let start = Instant::now();
+    let recent = if context_turns == 0 {
+        None
+    } else {
+        let transcript_cwd = cwd.clone();
+        run_detached_with_timeout(budget, move || {
+            let contents = resolve_transcript(
+                transcript_path.as_deref(),
+                session_id.as_deref(),
+                transcript_cwd.as_deref(),
+            )?;
+            let turns = parse_transcript(&contents);
+            recent_context(&turns, context_turns, 500, 2000)
+        })
+    };
+    let query = user_prompt_query(&prompt, cwd.as_deref(), recent.as_deref());
+    let scope = project_scope(cwd.as_deref());
+    let remaining = remaining_budget(start, budget)?;
+    let req = build_hook_recall_request(
+        cfg,
+        &query,
+        cfg.hook_topk,
+        /* reinforce = */ Some(false),
+        /* gate = */ Some(cfg.hook_threshold),
+        /* cosine_gate = */ Some(cfg.hook_cosine_gate),
+        scope,
+    );
+    let block = recall_request_with_timeout(cfg, req, remaining).await?;
     Some(render_user_prompt(&block))
 }
 
@@ -219,6 +214,14 @@ async fn gated_recall(
 ) -> Option<String> {
     let req = build_hook_recall_request(cfg, query, limit, reinforce, gate, cosine_gate, scope);
     let timeout = Duration::from_millis(cfg.hook_timeout_ms);
+    recall_request_with_timeout(cfg, req, timeout).await
+}
+
+async fn recall_request_with_timeout(
+    cfg: &Config,
+    req: Request,
+    timeout: Duration,
+) -> Option<String> {
     let outcome = tokio::time::timeout(timeout, call_oneshot(cfg, req)).await;
     interpret_recall(outcome)
 }
@@ -475,6 +478,56 @@ fn capture_turn_inputs(selected: Vec<&ParsedTurn>) -> Vec<TurnInput> {
         .collect()
 }
 
+struct PreparedCapture {
+    session: String,
+    turns: Vec<TurnInput>,
+    scope: Option<String>,
+}
+
+fn run_detached_with_timeout<T, F>(timeout: Duration, work: F) -> Option<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Option<T> + Send + 'static,
+{
+    if timeout.is_zero() {
+        return None;
+    }
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let result = work();
+        let _ = tx.send(result);
+    });
+    rx.recv_timeout(timeout).ok().flatten()
+}
+
+fn remaining_budget(start: Instant, budget: Duration) -> Option<Duration> {
+    budget.checked_sub(start.elapsed()).filter(|d| !d.is_zero())
+}
+
+fn prepare_capture(input: CaptureInput, event: HookEvent) -> Option<PreparedCapture> {
+    let scope = project_scope(input.cwd.as_deref());
+    let contents = resolve_transcript(
+        input.transcript_path.as_deref(),
+        input.session_id.as_deref(),
+        input.cwd.as_deref(),
+    )?;
+    let all = parse_transcript(&contents);
+    if all.is_empty() {
+        return None;
+    }
+    let selected = select_turns(&all, &event);
+    let turns = capture_turn_inputs(selected);
+    if turns.is_empty() {
+        return None;
+    }
+    let session = input.session_id.unwrap_or_else(|| "capture".to_string());
+    Some(PreparedCapture {
+        session,
+        turns,
+        scope,
+    })
+}
+
 /// Capture handler: read the transcript, send selected turns as raw Episodic
 /// (capture=true ⇒ dedup + enqueue). Silent (returns None); fail-open.
 ///
@@ -489,40 +542,17 @@ async fn run_capture(cfg: &Config, stdin: &str, event: &HookEvent) -> Option<Str
     let input = parse_capture_input(stdin)?;
     let event = event.clone();
     let budget = Duration::from_millis(cfg.hook_timeout_ms);
-    let _ = tokio::time::timeout(budget, async move {
-        // Blocking fs walk + read + parse on the blocking pool.
-        let prepared = tokio::task::spawn_blocking(move || {
-            let scope = project_scope(input.cwd.as_deref());
-            let contents = resolve_transcript(
-                input.transcript_path.as_deref(),
-                input.session_id.as_deref(),
-                input.cwd.as_deref(),
-            )?;
-            let all = parse_transcript(&contents);
-            if all.is_empty() {
-                return None;
-            }
-            let selected = select_turns(&all, &event);
-            let turns = capture_turn_inputs(selected);
-            if turns.is_empty() {
-                return None;
-            }
-            let session = input.session_id.unwrap_or_else(|| "capture".to_string());
-            Some((session, turns, scope))
-        })
-        .await
-        .ok()??;
-        let (session, turns, scope) = prepared;
-        let req = Request::Ingest {
-            session,
-            turns,
-            namespace: None,
-            capture: Some(true),
-            scope,
-        };
-        call_oneshot(cfg, req).await.ok()
-    })
-    .await;
+    let start = Instant::now();
+    let prepared = run_detached_with_timeout(budget, move || prepare_capture(input, event))?;
+    let remaining = remaining_budget(start, budget)?;
+    let req = Request::Ingest {
+        session: prepared.session,
+        turns: prepared.turns,
+        namespace: None,
+        capture: Some(true),
+        scope: prepared.scope,
+    };
+    let _ = tokio::time::timeout(remaining, call_oneshot(cfg, req)).await;
     None
 }
 
@@ -811,6 +841,17 @@ mod tests {
         ));
         let block = interpret_recall(outcome).expect("a real payload injects");
         assert!(block.contains("a prior lesson"));
+    }
+
+    #[test]
+    fn detached_timeout_returns_before_slow_work_finishes() {
+        let start = std::time::Instant::now();
+        let out = run_detached_with_timeout(Duration::from_millis(30), || {
+            std::thread::sleep(Duration::from_millis(250));
+            Some("late")
+        });
+        assert!(out.is_none());
+        assert!(start.elapsed() < Duration::from_millis(150));
     }
 
     // --- capture: parse_capture_input + select_turns (hermetic, no daemon) ---

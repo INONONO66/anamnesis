@@ -19,9 +19,13 @@ use std::path::{Path, PathBuf};
 pub const DEFAULT_HOOK_THRESHOLD: f64 = 13.0;
 /// Default query-embedding cosine gate for UserPrompt recall.
 ///
-/// e5-family embeddings are anisotropic, so this prior is intentionally
-/// env-tunable and is finalized by the hook-battery calibration task.
-pub const DEFAULT_HOOK_COSINE_GATE: f64 = 0.83;
+/// e5-small calibration on 2026-07-08: direct recall pairs had related top
+/// cosine min/median `0.7805/0.8834` and unrelated max/median `0.8127/0.7840`;
+/// the hook battery's content-free project-cue prompt reached `0.8533`.
+/// `0.86` favors precision: it keeps 7/10 measured related prompts and blocks
+/// the observed content-free injection. Env-tune per graph if recall is too
+/// quiet.
+pub const DEFAULT_HOOK_COSINE_GATE: f64 = 0.86;
 /// Default query-embedding cosine gate for SessionStart seed recall.
 pub const DEFAULT_HOOK_SEED_COSINE_GATE: f64 = 0.80;
 /// Number of recent transcript turns folded into UserPrompt recall queries.
@@ -339,7 +343,7 @@ mod tests {
             extract_threshold_n: 20,
             embed_model: DEFAULT_EMBED_MODEL.to_string(),
         };
-        assert_eq!(cfg.hook_cosine_gate, 0.83);
+        assert_eq!(cfg.hook_cosine_gate, 0.86);
         assert_eq!(cfg.hook_seed_cosine_gate, 0.80);
         assert_eq!(cfg.hook_context_turns, 3);
         assert_eq!(cfg.hook_topk, 3);
