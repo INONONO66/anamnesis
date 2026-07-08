@@ -17,6 +17,15 @@ use std::path::{Path, PathBuf};
 /// env-tunable via `ANAMNESIS_HOOK_THRESHOLD` and should be **recalibrated
 /// per-graph**, since activation magnitude scales with graph density/recency.
 pub const DEFAULT_HOOK_THRESHOLD: f64 = 13.0;
+/// Default query-embedding cosine gate for UserPrompt recall.
+///
+/// e5-family embeddings are anisotropic, so this prior is intentionally
+/// env-tunable and is finalized by the hook-battery calibration task.
+pub const DEFAULT_HOOK_COSINE_GATE: f64 = 0.83;
+/// Default query-embedding cosine gate for SessionStart seed recall.
+pub const DEFAULT_HOOK_SEED_COSINE_GATE: f64 = 0.80;
+/// Number of recent transcript turns folded into UserPrompt recall queries.
+pub const DEFAULT_HOOK_CONTEXT_TURNS: usize = 3;
 
 /// Resolved runtime configuration.
 #[derive(Debug, Clone)]
@@ -27,15 +36,26 @@ pub struct Config {
     pub default_namespace: String,
     /// Auto-commit (reinforce) the package returned by `recall`.
     pub reinforce_on_recall: bool,
-    // The four `hook_*` knobs below are resolved here (Component 1) and consumed by
-    // the `hook` subcommand family (Component 2, added next). Allow dead_code until
-    // that subcommand reads them so this component's quality gate stays green.
+    // The `hook_*` knobs below are resolved here and consumed by the `hook`
+    // subcommand family. Allow dead_code until follow-on tasks wire the new knobs.
     /// `τ` — need-odds injection gate: a floor on the top recall score (raw
     /// ACT-R activation, ~8–16 on a typical graph — NOT a 0..1 similarity).
     /// `ANAMNESIS_HOOK_THRESHOLD`; see [`DEFAULT_HOOK_THRESHOLD`].
     #[allow(dead_code)]
     pub hook_threshold: f64,
-    /// `k` — cap on injected per-turn memories. `ANAMNESIS_HOOK_TOPK` (default 5).
+    /// Query-embedding cosine floor for UserPrompt recall.
+    /// `ANAMNESIS_HOOK_COSINE_GATE`; see [`DEFAULT_HOOK_COSINE_GATE`].
+    #[allow(dead_code)]
+    pub hook_cosine_gate: f64,
+    /// Query-embedding cosine floor for SessionStart seed recall.
+    /// `ANAMNESIS_HOOK_SEED_COSINE_GATE`; see [`DEFAULT_HOOK_SEED_COSINE_GATE`].
+    #[allow(dead_code)]
+    pub hook_seed_cosine_gate: f64,
+    /// Recent transcript turns included in UserPrompt recall queries.
+    /// `ANAMNESIS_HOOK_CONTEXT_TURNS`; see [`DEFAULT_HOOK_CONTEXT_TURNS`].
+    #[allow(dead_code)]
+    pub hook_context_turns: usize,
+    /// `k` — cap on injected per-turn memories. `ANAMNESIS_HOOK_TOPK` (default 3).
     #[allow(dead_code)]
     pub hook_topk: usize,
     /// SessionStart seed size. `ANAMNESIS_HOOK_SEED_K` (default 5).
@@ -58,7 +78,10 @@ impl Config {
     /// - `ANAMNESIS_NAMESPACE`       → `default_namespace` (default: `"default"`)
     /// - `ANAMNESIS_REINFORCE`       → `reinforce_on_recall`; "0"/"false" disables (default: true)
     /// - `ANAMNESIS_HOOK_THRESHOLD`  → `hook_threshold` (default: [`DEFAULT_HOOK_THRESHOLD`])
-    /// - `ANAMNESIS_HOOK_TOPK`       → `hook_topk` (default: 5)
+    /// - `ANAMNESIS_HOOK_COSINE_GATE` → `hook_cosine_gate` (default: [`DEFAULT_HOOK_COSINE_GATE`])
+    /// - `ANAMNESIS_HOOK_SEED_COSINE_GATE` → `hook_seed_cosine_gate` (default: [`DEFAULT_HOOK_SEED_COSINE_GATE`])
+    /// - `ANAMNESIS_HOOK_CONTEXT_TURNS` → `hook_context_turns` (default: [`DEFAULT_HOOK_CONTEXT_TURNS`])
+    /// - `ANAMNESIS_HOOK_TOPK`       → `hook_topk` (default: 3)
     /// - `ANAMNESIS_HOOK_SEED_K`     → `hook_seed_k` (default: 5)
     /// - `ANAMNESIS_HOOK_TIMEOUT_MS` → `hook_timeout_ms` (default: 1500)
     pub fn from_env() -> Self {
@@ -72,7 +95,14 @@ impl Config {
             Err(_) => true,
         };
         let hook_threshold = parse_env("ANAMNESIS_HOOK_THRESHOLD", DEFAULT_HOOK_THRESHOLD);
-        let hook_topk = parse_env("ANAMNESIS_HOOK_TOPK", 5usize);
+        let hook_cosine_gate = parse_env("ANAMNESIS_HOOK_COSINE_GATE", DEFAULT_HOOK_COSINE_GATE);
+        let hook_seed_cosine_gate = parse_env(
+            "ANAMNESIS_HOOK_SEED_COSINE_GATE",
+            DEFAULT_HOOK_SEED_COSINE_GATE,
+        );
+        let hook_context_turns =
+            parse_env("ANAMNESIS_HOOK_CONTEXT_TURNS", DEFAULT_HOOK_CONTEXT_TURNS);
+        let hook_topk = parse_env("ANAMNESIS_HOOK_TOPK", 3usize);
         let hook_seed_k = parse_env("ANAMNESIS_HOOK_SEED_K", 5usize);
         let hook_timeout_ms = parse_env("ANAMNESIS_HOOK_TIMEOUT_MS", 1500u64);
         let capture_enabled = match std::env::var("ANAMNESIS_CAPTURE_ENABLED") {
@@ -85,6 +115,9 @@ impl Config {
             default_namespace,
             reinforce_on_recall,
             hook_threshold,
+            hook_cosine_gate,
+            hook_seed_cosine_gate,
+            hook_context_turns,
             hook_topk,
             hook_seed_k,
             hook_timeout_ms,
@@ -186,7 +219,10 @@ mod tests {
             default_namespace: "default".into(),
             reinforce_on_recall: true,
             hook_threshold: DEFAULT_HOOK_THRESHOLD,
-            hook_topk: 5,
+            hook_cosine_gate: DEFAULT_HOOK_COSINE_GATE,
+            hook_seed_cosine_gate: DEFAULT_HOOK_SEED_COSINE_GATE,
+            hook_context_turns: DEFAULT_HOOK_CONTEXT_TURNS,
+            hook_topk: 3,
             hook_seed_k: 5,
             hook_timeout_ms: 1500,
             capture_enabled: true,
@@ -203,7 +239,10 @@ mod tests {
             default_namespace: "default".into(),
             reinforce_on_recall: true,
             hook_threshold: DEFAULT_HOOK_THRESHOLD,
-            hook_topk: 5,
+            hook_cosine_gate: DEFAULT_HOOK_COSINE_GATE,
+            hook_seed_cosine_gate: DEFAULT_HOOK_SEED_COSINE_GATE,
+            hook_context_turns: DEFAULT_HOOK_CONTEXT_TURNS,
+            hook_topk: 3,
             hook_seed_k: 5,
             hook_timeout_ms: 1500,
             capture_enabled: true,
@@ -252,7 +291,10 @@ mod tests {
             default_namespace: "default".into(),
             reinforce_on_recall: true,
             hook_threshold: DEFAULT_HOOK_THRESHOLD,
-            hook_topk: 5,
+            hook_cosine_gate: DEFAULT_HOOK_COSINE_GATE,
+            hook_seed_cosine_gate: DEFAULT_HOOK_SEED_COSINE_GATE,
+            hook_context_turns: DEFAULT_HOOK_CONTEXT_TURNS,
+            hook_topk: 3,
             hook_seed_k: 5,
             hook_timeout_ms: 1500,
             capture_enabled: true,
@@ -260,6 +302,35 @@ mod tests {
         };
         assert!(cfg.capture_enabled);
         assert_eq!(cfg.extract_threshold_n, 20);
+    }
+
+    #[test]
+    fn hook_gate_knobs_default_and_parse() {
+        let cfg = Config {
+            default_db: "x".into(),
+            default_namespace: "default".into(),
+            reinforce_on_recall: true,
+            hook_threshold: DEFAULT_HOOK_THRESHOLD,
+            hook_cosine_gate: DEFAULT_HOOK_COSINE_GATE,
+            hook_seed_cosine_gate: DEFAULT_HOOK_SEED_COSINE_GATE,
+            hook_context_turns: DEFAULT_HOOK_CONTEXT_TURNS,
+            hook_topk: 3,
+            hook_seed_k: 5,
+            hook_timeout_ms: 1500,
+            capture_enabled: true,
+            extract_threshold_n: 20,
+        };
+        assert_eq!(cfg.hook_cosine_gate, 0.83);
+        assert_eq!(cfg.hook_seed_cosine_gate, 0.80);
+        assert_eq!(cfg.hook_context_turns, 3);
+        assert_eq!(cfg.hook_topk, 3);
+        assert_eq!(
+            parse_env(
+                "ANAMNESIS_DEFINITELY_UNSET_FOR_TEST_HOOK_COSINE",
+                DEFAULT_HOOK_COSINE_GATE,
+            ),
+            DEFAULT_HOOK_COSINE_GATE
+        );
     }
 
     #[test]
