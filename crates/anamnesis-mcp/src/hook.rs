@@ -450,6 +450,31 @@ fn select_turns<'a>(turns: &'a [ParsedTurn], event: &HookEvent) -> Vec<&'a Parse
     turns[start..].iter().collect()
 }
 
+fn is_noise_turn(text: &str) -> bool {
+    const PREFIXES: &[&str] = &[
+        "# AGENTS.md",
+        "<system-reminder>",
+        "<command-name>",
+        "<command-message>",
+        "Caveat: the messages below",
+        "[Request interrupted",
+    ];
+    let text = text.trim();
+    PREFIXES.iter().any(|prefix| text.starts_with(prefix))
+}
+
+fn capture_turn_inputs(selected: Vec<&ParsedTurn>) -> Vec<TurnInput> {
+    selected
+        .into_iter()
+        .filter(|t| !is_noise_turn(&t.text))
+        .map(|t| TurnInput {
+            speaker: t.speaker.clone(),
+            text: t.text.clone(),
+            at_ms: t.at_ms,
+        })
+        .collect()
+}
+
 /// Capture handler: read the transcript, send selected turns as raw Episodic
 /// (capture=true ⇒ dedup + enqueue). Silent (returns None); fail-open.
 ///
@@ -478,15 +503,11 @@ async fn run_capture(cfg: &Config, stdin: &str, event: &HookEvent) -> Option<Str
                 return None;
             }
             let selected = select_turns(&all, &event);
+            let turns = capture_turn_inputs(selected);
+            if turns.is_empty() {
+                return None;
+            }
             let session = input.session_id.unwrap_or_else(|| "capture".to_string());
-            let turns: Vec<TurnInput> = selected
-                .iter()
-                .map(|t| TurnInput {
-                    speaker: t.speaker.clone(),
-                    text: t.text.clone(),
-                    at_ms: t.at_ms,
-                })
-                .collect();
             Some((session, turns, scope))
         })
         .await
@@ -823,6 +844,38 @@ mod tests {
         let pc = select_turns(&turns, &HookEvent::PreCompact);
         assert_eq!(pc.len(), 50);
         assert_eq!(pc.last().unwrap().text, "t59");
+    }
+
+    #[test]
+    fn noise_turns_are_filtered_from_capture() {
+        assert!(is_noise_turn("# AGENTS.md instructions for /Users/x"));
+        assert!(is_noise_turn(
+            "<system-reminder>use the newest message</system-reminder>"
+        ));
+        assert!(is_noise_turn("<command-name>Read</command-name>"));
+        assert!(is_noise_turn(
+            "<command-message>opened file</command-message>"
+        ));
+        assert!(is_noise_turn(
+            "Caveat: the messages below were generated elsewhere"
+        ));
+        assert!(is_noise_turn("[Request interrupted by user]"));
+        assert!(!is_noise_turn("실제 사용자 발화"));
+
+        let turns = vec![
+            crate::transcript::ParsedTurn {
+                speaker: "user".into(),
+                text: "# AGENTS.md instructions for /Users/x".into(),
+                at_ms: Some(1),
+            },
+            crate::transcript::ParsedTurn {
+                speaker: "assistant".into(),
+                text: "<system-reminder>noise</system-reminder>".into(),
+                at_ms: Some(2),
+            },
+        ];
+        let selected = select_turns(&turns, &HookEvent::Stop);
+        assert!(capture_turn_inputs(selected).is_empty());
     }
 
     // --- extraction_signal: pure helper, no daemon ---
