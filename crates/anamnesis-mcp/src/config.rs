@@ -26,6 +26,8 @@ pub const DEFAULT_HOOK_COSINE_GATE: f64 = 0.83;
 pub const DEFAULT_HOOK_SEED_COSINE_GATE: f64 = 0.80;
 /// Number of recent transcript turns folded into UserPrompt recall queries.
 pub const DEFAULT_HOOK_CONTEXT_TURNS: usize = 3;
+/// Default embedding model for new databases and model downloads.
+pub const DEFAULT_EMBED_MODEL: &str = "multilingual-e5-small";
 
 /// Resolved runtime configuration.
 #[derive(Debug, Clone)]
@@ -69,6 +71,8 @@ pub struct Config {
     /// Un-extracted queue size that triggers the extraction signal.
     /// `ANAMNESIS_EXTRACT_THRESHOLD_N` (default 20).
     pub extract_threshold_n: usize,
+    /// FastEmbed model name. `ANAMNESIS_EMBED_MODEL` (default multilingual-e5-small).
+    pub embed_model: String,
 }
 
 impl Config {
@@ -84,6 +88,7 @@ impl Config {
     /// - `ANAMNESIS_HOOK_TOPK`       → `hook_topk` (default: 3)
     /// - `ANAMNESIS_HOOK_SEED_K`     → `hook_seed_k` (default: 5)
     /// - `ANAMNESIS_HOOK_TIMEOUT_MS` → `hook_timeout_ms` (default: 1500)
+    /// - `ANAMNESIS_EMBED_MODEL`     → `embed_model` (default: [`DEFAULT_EMBED_MODEL`])
     pub fn from_env() -> Self {
         let default_db = std::env::var_os("ANAMNESIS_DB")
             .map(PathBuf::from)
@@ -110,6 +115,7 @@ impl Config {
             Err(_) => true,
         };
         let extract_threshold_n = parse_env("ANAMNESIS_EXTRACT_THRESHOLD_N", 20usize);
+        let embed_model = parse_env_string("ANAMNESIS_EMBED_MODEL", DEFAULT_EMBED_MODEL);
         Self {
             default_db,
             default_namespace,
@@ -123,6 +129,7 @@ impl Config {
             hook_timeout_ms,
             capture_enabled,
             extract_threshold_n,
+            embed_model,
         }
     }
 
@@ -170,6 +177,14 @@ fn parse_env<T: std::str::FromStr>(name: &str, default: T) -> T {
         .ok()
         .and_then(|v| v.trim().parse().ok())
         .unwrap_or(default)
+}
+
+fn parse_env_string(name: &str, default: &str) -> String {
+    std::env::var(name)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| default.to_string())
 }
 
 /// Nearest ancestor of `start` (inclusive) holding a `.anamnesis/` dir, mapped to
@@ -227,6 +242,7 @@ mod tests {
             hook_timeout_ms: 1500,
             capture_enabled: true,
             extract_threshold_n: 20,
+            embed_model: DEFAULT_EMBED_MODEL.to_string(),
         };
         assert!(cfg.reinforce_on_recall);
         assert_eq!(cfg.db_dir(), PathBuf::from("."));
@@ -247,6 +263,7 @@ mod tests {
             hook_timeout_ms: 1500,
             capture_enabled: true,
             extract_threshold_n: 20,
+            embed_model: DEFAULT_EMBED_MODEL.to_string(),
         };
         assert_eq!(cfg.db_dir(), PathBuf::from("/var/lib/anamnesis"));
     }
@@ -299,6 +316,7 @@ mod tests {
             hook_timeout_ms: 1500,
             capture_enabled: true,
             extract_threshold_n: 20,
+            embed_model: DEFAULT_EMBED_MODEL.to_string(),
         };
         assert!(cfg.capture_enabled);
         assert_eq!(cfg.extract_threshold_n, 20);
@@ -319,6 +337,7 @@ mod tests {
             hook_timeout_ms: 1500,
             capture_enabled: true,
             extract_threshold_n: 20,
+            embed_model: DEFAULT_EMBED_MODEL.to_string(),
         };
         assert_eq!(cfg.hook_cosine_gate, 0.83);
         assert_eq!(cfg.hook_seed_cosine_gate, 0.80);
@@ -330,6 +349,18 @@ mod tests {
                 DEFAULT_HOOK_COSINE_GATE,
             ),
             DEFAULT_HOOK_COSINE_GATE
+        );
+    }
+
+    #[test]
+    fn embed_model_default_is_multilingual_e5_small() {
+        assert_eq!(DEFAULT_EMBED_MODEL, "multilingual-e5-small");
+        assert_eq!(
+            parse_env_string(
+                "ANAMNESIS_DEFINITELY_UNSET_FOR_TEST_EMBED_MODEL",
+                DEFAULT_EMBED_MODEL,
+            ),
+            DEFAULT_EMBED_MODEL
         );
     }
 

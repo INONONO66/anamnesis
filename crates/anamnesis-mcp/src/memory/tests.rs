@@ -5,6 +5,81 @@ fn registry(reinforce: bool) -> MemoryRegistry {
     MemoryRegistry::in_memory_with(Arc::new(StubProvider), reinforce)
 }
 
+#[test]
+fn embed_model_from_name_maps_supported_models() {
+    assert_eq!(
+        format!(
+            "{:?}",
+            embed_model_from_name("multilingual-e5-small").unwrap()
+        ),
+        "MultilingualE5Small"
+    );
+    assert_eq!(
+        format!(
+            "{:?}",
+            embed_model_from_name("multilingual-e5-base").unwrap()
+        ),
+        "MultilingualE5Base"
+    );
+    assert_eq!(
+        format!(
+            "{:?}",
+            embed_model_from_name("multilingual-e5-large").unwrap()
+        ),
+        "MultilingualE5Large"
+    );
+    assert_eq!(
+        format!("{:?}", embed_model_from_name("bge-base-en-v1.5").unwrap()),
+        "BGEBaseENV15"
+    );
+
+    let err = embed_model_from_name("unknown-model").unwrap_err();
+    assert!(
+        err.to_string().contains("multilingual-e5-small"),
+        "supported model list should be actionable: {err}"
+    );
+}
+
+struct FixedDimProvider {
+    dim: usize,
+}
+
+impl EmbeddingProvider for FixedDimProvider {
+    fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, Error> {
+        Ok(texts.iter().map(|_| vec![0.1; self.dim]).collect())
+    }
+
+    fn dimensions(&self) -> usize {
+        self.dim
+    }
+
+    fn model_name(&self) -> &str {
+        "fixed-dim"
+    }
+}
+
+#[test]
+fn verify_embedding_dim_allows_empty_and_matching_but_rejects_mismatch() {
+    let provider: Arc<dyn EmbeddingProvider> = Arc::new(FixedDimProvider { dim: 384 });
+    let mut mem = Memory::in_memory_with_provider(provider).unwrap();
+
+    verify_embedding_dim(&mem, 768, "bge-base-en-v1.5").unwrap();
+    mem.add(
+        "s",
+        "user",
+        "dimensioned memory",
+        anamnesis::graph::Timestamp(1),
+    )
+    .unwrap();
+
+    verify_embedding_dim(&mem, 384, "multilingual-e5-small").unwrap();
+    let err = verify_embedding_dim(&mem, 768, "bge-base-en-v1.5").unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("DB has 384-d embeddings"), "{msg}");
+    assert!(msg.contains("bge-base-en-v1.5"), "{msg}");
+    assert!(msg.contains("ANAMNESIS_EMBED_MODEL"), "{msg}");
+}
+
 // ── Single-tick-per-recall (flagship bug #2) ────────────────────────────
 
 #[test]

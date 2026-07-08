@@ -6,7 +6,8 @@
 
 use std::sync::Mutex;
 
-use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
+pub use fastembed::EmbeddingModel;
+use fastembed::{InitOptions, TextEmbedding};
 
 use crate::embedding::EmbeddingProvider;
 use crate::error::Error;
@@ -46,6 +47,25 @@ fn e5_prefix(model_code: &str, kind: PrefixKind, text: &str) -> String {
         }
     } else {
         text.to_string()
+    }
+}
+
+pub fn embed_model_from_name(name: &str) -> Result<EmbeddingModel, Error> {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "multilingual-e5-small" | "intfloat/multilingual-e5-small" => {
+            Ok(EmbeddingModel::MultilingualE5Small)
+        }
+        "multilingual-e5-base" | "intfloat/multilingual-e5-base" => {
+            Ok(EmbeddingModel::MultilingualE5Base)
+        }
+        "multilingual-e5-large" | "intfloat/multilingual-e5-large" => {
+            Ok(EmbeddingModel::MultilingualE5Large)
+        }
+        "bge-base-en-v1.5" | "baai/bge-base-en-v1.5" => Ok(EmbeddingModel::BGEBaseENV15),
+        other => Err(Error::InvalidInput(format!(
+            "unsupported embedding model {other:?}; supported: multilingual-e5-small, \
+             multilingual-e5-base, multilingual-e5-large, bge-base-en-v1.5"
+        ))),
     }
 }
 

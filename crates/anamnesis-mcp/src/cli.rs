@@ -140,11 +140,12 @@ pub enum HookEvent {
 }
 
 fn registry(cfg: &Config) -> MemoryRegistry {
-    MemoryRegistry::file_backed(
+    MemoryRegistry::file_backed_with_model(
         cfg.default_db.clone(),
         cfg.db_dir(),
         cfg.default_namespace.clone(),
         cfg.reinforce_on_recall,
+        cfg.embed_model.clone(),
     )
 }
 

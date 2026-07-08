@@ -884,6 +884,7 @@ mod tests {
             hook_timeout_ms: 1,
             capture_enabled: true,
             extract_threshold_n: 20,
+            embed_model: crate::config::DEFAULT_EMBED_MODEL.to_string(),
         }
     }
 

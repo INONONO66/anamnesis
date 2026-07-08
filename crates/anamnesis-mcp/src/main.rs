@@ -135,11 +135,12 @@ async fn serve_launcher() -> Result<()> {
 async fn serve_embedded() -> Result<()> {
     config::ensure_model_cache_dir();
     let cfg = Config::from_env();
-    let registry = Arc::new(Mutex::new(MemoryRegistry::file_backed(
+    let registry = Arc::new(Mutex::new(MemoryRegistry::file_backed_with_model(
         cfg.default_db.clone(),
         cfg.db_dir(),
         cfg.default_namespace.clone(),
         cfg.reinforce_on_recall,
+        cfg.embed_model.clone(),
     )));
     let server = AnamnesisServer::local(registry.clone());
     tracing::info!("anamnesis serving over stdio (embedded mode)");
