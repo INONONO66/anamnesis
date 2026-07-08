@@ -103,6 +103,8 @@ struct PendingTurn {
     speaker: String,
     /// 1-based turn index.
     turn_index: usize,
+    /// Origin scope to stamp on this turn's Semantic node when finalized.
+    scope: ScopePath,
 }
 
 /// Options for [`Memory::add_note_with`] — optional scope, extra entity tags,
@@ -441,6 +443,19 @@ impl<S: StorageAdapter + Clone> Memory<S> {
         text: &str,
         at: Timestamp,
     ) -> Result<AddReceipt, Error> {
+        self.add_in_scope(session, speaker, text, at, ScopePath::universal())
+    }
+
+    /// Like [`add`](Memory::add), but stamps the current turn and its eventual
+    /// Semantic window with `scope`.
+    pub fn add_in_scope(
+        &mut self,
+        session: &str,
+        speaker: &str,
+        text: &str,
+        at: Timestamp,
+        scope: ScopePath,
+    ) -> Result<AddReceipt, Error> {
         let session_buf = self.sessions.entry(session.to_string()).or_default();
 
         // Snapshot continuity state BEFORE any mutation so we can use it
@@ -484,7 +499,7 @@ impl<S: StorageAdapter + Clone> Memory<S> {
             entity_tags_for(session, speaker),
             Some(format!("{} turn {}", speaker, next_turn_index)),
             session,
-            ScopePath::universal(),
+            scope.clone(),
         )?;
 
         // (d) If pending: ingest its semantic, then wire ExtractedFrom + Temporal.
@@ -501,7 +516,7 @@ impl<S: StorageAdapter + Clone> Memory<S> {
                 entity_tags_for(&pending.session_id, &pending.speaker),
                 Some(format!("{} turn {}", pending.speaker, pending.turn_index)),
                 &pending.session_id,
-                ScopePath::universal(),
+                pending.scope.clone(),
             )?;
             self.engine
                 .link(sem_id, pending.episodic_id, EdgeType::ExtractedFrom)?;
@@ -550,6 +565,7 @@ impl<S: StorageAdapter + Clone> Memory<S> {
             session_id: session.to_string(),
             speaker: speaker.to_string(),
             turn_index: next_turn_index,
+            scope,
         });
 
         Ok(AddReceipt {
@@ -681,7 +697,7 @@ impl<S: StorageAdapter + Clone> Memory<S> {
             entity_tags_for(&pending.session_id, &pending.speaker),
             Some(format!("{} turn {}", pending.speaker, pending.turn_index)),
             &pending.session_id,
-            ScopePath::universal(),
+            pending.scope,
         )?;
         self.engine
             .link(sem_id, pending.episodic_id, EdgeType::ExtractedFrom)?;
@@ -1184,6 +1200,16 @@ impl<S: StorageAdapter + Clone> Memory<S> {
         self.search_at(query, limit, Timestamp::now())
     }
 
+    /// Search memory with an optional query scope for scope-aware ranking.
+    pub fn search_scoped(
+        &mut self,
+        query: &str,
+        limit: usize,
+        scope: Option<ScopePath>,
+    ) -> Result<Recall, Error> {
+        self.search_scoped_at(query, limit, scope, Timestamp::now())
+    }
+
     /// Search memory at an explicit `now` timestamp.
     ///
     /// First flushes all pending session buffers so that every previously added
@@ -1200,6 +1226,16 @@ impl<S: StorageAdapter + Clone> Memory<S> {
         limit: usize,
         now: Timestamp,
     ) -> Result<Recall, Error> {
+        self.search_scoped_at(query, limit, None, now)
+    }
+
+    fn search_scoped_at(
+        &mut self,
+        query: &str,
+        limit: usize,
+        scope: Option<ScopePath>,
+        now: Timestamp,
+    ) -> Result<Recall, Error> {
         // Flush pending buffers so the last buffered turn is searchable.
         self.flush_all()?;
 
@@ -1214,6 +1250,7 @@ impl<S: StorageAdapter + Clone> Memory<S> {
             limit,
             seed_limit: Some(limit.max(1)),
             now,
+            scope: scope.unwrap_or_else(ScopePath::universal),
             entity_tags: Vec::new(), // speaker cues OFF (bench default)
             ..SearchInput::default()
         };
@@ -1520,6 +1557,58 @@ mod tests {
             top.cosine > 0.0 && top.cosine <= 1.0 + f64::EPSILON,
             "cosine must be populated from the readout surface, got {}",
             top.cosine
+        );
+    }
+
+    #[test]
+    fn add_in_scope_stamps_origin_scope_on_episodic_and_semantic() {
+        let mut m = mem();
+        let scope = ScopePath::new("project/anamnesis").unwrap();
+        m.add_in_scope("s1", "user", "first turn", t(1), scope.clone())
+            .unwrap();
+        m.add_in_scope("s1", "user", "second turn", t(2), scope.clone())
+            .unwrap();
+        m.flush_all().unwrap();
+
+        for id in m.engine().graph().storage().all_node_ids() {
+            let node = m.engine().graph().get_node(id).unwrap();
+            assert_eq!(
+                node.origin.scope.as_str(),
+                "project/anamnesis",
+                "node {id:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn search_scoped_ranks_same_scope_above_cross_scope() {
+        let mut m = mem();
+        let a = ScopePath::new("project/aaa").unwrap();
+        let b = ScopePath::new("project/bbb").unwrap();
+        m.add_in_scope(
+            "sa",
+            "user",
+            "shared topic phrase aaa local detail",
+            t(1),
+            a.clone(),
+        )
+        .unwrap();
+        m.add_in_scope(
+            "sb",
+            "user",
+            "shared topic phrase bbb foreign detail",
+            t(2),
+            b,
+        )
+        .unwrap();
+        m.flush_all().unwrap();
+
+        let recall = m.search_scoped("shared topic phrase", 2, Some(a)).unwrap();
+        let top = m.engine().graph().get_node(recall.hits[0].node_id).unwrap();
+        assert_eq!(
+            top.origin.scope.as_str(),
+            "project/aaa",
+            "same-scope must outrank cross-scope"
         );
     }
 
