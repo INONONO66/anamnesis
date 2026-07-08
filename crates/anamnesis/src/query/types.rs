@@ -425,6 +425,8 @@ pub struct ReadoutCandidate {
     pub activation: f64,
     /// Query-field potential bias `phi_i`.
     pub phi: f64,
+    /// Query-embedding cosine vs this node, or `0.0` when either embedding is absent.
+    pub embedding_cosine: f64,
     /// Salience projection `s_i`.
     pub salience: f64,
     /// Effective impedance `Z_i`.

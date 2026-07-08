@@ -1059,6 +1059,8 @@ pub struct Hit {
     pub text: String,
     /// Readout score (ranking key; higher = more relevant).
     pub score: f64,
+    /// Query-embedding cosine vs this node, or `0.0` when either embedding is absent.
+    pub cosine: f64,
     /// Timestamp when the node was created.
     pub at: Timestamp,
     /// Normalized speaker extracted from the node's `speaker-<norm>` entity tag, if any.
@@ -1231,6 +1233,7 @@ impl<S: StorageAdapter + Clone> Memory<S> {
                     node_id: candidate.node_id,
                     text: node.content.clone(),
                     score: candidate.score,
+                    cosine: candidate.embedding_cosine,
                     at: node.created_at,
                     speaker,
                     session,
@@ -1503,6 +1506,21 @@ mod tests {
     #[test]
     fn relation_supersedes_maps_to_edge_type() {
         assert_eq!(EdgeType::from(Relation::Supersedes), EdgeType::Supersedes);
+    }
+
+    #[test]
+    fn search_hits_carry_embedding_cosine() {
+        let mut m = mem();
+        m.add_note("the recall gate uses cosine now", t(1)).unwrap();
+
+        let recall = m.search("recall gate", 5).unwrap();
+        let top = recall.hits.first().expect("at least one hit");
+
+        assert!(
+            top.cosine > 0.0 && top.cosine <= 1.0 + f64::EPSILON,
+            "cosine must be populated from the readout surface, got {}",
+            top.cosine
+        );
     }
 
     // ── relate ────────────────────────────────────────────────────────────────
