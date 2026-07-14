@@ -1077,3 +1077,445 @@ fn usage_report_counts_ops_and_backlog() {
     assert!(report.contains("captured total: 1"), "got: {report}");
     assert!(report.contains("stale ratio"), "got: {report}");
 }
+
+mod embedding_migration {
+    use super::migration::{EMBEDDING_MIGRATION_BATCH_SIZE, migrate_embeddings};
+    use super::*;
+    use anamnesis::engine::{KnowledgeType, Node, NodeId, Timestamp};
+    use anamnesis::graph::edge::{Edge, EdgeSource};
+    use anamnesis::graph::node::Origin;
+    use anamnesis::graph::types::{PeerId, SourceKind};
+    use anamnesis::graph::{EdgeType, MemoryTier, ScopePath};
+    use anamnesis::storage::sqlite::{EmbeddingMigrationInspection, EmbeddingSelection};
+    use std::collections::{HashMap, VecDeque};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct RecordingProvider {
+        dimensions: usize,
+        model: &'static str,
+        passage_value: f32,
+        raw_value: f32,
+        fail_at: Option<usize>,
+        passages: Mutex<Vec<String>>,
+        raw_calls: AtomicUsize,
+    }
+
+    impl RecordingProvider {
+        fn healthy(dimensions: usize, model: &'static str) -> Self {
+            Self {
+                dimensions,
+                model,
+                passage_value: 0.75,
+                raw_value: -0.25,
+                fail_at: None,
+                passages: Mutex::new(Vec::new()),
+                raw_calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn failing(dimensions: usize, model: &'static str, fail_at: usize) -> Self {
+            Self {
+                fail_at: Some(fail_at),
+                ..Self::healthy(dimensions, model)
+            }
+        }
+
+        fn passage_inputs(&self) -> Vec<String> {
+            self.passages
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+        }
+    }
+
+    impl EmbeddingProvider for RecordingProvider {
+        fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, Error> {
+            self.raw_calls.fetch_add(texts.len(), Ordering::SeqCst);
+            Ok(texts
+                .iter()
+                .map(|_| vec![self.raw_value; self.dimensions])
+                .collect())
+        }
+
+        fn dimensions(&self) -> usize {
+            self.dimensions
+        }
+
+        fn model_name(&self) -> &str {
+            self.model
+        }
+
+        fn embed_passage(&self, text: &str) -> Result<Vec<f32>, Error> {
+            let call = {
+                let mut passages = self
+                    .passages
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let call = passages.len();
+                passages.push(text.to_string());
+                call
+            };
+            if self.fail_at.is_some_and(|fail_at| call >= fail_at) {
+                return Err(Error::InvalidInput("injected passage failure".to_string()));
+            }
+            Ok(vec![self.passage_value; self.dimensions])
+        }
+    }
+
+    fn fixture_node(id: NodeId, dimensions: usize, prefix: &str) -> Node {
+        Node {
+            id,
+            node_type: KnowledgeType::Semantic,
+            name: format!("{prefix}-node-{}", id.0),
+            summary: Some(format!("{prefix}-summary-{}", id.0)),
+            content: format!("{prefix}-content-{}", id.0),
+            embedding: Some(vec![0.125; dimensions]),
+            created_at: Timestamp(1_000 + id.0),
+            updated_at: Timestamp(2_000 + id.0),
+            accessed_at: Timestamp(3_000 + id.0),
+            valid_from: Some(Timestamp(900 + id.0)),
+            valid_until: Some(Timestamp(9_000 + id.0)),
+            salience: 0.7,
+            retained_action: 0.4,
+            evidence_prior: 0.3,
+            access_count: 2,
+            access_history: VecDeque::new(),
+            tier: MemoryTier::Recall,
+            origin: Origin {
+                peer_id: PeerId(17),
+                source_kind: SourceKind::AgentObservation,
+                session_id: format!("{prefix}-session"),
+                scope: ScopePath::new("project/migration").expect("valid fixture scope"),
+                confidence: 0.93,
+            },
+            entity_tags: vec!["migration".to_string(), format!("entity-{}", id.0)],
+            metadata: HashMap::from([
+                ("preserved".to_string(), "true".to_string()),
+                ("fixture".to_string(), prefix.to_string()),
+            ]),
+        }
+    }
+
+    fn create_fixture(
+        db_path: &std::path::Path,
+        count: usize,
+        dimensions: usize,
+        model: &str,
+        prefix: &str,
+    ) {
+        let mut storage = SqliteStorage::open(db_path).expect("open fixture database");
+        for _ in 0..count {
+            let id = storage.next_node_id();
+            storage
+                .set_node(fixture_node(id, dimensions, prefix))
+                .expect("persist fixture node");
+        }
+        if count >= 2 {
+            let edge_id = storage.next_edge_id();
+            storage
+                .set_edge(Edge::seeded(
+                    edge_id,
+                    NodeId(0),
+                    NodeId(1),
+                    EdgeType::Reason,
+                    0.6,
+                    EdgeSource::Manual,
+                    Timestamp(4_000),
+                    Timestamp(4_500),
+                    HashMap::from([("edge-preserved".to_string(), "true".to_string())]),
+                ))
+                .expect("persist fixture edge");
+        }
+        storage
+            .set_embedding_model_name(model)
+            .expect("stamp source model");
+    }
+
+    fn request(
+        db_path: &std::path::Path,
+        provider: Arc<dyn EmbeddingProvider>,
+    ) -> EmbeddingMigrationRequest {
+        let pending = PendingEmbeddingMigrationRequest {
+            namespace: "default".to_string(),
+            db_path: db_path.to_path_buf(),
+            provider,
+        };
+        let lease = acquire_namespace_migration_lock(db_path).expect("acquire migration lock");
+        (pending, lease).into()
+    }
+
+    fn daemon_leased_request(
+        db_path: &std::path::Path,
+        provider: Arc<dyn EmbeddingProvider>,
+    ) -> EmbeddingMigrationRequest {
+        let lock_path = namespace_lock_path(db_path);
+        let lock_file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(lock_path)
+            .expect("open daemon fixture lock");
+        fs4::FileExt::try_lock(&lock_file).expect("acquire daemon fixture lock");
+        (
+            PendingEmbeddingMigrationRequest {
+                namespace: "default".to_string(),
+                db_path: db_path.to_path_buf(),
+                provider,
+            },
+            MigrationLockLease::from(Arc::new(lock_file)),
+        )
+            .into()
+    }
+
+    fn inspection(db_path: &std::path::Path) -> EmbeddingMigrationInspection {
+        SqliteStorage::inspect_embedding_migration(db_path).expect("inspect migration state")
+    }
+
+    fn graph_snapshot(db_path: &std::path::Path) -> (Vec<Node>, Vec<Edge>) {
+        let storage = SqliteStorage::open(db_path).expect("open graph snapshot");
+        let nodes = storage
+            .all_node_ids()
+            .into_iter()
+            .map(|id| storage.get_node(id).expect("snapshot node").clone())
+            .collect();
+        let edges = storage
+            .all_edge_ids()
+            .into_iter()
+            .map(|id| storage.get_edge(id).expect("snapshot edge").clone())
+            .collect();
+        (nodes, edges)
+    }
+
+    fn non_embedding_snapshot(db_path: &std::path::Path) -> (Vec<Node>, Vec<Edge>) {
+        let (mut nodes, edges) = graph_snapshot(db_path);
+        for node in &mut nodes {
+            node.embedding = None;
+        }
+        (nodes, edges)
+    }
+
+    fn expected_inputs(prefix: &str, range: std::ops::Range<usize>) -> Vec<String> {
+        range
+            .map(|index| format!("{prefix}-content-{index}"))
+            .collect()
+    }
+
+    #[test]
+    fn migrates_768_fixture_via_passage_and_preserves_graph() {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let db_path = dir.path().join("graph.db");
+        create_fixture(&db_path, 3, 768, "bge-base-en-v1.5", "happy");
+        let before = non_embedding_snapshot(&db_path);
+        let provider = Arc::new(RecordingProvider::healthy(384, "multilingual-e5-small"));
+        let mut progress = Vec::new();
+
+        let outcome = migrate_embeddings(
+            daemon_leased_request(&db_path, provider.clone()),
+            &mut |event| progress.push(event),
+        )
+        .expect("migrate fixture");
+
+        let EmbeddingMigrationOutcome::Migrated(report) = outcome else {
+            panic!("expected migrated outcome");
+        };
+        assert_eq!(report.scanned, 3);
+        assert_eq!(report.migrated, 3);
+        assert_eq!(report.resumed, 0);
+        assert_eq!(report.batches, 1);
+        assert!(report.backup_path.is_file());
+        assert_eq!(progress.len(), 1);
+        assert_eq!(progress[0].committed, 3);
+        assert_eq!(provider.passage_inputs(), expected_inputs("happy", 0..3));
+        assert_eq!(provider.raw_calls.load(Ordering::SeqCst), 0);
+        let after = inspection(&db_path);
+        assert_eq!(
+            after.embedding_model.as_deref(),
+            Some("multilingual-e5-small")
+        );
+        assert_eq!(after.checkpoint, None);
+        assert_eq!(after.embedding_dimensions, vec![Some(384); 3]);
+        assert_eq!(non_embedding_snapshot(&db_path), before);
+        let storage = SqliteStorage::open(&db_path).expect("open migrated graph");
+        assert_eq!(storage.node_count(), 3);
+        assert_eq!(storage.edge_count(), 1);
+        assert_eq!(storage.text_search("happy-content-1", 5)[0].0, NodeId(1));
+        assert_eq!(
+            storage
+                .get_node(NodeId(0))
+                .expect("migrated node")
+                .embedding,
+            Some(vec![0.75; 384])
+        );
+        drop(storage);
+        let mut registry =
+            file_registry(provider.clone(), db_path.clone(), dir.path().to_path_buf());
+        assert_eq!(registry.stats(None).expect("guard reopen").node_count, 3);
+        assert!(
+            !registry
+                .recall("happy-content-1", 3, None)
+                .expect("recall migrated graph")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn interruption_after_one_batch_resumes_only_remaining_old_dimensions() {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let db_path = dir.path().join("resume-dimension.db");
+        create_fixture(&db_path, 70, 768, "bge-base-en-v1.5", "dimension");
+        let failing = Arc::new(RecordingProvider::failing(
+            384,
+            "multilingual-e5-small",
+            EMBEDDING_MIGRATION_BATCH_SIZE,
+        ));
+        let mut first_progress = Vec::new();
+
+        let first = migrate_embeddings(request(&db_path, failing.clone()), &mut |event| {
+            first_progress.push(event)
+        });
+
+        assert!(first.is_err());
+        assert_eq!(first_progress.len(), 1);
+        let interrupted = inspection(&db_path);
+        assert_eq!(
+            interrupted.embedding_model.as_deref(),
+            Some("bge-base-en-v1.5")
+        );
+        assert!(interrupted.checkpoint.is_some());
+        assert_eq!(
+            interrupted
+                .embedding_dimensions
+                .iter()
+                .filter(|dimension| **dimension == Some(384))
+                .count(),
+            64
+        );
+        assert_eq!(failing.raw_calls.load(Ordering::SeqCst), 0);
+        let healthy = Arc::new(RecordingProvider::healthy(384, "multilingual-e5-small"));
+        let outcome = migrate_embeddings(request(&db_path, healthy.clone()), &mut |_| {})
+            .expect("resume dimension migration");
+
+        let EmbeddingMigrationOutcome::Migrated(report) = outcome else {
+            panic!("expected resumed migration");
+        };
+        assert_eq!(report.migrated, 6);
+        assert_eq!(report.resumed, 64);
+        assert_eq!(
+            healthy.passage_inputs(),
+            expected_inputs("dimension", 64..70)
+        );
+        let completed = inspection(&db_path);
+        assert_eq!(completed.embedding_dimensions, vec![Some(384); 70]);
+        assert_eq!(
+            completed.embedding_model.as_deref(),
+            Some("multilingual-e5-small")
+        );
+        assert_eq!(completed.checkpoint, None);
+    }
+
+    #[test]
+    fn same_dimension_model_change_resumes_from_atomic_cursor() {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let db_path = dir.path().join("resume-cursor.db");
+        create_fixture(&db_path, 70, 3, "model-a", "cursor");
+        let failing = Arc::new(RecordingProvider::failing(
+            3,
+            "model-b",
+            EMBEDDING_MIGRATION_BATCH_SIZE,
+        ));
+
+        assert!(migrate_embeddings(request(&db_path, failing), &mut |_| {}).is_err());
+        let checkpoint = inspection(&db_path)
+            .checkpoint
+            .expect("cursor checkpoint remains");
+        assert_eq!(checkpoint.selection, EmbeddingSelection::Cursor);
+        assert_eq!(checkpoint.cursor, Some(NodeId(63)));
+        assert_eq!(inspection(&db_path).embedding_dimensions, vec![Some(3); 70]);
+        let healthy = Arc::new(RecordingProvider::healthy(3, "model-b"));
+
+        let outcome = migrate_embeddings(request(&db_path, healthy.clone()), &mut |_| {})
+            .expect("resume cursor migration");
+
+        let EmbeddingMigrationOutcome::Migrated(report) = outcome else {
+            panic!("expected resumed cursor migration");
+        };
+        assert_eq!(report.migrated, 6);
+        assert_eq!(report.resumed, 64);
+        assert_eq!(healthy.passage_inputs(), expected_inputs("cursor", 64..70));
+        assert_eq!(
+            inspection(&db_path).embedding_model.as_deref(),
+            Some("model-b")
+        );
+        assert_eq!(inspection(&db_path).checkpoint, None);
+    }
+
+    #[test]
+    fn backup_failure_writes_no_checkpoint_or_embedding() {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let db_path = dir.path().join("backup-failure.db");
+        create_fixture(&db_path, 2, 768, "bge-base-en-v1.5", "backup-failure");
+        let before = graph_snapshot(&db_path);
+        let backup_path = backup_path_for_database(&db_path).expect("derive backup path");
+        std::fs::create_dir(&backup_path).expect("block backup destination with directory");
+        let provider = Arc::new(RecordingProvider::healthy(384, "multilingual-e5-small"));
+
+        let result = migrate_embeddings(request(&db_path, provider.clone()), &mut |_| {});
+
+        assert!(result.is_err());
+        assert!(provider.passage_inputs().is_empty());
+        assert_eq!(graph_snapshot(&db_path), before);
+        let after = inspection(&db_path);
+        assert_eq!(after.checkpoint, None);
+        assert_eq!(after.embedding_model.as_deref(), Some("bge-base-en-v1.5"));
+    }
+
+    #[test]
+    fn existing_unrelated_backup_is_never_overwritten() {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let db_path = dir.path().join("unrelated.db");
+        create_fixture(&db_path, 2, 768, "bge-base-en-v1.5", "unrelated");
+        let backup_path = backup_path_for_database(&db_path).expect("derive backup path");
+        let unrelated = b"operator-owned-unrelated-backup";
+        std::fs::write(&backup_path, unrelated).expect("write unrelated backup bytes");
+        let provider = Arc::new(RecordingProvider::healthy(384, "multilingual-e5-small"));
+
+        let result = migrate_embeddings(request(&db_path, provider.clone()), &mut |_| {});
+
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&backup_path).expect("read backup"), unrelated);
+        assert!(provider.passage_inputs().is_empty());
+        assert_eq!(inspection(&db_path).checkpoint, None);
+        assert_eq!(
+            inspection(&db_path).embedding_dimensions,
+            vec![Some(768); 2]
+        );
+    }
+
+    #[test]
+    fn existing_backup_without_checkpoint_fails_closed_even_when_coarse_inventory_matches() {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let db_path = dir.path().join("live.db");
+        let other_path = dir.path().join("other.db");
+        create_fixture(&db_path, 2, 768, "bge-base-en-v1.5", "live");
+        create_fixture(&other_path, 2, 768, "bge-base-en-v1.5", "other");
+        let backup_path = backup_path_for_database(&db_path).expect("derive backup path");
+        SqliteStorage::create_verified_backup(&other_path, &backup_path)
+            .expect("create valid but unrelated backup");
+        let backup_bytes = std::fs::read(&backup_path).expect("snapshot unrelated backup");
+        let provider = Arc::new(RecordingProvider::healthy(384, "multilingual-e5-small"));
+
+        let result = migrate_embeddings(request(&db_path, provider.clone()), &mut |_| {});
+
+        assert!(result.is_err());
+        assert_eq!(
+            std::fs::read(&backup_path).expect("reread unrelated backup"),
+            backup_bytes
+        );
+        assert!(provider.passage_inputs().is_empty());
+        assert_eq!(inspection(&db_path).checkpoint, None);
+        assert_eq!(
+            inspection(&db_path).embedding_dimensions,
+            vec![Some(768); 2]
+        );
+    }
+}

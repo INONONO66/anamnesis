@@ -27,6 +27,8 @@ use anamnesis::{Error, Memory};
 use crate::capture::{extract_redelivery_ms, scan_extraction_state};
 
 mod mgmt;
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) mod migration;
 mod recall;
 #[cfg(test)]
 mod tests;
@@ -38,6 +40,143 @@ pub(crate) fn embed_model_from_name(
     name: &str,
 ) -> Result<anamnesis::embedding::fastembed::EmbeddingModel, Error> {
     anamnesis::embedding::fastembed::embed_model_from_name(name)
+}
+
+pub(crate) struct PendingEmbeddingMigrationRequest {
+    pub namespace: String,
+    pub db_path: PathBuf,
+    pub provider: Arc<dyn EmbeddingProvider>,
+}
+
+pub(crate) struct EmbeddingMigrationRequest {
+    pending: PendingEmbeddingMigrationRequest,
+    pub lock_lease: MigrationLockLease,
+}
+
+impl From<(PendingEmbeddingMigrationRequest, MigrationLockLease)> for EmbeddingMigrationRequest {
+    fn from((pending, lock_lease): (PendingEmbeddingMigrationRequest, MigrationLockLease)) -> Self {
+        Self {
+            pending,
+            lock_lease,
+        }
+    }
+}
+
+pub(crate) struct MigrationLockLease {
+    kind: MigrationLockLeaseKind,
+}
+
+enum MigrationLockLeaseKind {
+    Acquired(std::fs::File),
+    DaemonDefault(Arc<std::fs::File>),
+}
+
+impl From<std::fs::File> for MigrationLockLease {
+    fn from(file: std::fs::File) -> Self {
+        Self {
+            kind: MigrationLockLeaseKind::Acquired(file),
+        }
+    }
+}
+
+impl From<Arc<std::fs::File>> for MigrationLockLease {
+    fn from(file: Arc<std::fs::File>) -> Self {
+        Self {
+            kind: MigrationLockLeaseKind::DaemonDefault(file),
+        }
+    }
+}
+
+impl MigrationLockLease {
+    fn file(&self) -> &std::fs::File {
+        match &self.kind {
+            MigrationLockLeaseKind::Acquired(file) => file,
+            MigrationLockLeaseKind::DaemonDefault(file) => file,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct EmbeddingProgress {
+    pub namespace: String,
+    pub committed: usize,
+    pub total: usize,
+    pub batch: usize,
+    pub source_model: Option<String>,
+    pub source_dimensions: Option<usize>,
+    pub target_model: String,
+    pub target_dimensions: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct EmbeddingMigrationReport {
+    pub scanned: usize,
+    pub migrated: usize,
+    pub resumed: usize,
+    pub batches: usize,
+    pub backup_path: PathBuf,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum EmbeddingMigrationOutcome {
+    NoOp { model: String, dimensions: usize },
+    Migrated(EmbeddingMigrationReport),
+}
+
+pub(crate) fn backup_path_for_database(db_path: &std::path::Path) -> Result<PathBuf, Error> {
+    let output = std::process::Command::new("date")
+        .arg("+%Y%m%d")
+        .output()
+        .map_err(|error| Error::StorageError(format!("read local calendar date: {error}")))?;
+    if !output.status.success() {
+        return Err(Error::StorageError(format!(
+            "read local calendar date: date exited with {}",
+            output.status
+        )));
+    }
+    let stamp = String::from_utf8(output.stdout)
+        .map_err(|error| Error::StorageError(format!("decode local calendar date: {error}")))?;
+    let stamp = stamp.trim();
+    if stamp.len() != 8 || !stamp.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(Error::StorageError(format!(
+            "local calendar date returned invalid YYYYMMDD value {stamp:?}"
+        )));
+    }
+    let mut backup = std::ffi::OsString::from(db_path.as_os_str());
+    backup.push(format!(".bak-{stamp}"));
+    Ok(PathBuf::from(backup))
+}
+
+fn namespace_lock_path(path: &std::path::Path) -> PathBuf {
+    let mut lock_path = path.as_os_str().to_os_string();
+    lock_path.push(".lock");
+    PathBuf::from(lock_path)
+}
+
+fn acquire_namespace_lock(path: &std::path::Path) -> Result<std::fs::File, Error> {
+    let lock_path = namespace_lock_path(path);
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|error| {
+            Error::StorageError(format!("open namespace lock file {lock_path:?}: {error}"))
+        })?;
+    if fs4::FileExt::try_lock(&lock_file).is_err() {
+        return Err(Error::StorageError(format!(
+            "database {path:?} is already in use by another anamnesis process; use a different \
+             ANAMNESIS_DB or namespace"
+        )));
+    }
+    Ok(lock_file)
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn acquire_namespace_migration_lock(
+    path: &std::path::Path,
+) -> Result<MigrationLockLease, Error> {
+    acquire_namespace_lock(path).map(MigrationLockLease::from)
 }
 
 /// One conversational turn for `ingest_conversation`.
@@ -453,23 +592,17 @@ impl MemoryRegistry {
         self.canonical_key(self.resolve_namespace(ns))
     }
 
-    fn open_namespace(&mut self, ns: &str) -> Result<Memory<SqliteStorage>, Error> {
-        let provider = self.provider()?;
-        let provider_dim = provider.dimensions();
-        let provider_model = provider.model_name().to_string();
-        // Resolve where this namespace lives WITHOUT holding a borrow of
-        // `self.backend`, so we can push to `self.locks` below. `None` = the
-        // in-memory test backend.
-        let path: Option<PathBuf> = match &self.backend {
+    pub(crate) fn namespace_db_path(&self, ns: &str) -> Result<Option<PathBuf>, Error> {
+        match &self.backend {
             #[cfg(test)]
-            Backend::Memory => None,
+            Backend::Memory => Ok(None),
             Backend::File {
                 default_db,
                 dir,
                 default_namespace,
             } => {
                 if ns == default_namespace {
-                    Some(default_db.clone())
+                    Ok(Some(default_db.clone()))
                 } else {
                     let path = dir.join(format!("{}.db", Self::sanitize(ns)));
                     // A non-default namespace whose sanitized file resolves to the
@@ -481,10 +614,17 @@ impl MemoryRegistry {
                              choose a different namespace name"
                         )));
                     }
-                    Some(path)
+                    Ok(Some(path))
                 }
             }
-        };
+        }
+    }
+
+    fn open_namespace(&mut self, ns: &str) -> Result<Memory<SqliteStorage>, Error> {
+        let provider = self.provider()?;
+        let provider_dim = provider.dimensions();
+        let provider_model = provider.model_name().to_string();
+        let path = self.namespace_db_path(ns)?;
 
         let Some(path) = path else {
             let mut mem = Memory::in_memory_with_provider(provider)?;
@@ -504,25 +644,7 @@ impl MemoryRegistry {
         // processes => two in-memory caches over one file => corruption). The OS
         // releases the lock when this process exits or is killed.
         if self.lock_on_open {
-            let mut lock_path = path.clone().into_os_string();
-            lock_path.push(".lock");
-            let lock_path = PathBuf::from(lock_path);
-            let lock_file = std::fs::OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(false)
-                .open(&lock_path)
-                .map_err(|e| Error::StorageError(format!("open lock file {lock_path:?}: {e}")))?;
-            // UFCS: on rustc >= 1.89 `File` has an inherent `try_lock` (different
-            // signature) that would shadow the trait method; pin to fs4's so the
-            // behavior is identical on our 1.88 MSRV and on newer toolchains.
-            if fs4::FileExt::try_lock(&lock_file).is_err() {
-                return Err(Error::StorageError(format!(
-                    "database {path:?} is already in use by another anamnesis process; \
-                     use a different ANAMNESIS_DB or namespace"
-                )));
-            }
-            self.locks.push(lock_file);
+            self.locks.push(acquire_namespace_lock(&path)?);
         }
 
         let mut mem = Memory::with_provider(path, provider)?;
