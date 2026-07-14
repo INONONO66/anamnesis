@@ -1518,4 +1518,62 @@ mod embedding_migration {
             vec![Some(768); 2]
         );
     }
+
+    #[test]
+    fn manual_migration_refuses_daemon_owned_lock_before_backup() {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let db_path = dir.path().join("daemon-owned.db");
+        create_fixture(&db_path, 2, 768, "bge-base-en-v1.5", "locked");
+        let before = graph_snapshot(&db_path);
+        let backup_path = backup_path_for_database(&db_path).expect("derive backup path");
+        let _daemon_lease = acquire_namespace_migration_lock(&db_path)
+            .expect("simulate daemon-owned namespace lock");
+        let registry = file_registry(
+            Arc::new(RecordingProvider::healthy(
+                384,
+                "intfloat/multilingual-e5-small",
+            )),
+            db_path.clone(),
+            dir.path().to_path_buf(),
+        );
+
+        let error = crate::cli::prepare_manual_migration(&registry, None)
+            .err()
+            .expect("manual migration must refuse the daemon lock");
+
+        let message = error.to_string();
+        assert!(message.contains("stop the anamnesis daemon"), "{message}");
+        assert!(message.contains("retry"), "{message}");
+        assert!(!backup_path.exists());
+        assert_eq!(graph_snapshot(&db_path), before);
+    }
+
+    #[test]
+    fn progress_is_reported_only_for_committed_batches() {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let db_path = dir.path().join("committed-progress.db");
+        create_fixture(
+            &db_path,
+            EMBEDDING_MIGRATION_BATCH_SIZE + 1,
+            768,
+            "bge-base-en-v1.5",
+            "progress",
+        );
+        let provider = Arc::new(RecordingProvider::failing(
+            384,
+            "multilingual-e5-small",
+            EMBEDDING_MIGRATION_BATCH_SIZE,
+        ));
+        let mut progress = Vec::new();
+
+        let result = migrate_embeddings(request(&db_path, provider), &mut |event| {
+            progress.push(event)
+        });
+
+        assert!(result.is_err());
+        assert_eq!(progress.len(), 1);
+        assert_eq!(progress[0].batch, 1);
+        assert_eq!(progress[0].committed, EMBEDDING_MIGRATION_BATCH_SIZE);
+        assert_eq!(progress[0].total, EMBEDDING_MIGRATION_BATCH_SIZE + 1);
+    }
 }
