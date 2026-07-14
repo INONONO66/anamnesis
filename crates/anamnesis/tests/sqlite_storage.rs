@@ -618,3 +618,23 @@ fn file_backed_storage_reopens_existing_rows() {
     }
     let _ = std::fs::remove_file(path);
 }
+#[test]
+fn graph_metadata_round_trips_and_persists() {
+    // Given: a fresh file-backed graph.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("metadata.db");
+    let mut storage = SqliteStorage::open(&path).expect("open storage");
+
+    // When: the embedding model is recorded in graph metadata.
+    storage
+        .set_embedding_model_name("BAAI/bge-base-en-v1.5")
+        .expect("record model");
+    drop(storage);
+
+    // Then: reopening the graph returns the durable model name.
+    let reopened = SqliteStorage::open(&path).expect("reopen storage");
+    assert_eq!(
+        reopened.embedding_model_name().expect("read model"),
+        Some("BAAI/bge-base-en-v1.5".to_string())
+    );
+}

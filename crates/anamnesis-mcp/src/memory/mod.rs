@@ -487,8 +487,8 @@ impl MemoryRegistry {
         };
 
         let Some(path) = path else {
-            let mem = Memory::in_memory_with_provider(provider)?;
-            verify_embedding_dim(&mem, provider_dim, &provider_model)?;
+            let mut mem = Memory::in_memory_with_provider(provider)?;
+            verify_embedding_compatibility(&mut mem, provider_dim, &provider_model)?;
             return Ok(mem);
         };
 
@@ -525,8 +525,8 @@ impl MemoryRegistry {
             self.locks.push(lock_file);
         }
 
-        let mem = Memory::with_provider(path, provider)?;
-        verify_embedding_dim(&mem, provider_dim, &provider_model)?;
+        let mut mem = Memory::with_provider(path, provider)?;
+        verify_embedding_compatibility(&mut mem, provider_dim, &provider_model)?;
         Ok(mem)
     }
 
@@ -717,6 +717,29 @@ pub(crate) fn verify_embedding_dim(
         return Ok(());
     }
     Ok(())
+}
+
+fn verify_embedding_compatibility(
+    mem: &mut Memory<SqliteStorage>,
+    provider_dim: usize,
+    current_model: &str,
+) -> Result<(), Error> {
+    verify_embedding_dim(mem, provider_dim, current_model)?;
+
+    match mem.engine().graph().storage().embedding_model_name()? {
+        Some(stored_model) if stored_model == current_model => Ok(()),
+        Some(stored_model) => Err(Error::InvalidInput(format!(
+            "embedding model mismatch: DB was created by '{stored_model}' but the current model \
+             is '{current_model}'. Back up and reset the DB \
+             (mv ~/.anamnesis/memory.db ~/.anamnesis/memory.db.bak-YYYYMMDD) or set \
+             ANAMNESIS_EMBED_MODEL to '{stored_model}'."
+        ))),
+        None => mem
+            .engine_mut()
+            .graph_mut()
+            .storage_mut()
+            .set_embedding_model_name(current_model),
+    }
 }
 
 /// Render the `usage_report` text from registry-wide counters plus a

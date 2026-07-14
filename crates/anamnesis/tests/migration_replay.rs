@@ -63,7 +63,7 @@ fn replay_after_a_stale_version_stamp_does_not_brick_an_already_migrated_db() {
     let conn = Connection::open(&tmp).expect("raw conn opens");
     assert_eq!(
         schema_version(&conn),
-        10,
+        11,
         "replay must reach the current schema version"
     );
 
@@ -97,7 +97,7 @@ fn replay_from_stale_v1_against_current_schema_does_not_brick() {
     let conn = Connection::open(&tmp).expect("raw conn opens");
     assert_eq!(
         schema_version(&conn),
-        10,
+        11,
         "replay must reach the current schema version"
     );
 
