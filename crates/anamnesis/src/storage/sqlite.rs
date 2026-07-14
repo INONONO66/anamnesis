@@ -9,12 +9,158 @@ use crate::graph::{
     Timestamp,
 };
 use crate::storage::StorageAdapter;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::backup::Backup;
+use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use std::collections::{HashMap, VecDeque};
-use std::path::Path;
+use std::fmt;
+use std::fs::OpenOptions;
+use std::io;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
+use std::time::Duration;
 
 const EMPTY_EDGE_SLICE: &[EdgeId] = &[];
+
+const EMBEDDING_MIGRATION_PHASE_KEY: &str = "embedding.migration.phase";
+const EMBEDDING_MIGRATION_SOURCE_MODEL_KEY: &str = "embedding.migration.source_model";
+const EMBEDDING_MIGRATION_SOURCE_DIM_KEY: &str = "embedding.migration.source_dim";
+const EMBEDDING_MIGRATION_TARGET_MODEL_KEY: &str = "embedding.migration.target_model";
+const EMBEDDING_MIGRATION_TARGET_DIM_KEY: &str = "embedding.migration.target_dim";
+const EMBEDDING_MIGRATION_SELECTION_KEY: &str = "embedding.migration.selection";
+const EMBEDDING_MIGRATION_CURSOR_KEY: &str = "embedding.migration.cursor";
+const EMBEDDING_MIGRATION_BACKUP_PATH_KEY: &str = "embedding.migration.backup_path";
+const EMBEDDING_MIGRATION_PHASE: &str = "in-progress";
+const EMBEDDING_MIGRATION_KEYS: [&str; 8] = [
+    EMBEDDING_MIGRATION_PHASE_KEY,
+    EMBEDDING_MIGRATION_SOURCE_MODEL_KEY,
+    EMBEDDING_MIGRATION_SOURCE_DIM_KEY,
+    EMBEDDING_MIGRATION_TARGET_MODEL_KEY,
+    EMBEDDING_MIGRATION_TARGET_DIM_KEY,
+    EMBEDDING_MIGRATION_SELECTION_KEY,
+    EMBEDDING_MIGRATION_CURSOR_KEY,
+    EMBEDDING_MIGRATION_BACKUP_PATH_KEY,
+];
+
+/// A failure while creating or verifying a durable SQLite backup.
+#[derive(Debug)]
+pub enum BackupError {
+    /// The destination could not be created with create-new semantics.
+    Io(io::Error),
+    /// SQLite could not copy or inspect the database.
+    Storage(Error),
+    /// The copied database failed `PRAGMA quick_check`.
+    IntegrityCheckFailed(String),
+    /// A failed backup could not be removed.
+    Cleanup {
+        /// The original backup failure.
+        backup: String,
+        /// The cleanup failure.
+        cleanup: io::Error,
+    },
+}
+
+impl fmt::Display for BackupError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io(error) => write!(formatter, "backup I/O error: {error}"),
+            Self::Storage(error) => write!(formatter, "backup {error}"),
+            Self::IntegrityCheckFailed(result) => {
+                write!(formatter, "backup quick_check returned '{result}'")
+            }
+            Self::Cleanup { backup, cleanup } => {
+                write!(
+                    formatter,
+                    "{backup}; failed to remove incomplete backup: {cleanup}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for BackupError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(error) => Some(error),
+            Self::Storage(error) => Some(error),
+            Self::IntegrityCheckFailed(_) => None,
+            Self::Cleanup { cleanup, .. } => Some(cleanup),
+        }
+    }
+}
+
+impl From<io::Error> for BackupError {
+    fn from(error: io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+/// How migration candidates are selected during resume.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EmbeddingSelection {
+    /// Select missing vectors and vectors whose dimension differs from the target.
+    Dimension,
+    /// Select every node after the last atomically committed node ID.
+    Cursor,
+}
+
+/// Durable state needed to resume an embedding migration.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EmbeddingMigrationCheckpoint {
+    /// Model recorded before migration, when known.
+    pub source_model: Option<String>,
+    /// Embedding dimension observed before migration, when known.
+    pub source_dim: Option<usize>,
+    /// Model to stamp only after full persisted-vector validation.
+    pub target_model: String,
+    /// Required dimension of every completed vector.
+    pub target_dim: usize,
+    /// Resume selection strategy.
+    pub selection: EmbeddingSelection,
+    /// Last committed node in cursor mode.
+    pub cursor: Option<NodeId>,
+    /// Verified durable backup protecting the migration.
+    pub backup_path: PathBuf,
+}
+
+/// A node whose embedding must be regenerated.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EmbeddingCandidate {
+    /// Stable graph node ID.
+    pub node_id: NodeId,
+    /// Source-of-truth text to pass to the embedding provider.
+    pub content: String,
+    /// Current persisted vector dimension, or `None` when missing.
+    pub embedding_dim: Option<usize>,
+}
+
+/// A validated replacement vector for one node.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EmbeddingReplacement {
+    /// Node receiving the replacement.
+    pub node_id: NodeId,
+    /// Complete replacement vector.
+    pub embedding: Vec<f64>,
+}
+
+/// One atomically committed set of replacement vectors.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EmbeddingBatch {
+    /// Vectors to persist and then apply to the in-memory cache.
+    pub replacements: Vec<EmbeddingReplacement>,
+    /// Cursor persisted in the same transaction as the vectors.
+    pub next_cursor: Option<NodeId>,
+}
+
+/// Read-only migration state inspected without running normal schema opening.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EmbeddingMigrationInspection {
+    /// Persisted embedding-model stamp, when present.
+    pub embedding_model: Option<String>,
+    /// Per-node embedding dimensions in ascending node-ID order.
+    pub embedding_dimensions: Vec<Option<usize>>,
+    /// Durable migration checkpoint, when present.
+    pub checkpoint: Option<EmbeddingMigrationCheckpoint>,
+}
 
 /// SQLite-backed storage adapter.
 ///
@@ -73,6 +219,103 @@ impl SqliteStorage {
         Self::from_connection(Connection::open(path).map_err(sqlite_error)?)
     }
 
+    /// Inspect embedding state through a read-only raw connection without migrating schemas.
+    pub fn inspect_embedding_migration(
+        path: impl AsRef<Path>,
+    ) -> Result<EmbeddingMigrationInspection, Error> {
+        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(sqlite_error)?;
+        if !table_exists(&conn, "nodes")? {
+            return Err(Error::StorageError(
+                "embedding inspection requires a nodes table".to_string(),
+            ));
+        }
+
+        let embedding_model = if table_exists(&conn, "graph_metadata")? {
+            metadata_value(&conn, Self::EMBEDDING_MODEL_KEY)?
+        } else {
+            None
+        };
+        let checkpoint = if table_exists(&conn, "graph_metadata")? {
+            read_embedding_migration_checkpoint(&conn)?
+        } else {
+            None
+        };
+        let encoded_embeddings = {
+            let mut statement = conn
+                .prepare("SELECT embedding_json FROM nodes ORDER BY id")
+                .map_err(sqlite_error)?;
+            statement
+                .query_map([], |row| row.get::<_, Option<String>>(0))
+                .map_err(sqlite_error)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(sqlite_error)?
+        };
+        let embedding_dimensions = encoded_embeddings
+            .into_iter()
+            .map(decode_embedding)
+            .map(|embedding| embedding.map(|value| value.map(|vector| vector.len())))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(EmbeddingMigrationInspection {
+            embedding_model,
+            embedding_dimensions,
+            checkpoint,
+        })
+    }
+
+    /// Create a no-overwrite online backup and verify it with `PRAGMA quick_check`.
+    pub fn create_verified_backup(
+        source: impl AsRef<Path>,
+        destination: impl AsRef<Path>,
+    ) -> Result<(), BackupError> {
+        let source = source.as_ref();
+        let destination = destination.as_ref();
+        let reserved = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(destination)?;
+        drop(reserved);
+
+        let backup_result = (|| -> Result<(), BackupError> {
+            let source_conn = Connection::open_with_flags(source, OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .map_err(|error| BackupError::Storage(sqlite_error(error)))?;
+            let mut destination_conn =
+                Connection::open_with_flags(destination, OpenFlags::SQLITE_OPEN_READ_WRITE)
+                    .map_err(|error| BackupError::Storage(sqlite_error(error)))?;
+            {
+                let backup = Backup::new(&source_conn, &mut destination_conn)
+                    .map_err(|error| BackupError::Storage(sqlite_error(error)))?;
+                backup
+                    .run_to_completion(128, Duration::from_millis(5), None)
+                    .map_err(|error| BackupError::Storage(sqlite_error(error)))?;
+            }
+            drop(destination_conn);
+
+            let verification =
+                Connection::open_with_flags(destination, OpenFlags::SQLITE_OPEN_READ_ONLY)
+                    .map_err(|error| BackupError::Storage(sqlite_error(error)))?;
+            let quick_check = verification
+                .query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))
+                .map_err(|error| BackupError::Storage(sqlite_error(error)))?;
+            if quick_check != "ok" {
+                return Err(BackupError::IntegrityCheckFailed(quick_check));
+            }
+            Ok(())
+        })();
+
+        if let Err(error) = backup_result {
+            if let Err(cleanup) = std::fs::remove_file(destination) {
+                return Err(BackupError::Cleanup {
+                    backup: error.to_string(),
+                    cleanup,
+                });
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+
     /// Return the embedding model recorded for this graph, if any.
     pub fn embedding_model_name(&self) -> Result<Option<String>, Error> {
         let conn = self.lock_conn()?;
@@ -95,6 +338,254 @@ impl SqliteStorage {
         )
         .map_err(sqlite_error)?;
         Ok(())
+    }
+
+    /// Return the durable embedding-migration checkpoint, if one is active.
+    pub fn embedding_migration_checkpoint(
+        &self,
+    ) -> Result<Option<EmbeddingMigrationCheckpoint>, Error> {
+        let conn = self.lock_conn()?;
+        read_embedding_migration_checkpoint(&conn)
+    }
+
+    /// Persist a complete migration checkpoint in one immediate transaction.
+    pub fn begin_embedding_migration(
+        &mut self,
+        checkpoint: &EmbeddingMigrationCheckpoint,
+    ) -> Result<(), Error> {
+        validate_embedding_migration_checkpoint(checkpoint)?;
+        let backup_path = checkpoint.backup_path.to_str().ok_or_else(|| {
+            Error::InvalidInput(
+                "embedding.migration.backup_path must contain valid UTF-8".to_string(),
+            )
+        })?;
+        let mut conn = self.lock_conn()?;
+        let transaction = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sqlite_error)?;
+        clear_embedding_migration_metadata(&transaction)?;
+        set_metadata(
+            &transaction,
+            EMBEDDING_MIGRATION_PHASE_KEY,
+            EMBEDDING_MIGRATION_PHASE,
+        )?;
+        if let Some(source_model) = checkpoint.source_model.as_deref() {
+            set_metadata(
+                &transaction,
+                EMBEDDING_MIGRATION_SOURCE_MODEL_KEY,
+                source_model,
+            )?;
+        }
+        if let Some(source_dim) = checkpoint.source_dim {
+            set_metadata(
+                &transaction,
+                EMBEDDING_MIGRATION_SOURCE_DIM_KEY,
+                &source_dim.to_string(),
+            )?;
+        }
+        set_metadata(
+            &transaction,
+            EMBEDDING_MIGRATION_TARGET_MODEL_KEY,
+            &checkpoint.target_model,
+        )?;
+        set_metadata(
+            &transaction,
+            EMBEDDING_MIGRATION_TARGET_DIM_KEY,
+            &checkpoint.target_dim.to_string(),
+        )?;
+        set_metadata(
+            &transaction,
+            EMBEDDING_MIGRATION_SELECTION_KEY,
+            encode_embedding_selection(checkpoint.selection),
+        )?;
+        if let Some(cursor) = checkpoint.cursor {
+            set_metadata(
+                &transaction,
+                EMBEDDING_MIGRATION_CURSOR_KEY,
+                &cursor.0.to_string(),
+            )?;
+        }
+        set_metadata(
+            &transaction,
+            EMBEDDING_MIGRATION_BACKUP_PATH_KEY,
+            backup_path,
+        )?;
+        transaction.commit().map_err(sqlite_error)
+    }
+
+    /// Return at most `limit` candidates in deterministic ascending node-ID order.
+    pub fn embedding_candidates(
+        &self,
+        checkpoint: &EmbeddingMigrationCheckpoint,
+        limit: usize,
+    ) -> Result<Vec<EmbeddingCandidate>, Error> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        validate_embedding_migration_checkpoint(checkpoint)?;
+        let rows = {
+            let conn = self.lock_conn()?;
+            let mut statement = conn
+                .prepare("SELECT id, content, embedding_json FROM nodes ORDER BY id")
+                .map_err(sqlite_error)?;
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        NodeId(row.get::<_, u64>(0)?),
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                })
+                .map_err(sqlite_error)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(sqlite_error)?
+        };
+        let mut candidates = Vec::with_capacity(limit.min(rows.len()));
+        for (node_id, content, encoded_embedding) in rows {
+            let embedding = decode_embedding(encoded_embedding)?;
+            let selected = match checkpoint.selection {
+                EmbeddingSelection::Dimension => embedding
+                    .as_ref()
+                    .is_none_or(|vector| vector.len() != checkpoint.target_dim),
+                EmbeddingSelection::Cursor => {
+                    checkpoint.cursor.is_none_or(|cursor| node_id.0 > cursor.0)
+                }
+            };
+            if selected {
+                candidates.push(EmbeddingCandidate {
+                    node_id,
+                    content,
+                    embedding_dim: embedding.as_ref().map(Vec::len),
+                });
+                if candidates.len() == limit {
+                    break;
+                }
+            }
+        }
+        Ok(candidates)
+    }
+
+    /// Atomically commit replacement vectors and the migration cursor.
+    pub fn commit_embedding_batch(&mut self, batch: EmbeddingBatch) -> Result<(), Error> {
+        let checkpoint = self.embedding_migration_checkpoint()?.ok_or_else(|| {
+            Error::InvalidInput("embedding migration checkpoint is not active".to_string())
+        })?;
+        for replacement in &batch.replacements {
+            if replacement.embedding.len() != checkpoint.target_dim {
+                return Err(Error::InvalidInput(format!(
+                    "node {} replacement has dimension {}, expected {}",
+                    replacement.node_id.0,
+                    replacement.embedding.len(),
+                    checkpoint.target_dim
+                )));
+            }
+            if !replacement.embedding.iter().all(|value| value.is_finite()) {
+                return Err(Error::InvalidInput(format!(
+                    "node {} replacement contains a non-finite embedding value",
+                    replacement.node_id.0
+                )));
+            }
+            let index = usize::try_from(replacement.node_id.0)
+                .map_err(|_| Error::NodeNotFound(replacement.node_id))?;
+            if self.nodes.get(index).and_then(Option::as_ref).is_none() {
+                return Err(Error::NodeNotFound(replacement.node_id));
+            }
+        }
+
+        let mut conn = self.lock_conn()?;
+        let transaction = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sqlite_error)?;
+        for replacement in &batch.replacements {
+            let encoded = encode_embedding(Some(&replacement.embedding)).ok_or_else(|| {
+                Error::StorageError("replacement embedding failed to encode".to_string())
+            })?;
+            let updated = transaction
+                .execute(
+                    "UPDATE nodes SET embedding_json = ?1 WHERE id = ?2",
+                    params![encoded, replacement.node_id.0],
+                )
+                .map_err(sqlite_error)?;
+            if updated != 1 {
+                return Err(Error::NodeNotFound(replacement.node_id));
+            }
+        }
+        if let Some(cursor) = batch.next_cursor {
+            set_metadata(
+                &transaction,
+                EMBEDDING_MIGRATION_CURSOR_KEY,
+                &cursor.0.to_string(),
+            )?;
+        }
+        transaction.commit().map_err(sqlite_error)?;
+        drop(conn);
+
+        for replacement in batch.replacements {
+            let index = usize::try_from(replacement.node_id.0)
+                .map_err(|_| Error::NodeNotFound(replacement.node_id))?;
+            let node = self
+                .nodes
+                .get_mut(index)
+                .and_then(Option::as_mut)
+                .ok_or(Error::NodeNotFound(replacement.node_id))?;
+            node.embedding = Some(replacement.embedding);
+        }
+        Ok(())
+    }
+
+    /// Validate all persisted vectors, stamp the target model, and clear checkpoint keys.
+    pub fn finish_embedding_migration(&mut self) -> Result<(), Error> {
+        let mut conn = self.lock_conn()?;
+        let transaction = conn
+            .transaction_with_behavior(TransactionBehavior::Exclusive)
+            .map_err(sqlite_error)?;
+        let checkpoint = read_embedding_migration_checkpoint(&transaction)?.ok_or_else(|| {
+            Error::InvalidInput("embedding migration checkpoint is not active".to_string())
+        })?;
+        let persisted = {
+            let mut statement = transaction
+                .prepare("SELECT id, embedding_json FROM nodes ORDER BY id")
+                .map_err(sqlite_error)?;
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        NodeId(row.get::<_, u64>(0)?),
+                        row.get::<_, Option<String>>(1)?,
+                    ))
+                })
+                .map_err(sqlite_error)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(sqlite_error)?
+        };
+        for (node_id, encoded_embedding) in persisted {
+            let embedding = decode_embedding(encoded_embedding)?.ok_or_else(|| {
+                Error::InvalidInput(format!(
+                    "node {} is missing an embedding during migration completion",
+                    node_id.0
+                ))
+            })?;
+            if embedding.len() != checkpoint.target_dim {
+                return Err(Error::InvalidInput(format!(
+                    "node {} has dimension {}, expected {} during migration completion",
+                    node_id.0,
+                    embedding.len(),
+                    checkpoint.target_dim
+                )));
+            }
+            if !embedding.iter().all(|value| value.is_finite()) {
+                return Err(Error::InvalidInput(format!(
+                    "node {} contains a non-finite embedding during migration completion",
+                    node_id.0
+                )));
+            }
+        }
+        set_metadata(
+            &transaction,
+            Self::EMBEDDING_MODEL_KEY,
+            &checkpoint.target_model,
+        )?;
+        clear_embedding_migration_metadata(&transaction)?;
+        transaction.commit().map_err(sqlite_error)
     }
 
     fn from_connection(conn: Connection) -> Result<Self, Error> {
@@ -3570,6 +4061,127 @@ fn rank_to_score(rank: f64) -> f64 {
 
 fn sqlite_error(error: rusqlite::Error) -> Error {
     Error::StorageError(error.to_string())
+}
+
+fn metadata_value(conn: &Connection, key: &str) -> Result<Option<String>, Error> {
+    conn.query_row(
+        "SELECT value FROM graph_metadata WHERE key = ?1",
+        [key],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(sqlite_error)
+}
+
+fn required_metadata_value(conn: &Connection, key: &str) -> Result<String, Error> {
+    metadata_value(conn, key)?.ok_or_else(|| {
+        Error::StorageError(format!("missing embedding migration metadata key '{key}'"))
+    })
+}
+
+fn invalid_metadata_value(key: &str) -> Error {
+    Error::StorageError(format!(
+        "invalid embedding migration metadata value for key '{key}'"
+    ))
+}
+
+fn parse_metadata_usize(key: &str, value: &str) -> Result<usize, Error> {
+    value
+        .parse::<usize>()
+        .map_err(|_| invalid_metadata_value(key))
+}
+
+fn parse_metadata_node_id(key: &str, value: &str) -> Result<NodeId, Error> {
+    value
+        .parse::<u64>()
+        .map(NodeId)
+        .map_err(|_| invalid_metadata_value(key))
+}
+
+fn read_embedding_migration_checkpoint(
+    conn: &Connection,
+) -> Result<Option<EmbeddingMigrationCheckpoint>, Error> {
+    let Some(phase) = metadata_value(conn, EMBEDDING_MIGRATION_PHASE_KEY)? else {
+        return Ok(None);
+    };
+    if phase != EMBEDDING_MIGRATION_PHASE {
+        return Err(invalid_metadata_value(EMBEDDING_MIGRATION_PHASE_KEY));
+    }
+
+    let source_model = metadata_value(conn, EMBEDDING_MIGRATION_SOURCE_MODEL_KEY)?;
+    let source_dim = metadata_value(conn, EMBEDDING_MIGRATION_SOURCE_DIM_KEY)?
+        .map(|value| parse_metadata_usize(EMBEDDING_MIGRATION_SOURCE_DIM_KEY, &value))
+        .transpose()?;
+    let target_model = required_metadata_value(conn, EMBEDDING_MIGRATION_TARGET_MODEL_KEY)?;
+    let target_dim_raw = required_metadata_value(conn, EMBEDDING_MIGRATION_TARGET_DIM_KEY)?;
+    let target_dim = parse_metadata_usize(EMBEDDING_MIGRATION_TARGET_DIM_KEY, &target_dim_raw)?;
+    let selection_raw = required_metadata_value(conn, EMBEDDING_MIGRATION_SELECTION_KEY)?;
+    let selection = match selection_raw.as_str() {
+        "dimension" => EmbeddingSelection::Dimension,
+        "cursor" => EmbeddingSelection::Cursor,
+        _ => return Err(invalid_metadata_value(EMBEDDING_MIGRATION_SELECTION_KEY)),
+    };
+    let cursor = metadata_value(conn, EMBEDDING_MIGRATION_CURSOR_KEY)?
+        .map(|value| parse_metadata_node_id(EMBEDDING_MIGRATION_CURSOR_KEY, &value))
+        .transpose()?;
+    let backup_path = PathBuf::from(required_metadata_value(
+        conn,
+        EMBEDDING_MIGRATION_BACKUP_PATH_KEY,
+    )?);
+    let checkpoint = EmbeddingMigrationCheckpoint {
+        source_model,
+        source_dim,
+        target_model,
+        target_dim,
+        selection,
+        cursor,
+        backup_path,
+    };
+    validate_embedding_migration_checkpoint(&checkpoint)?;
+    Ok(Some(checkpoint))
+}
+
+fn validate_embedding_migration_checkpoint(
+    checkpoint: &EmbeddingMigrationCheckpoint,
+) -> Result<(), Error> {
+    if checkpoint.target_model.is_empty() {
+        return Err(invalid_metadata_value(EMBEDDING_MIGRATION_TARGET_MODEL_KEY));
+    }
+    if checkpoint.target_dim == 0 {
+        return Err(invalid_metadata_value(EMBEDDING_MIGRATION_TARGET_DIM_KEY));
+    }
+    if checkpoint.source_dim == Some(0) {
+        return Err(invalid_metadata_value(EMBEDDING_MIGRATION_SOURCE_DIM_KEY));
+    }
+    if checkpoint.backup_path.as_os_str().is_empty() {
+        return Err(invalid_metadata_value(EMBEDDING_MIGRATION_BACKUP_PATH_KEY));
+    }
+    Ok(())
+}
+
+const fn encode_embedding_selection(selection: EmbeddingSelection) -> &'static str {
+    match selection {
+        EmbeddingSelection::Dimension => "dimension",
+        EmbeddingSelection::Cursor => "cursor",
+    }
+}
+
+fn set_metadata(conn: &Connection, key: &str, value: &str) -> Result<(), Error> {
+    conn.execute(
+        "INSERT INTO graph_metadata (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![key, value],
+    )
+    .map_err(sqlite_error)?;
+    Ok(())
+}
+
+fn clear_embedding_migration_metadata(conn: &Connection) -> Result<(), Error> {
+    for key in EMBEDDING_MIGRATION_KEYS {
+        conn.execute("DELETE FROM graph_metadata WHERE key = ?1", [key])
+            .map_err(sqlite_error)?;
+    }
+    Ok(())
 }
 
 fn to_sql_error(error: Error) -> rusqlite::Error {
