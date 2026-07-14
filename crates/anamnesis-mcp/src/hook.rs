@@ -284,7 +284,7 @@ fn project_scope(cwd: Option<&str>) -> Option<String> {
         .chars()
         .map(|ch| {
             let ch = ch.to_ascii_lowercase();
-            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-') {
+            if ch.is_alphanumeric() || matches!(ch, '.' | '_' | '-') {
                 ch
             } else {
                 '-'
@@ -646,6 +646,16 @@ mod tests {
         assert!(project_scope(None).is_none());
         assert!(project_scope(Some("/")).is_none());
         assert!(project_scope(Some("")).is_none());
+    }
+
+    #[test]
+    fn project_scope_preserves_distinct_korean_basenames() {
+        let memory = project_scope(Some("/Users/me/dev/메모리"));
+        let notebook = project_scope(Some("/Users/me/dev/노트북"));
+
+        assert_eq!(memory.as_deref(), Some("project/메모리"));
+        assert_eq!(notebook.as_deref(), Some("project/노트북"));
+        assert_ne!(memory, notebook);
     }
 
     #[test]
