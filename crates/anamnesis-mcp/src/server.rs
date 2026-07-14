@@ -39,6 +39,12 @@ pub struct RecallParams {
     /// return an empty context block (inject nothing). Omitted ⇒ no gate.
     #[serde(default)]
     pub gate_threshold: Option<f64>,
+    /// Query-embedding cosine gate `τ_cos`: omitted ⇒ no cosine gate.
+    #[serde(default)]
+    pub cosine_gate: Option<f64>,
+    /// If true, render only durable knowledge and omit episodic/capture fragments.
+    #[serde(default)]
+    pub knowledge_only: Option<bool>,
     /// Post-filter: drop hits whose node origin scope doesn't match.
     #[serde(default)]
     pub scope: Option<String>,
@@ -83,6 +89,8 @@ pub struct IngestParams {
     pub turns: Vec<TurnInput>,
     #[serde(default)]
     pub namespace: Option<String>,
+    #[serde(default)]
+    pub scope: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -278,7 +286,7 @@ impl AnamnesisServer {
     #[tool(
         description = "Search memory for relevant prior knowledge. ALWAYS call before answering. \
                        Returns a readable context block (knowledge / memories / tensions \
-                       with provenance) plus a compact ranked list of {node_id, score} — pass those \
+                       with provenance) plus a compact ranked list of {node_id, score, cosine} — pass those \
                        node_ids to `relate` to link reasoning. Reading reinforces what it returns."
     )]
     async fn recall(
@@ -291,6 +299,8 @@ impl AnamnesisServer {
             namespace: p.namespace,
             reinforce: p.reinforce,
             gate_threshold: p.gate_threshold,
+            cosine_gate: p.cosine_gate,
+            knowledge_only: p.knowledge_only,
             scope: p.scope,
             tag: p.tag,
         };
@@ -333,6 +343,7 @@ impl AnamnesisServer {
             turns,
             namespace: p.namespace,
             capture: None,
+            scope: p.scope,
         };
         to_result(self.backend.call(req).await)
     }

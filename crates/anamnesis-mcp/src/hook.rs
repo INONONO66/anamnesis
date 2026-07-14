@@ -7,9 +7,10 @@
 //!
 //! Two events in v1:
 //! - `hook session-start` — seed the session with up to `ANAMNESIS_HOOK_SEED_K`
-//!   project memories (query = cwd basename; no gate — inject whatever it finds).
+//!   project memories (query = cwd basename; seed cosine gate decides whether to inject).
 //! - `hook user-prompt`   — activation-**gated** recall on the submitted prompt
-//!   (`gate = τ`, top-`k = ANAMNESIS_HOOK_TOPK`); below `τ` ⇒ inject nothing.
+//!   (`gate = τ`, cosine gate = `τ_cos`, top-`k = ANAMNESIS_HOOK_TOPK`);
+//!   below either gate ⇒ inject nothing.
 //!
 //! **Fail-open is mandatory.** Every error path (bad stdin, daemon down/unreachable,
 //! timeout, tool error) prints a valid *empty* output (nothing) and returns
@@ -18,7 +19,7 @@
 //! never propagate an error and never panic on the recall path.
 
 use std::io::Read;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 
@@ -38,7 +39,7 @@ const NO_MEMORY_SENTINEL: &str = "(no relevant memory)";
 
 /// Trailer the `recall` tool appends after the readable context block. Splitting
 /// on it lets us inspect the human-readable context independently of the compact
-/// `{node_id, score}` list the agent uses for `relate`.
+/// `{node_id, score, cosine}` list the agent uses for `relate`.
 const NODES_TRAILER: &str = "## NODES (for `relate`)";
 
 /// Run a hook event end-to-end. **Never returns `Err`** (fail-open): any failure
@@ -117,7 +118,11 @@ async fn session_extraction_signal(cfg: &Config) -> Option<String> {
 /// Seed and signal are assembled by [`assemble_session_block`]; `None` only when
 /// BOTH are absent.
 async fn run_session_start(cfg: &Config, stdin: &str) -> Option<String> {
-    let cue = parse_session_start(stdin).and_then(|p| project_cue(p.cwd.as_deref()));
+    let parsed = parse_session_start(stdin);
+    let cue = parsed.as_ref().and_then(|p| project_cue(p.cwd.as_deref()));
+    let scope = parsed
+        .as_ref()
+        .and_then(|p| project_scope(p.cwd.as_deref()));
     let seed = match cue {
         Some(cue) => {
             gated_recall(
@@ -126,6 +131,8 @@ async fn run_session_start(cfg: &Config, stdin: &str) -> Option<String> {
                 cfg.hook_seed_k,
                 /* reinforce = */ Some(false),
                 /* gate = */ None,
+                /* cosine_gate = */ Some(cfg.hook_seed_cosine_gate),
+                scope,
             )
             .await
         }
@@ -157,14 +164,39 @@ async fn run_user_prompt(cfg: &Config, stdin: &str) -> Option<String> {
     if prompt.trim().is_empty() {
         return None;
     }
-    let block = gated_recall(
+    let cwd = parsed.cwd.clone();
+    let transcript_path = parsed.transcript_path.clone();
+    let session_id = parsed.session_id.clone();
+    let context_turns = cfg.hook_context_turns;
+    let budget = Duration::from_millis(cfg.hook_timeout_ms);
+    let start = Instant::now();
+    let recent = if context_turns == 0 {
+        None
+    } else {
+        let transcript_cwd = cwd.clone();
+        run_detached_with_timeout(budget, move || {
+            let contents = resolve_transcript(
+                transcript_path.as_deref(),
+                session_id.as_deref(),
+                transcript_cwd.as_deref(),
+            )?;
+            let turns = parse_transcript(&contents);
+            recent_context(&turns, context_turns, 500, 2000)
+        })
+    };
+    let query = user_prompt_query(&prompt, cwd.as_deref(), recent.as_deref());
+    let scope = project_scope(cwd.as_deref());
+    let remaining = remaining_budget(start, budget)?;
+    let req = build_hook_recall_request(
         cfg,
-        &prompt,
+        &query,
         cfg.hook_topk,
         /* reinforce = */ Some(false),
         /* gate = */ Some(cfg.hook_threshold),
-    )
-    .await?;
+        /* cosine_gate = */ Some(cfg.hook_cosine_gate),
+        scope,
+    );
+    let block = recall_request_with_timeout(cfg, req, remaining).await?;
     Some(render_user_prompt(&block))
 }
 
@@ -177,19 +209,43 @@ async fn gated_recall(
     limit: usize,
     reinforce: Option<bool>,
     gate: Option<f64>,
+    cosine_gate: Option<f64>,
+    scope: Option<String>,
 ) -> Option<String> {
-    let req = Request::Recall {
+    let req = build_hook_recall_request(cfg, query, limit, reinforce, gate, cosine_gate, scope);
+    let timeout = Duration::from_millis(cfg.hook_timeout_ms);
+    recall_request_with_timeout(cfg, req, timeout).await
+}
+
+async fn recall_request_with_timeout(
+    cfg: &Config,
+    req: Request,
+    timeout: Duration,
+) -> Option<String> {
+    let outcome = tokio::time::timeout(timeout, call_oneshot(cfg, req)).await;
+    interpret_recall(outcome)
+}
+
+fn build_hook_recall_request(
+    _cfg: &Config,
+    query: &str,
+    limit: usize,
+    reinforce: Option<bool>,
+    gate: Option<f64>,
+    cosine_gate: Option<f64>,
+    scope: Option<String>,
+) -> Request {
+    Request::Recall {
         query: query.to_string(),
         limit: Some(limit as u32),
         namespace: None,
         reinforce,
         gate_threshold: gate,
-        scope: None,
+        cosine_gate,
+        knowledge_only: Some(true),
+        scope,
         tag: None,
-    };
-    let timeout = Duration::from_millis(cfg.hook_timeout_ms);
-    let outcome = tokio::time::timeout(timeout, call_oneshot(cfg, req)).await;
-    interpret_recall(outcome)
+    }
 }
 
 /// Map a recall outcome (timeout-wrapped daemon call) to an injectable block.
@@ -222,6 +278,59 @@ fn project_cue(cwd: Option<&str>) -> Option<String> {
     }
 }
 
+fn project_scope(cwd: Option<&str>) -> Option<String> {
+    let base = project_cue(cwd)?;
+    let normalized: String = base
+        .chars()
+        .map(|ch| {
+            let ch = ch.to_ascii_lowercase();
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-') {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    (!normalized.is_empty()).then(|| format!("project/{normalized}"))
+}
+
+fn recent_context(
+    turns: &[ParsedTurn],
+    take: usize,
+    per_turn_chars: usize,
+    total_chars: usize,
+) -> Option<String> {
+    if take == 0 || per_turn_chars == 0 || total_chars == 0 {
+        return None;
+    }
+    let start = turns.len().saturating_sub(take);
+    let mut lines: Vec<String> = turns[start..]
+        .iter()
+        .map(|t| {
+            let text: String = t.text.chars().take(per_turn_chars).collect();
+            format!("{}: {}", t.speaker, text)
+        })
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    while !lines.is_empty() && lines.join("\n").chars().count() > total_chars {
+        lines.remove(0);
+    }
+    let joined = lines.join("\n");
+    (!joined.trim().is_empty()).then_some(joined)
+}
+
+fn user_prompt_query(prompt: &str, cwd: Option<&str>, recent: Option<&str>) -> String {
+    let mut parts = Vec::new();
+    if let Some(cue) = project_cue(cwd) {
+        parts.push(format!("project: {cue}"));
+    }
+    if let Some(recent) = recent.map(str::trim).filter(|s| !s.is_empty()) {
+        parts.push(format!("recent conversation:\n{recent}"));
+    }
+    parts.push(format!("current user prompt: {prompt}"));
+    parts.join("\n")
+}
+
 /// Collapse a `recall` tool text payload into an injectable block, or `None` when
 /// there is nothing to inject.
 ///
@@ -229,7 +338,7 @@ fn project_cue(cwd: Option<&str>) -> Option<String> {
 /// `## NODES` trailer to inspect the human-readable context: if it is empty or the
 /// `(no relevant memory)` sentinel, the gate tripped (or the recall was empty) ⇒
 /// `None`. Otherwise we keep the FULL payload (context + NODES) as the block, so
-/// the agent still gets the `{node_id, score}` list for `relate`.
+/// the agent still gets the `{node_id, score, cosine}` list for `relate`.
 fn injectable_block(text: &str) -> Option<String> {
     let context = match text.split_once(NODES_TRAILER) {
         Some((before, _)) => before,
@@ -290,8 +399,11 @@ struct UserPromptInput {
     #[serde(default)]
     prompt: Option<String>,
     #[serde(default)]
-    #[allow(dead_code)]
     cwd: Option<String>,
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    transcript_path: Option<String>,
 }
 
 /// Parse `SessionStart` stdin tolerantly. Malformed/empty JSON ⇒ `None` (fail-open).
@@ -341,6 +453,81 @@ fn select_turns<'a>(turns: &'a [ParsedTurn], event: &HookEvent) -> Vec<&'a Parse
     turns[start..].iter().collect()
 }
 
+fn is_noise_turn(text: &str) -> bool {
+    const PREFIXES: &[&str] = &[
+        "# AGENTS.md",
+        "<system-reminder>",
+        "<command-name>",
+        "<command-message>",
+        "Caveat: the messages below",
+        "[Request interrupted",
+    ];
+    let text = text.trim();
+    PREFIXES.iter().any(|prefix| text.starts_with(prefix))
+}
+
+fn capture_turn_inputs(selected: Vec<&ParsedTurn>) -> Vec<TurnInput> {
+    selected
+        .into_iter()
+        .filter(|t| !is_noise_turn(&t.text))
+        .map(|t| TurnInput {
+            speaker: t.speaker.clone(),
+            text: t.text.clone(),
+            at_ms: t.at_ms,
+        })
+        .collect()
+}
+
+struct PreparedCapture {
+    session: String,
+    turns: Vec<TurnInput>,
+    scope: Option<String>,
+}
+
+fn run_detached_with_timeout<T, F>(timeout: Duration, work: F) -> Option<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Option<T> + Send + 'static,
+{
+    if timeout.is_zero() {
+        return None;
+    }
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let result = work();
+        let _ = tx.send(result);
+    });
+    rx.recv_timeout(timeout).ok().flatten()
+}
+
+fn remaining_budget(start: Instant, budget: Duration) -> Option<Duration> {
+    budget.checked_sub(start.elapsed()).filter(|d| !d.is_zero())
+}
+
+fn prepare_capture(input: CaptureInput, event: HookEvent) -> Option<PreparedCapture> {
+    let scope = project_scope(input.cwd.as_deref());
+    let contents = resolve_transcript(
+        input.transcript_path.as_deref(),
+        input.session_id.as_deref(),
+        input.cwd.as_deref(),
+    )?;
+    let all = parse_transcript(&contents);
+    if all.is_empty() {
+        return None;
+    }
+    let selected = select_turns(&all, &event);
+    let turns = capture_turn_inputs(selected);
+    if turns.is_empty() {
+        return None;
+    }
+    let session = input.session_id.unwrap_or_else(|| "capture".to_string());
+    Some(PreparedCapture {
+        session,
+        turns,
+        scope,
+    })
+}
+
 /// Capture handler: read the transcript, send selected turns as raw Episodic
 /// (capture=true ⇒ dedup + enqueue). Silent (returns None); fail-open.
 ///
@@ -355,42 +542,17 @@ async fn run_capture(cfg: &Config, stdin: &str, event: &HookEvent) -> Option<Str
     let input = parse_capture_input(stdin)?;
     let event = event.clone();
     let budget = Duration::from_millis(cfg.hook_timeout_ms);
-    let _ = tokio::time::timeout(budget, async move {
-        // Blocking fs walk + read + parse on the blocking pool.
-        let prepared = tokio::task::spawn_blocking(move || {
-            let contents = resolve_transcript(
-                input.transcript_path.as_deref(),
-                input.session_id.as_deref(),
-                input.cwd.as_deref(),
-            )?;
-            let all = parse_transcript(&contents);
-            if all.is_empty() {
-                return None;
-            }
-            let selected = select_turns(&all, &event);
-            let session = input.session_id.unwrap_or_else(|| "capture".to_string());
-            let turns: Vec<TurnInput> = selected
-                .iter()
-                .map(|t| TurnInput {
-                    speaker: t.speaker.clone(),
-                    text: t.text.clone(),
-                    at_ms: t.at_ms,
-                })
-                .collect();
-            Some((session, turns))
-        })
-        .await
-        .ok()??;
-        let (session, turns) = prepared;
-        let req = Request::Ingest {
-            session,
-            turns,
-            namespace: None,
-            capture: Some(true),
-        };
-        call_oneshot(cfg, req).await.ok()
-    })
-    .await;
+    let start = Instant::now();
+    let prepared = run_detached_with_timeout(budget, move || prepare_capture(input, event))?;
+    let remaining = remaining_budget(start, budget)?;
+    let req = Request::Ingest {
+        session: prepared.session,
+        turns: prepared.turns,
+        namespace: None,
+        capture: Some(true),
+        scope: prepared.scope,
+    };
+    let _ = tokio::time::timeout(remaining, call_oneshot(cfg, req)).await;
     None
 }
 
@@ -420,6 +582,7 @@ mod tests {
     fn parses_user_prompt_with_extra_fields() {
         let json = r#"{
             "session_id": "abc123",
+            "transcript_path": "/x/y.jsonl",
             "cwd": "/Users/me/dev/anamnesis",
             "permission_mode": "default",
             "hook_event_name": "UserPromptSubmit",
@@ -431,6 +594,8 @@ mod tests {
             Some("What files changed in the last commit?")
         );
         assert_eq!(p.cwd.as_deref(), Some("/Users/me/dev/anamnesis"));
+        assert_eq!(p.session_id.as_deref(), Some("abc123"));
+        assert_eq!(p.transcript_path.as_deref(), Some("/x/y.jsonl"));
     }
 
     #[test]
@@ -466,6 +631,82 @@ mod tests {
         assert!(project_cue(None).is_none());
         assert!(project_cue(Some("/")).is_none());
         assert!(project_cue(Some("")).is_none());
+    }
+
+    #[test]
+    fn project_scope_normalizes_basename() {
+        assert_eq!(
+            project_scope(Some("/Users/me/dev/Anamnesis Hook")).as_deref(),
+            Some("project/anamnesis-hook")
+        );
+        assert_eq!(
+            project_scope(Some("/Users/me/dev/anamnesis.rs")).as_deref(),
+            Some("project/anamnesis.rs")
+        );
+        assert!(project_scope(None).is_none());
+        assert!(project_scope(Some("/")).is_none());
+        assert!(project_scope(Some("")).is_none());
+    }
+
+    #[test]
+    fn recent_context_takes_tail_and_caps_by_chars() {
+        let turns: Vec<ParsedTurn> = (0..10)
+            .map(|i| ParsedTurn {
+                speaker: "user".into(),
+                text: format!("턴{i} 한국어내용"),
+                at_ms: None,
+            })
+            .collect();
+        let ctx = recent_context(&turns, 3, 500, 2000).expect("tail context");
+        assert!(ctx.contains("턴9") && ctx.contains("턴7") && !ctx.contains("턴6"));
+
+        let long = vec![ParsedTurn {
+            speaker: "user".into(),
+            text: "가".repeat(600),
+            at_ms: None,
+        }];
+        let capped = recent_context(&long, 3, 500, 2000).expect("capped context");
+        assert!(capped.chars().count() < 520);
+    }
+
+    #[test]
+    fn user_prompt_query_layers_project_recent_prompt() {
+        let q = user_prompt_query(
+            "다 별론데?",
+            Some("/Users/me/dev/anamnesis"),
+            Some("user: cosine 게이트 얘기"),
+        );
+        assert!(q.contains("project: anamnesis"));
+        assert!(q.contains("recent conversation:\nuser: cosine 게이트 얘기"));
+        assert!(q.ends_with("current user prompt: 다 별론데?"));
+    }
+
+    #[test]
+    fn hook_recall_request_sets_gates_and_knowledge_only() {
+        let cfg = short_circuit_cfg();
+        let req = build_hook_recall_request(
+            &cfg,
+            "q",
+            cfg.hook_topk,
+            Some(false),
+            Some(cfg.hook_threshold),
+            Some(cfg.hook_cosine_gate),
+            Some("project/anamnesis".to_string()),
+        );
+        let Request::Recall {
+            cosine_gate,
+            knowledge_only,
+            limit,
+            scope,
+            ..
+        } = req
+        else {
+            panic!("expected recall request");
+        };
+        assert_eq!(cosine_gate, Some(crate::config::DEFAULT_HOOK_COSINE_GATE));
+        assert_eq!(knowledge_only, Some(true));
+        assert_eq!(limit, Some(3));
+        assert_eq!(scope.as_deref(), Some("project/anamnesis"));
     }
 
     // --- injectable_block: gate the recall tool text into something or nothing ---
@@ -602,6 +843,17 @@ mod tests {
         assert!(block.contains("a prior lesson"));
     }
 
+    #[test]
+    fn detached_timeout_returns_before_slow_work_finishes() {
+        let start = std::time::Instant::now();
+        let out = run_detached_with_timeout(Duration::from_millis(30), || {
+            std::thread::sleep(Duration::from_millis(250));
+            Some("late")
+        });
+        assert!(out.is_none());
+        assert!(start.elapsed() < Duration::from_millis(150));
+    }
+
     // --- capture: parse_capture_input + select_turns (hermetic, no daemon) ---
 
     #[test]
@@ -633,6 +885,38 @@ mod tests {
         let pc = select_turns(&turns, &HookEvent::PreCompact);
         assert_eq!(pc.len(), 50);
         assert_eq!(pc.last().unwrap().text, "t59");
+    }
+
+    #[test]
+    fn noise_turns_are_filtered_from_capture() {
+        assert!(is_noise_turn("# AGENTS.md instructions for /Users/x"));
+        assert!(is_noise_turn(
+            "<system-reminder>use the newest message</system-reminder>"
+        ));
+        assert!(is_noise_turn("<command-name>Read</command-name>"));
+        assert!(is_noise_turn(
+            "<command-message>opened file</command-message>"
+        ));
+        assert!(is_noise_turn(
+            "Caveat: the messages below were generated elsewhere"
+        ));
+        assert!(is_noise_turn("[Request interrupted by user]"));
+        assert!(!is_noise_turn("실제 사용자 발화"));
+
+        let turns = vec![
+            crate::transcript::ParsedTurn {
+                speaker: "user".into(),
+                text: "# AGENTS.md instructions for /Users/x".into(),
+                at_ms: Some(1),
+            },
+            crate::transcript::ParsedTurn {
+                speaker: "assistant".into(),
+                text: "<system-reminder>noise</system-reminder>".into(),
+                at_ms: Some(2),
+            },
+        ];
+        let selected = select_turns(&turns, &HookEvent::Stop);
+        assert!(capture_turn_inputs(selected).is_empty());
     }
 
     // --- extraction_signal: pure helper, no daemon ---
@@ -686,11 +970,15 @@ mod tests {
             default_namespace: "default".into(),
             reinforce_on_recall: false,
             hook_threshold: 13.0,
-            hook_topk: 5,
+            hook_cosine_gate: crate::config::DEFAULT_HOOK_COSINE_GATE,
+            hook_seed_cosine_gate: crate::config::DEFAULT_HOOK_SEED_COSINE_GATE,
+            hook_context_turns: crate::config::DEFAULT_HOOK_CONTEXT_TURNS,
+            hook_topk: 3,
             hook_seed_k: 5,
             hook_timeout_ms: 1,
             capture_enabled: true,
             extract_threshold_n: 20,
+            embed_model: crate::config::DEFAULT_EMBED_MODEL.to_string(),
         }
     }
 

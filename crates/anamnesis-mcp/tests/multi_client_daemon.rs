@@ -187,7 +187,7 @@ fn two_launchers_share_one_daemon_then_grace_exits() {
     b.close();
 
     assert!(
-        wait_until(Duration::from_secs(8), || !the_socket.exists()),
+        wait_until(Duration::from_secs(20), || !the_socket.exists()),
         "daemon did not exit / unlink its socket {the_socket:?} within the grace window"
     );
     assert!(

@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use anamnesis::embedding::EmbeddingProvider;
-use anamnesis::graph::{EdgeType, KnowledgeType, NodeId, Timestamp};
+use anamnesis::graph::{EdgeType, KnowledgeType, NodeId, ScopePath, Timestamp};
 use anamnesis::memory::{Hit, MemoryStats};
 use anamnesis::storage::SqliteStorage;
 use anamnesis::{Error, Memory};
@@ -33,6 +33,12 @@ mod tests;
 
 pub(crate) use mgmt::*;
 pub(crate) use recall::*;
+
+pub(crate) fn embed_model_from_name(
+    name: &str,
+) -> Result<anamnesis::embedding::fastembed::EmbeddingModel, Error> {
+    anamnesis::embedding::fastembed::embed_model_from_name(name)
+}
 
 /// One conversational turn for `ingest_conversation`.
 #[derive(Debug, Clone)]
@@ -123,8 +129,8 @@ enum ProviderSource {
     /// Pre-built provider (tests, or a caller-supplied embedder).
     #[cfg(test)]
     Ready(Arc<dyn EmbeddingProvider>),
-    /// Build the FastEmbed (bge-base-en-v1.5) provider on first use.
-    FastEmbedLazy,
+    /// Build the configured FastEmbed provider on first use.
+    FastEmbedLazy { model_name: String },
 }
 
 /// Storage backend for opened namespaces.
@@ -224,15 +230,34 @@ impl MemoryRegistry {
     ///
     /// Each opened namespace takes its own `<db>.lock` (single-writer guard for
     /// the embedded one-shot / stdio path, where this process owns the DB).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn file_backed(
         default_db: PathBuf,
         dir: PathBuf,
         default_namespace: String,
         reinforce_on_recall: bool,
     ) -> Self {
+        Self::file_backed_with_model(
+            default_db,
+            dir,
+            default_namespace,
+            reinforce_on_recall,
+            crate::config::DEFAULT_EMBED_MODEL.to_string(),
+        )
+    }
+
+    pub fn file_backed_with_model(
+        default_db: PathBuf,
+        dir: PathBuf,
+        default_namespace: String,
+        reinforce_on_recall: bool,
+        embed_model: String,
+    ) -> Self {
         Self {
             provider: None,
-            source: ProviderSource::FastEmbedLazy,
+            source: ProviderSource::FastEmbedLazy {
+                model_name: embed_model,
+            },
             backend: Backend::File {
                 default_db,
                 dir,
@@ -256,6 +281,7 @@ impl MemoryRegistry {
     /// [`crate::daemon::acquire_daemon`]) and is the sole process that opens it,
     /// so re-locking inside the registry is both redundant and would deadlock the
     /// default namespace against the daemon's own held lock.
+    #[allow(dead_code)]
     pub fn file_backed_unlocked(
         default_db: PathBuf,
         dir: PathBuf,
@@ -265,6 +291,25 @@ impl MemoryRegistry {
         Self {
             lock_on_open: false,
             ..Self::file_backed(default_db, dir, default_namespace, reinforce_on_recall)
+        }
+    }
+
+    pub fn file_backed_unlocked_with_model(
+        default_db: PathBuf,
+        dir: PathBuf,
+        default_namespace: String,
+        reinforce_on_recall: bool,
+        embed_model: String,
+    ) -> Self {
+        Self {
+            lock_on_open: false,
+            ..Self::file_backed_with_model(
+                default_db,
+                dir,
+                default_namespace,
+                reinforce_on_recall,
+                embed_model,
+            )
         }
     }
 
@@ -345,8 +390,9 @@ impl MemoryRegistry {
         let p: Arc<dyn EmbeddingProvider> = match &self.source {
             #[cfg(test)]
             ProviderSource::Ready(p) => p.clone(),
-            ProviderSource::FastEmbedLazy => {
-                Arc::new(anamnesis::embedding::fastembed::FastEmbedProvider::new()?)
+            ProviderSource::FastEmbedLazy { model_name } => {
+                let model = embed_model_from_name(model_name)?;
+                Arc::new(anamnesis::embedding::fastembed::FastEmbedProvider::with_model(model)?)
             }
         };
         self.provider = Some(p.clone());
@@ -409,6 +455,8 @@ impl MemoryRegistry {
 
     fn open_namespace(&mut self, ns: &str) -> Result<Memory<SqliteStorage>, Error> {
         let provider = self.provider()?;
+        let provider_dim = provider.dimensions();
+        let provider_model = provider.model_name().to_string();
         // Resolve where this namespace lives WITHOUT holding a borrow of
         // `self.backend`, so we can push to `self.locks` below. `None` = the
         // in-memory test backend.
@@ -439,7 +487,9 @@ impl MemoryRegistry {
         };
 
         let Some(path) = path else {
-            return Memory::in_memory_with_provider(provider);
+            let mem = Memory::in_memory_with_provider(provider)?;
+            verify_embedding_dim(&mem, provider_dim, &provider_model)?;
+            return Ok(mem);
         };
 
         if let Some(parent) = path.parent() {
@@ -476,6 +526,7 @@ impl MemoryRegistry {
         }
 
         let mem = Memory::with_provider(path, provider)?;
+        verify_embedding_dim(&mem, provider_dim, &provider_model)?;
         Ok(mem)
     }
 
@@ -590,7 +641,13 @@ impl MemoryRegistry {
         // for this namespace, so the dedup filter below sees restart-durable state.
         let ns_key = self.canonical_ns_key(ns);
         let handle = self.namespace_handle(ns)?;
-        let decisions = filter_capture_decisions(&self.seen_turn_keys, session, turns, capture);
+        let decisions = filter_capture_decisions(
+            &self.seen_turn_keys,
+            session,
+            turns,
+            capture,
+            ScopePath::universal(),
+        );
         let phase2 = {
             let mut mem = handle.lock().unwrap_or_else(|p| p.into_inner());
             mem_ingest_conversation(&mut mem, session, decisions)
@@ -638,6 +695,30 @@ pub(crate) fn mem_usage_totals(mem: &Memory<SqliteStorage>) -> (usize, usize) {
     (total, stale)
 }
 
+pub(crate) fn verify_embedding_dim(
+    mem: &Memory<SqliteStorage>,
+    provider_dim: usize,
+    model: &str,
+) -> Result<(), Error> {
+    for id in mem.engine().graph().all_node_ids() {
+        let node = mem.engine().graph().get_node(id)?;
+        let Some(embedding) = node.embedding.as_ref() else {
+            continue;
+        };
+        let db_dim = embedding.len();
+        if db_dim != provider_dim {
+            return Err(Error::InvalidInput(format!(
+                "embedding dimension mismatch: DB has {db_dim}-d embeddings but model \
+                 '{model}' produces {provider_dim}-d. Back up and reset the DB \
+                 (mv ~/.anamnesis/memory.db ~/.anamnesis/memory.db.bak-YYYYMMDD) \
+                 or set ANAMNESIS_EMBED_MODEL to the model that created it."
+            )));
+        }
+        return Ok(());
+    }
+    Ok(())
+}
+
 /// Render the `usage_report` text from registry-wide counters plus a
 /// namespace's `(total, stale)` scan. Shared by [`MemoryRegistry::usage_report`]
 /// and `crate::dispatch`'s `Stats` phase-3 commit so both render byte-identical
@@ -679,12 +760,21 @@ pub(crate) fn format_usage_report(
 /// [`MemoryRegistry::ingest_conversation`] and `crate::dispatch`'s `Ingest`
 /// phase-1: decide which turns are new against `seen_turn_keys` BEFORE any
 /// `Memory` access, so the global lock never overlaps the per-namespace one.
+pub(crate) struct IngestDecision {
+    pub(crate) speaker: String,
+    pub(crate) text: String,
+    pub(crate) at: Timestamp,
+    pub(crate) key: Option<String>,
+    pub(crate) scope: ScopePath,
+}
+
 pub(crate) fn filter_capture_decisions(
     seen_turn_keys: &HashSet<String>,
     session: &str,
     turns: &[Turn],
     capture: bool,
-) -> Vec<(String, String, Timestamp, Option<String>)> {
+    scope: ScopePath,
+) -> Vec<IngestDecision> {
     let base = Timestamp::now().0;
     turns
         .iter()
@@ -699,7 +789,13 @@ pub(crate) fn filter_capture_decisions(
             {
                 return None; // deduplicated
             }
-            Some((turn.speaker.clone(), turn.text.clone(), at, key))
+            Some(IngestDecision {
+                speaker: turn.speaker.clone(),
+                text: turn.text.clone(),
+                at,
+                key,
+                scope: scope.clone(),
+            })
         })
         .collect()
 }
@@ -723,16 +819,23 @@ pub(crate) struct IngestPhase2 {
 pub(crate) fn mem_ingest_conversation(
     mem: &mut Memory<SqliteStorage>,
     session: &str,
-    decisions: Vec<(String, String, Timestamp, Option<String>)>,
+    decisions: Vec<IngestDecision>,
 ) -> IngestPhase2 {
-    use crate::capture::{META_EXTRACTED, META_TURN_KEY};
+    use crate::capture::{META_CAPTURE, META_EXTRACTED, META_TURN_KEY};
 
     let mut episodic = 0usize;
     let mut semantic = 0usize;
     let mut newly_captured: Vec<(NodeId, String)> = Vec::new();
+    let mut capture_nodes: Vec<NodeId> = Vec::new();
 
-    for (speaker, text, at, key) in decisions {
-        let receipt = match mem.add(session, &speaker, &text, at) {
+    for decision in decisions {
+        let receipt = match mem.add_in_scope(
+            session,
+            &decision.speaker,
+            &decision.text,
+            decision.at,
+            decision.scope,
+        ) {
             Ok(r) => r,
             Err(e) => {
                 return IngestPhase2 {
@@ -742,18 +845,36 @@ pub(crate) fn mem_ingest_conversation(
             }
         };
         episodic += 1;
-        if receipt.finalized_semantic.is_some() {
+        if let Some(semantic_id) = receipt.finalized_semantic {
             semantic += 1;
+            if decision.key.is_some() {
+                capture_nodes.push(semantic_id);
+            }
         }
-        if let Some(k) = key {
+        if let Some(k) = decision.key {
+            capture_nodes.push(receipt.episodic);
             newly_captured.push((receipt.episodic, k));
         }
     }
 
     match mem.flush_session(session) {
-        Ok(Some(_)) => semantic += 1,
+        Ok(Some(semantic_id)) => {
+            semantic += 1;
+            if !newly_captured.is_empty() {
+                capture_nodes.push(semantic_id);
+            }
+        }
         Ok(None) => {}
         Err(e) => {
+            return IngestPhase2 {
+                committed: Vec::new(),
+                outcome: Err(e),
+            };
+        }
+    }
+
+    for id in capture_nodes {
+        if let Err(e) = mem.set_metadata(id, META_CAPTURE, "true") {
             return IngestPhase2 {
                 committed: Vec::new(),
                 outcome: Err(e),

@@ -1,8 +1,110 @@
 use super::*;
-use anamnesis::memory::{ListFilter, Relation};
+use anamnesis::memory::{ListFilter, NoteOptions, Relation};
 
 fn registry(reinforce: bool) -> MemoryRegistry {
     MemoryRegistry::in_memory_with(Arc::new(StubProvider), reinforce)
+}
+
+#[test]
+fn embed_model_from_name_maps_supported_models() {
+    assert_eq!(
+        format!(
+            "{:?}",
+            embed_model_from_name("multilingual-e5-small").unwrap()
+        ),
+        "MultilingualE5Small"
+    );
+    assert_eq!(
+        format!(
+            "{:?}",
+            embed_model_from_name("multilingual-e5-base").unwrap()
+        ),
+        "MultilingualE5Base"
+    );
+    assert_eq!(
+        format!(
+            "{:?}",
+            embed_model_from_name("multilingual-e5-large").unwrap()
+        ),
+        "MultilingualE5Large"
+    );
+    assert_eq!(
+        format!("{:?}", embed_model_from_name("bge-base-en-v1.5").unwrap()),
+        "BGEBaseENV15"
+    );
+
+    let err = embed_model_from_name("unknown-model").unwrap_err();
+    assert!(
+        err.to_string().contains("multilingual-e5-small"),
+        "supported model list should be actionable: {err}"
+    );
+}
+
+struct FixedDimProvider {
+    dim: usize,
+}
+
+impl EmbeddingProvider for FixedDimProvider {
+    fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, Error> {
+        Ok(texts.iter().map(|_| vec![0.1; self.dim]).collect())
+    }
+
+    fn dimensions(&self) -> usize {
+        self.dim
+    }
+
+    fn model_name(&self) -> &str {
+        "fixed-dim"
+    }
+}
+
+struct ScopeGateProvider;
+
+impl EmbeddingProvider for ScopeGateProvider {
+    fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, Error> {
+        Ok(texts
+            .iter()
+            .map(|text| {
+                if text.contains("scope gate query") || text.contains("scope gate high") {
+                    vec![1.0, 0.0]
+                } else if text.contains("scope gate local") {
+                    vec![0.2, 0.98]
+                } else {
+                    vec![0.5, 0.5]
+                }
+            })
+            .collect())
+    }
+
+    fn dimensions(&self) -> usize {
+        2
+    }
+
+    fn model_name(&self) -> &str {
+        "scope-gate"
+    }
+}
+
+#[test]
+fn verify_embedding_dim_allows_empty_and_matching_but_rejects_mismatch() {
+    let provider: Arc<dyn EmbeddingProvider> = Arc::new(FixedDimProvider { dim: 384 });
+    let mut mem = Memory::in_memory_with_provider(provider).unwrap();
+
+    verify_embedding_dim(&mem, 768, "bge-base-en-v1.5").unwrap();
+    mem.add(
+        "s",
+        "user",
+        "dimensioned memory",
+        anamnesis::graph::Timestamp(1),
+    )
+    .unwrap();
+
+    verify_embedding_dim(&mem, 384, "multilingual-e5-small").unwrap();
+    let err = verify_embedding_dim(&mem, 768, "bge-base-en-v1.5").unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("DB has 384-d embeddings"), "{msg}");
+    assert!(msg.contains("bge-base-en-v1.5"), "{msg}");
+    assert!(msg.contains("ANAMNESIS_EMBED_MODEL"), "{msg}");
 }
 
 // ── Single-tick-per-recall (flagship bug #2) ────────────────────────────
@@ -27,7 +129,7 @@ fn recall_packaged_gated_ticks_engine_exactly_once() {
     reg.remember("the cache key omitted the lockfile hash", None)
         .unwrap();
     let before = TICK_CALLS.with(|c| c.get());
-    reg.recall_packaged_gated("cache key lockfile", 5, None, None, None)
+    reg.recall_packaged_gated("cache key lockfile", 5, None, None, None, None)
         .unwrap();
     assert_eq!(
         TICK_CALLS.with(|c| c.get()) - before,
@@ -43,7 +145,7 @@ fn recall_packaged_gated_gated_out_still_ticks_exactly_once() {
     let before = TICK_CALLS.with(|c| c.get());
     // An impossibly high gate threshold forces the gated-out early-return
     // branch, which has its own tick call site.
-    reg.recall_packaged_gated("unrelated note", 5, None, None, Some(1_000.0))
+    reg.recall_packaged_gated("unrelated note", 5, None, None, Some(1_000.0), None)
         .unwrap();
     assert_eq!(
         TICK_CALLS.with(|c| c.get()) - before,
@@ -395,7 +497,7 @@ fn gated_recall_below_threshold_is_empty() {
         .unwrap();
     // First read the true top score with no gate, then set τ just above it.
     let ungated = reg
-        .recall_packaged_gated("auth race condition", 5, None, Some(false), None)
+        .recall_packaged_gated("auth race condition", 5, None, Some(false), None, None)
         .unwrap();
     let top = ungated
         .hits
@@ -405,7 +507,7 @@ fn gated_recall_below_threshold_is_empty() {
     let tau = top + 1.0; // strictly above the best score ⇒ gate trips.
 
     let gated = reg
-        .recall_packaged_gated("auth race condition", 5, None, Some(false), Some(tau))
+        .recall_packaged_gated("auth race condition", 5, None, Some(false), Some(tau), None)
         .unwrap();
     assert!(
         gated.context.is_empty(),
@@ -425,7 +527,7 @@ fn gated_recall_with_no_hits_is_empty() {
     let mut reg = registry(false);
     // Empty graph: nothing to retrieve, so any gate (even 0.0) yields empty.
     let gated = reg
-        .recall_packaged_gated("nothing here", 5, None, Some(false), Some(0.0))
+        .recall_packaged_gated("nothing here", 5, None, Some(false), Some(0.0), None)
         .unwrap();
     assert!(gated.context.is_empty());
     assert!(gated.hits.is_empty());
@@ -439,13 +541,145 @@ fn gated_recall_at_or_above_threshold_renders_top_k() {
         .unwrap();
     // τ = 0.0 admits every positive-scored hit.
     let gated = reg
-        .recall_packaged_gated("auth race condition", 5, None, Some(false), Some(0.0))
+        .recall_packaged_gated("auth race condition", 5, None, Some(false), Some(0.0), None)
         .unwrap();
     assert!(!gated.hits.is_empty(), "τ=0.0 must admit the relevant hit");
     assert!(
         gated.context.contains("##"),
         "expected a rendered section header, got:\n{}",
         gated.context
+    );
+}
+
+#[test]
+fn cosine_gate_trips_when_top_cosine_below_threshold() {
+    let mut reg = registry(false);
+    reg.remember("the auth bug was a race in the middleware", None)
+        .unwrap();
+
+    let gated = reg
+        .recall_packaged_gated(
+            "auth race condition",
+            5,
+            None,
+            Some(false),
+            None,
+            Some(1.01),
+        )
+        .unwrap();
+
+    assert!(
+        gated.context.is_empty(),
+        "above-cosine gate must yield empty context, got:\n{}",
+        gated.context
+    );
+    assert!(
+        gated.hits.is_empty(),
+        "above-cosine gate must yield no hits, got {} hits",
+        gated.hits.len()
+    );
+}
+
+#[test]
+fn knowledge_only_drops_memories_tensions_and_capture_fragments() {
+    let mut reg = registry(false);
+    let handle = reg.namespace_handle(None).unwrap();
+    let mut mem = handle.lock().unwrap_or_else(|p| p.into_inner());
+
+    mem_remember(&mut mem, "distilled: recall gate is cosine-based").unwrap();
+    let mut opts = NoteOptions::default();
+    opts.metadata
+        .push(("capture".to_string(), "true".to_string()));
+    mem_remember_with(
+        &mut mem,
+        "captured conversation window about recall gate",
+        opts,
+    )
+    .unwrap();
+
+    let out = mem_recall_packaged_gated_filtered(
+        &mut mem,
+        "recall gate",
+        10,
+        false,
+        RecallFilters {
+            gate: None,
+            cosine_gate: None,
+            scope: None,
+            tag: None,
+            knowledge_only: true,
+        },
+    )
+    .unwrap();
+
+    assert!(out.context.contains("## KNOWLEDGE"));
+    assert!(
+        !out.context.contains("## MEMORIES"),
+        "episodic section must be dropped:\n{}",
+        out.context
+    );
+    assert!(!out.context.contains("captured conversation window"));
+    assert!(
+        out.hits
+            .iter()
+            .all(|h| !h.text.contains("captured conversation window")),
+        "capture hits must be dropped: {:?}",
+        out.hits
+    );
+}
+
+#[test]
+fn filtered_recall_gates_on_final_filtered_hits() {
+    let provider: Arc<dyn EmbeddingProvider> = Arc::new(ScopeGateProvider);
+    let mut mem = Memory::in_memory_with_provider(provider).unwrap();
+
+    let mut remote = NoteOptions {
+        scope: Some(anamnesis::graph::ScopePath::new("project/remote").unwrap()),
+        ..NoteOptions::default()
+    };
+    remote.tags.push("scope-gate".to_string());
+    mem.add_note_with(
+        "scope gate high remote note excluded by project scope",
+        anamnesis::graph::Timestamp(1),
+        remote,
+    )
+    .unwrap();
+
+    let local = NoteOptions {
+        scope: Some(anamnesis::graph::ScopePath::new("project/local").unwrap()),
+        ..NoteOptions::default()
+    };
+    mem.add_note_with(
+        "scope gate local note is visible but below cosine gate",
+        anamnesis::graph::Timestamp(2),
+        local,
+    )
+    .unwrap();
+
+    let out = mem_recall_packaged_gated_filtered(
+        &mut mem,
+        "scope gate query",
+        10,
+        false,
+        RecallFilters {
+            gate: None,
+            cosine_gate: Some(0.9),
+            scope: Some("project/local"),
+            tag: None,
+            knowledge_only: false,
+        },
+    )
+    .unwrap();
+
+    assert!(
+        out.context.is_empty(),
+        "excluded remote hits must not open the cosine gate:\n{}",
+        out.context
+    );
+    assert!(
+        out.hits.is_empty(),
+        "filtered below-gate hits must not be returned: {:?}",
+        out.hits
     );
 }
 
@@ -456,7 +690,7 @@ fn gated_recall_none_gate_never_filters() {
     let mut reg = registry(false);
     reg.remember("postgres was chosen for jsonb", None).unwrap();
     let gated = reg
-        .recall_packaged_gated("postgres jsonb", 5, None, Some(false), None)
+        .recall_packaged_gated("postgres jsonb", 5, None, Some(false), None, None)
         .unwrap();
     assert!(!gated.hits.is_empty());
     assert!(gated.context.contains("##"));
@@ -474,7 +708,7 @@ fn read_only_recall_does_not_reinforce_but_reinforcing_does() {
     let ro_before = ro.stats(None).unwrap().avg_salience;
     for _ in 0..3 {
         let pkg = ro
-            .recall_packaged_gated("auth race condition", 5, None, Some(false), None)
+            .recall_packaged_gated("auth race condition", 5, None, Some(false), None, None)
             .unwrap();
         assert!(
             !pkg.hits.is_empty(),
@@ -493,7 +727,7 @@ fn read_only_recall_does_not_reinforce_but_reinforcing_does() {
         .unwrap();
     let rw_before = rw.stats(None).unwrap().avg_salience;
     for _ in 0..3 {
-        rw.recall_packaged_gated("auth race condition", 5, None, Some(true), None)
+        rw.recall_packaged_gated("auth race condition", 5, None, Some(true), None, None)
             .unwrap();
     }
     let rw_after = rw.stats(None).unwrap().avg_salience;
@@ -514,7 +748,7 @@ fn gated_out_recall_never_reinforces_even_when_asked() {
     // τ astronomically high ⇒ always gated out, even with reinforce=true.
     for _ in 0..3 {
         let pkg = reg
-            .recall_packaged_gated("auth race condition", 5, None, Some(true), Some(1e9))
+            .recall_packaged_gated("auth race condition", 5, None, Some(true), Some(1e9), None)
             .unwrap();
         assert!(pkg.hits.is_empty(), "gate must trip at τ=1e9");
     }
@@ -574,10 +808,10 @@ fn usage_report_counts_ops_and_backlog() {
     let b = reg.remember("the disk was full", None).unwrap();
     reg.relate(b, a, "causes", None).unwrap();
     let _ = reg
-        .recall_packaged_gated("deploy", 5, None, Some(false), None)
+        .recall_packaged_gated("deploy", 5, None, Some(false), None, None)
         .unwrap();
     let _ = reg
-        .recall_packaged_gated("deploy", 5, None, Some(true), None)
+        .recall_packaged_gated("deploy", 5, None, Some(true), None, None)
         .unwrap();
     let turns = vec![Turn {
         speaker: "user".into(),

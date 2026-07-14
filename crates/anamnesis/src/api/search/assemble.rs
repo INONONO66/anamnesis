@@ -213,6 +213,7 @@ fn assemble_graph_recall_package<S: StorageAdapter + Clone>(
             score,
             activation: inputs.activation,
             phi: inputs.phi,
+            embedding_cosine: cosine,
             salience: inputs.salience,
             impedance: inputs.impedance,
             scope_weight: inputs.scope_weight,

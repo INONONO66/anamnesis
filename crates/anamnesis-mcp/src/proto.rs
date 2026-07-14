@@ -39,6 +39,12 @@ pub enum Request {
         /// Need-odds gate `τ`: below it, recall returns nothing.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         gate_threshold: Option<f64>,
+        /// Query-embedding cosine gate `τ_cos`: below it, recall returns nothing.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cosine_gate: Option<f64>,
+        /// Render only durable knowledge; omit episodic/capture fragments.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        knowledge_only: Option<bool>,
         /// Post-filter: drop hits whose node origin scope doesn't match.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         scope: Option<String>,
@@ -71,6 +77,8 @@ pub enum Request {
         namespace: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         capture: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<String>,
     },
     Stats {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -215,6 +223,8 @@ mod tests {
             namespace: None,
             reinforce: Some(false),
             gate_threshold: Some(13.0),
+            cosine_gate: Some(0.83),
+            knowledge_only: Some(true),
             scope: Some("projA".into()),
             tag: Some("auth".into()),
         });
@@ -250,6 +260,7 @@ mod tests {
             ],
             namespace: None,
             capture: None,
+            scope: Some("project/anamnesis".into()),
         });
         round_trip_request(Request::Stats { namespace: None });
         round_trip_request(Request::Update {
@@ -311,6 +322,8 @@ mod tests {
             namespace: None,
             reinforce: None,
             gate_threshold: None,
+            cosine_gate: None,
+            knowledge_only: None,
             scope: None,
             tag: None,
         })
@@ -320,6 +333,8 @@ mod tests {
         assert!(!line.contains("limit"), "None optionals omitted: {line}");
         assert!(!line.contains("namespace"));
         assert!(!line.contains("gate_threshold"));
+        assert!(!line.contains("cosine_gate"));
+        assert!(!line.contains("knowledge_only"));
     }
 
     #[test]
@@ -375,6 +390,7 @@ mod tests {
             turns: vec![],
             namespace: None,
             capture: None,
+            scope: None,
         };
         let line = encode_line(&req).unwrap();
         assert!(
@@ -390,9 +406,40 @@ mod tests {
             turns: vec![],
             namespace: None,
             capture: Some(true),
+            scope: None,
         };
         let line2 = encode_line(&req2).unwrap();
         assert!(line2.contains("\"capture\":true"), "got: {line2}");
         assert_eq!(decode_line::<Request>(&line2).unwrap(), req2);
+    }
+
+    #[test]
+    fn ingest_scope_round_trips_and_defaults_absent() {
+        let req = Request::Ingest {
+            session: "s".into(),
+            turns: vec![],
+            namespace: None,
+            capture: None,
+            scope: None,
+        };
+        let line = encode_line(&req).unwrap();
+        assert!(
+            !line.contains("scope"),
+            "None scope must be omitted: {line}"
+        );
+
+        let scoped = Request::Ingest {
+            session: "s".into(),
+            turns: vec![],
+            namespace: None,
+            capture: Some(true),
+            scope: Some("project/anamnesis".into()),
+        };
+        let scoped_line = encode_line(&scoped).unwrap();
+        assert!(
+            scoped_line.contains("\"scope\":\"project/anamnesis\""),
+            "got: {scoped_line}"
+        );
+        assert_eq!(decode_line::<Request>(&scoped_line).unwrap(), scoped);
     }
 }

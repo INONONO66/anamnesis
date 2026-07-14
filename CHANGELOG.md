@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.0] - 2026-07-08
+
+### Added
+- **Hook cosine abstention gates** — recall now carries query-embedding cosine through the readout path, and hook recall abstains when top hits fail calibrated cosine floors.
+- **Transcript-aware hook queries** — `UserPromptSubmit` recall folds in a bounded tail of recent transcript turns alongside the project cue and current prompt.
+- **Knowledge-only hook rendering** — hook injections now omit raw episodic/capture fragments and keep compact node references for follow-up `relate`.
+- **Scope-native project boundaries** — capture and hook recall use `project/<normalized-cwd-basename>` scopes so unrelated project memories are filtered out.
+- **Hook precision battery** — `scripts/hook-battery.sh` seeds an isolated DB and checks content-free, topical, cross-project, and unknown-project hook behavior.
+
+### Changed
+- **Default hook top-k is now 3** for tighter prompt injections.
+- **Default MCP embedding model is now `multilingual-e5-small`** via `ANAMNESIS_EMBED_MODEL`; existing 768-d BGE DBs should be backed up/reset or opened with `ANAMNESIS_EMBED_MODEL=bge-base-en-v1.5`.
+- **Scoped recall keeps universal plus same-scope nodes and drops foreign-scope nodes**, which is a precision-oriented behavior change for callers using `scope`.
+- **Default user-prompt cosine gate is calibrated to `0.86`** from the 2026-07-08 e5-small battery; override with `ANAMNESIS_HOOK_COSINE_GATE` if a graph needs higher recall.
+
+### Fixed
+- **System preamble capture noise is filtered** from automatic transcript capture, including `# AGENTS.md`, system reminders, command wrappers, caveats, and interruption markers.
+
 ## [0.17.0] - 2026-07-05
 
 ### Added

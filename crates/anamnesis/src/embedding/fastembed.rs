@@ -6,7 +6,8 @@
 
 use std::sync::Mutex;
 
-use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
+pub use fastembed::EmbeddingModel;
+use fastembed::{InitOptions, TextEmbedding};
 
 use crate::embedding::EmbeddingProvider;
 use crate::error::Error;
@@ -30,6 +31,42 @@ pub struct FastEmbedProvider {
     model: Mutex<TextEmbedding>,
     dim: usize,
     name: String,
+}
+
+#[derive(Clone, Copy)]
+enum PrefixKind {
+    Query,
+    Passage,
+}
+
+fn e5_prefix(model_code: &str, kind: PrefixKind, text: &str) -> String {
+    if model_code.starts_with("intfloat/multilingual-e5") {
+        match kind {
+            PrefixKind::Query => format!("query: {text}"),
+            PrefixKind::Passage => format!("passage: {text}"),
+        }
+    } else {
+        text.to_string()
+    }
+}
+
+pub fn embed_model_from_name(name: &str) -> Result<EmbeddingModel, Error> {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "multilingual-e5-small" | "intfloat/multilingual-e5-small" => {
+            Ok(EmbeddingModel::MultilingualE5Small)
+        }
+        "multilingual-e5-base" | "intfloat/multilingual-e5-base" => {
+            Ok(EmbeddingModel::MultilingualE5Base)
+        }
+        "multilingual-e5-large" | "intfloat/multilingual-e5-large" => {
+            Ok(EmbeddingModel::MultilingualE5Large)
+        }
+        "bge-base-en-v1.5" | "baai/bge-base-en-v1.5" => Ok(EmbeddingModel::BGEBaseENV15),
+        other => Err(Error::InvalidInput(format!(
+            "unsupported embedding model {other:?}; supported: multilingual-e5-small, \
+             multilingual-e5-base, multilingual-e5-large, bge-base-en-v1.5"
+        ))),
+    }
 }
 
 impl FastEmbedProvider {
@@ -85,5 +122,38 @@ impl EmbeddingProvider for FastEmbedProvider {
 
     fn model_name(&self) -> &str {
         &self.name
+    }
+
+    fn embed_query(&self, text: &str) -> Result<Vec<f32>, Error> {
+        self.embed_single(&e5_prefix(&self.name, PrefixKind::Query, text))
+    }
+
+    fn embed_passage(&self, text: &str) -> Result<Vec<f32>, Error> {
+        self.embed_single(&e5_prefix(&self.name, PrefixKind::Passage, text))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn e5_prefix_applies_only_to_e5_models() {
+        assert_eq!(
+            e5_prefix("intfloat/multilingual-e5-small", PrefixKind::Query, "안녕"),
+            "query: 안녕"
+        );
+        assert_eq!(
+            e5_prefix(
+                "intfloat/multilingual-e5-small",
+                PrefixKind::Passage,
+                "안녕"
+            ),
+            "passage: 안녕"
+        );
+        assert_eq!(
+            e5_prefix("BAAI/bge-base-en-v1.5", PrefixKind::Query, "hi"),
+            "hi"
+        );
     }
 }

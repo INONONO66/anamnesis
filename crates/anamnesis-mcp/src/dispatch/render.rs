@@ -67,7 +67,7 @@ pub(crate) fn render_view(v: &MemoryView) -> String {
 
 /// Render a [`PackagedRecall`](crate::memory::PackagedRecall) to the `recall`
 /// payload: the readable context block (or the `(no relevant memory)` sentinel
-/// when nothing packaged) followed by the compact `{node_id, score}` NODES list
+/// when nothing packaged) followed by the compact `{node_id, score, cosine}` NODES list
 /// the agent feeds to `relate`. The hook keys off this exact shape.
 pub(crate) fn render_recall(
     packaged: &crate::memory::PackagedRecall,
@@ -75,7 +75,9 @@ pub(crate) fn render_recall(
     let refs: Vec<_> = packaged
         .hits
         .iter()
-        .map(|h| serde_json::json!({ "node_id": h.node_id.0, "score": h.score }))
+        .map(
+            |h| serde_json::json!({ "node_id": h.node_id.0, "score": h.score, "cosine": h.cosine }),
+        )
         .collect();
     let refs_json = serde_json::to_string(&refs)?;
     let context = if packaged.context.trim().is_empty() {

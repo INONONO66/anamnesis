@@ -140,11 +140,12 @@ pub enum HookEvent {
 }
 
 fn registry(cfg: &Config) -> MemoryRegistry {
-    MemoryRegistry::file_backed(
+    MemoryRegistry::file_backed_with_model(
         cfg.default_db.clone(),
         cfg.db_dir(),
         cfg.default_namespace.clone(),
         cfg.reinforce_on_recall,
+        cfg.embed_model.clone(),
     )
 }
 
@@ -282,6 +283,8 @@ pub async fn run_oneshot_client(cli: &Cli) -> Result<()> {
             namespace: namespace.clone(),
             reinforce: None,
             gate_threshold: None,
+            cosine_gate: None,
+            knowledge_only: None,
             scope: None,
             tag: None,
         },
@@ -412,13 +415,15 @@ fn probe_lock(db: &std::path::Path) -> (bool, String) {
 
 /// Print an embedded `recall` result in the same shape the daemon's `recall`
 /// tool returns: the readable context block followed by a compact `NODES` list of
-/// `{node_id, score}` for `relate`. Keeping the two paths identical means a script
+/// `{node_id, score, cosine}` for `relate`. Keeping the two paths identical means a script
 /// sees the same output whether or not a daemon is running.
 fn print_recall(packaged: &crate::memory::PackagedRecall) {
     let refs: Vec<_> = packaged
         .hits
         .iter()
-        .map(|h| serde_json::json!({ "node_id": h.node_id.0, "score": h.score }))
+        .map(
+            |h| serde_json::json!({ "node_id": h.node_id.0, "score": h.score, "cosine": h.cosine }),
+        )
         .collect();
     let refs_json = serde_json::to_string(&refs).unwrap_or_else(|_| "[]".to_string());
     let context = if packaged.context.trim().is_empty() {

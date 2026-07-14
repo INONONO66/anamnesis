@@ -468,13 +468,15 @@ pub async fn run(cfg: Config) -> Result<()> {
     tracing::info!(socket = %bind.socket_path.display(), "anamnesis daemon serving");
 
     // The daemon holds the DB lock and is the sole opener → unlocked registry.
-    let registry =
-        std::sync::Arc::new(std::sync::Mutex::new(MemoryRegistry::file_backed_unlocked(
+    let registry = std::sync::Arc::new(std::sync::Mutex::new(
+        MemoryRegistry::file_backed_unlocked_with_model(
             cfg.default_db.clone(),
             cfg.db_dir(),
             cfg.default_namespace.clone(),
             cfg.reinforce_on_recall,
-        )));
+            cfg.embed_model.clone(),
+        ),
+    ));
 
     // Rebuild the capture queue + dedup set from node metadata before serving,
     // so Stage-2 extraction survives daemon restarts (best-effort; fail-open).

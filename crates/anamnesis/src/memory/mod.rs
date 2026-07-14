@@ -103,6 +103,8 @@ struct PendingTurn {
     speaker: String,
     /// 1-based turn index.
     turn_index: usize,
+    /// Origin scope to stamp on this turn's Semantic node when finalized.
+    scope: ScopePath,
 }
 
 /// Options for [`Memory::add_note_with`] — optional scope, extra entity tags,
@@ -441,6 +443,19 @@ impl<S: StorageAdapter + Clone> Memory<S> {
         text: &str,
         at: Timestamp,
     ) -> Result<AddReceipt, Error> {
+        self.add_in_scope(session, speaker, text, at, ScopePath::universal())
+    }
+
+    /// Like [`add`](Memory::add), but stamps the current turn and its eventual
+    /// Semantic window with `scope`.
+    pub fn add_in_scope(
+        &mut self,
+        session: &str,
+        speaker: &str,
+        text: &str,
+        at: Timestamp,
+        scope: ScopePath,
+    ) -> Result<AddReceipt, Error> {
         let session_buf = self.sessions.entry(session.to_string()).or_default();
 
         // Snapshot continuity state BEFORE any mutation so we can use it
@@ -454,7 +469,7 @@ impl<S: StorageAdapter + Clone> Memory<S> {
         // ── Phase A: all fallible work (NO buffer mutation yet) ──────────────
 
         // (a) Embed the current turn's episodic text.
-        let epi_embedding = embed_one(&*self.provider, &speaker_text)?;
+        let epi_embedding = embed_one_passage(&*self.provider, &speaker_text)?;
 
         // (b) If pending: build window and embed it. Both are fallible.
         let pending_window_result: Option<(String, Vec<f64>)> =
@@ -464,7 +479,7 @@ impl<S: StorageAdapter + Clone> Memory<S> {
                     &pending.speaker_text,
                     Some(&speaker_text),
                 );
-                let sem_embedding = embed_one(&*self.provider, &window)?;
+                let sem_embedding = embed_one_passage(&*self.provider, &window)?;
                 Some((window, sem_embedding))
             } else {
                 None
@@ -484,7 +499,7 @@ impl<S: StorageAdapter + Clone> Memory<S> {
             entity_tags_for(session, speaker),
             Some(format!("{} turn {}", speaker, next_turn_index)),
             session,
-            ScopePath::universal(),
+            scope.clone(),
         )?;
 
         // (d) If pending: ingest its semantic, then wire ExtractedFrom + Temporal.
@@ -501,7 +516,7 @@ impl<S: StorageAdapter + Clone> Memory<S> {
                 entity_tags_for(&pending.session_id, &pending.speaker),
                 Some(format!("{} turn {}", pending.speaker, pending.turn_index)),
                 &pending.session_id,
-                ScopePath::universal(),
+                pending.scope.clone(),
             )?;
             self.engine
                 .link(sem_id, pending.episodic_id, EdgeType::ExtractedFrom)?;
@@ -550,6 +565,7 @@ impl<S: StorageAdapter + Clone> Memory<S> {
             session_id: session.to_string(),
             speaker: speaker.to_string(),
             turn_index: next_turn_index,
+            scope,
         });
 
         Ok(AddReceipt {
@@ -592,7 +608,7 @@ impl<S: StorageAdapter + Clone> Memory<S> {
         let mut entity_tags = entity_tags_for(&session_id, speaker);
         entity_tags.extend(opts.tags.iter().cloned());
 
-        let epi_embedding = embed_one(&*self.provider, &speaker_text)?;
+        let epi_embedding = embed_one_passage(&*self.provider, &speaker_text)?;
         let epi_id = ingest_node(
             &mut self.engine,
             &speaker_text,
@@ -608,7 +624,7 @@ impl<S: StorageAdapter + Clone> Memory<S> {
 
         // Window = just itself (no prev, no next).
         let window = speaker_text.clone();
-        let sem_embedding = embed_one(&*self.provider, &window)?;
+        let sem_embedding = embed_one_passage(&*self.provider, &window)?;
         let sem_id = ingest_node(
             &mut self.engine,
             &window,
@@ -670,7 +686,7 @@ impl<S: StorageAdapter + Clone> Memory<S> {
             &pending.speaker_text,
             None,
         );
-        let sem_embedding = embed_one(&*self.provider, &window)?;
+        let sem_embedding = embed_one_passage(&*self.provider, &window)?;
         let sem_id = ingest_node(
             &mut self.engine,
             &window,
@@ -681,7 +697,7 @@ impl<S: StorageAdapter + Clone> Memory<S> {
             entity_tags_for(&pending.session_id, &pending.speaker),
             Some(format!("{} turn {}", pending.speaker, pending.turn_index)),
             &pending.session_id,
-            ScopePath::universal(),
+            pending.scope,
         )?;
         self.engine
             .link(sem_id, pending.episodic_id, EdgeType::ExtractedFrom)?;
@@ -1059,6 +1075,8 @@ pub struct Hit {
     pub text: String,
     /// Readout score (ranking key; higher = more relevant).
     pub score: f64,
+    /// Query-embedding cosine vs this node, or `0.0` when either embedding is absent.
+    pub cosine: f64,
     /// Timestamp when the node was created.
     pub at: Timestamp,
     /// Normalized speaker extracted from the node's `speaker-<norm>` entity tag, if any.
@@ -1182,6 +1200,16 @@ impl<S: StorageAdapter + Clone> Memory<S> {
         self.search_at(query, limit, Timestamp::now())
     }
 
+    /// Search memory with an optional query scope for scope-aware ranking.
+    pub fn search_scoped(
+        &mut self,
+        query: &str,
+        limit: usize,
+        scope: Option<ScopePath>,
+    ) -> Result<Recall, Error> {
+        self.search_scoped_at(query, limit, scope, Timestamp::now())
+    }
+
     /// Search memory at an explicit `now` timestamp.
     ///
     /// First flushes all pending session buffers so that every previously added
@@ -1198,11 +1226,21 @@ impl<S: StorageAdapter + Clone> Memory<S> {
         limit: usize,
         now: Timestamp,
     ) -> Result<Recall, Error> {
+        self.search_scoped_at(query, limit, None, now)
+    }
+
+    fn search_scoped_at(
+        &mut self,
+        query: &str,
+        limit: usize,
+        scope: Option<ScopePath>,
+        now: Timestamp,
+    ) -> Result<Recall, Error> {
         // Flush pending buffers so the last buffered turn is searchable.
         self.flush_all()?;
 
         // Embed the query via the provider.
-        let embedding = embed_one(&*self.provider, query)?;
+        let embedding = embed_one_query(&*self.provider, query)?;
 
         // Build bench-default SearchInput: text + query_embedding + limit +
         // seed_limit = Some(limit.max(1)); speaker cues OFF; now = explicit.
@@ -1212,6 +1250,7 @@ impl<S: StorageAdapter + Clone> Memory<S> {
             limit,
             seed_limit: Some(limit.max(1)),
             now,
+            scope: scope.unwrap_or_else(ScopePath::universal),
             entity_tags: Vec::new(), // speaker cues OFF (bench default)
             ..SearchInput::default()
         };
@@ -1231,6 +1270,7 @@ impl<S: StorageAdapter + Clone> Memory<S> {
                     node_id: candidate.node_id,
                     text: node.content.clone(),
                     score: candidate.score,
+                    cosine: candidate.embedding_cosine,
                     at: node.created_at,
                     speaker,
                     session,
@@ -1264,7 +1304,7 @@ impl<S: StorageAdapter + Clone> Memory<S> {
     ) -> Result<SearchResult, Error> {
         self.flush_all()?;
 
-        let embedding = embed_one(&*self.provider, query)?;
+        let embedding = embed_one_query(&*self.provider, query)?;
         let seed_limit = tuning.seed_limit.unwrap_or_else(|| limit.max(1));
         let input = SearchInput {
             text: query.to_string(),
@@ -1363,13 +1403,12 @@ fn make_name(content: &str) -> String {
     }
 }
 
-/// Embed a single text string via the provider.
-fn embed_one(provider: &dyn EmbeddingProvider, text: &str) -> Result<Vec<f64>, Error> {
-    let results = provider.embed_f64(&[text])?;
-    results
-        .into_iter()
-        .next()
-        .ok_or_else(|| Error::InvalidInput("provider returned empty embedding".to_string()))
+fn embed_one_query(provider: &dyn EmbeddingProvider, text: &str) -> Result<Vec<f64>, Error> {
+    Ok(crate::embedding::widen(&provider.embed_query(text)?))
+}
+
+fn embed_one_passage(provider: &dyn EmbeddingProvider, text: &str) -> Result<Vec<f64>, Error> {
+    Ok(crate::embedding::widen(&provider.embed_passage(text)?))
 }
 
 /// Ingest a node via the public `Engine::ingest` API and return its `NodeId`.
@@ -1474,6 +1513,62 @@ mod tests {
         Memory::in_memory_with_provider(provider).expect("in-memory Memory")
     }
 
+    type EmbedCalls = Arc<std::sync::Mutex<Vec<(&'static str, String)>>>;
+
+    struct RecordingProvider {
+        calls: EmbedCalls,
+    }
+
+    impl EmbeddingProvider for RecordingProvider {
+        fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, Error> {
+            Ok(texts.iter().map(|_| vec![0.25; 8]).collect())
+        }
+
+        fn embed_query(&self, text: &str) -> Result<Vec<f32>, Error> {
+            self.calls.lock().unwrap().push(("query", text.to_string()));
+            self.embed_single(text)
+        }
+
+        fn embed_passage(&self, text: &str) -> Result<Vec<f32>, Error> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(("passage", text.to_string()));
+            self.embed_single(text)
+        }
+
+        fn dimensions(&self) -> usize {
+            8
+        }
+
+        fn model_name(&self) -> &str {
+            "recording"
+        }
+    }
+
+    fn recording_mem() -> (Memory<SqliteStorage>, EmbedCalls) {
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let provider: Arc<dyn EmbeddingProvider> = Arc::new(RecordingProvider {
+            calls: calls.clone(),
+        });
+        (
+            Memory::in_memory_with_provider(provider).expect("in-memory Memory"),
+            calls,
+        )
+    }
+
+    #[test]
+    fn memory_uses_passage_for_add_and_query_for_search() {
+        let (mut m, calls) = recording_mem();
+        m.add("s", "user", "본문", t(1)).unwrap();
+        let _ = m.search("질의", 3).unwrap();
+
+        let calls = calls.lock().unwrap();
+        let kinds: Vec<&str> = calls.iter().map(|(kind, _)| *kind).collect();
+        assert!(kinds.contains(&"passage"), "{kinds:?}");
+        assert!(kinds.contains(&"query"), "{kinds:?}");
+    }
+
     fn t(ms: u64) -> Timestamp {
         Timestamp(ms)
     }
@@ -1503,6 +1598,73 @@ mod tests {
     #[test]
     fn relation_supersedes_maps_to_edge_type() {
         assert_eq!(EdgeType::from(Relation::Supersedes), EdgeType::Supersedes);
+    }
+
+    #[test]
+    fn search_hits_carry_embedding_cosine() {
+        let mut m = mem();
+        m.add_note("the recall gate uses cosine now", t(1)).unwrap();
+
+        let recall = m.search("recall gate", 5).unwrap();
+        let top = recall.hits.first().expect("at least one hit");
+
+        assert!(
+            top.cosine > 0.0 && top.cosine <= 1.0 + f64::EPSILON,
+            "cosine must be populated from the readout surface, got {}",
+            top.cosine
+        );
+    }
+
+    #[test]
+    fn add_in_scope_stamps_origin_scope_on_episodic_and_semantic() {
+        let mut m = mem();
+        let scope = ScopePath::new("project/anamnesis").unwrap();
+        m.add_in_scope("s1", "user", "first turn", t(1), scope.clone())
+            .unwrap();
+        m.add_in_scope("s1", "user", "second turn", t(2), scope.clone())
+            .unwrap();
+        m.flush_all().unwrap();
+
+        for id in m.engine().graph().storage().all_node_ids() {
+            let node = m.engine().graph().get_node(id).unwrap();
+            assert_eq!(
+                node.origin.scope.as_str(),
+                "project/anamnesis",
+                "node {id:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn search_scoped_ranks_same_scope_above_cross_scope() {
+        let mut m = mem();
+        let a = ScopePath::new("project/aaa").unwrap();
+        let b = ScopePath::new("project/bbb").unwrap();
+        m.add_in_scope(
+            "sa",
+            "user",
+            "shared topic phrase aaa local detail",
+            t(1),
+            a.clone(),
+        )
+        .unwrap();
+        m.add_in_scope(
+            "sb",
+            "user",
+            "shared topic phrase bbb foreign detail",
+            t(2),
+            b,
+        )
+        .unwrap();
+        m.flush_all().unwrap();
+
+        let recall = m.search_scoped("shared topic phrase", 2, Some(a)).unwrap();
+        let top = m.engine().graph().get_node(recall.hits[0].node_id).unwrap();
+        assert_eq!(
+            top.origin.scope.as_str(),
+            "project/aaa",
+            "same-scope must outrank cross-scope"
+        );
     }
 
     // ── relate ────────────────────────────────────────────────────────────────

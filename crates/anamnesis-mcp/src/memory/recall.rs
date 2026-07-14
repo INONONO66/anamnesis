@@ -1,17 +1,23 @@
 //! Gated recall primitives: the `recall`/`recall_packaged`/`recall_packaged_gated`
-//! registry methods and their namespace-locked bodies, plus the scope/tag
-//! post-filter applied before rendering. Split out of `memory.rs` verbatim
-//! (behavior-preserving move only) — every function body below is
-//! byte-identical to its prior form in the single-file module.
+//! registry methods and their namespace-locked bodies, plus recall gates and the
+//! scope/tag post-filter applied before rendering.
 
 use std::collections::HashSet;
 
-use anamnesis::graph::{NodeId, Timestamp};
+use anamnesis::graph::{NodeId, ScopePath, Timestamp};
 use anamnesis::memory::Hit;
 use anamnesis::storage::SqliteStorage;
 use anamnesis::{Error, Memory};
 
 use super::{MemoryRegistry, PackagedRecall};
+
+pub(crate) struct RecallFilters<'a> {
+    pub(crate) gate: Option<f64>,
+    pub(crate) cosine_gate: Option<f64>,
+    pub(crate) scope: Option<&'a str>,
+    pub(crate) tag: Option<&'a str>,
+    pub(crate) knowledge_only: bool,
+}
 
 impl MemoryRegistry {
     /// Search; on success optionally auto-commit (reinforce) the returned package.
@@ -76,7 +82,7 @@ impl MemoryRegistry {
         ns: Option<&str>,
     ) -> Result<PackagedRecall, Error> {
         // The classic path: reinforce per the registry default, no gate.
-        self.recall_packaged_gated(query, limit, ns, None, None)
+        self.recall_packaged_gated(query, limit, ns, None, None, None)
     }
 
     /// Gated, optionally read-only variant of [`recall_packaged`](Self::recall_packaged)
@@ -102,6 +108,7 @@ impl MemoryRegistry {
         ns: Option<&str>,
         reinforce: Option<bool>,
         gate: Option<f64>,
+        cosine_gate: Option<f64>,
     ) -> Result<PackagedRecall, Error> {
         // Count every recall; a recall is "reinforcing" per the SAME resolution
         // the method uses below (`reinforce.unwrap_or(self.reinforce_on_recall)`).
@@ -114,7 +121,7 @@ impl MemoryRegistry {
         let reinforce = reinforce.unwrap_or(self.reinforce_on_recall);
         let handle = self.namespace_handle(ns)?;
         let mut mem = handle.lock().unwrap_or_else(|p| p.into_inner());
-        mem_recall_packaged_gated(&mut mem, query, limit, reinforce, gate)
+        mem_recall_packaged_gated(&mut mem, query, limit, reinforce, gate, cosine_gate)
     }
 }
 
@@ -133,17 +140,11 @@ pub(crate) fn mem_recall_packaged_gated(
     limit: usize,
     reinforce: bool,
     gate: Option<f64>,
+    cosine_gate: Option<f64>,
 ) -> Result<PackagedRecall, Error> {
     let recall = mem.search(query, limit)?;
 
-    // Gate on the top readout score (hits are rank-ordered, highest first).
-    // No hits ⇒ below any threshold. Below `τ` ⇒ inject nothing.
-    let gated_out = match (gate, recall.hits.first().map(|h| h.score)) {
-        (Some(tau), Some(top)) => top < tau,
-        (Some(_), None) => true,
-        (None, _) => false,
-    };
-    if gated_out {
+    if gated_out(gate, cosine_gate, &recall.hits) {
         // Pure read, no reinforcement, nothing to inject. Still tick once for
         // durability / decay-clock advancement (single tick per call).
         mem.tick(Timestamp::now())?;
@@ -180,22 +181,34 @@ pub(crate) fn mem_recall_packaged_gated_filtered(
     query: &str,
     limit: usize,
     reinforce: bool,
-    gate: Option<f64>,
-    scope: Option<&str>,
-    tag: Option<&str>,
+    filters: RecallFilters<'_>,
 ) -> Result<PackagedRecall, Error> {
-    if scope.is_none() && tag.is_none() {
-        return mem_recall_packaged_gated(mem, query, limit, reinforce, gate);
+    if filters.scope.is_none() && filters.tag.is_none() && !filters.knowledge_only {
+        return mem_recall_packaged_gated(
+            mem,
+            query,
+            limit,
+            reinforce,
+            filters.gate,
+            filters.cosine_gate,
+        );
     }
 
-    let mut recall = mem.search(query, limit)?;
-
-    let gated_out = match (gate, recall.hits.first().map(|h| h.score)) {
-        (Some(tau), Some(top)) => top < tau,
-        (Some(_), None) => true,
-        (None, _) => false,
+    let scope_path = filters.scope.map(ScopePath::new).transpose()?;
+    let mut recall = match scope_path {
+        Some(scope) => mem.search_scoped(query, limit, Some(scope))?,
+        None => mem.search(query, limit)?,
     };
-    if gated_out {
+
+    filter_context_package(mem, &mut recall.package, filters.scope, filters.tag);
+    recall
+        .hits
+        .retain(|h| node_matches_scope_tag(mem, h.node_id, filters.scope, filters.tag));
+    if filters.knowledge_only {
+        apply_knowledge_only(mem, &mut recall.package, &mut recall.hits);
+    }
+
+    if gated_out(filters.gate, filters.cosine_gate, &recall.hits) {
         mem.tick(Timestamp::now())?;
         #[cfg(test)]
         super::record_tick();
@@ -204,11 +217,6 @@ pub(crate) fn mem_recall_packaged_gated_filtered(
             hits: Vec::new(),
         });
     }
-
-    filter_context_package(mem, &mut recall.package, scope, tag);
-    recall
-        .hits
-        .retain(|h| node_matches_scope_tag(mem, h.node_id, scope, tag));
 
     let context = recall.as_context();
     let raw = recall.hits.clone();
@@ -220,6 +228,21 @@ pub(crate) fn mem_recall_packaged_gated_filtered(
     super::record_tick();
     let hits = super::dedup_hits(raw);
     Ok(PackagedRecall { context, hits })
+}
+
+fn gated_out(gate: Option<f64>, cosine_gate: Option<f64>, hits: &[Hit]) -> bool {
+    let top = hits.first();
+    let readout_trip = match (gate, top.map(|h| h.score)) {
+        (Some(tau), Some(score)) => score < tau,
+        (Some(_), None) => true,
+        (None, _) => false,
+    };
+    let cosine_trip = match (cosine_gate, top.map(|h| h.cosine)) {
+        (Some(tau), Some(cosine)) => cosine < tau,
+        (Some(_), None) => true,
+        (None, _) => false,
+    };
+    readout_trip || cosine_trip
 }
 
 /// Whether `node_id`'s origin scope and entity tags satisfy the requested
@@ -234,7 +257,8 @@ fn node_matches_scope_tag(
     let Ok(node) = mem.engine().graph().get_node(node_id) else {
         return false;
     };
-    let scope_ok = scope.is_none_or(|s| node.origin.scope.as_str() == s);
+    let scope_ok =
+        scope.is_none_or(|s| node.origin.scope.is_universal() || node.origin.scope.as_str() == s);
     let tag_ok = tag.is_none_or(|t| node.entity_tags.iter().any(|et| et == t));
     scope_ok && tag_ok
 }
@@ -266,4 +290,28 @@ fn filter_context_package(
     package
         .tensions
         .retain(|t| surviving.contains(&t.node_a) && surviving.contains(&t.node_b));
+}
+
+fn apply_knowledge_only(
+    mem: &Memory<SqliteStorage>,
+    package: &mut anamnesis::query::ContextPackage,
+    hits: &mut Vec<Hit>,
+) {
+    package.memories.clear();
+    package.tensions.clear();
+    package
+        .identity
+        .retain(|f| !is_capture_node(mem, f.node_id));
+    package
+        .knowledge
+        .retain(|f| !is_capture_node(mem, f.node_id));
+    hits.retain(|h| !is_capture_node(mem, h.node_id));
+}
+
+fn is_capture_node(mem: &Memory<SqliteStorage>, node_id: NodeId) -> bool {
+    mem.engine()
+        .graph()
+        .get_node(node_id)
+        .map(|n| n.metadata.get("capture").is_some_and(|v| v == "true"))
+        .unwrap_or(true)
 }

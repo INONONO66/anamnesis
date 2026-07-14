@@ -27,6 +27,8 @@ pub(crate) const META_TURN_KEY: &str = "anamnesis:turn_key";
 /// start once [`extract_redelivery_ms`] elapses, up to
 /// [`EXTRACT_MAX_PULL_ATTEMPTS`] total deliveries — after that it is `"true"`.
 pub(crate) const META_EXTRACTED: &str = "anamnesis:extracted";
+/// Metadata key marking nodes that came from automatic transcript capture.
+pub(crate) const META_CAPTURE: &str = "capture";
 
 /// Total deliveries a captured turn gets before it is considered extracted.
 /// 2 = one normal pull + one redelivery after an abandoned pull.
