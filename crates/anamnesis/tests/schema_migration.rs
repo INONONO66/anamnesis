@@ -1,4 +1,4 @@
-//! Tests for SQLite schema migration infrastructure (v1 → … → v7 → v8).
+//! Tests for SQLite schema migration infrastructure (v1 through current).
 //!
 //! v6 dropped the `peers` / `peer_aliases` tables with the peer/trust subsystem;
 //! nodes' own `peer_id` / `source_kind` columns and `idx_nodes_peer` STAY.
@@ -88,8 +88,8 @@ fn fresh_db_gets_current_schema_version() {
     let conn = Connection::open(&tmp).expect("reopen");
     assert_eq!(
         schema_version(&conn),
-        10,
-        "fresh DB should be at schema v10"
+        11,
+        "fresh DB should be at schema v11"
     );
 
     // v6 removed the peer/trust subsystem: a fresh DB has no peers tables.
@@ -110,6 +110,10 @@ fn fresh_db_gets_current_schema_version() {
     assert!(
         node_cols.iter().any(|c| c == "evidence_prior"),
         "fresh DB nodes table must carry the v5 evidence_prior column"
+    );
+    assert!(
+        table_exists(&conn, "graph_metadata"),
+        "fresh DB must carry the v11 graph metadata table"
     );
 
     let _ = std::fs::remove_file(&tmp);
@@ -236,8 +240,8 @@ fn existing_db_migrates_from_v1_to_current() {
 
         assert_eq!(
             schema_version(&conn),
-            10,
-            "schema_version should be 10 after full v1 -> v10 migration"
+            11,
+            "schema_version should be 11 after full v1 -> v11 migration"
         );
 
         // Nodes' peer_id column (inside the Origin encoding) STAYS after the chain.
@@ -258,6 +262,10 @@ fn existing_db_migrates_from_v1_to_current() {
         assert!(
             node_cols.iter().any(|c| c == "evidence_prior"),
             "migrated nodes table must carry the v5 evidence_prior column"
+        );
+        assert!(
+            table_exists(&conn, "graph_metadata"),
+            "migrated DB must carry the v11 graph metadata table"
         );
     }
 
@@ -366,8 +374,8 @@ fn fresh_schema_equals_migrated_schema() {
     let fresh = Connection::open(&fresh_path).expect("reopen fresh");
     let migrated = Connection::open(&migrated_path).expect("reopen migrated");
 
-    assert_eq!(schema_version(&fresh), 10);
-    assert_eq!(schema_version(&migrated), 10);
+    assert_eq!(schema_version(&fresh), 11);
+    assert_eq!(schema_version(&migrated), 11);
 
     // Both the fresh-create and migration paths must converge on a nodes table that
     // carries the v5 evidence_prior column (legacy v1->v2 ALTERs leave the rest of
@@ -393,6 +401,11 @@ fn fresh_schema_equals_migrated_schema() {
         table_columns(&fresh, "retained_action"),
         table_columns(&migrated, "retained_action"),
         "fresh and migrated retained_action columns must be identical"
+    );
+    assert_eq!(
+        table_columns(&fresh, "graph_metadata"),
+        table_columns(&migrated, "graph_metadata"),
+        "fresh and migrated graph_metadata columns must be identical"
     );
     // The peers tables must be absent on BOTH the fresh-create and migrated paths
     // after the v6 drop (schema convergence: neither path leaves them behind).
@@ -585,8 +598,8 @@ fn v5_db_with_planted_peers_reopens_clean_at_v6() {
         let conn = Connection::open(&tmp).expect("reopen after migration");
         assert_eq!(
             schema_version(&conn),
-            10,
-            "DB should be at v10 after reopen"
+            11,
+            "DB should be at v11 after reopen"
         );
         assert!(
             !table_exists(&conn, "peers"),
@@ -713,7 +726,7 @@ fn v5_db_with_bare_node_type_normalizes_through_full_chain_to_v8() {
 
     {
         let conn = Connection::open(&tmp).expect("reopen raw");
-        assert_eq!(schema_version(&conn), 10, "chain must land at v10");
+        assert_eq!(schema_version(&conn), 11, "chain must land at v11");
         let enc: String = conn
             .query_row(
                 "SELECT node_type FROM nodes WHERE id = ?1",
