@@ -1880,3 +1880,374 @@ fn tiny_graph_single_cluster() {
         );
     }
 }
+
+mod migration_job {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Barrier, Condvar};
+
+    use anamnesis::Error;
+    use anamnesis::embedding::EmbeddingProvider;
+    use anamnesis::storage::SqliteStorage;
+
+    use crate::dispatch::DaemonRuntimeContext;
+    use crate::memory::MigrationLockLease;
+    use crate::memory::migration::MigrationRuntime;
+
+    struct OldProvider;
+
+    impl EmbeddingProvider for OldProvider {
+        fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, Error> {
+            Ok(texts.iter().map(|_| vec![0.5; 4]).collect())
+        }
+
+        fn dimensions(&self) -> usize {
+            4
+        }
+
+        fn model_name(&self) -> &str {
+            "source-model"
+        }
+    }
+
+    struct BlockingProvider {
+        calls: AtomicUsize,
+        started: Mutex<Option<std::sync::mpsc::Sender<()>>>,
+        released: Arc<(Mutex<bool>, Condvar)>,
+    }
+
+    impl BlockingProvider {
+        fn new(started: std::sync::mpsc::Sender<()>) -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+                started: Mutex::new(Some(started)),
+                released: Arc::new((Mutex::new(false), Condvar::new())),
+            }
+        }
+
+        fn release(&self) {
+            let (released, wake) = self.released.as_ref();
+            *released
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
+            wake.notify_all();
+        }
+    }
+
+    impl EmbeddingProvider for BlockingProvider {
+        fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, Error> {
+            self.calls.fetch_add(texts.len(), Ordering::SeqCst);
+            if let Some(started) = self
+                .started
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take()
+            {
+                let _ = started.send(());
+            }
+            let (released, wake) = self.released.as_ref();
+            let mut released = released
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            while !*released {
+                released = wake
+                    .wait(released)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+            }
+            Ok(texts.iter().map(|_| vec![0.25; 3]).collect())
+        }
+
+        fn dimensions(&self) -> usize {
+            3
+        }
+
+        fn model_name(&self) -> &str {
+            "target-model"
+        }
+    }
+
+    fn create_old_fixture(db: &std::path::Path, dir: &std::path::Path) {
+        let mut registry = MemoryRegistry::file_backed_with(
+            Arc::new(OldProvider),
+            db.to_path_buf(),
+            dir.to_path_buf(),
+            "default".to_string(),
+            false,
+        );
+        registry
+            .remember("legacy embedding content", None)
+            .expect("create old embedding fixture");
+        registry.flush_all_open().expect("flush old fixture");
+    }
+
+    fn daemon_runtime(
+        registry: Arc<Mutex<MemoryRegistry>>,
+        default_db: &std::path::Path,
+    ) -> (DispatchRuntime, Arc<MigrationRuntime>) {
+        let mut lock_path = default_db.as_os_str().to_os_string();
+        lock_path.push(".lock");
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(lock_path)
+            .expect("open daemon lock");
+        fs4::FileExt::try_lock(&lock).expect("acquire daemon lock");
+        let migrations = Arc::new(
+            MigrationRuntime::new(
+                &registry,
+                default_db.to_path_buf(),
+                MigrationLockLease::from(Arc::new(lock)),
+            )
+            .expect("create migration runtime"),
+        );
+        let runtime = DispatchRuntime::daemon(DaemonRuntimeContext {
+            registry,
+            migrations: Arc::clone(&migrations),
+        });
+        (runtime, migrations)
+    }
+
+    fn stats_request(namespace: Option<&str>) -> Request {
+        Request::Stats {
+            namespace: namespace.map(str::to_string),
+        }
+    }
+
+    fn recall_request() -> Request {
+        Request::Recall {
+            query: "legacy content".to_string(),
+            limit: Some(3),
+            namespace: None,
+            reinforce: Some(false),
+            gate_threshold: None,
+            cosine_gate: None,
+            knowledge_only: None,
+            scope: None,
+            tag: None,
+        }
+    }
+
+    #[test]
+    fn mismatch_schedules_exactly_one_background_job_per_namespace() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("memory.db");
+        create_old_fixture(&db, dir.path());
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let provider = Arc::new(BlockingProvider::new(started_tx));
+        let registry = Arc::new(Mutex::new(MemoryRegistry::file_backed_unlocked_with(
+            provider.clone(),
+            db.clone(),
+            dir.path().to_path_buf(),
+            "default".to_string(),
+            false,
+        )));
+        let (runtime, migrations) = daemon_runtime(registry, &db);
+        let barrier = Arc::new(Barrier::new(3));
+        let mut workers = Vec::new();
+        for _ in 0..2 {
+            let runtime = runtime.clone();
+            let barrier = Arc::clone(&barrier);
+            workers.push(std::thread::spawn(move || {
+                barrier.wait();
+                dispatch_two_phase(&runtime, stats_request(None))
+            }));
+        }
+        barrier.wait();
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("one migration worker reaches embedding");
+        assert!(matches!(
+            dispatch_two_phase(&runtime, stats_request(Some("compatible"))),
+            Response::Ok { .. }
+        ));
+        for worker in workers {
+            assert!(matches!(worker.join().unwrap(), Response::Err { .. }));
+        }
+        assert_eq!(migrations.job_count(), 1);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+        provider.release();
+        migrations.drain().expect("migration completes");
+        assert!(matches!(
+            dispatch_two_phase(&runtime, stats_request(None)),
+            Response::Ok { .. }
+        ));
+    }
+
+    #[test]
+    fn recall_while_migrating_returns_internal_and_hook_injects_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("memory.db");
+        create_old_fixture(&db, dir.path());
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let provider = Arc::new(BlockingProvider::new(started_tx));
+        let registry = Arc::new(Mutex::new(MemoryRegistry::file_backed_unlocked_with(
+            provider.clone(),
+            db.clone(),
+            dir.path().to_path_buf(),
+            "default".to_string(),
+            false,
+        )));
+        let (runtime, migrations) = daemon_runtime(registry, &db);
+        assert!(matches!(
+            dispatch_two_phase(&runtime, stats_request(None)),
+            Response::Err { .. }
+        ));
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("migration reaches embedding");
+        let response = dispatch_two_phase(&runtime, recall_request());
+        let Response::Err { kind, message } = response else {
+            panic!("recall must be unavailable during migration")
+        };
+        assert_eq!(kind, ErrKind::Internal);
+        let outcome: Result<Result<String, &str>, tokio::time::error::Elapsed> =
+            Ok(Err(message.as_str()));
+        assert!(crate::hook::interpret_recall_for_test(outcome).is_none());
+        provider.release();
+        migrations.drain().expect("migration completes");
+    }
+
+    #[test]
+    fn backup_failure_never_starts_embedding_and_remains_fail_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("memory.db");
+        create_old_fixture(&db, dir.path());
+        let before = SqliteStorage::inspect_embedding_migration(&db).unwrap();
+        let backup = crate::memory::backup_path_for_database(&db).unwrap();
+        std::fs::create_dir(&backup).unwrap();
+        let (started_tx, _started_rx) = std::sync::mpsc::channel();
+        let provider = Arc::new(BlockingProvider::new(started_tx));
+        let registry = Arc::new(Mutex::new(MemoryRegistry::file_backed_unlocked_with(
+            provider.clone(),
+            db.clone(),
+            dir.path().to_path_buf(),
+            "default".to_string(),
+            false,
+        )));
+        let (runtime, migrations) = daemon_runtime(Arc::clone(&registry), &db);
+        assert!(matches!(
+            dispatch_two_phase(&runtime, stats_request(None)),
+            Response::Err { .. }
+        ));
+        assert!(migrations.drain().is_err());
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+        assert!(matches!(
+            registry
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .namespace_migration_state("default"),
+            Some(crate::memory::NamespaceMigrationState::Failed { .. })
+        ));
+        assert!(matches!(
+            dispatch_two_phase(&runtime, stats_request(None)),
+            Response::Err { .. }
+        ));
+        let after = SqliteStorage::inspect_embedding_migration(&db).unwrap();
+        assert_eq!(before.embedding_model, after.embedding_model);
+        assert_eq!(before.embedding_dimensions, after.embedding_dimensions);
+        assert!(after.checkpoint.is_none());
+    }
+
+    #[test]
+    fn auto_migration_opt_out_does_not_mutate_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("memory.db");
+        create_old_fixture(&db, dir.path());
+        let before = SqliteStorage::inspect_embedding_migration(&db).unwrap();
+        let (started_tx, _started_rx) = std::sync::mpsc::channel();
+        let provider = Arc::new(BlockingProvider::new(started_tx));
+        let mut registry = MemoryRegistry::file_backed_unlocked_with(
+            provider.clone(),
+            db.clone(),
+            dir.path().to_path_buf(),
+            "default".to_string(),
+            false,
+        );
+        registry.set_auto_migrate_embeddings(false);
+        let registry = Arc::new(Mutex::new(registry));
+        let (runtime, migrations) = daemon_runtime(registry, &db);
+        let response = dispatch_two_phase(&runtime, stats_request(None));
+        let Response::Err { message, .. } = response else {
+            panic!("opt-out mismatch must fail open")
+        };
+        assert!(message.contains("ANAMNESIS_AUTO_MIGRATE_EMBEDDINGS"));
+        assert_eq!(migrations.job_count(), 0);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+        let after = SqliteStorage::inspect_embedding_migration(&db).unwrap();
+        assert_eq!(before.embedding_model, after.embedding_model);
+        assert_eq!(before.embedding_dimensions, after.embedding_dimensions);
+        assert!(after.checkpoint.is_none());
+    }
+
+    #[test]
+    fn named_namespace_job_holds_its_own_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let default_db = dir.path().join("memory.db");
+        let named_db = dir.path().join("other.db");
+        create_old_fixture(&named_db, dir.path());
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let provider = Arc::new(BlockingProvider::new(started_tx));
+        let registry = Arc::new(Mutex::new(MemoryRegistry::file_backed_unlocked_with(
+            provider.clone(),
+            default_db.clone(),
+            dir.path().to_path_buf(),
+            "default".to_string(),
+            false,
+        )));
+        let (runtime, migrations) = daemon_runtime(registry, &default_db);
+        assert!(matches!(
+            dispatch_two_phase(&runtime, stats_request(Some("other"))),
+            Response::Err { .. }
+        ));
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("named migration reaches embedding");
+        let mut named_lock_path = named_db.as_os_str().to_os_string();
+        named_lock_path.push(".lock");
+        let competitor = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(named_lock_path)
+            .unwrap();
+        assert!(fs4::FileExt::try_lock(&competitor).is_err());
+        provider.release();
+        migrations.drain().expect("named migration completes");
+    }
+
+    #[test]
+    fn migration_lock_is_acquired_only_after_registry_guard_is_released() {
+        let dir = tempfile::tempdir().unwrap();
+        let default_db = dir.path().join("memory.db");
+        let named_db = dir.path().join("other.db");
+        create_old_fixture(&named_db, dir.path());
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let provider = Arc::new(BlockingProvider::new(started_tx));
+        let registry = Arc::new(Mutex::new(MemoryRegistry::file_backed_unlocked_with(
+            provider.clone(),
+            default_db.clone(),
+            dir.path().to_path_buf(),
+            "default".to_string(),
+            false,
+        )));
+        let (runtime, migrations) = daemon_runtime(Arc::clone(&registry), &default_db);
+        let observed = Arc::new(AtomicUsize::new(0));
+        let observed_clone = Arc::clone(&observed);
+        let registry_clone = Arc::clone(&registry);
+        migrations.set_lock_observer(Arc::new(move || {
+            assert!(registry_clone.try_lock().is_ok());
+            observed_clone.fetch_add(1, Ordering::SeqCst);
+        }));
+        assert!(matches!(
+            dispatch_two_phase(&runtime, stats_request(Some("other"))),
+            Response::Err { .. }
+        ));
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("migration reaches embedding");
+        assert_eq!(observed.load(Ordering::SeqCst), 1);
+        provider.release();
+        migrations.drain().expect("migration completes");
+    }
+}

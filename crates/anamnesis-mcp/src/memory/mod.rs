@@ -48,9 +48,33 @@ pub(crate) struct PendingEmbeddingMigrationRequest {
     pub provider: Arc<dyn EmbeddingProvider>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum NamespaceMigrationState {
+    Running,
+    Failed { message: String },
+    Completed,
+}
+
+pub(crate) type NamespaceHandle = Arc<Mutex<Memory<SqliteStorage>>>;
+
+pub(crate) enum NamespaceResolution {
+    Ready(NamespaceHandle),
+    StartMigration(PendingEmbeddingMigrationRequest),
+    Migrating,
+    MigrationFailed(String),
+}
+
+pub(crate) enum NamespaceProbe {
+    Resolved(NamespaceResolution),
+    Inspect {
+        key: String,
+        pending: PendingEmbeddingMigrationRequest,
+    },
+}
+
 pub(crate) struct EmbeddingMigrationRequest {
     pending: PendingEmbeddingMigrationRequest,
-    pub lock_lease: MigrationLockLease,
+    lock_lease: MigrationLockLease,
 }
 
 impl From<(PendingEmbeddingMigrationRequest, MigrationLockLease)> for EmbeddingMigrationRequest {
@@ -92,6 +116,15 @@ impl MigrationLockLease {
         match &self.kind {
             MigrationLockLeaseKind::Acquired(file) => file,
             MigrationLockLeaseKind::DaemonDefault(file) => file,
+        }
+    }
+
+    fn into_daemon_default(self) -> Result<Arc<std::fs::File>, Error> {
+        match self.kind {
+            MigrationLockLeaseKind::DaemonDefault(file) => Ok(file),
+            MigrationLockLeaseKind::Acquired(_) => Err(Error::InvalidInput(
+                "migration runtime requires the daemon's default database lease".to_string(),
+            )),
         }
     }
 }
@@ -285,6 +318,58 @@ enum Backend {
     Memory,
 }
 
+pub(crate) enum NamespaceCompatibility {
+    Ready,
+    DimensionMismatch {
+        stored_model: Option<String>,
+        db_dimensions: Vec<Option<usize>>,
+        target_model: String,
+        target_dimensions: usize,
+    },
+    ModelMismatch {
+        stored_model: String,
+        target_model: String,
+        target_dimensions: usize,
+    },
+    IncompleteMigration {
+        target_model: String,
+        target_dimensions: usize,
+    },
+}
+
+impl NamespaceCompatibility {
+    pub(crate) fn message(&self) -> String {
+        match self {
+            Self::Ready => "embedding space is compatible".to_string(),
+            Self::DimensionMismatch {
+                stored_model,
+                db_dimensions,
+                target_model,
+                target_dimensions,
+            } => format!(
+                "embedding dimension mismatch: DB dimensions are {db_dimensions:?} with stored \
+                 model {stored_model:?}, but configured model '{target_model}' produces \
+                 {target_dimensions}-d embeddings"
+            ),
+            Self::ModelMismatch {
+                stored_model,
+                target_model,
+                target_dimensions,
+            } => format!(
+                "embedding model mismatch: DB was created by '{stored_model}', but configured \
+                 model '{target_model}' produces {target_dimensions}-d embeddings"
+            ),
+            Self::IncompleteMigration {
+                target_model,
+                target_dimensions,
+            } => format!(
+                "embedding migration checkpoint is incomplete for configured model \
+                 '{target_model}' ({target_dimensions}-d)"
+            ),
+        }
+    }
+}
+
 /// Daemon-lifetime operation counters (in-memory; reset when the daemon
 /// exits). A working-session observability window, not a persisted metric.
 ///
@@ -362,6 +447,8 @@ pub struct MemoryRegistry {
     /// `pub(crate)` so the capture pipeline (`crate::capture`) can increment
     /// `captured_turns` / `extraction_pulls` from its impl block there.
     pub(crate) ops: OpCounters,
+    migration_states: HashMap<String, NamespaceMigrationState>,
+    auto_migrate_embeddings: bool,
 }
 
 impl MemoryRegistry {
@@ -410,16 +497,16 @@ impl MemoryRegistry {
             seen_turn_keys: HashSet::new(),
             unextracted: HashMap::new(),
             ops: OpCounters::default(),
+            migration_states: HashMap::new(),
+            auto_migrate_embeddings: true,
         }
     }
 
-    /// Daemon constructor: file-backed, FastEmbed provider built lazily, but the
-    /// registry does **not** take per-namespace locks.
+    /// Daemon constructor: file-backed, FastEmbed provider built lazily, with
+    /// the default database lock supplied externally.
     ///
-    /// The daemon already holds the single exclusive lock on the resolved DB (via
-    /// [`crate::daemon::acquire_daemon`]) and is the sole process that opens it,
-    /// so re-locking inside the registry is both redundant and would deadlock the
-    /// default namespace against the daemon's own held lock.
+    /// The daemon does not re-lock its default database, but named namespace
+    /// databases retain their own process-lifetime sibling locks.
     #[allow(dead_code)]
     pub fn file_backed_unlocked(
         default_db: PathBuf,
@@ -452,6 +539,10 @@ impl MemoryRegistry {
         }
     }
 
+    pub(crate) fn set_auto_migrate_embeddings(&mut self, enabled: bool) {
+        self.auto_migrate_embeddings = enabled;
+    }
+
     /// Test/embeddable constructor: in-memory graphs + a caller-supplied provider.
     #[cfg(test)]
     pub fn in_memory_with(provider: Arc<dyn EmbeddingProvider>, reinforce_on_recall: bool) -> Self {
@@ -467,6 +558,8 @@ impl MemoryRegistry {
             seen_turn_keys: HashSet::new(),
             unextracted: HashMap::new(),
             ops: OpCounters::default(),
+            migration_states: HashMap::new(),
+            auto_migrate_embeddings: true,
         }
     }
 
@@ -495,6 +588,8 @@ impl MemoryRegistry {
             seen_turn_keys: HashSet::new(),
             unextracted: HashMap::new(),
             ops: OpCounters::default(),
+            migration_states: HashMap::new(),
+            auto_migrate_embeddings: true,
         }
     }
 
@@ -536,6 +631,95 @@ impl MemoryRegistry {
         };
         self.provider = Some(p.clone());
         Ok(p)
+    }
+
+    pub(crate) fn prepare_namespace_probe(
+        &mut self,
+        namespace: Option<&str>,
+    ) -> Result<NamespaceProbe, Error> {
+        let key = self.canonical_ns_key(namespace);
+        match self.migration_states.get(&key).cloned() {
+            Some(NamespaceMigrationState::Running) => {
+                return Ok(NamespaceProbe::Resolved(NamespaceResolution::Migrating));
+            }
+            Some(NamespaceMigrationState::Failed { message }) => {
+                return Ok(NamespaceProbe::Resolved(
+                    NamespaceResolution::MigrationFailed(message),
+                ));
+            }
+            Some(NamespaceMigrationState::Completed) => {
+                self.migration_states.remove(&key);
+            }
+            None => {}
+        }
+        if let Some(handle) = self.open.get(&key) {
+            return Ok(NamespaceProbe::Resolved(NamespaceResolution::Ready(
+                Arc::clone(handle),
+            )));
+        }
+
+        let Some(db_path) = self.namespace_db_path(&key)? else {
+            return self
+                .namespace_handle(Some(&key))
+                .map(NamespaceResolution::Ready)
+                .map(NamespaceProbe::Resolved);
+        };
+        if !db_path.exists() {
+            return self
+                .namespace_handle(Some(&key))
+                .map(NamespaceResolution::Ready)
+                .map(NamespaceProbe::Resolved);
+        }
+
+        let provider = self.provider()?;
+        Ok(NamespaceProbe::Inspect {
+            key: key.clone(),
+            pending: PendingEmbeddingMigrationRequest {
+                namespace: key,
+                db_path,
+                provider,
+            },
+        })
+    }
+
+    pub(crate) fn schedule_namespace_migration(
+        &mut self,
+        key: String,
+        pending: PendingEmbeddingMigrationRequest,
+        mismatch: NamespaceCompatibility,
+    ) -> NamespaceResolution {
+        match self.migration_states.get(&key).cloned() {
+            Some(NamespaceMigrationState::Running) => NamespaceResolution::Migrating,
+            Some(NamespaceMigrationState::Failed { message }) => {
+                NamespaceResolution::MigrationFailed(message)
+            }
+            Some(NamespaceMigrationState::Completed) | None if !self.auto_migrate_embeddings => {
+                NamespaceResolution::MigrationFailed(format!(
+                    "{}. Automatic migration is disabled by \
+                     ANAMNESIS_AUTO_MIGRATE_EMBEDDINGS; no database mutation occurred. Run \
+                     `anamnesis migrate-embeddings --namespace {key}`.",
+                    mismatch.message()
+                ))
+            }
+            Some(NamespaceMigrationState::Completed) | None => {
+                self.migration_states
+                    .insert(key, NamespaceMigrationState::Running);
+                NamespaceResolution::StartMigration(pending)
+            }
+        }
+    }
+
+    pub(crate) fn finish_namespace_migration(&mut self, key: &str, result: Result<(), String>) {
+        let state = match result {
+            Ok(()) => NamespaceMigrationState::Completed,
+            Err(message) => NamespaceMigrationState::Failed { message },
+        };
+        self.migration_states.insert(key.to_string(), state);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn namespace_migration_state(&self, key: &str) -> Option<NamespaceMigrationState> {
+        self.migration_states.get(key).cloned()
     }
 
     /// Sanitize a namespace into a safe file stem (no path traversal).
@@ -637,13 +821,15 @@ impl MemoryRegistry {
                 .map_err(|e| Error::StorageError(format!("create db dir: {e}")))?;
         }
 
-        // The daemon already holds the single exclusive lock on the resolved DB
-        // and is the sole opener, so it skips the per-namespace lock entirely.
-        // Every other path takes an exclusive lock on a sibling `<db>.lock` so a
-        // second anamnesis-mcp process can't open the same database (two
-        // processes => two in-memory caches over one file => corruption). The OS
-        // releases the lock when this process exits or is killed.
-        if self.lock_on_open {
+        // The daemon reuses its externally held default DB lock. Named namespace
+        // DBs and embedded callers take their own sibling `<db>.lock`, preventing
+        // two in-memory caches in different processes from opening one SQLite DB.
+        let daemon_named_namespace = match &self.backend {
+            Backend::File { default_db, .. } => path != *default_db,
+            #[cfg(test)]
+            Backend::Memory => false,
+        };
+        if self.lock_on_open || daemon_named_namespace {
             self.locks.push(acquire_namespace_lock(&path)?);
         }
 
@@ -839,6 +1025,49 @@ pub(crate) fn verify_embedding_dim(
         return Ok(());
     }
     Ok(())
+}
+
+fn inspect_namespace_compatibility(
+    db_path: &std::path::Path,
+    provider: &dyn EmbeddingProvider,
+) -> Result<NamespaceCompatibility, Error> {
+    let inspection = SqliteStorage::inspect_embedding_migration(db_path)?;
+    let target_model = provider.model_name().to_string();
+    let target_dimensions = provider.dimensions();
+    if inspection.checkpoint.is_some() {
+        return Ok(NamespaceCompatibility::IncompleteMigration {
+            target_model,
+            target_dimensions,
+        });
+    }
+    if inspection
+        .embedding_dimensions
+        .iter()
+        .any(|dimension| *dimension != Some(target_dimensions))
+    {
+        return Ok(NamespaceCompatibility::DimensionMismatch {
+            stored_model: inspection.embedding_model,
+            db_dimensions: inspection.embedding_dimensions,
+            target_model,
+            target_dimensions,
+        });
+    }
+    match inspection.embedding_model {
+        Some(stored_model) if stored_model != target_model => {
+            Ok(NamespaceCompatibility::ModelMismatch {
+                stored_model,
+                target_model,
+                target_dimensions,
+            })
+        }
+        Some(_) | None => Ok(NamespaceCompatibility::Ready),
+    }
+}
+
+pub(crate) fn inspect_pending_embedding_compatibility(
+    pending: &PendingEmbeddingMigrationRequest,
+) -> Result<NamespaceCompatibility, Error> {
+    inspect_namespace_compatibility(&pending.db_path, pending.provider.as_ref())
 }
 
 fn verify_embedding_compatibility(

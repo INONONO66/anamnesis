@@ -1,6 +1,7 @@
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, Weak};
 
 use anamnesis::embedding::{EmbeddingProvider, widen};
 use anamnesis::storage::sqlite::{
@@ -12,7 +13,8 @@ use anamnesis::{Error, Memory};
 
 use super::{
     EmbeddingMigrationOutcome, EmbeddingMigrationReport, EmbeddingMigrationRequest,
-    EmbeddingProgress, backup_path_for_database, verify_embedding_compatibility,
+    EmbeddingProgress, MemoryRegistry, MigrationLockLease, PendingEmbeddingMigrationRequest,
+    acquire_namespace_migration_lock, backup_path_for_database, verify_embedding_compatibility,
 };
 
 pub(crate) const EMBEDDING_MIGRATION_BATCH_SIZE: usize = 64;
@@ -260,4 +262,182 @@ fn reopen_with_normal_guard(
     let model = provider.model_name().to_string();
     let mut memory = Memory::with_provider(db_path, provider)?;
     verify_embedding_compatibility(&mut memory, dimensions, &model)
+}
+
+pub(crate) struct MigrationSupervisor {
+    jobs: HashMap<String, std::thread::JoinHandle<()>>,
+    registry: Weak<Mutex<MemoryRegistry>>,
+    failures: Arc<Mutex<Vec<String>>>,
+}
+
+impl MigrationSupervisor {
+    fn new(registry: &Arc<Mutex<MemoryRegistry>>) -> Self {
+        Self {
+            jobs: HashMap::new(),
+            registry: Arc::downgrade(registry),
+            failures: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn spawn_leased(
+        &mut self,
+        key: String,
+        request: EmbeddingMigrationRequest,
+    ) -> Result<(), Error> {
+        if self.jobs.contains_key(&key) {
+            return Ok(());
+        }
+        let registry = self.registry.clone();
+        let failures = Arc::clone(&self.failures);
+        let worker_key = key.clone();
+        let handle = std::thread::Builder::new()
+            .name(format!("embedding-migration-{key}"))
+            .spawn(move || {
+                let mut progress = |event: EmbeddingProgress| {
+                    tracing::info!(
+                        namespace = %event.namespace,
+                        committed = event.committed,
+                        total = event.total,
+                        batch = event.batch,
+                        source_model = ?event.source_model,
+                        source_dimensions = ?event.source_dimensions,
+                        target_model = %event.target_model,
+                        target_dimensions = event.target_dimensions,
+                        "embedding migration batch committed"
+                    );
+                };
+                let state = migrate_embeddings(request, &mut progress)
+                    .map(|_| ())
+                    .map_err(|error| error.to_string());
+                if let Some(registry) = registry.upgrade() {
+                    registry
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .finish_namespace_migration(&worker_key, state.clone());
+                }
+                match state {
+                    Ok(()) => tracing::info!(
+                        namespace = %worker_key,
+                        "embedding migration completed"
+                    ),
+                    Err(message) => {
+                        tracing::error!(
+                            namespace = %worker_key,
+                            error = %message,
+                            "embedding migration failed"
+                        );
+                        failures
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .push(format!("{worker_key}: {message}"));
+                    }
+                }
+            })
+            .map_err(|error| {
+                Error::StorageError(format!("spawn embedding migration for {key}: {error}"))
+            })?;
+        self.jobs.insert(key, handle);
+        Ok(())
+    }
+
+    pub(crate) fn drain(&mut self) -> Result<(), Error> {
+        let jobs = std::mem::take(&mut self.jobs);
+        let mut errors = Vec::new();
+        for (key, handle) in jobs {
+            if handle.join().is_err() {
+                errors.push(format!("{key}: migration worker panicked"));
+            }
+        }
+        errors.extend(std::mem::take(
+            &mut *self
+                .failures
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        ));
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(Error::StorageError(format!(
+                "embedding migration workers failed: {}",
+                errors.join("; ")
+            )))
+        }
+    }
+
+    #[cfg(test)]
+    fn job_count(&self) -> usize {
+        self.jobs.len()
+    }
+}
+
+pub(crate) struct MigrationRuntime {
+    supervisor: Mutex<MigrationSupervisor>,
+    default_db_lock: Arc<std::fs::File>,
+    default_db_path: PathBuf,
+    #[cfg(test)]
+    lock_observer: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+}
+
+impl MigrationRuntime {
+    pub(crate) fn new(
+        registry: &Arc<Mutex<MemoryRegistry>>,
+        default_db_path: PathBuf,
+        default_lease: MigrationLockLease,
+    ) -> Result<Self, Error> {
+        Ok(Self {
+            supervisor: Mutex::new(MigrationSupervisor::new(registry)),
+            default_db_lock: default_lease.into_daemon_default()?,
+            default_db_path,
+            #[cfg(test)]
+            lock_observer: Mutex::new(None),
+        })
+    }
+
+    pub(crate) fn spawn_once(
+        &self,
+        key: String,
+        pending: PendingEmbeddingMigrationRequest,
+    ) -> Result<(), Error> {
+        #[cfg(test)]
+        if let Some(observer) = self
+            .lock_observer
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+        {
+            observer();
+        }
+        let lease = if pending.db_path == self.default_db_path {
+            MigrationLockLease::from(Arc::clone(&self.default_db_lock))
+        } else {
+            acquire_namespace_migration_lock(&pending.db_path)?
+        };
+        self.supervisor
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .spawn_leased(key, EmbeddingMigrationRequest::from((pending, lease)))
+    }
+
+    pub(crate) fn drain(&self) -> Result<(), Error> {
+        self.supervisor
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .drain()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn job_count(&self) -> usize {
+        self.supervisor
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .job_count()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_lock_observer(&self, observer: Arc<dyn Fn() + Send + Sync>) {
+        *self
+            .lock_observer
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(observer);
+    }
 }

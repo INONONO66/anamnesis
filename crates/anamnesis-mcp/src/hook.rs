@@ -263,6 +263,13 @@ fn interpret_recall<E>(
     }
 }
 
+#[cfg(test)]
+pub(crate) fn interpret_recall_for_test<E>(
+    outcome: Result<Result<String, E>, tokio::time::error::Elapsed>,
+) -> Option<String> {
+    interpret_recall(outcome)
+}
+
 /// The cwd basename, used as the SessionStart seed query. `None` for an absent /
 /// empty / root path (nothing project-specific to seed on).
 fn project_cue(cwd: Option<&str>) -> Option<String> {
@@ -989,6 +996,7 @@ mod tests {
             capture_enabled: true,
             extract_threshold_n: 20,
             embed_model: crate::config::DEFAULT_EMBED_MODEL.to_string(),
+            auto_migrate_embeddings: true,
         }
     }
 
