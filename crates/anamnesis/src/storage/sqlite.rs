@@ -56,6 +56,8 @@ pub struct SqliteStorage {
 }
 
 impl SqliteStorage {
+    const EMBEDDING_MODEL_KEY: &str = "embedding_model";
+
     /// Create an in-memory SQLite storage backend.
     pub fn new() -> Result<Self, Error> {
         Self::in_memory()
@@ -69,6 +71,30 @@ impl SqliteStorage {
     /// Open or create a SQLite-backed storage file.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, Error> {
         Self::from_connection(Connection::open(path).map_err(sqlite_error)?)
+    }
+
+    /// Return the embedding model recorded for this graph, if any.
+    pub fn embedding_model_name(&self) -> Result<Option<String>, Error> {
+        let conn = self.lock_conn()?;
+        conn.query_row(
+            "SELECT value FROM graph_metadata WHERE key = ?1",
+            [Self::EMBEDDING_MODEL_KEY],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(sqlite_error)
+    }
+
+    /// Record the embedding model used to create this graph's vector space.
+    pub fn set_embedding_model_name(&mut self, model: &str) -> Result<(), Error> {
+        let conn = self.lock_conn()?;
+        conn.execute(
+            "INSERT INTO graph_metadata (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![Self::EMBEDDING_MODEL_KEY, model],
+        )
+        .map_err(sqlite_error)?;
+        Ok(())
     }
 
     fn from_connection(conn: Connection) -> Result<Self, Error> {
@@ -277,6 +303,17 @@ impl Clone for SqliteStorage {
                 .unwrap_or_else(|e| panic!("failed to begin transaction during sqlite clone: {e}"));
 
             let write_result = (|| -> Result<(), Box<dyn std::error::Error>> {
+                if let Some(model) = self
+                    .embedding_model_name()
+                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?
+                {
+                    conn.execute(
+                        "INSERT INTO graph_metadata (key, value) VALUES (?1, ?2)",
+                        params![Self::EMBEDDING_MODEL_KEY, model],
+                    )
+                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+                }
+
                 for id in self.all_node_ids() {
                     let node = self
                         .get_node(id)
@@ -1956,7 +1993,7 @@ mod tests {
 /// Current on-disk schema version. The fresh-DB `create_schema` path and the
 /// incremental migration chain must converge on an IDENTICAL schema at this
 /// version (same columns, same indexes).
-const SCHEMA_VERSION: u32 = 10;
+const SCHEMA_VERSION: u32 = 11;
 
 /// Run schema migrations to bring the database up to the current version.
 ///
@@ -1996,13 +2033,15 @@ const SCHEMA_VERSION: u32 = 10;
 ///   is empty (`''`) — the shape a legacy pre-ACT-R row left on disk, which
 ///   otherwise makes `compute_base_level` return `NEG_INFINITY`. Data only,
 ///   idempotent (`WHERE access_history = ''`). See [`migrate_v8_to_v9`].
-/// - v10 (current): `edges.leaked_at INTEGER` — the per-edge leak checkpoint
+/// - v10: `edges.leaked_at INTEGER` — the per-edge leak checkpoint
 ///   `Engine::tick`'s idle-edge leakage measures idle time from (flagship bug
 ///   #2: without a checkpoint, `accessed_at` — a committed-USE marker, never
 ///   advanced by leakage — made every repeated `tick` at a fixed idle window
 ///   re-subtract the same idle-window leak again, collapsing an idle edge's
 ///   conductance the more the graph was ticked). Backfilled to `accessed_at`
 ///   for existing rows. See [`migrate_v9_to_v10`].
+/// - v11 (current): `graph_metadata` key/value table for graph-wide persistent
+///   metadata, initially used to guard the embedding model identity.
 /// - v5: `nodes.evidence_prior REAL NOT NULL DEFAULT 0` — the persistent,
 ///   decay-exempt evidence prior `P_i` of the `A_i = B_i + P_i` decomposition
 ///   (ADR-0008). Backfilled to `0.0`: the base-level `B_i` is recomputed from
@@ -2064,7 +2103,7 @@ fn migrate_schema(conn: &Connection) -> Result<(), Error> {
                 migrate_v8_to_v9(conn)?;
                 migrate_v9_to_v10(conn)?;
             } else {
-                // Brand new database — create the current (v9) schema directly.
+                // Brand new database — create the current schema directly.
                 // No hop runs to stamp the version, so this arm stamps it itself.
                 create_schema(conn)?;
                 conn.execute_batch(&format!(
@@ -2142,6 +2181,9 @@ fn migrate_schema(conn: &Connection) -> Result<(), Error> {
             migrate_v9_to_v10(conn)?;
         }
         Some(10) => {
+            migrate_v10_to_v11(conn)?;
+        }
+        Some(11) => {
             // Already at current version — ensure schema is complete (idempotent
             // CREATE IF NOT EXISTS only; no bare ALTER that would fail twice).
             create_schema(conn)?;
@@ -2151,6 +2193,15 @@ fn migrate_schema(conn: &Connection) -> Result<(), Error> {
                 "unknown schema version {v}; this build supports up to v{SCHEMA_VERSION}"
             )));
         }
+    }
+
+    let migrated_version: u32 = conn
+        .query_row("SELECT version FROM schema_version LIMIT 1", [], |row| {
+            row.get(0)
+        })
+        .map_err(sqlite_error)?;
+    if migrated_version == 10 {
+        migrate_v10_to_v11(conn)?;
     }
 
     Ok(())
@@ -2702,6 +2753,34 @@ fn migrate_v9_to_v10(conn: &Connection) -> Result<(), Error> {
     }
 }
 
+/// Migrate v10 to v11 by adding graph-wide key/value metadata.
+fn migrate_v10_to_v11(conn: &Connection) -> Result<(), Error> {
+    conn.execute_batch("BEGIN IMMEDIATE;")
+        .map_err(sqlite_error)?;
+
+    let result = (|| -> Result<(), Error> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS graph_metadata (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );",
+        )
+        .map_err(sqlite_error)?;
+        stamp_version(conn, 11)
+    })();
+
+    match result {
+        Ok(()) => {
+            conn.execute_batch("COMMIT;").map_err(sqlite_error)?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK;");
+            Err(e)
+        }
+    }
+}
+
 /// Stamp `schema_version` to `version`, to be called inside the caller's own
 /// migration-hop transaction just before `COMMIT`.
 ///
@@ -2884,6 +2963,11 @@ fn create_schema(conn: &Connection) -> Result<(), Error> {
             id_type TEXT NOT NULL,
             id_value INTEGER NOT NULL,
             PRIMARY KEY (id_type, id_value)
+        );
+
+        CREATE TABLE IF NOT EXISTS graph_metadata (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
         );
 
         CREATE INDEX IF NOT EXISTS idx_nodes_type ON nodes(node_type);

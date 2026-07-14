@@ -58,6 +58,182 @@ impl EmbeddingProvider for FixedDimProvider {
     }
 }
 
+struct NamedProvider {
+    dim: usize,
+    name: &'static str,
+}
+
+impl EmbeddingProvider for NamedProvider {
+    fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, Error> {
+        Ok(texts.iter().map(|_| vec![0.1; self.dim]).collect())
+    }
+
+    fn dimensions(&self) -> usize {
+        self.dim
+    }
+
+    fn model_name(&self) -> &str {
+        self.name
+    }
+}
+
+fn file_registry(
+    provider: Arc<dyn EmbeddingProvider>,
+    db: PathBuf,
+    dir: PathBuf,
+) -> MemoryRegistry {
+    MemoryRegistry::file_backed_with(provider, db, dir, "default".into(), false)
+}
+
+#[test]
+fn namespace_open_records_and_accepts_same_embedding_model() {
+    // Given: a graph created with one named embedding provider.
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("model.db");
+    let provider = || {
+        Arc::new(NamedProvider {
+            dim: 3,
+            name: "model-a",
+        }) as Arc<dyn EmbeddingProvider>
+    };
+    let mut first = file_registry(provider(), db.clone(), dir.path().to_path_buf());
+    first.remember("durable model stamp", None).unwrap();
+    drop(first);
+
+    // When: the namespace is reopened with the same model.
+    let mut reopened = file_registry(provider(), db, dir.path().to_path_buf());
+
+    // Then: model comparison succeeds.
+    reopened.stats(None).unwrap();
+}
+
+#[test]
+fn namespace_open_rejects_different_same_dimension_model_actionably() {
+    // Given: a graph stamped by model-a with 3-dimensional embeddings.
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("model.db");
+    let mut first = file_registry(
+        Arc::new(NamedProvider {
+            dim: 3,
+            name: "model-a",
+        }),
+        db.clone(),
+        dir.path().to_path_buf(),
+    );
+    first
+        .remember("same dimension is not same space", None)
+        .unwrap();
+    drop(first);
+
+    // When: the namespace is reopened with model-b at the same dimension.
+    let mut reopened = file_registry(
+        Arc::new(NamedProvider {
+            dim: 3,
+            name: "model-b",
+        }),
+        db,
+        dir.path().to_path_buf(),
+    );
+    let err = reopened.stats(None).unwrap_err();
+
+    // Then: the error names both models and the recovery control.
+    let message = err.to_string();
+    assert!(message.contains("model-a"), "{message}");
+    assert!(message.contains("model-b"), "{message}");
+    assert!(message.contains("ANAMNESIS_EMBED_MODEL"), "{message}");
+}
+
+#[test]
+fn namespace_open_backfills_unstamped_legacy_db_after_dimension_match() {
+    // Given: an old graph with 3-dimensional embeddings but no model stamp.
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("legacy.db");
+    let legacy_provider: Arc<dyn EmbeddingProvider> = Arc::new(NamedProvider {
+        dim: 3,
+        name: "legacy-writer",
+    });
+    let mut legacy = Memory::with_provider(&db, legacy_provider).unwrap();
+    legacy
+        .add("s", "user", "legacy unstamped node", Timestamp(1))
+        .unwrap();
+    legacy.flush_all().unwrap();
+    drop(legacy);
+
+    // When: the namespace first opens with a dimension-compatible model.
+    let mut registry = file_registry(
+        Arc::new(NamedProvider {
+            dim: 3,
+            name: "model-a",
+        }),
+        db.clone(),
+        dir.path().to_path_buf(),
+    );
+    registry.stats(None).unwrap();
+    drop(registry);
+
+    // Then: the compatible model is durably backfilled.
+    let storage = SqliteStorage::open(&db).unwrap();
+    assert_eq!(
+        storage.embedding_model_name().unwrap(),
+        Some("model-a".to_string())
+    );
+}
+
+#[test]
+fn namespace_open_preserves_dimension_mismatch_and_leaves_model_unstamped() {
+    // Given: an unstamped legacy graph containing 3-dimensional embeddings.
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("legacy.db");
+    let legacy_provider: Arc<dyn EmbeddingProvider> = Arc::new(NamedProvider {
+        dim: 3,
+        name: "legacy-writer",
+    });
+    let mut legacy = Memory::with_provider(&db, legacy_provider).unwrap();
+    legacy
+        .add("s", "user", "legacy mismatched node", Timestamp(1))
+        .unwrap();
+    legacy.flush_all().unwrap();
+    drop(legacy);
+
+    // When: the namespace opens with a provider of a different dimension.
+    let mut registry = file_registry(
+        Arc::new(NamedProvider {
+            dim: 4,
+            name: "model-b",
+        }),
+        db.clone(),
+        dir.path().to_path_buf(),
+    );
+    let err = registry.stats(None).unwrap_err();
+    drop(registry);
+
+    // Then: the existing dimension error is preserved and no model is stamped.
+    assert!(err.to_string().contains("DB has 3-d embeddings"), "{err}");
+    let storage = SqliteStorage::open(&db).unwrap();
+    assert_eq!(storage.embedding_model_name().unwrap(), None);
+}
+
+#[test]
+fn namespace_open_allows_empty_db() {
+    // Given: an empty database and a named provider.
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("empty.db");
+    let mut registry = file_registry(
+        Arc::new(NamedProvider {
+            dim: 3,
+            name: "model-a",
+        }),
+        db,
+        dir.path().to_path_buf(),
+    );
+
+    // When: the empty namespace is opened.
+    let stats = registry.stats(None).unwrap();
+
+    // Then: it passes validation without requiring an existing embedding.
+    assert_eq!(stats.node_count, 0);
+}
+
 struct ScopeGateProvider;
 
 impl EmbeddingProvider for ScopeGateProvider {
