@@ -1,5 +1,6 @@
 use super::*;
 use anamnesis::memory::{ListFilter, NoteOptions, Relation};
+use anamnesis::storage::StorageAdapter;
 
 fn registry(reinforce: bool) -> MemoryRegistry {
     MemoryRegistry::in_memory_with(Arc::new(StubProvider), reinforce)
@@ -105,6 +106,69 @@ fn namespace_open_records_and_accepts_same_embedding_model() {
 
     // Then: model comparison succeeds.
     reopened.stats(None).unwrap();
+}
+
+#[test]
+fn namespace_open_pins_bge_baseline_and_preserves_graph_on_e5_rejection() {
+    // Given: a populated file-backed graph stamped by bge-base-en-v1.5 at 768 dimensions.
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("model.db");
+    let bge_provider = || {
+        Arc::new(NamedProvider {
+            dim: 768,
+            name: "bge-base-en-v1.5",
+        }) as Arc<dyn EmbeddingProvider>
+    };
+    let mut first = file_registry(bge_provider(), db.clone(), dir.path().to_path_buf());
+    let first_node = first.remember("baseline source", None).unwrap();
+    let second_node = first.remember("baseline target", None).unwrap();
+    first
+        .relate(first_node, second_node, "related", None)
+        .unwrap();
+    let created_stats = first.stats(None).unwrap();
+    assert!(created_stats.node_count > 0);
+    assert!(created_stats.edge_count > 0);
+    drop(first);
+
+    let mut matching = file_registry(bge_provider(), db.clone(), dir.path().to_path_buf());
+    let matching_stats = matching.stats(None).unwrap();
+    assert_eq!(matching_stats.node_count, created_stats.node_count);
+    assert_eq!(matching_stats.edge_count, created_stats.edge_count);
+    drop(matching);
+
+    let storage_before = SqliteStorage::open(&db).unwrap();
+    let counts_before = (storage_before.node_count(), storage_before.edge_count());
+    assert_eq!(
+        counts_before,
+        (created_stats.node_count, created_stats.edge_count)
+    );
+    assert_eq!(
+        storage_before.embedding_model_name().unwrap().as_deref(),
+        Some("bge-base-en-v1.5")
+    );
+    drop(storage_before);
+
+    // When: the populated namespace is opened with multilingual-e5-small at 384 dimensions.
+    let mut mismatched = file_registry(
+        Arc::new(NamedProvider {
+            dim: 384,
+            name: "multilingual-e5-small",
+        }),
+        db.clone(),
+        dir.path().to_path_buf(),
+    );
+    let error = mismatched.stats(None).unwrap_err();
+    drop(mismatched);
+
+    // Then: the incompatible provider is rejected without changing the persisted graph.
+    let message = error.to_string();
+    assert!(message.contains("DB has 768-d embeddings"), "{message}");
+    assert!(message.contains("multilingual-e5-small"), "{message}");
+    let storage_after = SqliteStorage::open(&db).unwrap();
+    assert_eq!(
+        (storage_after.node_count(), storage_after.edge_count()),
+        counts_before
+    );
 }
 
 #[test]
