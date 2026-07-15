@@ -12,7 +12,7 @@
 
 use serde::{Deserialize, Serialize};
 /// The kind of client action that caused a recall attempt.
-#[cfg_attr(not(test), allow(dead_code))]
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RecallEventKind {
@@ -61,6 +61,9 @@ pub enum Request {
         /// Post-filter: drop hits whose node doesn't carry this entity tag.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tag: Option<String>,
+        /// Client-reported action that caused this recall attempt.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        event_kind: Option<RecallEventKind>,
     },
     Remember {
         content: String,
@@ -93,6 +96,9 @@ pub enum Request {
     Stats {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         namespace: Option<String>,
+        /// Whether this stats request should include recall telemetry.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        recall: Option<bool>,
     },
     PullPending {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -237,6 +243,7 @@ mod tests {
             knowledge_only: Some(true),
             scope: Some("projA".into()),
             tag: Some("auth".into()),
+            event_kind: None,
         });
         round_trip_request(Request::Remember {
             content: "a lesson".into(),
@@ -272,7 +279,10 @@ mod tests {
             capture: None,
             scope: Some("project/anamnesis".into()),
         });
-        round_trip_request(Request::Stats { namespace: None });
+        round_trip_request(Request::Stats {
+            namespace: None,
+            recall: None,
+        });
         round_trip_request(Request::Update {
             id: 7,
             new_content: "revised content".into(),
@@ -336,15 +346,101 @@ mod tests {
             knowledge_only: None,
             scope: None,
             tag: None,
+            event_kind: None,
         })
         .unwrap();
         assert!(line.contains("\"op\":\"recall\""), "tagged by op: {line}");
         assert!(line.contains("\"query\":\"q\""));
+        assert_eq!(
+            line, "{\"op\":\"recall\",\"query\":\"q\"}\n",
+            "None optionals must preserve existing recall bytes"
+        );
         assert!(!line.contains("limit"), "None optionals omitted: {line}");
         assert!(!line.contains("namespace"));
         assert!(!line.contains("gate_threshold"));
         assert!(!line.contains("cosine_gate"));
         assert!(!line.contains("knowledge_only"));
+    }
+
+    #[test]
+    fn stats_recall_round_trips_and_omits_when_absent() {
+        let with_recall = Request::Stats {
+            namespace: None,
+            recall: Some(true),
+        };
+        let with_recall_line = encode_line(&with_recall).unwrap();
+        assert!(
+            with_recall_line.contains("\"recall\":true"),
+            "recall flag must be serialized: {with_recall_line}"
+        );
+        assert_eq!(
+            decode_line::<Request>(&with_recall_line).unwrap(),
+            with_recall,
+            "recall flag must survive decoding"
+        );
+
+        let without_recall = Request::Stats {
+            namespace: None,
+            recall: None,
+        };
+        let without_recall_line = encode_line(&without_recall).unwrap();
+        assert_eq!(
+            without_recall_line, "{\"op\":\"stats\"}\n",
+            "absent recall must preserve existing stats bytes"
+        );
+        assert_eq!(
+            decode_line::<Request>(&without_recall_line).unwrap(),
+            without_recall,
+            "absent recall must survive decoding"
+        );
+    }
+    #[test]
+    fn recall_event_kind_round_trips_and_omits_when_absent() {
+        let with_kind = Request::Recall {
+            query: "q".into(),
+            limit: None,
+            namespace: None,
+            reinforce: None,
+            gate_threshold: None,
+            cosine_gate: None,
+            knowledge_only: None,
+            scope: None,
+            tag: None,
+            event_kind: Some(RecallEventKind::UserPrompt),
+        };
+        let with_kind_line = encode_line(&with_kind).unwrap();
+        assert!(
+            with_kind_line.contains("\"event_kind\":\"user-prompt\""),
+            "event kind must be kebab-case: {with_kind_line}"
+        );
+        assert_eq!(
+            decode_line::<Request>(&with_kind_line).unwrap(),
+            with_kind,
+            "event kind must survive decoding"
+        );
+
+        let without_kind = Request::Recall {
+            query: "q".into(),
+            limit: None,
+            namespace: None,
+            reinforce: None,
+            gate_threshold: None,
+            cosine_gate: None,
+            knowledge_only: None,
+            scope: None,
+            tag: None,
+            event_kind: None,
+        };
+        let without_kind_line = encode_line(&without_kind).unwrap();
+        assert!(
+            !without_kind_line.contains("event_kind"),
+            "absent event kind must be omitted: {without_kind_line}"
+        );
+        assert_eq!(
+            decode_line::<Request>(&without_kind_line).unwrap(),
+            without_kind,
+            "absent event kind must survive decoding"
+        );
     }
 
     #[test]

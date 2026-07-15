@@ -1,7 +1,10 @@
 use super::*;
-use crate::memory::{MemoryRegistry, StubProvider};
-use crate::proto::{ErrKind, Response, TurnInput};
-use std::sync::{Arc, Mutex};
+use crate::memory::{MemoryRegistry, PolicyStore, PolicyStoreState, StubProvider};
+use crate::proto::{ErrKind, RecallEventKind, Response, TurnInput};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
+};
 
 /// A stub-backed registry on a tempdir DB — no model download, no socket.
 /// Wrapped in the same `Arc<Mutex<_>>` shape `dispatch` expects from its
@@ -135,6 +138,7 @@ fn remember_then_recall_round_trips_through_dispatch() {
             knowledge_only: None,
             scope: None,
             tag: None,
+            event_kind: None,
         },
     ));
     // Same shape the MCP tool produced: readable block + NODES trailer.
@@ -169,10 +173,218 @@ fn recall_with_no_matches_renders_sentinel_and_empty_nodes() {
             knowledge_only: None,
             scope: None,
             tag: None,
+            event_kind: None,
         },
     ));
     assert!(text.starts_with("(no relevant memory)"), "got: {text}");
     assert!(text.contains("## NODES (for `relate`)\n[]"), "got: {text}");
+}
+#[test]
+fn recall_telemetry_write_failure_preserves_response_and_dispatch_counters() {
+    let (registry, _dir) = stub_registry();
+    let request = Request::Recall {
+        query: "stable recall output despite telemetry failure".into(),
+        limit: Some(5),
+        namespace: None,
+        reinforce: Some(false),
+        gate_threshold: None,
+        cosine_gate: None,
+        knowledge_only: None,
+        scope: None,
+        tag: None,
+        event_kind: None,
+    };
+
+    let before = ok_text(dispatch(&registry, request.clone()));
+    let (handles, dispatch_errors) = {
+        let mut registry_guard = registry.lock().unwrap_or_else(|p| p.into_inner());
+        let handles = registry_guard
+            .namespace_handles(None)
+            .expect("resolve default graph and policy handles");
+        (handles, registry_guard.ops.dispatch_errors)
+    };
+    let event_count = {
+        let _memory_guard = handles.memory.lock().unwrap_or_else(|p| p.into_inner());
+        let mut policy_guard =
+            MemoryRegistry::policy_store(&handles.policy).expect("open default policy store");
+        let PolicyStoreState::Ready(store) = &mut *policy_guard else {
+            panic!("policy store must be ready after the successful recall");
+        };
+        let event_count = store
+            .recall_event_count_for_test()
+            .expect("count successful recall telemetry");
+        store
+            .install_recall_event_insert_failure_trigger_for_test()
+            .expect("install approved recall_events failure trigger");
+        event_count
+    };
+
+    let after = ok_text(dispatch(&registry, request));
+    assert_eq!(
+        after, before,
+        "telemetry persistence is best-effort and must not alter the recall reply"
+    );
+
+    let handles = {
+        let mut registry_guard = registry.lock().unwrap_or_else(|p| p.into_inner());
+        registry_guard
+            .namespace_handles(None)
+            .expect("resolve default graph and policy handles")
+    };
+    let post_event_count = {
+        let _memory_guard = handles.memory.lock().unwrap_or_else(|p| p.into_inner());
+        let mut policy_guard =
+            MemoryRegistry::policy_store(&handles.policy).expect("reopen default policy store");
+        let PolicyStoreState::Ready(store) = &mut *policy_guard else {
+            panic!("policy store must remain ready after a failed telemetry insert");
+        };
+        store
+            .recall_event_count_for_test()
+            .expect("count recall telemetry after failed insert")
+    };
+    assert_eq!(
+        post_event_count, event_count,
+        "a failed transactional insert must not leave a recall_events row behind"
+    );
+    assert_eq!(
+        registry
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .ops
+            .dispatch_errors,
+        dispatch_errors,
+        "a best-effort telemetry failure must not be reported as a dispatch failure"
+    );
+}
+
+#[test]
+fn recall_telemetry_uses_canonical_namespace_unicode_char_count_and_unknown_kind() {
+    let (registry, _dir) = stub_registry();
+    let raw_namespace = "Telemetry/Namespace";
+    let query = "한국어 기억";
+    let expected_namespace = {
+        let registry_guard = registry.lock().unwrap_or_else(|p| p.into_inner());
+        registry_guard.canonical_ns_key(Some(raw_namespace))
+    };
+
+    ok_text(dispatch(
+        &registry,
+        Request::Recall {
+            query: query.into(),
+            limit: Some(5),
+            namespace: Some(raw_namespace.into()),
+            reinforce: Some(false),
+            gate_threshold: None,
+            cosine_gate: None,
+            knowledge_only: None,
+            scope: None,
+            tag: None,
+            event_kind: None,
+        },
+    ));
+
+    let handles = {
+        let mut registry_guard = registry.lock().unwrap_or_else(|p| p.into_inner());
+        registry_guard
+            .namespace_handles(Some(raw_namespace))
+            .expect("resolve telemetry namespace handles")
+    };
+    assert_eq!(
+        handles.key, expected_namespace,
+        "test must inspect the same canonical namespace dispatch resolved"
+    );
+    let _memory_guard = handles.memory.lock().unwrap_or_else(|p| p.into_inner());
+    let mut policy_guard =
+        MemoryRegistry::policy_store(&handles.policy).expect("open telemetry policy store");
+    let PolicyStoreState::Ready(store) = &mut *policy_guard else {
+        panic!("recall must initialize the telemetry policy store");
+    };
+    let events = store
+        .read_recall_events_for_test()
+        .expect("read persisted recall telemetry");
+    assert_eq!(
+        events.len(),
+        1,
+        "one recall must persist one telemetry event"
+    );
+    let event = &events[0];
+    assert_eq!(event.namespace, expected_namespace);
+    assert_eq!(
+        event.query_chars, 6,
+        "count Unicode scalar values, not UTF-8 bytes"
+    );
+    assert_eq!(event.event_kind, RecallEventKind::Unknown);
+    assert!(
+        !store
+            .recall_events_contain_raw_value_for_test(query)
+            .expect("inspect recall_events values for raw query data"),
+        "minimized recall telemetry must never retain the raw query"
+    );
+}
+
+#[test]
+fn recall_policy_sql_runs_after_registry_release_with_memory_then_policy_lock_order() {
+    let (registry, _dir) = stub_registry();
+    let (memory, policy) = {
+        let mut registry_guard = registry.lock().unwrap_or_else(|p| p.into_inner());
+        let handles = registry_guard
+            .namespace_handles(Some("lock-order"))
+            .expect("phase 1 resolves graph and policy handles");
+        assert!(
+            matches!(
+                *handles.policy.lock().unwrap_or_else(|p| p.into_inner()),
+                PolicyStoreState::Uninitialized { .. }
+            ),
+            "phase 1 must create only an uninitialized policy handle"
+        );
+        (handles.memory, handles.policy)
+    };
+
+    let observed_operations = Arc::new(AtomicUsize::new(0));
+    let observer_registry = Arc::clone(&registry);
+    let observer_memory = Arc::clone(&memory);
+    let observer_operations = Arc::clone(&observed_operations);
+    let _observer = PolicyStore::install_operation_observer_for_test(Arc::new(move || {
+        assert!(
+            observer_registry.try_lock().is_ok(),
+            "policy SQL must run only after the registry guard is released"
+        );
+        assert!(
+            observer_memory.try_lock().is_err(),
+            "policy SQL must run while its corresponding Memory lock is held \
+             (Memory -> PolicyStore order)"
+        );
+        observer_operations.fetch_add(1, Ordering::SeqCst);
+    }));
+
+    ok_text(dispatch(
+        &registry,
+        Request::Recall {
+            query: "lock ordering telemetry".into(),
+            limit: Some(5),
+            namespace: Some("lock-order".into()),
+            reinforce: Some(false),
+            gate_threshold: None,
+            cosine_gate: None,
+            knowledge_only: None,
+            scope: None,
+            tag: None,
+            event_kind: None,
+        },
+    ));
+
+    assert_eq!(
+        observed_operations.load(Ordering::SeqCst),
+        2,
+        "the dispatch must perform exactly policy initialization then recall-event insertion"
+    );
+    assert!(
+        matches!(
+            *policy.lock().unwrap_or_else(|p| p.into_inner()),
+            PolicyStoreState::Ready(_)
+        ),
+        "phase 2 must initialize the policy store before inserting telemetry"
+    );
 }
 
 #[test]
@@ -223,7 +435,13 @@ fn relate_bad_label_is_invalid_params_not_internal() {
 #[test]
 fn stats_dispatch_matches_format_stats() {
     let (reg, _dir) = stub_registry();
-    let text = ok_text(dispatch(&reg, Request::Stats { namespace: None }));
+    let text = ok_text(dispatch(
+        &reg,
+        Request::Stats {
+            namespace: None,
+            recall: None,
+        },
+    ));
     assert!(text.contains("nodes:"));
     assert!(text.contains("health grade:"));
     // The dogfood usage section is appended after the stats block.
@@ -441,7 +659,13 @@ fn forget_soft_hides_then_stats_counts_retracted() {
     let view: serde_json::Value = serde_json::from_str(&got).expect("get returns JSON");
     assert_eq!(view["retracted"], true, "got: {view}");
 
-    let stats = ok_text(dispatch(&reg, Request::Stats { namespace: None }));
+    let stats = ok_text(dispatch(
+        &reg,
+        Request::Stats {
+            namespace: None,
+            recall: None,
+        },
+    ));
     assert!(
         stats.contains("retracted:            1"),
         "stats must count the retraction: {stats}"
@@ -597,6 +821,7 @@ fn list_returns_ranked_json() {
                 knowledge_only: None,
                 scope: None,
                 tag: None,
+                event_kind: None,
             },
         ));
     }
@@ -967,7 +1192,13 @@ fn stats_renders_failure_counters_that_increment() {
     let (reg, _dir) = stub_registry();
 
     // Baseline: the failure section exists and starts at zero.
-    let s0 = ok_text(dispatch(&reg, Request::Stats { namespace: None }));
+    let s0 = ok_text(dispatch(
+        &reg,
+        Request::Stats {
+            namespace: None,
+            recall: None,
+        },
+    ));
     assert!(
         s0.contains("failures (this daemon):"),
         "stats must render a failures section:\n{s0}"
@@ -995,6 +1226,7 @@ fn stats_renders_failure_counters_that_increment() {
             knowledge_only: None,
             scope: None,
             tag: None,
+            event_kind: None,
         },
     ));
     assert!(
@@ -1030,7 +1262,13 @@ fn stats_renders_failure_counters_that_increment() {
     );
 
     // GREEN expectation: the rendered counters reflect exactly one of each.
-    let s1 = ok_text(dispatch(&reg, Request::Stats { namespace: None }));
+    let s1 = ok_text(dispatch(
+        &reg,
+        Request::Stats {
+            namespace: None,
+            recall: None,
+        },
+    ));
     assert!(
         s1.contains("dispatch errors: 1 (0 ingest)"),
         "one failed request must show as one dispatch error:\n{s1}"
@@ -1202,6 +1440,7 @@ fn recall_filter_by_scope_excludes_other_scope() {
             knowledge_only: None,
             scope: Some("projA".to_string()),
             tag: None,
+            event_kind: None,
         },
     ));
     let nodes_json = resp
@@ -1282,6 +1521,7 @@ fn scope_filter_keeps_universal_and_matching_drops_foreign() {
             knowledge_only: None,
             scope: Some("projA".to_string()),
             tag: None,
+            event_kind: None,
         },
     ));
 
@@ -1466,6 +1706,7 @@ fn p1_t5_manual_qa_demo() {
             knowledge_only: None,
             scope: Some("projA".to_string()),
             tag: None,
+            event_kind: None,
         },
     ));
     println!("recall (scope=projA) -> {recalled}");
@@ -2068,6 +2309,7 @@ mod migration_job {
     fn stats_request(namespace: Option<&str>) -> Request {
         Request::Stats {
             namespace: namespace.map(str::to_string),
+            recall: None,
         }
     }
 
@@ -2082,6 +2324,7 @@ mod migration_job {
             knowledge_only: None,
             scope: None,
             tag: None,
+            event_kind: None,
         }
     }
 

@@ -245,6 +245,7 @@ fn build_hook_recall_request(
         knowledge_only: Some(true),
         scope,
         tag: None,
+        event_kind: None,
     }
 }
 
@@ -712,6 +713,7 @@ mod tests {
         );
         let Request::Recall {
             cosine_gate,
+            event_kind,
             knowledge_only,
             limit,
             scope,
@@ -723,6 +725,7 @@ mod tests {
         assert_eq!(cosine_gate, Some(crate::config::DEFAULT_HOOK_COSINE_GATE));
         assert_eq!(knowledge_only, Some(true));
         assert_eq!(limit, Some(3));
+        assert_eq!(event_kind, None);
         assert_eq!(scope.as_deref(), Some("project/anamnesis"));
     }
 

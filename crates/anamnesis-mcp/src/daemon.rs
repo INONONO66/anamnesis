@@ -926,7 +926,10 @@ mod tests {
 
         // A `stats` request comes back Ok — proves the daemon serves the bespoke
         // protocol over the socket (no rmcp/MCP on this path).
-        let req = crate::proto::Request::Stats { namespace: None };
+        let req = crate::proto::Request::Stats {
+            namespace: None,
+            recall: None,
+        };
         wr.write_all(crate::proto::encode_line(&req).unwrap().as_bytes())
             .await
             .unwrap();
@@ -1000,7 +1003,10 @@ mod tests {
             .expect("late first client must still reach a grace=0 daemon");
         let (rd, mut wr) = stream.into_split();
         let mut lines = BufReader::new(rd).lines();
-        let req = crate::proto::Request::Stats { namespace: None };
+        let req = crate::proto::Request::Stats {
+            namespace: None,
+            recall: None,
+        };
         wr.write_all(crate::proto::encode_line(&req).unwrap().as_bytes())
             .await
             .unwrap();
@@ -1129,7 +1135,11 @@ mod tests {
         let stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
         let (rd, mut wr) = stream.into_split();
         let mut lines = BufReader::new(rd).lines();
-        let request = proto::encode_line(&proto::Request::Stats { namespace: None }).unwrap();
+        let request = proto::encode_line(&proto::Request::Stats {
+            namespace: None,
+            recall: None,
+        })
+        .unwrap();
         wr.write_all(request.as_bytes()).await.unwrap();
         wr.flush().await.unwrap();
         let response = lines.next_line().await.unwrap().unwrap();

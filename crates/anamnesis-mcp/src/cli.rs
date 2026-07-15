@@ -428,6 +428,7 @@ pub async fn run_oneshot_client(cli: &Cli) -> Result<()> {
             knowledge_only: None,
             scope: None,
             tag: None,
+            event_kind: None,
         },
         Some(Commands::Remember {
             text, namespace, ..
@@ -452,6 +453,7 @@ pub async fn run_oneshot_client(cli: &Cli) -> Result<()> {
         },
         Some(Commands::Stats { namespace, .. }) => Request::Stats {
             namespace: namespace.clone(),
+            recall: None,
         },
         // The dispatcher only routes the four commands above here.
         _ => unreachable!("run_oneshot_client dispatched for a non-daemon-routed command"),

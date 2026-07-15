@@ -303,6 +303,7 @@ impl AnamnesisServer {
             knowledge_only: p.knowledge_only,
             scope: p.scope,
             tag: p.tag,
+            event_kind: None,
         };
         to_result(self.backend.call(req).await)
     }
@@ -379,6 +380,7 @@ impl AnamnesisServer {
     ) -> Result<CallToolResult, ErrorData> {
         let req = Request::Stats {
             namespace: p.namespace,
+            recall: None,
         };
         to_result(self.backend.call(req).await)
     }
