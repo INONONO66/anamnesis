@@ -183,6 +183,9 @@ pub enum Commands {
     Stats {
         #[arg(long)]
         namespace: Option<String>,
+        /// Include data-minimized recall eligibility telemetry.
+        #[arg(long)]
+        recall: bool,
         /// Bypass the shared daemon and open the DB in-process.
         #[arg(long)]
         embedded: bool,
@@ -292,8 +295,14 @@ pub fn run_oneshot(cli: &Cli) -> Result<Oneshot> {
 
         Some(Commands::Recall { .. }) => {
             let registry = Arc::new(Mutex::new(registry(&cfg)));
-            let text = run_embedded_recall(cli, &registry)?;
+            let text = run_embedded_oneshot(cli, &registry)?;
             println!("{text}");
+            Ok(Oneshot::Done)
+        }
+        Some(Commands::Stats { recall: true, .. }) => {
+            let registry = Arc::new(Mutex::new(registry(&cfg)));
+            let text = run_embedded_oneshot(cli, &registry)?;
+            print!("{text}");
             Ok(Oneshot::Done)
         }
         Some(Commands::Remember {
@@ -409,8 +418,17 @@ pub async fn run_oneshot_client(cli: &Cli) -> Result<()> {
     let req =
         oneshot_request(cli).ok_or_else(|| anyhow::anyhow!("invalid one-shot client command"))?;
     let text = call_oneshot(&cfg, req).await?;
-    println!("{text}");
+    let output = format_oneshot_stdout(cli, &text);
+    print!("{output}");
     Ok(())
+}
+
+fn format_oneshot_stdout(cli: &Cli, text: &str) -> String {
+    if matches!(&cli.command, Some(Commands::Stats { recall: true, .. })) {
+        text.to_owned()
+    } else {
+        format!("{text}\n")
+    }
 }
 
 fn oneshot_request(cli: &Cli) -> Option<crate::proto::Request> {
@@ -455,17 +473,19 @@ fn oneshot_request(cli: &Cli) -> Option<crate::proto::Request> {
             relation: relation.clone(),
             namespace: namespace.clone(),
         }),
-        Some(Commands::Stats { namespace, .. }) => Some(Request::Stats {
+        Some(Commands::Stats {
+            namespace, recall, ..
+        }) => Some(Request::Stats {
             namespace: namespace.clone(),
-            recall: None,
+            recall: (*recall).then_some(true),
         }),
         _ => None,
     }
 }
 
-fn run_embedded_recall(cli: &Cli, registry: &Arc<Mutex<MemoryRegistry>>) -> Result<String> {
+fn run_embedded_oneshot(cli: &Cli, registry: &Arc<Mutex<MemoryRegistry>>) -> Result<String> {
     let request =
-        oneshot_request(cli).ok_or_else(|| anyhow::anyhow!("invalid embedded recall command"))?;
+        oneshot_request(cli).ok_or_else(|| anyhow::anyhow!("invalid embedded one-shot command"))?;
     match crate::dispatch::dispatch(registry, request) {
         crate::proto::Response::Ok { text } => Ok(text),
         crate::proto::Response::Err { message, .. } => Err(anyhow::anyhow!(message)),
@@ -482,7 +502,7 @@ fn run_embedded_oneshot_for_test(
     cli: &Cli,
     registry: &Arc<Mutex<MemoryRegistry>>,
 ) -> Result<String> {
-    run_embedded_recall(cli, registry)
+    run_embedded_oneshot(cli, registry)
 }
 
 /// `[ok]` / `[!!]` checklist line.
@@ -593,6 +613,18 @@ mod tests {
         }
         Cli::try_parse_from(args).expect("parse recall CLI")
     }
+    fn stats_cli(recall: bool, embedded: bool) -> Cli {
+        use clap::Parser;
+
+        let mut args = vec!["anamnesis", "stats"];
+        if recall {
+            args.push("--recall");
+        }
+        if embedded {
+            args.push("--embedded");
+        }
+        Cli::try_parse_from(args).expect("parse stats CLI")
+    }
 
     fn stub_registry() -> (Arc<Mutex<MemoryRegistry>>, tempfile::TempDir) {
         let dir = tempfile::tempdir().expect("temporary directory");
@@ -691,6 +723,67 @@ mod tests {
             events[0].event_kind,
             RecallEventKind::Unknown,
             "an embedded raw CLI recall has no richer caller provenance"
+        );
+    }
+    #[test]
+    fn stats_recall_cli_parses_and_sends_true_to_daemon() {
+        let request = oneshot_request_for_test(&stats_cli(true, false))
+            .expect("stats --recall must build a daemon request");
+        let wire = serde_json::to_string(&request).expect("serialize stats request");
+
+        assert!(
+            wire.contains("\"recall\":true"),
+            "stats --recall must carry recall=true on the daemon wire: {wire}"
+        );
+        assert!(matches!(
+            request,
+            Request::Stats {
+                namespace: None,
+                recall: Some(true),
+            }
+        ));
+    }
+
+    #[test]
+    fn stats_without_recall_preserves_none_on_daemon_request() {
+        let request = oneshot_request_for_test(&stats_cli(false, false))
+            .expect("stats without --recall must build a daemon request");
+
+        assert!(matches!(
+            request,
+            Request::Stats {
+                namespace: None,
+                recall: None,
+            }
+        ));
+        assert_eq!(
+            format_oneshot_stdout(&stats_cli(false, false), "graph stats"),
+            "graph stats\n",
+            "the existing daemon stats path must keep its one trailing newline"
+        );
+    }
+
+    #[test]
+    fn embedded_and_daemon_stats_recall_render_byte_identically() {
+        let (daemon_registry, _daemon_dir) = stub_registry();
+        let (embedded_registry, _embedded_dir) = stub_registry();
+
+        let daemon_text = match crate::dispatch::dispatch(
+            &daemon_registry,
+            oneshot_request_for_test(&stats_cli(true, false))
+                .expect("stats --recall must build a daemon request"),
+        ) {
+            Response::Ok { text } => text,
+            response => panic!("daemon stats --recall must succeed: {response:?}"),
+        };
+        let embedded_text =
+            run_embedded_oneshot_for_test(&stats_cli(true, true), &embedded_registry)
+                .expect("embedded stats --recall must dispatch locally");
+
+        let daemon_stdout = format_oneshot_stdout(&stats_cli(true, false), &daemon_text);
+        assert_eq!(
+            embedded_text, daemon_stdout,
+            "embedded and daemon stats --recall must have byte-identical stdout framing"
         );
     }
 

@@ -11,6 +11,7 @@ use std::time::Duration;
 #[cfg(test)]
 use std::{cell::RefCell, marker::PhantomData, rc::Rc};
 
+use crate::proto::RecallEventKind;
 use anamnesis::Error;
 use rusqlite::Connection;
 
@@ -18,6 +19,55 @@ mod recall;
 mod schema;
 
 pub(crate) use recall::RecallEvent;
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct RecallStats {
+    pub total_attempts: u64,
+    pub by_event_kind: Vec<EventKindStats>,
+    pub abstentions: AbstentionStats,
+    pub cosine: CosineStats,
+    pub auto_exposure: AutoExposureStats,
+    pub sweep: Vec<SweepPoint>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct EventKindStats {
+    pub event_kind: RecallEventKind,
+    pub attempts: u64,
+    pub eligible: u64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct AbstentionStats {
+    pub empty: u64,
+    pub readout_only: u64,
+    pub cosine_only: u64,
+    pub both: u64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CosineStats {
+    pub samples: u64,
+    pub nulls: u64,
+    pub p50: Option<f64>,
+    pub p90: Option<f64>,
+    pub p95: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct AutoExposureStats {
+    pub eligible_events: u64,
+    pub events_with_auto: u64,
+    pub result_slots: u64,
+    pub auto_slots: u64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SweepPoint {
+    pub threshold: f64,
+    pub eligible: u64,
+    pub attempts: u64,
+}
 
 const SCHEMA_VERSION: i64 = 1;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(2);
@@ -134,6 +184,10 @@ impl PolicyStore {
         transaction.commit().map_err(|_| {
             PolicyStoreError::operation("commit recall event transaction").into_engine_error()
         })
+    }
+    /// Aggregates data-minimized recall telemetry without exposing raw queries.
+    pub(crate) fn recall_stats(&self) -> Result<RecallStats, Error> {
+        recall::stats(&self.connection).map_err(PolicyStoreError::into_engine_error)
     }
 
     #[cfg(test)]

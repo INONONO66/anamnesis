@@ -21,6 +21,32 @@ fn stub_registry() -> (Arc<Mutex<MemoryRegistry>>, tempfile::TempDir) {
     );
     (Arc::new(Mutex::new(reg)), dir)
 }
+fn stub_registry_with_future_policy_schema() -> (Arc<Mutex<MemoryRegistry>>, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let db = dir.path().join("memory.db");
+    let connection = rusqlite::Connection::open(&db).expect("open future policy database");
+    connection
+        .execute_batch(
+            "
+            CREATE TABLE mcp_schema_version (
+                id INTEGER PRIMARY KEY CHECK(id = 1),
+                version INTEGER NOT NULL
+            );
+            INSERT INTO mcp_schema_version (id, version) VALUES (1, 2);
+            ",
+        )
+        .expect("seed future policy schema");
+    drop(connection);
+
+    let reg = MemoryRegistry::file_backed_unlocked_with(
+        Arc::new(StubProvider),
+        db,
+        dir.path().to_path_buf(),
+        "default".to_string(),
+        false,
+    );
+    (Arc::new(Mutex::new(reg)), dir)
+}
 
 fn ok_text(resp: Response) -> String {
     match resp {
@@ -447,6 +473,122 @@ fn stats_dispatch_matches_format_stats() {
     // The dogfood usage section is appended after the stats block.
     assert!(text.contains("usage (this daemon)"), "got: {text}");
     assert!(text.contains("extraction backlog:"), "got: {text}");
+}
+#[test]
+fn stats_without_recall_is_byte_identical_to_existing_graph_stats_and_usage() {
+    let (reg, _dir) = stub_registry();
+
+    let no_flag = ok_text(dispatch(
+        &reg,
+        Request::Stats {
+            namespace: None,
+            recall: None,
+        },
+    ));
+    let explicitly_disabled = ok_text(dispatch(
+        &reg,
+        Request::Stats {
+            namespace: None,
+            recall: Some(false),
+        },
+    ));
+
+    assert_eq!(
+        no_flag, explicitly_disabled,
+        "stats without --recall must preserve the graph-stats-plus-usage bytes"
+    );
+    assert!(
+        !no_flag.contains("recall telemetry"),
+        "stats without --recall must not append telemetry: {no_flag}"
+    );
+}
+
+#[test]
+fn stats_recall_unavailable_policy_preserves_graph_stats_and_appends_unavailable() {
+    let (reg, _dir) = stub_registry_with_future_policy_schema();
+
+    let text = ok_text(dispatch(
+        &reg,
+        Request::Stats {
+            namespace: None,
+            recall: Some(true),
+        },
+    ));
+
+    assert!(
+        text.contains("nodes:"),
+        "graph stats must still render: {text}"
+    );
+    assert!(
+        text.contains("usage (this daemon)"),
+        "usage must still render: {text}"
+    );
+    assert!(
+        text.contains("telemetry unavailable"),
+        "future policy state must be reported without failing stats: {text}"
+    );
+}
+
+#[test]
+fn stats_recall_populated_renderer_has_exact_eligibility_labels_sweep_and_finite_values() {
+    let (reg, _dir) = stub_registry();
+    let _ = ok_text(dispatch(
+        &reg,
+        Request::Recall {
+            query: "telemetry fixture".to_string(),
+            limit: Some(1),
+            namespace: None,
+            reinforce: Some(false),
+            gate_threshold: None,
+            cosine_gate: None,
+            knowledge_only: None,
+            scope: None,
+            tag: None,
+            event_kind: None,
+        },
+    ));
+
+    let text = ok_text(dispatch(
+        &reg,
+        Request::Stats {
+            namespace: None,
+            recall: Some(true),
+        },
+    ));
+
+    assert!(
+        text.contains("recall telemetry (injection eligibility, not delivery)"),
+        "recall heading must use the exact eligibility contract: {text}"
+    );
+    assert!(
+        !text.contains("telemetry fixture"),
+        "telemetry must aggregate without rendering raw recall queries: {text}"
+    );
+    assert!(
+        text.contains("exposure, not quality"),
+        "auto-exposure label must not claim quality: {text}"
+    );
+    for hundredths in 80..=90 {
+        let threshold = format!("{:.2}", hundredths as f64 / 100.0);
+        assert_eq!(
+            text.matches(&threshold).count(),
+            1,
+            "sweep must render threshold {threshold} exactly once: {text}"
+        );
+    }
+    let telemetry = text
+        .split_once("recall telemetry (injection eligibility, not delivery)")
+        .map(|(_, telemetry)| telemetry)
+        .expect("recall telemetry section must be present");
+    let lower = telemetry.to_ascii_lowercase();
+    assert!(
+        !lower.contains("nan"),
+        "telemetry must not render NaN: {text}"
+    );
+    assert!(
+        !lower.contains("inf"),
+        "telemetry must not render infinity: {text}"
+    );
 }
 
 #[test]

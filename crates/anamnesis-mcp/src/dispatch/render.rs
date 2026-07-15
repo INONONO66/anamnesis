@@ -125,3 +125,78 @@ pub fn format_stats(s: &MemoryStats) -> String {
     }
     out
 }
+/// Render optional recall eligibility telemetry without exposing recall queries.
+pub(crate) fn format_recall_stats(stats: Option<&memory::RecallStats>) -> String {
+    use std::fmt::Write as _;
+
+    let mut out = String::from("recall telemetry (injection eligibility, not delivery)\n");
+    let Some(stats) = stats else {
+        out.push_str("  telemetry unavailable\n");
+        return out;
+    };
+
+    let _ = writeln!(out, "  attempts: {}", stats.total_attempts);
+    let _ = writeln!(out, "  by event kind:");
+    for event in &stats.by_event_kind {
+        let _ = writeln!(
+            out,
+            "    {:?}: attempts {}, eligible {}",
+            event.event_kind, event.attempts, event.eligible
+        );
+    }
+    let _ = writeln!(out, "  abstentions:");
+    let _ = writeln!(out, "    empty: {}", stats.abstentions.empty);
+    let _ = writeln!(out, "    readout-only: {}", stats.abstentions.readout_only);
+    let _ = writeln!(out, "    cosine-only: {}", stats.abstentions.cosine_only);
+    let _ = writeln!(out, "    both: {}", stats.abstentions.both);
+    let _ = writeln!(out, "  cosine:");
+    let _ = writeln!(out, "    samples: {}", stats.cosine.samples);
+    let _ = writeln!(out, "    nulls: {}", stats.cosine.nulls);
+    let _ = writeln!(out, "    p50: {}", format_finite(stats.cosine.p50));
+    let _ = writeln!(out, "    p90: {}", format_finite(stats.cosine.p90));
+    let _ = writeln!(out, "    p95: {}", format_finite(stats.cosine.p95));
+    let _ = writeln!(out, "  auto exposure (exposure, not quality):");
+    let _ = writeln!(
+        out,
+        "    event exposure: {}",
+        format_ratio(
+            stats.auto_exposure.events_with_auto,
+            stats.auto_exposure.eligible_events
+        )
+    );
+    let _ = writeln!(
+        out,
+        "    slot exposure: {}",
+        format_ratio(
+            stats.auto_exposure.auto_slots,
+            stats.auto_exposure.result_slots
+        )
+    );
+    let _ = writeln!(out, "  eligibility sweep:");
+    for point in &stats.sweep {
+        let _ = writeln!(
+            out,
+            "    {:.2}: eligible {} / attempts {}",
+            point.threshold, point.eligible, point.attempts
+        );
+    }
+    out
+}
+
+fn format_finite(value: Option<f64>) -> String {
+    value
+        .filter(|value| value.is_finite())
+        .map(|value| format!("{value:.3}"))
+        .unwrap_or_else(|| "N/A".to_string())
+}
+
+fn format_ratio(numerator: u64, denominator: u64) -> String {
+    if denominator == 0 {
+        "N/A (0/0)".to_string()
+    } else {
+        format!(
+            "{:.1}% ({numerator}/{denominator})",
+            numerator as f64 * 100.0 / denominator as f64
+        )
+    }
+}

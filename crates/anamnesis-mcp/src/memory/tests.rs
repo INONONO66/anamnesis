@@ -151,6 +151,224 @@ fn registry_with_policy_version(version: i64) -> (MemoryRegistry, tempfile::Temp
         dir,
     )
 }
+#[derive(Clone, Copy)]
+struct RecallGateFixture {
+    has_hits: bool,
+    readout_pass: bool,
+    cosine_pass: bool,
+    eligible: bool,
+}
+
+fn recall_event(
+    at_ms: u64,
+    event_kind: RecallEventKind,
+    gates: RecallGateFixture,
+    top_cosine: Option<f64>,
+    result_node_ids: Vec<u64>,
+    auto_extract_node_count: u64,
+) -> RecallEvent {
+    RecallEvent {
+        at_ms,
+        namespace: "default".into(),
+        event_kind,
+        query_chars: 8,
+        scope: Some("project/anamnesis".into()),
+        knowledge_only: true,
+        has_hits: gates.has_hits,
+        readout_pass: gates.readout_pass,
+        cosine_pass: gates.cosine_pass,
+        eligible: gates.eligible,
+        top_score: top_cosine,
+        top_cosine,
+        gate_threshold: Some(0.8),
+        cosine_gate: Some(0.8),
+        result_node_ids,
+        auto_extract_node_count,
+    }
+}
+fn event_kind_stats(stats: &RecallStats, event_kind: RecallEventKind) -> &EventKindStats {
+    stats
+        .by_event_kind
+        .iter()
+        .find(|stats| stats.event_kind == event_kind)
+        .expect("event kind must have recall telemetry")
+}
+#[test]
+fn recall_stats_aggregates_gate_buckets() {
+    let mut store = PolicyStore::in_memory().expect("open policy store");
+    let events = [
+        // Empty attempts must not enter a gate-abstention bucket.
+        recall_event(
+            1,
+            RecallEventKind::UserPrompt,
+            RecallGateFixture {
+                has_hits: false,
+                readout_pass: true,
+                cosine_pass: true,
+                eligible: false,
+            },
+            None,
+            vec![90],
+            9,
+        ),
+        recall_event(
+            2,
+            RecallEventKind::SessionStart,
+            RecallGateFixture {
+                has_hits: true,
+                readout_pass: false,
+                cosine_pass: true,
+                eligible: false,
+            },
+            Some(0.80),
+            vec![91],
+            8,
+        ),
+        recall_event(
+            3,
+            RecallEventKind::Tool,
+            RecallGateFixture {
+                has_hits: true,
+                readout_pass: true,
+                cosine_pass: false,
+                eligible: false,
+            },
+            Some(0.82),
+            vec![92],
+            7,
+        ),
+        recall_event(
+            4,
+            RecallEventKind::Unknown,
+            RecallGateFixture {
+                has_hits: true,
+                readout_pass: false,
+                cosine_pass: false,
+                eligible: false,
+            },
+            Some(0.84),
+            vec![93],
+            6,
+        ),
+        recall_event(
+            5,
+            RecallEventKind::UserPrompt,
+            RecallGateFixture {
+                has_hits: true,
+                readout_pass: true,
+                cosine_pass: true,
+                eligible: true,
+            },
+            Some(0.88),
+            vec![1, 2, 3],
+            2,
+        ),
+        recall_event(
+            6,
+            RecallEventKind::Tool,
+            RecallGateFixture {
+                has_hits: true,
+                readout_pass: true,
+                cosine_pass: true,
+                eligible: true,
+            },
+            Some(0.90),
+            vec![4, 5],
+            0,
+        ),
+    ];
+
+    for event in &events {
+        store
+            .insert_recall_event(event)
+            .expect("seed recall telemetry event");
+    }
+
+    let stats: RecallStats = store.recall_stats().expect("aggregate recall telemetry");
+
+    assert_eq!(stats.total_attempts, 6);
+    assert_eq!(stats.by_event_kind.len(), 4);
+    let abstentions: &AbstentionStats = &stats.abstentions;
+    let cosine: &CosineStats = &stats.cosine;
+    let auto_exposure: &AutoExposureStats = &stats.auto_exposure;
+    let user_prompt = event_kind_stats(&stats, RecallEventKind::UserPrompt);
+    assert_eq!(user_prompt.attempts, 2);
+    assert_eq!(user_prompt.eligible, 1);
+    let session_start = event_kind_stats(&stats, RecallEventKind::SessionStart);
+    assert_eq!(session_start.attempts, 1);
+    assert_eq!(session_start.eligible, 0);
+    let tool = event_kind_stats(&stats, RecallEventKind::Tool);
+    assert_eq!(tool.attempts, 2);
+    assert_eq!(tool.eligible, 1);
+    let unknown = event_kind_stats(&stats, RecallEventKind::Unknown);
+    assert_eq!(unknown.attempts, 1);
+    assert_eq!(unknown.eligible, 0);
+
+    assert_eq!(abstentions.empty, 1);
+    assert_eq!(abstentions.readout_only, 1);
+    assert_eq!(abstentions.cosine_only, 1);
+    assert_eq!(abstentions.both, 1);
+
+    assert_eq!(cosine.samples, 5);
+    assert_eq!(cosine.nulls, 1);
+    assert_eq!(cosine.p50, Some(0.84));
+    assert_eq!(cosine.p90, Some(0.90));
+    assert_eq!(cosine.p95, Some(0.90));
+
+    assert_eq!(auto_exposure.eligible_events, 2);
+    assert_eq!(auto_exposure.events_with_auto, 1);
+    assert_eq!(auto_exposure.result_slots, 5);
+    assert_eq!(auto_exposure.auto_slots, 2);
+
+    assert_eq!(stats.sweep.len(), 11);
+    let first_sweep_point: &SweepPoint = &stats.sweep[0];
+    assert_eq!(first_sweep_point.threshold, 0.80);
+    for (point, (hundredths, eligible)) in stats
+        .sweep
+        .iter()
+        .zip((80_u8..=90).zip([3, 3, 3, 2, 2, 2, 2, 2, 2, 1, 1]))
+    {
+        assert_eq!(point.threshold, f64::from(hundredths) / 100.0);
+        assert_eq!(point.eligible, eligible);
+        assert_eq!(point.attempts, 6);
+    }
+}
+
+#[test]
+fn recall_stats_empty_dataset_has_no_nan() {
+    let store = PolicyStore::in_memory().expect("open policy store");
+
+    let stats: RecallStats = store
+        .recall_stats()
+        .expect("aggregate empty recall telemetry");
+
+    assert_eq!(stats.total_attempts, 0);
+    assert!(stats.by_event_kind.is_empty());
+    assert_eq!(stats.abstentions.empty, 0);
+    assert_eq!(stats.abstentions.readout_only, 0);
+    assert_eq!(stats.abstentions.cosine_only, 0);
+    assert_eq!(stats.abstentions.both, 0);
+    assert_eq!(stats.cosine.samples, 0);
+    assert_eq!(stats.cosine.nulls, 0);
+    assert_eq!(stats.cosine.p50, None);
+    assert_eq!(stats.cosine.p90, None);
+    assert_eq!(stats.cosine.p95, None);
+    assert_eq!(stats.auto_exposure.eligible_events, 0);
+    assert_eq!(stats.auto_exposure.events_with_auto, 0);
+    assert_eq!(stats.auto_exposure.result_slots, 0);
+    assert_eq!(stats.auto_exposure.auto_slots, 0);
+
+    assert_eq!(stats.sweep.len(), 11);
+    for (point, hundredths) in stats.sweep.iter().zip(80_u8..=90) {
+        assert_eq!(point.threshold, f64::from(hundredths) / 100.0);
+        assert!(
+            point.threshold.is_finite(),
+            "threshold must not be NaN or infinite"
+        );
+        assert_eq!(point.eligible, 0);
+        assert_eq!(point.attempts, 0);
+    }
+}
 
 #[test]
 fn policy_schema_fresh_and_v0_migration_converge() {

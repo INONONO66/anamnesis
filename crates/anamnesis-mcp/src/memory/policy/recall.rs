@@ -1,10 +1,11 @@
-#[cfg(test)]
-use rusqlite::Connection;
-use rusqlite::{Transaction, params};
+use rusqlite::{Connection, Transaction, params};
 
 use crate::proto::RecallEventKind;
 
-use super::PolicyStoreError;
+use super::{
+    AbstentionStats, AutoExposureStats, CosineStats, EventKindStats, PolicyStoreError, RecallStats,
+    SweepPoint,
+};
 
 pub(crate) const RECALL_EVENT_RETENTION: u64 = 10_000;
 
@@ -28,6 +29,185 @@ pub(crate) struct RecallEvent {
     pub cosine_gate: Option<f64>,
     pub result_node_ids: Vec<u64>,
     pub auto_extract_node_count: u64,
+}
+
+pub(super) fn stats(connection: &Connection) -> Result<RecallStats, PolicyStoreError> {
+    let (
+        total_attempts,
+        empty,
+        readout_only,
+        cosine_only,
+        both,
+        eligible_events,
+        events_with_auto,
+        result_slots,
+        auto_slots,
+        non_null_cosines,
+    ) = connection
+        .query_row(
+            "SELECT
+                COUNT(*),
+                COALESCE(SUM(CASE WHEN has_hits = 0 THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN has_hits = 1 AND readout_pass = 0 AND cosine_pass = 1 THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN has_hits = 1 AND readout_pass = 1 AND cosine_pass = 0 THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN has_hits = 1 AND readout_pass = 0 AND cosine_pass = 0 THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN eligible = 1 THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN eligible = 1 AND auto_extract_node_count > 0 THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN eligible = 1 THEN json_array_length(result_node_ids) ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN eligible = 1 THEN auto_extract_node_count ELSE 0 END), 0),
+                COUNT(top_cosine)
+             FROM recall_events",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, i64>(8)?,
+                    row.get::<_, i64>(9)?,
+                ))
+            },
+        )
+        .map_err(|_| PolicyStoreError::operation("aggregate recall telemetry"))?;
+
+    let total_attempts = stats_integer(total_attempts, "recall stats total attempts")?;
+    let non_null_cosines = stats_integer(non_null_cosines, "recall stats cosine samples")?;
+    let cosine_nulls = total_attempts
+        .checked_sub(non_null_cosines)
+        .ok_or_else(|| PolicyStoreError::invalid_value("recall stats cosine nulls"))?;
+
+    let by_event_kind = event_kind_stats(connection)?;
+    let cosine_values = cosine_values(connection)?;
+    let samples = u64::try_from(cosine_values.len())
+        .map_err(|_| PolicyStoreError::invalid_value("recall stats cosine samples"))?;
+    if samples != non_null_cosines {
+        return Err(PolicyStoreError::invalid_value(
+            "recall stats cosine samples",
+        ));
+    }
+
+    let sweep = sweep(connection, total_attempts)?;
+
+    Ok(RecallStats {
+        total_attempts,
+        by_event_kind,
+        abstentions: AbstentionStats {
+            empty: stats_integer(empty, "recall stats empty attempts")?,
+            readout_only: stats_integer(readout_only, "recall stats readout-only attempts")?,
+            cosine_only: stats_integer(cosine_only, "recall stats cosine-only attempts")?,
+            both: stats_integer(both, "recall stats both-gate attempts")?,
+        },
+        cosine: CosineStats {
+            samples,
+            nulls: cosine_nulls,
+            p50: percentile(&cosine_values, 0.50),
+            p90: percentile(&cosine_values, 0.90),
+            p95: percentile(&cosine_values, 0.95),
+        },
+        auto_exposure: AutoExposureStats {
+            eligible_events: stats_integer(eligible_events, "recall stats eligible events")?,
+            events_with_auto: stats_integer(events_with_auto, "recall stats auto events")?,
+            result_slots: stats_integer(result_slots, "recall stats result slots")?,
+            auto_slots: stats_integer(auto_slots, "recall stats auto slots")?,
+        },
+        sweep,
+    })
+}
+
+fn event_kind_stats(connection: &Connection) -> Result<Vec<EventKindStats>, PolicyStoreError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT event_kind, COUNT(*), COALESCE(SUM(CASE WHEN eligible = 1 THEN 1 ELSE 0 END), 0)
+             FROM recall_events
+             GROUP BY event_kind
+             ORDER BY event_kind",
+        )
+        .map_err(|_| PolicyStoreError::operation("prepare recall event-kind telemetry"))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })
+        .map_err(|_| PolicyStoreError::operation("query recall event-kind telemetry"))?;
+
+    rows.map(|row| {
+        let (event_kind, attempts, eligible) =
+            row.map_err(|_| PolicyStoreError::operation("read recall event-kind telemetry"))?;
+        let event_kind = serde_json::from_value(serde_json::Value::String(event_kind))
+            .map_err(|_| PolicyStoreError::operation("deserialize recall event kind"))?;
+        Ok(EventKindStats {
+            event_kind,
+            attempts: stats_integer(attempts, "recall stats event-kind attempts")?,
+            eligible: stats_integer(eligible, "recall stats event-kind eligible")?,
+        })
+    })
+    .collect()
+}
+
+fn cosine_values(connection: &Connection) -> Result<Vec<f64>, PolicyStoreError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT top_cosine FROM recall_events
+             WHERE top_cosine IS NOT NULL
+             ORDER BY top_cosine",
+        )
+        .map_err(|_| PolicyStoreError::operation("prepare recall cosine telemetry"))?;
+    let rows = statement
+        .query_map([], |row| row.get(0))
+        .map_err(|_| PolicyStoreError::operation("query recall cosine telemetry"))?;
+
+    rows.map(|row| row.map_err(|_| PolicyStoreError::operation("read recall cosine telemetry")))
+        .collect()
+}
+
+fn sweep(connection: &Connection, attempts: u64) -> Result<Vec<SweepPoint>, PolicyStoreError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT COALESCE(SUM(CASE
+                WHEN has_hits = 1
+                 AND readout_pass = 1
+                 AND top_cosine IS NOT NULL
+                 AND top_cosine >= ?1
+                THEN 1 ELSE 0
+             END), 0)
+             FROM recall_events",
+        )
+        .map_err(|_| PolicyStoreError::operation("prepare recall threshold sweep"))?;
+
+    (80_u8..=90)
+        .map(|hundredths| {
+            let threshold = f64::from(hundredths) / 100.0;
+            let eligible = statement
+                .query_row([threshold], |row| row.get::<_, i64>(0))
+                .map_err(|_| PolicyStoreError::operation("query recall threshold sweep"))?;
+            Ok(SweepPoint {
+                threshold,
+                eligible: stats_integer(eligible, "recall stats sweep eligible")?,
+                attempts,
+            })
+        })
+        .collect()
+}
+
+fn percentile(values: &[f64], percentile: f64) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+
+    let index = (percentile * values.len() as f64).ceil() as usize - 1;
+    values.get(index).copied()
+}
+
+fn stats_integer(value: i64, field: &'static str) -> Result<u64, PolicyStoreError> {
+    u64::try_from(value).map_err(|_| PolicyStoreError::invalid_value(field))
 }
 
 pub(super) fn insert(
