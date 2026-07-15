@@ -1308,6 +1308,7 @@ mod embedding_migration {
         db_path: &std::path::Path,
         provider: Arc<dyn EmbeddingProvider>,
     ) -> EmbeddingMigrationRequest {
+        wait_for_file_registry_lock_release(db_path);
         let pending = PendingEmbeddingMigrationRequest {
             namespace: "default".to_string(),
             db_path: db_path.to_path_buf(),
