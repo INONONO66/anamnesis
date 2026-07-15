@@ -45,6 +45,9 @@ fn main() -> Result<()> {
     if let Some(Commands::Dashboard { port, namespace }) = &cli.command {
         return run_dashboard(*port, namespace.clone());
     }
+    if let Some(Commands::MigrateEmbeddings { namespace }) = &cli.command {
+        return cli::run_migrate_embeddings(namespace.as_deref());
+    }
     // One-shot CLI commands. The synchronous path handles `prewarm`/`doctor` and
     // the `--embedded` (DB-direct) variants of the daemon-routed commands; the
     // default daemon-routed commands run as async MCP clients.

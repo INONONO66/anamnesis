@@ -28,7 +28,9 @@ use tokio::net::UnixListener;
 use tokio::sync::Notify;
 
 use crate::config::Config;
-use crate::memory::MemoryRegistry;
+use crate::dispatch::{DaemonRuntimeContext, DispatchRuntime};
+use crate::memory::migration::MigrationRuntime;
+use crate::memory::{MemoryRegistry, MigrationLockLease};
 use crate::proto;
 
 /// Unix `sun_path` is the binding constraint: 104 bytes on macOS/BSD, 108 on
@@ -188,8 +190,9 @@ pub struct DaemonBind {
     pub socket_path: PathBuf,
     /// Held for the process lifetime. The OS releases it on exit/crash; we also
     /// release explicitly on graceful shutdown.
-    lock_file: std::fs::File,
+    lock_file: Arc<std::fs::File>,
     lock_path: PathBuf,
+    default_db_path: PathBuf,
 }
 
 /// Acquire daemon ownership atomically.
@@ -242,8 +245,9 @@ pub fn acquire_daemon(db: &Path, socket_path: &Path) -> Result<Option<DaemonBind
     Ok(Some(DaemonBind {
         listener,
         socket_path: socket_path.to_path_buf(),
-        lock_file,
+        lock_file: Arc::new(lock_file),
         lock_path,
+        default_db_path: db.to_path_buf(),
     }))
 }
 
@@ -296,8 +300,11 @@ fn from_std(l: StdUnixListener) -> io::Result<UnixListener> {
 }
 
 impl DaemonBind {
+    fn default_migration_lease(&self) -> MigrationLockLease {
+        MigrationLockLease::from(Arc::clone(&self.lock_file))
+    }
     /// Release ownership in the correct order on graceful exit:
-    ///   1) caller flushes memory (`registry.flush_all_open`) BEFORE this,
+    ///   1) caller joins requests, flushes memory, and drains migrations,
     ///   2) unlink the socket so the next daemon binds fresh (no stale reclaim),
     ///   3) release the fs4 lock LAST, so no second daemon can bind the socket
     ///      until ours is gone — preserving the lock⇒socket invariant on the way
@@ -313,7 +320,7 @@ impl DaemonBind {
             tracing::warn!("unlink socket {:?} failed: {e}", self.socket_path);
         }
         // 3) release lock last.
-        let _ = fs4::FileExt::unlock(&self.lock_file);
+        let _ = fs4::FileExt::unlock(self.lock_file.as_ref());
         // lock_file drops here → fd closed; lock already released.
         let _ = &self.lock_path; // kept for diagnostics if extended.
     }
@@ -468,15 +475,15 @@ pub async fn run(cfg: Config) -> Result<()> {
     tracing::info!(socket = %bind.socket_path.display(), "anamnesis daemon serving");
 
     // The daemon holds the DB lock and is the sole opener → unlocked registry.
-    let registry = std::sync::Arc::new(std::sync::Mutex::new(
-        MemoryRegistry::file_backed_unlocked_with_model(
-            cfg.default_db.clone(),
-            cfg.db_dir(),
-            cfg.default_namespace.clone(),
-            cfg.reinforce_on_recall,
-            cfg.embed_model.clone(),
-        ),
-    ));
+    let mut memory_registry = MemoryRegistry::file_backed_unlocked_with_model(
+        cfg.default_db.clone(),
+        cfg.db_dir(),
+        cfg.default_namespace.clone(),
+        cfg.reinforce_on_recall,
+        cfg.embed_model.clone(),
+    );
+    memory_registry.set_auto_migrate_embeddings(cfg.auto_migrate_embeddings);
+    let registry = std::sync::Arc::new(std::sync::Mutex::new(memory_registry));
 
     // Rebuild the capture queue + dedup set from node metadata before serving,
     // so Stage-2 extraction survives daemon restarts (best-effort; fail-open).
@@ -503,7 +510,25 @@ pub(crate) async fn serve_loop(
     registry: std::sync::Arc<std::sync::Mutex<MemoryRegistry>>,
     grace: Duration,
 ) {
+    let migrations = match MigrationRuntime::new(
+        &registry,
+        bind.default_db_path.clone(),
+        bind.default_migration_lease(),
+    ) {
+        Ok(runtime) => Arc::new(runtime),
+        Err(error) => {
+            tracing::error!(error = %error, "initialize migration runtime failed");
+            bind.release();
+            return;
+        }
+    };
+    let runtime = DispatchRuntime::daemon(DaemonRuntimeContext {
+        registry: Arc::clone(&registry),
+        migrations: Arc::clone(&migrations),
+    });
     let tracker = ClientTracker::new();
+    let (connection_shutdown, connection_stopping) = tokio::sync::watch::channel(false);
+    let mut connections = tokio::task::JoinSet::new();
 
     // Distinguish the two shutdown causes: an explicit signal terminates
     // unconditionally, whereas the idle-grace path must first DRAIN the kernel
@@ -558,10 +583,11 @@ pub(crate) async fn serve_loop(
                 // Bump the count (and cancel any pending grace) BEFORE spawning,
                 // so a connect racing the grace window is never missed.
                 let guard = tracker.connect();
-                let registry = registry.clone(); // cheap Arc clone → SHARED registry.
-                tokio::spawn(async move {
+                let runtime = runtime.clone();
+                let connection_stopping = connection_stopping.clone();
+                connections.spawn(async move {
                     let _g = guard; // drop on task end → decrement.
-                    serve_connection(registry, stream).await;
+                    serve_connection(runtime, stream, connection_stopping).await;
                 });
                 continue 'serve;
             }
@@ -583,10 +609,11 @@ pub(crate) async fn serve_loop(
                 {
                     drained = true;
                     let guard = tracker.connect();
-                    let registry = registry.clone();
-                    tokio::spawn(async move {
+                    let runtime = runtime.clone();
+                    let connection_stopping = connection_stopping.clone();
+                    connections.spawn(async move {
                         let _g = guard;
-                        serve_connection(registry, stream).await;
+                        serve_connection(runtime, stream, connection_stopping).await;
                     });
                 }
                 if drained {
@@ -602,12 +629,22 @@ pub(crate) async fn serve_loop(
         }
     }
 
-    // `process::exit` is skipped here (we return normally), but flush + release in
-    // the correct order regardless: flush FIRST, then unlink socket, then unlock.
+    let _ = connection_shutdown.send(true);
+    while let Some(result) = connections.join_next().await {
+        if let Err(error) = result {
+            tracing::error!(error = %error, "connection task failed during shutdown");
+        }
+    }
     if let Ok(mut g) = registry.lock()
         && let Err(e) = g.flush_all_open()
     {
-        tracing::error!("flush on shutdown failed: {e}");
+        tracing::error!(error = %e, "flush on shutdown failed");
+    }
+    let migration_drain = Arc::clone(&migrations);
+    match tokio::task::spawn_blocking(move || migration_drain.drain()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => tracing::error!(error = %error, "migration drain failed"),
+        Err(error) => tracing::error!(error = %error, "migration drain task failed"),
     }
     bind.release(); // unlink socket + release lock
 }
@@ -623,13 +660,20 @@ pub(crate) async fn serve_loop(
 /// can't brick the daemon. A malformed line gets an `invalid_params` reply and
 /// the connection keeps serving.
 async fn serve_connection(
-    registry: Arc<std::sync::Mutex<MemoryRegistry>>,
+    runtime: DispatchRuntime,
     stream: tokio::net::UnixStream,
+    mut stopping: tokio::sync::watch::Receiver<bool>,
 ) {
     let (rd, mut wr) = stream.into_split();
     let mut lines = BufReader::new(rd).lines();
     loop {
-        let line = match lines.next_line().await {
+        let line = match tokio::select! {
+            line = lines.next_line() => line,
+            changed = stopping.changed() => {
+                let _ = changed;
+                break;
+            },
+        } {
             Ok(Some(line)) => line,
             Ok(None) => break, // peer closed the connection (EOF)
             Err(e) => {
@@ -642,7 +686,7 @@ async fn serve_connection(
         }
         let resp = match proto::decode_line::<proto::Request>(&line) {
             Ok(req) => {
-                let registry = registry.clone();
+                let runtime = runtime.clone();
                 // Pass the `Arc` itself — NOT a held `MutexGuard` — so
                 // `dispatch` can apply its own two-phase locking (brief global
                 // lock to resolve a namespace handle, drop it, then only the
@@ -651,11 +695,13 @@ async fn serve_connection(
                 // registry-lock-starvation bug this fixes: a different
                 // namespace's request would otherwise queue behind this one's
                 // embed/ingest work for the whole call.
-                tokio::task::spawn_blocking(move || crate::dispatch::dispatch(&registry, req))
-                    .await
-                    .unwrap_or_else(|e| {
-                        proto::Response::internal(format!("dispatch task panicked: {e}"))
-                    })
+                tokio::task::spawn_blocking(move || {
+                    crate::dispatch::dispatch_two_phase(&runtime, req)
+                })
+                .await
+                .unwrap_or_else(|e| {
+                    proto::Response::internal(format!("dispatch task panicked: {e}"))
+                })
             }
             Err(e) => proto::Response::invalid_params(format!("malformed request: {e}")),
         };
@@ -983,5 +1029,139 @@ mod tests {
             !bound_socket.exists(),
             "socket file {bound_socket:?} must be unlinked on graceful shutdown"
         );
+    }
+
+    struct LegacyProvider;
+
+    impl anamnesis::embedding::EmbeddingProvider for LegacyProvider {
+        fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, anamnesis::Error> {
+            Ok(texts.iter().map(|_| vec![0.5; 4]).collect())
+        }
+
+        fn dimensions(&self) -> usize {
+            4
+        }
+
+        fn model_name(&self) -> &str {
+            "legacy-model"
+        }
+    }
+
+    struct ShutdownBlockingProvider {
+        started: std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>>,
+        released: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+    }
+
+    impl ShutdownBlockingProvider {
+        fn release(&self) {
+            let (released, wake) = self.released.as_ref();
+            *released
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
+            wake.notify_all();
+        }
+    }
+
+    impl anamnesis::embedding::EmbeddingProvider for ShutdownBlockingProvider {
+        fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, anamnesis::Error> {
+            if let Some(started) = self
+                .started
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take()
+            {
+                let _ = started.send(());
+            }
+            let (released, wake) = self.released.as_ref();
+            let mut released = released
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            while !*released {
+                released = wake
+                    .wait(released)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+            }
+            Ok(texts.iter().map(|_| vec![0.25; 3]).collect())
+        }
+
+        fn dimensions(&self) -> usize {
+            3
+        }
+
+        fn model_name(&self) -> &str {
+            "target-model"
+        }
+    }
+
+    #[tokio::test]
+    async fn daemon_shutdown_waits_for_migration_before_releasing_default_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("memory.db");
+        let socket = socket_path_for_db(&db).unwrap();
+        let mut legacy = MemoryRegistry::file_backed_with(
+            Arc::new(LegacyProvider),
+            db.clone(),
+            dir.path().to_path_buf(),
+            "default".to_string(),
+            false,
+        );
+        legacy.remember("legacy content", None).unwrap();
+        legacy.flush_all_open().unwrap();
+        drop(legacy);
+
+        let bind = acquire_daemon(&db, &socket)
+            .unwrap()
+            .expect("daemon acquires default lock");
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let provider = Arc::new(ShutdownBlockingProvider {
+            started: std::sync::Mutex::new(Some(started_tx)),
+            released: Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new())),
+        });
+        let registry = Arc::new(std::sync::Mutex::new(
+            MemoryRegistry::file_backed_unlocked_with(
+                provider.clone(),
+                db.clone(),
+                dir.path().to_path_buf(),
+                "default".to_string(),
+                false,
+            ),
+        ));
+        let mut loop_handle = tokio::spawn(serve_loop(bind, registry, Duration::ZERO));
+        let stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
+        let (rd, mut wr) = stream.into_split();
+        let mut lines = BufReader::new(rd).lines();
+        let request = proto::encode_line(&proto::Request::Stats { namespace: None }).unwrap();
+        wr.write_all(request.as_bytes()).await.unwrap();
+        wr.flush().await.unwrap();
+        let response = lines.next_line().await.unwrap().unwrap();
+        assert!(matches!(
+            proto::decode_line::<proto::Response>(&response).unwrap(),
+            proto::Response::Err {
+                kind: proto::ErrKind::Internal,
+                ..
+            }
+        ));
+        started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("migration reaches blocked embedding");
+        drop(lines);
+        drop(wr);
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut loop_handle)
+                .await
+                .is_err(),
+            "daemon must not exit while its migration worker is blocked"
+        );
+        assert!(acquire_daemon(&db, &socket).unwrap().is_none());
+        provider.release();
+        tokio::time::timeout(Duration::from_secs(5), loop_handle)
+            .await
+            .expect("daemon exits after migration unblocks")
+            .expect("serve loop task succeeds");
+        let replacement = acquire_daemon(&db, &socket)
+            .unwrap()
+            .expect("default lock is released after migration drain");
+        replacement.release();
     }
 }

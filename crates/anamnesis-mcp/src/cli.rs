@@ -1,10 +1,81 @@
 //! One-shot CLI (cold model load) + the `serve` subcommand dispatcher.
 
+use std::sync::Arc;
+
+use anamnesis::embedding::EmbeddingProvider;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 use crate::config::Config;
-use crate::memory::MemoryRegistry;
+use crate::memory::{
+    EmbeddingMigrationRequest, MemoryRegistry, MigrationLockLease,
+    PendingEmbeddingMigrationRequest, acquire_namespace_migration_lock,
+};
+
+pub(crate) struct ManualEmbeddingMigration {
+    namespace: String,
+    db_path: std::path::PathBuf,
+    lock_lease: MigrationLockLease,
+}
+
+impl ManualEmbeddingMigration {
+    fn namespace(&self) -> &str {
+        &self.namespace
+    }
+
+    fn into_request(self, provider: Arc<dyn EmbeddingProvider>) -> EmbeddingMigrationRequest {
+        (
+            PendingEmbeddingMigrationRequest {
+                namespace: self.namespace,
+                db_path: self.db_path,
+                provider,
+            },
+            self.lock_lease,
+        )
+            .into()
+    }
+}
+
+pub(crate) fn prepare_manual_migration(
+    registry: &MemoryRegistry,
+    namespace: Option<&str>,
+) -> Result<ManualEmbeddingMigration, anamnesis::Error> {
+    let namespace = registry.canonical_ns_key(namespace);
+    let db_path = registry.namespace_db_path(&namespace)?.ok_or_else(|| {
+        anamnesis::Error::InvalidInput(
+            "manual embedding migration requires a file-backed database".into(),
+        )
+    })?;
+    let metadata = std::fs::metadata(&db_path).map_err(|error| {
+        anamnesis::Error::StorageError(format!(
+            "namespace {namespace:?} database {} must already exist before migration: {error}",
+            db_path.display()
+        ))
+    })?;
+    if !metadata.is_file() {
+        return Err(anamnesis::Error::InvalidInput(format!(
+            "namespace {namespace:?} database {} is not a regular file",
+            db_path.display()
+        )));
+    }
+    let lock_lease = acquire_namespace_migration_lock(&db_path).map_err(|error| {
+        anamnesis::Error::StorageError(format!(
+            "cannot migrate namespace {namespace:?} while its database is in use; stop the \
+             anamnesis daemon or other owner, then retry: {error}"
+        ))
+    })?;
+    let db_path = std::fs::canonicalize(&db_path).map_err(|error| {
+        anamnesis::Error::StorageError(format!(
+            "resolve namespace {namespace:?} database {}: {error}",
+            db_path.display()
+        ))
+    })?;
+    Ok(ManualEmbeddingMigration {
+        namespace,
+        db_path,
+        lock_lease,
+    })
+}
 
 #[derive(Parser)]
 #[command(
@@ -93,6 +164,15 @@ pub enum Commands {
     },
     /// Download/initialize the embedding model, then exit.
     Prewarm,
+    /// Re-embed an existing namespace database with the configured model.
+    ///
+    /// The daemon must be stopped because migration owns the namespace database
+    /// lock for the entire operation.
+    MigrateEmbeddings {
+        /// Namespace to migrate (defaults to the configured namespace).
+        #[arg(long)]
+        namespace: Option<String>,
+    },
     /// Check the local setup (db path + lock, model cache, config) and print a
     /// checklist. Does NOT load the embedding model.
     Doctor,
@@ -189,9 +269,13 @@ pub fn run_oneshot(cli: &Cli) -> Result<Oneshot> {
         // `Dashboard` are intercepted earlier in `main` (each runs its own
         // long-lived server, not a synchronous one-shot); they land here only via
         // the exhaustiveness check.
-        None | Some(Commands::Serve { .. } | Commands::Daemon | Commands::Dashboard { .. }) => {
-            Ok(Oneshot::Serve)
-        }
+        None
+        | Some(
+            Commands::Serve { .. }
+            | Commands::Daemon
+            | Commands::Dashboard { .. }
+            | Commands::MigrateEmbeddings { .. },
+        ) => Ok(Oneshot::Serve),
 
         // The `hook` family always talks to the warm daemon as an async client
         // (there is no embedded hook mode); defer to `run_oneshot_client`.
@@ -253,6 +337,63 @@ pub fn run_oneshot(cli: &Cli) -> Result<Oneshot> {
             doctor(&cfg);
             Ok(Oneshot::Done)
         }
+    }
+}
+
+pub fn run_migrate_embeddings(namespace: Option<&str>) -> Result<()> {
+    let cfg = Config::from_env();
+    let reg = registry(&cfg);
+    let prepared = prepare_manual_migration(&reg, namespace)?;
+    crate::config::ensure_model_cache_dir();
+    let model = crate::memory::embed_model_from_name(&cfg.embed_model)?;
+    let provider: Arc<dyn EmbeddingProvider> =
+        Arc::new(anamnesis::embedding::fastembed::FastEmbedProvider::with_model(model)?);
+    run_prepared_migration(prepared, provider, &mut std::io::stdout().lock())
+}
+
+fn run_prepared_migration(
+    prepared: ManualEmbeddingMigration,
+    provider: Arc<dyn EmbeddingProvider>,
+    output: &mut dyn std::io::Write,
+) -> Result<()> {
+    let canonical_namespace = prepared.namespace().to_string();
+    let outcome = crate::memory::migration::migrate_embeddings(
+        prepared.into_request(provider),
+        &mut |event| {
+            tracing::info!(
+                namespace = %event.namespace,
+                committed = event.committed,
+                total = event.total,
+                batch = event.batch,
+                source_model = ?event.source_model,
+                source_dimensions = ?event.source_dimensions,
+                target_model = %event.target_model,
+                target_dimensions = event.target_dimensions,
+                "embedding migration batch committed"
+            );
+        },
+    )?;
+    write_migration_summary(output, &canonical_namespace, &outcome)?;
+    Ok(())
+}
+
+fn write_migration_summary(
+    output: &mut dyn std::io::Write,
+    namespace: &str,
+    outcome: &crate::memory::EmbeddingMigrationOutcome,
+) -> std::io::Result<()> {
+    match outcome {
+        crate::memory::EmbeddingMigrationOutcome::NoOp { model, dimensions } => writeln!(
+            output,
+            "embedding migration no-op: namespace={namespace} model={model} dimensions={dimensions} already compatible"
+        ),
+        crate::memory::EmbeddingMigrationOutcome::Migrated(report) => writeln!(
+            output,
+            "embedding migration complete: namespace={namespace} migrated={} resumed={} backup={}",
+            report.migrated,
+            report.resumed,
+            report.backup_path.display()
+        ),
     }
 }
 
@@ -451,5 +592,83 @@ mod tests {
         ));
         assert!(Cli::try_parse_from(["anamnesis", "hook", "pre-compact"]).is_ok());
         assert!(Cli::try_parse_from(["anamnesis", "hook", "session-end"]).is_ok());
+    }
+
+    #[test]
+    fn migrate_embeddings_parses_optional_namespace() {
+        use clap::Parser;
+
+        let with_namespace = Cli::try_parse_from([
+            "anamnesis",
+            "migrate-embeddings",
+            "--namespace",
+            "Team Memory",
+        ])
+        .expect("parse migration namespace");
+        assert!(matches!(
+            with_namespace.command,
+            Some(Commands::MigrateEmbeddings {
+                namespace: Some(namespace)
+            }) if namespace == "Team Memory"
+        ));
+
+        let default_namespace = Cli::try_parse_from(["anamnesis", "migrate-embeddings"])
+            .expect("parse migration default namespace");
+        assert!(matches!(
+            default_namespace.command,
+            Some(Commands::MigrateEmbeddings { namespace: None })
+        ));
+    }
+
+    #[test]
+    fn already_compatible_cli_outcome_is_noop_without_backup_path() {
+        struct CompatibleProvider;
+
+        impl EmbeddingProvider for CompatibleProvider {
+            fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, anamnesis::Error> {
+                Ok(texts.iter().map(|_| vec![0.5; 384]).collect())
+            }
+
+            fn dimensions(&self) -> usize {
+                384
+            }
+
+            fn model_name(&self) -> &str {
+                "intfloat/multilingual-e5-small"
+            }
+        }
+
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let db = dir.path().join("compatible.db");
+        let mut storage =
+            anamnesis::storage::SqliteStorage::open(&db).expect("create compatible database");
+        storage
+            .set_embedding_model_name("intfloat/multilingual-e5-small")
+            .expect("stamp compatible model");
+        drop(storage);
+        let provider: Arc<dyn EmbeddingProvider> = Arc::new(CompatibleProvider);
+        let registry = crate::memory::MemoryRegistry::file_backed_with(
+            Arc::clone(&provider),
+            db.clone(),
+            dir.path().to_path_buf(),
+            "default".to_string(),
+            false,
+        );
+        let prepared = prepare_manual_migration(&registry, None).expect("prepare migration");
+        let mut output = Vec::new();
+
+        run_prepared_migration(prepared, provider, &mut output).expect("run no-op migration");
+
+        let summary = String::from_utf8(output).expect("UTF-8 summary");
+        assert_eq!(
+            summary,
+            "embedding migration no-op: namespace=default model=intfloat/multilingual-e5-small dimensions=384 already compatible\n"
+        );
+        assert!(!summary.contains("backup="));
+        assert!(
+            !crate::memory::backup_path_for_database(&db)
+                .expect("derive backup path")
+                .exists()
+        );
     }
 }

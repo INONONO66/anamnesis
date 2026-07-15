@@ -27,6 +27,8 @@ use anamnesis::{Error, Memory};
 use crate::capture::{extract_redelivery_ms, scan_extraction_state};
 
 mod mgmt;
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) mod migration;
 mod recall;
 #[cfg(test)]
 mod tests;
@@ -38,6 +40,176 @@ pub(crate) fn embed_model_from_name(
     name: &str,
 ) -> Result<anamnesis::embedding::fastembed::EmbeddingModel, Error> {
     anamnesis::embedding::fastembed::embed_model_from_name(name)
+}
+
+pub(crate) struct PendingEmbeddingMigrationRequest {
+    pub namespace: String,
+    pub db_path: PathBuf,
+    pub provider: Arc<dyn EmbeddingProvider>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum NamespaceMigrationState {
+    Running,
+    Failed { message: String },
+    Completed,
+}
+
+pub(crate) type NamespaceHandle = Arc<Mutex<Memory<SqliteStorage>>>;
+
+pub(crate) enum NamespaceResolution {
+    Ready(NamespaceHandle),
+    StartMigration(PendingEmbeddingMigrationRequest),
+    Migrating,
+    MigrationFailed(String),
+}
+
+pub(crate) enum NamespaceProbe {
+    Resolved(NamespaceResolution),
+    Inspect {
+        key: String,
+        pending: PendingEmbeddingMigrationRequest,
+    },
+}
+
+pub(crate) struct EmbeddingMigrationRequest {
+    pending: PendingEmbeddingMigrationRequest,
+    lock_lease: MigrationLockLease,
+}
+
+impl From<(PendingEmbeddingMigrationRequest, MigrationLockLease)> for EmbeddingMigrationRequest {
+    fn from((pending, lock_lease): (PendingEmbeddingMigrationRequest, MigrationLockLease)) -> Self {
+        Self {
+            pending,
+            lock_lease,
+        }
+    }
+}
+
+pub(crate) struct MigrationLockLease {
+    kind: MigrationLockLeaseKind,
+}
+
+enum MigrationLockLeaseKind {
+    Acquired(std::fs::File),
+    DaemonDefault(Arc<std::fs::File>),
+}
+
+impl From<std::fs::File> for MigrationLockLease {
+    fn from(file: std::fs::File) -> Self {
+        Self {
+            kind: MigrationLockLeaseKind::Acquired(file),
+        }
+    }
+}
+
+impl From<Arc<std::fs::File>> for MigrationLockLease {
+    fn from(file: Arc<std::fs::File>) -> Self {
+        Self {
+            kind: MigrationLockLeaseKind::DaemonDefault(file),
+        }
+    }
+}
+
+impl MigrationLockLease {
+    fn file(&self) -> &std::fs::File {
+        match &self.kind {
+            MigrationLockLeaseKind::Acquired(file) => file,
+            MigrationLockLeaseKind::DaemonDefault(file) => file,
+        }
+    }
+
+    fn into_daemon_default(self) -> Result<Arc<std::fs::File>, Error> {
+        match self.kind {
+            MigrationLockLeaseKind::DaemonDefault(file) => Ok(file),
+            MigrationLockLeaseKind::Acquired(_) => Err(Error::InvalidInput(
+                "migration runtime requires the daemon's default database lease".to_string(),
+            )),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct EmbeddingProgress {
+    pub namespace: String,
+    pub committed: usize,
+    pub total: usize,
+    pub batch: usize,
+    pub source_model: Option<String>,
+    pub source_dimensions: Option<usize>,
+    pub target_model: String,
+    pub target_dimensions: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct EmbeddingMigrationReport {
+    pub scanned: usize,
+    pub migrated: usize,
+    pub resumed: usize,
+    pub batches: usize,
+    pub backup_path: PathBuf,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum EmbeddingMigrationOutcome {
+    NoOp { model: String, dimensions: usize },
+    Migrated(EmbeddingMigrationReport),
+}
+
+pub(crate) fn backup_path_for_database(db_path: &std::path::Path) -> Result<PathBuf, Error> {
+    let output = std::process::Command::new("date")
+        .arg("+%Y%m%d")
+        .output()
+        .map_err(|error| Error::StorageError(format!("read local calendar date: {error}")))?;
+    if !output.status.success() {
+        return Err(Error::StorageError(format!(
+            "read local calendar date: date exited with {}",
+            output.status
+        )));
+    }
+    let stamp = String::from_utf8(output.stdout)
+        .map_err(|error| Error::StorageError(format!("decode local calendar date: {error}")))?;
+    let stamp = stamp.trim();
+    if stamp.len() != 8 || !stamp.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(Error::StorageError(format!(
+            "local calendar date returned invalid YYYYMMDD value {stamp:?}"
+        )));
+    }
+    let mut backup = std::ffi::OsString::from(db_path.as_os_str());
+    backup.push(format!(".bak-{stamp}"));
+    Ok(PathBuf::from(backup))
+}
+
+fn namespace_lock_path(path: &std::path::Path) -> PathBuf {
+    let mut lock_path = path.as_os_str().to_os_string();
+    lock_path.push(".lock");
+    PathBuf::from(lock_path)
+}
+
+fn acquire_namespace_lock(path: &std::path::Path) -> Result<std::fs::File, Error> {
+    let lock_path = namespace_lock_path(path);
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|error| {
+            Error::StorageError(format!("open namespace lock file {lock_path:?}: {error}"))
+        })?;
+    if fs4::FileExt::try_lock(&lock_file).is_err() {
+        return Err(Error::StorageError(format!(
+            "database {path:?} is already in use by another anamnesis process; use a different \
+             ANAMNESIS_DB or namespace"
+        )));
+    }
+    Ok(lock_file)
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn acquire_namespace_migration_lock(
+    path: &std::path::Path,
+) -> Result<MigrationLockLease, Error> {
+    acquire_namespace_lock(path).map(MigrationLockLease::from)
 }
 
 /// One conversational turn for `ingest_conversation`.
@@ -146,6 +318,338 @@ enum Backend {
     Memory,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum NamespaceCompatibility {
+    Ready,
+    DimensionMismatch {
+        stored_model: Option<String>,
+        db_dimensions: Vec<Option<usize>>,
+        target_model: String,
+        target_dimensions: usize,
+    },
+    ModelMismatch {
+        stored_model: String,
+        target_model: String,
+        target_dimensions: usize,
+    },
+    IncompleteMigration {
+        target_model: String,
+        target_dimensions: usize,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum MigrationBackupState {
+    NoBackupCreated,
+    BackupPreserved { backup_path: PathBuf },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum MigrationFailureContext {
+    FixedCategory,
+    BackupCreation {
+        backup_path: PathBuf,
+        destination_exists: bool,
+    },
+    CheckpointBackupValidation {
+        backup_path: PathBuf,
+    },
+    CheckpointBackupVerification {
+        backup_path: PathBuf,
+    },
+    BackupVerificationCleanup {
+        backup_path: PathBuf,
+        validation_path: PathBuf,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MigrationFailureCause {
+    MissingNode,
+    MissingEdge,
+    Storage,
+    Rejected,
+    InvalidConfiguration,
+    InvalidInput,
+    NonFiniteState,
+    BudgetExhausted,
+}
+
+impl From<&Error> for MigrationFailureCause {
+    fn from(source: &Error) -> Self {
+        match source {
+            Error::NodeNotFound(_) => Self::MissingNode,
+            Error::EdgeNotFound(_) => Self::MissingEdge,
+            Error::StorageError(_) => Self::Storage,
+            Error::Rejected(_) => Self::Rejected,
+            Error::InvalidConfig(_) => Self::InvalidConfiguration,
+            Error::InvalidInput(_) => Self::InvalidInput,
+            Error::NonFinite(_) => Self::NonFiniteState,
+            Error::BudgetExhausted => Self::BudgetExhausted,
+        }
+    }
+}
+
+impl std::fmt::Display for MigrationFailureCause {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::MissingNode => "missing node",
+            Self::MissingEdge => "missing edge",
+            Self::Storage => "storage",
+            Self::Rejected => "rejected",
+            Self::InvalidConfiguration => "invalid configuration",
+            Self::InvalidInput => "invalid input",
+            Self::NonFiniteState => "non-finite state",
+            Self::BudgetExhausted => "budget exhausted",
+        })
+    }
+}
+
+pub(crate) struct EmbeddingMigrationFailure {
+    backup_state: MigrationBackupState,
+    failure_context: MigrationFailureContext,
+    source: Error,
+}
+
+impl std::fmt::Debug for EmbeddingMigrationFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "EmbeddingMigrationFailure({self})")
+    }
+}
+
+impl EmbeddingMigrationFailure {
+    pub(crate) fn new(
+        backup_state: MigrationBackupState,
+        failure_context: MigrationFailureContext,
+        source: Error,
+    ) -> Self {
+        Self {
+            backup_state,
+            failure_context,
+            source,
+        }
+    }
+
+    pub(crate) fn retained_source(&self) -> &Error {
+        &self.source
+    }
+}
+
+impl std::fmt::Display for EmbeddingMigrationFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(
+            &EmbeddingMigrationError::Failed {
+                backup_state: self.backup_state.clone(),
+                failure_context: self.failure_context.clone(),
+                cause: MigrationFailureCause::from(self.retained_source()),
+            }
+            .render(),
+        )
+    }
+}
+
+impl std::error::Error for EmbeddingMigrationFailure {}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum EmbeddingMigrationError {
+    Incompatible(NamespaceCompatibility),
+    AutomaticMigrationDisabled(NamespaceCompatibility),
+    Failed {
+        backup_state: MigrationBackupState,
+        failure_context: MigrationFailureContext,
+        cause: MigrationFailureCause,
+    },
+}
+
+impl EmbeddingMigrationError {
+    pub(crate) fn render(&self) -> String {
+        match self {
+            Self::Incompatible(compatibility) => compatibility.render(),
+            Self::AutomaticMigrationDisabled(compatibility) => format!(
+                "{}. Automatic migration is disabled by \
+                 ANAMNESIS_AUTO_MIGRATE_EMBEDDINGS; no database mutation occurred.",
+                compatibility.message()
+            ),
+            Self::Failed {
+                failure_context:
+                    MigrationFailureContext::BackupCreation {
+                        backup_path,
+                        destination_exists: true,
+                    },
+                cause,
+                ..
+            } => format!(
+                "embedding migration failed while creating the required backup at {} (cause \
+                 category: {cause}); no verified backup was created. An existing item blocks \
+                 that path. Preserve or move it before rerunning `{}`.",
+                backup_path.display(),
+                migration_command()
+            ),
+            Self::Failed {
+                failure_context:
+                    MigrationFailureContext::BackupCreation {
+                        backup_path,
+                        destination_exists: false,
+                    },
+                cause,
+                ..
+            } => format!(
+                "embedding migration failed while creating the required backup at {} (cause \
+                 category: {cause}); no verified backup was created. Resolve access or \
+                 free-space issues for that backup path, then rerun `{}`.",
+                backup_path.display(),
+                migration_command()
+            ),
+            Self::Failed {
+                failure_context: MigrationFailureContext::CheckpointBackupValidation { backup_path },
+                cause,
+                ..
+            } => format!(
+                "embedding migration cannot safely validate the checkpoint backup at {} \
+                 (cause category: {cause}). Do not overwrite that path; reconcile the checkpoint \
+                 with the live database before rerunning `{}`.",
+                backup_path.display(),
+                migration_command()
+            ),
+            Self::Failed {
+                failure_context:
+                    MigrationFailureContext::CheckpointBackupVerification { backup_path },
+                cause,
+                ..
+            } => format!(
+                "embedding migration could not re-verify the preserved checkpoint backup at {} \
+                 (cause category: {cause}). Preserve it, resolve the verification issue, then \
+                 rerun `{}`.",
+                backup_path.display(),
+                migration_command()
+            ),
+            Self::Failed {
+                failure_context:
+                    MigrationFailureContext::BackupVerificationCleanup {
+                        backup_path,
+                        validation_path,
+                    },
+                cause,
+                ..
+            } => format!(
+                "embedding migration failed while removing the validation copy at {} after the \
+                 checkpoint backup at {} was verified (cause category: {cause}); the checkpoint \
+                 backup is preserved. Remove the validation copy if it remains, then rerun `{}`.",
+                validation_path.display(),
+                backup_path.display(),
+                migration_command()
+            ),
+            Self::Failed {
+                backup_state: MigrationBackupState::NoBackupCreated,
+                cause,
+                ..
+            } => format!(
+                "embedding migration failed (cause category: {cause}) before a verified backup \
+                 was created; no backup was created. Resolve the migration issue, then run \
+                 `{}`.",
+                migration_command()
+            ),
+            Self::Failed {
+                backup_state: MigrationBackupState::BackupPreserved { backup_path },
+                cause,
+                ..
+            } => format!(
+                "embedding migration failed (cause category: {cause}) after a verified backup \
+                 was created; the backup at {} is preserved. Resolve the migration issue, then \
+                 run `{}`.",
+                backup_path.display(),
+                migration_command()
+            ),
+        }
+    }
+}
+
+impl NamespaceCompatibility {
+    pub(crate) fn message(&self) -> String {
+        EmbeddingMigrationError::Incompatible(self.clone()).render()
+    }
+
+    fn render(&self) -> String {
+        match self {
+            Self::Ready => "embedding space is compatible".to_string(),
+            Self::DimensionMismatch {
+                stored_model,
+                db_dimensions,
+                target_model,
+                target_dimensions,
+            } => {
+                let fallback = stored_model_fallback(stored_model.as_deref());
+                let stored_model_text = stored_model.as_deref().map_or_else(String::new, |model| {
+                    format!(" The stored model is '{model}'.")
+                });
+                format!(
+                    "embedding dimension mismatch: DB has {} embeddings.{} Configured model \
+                     '{target_model}' produces {target_dimensions}-d embeddings. Preferred \
+                     recovery: `{}`.{}",
+                    format_db_dimensions(db_dimensions),
+                    stored_model_text,
+                    migration_command(),
+                    fallback
+                )
+            }
+            Self::ModelMismatch {
+                stored_model,
+                target_model,
+                target_dimensions,
+            } => format!(
+                "embedding model mismatch: DB has {target_dimensions}-d embeddings created by \
+                 '{stored_model}', but configured model '{target_model}' produces \
+                 {target_dimensions}-d embeddings. Preferred recovery: `{}`.{}",
+                migration_command(),
+                stored_model_fallback(Some(stored_model))
+            ),
+            Self::IncompleteMigration {
+                target_model,
+                target_dimensions,
+            } => format!(
+                "embedding migration checkpoint is incomplete for configured model \
+                 '{target_model}' ({target_dimensions}-d). Resume it with `{}`.",
+                migration_command()
+            ),
+        }
+    }
+}
+
+fn migration_command() -> &'static str {
+    "anamnesis migrate-embeddings [--namespace NS]"
+}
+
+fn stored_model_fallback(stored_model: Option<&str>) -> String {
+    match stored_model {
+        Some(model) => format!(
+            " To keep the stored embedding space instead, set \
+             ANAMNESIS_EMBED_MODEL={model}."
+        ),
+        None => " To keep the stored embedding space instead, set ANAMNESIS_EMBED_MODEL to the \
+             model that created the DB."
+            .to_string(),
+    }
+}
+
+fn format_db_dimensions(db_dimensions: &[Option<usize>]) -> String {
+    let mut dimensions: Vec<usize> = db_dimensions.iter().flatten().copied().collect();
+    dimensions.sort_unstable();
+    dimensions.dedup();
+    let formatted = dimensions
+        .iter()
+        .map(|dimension| format!("{dimension}-d"))
+        .collect::<Vec<_>>();
+
+    match (
+        formatted.is_empty(),
+        db_dimensions.iter().any(Option::is_none),
+    ) {
+        (true, _) => "unknown-dimension".to_string(),
+        (false, true) => format!("{} and unknown-dimension", formatted.join(", ")),
+        (false, false) => formatted.join(", "),
+    }
+}
+
 /// Daemon-lifetime operation counters (in-memory; reset when the daemon
 /// exits). A working-session observability window, not a persisted metric.
 ///
@@ -223,6 +727,8 @@ pub struct MemoryRegistry {
     /// `pub(crate)` so the capture pipeline (`crate::capture`) can increment
     /// `captured_turns` / `extraction_pulls` from its impl block there.
     pub(crate) ops: OpCounters,
+    migration_states: HashMap<String, NamespaceMigrationState>,
+    auto_migrate_embeddings: bool,
 }
 
 impl MemoryRegistry {
@@ -271,16 +777,16 @@ impl MemoryRegistry {
             seen_turn_keys: HashSet::new(),
             unextracted: HashMap::new(),
             ops: OpCounters::default(),
+            migration_states: HashMap::new(),
+            auto_migrate_embeddings: true,
         }
     }
 
-    /// Daemon constructor: file-backed, FastEmbed provider built lazily, but the
-    /// registry does **not** take per-namespace locks.
+    /// Daemon constructor: file-backed, FastEmbed provider built lazily, with
+    /// the default database lock supplied externally.
     ///
-    /// The daemon already holds the single exclusive lock on the resolved DB (via
-    /// [`crate::daemon::acquire_daemon`]) and is the sole process that opens it,
-    /// so re-locking inside the registry is both redundant and would deadlock the
-    /// default namespace against the daemon's own held lock.
+    /// The daemon does not re-lock its default database, but named namespace
+    /// databases retain their own process-lifetime sibling locks.
     #[allow(dead_code)]
     pub fn file_backed_unlocked(
         default_db: PathBuf,
@@ -313,6 +819,10 @@ impl MemoryRegistry {
         }
     }
 
+    pub(crate) fn set_auto_migrate_embeddings(&mut self, enabled: bool) {
+        self.auto_migrate_embeddings = enabled;
+    }
+
     /// Test/embeddable constructor: in-memory graphs + a caller-supplied provider.
     #[cfg(test)]
     pub fn in_memory_with(provider: Arc<dyn EmbeddingProvider>, reinforce_on_recall: bool) -> Self {
@@ -328,6 +838,8 @@ impl MemoryRegistry {
             seen_turn_keys: HashSet::new(),
             unextracted: HashMap::new(),
             ops: OpCounters::default(),
+            migration_states: HashMap::new(),
+            auto_migrate_embeddings: true,
         }
     }
 
@@ -356,6 +868,8 @@ impl MemoryRegistry {
             seen_turn_keys: HashSet::new(),
             unextracted: HashMap::new(),
             ops: OpCounters::default(),
+            migration_states: HashMap::new(),
+            auto_migrate_embeddings: true,
         }
     }
 
@@ -397,6 +911,92 @@ impl MemoryRegistry {
         };
         self.provider = Some(p.clone());
         Ok(p)
+    }
+
+    pub(crate) fn prepare_namespace_probe(
+        &mut self,
+        namespace: Option<&str>,
+    ) -> Result<NamespaceProbe, Error> {
+        let key = self.canonical_ns_key(namespace);
+        match self.migration_states.get(&key).cloned() {
+            Some(NamespaceMigrationState::Running) => {
+                return Ok(NamespaceProbe::Resolved(NamespaceResolution::Migrating));
+            }
+            Some(NamespaceMigrationState::Failed { message }) => {
+                return Ok(NamespaceProbe::Resolved(
+                    NamespaceResolution::MigrationFailed(message),
+                ));
+            }
+            Some(NamespaceMigrationState::Completed) => {
+                self.migration_states.remove(&key);
+            }
+            None => {}
+        }
+        if let Some(handle) = self.open.get(&key) {
+            return Ok(NamespaceProbe::Resolved(NamespaceResolution::Ready(
+                Arc::clone(handle),
+            )));
+        }
+
+        let Some(db_path) = self.namespace_db_path(&key)? else {
+            return self
+                .namespace_handle(Some(&key))
+                .map(NamespaceResolution::Ready)
+                .map(NamespaceProbe::Resolved);
+        };
+        if !db_path.exists() {
+            return self
+                .namespace_handle(Some(&key))
+                .map(NamespaceResolution::Ready)
+                .map(NamespaceProbe::Resolved);
+        }
+
+        let provider = self.provider()?;
+        Ok(NamespaceProbe::Inspect {
+            key: key.clone(),
+            pending: PendingEmbeddingMigrationRequest {
+                namespace: key,
+                db_path,
+                provider,
+            },
+        })
+    }
+
+    pub(crate) fn schedule_namespace_migration(
+        &mut self,
+        key: String,
+        pending: PendingEmbeddingMigrationRequest,
+        mismatch: NamespaceCompatibility,
+    ) -> NamespaceResolution {
+        match self.migration_states.get(&key).cloned() {
+            Some(NamespaceMigrationState::Running) => NamespaceResolution::Migrating,
+            Some(NamespaceMigrationState::Failed { message }) => {
+                NamespaceResolution::MigrationFailed(message)
+            }
+            Some(NamespaceMigrationState::Completed) | None if !self.auto_migrate_embeddings => {
+                NamespaceResolution::MigrationFailed(
+                    EmbeddingMigrationError::AutomaticMigrationDisabled(mismatch).render(),
+                )
+            }
+            Some(NamespaceMigrationState::Completed) | None => {
+                self.migration_states
+                    .insert(key, NamespaceMigrationState::Running);
+                NamespaceResolution::StartMigration(pending)
+            }
+        }
+    }
+
+    pub(crate) fn finish_namespace_migration(&mut self, key: &str, result: Result<(), String>) {
+        let state = match result {
+            Ok(()) => NamespaceMigrationState::Completed,
+            Err(message) => NamespaceMigrationState::Failed { message },
+        };
+        self.migration_states.insert(key.to_string(), state);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn namespace_migration_state(&self, key: &str) -> Option<NamespaceMigrationState> {
+        self.migration_states.get(key).cloned()
     }
 
     /// Sanitize a namespace into a safe file stem (no path traversal).
@@ -453,23 +1053,17 @@ impl MemoryRegistry {
         self.canonical_key(self.resolve_namespace(ns))
     }
 
-    fn open_namespace(&mut self, ns: &str) -> Result<Memory<SqliteStorage>, Error> {
-        let provider = self.provider()?;
-        let provider_dim = provider.dimensions();
-        let provider_model = provider.model_name().to_string();
-        // Resolve where this namespace lives WITHOUT holding a borrow of
-        // `self.backend`, so we can push to `self.locks` below. `None` = the
-        // in-memory test backend.
-        let path: Option<PathBuf> = match &self.backend {
+    pub(crate) fn namespace_db_path(&self, ns: &str) -> Result<Option<PathBuf>, Error> {
+        match &self.backend {
             #[cfg(test)]
-            Backend::Memory => None,
+            Backend::Memory => Ok(None),
             Backend::File {
                 default_db,
                 dir,
                 default_namespace,
             } => {
                 if ns == default_namespace {
-                    Some(default_db.clone())
+                    Ok(Some(default_db.clone()))
                 } else {
                     let path = dir.join(format!("{}.db", Self::sanitize(ns)));
                     // A non-default namespace whose sanitized file resolves to the
@@ -481,10 +1075,17 @@ impl MemoryRegistry {
                              choose a different namespace name"
                         )));
                     }
-                    Some(path)
+                    Ok(Some(path))
                 }
             }
-        };
+        }
+    }
+
+    fn open_namespace(&mut self, ns: &str) -> Result<Memory<SqliteStorage>, Error> {
+        let provider = self.provider()?;
+        let provider_dim = provider.dimensions();
+        let provider_model = provider.model_name().to_string();
+        let path = self.namespace_db_path(ns)?;
 
         let Some(path) = path else {
             let mut mem = Memory::in_memory_with_provider(provider)?;
@@ -497,32 +1098,16 @@ impl MemoryRegistry {
                 .map_err(|e| Error::StorageError(format!("create db dir: {e}")))?;
         }
 
-        // The daemon already holds the single exclusive lock on the resolved DB
-        // and is the sole opener, so it skips the per-namespace lock entirely.
-        // Every other path takes an exclusive lock on a sibling `<db>.lock` so a
-        // second anamnesis-mcp process can't open the same database (two
-        // processes => two in-memory caches over one file => corruption). The OS
-        // releases the lock when this process exits or is killed.
-        if self.lock_on_open {
-            let mut lock_path = path.clone().into_os_string();
-            lock_path.push(".lock");
-            let lock_path = PathBuf::from(lock_path);
-            let lock_file = std::fs::OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(false)
-                .open(&lock_path)
-                .map_err(|e| Error::StorageError(format!("open lock file {lock_path:?}: {e}")))?;
-            // UFCS: on rustc >= 1.89 `File` has an inherent `try_lock` (different
-            // signature) that would shadow the trait method; pin to fs4's so the
-            // behavior is identical on our 1.88 MSRV and on newer toolchains.
-            if fs4::FileExt::try_lock(&lock_file).is_err() {
-                return Err(Error::StorageError(format!(
-                    "database {path:?} is already in use by another anamnesis process; \
-                     use a different ANAMNESIS_DB or namespace"
-                )));
-            }
-            self.locks.push(lock_file);
+        // The daemon reuses its externally held default DB lock. Named namespace
+        // DBs and embedded callers take their own sibling `<db>.lock`, preventing
+        // two in-memory caches in different processes from opening one SQLite DB.
+        let daemon_named_namespace = match &self.backend {
+            Backend::File { default_db, .. } => path != *default_db,
+            #[cfg(test)]
+            Backend::Memory => false,
+        };
+        if self.lock_on_open || daemon_named_namespace {
+            self.locks.push(acquire_namespace_lock(&path)?);
         }
 
         let mut mem = Memory::with_provider(path, provider)?;
@@ -707,16 +1292,62 @@ pub(crate) fn verify_embedding_dim(
         };
         let db_dim = embedding.len();
         if db_dim != provider_dim {
-            return Err(Error::InvalidInput(format!(
-                "embedding dimension mismatch: DB has {db_dim}-d embeddings but model \
-                 '{model}' produces {provider_dim}-d. Back up and reset the DB \
-                 (mv ~/.anamnesis/memory.db ~/.anamnesis/memory.db.bak-YYYYMMDD) \
-                 or set ANAMNESIS_EMBED_MODEL to the model that created it."
-            )));
+            return Err(Error::InvalidInput(
+                EmbeddingMigrationError::Incompatible(NamespaceCompatibility::DimensionMismatch {
+                    stored_model: mem.engine().graph().storage().embedding_model_name()?,
+                    db_dimensions: vec![Some(db_dim)],
+                    target_model: model.to_string(),
+                    target_dimensions: provider_dim,
+                })
+                .render(),
+            ));
         }
         return Ok(());
     }
     Ok(())
+}
+
+fn inspect_namespace_compatibility(
+    db_path: &std::path::Path,
+    provider: &dyn EmbeddingProvider,
+) -> Result<NamespaceCompatibility, Error> {
+    let inspection = SqliteStorage::inspect_embedding_migration(db_path)?;
+    let target_model = provider.model_name().to_string();
+    let target_dimensions = provider.dimensions();
+    if inspection.checkpoint.is_some() {
+        return Ok(NamespaceCompatibility::IncompleteMigration {
+            target_model,
+            target_dimensions,
+        });
+    }
+    if inspection
+        .embedding_dimensions
+        .iter()
+        .any(|dimension| *dimension != Some(target_dimensions))
+    {
+        return Ok(NamespaceCompatibility::DimensionMismatch {
+            stored_model: inspection.embedding_model,
+            db_dimensions: inspection.embedding_dimensions,
+            target_model,
+            target_dimensions,
+        });
+    }
+    match inspection.embedding_model {
+        Some(stored_model) if stored_model != target_model => {
+            Ok(NamespaceCompatibility::ModelMismatch {
+                stored_model,
+                target_model,
+                target_dimensions,
+            })
+        }
+        Some(_) | None => Ok(NamespaceCompatibility::Ready),
+    }
+}
+
+pub(crate) fn inspect_pending_embedding_compatibility(
+    pending: &PendingEmbeddingMigrationRequest,
+) -> Result<NamespaceCompatibility, Error> {
+    inspect_namespace_compatibility(&pending.db_path, pending.provider.as_ref())
 }
 
 fn verify_embedding_compatibility(
@@ -728,12 +1359,14 @@ fn verify_embedding_compatibility(
 
     match mem.engine().graph().storage().embedding_model_name()? {
         Some(stored_model) if stored_model == current_model => Ok(()),
-        Some(stored_model) => Err(Error::InvalidInput(format!(
-            "embedding model mismatch: DB was created by '{stored_model}' but the current model \
-             is '{current_model}'. Back up and reset the DB \
-             (mv ~/.anamnesis/memory.db ~/.anamnesis/memory.db.bak-YYYYMMDD) or set \
-             ANAMNESIS_EMBED_MODEL to '{stored_model}'."
-        ))),
+        Some(stored_model) => Err(Error::InvalidInput(
+            EmbeddingMigrationError::Incompatible(NamespaceCompatibility::ModelMismatch {
+                stored_model,
+                target_model: current_model.to_string(),
+                target_dimensions: provider_dim,
+            })
+            .render(),
+        )),
         None => mem
             .engine_mut()
             .graph_mut()

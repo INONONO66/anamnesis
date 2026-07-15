@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.19.0] - 2026-07-15
+
+### Added
+- **Backup-first embedding migration** — `anamnesis migrate-embeddings` provides a manual migration command, and the daemon migrates automatically; before any writes, it creates and verifies a deterministic dated backup.
+- **Resumable, isolated migrations** — batched checkpoints resume interrupted work, with at most one migration job per namespace.
+
+### Changed
+- **Migration-time recall fails open** through the existing hook path and injects no context.
+- **Automatic migration control** — set `ANAMNESIS_AUTO_MIGRATE_EMBEDDINGS=0` to opt out and run `anamnesis migrate-embeddings` manually.
+- **Model-stamp safety** — the target model stamp is written only after the migration completes.
+
 ## [0.18.0] - 2026-07-08
 
 ### Added

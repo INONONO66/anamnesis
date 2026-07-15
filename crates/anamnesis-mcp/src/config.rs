@@ -68,6 +68,9 @@ pub struct Config {
     pub extract_threshold_n: usize,
     /// FastEmbed model name. `ANAMNESIS_EMBED_MODEL` (default multilingual-e5-small).
     pub embed_model: String,
+    /// Automatically migrate incompatible embedding spaces in the daemon.
+    /// `ANAMNESIS_AUTO_MIGRATE_EMBEDDINGS` (default true).
+    pub auto_migrate_embeddings: bool,
 }
 
 impl Config {
@@ -84,6 +87,7 @@ impl Config {
     /// - `ANAMNESIS_HOOK_SEED_K`     → `hook_seed_k` (default: 5)
     /// - `ANAMNESIS_HOOK_TIMEOUT_MS` → `hook_timeout_ms` (default: 1500)
     /// - `ANAMNESIS_EMBED_MODEL`     → `embed_model` (default: [`DEFAULT_EMBED_MODEL`])
+    /// - `ANAMNESIS_AUTO_MIGRATE_EMBEDDINGS` → automatic daemon migration (default: true)
     pub fn from_env() -> Self {
         let default_db = std::env::var_os("ANAMNESIS_DB")
             .map(PathBuf::from)
@@ -111,6 +115,7 @@ impl Config {
         };
         let extract_threshold_n = parse_env("ANAMNESIS_EXTRACT_THRESHOLD_N", 20usize);
         let embed_model = parse_env_string("ANAMNESIS_EMBED_MODEL", DEFAULT_EMBED_MODEL);
+        let auto_migrate_embeddings = positive_env_enabled("ANAMNESIS_AUTO_MIGRATE_EMBEDDINGS");
         Self {
             default_db,
             default_namespace,
@@ -125,6 +130,7 @@ impl Config {
             capture_enabled,
             extract_threshold_n,
             embed_model,
+            auto_migrate_embeddings,
         }
     }
 
@@ -180,6 +186,19 @@ fn parse_env_string(name: &str, default: &str) -> String {
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| default.to_string())
+}
+
+fn positive_env_enabled(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| positive_value_enabled(&value))
+        .unwrap_or(true)
+}
+
+fn positive_value_enabled(value: &str) -> bool {
+    !matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "0" | "false" | "no"
+    )
 }
 
 /// Nearest ancestor of `start` (inclusive) holding a `.anamnesis/` dir, mapped to
@@ -238,6 +257,7 @@ mod tests {
             capture_enabled: true,
             extract_threshold_n: 20,
             embed_model: DEFAULT_EMBED_MODEL.to_string(),
+            auto_migrate_embeddings: true,
         };
         assert!(cfg.reinforce_on_recall);
         assert_eq!(cfg.db_dir(), PathBuf::from("."));
@@ -259,6 +279,7 @@ mod tests {
             capture_enabled: true,
             extract_threshold_n: 20,
             embed_model: DEFAULT_EMBED_MODEL.to_string(),
+            auto_migrate_embeddings: true,
         };
         assert_eq!(cfg.db_dir(), PathBuf::from("/var/lib/anamnesis"));
     }
@@ -312,6 +333,7 @@ mod tests {
             capture_enabled: true,
             extract_threshold_n: 20,
             embed_model: DEFAULT_EMBED_MODEL.to_string(),
+            auto_migrate_embeddings: true,
         };
         assert!(cfg.capture_enabled);
         assert_eq!(cfg.extract_threshold_n, 20);
@@ -333,6 +355,7 @@ mod tests {
             capture_enabled: true,
             extract_threshold_n: 20,
             embed_model: DEFAULT_EMBED_MODEL.to_string(),
+            auto_migrate_embeddings: true,
         };
         assert_eq!(cfg.hook_cosine_gate, 0.86);
         assert_eq!(cfg.hook_seed_cosine_gate, 0.80);
@@ -357,6 +380,17 @@ mod tests {
             ),
             DEFAULT_EMBED_MODEL
         );
+    }
+
+    #[test]
+    fn auto_migration_positive_flag_defaults_enabled_and_accepts_falseish_values() {
+        assert!(positive_env_enabled(
+            "ANAMNESIS_DEFINITELY_UNSET_AUTO_MIGRATION"
+        ));
+        for value in ["0", "false", "FALSE", " no "] {
+            assert!(!positive_value_enabled(value));
+        }
+        assert!(positive_value_enabled("yes"));
     }
 
     #[test]

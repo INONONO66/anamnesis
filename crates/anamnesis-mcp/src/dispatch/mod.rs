@@ -39,7 +39,10 @@ use std::sync::{Arc, Mutex};
 
 use anamnesis::graph::{ScopePath, Timestamp};
 
-use crate::memory::{self, MemoryRegistry, Turn};
+use crate::memory::migration::MigrationRuntime;
+use crate::memory::{
+    self, MemoryRegistry, NamespaceCompatibility, NamespaceProbe, NamespaceResolution, Turn,
+};
 use crate::proto::{Request, Response};
 
 mod enrich;
@@ -50,6 +53,34 @@ mod render;
 mod tests;
 
 pub use render::format_stats;
+
+#[derive(Clone)]
+pub(crate) struct DaemonRuntimeContext {
+    pub(crate) registry: Arc<Mutex<MemoryRegistry>>,
+    pub(crate) migrations: Arc<MigrationRuntime>,
+}
+
+#[derive(Clone)]
+pub struct DispatchRuntime {
+    registry: Arc<Mutex<MemoryRegistry>>,
+    migrations: Option<Arc<MigrationRuntime>>,
+}
+
+impl DispatchRuntime {
+    pub fn without_auto_migration(registry: Arc<Mutex<MemoryRegistry>>) -> Self {
+        Self {
+            registry,
+            migrations: None,
+        }
+    }
+
+    pub(crate) fn daemon(context: DaemonRuntimeContext) -> Self {
+        Self {
+            registry: context.registry,
+            migrations: Some(context.migrations),
+        }
+    }
+}
 
 /// Run one request against the shared `registry` and return the
 /// consumer-ready reply, following the two-phase locking discipline documented
@@ -62,6 +93,88 @@ pub use render::format_stats;
 /// missing endpoint) map to [`Response::invalid_params`]; everything else to
 /// [`Response::internal`].
 pub fn dispatch(registry: &Arc<Mutex<MemoryRegistry>>, req: Request) -> Response {
+    let runtime = DispatchRuntime::without_auto_migration(Arc::clone(registry));
+    dispatch_two_phase(&runtime, req)
+}
+
+pub(crate) fn dispatch_two_phase(runtime: &DispatchRuntime, req: Request) -> Response {
+    let Some(migrations) = runtime.migrations.as_ref() else {
+        return dispatch_registry(&runtime.registry, req);
+    };
+    let namespace = request_namespace(&req);
+    let probe = {
+        runtime
+            .registry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .prepare_namespace_probe(namespace)
+    };
+    let resolution = match probe {
+        Ok(NamespaceProbe::Resolved(resolution)) => Ok(resolution),
+        Ok(NamespaceProbe::Inspect { key, pending }) => {
+            match memory::inspect_pending_embedding_compatibility(&pending) {
+                Ok(NamespaceCompatibility::Ready) => {
+                    return dispatch_registry(&runtime.registry, req);
+                }
+                Ok(mismatch) => Ok(runtime
+                    .registry
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .schedule_namespace_migration(key, pending, mismatch)),
+                Err(error) => Err(error),
+            }
+        }
+        Err(error) => Err(error),
+    };
+    match resolution {
+        Ok(NamespaceResolution::Ready(handle)) => {
+            drop(handle);
+            dispatch_registry(&runtime.registry, req)
+        }
+        Ok(NamespaceResolution::StartMigration(pending)) => {
+            let key = pending.namespace.clone();
+            match migrations.spawn_once(key.clone(), pending) {
+                Ok(()) => Response::internal(format!(
+                    "namespace {key:?} is migrating its embedding space; retry after migration"
+                )),
+                Err(error) => {
+                    let message = error.to_string();
+                    runtime
+                        .registry
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .finish_namespace_migration(&key, Err(message.clone()));
+                    Response::internal(message)
+                }
+            }
+        }
+        Ok(NamespaceResolution::Migrating) => Response::internal(
+            "namespace embedding migration is in progress; retry after migration",
+        ),
+        Ok(NamespaceResolution::MigrationFailed(message)) => Response::internal(message),
+        Err(error) => Response::internal(error),
+    }
+}
+
+fn request_namespace(req: &Request) -> Option<&str> {
+    match req {
+        Request::Recall { namespace, .. }
+        | Request::Remember { namespace, .. }
+        | Request::Relate { namespace, .. }
+        | Request::Ingest { namespace, .. }
+        | Request::Stats { namespace }
+        | Request::PullPending { namespace, .. }
+        | Request::ExtractionStatus { namespace }
+        | Request::Update { namespace, .. }
+        | Request::Forget { namespace, .. }
+        | Request::Supersede { namespace, .. }
+        | Request::List { namespace, .. }
+        | Request::Get { namespace, .. }
+        | Request::Graph { namespace, .. } => namespace.as_deref(),
+    }
+}
+
+fn dispatch_registry(registry: &Arc<Mutex<MemoryRegistry>>, req: Request) -> Response {
     match req {
         Request::Recall {
             query,
