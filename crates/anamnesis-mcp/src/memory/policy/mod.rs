@@ -1,0 +1,123 @@
+//! MCP-owned, additive policy telemetry stored beside the engine graph.
+//!
+//! The store intentionally owns only its side schema. Callers retain ownership
+//! of graph locking and may disable policy features when this schema is newer
+//! than this binary understands.
+
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use anamnesis::Error;
+use rusqlite::Connection;
+
+mod recall;
+mod schema;
+
+pub(crate) use recall::RecallEvent;
+
+const SCHEMA_VERSION: i64 = 1;
+const BUSY_TIMEOUT: Duration = Duration::from_secs(2);
+const UNSUPPORTED_VERSION_PREFIX: &str = "unsupported policy schema version ";
+
+/// The registry-owned policy state handle for one namespace.
+pub(crate) type PolicyStoreHandle = Arc<Mutex<PolicyStoreState>>;
+
+/// A namespace's policy capability state. A newer side schema disables only
+/// policy features; callers can continue using the engine graph normally.
+pub(crate) enum PolicyStoreState {
+    Uninitialized { path: Option<PathBuf> },
+    Ready(PolicyStore),
+    Disabled { reason: String },
+}
+
+/// Typed internal policy-store failure. Public facade methods translate this
+/// into the engine's established error contract.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PolicyStoreError {
+    UnsupportedVersion { version: i64 },
+    Operation { operation: &'static str },
+    InvalidValue { field: &'static str },
+}
+
+impl PolicyStoreError {
+    fn operation(operation: &'static str) -> Self {
+        Self::Operation { operation }
+    }
+
+    fn invalid_value(field: &'static str) -> Self {
+        Self::InvalidValue { field }
+    }
+
+    fn into_engine_error(self) -> Error {
+        match self {
+            Self::UnsupportedVersion { version } => {
+                Error::StorageError(format!("{UNSUPPORTED_VERSION_PREFIX}{version}"))
+            }
+            Self::Operation { operation } => {
+                Error::StorageError(format!("policy store operation failed: {operation}"))
+            }
+            Self::InvalidValue { field } => {
+                Error::InvalidInput(format!("invalid policy store value: {field}"))
+            }
+        }
+    }
+}
+
+/// Facade around the MCP-owned SQLite side schema.
+pub(crate) struct PolicyStore {
+    connection: Connection,
+}
+
+impl PolicyStore {
+    /// Opens and transactionally converges the MCP side schema without changing
+    /// SQLite journal mode or acquiring any graph/registry lock.
+    pub(crate) fn open(path: &Path) -> Result<Self, Error> {
+        let connection = Connection::open(path)
+            .map_err(|_| PolicyStoreError::operation("open policy store").into_engine_error())?;
+        Self::from_connection(connection)
+    }
+
+    fn from_connection(mut connection: Connection) -> Result<Self, Error> {
+        connection.busy_timeout(BUSY_TIMEOUT).map_err(|_| {
+            PolicyStoreError::operation("configure policy store busy timeout").into_engine_error()
+        })?;
+        schema::initialize(&mut connection).map_err(PolicyStoreError::into_engine_error)?;
+        Ok(Self { connection })
+    }
+
+    /// Inserts one data-minimized recall event and prunes older events in the
+    /// same transaction, retaining only the newest [`RECALL_EVENT_RETENTION`].
+    pub(crate) fn insert_recall_event(&mut self, event: &RecallEvent) -> Result<(), Error> {
+        let transaction = self.connection.transaction().map_err(|_| {
+            PolicyStoreError::operation("start recall event transaction").into_engine_error()
+        })?;
+        recall::insert(&transaction, event).map_err(PolicyStoreError::into_engine_error)?;
+        transaction.commit().map_err(|_| {
+            PolicyStoreError::operation("commit recall event transaction").into_engine_error()
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn in_memory() -> Result<Self, Error> {
+        let connection = Connection::open_in_memory().map_err(|_| {
+            PolicyStoreError::operation("open in-memory policy store").into_engine_error()
+        })?;
+        Self::from_connection(connection)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_test_connection(connection: Connection) -> Result<Self, Error> {
+        Self::from_connection(connection)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn schema_version(&self) -> Result<i64, Error> {
+        schema::schema_version(&self.connection).map_err(PolicyStoreError::into_engine_error)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn schema_fingerprint(&self) -> Result<String, Error> {
+        schema::schema_fingerprint(&self.connection).map_err(PolicyStoreError::into_engine_error)
+    }
+}

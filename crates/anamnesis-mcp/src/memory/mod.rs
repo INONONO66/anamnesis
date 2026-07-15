@@ -15,8 +15,8 @@
 //! `dispatch.rs`, `capture.rs`, …) keeps working unchanged.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use anamnesis::embedding::EmbeddingProvider;
 use anamnesis::graph::{EdgeType, KnowledgeType, NodeId, ScopePath, Timestamp};
@@ -29,11 +29,15 @@ use crate::capture::{extract_redelivery_ms, scan_extraction_state};
 mod mgmt;
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) mod migration;
+#[cfg_attr(not(test), allow(dead_code))]
+mod policy;
 mod recall;
 #[cfg(test)]
 mod tests;
 
 pub(crate) use mgmt::*;
+#[cfg_attr(not(test), allow(unused_imports))]
+pub(crate) use policy::*;
 pub(crate) use recall::*;
 
 pub(crate) fn embed_model_from_name(
@@ -56,6 +60,15 @@ pub(crate) enum NamespaceMigrationState {
 }
 
 pub(crate) type NamespaceHandle = Arc<Mutex<Memory<SqliteStorage>>>;
+#[cfg_attr(not(test), allow(dead_code))]
+/// The phase-1 namespace handles returned to dispatch callers. The policy
+/// handle uses the same canonical key as the graph handle and remains
+/// uninitialized until phase 2.
+pub(crate) struct NamespaceHandles {
+    pub(crate) key: String,
+    pub(crate) memory: NamespaceHandle,
+    pub(crate) policy: PolicyStoreHandle,
+}
 
 pub(crate) enum NamespaceResolution {
     Ready(NamespaceHandle),
@@ -699,6 +712,11 @@ pub struct MemoryRegistry {
     /// See [`namespace_handle`](Self::namespace_handle) for the two-phase
     /// locking discipline this enables.
     open: HashMap<String, Arc<Mutex<Memory<SqliteStorage>>>>,
+    /// One policy side-store state per namespace, keyed identically to `open`.
+    /// Phase 1 only creates `Uninitialized`; phase 2 opens it after locking the
+    /// corresponding graph handle.
+    #[cfg_attr(not(test), allow(dead_code))]
+    policy: HashMap<String, PolicyStoreHandle>,
     default_namespace: String,
     /// Exclusive locks on each opened file-backed DB. Held for the process
     /// lifetime so a second process can't open the same database; the OS
@@ -771,6 +789,7 @@ impl MemoryRegistry {
             },
             reinforce_on_recall,
             open: HashMap::new(),
+            policy: HashMap::new(),
             default_namespace,
             locks: Vec::new(),
             lock_on_open: true,
@@ -832,6 +851,7 @@ impl MemoryRegistry {
             backend: Backend::Memory,
             reinforce_on_recall,
             open: HashMap::new(),
+            policy: HashMap::new(),
             default_namespace: "default".to_string(),
             locks: Vec::new(),
             lock_on_open: true,
@@ -862,6 +882,7 @@ impl MemoryRegistry {
             },
             reinforce_on_recall,
             open: HashMap::new(),
+            policy: HashMap::new(),
             default_namespace,
             locks: Vec::new(),
             lock_on_open: true,
@@ -1081,6 +1102,19 @@ impl MemoryRegistry {
         }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn open_policy_store(path: Option<&Path>) -> Result<PolicyStore, Error> {
+        match path {
+            Some(path) => PolicyStore::open(path),
+            #[cfg(test)]
+            None => PolicyStore::in_memory(),
+            #[cfg(not(test))]
+            None => Err(Error::StorageError(
+                "in-memory policy store is unavailable outside tests".to_string(),
+            )),
+        }
+    }
+
     fn open_namespace(&mut self, ns: &str) -> Result<Memory<SqliteStorage>, Error> {
         let provider = self.provider()?;
         let provider_dim = provider.dimensions();
@@ -1156,6 +1190,61 @@ impl MemoryRegistry {
             self.open.insert(key.clone(), Arc::new(Mutex::new(mem)));
         }
         Ok(self.open.get(&key).expect("just inserted").clone())
+    }
+    /// Resolve graph and policy handles under the caller's brief registry-lock
+    /// phase. This creates only an `Uninitialized` policy state; it never opens,
+    /// migrates, or issues SQL against the policy side schema.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn namespace_handles(
+        &mut self,
+        ns: Option<&str>,
+    ) -> Result<NamespaceHandles, Error> {
+        let key = self.canonical_ns_key(ns);
+        let memory = self.namespace_handle(ns)?;
+        let path = self.namespace_db_path(&key)?;
+        let policy = match self.policy.entry(key.clone()) {
+            std::collections::hash_map::Entry::Occupied(entry) => Arc::clone(entry.get()),
+            std::collections::hash_map::Entry::Vacant(entry) => Arc::clone(entry.insert(Arc::new(
+                Mutex::new(PolicyStoreState::Uninitialized { path }),
+            ))),
+        };
+
+        Ok(NamespaceHandles {
+            key,
+            memory,
+            policy,
+        })
+    }
+
+    /// Lazily open the resolved policy side store. Callers must hold the
+    /// corresponding namespace `Memory` lock before calling this function, so
+    /// the lock order is always Memory then PolicyStore. It never accesses the
+    /// registry/global lock.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn policy_store(
+        policy: &PolicyStoreHandle,
+    ) -> Result<MutexGuard<'_, PolicyStoreState>, Error> {
+        let mut state = policy
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let path = match &*state {
+            PolicyStoreState::Uninitialized { path } => path.clone(),
+            PolicyStoreState::Ready(_) => return Ok(state),
+            PolicyStoreState::Disabled { reason } => {
+                return Err(Error::StorageError(reason.clone()));
+            }
+        };
+
+        match Self::open_policy_store(path.as_deref()) {
+            Ok(store) => *state = PolicyStoreState::Ready(store),
+            Err(error) => {
+                let reason = error.to_string();
+                *state = PolicyStoreState::Disabled { reason };
+                return Err(error);
+            }
+        }
+
+        Ok(state)
     }
 
     /// Flush every open namespace's pending state to disk. Called on graceful

@@ -1,4 +1,5 @@
 use super::*;
+use crate::proto::RecallEventKind;
 use anamnesis::memory::{ListFilter, NoteOptions, Relation};
 use anamnesis::storage::StorageAdapter;
 
@@ -106,6 +107,170 @@ fn wait_for_file_registry_lock_release(db: &std::path::Path) {
         }
     }
     fs4::FileExt::unlock(&lock).expect("release file registry lock probe");
+}
+fn v0_connection() -> rusqlite::Connection {
+    let connection = rusqlite::Connection::open_in_memory().expect("open v0 policy database");
+    connection
+        .execute_batch(
+            "
+            CREATE TABLE mcp_schema_version (
+                id INTEGER PRIMARY KEY CHECK(id = 1),
+                version INTEGER NOT NULL
+            );
+            INSERT INTO mcp_schema_version (id, version) VALUES (1, 0);
+            ",
+        )
+        .expect("create v0 policy schema");
+    connection
+}
+
+fn registry_with_policy_version(version: i64) -> (MemoryRegistry, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("create policy registry directory");
+    let db = dir.path().join("policy.db");
+    let connection = rusqlite::Connection::open(&db).expect("open policy database");
+    connection
+        .execute_batch(
+            "
+            CREATE TABLE mcp_schema_version (
+                id INTEGER PRIMARY KEY CHECK(id = 1),
+                version INTEGER NOT NULL
+            );
+            ",
+        )
+        .expect("create policy schema");
+    connection
+        .execute(
+            "INSERT INTO mcp_schema_version (id, version) VALUES (1, ?1)",
+            [version],
+        )
+        .expect("seed policy schema version");
+    drop(connection);
+
+    (
+        file_registry(Arc::new(StubProvider), db, dir.path().to_path_buf()),
+        dir,
+    )
+}
+
+#[test]
+fn policy_schema_fresh_and_v0_migration_converge() {
+    let fresh = PolicyStore::in_memory().expect("fresh policy store");
+    let migrated = PolicyStore::from_test_connection(v0_connection()).expect("migrated store");
+
+    assert_eq!(
+        fresh.schema_fingerprint().expect("fresh schema"),
+        migrated.schema_fingerprint().expect("migrated schema")
+    );
+    assert_eq!(fresh.schema_version().expect("fresh version"), 1);
+    assert_eq!(migrated.schema_version().expect("migrated version"), 1);
+}
+#[test]
+fn ready_policy_store_persists_minimized_event_and_rejects_out_of_range_values() {
+    let mut reg = registry(false);
+    let handles = reg
+        .namespace_handles(None)
+        .expect("resolve in-memory namespace handles");
+    let _memory = handles
+        .memory
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut policy = MemoryRegistry::policy_store(&handles.policy).expect("open policy store");
+    let PolicyStoreState::Ready(store) = &mut *policy else {
+        panic!("in-memory policy store should be ready");
+    };
+    let event = RecallEvent {
+        at_ms: 1,
+        namespace: "default".into(),
+        event_kind: RecallEventKind::Tool,
+        query_chars: 11,
+        scope: Some("project".into()),
+        knowledge_only: true,
+        has_hits: true,
+        readout_pass: true,
+        cosine_pass: true,
+        eligible: true,
+        top_score: Some(0.9),
+        top_cosine: Some(0.8),
+        gate_threshold: Some(0.7),
+        cosine_gate: Some(0.6),
+        result_node_ids: vec![1, 2],
+        auto_extract_node_count: 3,
+    };
+
+    store
+        .insert_recall_event(&event)
+        .expect("insert recall event");
+
+    let error = store
+        .insert_recall_event(&RecallEvent {
+            at_ms: u64::MAX,
+            ..event
+        })
+        .expect_err("out-of-range timestamp should be rejected");
+    assert!(
+        matches!(
+            &error,
+            Error::InvalidInput(message)
+                if message == "invalid policy store value: recall event timestamp"
+        ),
+        "expected invalid policy value error, got {error:?}"
+    );
+}
+#[test]
+fn phase_one_resolution_leaves_policy_uninitialized() {
+    let (mut reg, _dir) = registry_with_policy_version(1);
+
+    let handles = reg
+        .namespace_handles(None)
+        .expect("resolve namespace handles");
+
+    assert!(matches!(
+        &*handles
+            .policy
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        PolicyStoreState::Uninitialized { path: Some(_) }
+    ));
+}
+
+#[test]
+fn repeated_phase_one_resolution_reuses_namespace_handles() {
+    let (mut reg, _dir) = registry_with_policy_version(1);
+
+    let first = reg.namespace_handles(None).expect("first resolution");
+    let second = reg
+        .namespace_handles(Some("default"))
+        .expect("second resolution");
+
+    assert_eq!(first.key, second.key);
+    assert!(Arc::ptr_eq(&first.memory, &second.memory));
+    assert!(Arc::ptr_eq(&first.policy, &second.policy));
+}
+
+#[test]
+fn future_policy_schema_disables_only_policy_features() {
+    let (mut reg, _dir) = registry_with_policy_version(2);
+
+    reg.remember("core recall remains available", None)
+        .expect("remember");
+    let recalled = reg.recall_packaged("core recall", 5, None).expect("recall");
+
+    assert!(!recalled.hits.is_empty());
+    let handles = reg.namespace_handles(None).expect("resolve policy handle");
+    let memory = handles
+        .memory
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    assert!(MemoryRegistry::policy_store(&handles.policy).is_err());
+    drop(memory);
+
+    assert!(matches!(
+        &*handles
+            .policy
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        PolicyStoreState::Disabled { .. }
+    ));
 }
 
 #[test]

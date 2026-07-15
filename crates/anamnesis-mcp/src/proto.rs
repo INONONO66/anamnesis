@@ -11,6 +11,16 @@
 //! mutex anyway). See `docs/adr/0012-daemon-core-mcp-plugin-clients.md`.
 
 use serde::{Deserialize, Serialize};
+/// The kind of client action that caused a recall attempt.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RecallEventKind {
+    UserPrompt,
+    SessionStart,
+    Tool,
+    Unknown,
+}
 
 /// One conversation turn for [`Request::Ingest`] (serde-only mirror of the
 /// engine's `Turn`; kept here so `proto` has no rmcp/schemars dependency).
