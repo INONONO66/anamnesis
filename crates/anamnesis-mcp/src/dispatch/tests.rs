@@ -1984,6 +1984,28 @@ mod migration_job {
         }
     }
 
+    fn wait_for_fixture_lock_release(db: &std::path::Path) {
+        let mut lock_path = db.as_os_str().to_os_string();
+        lock_path.push(".lock");
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(lock_path)
+            .expect("open fixture lock probe");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        loop {
+            match fs4::FileExt::try_lock(&lock) {
+                Ok(()) => break,
+                Err(fs4::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Err(error) => panic!("fixture lock remained held after drop: {error}"),
+            }
+        }
+        fs4::FileExt::unlock(&lock).expect("release fixture lock probe");
+    }
+
     fn create_old_fixture(db: &std::path::Path, dir: &std::path::Path) {
         let mut registry = MemoryRegistry::file_backed_with(
             Arc::new(OldProvider),
@@ -1996,6 +2018,8 @@ mod migration_job {
             .remember("legacy embedding content", None)
             .expect("create old embedding fixture");
         registry.flush_all_open().expect("flush old fixture");
+        drop(registry);
+        wait_for_fixture_lock_release(db);
     }
     fn create_compatible_fixture(db: &std::path::Path, dir: &std::path::Path) {
         let mut registry = MemoryRegistry::file_backed_with(
@@ -2009,6 +2033,8 @@ mod migration_job {
             .remember("legacy content in compatible namespace", None)
             .expect("create compatible embedding fixture");
         registry.flush_all_open().expect("flush compatible fixture");
+        drop(registry);
+        wait_for_fixture_lock_release(db);
     }
 
     fn daemon_runtime(
@@ -2023,16 +2049,7 @@ mod migration_job {
             .truncate(false)
             .open(lock_path)
             .expect("open daemon lock");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
-        loop {
-            match fs4::FileExt::try_lock(&lock) {
-                Ok(()) => break,
-                Err(fs4::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
-                    std::thread::sleep(std::time::Duration::from_millis(5));
-                }
-                Err(error) => panic!("acquire daemon lock before deadline: {error}"),
-            }
-        }
+        fs4::FileExt::try_lock(&lock).expect("acquire daemon lock");
         let migrations = Arc::new(
             MigrationRuntime::new(
                 &registry,
