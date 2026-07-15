@@ -86,6 +86,28 @@ fn file_registry(
     MemoryRegistry::file_backed_with(provider, db, dir, "default".into(), false)
 }
 
+fn wait_for_file_registry_lock_release(db: &std::path::Path) {
+    let mut lock_path = db.as_os_str().to_os_string();
+    lock_path.push(".lock");
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(lock_path)
+        .expect("open file registry lock probe");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    loop {
+        match fs4::FileExt::try_lock(&lock) {
+            Ok(()) => break,
+            Err(fs4::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            Err(error) => panic!("file registry lock remained held after drop: {error}"),
+        }
+    }
+    fs4::FileExt::unlock(&lock).expect("release file registry lock probe");
+}
+
 #[test]
 fn namespace_open_records_and_accepts_same_embedding_model() {
     // Given: a graph created with one named embedding provider.
@@ -100,6 +122,7 @@ fn namespace_open_records_and_accepts_same_embedding_model() {
     let mut first = file_registry(provider(), db.clone(), dir.path().to_path_buf());
     first.remember("durable model stamp", None).unwrap();
     drop(first);
+    wait_for_file_registry_lock_release(&db);
 
     // When: the namespace is reopened with the same model.
     let mut reopened = file_registry(provider(), db, dir.path().to_path_buf());
@@ -129,12 +152,14 @@ fn namespace_open_pins_bge_baseline_and_preserves_graph_on_e5_rejection() {
     assert!(created_stats.node_count > 0);
     assert!(created_stats.edge_count > 0);
     drop(first);
+    wait_for_file_registry_lock_release(&db);
 
     let mut matching = file_registry(bge_provider(), db.clone(), dir.path().to_path_buf());
     let matching_stats = matching.stats(None).unwrap();
     assert_eq!(matching_stats.node_count, created_stats.node_count);
     assert_eq!(matching_stats.edge_count, created_stats.edge_count);
     drop(matching);
+    wait_for_file_registry_lock_release(&db);
 
     let storage_before = SqliteStorage::open(&db).unwrap();
     let counts_before = (storage_before.node_count(), storage_before.edge_count());
@@ -159,6 +184,7 @@ fn namespace_open_pins_bge_baseline_and_preserves_graph_on_e5_rejection() {
     );
     let error = mismatched.stats(None).unwrap_err();
     drop(mismatched);
+    wait_for_file_registry_lock_release(&db);
 
     // Then: the incompatible provider is rejected without changing the persisted graph.
     let message = error.to_string();
@@ -188,6 +214,7 @@ fn namespace_open_rejects_different_same_dimension_model_actionably() {
         .remember("same dimension is not same space", None)
         .unwrap();
     drop(first);
+    wait_for_file_registry_lock_release(&db);
 
     // When: the namespace is reopened with model-b at the same dimension.
     let mut reopened = file_registry(
