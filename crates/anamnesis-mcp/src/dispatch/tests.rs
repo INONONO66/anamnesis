@@ -2023,7 +2023,16 @@ mod migration_job {
             .truncate(false)
             .open(lock_path)
             .expect("open daemon lock");
-        fs4::FileExt::try_lock(&lock).expect("acquire daemon lock");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        loop {
+            match fs4::FileExt::try_lock(&lock) {
+                Ok(()) => break,
+                Err(fs4::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Err(error) => panic!("acquire daemon lock before deadline: {error}"),
+            }
+        }
         let migrations = Arc::new(
             MigrationRuntime::new(
                 &registry,
