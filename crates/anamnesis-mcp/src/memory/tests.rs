@@ -1351,7 +1351,78 @@ mod embedding_migration {
         let dir = tempfile::tempdir().expect("temporary directory");
         let db_path = dir.path().join("graph.db");
         create_fixture(&db_path, 3, 768, "bge-base-en-v1.5", "happy");
+        {
+            let mut storage = SqliteStorage::open(&db_path).expect("open Scenario A fixture");
+            let mut identity = storage
+                .get_node(NodeId(1))
+                .expect("identity fixture node")
+                .clone();
+            identity.node_type = KnowledgeType::Identity;
+            identity.salience = 0.61;
+            identity.origin.peer_id = PeerId(18);
+            identity.origin.session_id = "happy-identity-session".to_string();
+            identity.valid_until = None;
+            identity.access_count = 7;
+            identity
+                .metadata
+                .insert("knowledge-role".to_string(), "identity".to_string());
+            storage
+                .set_node(identity)
+                .expect("persist identity fixture node");
+
+            let mut decision = storage
+                .get_node(NodeId(2))
+                .expect("decision fixture node")
+                .clone();
+            decision.node_type = KnowledgeType::Custom("decision".to_string());
+            decision.salience = 0.83;
+            decision.origin.peer_id = PeerId(19);
+            decision.origin.session_id = "happy-decision-session".to_string();
+            decision.valid_from = None;
+            decision.access_count = 5;
+            decision
+                .metadata
+                .insert("knowledge-role".to_string(), "decision".to_string());
+            storage
+                .set_node(decision)
+                .expect("persist decision fixture node");
+
+            let edge_id = storage.next_edge_id();
+            storage
+                .set_edge(Edge::seeded(
+                    edge_id,
+                    NodeId(1),
+                    NodeId(2),
+                    EdgeType::Supports,
+                    0.4,
+                    EdgeSource::Auto,
+                    Timestamp(5_000),
+                    Timestamp(5_500),
+                    HashMap::from([("edge-preserved".to_string(), "supports".to_string())]),
+                ))
+                .expect("persist supports fixture edge");
+        }
         let before = non_embedding_snapshot(&db_path);
+        assert_eq!(
+            before
+                .0
+                .iter()
+                .map(|node| node.node_type.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                KnowledgeType::Semantic,
+                KnowledgeType::Identity,
+                KnowledgeType::Custom("decision".to_string()),
+            ]
+        );
+        assert_eq!(
+            before
+                .1
+                .iter()
+                .map(|edge| edge.edge_type.clone())
+                .collect::<Vec<_>>(),
+            vec![EdgeType::Reason, EdgeType::Supports]
+        );
         let provider = Arc::new(RecordingProvider::healthy(384, "multilingual-e5-small"));
         let mut progress = Vec::new();
 
@@ -1383,7 +1454,7 @@ mod embedding_migration {
         assert_eq!(non_embedding_snapshot(&db_path), before);
         let storage = SqliteStorage::open(&db_path).expect("open migrated graph");
         assert_eq!(storage.node_count(), 3);
-        assert_eq!(storage.edge_count(), 1);
+        assert_eq!(storage.edge_count(), 2);
         assert_eq!(storage.text_search("happy-content-1", 5)[0].0, NodeId(1));
         assert_eq!(
             storage
@@ -1436,8 +1507,44 @@ mod embedding_migration {
                 .count(),
             64
         );
+        assert_eq!(
+            interrupted
+                .embedding_dimensions
+                .iter()
+                .filter(|dimension| **dimension == Some(768))
+                .count(),
+            6
+        );
         assert_eq!(failing.raw_calls.load(Ordering::SeqCst), 0);
+        let checkpoint = interrupted
+            .checkpoint
+            .as_ref()
+            .expect("checkpoint remains after the committed batch failure");
+        let backup_path = checkpoint.backup_path.clone();
+        let mut validation_path = backup_path.as_os_str().to_os_string();
+        validation_path.push(".verify");
+        let validation_path = std::path::PathBuf::from(validation_path);
+        SqliteStorage::create_verified_backup(&backup_path, &validation_path)
+            .expect("checkpoint backup passes core verified-backup quick check");
+        assert!(validation_path.is_file());
+        std::fs::remove_file(&validation_path).expect("remove checkpoint backup validation copy");
+        assert!(!validation_path.exists());
+
         let healthy = Arc::new(RecordingProvider::healthy(384, "multilingual-e5-small"));
+        {
+            let mut guarded_registry =
+                file_registry(healthy.clone(), db_path.clone(), dir.path().to_path_buf());
+            let recall_error = guarded_registry
+                .recall("dimension-content-0", 3, None)
+                .expect_err("normal registry recall must reject the incomplete migration");
+            assert!(
+                recall_error
+                    .to_string()
+                    .contains("anamnesis migrate-embeddings"),
+                "{recall_error}"
+            );
+            drop(guarded_registry);
+        }
         let outcome = migrate_embeddings(request(&db_path, healthy.clone()), &mut |_| {})
             .expect("resume dimension migration");
 
