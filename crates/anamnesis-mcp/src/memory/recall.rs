@@ -75,6 +75,7 @@ impl MemoryRegistry {
     /// `hits` carry the same de-duplicated ranked list so the agent can pass
     /// `node_id`s on to `relate`. Reinforcement / tick semantics are identical to
     /// [`recall`](Self::recall).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn recall_packaged(
         &mut self,
         query: &str,
@@ -97,6 +98,7 @@ impl MemoryRegistry {
     ///
     /// Tick semantics match [`recall`](Self::recall): exactly ONE tick per call
     /// after the search, including gated-out calls. Gated-out calls never reinforce.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn recall_packaged_gated(
         &mut self,
         query: &str,
