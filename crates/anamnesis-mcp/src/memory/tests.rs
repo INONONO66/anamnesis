@@ -208,6 +208,47 @@ fn namespace_open_rejects_different_same_dimension_model_actionably() {
 }
 
 #[test]
+fn dim_mismatch_error_names_migrate_command_and_both_spaces() {
+    let mismatch = NamespaceCompatibility::DimensionMismatch {
+        stored_model: Some("bge-base-en-v1.5".to_string()),
+        db_dimensions: vec![Some(768)],
+        target_model: "multilingual-e5-small".to_string(),
+        target_dimensions: 384,
+    };
+
+    let message = mismatch.message();
+
+    assert!(message.contains("768-d"), "{message}");
+    assert!(message.contains("bge-base-en-v1.5"), "{message}");
+    assert!(message.contains("multilingual-e5-small"), "{message}");
+    assert!(message.contains("384-d"), "{message}");
+    assert!(
+        message.contains("anamnesis migrate-embeddings [--namespace NS]"),
+        "{message}"
+    );
+}
+
+#[test]
+fn model_mismatch_error_preserves_stored_model_fallback() {
+    let mismatch = NamespaceCompatibility::ModelMismatch {
+        stored_model: "model-a".to_string(),
+        target_model: "model-b".to_string(),
+        target_dimensions: 384,
+    };
+
+    let message = mismatch.message();
+
+    assert!(
+        message.contains("anamnesis migrate-embeddings [--namespace NS]"),
+        "{message}"
+    );
+    assert!(
+        message.contains("ANAMNESIS_EMBED_MODEL=model-a"),
+        "{message}"
+    );
+}
+
+#[test]
 fn namespace_open_backfills_unstamped_legacy_db_after_dimension_match() {
     // Given: an old graph with 3-dimensional embeddings but no model stamp.
     let dir = tempfile::tempdir().unwrap();
@@ -1079,7 +1120,10 @@ fn usage_report_counts_ops_and_backlog() {
 }
 
 mod embedding_migration {
-    use super::migration::{EMBEDDING_MIGRATION_BATCH_SIZE, migrate_embeddings};
+    use super::migration::{
+        EMBEDDING_MIGRATION_BATCH_SIZE, migrate_embeddings,
+        migrate_embeddings_with_backup_verification_cleanup,
+    };
     use super::*;
     use anamnesis::engine::{KnowledgeType, Node, NodeId, Timestamp};
     use anamnesis::graph::edge::{Edge, EdgeSource};
@@ -1156,7 +1200,9 @@ mod embedding_migration {
                 call
             };
             if self.fail_at.is_some_and(|fail_at| call >= fail_at) {
-                return Err(Error::InvalidInput("injected passage failure".to_string()));
+                return Err(Error::InvalidInput(format!(
+                    "injected passage failure for {text}"
+                )));
             }
             Ok(vec![self.passage_value; self.dimensions])
         }
@@ -1414,6 +1460,150 @@ mod embedding_migration {
     }
 
     #[test]
+    fn resume_cleanup_failure_reports_preserved_verified_backup() {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let db_path = dir.path().join("resume-cleanup.db");
+        create_fixture(
+            &db_path,
+            1,
+            768,
+            "bge-base-en-v1.5",
+            "resume-cleanup-secret",
+        );
+        let failing = Arc::new(RecordingProvider::failing(384, "multilingual-e5-small", 0));
+
+        migrate_embeddings(request(&db_path, failing), &mut |_| {})
+            .expect_err("initial migration must leave a checkpoint");
+        let checkpoint = inspection(&db_path)
+            .checkpoint
+            .expect("initial migration checkpoint");
+        let backup_path = checkpoint.backup_path.clone();
+        assert!(backup_path.is_file());
+
+        let mut validation_path = backup_path.clone().into_os_string();
+        validation_path.push(".verify");
+        let validation_path = std::path::PathBuf::from(validation_path);
+        let mut fail_cleanup = |_: &std::path::Path| {
+            Err(Error::StorageError(
+                "injected backup verification cleanup failure".to_string(),
+            ))
+        };
+        let provider = Arc::new(RecordingProvider::healthy(384, "multilingual-e5-small"));
+        let failure = migrate_embeddings_with_backup_verification_cleanup(
+            request(&db_path, provider.clone()),
+            &mut |_| {},
+            &mut fail_cleanup,
+        )
+        .expect_err("cleanup failure must stop the resume");
+        let message = failure.to_string();
+        assert_eq!(
+            failure.backup_state,
+            MigrationBackupState::BackupPreserved {
+                backup_path: backup_path.clone(),
+            },
+        );
+        assert_eq!(
+            failure.failure_context,
+            MigrationFailureContext::BackupVerificationCleanup {
+                backup_path: backup_path.clone(),
+                validation_path: validation_path.clone(),
+            },
+        );
+        assert_eq!(
+            failure.retained_source(),
+            &Error::StorageError("injected backup verification cleanup failure".to_string())
+        );
+        assert!(validation_path.is_file());
+
+        assert!(std::error::Error::source(&failure).is_none());
+        assert!(
+            message.contains(&backup_path.display().to_string()),
+            "{message}"
+        );
+        assert!(message.contains("after the checkpoint backup"), "{message}");
+        assert!(message.contains("was verified"), "{message}");
+        assert!(message.contains("is preserved"), "{message}");
+        assert!(message.contains("Remove the validation copy"), "{message}");
+        assert!(
+            message.contains("anamnesis migrate-embeddings [--namespace NS]"),
+            "{message}"
+        );
+        assert!(
+            !message.contains("resume-cleanup-secret-content-0"),
+            "{message}"
+        );
+        assert!(provider.passage_inputs().is_empty());
+        let resumed = inspection(&db_path);
+        assert_eq!(
+            resumed
+                .checkpoint
+                .as_ref()
+                .map(|checkpoint| &checkpoint.backup_path),
+            Some(&backup_path)
+        );
+        assert_eq!(resumed.embedding_dimensions, vec![Some(768)]);
+    }
+    #[test]
+    fn resume_backup_verification_failure_names_preserved_checkpoint_backup() {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let db_path = dir.path().join("resume-verification.db");
+        create_fixture(
+            &db_path,
+            1,
+            768,
+            "bge-base-en-v1.5",
+            "resume-verification-secret",
+        );
+        let failing = Arc::new(RecordingProvider::failing(384, "multilingual-e5-small", 0));
+
+        migrate_embeddings(request(&db_path, failing), &mut |_| {})
+            .expect_err("initial migration must leave a checkpoint");
+        let checkpoint = inspection(&db_path)
+            .checkpoint
+            .expect("initial migration checkpoint");
+        let backup_path = checkpoint.backup_path.clone();
+        std::fs::write(&backup_path, b"invalid checkpoint backup")
+            .expect("corrupt checkpoint backup");
+
+        let provider = Arc::new(RecordingProvider::healthy(384, "multilingual-e5-small"));
+        let failure = migrate_embeddings(request(&db_path, provider.clone()), &mut |_| {})
+            .expect_err("backup verification must stop the resume");
+        let message = failure.to_string();
+
+        assert!(std::error::Error::source(&failure).is_none());
+        assert!(
+            message.contains(&backup_path.display().to_string()),
+            "{message}"
+        );
+        assert!(
+            message.contains("re-verify the preserved checkpoint backup"),
+            "{message}"
+        );
+        assert!(
+            message.contains("Preserve it, resolve the verification issue"),
+            "{message}"
+        );
+        assert!(
+            message.contains("anamnesis migrate-embeddings [--namespace NS]"),
+            "{message}"
+        );
+        assert!(
+            !message.contains("resume-verification-secret-content-0"),
+            "{message}"
+        );
+        assert!(provider.passage_inputs().is_empty());
+        let resumed = inspection(&db_path);
+        assert_eq!(
+            resumed
+                .checkpoint
+                .as_ref()
+                .map(|checkpoint| &checkpoint.backup_path),
+            Some(&backup_path)
+        );
+        assert_eq!(resumed.embedding_dimensions, vec![Some(768)]);
+    }
+
+    #[test]
     fn same_dimension_model_change_resumes_from_atomic_cursor() {
         let dir = tempfile::tempdir().expect("temporary directory");
         let db_path = dir.path().join("resume-cursor.db");
@@ -1450,6 +1640,127 @@ mod embedding_migration {
     }
 
     #[test]
+    fn migration_errors_distinguish_pre_backup_from_preserved_backup() {
+        let dir = tempfile::tempdir().expect("temporary directory");
+
+        let pre_backup_db = dir.path().join("pre-backup.db");
+        create_fixture(
+            &pre_backup_db,
+            1,
+            768,
+            "bge-base-en-v1.5",
+            "pre-backup-secret",
+        );
+        let pre_backup_path = backup_path_for_database(
+            &std::fs::canonicalize(&pre_backup_db).expect("canonicalize pre-backup database"),
+        )
+        .expect("derive pre-backup path");
+        std::fs::create_dir(&pre_backup_path).expect("block backup destination with directory");
+        let pre_backup_provider =
+            Arc::new(RecordingProvider::healthy(384, "multilingual-e5-small"));
+
+        let pre_backup_error =
+            migrate_embeddings(request(&pre_backup_db, pre_backup_provider), &mut |_| {})
+                .expect_err("backup creation must fail")
+                .to_string();
+
+        assert!(
+            pre_backup_error.contains(&pre_backup_path.display().to_string()),
+            "{pre_backup_error}"
+        );
+        assert!(
+            pre_backup_error.contains("no verified backup was created"),
+            "{pre_backup_error}"
+        );
+        assert!(
+            pre_backup_error.contains("Preserve or move it before rerunning"),
+            "{pre_backup_error}"
+        );
+        assert!(
+            pre_backup_error.contains("anamnesis migrate-embeddings [--namespace NS]"),
+            "{pre_backup_error}"
+        );
+        assert!(
+            !pre_backup_error.contains("pre-backup-secret-content-0"),
+            "{pre_backup_error}"
+        );
+
+        let post_backup_db = dir.path().join("post-backup.db");
+        create_fixture(
+            &post_backup_db,
+            1,
+            768,
+            "bge-base-en-v1.5",
+            "post-backup-secret",
+        );
+        let post_backup_path = backup_path_for_database(
+            &std::fs::canonicalize(&post_backup_db).expect("canonicalize post-backup database"),
+        )
+        .expect("derive post-backup path");
+        let post_backup_provider =
+            Arc::new(RecordingProvider::failing(384, "multilingual-e5-small", 0));
+
+        let post_backup_failure =
+            migrate_embeddings(request(&post_backup_db, post_backup_provider), &mut |_| {})
+                .expect_err("embedding must fail after backup creation");
+        assert_eq!(
+            post_backup_failure.retained_source(),
+            &Error::InvalidInput(
+                "injected passage failure for post-backup-secret-content-0".to_string()
+            )
+        );
+        assert!(std::error::Error::source(&post_backup_failure).is_none());
+        let post_backup_error = post_backup_failure.to_string();
+        let post_backup_debug = format!("{post_backup_failure:?}");
+        let post_backup_anyhow_debug = format!("{:?}", anyhow::Error::new(post_backup_failure));
+
+        assert!(
+            post_backup_error.contains(&post_backup_path.display().to_string()),
+            "{post_backup_error}"
+        );
+        assert!(
+            post_backup_error.contains("is preserved"),
+            "{post_backup_error}"
+        );
+        assert!(
+            post_backup_error.contains("cause category: invalid input"),
+            "{post_backup_error}"
+        );
+        assert!(
+            post_backup_error.contains("anamnesis migrate-embeddings [--namespace NS]"),
+            "{post_backup_error}"
+        );
+        assert!(
+            !post_backup_error.contains("post-backup-secret-content-0"),
+            "{post_backup_error}"
+        );
+        assert!(
+            !post_backup_debug.contains("post-backup-secret-content-0"),
+            "{post_backup_debug}"
+        );
+        assert!(
+            post_backup_debug.contains("is preserved"),
+            "{post_backup_debug}"
+        );
+        assert!(
+            post_backup_debug.contains("anamnesis migrate-embeddings [--namespace NS]"),
+            "{post_backup_debug}"
+        );
+        assert!(
+            post_backup_anyhow_debug.contains("is preserved"),
+            "{post_backup_anyhow_debug}"
+        );
+        assert!(
+            post_backup_anyhow_debug.contains("anamnesis migrate-embeddings [--namespace NS]"),
+            "{post_backup_anyhow_debug}"
+        );
+        assert!(
+            !post_backup_anyhow_debug.contains("post-backup-secret-content-0"),
+            "{post_backup_anyhow_debug}"
+        );
+    }
+
+    #[test]
     fn backup_failure_writes_no_checkpoint_or_embedding() {
         let dir = tempfile::tempdir().expect("temporary directory");
         let db_path = dir.path().join("backup-failure.db");
@@ -1478,10 +1789,24 @@ mod embedding_migration {
         let unrelated = b"operator-owned-unrelated-backup";
         std::fs::write(&backup_path, unrelated).expect("write unrelated backup bytes");
         let provider = Arc::new(RecordingProvider::healthy(384, "multilingual-e5-small"));
-
         let result = migrate_embeddings(request(&db_path, provider.clone()), &mut |_| {});
 
-        assert!(result.is_err());
+        let error = result
+            .expect_err("existing unrelated backup must fail closed")
+            .to_string();
+        assert!(
+            error.contains(&backup_path.display().to_string()),
+            "{error}"
+        );
+        assert!(
+            error.contains("Preserve or move it before rerunning"),
+            "{error}"
+        );
+        assert!(
+            error.contains("anamnesis migrate-embeddings [--namespace NS]"),
+            "{error}"
+        );
+        assert!(!error.contains("unrelated-content-0"), "{error}");
         assert_eq!(std::fs::read(&backup_path).expect("read backup"), unrelated);
         assert!(provider.passage_inputs().is_empty());
         assert_eq!(inspection(&db_path).checkpoint, None);

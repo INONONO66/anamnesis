@@ -318,6 +318,7 @@ enum Backend {
     Memory,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum NamespaceCompatibility {
     Ready,
     DimensionMismatch {
@@ -337,8 +338,238 @@ pub(crate) enum NamespaceCompatibility {
     },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum MigrationBackupState {
+    NoBackupCreated,
+    BackupPreserved { backup_path: PathBuf },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum MigrationFailureContext {
+    FixedCategory,
+    BackupCreation {
+        backup_path: PathBuf,
+        destination_exists: bool,
+    },
+    CheckpointBackupValidation {
+        backup_path: PathBuf,
+    },
+    CheckpointBackupVerification {
+        backup_path: PathBuf,
+    },
+    BackupVerificationCleanup {
+        backup_path: PathBuf,
+        validation_path: PathBuf,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MigrationFailureCause {
+    MissingNode,
+    MissingEdge,
+    Storage,
+    Rejected,
+    InvalidConfiguration,
+    InvalidInput,
+    NonFiniteState,
+    BudgetExhausted,
+}
+
+impl From<&Error> for MigrationFailureCause {
+    fn from(source: &Error) -> Self {
+        match source {
+            Error::NodeNotFound(_) => Self::MissingNode,
+            Error::EdgeNotFound(_) => Self::MissingEdge,
+            Error::StorageError(_) => Self::Storage,
+            Error::Rejected(_) => Self::Rejected,
+            Error::InvalidConfig(_) => Self::InvalidConfiguration,
+            Error::InvalidInput(_) => Self::InvalidInput,
+            Error::NonFinite(_) => Self::NonFiniteState,
+            Error::BudgetExhausted => Self::BudgetExhausted,
+        }
+    }
+}
+
+impl std::fmt::Display for MigrationFailureCause {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::MissingNode => "missing node",
+            Self::MissingEdge => "missing edge",
+            Self::Storage => "storage",
+            Self::Rejected => "rejected",
+            Self::InvalidConfiguration => "invalid configuration",
+            Self::InvalidInput => "invalid input",
+            Self::NonFiniteState => "non-finite state",
+            Self::BudgetExhausted => "budget exhausted",
+        })
+    }
+}
+
+pub(crate) struct EmbeddingMigrationFailure {
+    backup_state: MigrationBackupState,
+    failure_context: MigrationFailureContext,
+    source: Error,
+}
+
+impl std::fmt::Debug for EmbeddingMigrationFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "EmbeddingMigrationFailure({self})")
+    }
+}
+
+impl EmbeddingMigrationFailure {
+    pub(crate) fn new(
+        backup_state: MigrationBackupState,
+        failure_context: MigrationFailureContext,
+        source: Error,
+    ) -> Self {
+        Self {
+            backup_state,
+            failure_context,
+            source,
+        }
+    }
+
+    pub(crate) fn retained_source(&self) -> &Error {
+        &self.source
+    }
+}
+
+impl std::fmt::Display for EmbeddingMigrationFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(
+            &EmbeddingMigrationError::Failed {
+                backup_state: self.backup_state.clone(),
+                failure_context: self.failure_context.clone(),
+                cause: MigrationFailureCause::from(self.retained_source()),
+            }
+            .render(),
+        )
+    }
+}
+
+impl std::error::Error for EmbeddingMigrationFailure {}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum EmbeddingMigrationError {
+    Incompatible(NamespaceCompatibility),
+    AutomaticMigrationDisabled(NamespaceCompatibility),
+    Failed {
+        backup_state: MigrationBackupState,
+        failure_context: MigrationFailureContext,
+        cause: MigrationFailureCause,
+    },
+}
+
+impl EmbeddingMigrationError {
+    pub(crate) fn render(&self) -> String {
+        match self {
+            Self::Incompatible(compatibility) => compatibility.render(),
+            Self::AutomaticMigrationDisabled(compatibility) => format!(
+                "{}. Automatic migration is disabled by \
+                 ANAMNESIS_AUTO_MIGRATE_EMBEDDINGS; no database mutation occurred.",
+                compatibility.message()
+            ),
+            Self::Failed {
+                failure_context:
+                    MigrationFailureContext::BackupCreation {
+                        backup_path,
+                        destination_exists: true,
+                    },
+                cause,
+                ..
+            } => format!(
+                "embedding migration failed while creating the required backup at {} (cause \
+                 category: {cause}); no verified backup was created. An existing item blocks \
+                 that path. Preserve or move it before rerunning `{}`.",
+                backup_path.display(),
+                migration_command()
+            ),
+            Self::Failed {
+                failure_context:
+                    MigrationFailureContext::BackupCreation {
+                        backup_path,
+                        destination_exists: false,
+                    },
+                cause,
+                ..
+            } => format!(
+                "embedding migration failed while creating the required backup at {} (cause \
+                 category: {cause}); no verified backup was created. Resolve access or \
+                 free-space issues for that backup path, then rerun `{}`.",
+                backup_path.display(),
+                migration_command()
+            ),
+            Self::Failed {
+                failure_context: MigrationFailureContext::CheckpointBackupValidation { backup_path },
+                cause,
+                ..
+            } => format!(
+                "embedding migration cannot safely validate the checkpoint backup at {} \
+                 (cause category: {cause}). Do not overwrite that path; reconcile the checkpoint \
+                 with the live database before rerunning `{}`.",
+                backup_path.display(),
+                migration_command()
+            ),
+            Self::Failed {
+                failure_context:
+                    MigrationFailureContext::CheckpointBackupVerification { backup_path },
+                cause,
+                ..
+            } => format!(
+                "embedding migration could not re-verify the preserved checkpoint backup at {} \
+                 (cause category: {cause}). Preserve it, resolve the verification issue, then \
+                 rerun `{}`.",
+                backup_path.display(),
+                migration_command()
+            ),
+            Self::Failed {
+                failure_context:
+                    MigrationFailureContext::BackupVerificationCleanup {
+                        backup_path,
+                        validation_path,
+                    },
+                cause,
+                ..
+            } => format!(
+                "embedding migration failed while removing the validation copy at {} after the \
+                 checkpoint backup at {} was verified (cause category: {cause}); the checkpoint \
+                 backup is preserved. Remove the validation copy if it remains, then rerun `{}`.",
+                validation_path.display(),
+                backup_path.display(),
+                migration_command()
+            ),
+            Self::Failed {
+                backup_state: MigrationBackupState::NoBackupCreated,
+                cause,
+                ..
+            } => format!(
+                "embedding migration failed (cause category: {cause}) before a verified backup \
+                 was created; no backup was created. Resolve the migration issue, then run \
+                 `{}`.",
+                migration_command()
+            ),
+            Self::Failed {
+                backup_state: MigrationBackupState::BackupPreserved { backup_path },
+                cause,
+                ..
+            } => format!(
+                "embedding migration failed (cause category: {cause}) after a verified backup \
+                 was created; the backup at {} is preserved. Resolve the migration issue, then \
+                 run `{}`.",
+                backup_path.display(),
+                migration_command()
+            ),
+        }
+    }
+}
+
 impl NamespaceCompatibility {
     pub(crate) fn message(&self) -> String {
+        EmbeddingMigrationError::Incompatible(self.clone()).render()
+    }
+
+    fn render(&self) -> String {
         match self {
             Self::Ready => "embedding space is compatible".to_string(),
             Self::DimensionMismatch {
@@ -346,27 +577,76 @@ impl NamespaceCompatibility {
                 db_dimensions,
                 target_model,
                 target_dimensions,
-            } => format!(
-                "embedding dimension mismatch: DB dimensions are {db_dimensions:?} with stored \
-                 model {stored_model:?}, but configured model '{target_model}' produces \
-                 {target_dimensions}-d embeddings"
-            ),
+            } => {
+                let fallback = stored_model_fallback(stored_model.as_deref());
+                let stored_model_text = stored_model.as_deref().map_or_else(String::new, |model| {
+                    format!(" The stored model is '{model}'.")
+                });
+                format!(
+                    "embedding dimension mismatch: DB has {} embeddings.{} Configured model \
+                     '{target_model}' produces {target_dimensions}-d embeddings. Preferred \
+                     recovery: `{}`.{}",
+                    format_db_dimensions(db_dimensions),
+                    stored_model_text,
+                    migration_command(),
+                    fallback
+                )
+            }
             Self::ModelMismatch {
                 stored_model,
                 target_model,
                 target_dimensions,
             } => format!(
-                "embedding model mismatch: DB was created by '{stored_model}', but configured \
-                 model '{target_model}' produces {target_dimensions}-d embeddings"
+                "embedding model mismatch: DB has {target_dimensions}-d embeddings created by \
+                 '{stored_model}', but configured model '{target_model}' produces \
+                 {target_dimensions}-d embeddings. Preferred recovery: `{}`.{}",
+                migration_command(),
+                stored_model_fallback(Some(stored_model))
             ),
             Self::IncompleteMigration {
                 target_model,
                 target_dimensions,
             } => format!(
                 "embedding migration checkpoint is incomplete for configured model \
-                 '{target_model}' ({target_dimensions}-d)"
+                 '{target_model}' ({target_dimensions}-d). Resume it with `{}`.",
+                migration_command()
             ),
         }
+    }
+}
+
+fn migration_command() -> &'static str {
+    "anamnesis migrate-embeddings [--namespace NS]"
+}
+
+fn stored_model_fallback(stored_model: Option<&str>) -> String {
+    match stored_model {
+        Some(model) => format!(
+            " To keep the stored embedding space instead, set \
+             ANAMNESIS_EMBED_MODEL={model}."
+        ),
+        None => " To keep the stored embedding space instead, set ANAMNESIS_EMBED_MODEL to the \
+             model that created the DB."
+            .to_string(),
+    }
+}
+
+fn format_db_dimensions(db_dimensions: &[Option<usize>]) -> String {
+    let mut dimensions: Vec<usize> = db_dimensions.iter().flatten().copied().collect();
+    dimensions.sort_unstable();
+    dimensions.dedup();
+    let formatted = dimensions
+        .iter()
+        .map(|dimension| format!("{dimension}-d"))
+        .collect::<Vec<_>>();
+
+    match (
+        formatted.is_empty(),
+        db_dimensions.iter().any(Option::is_none),
+    ) {
+        (true, _) => "unknown-dimension".to_string(),
+        (false, true) => format!("{} and unknown-dimension", formatted.join(", ")),
+        (false, false) => formatted.join(", "),
     }
 }
 
@@ -694,12 +974,9 @@ impl MemoryRegistry {
                 NamespaceResolution::MigrationFailed(message)
             }
             Some(NamespaceMigrationState::Completed) | None if !self.auto_migrate_embeddings => {
-                NamespaceResolution::MigrationFailed(format!(
-                    "{}. Automatic migration is disabled by \
-                     ANAMNESIS_AUTO_MIGRATE_EMBEDDINGS; no database mutation occurred. Run \
-                     `anamnesis migrate-embeddings --namespace {key}`.",
-                    mismatch.message()
-                ))
+                NamespaceResolution::MigrationFailed(
+                    EmbeddingMigrationError::AutomaticMigrationDisabled(mismatch).render(),
+                )
             }
             Some(NamespaceMigrationState::Completed) | None => {
                 self.migration_states
@@ -1015,12 +1292,15 @@ pub(crate) fn verify_embedding_dim(
         };
         let db_dim = embedding.len();
         if db_dim != provider_dim {
-            return Err(Error::InvalidInput(format!(
-                "embedding dimension mismatch: DB has {db_dim}-d embeddings but model \
-                 '{model}' produces {provider_dim}-d. Back up and reset the DB \
-                 (mv ~/.anamnesis/memory.db ~/.anamnesis/memory.db.bak-YYYYMMDD) \
-                 or set ANAMNESIS_EMBED_MODEL to the model that created it."
-            )));
+            return Err(Error::InvalidInput(
+                EmbeddingMigrationError::Incompatible(NamespaceCompatibility::DimensionMismatch {
+                    stored_model: mem.engine().graph().storage().embedding_model_name()?,
+                    db_dimensions: vec![Some(db_dim)],
+                    target_model: model.to_string(),
+                    target_dimensions: provider_dim,
+                })
+                .render(),
+            ));
         }
         return Ok(());
     }
@@ -1079,12 +1359,14 @@ fn verify_embedding_compatibility(
 
     match mem.engine().graph().storage().embedding_model_name()? {
         Some(stored_model) if stored_model == current_model => Ok(()),
-        Some(stored_model) => Err(Error::InvalidInput(format!(
-            "embedding model mismatch: DB was created by '{stored_model}' but the current model \
-             is '{current_model}'. Back up and reset the DB \
-             (mv ~/.anamnesis/memory.db ~/.anamnesis/memory.db.bak-YYYYMMDD) or set \
-             ANAMNESIS_EMBED_MODEL to '{stored_model}'."
-        ))),
+        Some(stored_model) => Err(Error::InvalidInput(
+            EmbeddingMigrationError::Incompatible(NamespaceCompatibility::ModelMismatch {
+                stored_model,
+                target_model: current_model.to_string(),
+                target_dimensions: provider_dim,
+            })
+            .render(),
+        )),
         None => mem
             .engine_mut()
             .graph_mut()

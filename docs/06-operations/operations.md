@@ -105,6 +105,64 @@ Transport selection is separate from the knobs below: `ANAMNESIS_NO_DAEMON=1` (o
 `--embedded`) bypasses the daemon and opens the DB in-process, and `ANAMNESIS_SOCKET`
 overrides the socket path when the default is too long for the platform.
 
+## Embedding-space migration
+
+An embedding dimension or model mismatch is a database compatibility problem, not a
+recall-quality warning. The preferred recovery path is:
+
+```text
+anamnesis migrate-embeddings [--namespace NS]
+```
+
+Run the command while the daemon is stopped: it must own the selected namespace
+database lock for the entire operation. Select the namespace explicitly with
+`--namespace NS`, or omit it to use the configured default namespace and its normal
+database-path rules. Confirm free disk space for a complete SQLite backup before
+starting. The migration derives its required backup name from the live database path
+and the local date: `<db>.bak-YYYYMMDD` (for example,
+`memory.db.bak-20260715`).
+
+### Automatic migration, availability, and resume
+
+When the daemon finds a mismatch, it creates and verifies the required backup, runs
+embedding replacements in background batches, then reopens the namespace through
+the normal compatibility guard. If initial backup creation or verification fails,
+migration does not start and no migration writes occur. On resume, the daemon
+re-verifies the durable checkpoint backup before starting a new batch. A resume
+verification failure stops new writes for that attempt, but leaves the durable
+checkpoint, prior committed batches, and live partial state intact.
+
+While a namespace is migrating, MCP operations for that namespace return an error.
+Hook recall follows its existing fail-open behavior and injects no context for that
+request. Other namespaces remain available.
+
+After an interruption, rerun the manual command or restart the daemon to resume.
+For a target with a different dimension, candidates are selected from the stored
+per-node dimensions (including missing embeddings). For a same-dimension model
+replacement, the migration resumes from its committed checkpoint cursor rather than
+treating matching dimensions as complete.
+
+### Recovery and configuration
+
+Keep the verified `<db>.bak-YYYYMMDD` backup. When a migration fails, stop the
+daemon, preserve the failed live database at a separate path for diagnosis, and only
+then restore the backup to the live database path.
+
+To disable only automatic daemon migration, set
+`ANAMNESIS_AUTO_MIGRATE_EMBEDDINGS` to `0`, `false`, or `no` before starting the
+process. The mismatch remains an actionable error; this opt-out performs no database
+mutation:
+
+```bash
+export ANAMNESIS_AUTO_MIGRATE_EMBEDDINGS=0
+```
+
+When the stored model is known and migration is not wanted, use it as the non-migrating fallback:
+
+```bash
+export ANAMNESIS_EMBED_MODEL=<stored-model>
+```
+
 ## Env knobs
 
 Every value below is verified against source. Defaults apply when the variable is
@@ -124,6 +182,8 @@ default, never an error).
 | `ANAMNESIS_EXTRACT_THRESHOLD_N` | `20` | Un-extracted queue length that triggers the SessionStart extraction nudge. |
 | `ANAMNESIS_EXTRACT_REDELIVERY_MS` | `21600000` (6h) | TTL after which a pulled-but-abandoned extraction is re-queued once (attempt cap 2). |
 | `ANAMNESIS_DAEMON_GRACE_SECS` | `30` | Idle grace before a zero-client daemon exits; `0` ⇒ exit immediately. |
+| `ANAMNESIS_EMBED_MODEL` | `multilingual-e5-small` | Embedding model. Set it to the known stored model to continue without migrating. |
+| `ANAMNESIS_AUTO_MIGRATE_EMBEDDINGS` | `true` | Enables daemon migration after a model/dimension mismatch; `0` / `false` / `no` disables it without mutating the DB. |
 
 ## Troubleshooting
 

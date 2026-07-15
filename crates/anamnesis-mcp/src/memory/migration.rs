@@ -12,8 +12,9 @@ use anamnesis::storage::{SqliteStorage, StorageAdapter};
 use anamnesis::{Error, Memory};
 
 use super::{
-    EmbeddingMigrationOutcome, EmbeddingMigrationReport, EmbeddingMigrationRequest,
-    EmbeddingProgress, MemoryRegistry, MigrationLockLease, PendingEmbeddingMigrationRequest,
+    EmbeddingMigrationFailure, EmbeddingMigrationOutcome, EmbeddingMigrationReport,
+    EmbeddingMigrationRequest, EmbeddingProgress, MemoryRegistry, MigrationBackupState,
+    MigrationFailureContext, MigrationLockLease, PendingEmbeddingMigrationRequest,
     acquire_namespace_migration_lock, backup_path_for_database, verify_embedding_compatibility,
 };
 
@@ -22,6 +23,38 @@ pub(crate) const EMBEDDING_MIGRATION_BATCH_SIZE: usize = 64;
 pub(crate) fn migrate_embeddings(
     request: EmbeddingMigrationRequest,
     progress: &mut dyn FnMut(EmbeddingProgress),
+) -> Result<EmbeddingMigrationOutcome, EmbeddingMigrationFailure> {
+    let mut cleanup_verification_copy = remove_backup_verification_copy;
+    migrate_embeddings_with_backup_verification_cleanup(
+        request,
+        progress,
+        &mut cleanup_verification_copy,
+    )
+}
+
+pub(super) fn migrate_embeddings_with_backup_verification_cleanup(
+    request: EmbeddingMigrationRequest,
+    progress: &mut dyn FnMut(EmbeddingProgress),
+    cleanup_verification_copy: &mut dyn FnMut(&Path) -> Result<(), Error>,
+) -> Result<EmbeddingMigrationOutcome, EmbeddingMigrationFailure> {
+    let mut backup_state = MigrationBackupState::NoBackupCreated;
+    let mut failure_context = MigrationFailureContext::FixedCategory;
+    migrate_embeddings_inner(
+        request,
+        progress,
+        &mut backup_state,
+        &mut failure_context,
+        cleanup_verification_copy,
+    )
+    .map_err(|source| EmbeddingMigrationFailure::new(backup_state, failure_context, source))
+}
+
+fn migrate_embeddings_inner(
+    request: EmbeddingMigrationRequest,
+    progress: &mut dyn FnMut(EmbeddingProgress),
+    backup_state: &mut MigrationBackupState,
+    failure_context: &mut MigrationFailureContext,
+    cleanup_verification_copy: &mut dyn FnMut(&Path) -> Result<(), Error>,
 ) -> Result<EmbeddingMigrationOutcome, Error> {
     let EmbeddingMigrationRequest {
         pending,
@@ -67,42 +100,84 @@ pub(crate) fn migrate_embeddings(
     };
     let mut checkpoint = match inspection.checkpoint {
         Some(checkpoint) => {
-            let checkpoint_backup =
-                std::fs::canonicalize(&checkpoint.backup_path).map_err(|error| {
-                    Error::StorageError(format!(
+            let checkpoint_backup = match std::fs::canonicalize(&checkpoint.backup_path) {
+                Ok(path) => path,
+                Err(error) => {
+                    *failure_context = MigrationFailureContext::CheckpointBackupValidation {
+                        backup_path: checkpoint.backup_path.clone(),
+                    };
+                    return Err(Error::StorageError(format!(
                         "resolve checkpoint backup {:?}: {error}",
                         checkpoint.backup_path
-                    ))
-                })?;
-            let expected_backup =
-                std::fs::canonicalize(&expected_backup_path).map_err(|error| {
-                    Error::StorageError(format!(
+                    )));
+                }
+            };
+            let expected_backup = match std::fs::canonicalize(&expected_backup_path) {
+                Ok(path) => path,
+                Err(error) => {
+                    *failure_context = MigrationFailureContext::CheckpointBackupValidation {
+                        backup_path: checkpoint.backup_path.clone(),
+                    };
+                    return Err(Error::StorageError(format!(
                         "resolve expected migration backup {expected_backup_path:?}: {error}"
-                    ))
-                })?;
+                    )));
+                }
+            };
             if checkpoint.source_model.as_deref() != source_model.as_deref()
                 || checkpoint.target_model != target_model
                 || checkpoint.target_dim != target_dim
                 || checkpoint_backup != expected_backup
             {
+                *failure_context = MigrationFailureContext::CheckpointBackupValidation {
+                    backup_path: checkpoint.backup_path.clone(),
+                };
                 return Err(Error::InvalidInput(
                     "embedding migration checkpoint does not match the live source/target tuple \
                      and canonical backup"
                         .to_string(),
                 ));
             }
-            verify_existing_backup(&checkpoint.backup_path)?;
+            let validation_path = match verify_existing_backup(&checkpoint.backup_path) {
+                Ok(path) => path,
+                Err(error) => {
+                    *failure_context = MigrationFailureContext::CheckpointBackupVerification {
+                        backup_path: checkpoint.backup_path.clone(),
+                    };
+                    return Err(error);
+                }
+            };
+            *backup_state = MigrationBackupState::BackupPreserved {
+                backup_path: checkpoint.backup_path.clone(),
+            };
+            if let Err(error) = cleanup_verification_copy(&validation_path) {
+                *failure_context = MigrationFailureContext::BackupVerificationCleanup {
+                    backup_path: checkpoint.backup_path.clone(),
+                    validation_path,
+                };
+                return Err(error);
+            }
             checkpoint
         }
         None => {
-            SqliteStorage::create_verified_backup(&db_path, &expected_backup_path).map_err(
-                |error| {
-                    Error::StorageError(format!(
-                        "create verified embedding migration backup {expected_backup_path:?}: \
-                         {error}"
-                    ))
-                },
-            )?;
+            let backup_result =
+                SqliteStorage::create_verified_backup(&db_path, &expected_backup_path).map_err(
+                    |error| {
+                        Error::StorageError(format!(
+                            "create verified embedding migration backup {expected_backup_path:?}: \
+                             {error}"
+                        ))
+                    },
+                );
+            if let Err(error) = backup_result {
+                *failure_context = MigrationFailureContext::BackupCreation {
+                    backup_path: expected_backup_path.clone(),
+                    destination_exists: expected_backup_path.exists(),
+                };
+                return Err(error);
+            }
+            *backup_state = MigrationBackupState::BackupPreserved {
+                backup_path: expected_backup_path.clone(),
+            };
             EmbeddingMigrationCheckpoint {
                 source_model: source_model.clone(),
                 source_dim,
@@ -213,7 +288,7 @@ fn source_dimension(inspection: &EmbeddingMigrationInspection) -> Result<Option<
     Ok(first)
 }
 
-fn verify_existing_backup(path: &Path) -> Result<(), Error> {
+fn verify_existing_backup(path: &Path) -> Result<PathBuf, Error> {
     let mut validation_path = OsString::from(path.as_os_str());
     validation_path.push(".verify");
     let validation_path = PathBuf::from(validation_path);
@@ -222,7 +297,11 @@ fn verify_existing_backup(path: &Path) -> Result<(), Error> {
             "verify existing embedding migration backup {path:?}: {error}"
         ))
     })?;
-    std::fs::remove_file(&validation_path).map_err(|error| {
+    Ok(validation_path)
+}
+
+fn remove_backup_verification_copy(validation_path: &Path) -> Result<(), Error> {
+    std::fs::remove_file(validation_path).map_err(|error| {
         Error::StorageError(format!(
             "remove backup verification copy {validation_path:?}: {error}"
         ))
