@@ -1909,6 +1909,21 @@ mod migration_job {
             "source-model"
         }
     }
+    struct TargetProvider;
+
+    impl EmbeddingProvider for TargetProvider {
+        fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, Error> {
+            Ok(texts.iter().map(|_| vec![0.25; 3]).collect())
+        }
+
+        fn dimensions(&self) -> usize {
+            3
+        }
+
+        fn model_name(&self) -> &str {
+            "target-model"
+        }
+    }
 
     struct BlockingProvider {
         calls: AtomicUsize,
@@ -1956,6 +1971,9 @@ mod migration_job {
             }
             Ok(texts.iter().map(|_| vec![0.25; 3]).collect())
         }
+        fn embed_query(&self, _text: &str) -> Result<Vec<f32>, Error> {
+            Ok(vec![0.25; 3])
+        }
 
         fn dimensions(&self) -> usize {
             3
@@ -1978,6 +1996,19 @@ mod migration_job {
             .remember("legacy embedding content", None)
             .expect("create old embedding fixture");
         registry.flush_all_open().expect("flush old fixture");
+    }
+    fn create_compatible_fixture(db: &std::path::Path, dir: &std::path::Path) {
+        let mut registry = MemoryRegistry::file_backed_with(
+            Arc::new(TargetProvider),
+            db.to_path_buf(),
+            dir.to_path_buf(),
+            "compatible".to_string(),
+            false,
+        );
+        registry
+            .remember("legacy content in compatible namespace", None)
+            .expect("create compatible embedding fixture");
+        registry.flush_all_open().expect("flush compatible fixture");
     }
 
     fn daemon_runtime(
@@ -2014,11 +2045,11 @@ mod migration_job {
         }
     }
 
-    fn recall_request() -> Request {
+    fn recall_request(namespace: Option<&str>) -> Request {
         Request::Recall {
             query: "legacy content".to_string(),
             limit: Some(3),
-            namespace: None,
+            namespace: namespace.map(str::to_string),
             reinforce: Some(false),
             gate_threshold: None,
             cosine_gate: None,
@@ -2032,7 +2063,11 @@ mod migration_job {
     fn mismatch_schedules_exactly_one_background_job_per_namespace() {
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("memory.db");
+        let compatible_db = dir.path().join("compatible.db");
         create_old_fixture(&db, dir.path());
+        create_compatible_fixture(&compatible_db, dir.path());
+        let backup = crate::memory::backup_path_for_database(&db)
+            .expect("derive deterministic default migration backup path");
         let (started_tx, started_rx) = std::sync::mpsc::channel();
         let provider = Arc::new(BlockingProvider::new(started_tx));
         let registry = Arc::new(Mutex::new(MemoryRegistry::file_backed_unlocked_with(
@@ -2057,10 +2092,14 @@ mod migration_job {
         started_rx
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("one migration worker reaches embedding");
-        assert!(matches!(
-            dispatch_two_phase(&runtime, stats_request(Some("compatible"))),
-            Response::Ok { .. }
+        let compatible_recall = ok_text(dispatch_two_phase(
+            &runtime,
+            recall_request(Some("compatible")),
         ));
+        assert!(
+            compatible_recall.contains("legacy content in compatible namespace"),
+            "compatible namespace recall must complete while default migrates: {compatible_recall}"
+        );
         for worker in workers {
             assert!(matches!(worker.join().unwrap(), Response::Err { .. }));
         }
@@ -2068,6 +2107,10 @@ mod migration_job {
         assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
         provider.release();
         migrations.drain().expect("migration completes");
+        assert!(
+            backup.is_file(),
+            "the single default migration job must preserve its backup at {backup:?}"
+        );
         assert!(matches!(
             dispatch_two_phase(&runtime, stats_request(None)),
             Response::Ok { .. }
@@ -2096,7 +2139,7 @@ mod migration_job {
         started_rx
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("migration reaches embedding");
-        let response = dispatch_two_phase(&runtime, recall_request());
+        let response = dispatch_two_phase(&runtime, recall_request(None));
         let Response::Err { kind, message } = response else {
             panic!("recall must be unavailable during migration")
         };
