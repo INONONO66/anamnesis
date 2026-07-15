@@ -253,6 +253,27 @@ pub struct PackagedRecall {
     /// De-duplicated ranked hits (id reference for `relate`).
     pub hits: Vec<Hit>,
 }
+/// Gate decision and data-minimized result attribution for one recall.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecallGateTrace {
+    pub has_hits: bool,
+    pub readout_pass: bool,
+    pub cosine_pass: bool,
+    pub eligible: bool,
+    pub top_score: Option<f64>,
+    pub top_cosine: Option<f64>,
+    pub gate_threshold: Option<f64>,
+    pub cosine_gate: Option<f64>,
+    pub result_node_ids: Vec<u64>,
+    pub auto_extract_node_count: usize,
+}
+
+/// Full result of a gated recall, separating rendered content from its gate trace.
+#[derive(Debug, Clone)]
+pub struct RecallOutcome {
+    pub packaged: PackagedRecall,
+    pub trace: RecallGateTrace,
+}
 
 /// Render a [`KnowledgeType`] as the short label `list`/`get` use on the wire
 /// (the inverse of [`parse_knowledge_type`]).

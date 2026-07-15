@@ -254,7 +254,6 @@ fn future_policy_schema_disables_only_policy_features() {
     reg.remember("core recall remains available", None)
         .expect("remember");
     let recalled = reg.recall_packaged("core recall", 5, None).expect("recall");
-
     assert!(!recalled.hits.is_empty());
     let handles = reg.namespace_handles(None).expect("resolve policy handle");
     let memory = handles
@@ -556,6 +555,61 @@ impl EmbeddingProvider for ScopeGateProvider {
     fn model_name(&self) -> &str {
         "scope-gate"
     }
+}
+struct ScopedTraceProvider;
+
+impl EmbeddingProvider for ScopedTraceProvider {
+    fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, Error> {
+        Ok(texts
+            .iter()
+            .map(|text| {
+                if text.contains("deployment") && !text.contains("local") {
+                    vec![1.0, 0.0]
+                } else if text.contains("local deployment") {
+                    vec![0.6, 0.8]
+                } else {
+                    vec![0.5, 0.5]
+                }
+            })
+            .collect())
+    }
+
+    fn dimensions(&self) -> usize {
+        2
+    }
+
+    fn model_name(&self) -> &str {
+        "scoped-trace"
+    }
+}
+
+fn scoped_test_memory() -> Memory<SqliteStorage> {
+    let provider: Arc<dyn EmbeddingProvider> = Arc::new(ScopedTraceProvider);
+    let mut mem = Memory::in_memory_with_provider(provider).expect("create scoped test memory");
+
+    let remote = NoteOptions {
+        scope: Some(anamnesis::graph::ScopePath::new("project/b").expect("remote scope")),
+        ..NoteOptions::default()
+    };
+    mem.add_note_with(
+        "remote deployment note excluded by scope",
+        anamnesis::graph::Timestamp(1),
+        remote,
+    )
+    .expect("add remote note");
+
+    let local = NoteOptions {
+        scope: Some(anamnesis::graph::ScopePath::new("project/a").expect("local scope")),
+        ..NoteOptions::default()
+    };
+    mem.add_note_with(
+        "local deployment note retained after filtering",
+        anamnesis::graph::Timestamp(2),
+        local,
+    )
+    .expect("add local note");
+
+    mem
 }
 
 #[test]
@@ -973,6 +1027,7 @@ fn gated_recall_below_threshold_is_empty() {
         .recall_packaged_gated("auth race condition", 5, None, Some(false), None, None)
         .unwrap();
     let top = ungated
+        .packaged
         .hits
         .first()
         .map(|h| h.score)
@@ -983,14 +1038,14 @@ fn gated_recall_below_threshold_is_empty() {
         .recall_packaged_gated("auth race condition", 5, None, Some(false), Some(tau), None)
         .unwrap();
     assert!(
-        gated.context.is_empty(),
+        gated.packaged.context.is_empty(),
         "above-τ gate must yield empty context, got:\n{}",
-        gated.context
+        gated.packaged.context
     );
     assert!(
-        gated.hits.is_empty(),
+        gated.packaged.hits.is_empty(),
         "above-τ gate must yield no hits, got {} hits",
-        gated.hits.len()
+        gated.packaged.hits.len()
     );
 }
 
@@ -1002,8 +1057,8 @@ fn gated_recall_with_no_hits_is_empty() {
     let gated = reg
         .recall_packaged_gated("nothing here", 5, None, Some(false), Some(0.0), None)
         .unwrap();
-    assert!(gated.context.is_empty());
-    assert!(gated.hits.is_empty());
+    assert!(gated.packaged.context.is_empty());
+    assert!(gated.packaged.hits.is_empty());
 }
 
 /// A gate `τ` at/below the top score ⇒ the rendered top-k context block.
@@ -1016,11 +1071,14 @@ fn gated_recall_at_or_above_threshold_renders_top_k() {
     let gated = reg
         .recall_packaged_gated("auth race condition", 5, None, Some(false), Some(0.0), None)
         .unwrap();
-    assert!(!gated.hits.is_empty(), "τ=0.0 must admit the relevant hit");
     assert!(
-        gated.context.contains("##"),
+        !gated.packaged.hits.is_empty(),
+        "τ=0.0 must admit the relevant hit"
+    );
+    assert!(
+        gated.packaged.context.contains("##"),
         "expected a rendered section header, got:\n{}",
-        gated.context
+        gated.packaged.context
     );
 }
 
@@ -1042,14 +1100,14 @@ fn cosine_gate_trips_when_top_cosine_below_threshold() {
         .unwrap();
 
     assert!(
-        gated.context.is_empty(),
+        gated.packaged.context.is_empty(),
         "above-cosine gate must yield empty context, got:\n{}",
-        gated.context
+        gated.packaged.context
     );
     assert!(
-        gated.hits.is_empty(),
+        gated.packaged.hits.is_empty(),
         "above-cosine gate must yield no hits, got {} hits",
-        gated.hits.len()
+        gated.packaged.hits.len()
     );
 }
 
@@ -1085,22 +1143,115 @@ fn knowledge_only_drops_memories_tensions_and_capture_fragments() {
     )
     .unwrap();
 
-    assert!(out.context.contains("## KNOWLEDGE"));
+    assert!(out.packaged.context.contains("## KNOWLEDGE"));
     assert!(
-        !out.context.contains("## MEMORIES"),
+        !out.packaged.context.contains("## MEMORIES"),
         "episodic section must be dropped:\n{}",
-        out.context
+        out.packaged.context
     );
-    assert!(!out.context.contains("captured conversation window"));
     assert!(
-        out.hits
+        !out.packaged
+            .context
+            .contains("captured conversation window")
+    );
+    assert!(
+        out.packaged
+            .hits
             .iter()
             .all(|h| !h.text.contains("captured conversation window")),
         "capture hits must be dropped: {:?}",
-        out.hits
+        out.packaged.hits
     );
 }
 
+#[test]
+fn trace_uses_filtered_top_and_preserves_both_gate_failures() {
+    let mut mem = scoped_test_memory();
+    let outcome = mem_recall_packaged_gated_filtered(
+        &mut mem,
+        "deployment",
+        5,
+        false,
+        RecallFilters {
+            gate: Some(100.0),
+            cosine_gate: Some(1.0),
+            scope: Some("project/a"),
+            tag: None,
+            knowledge_only: true,
+        },
+    )
+    .expect("recall outcome");
+
+    assert!(outcome.trace.has_hits);
+    assert!(!outcome.trace.readout_pass);
+    assert!(!outcome.trace.cosine_pass);
+    assert!(!outcome.trace.eligible);
+    assert!(
+        outcome.trace.top_cosine.expect("filtered top cosine") < 1.0,
+        "trace must use the scope-filtered local hit rather than the excluded remote hit"
+    );
+    assert!(outcome.packaged.hits.is_empty());
+}
+#[test]
+fn eligible_trace_snapshots_deduplicated_result_ids_and_auto_extract_metadata() {
+    let mut mem = Memory::in_memory_with_provider(Arc::new(StubProvider)).unwrap();
+    let mut auto_extract = NoteOptions::default();
+    auto_extract
+        .metadata
+        .push(("origin".to_string(), "auto-extract".to_string()));
+    mem_remember_with(&mut mem, "auto-extract recall result", auto_extract).unwrap();
+
+    let outcome =
+        mem_recall_packaged_gated(&mut mem, "auto-extract recall result", 5, false, None, None)
+            .unwrap();
+
+    let expected_ids: Vec<u64> = outcome
+        .packaged
+        .hits
+        .iter()
+        .map(|hit| hit.node_id.0)
+        .collect();
+    assert_eq!(outcome.trace.result_node_ids, expected_ids);
+    assert_eq!(outcome.trace.auto_extract_node_count, 1);
+}
+
+#[test]
+fn unfiltered_fast_path_has_the_same_trace_as_filtered_path() {
+    let mut fast = scoped_test_memory();
+    let mut filtered = scoped_test_memory();
+
+    let fast =
+        mem_recall_packaged_gated(&mut fast, "deployment", 5, false, Some(0.0), Some(0.0)).unwrap();
+    let filtered = mem_recall_packaged_gated_filtered(
+        &mut filtered,
+        "deployment",
+        5,
+        false,
+        RecallFilters {
+            gate: Some(0.0),
+            cosine_gate: Some(0.0),
+            scope: None,
+            tag: None,
+            knowledge_only: false,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(fast.trace, filtered.trace);
+    assert_eq!(fast.packaged.hits.len(), filtered.packaged.hits.len());
+}
+
+#[test]
+fn empty_filtered_result_is_not_a_gate_specific_failure() {
+    let trace = gate_trace(None, Some(12.0), Some(0.86));
+
+    assert!(!trace.has_hits);
+    assert!(!trace.readout_pass);
+    assert!(!trace.cosine_pass);
+    assert!(!trace.eligible);
+    assert_eq!(trace.top_score, None);
+    assert_eq!(trace.top_cosine, None);
+}
 #[test]
 fn filtered_recall_gates_on_final_filtered_hits() {
     let provider: Arc<dyn EmbeddingProvider> = Arc::new(ScopeGateProvider);
@@ -1145,14 +1296,14 @@ fn filtered_recall_gates_on_final_filtered_hits() {
     .unwrap();
 
     assert!(
-        out.context.is_empty(),
+        out.packaged.context.is_empty(),
         "excluded remote hits must not open the cosine gate:\n{}",
-        out.context
+        out.packaged.context
     );
     assert!(
-        out.hits.is_empty(),
+        out.packaged.hits.is_empty(),
         "filtered below-gate hits must not be returned: {:?}",
-        out.hits
+        out.packaged.hits
     );
 }
 
@@ -1165,8 +1316,12 @@ fn gated_recall_none_gate_never_filters() {
     let gated = reg
         .recall_packaged_gated("postgres jsonb", 5, None, Some(false), None, None)
         .unwrap();
-    assert!(!gated.hits.is_empty());
-    assert!(gated.context.contains("##"));
+    assert!(gated.trace.has_hits);
+    assert!(gated.trace.readout_pass);
+    assert!(gated.trace.cosine_pass);
+    assert!(gated.trace.eligible);
+    assert!(!gated.packaged.hits.is_empty());
+    assert!(gated.packaged.context.contains("##"));
 }
 
 /// `reinforce = false` is a pure read: repeated reads never lift base-level
@@ -1184,7 +1339,7 @@ fn read_only_recall_does_not_reinforce_but_reinforcing_does() {
             .recall_packaged_gated("auth race condition", 5, None, Some(false), None, None)
             .unwrap();
         assert!(
-            !pkg.hits.is_empty(),
+            !pkg.packaged.hits.is_empty(),
             "each read should still return the hit"
         );
     }
@@ -1223,7 +1378,7 @@ fn gated_out_recall_never_reinforces_even_when_asked() {
         let pkg = reg
             .recall_packaged_gated("auth race condition", 5, None, Some(true), Some(1e9), None)
             .unwrap();
-        assert!(pkg.hits.is_empty(), "gate must trip at τ=1e9");
+        assert!(pkg.packaged.hits.is_empty(), "gate must trip at τ=1e9");
     }
     let after = reg.stats(None).unwrap().avg_salience;
     assert!(

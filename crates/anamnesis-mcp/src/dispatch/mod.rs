@@ -227,7 +227,10 @@ fn dispatch_registry(registry: &Arc<Mutex<MemoryRegistry>>, req: Request) -> Res
             // Phase 3: commit result-dependent counters, format the reply.
             let mut reg = registry.lock().unwrap_or_else(|p| p.into_inner());
             let packaged = match result {
-                Ok(p) => p,
+                Ok(memory::RecallOutcome {
+                    packaged,
+                    trace: _trace,
+                }) => packaged,
                 Err(e) => {
                     reg.ops.dispatch_errors += 1;
                     return Response::internal(e);
