@@ -11,6 +11,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::{Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -22,7 +23,15 @@ const STAGE1_SOURCE_MARKER: &str = "RAW_STAGE1_SOURCE_MARKER";
 
 type GraphSnapshot = (Vec<Node>, Vec<Edge>);
 
+// Libtest runs this integration binary's tests concurrently. Each fixture launches
+// nested Cargo to run the test-only daemon harness; concurrent nested Cargos
+// contend on Cargo's package/build locks and delay socket readiness. This mutex
+// serializes fixtures within this process for their whole lifetime. nextest.toml
+// retains the separate cross-process serialization against the latency regression.
+static CARGO_HARNESS_LOCK: Mutex<()> = Mutex::new(());
 struct Fixture {
+    // Keep the process-wide lock until the nested Cargo harness is reaped.
+    _cargo_harness_lock: MutexGuard<'static, ()>,
     _temp: tempfile::TempDir,
     db: PathBuf,
     script: PathBuf,
@@ -44,6 +53,9 @@ impl Drop for Fixture {
 
 impl Fixture {
     fn new() -> Self {
+        let cargo_harness_lock = CARGO_HARNESS_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let temp = tempfile::tempdir().expect("tempdir");
         let db = temp.path().join("memory.db");
         let script = temp.path().join("fake-extractor.sh");
@@ -85,6 +97,7 @@ impl Fixture {
         // Construct ownership before readiness checks: a failed assertion still reaps
         // the test-only daemon before the temporary database and socket are removed.
         let mut fixture = Self {
+            _cargo_harness_lock: cargo_harness_lock,
             _temp: temp,
             db,
             script,
