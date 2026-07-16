@@ -1,3 +1,4 @@
+pub(crate) mod audit;
 pub(crate) mod config;
 pub(crate) mod error_log;
 pub(crate) mod process;

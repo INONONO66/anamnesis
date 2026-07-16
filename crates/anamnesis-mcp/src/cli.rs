@@ -4,7 +4,10 @@ use std::sync::{Arc, Mutex};
 
 use anamnesis::embedding::EmbeddingProvider;
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{ArgGroup, Parser, Subcommand};
+
+use crate::extract::audit::{ExtractionAuditResult, resolve_reviewer};
+use crate::extract::types::{AuditSupport, ContaminationCategory, RelationVerdict};
 
 use crate::config::Config;
 use crate::memory::{
@@ -162,6 +165,41 @@ pub enum Commands {
         #[arg(long)]
         embedded: bool,
     },
+    #[command(group(
+        ArgGroup::new("audit_update")
+            .args(["candidate", "relation"])
+            .multiple(false)
+    ))]
+    /// Review staged extraction candidates and relations without writing graph content.
+    Extract {
+        /// Retained for explicit audit invocation compatibility.
+        #[arg(long)]
+        audit: bool,
+        /// Namespace to audit (defaults to the configured namespace).
+        #[arg(long)]
+        namespace: Option<String>,
+        /// Maximum audit rows to return for a list request.
+        #[arg(long, default_value_t = 20)]
+        limit: u32,
+        /// Candidate row to review.
+        #[arg(long, conflicts_with = "relation", requires = "support")]
+        candidate: Option<u64>,
+        /// Candidate support verdict.
+        #[arg(long, requires = "candidate", value_parser = parse_audit_support)]
+        support: Option<AuditSupport>,
+        /// Optional contamination finding for a candidate review.
+        #[arg(long, requires = "candidate", value_parser = parse_contamination_category)]
+        contamination: Option<ContaminationCategory>,
+        /// Relation row to review.
+        #[arg(long, conflicts_with = "candidate", requires = "relation_verdict")]
+        relation: Option<u64>,
+        /// Relation review verdict.
+        #[arg(long, requires = "relation", value_parser = parse_relation_verdict)]
+        relation_verdict: Option<RelationVerdict>,
+        /// Reviewer identity; defaults through audit environment variables.
+        #[arg(long, requires = "audit_update")]
+        reviewer: Option<String>,
+    },
     /// Download/initialize the embedding model, then exit.
     Prewarm,
     /// Re-embed an existing namespace database with the configured model.
@@ -220,6 +258,38 @@ pub enum HookEvent {
     /// `SessionEnd`: flush remaining turns at session close (Claude Code only;
     /// omitted from codex-hooks.json — Codex lacks this event).
     SessionEnd,
+}
+fn parse_audit_support(value: &str) -> Result<AuditSupport, String> {
+    match value {
+        "supported" => Ok(AuditSupport::Supported),
+        "partial" => Ok(AuditSupport::Partial),
+        "unsupported" => Ok(AuditSupport::Unsupported),
+        _ => Err("must be supported, partial, or unsupported".to_owned()),
+    }
+}
+
+fn parse_contamination_category(value: &str) -> Result<ContaminationCategory, String> {
+    match value {
+        "unsupported-claim" => Ok(ContaminationCategory::UnsupportedClaim),
+        "prompt-injection" => Ok(ContaminationCategory::PromptInjection),
+        "secret-reexposure" => Ok(ContaminationCategory::SecretReexposure),
+        "foreign-scope" => Ok(ContaminationCategory::ForeignScope),
+        "contradicts-source" => Ok(ContaminationCategory::ContradictsSource),
+        _ => Err(
+            "must be unsupported-claim, prompt-injection, secret-reexposure, foreign-scope, or contradicts-source"
+                .to_owned(),
+        ),
+    }
+}
+
+fn parse_relation_verdict(value: &str) -> Result<RelationVerdict, String> {
+    match value {
+        "correct" => Ok(RelationVerdict::Correct),
+        "wrong-type" => Ok(RelationVerdict::WrongType),
+        "wrong-direction" => Ok(RelationVerdict::WrongDirection),
+        "invalid" => Ok(RelationVerdict::Invalid),
+        _ => Err("must be correct, wrong-type, wrong-direction, or invalid".to_owned()),
+    }
 }
 
 fn registry(cfg: &Config) -> MemoryRegistry {
@@ -284,6 +354,7 @@ pub fn run_oneshot(cli: &Cli) -> Result<Oneshot> {
         // (there is no embedded hook mode); defer to `run_oneshot_client`.
         Some(Commands::Hook { .. }) => Ok(Oneshot::Client),
 
+        Some(Commands::Extract { .. }) => Ok(Oneshot::Client),
         // Daemon-routed one-shots: default mode defers to the async client; only
         // the embedded/no-daemon mode runs here against the DB directly.
         Some(Commands::Recall { .. } | Commands::Remember { .. })
@@ -423,7 +494,19 @@ pub async fn run_oneshot_client(cli: &Cli) -> Result<()> {
 }
 
 fn format_oneshot_stdout(cli: &Cli, text: &str) -> String {
-    if matches!(&cli.command, Some(Commands::Stats { recall: true, .. })) {
+    if matches!(
+        &cli.command,
+        Some(Commands::Extract {
+            candidate: None,
+            relation: None,
+            ..
+        })
+    ) {
+        match serde_json::from_str::<ExtractionAuditResult>(text) {
+            Ok(result) => crate::extract::audit::render_audit_report(&result),
+            Err(_) => format!("{text}\n"),
+        }
+    } else if matches!(&cli.command, Some(Commands::Stats { recall: true, .. })) {
         text.to_owned()
     } else {
         format!("{text}\n")
@@ -482,6 +565,42 @@ fn oneshot_request(cli: &Cli) -> Option<crate::proto::Request> {
         }) => Some(Request::Stats {
             namespace: namespace.clone(),
             recall: (*recall).then_some(true),
+        }),
+        Some(Commands::Extract {
+            namespace,
+            limit,
+            candidate: None,
+            relation: None,
+            ..
+        }) => Some(Request::ExtractionAuditList {
+            namespace: namespace.clone(),
+            limit: Some(*limit),
+        }),
+        Some(Commands::Extract {
+            namespace,
+            candidate: Some(candidate_id),
+            support: Some(support),
+            contamination,
+            reviewer,
+            ..
+        }) => Some(Request::UpdateExtractionCandidateAudit {
+            namespace: namespace.clone(),
+            candidate_id: *candidate_id,
+            support: *support,
+            contamination: *contamination,
+            reviewer: resolve_reviewer(reviewer.as_deref()),
+        }),
+        Some(Commands::Extract {
+            namespace,
+            relation: Some(relation_id),
+            relation_verdict: Some(verdict),
+            reviewer,
+            ..
+        }) => Some(Request::UpdateExtractionRelationAudit {
+            namespace: namespace.clone(),
+            relation_id: *relation_id,
+            verdict: *verdict,
+            reviewer: resolve_reviewer(reviewer.as_deref()),
         }),
         _ => None,
     }
@@ -823,6 +942,81 @@ mod tests {
             default_namespace.command,
             Some(Commands::MigrateEmbeddings { namespace: None })
         ));
+    }
+    #[test]
+    fn extract_audit_cli_accepts_list_candidate_and_relation_forms() {
+        use clap::Parser;
+
+        for args in [
+            vec!["anamnesis", "extract", "--audit"],
+            vec!["anamnesis", "extract", "--audit", "--limit", "25"],
+            vec![
+                "anamnesis",
+                "extract",
+                "--audit",
+                "--candidate",
+                "7",
+                "--support",
+                "partial",
+                "--contamination",
+                "unsupported-claim",
+                "--reviewer",
+                "reviewer",
+                "--namespace",
+                "project/anamnesis",
+            ],
+            vec![
+                "anamnesis",
+                "extract",
+                "--audit",
+                "--relation",
+                "9",
+                "--relation-verdict",
+                "wrong-direction",
+                "--reviewer",
+                "reviewer",
+            ],
+        ] {
+            assert!(
+                Cli::try_parse_from(args).is_ok(),
+                "valid extraction audit form must parse"
+            );
+        }
+    }
+
+    #[test]
+    fn extract_audit_cli_rejects_incomplete_or_mixed_update_forms() {
+        use clap::Parser;
+
+        for args in [
+            vec!["anamnesis", "extract", "--audit", "--support", "supported"],
+            vec!["anamnesis", "extract", "--audit", "--candidate", "7"],
+            vec![
+                "anamnesis",
+                "extract",
+                "--audit",
+                "--relation-verdict",
+                "correct",
+            ],
+            vec![
+                "anamnesis",
+                "extract",
+                "--audit",
+                "--candidate",
+                "7",
+                "--support",
+                "supported",
+                "--relation",
+                "9",
+                "--relation-verdict",
+                "correct",
+            ],
+        ] {
+            assert!(
+                Cli::try_parse_from(args).is_err(),
+                "incomplete or mixed extraction audit form must be rejected"
+            );
+        }
     }
 
     #[test]

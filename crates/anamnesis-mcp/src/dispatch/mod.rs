@@ -159,6 +159,9 @@ fn request_namespace(req: &Request) -> Option<&str> {
         | Request::ExtractionScan { namespace, .. }
         | Request::StageExtraction { namespace, .. }
         | Request::RecordExtractionFailure { namespace, .. }
+        | Request::ExtractionAuditList { namespace, .. }
+        | Request::UpdateExtractionCandidateAudit { namespace, .. }
+        | Request::UpdateExtractionRelationAudit { namespace, .. }
         | Request::Update { namespace, .. }
         | Request::Forget { namespace, .. }
         | Request::Supersede { namespace, .. }
@@ -708,6 +711,35 @@ fn dispatch_registry(registry: &Arc<Mutex<MemoryRegistry>>, req: Request) -> Res
             llm_invoked,
             error_kind,
             duration_ms,
+        ),
+        Request::ExtractionAuditList { namespace, limit } => {
+            extract::dispatch_audit_list(registry, namespace, limit)
+        }
+        Request::UpdateExtractionCandidateAudit {
+            namespace,
+            candidate_id,
+            support,
+            contamination,
+            reviewer,
+        } => extract::dispatch_update_candidate_audit(
+            registry,
+            namespace,
+            candidate_id,
+            support,
+            contamination,
+            reviewer,
+        ),
+        Request::UpdateExtractionRelationAudit {
+            namespace,
+            relation_id,
+            verdict,
+            reviewer,
+        } => extract::dispatch_update_relation_audit(
+            registry,
+            namespace,
+            relation_id,
+            verdict,
+            reviewer,
         ),
         Request::Update {
             id,

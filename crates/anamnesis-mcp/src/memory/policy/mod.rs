@@ -11,6 +11,8 @@ use std::time::Duration;
 #[cfg(test)]
 use std::{cell::RefCell, marker::PhantomData, rc::Rc};
 
+use crate::extract::audit::ExtractionAuditResult;
+use crate::extract::types::{AuditSupport, ContaminationCategory, RelationVerdict};
 use crate::proto::RecallEventKind;
 use crate::proto::{ExtractionErrorKind, StageExtractionResult};
 use anamnesis::Error;
@@ -313,6 +315,37 @@ impl PolicyStore {
             duration_ms,
         )
         .map_err(PolicyStoreError::into_engine_error)
+    }
+    pub(crate) fn list_extraction_audit(&self, limit: u32) -> Result<ExtractionAuditResult, Error> {
+        extraction::list_audit(&self.connection, limit).map_err(PolicyStoreError::into_engine_error)
+    }
+    pub(crate) fn update_extraction_candidate_audit(
+        &mut self,
+        id: u64,
+        support: AuditSupport,
+        contamination: Option<ContaminationCategory>,
+        reviewer: &str,
+        reviewed_at: u64,
+    ) -> Result<(), Error> {
+        extraction::update_candidate_audit(
+            &mut self.connection,
+            id,
+            support,
+            contamination,
+            reviewer,
+            reviewed_at,
+        )
+        .map_err(PolicyStoreError::into_engine_error)
+    }
+    pub(crate) fn update_extraction_relation_audit(
+        &mut self,
+        id: u64,
+        verdict: RelationVerdict,
+        reviewer: &str,
+        reviewed_at: u64,
+    ) -> Result<(), Error> {
+        extraction::update_relation_audit(&mut self.connection, id, verdict, reviewer, reviewed_at)
+            .map_err(PolicyStoreError::into_engine_error)
     }
 
     #[cfg(test)]

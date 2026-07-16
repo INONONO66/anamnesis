@@ -3183,22 +3183,41 @@ fn staged_result(response: Response) -> crate::proto::StageExtractionResult {
     serde_json::from_str(&ok_text(response)).expect("stage response must be canonical JSON")
 }
 
-fn candidate(
-    source: &crate::extract::types::ExtractionSource,
-    item_local_id: &str,
-) -> crate::extract::types::ValidatedCandidate {
-    crate::extract::types::ValidatedCandidate {
-        item_local_id: item_local_id.into(),
-        content: format!("derived {item_local_id}"),
-        kind: crate::extract::types::CandidateKind::Lesson,
-        confidence: 0.9,
-        sources: vec![crate::extract::types::ExtractionSourceRef {
-            node_id: source.node_id,
-            turn_key: source.turn_key.clone(),
-            content_hash: source.content_hash.clone(),
-        }],
-        idempotency_key: format!("candidate-{item_local_id}"),
-    }
+fn canonical_extraction(
+    profile: &crate::extract::types::ExtractorProfileComponents,
+    sources: &[crate::extract::types::ExtractionSource],
+    item_sources: &[(&str, u64)],
+    relations: &[(&str, &str, crate::extract::types::RelationKind)],
+) -> crate::extract::types::ValidatedExtraction {
+    let items: Vec<_> = item_sources
+        .iter()
+        .map(|(item_local_id, source_node_id)| {
+            serde_json::json!({
+                "item_local_id": item_local_id,
+                "content": format!("derived {item_local_id}"),
+                "kind": crate::extract::types::CandidateKind::Lesson,
+                "confidence": 0.9,
+                "source_node_ids": [source_node_id],
+            })
+        })
+        .collect();
+    let relations: Vec<_> = relations
+        .iter()
+        .map(|(from_item_local_id, to_item_local_id, relation_type)| {
+            serde_json::json!({
+                "from_item_local_id": from_item_local_id,
+                "to_item_local_id": to_item_local_id,
+                "relation_type": relation_type,
+            })
+        })
+        .collect();
+    let payload = serde_json::to_vec(&serde_json::json!({
+        "items": items,
+        "relations": relations,
+    }))
+    .expect("serialize provider-boundary extraction JSON");
+    crate::extract::validate::validate_output(&payload, sources, &extraction_profile_id(profile))
+        .expect("provider-boundary extraction must canonically validate")
 }
 
 #[test]
@@ -3221,22 +3240,22 @@ fn stage_extraction_relation_insert_failure_rolls_back_every_success_table() {
 
     let response = stage_extraction(
         &reg,
-        profile,
+        profile.clone(),
         sources.clone(),
-        crate::extract::types::ValidatedExtraction {
-            items: vec![candidate(&sources[0], "one"), candidate(&sources[1], "two")],
-            relations: vec![crate::extract::types::ValidatedRelation {
-                from_item_local_id: "one".into(),
-                to_item_local_id: "two".into(),
-                relation_type: crate::extract::types::RelationKind::Supports,
-                idempotency_key: "relation-one-two".into(),
-            }],
-        },
+        canonical_extraction(
+            &profile,
+            &sources,
+            &[("one", sources[0].node_id), ("two", sources[1].node_id)],
+            &[("one", "two", crate::extract::types::RelationKind::Supports)],
+        ),
     );
 
+    let Response::Err { message, .. } = &response else {
+        panic!("relation insert failure must reject the whole stage: {response:?}");
+    };
     assert!(
-        matches!(response, Response::Err { .. }),
-        "relation insert failure must reject the whole stage: {response:?}"
+        message.contains("relation insert rejected"),
+        "the SQLite relation trigger must be reached before rollback: {message}"
     );
     assert_eq!(
         policy_counts(&dir),
@@ -3926,5 +3945,327 @@ mod migration_job {
         assert_eq!(observed.load(Ordering::SeqCst), 1);
         provider.release();
         migrations.drain().expect("migration completes");
+    }
+    // ── R2 Task 8: extraction audit (RED) ──────────────────────────────────────
+
+    fn extraction_audit_list(reg: &Arc<Mutex<MemoryRegistry>>) -> serde_json::Value {
+        let text = ok_text(dispatch(
+            reg,
+            Request::ExtractionAuditList {
+                namespace: None,
+                limit: Some(100),
+            },
+        ));
+        serde_json::from_str(&text).expect("audit list must be typed JSON")
+    }
+    fn rendered_extraction_audit(reg: &Arc<Mutex<MemoryRegistry>>) -> String {
+        let text = ok_text(dispatch(
+            reg,
+            Request::ExtractionAuditList {
+                namespace: None,
+                limit: Some(100),
+            },
+        ));
+        let result: crate::extract::audit::ExtractionAuditResult =
+            serde_json::from_str(&text).expect("audit list must decode to its typed result");
+        crate::extract::audit::render_audit_report(&result)
+    }
+
+    fn audit_fixture(
+        reg: &Arc<Mutex<MemoryRegistry>>,
+    ) -> (
+        Vec<crate::extract::types::ExtractionSource>,
+        serde_json::Value,
+    ) {
+        capture_turns(reg, "audit", "scope", 10, 100, "audit");
+        let profile = extraction_profile();
+        let sources = extraction_scan(reg, profile.clone()).sources;
+        staged_result(stage_extraction(
+            reg,
+            profile.clone(),
+            sources.clone(),
+            canonical_extraction(
+                &profile,
+                &sources,
+                &[
+                    ("one", sources[0].node_id),
+                    ("two", sources[1].node_id),
+                    ("three", sources[2].node_id),
+                ],
+                &[("one", "two", crate::extract::types::RelationKind::Supports)],
+            ),
+        ));
+        (sources, extraction_audit_list(reg))
+    }
+
+    fn audit_candidate<'a>(
+        audit: &'a serde_json::Value,
+        item_local_id: &str,
+    ) -> &'a serde_json::Value {
+        audit["candidates"]
+            .as_array()
+            .expect("candidate rows")
+            .iter()
+            .find(|candidate| candidate["item_local_id"] == item_local_id)
+            .unwrap_or_else(|| panic!("candidate {item_local_id} must be present"))
+    }
+    fn audit_source<'a>(candidate: &'a serde_json::Value, turn_key: &str) -> &'a serde_json::Value {
+        candidate["sources"]
+            .as_array()
+            .expect("candidate sources")
+            .iter()
+            .find(|source| source["turn_key"] == turn_key)
+            .unwrap_or_else(|| panic!("source {turn_key} must be present"))
+    }
+    fn authoritative_source_content<'a>(
+        sources: &'a [crate::extract::types::ExtractionSource],
+        turn_key: &str,
+    ) -> &'a str {
+        &sources
+            .iter()
+            .find(|source| source.turn_key == turn_key)
+            .unwrap_or_else(|| panic!("authoritative source {turn_key} must be present"))
+            .content
+    }
+
+    fn audit_relation<'a>(
+        audit: &'a serde_json::Value,
+        from_item_local_id: &str,
+        to_item_local_id: &str,
+    ) -> &'a serde_json::Value {
+        audit["relations"]
+            .as_array()
+            .expect("relation rows")
+            .iter()
+            .find(|relation| {
+                relation["from_item_local_id"] == from_item_local_id
+                    && relation["to_item_local_id"] == to_item_local_id
+            })
+            .unwrap_or_else(|| {
+                panic!("relation {from_item_local_id} -> {to_item_local_id} must be present")
+            })
+    }
+
+    fn assert_audit_rejection(response: &Response) {
+        let Response::Err { kind, message } = response else {
+            panic!("unavailable or mismatched audit source must reject: {response:?}");
+        };
+        assert_eq!(*kind, ErrKind::InvalidParams);
+        assert_eq!(
+            message,
+            "extraction audit candidate sources are unavailable or mismatched"
+        );
+    }
+
+    #[test]
+    fn extraction_audit_demo_reads_live_sources_and_never_mutates_the_graph() {
+        let (reg, dir) = stub_registry();
+        let (sources, listed) = audit_fixture(&reg);
+        let candidates = listed["candidates"].as_array().expect("candidate rows");
+        let relations = listed["relations"].as_array().expect("relation rows");
+
+        assert_eq!(candidates.len(), 3);
+        assert_eq!(relations.len(), 1);
+        let one = audit_candidate(&listed, "one");
+        let two = audit_candidate(&listed, "two");
+        let three = audit_candidate(&listed, "three");
+        let one_turn_key = one["source_turn_keys"][0]
+            .as_str()
+            .expect("one source turn key");
+        let two_turn_key = two["source_turn_keys"][0]
+            .as_str()
+            .expect("two source turn key");
+        let three_turn_key = three["source_turn_keys"][0]
+            .as_str()
+            .expect("three source turn key");
+        let one_source = audit_source(one, one_turn_key);
+        let two_source = audit_source(two, two_turn_key);
+        let three_source = audit_source(three, three_turn_key);
+        assert_eq!(one["content"], "derived one");
+        assert_eq!(one["kind"], "lesson");
+        assert_eq!(one["confidence"], 0.9);
+        assert_eq!(one_source["availability"], "available");
+        assert_eq!(
+            one_source["content"],
+            authoritative_source_content(&sources, one_turn_key)
+        );
+        assert_eq!(two["content"], "derived two");
+        assert_eq!(two_source["availability"], "available");
+        assert_eq!(
+            two_source["content"],
+            authoritative_source_content(&sources, two_turn_key)
+        );
+        assert_eq!(three["content"], "derived three");
+        assert_eq!(three_source["availability"], "available");
+        assert_eq!(
+            three_source["content"],
+            authoritative_source_content(&sources, three_turn_key)
+        );
+        let first_candidate = one["id"].as_u64().expect("one candidate id");
+        let second_candidate = two["id"].as_u64().expect("two candidate id");
+        let third_candidate = three["id"].as_u64().expect("three candidate id");
+        let relation = audit_relation(&listed, "one", "two");
+        let relation_id = relation["id"].as_u64().expect("relation id");
+        assert_eq!(relation["run_id"], one["run_id"]);
+        assert_eq!(relation["profile_id"], one["profile_id"]);
+        assert_eq!(relation["from_item_local_id"], "one");
+        assert_eq!(relation["to_item_local_id"], "two");
+        assert_eq!(relation["relation_type"], "supports");
+
+        let before_list = graph_snapshot(&reg);
+        let relisted = extraction_audit_list(&reg);
+        assert_eq!(relisted, listed, "list must be a pure graph read");
+        assert_eq!(
+            graph_snapshot(&reg),
+            before_list,
+            "list must not mutate graph"
+        );
+
+        let updated_candidate = dispatch(
+            &reg,
+            Request::UpdateExtractionCandidateAudit {
+                namespace: None,
+                candidate_id: first_candidate,
+                support: crate::extract::types::AuditSupport::Partial,
+                contamination: Some(crate::extract::types::ContaminationCategory::UnsupportedClaim),
+                reviewer: "  reviewer  ".into(),
+            },
+        );
+        assert!(
+            matches!(updated_candidate, Response::Ok { .. }),
+            "{updated_candidate:?}"
+        );
+        let updated_relation = dispatch(
+            &reg,
+            Request::UpdateExtractionRelationAudit {
+                namespace: None,
+                relation_id,
+                verdict: crate::extract::types::RelationVerdict::WrongDirection,
+                reviewer: "reviewer".into(),
+            },
+        );
+        assert!(
+            matches!(updated_relation, Response::Ok { .. }),
+            "{updated_relation:?}"
+        );
+        let reviewed = extraction_audit_list(&reg);
+        let candidate = audit_candidate(&reviewed, "one");
+        let relation = audit_relation(&reviewed, "one", "two");
+        assert_eq!(candidate["audit_support"], "partial");
+        assert_eq!(candidate["contamination_category"], "unsupported-claim");
+        assert_eq!(candidate["reviewed_by"], "reviewer");
+        assert!(
+            candidate["reviewed_at"].is_u64(),
+            "candidate review must be timestamped"
+        );
+        assert_eq!(relation["audit_status"], "wrong-direction");
+        assert_eq!(relation["reviewed_by"], "reviewer");
+        assert!(
+            relation["reviewed_at"].is_u64(),
+            "relation review must be timestamped"
+        );
+        assert_eq!(
+            graph_snapshot(&reg),
+            before_list,
+            "valid candidate and relation audit writes are policy-only"
+        );
+
+        ok_text(dispatch(
+            &reg,
+            Request::Forget {
+                id: one_source["node_id"].as_u64().expect("one source node id"),
+                reason: None,
+                hard: Some(true),
+                namespace: None,
+            },
+        ));
+        let before_rejected_update = graph_snapshot(&reg);
+        let unavailable = extraction_audit_list(&reg);
+        let unavailable_one = audit_candidate(&unavailable, "one");
+        let unavailable_one_source = audit_source(unavailable_one, one_turn_key);
+        assert_eq!(unavailable_one_source["availability"], "source-unavailable");
+        assert_eq!(unavailable_one_source["content"], serde_json::Value::Null);
+        assert!(rendered_extraction_audit(&reg).contains("AUDIT UNAVAILABLE: source-unavailable"));
+        let rejected = dispatch(
+            &reg,
+            Request::UpdateExtractionCandidateAudit {
+                namespace: None,
+                candidate_id: first_candidate,
+                support: crate::extract::types::AuditSupport::Unsupported,
+                contamination: None,
+                reviewer: "reviewer".into(),
+            },
+        );
+        assert_audit_rejection(&rejected);
+        assert_eq!(
+            graph_snapshot(&reg),
+            before_rejected_update,
+            "rejected unavailable-source audit cannot mutate graph"
+        );
+
+        ok_text(dispatch(
+            &reg,
+            Request::Update {
+                id: two_source["node_id"].as_u64().expect("two source node id"),
+                new_content: "live content no longer matches staged source".into(),
+                namespace: None,
+            },
+        ));
+        let before_mismatch_rejection = graph_snapshot(&reg);
+        let mismatched = extraction_audit_list(&reg);
+        let mismatched_two = audit_candidate(&mismatched, "two");
+        let mismatched_two_source = audit_source(mismatched_two, two_turn_key);
+        assert_eq!(mismatched_two_source["availability"], "source-mismatch");
+        assert_eq!(mismatched_two_source["content"], serde_json::Value::Null);
+        assert!(rendered_extraction_audit(&reg).contains("AUDIT UNAVAILABLE: source-mismatch"));
+        let rejected = dispatch(
+            &reg,
+            Request::UpdateExtractionCandidateAudit {
+                namespace: None,
+                candidate_id: second_candidate,
+                support: crate::extract::types::AuditSupport::Unsupported,
+                contamination: None,
+                reviewer: "reviewer".into(),
+            },
+        );
+        assert_audit_rejection(&rejected);
+        assert_eq!(
+            graph_snapshot(&reg),
+            before_mismatch_rejection,
+            "rejected mismatched-source audit cannot mutate graph"
+        );
+
+        let connection = rusqlite::Connection::open(dir.path().join("memory.db"))
+            .expect("open audit policy database");
+        connection
+            .execute(
+                "UPDATE extract_candidates SET source_node_ids = '[999999]' WHERE id = ?1",
+                [third_candidate],
+            )
+            .expect("make staged node id stale while retaining its turn key");
+        let before_reused_rejection = graph_snapshot(&reg);
+        let reused_node_id = extraction_audit_list(&reg);
+        let unavailable_three = audit_candidate(&reused_node_id, "three");
+        let unavailable_three_source = audit_source(unavailable_three, three_turn_key);
+        assert_eq!(
+            unavailable_three_source["availability"],
+            "source-unavailable",
+        );
+        let rejected = dispatch(
+            &reg,
+            Request::UpdateExtractionCandidateAudit {
+                namespace: None,
+                candidate_id: third_candidate,
+                support: crate::extract::types::AuditSupport::Unsupported,
+                contamination: None,
+                reviewer: "reviewer".into(),
+            },
+        );
+        assert_audit_rejection(&rejected);
+        assert_eq!(
+            graph_snapshot(&reg),
+            before_reused_rejection,
+            "reused-node-id rejection cannot mutate graph"
+        );
     }
 }

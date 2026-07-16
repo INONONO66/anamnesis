@@ -10,7 +10,10 @@
 //! ids: calls are serialized, and the daemon serializes at its single registry
 //! mutex anyway). See `docs/adr/0012-daemon-core-mcp-plugin-clients.md`.
 
-use crate::extract::types::{ExtractionSource, ExtractorProfileComponents, ValidatedExtraction};
+use crate::extract::types::{
+    AuditSupport, ContaminationCategory, ExtractionSource, ExtractorProfileComponents,
+    RelationVerdict, ValidatedExtraction,
+};
 use serde::{Deserialize, Serialize};
 /// The kind of client action that caused a recall attempt.
 
@@ -126,6 +129,28 @@ pub enum Request {
         llm_invoked: bool,
         error_kind: ExtractionErrorKind,
         duration_ms: u64,
+    },
+    ExtractionAuditList {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        namespace: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<u32>,
+    },
+    UpdateExtractionCandidateAudit {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        namespace: Option<String>,
+        candidate_id: u64,
+        support: AuditSupport,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        contamination: Option<ContaminationCategory>,
+        reviewer: String,
+    },
+    UpdateExtractionRelationAudit {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        namespace: Option<String>,
+        relation_id: u64,
+        verdict: RelationVerdict,
+        reviewer: String,
     },
     Stats {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -406,6 +431,23 @@ mod tests {
             error_kind: ExtractionErrorKind::SchemaReject,
             duration_ms: 42,
         });
+        round_trip_request(Request::ExtractionAuditList {
+            namespace: Some("project/anamnesis".into()),
+            limit: Some(25),
+        });
+        round_trip_request(Request::UpdateExtractionCandidateAudit {
+            namespace: Some("project/anamnesis".into()),
+            candidate_id: 7,
+            support: crate::extract::types::AuditSupport::Partial,
+            contamination: Some(crate::extract::types::ContaminationCategory::UnsupportedClaim),
+            reviewer: "reviewer".into(),
+        });
+        round_trip_request(Request::UpdateExtractionRelationAudit {
+            namespace: Some("project/anamnesis".into()),
+            relation_id: 9,
+            verdict: crate::extract::types::RelationVerdict::WrongDirection,
+            reviewer: "reviewer".into(),
+        });
     }
 
     #[test]
@@ -480,6 +522,61 @@ mod tests {
             without_recall,
             "absent recall must survive decoding"
         );
+    }
+    #[test]
+    fn extraction_audit_wire_bytes_are_canonical_and_unknown_enums_reject() {
+        let list = encode_line(&Request::ExtractionAuditList {
+            namespace: Some("project/anamnesis".into()),
+            limit: Some(25),
+        })
+        .expect("encode audit list");
+        assert_eq!(
+            list,
+            "{\"op\":\"extraction_audit_list\",\"namespace\":\"project/anamnesis\",\"limit\":25}\n"
+        );
+        assert_eq!(
+            decode_line::<Request>(&list).expect("decode audit list"),
+            Request::ExtractionAuditList {
+                namespace: Some("project/anamnesis".into()),
+                limit: Some(25),
+            }
+        );
+
+        let candidate = encode_line(&Request::UpdateExtractionCandidateAudit {
+            namespace: Some("project/anamnesis".into()),
+            candidate_id: 7,
+            support: crate::extract::types::AuditSupport::Partial,
+            contamination: Some(crate::extract::types::ContaminationCategory::UnsupportedClaim),
+            reviewer: "reviewer".into(),
+        })
+        .expect("encode candidate audit");
+        assert_eq!(
+            candidate,
+            "{\"op\":\"update_extraction_candidate_audit\",\"namespace\":\"project/anamnesis\",\"candidate_id\":7,\"support\":\"partial\",\"contamination\":\"unsupported-claim\",\"reviewer\":\"reviewer\"}\n"
+        );
+
+        let relation = encode_line(&Request::UpdateExtractionRelationAudit {
+            namespace: Some("project/anamnesis".into()),
+            relation_id: 9,
+            verdict: crate::extract::types::RelationVerdict::WrongDirection,
+            reviewer: "reviewer".into(),
+        })
+        .expect("encode relation audit");
+        assert_eq!(
+            relation,
+            "{\"op\":\"update_extraction_relation_audit\",\"namespace\":\"project/anamnesis\",\"relation_id\":9,\"verdict\":\"wrong-direction\",\"reviewer\":\"reviewer\"}\n"
+        );
+
+        for bad in [
+            "{\"op\":\"update_extraction_candidate_audit\",\"candidate_id\":7,\"support\":\"unknown\",\"reviewer\":\"r\"}",
+            "{\"op\":\"update_extraction_candidate_audit\",\"candidate_id\":7,\"support\":\"supported\",\"contamination\":\"unknown\",\"reviewer\":\"r\"}",
+            "{\"op\":\"update_extraction_relation_audit\",\"relation_id\":9,\"verdict\":\"unknown\",\"reviewer\":\"r\"}",
+        ] {
+            assert!(
+                decode_line::<Request>(bad).is_err(),
+                "unknown audit enum must reject: {bad}"
+            );
+        }
     }
     #[test]
     fn recall_event_kind_round_trips_and_omits_when_absent() {

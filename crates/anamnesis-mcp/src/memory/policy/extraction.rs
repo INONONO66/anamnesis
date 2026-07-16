@@ -3,8 +3,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
+use crate::extract::audit::{
+    ExtractionAuditCandidateRow, ExtractionAuditRelationRow, ExtractionAuditResult,
+};
 use crate::extract::types::{
-    CandidateKind, ExtractionSource, ExtractorProfileComponents, RelationKind, ValidatedExtraction,
+    AuditSupport, CandidateKind, ContaminationCategory, ExtractionSource,
+    ExtractorProfileComponents, RelationKind, RelationVerdict, ValidatedExtraction,
 };
 use crate::proto::{ExtractionErrorKind, StageExtractionResult};
 
@@ -314,6 +318,179 @@ pub(super) fn stage(
     Ok(StageExtractionResult::Staged { run_id })
 }
 
+pub(super) fn list_audit(
+    connection: &Connection,
+    limit: u32,
+) -> Result<ExtractionAuditResult, PolicyStoreError> {
+    let limit = i64::from(limit);
+    let mut candidate_statement = connection
+        .prepare(
+            "SELECT c.id, c.run_id, r.profile_id, c.item_local_id, c.content, c.kind,
+                    c.confidence, c.source_turn_keys, c.source_content_hashes,
+                    c.source_session_id, c.source_scope, c.source_node_ids,
+                    c.audit_support, c.contamination_category, c.reviewed_by, c.reviewed_at
+             FROM extract_candidates c JOIN extract_runs r ON r.id = c.run_id
+             ORDER BY c.id LIMIT ?1",
+        )
+        .map_err(|error| PolicyStoreError::sqlite("prepare extraction audit candidates", error))?;
+    let mut candidate_rows = candidate_statement
+        .query([limit])
+        .map_err(|error| PolicyStoreError::sqlite("query extraction audit candidates", error))?;
+    let mut candidates = Vec::new();
+    while let Some(row) = candidate_rows
+        .next()
+        .map_err(|error| PolicyStoreError::sqlite("read extraction audit candidate", error))?
+    {
+        let kind: String = row
+            .get(5)
+            .map_err(|error| PolicyStoreError::sqlite("read candidate kind", error))?;
+        let support: Option<String> = row
+            .get(12)
+            .map_err(|error| PolicyStoreError::sqlite("read candidate audit support", error))?;
+        let contamination: Option<String> = row
+            .get(13)
+            .map_err(|error| PolicyStoreError::sqlite("read candidate contamination", error))?;
+        let reviewed_at: Option<i64> = row
+            .get(15)
+            .map_err(|error| PolicyStoreError::sqlite("read candidate reviewed_at", error))?;
+        candidates.push(ExtractionAuditCandidateRow {
+            id: sqlite_row_id(
+                row.get(0)
+                    .map_err(|error| PolicyStoreError::sqlite("read candidate id", error))?,
+                "candidate id",
+            )?,
+            run_id: sqlite_row_id(
+                row.get(1)
+                    .map_err(|error| PolicyStoreError::sqlite("read candidate run_id", error))?,
+                "candidate run_id",
+            )?,
+            profile_id: row
+                .get(2)
+                .map_err(|error| PolicyStoreError::sqlite("read candidate profile_id", error))?,
+            item_local_id: row
+                .get(3)
+                .map_err(|error| PolicyStoreError::sqlite("read candidate item local id", error))?,
+            content: row
+                .get(4)
+                .map_err(|error| PolicyStoreError::sqlite("read candidate content", error))?,
+            kind: parse_candidate_kind(&kind)?,
+            confidence: row
+                .get(6)
+                .map_err(|error| PolicyStoreError::sqlite("read candidate confidence", error))?,
+            source_turn_keys: deserialize(
+                &row.get::<_, String>(7).map_err(|error| {
+                    PolicyStoreError::sqlite("read candidate source turn keys", error)
+                })?,
+                "candidate source turn keys",
+            )?,
+            source_content_hashes: deserialize(
+                &row.get::<_, String>(8).map_err(|error| {
+                    PolicyStoreError::sqlite("read candidate source content hashes", error)
+                })?,
+                "candidate source content hashes",
+            )?,
+            source_session_id: row.get(9).map_err(|error| {
+                PolicyStoreError::sqlite("read candidate source session", error)
+            })?,
+            source_scope: row
+                .get(10)
+                .map_err(|error| PolicyStoreError::sqlite("read candidate source scope", error))?,
+            source_node_ids: deserialize(
+                &row.get::<_, String>(11).map_err(|error| {
+                    PolicyStoreError::sqlite("read candidate source node ids", error)
+                })?,
+                "candidate source node ids",
+            )?,
+            support: support.as_deref().map(parse_audit_support).transpose()?,
+            contamination: contamination
+                .as_deref()
+                .map(parse_contamination_category)
+                .transpose()?,
+            reviewed_by: row
+                .get(14)
+                .map_err(|error| PolicyStoreError::sqlite("read candidate reviewer", error))?,
+            reviewed_at: reviewed_at
+                .map(|value| sqlite_row_id(value, "candidate reviewed_at"))
+                .transpose()?,
+            sources: Vec::new(),
+        });
+    }
+
+    let mut relation_statement = connection
+        .prepare(
+            "SELECT r.id, source.run_id, run.profile_id, r.candidate_from, r.candidate_to,
+                    source.item_local_id, target.item_local_id, r.relation_type,
+                    r.audit_status, r.reviewed_by, r.reviewed_at
+             FROM extract_relations r
+             JOIN extract_candidates source ON source.id = r.candidate_from
+             JOIN extract_candidates target ON target.id = r.candidate_to
+             JOIN extract_runs run ON run.id = source.run_id
+             ORDER BY r.id LIMIT ?1",
+        )
+        .map_err(|error| PolicyStoreError::sqlite("prepare extraction audit relations", error))?;
+    let mut relation_rows = relation_statement
+        .query([limit])
+        .map_err(|error| PolicyStoreError::sqlite("query extraction audit relations", error))?;
+    let mut relations = Vec::new();
+    while let Some(row) = relation_rows
+        .next()
+        .map_err(|error| PolicyStoreError::sqlite("read extraction audit relation", error))?
+    {
+        let relation_type: String = row
+            .get(7)
+            .map_err(|error| PolicyStoreError::sqlite("read relation type", error))?;
+        let verdict: Option<String> = row
+            .get(8)
+            .map_err(|error| PolicyStoreError::sqlite("read relation audit verdict", error))?;
+        let reviewed_at: Option<i64> = row
+            .get(10)
+            .map_err(|error| PolicyStoreError::sqlite("read relation reviewed_at", error))?;
+        relations.push(ExtractionAuditRelationRow {
+            id: sqlite_row_id(
+                row.get(0)
+                    .map_err(|error| PolicyStoreError::sqlite("read relation id", error))?,
+                "relation id",
+            )?,
+            run_id: sqlite_row_id(
+                row.get(1)
+                    .map_err(|error| PolicyStoreError::sqlite("read relation run_id", error))?,
+                "relation run_id",
+            )?,
+            profile_id: row
+                .get(2)
+                .map_err(|error| PolicyStoreError::sqlite("read relation profile_id", error))?,
+            candidate_from: sqlite_row_id(
+                row.get(3)
+                    .map_err(|error| PolicyStoreError::sqlite("read relation source", error))?,
+                "relation source",
+            )?,
+            candidate_to: sqlite_row_id(
+                row.get(4)
+                    .map_err(|error| PolicyStoreError::sqlite("read relation target", error))?,
+                "relation target",
+            )?,
+            from_item_local_id: row.get(5).map_err(|error| {
+                PolicyStoreError::sqlite("read relation source item local id", error)
+            })?,
+            to_item_local_id: row.get(6).map_err(|error| {
+                PolicyStoreError::sqlite("read relation target item local id", error)
+            })?,
+            relation_type: parse_relation_kind(&relation_type)?,
+            verdict: verdict.as_deref().map(parse_relation_verdict).transpose()?,
+            reviewed_by: row
+                .get(9)
+                .map_err(|error| PolicyStoreError::sqlite("read relation reviewer", error))?,
+            reviewed_at: reviewed_at
+                .map(|value| sqlite_row_id(value, "relation reviewed_at"))
+                .transpose()?,
+        });
+    }
+
+    Ok(ExtractionAuditResult {
+        candidates,
+        relations,
+    })
+}
 pub(super) fn record_failure(
     connection: &mut Connection,
     profile_id: &str,
@@ -339,6 +516,73 @@ pub(super) fn record_failure(
         )
         .map_err(|error| PolicyStoreError::sqlite("insert extraction failure run", error))?;
     Ok(())
+}
+pub(super) fn update_candidate_audit(
+    connection: &mut Connection,
+    id: u64,
+    support: AuditSupport,
+    contamination: Option<ContaminationCategory>,
+    reviewer: &str,
+    reviewed_at: u64,
+) -> Result<(), PolicyStoreError> {
+    let id = sqlite_u64(id, "extraction candidate audit id")?;
+    let reviewed_at = sqlite_u64(reviewed_at, "extraction candidate reviewed_at")?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| PolicyStoreError::sqlite("start candidate audit transaction", error))?;
+    let updated = transaction
+        .execute(
+            "UPDATE extract_candidates
+             SET audit_support = ?1, contamination_category = ?2,
+                 reviewed_by = ?3, reviewed_at = ?4
+             WHERE id = ?5",
+            params![
+                audit_support(support),
+                contamination.map(contamination_category),
+                reviewer,
+                reviewed_at,
+                id,
+            ],
+        )
+        .map_err(|error| PolicyStoreError::sqlite("update extraction candidate audit", error))?;
+    if updated != 1 {
+        return Err(PolicyStoreError::operation(
+            "update extraction candidate audit",
+        ));
+    }
+    transaction
+        .commit()
+        .map_err(|error| PolicyStoreError::sqlite("commit candidate audit transaction", error))
+}
+
+pub(super) fn update_relation_audit(
+    connection: &mut Connection,
+    id: u64,
+    verdict: RelationVerdict,
+    reviewer: &str,
+    reviewed_at: u64,
+) -> Result<(), PolicyStoreError> {
+    let id = sqlite_u64(id, "extraction relation audit id")?;
+    let reviewed_at = sqlite_u64(reviewed_at, "extraction relation reviewed_at")?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| PolicyStoreError::sqlite("start relation audit transaction", error))?;
+    let updated = transaction
+        .execute(
+            "UPDATE extract_relations
+             SET audit_status = ?1, reviewed_by = ?2, reviewed_at = ?3
+             WHERE id = ?4",
+            params![relation_verdict(verdict), reviewer, reviewed_at, id],
+        )
+        .map_err(|error| PolicyStoreError::sqlite("update extraction relation audit", error))?;
+    if updated != 1 {
+        return Err(PolicyStoreError::operation(
+            "update extraction relation audit",
+        ));
+    }
+    transaction
+        .commit()
+        .map_err(|error| PolicyStoreError::sqlite("commit relation audit transaction", error))
 }
 
 fn ensure_shadow_profile_in_transaction(
@@ -474,7 +718,91 @@ fn serialize<T: serde::Serialize>(
 ) -> Result<String, PolicyStoreError> {
     serde_json::to_string(&value).map_err(|_| PolicyStoreError::operation(operation))
 }
+fn deserialize<T: serde::de::DeserializeOwned>(
+    value: &str,
+    field: &'static str,
+) -> Result<T, PolicyStoreError> {
+    serde_json::from_str(value).map_err(|_| PolicyStoreError::invalid_value(field))
+}
 
+fn parse_audit_support(value: &str) -> Result<AuditSupport, PolicyStoreError> {
+    match value {
+        "supported" => Ok(AuditSupport::Supported),
+        "partial" => Ok(AuditSupport::Partial),
+        "unsupported" => Ok(AuditSupport::Unsupported),
+        _ => Err(PolicyStoreError::invalid_value("candidate audit support")),
+    }
+}
+
+fn parse_contamination_category(value: &str) -> Result<ContaminationCategory, PolicyStoreError> {
+    match value {
+        "unsupported-claim" => Ok(ContaminationCategory::UnsupportedClaim),
+        "prompt-injection" => Ok(ContaminationCategory::PromptInjection),
+        "secret-reexposure" => Ok(ContaminationCategory::SecretReexposure),
+        "foreign-scope" => Ok(ContaminationCategory::ForeignScope),
+        "contradicts-source" => Ok(ContaminationCategory::ContradictsSource),
+        _ => Err(PolicyStoreError::invalid_value(
+            "candidate contamination category",
+        )),
+    }
+}
+
+fn parse_relation_verdict(value: &str) -> Result<RelationVerdict, PolicyStoreError> {
+    match value {
+        "correct" => Ok(RelationVerdict::Correct),
+        "wrong-type" => Ok(RelationVerdict::WrongType),
+        "wrong-direction" => Ok(RelationVerdict::WrongDirection),
+        "invalid" => Ok(RelationVerdict::Invalid),
+        _ => Err(PolicyStoreError::invalid_value("relation audit verdict")),
+    }
+}
+
+fn parse_candidate_kind(value: &str) -> Result<CandidateKind, PolicyStoreError> {
+    match value {
+        "decision" => Ok(CandidateKind::Decision),
+        "causal" => Ok(CandidateKind::Causal),
+        "lesson" => Ok(CandidateKind::Lesson),
+        "convention" => Ok(CandidateKind::Convention),
+        "gotcha" => Ok(CandidateKind::Gotcha),
+        _ => Err(PolicyStoreError::invalid_value("candidate kind")),
+    }
+}
+
+fn parse_relation_kind(value: &str) -> Result<RelationKind, PolicyStoreError> {
+    match value {
+        "reason" => Ok(RelationKind::Reason),
+        "causal" => Ok(RelationKind::Causal),
+        "contradicts" => Ok(RelationKind::Contradicts),
+        "supports" => Ok(RelationKind::Supports),
+        _ => Err(PolicyStoreError::invalid_value("relation type")),
+    }
+}
+fn audit_support(support: AuditSupport) -> &'static str {
+    match support {
+        AuditSupport::Supported => "supported",
+        AuditSupport::Partial => "partial",
+        AuditSupport::Unsupported => "unsupported",
+    }
+}
+
+fn contamination_category(category: ContaminationCategory) -> &'static str {
+    match category {
+        ContaminationCategory::UnsupportedClaim => "unsupported-claim",
+        ContaminationCategory::PromptInjection => "prompt-injection",
+        ContaminationCategory::SecretReexposure => "secret-reexposure",
+        ContaminationCategory::ForeignScope => "foreign-scope",
+        ContaminationCategory::ContradictsSource => "contradicts-source",
+    }
+}
+
+fn relation_verdict(verdict: RelationVerdict) -> &'static str {
+    match verdict {
+        RelationVerdict::Correct => "correct",
+        RelationVerdict::WrongType => "wrong-type",
+        RelationVerdict::WrongDirection => "wrong-direction",
+        RelationVerdict::Invalid => "invalid",
+    }
+}
 fn candidate_kind(kind: &CandidateKind) -> &'static str {
     match kind {
         CandidateKind::Decision => "decision",
