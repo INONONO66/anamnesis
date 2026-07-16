@@ -24,11 +24,13 @@ use crate::error::Error;
 ///
 /// # Network I/O
 ///
-/// The constructor downloads model weights on first use (~100-500 MB depending
-/// on the model). Ensure network access is available, or pre-populate the
-/// cache directory.
+/// Construction performs only local model metadata lookup. Model weights are
+/// initialized on the first embedding call and may download (~100-500 MB
+/// depending on the model). Ensure network access is available, or
+/// pre-populate the cache directory.
 pub struct FastEmbedProvider {
-    model: Mutex<TextEmbedding>,
+    model: Mutex<Option<TextEmbedding>>,
+    init_options: InitOptions,
     dim: usize,
     name: String,
 }
@@ -74,8 +76,7 @@ impl FastEmbedProvider {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if model initialization fails
-    /// (e.g. network error, invalid cache).
+    /// Returns [`Error::InvalidInput`] if model metadata lookup fails.
     pub fn new() -> Result<Self, Error> {
         Self::with_model(EmbeddingModel::BGEBaseENV15)
     }
@@ -84,19 +85,15 @@ impl FastEmbedProvider {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if model info lookup or
-    /// initialization fails.
+    /// Returns [`Error::InvalidInput`] if model metadata lookup fails.
     pub fn with_model(model: EmbeddingModel) -> Result<Self, Error> {
         let info = TextEmbedding::get_model_info(&model)
             .map_err(|e| Error::InvalidInput(format!("model info lookup failed: {e}")))?;
         let dim = info.dim;
         let name = info.model_code.clone();
-
-        let embedding = TextEmbedding::try_new(InitOptions::new(model))
-            .map_err(|e| Error::InvalidInput(format!("model init failed: {e}")))?;
-
         Ok(Self {
-            model: Mutex::new(embedding),
+            model: Mutex::new(None),
+            init_options: InitOptions::new(model),
             dim,
             name,
         })
@@ -105,12 +102,21 @@ impl FastEmbedProvider {
 
 impl EmbeddingProvider for FastEmbedProvider {
     fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, Error> {
-        let model = self
+        let mut model = self
             .model
             .lock()
             .map_err(|e| Error::InvalidInput(format!("mutex poisoned: {e}")))?;
 
         let owned: Vec<String> = texts.iter().map(|s| (*s).to_string()).collect();
+        if model.is_none() {
+            *model = Some(
+                TextEmbedding::try_new(self.init_options.clone())
+                    .map_err(|e| Error::InvalidInput(format!("model init failed: {e}")))?,
+            );
+        }
+        let model = model.as_mut().ok_or_else(|| {
+            Error::InvalidInput("model initialization produced no provider".to_owned())
+        })?;
         model
             .embed(owned, None)
             .map_err(|e| Error::InvalidInput(format!("embedding failed: {e}")))
@@ -155,5 +161,14 @@ mod tests {
             e5_prefix("BAAI/bge-base-en-v1.5", PrefixKind::Query, "hi"),
             "hi"
         );
+    }
+    #[test]
+    fn with_model_defers_model_initialization() {
+        let provider = FastEmbedProvider::with_model(EmbeddingModel::BGEBaseENV15)
+            .expect("model info lookup failed");
+
+        assert_eq!(provider.dimensions(), 768);
+        assert_eq!(provider.model_name(), "Xenova/bge-base-en-v1.5");
+        assert!(provider.model.lock().unwrap().is_none());
     }
 }
