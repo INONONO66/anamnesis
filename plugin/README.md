@@ -292,6 +292,19 @@ generic stdio config above and consult the client's own MCP documentation for th
 exact wrapper key/field names (most MCP clients use a `command`/`args`/`env` triple
 under some `mcpServers`-style object).
 
+## Recall telemetry and rollout gate
+
+Hook and tool recall records privacy-minimized eligibility telemetry only: it never stores the raw
+query, transcript, or rendered context. The row includes metadata such as event kind, provenance,
+scope, gate outcomes, filtered top score/cosine, and `query_chars`, and retains only the newest
+**10,000** rows. `anamnesis stats --recall` reports **injection eligibility, not delivery or
+quality**. A newer telemetry side-schema, or a telemetry policy open/write/query failure, disables
+or degrades telemetry only; core recall and fail-open hook prompt delivery continue.
+
+Plugin reactivation is blocked until the operational evidence gate is complete. Follow the
+[recall telemetry rollout gate](../docs/06-operations/operations.md#recall-telemetry-rollout-gate);
+this document does not claim that live deployment observations have been collected.
+
 ## Verify it works
 
 Pipe a real `UserPromptSubmit` payload into the hook and confirm you get valid hook JSON out

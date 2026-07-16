@@ -282,6 +282,303 @@ fn recall_telemetry_write_failure_preserves_response_and_dispatch_counters() {
         "a best-effort telemetry failure must not be reported as a dispatch failure"
     );
 }
+#[test]
+fn r1_recall_telemetry_deploy_gate_demo() {
+    let (registry, _dir) = stub_registry();
+    let namespace = "r1-deploy-gate";
+    let scope = "project/r1-deploy-gate";
+    let query = "r1 filtered top rollout proof";
+    let canonical_namespace = {
+        let registry_guard = registry.lock().unwrap_or_else(|p| p.into_inner());
+        registry_guard.canonical_ns_key(Some(namespace))
+    };
+    assert_eq!(
+        canonical_namespace, namespace,
+        "the deterministic deploy-gate namespace must already be canonical"
+    );
+
+    let mut capture_metadata = std::collections::HashMap::new();
+    capture_metadata.insert("capture".to_string(), "true".to_string());
+
+    ok_text(dispatch(
+        &registry,
+        Request::Remember {
+            content: query.into(),
+            namespace: Some(namespace.into()),
+            tags: None,
+            metadata: Some(capture_metadata),
+            scope: Some(scope.into()),
+        },
+    ));
+
+    // `Remember` creates an Episodic + Semantic pair. Mark only the Semantic
+    // fixture as durable so the identical, high-scoring captured Episodic node
+    // must be removed by `knowledge_only` before the final top is traced.
+    let (captured_episodic_id, surviving_semantic_id) = {
+        let handle = {
+            let mut registry_guard = registry.lock().unwrap_or_else(|p| p.into_inner());
+            registry_guard
+                .namespace_handle(Some(namespace))
+                .expect("resolve deploy-gate memory handle")
+        };
+        let mut memory_guard = handle.lock().unwrap_or_else(|p| p.into_inner());
+        let graph = memory_guard.engine().graph();
+        let mut captured_episodic_id = None;
+        let mut surviving_semantic_id = None;
+        for id in graph.all_node_ids() {
+            let node = graph.get_node(id).expect("fixture node exists");
+            if node.content == query
+                && node.metadata.get("capture").map(String::as_str) == Some("true")
+            {
+                match node.node_type {
+                    anamnesis::graph::KnowledgeType::Episodic => captured_episodic_id = Some(id),
+                    anamnesis::graph::KnowledgeType::Semantic => surviving_semantic_id = Some(id),
+                    _ => {}
+                }
+            }
+        }
+        let captured_episodic_id =
+            captured_episodic_id.expect("fixture must include a captured Episodic node");
+        let surviving_semantic_id =
+            surviving_semantic_id.expect("fixture must include a captured Semantic node");
+        memory_guard
+            .set_metadata(surviving_semantic_id, "capture", "false")
+            .expect("mark only the Semantic fixture as durable");
+        (captured_episodic_id.0, surviving_semantic_id.0)
+    };
+
+    let unfiltered_response = ok_text(dispatch(
+        &registry,
+        Request::Recall {
+            query: query.into(),
+            limit: Some(5),
+            namespace: Some(namespace.into()),
+            reinforce: Some(false),
+            gate_threshold: Some(0.0),
+            cosine_gate: Some(0.99),
+            knowledge_only: Some(false),
+            scope: Some(scope.into()),
+            tag: None,
+            event_kind: Some(RecallEventKind::UserPrompt),
+        },
+    ));
+    let unfiltered_nodes_json = unfiltered_response
+        .split_once("## NODES (for `relate`)\n")
+        .expect("unfiltered recall response has a NODES trailer")
+        .1;
+    let unfiltered_nodes: Vec<serde_json::Value> =
+        serde_json::from_str(unfiltered_nodes_json.trim()).expect("NODES trailer is a JSON array");
+    let unfiltered_top_id = unfiltered_nodes
+        .first()
+        .and_then(|node| node["node_id"].as_u64())
+        .expect("unfiltered recall must expose a top candidate id");
+    assert_eq!(
+        unfiltered_top_id, captured_episodic_id,
+        "the captured Episodic node must be the actual unfiltered top candidate"
+    );
+
+    let request = Request::Recall {
+        query: query.into(),
+        limit: Some(5),
+        namespace: Some(namespace.into()),
+        reinforce: Some(false),
+        gate_threshold: Some(0.0),
+        cosine_gate: Some(0.99),
+        knowledge_only: Some(true),
+        scope: Some(scope.into()),
+        tag: None,
+        event_kind: Some(RecallEventKind::UserPrompt),
+    };
+    let first_response = dispatch(&registry, request);
+    assert!(
+        matches!(&first_response, Response::Ok { .. }),
+        "the successful recall must return a healthy core response"
+    );
+
+    let handles = {
+        let mut registry_guard = registry.lock().unwrap_or_else(|p| p.into_inner());
+        registry_guard
+            .namespace_handles(Some(namespace))
+            .expect("resolve deploy-gate graph and policy handles")
+    };
+    assert_eq!(
+        handles.key, canonical_namespace,
+        "test must inspect the same canonical namespace dispatch resolved"
+    );
+    {
+        let _memory_guard = handles.memory.lock().unwrap_or_else(|p| p.into_inner());
+        let mut policy_guard =
+            MemoryRegistry::policy_store(&handles.policy).expect("open deploy-gate policy store");
+        let PolicyStoreState::Ready(store) = &mut *policy_guard else {
+            panic!("successful recall must initialize the telemetry policy store");
+        };
+        let events = store
+            .read_recall_events_for_test()
+            .expect("read persisted minimized recall events");
+        assert_eq!(
+            events.len(),
+            2,
+            "the unfiltered baseline and knowledge-only recall must write exactly two events"
+        );
+        let event = &events[1];
+        assert_eq!(event.event_kind, RecallEventKind::UserPrompt);
+        assert_eq!(event.namespace, canonical_namespace);
+        assert_eq!(event.scope.as_deref(), Some(scope));
+        assert_eq!(event.query_chars, query.chars().count() as u64);
+        assert!(event.has_hits && event.readout_pass && event.cosine_pass && event.eligible);
+        assert_eq!(
+            event.result_node_ids.first().copied(),
+            Some(surviving_semantic_id),
+            "persisted filtered top must be the surviving Semantic node, not captured Episodic node {captured_episodic_id}"
+        );
+        assert!(
+            !event.result_node_ids.contains(&captured_episodic_id),
+            "knowledge_only must exclude the captured high-scoring Episodic node"
+        );
+        assert!(
+            event.top_score.is_some() && event.top_cosine.is_some(),
+            "eligible filtered result must persist top score and cosine"
+        );
+        assert!(
+            !store
+                .recall_events_contain_raw_value_for_test(query)
+                .expect("inspect minimized event for raw query data"),
+            "recall telemetry must not retain the raw query"
+        );
+        println!(
+            "R1_DEPLOY_GATE filtered_top node_id={} node_type=semantic prefilter_top_node_id={} namespace={} scope={} top_score={:?} top_cosine={:?} event_kind={:?} query_chars={} has_hits={} readout_pass={} cosine_pass={} eligible={} result_node_ids={:?} event_rows={} auto_extract_node_count={}",
+            surviving_semantic_id,
+            unfiltered_top_id,
+            event.namespace,
+            event
+                .scope
+                .as_deref()
+                .expect("deploy-gate event must retain scope"),
+            event.top_score,
+            event.top_cosine,
+            event.event_kind,
+            event.query_chars,
+            event.has_hits,
+            event.readout_pass,
+            event.cosine_pass,
+            event.eligible,
+            event.result_node_ids,
+            events.len(),
+            event.auto_extract_node_count,
+        );
+    }
+
+    let fail_open_probe = Request::Recall {
+        query: "deterministic fail-open response probe".into(),
+        limit: Some(5),
+        namespace: Some(namespace.into()),
+        reinforce: Some(false),
+        gate_threshold: None,
+        cosine_gate: None,
+        knowledge_only: Some(true),
+        scope: Some(scope.into()),
+        tag: None,
+        event_kind: Some(RecallEventKind::UserPrompt),
+    };
+    let control_graph_snapshot = {
+        let mut memory_guard = handles.memory.lock().unwrap_or_else(|p| p.into_inner());
+        memory_guard
+            .engine_mut()
+            .snapshot("r1 deploy-gate fail-open control")
+            .expect("snapshot graph state before the control recall")
+    };
+    let event_count_before_control = {
+        let _memory_guard = handles.memory.lock().unwrap_or_else(|p| p.into_inner());
+        let mut policy_guard =
+            MemoryRegistry::policy_store(&handles.policy).expect("reopen deploy-gate policy store");
+        let PolicyStoreState::Ready(store) = &mut *policy_guard else {
+            panic!("policy store must remain ready before the control probe");
+        };
+        store
+            .recall_event_count_for_test()
+            .expect("count recall telemetry before control probe")
+    };
+    let control_response = dispatch(&registry, fail_open_probe.clone());
+    assert!(
+        matches!(&control_response, Response::Ok { .. }),
+        "the control fail-open probe must return a healthy core response"
+    );
+    let control_response_bytes =
+        serde_json::to_vec(&control_response).expect("serialize control recall response");
+    {
+        let mut memory_guard = handles.memory.lock().unwrap_or_else(|p| p.into_inner());
+        memory_guard
+            .engine_mut()
+            .restore(&control_graph_snapshot)
+            .expect("restore identical graph state before forced telemetry failure");
+    }
+    let event_count_after_control = {
+        let _memory_guard = handles.memory.lock().unwrap_or_else(|p| p.into_inner());
+        let mut policy_guard =
+            MemoryRegistry::policy_store(&handles.policy).expect("reopen deploy-gate policy store");
+        let PolicyStoreState::Ready(store) = &mut *policy_guard else {
+            panic!("policy store must remain ready after the control probe");
+        };
+        let event_count = store
+            .recall_event_count_for_test()
+            .expect("count recall telemetry after control probe");
+        assert_eq!(
+            event_count,
+            event_count_before_control + 1,
+            "the healthy control probe must persist exactly one telemetry row"
+        );
+        store
+            .install_recall_event_insert_failure_trigger_for_test()
+            .expect("install approved recall_events failure trigger");
+        event_count
+    };
+
+    let observed_insert_attempts = Arc::new(AtomicUsize::new(0));
+    let observer_attempts = Arc::clone(&observed_insert_attempts);
+    let _observer = PolicyStore::install_operation_observer_for_test(Arc::new(move || {
+        observer_attempts.fetch_add(1, Ordering::SeqCst);
+    }));
+
+    let failed_telemetry_response = dispatch(&registry, fail_open_probe);
+    assert!(
+        matches!(&failed_telemetry_response, Response::Ok { .. }),
+        "forced telemetry failure must leave core recall healthy"
+    );
+    assert_eq!(
+        observed_insert_attempts.load(Ordering::SeqCst),
+        1,
+        "the triggered dispatch must attempt exactly one telemetry insert"
+    );
+    assert_eq!(
+        serde_json::to_vec(&failed_telemetry_response)
+            .expect("serialize recall response after telemetry failure"),
+        control_response_bytes,
+        "forced telemetry write failure must preserve the control response bytes"
+    );
+
+    let post_failure_event_count = {
+        let _memory_guard = handles.memory.lock().unwrap_or_else(|p| p.into_inner());
+        let mut policy_guard =
+            MemoryRegistry::policy_store(&handles.policy).expect("reopen deploy-gate policy store");
+        let PolicyStoreState::Ready(store) = &mut *policy_guard else {
+            panic!("policy store must remain ready after a failed telemetry insert");
+        };
+        store
+            .recall_event_count_for_test()
+            .expect("count recall telemetry after forced failure")
+    };
+    assert_eq!(
+        post_failure_event_count, event_count_after_control,
+        "forced telemetry write failure must not leave an event row behind"
+    );
+    println!(
+        "R1_DEPLOY_GATE fail_open response_bytes_identical=true core_response_healthy=true control_row_increment={} insert_attempts={} event_rows_unchanged={} event_count={}",
+        event_count_after_control == event_count_before_control + 1,
+        observed_insert_attempts.load(Ordering::SeqCst),
+        post_failure_event_count == event_count_after_control,
+        post_failure_event_count,
+    );
+}
 
 #[test]
 fn recall_telemetry_uses_canonical_namespace_unicode_char_count_and_unknown_kind() {

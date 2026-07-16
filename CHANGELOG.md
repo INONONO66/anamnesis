@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **Backup-first embedding migration** — `anamnesis migrate-embeddings` provides a manual migration command, and the daemon migrates automatically; before any writes, it creates and verifies a deterministic dated backup.
 - **Resumable, isolated migrations** — batched checkpoints resume interrupted work, with at most one migration job per namespace.
+- **Privacy-minimized recall eligibility telemetry** — recall records bounded (newest **10,000**) side-schema rows with query character counts and gate metadata, never raw queries, transcripts, or rendered context. `anamnesis stats --recall` reports injection eligibility rather than delivery or quality; unsupported side schemas and telemetry failures fail open without blocking recall or hook prompt delivery.
 
 ### Changed
 - **Migration-time recall fails open** through the existing hook path and injects no context.

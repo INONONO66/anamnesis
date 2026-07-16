@@ -74,6 +74,48 @@ silent no-op and the agent proceeds. Concretely:
   turn is marked done regardless, so a permanently-abandoned batch cannot loop
   forever.
 
+## Recall telemetry rollout gate
+
+Recall telemetry is a privacy-minimized side schema, not a record of prompt content. It never
+stores a raw query, transcript, or rendered context. Each row contains only recall metadata:
+event kind and provenance, namespace/scope, `query_chars`, knowledge-only state, the filtered top
+score/cosine, gate settings, result node ids/counts, and the four gate booleans `has_hits`,
+`readout_pass`, `cosine_pass`, and `eligible`. Retention keeps the newest **10,000** rows.
+
+Run `anamnesis stats --recall` against the same database and namespace as the daemon. Its counts,
+abstentions, threshold sweep, cosine percentiles, and auto-exposure ratios measure **injection
+eligibility, not delivery or quality**: they cannot establish that a client rendered context, that
+an agent used it, or that an answer improved. The ordinary `stats` command omits this section.
+
+The telemetry side schema is optional. A future side-schema version, or a policy-store open,
+write, or query failure, disables or degrades telemetry only. It must never block core recall; the
+hook retains its fail-open contract and still delivers the user's prompt (with no injected context
+when recall itself cannot complete).
+
+### Pre-plugin-reactivation evidence gate
+
+Plugin reactivation remains blocked until all of the following evidence is collected from the
+target temporary daemon/database and namespace. These are required observations, not claims about
+a deployment that has already occurred.
+
+1. Run one real `UserPromptSubmit` recall. Inspect the newest `recall_events` row with the local
+   SQLite CLI and retain its event kind plus provenance (namespace and scope), confirming it has
+   `query_chars` and no raw query/transcript/rendered-context field or value.
+2. Seed or select a knowledge-only case where a high-scoring episodic candidate is filtered out
+   and a semantic candidate remains. Retain the post-filter top score and cosine plus all four
+   booleans: `has_hits`, `readout_pass`, `cosine_pass`, and `eligible`.
+3. Force a telemetry write failure, then compare the recall response and hook health with the
+   corresponding successful run; they must be identical while telemetry fails. Run the required
+   sweep afterward:
+   ```bash
+   anamnesis stats --recall
+   ```
+   Retain its eligibility sweep, cosine p50/p90/p95, and auto-exposure output as evidence, while
+   labeling those values as eligibility/exposure rather than delivery or quality.
+
+Do not reactivate the plugin from deterministic test output alone. Collect and review all three
+evidence groups first; no live deployment observations are asserted here.
+
 ## Daemon lifecycle & version skew
 
 Anamnesis runs an **on-demand daemon per database**. A client (a plugin hook, an
