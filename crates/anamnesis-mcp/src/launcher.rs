@@ -101,7 +101,7 @@ fn spawn_daemon_detached(exe: &Path, db: &Path) -> io::Result<()> {
 
 /// Spawn the current executable with detached null stdio.
 ///
-/// `argv` excludes argv[0]. The child is not waited on.
+/// `argv` excludes the executable name. The child is not waited on.
 pub(crate) fn spawn_detached_current_exe(argv: &[String]) -> io::Result<()> {
     let exe = std::env::current_exe()?;
     spawn_detached(&exe, argv, None)
