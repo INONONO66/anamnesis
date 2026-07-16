@@ -1,6 +1,7 @@
 pub(crate) mod audit;
 pub(crate) mod config;
 pub(crate) mod error_log;
+pub(crate) mod kick;
 pub(crate) mod process;
 pub(crate) mod profile;
 pub(crate) mod prompt;

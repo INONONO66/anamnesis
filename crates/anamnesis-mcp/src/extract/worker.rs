@@ -46,8 +46,16 @@ pub(crate) enum WorkerNoop {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum WorkerOutcome {
     Noop(WorkerNoop),
-    Staged { run_id: u64 },
-    AlreadyStaged { run_id: u64 },
+    Staged {
+        run_id: u64,
+        candidate_count: usize,
+        relation_count: usize,
+    },
+    AlreadyStaged {
+        run_id: u64,
+        candidate_count: usize,
+        relation_count: usize,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,7 +121,10 @@ pub(crate) trait WorkerDependencies {
 }
 
 /// Run one opt-in extraction pass using the daemon as the sole persistence API.
-pub(crate) fn run_worker(cfg: &Config) -> Result<WorkerOutcome, WorkerError> {
+pub(crate) fn run_worker(
+    cfg: &Config,
+    namespace: Option<&str>,
+) -> Result<WorkerOutcome, WorkerError> {
     if ExtractMode::parse(std::env::var("ANAMNESIS_EXTRACT_MODE").ok().as_deref()).mode
         == ExtractMode::Off
     {
@@ -133,11 +144,17 @@ pub(crate) fn run_worker(cfg: &Config) -> Result<WorkerOutcome, WorkerError> {
         provider_output_limit: PROVIDER_OUTPUT_LIMIT,
     };
     let config = cfg.clone();
+    let namespace = namespace.map(str::to_owned);
     std::thread::Builder::new()
         .name("anamnesis-extract".into())
         .spawn(move || {
             let mut dependencies = ProductionDependencies::new(&config)?;
-            run_worker_with(&worker_config, &socket_path, None, &mut dependencies)
+            run_worker_with(
+                &worker_config,
+                &socket_path,
+                namespace.as_deref(),
+                &mut dependencies,
+            )
         })
         .map_err(|error| WorkerError::Runtime(error.to_string()))?
         .join()
@@ -216,6 +233,8 @@ pub(crate) fn run_worker_with(
         }
     };
 
+    let candidate_count = extraction.items.len();
+    let relation_count = extraction.relations.len();
     match dependencies.stage(
         namespace,
         &config.profile,
@@ -223,10 +242,16 @@ pub(crate) fn run_worker_with(
         scan.sources.clone(),
         extraction,
     ) {
-        Ok(StageExtractionResult::Staged { run_id }) => Ok(WorkerOutcome::Staged { run_id }),
-        Ok(StageExtractionResult::AlreadyStaged { run_id }) => {
-            Ok(WorkerOutcome::AlreadyStaged { run_id })
-        }
+        Ok(StageExtractionResult::Staged { run_id }) => Ok(WorkerOutcome::Staged {
+            run_id,
+            candidate_count,
+            relation_count,
+        }),
+        Ok(StageExtractionResult::AlreadyStaged { run_id }) => Ok(WorkerOutcome::AlreadyStaged {
+            run_id,
+            candidate_count,
+            relation_count,
+        }),
         Err(error) => {
             let _ = record_failure(
                 dependencies,
@@ -472,6 +497,7 @@ mod tests {
         WorkerConfig, WorkerDependencies, WorkerError, WorkerNoop, WorkerOutcome, run_worker,
         run_worker_with,
     };
+    use crate::config::Config;
     use crate::extract::{
         config::{ExtractCommand, ExtractMode},
         process::{OutputStream, ProcessError, ProcessOutput},
@@ -619,7 +645,7 @@ mod tests {
 
     #[test]
     fn r2_worker_exposes_the_one_shot_entrypoint() {
-        let _ = run_worker;
+        let _: fn(&Config, Option<&str>) -> Result<WorkerOutcome, WorkerError> = run_worker;
     }
     #[test]
     fn r2_worker_mode_off_does_not_connect_or_invoke_provider() {
@@ -694,7 +720,14 @@ mod tests {
         let outcome = run_worker_with(&config(ExtractMode::Shadow), &socket, None, &mut fake)
             .expect("second valid response stages");
 
-        assert_eq!(outcome, WorkerOutcome::Staged { run_id: 41 });
+        assert_eq!(
+            outcome,
+            WorkerOutcome::Staged {
+                run_id: 41,
+                candidate_count: 0,
+                relation_count: 0,
+            }
+        );
         assert_eq!(fake.provider_calls, 2, "invalid JSON has exactly one retry");
         assert_eq!(fake.recorded_failures, [ExtractionErrorKind::InvalidJson]);
         assert_eq!(
@@ -807,7 +840,14 @@ mod tests {
         let outcome = run_worker_with(&config(ExtractMode::Shadow), &socket, None, &mut fake)
             .expect("replay is successful");
 
-        assert_eq!(outcome, WorkerOutcome::AlreadyStaged { run_id: 41 });
+        assert_eq!(
+            outcome,
+            WorkerOutcome::AlreadyStaged {
+                run_id: 41,
+                candidate_count: 0,
+                relation_count: 0,
+            }
+        );
         assert_eq!(fake.provider_calls, 1);
         assert_eq!(
             fake.staged_sources.len(),

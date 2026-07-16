@@ -8,6 +8,7 @@ use clap::{ArgGroup, Parser, Subcommand};
 
 use crate::extract::audit::{ExtractionAuditResult, resolve_reviewer};
 use crate::extract::types::{AuditSupport, ContaminationCategory, RelationVerdict};
+use crate::extract::worker::{WorkerError, WorkerNoop, WorkerOutcome, run_worker};
 
 use crate::config::Config;
 use crate::memory::{
@@ -315,6 +316,92 @@ fn wants_embedded(cli: &Cli) -> bool {
     );
     flag || crate::env_flag("ANAMNESIS_NO_DAEMON")
 }
+/// Whether an extract invocation is an audit request rather than a worker run.
+pub fn is_extract_audit(cli: &Cli) -> bool {
+    matches!(
+        &cli.command,
+        Some(Commands::Extract { audit: true, .. })
+            | Some(Commands::Extract {
+                candidate: Some(_),
+                ..
+            })
+            | Some(Commands::Extract {
+                relation: Some(_),
+                ..
+            })
+    )
+}
+
+/// Render the extraction worker result without performing process I/O.
+struct ExtractRender {
+    exit_code: i32,
+    stdout: String,
+    stderr: String,
+}
+
+fn render_extract_outcome(result: Result<WorkerOutcome, WorkerError>) -> ExtractRender {
+    match result {
+        Ok(WorkerOutcome::Staged {
+            run_id,
+            candidate_count,
+            relation_count,
+        }) => ExtractRender {
+            exit_code: 0,
+            stdout: format!(
+                "extraction staged: run_id={run_id} candidate_count={candidate_count} relation_count={relation_count}"
+            ),
+            stderr: String::new(),
+        },
+        Ok(WorkerOutcome::AlreadyStaged {
+            run_id,
+            candidate_count,
+            relation_count,
+        }) => ExtractRender {
+            exit_code: 0,
+            stdout: format!(
+                "extraction already staged: run_id={run_id} candidate_count={candidate_count} relation_count={relation_count}"
+            ),
+            stderr: String::new(),
+        },
+        Ok(WorkerOutcome::Noop(WorkerNoop::ModeOff)) => ExtractRender {
+            exit_code: 0,
+            stdout: "extraction disabled".to_owned(),
+            stderr: String::new(),
+        },
+        Ok(WorkerOutcome::Noop(WorkerNoop::WorkerBusy)) => ExtractRender {
+            exit_code: 0,
+            stdout: "extraction already running".to_owned(),
+            stderr: String::new(),
+        },
+        Ok(WorkerOutcome::Noop(WorkerNoop::BelowThreshold)) => ExtractRender {
+            exit_code: 0,
+            stdout: "extraction skipped: insufficient captured turns".to_owned(),
+            stderr: String::new(),
+        },
+        Err(error) => ExtractRender {
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: error.to_string(),
+        },
+    }
+}
+
+/// Run the explicit, opt-in extraction worker. Audit requests are dispatched to
+/// the daemon instead and therefore never parse provider configuration.
+pub fn run_extract_worker(cli: &Cli) -> Result<()> {
+    let namespace = match &cli.command {
+        Some(Commands::Extract { namespace, .. }) => namespace.as_deref(),
+        _ => None,
+    };
+    let cfg = Config::from_env();
+    let rendered = render_extract_outcome(run_worker(&cfg, namespace));
+    if rendered.exit_code == 0 {
+        write_oneshot_stdout(cli, &rendered.stdout);
+        return Ok(());
+    }
+    tracing::error!(error = %rendered.stderr, "extraction worker failed");
+    Err(anyhow::anyhow!(rendered.stderr))
+}
 
 /// Outcome of attempting a synchronous one-shot.
 pub enum Oneshot {
@@ -473,9 +560,9 @@ fn write_migration_summary(
 }
 
 /// Run a daemon-routed one-shot as an MCP client: ensure the shared daemon, issue
-/// one `tools/call`, print the result text, and disconnect. Only the four
-/// `Daemon`-routed commands reach here (the dispatcher sends everything else to
-/// the synchronous path); other variants are unreachable by construction.
+/// one `tools/call`, print the result text, and disconnect. The main dispatcher
+/// routes extraction audits here; other commands reach here only when their
+/// default daemon mode is selected.
 pub async fn run_oneshot_client(cli: &Cli) -> Result<()> {
     use crate::client::call_oneshot;
 
@@ -1069,5 +1156,82 @@ mod tests {
                 .expect("derive backup path")
                 .exists()
         );
+    }
+    #[test]
+    fn extract_has_no_embedded_flag() {
+        use clap::Parser;
+        assert!(
+            Cli::try_parse_from(["anamnesis", "extract", "--embedded"]).is_err(),
+            "extract must never offer an embedded mode"
+        );
+    }
+    #[test]
+    fn audit_request_is_daemon_only_and_carries_no_worker_configuration() {
+        use clap::Parser;
+
+        let cli = Cli::try_parse_from([
+            "anamnesis",
+            "extract",
+            "--audit",
+            "--namespace",
+            "project/resolved-namespace",
+        ])
+        .expect("audit CLI parses without any provider command");
+        assert!(matches!(
+            oneshot_request(&cli),
+            Some(Request::ExtractionAuditList {
+                namespace: Some(namespace),
+                ..
+            }) if namespace == "project/resolved-namespace"
+        ));
+    }
+
+    #[test]
+    fn extract_outcome_rendering_keeps_successes_concise_and_failures_typed() {
+        use crate::extract::worker::{WorkerError, WorkerNoop, WorkerOutcome};
+
+        for outcome in [
+            WorkerOutcome::Staged {
+                run_id: 41,
+                candidate_count: 3,
+                relation_count: 2,
+            },
+            WorkerOutcome::AlreadyStaged {
+                run_id: 42,
+                candidate_count: 5,
+                relation_count: 4,
+            },
+        ] {
+            let rendered = render_extract_outcome(Ok(outcome));
+            assert_eq!(rendered.exit_code, 0);
+            assert!(rendered.stderr.is_empty());
+            assert!(
+                rendered.stdout.contains("run_id="),
+                "successful extraction must identify its run: {}",
+                rendered.stdout
+            );
+            assert!(
+                rendered.stdout.contains("candidate_count=")
+                    && rendered.stdout.contains("relation_count="),
+                "successful extraction must report candidate and relation counts: {}",
+                rendered.stdout
+            );
+        }
+
+        for outcome in [
+            WorkerOutcome::Noop(WorkerNoop::ModeOff),
+            WorkerOutcome::Noop(WorkerNoop::WorkerBusy),
+            WorkerOutcome::Noop(WorkerNoop::BelowThreshold),
+        ] {
+            let rendered = render_extract_outcome(Ok(outcome));
+            assert_eq!(rendered.exit_code, 0);
+            assert!(rendered.stderr.is_empty());
+            assert!(!rendered.stdout.contains('\n'));
+        }
+
+        let failed = render_extract_outcome(Err(WorkerError::Runtime("boom".into())));
+        assert_ne!(failed.exit_code, 0);
+        assert!(failed.stdout.is_empty());
+        assert!(failed.stderr.contains("runtime"));
     }
 }

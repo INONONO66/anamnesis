@@ -49,6 +49,16 @@ fn main() -> Result<()> {
     if let Some(Commands::MigrateEmbeddings { namespace }) = &cli.command {
         return cli::run_migrate_embeddings(namespace.as_deref());
     }
+    // `extract` is deliberately split at the process boundary: audits always use
+    // the daemon and never initialize provider/worker configuration, while a
+    // plain invocation is the explicit local worker entrypoint.
+    if matches!(cli.command, Some(Commands::Extract { .. })) {
+        return if cli::is_extract_audit(&cli) {
+            run_oneshot_client(&cli)
+        } else {
+            cli::run_extract_worker(&cli)
+        };
+    }
     // One-shot CLI commands. The synchronous path handles `prewarm`/`doctor` and
     // the `--embedded` (DB-direct) variants of the daemon-routed commands; the
     // default daemon-routed commands run as async MCP clients.

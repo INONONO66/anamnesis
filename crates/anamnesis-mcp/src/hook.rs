@@ -24,9 +24,11 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 
 use crate::cli::HookEvent;
-use crate::client::call_oneshot;
+use crate::client::{DaemonClient, call_oneshot};
 use crate::config::Config;
-use crate::proto::{RecallEventKind, Request, TurnInput};
+use crate::extract::config::ExtractConfig;
+use crate::extract::kick::{DetachedExtractKickSpawner, ExtractKickSpawner, should_kick};
+use crate::proto::{RecallEventKind, Request, Response, TurnInput};
 use crate::transcript::{ParsedTurn, parse_transcript, resolve_transcript};
 
 /// One-line nudge prepended to a `user-prompt` injection so the agent reinforces
@@ -546,15 +548,46 @@ fn prepare_capture(input: CaptureInput, event: HookEvent) -> Option<PreparedCapt
 /// `hook_timeout_ms` budget, so a slow disk / large session tree can never
 /// block the hook past its deadline.
 async fn run_capture(cfg: &Config, stdin: &str, event: &HookEvent) -> Option<String> {
-    if !cfg.capture_enabled {
-        return None;
-    }
     let input = parse_capture_input(stdin)?;
-    let event = event.clone();
+    let event = match event {
+        HookEvent::Stop => "Stop",
+        HookEvent::PreCompact => "PreCompact",
+        HookEvent::SessionEnd => "SessionEnd",
+        HookEvent::SessionStart | HookEvent::UserPrompt => return None,
+    };
+    run_capture_with_kick(cfg, event, input, &DetachedExtractKickSpawner)
+        .await
+        .ok()
+        .flatten()
+}
+
+async fn run_capture_with_kick(
+    cfg: &Config,
+    event: &str,
+    input: CaptureInput,
+    spawner: &impl ExtractKickSpawner,
+) -> Result<Option<String>> {
+    if !cfg.capture_enabled {
+        return Ok(None);
+    }
+    let event_kind = match event {
+        "Stop" => HookEvent::Stop,
+        "PreCompact" => HookEvent::PreCompact,
+        "SessionEnd" => HookEvent::SessionEnd,
+        _ => return Ok(None),
+    };
     let budget = Duration::from_millis(cfg.hook_timeout_ms);
     let start = Instant::now();
-    let prepared = run_detached_with_timeout(budget, move || prepare_capture(input, event))?;
-    let remaining = remaining_budget(start, budget)?;
+    let prepared =
+        match run_detached_with_timeout(budget, move || prepare_capture(input, event_kind)) {
+            Some(prepared) => prepared,
+            None => return Ok(None),
+        };
+    let remaining = match remaining_budget(start, budget) {
+        Some(remaining) => remaining,
+        None => return Ok(None),
+    };
+    let namespace = prepared.scope.clone();
     let req = Request::Ingest {
         session: prepared.session,
         turns: prepared.turns,
@@ -562,8 +595,24 @@ async fn run_capture(cfg: &Config, stdin: &str, event: &HookEvent) -> Option<Str
         capture: Some(true),
         scope: prepared.scope,
     };
-    let _ = tokio::time::timeout(remaining, call_oneshot(cfg, req)).await;
-    None
+    let capture_succeeded = matches!(
+        tokio::time::timeout(remaining, async {
+            let mut client = DaemonClient::connect(cfg).await?;
+            client.call(&req).await
+        })
+        .await,
+        Ok(Ok(Response::Ok { .. }))
+    );
+    let mode = ExtractConfig::from_env()
+        .map(|config| config.mode)
+        .unwrap_or(crate::extract::config::ExtractMode::Off);
+    if should_kick(mode, event, capture_succeeded)
+        && let Some(namespace) = namespace
+        && let Err(error) = spawner.spawn_extract(&namespace)
+    {
+        tracing::warn!(error = %error, "could not start detached extraction");
+    }
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -1038,6 +1087,7 @@ mod tests {
                     "## MEMORIES\n- mock daemon memory\n## NODES (for `relate`)\n[]"
                 }
                 Request::ExtractionStatus { .. } => r#"{"pending":0}"#,
+                Request::Ingest { .. } => "",
                 other => panic!("unexpected hook request: {other:?}"),
             };
             let response = encode_line(&Response::ok(text)).expect("mock encodes response");
@@ -1048,6 +1098,27 @@ mod tests {
             requests.push(request);
         }
         requests
+    }
+    async fn serve_hook_error(listener: UnixListener) -> Request {
+        let (stream, _) = listener
+            .accept()
+            .await
+            .expect("hook connects to mock daemon");
+        let (reader, mut writer) = stream.into_split();
+        let mut lines = BufReader::new(reader).lines();
+        let line = lines
+            .next_line()
+            .await
+            .expect("read mock request")
+            .expect("hook sends a request");
+        let request = decode_line::<Request>(&line).expect("mock decodes request");
+        let response =
+            encode_line(&Response::internal("capture rejected")).expect("mock encodes response");
+        writer
+            .write_all(response.as_bytes())
+            .await
+            .expect("mock writes response");
+        request
     }
 
     #[tokio::test]
@@ -1165,6 +1236,208 @@ mod tests {
         assert!(
             out.is_none(),
             "malformed stdin ⇒ inject nothing, no daemon call"
+        );
+    }
+    static EXTRACT_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    struct ExtractEnvGuard {
+        mode: Option<std::ffi::OsString>,
+        command: Option<std::ffi::OsString>,
+    }
+
+    impl ExtractEnvGuard {
+        fn shadow() -> Self {
+            let guard = Self {
+                mode: std::env::var_os("ANAMNESIS_EXTRACT_MODE"),
+                command: std::env::var_os("ANAMNESIS_EXTRACT_CMD"),
+            };
+            unsafe {
+                std::env::set_var("ANAMNESIS_EXTRACT_MODE", "shadow");
+                std::env::set_var("ANAMNESIS_EXTRACT_CMD", "/bin/true");
+            }
+            guard
+        }
+    }
+
+    impl Drop for ExtractEnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.mode {
+                    Some(value) => std::env::set_var("ANAMNESIS_EXTRACT_MODE", value),
+                    None => std::env::remove_var("ANAMNESIS_EXTRACT_MODE"),
+                }
+                match &self.command {
+                    Some(value) => std::env::set_var("ANAMNESIS_EXTRACT_CMD", value),
+                    None => std::env::remove_var("ANAMNESIS_EXTRACT_CMD"),
+                }
+            }
+        }
+    }
+    #[derive(Default)]
+    struct SpawnSpy(std::sync::Mutex<Vec<String>>);
+
+    impl crate::extract::kick::ExtractKickSpawner for SpawnSpy {
+        fn spawn_extract(&self, namespace: &str) -> std::io::Result<()> {
+            self.0
+                .lock()
+                .expect("record kick")
+                .push(namespace.to_string());
+            Ok(())
+        }
+    }
+
+    fn capture_input(path: &std::path::Path) -> CaptureInput {
+        CaptureInput {
+            session_id: Some("capture-session".into()),
+            transcript_path: Some(path.to_string_lossy().into_owned()),
+            cwd: Some("/tmp/Resolved Namespace".into()),
+        }
+    }
+
+    #[tokio::test]
+    async fn capture_kicks_only_successful_shadow_precompact_and_session_end() {
+        let temp = tempfile::tempdir().expect("temporary transcript directory");
+        let transcript = temp.path().join("session.jsonl");
+        std::fs::write(
+            &transcript,
+            r#"{"type":"user","message":{"content":"remember this"}}
+{"type":"assistant","message":{"content":"acknowledged"}}"#,
+        )
+        .expect("write capture transcript");
+        let cfg = live_hook_cfg(&temp);
+        let _env_lock = EXTRACT_ENV_LOCK.lock().await;
+        let _extract_env = ExtractEnvGuard::shadow();
+        let socket =
+            crate::daemon::socket_path_for_db(&cfg.default_db).expect("derive mock daemon socket");
+        let listener = UnixListener::bind(&socket).expect("bind mock daemon socket");
+        let daemon = tokio::spawn(serve_hook_requests(listener, 2));
+        let spy = SpawnSpy::default();
+
+        for event in ["PreCompact", "SessionEnd"] {
+            run_capture_with_kick(&cfg, event, capture_input(&transcript), &spy)
+                .await
+                .expect("successful shadow capture remains fail-open");
+        }
+        let requests = daemon.await.expect("mock daemon completes");
+        assert!(
+            requests
+                .iter()
+                .all(|request| matches!(request, Request::Ingest { .. })),
+            "capture must send ingest requests before kicking extraction"
+        );
+        assert_eq!(
+            spy.0.lock().expect("read kicks").as_slice(),
+            ["project/resolved-namespace", "project/resolved-namespace"]
+        );
+
+        run_capture_with_kick(&cfg, "Stop", capture_input(&transcript), &spy)
+            .await
+            .expect("Stop capture remains silent");
+        run_capture_with_kick(
+            &cfg,
+            "PreCompact",
+            capture_input(&temp.path().join("missing.jsonl")),
+            &spy,
+        )
+        .await
+        .expect("failed capture remains fail-open");
+        assert_eq!(spy.0.lock().expect("read kicks").len(), 2);
+    }
+    #[tokio::test]
+    async fn capture_daemon_error_does_not_kick() {
+        let temp = tempfile::tempdir().expect("temporary hook directory");
+        let transcript = temp.path().join("session.jsonl");
+        std::fs::write(
+            &transcript,
+            r#"{"type":"user","message":{"content":"remember this"}}
+{"type":"assistant","message":{"content":"acknowledged"}}"#,
+        )
+        .expect("write capture transcript");
+        let cfg = live_hook_cfg(&temp);
+        let _env_lock = EXTRACT_ENV_LOCK.lock().await;
+        let _extract_env = ExtractEnvGuard::shadow();
+        let socket =
+            crate::daemon::socket_path_for_db(&cfg.default_db).expect("derive mock daemon socket");
+        let listener = UnixListener::bind(&socket).expect("bind mock daemon socket");
+        let daemon = tokio::spawn(serve_hook_error(listener));
+        let spy = SpawnSpy::default();
+
+        let result =
+            run_capture_with_kick(&cfg, "PreCompact", capture_input(&transcript), &spy).await;
+        let request = daemon.await.expect("mock daemon completes");
+        assert!(
+            matches!(request, Request::Ingest { .. }),
+            "capture attempts ingestion before processing the daemon error"
+        );
+        assert!(matches!(result, Ok(None)), "capture remains fail-open");
+        assert!(
+            spy.0.lock().expect("read kicks").is_empty(),
+            "daemon error must not start detached extraction"
+        );
+    }
+
+    #[test]
+    fn kick_policy_bypasses_off_auto_and_invalid_modes() {
+        use crate::extract::config::ExtractMode;
+        use crate::extract::kick::should_kick;
+
+        for mode in [
+            ExtractMode::Off,
+            ExtractMode::parse(Some("auto")).mode,
+            ExtractMode::parse(Some("invalid")).mode,
+        ] {
+            for event in ["Stop", "PreCompact", "SessionEnd"] {
+                assert!(
+                    !should_kick(mode, event, true),
+                    "disabled mode must never kick for {event}"
+                );
+            }
+        }
+        assert!(!should_kick(ExtractMode::Shadow, "Stop", true));
+        assert!(!should_kick(ExtractMode::Shadow, "PreCompact", false));
+        assert!(!should_kick(ExtractMode::Shadow, "SessionEnd", false));
+    }
+    struct FailingSpawn;
+
+    impl crate::extract::kick::ExtractKickSpawner for FailingSpawn {
+        fn spawn_extract(&self, _: &str) -> std::io::Result<()> {
+            Err(std::io::Error::other("spawn denied"))
+        }
+    }
+
+    #[tokio::test]
+    async fn kick_spawn_failure_preserves_capture_fail_open_result() {
+        let temp = tempfile::tempdir().expect("temporary hook directory");
+        let transcript = temp.path().join("session.jsonl");
+        std::fs::write(
+            &transcript,
+            r#"{"type":"user","message":{"content":"remember this"}}
+{"type":"assistant","message":{"content":"acknowledged"}}"#,
+        )
+        .expect("write capture transcript");
+        let cfg = live_hook_cfg(&temp);
+        let _env_lock = EXTRACT_ENV_LOCK.lock().await;
+        let _extract_env = ExtractEnvGuard::shadow();
+        let socket =
+            crate::daemon::socket_path_for_db(&cfg.default_db).expect("derive mock daemon socket");
+        let listener = UnixListener::bind(&socket).expect("bind mock daemon socket");
+        let daemon = tokio::spawn(serve_hook_requests(listener, 1));
+
+        let result = run_capture_with_kick(
+            &cfg,
+            "PreCompact",
+            capture_input(&transcript),
+            &FailingSpawn,
+        )
+        .await;
+        let requests = daemon.await.expect("mock daemon completes");
+        assert!(
+            matches!(requests.as_slice(), [Request::Ingest { .. }]),
+            "spawn failure test requires a successful capture"
+        );
+        assert!(
+            matches!(result, Ok(None)),
+            "a detached-kick failure must not alter hook output or exit behavior"
         );
     }
 }

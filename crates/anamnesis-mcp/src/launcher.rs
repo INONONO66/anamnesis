@@ -90,28 +90,37 @@ async fn connect_with_retry(path: &Path) -> io::Result<UnixStream> {
 /// the child, so we spawn and immediately drop the handle. Dropping a
 /// `std::process::Child` neither kills nor waits — the orphan is reparented to
 /// PID 1 (init/launchd), which reaps it, so there is no zombie.
-///
-/// Detachment recipe:
-/// - `setsid` in a `pre_exec` hook → new session with no controlling terminal,
-///   so the daemon is fully decoupled from the launcher's TTY and immune to
-///   `SIGINT`/`SIGHUP` delivered to it.
-/// - All three stdio fds → `/dev/null` so the daemon never holds the MCP host's
-///   pipe open or writes into a dead pipe after the launcher exits.
-#[cfg(unix)]
 fn spawn_daemon_detached(exe: &Path, db: &Path) -> io::Result<()> {
-    use std::os::unix::process::CommandExt;
-
     // Pin the daemon to the launcher's resolved, ABSOLUTE db path so both sides
     // derive the SAME socket — independent of the daemon's inherited CWD/env
     // (a detached setsid child, or a Claude Desktop host with a different CWD,
     // must not re-resolve a project `.anamnesis/` to a different socket).
     let db = std::path::absolute(db).unwrap_or_else(|_| db.to_path_buf());
+    spawn_detached(exe, &["daemon".to_owned()], Some(&db))
+}
+
+/// Spawn the current executable with detached null stdio.
+///
+/// `argv` excludes argv[0]. The child is not waited on.
+pub(crate) fn spawn_detached_current_exe(argv: &[String]) -> io::Result<()> {
+    let exe = std::env::current_exe()?;
+    spawn_detached(&exe, argv, None)
+}
+
+/// Spawn an executable with detached null stdio. `daemon_db`, when present,
+/// preserves the daemon launcher's resolved database environment.
+#[cfg(unix)]
+fn spawn_detached(exe: &Path, argv: &[String], daemon_db: Option<&Path>) -> io::Result<()> {
+    use std::os::unix::process::CommandExt;
+
     let mut cmd = StdCommand::new(exe);
-    cmd.arg("daemon")
-        .env("ANAMNESIS_DB", &db)
+    cmd.args(argv)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    if let Some(db) = daemon_db {
+        cmd.env("ANAMNESIS_DB", db);
+    }
 
     // SAFETY: the closure runs in the child after `fork()` and before `exec()`,
     // so it must be async-signal-safe. `setsid()` qualifies; it allocates
@@ -134,16 +143,16 @@ fn spawn_daemon_detached(exe: &Path, db: &Path) -> io::Result<()> {
 /// Non-unix fallback: spawn detached with null stdio in a new process group.
 /// (Anamnesis is unix-only in practice; this keeps the code portable.)
 #[cfg(not(unix))]
-fn spawn_daemon_detached(exe: &Path, db: &Path) -> io::Result<()> {
-    let db = std::path::absolute(db).unwrap_or_else(|_| db.to_path_buf());
-    StdCommand::new(exe)
-        .arg("daemon")
-        .env("ANAMNESIS_DB", &db)
+fn spawn_detached(exe: &Path, argv: &[String], daemon_db: Option<&Path>) -> io::Result<()> {
+    let mut cmd = StdCommand::new(exe);
+    cmd.args(argv)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map(|_child| ())
+        .stderr(Stdio::null());
+    if let Some(db) = daemon_db {
+        cmd.env("ANAMNESIS_DB", db);
+    }
+    cmd.spawn().map(|_child| ())
 }
 
 #[cfg(test)]
@@ -221,5 +230,15 @@ mod tests {
         drop(s2);
         assert!(!loop_handle.is_finished(), "the single daemon is still up");
         loop_handle.abort();
+    }
+    #[test]
+    fn detached_current_executable_helper_accepts_extract_argv() {
+        let argv = vec![
+            "extract".to_string(),
+            "--namespace".to_string(),
+            "project/resolved-namespace".to_string(),
+        ];
+        let helper: fn(&[String]) -> io::Result<()> = spawn_detached_current_exe;
+        let _ = (helper, argv);
     }
 }

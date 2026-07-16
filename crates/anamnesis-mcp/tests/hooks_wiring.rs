@@ -21,6 +21,30 @@ fn cc_hooks_have_all_capture_events() {
         assert!(hooks.contains_key(e), "CC hooks.json missing {e}");
     }
 }
+#[test]
+fn cc_hooks_dispatch_the_expected_event_arguments() {
+    let v = load("plugin/hooks/hooks.json");
+    let hooks = v["hooks"].as_object().unwrap();
+
+    for (event, argument) in [
+        ("SessionStart", "session-start"),
+        ("UserPromptSubmit", "user-prompt"),
+        ("Stop", "stop"),
+        ("PreCompact", "pre-compact"),
+        ("SessionEnd", "session-end"),
+    ] {
+        let command = &hooks[event][0]["hooks"][0];
+        assert_eq!(
+            command["command"], "${CLAUDE_PLUGIN_ROOT}/hooks/anamnesis-hook.sh",
+            "{event} must use the current hook executable"
+        );
+        assert_eq!(
+            command["args"],
+            serde_json::json!([argument]),
+            "{event} must pass its exact event argument"
+        );
+    }
+}
 
 #[test]
 fn codex_hooks_have_capture_but_no_session_end() {
