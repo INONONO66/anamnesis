@@ -123,6 +123,40 @@ fn v0_connection() -> rusqlite::Connection {
         .expect("create v0 policy schema");
     connection
 }
+fn v1_connection() -> rusqlite::Connection {
+    let connection = rusqlite::Connection::open_in_memory().expect("open v1 policy database");
+    connection
+        .execute_batch(
+            "
+            CREATE TABLE mcp_schema_version (
+                id INTEGER PRIMARY KEY CHECK(id = 1),
+                version INTEGER NOT NULL
+            );
+            INSERT INTO mcp_schema_version (id, version) VALUES (1, 1);
+            CREATE TABLE recall_events (
+                id INTEGER PRIMARY KEY,
+                at_ms INTEGER NOT NULL,
+                namespace TEXT NOT NULL,
+                event_kind TEXT NOT NULL,
+                query_chars INTEGER NOT NULL,
+                scope TEXT,
+                knowledge_only INTEGER NOT NULL CHECK(knowledge_only IN (0, 1)),
+                has_hits INTEGER NOT NULL CHECK(has_hits IN (0, 1)),
+                readout_pass INTEGER NOT NULL CHECK(readout_pass IN (0, 1)),
+                cosine_pass INTEGER NOT NULL CHECK(cosine_pass IN (0, 1)),
+                eligible INTEGER NOT NULL CHECK(eligible IN (0, 1)),
+                top_score REAL,
+                top_cosine REAL,
+                gate_threshold REAL,
+                cosine_gate REAL,
+                result_node_ids TEXT NOT NULL,
+                auto_extract_node_count INTEGER NOT NULL
+            );
+            ",
+        )
+        .expect("create v1 policy schema");
+    connection
+}
 
 fn registry_with_policy_version(version: i64) -> (MemoryRegistry, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("create policy registry directory");
@@ -420,8 +454,30 @@ fn policy_schema_fresh_and_v0_migration_converge() {
         fresh.schema_fingerprint().expect("fresh schema"),
         migrated.schema_fingerprint().expect("migrated schema")
     );
-    assert_eq!(fresh.schema_version().expect("fresh version"), 1);
-    assert_eq!(migrated.schema_version().expect("migrated version"), 1);
+    assert_eq!(fresh.schema_version().expect("fresh version"), 2);
+    assert_eq!(migrated.schema_version().expect("migrated version"), 2);
+}
+#[test]
+fn policy_schema_v1_to_v2_matches_fresh_v2() {
+    let fresh = PolicyStore::in_memory().expect("fresh v2");
+    let migrated = PolicyStore::from_test_connection(v1_connection()).expect("migrated v2");
+
+    assert_eq!(fresh.schema_version().expect("fresh version"), 2);
+    assert_eq!(migrated.schema_version().expect("migrated version"), 2);
+    assert_eq!(
+        fresh.schema_fingerprint().expect("fresh schema"),
+        migrated.schema_fingerprint().expect("migrated schema")
+    );
+    assert!(
+        !fresh
+            .has_table("extract_source_states")
+            .expect("fresh table check")
+    );
+    assert!(
+        !migrated
+            .has_table("extract_source_states")
+            .expect("migrated table check")
+    );
 }
 #[test]
 fn ready_policy_store_persists_minimized_event_and_rejects_out_of_range_values() {
@@ -508,7 +564,7 @@ fn repeated_phase_one_resolution_reuses_namespace_handles() {
 
 #[test]
 fn future_policy_schema_disables_only_policy_features() {
-    let (mut reg, _dir) = registry_with_policy_version(2);
+    let (mut reg, _dir) = registry_with_policy_version(3);
 
     reg.remember("core recall remains available", None)
         .expect("remember");

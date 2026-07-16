@@ -5,6 +5,7 @@ mod config;
 mod daemon;
 mod dashboard;
 mod dispatch;
+mod extract;
 mod hook;
 mod launcher;
 mod memory;

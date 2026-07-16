@@ -15,6 +15,7 @@ use crate::proto::RecallEventKind;
 use anamnesis::Error;
 use rusqlite::{Connection, Error as SqliteError};
 
+mod extraction;
 mod recall;
 mod schema;
 
@@ -69,7 +70,7 @@ pub(crate) struct SweepPoint {
     pub attempts: u64,
 }
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 #[cfg(test)]
 thread_local! {
@@ -227,6 +228,12 @@ impl PolicyStore {
             PolicyStoreError::sqlite("configure policy store busy timeout", error)
                 .into_engine_error()
         })?;
+        connection
+            .execute_batch("PRAGMA foreign_keys = ON;")
+            .map_err(|error| {
+                PolicyStoreError::sqlite("enable policy store foreign keys", error)
+                    .into_engine_error()
+            })?;
         schema::initialize(&mut connection).map_err(PolicyStoreError::into_engine_error)?;
         #[cfg(test)]
         observe_operation();
@@ -273,6 +280,22 @@ impl PolicyStore {
     #[cfg(test)]
     pub(crate) fn schema_fingerprint(&self) -> Result<String, Error> {
         schema::schema_fingerprint(&self.connection).map_err(PolicyStoreError::into_engine_error)
+    }
+    #[cfg(test)]
+    pub(crate) fn has_table(&self, table_name: &str) -> Result<bool, Error> {
+        self.connection
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM sqlite_master
+                    WHERE type = 'table' AND name = ?1
+                )",
+                [table_name],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|exists| exists != 0)
+            .map_err(|error| {
+                PolicyStoreError::sqlite("check policy schema table", error).into_engine_error()
+            })
     }
     #[cfg(test)]
     pub(crate) fn recall_event_count_for_test(&self) -> Result<u64, Error> {

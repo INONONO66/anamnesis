@@ -63,7 +63,7 @@ fn stub_registry_with_future_policy_schema() -> (Arc<Mutex<MemoryRegistry>>, tem
                 id INTEGER PRIMARY KEY CHECK(id = 1),
                 version INTEGER NOT NULL
             );
-            INSERT INTO mcp_schema_version (id, version) VALUES (1, 2);
+            INSERT INTO mcp_schema_version (id, version) VALUES (1, 3);
             CREATE TABLE recall_events (id INTEGER PRIMARY KEY);
             ",
         )
@@ -905,7 +905,7 @@ fn recall_policy_migration_failure_is_fail_open_and_disables_telemetry_without_r
         }
     };
     assert!(
-        disabled_reason.contains("initialize policy schema version")
+        disabled_reason.contains("update policy schema version")
             && disabled_reason.contains("sqlite code:")
             && disabled_reason.contains("sqlite category:"),
         "policy migration failure must retain actionable SQLite evidence: {disabled_reason}"
