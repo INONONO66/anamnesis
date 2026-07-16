@@ -600,9 +600,15 @@ async fn run_capture_with_kick(
         .await,
         Ok(Ok(Response::Ok { .. }))
     );
-    let mode = ExtractConfig::from_env()
-        .map(|config| config.mode)
-        .unwrap_or(crate::extract::config::ExtractMode::Off);
+    let mode = match ExtractConfig::from_env() {
+        Ok(extract_config) => {
+            if let Some(warning) = extract_config.mode_warning.as_deref() {
+                tracing::warn!(warning = %warning, "extraction is disabled");
+            }
+            extract_config.mode
+        }
+        Err(_) => crate::extract::config::ExtractMode::Off,
+    };
     if should_kick(mode, event, capture_succeeded)
         && let Err(error) = spawner.spawn_extract(&namespace)
     {
@@ -1373,6 +1379,45 @@ mod tests {
         assert!(
             spy.0.lock().expect("read kicks").is_empty(),
             "daemon error must not start detached extraction"
+        );
+    }
+    #[tokio::test]
+    async fn capture_invalid_mode_never_kicks() {
+        let temp = tempfile::tempdir().expect("temporary hook directory");
+        let transcript = temp.path().join("session.jsonl");
+        std::fs::write(
+            &transcript,
+            r#"{"type":"user","message":{"content":"remember this"}}
+{"type":"assistant","message":{"content":"acknowledged"}}"#,
+        )
+        .expect("write capture transcript");
+        let cfg = live_hook_cfg(&temp);
+        let _env_lock = EXTRACT_ENV_LOCK.lock().await;
+        let _extract_env = ExtractEnvGuard::shadow();
+        // SAFETY: `EXTRACT_ENV_LOCK` serializes test environment mutation.
+        unsafe {
+            std::env::set_var("ANAMNESIS_EXTRACT_MODE", "true");
+        }
+        let socket =
+            crate::daemon::socket_path_for_db(&cfg.default_db).expect("derive mock daemon socket");
+        let listener = UnixListener::bind(&socket).expect("bind mock daemon socket");
+        let daemon = tokio::spawn(serve_hook_requests(listener, 1));
+        let spy = SpawnSpy::default();
+
+        let result =
+            run_capture_with_kick(&cfg, "PreCompact", capture_input(&transcript), &spy).await;
+
+        assert!(matches!(result, Ok(None)), "capture remains fail-open");
+        assert!(
+            matches!(
+                daemon.await.expect("mock daemon completes").as_slice(),
+                [Request::Ingest { .. }]
+            ),
+            "capture still reaches the daemon"
+        );
+        assert!(
+            spy.0.lock().expect("read kicks").is_empty(),
+            "invalid mode must not start detached extraction"
         );
     }
 

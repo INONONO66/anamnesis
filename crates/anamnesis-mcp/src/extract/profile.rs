@@ -117,7 +117,7 @@ mod tests {
     #[test]
     fn profile_components_have_a_fixed_compact_json_and_sha256_profile_id() {
         let components = test_components();
-        let json = r#"{"provider_id":"claude","model_id":"provider-default","prompt_version":1,"schema_version":1,"normalization_version":1,"relation_policy_version":1,"command_hash":"35f9a42f2b95d4001f4e33222e0c37b5e30b2f6af8c7aa1ed84d1cb2a7ce2be4"}"#;
+        let json = r#"{"provider_id":"claude","model_id":"provider-default","prompt_version":2,"schema_version":1,"normalization_version":1,"relation_policy_version":1,"command_hash":"35f9a42f2b95d4001f4e33222e0c37b5e30b2f6af8c7aa1ed84d1cb2a7ce2be4"}"#;
         assert_eq!(
             serde_json::to_string(&components).expect("components JSON"),
             json

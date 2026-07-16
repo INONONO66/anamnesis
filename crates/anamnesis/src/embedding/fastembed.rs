@@ -24,13 +24,11 @@ use crate::error::Error;
 ///
 /// # Network I/O
 ///
-/// Construction performs only local model metadata lookup. Model weights are
-/// initialized on the first embedding call and may download (~100-500 MB
-/// depending on the model). Ensure network access is available, or
-/// pre-populate the cache directory.
+/// The constructor downloads model weights on first use (~100-500 MB depending
+/// on the model). Ensure network access is available, or pre-populate the
+/// cache directory.
 pub struct FastEmbedProvider {
-    model: Mutex<Option<TextEmbedding>>,
-    init_options: InitOptions,
+    model: Mutex<TextEmbedding>,
     dim: usize,
     name: String,
 }
@@ -49,18 +47,6 @@ fn e5_prefix(model_code: &str, kind: PrefixKind, text: &str) -> String {
         }
     } else {
         text.to_string()
-    }
-}
-fn initialize_model<T, E>(
-    slot: &mut Option<T>,
-    initialize: impl FnOnce() -> Result<T, E>,
-) -> Result<&mut T, E> {
-    match slot {
-        Some(model) => Ok(model),
-        None => {
-            let model = initialize()?;
-            Ok(slot.insert(model))
-        }
     }
 }
 
@@ -88,7 +74,8 @@ impl FastEmbedProvider {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if model metadata lookup fails.
+    /// Returns [`Error::InvalidInput`] if model initialization fails
+    /// (e.g. network error, invalid cache).
     pub fn new() -> Result<Self, Error> {
         Self::with_model(EmbeddingModel::BGEBaseENV15)
     }
@@ -97,15 +84,18 @@ impl FastEmbedProvider {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if model metadata lookup fails.
+    /// Returns [`Error::InvalidInput`] if model info lookup or
+    /// initialization fails.
     pub fn with_model(model: EmbeddingModel) -> Result<Self, Error> {
         let info = TextEmbedding::get_model_info(&model)
             .map_err(|e| Error::InvalidInput(format!("model info lookup failed: {e}")))?;
         let dim = info.dim;
         let name = info.model_code.clone();
+        let embedding = TextEmbedding::try_new(InitOptions::new(model))
+            .map_err(|e| Error::InvalidInput(format!("model init failed: {e}")))?;
+
         Ok(Self {
-            model: Mutex::new(None),
-            init_options: InitOptions::new(model),
+            model: Mutex::new(embedding),
             dim,
             name,
         })
@@ -114,16 +104,12 @@ impl FastEmbedProvider {
 
 impl EmbeddingProvider for FastEmbedProvider {
     fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, Error> {
-        let mut model = self
+        let model = self
             .model
             .lock()
             .map_err(|e| Error::InvalidInput(format!("mutex poisoned: {e}")))?;
 
         let owned: Vec<String> = texts.iter().map(|s| (*s).to_string()).collect();
-        let model = initialize_model(&mut model, || {
-            TextEmbedding::try_new(self.init_options.clone())
-                .map_err(|e| Error::InvalidInput(format!("model init failed: {e}")))
-        })?;
         model
             .embed(owned, None)
             .map_err(|e| Error::InvalidInput(format!("embedding failed: {e}")))
@@ -168,24 +154,5 @@ mod tests {
             e5_prefix("BAAI/bge-base-en-v1.5", PrefixKind::Query, "hi"),
             "hi"
         );
-    }
-    #[test]
-    fn initialization_error_leaves_slot_empty_and_can_retry() {
-        let mut slot = None;
-
-        assert!(initialize_model(&mut slot, || Err::<usize, _>("unavailable")).is_err());
-        assert!(slot.is_none());
-
-        let model = initialize_model(&mut slot, || Ok::<usize, &str>(768));
-        assert_eq!(model.map(|model| *model), Ok(768));
-    }
-    #[test]
-    fn with_model_defers_model_initialization() {
-        let provider = FastEmbedProvider::with_model(EmbeddingModel::BGEBaseENV15)
-            .expect("model info lookup failed");
-
-        assert_eq!(provider.dimensions(), 768);
-        assert_eq!(provider.model_name(), "Xenova/bge-base-en-v1.5");
-        assert!(provider.model.lock().unwrap().is_none());
     }
 }

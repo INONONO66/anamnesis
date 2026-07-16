@@ -1,15 +1,11 @@
-//! R2 shadow extraction E2E tests. The graph is seeded through the public core
-//! storage API so the real daemon and worker exercise durable capture-shaped data
-//! without initializing FastEmbed or requiring a model download.
-
-use anamnesis::engine::SourceKind;
-use anamnesis::graph::node::{Node, Origin};
-use anamnesis::graph::types::PeerId;
-use anamnesis::graph::{Edge, KnowledgeType, MemoryTier, ScopePath, Timestamp};
+//! R2 shadow extraction E2E tests. Capture turns are ingested through the real
+//! daemon protocol and a debug-only stub embedding seam, so no model download
+//! is needed.
+use anamnesis::graph::Edge;
+use anamnesis::graph::node::Node;
 use anamnesis::storage::{SqliteStorage, StorageAdapter};
 use rusqlite::Connection;
 use serde_json::{Value, json};
-use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
@@ -47,7 +43,6 @@ impl Fixture {
     fn new() -> Self {
         let temp = tempfile::tempdir().expect("tempdir");
         let db = temp.path().join("memory.db");
-        seed_captured_turns(&db);
         let script = temp.path().join("fake-extractor.sh");
         let calls = temp.path().join("provider.calls");
         let fallback_calls = temp.path().join("default-provider.calls");
@@ -68,7 +63,8 @@ impl Fixture {
         let daemon = Command::new(env!("CARGO_BIN_EXE_anamnesis"))
             .arg("daemon")
             .env("ANAMNESIS_DB", &db)
-            .env("ANAMNESIS_DAEMON_GRACE_SECS", "60")
+            .env("ANAMNESIS_TEST_STUB_EMBEDDINGS", "1")
+            .env("ANAMNESIS_DAEMON_GRACE_SECS", "180")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -95,6 +91,7 @@ impl Fixture {
             fixture.daemon.try_wait().expect("poll daemon").is_none(),
             "daemon exited during readiness"
         );
+        fixture.seed_captured_turns();
         fixture
     }
 
@@ -120,6 +117,19 @@ impl Fixture {
             .env("EXTRACT_CALLS", &self.calls)
             .env("EXTRACT_FALLBACK_CALLS", &self.fallback_calls)
             .env("PATH", &self.provider_path);
+        if extract_mode == Some("shadow") {
+            let source_ids = self.scan_source_ids();
+            command.env(
+                "EXTRACT_SOURCE_IDS",
+                source_ids
+                    .iter()
+                    .map(u64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(","),
+            );
+        } else {
+            command.env_remove("EXTRACT_SOURCE_IDS");
+        }
         match extract_mode {
             Some(value) => command.env("ANAMNESIS_EXTRACT_MODE", value),
             None => command.env_remove("ANAMNESIS_EXTRACT_MODE"),
@@ -202,6 +212,40 @@ impl Fixture {
             "manual PullPending must see seeded captures"
         );
     }
+    fn seed_captured_turns(&self) {
+        let turns = (0..10)
+            .map(|index| {
+                json!({
+                    "speaker": "user",
+                    "text": format!(
+                        "turn {index}: deterministic shadow extraction source {}",
+                        if index == 0 { STAGE1_SOURCE_MARKER } else { "" }
+                    ),
+                    "at_ms": 1_000 + index
+                })
+            })
+            .collect::<Vec<_>>();
+        let response = daemon_request(
+            &self.db,
+            json!({
+                "op": "ingest",
+                "session": SESSION,
+                "turns": turns,
+                "capture": true,
+                "scope": SCOPE
+            }),
+        );
+        assert_eq!(
+            response["status"].as_str(),
+            Some("ok"),
+            "capture ingestion failed: {response}"
+        );
+        assert_eq!(
+            self.scan_source_ids().len(),
+            10,
+            "capture ingestion must create ten eligible episodic sources"
+        );
+    }
 }
 
 #[test]
@@ -209,7 +253,7 @@ fn shadow_extract_stages_once_without_mutating_graph_or_reinvoking_provider() {
     let fixture = Fixture::new();
     let before = fixture.graph_snapshot();
     assert_graph_unchanged(&before, &fixture.graph_snapshot(), "initial graph");
-    assert_eq!(fixture.scan_source_ids(), (0..10).collect::<Vec<_>>());
+    assert_eq!(fixture.scan_source_ids().len(), 10);
 
     let first = fixture.worker("valid");
     assert!(
@@ -250,8 +294,8 @@ fn shadow_extract_stages_once_without_mutating_graph_or_reinvoking_provider() {
         String::from_utf8_lossy(&stats.stderr)
     );
     let stats_stdout = String::from_utf8_lossy(&stats.stdout);
-    assert!(stats_stdout.contains("nodes:                10"));
-    assert!(stats_stdout.contains("edges:                0"));
+    assert!(stats_stdout.contains(&format!("nodes:                {}", before.0.len())));
+    assert!(stats_stdout.contains(&format!("edges:                {}", before.1.len())));
     assert_graph_unchanged(&before, &fixture.graph_snapshot(), "stats");
 
     let second = fixture.worker("valid");
@@ -480,8 +524,9 @@ fn assert_graph_unchanged(before: &GraphSnapshot, after: &GraphSnapshot, operati
         after
             .0
             .iter()
-            .all(|node| node.metadata.get("anamnesis:extracted") == Some(&"false".to_owned())),
-        "{operation} must retain anamnesis:extracted=false"
+            .filter(|node| node.metadata.contains_key("anamnesis:turn_key"))
+            .all(|node| { node.metadata.get("anamnesis:extracted") == Some(&"false".to_owned()) }),
+        "{operation} must retain anamnesis:extracted=false for every captured turn"
     );
 }
 
@@ -495,6 +540,9 @@ fn assert_snapshot_unchanged(before: &GraphSnapshot, after: &GraphSnapshot, oper
 fn assert_manual_pull_only_updates_extraction_state(before: &GraphSnapshot, after: &GraphSnapshot) {
     let mut expected = before.clone();
     for (expected_node, actual_node) in expected.0.iter_mut().zip(&after.0) {
+        if !actual_node.metadata.contains_key("anamnesis:turn_key") {
+            continue;
+        }
         let state = actual_node
             .metadata
             .get("anamnesis:extracted")
@@ -612,53 +660,8 @@ fn latest_error_kind(db: &Path) -> Option<String> {
         .expect("read latest extraction error kind")
 }
 
-fn seed_captured_turns(db: &Path) {
-    let mut storage = SqliteStorage::open(db).expect("create fixture database");
-    for index in 0..10 {
-        let id = storage.next_node_id();
-        let mut metadata = HashMap::new();
-        metadata.insert("capture".to_owned(), "true".to_owned());
-        metadata.insert("anamnesis:extracted".to_owned(), "false".to_owned());
-        metadata.insert("anamnesis:turn_key".to_owned(), format!("turn-{index:02}"));
-        storage
-            .set_node(Node {
-                id,
-                node_type: KnowledgeType::Episodic,
-                name: format!("captured turn {index}"),
-                summary: None,
-                content: format!(
-                    "turn {index}: deterministic shadow extraction source {}",
-                    if index == 0 { STAGE1_SOURCE_MARKER } else { "" }
-                ),
-                embedding: None,
-                created_at: Timestamp(1_000 + index),
-                updated_at: Timestamp(1_000 + index),
-                accessed_at: Timestamp(1_000 + index),
-                valid_from: None,
-                valid_until: None,
-                salience: 0.5,
-                retained_action: 0.0,
-                evidence_prior: 0.0,
-                access_count: 0,
-                access_history: VecDeque::new(),
-                tier: MemoryTier::Auto,
-                origin: Origin {
-                    peer_id: PeerId(0),
-                    source_kind: SourceKind::AgentObservation,
-                    session_id: SESSION.to_owned(),
-                    scope: ScopePath::new(SCOPE).expect("fixture scope"),
-                    confidence: 1.0,
-                },
-                entity_tags: vec![],
-                metadata,
-            })
-            .expect("seed captured source");
-    }
-    storage.flush().expect("flush seeded graph");
-}
-
 fn profile() -> Value {
-    json!({"provider_id":"shadow-e2e","model_id":"provider-default","prompt_version":1,"schema_version":1,"normalization_version":1,"relation_policy_version":1,"command_hash":"shadow-e2e"})
+    json!({"provider_id":"shadow-e2e","model_id":"provider-default","prompt_version":2,"schema_version":1,"normalization_version":1,"relation_policy_version":1,"command_hash":"shadow-e2e"})
 }
 
 fn daemon_request(db: &Path, request: Value) -> Value {
@@ -704,8 +707,14 @@ set -eu
 printf '%s\n' call >> "$EXTRACT_CALLS"
 case "$EXTRACT_MODE" in
   valid)
+    : "${EXTRACT_SOURCE_IDS:?}"
+    OLDIFS=$IFS
+    IFS=,
+    set -- $EXTRACT_SOURCE_IDS
+    IFS=$OLDIFS
+    [ "$#" -ge 2 ]
     cat >/dev/null
-    printf '%s\n' '{"items":[{"item_local_id":"one","content":"first staged candidate","kind":"decision","confidence":0.9,"source_node_ids":[0]},{"item_local_id":"two","content":"second staged candidate","kind":"lesson","confidence":0.8,"source_node_ids":[1]}],"relations":[{"from_item_local_id":"one","to_item_local_id":"two","relation_type":"supports"}]}'
+    printf '{"items":[{"item_local_id":"one","content":"first staged candidate","kind":"decision","confidence":0.9,"source_node_ids":[%s]},{"item_local_id":"two","content":"second staged candidate","kind":"lesson","confidence":0.8,"source_node_ids":[%s]}],"relations":[{"from_item_local_id":"one","to_item_local_id":"two","relation_type":"supports"}]}\n' "$1" "$2"
     ;;
   zero)
     cat >/dev/null

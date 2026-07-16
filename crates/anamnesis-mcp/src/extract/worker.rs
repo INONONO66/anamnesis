@@ -122,13 +122,14 @@ pub(crate) fn run_worker(
     cfg: &Config,
     namespace: Option<&str>,
 ) -> Result<WorkerOutcome, WorkerError> {
-    if ExtractMode::parse(std::env::var("ANAMNESIS_EXTRACT_MODE").ok().as_deref()).mode
-        != ExtractMode::Shadow
-    {
-        return Ok(WorkerOutcome::Noop(WorkerNoop::ModeOff));
-    }
     let extract_config =
         ExtractConfig::from_env().map_err(|error| WorkerError::Profile(error.to_string()))?;
+    if let Some(warning) = extract_config.mode_warning.as_deref() {
+        tracing::warn!(warning = %warning, "extraction is disabled");
+    }
+    if extract_config.mode != ExtractMode::Shadow {
+        return Ok(WorkerOutcome::Noop(WorkerNoop::ModeOff));
+    }
     let profile = ExtractorProfile::from_command(&extract_config.command)
         .map_err(|error| WorkerError::Profile(error.to_string()))?;
     let socket_path = socket_path_for_db(&cfg.default_db)

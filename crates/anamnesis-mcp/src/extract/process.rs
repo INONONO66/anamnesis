@@ -83,49 +83,104 @@ pub(super) async fn run_provider(
     let stdout = child.stdout.take().ok_or(ProcessError::Wait)?;
     let stderr = child.stderr.take().ok_or(ProcessError::Wait)?;
 
-    let result = tokio::time::timeout(timeout, async {
-        let write_stdin = async {
-            let mut stdin = stdin;
-            stdin
-                .write_all(prompt)
-                .await
-                .map_err(|_| ProcessError::Stdin)?;
-            stdin.shutdown().await.map_err(|_| ProcessError::Stdin)
-        };
-        let read_stdout = read_capped(stdout, output_limit, OutputStream::Stdout);
-        let read_stderr = read_capped(stderr, output_limit, OutputStream::Stderr);
-        let wait = async { child.wait().await.map_err(|_| ProcessError::Wait) };
-        tokio::join!(write_stdin, read_stdout, read_stderr, wait)
-    })
-    .await;
+    let write_stdin = async {
+        let mut stdin = stdin;
+        stdin
+            .write_all(prompt)
+            .await
+            .map_err(|_| ProcessError::Stdin)?;
+        stdin.shutdown().await.map_err(|_| ProcessError::Stdin)
+    };
+    tokio::pin!(write_stdin);
+    let mut stdout_task = tokio::spawn(read_capped(stdout, output_limit, OutputStream::Stdout));
+    let mut stderr_task = tokio::spawn(read_capped(stderr, output_limit, OutputStream::Stderr));
+    let deadline = tokio::time::sleep(timeout);
+    tokio::pin!(deadline);
+    let mut process_poll = tokio::time::interval(Duration::from_millis(1));
 
-    let (stdin_result, stdout_result, stderr_result, status_result) = match result {
-        Ok(output) => output,
-        Err(_) => {
-            return match kill_process_group_and_reap(&mut child, process_group).await {
-                Ok(()) => Err(ProcessError::Timeout),
-                Err(error) => Err(error),
-            };
+    let mut stdin_result = None;
+    let mut stdout_result = None;
+    let mut stderr_result = None;
+    let mut status = None;
+    loop {
+        if stdin_result.is_some()
+            && stdout_result.is_some()
+            && stderr_result.is_some()
+            && status.is_some()
+        {
+            break;
         }
-    };
-    let status = match status_result {
-        Ok(status) => status,
-        Err(error) => {
-            return match kill_process_group_and_reap(&mut child, process_group).await {
-                Ok(()) => Err(error),
-                Err(cleanup_error) => Err(cleanup_error),
-            };
+
+        tokio::select! {
+            biased;
+
+            stdout = &mut stdout_task, if stdout_result.is_none() => {
+                let stdout = stdout
+                    .map_err(|_| ProcessError::Wait)
+                    .and_then(|result| result);
+                match stdout {
+                    Err(error @ ProcessError::OutputTooLarge { .. }) => {
+                        stderr_task.abort();
+                        kill_process_group_and_reap(&mut child, process_group).await?;
+                        return Err(error);
+                    }
+                    result => stdout_result = Some(result),
+                }
+            }
+            stderr = &mut stderr_task, if stderr_result.is_none() => {
+                let stderr = stderr
+                    .map_err(|_| ProcessError::Wait)
+                    .and_then(|result| result);
+                match stderr {
+                    Err(error @ ProcessError::OutputTooLarge { .. }) => {
+                        stdout_task.abort();
+                        kill_process_group_and_reap(&mut child, process_group).await?;
+                        return Err(error);
+                    }
+                    result => stderr_result = Some(result),
+                }
+            }
+            stdin = &mut write_stdin, if stdin_result.is_none() => {
+                stdin_result = Some(stdin);
+            }
+            _ = process_poll.tick(), if status.is_none() => {
+                match child.try_wait() {
+                    Ok(Some(result)) => status = Some(result),
+                    Ok(None) => {}
+                    Err(_) => {
+                        stdout_task.abort();
+                        stderr_task.abort();
+                        return match kill_process_group_and_reap(&mut child, process_group).await {
+                            Ok(()) => Err(ProcessError::Wait),
+                            Err(error) => Err(error),
+                        };
+                    }
+                }
+            }
+            _ = &mut deadline => {
+                stdout_task.abort();
+                stderr_task.abort();
+                return match kill_process_group_and_reap(&mut child, process_group).await {
+                    Ok(()) => Err(ProcessError::Timeout),
+                    Err(error) => Err(error),
+                };
+            }
         }
-    };
+    }
+
+    let status = status.expect("all process results are present");
     if !status.success() {
         return Err(ProcessError::NonZero {
             code: status.code(),
-            stderr_bytes: stderr_result.as_ref().map_or(0, Vec::len),
+            stderr_bytes: stderr_result
+                .expect("all process results are present")
+                .as_ref()
+                .map_or(0, Vec::len),
         });
     }
-    stdin_result?;
-    let stdout = stdout_result?;
-    let _stderr = stderr_result?;
+    stdin_result.expect("all process results are present")?;
+    let stdout = stdout_result.expect("all process results are present")?;
+    let _stderr = stderr_result.expect("all process results are present")?;
 
     Ok(ProcessOutput {
         stdout,
@@ -175,6 +230,9 @@ async fn kill_process_group_and_reap(
     match killpg(Pid::from_raw(process_group), Signal::SIGKILL) {
         Ok(()) | Err(Errno::ESRCH) => {}
         Err(_) => return Err(ProcessError::Wait),
+    }
+    if child.try_wait().map_err(|_| ProcessError::Wait)?.is_some() {
+        return Ok(());
     }
     tokio::time::timeout(CLEANUP_TIMEOUT, child.wait())
         .await
@@ -284,18 +342,24 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn r2_process_rejects_each_stream_over_its_independent_limit() {
         completes_within(async {
-            for (mode, stream) in [
-                ("large-stdout", OutputStream::Stdout),
-                ("large-stderr", OutputStream::Stderr),
+            let over_limit = OUTPUT_LIMIT * 4;
+            for (script, stream) in [
+                (
+                    format!("dd if=/dev/zero bs={over_limit} count=1 2>/dev/null; exit 7"),
+                    OutputStream::Stdout,
+                ),
+                (
+                    format!("dd if=/dev/zero bs={over_limit} count=1 >&2 2>/dev/null; exit 7"),
+                    OutputStream::Stderr,
+                ),
             ] {
-                let error = run_provider(
-                    &fixture_command(mode, []),
-                    b"{}\n",
-                    Duration::from_secs(1),
-                    OUTPUT_LIMIT,
-                )
-                .await
-                .expect_err("large fixture should exceed its stream limit");
+                let command = ExtractCommand {
+                    program: "/bin/sh".into(),
+                    args: vec!["-c".into(), script],
+                };
+                let error = run_provider(&command, b"{}\n", Duration::from_secs(1), OUTPUT_LIMIT)
+                    .await
+                    .expect_err("over-limit extractor should fail");
                 assert_eq!(error, ProcessError::OutputTooLarge { stream });
             }
         })

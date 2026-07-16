@@ -3141,6 +3141,87 @@ fn extraction_scan_hashes_exact_utf8_source_content() {
         );
     }
 }
+#[test]
+fn extraction_scan_sends_only_captured_episodic_turns() {
+    let (reg, _dir) = stub_registry();
+    capture_turns(&reg, "capture-only", "scope", 10, 100, "captured");
+    ok_text(remember_with(
+        &reg,
+        "turn key impostor",
+        None,
+        Some(
+            [("anamnesis:turn_key".to_owned(), "impostor-key".to_owned())]
+                .into_iter()
+                .collect(),
+        ),
+        None,
+    ));
+    {
+        let handle = {
+            let mut registry = reg.lock().unwrap_or_else(|poison| poison.into_inner());
+            registry.namespace_handle(None).expect("default namespace")
+        };
+        let mut memory = handle.lock().unwrap_or_else(|poison| poison.into_inner());
+        let graph = memory.engine_mut().graph_mut();
+        for id in graph.all_node_ids() {
+            let node = graph.get_node_mut(id).expect("remember fixture node");
+            if node.content == "turn key impostor"
+                && matches!(&node.node_type, anamnesis::graph::KnowledgeType::Semantic)
+            {
+                node.metadata.insert("capture".into(), "true".into());
+            }
+        }
+    }
+
+    let sources = extraction_scan(&reg, extraction_profile()).sources;
+    assert_eq!(
+        sources.len(),
+        10,
+        "only captured turns reach the provider boundary"
+    );
+    assert!(
+        sources
+            .iter()
+            .all(|source| source.turn_key != "impostor-key"),
+        "a non-capture node carrying a turn key must not be scanned"
+    );
+}
+
+#[test]
+fn extraction_scan_rejects_non_shadow_status_without_approval_semantics() {
+    let (reg, dir) = stub_registry();
+    capture_turns(&reg, "unsupported-status", "scope", 10, 100, "captured");
+    let profile = extraction_profile();
+    let profile_id = extraction_profile_id(&profile);
+    extraction_scan(&reg, profile.clone());
+
+    let connection =
+        rusqlite::Connection::open(dir.path().join("memory.db")).expect("open policy database");
+    connection
+        .execute(
+            "UPDATE extractor_profiles SET status = 'approved' WHERE profile_id = ?1",
+            [&profile_id],
+        )
+        .expect("set unsupported profile status");
+
+    let response = dispatch(
+        &reg,
+        Request::ExtractionScan {
+            namespace: None,
+            profile,
+            min_turns: 10,
+            max_turns: 20,
+        },
+    );
+    let Response::Err { kind, message } = response else {
+        panic!("non-shadow status must reject scan");
+    };
+    assert_eq!(kind, ErrKind::InvalidParams);
+    assert_eq!(
+        message,
+        "unsupported extraction profile status for shadow scans: Approved"
+    );
+}
 // ── R2 Task 6: atomic shadow-extraction staging and failure recording (RED) ──
 
 fn policy_counts(dir: &tempfile::TempDir) -> (u64, u64, u64, u64) {
@@ -3218,6 +3299,79 @@ fn canonical_extraction(
     .expect("serialize provider-boundary extraction JSON");
     crate::extract::validate::validate_output(&payload, sources, &extraction_profile_id(profile))
         .expect("provider-boundary extraction must canonically validate")
+}
+#[test]
+fn stage_extraction_rejects_non_capture_turn_key_snapshot() {
+    let (reg, _dir) = stub_registry();
+    capture_turns(&reg, "stage-capture-only", "scope", 10, 100, "captured");
+    let profile = extraction_profile();
+    extraction_scan(&reg, profile.clone());
+    ok_text(remember_with(
+        &reg,
+        "stage turn key impostor",
+        None,
+        Some(
+            [(
+                "anamnesis:turn_key".to_owned(),
+                "stage-impostor-key".to_owned(),
+            )]
+            .into_iter()
+            .collect(),
+        ),
+        None,
+    ));
+    {
+        let handle = {
+            let mut registry = reg.lock().unwrap_or_else(|poison| poison.into_inner());
+            registry.namespace_handle(None).expect("default namespace")
+        };
+        let mut memory = handle.lock().unwrap_or_else(|poison| poison.into_inner());
+        let graph = memory.engine_mut().graph_mut();
+        for id in graph.all_node_ids() {
+            let node = graph.get_node_mut(id).expect("remember fixture node");
+            if node.content == "stage turn key impostor"
+                && matches!(&node.node_type, anamnesis::graph::KnowledgeType::Semantic)
+            {
+                node.metadata.insert("capture".into(), "true".into());
+            }
+        }
+    }
+
+    let impostor = graph_snapshot(&reg)
+        .0
+        .into_iter()
+        .find(|node| {
+            node.content == "stage turn key impostor"
+                && matches!(&node.node_type, anamnesis::graph::KnowledgeType::Semantic)
+        })
+        .expect("remember fixture node");
+    let source = crate::extract::types::ExtractionSource {
+        node_id: impostor.id.0,
+        turn_key: "stage-impostor-key".to_owned(),
+        session_id: impostor.origin.session_id,
+        scope: impostor.origin.scope.as_str().to_owned(),
+        content: impostor.content.clone(),
+        content_hash: format!("{:x}", Sha256::digest(impostor.content.as_bytes())),
+        at_ms: impostor.created_at.0,
+    };
+
+    let response = stage_extraction(
+        &reg,
+        profile,
+        vec![source],
+        crate::extract::types::ValidatedExtraction {
+            items: vec![],
+            relations: vec![],
+        },
+    );
+    let Response::Err { kind, message } = response else {
+        panic!("non-capture source snapshot must reject");
+    };
+    assert_eq!(kind, ErrKind::InvalidParams);
+    assert_eq!(
+        message,
+        "extraction source node is not a captured episodic node"
+    );
 }
 
 #[test]
@@ -4067,6 +4221,39 @@ mod migration_job {
             message,
             "extraction audit candidate sources are unavailable or mismatched"
         );
+    }
+    #[test]
+    fn extraction_audit_resolves_a_unique_live_turn_key_after_node_id_changes() {
+        let (reg, _dir) = stub_registry();
+        let (sources, _) = audit_fixture(&reg);
+        let original = &sources[0];
+        let replacement_id = {
+            let handle = {
+                let mut registry = reg.lock().unwrap_or_else(|poison| poison.into_inner());
+                registry.namespace_handle(None).expect("default namespace")
+            };
+            let mut memory = handle.lock().unwrap_or_else(|poison| poison.into_inner());
+            let graph = memory.engine_mut().graph_mut();
+            let mut replacement = graph
+                .get_node(anamnesis::graph::NodeId(original.node_id))
+                .expect("staged source node")
+                .clone();
+            let replacement_id = graph.next_node_id();
+            replacement.id = replacement_id;
+            graph
+                .add_node(replacement)
+                .expect("replacement source node");
+            graph
+                .remove_node(anamnesis::graph::NodeId(original.node_id))
+                .expect("remove stale node-id hint");
+            replacement_id.0
+        };
+
+        let audit = extraction_audit_list(&reg);
+        let source = audit_source(audit_candidate(&audit, "one"), &original.turn_key);
+        assert_eq!(source["availability"], "available");
+        assert_eq!(source["node_id"], replacement_id);
+        assert_eq!(source["content"], original.content);
     }
 
     #[test]

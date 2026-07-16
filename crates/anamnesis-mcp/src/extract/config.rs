@@ -12,15 +12,14 @@ pub(crate) enum ExtractMode {
     Shadow,
 }
 
-/// Result of parsing [`ExtractMode`].
-///
-/// `warning` retains an unsupported Unicode mode value or a fixed redacted
-/// description of non-Unicode mode configuration.
+/// `warning` is a fixed message that never retains a configured mode value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ParsedExtractMode {
     pub(crate) mode: ExtractMode,
     pub(crate) warning: Option<String>,
 }
+
+const UNSUPPORTED_MODE_WARNING: &str = "ANAMNESIS_EXTRACT_MODE is unsupported; extraction is off";
 
 impl ExtractMode {
     /// Parse only the exact mode spellings accepted by the extraction contract.
@@ -34,9 +33,9 @@ impl ExtractMode {
                 mode: Self::Shadow,
                 warning: None,
             },
-            Some(raw_mode) => ParsedExtractMode {
+            Some(_) => ParsedExtractMode {
                 mode: Self::Off,
-                warning: Some(raw_mode.to_owned()),
+                warning: Some(UNSUPPORTED_MODE_WARNING.to_owned()),
             },
         }
     }
@@ -180,14 +179,12 @@ mod tests {
         assert_eq!(shadow.mode, ExtractMode::Shadow);
         assert!(shadow.warning.is_none());
 
-        for unsupported in ["auto", "true", "1", "SHADOWED"] {
+        for unsupported in ["auto", "true", "false", "1", "SHADOWED"] {
             let parsed = ExtractMode::parse(Some(unsupported));
             assert_eq!(parsed.mode, ExtractMode::Off, "{unsupported}");
-            assert!(
-                parsed
-                    .warning
-                    .as_deref()
-                    .is_some_and(|warning| warning.contains(unsupported)),
+            assert_eq!(
+                parsed.warning.as_deref(),
+                Some("ANAMNESIS_EXTRACT_MODE is unsupported; extraction is off"),
                 "{unsupported}"
             );
         }

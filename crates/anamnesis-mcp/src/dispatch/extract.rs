@@ -1,9 +1,9 @@
 use std::collections::HashSet;
 
-use anamnesis::graph::Timestamp;
+use anamnesis::graph::{KnowledgeType, Node, Timestamp};
 use sha2::{Digest, Sha256};
 
-use crate::capture::META_TURN_KEY;
+use crate::capture::{META_CAPTURE, META_TURN_KEY};
 use crate::extract::{
     audit::{
         ExtractionAuditCandidateRow, ExtractionAuditResult, ExtractionAuditSource,
@@ -319,20 +319,55 @@ fn resolve_audit_source(
         availability: ExtractionAuditSourceAvailability::SourceUnavailable,
     };
     let graph = memory.engine().graph();
-    let Ok(node) = graph.get_node(anamnesis::graph::NodeId(node_id)) else {
-        return unavailable();
+    let hinted = graph.get_node(anamnesis::graph::NodeId(node_id)).ok();
+    let resolved = hinted.filter(|node| {
+        is_capture_node(node)
+            && node
+                .metadata
+                .get(META_TURN_KEY)
+                .is_some_and(|candidate_key| candidate_key == turn_key)
+    });
+    let resolved = resolved.or_else(|| {
+        let matches: Vec<_> = graph
+            .all_node_ids()
+            .into_iter()
+            .filter_map(|id| graph.get_node(id).ok())
+            .filter(|node| {
+                is_capture_node(node)
+                    && node
+                        .metadata
+                        .get(META_TURN_KEY)
+                        .is_some_and(|candidate_key| candidate_key == turn_key)
+            })
+            .collect();
+        (matches.len() == 1).then(|| matches[0])
+    });
+    let Some(node) = resolved else {
+        let has_live_turn_key = graph.all_node_ids().into_iter().any(|id| {
+            graph.get_node(id).is_ok_and(|node| {
+                is_capture_node(node)
+                    && node
+                        .metadata
+                        .get(META_TURN_KEY)
+                        .is_some_and(|candidate_key| candidate_key == turn_key)
+            })
+        });
+        return if hinted.is_none() && !has_live_turn_key {
+            unavailable()
+        } else {
+            ExtractionAuditSource {
+                availability: ExtractionAuditSourceAvailability::SourceMismatch,
+                ..unavailable()
+            }
+        };
     };
 
     let live_hash = format!("{:x}", Sha256::digest(node.content.as_bytes()));
-    let exact = node
-        .metadata
-        .get(META_TURN_KEY)
-        .is_some_and(|candidate_key| candidate_key == turn_key)
-        && node.origin.session_id == session_id
+    let exact = node.origin.session_id == session_id
         && node.origin.scope.as_str() == scope
         && live_hash == content_hash;
     ExtractionAuditSource {
-        node_id,
+        node_id: node.id.0,
         turn_key: turn_key.to_owned(),
         session_id: session_id.to_owned(),
         scope: scope.to_owned(),
@@ -408,6 +443,11 @@ fn validate_stage_snapshot(
             ));
         }
         let node = graph.get_node(anamnesis::graph::NodeId(source.node_id))?;
+        if !is_capture_node(node) {
+            return Err(anamnesis::Error::InvalidInput(
+                "extraction source node is not a captured episodic node".to_owned(),
+            ));
+        }
         let Some(turn_key) = node.metadata.get(META_TURN_KEY) else {
             return Err(anamnesis::Error::InvalidInput(
                 "extraction source node has no turn key".to_owned(),
@@ -497,12 +537,12 @@ fn processed_turn_keys(
         PolicyStoreState::Ready(store) => {
             match store.ensure_extraction_shadow_profile(profile_id, profile, Timestamp::now().0)? {
                 ExtractionProfileStatus::Shadow => store.processed_extraction_turn_keys(profile_id),
-                ExtractionProfileStatus::Approved => Err(anamnesis::Error::InvalidInput(
-                    "approved extraction profiles cannot be used for shadow scans".to_owned(),
-                )),
                 ExtractionProfileStatus::Revoked => Err(anamnesis::Error::InvalidInput(
                     "revoked extraction profile cannot be used".to_owned(),
                 )),
+                status => Err(anamnesis::Error::InvalidInput(format!(
+                    "unsupported extraction profile status for shadow scans: {status:?}"
+                ))),
             }
         }
         PolicyStoreState::Uninitialized { .. } | PolicyStoreState::Disabled { .. } => {
@@ -522,6 +562,9 @@ fn capture_sources(
         .into_iter()
         .map(|node_id| {
             let node = graph.get_node(node_id)?;
+            if !is_capture_node(node) {
+                return Ok(None);
+            }
             let Some(turn_key) = node.metadata.get(META_TURN_KEY) else {
                 return Ok(None);
             };
@@ -537,4 +580,12 @@ fn capture_sources(
         })
         .collect::<Result<Vec<_>, _>>()
         .map(|sources| sources.into_iter().flatten().collect())
+}
+fn is_capture_node(node: &Node) -> bool {
+    matches!(&node.node_type, KnowledgeType::Episodic)
+        && node
+            .metadata
+            .get(META_CAPTURE)
+            .is_some_and(|value| value == "true")
+        && node.metadata.contains_key(META_TURN_KEY)
 }
