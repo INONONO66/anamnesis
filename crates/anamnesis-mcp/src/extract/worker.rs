@@ -24,7 +24,7 @@ use crate::proto::{ExtractionErrorKind, StageExtractionResult};
 
 const MIN_TURNS: u32 = 10;
 const MAX_TURNS: u32 = 20;
-const PROVIDER_TIMEOUT: Duration = Duration::from_secs(60);
+const PROVIDER_TIMEOUT: Duration = Duration::from_secs(120);
 const PROVIDER_OUTPUT_LIMIT: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -494,8 +494,8 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        WorkerConfig, WorkerDependencies, WorkerError, WorkerNoop, WorkerOutcome, run_worker,
-        run_worker_with,
+        PROVIDER_TIMEOUT, WorkerConfig, WorkerDependencies, WorkerError, WorkerNoop, WorkerOutcome,
+        run_worker, run_worker_with,
     };
     use crate::config::Config;
     use crate::extract::{
@@ -646,6 +646,10 @@ mod tests {
     #[test]
     fn r2_worker_exposes_the_one_shot_entrypoint() {
         let _: fn(&Config, Option<&str>) -> Result<WorkerOutcome, WorkerError> = run_worker;
+    }
+    #[test]
+    fn r2_worker_provider_timeout_matches_approved_contract() {
+        assert_eq!(PROVIDER_TIMEOUT, Duration::from_secs(120));
     }
     #[test]
     fn r2_worker_mode_off_does_not_connect_or_invoke_provider() {
