@@ -303,6 +303,7 @@ impl AnamnesisServer {
             knowledge_only: p.knowledge_only,
             scope: p.scope,
             tag: p.tag,
+            event_kind: Some(proto::RecallEventKind::Tool),
         };
         to_result(self.backend.call(req).await)
     }
@@ -379,6 +380,7 @@ impl AnamnesisServer {
     ) -> Result<CallToolResult, ErrorData> {
         let req = Request::Stats {
             namespace: p.namespace,
+            recall: None,
         };
         to_result(self.backend.call(req).await)
     }
@@ -495,5 +497,63 @@ impl ServerHandler for AnamnesisServer {
                 "Persistent associative memory. Call `recall` before answering; \
                  call `remember` after any decision or lesson worth keeping.",
             )
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    use crate::memory::{PolicyStoreState, StubProvider};
+    use crate::proto::RecallEventKind;
+
+    #[tokio::test]
+    async fn mcp_recall_forwards_tool_provenance_to_the_local_backend() {
+        let registry = Arc::new(Mutex::new(MemoryRegistry::in_memory_with(
+            Arc::new(StubProvider),
+            false,
+        )));
+        let server = AnamnesisServer::local(registry.clone());
+
+        server
+            .recall(Parameters(RecallParams {
+                query: "adapter cue".into(),
+                limit: Some(7),
+                namespace: Some("mcp-adapter".into()),
+                reinforce: Some(false),
+                gate_threshold: Some(0.25),
+                cosine_gate: Some(0.5),
+                knowledge_only: Some(true),
+                scope: Some("project/anamnesis".into()),
+                tag: Some("adapter-test".into()),
+            }))
+            .await
+            .expect("recall should reach the local backend");
+
+        let handles = {
+            let mut registry = registry.lock().unwrap_or_else(|p| p.into_inner());
+            registry
+                .namespace_handles(Some("mcp-adapter"))
+                .expect("resolve the recall namespace")
+        };
+        let _memory = handles.memory.lock().unwrap_or_else(|p| p.into_inner());
+        let mut policy = MemoryRegistry::policy_store(&handles.policy)
+            .expect("open the recall telemetry policy store");
+        let PolicyStoreState::Ready(store) = &mut *policy else {
+            panic!("recall should initialize telemetry");
+        };
+        let events = store
+            .read_recall_events_for_test()
+            .expect("read recall telemetry");
+        assert_eq!(events.len(), 1);
+
+        let event = &events[0];
+        assert_eq!(event.event_kind, RecallEventKind::Tool);
+        assert_eq!(event.namespace, "mcp-adapter");
+        assert_eq!(event.query_chars, "adapter cue".chars().count() as u64);
+        assert_eq!(event.scope.as_deref(), Some("project/anamnesis"));
+        assert!(event.knowledge_only);
+        assert_eq!(event.gate_threshold, Some(0.25));
+        assert_eq!(event.cosine_gate, Some(0.5));
     }
 }

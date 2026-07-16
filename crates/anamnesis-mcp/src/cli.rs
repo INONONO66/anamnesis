@@ -1,6 +1,6 @@
 //! One-shot CLI (cold model load) + the `serve` subcommand dispatcher.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anamnesis::embedding::EmbeddingProvider;
 use anyhow::Result;
@@ -183,6 +183,9 @@ pub enum Commands {
     Stats {
         #[arg(long)]
         namespace: Option<String>,
+        /// Include data-minimized recall eligibility telemetry.
+        #[arg(long)]
+        recall: bool,
         /// Bypass the shared daemon and open the DB in-process.
         #[arg(long)]
         embedded: bool,
@@ -290,15 +293,16 @@ pub fn run_oneshot(cli: &Cli) -> Result<Oneshot> {
             Ok(Oneshot::Client)
         }
 
-        Some(Commands::Recall {
-            query,
-            limit,
-            namespace,
-            ..
-        }) => {
-            let mut reg = registry(&cfg);
-            let packaged = reg.recall_packaged(query, *limit, namespace.as_deref())?;
-            print_recall(&packaged);
+        Some(Commands::Recall { .. }) => {
+            let registry = Arc::new(Mutex::new(registry(&cfg)));
+            let text = run_embedded_oneshot(cli, &registry)?;
+            write_oneshot_stdout(cli, &text);
+            Ok(Oneshot::Done)
+        }
+        Some(Commands::Stats { recall: true, .. }) => {
+            let registry = Arc::new(Mutex::new(registry(&cfg)));
+            let text = run_embedded_oneshot(cli, &registry)?;
+            write_oneshot_stdout(cli, &text);
             Ok(Oneshot::Done)
         }
         Some(Commands::Remember {
@@ -403,7 +407,6 @@ fn write_migration_summary(
 /// the synchronous path); other variants are unreachable by construction.
 pub async fn run_oneshot_client(cli: &Cli) -> Result<()> {
     use crate::client::call_oneshot;
-    use crate::proto::Request;
 
     // The `hook` family has a different flow (read stdin, gated read-only recall,
     // emit hook JSON, fail-open) and never bails — handle it up front.
@@ -412,13 +415,36 @@ pub async fn run_oneshot_client(cli: &Cli) -> Result<()> {
     }
 
     let cfg = Config::from_env();
-    let req = match &cli.command {
+    let req =
+        oneshot_request(cli).ok_or_else(|| anyhow::anyhow!("invalid one-shot client command"))?;
+    let text = call_oneshot(&cfg, req).await?;
+    write_oneshot_stdout(cli, &text);
+    Ok(())
+}
+
+fn format_oneshot_stdout(cli: &Cli, text: &str) -> String {
+    if matches!(&cli.command, Some(Commands::Stats { recall: true, .. })) {
+        text.to_owned()
+    } else {
+        format!("{text}\n")
+    }
+}
+
+fn write_oneshot_stdout(cli: &Cli, text: &str) {
+    let output = format_oneshot_stdout(cli, text);
+    print!("{output}");
+}
+
+fn oneshot_request(cli: &Cli) -> Option<crate::proto::Request> {
+    use crate::proto::Request;
+
+    match &cli.command {
         Some(Commands::Recall {
             query,
             limit,
             namespace,
             ..
-        }) => Request::Recall {
+        }) => Some(Request::Recall {
             query: query.clone(),
             limit: Some(*limit as u32),
             namespace: namespace.clone(),
@@ -428,38 +454,46 @@ pub async fn run_oneshot_client(cli: &Cli) -> Result<()> {
             knowledge_only: None,
             scope: None,
             tag: None,
-        },
+            event_kind: None,
+        }),
         Some(Commands::Remember {
             text, namespace, ..
-        }) => Request::Remember {
+        }) => Some(Request::Remember {
             content: text.clone(),
             namespace: namespace.clone(),
             tags: None,
             metadata: None,
             scope: None,
-        },
+        }),
         Some(Commands::Relate {
             from_id,
             to_id,
             relation,
             namespace,
             ..
-        }) => Request::Relate {
+        }) => Some(Request::Relate {
             from_id: *from_id,
             to_id: *to_id,
             relation: relation.clone(),
             namespace: namespace.clone(),
-        },
-        Some(Commands::Stats { namespace, .. }) => Request::Stats {
+        }),
+        Some(Commands::Stats {
+            namespace, recall, ..
+        }) => Some(Request::Stats {
             namespace: namespace.clone(),
-        },
-        // The dispatcher only routes the four commands above here.
-        _ => unreachable!("run_oneshot_client dispatched for a non-daemon-routed command"),
-    };
+            recall: (*recall).then_some(true),
+        }),
+        _ => None,
+    }
+}
 
-    let text = call_oneshot(&cfg, req).await?;
-    println!("{text}");
-    Ok(())
+fn run_embedded_oneshot(cli: &Cli, registry: &Arc<Mutex<MemoryRegistry>>) -> Result<String> {
+    let request =
+        oneshot_request(cli).ok_or_else(|| anyhow::anyhow!("invalid embedded one-shot command"))?;
+    match crate::dispatch::dispatch(registry, request) {
+        crate::proto::Response::Ok { text } => Ok(text),
+        crate::proto::Response::Err { message, .. } => Err(anyhow::anyhow!(message)),
+    }
 }
 
 /// `[ok]` / `[!!]` checklist line.
@@ -554,30 +588,201 @@ fn probe_lock(db: &std::path::Path) -> (bool, String) {
     (true, format!("{} (free)", lock_path.display()))
 }
 
-/// Print an embedded `recall` result in the same shape the daemon's `recall`
-/// tool returns: the readable context block followed by a compact `NODES` list of
-/// `{node_id, score, cosine}` for `relate`. Keeping the two paths identical means a script
-/// sees the same output whether or not a daemon is running.
-fn print_recall(packaged: &crate::memory::PackagedRecall) {
-    let refs: Vec<_> = packaged
-        .hits
-        .iter()
-        .map(
-            |h| serde_json::json!({ "node_id": h.node_id.0, "score": h.score, "cosine": h.cosine }),
-        )
-        .collect();
-    let refs_json = serde_json::to_string(&refs).unwrap_or_else(|_| "[]".to_string());
-    let context = if packaged.context.trim().is_empty() {
-        "(no relevant memory)\n".to_string()
-    } else {
-        packaged.context.clone()
-    };
-    println!("{context}## NODES (for `relate`)\n{refs_json}");
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::memory::{MemoryRegistry, PolicyStoreState, StubProvider};
+    use crate::proto::{RecallEventKind, Request, Response};
+    use std::sync::{Arc, Mutex};
+
+    fn recall_cli(embedded: bool) -> Cli {
+        use clap::Parser;
+
+        let mut args = vec!["anamnesis", "recall", "caller provenance"];
+        if embedded {
+            args.push("--embedded");
+        }
+        Cli::try_parse_from(args).expect("parse recall CLI")
+    }
+    fn stats_cli(recall: bool, embedded: bool) -> Cli {
+        use clap::Parser;
+
+        let mut args = vec!["anamnesis", "stats"];
+        if recall {
+            args.push("--recall");
+        }
+        if embedded {
+            args.push("--embedded");
+        }
+        Cli::try_parse_from(args).expect("parse stats CLI")
+    }
+
+    fn stub_registry() -> (Arc<Mutex<MemoryRegistry>>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let registry = MemoryRegistry::file_backed_unlocked_with(
+            Arc::new(StubProvider),
+            dir.path().join("memory.db"),
+            dir.path().to_path_buf(),
+            "default".to_string(),
+            false,
+        );
+        (Arc::new(Mutex::new(registry)), dir)
+    }
+
+    fn seed_recall(registry: &Arc<Mutex<MemoryRegistry>>) {
+        let handles = {
+            let mut guard = registry.lock().expect("lock registry");
+            guard
+                .namespace_handles(None)
+                .expect("resolve default namespace handles")
+        };
+        handles
+            .memory
+            .lock()
+            .expect("lock default memory")
+            .add_note(
+                "caller provenance belongs to the request boundary",
+                anamnesis::graph::Timestamp(1),
+            )
+            .expect("seed recall fixture with deterministic note origin");
+    }
+
+    fn recall_events(registry: &Arc<Mutex<MemoryRegistry>>) -> Vec<crate::memory::RecallEvent> {
+        let handles = {
+            let mut guard = registry.lock().expect("lock registry");
+            guard
+                .namespace_handles(None)
+                .expect("resolve default namespace handles")
+        };
+        let _memory_guard = handles.memory.lock().expect("lock default memory");
+        let mut policy_guard =
+            MemoryRegistry::policy_store(&handles.policy).expect("open default policy store");
+        let PolicyStoreState::Ready(store) = &mut *policy_guard else {
+            panic!("recall must initialize the policy store");
+        };
+        store
+            .read_recall_events_for_test()
+            .expect("read persisted recall events")
+    }
+
+    #[test]
+    fn raw_cli_recall_builds_an_unclassified_daemon_request() {
+        let request = oneshot_request(&recall_cli(false))
+            .expect("raw daemon-routed recall must build a request");
+        let wire = serde_json::to_string(&request).expect("serialize daemon request");
+        assert!(
+            !wire.contains("\"event_kind\""),
+            "raw CLI recall must omit unclassified provenance from daemon wire: {wire}"
+        );
+        assert!(matches!(
+            request,
+            Request::Recall {
+                query,
+                limit: Some(20),
+                namespace: None,
+                event_kind: None,
+                ..
+            } if query == "caller provenance"
+        ));
+    }
+
+    #[test]
+    fn embedded_cli_recall_uses_local_dispatch_with_unknown_provenance_and_daemon_bytes() {
+        let (daemon_registry, _daemon_dir) = stub_registry();
+        let (embedded_registry, _embedded_dir) = stub_registry();
+        seed_recall(&daemon_registry);
+        seed_recall(&embedded_registry);
+
+        let daemon_text = match crate::dispatch::dispatch(
+            &daemon_registry,
+            oneshot_request(&recall_cli(false))
+                .expect("raw daemon-routed recall must build a request"),
+        ) {
+            Response::Ok { text } => text,
+            response => panic!("daemon recall must succeed: {response:?}"),
+        };
+        let embedded_text = run_embedded_oneshot(&recall_cli(true), &embedded_registry)
+            .expect("embedded recall must dispatch locally");
+
+        let daemon_stdout = format_oneshot_stdout(&recall_cli(false), &daemon_text);
+        let embedded_stdout = format_oneshot_stdout(&recall_cli(true), &embedded_text);
+        assert_eq!(
+            embedded_stdout, daemon_stdout,
+            "embedded and daemon recall must render byte-identical stdout"
+        );
+        assert!(
+            daemon_stdout.ends_with('\n') && !daemon_stdout.ends_with("\n\n"),
+            "recall stdout must end with exactly one trailing newline: {daemon_stdout:?}"
+        );
+        let events = recall_events(&embedded_registry);
+        assert_eq!(events.len(), 1, "embedded recall must persist one event");
+        assert_eq!(
+            events[0].event_kind,
+            RecallEventKind::Unknown,
+            "an embedded raw CLI recall has no richer caller provenance"
+        );
+    }
+    #[test]
+    fn stats_recall_cli_parses_and_sends_true_to_daemon() {
+        let request = oneshot_request(&stats_cli(true, false))
+            .expect("stats --recall must build a daemon request");
+        let wire = serde_json::to_string(&request).expect("serialize stats request");
+
+        assert!(
+            wire.contains("\"recall\":true"),
+            "stats --recall must carry recall=true on the daemon wire: {wire}"
+        );
+        assert!(matches!(
+            request,
+            Request::Stats {
+                namespace: None,
+                recall: Some(true),
+            }
+        ));
+    }
+
+    #[test]
+    fn stats_without_recall_preserves_none_on_daemon_request() {
+        let request = oneshot_request(&stats_cli(false, false))
+            .expect("stats without --recall must build a daemon request");
+
+        assert!(matches!(
+            request,
+            Request::Stats {
+                namespace: None,
+                recall: None,
+            }
+        ));
+        assert_eq!(
+            format_oneshot_stdout(&stats_cli(false, false), "graph stats"),
+            "graph stats\n",
+            "the existing daemon stats path must keep its one trailing newline"
+        );
+    }
+
+    #[test]
+    fn embedded_and_daemon_stats_recall_render_byte_identically() {
+        let (daemon_registry, _daemon_dir) = stub_registry();
+        let (embedded_registry, _embedded_dir) = stub_registry();
+
+        let daemon_text = match crate::dispatch::dispatch(
+            &daemon_registry,
+            oneshot_request(&stats_cli(true, false))
+                .expect("stats --recall must build a daemon request"),
+        ) {
+            Response::Ok { text } => text,
+            response => panic!("daemon stats --recall must succeed: {response:?}"),
+        };
+        let embedded_text = run_embedded_oneshot(&stats_cli(true, true), &embedded_registry)
+            .expect("embedded stats --recall must dispatch locally");
+
+        let daemon_stdout = format_oneshot_stdout(&stats_cli(true, false), &daemon_text);
+        let embedded_stdout = format_oneshot_stdout(&stats_cli(true, true), &embedded_text);
+        assert_eq!(
+            embedded_stdout, daemon_stdout,
+            "embedded and daemon stats --recall must have byte-identical stdout framing"
+        );
+    }
 
     #[test]
     fn hook_capture_events_parse() {

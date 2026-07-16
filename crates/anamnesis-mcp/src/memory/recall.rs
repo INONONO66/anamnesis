@@ -5,11 +5,11 @@
 use std::collections::HashSet;
 
 use anamnesis::graph::{NodeId, ScopePath, Timestamp};
-use anamnesis::memory::Hit;
+use anamnesis::memory::{Hit, Recall};
 use anamnesis::storage::SqliteStorage;
 use anamnesis::{Error, Memory};
 
-use super::{MemoryRegistry, PackagedRecall};
+use super::{MemoryRegistry, PackagedRecall, RecallGateTrace, RecallOutcome};
 
 pub(crate) struct RecallFilters<'a> {
     pub(crate) gate: Option<f64>,
@@ -75,14 +75,16 @@ impl MemoryRegistry {
     /// `hits` carry the same de-duplicated ranked list so the agent can pass
     /// `node_id`s on to `relate`. Reinforcement / tick semantics are identical to
     /// [`recall`](Self::recall).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn recall_packaged(
         &mut self,
         query: &str,
         limit: usize,
         ns: Option<&str>,
     ) -> Result<PackagedRecall, Error> {
-        // The classic path: reinforce per the registry default, no gate.
+        // The classic path retains its packaged-only API.
         self.recall_packaged_gated(query, limit, ns, None, None, None)
+            .map(|outcome| outcome.packaged)
     }
 
     /// Gated, optionally read-only variant of [`recall_packaged`](Self::recall_packaged)
@@ -91,16 +93,12 @@ impl MemoryRegistry {
     /// - `reinforce`: `None` ⇒ use the registry's configured default; `Some(false)`
     ///   ⇒ a pure read (skip the reinforcing `used()` commit); `Some(true)` ⇒ force
     ///   reinforcement.
-    /// - `gate`: the need-odds threshold `τ`. After ranking, if there are no hits OR
-    ///   the top hit's score is `< τ`, return an **empty** [`PackagedRecall`] (empty
-    ///   `context`, empty `hits`) so the caller injects nothing. `None` ⇒ no gate.
+    /// - `gate`: the need-odds threshold `τ`. The final filtered, de-duplicated top
+    ///   hit must pass it for the returned package to be eligible.
     ///
     /// Tick semantics match [`recall`](Self::recall): exactly ONE tick per call
-    /// (see its doc for why not two), after the search, on every branch
-    /// (gated-out or not) — durability of any reinforcement (or of the gated-out
-    /// read) never depends on how the call resolved. When the gate trips, the
-    /// read is pure (never reinforces) regardless of `reinforce`, since there is
-    /// nothing relevant to mark as used.
+    /// after the search, including gated-out calls. Gated-out calls never reinforce.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn recall_packaged_gated(
         &mut self,
         query: &str,
@@ -109,7 +107,7 @@ impl MemoryRegistry {
         reinforce: Option<bool>,
         gate: Option<f64>,
         cosine_gate: Option<f64>,
-    ) -> Result<PackagedRecall, Error> {
+    ) -> Result<RecallOutcome, Error> {
         // Count every recall; a recall is "reinforcing" per the SAME resolution
         // the method uses below (`reinforce.unwrap_or(self.reinforce_on_recall)`).
         // Counted on intent, before the gate can turn a would-be reinforce into a
@@ -141,48 +139,20 @@ pub(crate) fn mem_recall_packaged_gated(
     reinforce: bool,
     gate: Option<f64>,
     cosine_gate: Option<f64>,
-) -> Result<PackagedRecall, Error> {
+) -> Result<RecallOutcome, Error> {
     let recall = mem.search(query, limit)?;
-
-    if gated_out(gate, cosine_gate, &recall.hits) {
-        // Pure read, no reinforcement, nothing to inject. Still tick once for
-        // durability / decay-clock advancement (single tick per call).
-        mem.tick(Timestamp::now())?;
-        #[cfg(test)]
-        super::record_tick();
-        return Ok(PackagedRecall {
-            context: String::new(),
-            hits: Vec::new(),
-        });
-    }
-
-    // Render the context block from the package BEFORE `used` consumes it.
-    let context = recall.as_context();
-    let raw = recall.hits.clone();
-    if reinforce {
-        mem.used(recall)?;
-    }
-    // Single tick per call (see `MemoryRegistry::recall` for why not two).
-    mem.tick(Timestamp::now())?;
-    #[cfg(test)]
-    super::record_tick();
-    let hits = super::dedup_hits(raw);
-    Ok(PackagedRecall { context, hits })
+    finish_recall(mem, recall, reinforce, gate, cosine_gate)
 }
 
 /// Like [`mem_recall_packaged_gated`], with a scope/tag filter applied to the
-/// [`ContextPackage`](anamnesis::query::ContextPackage) BEFORE rendering — so an excluded node's content never
-/// reaches the rendered `context` block (identity/knowledge/memories/tensions),
-/// not just the compact `NODES` list. Re-implements the gate/render/reinforce
-/// sequence rather than delegating to `mem_recall_packaged_gated`, since that
-/// function renders before returning and the filter must run earlier.
+/// [`ContextPackage`](anamnesis::query::ContextPackage) before rendering.
 pub(crate) fn mem_recall_packaged_gated_filtered(
     mem: &mut Memory<SqliteStorage>,
     query: &str,
     limit: usize,
     reinforce: bool,
     filters: RecallFilters<'_>,
-) -> Result<PackagedRecall, Error> {
+) -> Result<RecallOutcome, Error> {
     if filters.scope.is_none() && filters.tag.is_none() && !filters.knowledge_only {
         return mem_recall_packaged_gated(
             mem,
@@ -208,41 +178,99 @@ pub(crate) fn mem_recall_packaged_gated_filtered(
         apply_knowledge_only(mem, &mut recall.package, &mut recall.hits);
     }
 
-    if gated_out(filters.gate, filters.cosine_gate, &recall.hits) {
+    finish_recall(mem, recall, reinforce, filters.gate, filters.cosine_gate)
+}
+
+/// Compute the gate decision for the final, de-duplicated top hit.
+pub(crate) fn gate_trace(
+    top: Option<&Hit>,
+    gate: Option<f64>,
+    cosine_gate: Option<f64>,
+) -> RecallGateTrace {
+    let Some(top) = top else {
+        return RecallGateTrace {
+            has_hits: false,
+            readout_pass: false,
+            cosine_pass: false,
+            eligible: false,
+            top_score: None,
+            top_cosine: None,
+            gate_threshold: gate,
+            cosine_gate,
+            result_node_ids: Vec::new(),
+            auto_extract_node_count: 0,
+        };
+    };
+    let readout_pass = gate.is_none_or(|threshold| top.score >= threshold);
+    let cosine_pass = cosine_gate.is_none_or(|threshold| top.cosine >= threshold);
+    RecallGateTrace {
+        has_hits: true,
+        readout_pass,
+        cosine_pass,
+        eligible: readout_pass && cosine_pass,
+        top_score: Some(top.score),
+        top_cosine: Some(top.cosine),
+        gate_threshold: gate,
+        cosine_gate,
+        result_node_ids: Vec::new(),
+        auto_extract_node_count: 0,
+    }
+}
+
+fn finish_recall(
+    mem: &mut Memory<SqliteStorage>,
+    recall: Recall,
+    reinforce: bool,
+    gate: Option<f64>,
+    cosine_gate: Option<f64>,
+) -> Result<RecallOutcome, Error> {
+    let hits = super::dedup_hits(recall.hits.clone());
+    let mut trace = gate_trace(hits.first(), gate, cosine_gate);
+
+    if !trace.eligible {
         mem.tick(Timestamp::now())?;
         #[cfg(test)]
         super::record_tick();
-        return Ok(PackagedRecall {
-            context: String::new(),
-            hits: Vec::new(),
+        return Ok(RecallOutcome {
+            packaged: PackagedRecall {
+                context: String::new(),
+                hits: Vec::new(),
+            },
+            trace,
         });
     }
 
+    trace.result_node_ids = hits.iter().map(|hit| hit.node_id.0).collect();
+    trace.auto_extract_node_count = hits
+        .iter()
+        .filter(|hit| match mem.engine().graph().get_node(hit.node_id) {
+            Ok(node) => node
+                .metadata
+                .get("origin")
+                .is_some_and(|origin| origin == "auto-extract"),
+            Err(error) => {
+                tracing::warn!(
+                    node_id = hit.node_id.0,
+                    "recall result metadata lookup failed: {error}"
+                );
+                false
+            }
+        })
+        .count();
+
+    // Render before `used` consumes the package; preserve the existing
+    // reinforce-then-tick order.
     let context = recall.as_context();
-    let raw = recall.hits.clone();
     if reinforce {
         mem.used(recall)?;
     }
     mem.tick(Timestamp::now())?;
     #[cfg(test)]
     super::record_tick();
-    let hits = super::dedup_hits(raw);
-    Ok(PackagedRecall { context, hits })
-}
-
-fn gated_out(gate: Option<f64>, cosine_gate: Option<f64>, hits: &[Hit]) -> bool {
-    let top = hits.first();
-    let readout_trip = match (gate, top.map(|h| h.score)) {
-        (Some(tau), Some(score)) => score < tau,
-        (Some(_), None) => true,
-        (None, _) => false,
-    };
-    let cosine_trip = match (cosine_gate, top.map(|h| h.cosine)) {
-        (Some(tau), Some(cosine)) => cosine < tau,
-        (Some(_), None) => true,
-        (None, _) => false,
-    };
-    readout_trip || cosine_trip
+    Ok(RecallOutcome {
+        packaged: PackagedRecall { context, hits },
+        trace,
+    })
 }
 
 /// Whether `node_id`'s origin scope and entity tags satisfy the requested

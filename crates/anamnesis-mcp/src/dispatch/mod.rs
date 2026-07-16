@@ -10,30 +10,19 @@
 //! MemoryRegistry` — that distinction is the whole fix. Every arm below runs in
 //! up to three phases:
 //!
-//!   1. **Phase 1** (brief global lock): resolve the namespace's
-//!      `Arc<Mutex<Memory>>` handle via [`MemoryRegistry::namespace_handle`],
-//!      do any fast pre-op bookkeeping that reads/writes registry-shared state
-//!      (an `ops` counter bump, the turn-key dedup filter), then DROP the
-//!      global lock.
-//!   2. **Phase 2** (namespace lock only): do the expensive embed/ingest/
-//!      recall work against the locked `Memory`. The global registry lock is
-//!      NOT held here — a concurrent request against a DIFFERENT namespace can
-//!      run phase 1/2/3 concurrently with this one.
-//!   3. **Phase 3** (brief global lock): re-lock the registry to commit
-//!      result-dependent shared state (`recalls`/`remembers`/`relates`, O1's
-//!      `dispatch_errors`/`ingest_errors`/`empty_recalls`, `seen_turn_keys`/
-//!      `unextracted`) and format the reply.
+//!   1. **Phase 1** (brief global lock): resolve namespace handles and do fast
+//!      registry bookkeeping, then DROP the global lock.
+//!   2. **Phase 2** (namespace locks only): do graph work under `Memory`; recall
+//!      telemetry may then lock its `PolicyStore` while retaining that `Memory`
+//!      lock. The global registry lock is never held in this phase.
+//!   3. **Phase 3** (brief global lock): after all namespace locks are dropped,
+//!      commit result-dependent shared counters and return the rendered reply.
 //!
-//! LOCK-ORDERING INVARIANT: always acquire the global registry lock THEN a
-//! per-namespace lock, NEVER the reverse, and NEVER hold both across blocking
-//! work. Every arm below locks `registry`, extracts an `Arc` handle (or the
-//! data it needs), and drops the `MutexGuard` (each `{ ... }` block below ends
-//! with the guard going out of scope) BEFORE locking the per-namespace handle
-//! in phase 2. This makes the two mutexes strictly hierarchical — a thread can
-//! never be waiting on the global lock while holding a namespace lock, so a
-//! cycle (and therefore a deadlock) is structurally impossible. Namespace
-//! isolation follows from the same split: two different namespaces' phase-2
-//! work never contends on any lock at all.
+//! LOCK-ORDERING INVARIANT: global resolution must be dropped before any
+//! per-namespace lock. Recall telemetry acquires `Memory` then `PolicyStore`.
+//! No path may acquire the global registry lock while either namespace lock is
+//! held. This prevents cycles while allowing distinct namespaces' phase-2 work
+//! to proceed independently.
 
 use std::sync::{Arc, Mutex};
 
@@ -41,9 +30,10 @@ use anamnesis::graph::{ScopePath, Timestamp};
 
 use crate::memory::migration::MigrationRuntime;
 use crate::memory::{
-    self, MemoryRegistry, NamespaceCompatibility, NamespaceProbe, NamespaceResolution, Turn,
+    self, MemoryRegistry, NamespaceCompatibility, NamespaceProbe, NamespaceResolution,
+    PolicyStoreState, RecallEvent, Turn,
 };
-use crate::proto::{Request, Response};
+use crate::proto::{RecallEventKind, Request, Response};
 
 mod enrich;
 mod graph;
@@ -162,7 +152,7 @@ fn request_namespace(req: &Request) -> Option<&str> {
         | Request::Remember { namespace, .. }
         | Request::Relate { namespace, .. }
         | Request::Ingest { namespace, .. }
-        | Request::Stats { namespace }
+        | Request::Stats { namespace, .. }
         | Request::PullPending { namespace, .. }
         | Request::ExtractionStatus { namespace }
         | Request::Update { namespace, .. }
@@ -171,6 +161,89 @@ fn request_namespace(req: &Request) -> Option<&str> {
         | Request::List { namespace, .. }
         | Request::Get { namespace, .. }
         | Request::Graph { namespace, .. } => namespace.as_deref(),
+    }
+}
+fn persist_recall_event(
+    namespace: &str,
+    policy: &memory::PolicyStoreHandle,
+    event_kind: RecallEventKind,
+    query: &str,
+    scope: Option<String>,
+    knowledge_only: bool,
+    trace: memory::RecallGateTrace,
+) {
+    let query_chars = match u64::try_from(query.chars().count()) {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!(
+                namespace,
+                ?event_kind,
+                %error,
+                "recall telemetry event construction failed"
+            );
+            return;
+        }
+    };
+    let auto_extract_node_count = match u64::try_from(trace.auto_extract_node_count) {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!(
+                namespace,
+                ?event_kind,
+                %error,
+                "recall telemetry event construction failed"
+            );
+            return;
+        }
+    };
+    let event = RecallEvent {
+        at_ms: Timestamp::now().0,
+        namespace: namespace.to_owned(),
+        event_kind,
+        query_chars,
+        scope,
+        knowledge_only,
+        has_hits: trace.has_hits,
+        readout_pass: trace.readout_pass,
+        cosine_pass: trace.cosine_pass,
+        eligible: trace.eligible,
+        top_score: trace.top_score,
+        top_cosine: trace.top_cosine,
+        gate_threshold: trace.gate_threshold,
+        cosine_gate: trace.cosine_gate,
+        result_node_ids: trace.result_node_ids,
+        auto_extract_node_count,
+    };
+
+    match MemoryRegistry::policy_store(policy) {
+        Ok(mut state) => match &mut *state {
+            PolicyStoreState::Ready(store) => {
+                if let Err(error) = store.insert_recall_event(&event) {
+                    tracing::warn!(
+                        namespace,
+                        event_kind = ?event.event_kind,
+                        %error,
+                        "recall telemetry persistence failed"
+                    );
+                }
+            }
+            PolicyStoreState::Uninitialized { .. } | PolicyStoreState::Disabled { .. } => {
+                tracing::warn!(
+                    namespace,
+                    event_kind = ?event.event_kind,
+                    error = "policy store was not ready after initialization",
+                    "recall telemetry policy store was not ready after initialization"
+                );
+            }
+        },
+        Err(error) => {
+            tracing::warn!(
+                namespace,
+                event_kind = ?event.event_kind,
+                %error,
+                "recall telemetry policy store initialization failed"
+            );
+        }
     }
 }
 
@@ -186,19 +259,21 @@ fn dispatch_registry(registry: &Arc<Mutex<MemoryRegistry>>, req: Request) -> Res
             knowledge_only,
             scope,
             tag,
+            event_kind,
         } => {
             let limit = limit.unwrap_or(20) as usize;
 
-            // Phase 1: bump intent counters, resolve the namespace handle.
-            let (handle, effective_reinforce) = {
+            // Phase 1: bump intent counters and resolve both namespace handles.
+            // `namespace_handles` creates no policy database connection or schema.
+            let (handles, effective_reinforce) = {
                 let mut reg = registry.lock().unwrap_or_else(|p| p.into_inner());
                 reg.ops.recalls += 1;
                 if reinforce == Some(true) || (reinforce.is_none() && reg.reinforce_on_recall) {
                     reg.ops.reinforcing_recalls += 1;
                 }
                 let effective_reinforce = reinforce.unwrap_or(reg.reinforce_on_recall);
-                match reg.namespace_handle(namespace.as_deref()) {
-                    Ok(h) => (h, effective_reinforce),
+                match reg.namespace_handles(namespace.as_deref()) {
+                    Ok(handles) => (handles, effective_reinforce),
                     Err(e) => {
                         reg.ops.dispatch_errors += 1;
                         return Response::internal(e);
@@ -206,10 +281,11 @@ fn dispatch_registry(registry: &Arc<Mutex<MemoryRegistry>>, req: Request) -> Res
                 }
             };
 
-            // Phase 2: namespace lock only — the expensive search/tick work.
-            let result = {
-                let mut mem = handle.lock().unwrap_or_else(|p| p.into_inner());
-                memory::mem_recall_packaged_gated_filtered(
+            // Phase 2: perform graph recall, render its response, then persist
+            // telemetry while preserving the Memory -> PolicyStore lock order.
+            let phase2 = {
+                let mut mem = handles.memory.lock().unwrap_or_else(|p| p.into_inner());
+                match memory::mem_recall_packaged_gated_filtered(
                     &mut mem,
                     &query,
                     limit,
@@ -221,29 +297,41 @@ fn dispatch_registry(registry: &Arc<Mutex<MemoryRegistry>>, req: Request) -> Res
                         tag: tag.as_deref(),
                         knowledge_only: knowledge_only.unwrap_or(false),
                     },
-                )
-            };
-
-            // Phase 3: commit result-dependent counters, format the reply.
-            let mut reg = registry.lock().unwrap_or_else(|p| p.into_inner());
-            let packaged = match result {
-                Ok(p) => p,
-                Err(e) => {
-                    reg.ops.dispatch_errors += 1;
-                    return Response::internal(e);
+                ) {
+                    Ok(memory::RecallOutcome { packaged, trace }) => {
+                        match render::render_recall(&packaged) {
+                            Ok(text) => {
+                                persist_recall_event(
+                                    &handles.key,
+                                    &handles.policy,
+                                    event_kind.unwrap_or(RecallEventKind::Unknown),
+                                    &query,
+                                    scope,
+                                    knowledge_only.unwrap_or(false),
+                                    trace,
+                                );
+                                Ok((Response::ok(text), packaged.context.trim().is_empty()))
+                            }
+                            Err(e) => Err(Response::internal(e)),
+                        }
+                    }
+                    Err(e) => Err(Response::internal(e)),
                 }
             };
-            // An empty package is the daemon's "nothing to inject" signal (τ-gate
-            // trip or no hits): the same condition render_recall collapses to the
-            // "(no relevant memory)" sentinel.
-            if packaged.context.trim().is_empty() {
-                reg.ops.empty_recalls += 1;
-            }
-            match render::render_recall(&packaged) {
-                Ok(text) => Response::ok(text),
-                Err(e) => {
+
+            // Phase 3: both namespace locks are dropped before updating global
+            // counters or returning the already-rendered response.
+            let mut reg = registry.lock().unwrap_or_else(|p| p.into_inner());
+            match phase2 {
+                Ok((response, empty)) => {
+                    if empty {
+                        reg.ops.empty_recalls += 1;
+                    }
+                    response
+                }
+                Err(response) => {
                     reg.ops.dispatch_errors += 1;
-                    Response::internal(e)
+                    response
                 }
             }
         }
@@ -426,32 +514,77 @@ fn dispatch_registry(registry: &Arc<Mutex<MemoryRegistry>>, req: Request) -> Res
                 }
             }
         }
-        Request::Stats { namespace } => {
-            // Phase 1: resolve the namespace handle.
-            let handle = {
+        Request::Stats { namespace, recall } => {
+            let recall_requested = recall == Some(true);
+            // Phase 1: resolve all needed namespace handles. Policy resolution
+            // only creates an uninitialized handle; opening it occurs in phase 2.
+            let (handle, policy) = {
                 let mut reg = registry.lock().unwrap_or_else(|p| p.into_inner());
-                match reg.namespace_handle(namespace.as_deref()) {
-                    Ok(h) => h,
-                    Err(e) => {
-                        reg.ops.dispatch_errors += 1;
-                        return Response::internal(e);
+                if recall_requested {
+                    match reg.namespace_handles(namespace.as_deref()) {
+                        Ok(handles) => (handles.memory, Some(handles.policy)),
+                        Err(e) => {
+                            reg.ops.dispatch_errors += 1;
+                            return Response::internal(e);
+                        }
+                    }
+                } else {
+                    match reg.namespace_handle(namespace.as_deref()) {
+                        Ok(handle) => (handle, None),
+                        Err(e) => {
+                            reg.ops.dispatch_errors += 1;
+                            return Response::internal(e);
+                        }
                     }
                 }
             };
-            // Phase 2: namespace lock only — flush, full stats, usage totals.
+            // Phase 2: flush, graph stats, and usage totals under Memory. Recall
+            // telemetry opens and queries PolicyStore only while retaining Memory,
+            // preserving the Memory -> PolicyStore order without the global lock.
             let result = {
                 let mut mem = handle.lock().unwrap_or_else(|p| p.into_inner());
                 mem.flush_all().and_then(|()| mem.stats()).map(|stats| {
                     let (total, stale) = memory::mem_usage_totals(&mem);
-                    (stats, total, stale)
+                    let recall_stats = policy.as_ref().and_then(|policy| {
+                        match MemoryRegistry::policy_store(policy) {
+                            Ok(mut state) => match &mut *state {
+                                PolicyStoreState::Ready(store) => {
+                                    match store.recall_stats() {
+                                        Ok(stats) => Some(stats),
+                                        Err(error) => {
+                                            tracing::warn!(
+                                                %error,
+                                                "recall telemetry stats query failed"
+                                            );
+                                            None
+                                        }
+                                    }
+                                }
+                                PolicyStoreState::Uninitialized { .. }
+                                | PolicyStoreState::Disabled { .. } => {
+                                    tracing::warn!(
+                                        "recall telemetry policy store was not ready after initialization"
+                                    );
+                                    None
+                                }
+                            },
+                            Err(error) => {
+                                tracing::warn!(
+                                    %error,
+                                    "recall telemetry policy store initialization failed"
+                                );
+                                None
+                            }
+                        }
+                    });
+                    (stats, total, stale, recall_stats)
                 })
             };
-            // Phase 3: commit / format using the registry's live counters. The
-            // extraction backlog is THIS request's own namespace's queue
-            // length, not a count summed across every namespace.
+            // Phase 3: all namespace locks and policy I/O are complete before
+            // reading live registry counters and formatting the response.
             let mut reg = registry.lock().unwrap_or_else(|p| p.into_inner());
             match result {
-                Ok((stats, total, stale)) => {
+                Ok((stats, total, stale, recall_stats)) => {
                     let ns_key = reg.canonical_ns_key(namespace.as_deref());
                     let backlog = reg.unextracted.get(&ns_key).map(Vec::len).unwrap_or(0);
                     let usage = memory::format_usage_report(
@@ -461,7 +594,16 @@ fn dispatch_registry(registry: &Arc<Mutex<MemoryRegistry>>, req: Request) -> Res
                         total,
                         stale,
                     );
-                    Response::ok(format!("{}\n{}", render::format_stats(&stats), usage))
+                    if recall_requested {
+                        Response::ok(format!(
+                            "{}\n{}\n{}",
+                            render::format_stats(&stats),
+                            usage,
+                            render::format_recall_stats(recall_stats.as_ref())
+                        ))
+                    } else {
+                        Response::ok(format!("{}\n{}", render::format_stats(&stats), usage))
+                    }
                 }
                 Err(e) => {
                     reg.ops.dispatch_errors += 1;

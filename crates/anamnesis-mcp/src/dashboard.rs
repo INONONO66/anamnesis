@@ -131,7 +131,10 @@ fn route(req: &Incoming, default_namespace: Option<&str>, daemon: &dyn Daemon) -
         }),
 
         ["api", "stats"] => require(method, "GET", || {
-            match daemon.call(Request::Stats { namespace }) {
+            match daemon.call(Request::Stats {
+                namespace,
+                recall: None,
+            }) {
                 Response::Ok { text } => {
                     HttpReply::json(200, serde_json::json!({ "stats": text }).to_string())
                 }
@@ -597,7 +600,13 @@ mod tests {
         assert_eq!(r.content_type, "application/json");
         let v: serde_json::Value = serde_json::from_str(&r.body).expect("stats body is valid JSON");
         assert_eq!(v["stats"], text);
-        assert_eq!(d.last(), Request::Stats { namespace: None });
+        assert_eq!(
+            d.last(),
+            Request::Stats {
+                namespace: None,
+                recall: None,
+            }
+        );
     }
 
     #[test]

@@ -1,4 +1,5 @@
 use super::*;
+use crate::proto::RecallEventKind;
 use anamnesis::memory::{ListFilter, NoteOptions, Relation};
 use anamnesis::storage::StorageAdapter;
 
@@ -106,6 +107,428 @@ fn wait_for_file_registry_lock_release(db: &std::path::Path) {
         }
     }
     fs4::FileExt::unlock(&lock).expect("release file registry lock probe");
+}
+fn v0_connection() -> rusqlite::Connection {
+    let connection = rusqlite::Connection::open_in_memory().expect("open v0 policy database");
+    connection
+        .execute_batch(
+            "
+            CREATE TABLE mcp_schema_version (
+                id INTEGER PRIMARY KEY CHECK(id = 1),
+                version INTEGER NOT NULL
+            );
+            INSERT INTO mcp_schema_version (id, version) VALUES (1, 0);
+            ",
+        )
+        .expect("create v0 policy schema");
+    connection
+}
+
+fn registry_with_policy_version(version: i64) -> (MemoryRegistry, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("create policy registry directory");
+    let db = dir.path().join("policy.db");
+    let connection = rusqlite::Connection::open(&db).expect("open policy database");
+    connection
+        .execute_batch(
+            "
+            CREATE TABLE mcp_schema_version (
+                id INTEGER PRIMARY KEY CHECK(id = 1),
+                version INTEGER NOT NULL
+            );
+            ",
+        )
+        .expect("create policy schema");
+    connection
+        .execute(
+            "INSERT INTO mcp_schema_version (id, version) VALUES (1, ?1)",
+            [version],
+        )
+        .expect("seed policy schema version");
+    drop(connection);
+
+    (
+        file_registry(Arc::new(StubProvider), db, dir.path().to_path_buf()),
+        dir,
+    )
+}
+fn recall_event(
+    at_ms: u64,
+    event_kind: RecallEventKind,
+    top: Option<(f64, f64)>,
+    gate_threshold: f64,
+    cosine_gate: f64,
+    result_node_ids: Vec<u64>,
+    auto_extract_node_count: u64,
+) -> RecallEvent {
+    let (top_score, top_cosine) = top
+        .map(|(score, cosine)| (Some(score), Some(cosine)))
+        .unwrap_or((None, None));
+    let has_hits = top.is_some();
+    let readout_pass = top_score.is_some_and(|score| score >= gate_threshold);
+    let cosine_pass = top_cosine.is_some_and(|cosine| cosine >= cosine_gate);
+    RecallEvent {
+        at_ms,
+        namespace: "default".into(),
+        event_kind,
+        query_chars: 8,
+        scope: Some("project/anamnesis".into()),
+        knowledge_only: true,
+        has_hits,
+        readout_pass,
+        cosine_pass,
+        eligible: has_hits && readout_pass && cosine_pass,
+        top_score,
+        top_cosine,
+        gate_threshold: Some(gate_threshold),
+        cosine_gate: Some(cosine_gate),
+        result_node_ids,
+        auto_extract_node_count,
+    }
+}
+fn event_kind_stats(stats: &RecallStats, event_kind: RecallEventKind) -> &EventKindStats {
+    stats
+        .by_event_kind
+        .iter()
+        .find(|stats| stats.event_kind == event_kind)
+        .expect("event kind must have recall telemetry")
+}
+
+#[test]
+fn recall_stats_aggregates_gate_buckets() {
+    let mut store = PolicyStore::in_memory().expect("open policy store");
+    let events = [
+        // Empty attempts must not enter a gate-abstention bucket.
+        recall_event(
+            1,
+            RecallEventKind::UserPrompt,
+            None,
+            0.8,
+            0.8,
+            Vec::new(),
+            0,
+        ),
+        // Readout-only abstention: score fails while cosine passes.
+        recall_event(
+            2,
+            RecallEventKind::SessionStart,
+            Some((0.70, 0.80)),
+            0.8,
+            0.8,
+            Vec::new(),
+            0,
+        ),
+        // Cosine-only abstention: score passes while cosine fails its observed gate.
+        recall_event(
+            3,
+            RecallEventKind::Tool,
+            Some((0.90, 0.82)),
+            0.8,
+            0.9,
+            Vec::new(),
+            0,
+        ),
+        // Both gates fail.
+        recall_event(
+            4,
+            RecallEventKind::Unknown,
+            Some((0.70, 0.84)),
+            0.8,
+            0.9,
+            Vec::new(),
+            0,
+        ),
+        recall_event(
+            5,
+            RecallEventKind::UserPrompt,
+            Some((0.90, 0.88)),
+            0.8,
+            0.8,
+            vec![1, 2, 3],
+            2,
+        ),
+        recall_event(
+            6,
+            RecallEventKind::Tool,
+            Some((0.95, 0.90)),
+            0.8,
+            0.8,
+            vec![4, 5],
+            0,
+        ),
+    ];
+    for event in &events {
+        store
+            .insert_recall_event(event)
+            .expect("seed recall telemetry event");
+    }
+
+    let stats: RecallStats = store.recall_stats().expect("aggregate recall telemetry");
+
+    assert_eq!(stats.total_attempts, 6);
+    assert_eq!(stats.by_event_kind.len(), 4);
+    let abstentions: &AbstentionStats = &stats.abstentions;
+    let cosine: &CosineStats = &stats.cosine;
+    let auto_exposure: &AutoExposureStats = &stats.auto_exposure;
+    let user_prompt = event_kind_stats(&stats, RecallEventKind::UserPrompt);
+    assert_eq!(user_prompt.attempts, 2);
+    assert_eq!(user_prompt.eligible, 1);
+    let session_start = event_kind_stats(&stats, RecallEventKind::SessionStart);
+    assert_eq!(session_start.attempts, 1);
+    assert_eq!(session_start.eligible, 0);
+    let tool = event_kind_stats(&stats, RecallEventKind::Tool);
+    assert_eq!(tool.attempts, 2);
+    assert_eq!(tool.eligible, 1);
+    let unknown = event_kind_stats(&stats, RecallEventKind::Unknown);
+    assert_eq!(unknown.attempts, 1);
+    assert_eq!(unknown.eligible, 0);
+
+    assert_eq!(abstentions.empty, 1);
+    assert_eq!(abstentions.readout_only, 1);
+    assert_eq!(abstentions.cosine_only, 1);
+    assert_eq!(abstentions.both, 1);
+
+    assert_eq!(cosine.samples, 5);
+    assert_eq!(cosine.nulls, 1);
+    assert_eq!(cosine.p50, Some(0.84));
+    assert_eq!(cosine.p90, Some(0.90));
+    assert_eq!(cosine.p95, Some(0.90));
+
+    assert_eq!(auto_exposure.eligible_events, 2);
+    assert_eq!(auto_exposure.events_with_auto, 1);
+    assert_eq!(auto_exposure.result_slots, 5);
+    assert_eq!(auto_exposure.auto_slots, 2);
+
+    assert_eq!(stats.sweep.len(), 11);
+    let first_sweep_point: &SweepPoint = &stats.sweep[0];
+    assert_eq!(first_sweep_point.threshold, 0.80);
+    for (point, (hundredths, eligible)) in stats
+        .sweep
+        .iter()
+        .zip((80_u8..=90).zip([3, 3, 3, 2, 2, 2, 2, 2, 2, 1, 1]))
+    {
+        assert_eq!(point.threshold, f64::from(hundredths) / 100.0);
+        assert_eq!(point.eligible, eligible);
+        assert_eq!(point.attempts, 6);
+    }
+}
+
+#[test]
+fn recall_gate_trace_follows_production_gate_decisions() {
+    let mut empty = registry(false);
+    let empty_outcome = empty
+        .recall_packaged_gated(
+            "nothing here",
+            5,
+            None,
+            Some(false),
+            Some(f64::MAX),
+            Some(f64::MAX),
+        )
+        .expect("empty recall outcome");
+    assert_eq!(
+        (
+            empty_outcome.trace.has_hits,
+            empty_outcome.trace.readout_pass,
+            empty_outcome.trace.cosine_pass,
+            empty_outcome.trace.eligible,
+        ),
+        (false, false, false, false)
+    );
+
+    let mut reg = registry(false);
+    reg.remember("the auth bug was a race in the middleware", None)
+        .expect("seed recallable memory");
+
+    for (name, gate, cosine_gate, expected) in [
+        ("readout only", Some(f64::MAX), None, (false, true, false)),
+        ("cosine only", None, Some(f64::MAX), (true, false, false)),
+        (
+            "both",
+            Some(f64::MAX),
+            Some(f64::MAX),
+            (false, false, false),
+        ),
+        ("eligible", None, None, (true, true, true)),
+    ] {
+        let outcome = reg
+            .recall_packaged_gated(
+                "auth race condition",
+                5,
+                None,
+                Some(false),
+                gate,
+                cosine_gate,
+            )
+            .expect("recall outcome");
+        let trace = outcome.trace;
+        assert_eq!(
+            (trace.readout_pass, trace.cosine_pass, trace.eligible),
+            expected,
+            "{name}"
+        );
+        assert_eq!(
+            trace.eligible,
+            trace.has_hits && trace.readout_pass && trace.cosine_pass,
+            "{name}"
+        );
+        assert_eq!(outcome.packaged.hits.is_empty(), !trace.eligible, "{name}");
+    }
+}
+
+#[test]
+fn recall_stats_empty_dataset_has_no_nan() {
+    let store = PolicyStore::in_memory().expect("open policy store");
+
+    let stats: RecallStats = store
+        .recall_stats()
+        .expect("aggregate empty recall telemetry");
+
+    assert_eq!(stats.total_attempts, 0);
+    assert!(stats.by_event_kind.is_empty());
+    assert_eq!(stats.abstentions.empty, 0);
+    assert_eq!(stats.abstentions.readout_only, 0);
+    assert_eq!(stats.abstentions.cosine_only, 0);
+    assert_eq!(stats.abstentions.both, 0);
+    assert_eq!(stats.cosine.samples, 0);
+    assert_eq!(stats.cosine.nulls, 0);
+    assert_eq!(stats.cosine.p50, None);
+    assert_eq!(stats.cosine.p90, None);
+    assert_eq!(stats.cosine.p95, None);
+    assert_eq!(stats.auto_exposure.eligible_events, 0);
+    assert_eq!(stats.auto_exposure.events_with_auto, 0);
+    assert_eq!(stats.auto_exposure.result_slots, 0);
+    assert_eq!(stats.auto_exposure.auto_slots, 0);
+
+    assert_eq!(stats.sweep.len(), 11);
+    for (point, hundredths) in stats.sweep.iter().zip(80_u8..=90) {
+        assert_eq!(point.threshold, f64::from(hundredths) / 100.0);
+        assert!(
+            point.threshold.is_finite(),
+            "threshold must not be NaN or infinite"
+        );
+        assert_eq!(point.eligible, 0);
+        assert_eq!(point.attempts, 0);
+    }
+}
+
+#[test]
+fn policy_schema_fresh_and_v0_migration_converge() {
+    let fresh = PolicyStore::in_memory().expect("fresh policy store");
+    let migrated = PolicyStore::from_test_connection(v0_connection()).expect("migrated store");
+
+    assert_eq!(
+        fresh.schema_fingerprint().expect("fresh schema"),
+        migrated.schema_fingerprint().expect("migrated schema")
+    );
+    assert_eq!(fresh.schema_version().expect("fresh version"), 1);
+    assert_eq!(migrated.schema_version().expect("migrated version"), 1);
+}
+#[test]
+fn ready_policy_store_persists_minimized_event_and_rejects_out_of_range_values() {
+    let mut reg = registry(false);
+    let handles = reg
+        .namespace_handles(None)
+        .expect("resolve in-memory namespace handles");
+    let _memory = handles
+        .memory
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut policy = MemoryRegistry::policy_store(&handles.policy).expect("open policy store");
+    let PolicyStoreState::Ready(store) = &mut *policy else {
+        panic!("in-memory policy store should be ready");
+    };
+    let event = RecallEvent {
+        at_ms: 1,
+        namespace: "default".into(),
+        event_kind: RecallEventKind::Tool,
+        query_chars: 11,
+        scope: Some("project".into()),
+        knowledge_only: true,
+        has_hits: true,
+        readout_pass: true,
+        cosine_pass: true,
+        eligible: true,
+        top_score: Some(0.9),
+        top_cosine: Some(0.8),
+        gate_threshold: Some(0.7),
+        cosine_gate: Some(0.6),
+        result_node_ids: vec![1, 2],
+        auto_extract_node_count: 1,
+    };
+
+    store
+        .insert_recall_event(&event)
+        .expect("insert recall event");
+
+    let error = store
+        .insert_recall_event(&RecallEvent {
+            at_ms: u64::MAX,
+            ..event
+        })
+        .expect_err("out-of-range timestamp should be rejected");
+    assert!(
+        matches!(
+            &error,
+            Error::InvalidInput(message)
+                if message == "invalid policy store value: recall event timestamp"
+        ),
+        "expected invalid policy value error, got {error:?}"
+    );
+}
+#[test]
+fn phase_one_resolution_leaves_policy_uninitialized() {
+    let (mut reg, _dir) = registry_with_policy_version(1);
+
+    let handles = reg
+        .namespace_handles(None)
+        .expect("resolve namespace handles");
+
+    assert!(matches!(
+        &*handles
+            .policy
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        PolicyStoreState::Uninitialized { path: Some(_) }
+    ));
+}
+
+#[test]
+fn repeated_phase_one_resolution_reuses_namespace_handles() {
+    let (mut reg, _dir) = registry_with_policy_version(1);
+
+    let first = reg.namespace_handles(None).expect("first resolution");
+    let second = reg
+        .namespace_handles(Some("default"))
+        .expect("second resolution");
+
+    assert_eq!(first.key, second.key);
+    assert!(Arc::ptr_eq(&first.memory, &second.memory));
+    assert!(Arc::ptr_eq(&first.policy, &second.policy));
+}
+
+#[test]
+fn future_policy_schema_disables_only_policy_features() {
+    let (mut reg, _dir) = registry_with_policy_version(2);
+
+    reg.remember("core recall remains available", None)
+        .expect("remember");
+    let recalled = reg.recall_packaged("core recall", 5, None).expect("recall");
+    assert!(!recalled.hits.is_empty());
+    let handles = reg.namespace_handles(None).expect("resolve policy handle");
+    let memory = handles
+        .memory
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    assert!(MemoryRegistry::policy_store(&handles.policy).is_err());
+    drop(memory);
+
+    assert!(matches!(
+        &*handles
+            .policy
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        PolicyStoreState::Disabled { .. }
+    ));
 }
 
 #[test]
@@ -391,6 +814,61 @@ impl EmbeddingProvider for ScopeGateProvider {
     fn model_name(&self) -> &str {
         "scope-gate"
     }
+}
+struct ScopedTraceProvider;
+
+impl EmbeddingProvider for ScopedTraceProvider {
+    fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, Error> {
+        Ok(texts
+            .iter()
+            .map(|text| {
+                if text.contains("deployment") && !text.contains("local") {
+                    vec![1.0, 0.0]
+                } else if text.contains("local deployment") {
+                    vec![0.6, 0.8]
+                } else {
+                    vec![0.5, 0.5]
+                }
+            })
+            .collect())
+    }
+
+    fn dimensions(&self) -> usize {
+        2
+    }
+
+    fn model_name(&self) -> &str {
+        "scoped-trace"
+    }
+}
+
+fn scoped_test_memory() -> Memory<SqliteStorage> {
+    let provider: Arc<dyn EmbeddingProvider> = Arc::new(ScopedTraceProvider);
+    let mut mem = Memory::in_memory_with_provider(provider).expect("create scoped test memory");
+
+    let remote = NoteOptions {
+        scope: Some(anamnesis::graph::ScopePath::new("project/b").expect("remote scope")),
+        ..NoteOptions::default()
+    };
+    mem.add_note_with(
+        "remote deployment note excluded by scope",
+        anamnesis::graph::Timestamp(1),
+        remote,
+    )
+    .expect("add remote note");
+
+    let local = NoteOptions {
+        scope: Some(anamnesis::graph::ScopePath::new("project/a").expect("local scope")),
+        ..NoteOptions::default()
+    };
+    mem.add_note_with(
+        "local deployment note retained after filtering",
+        anamnesis::graph::Timestamp(2),
+        local,
+    )
+    .expect("add local note");
+
+    mem
 }
 
 #[test]
@@ -808,6 +1286,7 @@ fn gated_recall_below_threshold_is_empty() {
         .recall_packaged_gated("auth race condition", 5, None, Some(false), None, None)
         .unwrap();
     let top = ungated
+        .packaged
         .hits
         .first()
         .map(|h| h.score)
@@ -818,14 +1297,14 @@ fn gated_recall_below_threshold_is_empty() {
         .recall_packaged_gated("auth race condition", 5, None, Some(false), Some(tau), None)
         .unwrap();
     assert!(
-        gated.context.is_empty(),
+        gated.packaged.context.is_empty(),
         "above-τ gate must yield empty context, got:\n{}",
-        gated.context
+        gated.packaged.context
     );
     assert!(
-        gated.hits.is_empty(),
+        gated.packaged.hits.is_empty(),
         "above-τ gate must yield no hits, got {} hits",
-        gated.hits.len()
+        gated.packaged.hits.len()
     );
 }
 
@@ -837,8 +1316,8 @@ fn gated_recall_with_no_hits_is_empty() {
     let gated = reg
         .recall_packaged_gated("nothing here", 5, None, Some(false), Some(0.0), None)
         .unwrap();
-    assert!(gated.context.is_empty());
-    assert!(gated.hits.is_empty());
+    assert!(gated.packaged.context.is_empty());
+    assert!(gated.packaged.hits.is_empty());
 }
 
 /// A gate `τ` at/below the top score ⇒ the rendered top-k context block.
@@ -851,11 +1330,14 @@ fn gated_recall_at_or_above_threshold_renders_top_k() {
     let gated = reg
         .recall_packaged_gated("auth race condition", 5, None, Some(false), Some(0.0), None)
         .unwrap();
-    assert!(!gated.hits.is_empty(), "τ=0.0 must admit the relevant hit");
     assert!(
-        gated.context.contains("##"),
+        !gated.packaged.hits.is_empty(),
+        "τ=0.0 must admit the relevant hit"
+    );
+    assert!(
+        gated.packaged.context.contains("##"),
         "expected a rendered section header, got:\n{}",
-        gated.context
+        gated.packaged.context
     );
 }
 
@@ -877,14 +1359,14 @@ fn cosine_gate_trips_when_top_cosine_below_threshold() {
         .unwrap();
 
     assert!(
-        gated.context.is_empty(),
+        gated.packaged.context.is_empty(),
         "above-cosine gate must yield empty context, got:\n{}",
-        gated.context
+        gated.packaged.context
     );
     assert!(
-        gated.hits.is_empty(),
+        gated.packaged.hits.is_empty(),
         "above-cosine gate must yield no hits, got {} hits",
-        gated.hits.len()
+        gated.packaged.hits.len()
     );
 }
 
@@ -920,22 +1402,115 @@ fn knowledge_only_drops_memories_tensions_and_capture_fragments() {
     )
     .unwrap();
 
-    assert!(out.context.contains("## KNOWLEDGE"));
+    assert!(out.packaged.context.contains("## KNOWLEDGE"));
     assert!(
-        !out.context.contains("## MEMORIES"),
+        !out.packaged.context.contains("## MEMORIES"),
         "episodic section must be dropped:\n{}",
-        out.context
+        out.packaged.context
     );
-    assert!(!out.context.contains("captured conversation window"));
     assert!(
-        out.hits
+        !out.packaged
+            .context
+            .contains("captured conversation window")
+    );
+    assert!(
+        out.packaged
+            .hits
             .iter()
             .all(|h| !h.text.contains("captured conversation window")),
         "capture hits must be dropped: {:?}",
-        out.hits
+        out.packaged.hits
     );
 }
 
+#[test]
+fn trace_uses_filtered_top_and_preserves_both_gate_failures() {
+    let mut mem = scoped_test_memory();
+    let outcome = mem_recall_packaged_gated_filtered(
+        &mut mem,
+        "deployment",
+        5,
+        false,
+        RecallFilters {
+            gate: Some(100.0),
+            cosine_gate: Some(1.0),
+            scope: Some("project/a"),
+            tag: None,
+            knowledge_only: true,
+        },
+    )
+    .expect("recall outcome");
+
+    assert!(outcome.trace.has_hits);
+    assert!(!outcome.trace.readout_pass);
+    assert!(!outcome.trace.cosine_pass);
+    assert!(!outcome.trace.eligible);
+    assert!(
+        outcome.trace.top_cosine.expect("filtered top cosine") < 1.0,
+        "trace must use the scope-filtered local hit rather than the excluded remote hit"
+    );
+    assert!(outcome.packaged.hits.is_empty());
+}
+#[test]
+fn eligible_trace_snapshots_deduplicated_result_ids_and_auto_extract_metadata() {
+    let mut mem = Memory::in_memory_with_provider(Arc::new(StubProvider)).unwrap();
+    let mut auto_extract = NoteOptions::default();
+    auto_extract
+        .metadata
+        .push(("origin".to_string(), "auto-extract".to_string()));
+    mem_remember_with(&mut mem, "auto-extract recall result", auto_extract).unwrap();
+
+    let outcome =
+        mem_recall_packaged_gated(&mut mem, "auto-extract recall result", 5, false, None, None)
+            .unwrap();
+
+    let expected_ids: Vec<u64> = outcome
+        .packaged
+        .hits
+        .iter()
+        .map(|hit| hit.node_id.0)
+        .collect();
+    assert_eq!(outcome.trace.result_node_ids, expected_ids);
+    assert_eq!(outcome.trace.auto_extract_node_count, 1);
+}
+
+#[test]
+fn unfiltered_fast_path_has_the_same_trace_as_filtered_path() {
+    let mut fast = scoped_test_memory();
+    let mut filtered = scoped_test_memory();
+
+    let fast =
+        mem_recall_packaged_gated(&mut fast, "deployment", 5, false, Some(0.0), Some(0.0)).unwrap();
+    let filtered = mem_recall_packaged_gated_filtered(
+        &mut filtered,
+        "deployment",
+        5,
+        false,
+        RecallFilters {
+            gate: Some(0.0),
+            cosine_gate: Some(0.0),
+            scope: None,
+            tag: None,
+            knowledge_only: false,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(fast.trace, filtered.trace);
+    assert_eq!(fast.packaged.hits.len(), filtered.packaged.hits.len());
+}
+
+#[test]
+fn empty_filtered_result_is_not_a_gate_specific_failure() {
+    let trace = gate_trace(None, Some(12.0), Some(0.86));
+
+    assert!(!trace.has_hits);
+    assert!(!trace.readout_pass);
+    assert!(!trace.cosine_pass);
+    assert!(!trace.eligible);
+    assert_eq!(trace.top_score, None);
+    assert_eq!(trace.top_cosine, None);
+}
 #[test]
 fn filtered_recall_gates_on_final_filtered_hits() {
     let provider: Arc<dyn EmbeddingProvider> = Arc::new(ScopeGateProvider);
@@ -980,14 +1555,14 @@ fn filtered_recall_gates_on_final_filtered_hits() {
     .unwrap();
 
     assert!(
-        out.context.is_empty(),
+        out.packaged.context.is_empty(),
         "excluded remote hits must not open the cosine gate:\n{}",
-        out.context
+        out.packaged.context
     );
     assert!(
-        out.hits.is_empty(),
+        out.packaged.hits.is_empty(),
         "filtered below-gate hits must not be returned: {:?}",
-        out.hits
+        out.packaged.hits
     );
 }
 
@@ -1000,8 +1575,12 @@ fn gated_recall_none_gate_never_filters() {
     let gated = reg
         .recall_packaged_gated("postgres jsonb", 5, None, Some(false), None, None)
         .unwrap();
-    assert!(!gated.hits.is_empty());
-    assert!(gated.context.contains("##"));
+    assert!(gated.trace.has_hits);
+    assert!(gated.trace.readout_pass);
+    assert!(gated.trace.cosine_pass);
+    assert!(gated.trace.eligible);
+    assert!(!gated.packaged.hits.is_empty());
+    assert!(gated.packaged.context.contains("##"));
 }
 
 /// `reinforce = false` is a pure read: repeated reads never lift base-level
@@ -1019,7 +1598,7 @@ fn read_only_recall_does_not_reinforce_but_reinforcing_does() {
             .recall_packaged_gated("auth race condition", 5, None, Some(false), None, None)
             .unwrap();
         assert!(
-            !pkg.hits.is_empty(),
+            !pkg.packaged.hits.is_empty(),
             "each read should still return the hit"
         );
     }
@@ -1058,7 +1637,7 @@ fn gated_out_recall_never_reinforces_even_when_asked() {
         let pkg = reg
             .recall_packaged_gated("auth race condition", 5, None, Some(true), Some(1e9), None)
             .unwrap();
-        assert!(pkg.hits.is_empty(), "gate must trip at τ=1e9");
+        assert!(pkg.packaged.hits.is_empty(), "gate must trip at τ=1e9");
     }
     let after = reg.stats(None).unwrap().avg_salience;
     assert!(
@@ -1308,6 +1887,7 @@ mod embedding_migration {
         db_path: &std::path::Path,
         provider: Arc<dyn EmbeddingProvider>,
     ) -> EmbeddingMigrationRequest {
+        wait_for_file_registry_lock_release(db_path);
         let pending = PendingEmbeddingMigrationRequest {
             namespace: "default".to_string(),
             db_path: db_path.to_path_buf(),

@@ -26,7 +26,7 @@ use anyhow::Result;
 use crate::cli::HookEvent;
 use crate::client::call_oneshot;
 use crate::config::Config;
-use crate::proto::{Request, TurnInput};
+use crate::proto::{RecallEventKind, Request, TurnInput};
 use crate::transcript::{ParsedTurn, parse_transcript, resolve_transcript};
 
 /// One-line nudge prepended to a `user-prompt` injection so the agent reinforces
@@ -128,11 +128,15 @@ async fn run_session_start(cfg: &Config, stdin: &str) -> Option<String> {
             gated_recall(
                 cfg,
                 &cue,
-                cfg.hook_seed_k,
-                /* reinforce = */ Some(false),
-                /* gate = */ None,
-                /* cosine_gate = */ Some(cfg.hook_seed_cosine_gate),
-                scope,
+                HookRecallPolicy {
+                    limit: cfg.hook_seed_k,
+                    reinforce: Some(false),
+                    gate_threshold: None,
+                    cosine_gate: Some(cfg.hook_seed_cosine_gate),
+                    knowledge_only: true,
+                    scope,
+                    event_kind: RecallEventKind::SessionStart,
+                },
             )
             .await
         }
@@ -188,31 +192,37 @@ async fn run_user_prompt(cfg: &Config, stdin: &str) -> Option<String> {
     let scope = project_scope(cwd.as_deref());
     let remaining = remaining_budget(start, budget)?;
     let req = build_hook_recall_request(
-        cfg,
         &query,
-        cfg.hook_topk,
-        /* reinforce = */ Some(false),
-        /* gate = */ Some(cfg.hook_threshold),
-        /* cosine_gate = */ Some(cfg.hook_cosine_gate),
-        scope,
+        HookRecallPolicy {
+            limit: cfg.hook_topk,
+            reinforce: Some(false),
+            gate_threshold: Some(cfg.hook_threshold),
+            cosine_gate: Some(cfg.hook_cosine_gate),
+            knowledge_only: true,
+            scope,
+            event_kind: RecallEventKind::UserPrompt,
+        },
     );
     let block = recall_request_with_timeout(cfg, req, remaining).await?;
     Some(render_user_prompt(&block))
 }
 
+/// Parameters that define a hook's read-only recall request.
+struct HookRecallPolicy {
+    limit: usize,
+    reinforce: Option<bool>,
+    gate_threshold: Option<f64>,
+    cosine_gate: Option<f64>,
+    knowledge_only: bool,
+    scope: Option<String>,
+    event_kind: RecallEventKind,
+}
+
 /// Issue one read-only `recall` against the warm daemon under the fail-open
 /// timeout. Returns the injectable block (the recall text with any empty/sentinel
 /// payload collapsed to `None`) or `None` on timeout / daemon error / empty recall.
-async fn gated_recall(
-    cfg: &Config,
-    query: &str,
-    limit: usize,
-    reinforce: Option<bool>,
-    gate: Option<f64>,
-    cosine_gate: Option<f64>,
-    scope: Option<String>,
-) -> Option<String> {
-    let req = build_hook_recall_request(cfg, query, limit, reinforce, gate, cosine_gate, scope);
+async fn gated_recall(cfg: &Config, query: &str, policy: HookRecallPolicy) -> Option<String> {
+    let req = build_hook_recall_request(query, policy);
     let timeout = Duration::from_millis(cfg.hook_timeout_ms);
     recall_request_with_timeout(cfg, req, timeout).await
 }
@@ -226,25 +236,18 @@ async fn recall_request_with_timeout(
     interpret_recall(outcome)
 }
 
-fn build_hook_recall_request(
-    _cfg: &Config,
-    query: &str,
-    limit: usize,
-    reinforce: Option<bool>,
-    gate: Option<f64>,
-    cosine_gate: Option<f64>,
-    scope: Option<String>,
-) -> Request {
+fn build_hook_recall_request(query: &str, policy: HookRecallPolicy) -> Request {
     Request::Recall {
         query: query.to_string(),
-        limit: Some(limit as u32),
+        limit: Some(policy.limit as u32),
         namespace: None,
-        reinforce,
-        gate_threshold: gate,
-        cosine_gate,
-        knowledge_only: Some(true),
-        scope,
+        reinforce: policy.reinforce,
+        gate_threshold: policy.gate_threshold,
+        cosine_gate: policy.cosine_gate,
+        knowledge_only: Some(policy.knowledge_only),
+        scope: policy.scope,
         tag: None,
+        event_kind: Some(policy.event_kind),
     }
 }
 
@@ -566,7 +569,10 @@ async fn run_capture(cfg: &Config, stdin: &str, event: &HookEvent) -> Option<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proto::{RecallEventKind, Response, decode_line, encode_line};
     use serde_json::Value;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
 
     // --- stdin parsing: tolerate the real shapes + unknown fields, fail-open on junk ---
 
@@ -702,16 +708,20 @@ mod tests {
     fn hook_recall_request_sets_gates_and_knowledge_only() {
         let cfg = short_circuit_cfg();
         let req = build_hook_recall_request(
-            &cfg,
             "q",
-            cfg.hook_topk,
-            Some(false),
-            Some(cfg.hook_threshold),
-            Some(cfg.hook_cosine_gate),
-            Some("project/anamnesis".to_string()),
+            HookRecallPolicy {
+                limit: cfg.hook_topk,
+                reinforce: Some(false),
+                gate_threshold: Some(cfg.hook_threshold),
+                cosine_gate: Some(cfg.hook_cosine_gate),
+                knowledge_only: true,
+                scope: Some("project/anamnesis".to_string()),
+                event_kind: RecallEventKind::UserPrompt,
+            },
         );
         let Request::Recall {
             cosine_gate,
+            event_kind,
             knowledge_only,
             limit,
             scope,
@@ -723,6 +733,7 @@ mod tests {
         assert_eq!(cosine_gate, Some(crate::config::DEFAULT_HOOK_COSINE_GATE));
         assert_eq!(knowledge_only, Some(true));
         assert_eq!(limit, Some(3));
+        assert_eq!(event_kind, Some(RecallEventKind::UserPrompt));
         assert_eq!(scope.as_deref(), Some("project/anamnesis"));
     }
 
@@ -998,6 +1009,120 @@ mod tests {
             embed_model: crate::config::DEFAULT_EMBED_MODEL.to_string(),
             auto_migrate_embeddings: true,
         }
+    }
+    fn live_hook_cfg(temp: &tempfile::TempDir) -> Config {
+        let mut cfg = short_circuit_cfg();
+        cfg.default_db = temp.path().join("hook-provenance.db");
+        cfg.hook_context_turns = 0;
+        cfg.hook_timeout_ms = 1_000;
+        cfg
+    }
+
+    async fn serve_hook_requests(listener: UnixListener, count: usize) -> Vec<Request> {
+        let mut requests = Vec::with_capacity(count);
+        for _ in 0..count {
+            let (stream, _) = listener
+                .accept()
+                .await
+                .expect("hook connects to mock daemon");
+            let (reader, mut writer) = stream.into_split();
+            let mut lines = BufReader::new(reader).lines();
+            let line = lines
+                .next_line()
+                .await
+                .expect("read mock request")
+                .expect("hook sends a request");
+            let request = decode_line::<Request>(&line).expect("mock decodes request");
+            let text = match &request {
+                Request::Recall { .. } => {
+                    "## MEMORIES\n- mock daemon memory\n## NODES (for `relate`)\n[]"
+                }
+                Request::ExtractionStatus { .. } => r#"{"pending":0}"#,
+                other => panic!("unexpected hook request: {other:?}"),
+            };
+            let response = encode_line(&Response::ok(text)).expect("mock encodes response");
+            writer
+                .write_all(response.as_bytes())
+                .await
+                .expect("mock writes response");
+            requests.push(request);
+        }
+        requests
+    }
+
+    #[tokio::test]
+    async fn user_prompt_recall_reports_user_prompt_provenance_to_daemon() {
+        let temp = tempfile::tempdir().expect("temporary hook database directory");
+        let cfg = live_hook_cfg(&temp);
+        let socket =
+            crate::daemon::socket_path_for_db(&cfg.default_db).expect("derive mock daemon socket");
+        let listener = UnixListener::bind(&socket).expect("bind mock daemon socket");
+        let daemon = tokio::spawn(serve_hook_requests(listener, 1));
+
+        let output = run_user_prompt(
+            &cfg,
+            r#"{"hook_event_name":"UserPromptSubmit","prompt":"recall this","cwd":"/tmp/project"}"#,
+        )
+        .await;
+
+        assert!(output.is_some(), "successful recall remains injectable");
+        let requests = daemon.await.expect("mock daemon completes");
+        let [
+            Request::Recall {
+                event_kind,
+                gate_threshold,
+                cosine_gate,
+                knowledge_only,
+                ..
+            },
+        ] = requests.as_slice()
+        else {
+            panic!("expected exactly one recall request, got {requests:?}");
+        };
+        assert_eq!(*event_kind, Some(RecallEventKind::UserPrompt));
+        assert_eq!(*gate_threshold, Some(cfg.hook_threshold));
+        assert_eq!(*cosine_gate, Some(cfg.hook_cosine_gate));
+        assert_eq!(*knowledge_only, Some(true));
+    }
+
+    #[tokio::test]
+    async fn session_start_recall_reports_session_start_provenance_to_daemon() {
+        let temp = tempfile::tempdir().expect("temporary hook database directory");
+        let cfg = live_hook_cfg(&temp);
+        let socket =
+            crate::daemon::socket_path_for_db(&cfg.default_db).expect("derive mock daemon socket");
+        let listener = UnixListener::bind(&socket).expect("bind mock daemon socket");
+        let daemon = tokio::spawn(serve_hook_requests(listener, 2));
+
+        let output = run_session_start(
+            &cfg,
+            r#"{"hook_event_name":"SessionStart","cwd":"/tmp/project","source":"startup"}"#,
+        )
+        .await;
+
+        assert!(output.is_some(), "successful seed remains injectable");
+        let requests = daemon.await.expect("mock daemon completes");
+        let Request::Recall {
+            event_kind,
+            gate_threshold,
+            cosine_gate,
+            knowledge_only,
+            ..
+        } = &requests[0]
+        else {
+            panic!(
+                "first session-start request must be recall: {:?}",
+                requests[0]
+            );
+        };
+        assert_eq!(*event_kind, Some(RecallEventKind::SessionStart));
+        assert_eq!(*gate_threshold, None);
+        assert_eq!(*cosine_gate, Some(cfg.hook_seed_cosine_gate));
+        assert_eq!(*knowledge_only, Some(true));
+        assert!(
+            matches!(&requests[1], Request::ExtractionStatus { .. }),
+            "session-start must preserve its extraction-status check"
+        );
     }
 
     #[tokio::test]

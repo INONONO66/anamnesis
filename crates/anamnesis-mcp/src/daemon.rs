@@ -926,7 +926,10 @@ mod tests {
 
         // A `stats` request comes back Ok — proves the daemon serves the bespoke
         // protocol over the socket (no rmcp/MCP on this path).
-        let req = crate::proto::Request::Stats { namespace: None };
+        let req = crate::proto::Request::Stats {
+            namespace: None,
+            recall: None,
+        };
         wr.write_all(crate::proto::encode_line(&req).unwrap().as_bytes())
             .await
             .unwrap();
@@ -1000,7 +1003,10 @@ mod tests {
             .expect("late first client must still reach a grace=0 daemon");
         let (rd, mut wr) = stream.into_split();
         let mut lines = BufReader::new(rd).lines();
-        let req = crate::proto::Request::Stats { namespace: None };
+        let req = crate::proto::Request::Stats {
+            namespace: None,
+            recall: None,
+        };
         wr.write_all(crate::proto::encode_line(&req).unwrap().as_bytes())
             .await
             .unwrap();
@@ -1097,8 +1103,11 @@ mod tests {
     async fn daemon_shutdown_waits_for_migration_before_releasing_default_lock() {
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("memory.db");
-        let socket = socket_path_for_db(&db).unwrap();
-        let mut legacy = MemoryRegistry::file_backed_with(
+        let socket = dir.path().join("daemon.sock");
+        let bind = acquire_daemon(&db, &socket)
+            .unwrap()
+            .expect("daemon acquires default lock");
+        let mut legacy = MemoryRegistry::file_backed_unlocked_with(
             Arc::new(LegacyProvider),
             db.clone(),
             dir.path().to_path_buf(),
@@ -1108,10 +1117,6 @@ mod tests {
         legacy.remember("legacy content", None).unwrap();
         legacy.flush_all_open().unwrap();
         drop(legacy);
-
-        let bind = acquire_daemon(&db, &socket)
-            .unwrap()
-            .expect("daemon acquires default lock");
         let (started_tx, started_rx) = std::sync::mpsc::channel();
         let provider = Arc::new(ShutdownBlockingProvider {
             started: std::sync::Mutex::new(Some(started_tx)),
@@ -1130,7 +1135,11 @@ mod tests {
         let stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
         let (rd, mut wr) = stream.into_split();
         let mut lines = BufReader::new(rd).lines();
-        let request = proto::encode_line(&proto::Request::Stats { namespace: None }).unwrap();
+        let request = proto::encode_line(&proto::Request::Stats {
+            namespace: None,
+            recall: None,
+        })
+        .unwrap();
         wr.write_all(request.as_bytes()).await.unwrap();
         wr.flush().await.unwrap();
         let response = lines.next_line().await.unwrap().unwrap();

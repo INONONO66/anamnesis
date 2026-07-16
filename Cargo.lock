@@ -87,6 +87,7 @@ dependencies = [
  "leiden-rs",
  "libc",
  "rmcp",
+ "rusqlite",
  "schemars",
  "serde",
  "serde_json",

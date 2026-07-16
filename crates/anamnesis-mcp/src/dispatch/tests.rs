@@ -1,7 +1,13 @@
 use super::*;
-use crate::memory::{MemoryRegistry, StubProvider};
-use crate::proto::{ErrKind, Response, TurnInput};
-use std::sync::{Arc, Mutex};
+use crate::memory::{
+    AbstentionStats, AutoExposureStats, CosineStats, EventKindStats, MemoryRegistry, PolicyStore,
+    PolicyStoreState, RecallStats, StubProvider, SweepPoint,
+};
+use crate::proto::{ErrKind, RecallEventKind, Response, TurnInput};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
+};
 
 /// A stub-backed registry on a tempdir DB — no model download, no socket.
 /// Wrapped in the same `Arc<Mutex<_>>` shape `dispatch` expects from its
@@ -12,6 +18,61 @@ fn stub_registry() -> (Arc<Mutex<MemoryRegistry>>, tempfile::TempDir) {
     let reg = MemoryRegistry::file_backed_unlocked_with(
         Arc::new(StubProvider),
         dir.path().join("memory.db"),
+        dir.path().to_path_buf(),
+        "default".to_string(),
+        false,
+    );
+    (Arc::new(Mutex::new(reg)), dir)
+}
+fn stub_registry_with_policy_migration_failure() -> (Arc<Mutex<MemoryRegistry>>, tempfile::TempDir)
+{
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let db = dir.path().join("memory.db");
+    let connection = rusqlite::Connection::open(&db).expect("open policy migration database");
+    connection
+        .execute_batch(
+            "
+            CREATE TABLE mcp_schema_version (
+                id INTEGER PRIMARY KEY CHECK(id = 1),
+                version INTEGER NOT NULL CHECK(version = 0)
+            );
+            CREATE TABLE recall_events (id INTEGER PRIMARY KEY);
+            ",
+        )
+        .expect("seed policy schema that rejects the v1 version write");
+    drop(connection);
+
+    let reg = MemoryRegistry::file_backed_unlocked_with(
+        Arc::new(StubProvider),
+        db,
+        dir.path().to_path_buf(),
+        "default".to_string(),
+        false,
+    );
+    (Arc::new(Mutex::new(reg)), dir)
+}
+
+fn stub_registry_with_future_policy_schema() -> (Arc<Mutex<MemoryRegistry>>, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let db = dir.path().join("memory.db");
+    let connection = rusqlite::Connection::open(&db).expect("open future policy database");
+    connection
+        .execute_batch(
+            "
+            CREATE TABLE mcp_schema_version (
+                id INTEGER PRIMARY KEY CHECK(id = 1),
+                version INTEGER NOT NULL
+            );
+            INSERT INTO mcp_schema_version (id, version) VALUES (1, 2);
+            CREATE TABLE recall_events (id INTEGER PRIMARY KEY);
+            ",
+        )
+        .expect("seed future policy schema");
+    drop(connection);
+
+    let reg = MemoryRegistry::file_backed_unlocked_with(
+        Arc::new(StubProvider),
+        db,
         dir.path().to_path_buf(),
         "default".to_string(),
         false,
@@ -135,6 +196,7 @@ fn remember_then_recall_round_trips_through_dispatch() {
             knowledge_only: None,
             scope: None,
             tag: None,
+            event_kind: None,
         },
     ));
     // Same shape the MCP tool produced: readable block + NODES trailer.
@@ -169,10 +231,515 @@ fn recall_with_no_matches_renders_sentinel_and_empty_nodes() {
             knowledge_only: None,
             scope: None,
             tag: None,
+            event_kind: None,
         },
     ));
     assert!(text.starts_with("(no relevant memory)"), "got: {text}");
     assert!(text.contains("## NODES (for `relate`)\n[]"), "got: {text}");
+}
+#[test]
+fn recall_telemetry_write_failure_preserves_response_and_dispatch_counters() {
+    let (registry, _dir) = stub_registry();
+    let request = Request::Recall {
+        query: "stable recall output despite telemetry failure".into(),
+        limit: Some(5),
+        namespace: None,
+        reinforce: Some(false),
+        gate_threshold: None,
+        cosine_gate: None,
+        knowledge_only: None,
+        scope: None,
+        tag: None,
+        event_kind: None,
+    };
+
+    let before = ok_text(dispatch(&registry, request.clone()));
+    let (handles, dispatch_errors) = {
+        let mut registry_guard = registry.lock().unwrap_or_else(|p| p.into_inner());
+        let handles = registry_guard
+            .namespace_handles(None)
+            .expect("resolve default graph and policy handles");
+        (handles, registry_guard.ops.dispatch_errors)
+    };
+    let event_count = {
+        let _memory_guard = handles.memory.lock().unwrap_or_else(|p| p.into_inner());
+        let mut policy_guard =
+            MemoryRegistry::policy_store(&handles.policy).expect("open default policy store");
+        let PolicyStoreState::Ready(store) = &mut *policy_guard else {
+            panic!("policy store must be ready after the successful recall");
+        };
+        let event_count = store
+            .recall_event_count_for_test()
+            .expect("count successful recall telemetry");
+        store
+            .install_recall_event_insert_failure_trigger_for_test()
+            .expect("install approved recall_events failure trigger");
+        event_count
+    };
+
+    let after = ok_text(dispatch(&registry, request));
+    assert_eq!(
+        after, before,
+        "telemetry persistence is best-effort and must not alter the recall reply"
+    );
+
+    let handles = {
+        let mut registry_guard = registry.lock().unwrap_or_else(|p| p.into_inner());
+        registry_guard
+            .namespace_handles(None)
+            .expect("resolve default graph and policy handles")
+    };
+    let post_event_count = {
+        let _memory_guard = handles.memory.lock().unwrap_or_else(|p| p.into_inner());
+        let mut policy_guard =
+            MemoryRegistry::policy_store(&handles.policy).expect("reopen default policy store");
+        let PolicyStoreState::Ready(store) = &mut *policy_guard else {
+            panic!("policy store must remain ready after a failed telemetry insert");
+        };
+        store
+            .recall_event_count_for_test()
+            .expect("count recall telemetry after failed insert")
+    };
+    assert_eq!(
+        post_event_count, event_count,
+        "a failed transactional insert must not leave a recall_events row behind"
+    );
+    assert_eq!(
+        registry
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .ops
+            .dispatch_errors,
+        dispatch_errors,
+        "a best-effort telemetry failure must not be reported as a dispatch failure"
+    );
+}
+#[test]
+fn r1_recall_telemetry_deploy_gate_demo() {
+    let (registry, _dir) = stub_registry();
+    let namespace = "r1-deploy-gate";
+    let scope = "project/r1-deploy-gate";
+    let query = "r1 filtered top rollout proof";
+    let canonical_namespace = {
+        let registry_guard = registry.lock().unwrap_or_else(|p| p.into_inner());
+        registry_guard.canonical_ns_key(Some(namespace))
+    };
+    assert_eq!(
+        canonical_namespace, namespace,
+        "the deterministic deploy-gate namespace must already be canonical"
+    );
+
+    let mut capture_metadata = std::collections::HashMap::new();
+    capture_metadata.insert("capture".to_string(), "true".to_string());
+
+    ok_text(dispatch(
+        &registry,
+        Request::Remember {
+            content: query.into(),
+            namespace: Some(namespace.into()),
+            tags: None,
+            metadata: Some(capture_metadata),
+            scope: Some(scope.into()),
+        },
+    ));
+
+    // `Remember` creates an Episodic + Semantic pair. Mark only the Semantic
+    // fixture as durable so the identical, high-scoring captured Episodic node
+    // must be removed by `knowledge_only` before the final top is traced.
+    let (captured_episodic_id, surviving_semantic_id) = {
+        let handle = {
+            let mut registry_guard = registry.lock().unwrap_or_else(|p| p.into_inner());
+            registry_guard
+                .namespace_handle(Some(namespace))
+                .expect("resolve deploy-gate memory handle")
+        };
+        let mut memory_guard = handle.lock().unwrap_or_else(|p| p.into_inner());
+        let graph = memory_guard.engine().graph();
+        let mut captured_episodic_id = None;
+        let mut surviving_semantic_id = None;
+        for id in graph.all_node_ids() {
+            let node = graph.get_node(id).expect("fixture node exists");
+            if node.content == query
+                && node.metadata.get("capture").map(String::as_str) == Some("true")
+            {
+                match node.node_type {
+                    anamnesis::graph::KnowledgeType::Episodic => captured_episodic_id = Some(id),
+                    anamnesis::graph::KnowledgeType::Semantic => surviving_semantic_id = Some(id),
+                    _ => {}
+                }
+            }
+        }
+        let captured_episodic_id =
+            captured_episodic_id.expect("fixture must include a captured Episodic node");
+        let surviving_semantic_id =
+            surviving_semantic_id.expect("fixture must include a captured Semantic node");
+        memory_guard
+            .set_metadata(surviving_semantic_id, "capture", "false")
+            .expect("mark only the Semantic fixture as durable");
+        (captured_episodic_id.0, surviving_semantic_id.0)
+    };
+
+    let unfiltered_response = ok_text(dispatch(
+        &registry,
+        Request::Recall {
+            query: query.into(),
+            limit: Some(5),
+            namespace: Some(namespace.into()),
+            reinforce: Some(false),
+            gate_threshold: Some(0.0),
+            cosine_gate: Some(0.99),
+            knowledge_only: Some(false),
+            scope: Some(scope.into()),
+            tag: None,
+            event_kind: Some(RecallEventKind::UserPrompt),
+        },
+    ));
+    let unfiltered_nodes_json = unfiltered_response
+        .split_once("## NODES (for `relate`)\n")
+        .expect("unfiltered recall response has a NODES trailer")
+        .1;
+    let unfiltered_nodes: Vec<serde_json::Value> =
+        serde_json::from_str(unfiltered_nodes_json.trim()).expect("NODES trailer is a JSON array");
+    let unfiltered_top_id = unfiltered_nodes
+        .first()
+        .and_then(|node| node["node_id"].as_u64())
+        .expect("unfiltered recall must expose a top candidate id");
+    assert_eq!(
+        unfiltered_top_id, captured_episodic_id,
+        "the captured Episodic node must be the actual unfiltered top candidate"
+    );
+
+    let request = Request::Recall {
+        query: query.into(),
+        limit: Some(5),
+        namespace: Some(namespace.into()),
+        reinforce: Some(false),
+        gate_threshold: Some(0.0),
+        cosine_gate: Some(0.99),
+        knowledge_only: Some(true),
+        scope: Some(scope.into()),
+        tag: None,
+        event_kind: Some(RecallEventKind::UserPrompt),
+    };
+    let first_response = dispatch(&registry, request);
+    assert!(
+        matches!(&first_response, Response::Ok { .. }),
+        "the successful recall must return a healthy core response"
+    );
+
+    let handles = {
+        let mut registry_guard = registry.lock().unwrap_or_else(|p| p.into_inner());
+        registry_guard
+            .namespace_handles(Some(namespace))
+            .expect("resolve deploy-gate graph and policy handles")
+    };
+    assert_eq!(
+        handles.key, canonical_namespace,
+        "test must inspect the same canonical namespace dispatch resolved"
+    );
+    {
+        let _memory_guard = handles.memory.lock().unwrap_or_else(|p| p.into_inner());
+        let mut policy_guard =
+            MemoryRegistry::policy_store(&handles.policy).expect("open deploy-gate policy store");
+        let PolicyStoreState::Ready(store) = &mut *policy_guard else {
+            panic!("successful recall must initialize the telemetry policy store");
+        };
+        let events = store
+            .read_recall_events_for_test()
+            .expect("read persisted minimized recall events");
+        assert_eq!(
+            events.len(),
+            2,
+            "the unfiltered baseline and knowledge-only recall must write exactly two events"
+        );
+        let event = &events[1];
+        assert_eq!(event.event_kind, RecallEventKind::UserPrompt);
+        assert_eq!(event.namespace, canonical_namespace);
+        assert_eq!(event.scope.as_deref(), Some(scope));
+        assert_eq!(event.query_chars, query.chars().count() as u64);
+        assert!(event.has_hits && event.readout_pass && event.cosine_pass && event.eligible);
+        assert_eq!(
+            event.result_node_ids.first().copied(),
+            Some(surviving_semantic_id),
+            "persisted filtered top must be the surviving Semantic node, not captured Episodic node {captured_episodic_id}"
+        );
+        assert!(
+            !event.result_node_ids.contains(&captured_episodic_id),
+            "knowledge_only must exclude the captured high-scoring Episodic node"
+        );
+        assert!(
+            event.top_score.is_some() && event.top_cosine.is_some(),
+            "eligible filtered result must persist top score and cosine"
+        );
+        assert!(
+            !store
+                .recall_events_contain_raw_value_for_test(query)
+                .expect("inspect minimized event for raw query data"),
+            "recall telemetry must not retain the raw query"
+        );
+        println!(
+            "R1_DEPLOY_GATE filtered_top node_id={} node_type=semantic prefilter_top_node_id={} namespace={} scope={} top_score={:?} top_cosine={:?} event_kind={:?} query_chars={} has_hits={} readout_pass={} cosine_pass={} eligible={} result_node_ids={:?} event_rows={} auto_extract_node_count={}",
+            surviving_semantic_id,
+            unfiltered_top_id,
+            event.namespace,
+            event
+                .scope
+                .as_deref()
+                .expect("deploy-gate event must retain scope"),
+            event.top_score,
+            event.top_cosine,
+            event.event_kind,
+            event.query_chars,
+            event.has_hits,
+            event.readout_pass,
+            event.cosine_pass,
+            event.eligible,
+            event.result_node_ids,
+            events.len(),
+            event.auto_extract_node_count,
+        );
+    }
+
+    let fail_open_probe = Request::Recall {
+        query: "deterministic fail-open response probe".into(),
+        limit: Some(5),
+        namespace: Some(namespace.into()),
+        reinforce: Some(false),
+        gate_threshold: None,
+        cosine_gate: None,
+        knowledge_only: Some(true),
+        scope: Some(scope.into()),
+        tag: None,
+        event_kind: Some(RecallEventKind::UserPrompt),
+    };
+    let control_graph_snapshot = {
+        let mut memory_guard = handles.memory.lock().unwrap_or_else(|p| p.into_inner());
+        memory_guard
+            .engine_mut()
+            .snapshot("r1 deploy-gate fail-open control")
+            .expect("snapshot graph state before the control recall")
+    };
+    let event_count_before_control = {
+        let _memory_guard = handles.memory.lock().unwrap_or_else(|p| p.into_inner());
+        let mut policy_guard =
+            MemoryRegistry::policy_store(&handles.policy).expect("reopen deploy-gate policy store");
+        let PolicyStoreState::Ready(store) = &mut *policy_guard else {
+            panic!("policy store must remain ready before the control probe");
+        };
+        store
+            .recall_event_count_for_test()
+            .expect("count recall telemetry before control probe")
+    };
+    let control_response = dispatch(&registry, fail_open_probe.clone());
+    assert!(
+        matches!(&control_response, Response::Ok { .. }),
+        "the control fail-open probe must return a healthy core response"
+    );
+    let control_response_bytes =
+        serde_json::to_vec(&control_response).expect("serialize control recall response");
+    {
+        let mut memory_guard = handles.memory.lock().unwrap_or_else(|p| p.into_inner());
+        memory_guard
+            .engine_mut()
+            .restore(&control_graph_snapshot)
+            .expect("restore identical graph state before forced telemetry failure");
+    }
+    let event_count_after_control = {
+        let _memory_guard = handles.memory.lock().unwrap_or_else(|p| p.into_inner());
+        let mut policy_guard =
+            MemoryRegistry::policy_store(&handles.policy).expect("reopen deploy-gate policy store");
+        let PolicyStoreState::Ready(store) = &mut *policy_guard else {
+            panic!("policy store must remain ready after the control probe");
+        };
+        let event_count = store
+            .recall_event_count_for_test()
+            .expect("count recall telemetry after control probe");
+        assert_eq!(
+            event_count,
+            event_count_before_control + 1,
+            "the healthy control probe must persist exactly one telemetry row"
+        );
+        store
+            .install_recall_event_insert_failure_trigger_for_test()
+            .expect("install approved recall_events failure trigger");
+        event_count
+    };
+
+    let observed_insert_attempts = Arc::new(AtomicUsize::new(0));
+    let observer_attempts = Arc::clone(&observed_insert_attempts);
+    let _observer = PolicyStore::install_operation_observer_for_test(Arc::new(move || {
+        observer_attempts.fetch_add(1, Ordering::SeqCst);
+    }));
+
+    let failed_telemetry_response = dispatch(&registry, fail_open_probe);
+    assert!(
+        matches!(&failed_telemetry_response, Response::Ok { .. }),
+        "forced telemetry failure must leave core recall healthy"
+    );
+    assert_eq!(
+        observed_insert_attempts.load(Ordering::SeqCst),
+        1,
+        "the triggered dispatch must attempt exactly one telemetry insert"
+    );
+    assert_eq!(
+        serde_json::to_vec(&failed_telemetry_response)
+            .expect("serialize recall response after telemetry failure"),
+        control_response_bytes,
+        "forced telemetry write failure must preserve the control response bytes"
+    );
+
+    let post_failure_event_count = {
+        let _memory_guard = handles.memory.lock().unwrap_or_else(|p| p.into_inner());
+        let mut policy_guard =
+            MemoryRegistry::policy_store(&handles.policy).expect("reopen deploy-gate policy store");
+        let PolicyStoreState::Ready(store) = &mut *policy_guard else {
+            panic!("policy store must remain ready after a failed telemetry insert");
+        };
+        store
+            .recall_event_count_for_test()
+            .expect("count recall telemetry after forced failure")
+    };
+    assert_eq!(
+        post_failure_event_count, event_count_after_control,
+        "forced telemetry write failure must not leave an event row behind"
+    );
+    println!(
+        "R1_DEPLOY_GATE fail_open response_bytes_identical=true core_response_healthy=true control_row_increment={} insert_attempts={} event_rows_unchanged={} event_count={}",
+        event_count_after_control == event_count_before_control + 1,
+        observed_insert_attempts.load(Ordering::SeqCst),
+        post_failure_event_count == event_count_after_control,
+        post_failure_event_count,
+    );
+}
+
+#[test]
+fn recall_telemetry_uses_canonical_namespace_unicode_char_count_and_unknown_kind() {
+    let (registry, _dir) = stub_registry();
+    let raw_namespace = "Telemetry/Namespace";
+    let query = "한국어 기억";
+    let expected_namespace = {
+        let registry_guard = registry.lock().unwrap_or_else(|p| p.into_inner());
+        registry_guard.canonical_ns_key(Some(raw_namespace))
+    };
+
+    ok_text(dispatch(
+        &registry,
+        Request::Recall {
+            query: query.into(),
+            limit: Some(5),
+            namespace: Some(raw_namespace.into()),
+            reinforce: Some(false),
+            gate_threshold: None,
+            cosine_gate: None,
+            knowledge_only: None,
+            scope: None,
+            tag: None,
+            event_kind: None,
+        },
+    ));
+
+    let handles = {
+        let mut registry_guard = registry.lock().unwrap_or_else(|p| p.into_inner());
+        registry_guard
+            .namespace_handles(Some(raw_namespace))
+            .expect("resolve telemetry namespace handles")
+    };
+    assert_eq!(
+        handles.key, expected_namespace,
+        "test must inspect the same canonical namespace dispatch resolved"
+    );
+    let _memory_guard = handles.memory.lock().unwrap_or_else(|p| p.into_inner());
+    let mut policy_guard =
+        MemoryRegistry::policy_store(&handles.policy).expect("open telemetry policy store");
+    let PolicyStoreState::Ready(store) = &mut *policy_guard else {
+        panic!("recall must initialize the telemetry policy store");
+    };
+    let events = store
+        .read_recall_events_for_test()
+        .expect("read persisted recall telemetry");
+    assert_eq!(
+        events.len(),
+        1,
+        "one recall must persist one telemetry event"
+    );
+    let event = &events[0];
+    assert_eq!(event.namespace, expected_namespace);
+    assert_eq!(
+        event.query_chars, 6,
+        "count Unicode scalar values, not UTF-8 bytes"
+    );
+    assert_eq!(event.event_kind, RecallEventKind::Unknown);
+    assert!(
+        !store
+            .recall_events_contain_raw_value_for_test(query)
+            .expect("inspect recall_events values for raw query data"),
+        "minimized recall telemetry must never retain the raw query"
+    );
+}
+
+#[test]
+fn recall_policy_sql_runs_after_registry_release_with_memory_then_policy_lock_order() {
+    let (registry, _dir) = stub_registry();
+    let (memory, policy) = {
+        let mut registry_guard = registry.lock().unwrap_or_else(|p| p.into_inner());
+        let handles = registry_guard
+            .namespace_handles(Some("lock-order"))
+            .expect("phase 1 resolves graph and policy handles");
+        assert!(
+            matches!(
+                *handles.policy.lock().unwrap_or_else(|p| p.into_inner()),
+                PolicyStoreState::Uninitialized { .. }
+            ),
+            "phase 1 must create only an uninitialized policy handle"
+        );
+        (handles.memory, handles.policy)
+    };
+
+    let observed_operations = Arc::new(AtomicUsize::new(0));
+    let observer_registry = Arc::clone(&registry);
+    let observer_memory = Arc::clone(&memory);
+    let observer_operations = Arc::clone(&observed_operations);
+    let _observer = PolicyStore::install_operation_observer_for_test(Arc::new(move || {
+        assert!(
+            observer_registry.try_lock().is_ok(),
+            "policy SQL must run only after the registry guard is released"
+        );
+        assert!(
+            observer_memory.try_lock().is_err(),
+            "policy SQL must run while its corresponding Memory lock is held \
+             (Memory -> PolicyStore order)"
+        );
+        observer_operations.fetch_add(1, Ordering::SeqCst);
+    }));
+
+    ok_text(dispatch(
+        &registry,
+        Request::Recall {
+            query: "lock ordering telemetry".into(),
+            limit: Some(5),
+            namespace: Some("lock-order".into()),
+            reinforce: Some(false),
+            gate_threshold: None,
+            cosine_gate: None,
+            knowledge_only: None,
+            scope: None,
+            tag: None,
+            event_kind: None,
+        },
+    ));
+
+    assert_eq!(
+        observed_operations.load(Ordering::SeqCst),
+        2,
+        "the dispatch must perform exactly policy initialization then recall-event insertion"
+    );
+    assert!(
+        matches!(
+            *policy.lock().unwrap_or_else(|p| p.into_inner()),
+            PolicyStoreState::Ready(_)
+        ),
+        "phase 2 must initialize the policy store before inserting telemetry"
+    );
 }
 
 #[test]
@@ -223,12 +790,395 @@ fn relate_bad_label_is_invalid_params_not_internal() {
 #[test]
 fn stats_dispatch_matches_format_stats() {
     let (reg, _dir) = stub_registry();
-    let text = ok_text(dispatch(&reg, Request::Stats { namespace: None }));
+    let text = ok_text(dispatch(
+        &reg,
+        Request::Stats {
+            namespace: None,
+            recall: None,
+        },
+    ));
     assert!(text.contains("nodes:"));
     assert!(text.contains("health grade:"));
     // The dogfood usage section is appended after the stats block.
     assert!(text.contains("usage (this daemon)"), "got: {text}");
     assert!(text.contains("extraction backlog:"), "got: {text}");
+}
+#[test]
+fn stats_without_recall_is_byte_identical_to_existing_graph_stats_and_usage() {
+    let (reg, _dir) = stub_registry();
+
+    let no_flag = ok_text(dispatch(
+        &reg,
+        Request::Stats {
+            namespace: None,
+            recall: None,
+        },
+    ));
+    let explicitly_disabled = ok_text(dispatch(
+        &reg,
+        Request::Stats {
+            namespace: None,
+            recall: Some(false),
+        },
+    ));
+
+    assert_eq!(
+        no_flag, explicitly_disabled,
+        "stats without --recall must preserve the graph-stats-plus-usage bytes"
+    );
+    assert!(
+        !no_flag.contains("recall telemetry"),
+        "stats without --recall must not append telemetry: {no_flag}"
+    );
+}
+
+#[test]
+fn stats_recall_unavailable_policy_preserves_graph_stats_and_appends_unavailable() {
+    let (reg, _dir) = stub_registry_with_future_policy_schema();
+
+    let text = ok_text(dispatch(
+        &reg,
+        Request::Stats {
+            namespace: None,
+            recall: Some(true),
+        },
+    ));
+
+    assert!(
+        text.contains("nodes:"),
+        "graph stats must still render: {text}"
+    );
+    assert!(
+        text.contains("usage (this daemon)"),
+        "usage must still render: {text}"
+    );
+    assert!(
+        text.contains("telemetry unavailable"),
+        "future policy state must be reported without failing stats: {text}"
+    );
+}
+
+#[test]
+fn recall_policy_migration_failure_is_fail_open_and_disables_telemetry_without_rows() {
+    let (registry, dir) = stub_registry_with_policy_migration_failure();
+    let database = dir.path().join("memory.db");
+    let rows_before: u64 = rusqlite::Connection::open(&database)
+        .expect("open seeded policy migration database")
+        .query_row("SELECT COUNT(*) FROM recall_events", [], |row| row.get(0))
+        .expect("count seeded telemetry rows");
+    let dispatch_errors_before = registry
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .ops
+        .dispatch_errors;
+
+    let text = ok_text(dispatch(
+        &registry,
+        Request::Recall {
+            query: "core recall survives policy migration failure".into(),
+            limit: Some(5),
+            namespace: None,
+            reinforce: Some(false),
+            gate_threshold: None,
+            cosine_gate: None,
+            knowledge_only: None,
+            scope: None,
+            tag: None,
+            event_kind: None,
+        },
+    ));
+    assert!(
+        text.starts_with("(no relevant memory)") && text.contains("## NODES (for `relate`)\n[]"),
+        "policy migration failure must not replace the core recall response: {text}"
+    );
+
+    let handles = registry
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .namespace_handles(None)
+        .expect("resolve policy state after fail-open recall");
+    let policy_guard = handles.policy.lock().unwrap_or_else(|p| p.into_inner());
+    let disabled_reason = match &*policy_guard {
+        PolicyStoreState::Disabled { reason } => reason,
+        PolicyStoreState::Uninitialized { .. } | PolicyStoreState::Ready(_) => {
+            panic!("policy migration failure must disable telemetry")
+        }
+    };
+    assert!(
+        disabled_reason.contains("initialize policy schema version")
+            && disabled_reason.contains("sqlite code:")
+            && disabled_reason.contains("sqlite category:"),
+        "policy migration failure must retain actionable SQLite evidence: {disabled_reason}"
+    );
+    drop(policy_guard);
+    let rows_after: u64 = rusqlite::Connection::open(&database)
+        .expect("reopen seeded policy migration database")
+        .query_row("SELECT COUNT(*) FROM recall_events", [], |row| row.get(0))
+        .expect("count telemetry rows after fail-open recall");
+    assert_eq!(
+        rows_after, rows_before,
+        "disabled telemetry must not create a recall row"
+    );
+    assert_eq!(
+        registry
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .ops
+            .dispatch_errors,
+        dispatch_errors_before,
+        "best-effort policy migration failure must not become a dispatch failure"
+    );
+
+    let stats = ok_text(dispatch(
+        &registry,
+        Request::Stats {
+            namespace: None,
+            recall: Some(true),
+        },
+    ));
+    assert!(
+        stats.contains("telemetry unavailable"),
+        "disabled policy telemetry must be visible in stats: {stats}"
+    );
+}
+
+#[test]
+fn stats_recall_query_failure_preserves_graph_usage_and_telemetry_rows() {
+    let (registry, dir) = stub_registry();
+    ok_text(dispatch(
+        &registry,
+        Request::Recall {
+            query: "initialize telemetry before corrupting a stats value".into(),
+            limit: Some(5),
+            namespace: None,
+            reinforce: Some(false),
+            gate_threshold: None,
+            cosine_gate: None,
+            knowledge_only: None,
+            scope: None,
+            tag: None,
+            event_kind: None,
+        },
+    ));
+    let handles = registry
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .namespace_handles(None)
+        .expect("resolve initialized telemetry store");
+    let rows_before = {
+        let policy_guard = handles.policy.lock().unwrap_or_else(|p| p.into_inner());
+        let PolicyStoreState::Ready(store) = &*policy_guard else {
+            panic!("successful recall must initialize telemetry");
+        };
+        store
+            .recall_event_count_for_test()
+            .expect("count telemetry before stats-query failure")
+    };
+
+    rusqlite::Connection::open(dir.path().join("memory.db"))
+        .expect("open telemetry database for deterministic stats corruption")
+        .execute(
+            "UPDATE recall_events SET top_cosine = 'not-a-numeric-cosine'",
+            [],
+        )
+        .expect("corrupt only the stats-read value");
+    let graph_and_usage = ok_text(dispatch(
+        &registry,
+        Request::Stats {
+            namespace: None,
+            recall: Some(false),
+        },
+    ));
+    let fail_open = ok_text(dispatch(
+        &registry,
+        Request::Stats {
+            namespace: None,
+            recall: Some(true),
+        },
+    ));
+    assert_eq!(
+        fail_open,
+        format!(
+            "{graph_and_usage}\nrecall telemetry (injection eligibility, not delivery)\n  telemetry unavailable\n"
+        ),
+        "stats-query failure must preserve graph stats and usage while visibly disabling telemetry"
+    );
+
+    let policy_guard = handles.policy.lock().unwrap_or_else(|p| p.into_inner());
+    let PolicyStoreState::Ready(store) = &*policy_guard else {
+        panic!("a stats query failure must not falsely change policy state");
+    };
+    assert_eq!(
+        store
+            .recall_event_count_for_test()
+            .expect("count telemetry after failed stats query"),
+        rows_before,
+        "a failed read-only stats query must not alter persisted telemetry rows"
+    );
+}
+
+#[test]
+fn stats_recall_renderer_empty_contract_is_exact() {
+    let stats = RecallStats {
+        total_attempts: 0,
+        by_event_kind: Vec::new(),
+        abstentions: AbstentionStats {
+            empty: 0,
+            readout_only: 0,
+            cosine_only: 0,
+            both: 0,
+        },
+        cosine: CosineStats {
+            samples: 0,
+            nulls: 0,
+            p50: None,
+            p90: None,
+            p95: None,
+        },
+        auto_exposure: AutoExposureStats {
+            eligible_events: 0,
+            events_with_auto: 0,
+            result_slots: 0,
+            auto_slots: 0,
+        },
+        sweep: (80..=90)
+            .map(|hundredths| SweepPoint {
+                threshold: hundredths as f64 / 100.0,
+                eligible: 0,
+                attempts: 0,
+            })
+            .collect(),
+    };
+
+    assert_eq!(
+        render::format_recall_stats(Some(&stats)),
+        concat!(
+            "recall telemetry (injection eligibility, not delivery)\n",
+            "  attempts: 0\n",
+            "  by event kind:\n",
+            "  abstentions:\n",
+            "    empty: 0\n",
+            "    readout-only: 0\n",
+            "    cosine-only: 0\n",
+            "    both: 0\n",
+            "  cosine:\n",
+            "    samples: 0\n",
+            "    nulls: 0\n",
+            "    p50: N/A\n",
+            "    p90: N/A\n",
+            "    p95: N/A\n",
+            "  auto exposure (exposure, not quality):\n",
+            "    event exposure: N/A (0/0)\n",
+            "    slot exposure: N/A (0/0)\n",
+            "  eligibility sweep:\n",
+            "    0.80: eligible 0 / attempts 0\n",
+            "    0.81: eligible 0 / attempts 0\n",
+            "    0.82: eligible 0 / attempts 0\n",
+            "    0.83: eligible 0 / attempts 0\n",
+            "    0.84: eligible 0 / attempts 0\n",
+            "    0.85: eligible 0 / attempts 0\n",
+            "    0.86: eligible 0 / attempts 0\n",
+            "    0.87: eligible 0 / attempts 0\n",
+            "    0.88: eligible 0 / attempts 0\n",
+            "    0.89: eligible 0 / attempts 0\n",
+            "    0.90: eligible 0 / attempts 0\n",
+        )
+    );
+}
+
+#[test]
+fn stats_recall_renderer_populated_contract_is_exact() {
+    let stats = RecallStats {
+        total_attempts: 6,
+        by_event_kind: vec![
+            EventKindStats {
+                event_kind: RecallEventKind::SessionStart,
+                attempts: 1,
+                eligible: 0,
+            },
+            EventKindStats {
+                event_kind: RecallEventKind::Tool,
+                attempts: 2,
+                eligible: 1,
+            },
+            EventKindStats {
+                event_kind: RecallEventKind::Unknown,
+                attempts: 1,
+                eligible: 0,
+            },
+            EventKindStats {
+                event_kind: RecallEventKind::UserPrompt,
+                attempts: 2,
+                eligible: 1,
+            },
+        ],
+        abstentions: AbstentionStats {
+            empty: 1,
+            readout_only: 1,
+            cosine_only: 1,
+            both: 1,
+        },
+        cosine: CosineStats {
+            samples: 5,
+            nulls: 1,
+            p50: Some(0.84),
+            p90: Some(0.90),
+            p95: Some(0.90),
+        },
+        auto_exposure: AutoExposureStats {
+            eligible_events: 2,
+            events_with_auto: 1,
+            result_slots: 5,
+            auto_slots: 2,
+        },
+        sweep: (80..=90)
+            .zip([3, 3, 3, 2, 2, 2, 2, 2, 2, 1, 1])
+            .map(|(hundredths, eligible)| SweepPoint {
+                threshold: hundredths as f64 / 100.0,
+                eligible,
+                attempts: 6,
+            })
+            .collect(),
+    };
+
+    assert_eq!(
+        render::format_recall_stats(Some(&stats)),
+        concat!(
+            "recall telemetry (injection eligibility, not delivery)\n",
+            "  attempts: 6\n",
+            "  by event kind:\n",
+            "    SessionStart: attempts 1, eligible 0\n",
+            "    Tool: attempts 2, eligible 1\n",
+            "    Unknown: attempts 1, eligible 0\n",
+            "    UserPrompt: attempts 2, eligible 1\n",
+            "  abstentions:\n",
+            "    empty: 1\n",
+            "    readout-only: 1\n",
+            "    cosine-only: 1\n",
+            "    both: 1\n",
+            "  cosine:\n",
+            "    samples: 5\n",
+            "    nulls: 1\n",
+            "    p50: 0.840\n",
+            "    p90: 0.900\n",
+            "    p95: 0.900\n",
+            "  auto exposure (exposure, not quality):\n",
+            "    event exposure: 50.0% (1/2)\n",
+            "    slot exposure: 40.0% (2/5)\n",
+            "  eligibility sweep:\n",
+            "    0.80: eligible 3 / attempts 6\n",
+            "    0.81: eligible 3 / attempts 6\n",
+            "    0.82: eligible 3 / attempts 6\n",
+            "    0.83: eligible 2 / attempts 6\n",
+            "    0.84: eligible 2 / attempts 6\n",
+            "    0.85: eligible 2 / attempts 6\n",
+            "    0.86: eligible 2 / attempts 6\n",
+            "    0.87: eligible 2 / attempts 6\n",
+            "    0.88: eligible 2 / attempts 6\n",
+            "    0.89: eligible 1 / attempts 6\n",
+            "    0.90: eligible 1 / attempts 6\n",
+        )
+    );
 }
 
 #[test]
@@ -441,7 +1391,13 @@ fn forget_soft_hides_then_stats_counts_retracted() {
     let view: serde_json::Value = serde_json::from_str(&got).expect("get returns JSON");
     assert_eq!(view["retracted"], true, "got: {view}");
 
-    let stats = ok_text(dispatch(&reg, Request::Stats { namespace: None }));
+    let stats = ok_text(dispatch(
+        &reg,
+        Request::Stats {
+            namespace: None,
+            recall: None,
+        },
+    ));
     assert!(
         stats.contains("retracted:            1"),
         "stats must count the retraction: {stats}"
@@ -597,6 +1553,7 @@ fn list_returns_ranked_json() {
                 knowledge_only: None,
                 scope: None,
                 tag: None,
+                event_kind: None,
             },
         ));
     }
@@ -967,7 +1924,13 @@ fn stats_renders_failure_counters_that_increment() {
     let (reg, _dir) = stub_registry();
 
     // Baseline: the failure section exists and starts at zero.
-    let s0 = ok_text(dispatch(&reg, Request::Stats { namespace: None }));
+    let s0 = ok_text(dispatch(
+        &reg,
+        Request::Stats {
+            namespace: None,
+            recall: None,
+        },
+    ));
     assert!(
         s0.contains("failures (this daemon):"),
         "stats must render a failures section:\n{s0}"
@@ -995,6 +1958,7 @@ fn stats_renders_failure_counters_that_increment() {
             knowledge_only: None,
             scope: None,
             tag: None,
+            event_kind: None,
         },
     ));
     assert!(
@@ -1030,7 +1994,13 @@ fn stats_renders_failure_counters_that_increment() {
     );
 
     // GREEN expectation: the rendered counters reflect exactly one of each.
-    let s1 = ok_text(dispatch(&reg, Request::Stats { namespace: None }));
+    let s1 = ok_text(dispatch(
+        &reg,
+        Request::Stats {
+            namespace: None,
+            recall: None,
+        },
+    ));
     assert!(
         s1.contains("dispatch errors: 1 (0 ingest)"),
         "one failed request must show as one dispatch error:\n{s1}"
@@ -1202,6 +2172,7 @@ fn recall_filter_by_scope_excludes_other_scope() {
             knowledge_only: None,
             scope: Some("projA".to_string()),
             tag: None,
+            event_kind: None,
         },
     ));
     let nodes_json = resp
@@ -1282,6 +2253,7 @@ fn scope_filter_keeps_universal_and_matching_drops_foreign() {
             knowledge_only: None,
             scope: Some("projA".to_string()),
             tag: None,
+            event_kind: None,
         },
     ));
 
@@ -1466,6 +2438,7 @@ fn p1_t5_manual_qa_demo() {
             knowledge_only: None,
             scope: Some("projA".to_string()),
             tag: None,
+            event_kind: None,
         },
     ));
     println!("recall (scope=projA) -> {recalled}");
@@ -2068,6 +3041,7 @@ mod migration_job {
     fn stats_request(namespace: Option<&str>) -> Request {
         Request::Stats {
             namespace: namespace.map(str::to_string),
+            recall: None,
         }
     }
 
@@ -2082,6 +3056,7 @@ mod migration_job {
             knowledge_only: None,
             scope: None,
             tag: None,
+            event_kind: None,
         }
     }
 

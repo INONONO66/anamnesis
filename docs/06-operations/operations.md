@@ -74,6 +74,194 @@ silent no-op and the agent proceeds. Concretely:
   turn is marked done regardless, so a permanently-abandoned batch cannot loop
   forever.
 
+## Recall telemetry rollout gate
+
+Recall telemetry is a privacy-minimized side schema, not a record of prompt content. It never
+stores a raw query, transcript, or rendered context. Each row contains only recall metadata:
+event kind and provenance, namespace/scope, `query_chars`, knowledge-only state, the filtered top
+score/cosine, gate settings, result node ids/counts, and the four gate booleans `has_hits`,
+`readout_pass`, `cosine_pass`, and `eligible`. Retention keeps the newest **10,000** rows.
+
+Run `anamnesis stats --recall` against the same database and namespace as the daemon. Its counts,
+abstentions, threshold sweep, cosine percentiles, and auto-exposure ratios measure **injection
+eligibility, not delivery or quality**: they cannot establish that a client rendered context, that
+an agent used it, or that an answer improved. The ordinary `stats` command omits this section.
+
+The telemetry side schema is optional. A future side-schema version, or a policy-store open,
+write, or query failure, disables or degrades telemetry only. It must never block core recall; the
+hook retains its fail-open contract and still delivers the user's prompt (with no injected context
+when recall itself cannot complete). The dispatch regression tests own the open/write/query
+fail-open assertions; the procedure below records a reproducible write-failure observation only.
+
+### Pre-plugin-reactivation evidence gate
+
+Plugin reactivation remains blocked until this fail-closed procedure succeeds against a disposable
+database. It creates one note through production CLI paths, gives its Episodic copy a valid
+authoritative retained-action advantage, proves the unfiltered top, restores the same pre-observation
+snapshot, and then proves the hook's knowledge-only filter persists the Semantic copy.
+
+Run the following as one script. Setup, unfiltered recall, and final stats use `--embedded`, so those
+processes release the database lock synchronously. Hook calls still exercise the real daemon path;
+`wait_for_db_lock` prevents direct SQLite access or snapshot replacement until daemon shutdown has
+released `<db>.lock`.
+
+```bash
+set -euo pipefail
+
+RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/anamnesis-recall-rollout.XXXXXX")"
+export ANAMNESIS_DB="$RUN_DIR/memory.db"
+export ANAMNESIS_NAMESPACE="r1-rollout"
+export ANAMNESIS_DAEMON_GRACE_SECS=0
+export ANAMNESIS_REINFORCE=false
+export ANAMNESIS_HOOK_THRESHOLD=13.0
+export ANAMNESIS_HOOK_COSINE_GATE=0.86
+NS_DB="$ANAMNESIS_DB"
+NOTE="R1 rollout marker semantic recall must select this exact note"
+
+cleanup_failed_gate() {
+  sqlite3 "$NS_DB" 'DROP TRIGGER IF EXISTS recall_events_force_insert_failure;' \
+    >/dev/null 2>&1 || true
+  rm -rf "$RUN_DIR"
+}
+trap cleanup_failed_gate EXIT
+
+wait_for_db_lock() {
+  python3 - "$NS_DB.lock" <<'PY'
+import fcntl
+import pathlib
+import sys
+import time
+
+lock_path = pathlib.Path(sys.argv[1])
+deadline = time.monotonic() + 15.0
+with lock_path.open("a+b") as lock_file:
+    while True:
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            break
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                raise SystemExit(f"timed out waiting for {lock_path}")
+            time.sleep(0.05)
+PY
+}
+
+EPISODIC_ID="$(
+  anamnesis remember "$NOTE" --namespace "$ANAMNESIS_NAMESPACE" --embedded |
+    python3 -c 'import re,sys
+text=sys.stdin.read()
+match=re.fullmatch(r"stored node ([0-9]+)\n?", text)
+assert match, text
+print(match.group(1))'
+)"
+SEMANTIC_ID="$(
+  sqlite3 "$NS_DB" \
+    "SELECT id FROM nodes WHERE node_type='semantic' AND content='$NOTE' ORDER BY id LIMIT 1"
+)"
+test -n "$EPISODIC_ID"
+test -n "$SEMANTIC_ID"
+test "$EPISODIC_ID" != "$SEMANTIC_ID"
+
+# retained_action is authoritative; salience is its bounded logistic projection.
+# The capture marker is the production knowledge-only exclusion predicate.
+sqlite3 "$NS_DB" \
+  "UPDATE retained_action SET value=20.0 WHERE node_id=$EPISODIC_ID;
+   UPDATE salience SET salience=0.9999999979388463 WHERE node_id=$EPISODIC_ID;
+   UPDATE nodes SET metadata='capture' || char(9) || 'true' WHERE id=$EPISODIC_ID;"
+anamnesis stats --recall --namespace "$ANAMNESIS_NAMESPACE" --embedded >/dev/null
+cp "$NS_DB" "$RUN_DIR/rank-baseline.db"
+
+anamnesis recall "R1 rollout marker semantic recall" --limit 2 \
+  --namespace "$ANAMNESIS_NAMESPACE" --embedded | tee "$RUN_DIR/unfiltered-recall.txt"
+RAW_TOP_ID="$(
+  python3 - "$RUN_DIR/unfiltered-recall.txt" <<'PY'
+import json
+import pathlib
+import sys
+
+text = pathlib.Path(sys.argv[1]).read_text()
+nodes = json.loads(text.split("## NODES (for `relate`)\n", 1)[1])
+assert nodes, text
+print(nodes[0]["node_id"])
+PY
+)"
+test "$RAW_TOP_ID" = "$EPISODIC_ID"
+test "$(sqlite3 "$NS_DB" "SELECT node_type FROM nodes WHERE id=$RAW_TOP_ID")" = "episodic"
+
+# Give successful and forced-failure hook calls the identical pre-observation graph state.
+cp "$RUN_DIR/rank-baseline.db" "$NS_DB"
+CONTROL_ROWS="$(sqlite3 "$NS_DB" 'SELECT COUNT(*) FROM recall_events')"
+
+printf '{"hook_event_name":"UserPromptSubmit","prompt":"R1 rollout marker semantic recall","cwd":"%s"}\n' \
+  "$RUN_DIR" | anamnesis hook user-prompt | tee "$RUN_DIR/hook-success.json"
+wait_for_db_lock
+
+SUCCESS_ROWS="$(sqlite3 "$NS_DB" 'SELECT COUNT(*) FROM recall_events')"
+test "$SUCCESS_ROWS" -eq "$((CONTROL_ROWS + 1))"
+FILTERED_TOP_ID="$(
+  sqlite3 "$NS_DB" \
+    "SELECT json_extract(result_node_ids, '\$[0]')
+     FROM recall_events WHERE event_kind='user-prompt' ORDER BY id DESC LIMIT 1"
+)"
+test "$FILTERED_TOP_ID" = "$SEMANTIC_ID"
+test "$(sqlite3 "$NS_DB" "SELECT node_type FROM nodes WHERE id=$FILTERED_TOP_ID")" = "semantic"
+
+sqlite3 "$NS_DB" '.schema recall_events' | tee "$RUN_DIR/recall-events-schema.txt"
+sqlite3 -header -column "$NS_DB" \
+  'SELECT id, at_ms, namespace, event_kind, query_chars, scope, knowledge_only,
+          has_hits, readout_pass, cosine_pass, eligible, top_score, top_cosine,
+          gate_threshold, cosine_gate, result_node_ids, auto_extract_node_count
+   FROM recall_events ORDER BY id DESC LIMIT 5;' |
+  tee "$RUN_DIR/success-rows.txt"
+cp "$NS_DB" "$RUN_DIR/success.db"
+
+cp "$RUN_DIR/rank-baseline.db" "$NS_DB"
+sqlite3 "$NS_DB" <<'SQL'
+CREATE TRIGGER recall_events_force_insert_failure
+BEFORE INSERT ON recall_events
+BEGIN
+  SELECT RAISE(FAIL, 'forced telemetry insert failure');
+END;
+SQL
+
+printf '{"hook_event_name":"UserPromptSubmit","prompt":"R1 rollout marker semantic recall","cwd":"%s"}\n' \
+  "$RUN_DIR" | anamnesis hook user-prompt | tee "$RUN_DIR/hook-failure.json"
+wait_for_db_lock
+
+FAILURE_ROWS="$(sqlite3 "$NS_DB" 'SELECT COUNT(*) FROM recall_events')"
+test "$FAILURE_ROWS" -eq "$CONTROL_ROWS"
+diff -u "$RUN_DIR/hook-success.json" "$RUN_DIR/hook-failure.json"
+sqlite3 "$NS_DB" 'DROP TRIGGER IF EXISTS recall_events_force_insert_failure;'
+
+cp "$RUN_DIR/success.db" "$NS_DB"
+anamnesis stats --recall --namespace "$ANAMNESIS_NAMESPACE" --embedded |
+  tee "$RUN_DIR/recall-stats.txt"
+
+# Success: retain the evidence directory for review instead of running the failure cleanup trap.
+trap - EXIT
+printf 'Recall telemetry evidence retained at %s\n' "$RUN_DIR"
+```
+
+The hook command is a local entrypoint simulation, not evidence that Claude Code delivered a real
+external `UserPromptSubmit`. Retain the unfiltered and filtered ids/types, schema, successful row,
+forced-failure zero-row delta, byte-identical hook output, 11-point sweep, cosine p50/p90/p95 with
+sample/NULL counts, and both auto-exposure ratios. The schema must contain `query_chars` but no
+raw-query, transcript, or rendered-context column. Label all metrics as eligibility/exposure rather
+than delivery or quality.
+
+The trigger proves only telemetry-write fail-open; the dispatch regression suite owns the causal
+migration/open and stats-query failure evidence. After reviewing or copying the retained evidence,
+remove it with:
+
+```bash
+rm -rf "$RUN_DIR"
+```
+
+A real external `UserPromptSubmit` activation with the installed plugin remains pending. Do not
+reactivate the plugin from this deterministic procedure or regression output alone; collect and
+review that external activation evidence separately.
+
 ## Daemon lifecycle & version skew
 
 Anamnesis runs an **on-demand daemon per database**. A client (a plugin hook, an
