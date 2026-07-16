@@ -184,10 +184,11 @@ pub(crate) fn format_recall_stats(stats: Option<&memory::RecallStats>) -> String
 }
 
 fn format_finite(value: Option<f64>) -> String {
-    value
-        .filter(|value| value.is_finite())
-        .map(|value| format!("{value:.3}"))
-        .unwrap_or_else(|| "N/A".to_string())
+    match value {
+        None => "N/A".to_string(),
+        Some(value) if value.is_finite() => format!("{value:.3}"),
+        Some(_) => "invalid".to_string(),
+    }
 }
 
 fn format_ratio(numerator: u64, denominator: u64) -> String {
@@ -198,5 +199,20 @@ fn format_ratio(numerator: u64, denominator: u64) -> String {
             "{:.1}% ({numerator}/{denominator})",
             numerator as f64 * 100.0 / denominator as f64
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_finite;
+
+    #[test]
+    fn format_finite_reserves_missing_for_absent_values() {
+        assert_eq!(format_finite(None), "N/A");
+        assert_eq!(format_finite(Some(0.9)), "0.900");
+
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(format_finite(Some(value)), "invalid");
+        }
     }
 }

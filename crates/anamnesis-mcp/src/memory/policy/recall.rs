@@ -164,8 +164,19 @@ fn cosine_values(connection: &Connection) -> Result<Vec<f64>, PolicyStoreError> 
         .query_map([], |row| row.get(0))
         .map_err(|_| PolicyStoreError::operation("query recall cosine telemetry"))?;
 
-    rows.map(|row| row.map_err(|_| PolicyStoreError::operation("read recall cosine telemetry")))
-        .collect()
+    rows.map(|row| {
+        let value = row.map_err(|_| PolicyStoreError::operation("read recall cosine telemetry"))?;
+        finite_cosine(value)
+    })
+    .collect()
+}
+
+fn finite_cosine(value: f64) -> Result<f64, PolicyStoreError> {
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err(PolicyStoreError::invalid_value("recall stats cosine"))
+    }
 }
 
 fn sweep(connection: &Connection, attempts: u64) -> Result<Vec<SweepPoint>, PolicyStoreError> {
@@ -547,5 +558,47 @@ mod tests {
                 .contains(secret_query),
             "the secret query must not be persisted"
         );
+    }
+    #[test]
+    fn non_finite_persisted_cosine_disables_recall_stats() {
+        let mut connection = initialized_connection();
+        {
+            let transaction = connection.transaction().unwrap();
+            insert(&transaction, &minimized_event(42)).unwrap();
+            transaction.commit().unwrap();
+        }
+        connection
+            .execute("UPDATE recall_events SET top_cosine = ?1", [f64::INFINITY])
+            .unwrap();
+
+        assert_eq!(
+            stats(&connection),
+            Err(PolicyStoreError::InvalidValue {
+                field: "recall stats cosine"
+            })
+        );
+    }
+
+    #[test]
+    fn recall_stats_rejects_non_finite_cosine_samples() {
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(
+                finite_cosine(value),
+                Err(PolicyStoreError::InvalidValue {
+                    field: "recall stats cosine"
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn empty_recall_stats_have_absent_cosine_percentiles() {
+        let stats = stats(&initialized_connection()).unwrap();
+
+        assert_eq!(stats.cosine.samples, 0);
+        assert_eq!(stats.cosine.nulls, 0);
+        assert_eq!(stats.cosine.p50, None);
+        assert_eq!(stats.cosine.p90, None);
+        assert_eq!(stats.cosine.p95, None);
     }
 }

@@ -27,16 +27,13 @@ use anamnesis::{Error, Memory};
 use crate::capture::{extract_redelivery_ms, scan_extraction_state};
 
 mod mgmt;
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) mod migration;
-#[cfg_attr(not(test), allow(dead_code))]
 mod policy;
 mod recall;
 #[cfg(test)]
 mod tests;
 
 pub(crate) use mgmt::*;
-#[cfg_attr(not(test), allow(unused_imports))]
 pub(crate) use policy::*;
 pub(crate) use recall::*;
 
@@ -60,7 +57,6 @@ pub(crate) enum NamespaceMigrationState {
 }
 
 pub(crate) type NamespaceHandle = Arc<Mutex<Memory<SqliteStorage>>>;
-#[cfg_attr(not(test), allow(dead_code))]
 /// The phase-1 namespace handles returned to dispatch callers. The policy
 /// handle uses the same canonical key as the graph handle and remains
 /// uninitialized until phase 2.
@@ -218,7 +214,6 @@ fn acquire_namespace_lock(path: &std::path::Path) -> Result<std::fs::File, Error
     Ok(lock_file)
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn acquire_namespace_migration_lock(
     path: &std::path::Path,
 ) -> Result<MigrationLockLease, Error> {
@@ -736,7 +731,6 @@ pub struct MemoryRegistry {
     /// One policy side-store state per namespace, keyed identically to `open`.
     /// Phase 1 only creates `Uninitialized`; phase 2 opens it after locking the
     /// corresponding graph handle.
-    #[cfg_attr(not(test), allow(dead_code))]
     policy: HashMap<String, PolicyStoreHandle>,
     default_namespace: String,
     /// Exclusive locks on each opened file-backed DB. Held for the process
@@ -775,7 +769,6 @@ impl MemoryRegistry {
     ///
     /// Each opened namespace takes its own `<db>.lock` (single-writer guard for
     /// the embedded one-shot / stdio path, where this process owns the DB).
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn file_backed(
         default_db: PathBuf,
         dir: PathBuf,
@@ -1123,7 +1116,6 @@ impl MemoryRegistry {
         }
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     fn open_policy_store(path: Option<&Path>) -> Result<PolicyStore, Error> {
         match path {
             Some(path) => PolicyStore::open(path),
@@ -1215,7 +1207,6 @@ impl MemoryRegistry {
     /// Resolve graph and policy handles under the caller's brief registry-lock
     /// phase. This creates only an `Uninitialized` policy state; it never opens,
     /// migrates, or issues SQL against the policy side schema.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn namespace_handles(
         &mut self,
         ns: Option<&str>,
@@ -1241,7 +1232,6 @@ impl MemoryRegistry {
     /// corresponding namespace `Memory` lock before calling this function, so
     /// the lock order is always Memory then PolicyStore. It never accesses the
     /// registry/global lock.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn policy_store(
         policy: &PolicyStoreHandle,
     ) -> Result<MutexGuard<'_, PolicyStoreState>, Error> {

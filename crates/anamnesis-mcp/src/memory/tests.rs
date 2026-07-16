@@ -151,22 +151,21 @@ fn registry_with_policy_version(version: i64) -> (MemoryRegistry, tempfile::Temp
         dir,
     )
 }
-#[derive(Clone, Copy)]
-struct RecallGateFixture {
-    has_hits: bool,
-    readout_pass: bool,
-    cosine_pass: bool,
-    eligible: bool,
-}
-
 fn recall_event(
     at_ms: u64,
     event_kind: RecallEventKind,
-    gates: RecallGateFixture,
-    top_cosine: Option<f64>,
+    top: Option<(f64, f64)>,
+    gate_threshold: f64,
+    cosine_gate: f64,
     result_node_ids: Vec<u64>,
     auto_extract_node_count: u64,
 ) -> RecallEvent {
+    let (top_score, top_cosine) = top
+        .map(|(score, cosine)| (Some(score), Some(cosine)))
+        .unwrap_or((None, None));
+    let has_hits = top.is_some();
+    let readout_pass = top_score.is_some_and(|score| score >= gate_threshold);
+    let cosine_pass = top_cosine.is_some_and(|cosine| cosine >= cosine_gate);
     RecallEvent {
         at_ms,
         namespace: "default".into(),
@@ -174,14 +173,14 @@ fn recall_event(
         query_chars: 8,
         scope: Some("project/anamnesis".into()),
         knowledge_only: true,
-        has_hits: gates.has_hits,
-        readout_pass: gates.readout_pass,
-        cosine_pass: gates.cosine_pass,
-        eligible: gates.eligible,
-        top_score: top_cosine,
+        has_hits,
+        readout_pass,
+        cosine_pass,
+        eligible: has_hits && readout_pass && cosine_pass,
+        top_score,
         top_cosine,
-        gate_threshold: Some(0.8),
-        cosine_gate: Some(0.8),
+        gate_threshold: Some(gate_threshold),
+        cosine_gate: Some(cosine_gate),
         result_node_ids,
         auto_extract_node_count,
     }
@@ -193,6 +192,7 @@ fn event_kind_stats(stats: &RecallStats, event_kind: RecallEventKind) -> &EventK
         .find(|stats| stats.event_kind == event_kind)
         .expect("event kind must have recall telemetry")
 }
+
 #[test]
 fn recall_stats_aggregates_gate_buckets() {
     let mut store = PolicyStore::in_memory().expect("open policy store");
@@ -201,83 +201,61 @@ fn recall_stats_aggregates_gate_buckets() {
         recall_event(
             1,
             RecallEventKind::UserPrompt,
-            RecallGateFixture {
-                has_hits: false,
-                readout_pass: true,
-                cosine_pass: true,
-                eligible: false,
-            },
             None,
-            vec![90],
-            9,
+            0.8,
+            0.8,
+            Vec::new(),
+            0,
         ),
+        // Readout-only abstention: score fails while cosine passes.
         recall_event(
             2,
             RecallEventKind::SessionStart,
-            RecallGateFixture {
-                has_hits: true,
-                readout_pass: false,
-                cosine_pass: true,
-                eligible: false,
-            },
-            Some(0.80),
-            vec![91],
-            8,
+            Some((0.70, 0.80)),
+            0.8,
+            0.8,
+            Vec::new(),
+            0,
         ),
+        // Cosine-only abstention: score passes while cosine fails its observed gate.
         recall_event(
             3,
             RecallEventKind::Tool,
-            RecallGateFixture {
-                has_hits: true,
-                readout_pass: true,
-                cosine_pass: false,
-                eligible: false,
-            },
-            Some(0.82),
-            vec![92],
-            7,
+            Some((0.90, 0.82)),
+            0.8,
+            0.9,
+            Vec::new(),
+            0,
         ),
+        // Both gates fail.
         recall_event(
             4,
             RecallEventKind::Unknown,
-            RecallGateFixture {
-                has_hits: true,
-                readout_pass: false,
-                cosine_pass: false,
-                eligible: false,
-            },
-            Some(0.84),
-            vec![93],
-            6,
+            Some((0.70, 0.84)),
+            0.8,
+            0.9,
+            Vec::new(),
+            0,
         ),
         recall_event(
             5,
             RecallEventKind::UserPrompt,
-            RecallGateFixture {
-                has_hits: true,
-                readout_pass: true,
-                cosine_pass: true,
-                eligible: true,
-            },
-            Some(0.88),
+            Some((0.90, 0.88)),
+            0.8,
+            0.8,
             vec![1, 2, 3],
             2,
         ),
         recall_event(
             6,
             RecallEventKind::Tool,
-            RecallGateFixture {
-                has_hits: true,
-                readout_pass: true,
-                cosine_pass: true,
-                eligible: true,
-            },
-            Some(0.90),
+            Some((0.95, 0.90)),
+            0.8,
+            0.8,
             vec![4, 5],
             0,
         ),
     ];
-
     for event in &events {
         store
             .insert_recall_event(event)
@@ -331,6 +309,69 @@ fn recall_stats_aggregates_gate_buckets() {
         assert_eq!(point.threshold, f64::from(hundredths) / 100.0);
         assert_eq!(point.eligible, eligible);
         assert_eq!(point.attempts, 6);
+    }
+}
+
+#[test]
+fn recall_gate_trace_follows_production_gate_decisions() {
+    let mut empty = registry(false);
+    let empty_outcome = empty
+        .recall_packaged_gated(
+            "nothing here",
+            5,
+            None,
+            Some(false),
+            Some(f64::MAX),
+            Some(f64::MAX),
+        )
+        .expect("empty recall outcome");
+    assert_eq!(
+        (
+            empty_outcome.trace.has_hits,
+            empty_outcome.trace.readout_pass,
+            empty_outcome.trace.cosine_pass,
+            empty_outcome.trace.eligible,
+        ),
+        (false, false, false, false)
+    );
+
+    let mut reg = registry(false);
+    reg.remember("the auth bug was a race in the middleware", None)
+        .expect("seed recallable memory");
+
+    for (name, gate, cosine_gate, expected) in [
+        ("readout only", Some(f64::MAX), None, (false, true, false)),
+        ("cosine only", None, Some(f64::MAX), (true, false, false)),
+        (
+            "both",
+            Some(f64::MAX),
+            Some(f64::MAX),
+            (false, false, false),
+        ),
+        ("eligible", None, None, (true, true, true)),
+    ] {
+        let outcome = reg
+            .recall_packaged_gated(
+                "auth race condition",
+                5,
+                None,
+                Some(false),
+                gate,
+                cosine_gate,
+            )
+            .expect("recall outcome");
+        let trace = outcome.trace;
+        assert_eq!(
+            (trace.readout_pass, trace.cosine_pass, trace.eligible),
+            expected,
+            "{name}"
+        );
+        assert_eq!(
+            trace.eligible,
+            trace.has_hits && trace.readout_pass && trace.cosine_pass,
+            "{name}"
+        );
+        assert_eq!(outcome.packaged.hits.is_empty(), !trace.eligible, "{name}");
     }
 }
 
@@ -412,7 +453,7 @@ fn ready_policy_store_persists_minimized_event_and_rejects_out_of_range_values()
         gate_threshold: Some(0.7),
         cosine_gate: Some(0.6),
         result_node_ids: vec![1, 2],
-        auto_extract_node_count: 3,
+        auto_extract_node_count: 1,
     };
 
     store

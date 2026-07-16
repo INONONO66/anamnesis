@@ -1,5 +1,8 @@
 use super::*;
-use crate::memory::{MemoryRegistry, PolicyStore, PolicyStoreState, StubProvider};
+use crate::memory::{
+    AbstentionStats, AutoExposureStats, CosineStats, EventKindStats, MemoryRegistry, PolicyStore,
+    PolicyStoreState, RecallStats, StubProvider, SweepPoint,
+};
 use crate::proto::{ErrKind, RecallEventKind, Response, TurnInput};
 use std::sync::{
     Arc, Mutex,
@@ -21,6 +24,34 @@ fn stub_registry() -> (Arc<Mutex<MemoryRegistry>>, tempfile::TempDir) {
     );
     (Arc::new(Mutex::new(reg)), dir)
 }
+fn stub_registry_with_policy_migration_failure() -> (Arc<Mutex<MemoryRegistry>>, tempfile::TempDir)
+{
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let db = dir.path().join("memory.db");
+    let connection = rusqlite::Connection::open(&db).expect("open policy migration database");
+    connection
+        .execute_batch(
+            "
+            CREATE TABLE mcp_schema_version (
+                id INTEGER PRIMARY KEY CHECK(id = 1),
+                version INTEGER NOT NULL CHECK(version = 0)
+            );
+            CREATE TABLE recall_events (id INTEGER PRIMARY KEY);
+            ",
+        )
+        .expect("seed policy schema that rejects the v1 version write");
+    drop(connection);
+
+    let reg = MemoryRegistry::file_backed_unlocked_with(
+        Arc::new(StubProvider),
+        db,
+        dir.path().to_path_buf(),
+        "default".to_string(),
+        false,
+    );
+    (Arc::new(Mutex::new(reg)), dir)
+}
+
 fn stub_registry_with_future_policy_schema() -> (Arc<Mutex<MemoryRegistry>>, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("temporary directory");
     let db = dir.path().join("memory.db");
@@ -33,6 +64,7 @@ fn stub_registry_with_future_policy_schema() -> (Arc<Mutex<MemoryRegistry>>, tem
                 version INTEGER NOT NULL
             );
             INSERT INTO mcp_schema_version (id, version) VALUES (1, 2);
+            CREATE TABLE recall_events (id INTEGER PRIMARY KEY);
             ",
         )
         .expect("seed future policy schema");
@@ -827,13 +859,24 @@ fn stats_recall_unavailable_policy_preserves_graph_stats_and_appends_unavailable
 }
 
 #[test]
-fn stats_recall_populated_renderer_has_exact_eligibility_labels_sweep_and_finite_values() {
-    let (reg, _dir) = stub_registry();
-    let _ = ok_text(dispatch(
-        &reg,
+fn recall_policy_migration_failure_is_fail_open_and_disables_telemetry_without_rows() {
+    let (registry, dir) = stub_registry_with_policy_migration_failure();
+    let database = dir.path().join("memory.db");
+    let rows_before: u64 = rusqlite::Connection::open(&database)
+        .expect("open seeded policy migration database")
+        .query_row("SELECT COUNT(*) FROM recall_events", [], |row| row.get(0))
+        .expect("count seeded telemetry rows");
+    let dispatch_errors_before = registry
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .ops
+        .dispatch_errors;
+
+    let text = ok_text(dispatch(
+        &registry,
         Request::Recall {
-            query: "telemetry fixture".to_string(),
-            limit: Some(1),
+            query: "core recall survives policy migration failure".into(),
+            limit: Some(5),
             namespace: None,
             reinforce: Some(false),
             gate_threshold: None,
@@ -844,47 +887,297 @@ fn stats_recall_populated_renderer_has_exact_eligibility_labels_sweep_and_finite
             event_kind: None,
         },
     ));
+    assert!(
+        text.starts_with("(no relevant memory)") && text.contains("## NODES (for `relate`)\n[]"),
+        "policy migration failure must not replace the core recall response: {text}"
+    );
 
-    let text = ok_text(dispatch(
-        &reg,
+    let handles = registry
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .namespace_handles(None)
+        .expect("resolve policy state after fail-open recall");
+    let policy_guard = handles.policy.lock().unwrap_or_else(|p| p.into_inner());
+    let disabled_reason = match &*policy_guard {
+        PolicyStoreState::Disabled { reason } => reason,
+        PolicyStoreState::Uninitialized { .. } | PolicyStoreState::Ready(_) => {
+            panic!("policy migration failure must disable telemetry")
+        }
+    };
+    assert!(
+        disabled_reason.contains("initialize policy schema version")
+            && disabled_reason.contains("sqlite code:")
+            && disabled_reason.contains("sqlite category:"),
+        "policy migration failure must retain actionable SQLite evidence: {disabled_reason}"
+    );
+    drop(policy_guard);
+    let rows_after: u64 = rusqlite::Connection::open(&database)
+        .expect("reopen seeded policy migration database")
+        .query_row("SELECT COUNT(*) FROM recall_events", [], |row| row.get(0))
+        .expect("count telemetry rows after fail-open recall");
+    assert_eq!(
+        rows_after, rows_before,
+        "disabled telemetry must not create a recall row"
+    );
+    assert_eq!(
+        registry
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .ops
+            .dispatch_errors,
+        dispatch_errors_before,
+        "best-effort policy migration failure must not become a dispatch failure"
+    );
+
+    let stats = ok_text(dispatch(
+        &registry,
         Request::Stats {
             namespace: None,
             recall: Some(true),
         },
     ));
+    assert!(
+        stats.contains("telemetry unavailable"),
+        "disabled policy telemetry must be visible in stats: {stats}"
+    );
+}
 
-    assert!(
-        text.contains("recall telemetry (injection eligibility, not delivery)"),
-        "recall heading must use the exact eligibility contract: {text}"
+#[test]
+fn stats_recall_query_failure_preserves_graph_usage_and_telemetry_rows() {
+    let (registry, dir) = stub_registry();
+    ok_text(dispatch(
+        &registry,
+        Request::Recall {
+            query: "initialize telemetry before corrupting a stats value".into(),
+            limit: Some(5),
+            namespace: None,
+            reinforce: Some(false),
+            gate_threshold: None,
+            cosine_gate: None,
+            knowledge_only: None,
+            scope: None,
+            tag: None,
+            event_kind: None,
+        },
+    ));
+    let handles = registry
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .namespace_handles(None)
+        .expect("resolve initialized telemetry store");
+    let rows_before = {
+        let policy_guard = handles.policy.lock().unwrap_or_else(|p| p.into_inner());
+        let PolicyStoreState::Ready(store) = &*policy_guard else {
+            panic!("successful recall must initialize telemetry");
+        };
+        store
+            .recall_event_count_for_test()
+            .expect("count telemetry before stats-query failure")
+    };
+
+    rusqlite::Connection::open(dir.path().join("memory.db"))
+        .expect("open telemetry database for deterministic stats corruption")
+        .execute(
+            "UPDATE recall_events SET top_cosine = 'not-a-numeric-cosine'",
+            [],
+        )
+        .expect("corrupt only the stats-read value");
+    let graph_and_usage = ok_text(dispatch(
+        &registry,
+        Request::Stats {
+            namespace: None,
+            recall: Some(false),
+        },
+    ));
+    let fail_open = ok_text(dispatch(
+        &registry,
+        Request::Stats {
+            namespace: None,
+            recall: Some(true),
+        },
+    ));
+    assert_eq!(
+        fail_open,
+        format!(
+            "{graph_and_usage}\nrecall telemetry (injection eligibility, not delivery)\n  telemetry unavailable\n"
+        ),
+        "stats-query failure must preserve graph stats and usage while visibly disabling telemetry"
     );
-    assert!(
-        !text.contains("telemetry fixture"),
-        "telemetry must aggregate without rendering raw recall queries: {text}"
+
+    let policy_guard = handles.policy.lock().unwrap_or_else(|p| p.into_inner());
+    let PolicyStoreState::Ready(store) = &*policy_guard else {
+        panic!("a stats query failure must not falsely change policy state");
+    };
+    assert_eq!(
+        store
+            .recall_event_count_for_test()
+            .expect("count telemetry after failed stats query"),
+        rows_before,
+        "a failed read-only stats query must not alter persisted telemetry rows"
     );
-    assert!(
-        text.contains("exposure, not quality"),
-        "auto-exposure label must not claim quality: {text}"
+}
+
+#[test]
+fn stats_recall_renderer_empty_contract_is_exact() {
+    let stats = RecallStats {
+        total_attempts: 0,
+        by_event_kind: Vec::new(),
+        abstentions: AbstentionStats {
+            empty: 0,
+            readout_only: 0,
+            cosine_only: 0,
+            both: 0,
+        },
+        cosine: CosineStats {
+            samples: 0,
+            nulls: 0,
+            p50: None,
+            p90: None,
+            p95: None,
+        },
+        auto_exposure: AutoExposureStats {
+            eligible_events: 0,
+            events_with_auto: 0,
+            result_slots: 0,
+            auto_slots: 0,
+        },
+        sweep: (80..=90)
+            .map(|hundredths| SweepPoint {
+                threshold: hundredths as f64 / 100.0,
+                eligible: 0,
+                attempts: 0,
+            })
+            .collect(),
+    };
+
+    assert_eq!(
+        render::format_recall_stats(Some(&stats)),
+        concat!(
+            "recall telemetry (injection eligibility, not delivery)\n",
+            "  attempts: 0\n",
+            "  by event kind:\n",
+            "  abstentions:\n",
+            "    empty: 0\n",
+            "    readout-only: 0\n",
+            "    cosine-only: 0\n",
+            "    both: 0\n",
+            "  cosine:\n",
+            "    samples: 0\n",
+            "    nulls: 0\n",
+            "    p50: N/A\n",
+            "    p90: N/A\n",
+            "    p95: N/A\n",
+            "  auto exposure (exposure, not quality):\n",
+            "    event exposure: N/A (0/0)\n",
+            "    slot exposure: N/A (0/0)\n",
+            "  eligibility sweep:\n",
+            "    0.80: eligible 0 / attempts 0\n",
+            "    0.81: eligible 0 / attempts 0\n",
+            "    0.82: eligible 0 / attempts 0\n",
+            "    0.83: eligible 0 / attempts 0\n",
+            "    0.84: eligible 0 / attempts 0\n",
+            "    0.85: eligible 0 / attempts 0\n",
+            "    0.86: eligible 0 / attempts 0\n",
+            "    0.87: eligible 0 / attempts 0\n",
+            "    0.88: eligible 0 / attempts 0\n",
+            "    0.89: eligible 0 / attempts 0\n",
+            "    0.90: eligible 0 / attempts 0\n",
+        )
     );
-    for hundredths in 80..=90 {
-        let threshold = format!("{:.2}", hundredths as f64 / 100.0);
-        assert_eq!(
-            text.matches(&threshold).count(),
-            1,
-            "sweep must render threshold {threshold} exactly once: {text}"
-        );
-    }
-    let telemetry = text
-        .split_once("recall telemetry (injection eligibility, not delivery)")
-        .map(|(_, telemetry)| telemetry)
-        .expect("recall telemetry section must be present");
-    let lower = telemetry.to_ascii_lowercase();
-    assert!(
-        !lower.contains("nan"),
-        "telemetry must not render NaN: {text}"
-    );
-    assert!(
-        !lower.contains("inf"),
-        "telemetry must not render infinity: {text}"
+}
+
+#[test]
+fn stats_recall_renderer_populated_contract_is_exact() {
+    let stats = RecallStats {
+        total_attempts: 6,
+        by_event_kind: vec![
+            EventKindStats {
+                event_kind: RecallEventKind::SessionStart,
+                attempts: 1,
+                eligible: 0,
+            },
+            EventKindStats {
+                event_kind: RecallEventKind::Tool,
+                attempts: 2,
+                eligible: 1,
+            },
+            EventKindStats {
+                event_kind: RecallEventKind::Unknown,
+                attempts: 1,
+                eligible: 0,
+            },
+            EventKindStats {
+                event_kind: RecallEventKind::UserPrompt,
+                attempts: 2,
+                eligible: 1,
+            },
+        ],
+        abstentions: AbstentionStats {
+            empty: 1,
+            readout_only: 1,
+            cosine_only: 1,
+            both: 1,
+        },
+        cosine: CosineStats {
+            samples: 5,
+            nulls: 1,
+            p50: Some(0.84),
+            p90: Some(0.90),
+            p95: Some(0.90),
+        },
+        auto_exposure: AutoExposureStats {
+            eligible_events: 2,
+            events_with_auto: 1,
+            result_slots: 5,
+            auto_slots: 2,
+        },
+        sweep: (80..=90)
+            .zip([3, 3, 3, 2, 2, 2, 2, 2, 2, 1, 1])
+            .map(|(hundredths, eligible)| SweepPoint {
+                threshold: hundredths as f64 / 100.0,
+                eligible,
+                attempts: 6,
+            })
+            .collect(),
+    };
+
+    assert_eq!(
+        render::format_recall_stats(Some(&stats)),
+        concat!(
+            "recall telemetry (injection eligibility, not delivery)\n",
+            "  attempts: 6\n",
+            "  by event kind:\n",
+            "    SessionStart: attempts 1, eligible 0\n",
+            "    Tool: attempts 2, eligible 1\n",
+            "    Unknown: attempts 1, eligible 0\n",
+            "    UserPrompt: attempts 2, eligible 1\n",
+            "  abstentions:\n",
+            "    empty: 1\n",
+            "    readout-only: 1\n",
+            "    cosine-only: 1\n",
+            "    both: 1\n",
+            "  cosine:\n",
+            "    samples: 5\n",
+            "    nulls: 1\n",
+            "    p50: 0.840\n",
+            "    p90: 0.900\n",
+            "    p95: 0.900\n",
+            "  auto exposure (exposure, not quality):\n",
+            "    event exposure: 50.0% (1/2)\n",
+            "    slot exposure: 40.0% (2/5)\n",
+            "  eligibility sweep:\n",
+            "    0.80: eligible 3 / attempts 6\n",
+            "    0.81: eligible 3 / attempts 6\n",
+            "    0.82: eligible 3 / attempts 6\n",
+            "    0.83: eligible 2 / attempts 6\n",
+            "    0.84: eligible 2 / attempts 6\n",
+            "    0.85: eligible 2 / attempts 6\n",
+            "    0.86: eligible 2 / attempts 6\n",
+            "    0.87: eligible 2 / attempts 6\n",
+            "    0.88: eligible 2 / attempts 6\n",
+            "    0.89: eligible 1 / attempts 6\n",
+            "    0.90: eligible 1 / attempts 6\n",
+        )
     );
 }
 

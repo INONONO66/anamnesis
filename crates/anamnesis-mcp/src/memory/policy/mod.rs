@@ -13,7 +13,7 @@ use std::{cell::RefCell, marker::PhantomData, rc::Rc};
 
 use crate::proto::RecallEventKind;
 use anamnesis::Error;
-use rusqlite::Connection;
+use rusqlite::{Connection, Error as SqliteError};
 
 mod recall;
 mod schema;
@@ -118,14 +118,53 @@ pub(crate) enum PolicyStoreState {
 /// into the engine's established error contract.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PolicyStoreError {
-    UnsupportedVersion { version: i64 },
-    Operation { operation: &'static str },
-    InvalidValue { field: &'static str },
+    UnsupportedVersion {
+        version: i64,
+    },
+    Operation {
+        operation: &'static str,
+        sqlite_code: Option<i32>,
+        sqlite_category: Option<String>,
+        sqlite_source: Option<String>,
+        path: Option<PathBuf>,
+    },
+    InvalidValue {
+        field: &'static str,
+    },
 }
 
 impl PolicyStoreError {
     fn operation(operation: &'static str) -> Self {
-        Self::Operation { operation }
+        Self::Operation {
+            operation,
+            sqlite_code: None,
+            sqlite_category: None,
+            sqlite_source: None,
+            path: None,
+        }
+    }
+
+    fn sqlite(operation: &'static str, error: SqliteError) -> Self {
+        match error {
+            SqliteError::SqliteFailure(error, source) => Self::Operation {
+                operation,
+                sqlite_code: Some(error.extended_code),
+                sqlite_category: Some(format!("{:?}", error.code)),
+                sqlite_source: source,
+                path: None,
+            },
+            _ => Self::operation(operation),
+        }
+    }
+
+    fn with_path(mut self, path: &Path) -> Self {
+        if let Self::Operation {
+            path: error_path, ..
+        } = &mut self
+        {
+            *error_path = Some(path.to_path_buf());
+        }
+        self
     }
 
     fn invalid_value(field: &'static str) -> Self {
@@ -137,8 +176,27 @@ impl PolicyStoreError {
             Self::UnsupportedVersion { version } => {
                 Error::StorageError(format!("{UNSUPPORTED_VERSION_PREFIX}{version}"))
             }
-            Self::Operation { operation } => {
-                Error::StorageError(format!("policy store operation failed: {operation}"))
+            Self::Operation {
+                operation,
+                sqlite_code,
+                sqlite_category,
+                sqlite_source,
+                path,
+            } => {
+                let mut message = format!("policy store operation failed: {operation}");
+                if let Some(path) = path {
+                    message.push_str(&format!("; path: {}", path.display()));
+                }
+                if let Some(code) = sqlite_code {
+                    message.push_str(&format!("; sqlite code: {code}"));
+                }
+                if let Some(category) = sqlite_category {
+                    message.push_str(&format!("; sqlite category: {category}"));
+                }
+                if let Some(source) = sqlite_source {
+                    message.push_str(&format!("; sqlite source: {source}"));
+                }
+                Error::StorageError(message)
             }
             Self::InvalidValue { field } => {
                 Error::InvalidInput(format!("invalid policy store value: {field}"))
@@ -156,14 +214,18 @@ impl PolicyStore {
     /// Opens and transactionally converges the MCP side schema without changing
     /// SQLite journal mode or acquiring any graph/registry lock.
     pub(crate) fn open(path: &Path) -> Result<Self, Error> {
-        let connection = Connection::open(path)
-            .map_err(|_| PolicyStoreError::operation("open policy store").into_engine_error())?;
+        let connection = Connection::open(path).map_err(|error| {
+            PolicyStoreError::sqlite("open policy store", error)
+                .with_path(path)
+                .into_engine_error()
+        })?;
         Self::from_connection(connection)
     }
 
     fn from_connection(mut connection: Connection) -> Result<Self, Error> {
-        connection.busy_timeout(BUSY_TIMEOUT).map_err(|_| {
-            PolicyStoreError::operation("configure policy store busy timeout").into_engine_error()
+        connection.busy_timeout(BUSY_TIMEOUT).map_err(|error| {
+            PolicyStoreError::sqlite("configure policy store busy timeout", error)
+                .into_engine_error()
         })?;
         schema::initialize(&mut connection).map_err(PolicyStoreError::into_engine_error)?;
         #[cfg(test)]
@@ -177,12 +239,12 @@ impl PolicyStore {
         #[cfg(test)]
         observe_operation();
 
-        let transaction = self.connection.transaction().map_err(|_| {
-            PolicyStoreError::operation("start recall event transaction").into_engine_error()
+        let transaction = self.connection.transaction().map_err(|error| {
+            PolicyStoreError::sqlite("start recall event transaction", error).into_engine_error()
         })?;
         recall::insert(&transaction, event).map_err(PolicyStoreError::into_engine_error)?;
-        transaction.commit().map_err(|_| {
-            PolicyStoreError::operation("commit recall event transaction").into_engine_error()
+        transaction.commit().map_err(|error| {
+            PolicyStoreError::sqlite("commit recall event transaction", error).into_engine_error()
         })
     }
     /// Aggregates data-minimized recall telemetry without exposing raw queries.
@@ -192,8 +254,8 @@ impl PolicyStore {
 
     #[cfg(test)]
     pub(crate) fn in_memory() -> Result<Self, Error> {
-        let connection = Connection::open_in_memory().map_err(|_| {
-            PolicyStoreError::operation("open in-memory policy store").into_engine_error()
+        let connection = Connection::open_in_memory().map_err(|error| {
+            PolicyStoreError::sqlite("open in-memory policy store", error).into_engine_error()
         })?;
         Self::from_connection(connection)
     }
@@ -245,5 +307,36 @@ impl PolicyStore {
             previous,
             _thread_bound: PhantomData,
         }
+    }
+}
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use rusqlite::Connection;
+
+    use super::PolicyStoreError;
+
+    #[test]
+    fn sqlite_failures_retain_actionable_open_evidence_without_sql() {
+        let connection = Connection::open_in_memory().expect("open policy database");
+        connection
+            .execute_batch("CREATE TABLE policy_error_probe (value INTEGER CHECK(value = 0));")
+            .expect("create policy error probe");
+        let sqlite_error = connection
+            .execute("INSERT INTO policy_error_probe (value) VALUES (1)", [])
+            .expect_err("invalid probe value must fail");
+
+        let message = PolicyStoreError::sqlite("open policy store", sqlite_error)
+            .with_path(Path::new("/safe/policy.db"))
+            .into_engine_error()
+            .to_string();
+
+        assert!(message.contains("open policy store"));
+        assert!(message.contains("path: /safe/policy.db"));
+        assert!(message.contains("sqlite code:"));
+        assert!(message.contains("sqlite category:"));
+        assert!(message.contains("sqlite source:"));
+        assert!(!message.contains("INSERT"));
     }
 }

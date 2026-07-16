@@ -296,13 +296,13 @@ pub fn run_oneshot(cli: &Cli) -> Result<Oneshot> {
         Some(Commands::Recall { .. }) => {
             let registry = Arc::new(Mutex::new(registry(&cfg)));
             let text = run_embedded_oneshot(cli, &registry)?;
-            println!("{text}");
+            write_oneshot_stdout(cli, &text);
             Ok(Oneshot::Done)
         }
         Some(Commands::Stats { recall: true, .. }) => {
             let registry = Arc::new(Mutex::new(registry(&cfg)));
             let text = run_embedded_oneshot(cli, &registry)?;
-            print!("{text}");
+            write_oneshot_stdout(cli, &text);
             Ok(Oneshot::Done)
         }
         Some(Commands::Remember {
@@ -418,8 +418,7 @@ pub async fn run_oneshot_client(cli: &Cli) -> Result<()> {
     let req =
         oneshot_request(cli).ok_or_else(|| anyhow::anyhow!("invalid one-shot client command"))?;
     let text = call_oneshot(&cfg, req).await?;
-    let output = format_oneshot_stdout(cli, &text);
-    print!("{output}");
+    write_oneshot_stdout(cli, &text);
     Ok(())
 }
 
@@ -429,6 +428,11 @@ fn format_oneshot_stdout(cli: &Cli, text: &str) -> String {
     } else {
         format!("{text}\n")
     }
+}
+
+fn write_oneshot_stdout(cli: &Cli, text: &str) {
+    let output = format_oneshot_stdout(cli, text);
+    print!("{output}");
 }
 
 fn oneshot_request(cli: &Cli) -> Option<crate::proto::Request> {
@@ -490,19 +494,6 @@ fn run_embedded_oneshot(cli: &Cli, registry: &Arc<Mutex<MemoryRegistry>>) -> Res
         crate::proto::Response::Ok { text } => Ok(text),
         crate::proto::Response::Err { message, .. } => Err(anyhow::anyhow!(message)),
     }
-}
-
-#[cfg(test)]
-fn oneshot_request_for_test(cli: &Cli) -> Option<crate::proto::Request> {
-    oneshot_request(cli)
-}
-
-#[cfg(test)]
-fn run_embedded_oneshot_for_test(
-    cli: &Cli,
-    registry: &Arc<Mutex<MemoryRegistry>>,
-) -> Result<String> {
-    run_embedded_oneshot(cli, registry)
 }
 
 /// `[ok]` / `[!!]` checklist line.
@@ -676,7 +667,7 @@ mod tests {
 
     #[test]
     fn raw_cli_recall_builds_an_unclassified_daemon_request() {
-        let request = oneshot_request_for_test(&recall_cli(false))
+        let request = oneshot_request(&recall_cli(false))
             .expect("raw daemon-routed recall must build a request");
         let wire = serde_json::to_string(&request).expect("serialize daemon request");
         assert!(
@@ -704,18 +695,24 @@ mod tests {
 
         let daemon_text = match crate::dispatch::dispatch(
             &daemon_registry,
-            oneshot_request_for_test(&recall_cli(false))
+            oneshot_request(&recall_cli(false))
                 .expect("raw daemon-routed recall must build a request"),
         ) {
             Response::Ok { text } => text,
             response => panic!("daemon recall must succeed: {response:?}"),
         };
-        let embedded_text = run_embedded_oneshot_for_test(&recall_cli(true), &embedded_registry)
+        let embedded_text = run_embedded_oneshot(&recall_cli(true), &embedded_registry)
             .expect("embedded recall must dispatch locally");
 
+        let daemon_stdout = format_oneshot_stdout(&recall_cli(false), &daemon_text);
+        let embedded_stdout = format_oneshot_stdout(&recall_cli(true), &embedded_text);
         assert_eq!(
-            embedded_text, daemon_text,
-            "embedded and daemon dispatch must render byte-identical recall text"
+            embedded_stdout, daemon_stdout,
+            "embedded and daemon recall must render byte-identical stdout"
+        );
+        assert!(
+            daemon_stdout.ends_with('\n') && !daemon_stdout.ends_with("\n\n"),
+            "recall stdout must end with exactly one trailing newline: {daemon_stdout:?}"
         );
         let events = recall_events(&embedded_registry);
         assert_eq!(events.len(), 1, "embedded recall must persist one event");
@@ -727,7 +724,7 @@ mod tests {
     }
     #[test]
     fn stats_recall_cli_parses_and_sends_true_to_daemon() {
-        let request = oneshot_request_for_test(&stats_cli(true, false))
+        let request = oneshot_request(&stats_cli(true, false))
             .expect("stats --recall must build a daemon request");
         let wire = serde_json::to_string(&request).expect("serialize stats request");
 
@@ -746,7 +743,7 @@ mod tests {
 
     #[test]
     fn stats_without_recall_preserves_none_on_daemon_request() {
-        let request = oneshot_request_for_test(&stats_cli(false, false))
+        let request = oneshot_request(&stats_cli(false, false))
             .expect("stats without --recall must build a daemon request");
 
         assert!(matches!(
@@ -770,19 +767,19 @@ mod tests {
 
         let daemon_text = match crate::dispatch::dispatch(
             &daemon_registry,
-            oneshot_request_for_test(&stats_cli(true, false))
+            oneshot_request(&stats_cli(true, false))
                 .expect("stats --recall must build a daemon request"),
         ) {
             Response::Ok { text } => text,
             response => panic!("daemon stats --recall must succeed: {response:?}"),
         };
-        let embedded_text =
-            run_embedded_oneshot_for_test(&stats_cli(true, true), &embedded_registry)
-                .expect("embedded stats --recall must dispatch locally");
+        let embedded_text = run_embedded_oneshot(&stats_cli(true, true), &embedded_registry)
+            .expect("embedded stats --recall must dispatch locally");
 
         let daemon_stdout = format_oneshot_stdout(&stats_cli(true, false), &daemon_text);
+        let embedded_stdout = format_oneshot_stdout(&stats_cli(true, true), &embedded_text);
         assert_eq!(
-            embedded_text, daemon_stdout,
+            embedded_stdout, daemon_stdout,
             "embedded and daemon stats --recall must have byte-identical stdout framing"
         );
     }
