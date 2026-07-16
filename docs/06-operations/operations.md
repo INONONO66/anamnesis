@@ -352,6 +352,7 @@ overrides the socket path when the default is too long for the platform.
 
 An embedding dimension or model mismatch is a database compatibility problem, not a
 recall-quality warning. The preferred recovery path is:
+> **Upgrade warning:** Non-plugin installs (`npm install -g` or `cargo install`) of binaries **<=0.17.0** lack the model guard and can mix 768-dimensional embeddings into a migrated database; remove those installs before upgrading.
 
 ```text
 anamnesis migrate-embeddings [--namespace NS]

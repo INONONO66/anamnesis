@@ -7,8 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-07-16
+
 ### Added
-- **R2 shadow extraction** — opt-in, graph-nonmutating staging sends bounded captured-turn batches to exactly one configured external argv with no fallback, for audit only; staged candidates remain invisible to recall pending R3 approval. Stage-1 raw capture remains in the graph; provider stdin/raw batch, raw stdout/stderr, and raw command are transient and never persisted or logged by R2 policy/error records. Policy rows retain profile hash/components, run/failure scalars, validated candidates/relations, source identity/hash ledger, and audit labels until an operator database lifecycle action; R2 has no automatic pruning or cleanup.
+- **R1 recall telemetry (first released in 0.20.0)** — fail-open `recall_events` telemetry retains only the newest **10,000** minimized rows and never stores raw queries. `anamnesis stats --recall` reports eligibility counts and rates, abstention categories, cosine percentiles, and a threshold sweep.
+- **R2 shadow extraction** — disabled by default; opt in with `ANAMNESIS_EXTRACT_MODE=shadow` to run one configured provider over bounded captured-turn batches with bounded execution time and output size. Provider output undergoes strict validation, remains graph-nonmutating, and is reviewable with `anamnesis extract --audit`.
+
+### Changed
+- **Nextest test-group serialization** — the shadow-extraction and latency-regression tests now share a serialized test group to avoid CI resource contention.
+
 ## [0.19.0] - 2026-07-15
 
 ### Added
