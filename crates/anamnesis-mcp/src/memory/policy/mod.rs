@@ -234,7 +234,7 @@ impl PolicyStore {
     }
 
     /// Inserts one data-minimized recall event and prunes older events in the
-    /// same transaction, retaining only the newest [`RECALL_EVENT_RETENTION`].
+    /// same transaction, retaining only the newest `RECALL_EVENT_RETENTION` rows.
     pub(crate) fn insert_recall_event(&mut self, event: &RecallEvent) -> Result<(), Error> {
         #[cfg(test)]
         observe_operation();
