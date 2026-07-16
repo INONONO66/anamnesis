@@ -1,8 +1,3 @@
-// Task 1 stages these domain APIs; remove this allowance as Tasks 2-8 wire consumers.
-#![cfg_attr(
-    not(test),
-    allow(dead_code, reason = "Task 1 staged APIs are consumed by Tasks 2-8")
-)]
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -83,6 +78,10 @@ pub(crate) struct ExtractionScanResult {
     pub sources: Vec<ExtractionSource>,
 }
 
+#[allow(
+    dead_code,
+    reason = "Task 8 consumes audit domain types; Task 5 only consumes validation types"
+)]
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum AuditSupport {
@@ -91,6 +90,10 @@ pub(crate) enum AuditSupport {
     Unsupported,
 }
 
+#[allow(
+    dead_code,
+    reason = "Task 8 consumes audit domain types; Task 5 only consumes validation types"
+)]
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum ContaminationCategory {
@@ -101,6 +104,10 @@ pub(crate) enum ContaminationCategory {
     ContradictsSource,
 }
 
+#[allow(
+    dead_code,
+    reason = "Task 8 consumes audit domain types; Task 5 only consumes validation types"
+)]
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum RelationVerdict {
