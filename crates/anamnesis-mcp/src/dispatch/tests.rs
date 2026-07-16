@@ -3,7 +3,10 @@ use crate::memory::{
     AbstentionStats, AutoExposureStats, CosineStats, EventKindStats, MemoryRegistry, PolicyStore,
     PolicyStoreState, RecallStats, StubProvider, SweepPoint,
 };
-use crate::proto::{ErrKind, RecallEventKind, Response, TurnInput};
+use crate::proto::{
+    ErrKind, ExtractionErrorKind, RecallEventKind, Response, StageExtractionResult, TurnInput,
+};
+use sha2::{Digest, Sha256};
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
@@ -63,7 +66,7 @@ fn stub_registry_with_future_policy_schema() -> (Arc<Mutex<MemoryRegistry>>, tem
                 id INTEGER PRIMARY KEY CHECK(id = 1),
                 version INTEGER NOT NULL
             );
-            INSERT INTO mcp_schema_version (id, version) VALUES (1, 2);
+            INSERT INTO mcp_schema_version (id, version) VALUES (1, 3);
             CREATE TABLE recall_events (id INTEGER PRIMARY KEY);
             ",
         )
@@ -905,7 +908,7 @@ fn recall_policy_migration_failure_is_fail_open_and_disables_telemetry_without_r
         }
     };
     assert!(
-        disabled_reason.contains("initialize policy schema version")
+        disabled_reason.contains("update policy schema version")
             && disabled_reason.contains("sqlite code:")
             && disabled_reason.contains("sqlite category:"),
         "policy migration failure must retain actionable SQLite evidence: {disabled_reason}"
@@ -2854,6 +2857,821 @@ fn tiny_graph_single_cluster() {
     }
 }
 
+// ── R2 Task 3: daemon-mediated, read-only extraction source scan (RED) ─────
+
+fn capture_turns(
+    reg: &Arc<Mutex<MemoryRegistry>>,
+    session: &str,
+    scope: &str,
+    count: usize,
+    at_ms: u64,
+    content_prefix: &str,
+) {
+    for offset in 0..count {
+        ok_text(dispatch(
+            reg,
+            Request::Ingest {
+                session: session.to_owned(),
+                turns: vec![TurnInput {
+                    speaker: "user".into(),
+                    text: format!("{content_prefix} turn {offset}"),
+                    at_ms: Some(at_ms + offset as u64),
+                }],
+                namespace: None,
+                capture: Some(true),
+                scope: Some(scope.to_owned()),
+            },
+        ));
+    }
+}
+
+fn extraction_scan(
+    reg: &Arc<Mutex<MemoryRegistry>>,
+    profile: crate::extract::types::ExtractorProfileComponents,
+) -> crate::extract::types::ExtractionScanResult {
+    let text = ok_text(dispatch(
+        reg,
+        Request::ExtractionScan {
+            namespace: None,
+            profile,
+            min_turns: 10,
+            max_turns: 20,
+        },
+    ));
+    serde_json::from_str(&text).expect("extraction scan must return its canonical JSON result")
+}
+
+fn extraction_profile() -> crate::extract::types::ExtractorProfileComponents {
+    let config = crate::extract::config::ExtractConfig::from_env()
+        .expect("the test environment must have a valid extraction command");
+    crate::extract::profile::ExtractorProfile::from_command(&config.command)
+        .expect("profile from extraction command")
+        .components
+}
+
+fn extraction_profile_id(profile: &crate::extract::types::ExtractorProfileComponents) -> String {
+    crate::extract::profile::profile_id(profile).expect("profile id")
+}
+
+fn record_scanned_sources(
+    dir: &tempfile::TempDir,
+    profile_id: &str,
+    sources: &[crate::extract::types::ExtractionSource],
+) {
+    let connection =
+        rusqlite::Connection::open(dir.path().join("memory.db")).expect("open policy ledger");
+    connection
+        .execute(
+            "INSERT OR IGNORE INTO extractor_profiles
+             (profile_id, components, status, created_at, approved_at)
+             VALUES (?1, '{}', 'shadow', 0, NULL)",
+            [profile_id],
+        )
+        .expect("record profile");
+    connection
+        .execute(
+            "INSERT INTO extract_runs
+             (at_ms, profile_id, mode, turn_count, candidate_count, relation_count,
+              schema_valid, llm_invoked, error_kind, duration_ms)
+             VALUES (0, ?1, 'shadow', 0, 0, 0, 1, 0, NULL, 0)",
+            [profile_id],
+        )
+        .expect("record extraction run");
+    let run_id = connection.last_insert_rowid();
+    for source in sources {
+        connection
+            .execute(
+                "INSERT INTO extract_run_sources (profile_id, turn_key, run_id)
+                 VALUES (?1, ?2, ?3)",
+                rusqlite::params![profile_id, source.turn_key, run_id],
+            )
+            .expect("record scanned source");
+    }
+}
+
+fn graph_snapshot(
+    reg: &Arc<Mutex<MemoryRegistry>>,
+) -> (Vec<anamnesis::graph::Node>, Vec<anamnesis::graph::Edge>) {
+    let handle = {
+        let mut registry = reg.lock().unwrap_or_else(|poison| poison.into_inner());
+        registry.namespace_handle(None).expect("default namespace")
+    };
+    let memory = handle.lock().unwrap_or_else(|poison| poison.into_inner());
+    let graph = memory.engine().graph();
+    let nodes = graph
+        .all_node_ids()
+        .into_iter()
+        .map(|id| graph.get_node(id).expect("live node").clone())
+        .collect();
+    let edges = graph
+        .all_edge_ids()
+        .into_iter()
+        .map(|id| graph.get_edge(id).expect("live edge").clone())
+        .collect();
+    (nodes, edges)
+}
+
+#[test]
+fn extraction_scan_excludes_current_profile_ledger_without_reading_extracted_metadata() {
+    let (reg, dir) = stub_registry();
+    capture_turns(
+        &reg,
+        "scan-session",
+        "project/anamnesis",
+        12,
+        100,
+        "captured",
+    );
+
+    {
+        let handle = {
+            let mut registry = reg.lock().unwrap_or_else(|poison| poison.into_inner());
+            registry.namespace_handle(None).expect("default namespace")
+        };
+        let mut memory = handle.lock().unwrap_or_else(|poison| poison.into_inner());
+        let graph = memory.engine_mut().graph_mut();
+        for (index, id) in graph.all_node_ids().into_iter().enumerate() {
+            let node = graph.get_node_mut(id).expect("live node");
+            if node.origin.session_id == "scan-session" {
+                node.metadata.insert(
+                    "anamnesis:extracted".into(),
+                    if index % 2 == 0 { "true" } else { "false" }.into(),
+                );
+                node.salience = 0.2 + index as f64 / 100.0;
+                node.accessed_at = anamnesis::graph::Timestamp(10_000 + index as u64);
+            }
+        }
+    }
+
+    let profile = extraction_profile();
+    let before = graph_snapshot(&reg);
+    let initial = extraction_scan(&reg, profile.clone());
+    assert_eq!(
+        initial.sources.len(),
+        12,
+        "twelve captured turns are eligible"
+    );
+    assert!(
+        initial.sources.iter().all(
+            |source| source.session_id == "scan-session" && source.scope == "project/anamnesis"
+        ),
+        "scan must preserve session and scope provenance"
+    );
+
+    record_scanned_sources(
+        &dir,
+        &extraction_profile_id(&profile),
+        &initial.sources[..3],
+    );
+    assert!(
+        extraction_scan(&reg, profile.clone()).sources.is_empty(),
+        "the current profile has only 9 unledgered turns, below the minimum batch size"
+    );
+
+    let mut other_profile = profile;
+    other_profile.model_id.push_str("-other");
+    assert_eq!(
+        extraction_scan(&reg, other_profile).sources.len(),
+        12,
+        "a different profile must see all twelve turns"
+    );
+
+    let after = graph_snapshot(&reg);
+    assert_eq!(
+        after, before,
+        "scan must not mutate graph node or edge records"
+    );
+    assert!(
+        before.0.iter().any(|node| {
+            node.metadata
+                .get("anamnesis:extracted")
+                .is_some_and(|value| value == "true")
+        }),
+        "fixture must snapshot anamnesis:extracted metadata"
+    );
+    assert!(
+        before
+            .0
+            .iter()
+            .any(|node| node.salience > 0.2 && node.accessed_at.0 >= 10_000),
+        "fixture must snapshot salience and accessed_at"
+    );
+}
+
+#[test]
+fn extraction_scan_groups_by_session_and_scope_selects_oldest_and_caps_at_twenty() {
+    let (reg, dir) = stub_registry();
+    capture_turns(&reg, "shared-session", "scope-a", 9, 100, "A");
+    capture_turns(&reg, "shared-session", "scope-b", 10, 200, "B");
+    capture_turns(&reg, "session-c", "scope-a", 21, 300, "C");
+
+    let profile = extraction_profile();
+    let first = extraction_scan(&reg, profile.clone());
+    assert_eq!(
+        first.sources.len(),
+        10,
+        "oldest eligible group B is selected"
+    );
+    assert!(
+        first
+            .sources
+            .iter()
+            .all(|source| source.session_id == "shared-session" && source.scope == "scope-b"),
+        "the same session in a distinct scope must remain a distinct group"
+    );
+
+    record_scanned_sources(&dir, &extraction_profile_id(&profile), &first.sources);
+    let second = extraction_scan(&reg, profile);
+    assert_eq!(
+        second.sources.len(),
+        20,
+        "group C is capped at twenty sources"
+    );
+    assert!(
+        second
+            .sources
+            .iter()
+            .all(|source| source.session_id == "session-c" && source.scope == "scope-a"),
+        "the next eligible session-and-scope group is selected"
+    );
+}
+
+#[test]
+fn extraction_scan_hashes_exact_utf8_source_content() {
+    let (reg, _dir) = stub_registry();
+    let content = "café 🦀\ncombining: e\u{301}";
+    ok_text(dispatch(
+        &reg,
+        Request::Ingest {
+            session: "utf8-session".into(),
+            turns: (0..10)
+                .map(|at_ms| TurnInput {
+                    speaker: "user".into(),
+                    text: content.into(),
+                    at_ms: Some(at_ms),
+                })
+                .collect(),
+            namespace: None,
+            capture: Some(true),
+            scope: Some("utf8-scope".into()),
+        },
+    ));
+
+    let sources = extraction_scan(&reg, extraction_profile()).sources;
+    assert_eq!(sources.len(), 10);
+
+    let handle = {
+        let mut registry = reg.lock().unwrap_or_else(|poison| poison.into_inner());
+        registry.namespace_handle(None).expect("default namespace")
+    };
+    let memory = handle.lock().unwrap_or_else(|poison| poison.into_inner());
+    let graph = memory.engine().graph();
+    for source in sources {
+        let node = graph
+            .get_node(anamnesis::graph::NodeId(source.node_id))
+            .expect("scanned source node exists");
+        assert_eq!(
+            source.content, node.content,
+            "scan must return the stored captured node content"
+        );
+        assert_eq!(
+            source.content_hash,
+            format!("{:x}", Sha256::digest(node.content.as_bytes())),
+            "scan must hash the exact stored UTF-8 node content bytes"
+        );
+    }
+}
+#[test]
+fn extraction_scan_sends_only_captured_episodic_turns() {
+    let (reg, _dir) = stub_registry();
+    capture_turns(&reg, "capture-only", "scope", 10, 100, "captured");
+    ok_text(remember_with(
+        &reg,
+        "turn key impostor",
+        None,
+        Some(
+            [("anamnesis:turn_key".to_owned(), "impostor-key".to_owned())]
+                .into_iter()
+                .collect(),
+        ),
+        None,
+    ));
+    {
+        let handle = {
+            let mut registry = reg.lock().unwrap_or_else(|poison| poison.into_inner());
+            registry.namespace_handle(None).expect("default namespace")
+        };
+        let mut memory = handle.lock().unwrap_or_else(|poison| poison.into_inner());
+        let graph = memory.engine_mut().graph_mut();
+        for id in graph.all_node_ids() {
+            let node = graph.get_node_mut(id).expect("remember fixture node");
+            if node.content == "turn key impostor"
+                && matches!(&node.node_type, anamnesis::graph::KnowledgeType::Semantic)
+            {
+                node.metadata.insert("capture".into(), "true".into());
+            }
+        }
+    }
+
+    let sources = extraction_scan(&reg, extraction_profile()).sources;
+    assert_eq!(
+        sources.len(),
+        10,
+        "only captured turns reach the provider boundary"
+    );
+    assert!(
+        sources
+            .iter()
+            .all(|source| source.turn_key != "impostor-key"),
+        "a non-capture node carrying a turn key must not be scanned"
+    );
+}
+
+#[test]
+fn extraction_scan_rejects_non_shadow_status_without_approval_semantics() {
+    let (reg, dir) = stub_registry();
+    capture_turns(&reg, "unsupported-status", "scope", 10, 100, "captured");
+    let profile = extraction_profile();
+    let profile_id = extraction_profile_id(&profile);
+    extraction_scan(&reg, profile.clone());
+
+    let connection =
+        rusqlite::Connection::open(dir.path().join("memory.db")).expect("open policy database");
+    connection
+        .execute(
+            "UPDATE extractor_profiles SET status = 'approved' WHERE profile_id = ?1",
+            [&profile_id],
+        )
+        .expect("set unsupported profile status");
+
+    let response = dispatch(
+        &reg,
+        Request::ExtractionScan {
+            namespace: None,
+            profile,
+            min_turns: 10,
+            max_turns: 20,
+        },
+    );
+    let Response::Err { kind, message } = response else {
+        panic!("non-shadow status must reject scan");
+    };
+    assert_eq!(kind, ErrKind::InvalidParams);
+    assert_eq!(
+        message,
+        "unsupported extraction profile status for shadow scans: Approved"
+    );
+}
+// ── R2 Task 6: atomic shadow-extraction staging and failure recording (RED) ──
+
+fn policy_counts(dir: &tempfile::TempDir) -> (u64, u64, u64, u64) {
+    let connection =
+        rusqlite::Connection::open(dir.path().join("memory.db")).expect("open policy database");
+    let count = |table: &str| -> u64 {
+        connection
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .expect("count policy rows")
+    };
+    (
+        count("extract_runs"),
+        count("extract_run_sources"),
+        count("extract_candidates"),
+        count("extract_relations"),
+    )
+}
+
+fn stage_extraction(
+    reg: &Arc<Mutex<MemoryRegistry>>,
+    profile: crate::extract::types::ExtractorProfileComponents,
+    sources: Vec<crate::extract::types::ExtractionSource>,
+    extraction: crate::extract::types::ValidatedExtraction,
+) -> Response {
+    dispatch(
+        reg,
+        Request::StageExtraction {
+            namespace: None,
+            profile,
+            llm_duration_ms: 17,
+            sources,
+            extraction,
+        },
+    )
+}
+
+fn staged_result(response: Response) -> crate::proto::StageExtractionResult {
+    serde_json::from_str(&ok_text(response)).expect("stage response must be canonical JSON")
+}
+
+fn canonical_extraction(
+    profile: &crate::extract::types::ExtractorProfileComponents,
+    sources: &[crate::extract::types::ExtractionSource],
+    item_sources: &[(&str, u64)],
+    relations: &[(&str, &str, crate::extract::types::RelationKind)],
+) -> crate::extract::types::ValidatedExtraction {
+    let items: Vec<_> = item_sources
+        .iter()
+        .map(|(item_local_id, source_node_id)| {
+            serde_json::json!({
+                "item_local_id": item_local_id,
+                "content": format!("derived {item_local_id}"),
+                "kind": crate::extract::types::CandidateKind::Lesson,
+                "confidence": 0.9,
+                "source_node_ids": [source_node_id],
+            })
+        })
+        .collect();
+    let relations: Vec<_> = relations
+        .iter()
+        .map(|(from_item_local_id, to_item_local_id, relation_type)| {
+            serde_json::json!({
+                "from_item_local_id": from_item_local_id,
+                "to_item_local_id": to_item_local_id,
+                "relation_type": relation_type,
+            })
+        })
+        .collect();
+    let payload = serde_json::to_vec(&serde_json::json!({
+        "items": items,
+        "relations": relations,
+    }))
+    .expect("serialize provider-boundary extraction JSON");
+    crate::extract::validate::validate_output(&payload, sources, &extraction_profile_id(profile))
+        .expect("provider-boundary extraction must canonically validate")
+}
+#[test]
+fn stage_extraction_rejects_non_capture_turn_key_snapshot() {
+    let (reg, _dir) = stub_registry();
+    capture_turns(&reg, "stage-capture-only", "scope", 10, 100, "captured");
+    let profile = extraction_profile();
+    extraction_scan(&reg, profile.clone());
+    ok_text(remember_with(
+        &reg,
+        "stage turn key impostor",
+        None,
+        Some(
+            [(
+                "anamnesis:turn_key".to_owned(),
+                "stage-impostor-key".to_owned(),
+            )]
+            .into_iter()
+            .collect(),
+        ),
+        None,
+    ));
+    {
+        let handle = {
+            let mut registry = reg.lock().unwrap_or_else(|poison| poison.into_inner());
+            registry.namespace_handle(None).expect("default namespace")
+        };
+        let mut memory = handle.lock().unwrap_or_else(|poison| poison.into_inner());
+        let graph = memory.engine_mut().graph_mut();
+        for id in graph.all_node_ids() {
+            let node = graph.get_node_mut(id).expect("remember fixture node");
+            if node.content == "stage turn key impostor"
+                && matches!(&node.node_type, anamnesis::graph::KnowledgeType::Semantic)
+            {
+                node.metadata.insert("capture".into(), "true".into());
+            }
+        }
+    }
+
+    let impostor = graph_snapshot(&reg)
+        .0
+        .into_iter()
+        .find(|node| {
+            node.content == "stage turn key impostor"
+                && matches!(&node.node_type, anamnesis::graph::KnowledgeType::Semantic)
+        })
+        .expect("remember fixture node");
+    let source = crate::extract::types::ExtractionSource {
+        node_id: impostor.id.0,
+        turn_key: "stage-impostor-key".to_owned(),
+        session_id: impostor.origin.session_id,
+        scope: impostor.origin.scope.as_str().to_owned(),
+        content: impostor.content.clone(),
+        content_hash: format!("{:x}", Sha256::digest(impostor.content.as_bytes())),
+        at_ms: impostor.created_at.0,
+    };
+
+    let response = stage_extraction(
+        &reg,
+        profile,
+        vec![source],
+        crate::extract::types::ValidatedExtraction {
+            items: vec![],
+            relations: vec![],
+        },
+    );
+    let Response::Err { kind, message } = response else {
+        panic!("non-capture source snapshot must reject");
+    };
+    assert_eq!(kind, ErrKind::InvalidParams);
+    assert_eq!(
+        message,
+        "extraction source node is not a captured episodic node"
+    );
+}
+
+#[test]
+fn stage_extraction_relation_insert_failure_rolls_back_every_success_table() {
+    let (reg, dir) = stub_registry();
+    capture_turns(&reg, "atomic", "scope", 10, 100, "atomic");
+    let profile = extraction_profile();
+    let sources = extraction_scan(&reg, profile.clone()).sources;
+    let before_graph = graph_snapshot(&reg);
+    let connection =
+        rusqlite::Connection::open(dir.path().join("memory.db")).expect("open policy database");
+    connection
+        .execute_batch(
+            "CREATE TRIGGER reject_staged_relation
+             BEFORE INSERT ON extract_relations
+             BEGIN SELECT RAISE(ABORT, 'relation insert rejected'); END;",
+        )
+        .expect("install relation failure trigger");
+    drop(connection);
+
+    let response = stage_extraction(
+        &reg,
+        profile.clone(),
+        sources.clone(),
+        canonical_extraction(
+            &profile,
+            &sources,
+            &[("one", sources[0].node_id), ("two", sources[1].node_id)],
+            &[("one", "two", crate::extract::types::RelationKind::Supports)],
+        ),
+    );
+
+    let Response::Err { message, .. } = &response else {
+        panic!("relation insert failure must reject the whole stage: {response:?}");
+    };
+    assert!(
+        message.contains("relation insert rejected"),
+        "the SQLite relation trigger must be reached before rollback: {message}"
+    );
+    assert_eq!(
+        policy_counts(&dir),
+        (0, 0, 0, 0),
+        "one transaction must roll back run, source ledger, candidates, and relations"
+    );
+    assert_eq!(
+        graph_snapshot(&reg),
+        before_graph,
+        "failed staging must leave the canonical graph snapshot unchanged"
+    );
+}
+
+#[test]
+fn zero_output_stage_is_replay_safe_and_its_sources_are_excluded_from_scan() {
+    let (reg, dir) = stub_registry();
+    capture_turns(&reg, "zero-output", "scope", 10, 100, "zero");
+    let profile = extraction_profile();
+    let sources = extraction_scan(&reg, profile.clone()).sources;
+    let before_graph = graph_snapshot(&reg);
+
+    let first = staged_result(stage_extraction(
+        &reg,
+        profile.clone(),
+        sources.clone(),
+        crate::extract::types::ValidatedExtraction {
+            items: vec![],
+            relations: vec![],
+        },
+    ));
+    let run_id = match first {
+        StageExtractionResult::Staged { run_id } => run_id,
+        other => panic!("first zero-output stage must create a run: {other:?}"),
+    };
+    assert_eq!(policy_counts(&dir), (1, 10, 0, 0));
+
+    assert_eq!(
+        staged_result(stage_extraction(
+            &reg,
+            profile.clone(),
+            sources,
+            crate::extract::types::ValidatedExtraction {
+                items: vec![],
+                relations: vec![],
+            },
+        )),
+        StageExtractionResult::AlreadyStaged { run_id },
+        "exact replay must retain the original run identity"
+    );
+    assert_eq!(
+        policy_counts(&dir),
+        (1, 10, 0, 0),
+        "exact replay must not create any additional policy rows"
+    );
+    assert!(
+        extraction_scan(&reg, profile).sources.is_empty(),
+        "zero-output success must ledger every source and exclude it from later scans"
+    );
+    assert_eq!(
+        graph_snapshot(&reg),
+        before_graph,
+        "successful staging and replay must leave the canonical graph snapshot unchanged"
+    );
+}
+
+#[test]
+fn stage_extraction_rejects_partial_or_mixed_source_ledger_conflicts() {
+    let (reg, dir) = stub_registry();
+    capture_turns(&reg, "mixed-ledger", "scope", 10, 100, "mixed");
+    let profile = extraction_profile();
+    let sources = extraction_scan(&reg, profile.clone()).sources;
+    let first_source = sources[0].clone();
+    let before_graph = graph_snapshot(&reg);
+
+    assert!(matches!(
+        staged_result(stage_extraction(
+            &reg,
+            profile.clone(),
+            vec![first_source],
+            crate::extract::types::ValidatedExtraction {
+                items: vec![],
+                relations: vec![],
+            },
+        )),
+        StageExtractionResult::Staged { .. }
+    ));
+    assert_eq!(policy_counts(&dir), (1, 1, 0, 0));
+
+    let response = stage_extraction(
+        &reg,
+        profile,
+        sources,
+        crate::extract::types::ValidatedExtraction {
+            items: vec![],
+            relations: vec![],
+        },
+    );
+    assert!(
+        matches!(response, Response::Err { .. }),
+        "a source set containing both ledgered and new turns must be rejected: {response:?}"
+    );
+    assert_eq!(
+        policy_counts(&dir),
+        (1, 1, 0, 0),
+        "conflicting source ledger must not create a partial second run"
+    );
+    assert_eq!(
+        graph_snapshot(&reg),
+        before_graph,
+        "partial and conflicting stages must leave the canonical graph snapshot unchanged"
+    );
+}
+
+#[test]
+fn stage_extraction_rejects_any_source_snapshot_mismatch_without_mutating_graph_or_policy() {
+    let (reg, dir) = stub_registry();
+    capture_turns(&reg, "snapshot", "scope", 10, 100, "snapshot");
+    let profile = extraction_profile();
+    let sources = extraction_scan(&reg, profile.clone()).sources;
+    let before_graph = graph_snapshot(&reg);
+
+    let mut cases = Vec::new();
+    cases.push((
+        "reused node id",
+        vec![sources[0].clone(), sources[0].clone()],
+    ));
+    let mut missing_node = sources.clone();
+    missing_node[0].node_id = 999_999;
+    cases.push(("mismatched node id", missing_node));
+    let mut changed_hash = sources.clone();
+    changed_hash[0].content_hash = "different-hash".into();
+    cases.push(("changed content hash", changed_hash));
+    let mut changed_session = sources.clone();
+    changed_session[0].session_id = "other-session".into();
+    cases.push(("changed session", changed_session));
+    let mut changed_scope = sources.clone();
+    changed_scope[0].scope = "other-scope".into();
+    cases.push(("changed scope", changed_scope));
+    let mut unknown_turn = sources;
+    unknown_turn[0].turn_key = "unknown-turn-key".into();
+    cases.push(("unknown turn key", unknown_turn));
+
+    for (label, invalid_sources) in cases {
+        let response = stage_extraction(
+            &reg,
+            profile.clone(),
+            invalid_sources,
+            crate::extract::types::ValidatedExtraction {
+                items: vec![],
+                relations: vec![],
+            },
+        );
+        assert!(
+            matches!(&response, Response::Err { .. }),
+            "{label} must reject staging: {response:?}"
+        );
+        if label == "reused node id" {
+            assert!(
+                matches!(
+                    &response,
+                    Response::Err {
+                        kind: ErrKind::InvalidParams,
+                        ..
+                    }
+                ),
+                "caller InvalidInput must map to invalid_params: {response:?}"
+            );
+        }
+        assert_eq!(
+            policy_counts(&dir),
+            (0, 0, 0, 0),
+            "{label} must leave every success table empty"
+        );
+        assert_eq!(
+            graph_snapshot(&reg),
+            before_graph,
+            "{label} must not alter the canonical graph snapshot"
+        );
+    }
+}
+
+#[test]
+fn extraction_failures_record_error_contract_without_ledgering_sources() {
+    let (reg, dir) = stub_registry();
+    capture_turns(&reg, "failures", "scope", 10, 100, "failure");
+    let profile = extraction_profile();
+    let initial_sources = extraction_scan(&reg, profile.clone()).sources;
+    let before_graph = graph_snapshot(&reg);
+
+    for (error_kind, llm_invoked) in [
+        (ExtractionErrorKind::Spawn, false),
+        (ExtractionErrorKind::Timeout, true),
+        (ExtractionErrorKind::InvalidJson, true),
+        (ExtractionErrorKind::SchemaReject, true),
+    ] {
+        let response = dispatch(
+            &reg,
+            Request::RecordExtractionFailure {
+                namespace: None,
+                profile: profile.clone(),
+                turn_count: initial_sources.len() as u32,
+                llm_invoked,
+                error_kind,
+                duration_ms: 29,
+            },
+        );
+        assert!(
+            matches!(response, Response::Ok { .. }),
+            "failure record must be accepted: {response:?}"
+        );
+    }
+
+    let connection =
+        rusqlite::Connection::open(dir.path().join("memory.db")).expect("open policy database");
+    let rows: Vec<(String, bool, u64, u64, u64)> = {
+        let mut statement = connection
+            .prepare(
+                "SELECT error_kind, llm_invoked, turn_count, candidate_count, relation_count
+                 FROM extract_runs ORDER BY id",
+            )
+            .expect("query failure runs");
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            })
+            .expect("map failure runs")
+            .collect::<Result<_, _>>()
+            .expect("read failure runs")
+    };
+    assert_eq!(
+        rows,
+        vec![
+            ("spawn".into(), false, 10, 0, 0),
+            ("timeout".into(), true, 10, 0, 0),
+            ("invalid-json".into(), true, 10, 0, 0),
+            ("schema-reject".into(), true, 10, 0, 0),
+        ],
+        "failure runs must preserve the wire error kind, invocation flag, and zero output counts"
+    );
+    assert_eq!(
+        policy_counts(&dir),
+        (4, 0, 0, 0),
+        "failure recording creates only runs, never source ledger or staged output"
+    );
+    assert_eq!(
+        extraction_scan(&reg, profile).sources,
+        initial_sources,
+        "failure rows must leave their sources selectable for a later attempt"
+    );
+    assert_eq!(
+        graph_snapshot(&reg),
+        before_graph,
+        "failure recording must leave the canonical graph snapshot unchanged"
+    );
+}
+
 mod migration_job {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -3293,5 +4111,424 @@ mod migration_job {
         assert_eq!(observed.load(Ordering::SeqCst), 1);
         provider.release();
         migrations.drain().expect("migration completes");
+    }
+    // ── R2 Task 8: extraction audit (RED) ──────────────────────────────────────
+
+    fn extraction_audit_list(reg: &Arc<Mutex<MemoryRegistry>>) -> serde_json::Value {
+        let text = ok_text(dispatch(
+            reg,
+            Request::ExtractionAuditList {
+                namespace: None,
+                limit: Some(100),
+            },
+        ));
+        serde_json::from_str(&text).expect("audit list must be typed JSON")
+    }
+    fn rendered_extraction_audit(reg: &Arc<Mutex<MemoryRegistry>>) -> String {
+        let text = ok_text(dispatch(
+            reg,
+            Request::ExtractionAuditList {
+                namespace: None,
+                limit: Some(100),
+            },
+        ));
+        let result: crate::extract::audit::ExtractionAuditResult =
+            serde_json::from_str(&text).expect("audit list must decode to its typed result");
+        crate::extract::audit::render_audit_report(&result)
+    }
+
+    fn audit_fixture(
+        reg: &Arc<Mutex<MemoryRegistry>>,
+    ) -> (
+        Vec<crate::extract::types::ExtractionSource>,
+        serde_json::Value,
+    ) {
+        capture_turns(reg, "audit", "scope", 10, 100, "audit");
+        let profile = extraction_profile();
+        let sources = extraction_scan(reg, profile.clone()).sources;
+        staged_result(stage_extraction(
+            reg,
+            profile.clone(),
+            sources.clone(),
+            canonical_extraction(
+                &profile,
+                &sources,
+                &[
+                    ("one", sources[0].node_id),
+                    ("two", sources[1].node_id),
+                    ("three", sources[2].node_id),
+                ],
+                &[("one", "two", crate::extract::types::RelationKind::Supports)],
+            ),
+        ));
+        (sources, extraction_audit_list(reg))
+    }
+
+    fn audit_candidate<'a>(
+        audit: &'a serde_json::Value,
+        item_local_id: &str,
+    ) -> &'a serde_json::Value {
+        audit["candidates"]
+            .as_array()
+            .expect("candidate rows")
+            .iter()
+            .find(|candidate| candidate["item_local_id"] == item_local_id)
+            .unwrap_or_else(|| panic!("candidate {item_local_id} must be present"))
+    }
+    fn audit_source<'a>(candidate: &'a serde_json::Value, turn_key: &str) -> &'a serde_json::Value {
+        candidate["sources"]
+            .as_array()
+            .expect("candidate sources")
+            .iter()
+            .find(|source| source["turn_key"] == turn_key)
+            .unwrap_or_else(|| panic!("source {turn_key} must be present"))
+    }
+    fn authoritative_source_content<'a>(
+        sources: &'a [crate::extract::types::ExtractionSource],
+        turn_key: &str,
+    ) -> &'a str {
+        &sources
+            .iter()
+            .find(|source| source.turn_key == turn_key)
+            .unwrap_or_else(|| panic!("authoritative source {turn_key} must be present"))
+            .content
+    }
+
+    fn audit_relation<'a>(
+        audit: &'a serde_json::Value,
+        from_item_local_id: &str,
+        to_item_local_id: &str,
+    ) -> &'a serde_json::Value {
+        audit["relations"]
+            .as_array()
+            .expect("relation rows")
+            .iter()
+            .find(|relation| {
+                relation["from_item_local_id"] == from_item_local_id
+                    && relation["to_item_local_id"] == to_item_local_id
+            })
+            .unwrap_or_else(|| {
+                panic!("relation {from_item_local_id} -> {to_item_local_id} must be present")
+            })
+    }
+
+    fn assert_audit_rejection(response: &Response) {
+        let Response::Err { kind, message } = response else {
+            panic!("unavailable or mismatched audit source must reject: {response:?}");
+        };
+        assert_eq!(*kind, ErrKind::InvalidParams);
+        assert_eq!(
+            message,
+            "extraction audit candidate sources are unavailable or mismatched"
+        );
+    }
+    #[test]
+    fn extraction_audit_resolves_a_unique_live_turn_key_after_node_id_changes() {
+        let (reg, _dir) = stub_registry();
+        let (sources, _) = audit_fixture(&reg);
+        let original = &sources[0];
+        let replacement_id = {
+            let handle = {
+                let mut registry = reg.lock().unwrap_or_else(|poison| poison.into_inner());
+                registry.namespace_handle(None).expect("default namespace")
+            };
+            let mut memory = handle.lock().unwrap_or_else(|poison| poison.into_inner());
+            let graph = memory.engine_mut().graph_mut();
+            let mut replacement = graph
+                .get_node(anamnesis::graph::NodeId(original.node_id))
+                .expect("staged source node")
+                .clone();
+            let replacement_id = graph.next_node_id();
+            replacement.id = replacement_id;
+            graph
+                .add_node(replacement)
+                .expect("replacement source node");
+            graph
+                .remove_node(anamnesis::graph::NodeId(original.node_id))
+                .expect("remove stale node-id hint");
+            replacement_id.0
+        };
+
+        let audit = extraction_audit_list(&reg);
+        let source = audit_source(audit_candidate(&audit, "one"), &original.turn_key);
+        assert_eq!(source["availability"], "available");
+        assert_eq!(source["node_id"], replacement_id);
+        assert_eq!(source["content"], original.content);
+    }
+    #[test]
+    fn extraction_audit_uses_a_valid_node_id_hint_when_turn_key_is_ambiguous() {
+        let (reg, _dir) = stub_registry();
+        let (sources, _) = audit_fixture(&reg);
+        let original = &sources[0];
+        {
+            let handle = {
+                let mut registry = reg.lock().unwrap_or_else(|poison| poison.into_inner());
+                registry.namespace_handle(None).expect("default namespace")
+            };
+            let mut memory = handle.lock().unwrap_or_else(|poison| poison.into_inner());
+            let graph = memory.engine_mut().graph_mut();
+            let mut duplicate = graph
+                .get_node(anamnesis::graph::NodeId(original.node_id))
+                .expect("staged source node")
+                .clone();
+            duplicate.id = graph.next_node_id();
+            graph
+                .add_node(duplicate)
+                .expect("duplicate capture source node");
+        }
+
+        let audit = extraction_audit_list(&reg);
+        let source = audit_source(audit_candidate(&audit, "one"), &original.turn_key);
+        assert_eq!(source["availability"], "available");
+        assert_eq!(source["node_id"], original.node_id);
+        assert_eq!(source["content"], original.content);
+    }
+
+    #[test]
+    fn extraction_audit_demo_reads_live_sources_and_never_mutates_the_graph() {
+        let (reg, dir) = stub_registry();
+        let (sources, listed) = audit_fixture(&reg);
+        let connection = rusqlite::Connection::open(dir.path().join("memory.db"))
+            .expect("open audit policy database");
+        let provenance_columns: Vec<String> = connection
+            .prepare(
+                "SELECT name FROM pragma_table_info('extract_candidates')
+                 WHERE name IN ('source_turn_keys', 'source_content_hashes', 'source_node_ids')",
+            )
+            .expect("inspect candidate provenance schema")
+            .query_map([], |row| row.get(0))
+            .expect("query candidate provenance schema")
+            .collect::<Result<_, _>>()
+            .expect("read candidate provenance schema");
+        assert_eq!(
+            provenance_columns,
+            [
+                "source_turn_keys",
+                "source_content_hashes",
+                "source_node_ids"
+            ],
+            "policy provenance stores only source identity, hashes, and node ids"
+        );
+        let stored_candidate_contents: Vec<String> = connection
+            .prepare("SELECT content FROM extract_candidates")
+            .expect("inspect staged candidate content")
+            .query_map([], |row| row.get(0))
+            .expect("query staged candidate content")
+            .collect::<Result<_, _>>()
+            .expect("read staged candidate content");
+        assert!(
+            stored_candidate_contents
+                .iter()
+                .all(|content| !sources.iter().any(|source| content == &source.content)),
+            "policy tables must not persist raw source content as candidate provenance"
+        );
+        drop(connection);
+        let candidates = listed["candidates"].as_array().expect("candidate rows");
+        let relations = listed["relations"].as_array().expect("relation rows");
+
+        assert_eq!(candidates.len(), 3);
+        assert_eq!(relations.len(), 1);
+        let one = audit_candidate(&listed, "one");
+        let two = audit_candidate(&listed, "two");
+        let three = audit_candidate(&listed, "three");
+        let one_turn_key = one["source_turn_keys"][0]
+            .as_str()
+            .expect("one source turn key");
+        let two_turn_key = two["source_turn_keys"][0]
+            .as_str()
+            .expect("two source turn key");
+        let three_turn_key = three["source_turn_keys"][0]
+            .as_str()
+            .expect("three source turn key");
+        let one_source = audit_source(one, one_turn_key);
+        let two_source = audit_source(two, two_turn_key);
+        let three_source = audit_source(three, three_turn_key);
+        assert_eq!(one["content"], "derived one");
+        assert_eq!(one["kind"], "lesson");
+        assert_eq!(one["confidence"], 0.9);
+        assert_eq!(one_source["availability"], "available");
+        assert_eq!(
+            one_source["content"],
+            authoritative_source_content(&sources, one_turn_key)
+        );
+        assert_eq!(two["content"], "derived two");
+        assert_eq!(two_source["availability"], "available");
+        assert_eq!(
+            two_source["content"],
+            authoritative_source_content(&sources, two_turn_key)
+        );
+        assert_eq!(three["content"], "derived three");
+        assert_eq!(three_source["availability"], "available");
+        assert_eq!(
+            three_source["content"],
+            authoritative_source_content(&sources, three_turn_key)
+        );
+        let first_candidate = one["id"].as_u64().expect("one candidate id");
+        let second_candidate = two["id"].as_u64().expect("two candidate id");
+        let third_candidate = three["id"].as_u64().expect("three candidate id");
+        let relation = audit_relation(&listed, "one", "two");
+        let relation_id = relation["id"].as_u64().expect("relation id");
+        assert_eq!(relation["run_id"], one["run_id"]);
+        assert_eq!(relation["profile_id"], one["profile_id"]);
+        assert_eq!(relation["from_item_local_id"], "one");
+        assert_eq!(relation["to_item_local_id"], "two");
+        assert_eq!(relation["relation_type"], "supports");
+
+        let before_list = graph_snapshot(&reg);
+        let relisted = extraction_audit_list(&reg);
+        assert_eq!(relisted, listed, "list must be a pure graph read");
+        assert_eq!(
+            graph_snapshot(&reg),
+            before_list,
+            "list must not mutate graph"
+        );
+
+        let updated_candidate = dispatch(
+            &reg,
+            Request::UpdateExtractionCandidateAudit {
+                namespace: None,
+                candidate_id: first_candidate,
+                support: crate::extract::types::AuditSupport::Partial,
+                contamination: Some(crate::extract::types::ContaminationCategory::UnsupportedClaim),
+                reviewer: "  reviewer  ".into(),
+            },
+        );
+        assert!(
+            matches!(updated_candidate, Response::Ok { .. }),
+            "{updated_candidate:?}"
+        );
+        let updated_relation = dispatch(
+            &reg,
+            Request::UpdateExtractionRelationAudit {
+                namespace: None,
+                relation_id,
+                verdict: crate::extract::types::RelationVerdict::WrongDirection,
+                reviewer: "reviewer".into(),
+            },
+        );
+        assert!(
+            matches!(updated_relation, Response::Ok { .. }),
+            "{updated_relation:?}"
+        );
+        let reviewed = extraction_audit_list(&reg);
+        let candidate = audit_candidate(&reviewed, "one");
+        let relation = audit_relation(&reviewed, "one", "two");
+        assert_eq!(candidate["audit_support"], "partial");
+        assert_eq!(candidate["contamination_category"], "unsupported-claim");
+        assert_eq!(candidate["reviewed_by"], "reviewer");
+        assert!(
+            candidate["reviewed_at"].is_u64(),
+            "candidate review must be timestamped"
+        );
+        assert_eq!(relation["audit_status"], "wrong-direction");
+        assert_eq!(relation["reviewed_by"], "reviewer");
+        assert!(
+            relation["reviewed_at"].is_u64(),
+            "relation review must be timestamped"
+        );
+        assert_eq!(
+            graph_snapshot(&reg),
+            before_list,
+            "valid candidate and relation audit writes are policy-only"
+        );
+
+        ok_text(dispatch(
+            &reg,
+            Request::Forget {
+                id: one_source["node_id"].as_u64().expect("one source node id"),
+                reason: None,
+                hard: Some(true),
+                namespace: None,
+            },
+        ));
+        let before_rejected_update = graph_snapshot(&reg);
+        let unavailable = extraction_audit_list(&reg);
+        let unavailable_one = audit_candidate(&unavailable, "one");
+        let unavailable_one_source = audit_source(unavailable_one, one_turn_key);
+        assert_eq!(unavailable_one_source["availability"], "source-unavailable");
+        assert_eq!(unavailable_one_source["content"], serde_json::Value::Null);
+        assert!(rendered_extraction_audit(&reg).contains("AUDIT UNAVAILABLE: source-unavailable"));
+        let rejected = dispatch(
+            &reg,
+            Request::UpdateExtractionCandidateAudit {
+                namespace: None,
+                candidate_id: first_candidate,
+                support: crate::extract::types::AuditSupport::Unsupported,
+                contamination: None,
+                reviewer: "reviewer".into(),
+            },
+        );
+        assert_audit_rejection(&rejected);
+        assert_eq!(
+            graph_snapshot(&reg),
+            before_rejected_update,
+            "rejected unavailable-source audit cannot mutate graph"
+        );
+
+        ok_text(dispatch(
+            &reg,
+            Request::Update {
+                id: two_source["node_id"].as_u64().expect("two source node id"),
+                new_content: "live content no longer matches staged source".into(),
+                namespace: None,
+            },
+        ));
+        let before_mismatch_rejection = graph_snapshot(&reg);
+        let mismatched = extraction_audit_list(&reg);
+        let mismatched_two = audit_candidate(&mismatched, "two");
+        let mismatched_two_source = audit_source(mismatched_two, two_turn_key);
+        assert_eq!(mismatched_two_source["availability"], "source-mismatch");
+        assert_eq!(mismatched_two_source["content"], serde_json::Value::Null);
+        assert!(rendered_extraction_audit(&reg).contains("AUDIT UNAVAILABLE: source-mismatch"));
+        let rejected = dispatch(
+            &reg,
+            Request::UpdateExtractionCandidateAudit {
+                namespace: None,
+                candidate_id: second_candidate,
+                support: crate::extract::types::AuditSupport::Unsupported,
+                contamination: None,
+                reviewer: "reviewer".into(),
+            },
+        );
+        assert_audit_rejection(&rejected);
+        assert_eq!(
+            graph_snapshot(&reg),
+            before_mismatch_rejection,
+            "rejected mismatched-source audit cannot mutate graph"
+        );
+
+        let connection = rusqlite::Connection::open(dir.path().join("memory.db"))
+            .expect("open audit policy database");
+        connection
+            .execute(
+                "UPDATE extract_candidates SET source_content_hashes = '[]' WHERE id = ?1",
+                [third_candidate],
+            )
+            .expect("empty persisted provenance hashes");
+        let before_malformed_rejection = graph_snapshot(&reg);
+        let malformed = extraction_audit_list(&reg);
+        assert!(
+            audit_candidate(&malformed, "three")["sources"]
+                .as_array()
+                .expect("malformed provenance sources")
+                .is_empty(),
+            "empty provenance vectors must not be treated as available"
+        );
+        let rejected = dispatch(
+            &reg,
+            Request::UpdateExtractionCandidateAudit {
+                namespace: None,
+                candidate_id: third_candidate,
+                support: crate::extract::types::AuditSupport::Unsupported,
+                contamination: None,
+                reviewer: "reviewer".into(),
+            },
+        );
+        assert_audit_rejection(&rejected);
+        assert_eq!(
+            graph_snapshot(&reg),
+            before_malformed_rejection,
+            "malformed provenance rejection cannot mutate graph"
+        );
     }
 }

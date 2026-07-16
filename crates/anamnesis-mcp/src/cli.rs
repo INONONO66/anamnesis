@@ -3,8 +3,12 @@
 use std::sync::{Arc, Mutex};
 
 use anamnesis::embedding::EmbeddingProvider;
-use anyhow::Result;
-use clap::{Parser, Subcommand};
+use anyhow::{Context, Result};
+use clap::{ArgGroup, Parser, Subcommand};
+
+use crate::extract::audit::{ExtractionAuditResult, resolve_reviewer};
+use crate::extract::types::{AuditSupport, ContaminationCategory, RelationVerdict};
+use crate::extract::worker::{WorkerNoop, WorkerOutcome, run_worker};
 
 use crate::config::Config;
 use crate::memory::{
@@ -162,6 +166,41 @@ pub enum Commands {
         #[arg(long)]
         embedded: bool,
     },
+    #[command(group(
+        ArgGroup::new("audit_update")
+            .args(["candidate", "relation"])
+            .multiple(false)
+    ))]
+    /// Review staged extraction candidates and relations without writing graph content.
+    Extract {
+        /// Retained for explicit audit invocation compatibility.
+        #[arg(long)]
+        audit: bool,
+        /// Namespace to audit (defaults to the configured namespace).
+        #[arg(long)]
+        namespace: Option<String>,
+        /// Maximum audit rows to return for a list request.
+        #[arg(long, default_value_t = 20)]
+        limit: u32,
+        /// Candidate row to review.
+        #[arg(long, conflicts_with = "relation", requires = "support")]
+        candidate: Option<u64>,
+        /// Candidate support verdict.
+        #[arg(long, requires = "candidate", value_parser = parse_audit_support)]
+        support: Option<AuditSupport>,
+        /// Optional contamination finding for a candidate review.
+        #[arg(long, requires = "candidate", value_parser = parse_contamination_category)]
+        contamination: Option<ContaminationCategory>,
+        /// Relation row to review.
+        #[arg(long, conflicts_with = "candidate", requires = "relation_verdict")]
+        relation: Option<u64>,
+        /// Relation review verdict.
+        #[arg(long, requires = "relation", value_parser = parse_relation_verdict)]
+        relation_verdict: Option<RelationVerdict>,
+        /// Reviewer identity; defaults through audit environment variables.
+        #[arg(long, requires = "audit_update")]
+        reviewer: Option<String>,
+    },
     /// Download/initialize the embedding model, then exit.
     Prewarm,
     /// Re-embed an existing namespace database with the configured model.
@@ -221,6 +260,38 @@ pub enum HookEvent {
     /// omitted from codex-hooks.json — Codex lacks this event).
     SessionEnd,
 }
+fn parse_audit_support(value: &str) -> Result<AuditSupport, String> {
+    match value {
+        "supported" => Ok(AuditSupport::Supported),
+        "partial" => Ok(AuditSupport::Partial),
+        "unsupported" => Ok(AuditSupport::Unsupported),
+        _ => Err("must be supported, partial, or unsupported".to_owned()),
+    }
+}
+
+fn parse_contamination_category(value: &str) -> Result<ContaminationCategory, String> {
+    match value {
+        "unsupported-claim" => Ok(ContaminationCategory::UnsupportedClaim),
+        "prompt-injection" => Ok(ContaminationCategory::PromptInjection),
+        "secret-reexposure" => Ok(ContaminationCategory::SecretReexposure),
+        "foreign-scope" => Ok(ContaminationCategory::ForeignScope),
+        "contradicts-source" => Ok(ContaminationCategory::ContradictsSource),
+        _ => Err(
+            "must be unsupported-claim, prompt-injection, secret-reexposure, foreign-scope, or contradicts-source"
+                .to_owned(),
+        ),
+    }
+}
+
+fn parse_relation_verdict(value: &str) -> Result<RelationVerdict, String> {
+    match value {
+        "correct" => Ok(RelationVerdict::Correct),
+        "wrong-type" => Ok(RelationVerdict::WrongType),
+        "wrong-direction" => Ok(RelationVerdict::WrongDirection),
+        "invalid" => Ok(RelationVerdict::Invalid),
+        _ => Err("must be correct, wrong-type, wrong-direction, or invalid".to_owned()),
+    }
+}
 
 fn registry(cfg: &Config) -> MemoryRegistry {
     MemoryRegistry::file_backed_with_model(
@@ -244,6 +315,56 @@ fn wants_embedded(cli: &Cli) -> bool {
             | Some(Commands::Stats { embedded: true, .. })
     );
     flag || crate::env_flag("ANAMNESIS_NO_DAEMON")
+}
+/// Whether an extract invocation is an audit request rather than a worker run.
+pub fn is_extract_audit(cli: &Cli) -> bool {
+    matches!(
+        &cli.command,
+        Some(Commands::Extract { audit: true, .. })
+            | Some(Commands::Extract {
+                candidate: Some(_),
+                ..
+            })
+            | Some(Commands::Extract {
+                relation: Some(_),
+                ..
+            })
+    )
+}
+
+fn render_extract_outcome(outcome: WorkerOutcome) -> String {
+    match outcome {
+        WorkerOutcome::Staged {
+            run_id,
+            candidate_count,
+            relation_count,
+        } => format!(
+            "extraction staged: run_id={run_id} candidate_count={candidate_count} relation_count={relation_count}"
+        ),
+        WorkerOutcome::AlreadyStaged {
+            run_id,
+            candidate_count,
+            relation_count,
+        } => format!(
+            "extraction already staged: run_id={run_id} candidate_count={candidate_count} relation_count={relation_count}"
+        ),
+        WorkerOutcome::Noop(WorkerNoop::ModeOff) => "extraction disabled".to_owned(),
+        WorkerOutcome::Noop(WorkerNoop::WorkerBusy) => "extraction already running".to_owned(),
+        WorkerOutcome::Noop(WorkerNoop::BelowThreshold) => {
+            "extraction skipped: insufficient captured turns".to_owned()
+        }
+    }
+}
+
+/// Run the explicit, opt-in extraction worker.
+pub fn run_extract_worker(cli: &Cli) -> Result<()> {
+    let namespace = match &cli.command {
+        Some(Commands::Extract { namespace, .. }) => namespace.as_deref(),
+        _ => None,
+    };
+    let cfg = Config::from_env();
+    let output = render_extract_outcome(run_worker(&cfg, namespace)?);
+    write_oneshot_stdout(cli, &output)
 }
 
 /// Outcome of attempting a synchronous one-shot.
@@ -296,13 +417,13 @@ pub fn run_oneshot(cli: &Cli) -> Result<Oneshot> {
         Some(Commands::Recall { .. }) => {
             let registry = Arc::new(Mutex::new(registry(&cfg)));
             let text = run_embedded_oneshot(cli, &registry)?;
-            write_oneshot_stdout(cli, &text);
+            write_oneshot_stdout(cli, &text)?;
             Ok(Oneshot::Done)
         }
         Some(Commands::Stats { recall: true, .. }) => {
             let registry = Arc::new(Mutex::new(registry(&cfg)));
             let text = run_embedded_oneshot(cli, &registry)?;
-            write_oneshot_stdout(cli, &text);
+            write_oneshot_stdout(cli, &text)?;
             Ok(Oneshot::Done)
         }
         Some(Commands::Remember {
@@ -341,6 +462,9 @@ pub fn run_oneshot(cli: &Cli) -> Result<Oneshot> {
             doctor(&cfg);
             Ok(Oneshot::Done)
         }
+        Some(Commands::Extract { .. }) => Err(anyhow::anyhow!(
+            "extract must be routed before synchronous one-shots"
+        )),
     }
 }
 
@@ -402,9 +526,9 @@ fn write_migration_summary(
 }
 
 /// Run a daemon-routed one-shot as an MCP client: ensure the shared daemon, issue
-/// one `tools/call`, print the result text, and disconnect. Only the four
-/// `Daemon`-routed commands reach here (the dispatcher sends everything else to
-/// the synchronous path); other variants are unreachable by construction.
+/// one `tools/call`, print the result text, and disconnect. The main dispatcher
+/// routes extraction audits here; other commands reach here only when their
+/// default daemon mode is selected.
 pub async fn run_oneshot_client(cli: &Cli) -> Result<()> {
     use crate::client::call_oneshot;
 
@@ -418,21 +542,35 @@ pub async fn run_oneshot_client(cli: &Cli) -> Result<()> {
     let req =
         oneshot_request(cli).ok_or_else(|| anyhow::anyhow!("invalid one-shot client command"))?;
     let text = call_oneshot(&cfg, req).await?;
-    write_oneshot_stdout(cli, &text);
+    write_oneshot_stdout(cli, &text)?;
     Ok(())
 }
 
-fn format_oneshot_stdout(cli: &Cli, text: &str) -> String {
-    if matches!(&cli.command, Some(Commands::Stats { recall: true, .. })) {
-        text.to_owned()
+fn format_oneshot_stdout(cli: &Cli, text: &str) -> Result<String> {
+    if is_extract_audit(cli)
+        && matches!(
+            &cli.command,
+            Some(Commands::Extract {
+                candidate: None,
+                relation: None,
+                ..
+            })
+        )
+    {
+        let result = serde_json::from_str::<ExtractionAuditResult>(text)
+            .context("decode extraction audit response")?;
+        Ok(crate::extract::audit::render_audit_report(&result))
+    } else if matches!(&cli.command, Some(Commands::Stats { recall: true, .. })) {
+        Ok(text.to_owned())
     } else {
-        format!("{text}\n")
+        Ok(format!("{text}\n"))
     }
 }
 
-fn write_oneshot_stdout(cli: &Cli, text: &str) {
-    let output = format_oneshot_stdout(cli, text);
+fn write_oneshot_stdout(cli: &Cli, text: &str) -> Result<()> {
+    let output = format_oneshot_stdout(cli, text)?;
     print!("{output}");
+    Ok(())
 }
 
 fn oneshot_request(cli: &Cli) -> Option<crate::proto::Request> {
@@ -482,6 +620,42 @@ fn oneshot_request(cli: &Cli) -> Option<crate::proto::Request> {
         }) => Some(Request::Stats {
             namespace: namespace.clone(),
             recall: (*recall).then_some(true),
+        }),
+        Some(Commands::Extract {
+            namespace,
+            limit,
+            candidate: None,
+            relation: None,
+            ..
+        }) => Some(Request::ExtractionAuditList {
+            namespace: namespace.clone(),
+            limit: Some(*limit),
+        }),
+        Some(Commands::Extract {
+            namespace,
+            candidate: Some(candidate_id),
+            support: Some(support),
+            contamination,
+            reviewer,
+            ..
+        }) => Some(Request::UpdateExtractionCandidateAudit {
+            namespace: namespace.clone(),
+            candidate_id: *candidate_id,
+            support: *support,
+            contamination: *contamination,
+            reviewer: resolve_reviewer(reviewer.as_deref()),
+        }),
+        Some(Commands::Extract {
+            namespace,
+            relation: Some(relation_id),
+            relation_verdict: Some(verdict),
+            reviewer,
+            ..
+        }) => Some(Request::UpdateExtractionRelationAudit {
+            namespace: namespace.clone(),
+            relation_id: *relation_id,
+            verdict: *verdict,
+            reviewer: resolve_reviewer(reviewer.as_deref()),
         }),
         _ => None,
     }
@@ -704,8 +878,8 @@ mod tests {
         let embedded_text = run_embedded_oneshot(&recall_cli(true), &embedded_registry)
             .expect("embedded recall must dispatch locally");
 
-        let daemon_stdout = format_oneshot_stdout(&recall_cli(false), &daemon_text);
-        let embedded_stdout = format_oneshot_stdout(&recall_cli(true), &embedded_text);
+        let daemon_stdout = format_oneshot_stdout(&recall_cli(false), &daemon_text).unwrap();
+        let embedded_stdout = format_oneshot_stdout(&recall_cli(true), &embedded_text).unwrap();
         assert_eq!(
             embedded_stdout, daemon_stdout,
             "embedded and daemon recall must render byte-identical stdout"
@@ -754,7 +928,7 @@ mod tests {
             }
         ));
         assert_eq!(
-            format_oneshot_stdout(&stats_cli(false, false), "graph stats"),
+            format_oneshot_stdout(&stats_cli(false, false), "graph stats").unwrap(),
             "graph stats\n",
             "the existing daemon stats path must keep its one trailing newline"
         );
@@ -776,8 +950,9 @@ mod tests {
         let embedded_text = run_embedded_oneshot(&stats_cli(true, true), &embedded_registry)
             .expect("embedded stats --recall must dispatch locally");
 
-        let daemon_stdout = format_oneshot_stdout(&stats_cli(true, false), &daemon_text);
-        let embedded_stdout = format_oneshot_stdout(&stats_cli(true, true), &embedded_text);
+        let daemon_stdout = format_oneshot_stdout(&stats_cli(true, false), &daemon_text).unwrap();
+        let embedded_stdout =
+            format_oneshot_stdout(&stats_cli(true, true), &embedded_text).unwrap();
         assert_eq!(
             embedded_stdout, daemon_stdout,
             "embedded and daemon stats --recall must have byte-identical stdout framing"
@@ -823,6 +998,81 @@ mod tests {
             default_namespace.command,
             Some(Commands::MigrateEmbeddings { namespace: None })
         ));
+    }
+    #[test]
+    fn extract_audit_cli_accepts_list_candidate_and_relation_forms() {
+        use clap::Parser;
+
+        for args in [
+            vec!["anamnesis", "extract", "--audit"],
+            vec!["anamnesis", "extract", "--audit", "--limit", "25"],
+            vec![
+                "anamnesis",
+                "extract",
+                "--audit",
+                "--candidate",
+                "7",
+                "--support",
+                "partial",
+                "--contamination",
+                "unsupported-claim",
+                "--reviewer",
+                "reviewer",
+                "--namespace",
+                "project/anamnesis",
+            ],
+            vec![
+                "anamnesis",
+                "extract",
+                "--audit",
+                "--relation",
+                "9",
+                "--relation-verdict",
+                "wrong-direction",
+                "--reviewer",
+                "reviewer",
+            ],
+        ] {
+            assert!(
+                Cli::try_parse_from(args).is_ok(),
+                "valid extraction audit form must parse"
+            );
+        }
+    }
+
+    #[test]
+    fn extract_audit_cli_rejects_incomplete_or_mixed_update_forms() {
+        use clap::Parser;
+
+        for args in [
+            vec!["anamnesis", "extract", "--audit", "--support", "supported"],
+            vec!["anamnesis", "extract", "--audit", "--candidate", "7"],
+            vec![
+                "anamnesis",
+                "extract",
+                "--audit",
+                "--relation-verdict",
+                "correct",
+            ],
+            vec![
+                "anamnesis",
+                "extract",
+                "--audit",
+                "--candidate",
+                "7",
+                "--support",
+                "supported",
+                "--relation",
+                "9",
+                "--relation-verdict",
+                "correct",
+            ],
+        ] {
+            assert!(
+                Cli::try_parse_from(args).is_err(),
+                "incomplete or mixed extraction audit form must be rejected"
+            );
+        }
     }
 
     #[test]
@@ -875,5 +1125,86 @@ mod tests {
                 .expect("derive backup path")
                 .exists()
         );
+    }
+    #[test]
+    fn extract_has_no_embedded_flag() {
+        use clap::Parser;
+        assert!(
+            Cli::try_parse_from(["anamnesis", "extract", "--embedded"]).is_err(),
+            "extract must never offer an embedded mode"
+        );
+    }
+    #[test]
+    fn audit_list_is_daemon_only_and_malformed_responses_are_not_rendered() {
+        use clap::Parser;
+
+        let cli = Cli::try_parse_from([
+            "anamnesis",
+            "extract",
+            "--audit",
+            "--namespace",
+            "project/resolved-namespace",
+        ])
+        .expect("audit CLI parses without any provider command");
+        assert!(matches!(
+            oneshot_request(&cli),
+            Some(Request::ExtractionAuditList {
+                namespace: Some(namespace),
+                ..
+            }) if namespace == "project/resolved-namespace"
+        ));
+
+        let raw_daemon_text = r#"{"candidate_rows":[not valid]"#;
+        let error = format_oneshot_stdout(&cli, raw_daemon_text)
+            .expect_err("malformed audit response must fail rather than print raw daemon text");
+        assert!(
+            !error.to_string().contains(raw_daemon_text),
+            "audit decode failure must not leak raw daemon text: {error:#}",
+        );
+
+        let worker_cli =
+            Cli::try_parse_from(["anamnesis", "extract"]).expect("plain worker CLI parses");
+        assert_eq!(
+            format_oneshot_stdout(&worker_cli, "extraction disabled")
+                .expect("worker output is not decoded as audit JSON"),
+            "extraction disabled\n"
+        );
+    }
+
+    #[test]
+    fn extract_outcome_rendering_keeps_successes_concise() {
+        use crate::extract::worker::{WorkerNoop, WorkerOutcome};
+
+        for outcome in [
+            WorkerOutcome::Staged {
+                run_id: 41,
+                candidate_count: 3,
+                relation_count: 2,
+            },
+            WorkerOutcome::AlreadyStaged {
+                run_id: 42,
+                candidate_count: 5,
+                relation_count: 4,
+            },
+        ] {
+            let rendered = render_extract_outcome(outcome);
+            assert!(
+                rendered.contains("run_id="),
+                "successful extraction must identify its run: {rendered}",
+            );
+            assert!(
+                rendered.contains("candidate_count=") && rendered.contains("relation_count="),
+                "successful extraction must report candidate and relation counts: {rendered}",
+            );
+        }
+
+        for outcome in [
+            WorkerOutcome::Noop(WorkerNoop::ModeOff),
+            WorkerOutcome::Noop(WorkerNoop::WorkerBusy),
+            WorkerOutcome::Noop(WorkerNoop::BelowThreshold),
+        ] {
+            let rendered = render_extract_outcome(outcome);
+            assert!(!rendered.contains('\n'));
+        }
     }
 }

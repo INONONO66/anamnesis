@@ -152,6 +152,23 @@ Both Claude Code and Codex can automatically ingest your turn transcripts into a
 **Stage 2 (Extraction):** The daemon holds an un-extracted queue of ingested turns. When the queue crosses `ANAMNESIS_EXTRACT_THRESHOLD_N` (default 20), the next `SessionStart` hook injects a one-line nudge into the context, asking the agent to call the `extract_pending` MCP tool. That tool returns the raw turns and marks them extracted, so the agent can distill them into reasoning or project lessons using `relate` and `remember`. Extraction is agent-driven and best-effort — the nudge is advisory only, and there is no guarantee the agent will call the tool or that extraction will be immediate.
 
 Enable or disable capture entirely with `ANAMNESIS_CAPTURE_ENABLED` (default `true`).
+## R2 shadow extraction (opt-in)
+
+R2 can send a bounded batch of captured raw turns to exactly one configured external extractor
+only with the explicit opt-in `ANAMNESIS_EXTRACT_MODE=shadow`; its default is `off`. `auto`,
+boolean-like, and other unrecognized values also degrade to `off`. `ANAMNESIS_EXTRACT_CMD`
+configures that one provider command (default argv `claude -p`), parsed into a program plus
+arguments and executed directly, **never through a shell and with no fallback command**. Stage-1
+raw capture remains in the graph as `Episodic` memories. Provider stdin/the raw source batch,
+raw stdout/stderr, and the raw command are transient and are not persisted or logged by R2
+policy or error records. The policy side schema persists only profile hash/components, run and
+failure scalars, validated candidates/relations, source identity/hash ledger, and audit labels.
+R2 performs no automatic pruning or cleanup; those rows persist until an operator takes a
+database lifecycle action. R2 stages candidates only for audit, does not change the graph, and
+keeps candidates out of recall until R3. See
+[operations](../docs/06-operations/operations.md#r2-shadow-extraction-opt-in) for batching and
+audit details.
+
 
 ## Configuration (environment variables)
 
@@ -169,6 +186,8 @@ laws (ADR-0010).
 | `ANAMNESIS_HOOK_TIMEOUT_MS` | Per-hook fail-open timeout (ms); on elapse, inject nothing. | `1500` |
 | `ANAMNESIS_CAPTURE_ENABLED` | Enable/disable capture hooks (Stage 1 & 2) entirely. | `true` |
 | `ANAMNESIS_EXTRACT_THRESHOLD_N` | Queue size threshold; when crossed, `SessionStart` injects extraction nudge to call `extract_pending`. | `20` |
+| `ANAMNESIS_EXTRACT_MODE` | R2 extraction mode: exact `shadow` permits raw captured content to be sent to the configured external extractor; `off` (and invalid values, including `auto`) disables it. | `off` |
+| `ANAMNESIS_EXTRACT_CMD` | Extractor command argv. Defaults to `claude -p`; parsed as argv and executed without a shell. | `claude -p` |
 
 > **`τ` is on the raw activation scale, not 0..1.** The gate compares the **top recall
 > score** — the unnormalized ACT-R activation of the strongest hit — against `τ`. On a typical

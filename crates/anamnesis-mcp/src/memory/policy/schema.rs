@@ -1,6 +1,6 @@
 use rusqlite::{Connection, OptionalExtension, Transaction};
 
-use super::{PolicyStoreError, SCHEMA_VERSION};
+use super::{PolicyStoreError, SCHEMA_VERSION, extraction};
 
 const VERSION_TABLE_SQL: &str = "
     CREATE TABLE IF NOT EXISTS mcp_schema_version (
@@ -56,29 +56,20 @@ fn migrate(transaction: &Transaction<'_>) -> Result<(), PolicyStoreError> {
         .map_err(|error| PolicyStoreError::sqlite("read policy schema version", error))?;
 
     match version {
-        None => {
+        None | Some(0) => {
             create_v1_schema(transaction)?;
-            transaction
-                .execute(
-                    "INSERT INTO mcp_schema_version (id, version) VALUES (1, ?1)",
-                    [SCHEMA_VERSION],
-                )
-                .map_err(|error| {
-                    PolicyStoreError::sqlite("initialize policy schema version", error)
-                })?;
+            extraction::create_schema(transaction)?;
+            set_version(transaction)?;
         }
-        Some(0) => {
+        Some(1) => {
             create_v1_schema(transaction)?;
-            transaction
-                .execute(
-                    "UPDATE mcp_schema_version SET version = ?1 WHERE id = 1",
-                    [SCHEMA_VERSION],
-                )
-                .map_err(|error| {
-                    PolicyStoreError::sqlite("upgrade policy schema version", error)
-                })?;
+            extraction::create_schema(transaction)?;
+            set_version(transaction)?;
         }
-        Some(SCHEMA_VERSION) => create_v1_schema(transaction)?,
+        Some(SCHEMA_VERSION) => {
+            create_v1_schema(transaction)?;
+            extraction::create_schema(transaction)?;
+        }
         Some(version) => return Err(PolicyStoreError::UnsupportedVersion { version }),
     }
 
@@ -89,6 +80,16 @@ fn create_v1_schema(transaction: &Transaction<'_>) -> Result<(), PolicyStoreErro
     transaction
         .execute_batch(RECALL_EVENTS_TABLE_SQL)
         .map_err(|error| PolicyStoreError::sqlite("create recall events table", error))
+}
+fn set_version(transaction: &Transaction<'_>) -> Result<(), PolicyStoreError> {
+    transaction
+        .execute(
+            "INSERT INTO mcp_schema_version (id, version) VALUES (1, ?1)
+             ON CONFLICT(id) DO UPDATE SET version = excluded.version",
+            [SCHEMA_VERSION],
+        )
+        .map(|_| ())
+        .map_err(|error| PolicyStoreError::sqlite("update policy schema version", error))
 }
 
 #[cfg(test)]
@@ -105,32 +106,38 @@ pub(super) fn schema_version(connection: &Connection) -> Result<i64, PolicyStore
 #[cfg(test)]
 pub(super) fn schema_fingerprint(connection: &Connection) -> Result<String, PolicyStoreError> {
     let mut fingerprint = String::new();
-    for table_name in ["mcp_schema_version", "recall_events"] {
-        let mut statement = connection
-            .prepare(&format!("PRAGMA table_info({table_name})"))
-            .map_err(|_| PolicyStoreError::operation("prepare policy schema fingerprint"))?;
-        let columns = statement
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                    row.get::<_, i64>(5)?,
-                ))
-            })
-            .map_err(|_| PolicyStoreError::operation("read policy schema fingerprint"))?;
-        fingerprint.push_str(table_name);
-        fingerprint.push('\n');
-        for column in columns {
-            let (name, ty, not_null, default, primary_key) = column
-                .map_err(|_| PolicyStoreError::operation("read policy schema fingerprint"))?;
-            fingerprint.push_str(&format!(
-                "{name}|{ty}|{not_null}|{default:?}|{primary_key}\n"
-            ));
-        }
+    let mut statement = connection
+        .prepare(
+            "SELECT type, name, tbl_name, sql
+             FROM sqlite_schema
+             WHERE name NOT LIKE 'sqlite_%'
+             ORDER BY type, name",
+        )
+        .map_err(|_| PolicyStoreError::operation("prepare policy schema fingerprint"))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        })
+        .map_err(|_| PolicyStoreError::operation("read policy schema fingerprint"))?;
+    for row in rows {
+        let (object_type, name, table_name, sql) =
+            row.map_err(|_| PolicyStoreError::operation("read policy schema fingerprint"))?;
+        fingerprint.push_str(&format!(
+            "{object_type}|{name}|{table_name}|{}\n",
+            normalize_schema_sql(sql.as_deref().unwrap_or_default())
+        ));
     }
     Ok(fingerprint)
+}
+
+#[cfg(test)]
+fn normalize_schema_sql(sql: &str) -> String {
+    sql.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 #[cfg(test)]
 mod tests {
@@ -186,7 +193,7 @@ mod tests {
                     id INTEGER PRIMARY KEY CHECK(id = 1),
                     version INTEGER NOT NULL
                 );
-                INSERT INTO mcp_schema_version (id, version) VALUES (1, 2);
+                INSERT INTO mcp_schema_version (id, version) VALUES (1, 3);
                 CREATE TABLE retained_metadata (id INTEGER PRIMARY KEY, marker INTEGER NOT NULL);
                 INSERT INTO retained_metadata (id, marker) VALUES (1, 7);
                 ",

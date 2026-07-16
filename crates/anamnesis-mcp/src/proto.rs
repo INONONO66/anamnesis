@@ -10,6 +10,10 @@
 //! ids: calls are serialized, and the daemon serializes at its single registry
 //! mutex anyway). See `docs/adr/0012-daemon-core-mcp-plugin-clients.md`.
 
+use crate::extract::types::{
+    AuditSupport, ContaminationCategory, ExtractionSource, ExtractorProfileComponents,
+    RelationVerdict, ValidatedExtraction,
+};
 use serde::{Deserialize, Serialize};
 /// The kind of client action that caused a recall attempt.
 
@@ -20,6 +24,21 @@ pub enum RecallEventKind {
     SessionStart,
     Tool,
     Unknown,
+}
+/// The explicit failure category recorded for an extraction attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ExtractionErrorKind {
+    Spawn,
+    Stdin,
+    Timeout,
+    StdoutTooLarge,
+    StderrTooLarge,
+    NonZero,
+    InvalidJson,
+    InvalidUtf8,
+    SchemaReject,
+    StageReject,
 }
 
 /// One conversation turn for [`Request::Ingest`] (serde-only mirror of the
@@ -92,6 +111,52 @@ pub enum Request {
         capture: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         scope: Option<String>,
+    },
+    ExtractionScan {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        namespace: Option<String>,
+        profile: ExtractorProfileComponents,
+        min_turns: u32,
+        max_turns: u32,
+    },
+    StageExtraction {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        namespace: Option<String>,
+        profile: ExtractorProfileComponents,
+        llm_duration_ms: u64,
+        sources: Vec<ExtractionSource>,
+        extraction: ValidatedExtraction,
+    },
+    RecordExtractionFailure {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        namespace: Option<String>,
+        profile: ExtractorProfileComponents,
+        turn_count: u32,
+        llm_invoked: bool,
+        error_kind: ExtractionErrorKind,
+        duration_ms: u64,
+    },
+    ExtractionAuditList {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        namespace: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<u32>,
+    },
+    UpdateExtractionCandidateAudit {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        namespace: Option<String>,
+        candidate_id: u64,
+        support: AuditSupport,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        contamination: Option<ContaminationCategory>,
+        reviewer: String,
+    },
+    UpdateExtractionRelationAudit {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        namespace: Option<String>,
+        relation_id: u64,
+        verdict: RelationVerdict,
+        reviewer: String,
     },
     Stats {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -169,6 +234,15 @@ pub enum Request {
     },
 }
 
+/// The result of an atomic extraction-stage operation.
+///
+/// This enum deliberately uses serde's default externally tagged shape so the
+/// response identifies the outcome without a second protocol tag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StageExtractionResult {
+    Staged { run_id: u64 },
+    AlreadyStaged { run_id: u64 },
+}
 /// Whether a failed request is the caller's fault (e.g. a bad relation label or
 /// missing node id) or an internal fault. Mirrors the MCP `invalid_params` vs
 /// `internal_error` split so the `serve` adapter can re-map it faithfully.
@@ -222,6 +296,18 @@ pub fn decode_line<T: for<'de> Deserialize<'de>>(line: &str) -> Result<T, serde_
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn extraction_profile() -> crate::extract::types::ExtractorProfileComponents {
+        crate::extract::types::ExtractorProfileComponents {
+            provider_id: "extractor".into(),
+            model_id: "model".into(),
+            prompt_version: 1,
+            schema_version: 2,
+            normalization_version: 3,
+            relation_policy_version: 4,
+            command_hash: "command-hash".into(),
+        }
+    }
 
     fn round_trip_request(req: Request) {
         let line = encode_line(&req).expect("encode");
@@ -319,6 +405,55 @@ mod tests {
             limit: Some(50),
             namespace: Some("projA".into()),
         });
+        round_trip_request(Request::ExtractionScan {
+            namespace: Some("projA".into()),
+            profile: extraction_profile(),
+            min_turns: 10,
+            max_turns: 20,
+        });
+        round_trip_request(Request::StageExtraction {
+            namespace: Some("project/anamnesis".into()),
+            profile: extraction_profile(),
+            llm_duration_ms: 42,
+            sources: vec![crate::extract::types::ExtractionSource {
+                node_id: 7,
+                turn_key: "session:7".into(),
+                session_id: "session".into(),
+                scope: "project/anamnesis".into(),
+                content: "captured turn".into(),
+                content_hash: "hash".into(),
+                at_ms: 1_000,
+            }],
+            extraction: crate::extract::types::ValidatedExtraction {
+                items: vec![],
+                relations: vec![],
+            },
+        });
+        round_trip_request(Request::RecordExtractionFailure {
+            namespace: Some("project/anamnesis".into()),
+            profile: extraction_profile(),
+            turn_count: 10,
+            llm_invoked: true,
+            error_kind: ExtractionErrorKind::SchemaReject,
+            duration_ms: 42,
+        });
+        round_trip_request(Request::ExtractionAuditList {
+            namespace: Some("project/anamnesis".into()),
+            limit: Some(25),
+        });
+        round_trip_request(Request::UpdateExtractionCandidateAudit {
+            namespace: Some("project/anamnesis".into()),
+            candidate_id: 7,
+            support: crate::extract::types::AuditSupport::Partial,
+            contamination: Some(crate::extract::types::ContaminationCategory::UnsupportedClaim),
+            reviewer: "reviewer".into(),
+        });
+        round_trip_request(Request::UpdateExtractionRelationAudit {
+            namespace: Some("project/anamnesis".into()),
+            relation_id: 9,
+            verdict: crate::extract::types::RelationVerdict::WrongDirection,
+            reviewer: "reviewer".into(),
+        });
     }
 
     #[test]
@@ -393,6 +528,61 @@ mod tests {
             without_recall,
             "absent recall must survive decoding"
         );
+    }
+    #[test]
+    fn extraction_audit_wire_bytes_are_canonical_and_unknown_enums_reject() {
+        let list = encode_line(&Request::ExtractionAuditList {
+            namespace: Some("project/anamnesis".into()),
+            limit: Some(25),
+        })
+        .expect("encode audit list");
+        assert_eq!(
+            list,
+            "{\"op\":\"extraction_audit_list\",\"namespace\":\"project/anamnesis\",\"limit\":25}\n"
+        );
+        assert_eq!(
+            decode_line::<Request>(&list).expect("decode audit list"),
+            Request::ExtractionAuditList {
+                namespace: Some("project/anamnesis".into()),
+                limit: Some(25),
+            }
+        );
+
+        let candidate = encode_line(&Request::UpdateExtractionCandidateAudit {
+            namespace: Some("project/anamnesis".into()),
+            candidate_id: 7,
+            support: crate::extract::types::AuditSupport::Partial,
+            contamination: Some(crate::extract::types::ContaminationCategory::UnsupportedClaim),
+            reviewer: "reviewer".into(),
+        })
+        .expect("encode candidate audit");
+        assert_eq!(
+            candidate,
+            "{\"op\":\"update_extraction_candidate_audit\",\"namespace\":\"project/anamnesis\",\"candidate_id\":7,\"support\":\"partial\",\"contamination\":\"unsupported-claim\",\"reviewer\":\"reviewer\"}\n"
+        );
+
+        let relation = encode_line(&Request::UpdateExtractionRelationAudit {
+            namespace: Some("project/anamnesis".into()),
+            relation_id: 9,
+            verdict: crate::extract::types::RelationVerdict::WrongDirection,
+            reviewer: "reviewer".into(),
+        })
+        .expect("encode relation audit");
+        assert_eq!(
+            relation,
+            "{\"op\":\"update_extraction_relation_audit\",\"namespace\":\"project/anamnesis\",\"relation_id\":9,\"verdict\":\"wrong-direction\",\"reviewer\":\"reviewer\"}\n"
+        );
+
+        for bad in [
+            "{\"op\":\"update_extraction_candidate_audit\",\"candidate_id\":7,\"support\":\"unknown\",\"reviewer\":\"r\"}",
+            "{\"op\":\"update_extraction_candidate_audit\",\"candidate_id\":7,\"support\":\"supported\",\"contamination\":\"unknown\",\"reviewer\":\"r\"}",
+            "{\"op\":\"update_extraction_relation_audit\",\"relation_id\":9,\"verdict\":\"unknown\",\"reviewer\":\"r\"}",
+        ] {
+            assert!(
+                decode_line::<Request>(bad).is_err(),
+                "unknown audit enum must reject: {bad}"
+            );
+        }
     }
     #[test]
     fn recall_event_kind_round_trips_and_omits_when_absent() {
@@ -489,6 +679,25 @@ mod tests {
     }
 
     #[test]
+    fn extraction_scan_round_trips_with_canonical_wire_shape() {
+        let request = Request::ExtractionScan {
+            namespace: Some("project/anamnesis".into()),
+            profile: extraction_profile(),
+            min_turns: 10,
+            max_turns: 20,
+        };
+        let line = encode_line(&request).expect("encode extraction scan");
+        assert_eq!(
+            line,
+            "{\"op\":\"extraction_scan\",\"namespace\":\"project/anamnesis\",\"profile\":{\"provider_id\":\"extractor\",\"model_id\":\"model\",\"prompt_version\":1,\"schema_version\":2,\"normalization_version\":3,\"relation_policy_version\":4,\"command_hash\":\"command-hash\"},\"min_turns\":10,\"max_turns\":20}\n"
+        );
+        assert_eq!(
+            decode_line::<Request>(&line).expect("decode extraction scan"),
+            request
+        );
+    }
+
+    #[test]
     fn ingest_capture_flag_round_trips_and_defaults_absent() {
         // capture omitted ⇒ absent on the wire (skip_serializing_if = None).
         let req = Request::Ingest {
@@ -547,5 +756,37 @@ mod tests {
             "got: {scoped_line}"
         );
         assert_eq!(decode_line::<Request>(&scoped_line).unwrap(), scoped);
+    }
+    #[test]
+    fn stage_extraction_result_and_failure_kinds_round_trip_on_the_wire() {
+        for result in [
+            StageExtractionResult::Staged { run_id: 7 },
+            StageExtractionResult::AlreadyStaged { run_id: 7 },
+        ] {
+            let line = encode_line(&result).expect("encode stage result");
+            assert_eq!(
+                decode_line::<StageExtractionResult>(&line).expect("decode stage result"),
+                result
+            );
+        }
+
+        for kind in [
+            ExtractionErrorKind::Spawn,
+            ExtractionErrorKind::Stdin,
+            ExtractionErrorKind::Timeout,
+            ExtractionErrorKind::StdoutTooLarge,
+            ExtractionErrorKind::StderrTooLarge,
+            ExtractionErrorKind::NonZero,
+            ExtractionErrorKind::InvalidJson,
+            ExtractionErrorKind::InvalidUtf8,
+            ExtractionErrorKind::SchemaReject,
+            ExtractionErrorKind::StageReject,
+        ] {
+            let line = encode_line(&kind).expect("encode failure kind");
+            assert_eq!(
+                decode_line::<ExtractionErrorKind>(&line).expect("decode failure kind"),
+                kind
+            );
+        }
     }
 }

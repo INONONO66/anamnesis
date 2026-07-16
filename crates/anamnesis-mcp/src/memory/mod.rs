@@ -327,13 +327,12 @@ pub(crate) fn is_caller_error(err: &Error) -> bool {
 
 /// How the shared embedding provider is obtained.
 enum ProviderSource {
-    /// Pre-built provider (tests, or a caller-supplied embedder).
+    /// Pre-built provider supplied by an in-process test.
     #[cfg(test)]
     Ready(Arc<dyn EmbeddingProvider>),
     /// Build the configured FastEmbed provider on first use.
     FastEmbedLazy { model_name: String },
 }
-
 /// Storage backend for opened namespaces.
 enum Backend {
     /// File-backed: `<dir>/<namespace>.db` (the default namespace uses `default_db`).
@@ -1678,8 +1677,8 @@ fn record_tick() {
     TICK_CALLS.with(|c| c.set(c.get() + 1));
 }
 
-/// Deterministic 64-dim embedding provider for tests — no network, no model
-/// download. Shared by this module's tests and the daemon lifecycle test.
+/// Deterministic 64-dim embedding provider for in-process tests — no network or
+/// model download.
 #[cfg(test)]
 pub(crate) struct StubProvider;
 

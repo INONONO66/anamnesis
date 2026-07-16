@@ -91,7 +91,6 @@ impl FastEmbedProvider {
             .map_err(|e| Error::InvalidInput(format!("model info lookup failed: {e}")))?;
         let dim = info.dim;
         let name = info.model_code.clone();
-
         let embedding = TextEmbedding::try_new(InitOptions::new(model))
             .map_err(|e| Error::InvalidInput(format!("model init failed: {e}")))?;
 

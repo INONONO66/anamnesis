@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **R2 shadow extraction** — opt-in, graph-nonmutating staging sends bounded captured-turn batches to exactly one configured external argv with no fallback, for audit only; staged candidates remain invisible to recall pending R3 approval. Stage-1 raw capture remains in the graph; provider stdin/raw batch, raw stdout/stderr, and raw command are transient and never persisted or logged by R2 policy/error records. Policy rows retain profile hash/components, run/failure scalars, validated candidates/relations, source identity/hash ledger, and audit labels until an operator database lifecycle action; R2 has no automatic pruning or cleanup.
 ## [0.19.0] - 2026-07-15
 
 ### Added

@@ -11,13 +11,18 @@ use std::time::Duration;
 #[cfg(test)]
 use std::{cell::RefCell, marker::PhantomData, rc::Rc};
 
+use crate::extract::audit::ExtractionAuditResult;
+use crate::extract::types::{AuditSupport, ContaminationCategory, RelationVerdict};
 use crate::proto::RecallEventKind;
+use crate::proto::{ExtractionErrorKind, StageExtractionResult};
 use anamnesis::Error;
 use rusqlite::{Connection, Error as SqliteError};
 
+mod extraction;
 mod recall;
 mod schema;
 
+pub(crate) use extraction::ExtractionProfileStatus;
 pub(crate) use recall::RecallEvent;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -69,7 +74,7 @@ pub(crate) struct SweepPoint {
     pub attempts: u64,
 }
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 #[cfg(test)]
 thread_local! {
@@ -227,6 +232,12 @@ impl PolicyStore {
             PolicyStoreError::sqlite("configure policy store busy timeout", error)
                 .into_engine_error()
         })?;
+        connection
+            .execute_batch("PRAGMA foreign_keys = ON;")
+            .map_err(|error| {
+                PolicyStoreError::sqlite("enable policy store foreign keys", error)
+                    .into_engine_error()
+            })?;
         schema::initialize(&mut connection).map_err(PolicyStoreError::into_engine_error)?;
         #[cfg(test)]
         observe_operation();
@@ -251,6 +262,91 @@ impl PolicyStore {
     pub(crate) fn recall_stats(&self) -> Result<RecallStats, Error> {
         recall::stats(&self.connection).map_err(PolicyStoreError::into_engine_error)
     }
+    pub(crate) fn processed_extraction_turn_keys(
+        &self,
+        profile_id: &str,
+    ) -> Result<std::collections::HashSet<String>, Error> {
+        extraction::processed_turn_keys(&self.connection, profile_id)
+            .map_err(PolicyStoreError::into_engine_error)
+    }
+
+    pub(crate) fn ensure_extraction_shadow_profile(
+        &self,
+        profile_id: &str,
+        components: &crate::extract::types::ExtractorProfileComponents,
+        created_at: u64,
+    ) -> Result<ExtractionProfileStatus, Error> {
+        extraction::ensure_shadow_profile(&self.connection, profile_id, components, created_at)
+            .map_err(PolicyStoreError::into_engine_error)
+    }
+    pub(crate) fn stage_extraction(
+        &mut self,
+        profile_id: &str,
+        profile_components: &crate::extract::types::ExtractorProfileComponents,
+        llm_duration_ms: u64,
+        sources: &[crate::extract::types::ExtractionSource],
+        validated_extraction: &crate::extract::types::ValidatedExtraction,
+    ) -> Result<StageExtractionResult, Error> {
+        extraction::stage(
+            &mut self.connection,
+            profile_id,
+            profile_components,
+            llm_duration_ms,
+            sources,
+            validated_extraction,
+        )
+        .map_err(PolicyStoreError::into_engine_error)
+    }
+
+    pub(crate) fn record_extraction_failure(
+        &mut self,
+        profile_id: &str,
+        turn_count: u32,
+        llm_invoked: bool,
+        error_kind: ExtractionErrorKind,
+        duration_ms: u64,
+    ) -> Result<(), Error> {
+        extraction::record_failure(
+            &mut self.connection,
+            profile_id,
+            turn_count,
+            llm_invoked,
+            error_kind,
+            duration_ms,
+        )
+        .map_err(PolicyStoreError::into_engine_error)
+    }
+    pub(crate) fn list_extraction_audit(&self, limit: u32) -> Result<ExtractionAuditResult, Error> {
+        extraction::list_audit(&self.connection, limit).map_err(PolicyStoreError::into_engine_error)
+    }
+    pub(crate) fn update_extraction_candidate_audit(
+        &mut self,
+        id: u64,
+        support: AuditSupport,
+        contamination: Option<ContaminationCategory>,
+        reviewer: &str,
+        reviewed_at: u64,
+    ) -> Result<(), Error> {
+        extraction::update_candidate_audit(
+            &mut self.connection,
+            id,
+            support,
+            contamination,
+            reviewer,
+            reviewed_at,
+        )
+        .map_err(PolicyStoreError::into_engine_error)
+    }
+    pub(crate) fn update_extraction_relation_audit(
+        &mut self,
+        id: u64,
+        verdict: RelationVerdict,
+        reviewer: &str,
+        reviewed_at: u64,
+    ) -> Result<(), Error> {
+        extraction::update_relation_audit(&mut self.connection, id, verdict, reviewer, reviewed_at)
+            .map_err(PolicyStoreError::into_engine_error)
+    }
 
     #[cfg(test)]
     pub(crate) fn in_memory() -> Result<Self, Error> {
@@ -273,6 +369,22 @@ impl PolicyStore {
     #[cfg(test)]
     pub(crate) fn schema_fingerprint(&self) -> Result<String, Error> {
         schema::schema_fingerprint(&self.connection).map_err(PolicyStoreError::into_engine_error)
+    }
+    #[cfg(test)]
+    pub(crate) fn has_table(&self, table_name: &str) -> Result<bool, Error> {
+        self.connection
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM sqlite_master
+                    WHERE type = 'table' AND name = ?1
+                )",
+                [table_name],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|exists| exists != 0)
+            .map_err(|error| {
+                PolicyStoreError::sqlite("check policy schema table", error).into_engine_error()
+            })
     }
     #[cfg(test)]
     pub(crate) fn recall_event_count_for_test(&self) -> Result<u64, Error> {

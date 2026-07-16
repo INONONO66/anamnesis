@@ -728,6 +728,35 @@ mod tests {
     /// own set → resolve → unset → resolve sequence can never interleave with
     /// itself under a harness that reruns/retries tests.
     static ENV_SOCKET_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// Process-isolated daemon used only by the shadow extraction integration
+    /// test. Cargo compiles this function into the `--bin anamnesis` test
+    /// executable, never the normal `anamnesis` binary. It runs the production
+    /// socket protocol and capture dispatch against a file-backed registry while
+    /// injecting the deterministic provider through the test-only constructor.
+    #[tokio::test]
+    #[ignore = "launched by shadow_extraction as a test-only daemon harness"]
+    async fn shadow_extraction_daemon_harness() {
+        let db = std::env::var_os("ANAMNESIS_SHADOW_HARNESS_DB")
+            .map(PathBuf::from)
+            .expect("shadow harness requires ANAMNESIS_SHADOW_HARNESS_DB");
+        let socket = socket_path_for_db(&db).expect("derive shadow harness socket");
+        let bind = acquire_daemon(&db, &socket)
+            .expect("acquire shadow harness daemon")
+            .expect("shadow harness must own its temporary database");
+        let registry = std::sync::Arc::new(std::sync::Mutex::new(
+            MemoryRegistry::file_backed_unlocked_with(
+                Arc::new(crate::memory::StubProvider),
+                db.clone(),
+                db.parent()
+                    .expect("shadow database directory")
+                    .to_path_buf(),
+                "default".to_string(),
+                false,
+            ),
+        ));
+
+        serve_loop(bind, registry, Duration::ZERO).await;
+    }
 
     #[test]
     fn env_socket_override_wins() {
