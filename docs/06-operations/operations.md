@@ -52,6 +52,54 @@ SessionEnd (Claude Code only)            ┘         (idempotent)          │
 - **Stage 2 (agent-driven).** The agent calls `extract_pending`, which hands back
   the raw turns to distill into reasoning (`relate`) and lessons (`remember`).
 
+## R2 shadow extraction (opt-in)
+
+R2 extraction is a separate, **shadow-only** path for auditing prospective distilled memories.
+It is off by default. Raw captured content leaves the machine only when
+`ANAMNESIS_EXTRACT_MODE=shadow` is set exactly; `off`, `auto`, boolean-like values, and every
+other unrecognized value disable extraction. Set `ANAMNESIS_EXTRACT_CMD` only to replace the
+default argv `claude -p`. The value is shell-word parsed into a program and arguments, then
+executed directly: no shell is started, and there is no fallback command.
+
+Run one pass manually with `anamnesis extract [--namespace NS]`. A pass selects one temporal
+session-and-scope group with **10–20** eligible turns and sends at most that one batch to the
+configured extractor. The provider has a **120 s** timeout; stdout and stderr each have their
+own **1 MiB** cap. Failure, timeout, malformed output, or an over-limit stream leaves its
+sources eligible for a later pass. A valid empty (`items=[]`) result is different: it records
+the selected sources in the zero-output ledger, so they are not sent again.
+
+Groups with fewer than 10 turns remain permanently unprocessed in R2. This intentionally biases
+shadow audit samples toward longer sessions; account for that bias in an R3 promotion decision.
+Age-based flushing is deferred to R3 and must be reconsidered only if measurements demonstrate
+that the bias warrants it.
+
+A successful R2 pass stages candidates, relations, run metadata, and source ledger records in
+the policy side schema only. It never changes graph nodes, graph edges, or
+`anamnesis:extracted` metadata. Staged candidates are invisible to recall until R3 commits an
+approved result.
+
+### Shadow audit
+
+List staged candidates and relations with their current source evidence:
+
+```bash
+anamnesis extract --audit [--namespace NS] [--limit N]
+```
+
+Record a candidate review or a relation review without writing graph content:
+
+```bash
+anamnesis extract --audit --candidate ID --support supported \
+  [--contamination unsupported-claim] [--reviewer NAME] [--namespace NS]
+anamnesis extract --audit --relation ID --relation-verdict correct \
+  [--reviewer NAME] [--namespace NS]
+```
+
+A source marked `source-unavailable` no longer has its recorded node. A
+`source-mismatch` source still resolves by node id but no longer matches its recorded turn key,
+session, scope, or content hash. Candidate review updates are rejected while any cited source is
+unavailable or mismatched; restore the authoritative source before reviewing it.
+
 ## Failure & recovery semantics
 
 The capture and recall paths are **fail-open**: a missing binary, an unreachable
@@ -369,6 +417,8 @@ default, never an error).
 | `ANAMNESIS_CAPTURE_ENABLED` | `true` | Global capture kill-switch; `0` / `false` / `no` disables passive capture. |
 | `ANAMNESIS_EXTRACT_THRESHOLD_N` | `20` | Un-extracted queue length that triggers the SessionStart extraction nudge. |
 | `ANAMNESIS_EXTRACT_REDELIVERY_MS` | `21600000` (6h) | TTL after which a pulled-but-abandoned extraction is re-queued once (attempt cap 2). |
+| `ANAMNESIS_EXTRACT_MODE` | `off` | R2 mode: only exact `shadow` permits external extraction of raw captured content; `auto`, boolean-like, and unrecognized values degrade to off. |
+| `ANAMNESIS_EXTRACT_CMD` | `claude -p` | External extractor argv, shell-word parsed and executed without a shell. |
 | `ANAMNESIS_DAEMON_GRACE_SECS` | `30` | Idle grace before a zero-client daemon exits; `0` ⇒ exit immediately. |
 | `ANAMNESIS_EMBED_MODEL` | `multilingual-e5-small` | Embedding model. Set it to the known stored model to continue without migrating. |
 | `ANAMNESIS_AUTO_MIGRATE_EMBEDDINGS` | `true` | Enables daemon migration after a model/dimension mismatch; `0` / `false` / `no` disables it without mutating the DB. |
