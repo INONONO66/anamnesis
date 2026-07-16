@@ -10,7 +10,7 @@
 //! ids: calls are serialized, and the daemon serializes at its single registry
 //! mutex anyway). See `docs/adr/0012-daemon-core-mcp-plugin-clients.md`.
 
-use crate::extract::types::ExtractorProfileComponents;
+use crate::extract::types::{ExtractionSource, ExtractorProfileComponents, ValidatedExtraction};
 use serde::{Deserialize, Serialize};
 /// The kind of client action that caused a recall attempt.
 
@@ -21,6 +21,15 @@ pub enum RecallEventKind {
     SessionStart,
     Tool,
     Unknown,
+}
+/// The explicit failure category recorded for an extraction attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ExtractionErrorKind {
+    Spawn,
+    Timeout,
+    InvalidJson,
+    SchemaReject,
 }
 
 /// One conversation turn for [`Request::Ingest`] (serde-only mirror of the
@@ -101,6 +110,23 @@ pub enum Request {
         min_turns: u32,
         max_turns: u32,
     },
+    StageExtraction {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        namespace: Option<String>,
+        profile: ExtractorProfileComponents,
+        llm_duration_ms: u64,
+        sources: Vec<ExtractionSource>,
+        extraction: ValidatedExtraction,
+    },
+    RecordExtractionFailure {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        namespace: Option<String>,
+        profile: ExtractorProfileComponents,
+        turn_count: u32,
+        llm_invoked: bool,
+        error_kind: ExtractionErrorKind,
+        duration_ms: u64,
+    },
     Stats {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         namespace: Option<String>,
@@ -177,6 +203,15 @@ pub enum Request {
     },
 }
 
+/// The result of an atomic extraction-stage operation.
+///
+/// This enum deliberately uses serde's default externally tagged shape so the
+/// response identifies the outcome without a second protocol tag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StageExtractionResult {
+    Staged { run_id: u64 },
+    AlreadyStaged { run_id: u64 },
+}
 /// Whether a failed request is the caller's fault (e.g. a bad relation label or
 /// missing node id) or an internal fault. Mirrors the MCP `invalid_params` vs
 /// `internal_error` split so the `serve` adapter can re-map it faithfully.
@@ -344,6 +379,32 @@ mod tests {
             profile: extraction_profile(),
             min_turns: 10,
             max_turns: 20,
+        });
+        round_trip_request(Request::StageExtraction {
+            namespace: Some("project/anamnesis".into()),
+            profile: extraction_profile(),
+            llm_duration_ms: 42,
+            sources: vec![crate::extract::types::ExtractionSource {
+                node_id: 7,
+                turn_key: "session:7".into(),
+                session_id: "session".into(),
+                scope: "project/anamnesis".into(),
+                content: "captured turn".into(),
+                content_hash: "hash".into(),
+                at_ms: 1_000,
+            }],
+            extraction: crate::extract::types::ValidatedExtraction {
+                items: vec![],
+                relations: vec![],
+            },
+        });
+        round_trip_request(Request::RecordExtractionFailure {
+            namespace: Some("project/anamnesis".into()),
+            profile: extraction_profile(),
+            turn_count: 10,
+            llm_invoked: true,
+            error_kind: ExtractionErrorKind::SchemaReject,
+            duration_ms: 42,
         });
     }
 
@@ -592,5 +653,31 @@ mod tests {
             "got: {scoped_line}"
         );
         assert_eq!(decode_line::<Request>(&scoped_line).unwrap(), scoped);
+    }
+    #[test]
+    fn stage_extraction_result_and_failure_kinds_round_trip_on_the_wire() {
+        for result in [
+            StageExtractionResult::Staged { run_id: 7 },
+            StageExtractionResult::AlreadyStaged { run_id: 7 },
+        ] {
+            let line = encode_line(&result).expect("encode stage result");
+            assert_eq!(
+                decode_line::<StageExtractionResult>(&line).expect("decode stage result"),
+                result
+            );
+        }
+
+        for kind in [
+            ExtractionErrorKind::Spawn,
+            ExtractionErrorKind::Timeout,
+            ExtractionErrorKind::InvalidJson,
+            ExtractionErrorKind::SchemaReject,
+        ] {
+            let line = encode_line(&kind).expect("encode failure kind");
+            assert_eq!(
+                decode_line::<ExtractionErrorKind>(&line).expect("decode failure kind"),
+                kind
+            );
+        }
     }
 }

@@ -157,6 +157,8 @@ fn request_namespace(req: &Request) -> Option<&str> {
         | Request::PullPending { namespace, .. }
         | Request::ExtractionStatus { namespace }
         | Request::ExtractionScan { namespace, .. }
+        | Request::StageExtraction { namespace, .. }
+        | Request::RecordExtractionFailure { namespace, .. }
         | Request::Update { namespace, .. }
         | Request::Forget { namespace, .. }
         | Request::Supersede { namespace, .. }
@@ -677,6 +679,36 @@ fn dispatch_registry(registry: &Arc<Mutex<MemoryRegistry>>, req: Request) -> Res
             min_turns,
             max_turns,
         } => extract::dispatch_scan(registry, namespace, profile, min_turns, max_turns),
+        Request::StageExtraction {
+            namespace,
+            profile,
+            llm_duration_ms,
+            sources,
+            extraction,
+        } => extract::dispatch_stage(
+            registry,
+            namespace,
+            profile,
+            llm_duration_ms,
+            sources,
+            extraction,
+        ),
+        Request::RecordExtractionFailure {
+            namespace,
+            profile,
+            turn_count,
+            llm_invoked,
+            error_kind,
+            duration_ms,
+        } => extract::dispatch_record_failure(
+            registry,
+            namespace,
+            profile,
+            turn_count,
+            llm_invoked,
+            error_kind,
+            duration_ms,
+        ),
         Request::Update {
             id,
             new_content,

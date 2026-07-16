@@ -12,6 +12,7 @@ use std::time::Duration;
 use std::{cell::RefCell, marker::PhantomData, rc::Rc};
 
 use crate::proto::RecallEventKind;
+use crate::proto::{ExtractionErrorKind, StageExtractionResult};
 use anamnesis::Error;
 use rusqlite::{Connection, Error as SqliteError};
 
@@ -275,6 +276,43 @@ impl PolicyStore {
     ) -> Result<ExtractionProfileStatus, Error> {
         extraction::ensure_shadow_profile(&self.connection, profile_id, components, created_at)
             .map_err(PolicyStoreError::into_engine_error)
+    }
+    pub(crate) fn stage_extraction(
+        &mut self,
+        profile_id: &str,
+        profile_components: &crate::extract::types::ExtractorProfileComponents,
+        llm_duration_ms: u64,
+        sources: &[crate::extract::types::ExtractionSource],
+        validated_extraction: &crate::extract::types::ValidatedExtraction,
+    ) -> Result<StageExtractionResult, Error> {
+        extraction::stage(
+            &mut self.connection,
+            profile_id,
+            profile_components,
+            llm_duration_ms,
+            sources,
+            validated_extraction,
+        )
+        .map_err(PolicyStoreError::into_engine_error)
+    }
+
+    pub(crate) fn record_extraction_failure(
+        &mut self,
+        profile_id: &str,
+        turn_count: u32,
+        llm_invoked: bool,
+        error_kind: ExtractionErrorKind,
+        duration_ms: u64,
+    ) -> Result<(), Error> {
+        extraction::record_failure(
+            &mut self.connection,
+            profile_id,
+            turn_count,
+            llm_invoked,
+            error_kind,
+            duration_ms,
+        )
+        .map_err(PolicyStoreError::into_engine_error)
     }
 
     #[cfg(test)]

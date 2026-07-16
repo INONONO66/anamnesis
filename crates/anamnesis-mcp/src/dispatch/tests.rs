@@ -3,7 +3,9 @@ use crate::memory::{
     AbstentionStats, AutoExposureStats, CosineStats, EventKindStats, MemoryRegistry, PolicyStore,
     PolicyStoreState, RecallStats, StubProvider, SweepPoint,
 };
-use crate::proto::{ErrKind, RecallEventKind, Response, TurnInput};
+use crate::proto::{
+    ErrKind, ExtractionErrorKind, RecallEventKind, Response, StageExtractionResult, TurnInput,
+};
 use sha2::{Digest, Sha256};
 use std::sync::{
     Arc, Mutex,
@@ -3138,6 +3140,351 @@ fn extraction_scan_hashes_exact_utf8_source_content() {
             "scan must hash the exact stored UTF-8 node content bytes"
         );
     }
+}
+// ── R2 Task 6: atomic shadow-extraction staging and failure recording (RED) ──
+
+fn policy_counts(dir: &tempfile::TempDir) -> (u64, u64, u64, u64) {
+    let connection =
+        rusqlite::Connection::open(dir.path().join("memory.db")).expect("open policy database");
+    let count = |table: &str| -> u64 {
+        connection
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .expect("count policy rows")
+    };
+    (
+        count("extract_runs"),
+        count("extract_run_sources"),
+        count("extract_candidates"),
+        count("extract_relations"),
+    )
+}
+
+fn stage_extraction(
+    reg: &Arc<Mutex<MemoryRegistry>>,
+    profile: crate::extract::types::ExtractorProfileComponents,
+    sources: Vec<crate::extract::types::ExtractionSource>,
+    extraction: crate::extract::types::ValidatedExtraction,
+) -> Response {
+    dispatch(
+        reg,
+        Request::StageExtraction {
+            namespace: None,
+            profile,
+            llm_duration_ms: 17,
+            sources,
+            extraction,
+        },
+    )
+}
+
+fn staged_result(response: Response) -> crate::proto::StageExtractionResult {
+    serde_json::from_str(&ok_text(response)).expect("stage response must be canonical JSON")
+}
+
+fn candidate(
+    source: &crate::extract::types::ExtractionSource,
+    item_local_id: &str,
+) -> crate::extract::types::ValidatedCandidate {
+    crate::extract::types::ValidatedCandidate {
+        item_local_id: item_local_id.into(),
+        content: format!("derived {item_local_id}"),
+        kind: crate::extract::types::CandidateKind::Lesson,
+        confidence: 0.9,
+        sources: vec![crate::extract::types::ExtractionSourceRef {
+            node_id: source.node_id,
+            turn_key: source.turn_key.clone(),
+            content_hash: source.content_hash.clone(),
+        }],
+        idempotency_key: format!("candidate-{item_local_id}"),
+    }
+}
+
+#[test]
+fn stage_extraction_relation_insert_failure_rolls_back_every_success_table() {
+    let (reg, dir) = stub_registry();
+    capture_turns(&reg, "atomic", "scope", 10, 100, "atomic");
+    let profile = extraction_profile();
+    let sources = extraction_scan(&reg, profile.clone()).sources;
+    let before_graph = graph_snapshot(&reg);
+    let connection =
+        rusqlite::Connection::open(dir.path().join("memory.db")).expect("open policy database");
+    connection
+        .execute_batch(
+            "CREATE TRIGGER reject_staged_relation
+             BEFORE INSERT ON extract_relations
+             BEGIN SELECT RAISE(ABORT, 'relation insert rejected'); END;",
+        )
+        .expect("install relation failure trigger");
+    drop(connection);
+
+    let response = stage_extraction(
+        &reg,
+        profile,
+        sources.clone(),
+        crate::extract::types::ValidatedExtraction {
+            items: vec![candidate(&sources[0], "one"), candidate(&sources[1], "two")],
+            relations: vec![crate::extract::types::ValidatedRelation {
+                from_item_local_id: "one".into(),
+                to_item_local_id: "two".into(),
+                relation_type: crate::extract::types::RelationKind::Supports,
+                idempotency_key: "relation-one-two".into(),
+            }],
+        },
+    );
+
+    assert!(
+        matches!(response, Response::Err { .. }),
+        "relation insert failure must reject the whole stage: {response:?}"
+    );
+    assert_eq!(
+        policy_counts(&dir),
+        (0, 0, 0, 0),
+        "one transaction must roll back run, source ledger, candidates, and relations"
+    );
+    assert_eq!(
+        graph_snapshot(&reg),
+        before_graph,
+        "failed staging must leave the canonical graph snapshot unchanged"
+    );
+}
+
+#[test]
+fn zero_output_stage_is_replay_safe_and_its_sources_are_excluded_from_scan() {
+    let (reg, dir) = stub_registry();
+    capture_turns(&reg, "zero-output", "scope", 10, 100, "zero");
+    let profile = extraction_profile();
+    let sources = extraction_scan(&reg, profile.clone()).sources;
+    let before_graph = graph_snapshot(&reg);
+
+    let first = staged_result(stage_extraction(
+        &reg,
+        profile.clone(),
+        sources.clone(),
+        crate::extract::types::ValidatedExtraction {
+            items: vec![],
+            relations: vec![],
+        },
+    ));
+    let run_id = match first {
+        StageExtractionResult::Staged { run_id } => run_id,
+        other => panic!("first zero-output stage must create a run: {other:?}"),
+    };
+    assert_eq!(policy_counts(&dir), (1, 10, 0, 0));
+
+    assert_eq!(
+        staged_result(stage_extraction(
+            &reg,
+            profile.clone(),
+            sources,
+            crate::extract::types::ValidatedExtraction {
+                items: vec![],
+                relations: vec![],
+            },
+        )),
+        StageExtractionResult::AlreadyStaged { run_id },
+        "exact replay must retain the original run identity"
+    );
+    assert_eq!(
+        policy_counts(&dir),
+        (1, 10, 0, 0),
+        "exact replay must not create any additional policy rows"
+    );
+    assert!(
+        extraction_scan(&reg, profile).sources.is_empty(),
+        "zero-output success must ledger every source and exclude it from later scans"
+    );
+    assert_eq!(
+        graph_snapshot(&reg),
+        before_graph,
+        "successful staging and replay must leave the canonical graph snapshot unchanged"
+    );
+}
+
+#[test]
+fn stage_extraction_rejects_partial_or_mixed_source_ledger_conflicts() {
+    let (reg, dir) = stub_registry();
+    capture_turns(&reg, "mixed-ledger", "scope", 10, 100, "mixed");
+    let profile = extraction_profile();
+    let sources = extraction_scan(&reg, profile.clone()).sources;
+    let first_source = sources[0].clone();
+    let before_graph = graph_snapshot(&reg);
+
+    assert!(matches!(
+        staged_result(stage_extraction(
+            &reg,
+            profile.clone(),
+            vec![first_source],
+            crate::extract::types::ValidatedExtraction {
+                items: vec![],
+                relations: vec![],
+            },
+        )),
+        StageExtractionResult::Staged { .. }
+    ));
+    assert_eq!(policy_counts(&dir), (1, 1, 0, 0));
+
+    let response = stage_extraction(
+        &reg,
+        profile,
+        sources,
+        crate::extract::types::ValidatedExtraction {
+            items: vec![],
+            relations: vec![],
+        },
+    );
+    assert!(
+        matches!(response, Response::Err { .. }),
+        "a source set containing both ledgered and new turns must be rejected: {response:?}"
+    );
+    assert_eq!(
+        policy_counts(&dir),
+        (1, 1, 0, 0),
+        "conflicting source ledger must not create a partial second run"
+    );
+    assert_eq!(
+        graph_snapshot(&reg),
+        before_graph,
+        "partial and conflicting stages must leave the canonical graph snapshot unchanged"
+    );
+}
+
+#[test]
+fn stage_extraction_rejects_any_source_snapshot_mismatch_without_mutating_graph_or_policy() {
+    let (reg, dir) = stub_registry();
+    capture_turns(&reg, "snapshot", "scope", 10, 100, "snapshot");
+    let profile = extraction_profile();
+    let sources = extraction_scan(&reg, profile.clone()).sources;
+    let before_graph = graph_snapshot(&reg);
+
+    let mut cases = Vec::new();
+    cases.push((
+        "reused node id",
+        vec![sources[0].clone(), sources[0].clone()],
+    ));
+    let mut missing_node = sources.clone();
+    missing_node[0].node_id = 999_999;
+    cases.push(("mismatched node id", missing_node));
+    let mut changed_hash = sources.clone();
+    changed_hash[0].content_hash = "different-hash".into();
+    cases.push(("changed content hash", changed_hash));
+    let mut changed_session = sources.clone();
+    changed_session[0].session_id = "other-session".into();
+    cases.push(("changed session", changed_session));
+    let mut changed_scope = sources.clone();
+    changed_scope[0].scope = "other-scope".into();
+    cases.push(("changed scope", changed_scope));
+    let mut unknown_turn = sources;
+    unknown_turn[0].turn_key = "unknown-turn-key".into();
+    cases.push(("unknown turn key", unknown_turn));
+
+    for (label, invalid_sources) in cases {
+        let response = stage_extraction(
+            &reg,
+            profile.clone(),
+            invalid_sources,
+            crate::extract::types::ValidatedExtraction {
+                items: vec![],
+                relations: vec![],
+            },
+        );
+        assert!(
+            matches!(response, Response::Err { .. }),
+            "{label} must reject staging: {response:?}"
+        );
+        assert_eq!(
+            policy_counts(&dir),
+            (0, 0, 0, 0),
+            "{label} must leave every success table empty"
+        );
+        assert_eq!(
+            graph_snapshot(&reg),
+            before_graph,
+            "{label} must not alter the canonical graph snapshot"
+        );
+    }
+}
+
+#[test]
+fn extraction_failures_record_error_contract_without_ledgering_sources() {
+    let (reg, dir) = stub_registry();
+    capture_turns(&reg, "failures", "scope", 10, 100, "failure");
+    let profile = extraction_profile();
+    let initial_sources = extraction_scan(&reg, profile.clone()).sources;
+    let before_graph = graph_snapshot(&reg);
+
+    for (error_kind, llm_invoked) in [
+        (ExtractionErrorKind::Spawn, false),
+        (ExtractionErrorKind::Timeout, true),
+        (ExtractionErrorKind::InvalidJson, true),
+        (ExtractionErrorKind::SchemaReject, true),
+    ] {
+        let response = dispatch(
+            &reg,
+            Request::RecordExtractionFailure {
+                namespace: None,
+                profile: profile.clone(),
+                turn_count: initial_sources.len() as u32,
+                llm_invoked,
+                error_kind,
+                duration_ms: 29,
+            },
+        );
+        assert!(
+            matches!(response, Response::Ok { .. }),
+            "failure record must be accepted: {response:?}"
+        );
+    }
+
+    let connection =
+        rusqlite::Connection::open(dir.path().join("memory.db")).expect("open policy database");
+    let rows: Vec<(String, bool, u64, u64, u64)> = {
+        let mut statement = connection
+            .prepare(
+                "SELECT error_kind, llm_invoked, turn_count, candidate_count, relation_count
+                 FROM extract_runs ORDER BY id",
+            )
+            .expect("query failure runs");
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            })
+            .expect("map failure runs")
+            .collect::<Result<_, _>>()
+            .expect("read failure runs")
+    };
+    assert_eq!(
+        rows,
+        vec![
+            ("spawn".into(), false, 10, 0, 0),
+            ("timeout".into(), true, 10, 0, 0),
+            ("invalid-json".into(), true, 10, 0, 0),
+            ("schema-reject".into(), true, 10, 0, 0),
+        ],
+        "failure runs must preserve the wire error kind, invocation flag, and zero output counts"
+    );
+    assert_eq!(
+        policy_counts(&dir),
+        (4, 0, 0, 0),
+        "failure recording creates only runs, never source ledger or staged output"
+    );
+    assert_eq!(
+        extraction_scan(&reg, profile).sources,
+        initial_sources,
+        "failure rows must leave their sources selectable for a later attempt"
+    );
+    assert_eq!(
+        graph_snapshot(&reg),
+        before_graph,
+        "failure recording must leave the canonical graph snapshot unchanged"
+    );
 }
 
 mod migration_job {

@@ -35,6 +35,28 @@ pub(crate) enum ValidationError {
     DuplicateCandidateKey,
     DuplicateRelation,
 }
+impl std::fmt::Display for ValidationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let label = match self {
+            Self::InvalidUtf8 => "invalid-utf8",
+            Self::InvalidJson => "invalid-json",
+            Self::SchemaReject => "schema-reject",
+            Self::TooManyItems => "too-many-items",
+            Self::InvalidItemId => "invalid-item-id",
+            Self::DuplicateItemId => "duplicate-item-id",
+            Self::InvalidContent => "invalid-content",
+            Self::InvalidConfidence => "invalid-confidence",
+            Self::InvalidSourceReference => "invalid-source-reference",
+            Self::InvalidRelationReference => "invalid-relation-reference",
+            Self::SelfRelation => "self-relation",
+            Self::DuplicateCandidateKey => "duplicate-candidate-key",
+            Self::DuplicateRelation => "duplicate-relation",
+        };
+        formatter.write_str(label)
+    }
+}
+
+impl std::error::Error for ValidationError {}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -608,5 +630,36 @@ mod tests {
         let extraction = validate(&bytes).expect("valid relation");
         assert_eq!(extraction.relations[0].from_item_local_id, "two");
         assert_eq!(extraction.relations[0].to_item_local_id, "one");
+    }
+    #[test]
+    fn validation_errors_display_stable_sanitized_labels() {
+        let cases = [
+            (ValidationError::InvalidUtf8, "invalid-utf8"),
+            (ValidationError::InvalidJson, "invalid-json"),
+            (ValidationError::SchemaReject, "schema-reject"),
+            (ValidationError::TooManyItems, "too-many-items"),
+            (ValidationError::InvalidItemId, "invalid-item-id"),
+            (ValidationError::DuplicateItemId, "duplicate-item-id"),
+            (ValidationError::InvalidContent, "invalid-content"),
+            (ValidationError::InvalidConfidence, "invalid-confidence"),
+            (
+                ValidationError::InvalidSourceReference,
+                "invalid-source-reference",
+            ),
+            (
+                ValidationError::InvalidRelationReference,
+                "invalid-relation-reference",
+            ),
+            (ValidationError::SelfRelation, "self-relation"),
+            (
+                ValidationError::DuplicateCandidateKey,
+                "duplicate-candidate-key",
+            ),
+            (ValidationError::DuplicateRelation, "duplicate-relation"),
+        ];
+
+        for (error, expected) in cases {
+            assert_eq!(error.to_string(), expected);
+        }
     }
 }
