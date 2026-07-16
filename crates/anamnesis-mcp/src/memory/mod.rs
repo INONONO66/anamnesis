@@ -327,25 +327,11 @@ pub(crate) fn is_caller_error(err: &Error) -> bool {
 
 /// How the shared embedding provider is obtained.
 enum ProviderSource {
-    /// Pre-built provider (tests, or a caller-supplied embedder).
+    /// Pre-built provider supplied by an in-process test.
     #[cfg(test)]
     Ready(Arc<dyn EmbeddingProvider>),
     /// Build the configured FastEmbed provider on first use.
     FastEmbedLazy { model_name: String },
-    /// Debug-test-only provider selected by `ANAMNESIS_TEST_STUB_EMBEDDINGS=1`.
-    #[cfg(debug_assertions)]
-    TestStub,
-}
-
-fn provider_source(model_name: String) -> ProviderSource {
-    #[cfg(debug_assertions)]
-    if std::env::var_os("ANAMNESIS_TEST_STUB_EMBEDDINGS").as_deref()
-        == Some(std::ffi::OsStr::new("1"))
-    {
-        return ProviderSource::TestStub;
-    }
-
-    ProviderSource::FastEmbedLazy { model_name }
 }
 /// Storage backend for opened namespaces.
 enum Backend {
@@ -806,7 +792,9 @@ impl MemoryRegistry {
     ) -> Self {
         Self {
             provider: None,
-            source: provider_source(embed_model),
+            source: ProviderSource::FastEmbedLazy {
+                model_name: embed_model,
+            },
             backend: Backend::File {
                 default_db,
                 dir,
@@ -954,8 +942,6 @@ impl MemoryRegistry {
                 let model = embed_model_from_name(model_name)?;
                 Arc::new(anamnesis::embedding::fastembed::FastEmbedProvider::with_model(model)?)
             }
-            #[cfg(debug_assertions)]
-            ProviderSource::TestStub => Arc::new(StubProvider),
         };
         self.provider = Some(p.clone());
         Ok(p)
@@ -1691,12 +1677,12 @@ fn record_tick() {
     TICK_CALLS.with(|c| c.set(c.get() + 1));
 }
 
-/// Deterministic 64-dim embedding provider for tests — no network, no model
-/// download. Shared by unit tests and the debug-only daemon E2E seam.
-#[cfg(any(test, debug_assertions))]
+/// Deterministic 64-dim embedding provider for in-process tests — no network or
+/// model download.
+#[cfg(test)]
 pub(crate) struct StubProvider;
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(test)]
 impl EmbeddingProvider for StubProvider {
     fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, Error> {
         Ok(texts

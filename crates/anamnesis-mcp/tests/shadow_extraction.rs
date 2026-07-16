@@ -1,6 +1,6 @@
 //! R2 shadow extraction E2E tests. Capture turns are ingested through the real
-//! daemon protocol and a debug-only stub embedding seam, so no model download
-//! is needed.
+//! daemon protocol. A process-isolated `#[cfg(test)]` daemon harness injects its
+//! embedding provider, so normal binaries cannot select a synthetic provider.
 use anamnesis::graph::Edge;
 use anamnesis::graph::node::Node;
 use anamnesis::storage::{SqliteStorage, StorageAdapter};
@@ -30,11 +30,14 @@ struct Fixture {
     fallback_calls: PathBuf,
     provider_path: String,
     daemon: Child,
+    keepalive: Option<UnixStream>,
 }
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        let _ = self.daemon.kill();
+        if self.keepalive.take().is_none() {
+            let _ = self.daemon.kill();
+        }
         let _ = self.daemon.wait();
     }
 }
@@ -60,19 +63,26 @@ impl Fixture {
             temp.path().display(),
             std::env::var("PATH").expect("PATH")
         );
-        let daemon = Command::new(env!("CARGO_BIN_EXE_anamnesis"))
-            .arg("daemon")
-            .env("ANAMNESIS_DB", &db)
-            .env("ANAMNESIS_TEST_STUB_EMBEDDINGS", "1")
-            .env("ANAMNESIS_DAEMON_GRACE_SECS", "180")
+        let daemon = Command::new("cargo")
+            .args([
+                "test",
+                "--bin",
+                "anamnesis",
+                "daemon::tests::shadow_extraction_daemon_harness",
+                "--",
+                "--exact",
+                "--ignored",
+            ])
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .env("ANAMNESIS_SHADOW_HARNESS_DB", &db)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .expect("start real daemon");
+            .expect("start test-only real daemon harness");
 
-        // Construct ownership before readiness checks: a failed assertion still kills and
-        // reaps the daemon before the temporary database and socket are removed.
+        // Construct ownership before readiness checks: a failed assertion still reaps
+        // the test-only daemon before the temporary database and socket are removed.
         let mut fixture = Self {
             _temp: temp,
             db,
@@ -81,15 +91,20 @@ impl Fixture {
             fallback_calls,
             provider_path,
             daemon,
+            keepalive: None,
         };
         let db_dir = fixture.db.parent().expect("database directory");
         assert!(
-            wait_until(Duration::from_secs(5), || socket_path(db_dir).is_some()),
-            "daemon did not bind a socket"
+            wait_until(Duration::from_secs(20), || socket_path(db_dir).is_some()),
+            "test-only daemon harness did not bind a socket"
         );
         assert!(
             fixture.daemon.try_wait().expect("poll daemon").is_none(),
-            "daemon exited during readiness"
+            "test-only daemon harness exited during readiness"
+        );
+        fixture.keepalive = Some(
+            UnixStream::connect(socket_path(db_dir).expect("daemon socket"))
+                .expect("keep test-only daemon harness alive"),
         );
         fixture.seed_captured_turns();
         fixture

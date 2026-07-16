@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use anamnesis::graph::{KnowledgeType, Node, Timestamp};
 use sha2::{Digest, Sha256};
@@ -252,8 +252,9 @@ fn enrich_audit_sources(
     memory: &anamnesis::Memory<anamnesis::storage::SqliteStorage>,
     result: &mut ExtractionAuditResult,
 ) {
+    let mut capture_turn_key_index = None;
     for candidate in &mut result.candidates {
-        candidate.sources = candidate_audit_sources(memory, candidate);
+        candidate.sources = candidate_audit_sources(memory, candidate, &mut capture_turn_key_index);
     }
 }
 
@@ -261,7 +262,7 @@ fn candidate_sources_available(
     memory: &anamnesis::Memory<anamnesis::storage::SqliteStorage>,
     candidate: &ExtractionAuditCandidateRow,
 ) -> bool {
-    let sources = candidate_audit_sources(memory, candidate);
+    let sources = candidate_audit_sources(memory, candidate, &mut None);
     !candidate.source_turn_keys.is_empty()
         && candidate.source_node_ids.len() == candidate.source_turn_keys.len()
         && candidate.source_content_hashes.len() == candidate.source_turn_keys.len()
@@ -274,6 +275,7 @@ fn candidate_sources_available(
 fn candidate_audit_sources(
     memory: &anamnesis::Memory<anamnesis::storage::SqliteStorage>,
     candidate: &ExtractionAuditCandidateRow,
+    capture_turn_key_index: &mut Option<HashMap<String, Vec<anamnesis::graph::NodeId>>>,
 ) -> Vec<ExtractionAuditSource> {
     let source_count = candidate.source_turn_keys.len();
     if source_count == 0
@@ -291,6 +293,7 @@ fn candidate_audit_sources(
         .map(|((&node_id, turn_key), content_hash)| {
             resolve_audit_source(
                 memory,
+                capture_turn_key_index,
                 node_id,
                 turn_key,
                 &candidate.source_session_id,
@@ -303,6 +306,7 @@ fn candidate_audit_sources(
 
 fn resolve_audit_source(
     memory: &anamnesis::Memory<anamnesis::storage::SqliteStorage>,
+    capture_turn_key_index: &mut Option<HashMap<String, Vec<anamnesis::graph::NodeId>>>,
     node_id: u64,
     turn_key: &str,
     session_id: &str,
@@ -320,31 +324,39 @@ fn resolve_audit_source(
     };
     let graph = memory.engine().graph();
     let hinted = graph.get_node(anamnesis::graph::NodeId(node_id)).ok();
-    let live_matches: Vec<_> = graph
-        .all_node_ids()
-        .into_iter()
-        .filter_map(|id| graph.get_node(id).ok())
-        .filter(|node| {
-            is_capture_node(node)
-                && node
-                    .metadata
-                    .get(META_TURN_KEY)
-                    .is_some_and(|candidate_key| candidate_key == turn_key)
-        })
-        .take(2)
-        .collect();
-    let has_live_turn_key = !live_matches.is_empty();
-    let resolved = hinted
-        .filter(|node| {
-            is_capture_node(node)
-                && node
-                    .metadata
-                    .get(META_TURN_KEY)
-                    .is_some_and(|candidate_key| candidate_key == turn_key)
-        })
-        .or_else(|| (live_matches.len() == 1).then(|| live_matches[0]));
+    let has_hint = hinted.is_some();
+    if let Some(node) = hinted.filter(|node| {
+        is_capture_node(node)
+            && node
+                .metadata
+                .get(META_TURN_KEY)
+                .is_some_and(|candidate_key| candidate_key == turn_key)
+    }) {
+        return audit_source_from_live_node(node, turn_key, session_id, scope, content_hash);
+    }
+
+    let capture_turn_key_index = capture_turn_key_index.get_or_insert_with(|| {
+        graph
+            .all_node_ids()
+            .into_iter()
+            .filter_map(|id| {
+                let node = graph.get_node(id).ok()?;
+                is_capture_node(node)
+                    .then_some(())
+                    .and_then(|()| node.metadata.get(META_TURN_KEY))
+                    .map(|turn_key| (turn_key.clone(), id))
+            })
+            .fold(HashMap::new(), |mut index, (turn_key, id)| {
+                index.entry(turn_key).or_default().push(id);
+                index
+            })
+    });
+    let matches = capture_turn_key_index.get(turn_key);
+    let resolved = matches
+        .filter(|matches| matches.len() == 1)
+        .and_then(|matches| graph.get_node(matches[0]).ok());
     let Some(node) = resolved else {
-        return if hinted.is_none() && !has_live_turn_key {
+        return if !has_hint && matches.is_none_or(Vec::is_empty) {
             unavailable()
         } else {
             ExtractionAuditSource {
@@ -353,7 +365,16 @@ fn resolve_audit_source(
             }
         };
     };
+    audit_source_from_live_node(node, turn_key, session_id, scope, content_hash)
+}
 
+fn audit_source_from_live_node(
+    node: &Node,
+    turn_key: &str,
+    session_id: &str,
+    scope: &str,
+    content_hash: &str,
+) -> ExtractionAuditSource {
     let live_hash = format!("{:x}", Sha256::digest(node.content.as_bytes()));
     let exact = node.origin.session_id == session_id
         && node.origin.scope.as_str() == scope

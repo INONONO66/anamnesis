@@ -4255,6 +4255,34 @@ mod migration_job {
         assert_eq!(source["node_id"], replacement_id);
         assert_eq!(source["content"], original.content);
     }
+    #[test]
+    fn extraction_audit_uses_a_valid_node_id_hint_when_turn_key_is_ambiguous() {
+        let (reg, _dir) = stub_registry();
+        let (sources, _) = audit_fixture(&reg);
+        let original = &sources[0];
+        {
+            let handle = {
+                let mut registry = reg.lock().unwrap_or_else(|poison| poison.into_inner());
+                registry.namespace_handle(None).expect("default namespace")
+            };
+            let mut memory = handle.lock().unwrap_or_else(|poison| poison.into_inner());
+            let graph = memory.engine_mut().graph_mut();
+            let mut duplicate = graph
+                .get_node(anamnesis::graph::NodeId(original.node_id))
+                .expect("staged source node")
+                .clone();
+            duplicate.id = graph.next_node_id();
+            graph
+                .add_node(duplicate)
+                .expect("duplicate capture source node");
+        }
+
+        let audit = extraction_audit_list(&reg);
+        let source = audit_source(audit_candidate(&audit, "one"), &original.turn_key);
+        assert_eq!(source["availability"], "available");
+        assert_eq!(source["node_id"], original.node_id);
+        assert_eq!(source["content"], original.content);
+    }
 
     #[test]
     fn extraction_audit_demo_reads_live_sources_and_never_mutates_the_graph() {
