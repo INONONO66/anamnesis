@@ -36,6 +36,7 @@ use crate::memory::{
 use crate::proto::{RecallEventKind, Request, Response};
 
 mod enrich;
+mod extract;
 mod graph;
 mod mgmt;
 mod render;
@@ -155,6 +156,7 @@ fn request_namespace(req: &Request) -> Option<&str> {
         | Request::Stats { namespace, .. }
         | Request::PullPending { namespace, .. }
         | Request::ExtractionStatus { namespace }
+        | Request::ExtractionScan { namespace, .. }
         | Request::Update { namespace, .. }
         | Request::Forget { namespace, .. }
         | Request::Supersede { namespace, .. }
@@ -669,6 +671,12 @@ fn dispatch_registry(registry: &Arc<Mutex<MemoryRegistry>>, req: Request) -> Res
                 }
             }
         }
+        Request::ExtractionScan {
+            namespace,
+            profile,
+            min_turns,
+            max_turns,
+        } => extract::dispatch_scan(registry, namespace, profile, min_turns, max_turns),
         Request::Update {
             id,
             new_content,

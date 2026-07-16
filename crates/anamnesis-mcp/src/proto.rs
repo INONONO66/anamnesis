@@ -10,6 +10,7 @@
 //! ids: calls are serialized, and the daemon serializes at its single registry
 //! mutex anyway). See `docs/adr/0012-daemon-core-mcp-plugin-clients.md`.
 
+use crate::extract::types::ExtractorProfileComponents;
 use serde::{Deserialize, Serialize};
 /// The kind of client action that caused a recall attempt.
 
@@ -92,6 +93,13 @@ pub enum Request {
         capture: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         scope: Option<String>,
+    },
+    ExtractionScan {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        namespace: Option<String>,
+        profile: ExtractorProfileComponents,
+        min_turns: u32,
+        max_turns: u32,
     },
     Stats {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -223,6 +231,18 @@ pub fn decode_line<T: for<'de> Deserialize<'de>>(line: &str) -> Result<T, serde_
 mod tests {
     use super::*;
 
+    fn extraction_profile() -> crate::extract::types::ExtractorProfileComponents {
+        crate::extract::types::ExtractorProfileComponents {
+            provider_id: "extractor".into(),
+            model_id: "model".into(),
+            prompt_version: 1,
+            schema_version: 2,
+            normalization_version: 3,
+            relation_policy_version: 4,
+            command_hash: "command-hash".into(),
+        }
+    }
+
     fn round_trip_request(req: Request) {
         let line = encode_line(&req).expect("encode");
         assert!(line.ends_with('\n'), "line must be newline-terminated");
@@ -318,6 +338,12 @@ mod tests {
             depth: Some(2),
             limit: Some(50),
             namespace: Some("projA".into()),
+        });
+        round_trip_request(Request::ExtractionScan {
+            namespace: Some("projA".into()),
+            profile: extraction_profile(),
+            min_turns: 10,
+            max_turns: 20,
         });
     }
 
@@ -486,6 +512,25 @@ mod tests {
         let line = encode_line(&b).unwrap();
         assert!(line.contains("\"op\":\"extraction_status\""), "got: {line}");
         assert_eq!(decode_line::<Request>(&line).unwrap(), b);
+    }
+
+    #[test]
+    fn extraction_scan_round_trips_with_canonical_wire_shape() {
+        let request = Request::ExtractionScan {
+            namespace: Some("project/anamnesis".into()),
+            profile: extraction_profile(),
+            min_turns: 10,
+            max_turns: 20,
+        };
+        let line = encode_line(&request).expect("encode extraction scan");
+        assert_eq!(
+            line,
+            "{\"op\":\"extraction_scan\",\"namespace\":\"project/anamnesis\",\"profile\":{\"provider_id\":\"extractor\",\"model_id\":\"model\",\"prompt_version\":1,\"schema_version\":2,\"normalization_version\":3,\"relation_policy_version\":4,\"command_hash\":\"command-hash\"},\"min_turns\":10,\"max_turns\":20}\n"
+        );
+        assert_eq!(
+            decode_line::<Request>(&line).expect("decode extraction scan"),
+            request
+        );
     }
 
     #[test]

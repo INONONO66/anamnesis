@@ -1,4 +1,8 @@
-use rusqlite::Transaction;
+use std::collections::HashSet;
+
+use rusqlite::{Connection, Transaction, params};
+
+use crate::extract::types::ExtractorProfileComponents;
 
 use super::PolicyStoreError;
 
@@ -66,6 +70,78 @@ const EXTRACTION_TABLES_SQL: &str = "
         committed_edge_id INTEGER
     );
 ";
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExtractionProfileStatus {
+    Shadow,
+    Approved,
+    Revoked,
+}
+
+pub(super) fn ensure_shadow_profile(
+    connection: &Connection,
+    profile_id: &str,
+    components: &ExtractorProfileComponents,
+    created_at: u64,
+) -> Result<ExtractionProfileStatus, PolicyStoreError> {
+    let components = serde_json::to_string(components)
+        .map_err(|_| PolicyStoreError::operation("serialize extraction profile components"))?;
+    let created_at = i64::try_from(created_at)
+        .map_err(|_| PolicyStoreError::invalid_value("extraction profile created_at"))?;
+
+    connection
+        .execute(
+            "INSERT OR IGNORE INTO extractor_profiles
+             (profile_id, components, status, created_at, approved_at)
+             VALUES (?1, ?2, 'shadow', ?3, NULL)",
+            params![profile_id, components, created_at],
+        )
+        .map_err(|error| PolicyStoreError::sqlite("ensure shadow extraction profile", error))?;
+
+    profile_status(connection, profile_id)
+}
+
+pub(super) fn processed_turn_keys(
+    connection: &Connection,
+    profile_id: &str,
+) -> Result<HashSet<String>, PolicyStoreError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT turn_key
+             FROM extract_run_sources
+             WHERE profile_id = ?1",
+        )
+        .map_err(|error| {
+            PolicyStoreError::sqlite("prepare processed extraction turn keys", error)
+        })?;
+    let rows = statement
+        .query_map([profile_id], |row| row.get::<_, String>(0))
+        .map_err(|error| PolicyStoreError::sqlite("query processed extraction turn keys", error))?;
+
+    rows.collect::<Result<HashSet<_>, _>>()
+        .map_err(|error| PolicyStoreError::sqlite("read processed extraction turn key", error))
+}
+
+fn profile_status(
+    connection: &Connection,
+    profile_id: &str,
+) -> Result<ExtractionProfileStatus, PolicyStoreError> {
+    let status = connection
+        .query_row(
+            "SELECT status FROM extractor_profiles WHERE profile_id = ?1",
+            [profile_id],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(|error| PolicyStoreError::sqlite("read extraction profile status", error))?;
+
+    match status.as_str() {
+        "shadow" => Ok(ExtractionProfileStatus::Shadow),
+        "approved" => Ok(ExtractionProfileStatus::Approved),
+        "revoked" => Ok(ExtractionProfileStatus::Revoked),
+        _ => Err(PolicyStoreError::operation(
+            "read extraction profile status",
+        )),
+    }
+}
 
 pub(super) fn create_schema(transaction: &Transaction<'_>) -> Result<(), PolicyStoreError> {
     transaction

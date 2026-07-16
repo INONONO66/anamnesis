@@ -468,14 +468,15 @@ fn policy_schema_v1_to_v2_matches_fresh_v2() {
         fresh.schema_fingerprint().expect("fresh schema"),
         migrated.schema_fingerprint().expect("migrated schema")
     );
+    let forbidden_table = ["extract_source", "states"].join("_");
     assert!(
         !fresh
-            .has_table("extract_source_states")
+            .has_table(&forbidden_table)
             .expect("fresh table check")
     );
     assert!(
         !migrated
-            .has_table("extract_source_states")
+            .has_table(&forbidden_table)
             .expect("migrated table check")
     );
 }

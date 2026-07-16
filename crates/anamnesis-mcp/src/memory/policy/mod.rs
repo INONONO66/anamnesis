@@ -19,6 +19,7 @@ mod extraction;
 mod recall;
 mod schema;
 
+pub(crate) use extraction::ExtractionProfileStatus;
 pub(crate) use recall::RecallEvent;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -257,6 +258,23 @@ impl PolicyStore {
     /// Aggregates data-minimized recall telemetry without exposing raw queries.
     pub(crate) fn recall_stats(&self) -> Result<RecallStats, Error> {
         recall::stats(&self.connection).map_err(PolicyStoreError::into_engine_error)
+    }
+    pub(crate) fn processed_extraction_turn_keys(
+        &self,
+        profile_id: &str,
+    ) -> Result<std::collections::HashSet<String>, Error> {
+        extraction::processed_turn_keys(&self.connection, profile_id)
+            .map_err(PolicyStoreError::into_engine_error)
+    }
+
+    pub(crate) fn ensure_extraction_shadow_profile(
+        &self,
+        profile_id: &str,
+        components: &crate::extract::types::ExtractorProfileComponents,
+        created_at: u64,
+    ) -> Result<ExtractionProfileStatus, Error> {
+        extraction::ensure_shadow_profile(&self.connection, profile_id, components, created_at)
+            .map_err(PolicyStoreError::into_engine_error)
     }
 
     #[cfg(test)]

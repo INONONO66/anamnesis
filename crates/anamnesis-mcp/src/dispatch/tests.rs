@@ -4,6 +4,7 @@ use crate::memory::{
     PolicyStoreState, RecallStats, StubProvider, SweepPoint,
 };
 use crate::proto::{ErrKind, RecallEventKind, Response, TurnInput};
+use sha2::{Digest, Sha256};
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
@@ -2850,6 +2851,291 @@ fn tiny_graph_single_cluster() {
         assert_eq!(
             n["cluster"], 0,
             "sub-threshold graph must be cluster 0: {n}"
+        );
+    }
+}
+
+// ── R2 Task 3: daemon-mediated, read-only extraction source scan (RED) ─────
+
+fn capture_turns(
+    reg: &Arc<Mutex<MemoryRegistry>>,
+    session: &str,
+    scope: &str,
+    count: usize,
+    at_ms: u64,
+    content_prefix: &str,
+) {
+    for offset in 0..count {
+        ok_text(dispatch(
+            reg,
+            Request::Ingest {
+                session: session.to_owned(),
+                turns: vec![TurnInput {
+                    speaker: "user".into(),
+                    text: format!("{content_prefix} turn {offset}"),
+                    at_ms: Some(at_ms + offset as u64),
+                }],
+                namespace: None,
+                capture: Some(true),
+                scope: Some(scope.to_owned()),
+            },
+        ));
+    }
+}
+
+fn extraction_scan(
+    reg: &Arc<Mutex<MemoryRegistry>>,
+    profile: crate::extract::types::ExtractorProfileComponents,
+) -> crate::extract::types::ExtractionScanResult {
+    let text = ok_text(dispatch(
+        reg,
+        Request::ExtractionScan {
+            namespace: None,
+            profile,
+            min_turns: 10,
+            max_turns: 20,
+        },
+    ));
+    serde_json::from_str(&text).expect("extraction scan must return its canonical JSON result")
+}
+
+fn extraction_profile() -> crate::extract::types::ExtractorProfileComponents {
+    let config = crate::extract::config::ExtractConfig::from_env()
+        .expect("the test environment must have a valid extraction command");
+    crate::extract::profile::ExtractorProfile::from_command(&config.command)
+        .expect("profile from extraction command")
+        .components
+}
+
+fn extraction_profile_id(profile: &crate::extract::types::ExtractorProfileComponents) -> String {
+    crate::extract::profile::profile_id(profile).expect("profile id")
+}
+
+fn record_scanned_sources(
+    dir: &tempfile::TempDir,
+    profile_id: &str,
+    sources: &[crate::extract::types::ExtractionSource],
+) {
+    let connection =
+        rusqlite::Connection::open(dir.path().join("memory.db")).expect("open policy ledger");
+    connection
+        .execute(
+            "INSERT OR IGNORE INTO extractor_profiles
+             (profile_id, components, status, created_at, approved_at)
+             VALUES (?1, '{}', 'shadow', 0, NULL)",
+            [profile_id],
+        )
+        .expect("record profile");
+    connection
+        .execute(
+            "INSERT INTO extract_runs
+             (at_ms, profile_id, mode, turn_count, candidate_count, relation_count,
+              schema_valid, llm_invoked, error_kind, duration_ms)
+             VALUES (0, ?1, 'shadow', 0, 0, 0, 1, 0, NULL, 0)",
+            [profile_id],
+        )
+        .expect("record extraction run");
+    let run_id = connection.last_insert_rowid();
+    for source in sources {
+        connection
+            .execute(
+                "INSERT INTO extract_run_sources (profile_id, turn_key, run_id)
+                 VALUES (?1, ?2, ?3)",
+                rusqlite::params![profile_id, source.turn_key, run_id],
+            )
+            .expect("record scanned source");
+    }
+}
+
+fn graph_snapshot(
+    reg: &Arc<Mutex<MemoryRegistry>>,
+) -> (Vec<anamnesis::graph::Node>, Vec<anamnesis::graph::Edge>) {
+    let handle = {
+        let mut registry = reg.lock().unwrap_or_else(|poison| poison.into_inner());
+        registry.namespace_handle(None).expect("default namespace")
+    };
+    let memory = handle.lock().unwrap_or_else(|poison| poison.into_inner());
+    let graph = memory.engine().graph();
+    let nodes = graph
+        .all_node_ids()
+        .into_iter()
+        .map(|id| graph.get_node(id).expect("live node").clone())
+        .collect();
+    let edges = graph
+        .all_edge_ids()
+        .into_iter()
+        .map(|id| graph.get_edge(id).expect("live edge").clone())
+        .collect();
+    (nodes, edges)
+}
+
+#[test]
+fn extraction_scan_excludes_current_profile_ledger_without_reading_extracted_metadata() {
+    let (reg, dir) = stub_registry();
+    capture_turns(
+        &reg,
+        "scan-session",
+        "project/anamnesis",
+        12,
+        100,
+        "captured",
+    );
+
+    {
+        let handle = {
+            let mut registry = reg.lock().unwrap_or_else(|poison| poison.into_inner());
+            registry.namespace_handle(None).expect("default namespace")
+        };
+        let mut memory = handle.lock().unwrap_or_else(|poison| poison.into_inner());
+        let graph = memory.engine_mut().graph_mut();
+        for (index, id) in graph.all_node_ids().into_iter().enumerate() {
+            let node = graph.get_node_mut(id).expect("live node");
+            if node.origin.session_id == "scan-session" {
+                node.metadata.insert(
+                    "anamnesis:extracted".into(),
+                    if index % 2 == 0 { "true" } else { "false" }.into(),
+                );
+                node.salience = 0.2 + index as f64 / 100.0;
+                node.accessed_at = anamnesis::graph::Timestamp(10_000 + index as u64);
+            }
+        }
+    }
+
+    let profile = extraction_profile();
+    let before = graph_snapshot(&reg);
+    let initial = extraction_scan(&reg, profile.clone());
+    assert_eq!(
+        initial.sources.len(),
+        12,
+        "twelve captured turns are eligible"
+    );
+    assert!(
+        initial.sources.iter().all(
+            |source| source.session_id == "scan-session" && source.scope == "project/anamnesis"
+        ),
+        "scan must preserve session and scope provenance"
+    );
+
+    record_scanned_sources(
+        &dir,
+        &extraction_profile_id(&profile),
+        &initial.sources[..3],
+    );
+    assert!(
+        extraction_scan(&reg, profile.clone()).sources.is_empty(),
+        "the current profile has only 9 unledgered turns, below the minimum batch size"
+    );
+
+    let mut other_profile = profile;
+    other_profile.model_id.push_str("-other");
+    assert_eq!(
+        extraction_scan(&reg, other_profile).sources.len(),
+        12,
+        "a different profile must see all twelve turns"
+    );
+
+    let after = graph_snapshot(&reg);
+    assert_eq!(
+        after, before,
+        "scan must not mutate graph node or edge records"
+    );
+    assert!(
+        before.0.iter().any(|node| {
+            node.metadata
+                .get("anamnesis:extracted")
+                .is_some_and(|value| value == "true")
+        }),
+        "fixture must snapshot anamnesis:extracted metadata"
+    );
+    assert!(
+        before
+            .0
+            .iter()
+            .any(|node| node.salience > 0.2 && node.accessed_at.0 >= 10_000),
+        "fixture must snapshot salience and accessed_at"
+    );
+}
+
+#[test]
+fn extraction_scan_groups_by_session_and_scope_selects_oldest_and_caps_at_twenty() {
+    let (reg, dir) = stub_registry();
+    capture_turns(&reg, "shared-session", "scope-a", 9, 100, "A");
+    capture_turns(&reg, "shared-session", "scope-b", 10, 200, "B");
+    capture_turns(&reg, "session-c", "scope-a", 21, 300, "C");
+
+    let profile = extraction_profile();
+    let first = extraction_scan(&reg, profile.clone());
+    assert_eq!(
+        first.sources.len(),
+        10,
+        "oldest eligible group B is selected"
+    );
+    assert!(
+        first
+            .sources
+            .iter()
+            .all(|source| source.session_id == "shared-session" && source.scope == "scope-b"),
+        "the same session in a distinct scope must remain a distinct group"
+    );
+
+    record_scanned_sources(&dir, &extraction_profile_id(&profile), &first.sources);
+    let second = extraction_scan(&reg, profile);
+    assert_eq!(
+        second.sources.len(),
+        20,
+        "group C is capped at twenty sources"
+    );
+    assert!(
+        second
+            .sources
+            .iter()
+            .all(|source| source.session_id == "session-c" && source.scope == "scope-a"),
+        "the next eligible session-and-scope group is selected"
+    );
+}
+
+#[test]
+fn extraction_scan_hashes_exact_utf8_source_content() {
+    let (reg, _dir) = stub_registry();
+    let content = "café 🦀\ncombining: e\u{301}";
+    ok_text(dispatch(
+        &reg,
+        Request::Ingest {
+            session: "utf8-session".into(),
+            turns: (0..10)
+                .map(|at_ms| TurnInput {
+                    speaker: "user".into(),
+                    text: content.into(),
+                    at_ms: Some(at_ms),
+                })
+                .collect(),
+            namespace: None,
+            capture: Some(true),
+            scope: Some("utf8-scope".into()),
+        },
+    ));
+
+    let sources = extraction_scan(&reg, extraction_profile()).sources;
+    assert_eq!(sources.len(), 10);
+
+    let handle = {
+        let mut registry = reg.lock().unwrap_or_else(|poison| poison.into_inner());
+        registry.namespace_handle(None).expect("default namespace")
+    };
+    let memory = handle.lock().unwrap_or_else(|poison| poison.into_inner());
+    let graph = memory.engine().graph();
+    for source in sources {
+        let node = graph
+            .get_node(anamnesis::graph::NodeId(source.node_id))
+            .expect("scanned source node exists");
+        assert_eq!(
+            source.content, node.content,
+            "scan must return the stored captured node content"
+        );
+        assert_eq!(
+            source.content_hash,
+            format!("{:x}", Sha256::digest(node.content.as_bytes())),
+            "scan must hash the exact stored UTF-8 node content bytes"
         );
     }
 }
