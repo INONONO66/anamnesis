@@ -168,19 +168,20 @@ pub(super) async fn run_provider(
         }
     }
 
-    let status = status.expect("all process results are present");
+    let (Some(status), Some(stdin_result), Some(stdout_result), Some(stderr_result)) =
+        (status, stdin_result, stdout_result, stderr_result)
+    else {
+        return Err(ProcessError::Wait);
+    };
     if !status.success() {
         return Err(ProcessError::NonZero {
             code: status.code(),
-            stderr_bytes: stderr_result
-                .expect("all process results are present")
-                .as_ref()
-                .map_or(0, Vec::len),
+            stderr_bytes: stderr_result.as_ref().map_or(0, Vec::len),
         });
     }
-    stdin_result.expect("all process results are present")?;
-    let stdout = stdout_result.expect("all process results are present")?;
-    let _stderr = stderr_result.expect("all process results are present")?;
+    stdin_result?;
+    let stdout = stdout_result?;
+    let _stderr = stderr_result?;
 
     Ok(ProcessOutput {
         stdout,

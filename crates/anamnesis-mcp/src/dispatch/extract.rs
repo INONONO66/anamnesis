@@ -320,38 +320,30 @@ fn resolve_audit_source(
     };
     let graph = memory.engine().graph();
     let hinted = graph.get_node(anamnesis::graph::NodeId(node_id)).ok();
-    let resolved = hinted.filter(|node| {
-        is_capture_node(node)
-            && node
-                .metadata
-                .get(META_TURN_KEY)
-                .is_some_and(|candidate_key| candidate_key == turn_key)
-    });
-    let resolved = resolved.or_else(|| {
-        let matches: Vec<_> = graph
-            .all_node_ids()
-            .into_iter()
-            .filter_map(|id| graph.get_node(id).ok())
-            .filter(|node| {
-                is_capture_node(node)
-                    && node
-                        .metadata
-                        .get(META_TURN_KEY)
-                        .is_some_and(|candidate_key| candidate_key == turn_key)
-            })
-            .collect();
-        (matches.len() == 1).then(|| matches[0])
-    });
+    let live_matches: Vec<_> = graph
+        .all_node_ids()
+        .into_iter()
+        .filter_map(|id| graph.get_node(id).ok())
+        .filter(|node| {
+            is_capture_node(node)
+                && node
+                    .metadata
+                    .get(META_TURN_KEY)
+                    .is_some_and(|candidate_key| candidate_key == turn_key)
+        })
+        .take(2)
+        .collect();
+    let has_live_turn_key = !live_matches.is_empty();
+    let resolved = hinted
+        .filter(|node| {
+            is_capture_node(node)
+                && node
+                    .metadata
+                    .get(META_TURN_KEY)
+                    .is_some_and(|candidate_key| candidate_key == turn_key)
+        })
+        .or_else(|| (live_matches.len() == 1).then(|| live_matches[0]));
     let Some(node) = resolved else {
-        let has_live_turn_key = graph.all_node_ids().into_iter().any(|id| {
-            graph.get_node(id).is_ok_and(|node| {
-                is_capture_node(node)
-                    && node
-                        .metadata
-                        .get(META_TURN_KEY)
-                        .is_some_and(|candidate_key| candidate_key == turn_key)
-            })
-        });
         return if hinted.is_none() && !has_live_turn_key {
             unavailable()
         } else {
