@@ -16,19 +16,19 @@ use tokio::process::{Child, Command};
 use super::config::ExtractCommand;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct ProcessOutput {
-    pub(super) stdout: Vec<u8>,
-    pub(super) duration: Duration,
+pub(crate) struct ProcessOutput {
+    pub(crate) stdout: Vec<u8>,
+    pub(crate) duration: Duration,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum OutputStream {
+pub(crate) enum OutputStream {
     Stdout,
     Stderr,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ProcessError {
+pub(crate) enum ProcessError {
     Spawn,
     Stdin,
     Timeout,
