@@ -825,8 +825,14 @@ fn relation_kind(kind: &RelationKind) -> &'static str {
 fn extraction_error_kind(kind: &ExtractionErrorKind) -> &'static str {
     match kind {
         ExtractionErrorKind::Spawn => "spawn",
+        ExtractionErrorKind::Stdin => "stdin",
         ExtractionErrorKind::Timeout => "timeout",
+        ExtractionErrorKind::StdoutTooLarge => "stdout-too-large",
+        ExtractionErrorKind::StderrTooLarge => "stderr-too-large",
+        ExtractionErrorKind::NonZero => "non-zero",
         ExtractionErrorKind::InvalidJson => "invalid-json",
+        ExtractionErrorKind::InvalidUtf8 => "invalid-utf8",
         ExtractionErrorKind::SchemaReject => "schema-reject",
+        ExtractionErrorKind::StageReject => "stage-reject",
     }
 }

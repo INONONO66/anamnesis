@@ -1,8 +1,3 @@
-#![cfg_attr(
-    not(test),
-    allow(dead_code, reason = "Task 7 consumes validation APIs")
-)]
-
 use std::collections::HashSet;
 
 use serde::Deserialize;

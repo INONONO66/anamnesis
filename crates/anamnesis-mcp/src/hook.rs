@@ -398,9 +398,6 @@ fn hook_output(event_name: &str, additional_context: &str) -> String {
 #[derive(Debug, Default, serde::Deserialize)]
 struct SessionStartInput {
     #[serde(default)]
-    #[allow(dead_code)]
-    source: Option<String>,
-    #[serde(default)]
     cwd: Option<String>,
 }
 
@@ -587,11 +584,11 @@ async fn run_capture_with_kick(
         Some(remaining) => remaining,
         None => return Ok(None),
     };
-    let namespace = prepared.scope.clone();
+    let namespace = cfg.default_namespace.clone();
     let req = Request::Ingest {
         session: prepared.session,
         turns: prepared.turns,
-        namespace: None,
+        namespace: Some(namespace.clone()),
         capture: Some(true),
         scope: prepared.scope,
     };
@@ -607,7 +604,6 @@ async fn run_capture_with_kick(
         .map(|config| config.mode)
         .unwrap_or(crate::extract::config::ExtractMode::Off);
     if should_kick(mode, event, capture_succeeded)
-        && let Some(namespace) = namespace
         && let Err(error) = spawner.spawn_extract(&namespace)
     {
         tracing::warn!(error = %error, "could not start detached extraction");
@@ -637,7 +633,6 @@ mod tests {
         }"#;
         let p = parse_session_start(json).expect("valid SessionStart JSON parses");
         assert_eq!(p.cwd.as_deref(), Some("/Users/me/dev/anamnesis"));
-        assert_eq!(p.source.as_deref(), Some("startup"));
     }
 
     #[test]
@@ -1044,7 +1039,7 @@ mod tests {
     fn short_circuit_cfg() -> Config {
         Config {
             default_db: std::path::PathBuf::from("/dev/null/anamnesis-never-reached.db"),
-            default_namespace: "default".into(),
+            default_namespace: "configured/canonical-namespace".into(),
             reinforce_on_recall: false,
             hook_threshold: 13.0,
             hook_cosine_gate: crate::config::DEFAULT_HOOK_COSINE_GATE,
@@ -1319,15 +1314,20 @@ mod tests {
                 .expect("successful shadow capture remains fail-open");
         }
         let requests = daemon.await.expect("mock daemon completes");
-        assert!(
-            requests
-                .iter()
-                .all(|request| matches!(request, Request::Ingest { .. })),
-            "capture must send ingest requests before kicking extraction"
-        );
+        let expected_namespace = "configured/canonical-namespace";
+        for request in &requests {
+            let Request::Ingest {
+                namespace, scope, ..
+            } = request
+            else {
+                panic!("capture must send ingest requests before kicking extraction: {request:?}");
+            };
+            assert_eq!(namespace.as_deref(), Some(expected_namespace));
+            assert_eq!(scope.as_deref(), Some("project/resolved-namespace"));
+        }
         assert_eq!(
             spy.0.lock().expect("read kicks").as_slice(),
-            ["project/resolved-namespace", "project/resolved-namespace"]
+            [expected_namespace, expected_namespace]
         );
 
         run_capture_with_kick(&cfg, "Stop", capture_input(&transcript), &spy)

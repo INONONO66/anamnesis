@@ -1,23 +1,15 @@
-// Task 2 stages these APIs; later tasks wire them into extraction execution.
-#![cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "Task 2 staged APIs are consumed by later extraction tasks"
-    )
-)]
-
 use anyhow::Result;
 use sha2::{Digest, Sha256};
 
-use crate::extract::{config::ExtractCommand, types::ExtractorProfileComponents};
+use crate::extract::{
+    config::ExtractCommand, prompt::PROMPT_VERSION, types::ExtractorProfileComponents,
+};
 #[derive(serde::Serialize)]
 struct CommandHashComponents<'a> {
     program: &'a str,
     args: &'a [String],
 }
 
-pub(crate) const PROMPT_VERSION: u32 = 1;
 pub(crate) const EXTRACT_SCHEMA_VERSION: u32 = 1;
 pub(crate) const NORMALIZATION_VERSION: u32 = 1;
 pub(crate) const RELATION_POLICY_VERSION: u32 = 1;
@@ -32,7 +24,7 @@ pub(crate) struct ExtractorProfile {
 impl ExtractorProfile {
     pub(crate) fn from_command(command: &ExtractCommand) -> Result<Self> {
         let components = ExtractorProfileComponents {
-            provider_id: provider_id(command),
+            provider_id: provider_id(command)?,
             model_id: model_id(command),
             prompt_version: PROMPT_VERSION,
             schema_version: EXTRACT_SCHEMA_VERSION,
@@ -50,14 +42,14 @@ impl ExtractorProfile {
 }
 
 /// Returns the executable basename, rather than an installation-specific path.
-pub(crate) fn provider_id(command: &ExtractCommand) -> String {
+pub(crate) fn provider_id(command: &ExtractCommand) -> Result<String> {
     command
         .program
         .rsplit(['/', '\\'])
         .next()
         .filter(|name| !name.is_empty())
-        .unwrap_or(command.program.as_str())
-        .to_owned()
+        .map(str::to_owned)
+        .ok_or_else(|| anyhow::anyhow!("extract command program must have a non-empty basename"))
 }
 
 /// Returns the configured model, if present, or a provider-specific default marker.
@@ -103,10 +95,12 @@ mod tests {
     use sha2::{Digest, Sha256};
 
     use super::{
-        EXTRACT_SCHEMA_VERSION, ExtractorProfile, NORMALIZATION_VERSION, PROMPT_VERSION,
-        RELATION_POLICY_VERSION, command_hash, model_id, profile_id, provider_id,
+        EXTRACT_SCHEMA_VERSION, ExtractorProfile, NORMALIZATION_VERSION, RELATION_POLICY_VERSION,
+        command_hash, model_id, profile_id, provider_id,
     };
-    use crate::extract::{config::ExtractCommand, types::ExtractorProfileComponents};
+    use crate::extract::{
+        config::ExtractCommand, prompt::PROMPT_VERSION, types::ExtractorProfileComponents,
+    };
 
     fn test_components() -> ExtractorProfileComponents {
         ExtractorProfileComponents {
@@ -192,7 +186,10 @@ mod tests {
         let default_profile =
             ExtractorProfile::from_command(&default_command).expect("default profile");
 
-        assert_eq!(provider_id(&default_command), "claude");
+        assert_eq!(
+            provider_id(&default_command).expect("provider id"),
+            "claude"
+        );
         assert_eq!(model_id(&default_command), "provider-default");
         assert_eq!(
             default_profile.components.command_hash,
@@ -213,12 +210,22 @@ mod tests {
             };
             let profile = ExtractorProfile::from_command(&command).expect("explicit model profile");
 
-            assert_eq!(provider_id(&command), "extractor");
+            assert_eq!(provider_id(&command).expect("provider id"), "extractor");
             assert_eq!(model_id(&command), expected_model);
             assert_eq!(
                 profile.components.command_hash,
                 command_hash(&command).expect("explicit command hash")
             );
         }
+    }
+    #[test]
+    fn profile_rejects_a_command_with_an_empty_basename() {
+        let command = ExtractCommand {
+            program: "/usr/local/bin/".into(),
+            args: vec!["-p".into()],
+        };
+
+        assert!(ExtractorProfile::from_command(&command).is_err());
+        assert!(provider_id(&command).is_err());
     }
 }

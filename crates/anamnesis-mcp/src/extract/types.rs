@@ -1,3 +1,5 @@
+use std::fmt;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -11,7 +13,7 @@ pub(crate) struct ExtractorProfileComponents {
     pub command_hash: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct ExtractionSource {
     pub node_id: u64,
     pub turn_key: String,
@@ -20,6 +22,20 @@ pub(crate) struct ExtractionSource {
     pub content: String,
     pub content_hash: String,
     pub at_ms: u64,
+}
+impl fmt::Debug for ExtractionSource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExtractionSource")
+            .field("node_id", &self.node_id)
+            .field("turn_key", &self.turn_key)
+            .field("session_id", &self.session_id)
+            .field("scope", &self.scope)
+            .field("content", &"[REDACTED]")
+            .field("content_hash", &self.content_hash)
+            .field("at_ms", &self.at_ms)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -72,16 +88,21 @@ pub(crate) struct ValidatedExtraction {
     pub relations: Vec<ValidatedRelation>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
 pub(crate) struct ExtractionScanResult {
     pub profile_id: String,
     pub sources: Vec<ExtractionSource>,
 }
+impl fmt::Debug for ExtractionScanResult {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExtractionScanResult")
+            .field("profile_id", &self.profile_id)
+            .field("sources_len", &self.sources.len())
+            .finish()
+    }
+}
 
-#[allow(
-    dead_code,
-    reason = "Task 8 consumes audit domain types; Task 5 only consumes validation types"
-)]
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum AuditSupport {
@@ -90,10 +111,6 @@ pub(crate) enum AuditSupport {
     Unsupported,
 }
 
-#[allow(
-    dead_code,
-    reason = "Task 8 consumes audit domain types; Task 5 only consumes validation types"
-)]
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum ContaminationCategory {
@@ -104,10 +121,6 @@ pub(crate) enum ContaminationCategory {
     ContradictsSource,
 }
 
-#[allow(
-    dead_code,
-    reason = "Task 8 consumes audit domain types; Task 5 only consumes validation types"
-)]
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum RelationVerdict {
@@ -275,5 +288,30 @@ mod tests {
             },
             r#"{"profile_id":"profile","sources":[{"node_id":7,"turn_key":"turn","session_id":"session","scope":"scope","content":"content","content_hash":"content-hash","at_ms":8}]}"#,
         );
+    }
+    #[test]
+    fn source_debug_redacts_transcript_content() {
+        let source = ExtractionSource {
+            node_id: 7,
+            turn_key: "turn".into(),
+            session_id: "session".into(),
+            scope: "scope".into(),
+            content: "do not expose this transcript".into(),
+            content_hash: "content-hash".into(),
+            at_ms: 8,
+        };
+        let source_debug = format!("{source:?}");
+        let scan_debug = format!(
+            "{:?}",
+            ExtractionScanResult {
+                profile_id: "profile".into(),
+                sources: vec![source],
+            }
+        );
+
+        assert!(!source_debug.contains("do not expose this transcript"));
+        assert!(source_debug.contains("[REDACTED]"));
+        assert!(!scan_debug.contains("do not expose this transcript"));
+        assert!(scan_debug.contains("sources_len: 1"));
     }
 }

@@ -51,6 +51,18 @@ fn e5_prefix(model_code: &str, kind: PrefixKind, text: &str) -> String {
         text.to_string()
     }
 }
+fn initialize_model<T, E>(
+    slot: &mut Option<T>,
+    initialize: impl FnOnce() -> Result<T, E>,
+) -> Result<&mut T, E> {
+    match slot {
+        Some(model) => Ok(model),
+        None => {
+            let model = initialize()?;
+            Ok(slot.insert(model))
+        }
+    }
+}
 
 pub fn embed_model_from_name(name: &str) -> Result<EmbeddingModel, Error> {
     match name.trim().to_ascii_lowercase().as_str() {
@@ -108,14 +120,9 @@ impl EmbeddingProvider for FastEmbedProvider {
             .map_err(|e| Error::InvalidInput(format!("mutex poisoned: {e}")))?;
 
         let owned: Vec<String> = texts.iter().map(|s| (*s).to_string()).collect();
-        if model.is_none() {
-            *model = Some(
-                TextEmbedding::try_new(self.init_options.clone())
-                    .map_err(|e| Error::InvalidInput(format!("model init failed: {e}")))?,
-            );
-        }
-        let model = model.as_mut().ok_or_else(|| {
-            Error::InvalidInput("model initialization produced no provider".to_owned())
+        let model = initialize_model(&mut model, || {
+            TextEmbedding::try_new(self.init_options.clone())
+                .map_err(|e| Error::InvalidInput(format!("model init failed: {e}")))
         })?;
         model
             .embed(owned, None)
@@ -161,6 +168,16 @@ mod tests {
             e5_prefix("BAAI/bge-base-en-v1.5", PrefixKind::Query, "hi"),
             "hi"
         );
+    }
+    #[test]
+    fn initialization_error_leaves_slot_empty_and_can_retry() {
+        let mut slot = None;
+
+        assert!(initialize_model(&mut slot, || Err::<usize, _>("unavailable")).is_err());
+        assert!(slot.is_none());
+
+        let model = initialize_model(&mut slot, || Ok::<usize, &str>(768));
+        assert_eq!(model.map(|model| *model), Ok(768));
     }
     #[test]
     fn with_model_defers_model_initialization() {

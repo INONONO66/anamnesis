@@ -86,6 +86,18 @@ impl ExtractionAuditSourceAvailability {
 
 /// Choose the audit reviewer without retaining unbounded or whitespace-only input.
 pub(crate) fn resolve_reviewer(explicit: Option<&str>) -> String {
+    resolve_reviewer_from(
+        explicit,
+        std::env::var("ANAMNESIS_AUDIT_REVIEWER").ok().as_deref(),
+        std::env::var("USER").ok().as_deref(),
+    )
+}
+
+fn resolve_reviewer_from(
+    explicit: Option<&str>,
+    audit_reviewer: Option<&str>,
+    user: Option<&str>,
+) -> String {
     fn normalize(reviewer: &str) -> Option<String> {
         let reviewer = reviewer.trim();
         (!reviewer.is_empty()).then(|| reviewer.chars().take(128).collect())
@@ -93,13 +105,8 @@ pub(crate) fn resolve_reviewer(explicit: Option<&str>) -> String {
 
     explicit
         .and_then(normalize)
-        .or_else(|| {
-            std::env::var("ANAMNESIS_AUDIT_REVIEWER")
-                .ok()
-                .as_deref()
-                .and_then(normalize)
-        })
-        .or_else(|| std::env::var("USER").ok().as_deref().and_then(normalize))
+        .or_else(|| audit_reviewer.and_then(normalize))
+        .or_else(|| user.and_then(normalize))
         .unwrap_or_else(|| "unknown".to_owned())
 }
 
@@ -154,47 +161,27 @@ pub(crate) fn render_audit_report(result: &ExtractionAuditResult) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_reviewer;
-
-    struct EnvRestore {
-        audit_reviewer: Option<std::ffi::OsString>,
-        user: Option<std::ffi::OsString>,
-    }
-
-    impl Drop for EnvRestore {
-        fn drop(&mut self) {
-            unsafe {
-                match &self.audit_reviewer {
-                    Some(value) => std::env::set_var("ANAMNESIS_AUDIT_REVIEWER", value),
-                    None => std::env::remove_var("ANAMNESIS_AUDIT_REVIEWER"),
-                }
-                match &self.user {
-                    Some(value) => std::env::set_var("USER", value),
-                    None => std::env::remove_var("USER"),
-                }
-            }
-        }
-    }
+    use super::resolve_reviewer_from;
 
     #[test]
-    fn reviewer_uses_explicit_then_env_then_user_then_unknown_and_normalizes() {
+    fn reviewer_precedence_is_explicit_then_audit_reviewer_then_user_then_unknown() {
         let explicit = format!("  {}  ", "x".repeat(129));
-        assert_eq!(resolve_reviewer(Some(&explicit)), "x".repeat(128));
-
-        let _restore = EnvRestore {
-            audit_reviewer: std::env::var_os("ANAMNESIS_AUDIT_REVIEWER"),
-            user: std::env::var_os("USER"),
-        };
-        unsafe {
-            std::env::set_var("ANAMNESIS_AUDIT_REVIEWER", "  audit reviewer  ");
-            std::env::set_var("USER", "  shell user  ");
-        }
-        assert_eq!(resolve_reviewer(None), "audit reviewer");
-
-        unsafe { std::env::remove_var("ANAMNESIS_AUDIT_REVIEWER") };
-        assert_eq!(resolve_reviewer(None), "shell user");
-
-        unsafe { std::env::set_var("USER", "   ") };
-        assert_eq!(resolve_reviewer(None), "unknown");
+        assert_eq!(
+            resolve_reviewer_from(
+                Some(&explicit),
+                Some("  audit reviewer  "),
+                Some("  shell user  "),
+            ),
+            "x".repeat(128)
+        );
+        assert_eq!(
+            resolve_reviewer_from(None, Some("  audit reviewer  "), Some("  shell user  ")),
+            "audit reviewer"
+        );
+        assert_eq!(
+            resolve_reviewer_from(None, Some("  "), Some("  shell user  ")),
+            "shell user"
+        );
+        assert_eq!(resolve_reviewer_from(None, None, Some("   ")), "unknown");
     }
 }

@@ -30,9 +30,15 @@ pub enum RecallEventKind {
 #[serde(rename_all = "kebab-case")]
 pub enum ExtractionErrorKind {
     Spawn,
+    Stdin,
     Timeout,
+    StdoutTooLarge,
+    StderrTooLarge,
+    NonZero,
     InvalidJson,
+    InvalidUtf8,
     SchemaReject,
+    StageReject,
 }
 
 /// One conversation turn for [`Request::Ingest`] (serde-only mirror of the
@@ -766,9 +772,15 @@ mod tests {
 
         for kind in [
             ExtractionErrorKind::Spawn,
+            ExtractionErrorKind::Stdin,
             ExtractionErrorKind::Timeout,
+            ExtractionErrorKind::StdoutTooLarge,
+            ExtractionErrorKind::StderrTooLarge,
+            ExtractionErrorKind::NonZero,
             ExtractionErrorKind::InvalidJson,
+            ExtractionErrorKind::InvalidUtf8,
             ExtractionErrorKind::SchemaReject,
+            ExtractionErrorKind::StageReject,
         ] {
             let line = encode_line(&kind).expect("encode failure kind");
             assert_eq!(

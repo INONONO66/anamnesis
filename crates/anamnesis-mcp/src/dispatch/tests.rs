@@ -3409,9 +3409,21 @@ fn stage_extraction_rejects_any_source_snapshot_mismatch_without_mutating_graph_
             },
         );
         assert!(
-            matches!(response, Response::Err { .. }),
+            matches!(&response, Response::Err { .. }),
             "{label} must reject staging: {response:?}"
         );
+        if label == "reused node id" {
+            assert!(
+                matches!(
+                    &response,
+                    Response::Err {
+                        kind: ErrKind::InvalidParams,
+                        ..
+                    }
+                ),
+                "caller InvalidInput must map to invalid_params: {response:?}"
+            );
+        }
         assert_eq!(
             policy_counts(&dir),
             (0, 0, 0, 0),
@@ -4061,6 +4073,41 @@ mod migration_job {
     fn extraction_audit_demo_reads_live_sources_and_never_mutates_the_graph() {
         let (reg, dir) = stub_registry();
         let (sources, listed) = audit_fixture(&reg);
+        let connection = rusqlite::Connection::open(dir.path().join("memory.db"))
+            .expect("open audit policy database");
+        let provenance_columns: Vec<String> = connection
+            .prepare(
+                "SELECT name FROM pragma_table_info('extract_candidates')
+                 WHERE name IN ('source_turn_keys', 'source_content_hashes', 'source_node_ids')",
+            )
+            .expect("inspect candidate provenance schema")
+            .query_map([], |row| row.get(0))
+            .expect("query candidate provenance schema")
+            .collect::<Result<_, _>>()
+            .expect("read candidate provenance schema");
+        assert_eq!(
+            provenance_columns,
+            [
+                "source_turn_keys",
+                "source_content_hashes",
+                "source_node_ids"
+            ],
+            "policy provenance stores only source identity, hashes, and node ids"
+        );
+        let stored_candidate_contents: Vec<String> = connection
+            .prepare("SELECT content FROM extract_candidates")
+            .expect("inspect staged candidate content")
+            .query_map([], |row| row.get(0))
+            .expect("query staged candidate content")
+            .collect::<Result<_, _>>()
+            .expect("read staged candidate content");
+        assert!(
+            stored_candidate_contents
+                .iter()
+                .all(|content| !sources.iter().any(|source| content == &source.content)),
+            "policy tables must not persist raw source content as candidate provenance"
+        );
+        drop(connection);
         let candidates = listed["candidates"].as_array().expect("candidate rows");
         let relations = listed["relations"].as_array().expect("relation rows");
 
@@ -4239,17 +4286,18 @@ mod migration_job {
             .expect("open audit policy database");
         connection
             .execute(
-                "UPDATE extract_candidates SET source_node_ids = '[999999]' WHERE id = ?1",
+                "UPDATE extract_candidates SET source_content_hashes = '[]' WHERE id = ?1",
                 [third_candidate],
             )
-            .expect("make staged node id stale while retaining its turn key");
-        let before_reused_rejection = graph_snapshot(&reg);
-        let reused_node_id = extraction_audit_list(&reg);
-        let unavailable_three = audit_candidate(&reused_node_id, "three");
-        let unavailable_three_source = audit_source(unavailable_three, three_turn_key);
-        assert_eq!(
-            unavailable_three_source["availability"],
-            "source-unavailable",
+            .expect("empty persisted provenance hashes");
+        let before_malformed_rejection = graph_snapshot(&reg);
+        let malformed = extraction_audit_list(&reg);
+        assert!(
+            audit_candidate(&malformed, "three")["sources"]
+                .as_array()
+                .expect("malformed provenance sources")
+                .is_empty(),
+            "empty provenance vectors must not be treated as available"
         );
         let rejected = dispatch(
             &reg,
@@ -4264,8 +4312,8 @@ mod migration_job {
         assert_audit_rejection(&rejected);
         assert_eq!(
             graph_snapshot(&reg),
-            before_reused_rejection,
-            "reused-node-id rejection cannot mutate graph"
+            before_malformed_rejection,
+            "malformed provenance rejection cannot mutate graph"
         );
     }
 }

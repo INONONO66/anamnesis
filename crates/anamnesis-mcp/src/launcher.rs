@@ -158,8 +158,9 @@ fn spawn_detached(exe: &Path, argv: &[String], daemon_db: Option<&Path>) -> io::
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
-    use std::time::Duration;
+    use std::os::unix::fs::MetadataExt;
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
 
     use crate::daemon::{acquire_daemon, serve_loop};
     use crate::memory::{MemoryRegistry, StubProvider};
@@ -231,14 +232,78 @@ mod tests {
         assert!(!loop_handle.is_finished(), "the single daemon is still up");
         loop_handle.abort();
     }
+    static DETACHED_CHILD_LOCK: Mutex<()> = Mutex::new(());
+    const DETACHED_CHILD_MARKER: &str = "ANAMNESIS_DETACHED_CHILD_MARKER";
+
     #[test]
-    fn detached_current_executable_helper_accepts_extract_argv() {
+    fn detached_child_marker() {
+        let Ok(marker) = std::env::var(DETACHED_CHILD_MARKER) else {
+            return;
+        };
+        let null_device = std::fs::metadata("/dev/null")
+            .expect("inspect null device")
+            .rdev();
+        let null_stdio = ["/dev/fd/0", "/dev/fd/1", "/dev/fd/2"].iter().all(|fd| {
+            std::fs::metadata(fd)
+                .map(|metadata| metadata.rdev() == null_device)
+                .unwrap_or(false)
+        });
+        let args = std::env::args().skip(1).collect::<Vec<_>>().join("\n");
+        std::fs::write(marker, format!("{null_stdio}\n{args}"))
+            .expect("detached child writes marker");
+    }
+
+    #[test]
+    fn detached_current_executable_helper_runs_a_null_stdio_marker_and_reports_spawn_failure() {
+        let _lock = DETACHED_CHILD_LOCK
+            .lock()
+            .expect("lock detached child fixture");
+        let dir = tempfile::tempdir().expect("create detached child marker directory");
+        let marker = dir.path().join("marker");
         let argv = vec![
-            "extract".to_string(),
-            "--namespace".to_string(),
-            "project/resolved-namespace".to_string(),
+            "--exact".to_string(),
+            "launcher::tests::detached_child_marker".to_string(),
         ];
-        let helper: fn(&[String]) -> io::Result<()> = spawn_detached_current_exe;
-        let _ = (helper, argv);
+        unsafe {
+            std::env::set_var(DETACHED_CHILD_MARKER, &marker);
+        }
+        let started = Instant::now();
+        let spawned = spawn_detached_current_exe(&argv);
+        unsafe {
+            std::env::remove_var(DETACHED_CHILD_MARKER);
+        }
+        spawned.expect("detached fixture spawns");
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "detached spawn must return promptly"
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !marker.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let marker_contents =
+            std::fs::read_to_string(&marker).expect("detached child writes marker before deadline");
+        let mut lines = marker_contents.lines();
+        assert_eq!(
+            lines.next(),
+            Some("true"),
+            "child stdio must all be /dev/null"
+        );
+        assert_eq!(
+            lines.collect::<Vec<_>>(),
+            argv.iter().map(String::as_str).collect::<Vec<_>>(),
+            "detached child must receive the exact argv"
+        );
+
+        assert!(
+            spawn_detached(
+                std::path::Path::new("/definitely-not-anamnesis-executable"),
+                &argv,
+                None,
+            )
+            .is_err(),
+            "spawn failure must be returned to the caller"
+        );
     }
 }

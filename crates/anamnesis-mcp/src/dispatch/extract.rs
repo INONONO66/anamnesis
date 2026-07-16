@@ -39,7 +39,7 @@ pub(super) fn dispatch_scan(
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         match registry.namespace_handles(namespace.as_deref()) {
             Ok(handles) => handles,
-            Err(error) => return Response::internal(error),
+            Err(error) => return extraction_error_response(error),
         }
     };
 
@@ -49,7 +49,7 @@ pub(super) fn dispatch_scan(
             Ok(text) => Response::ok(text),
             Err(error) => Response::internal(error),
         },
-        Err(error) => Response::internal(error),
+        Err(error) => extraction_error_response(error),
     }
 }
 pub(super) fn dispatch_stage(
@@ -66,7 +66,7 @@ pub(super) fn dispatch_stage(
     };
     let handles = match resolve_handles(registry, namespace.as_deref()) {
         Ok(handles) => handles,
-        Err(error) => return Response::internal(error),
+        Err(error) => return extraction_error_response(error),
     };
 
     let result = stage_namespace(
@@ -82,7 +82,7 @@ pub(super) fn dispatch_stage(
             Ok(text) => Response::ok(text),
             Err(error) => Response::internal(error),
         },
-        Err(error) => Response::internal(error),
+        Err(error) => extraction_error_response(error),
     }
 }
 
@@ -101,7 +101,7 @@ pub(super) fn dispatch_record_failure(
     };
     let handles = match resolve_handles(registry, namespace.as_deref()) {
         Ok(handles) => handles,
-        Err(error) => return Response::internal(error),
+        Err(error) => return extraction_error_response(error),
     };
 
     let result =
@@ -121,7 +121,7 @@ pub(super) fn dispatch_record_failure(
         });
     match result {
         Ok(_) => Response::ok("recorded extraction failure"),
-        Err(error) => Response::internal(error),
+        Err(error) => extraction_error_response(error),
     }
 }
 
@@ -132,7 +132,7 @@ pub(super) fn dispatch_audit_list(
 ) -> Response {
     let handles = match resolve_handles(registry, namespace.as_deref()) {
         Ok(handles) => handles,
-        Err(error) => return Response::internal(error),
+        Err(error) => return extraction_error_response(error),
     };
     let result = {
         let memory = handles
@@ -171,7 +171,7 @@ pub(super) fn dispatch_update_candidate_audit(
 ) -> Response {
     let handles = match resolve_handles(registry, namespace.as_deref()) {
         Ok(handles) => handles,
-        Err(error) => return Response::internal(error),
+        Err(error) => return extraction_error_response(error),
     };
     let reviewer = resolve_reviewer(Some(&reviewer));
     let result = {
@@ -225,7 +225,7 @@ pub(super) fn dispatch_update_relation_audit(
 ) -> Response {
     let handles = match resolve_handles(registry, namespace.as_deref()) {
         Ok(handles) => handles,
-        Err(error) => return Response::internal(error),
+        Err(error) => return extraction_error_response(error),
     };
     let reviewer = resolve_reviewer(Some(&reviewer));
     let result =
@@ -262,7 +262,10 @@ fn candidate_sources_available(
     candidate: &ExtractionAuditCandidateRow,
 ) -> bool {
     let sources = candidate_audit_sources(memory, candidate);
-    sources.len() == candidate.source_turn_keys.len()
+    !candidate.source_turn_keys.is_empty()
+        && candidate.source_node_ids.len() == candidate.source_turn_keys.len()
+        && candidate.source_content_hashes.len() == candidate.source_turn_keys.len()
+        && sources.len() == candidate.source_turn_keys.len()
         && sources
             .iter()
             .all(|source| source.availability == ExtractionAuditSourceAvailability::Available)
@@ -273,7 +276,8 @@ fn candidate_audit_sources(
     candidate: &ExtractionAuditCandidateRow,
 ) -> Vec<ExtractionAuditSource> {
     let source_count = candidate.source_turn_keys.len();
-    if candidate.source_node_ids.len() != source_count
+    if source_count == 0
+        || candidate.source_node_ids.len() != source_count
         || candidate.source_content_hashes.len() != source_count
     {
         return Vec::new();
@@ -319,16 +323,11 @@ fn resolve_audit_source(
         return unavailable();
     };
 
-    let authoritative = graph.all_node_ids().into_iter().any(|id| {
-        id.0 == node_id
-            && graph
-                .get_node(id)
-                .ok()
-                .and_then(|candidate| candidate.metadata.get(META_TURN_KEY))
-                .is_some_and(|candidate_key| candidate_key == turn_key)
-    });
     let live_hash = format!("{:x}", Sha256::digest(node.content.as_bytes()));
-    let exact = authoritative
+    let exact = node
+        .metadata
+        .get(META_TURN_KEY)
+        .is_some_and(|candidate_key| candidate_key == turn_key)
         && node.origin.session_id == session_id
         && node.origin.scope.as_str() == scope
         && live_hash == content_hash;
@@ -346,6 +345,13 @@ fn resolve_audit_source(
         },
     }
 }
+fn extraction_error_response(error: anamnesis::Error) -> Response {
+    match error {
+        anamnesis::Error::InvalidInput(message) => Response::invalid_params(message),
+        error => Response::internal(error),
+    }
+}
+
 fn resolve_handles(
     registry: &std::sync::Arc<std::sync::Mutex<MemoryRegistry>>,
     namespace: Option<&str>,
@@ -475,7 +481,7 @@ fn scan_namespace(
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let processed_turn_keys = processed_turn_keys(handles, profile_id, profile)?;
-    let sources = capture_sources(&memory);
+    let sources = capture_sources(&memory)?;
 
     scan::scan(sources, &processed_turn_keys, profile, min_turns, max_turns)
         .map_err(|error| anamnesis::Error::StorageError(error.to_string()))
@@ -509,23 +515,26 @@ fn processed_turn_keys(
 
 fn capture_sources(
     memory: &anamnesis::Memory<anamnesis::storage::SqliteStorage>,
-) -> Vec<ExtractionSource> {
+) -> Result<Vec<ExtractionSource>, anamnesis::Error> {
     let graph = memory.engine().graph();
     graph
         .all_node_ids()
         .into_iter()
-        .filter_map(|node_id| {
-            let node = graph.get_node(node_id).ok()?;
-            let turn_key = node.metadata.get(META_TURN_KEY)?.clone();
-            Some(ExtractionSource {
+        .map(|node_id| {
+            let node = graph.get_node(node_id)?;
+            let Some(turn_key) = node.metadata.get(META_TURN_KEY) else {
+                return Ok(None);
+            };
+            Ok(Some(ExtractionSource {
                 node_id: node_id.0,
-                turn_key,
+                turn_key: turn_key.clone(),
                 session_id: node.origin.session_id.clone(),
                 scope: node.origin.scope.as_str().to_owned(),
                 content: node.content.clone(),
                 content_hash: format!("{:x}", Sha256::digest(node.content.as_bytes())),
                 at_ms: node.created_at.0,
-            })
+            }))
         })
-        .collect()
+        .collect::<Result<Vec<_>, _>>()
+        .map(|sources| sources.into_iter().flatten().collect())
 }

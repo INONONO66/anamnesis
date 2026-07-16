@@ -1,9 +1,3 @@
-// Task 4 stages the process runner; Task 7 wires its sole worker call site.
-#![cfg_attr(
-    not(test),
-    allow(dead_code, reason = "Task 4 staged runner is consumed by Task 7")
-)]
-
 use std::fmt;
 use std::time::{Duration, Instant};
 
@@ -101,35 +95,42 @@ pub(super) async fn run_provider(
         let read_stdout = read_capped(stdout, output_limit, OutputStream::Stdout);
         let read_stderr = read_capped(stderr, output_limit, OutputStream::Stderr);
         let wait = async { child.wait().await.map_err(|_| ProcessError::Wait) };
-        let ((), stdout, stderr, status) =
-            tokio::try_join!(write_stdin, read_stdout, read_stderr, wait)?;
-        Ok::<_, ProcessError>((status, stdout, stderr))
+        tokio::join!(write_stdin, read_stdout, read_stderr, wait)
     })
     .await;
 
-    let (status, stdout, stderr) = match result {
-        Ok(Ok(output)) => output,
-        Ok(Err(error)) => {
-            kill_process_group_and_reap(&mut child, process_group).await;
-            return Err(error);
-        }
+    let (stdin_result, stdout_result, stderr_result, status_result) = match result {
+        Ok(output) => output,
         Err(_) => {
-            kill_process_group_and_reap(&mut child, process_group).await;
-            return Err(ProcessError::Timeout);
+            return match kill_process_group_and_reap(&mut child, process_group).await {
+                Ok(()) => Err(ProcessError::Timeout),
+                Err(error) => Err(error),
+            };
         }
     };
-
-    if status.success() {
-        Ok(ProcessOutput {
-            stdout,
-            duration: started.elapsed(),
-        })
-    } else {
-        Err(ProcessError::NonZero {
+    let status = match status_result {
+        Ok(status) => status,
+        Err(error) => {
+            return match kill_process_group_and_reap(&mut child, process_group).await {
+                Ok(()) => Err(error),
+                Err(cleanup_error) => Err(cleanup_error),
+            };
+        }
+    };
+    if !status.success() {
+        return Err(ProcessError::NonZero {
             code: status.code(),
-            stderr_bytes: stderr.len(),
-        })
+            stderr_bytes: stderr_result.as_ref().map_or(0, Vec::len),
+        });
     }
+    stdin_result?;
+    let stdout = stdout_result?;
+    let _stderr = stderr_result?;
+
+    Ok(ProcessOutput {
+        stdout,
+        duration: started.elapsed(),
+    })
 }
 
 async fn read_capped(
@@ -165,12 +166,21 @@ async fn read_capped(
     }
 }
 
-async fn kill_process_group_and_reap(child: &mut Child, process_group: i32) {
+const CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
+
+async fn kill_process_group_and_reap(
+    child: &mut Child,
+    process_group: i32,
+) -> Result<(), ProcessError> {
     match killpg(Pid::from_raw(process_group), Signal::SIGKILL) {
         Ok(()) | Err(Errno::ESRCH) => {}
-        Err(_) => {}
+        Err(_) => return Err(ProcessError::Wait),
     }
-    let _ = child.wait().await;
+    tokio::time::timeout(CLEANUP_TIMEOUT, child.wait())
+        .await
+        .map_err(|_| ProcessError::Wait)?
+        .map_err(|_| ProcessError::Wait)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -292,6 +302,31 @@ mod tests {
         .await;
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn r2_process_nonzero_exit_precedes_simultaneous_stdin_close_failure() {
+        let command = ExtractCommand {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), "sleep 0.05; exit 7".into()],
+        };
+        let prompt = vec![b'x'; 16 * 1024 * 1024];
+
+        let error = completes_within(run_provider(
+            &command,
+            &prompt,
+            Duration::from_secs(1),
+            OUTPUT_LIMIT,
+        ))
+        .await
+        .expect_err("early-close provider should fail");
+
+        assert_eq!(
+            error,
+            ProcessError::NonZero {
+                code: Some(7),
+                stderr_bytes: 0,
+            }
+        );
+    }
     #[tokio::test(flavor = "multi_thread")]
     async fn r2_process_timeout_kills_and_reaps_the_entire_process_group() {
         let tempdir = tempfile::tempdir().expect("temporary pidfile directory");

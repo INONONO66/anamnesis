@@ -57,9 +57,9 @@ SessionEnd (Claude Code only)            ┘         (idempotent)          │
 R2 extraction is a separate, **shadow-only** path for auditing prospective distilled memories.
 It is off by default. Raw captured content leaves the machine only when
 `ANAMNESIS_EXTRACT_MODE=shadow` is set exactly; `off`, `auto`, boolean-like values, and every
-other unrecognized value disable extraction. Set `ANAMNESIS_EXTRACT_CMD` only to replace the
-default argv `claude -p`. The value is shell-word parsed into a program and arguments, then
-executed directly: no shell is started, and there is no fallback command.
+other unrecognized value disable extraction. `ANAMNESIS_EXTRACT_CMD` configures exactly one
+provider command (default argv `claude -p`), shell-word parsed and executed directly: no shell
+and no fallback command.
 
 Run one pass manually with `anamnesis extract [--namespace NS]`. A pass selects one temporal
 session-and-scope group with **10–20** eligible turns and sends at most that one batch to the
@@ -72,6 +72,13 @@ Groups with fewer than 10 turns remain permanently unprocessed in R2. This inten
 shadow audit samples toward longer sessions; account for that bias in an R3 promotion decision.
 Age-based flushing is deferred to R3 and must be reconsidered only if measurements demonstrate
 that the bias warrants it.
+
+Stage-1 raw capture remains in the graph as `Episodic` memories. Provider stdin/the raw source
+batch, raw stdout/stderr, and the raw command are transient and are not persisted or logged by
+R2 policy or error records. The policy side schema persists only extractor profile
+hash/components, run and failure scalars, validated candidates and relations, the source
+identity/hash ledger, and audit labels. R2 performs no automatic pruning or cleanup: those rows
+persist until an operator takes a database lifecycle action.
 
 A successful R2 pass stages candidates, relations, run metadata, and source ledger records in
 the policy side schema only. It never changes graph nodes, graph edges, or
@@ -89,7 +96,7 @@ anamnesis extract --audit [--namespace NS] [--limit N]
 Record a candidate review or a relation review without writing graph content:
 
 ```bash
-anamnesis extract --audit --candidate ID --support supported \
+anamnesis extract --audit --candidate ID --support partial \
   [--contamination unsupported-claim] [--reviewer NAME] [--namespace NS]
 anamnesis extract --audit --relation ID --relation-verdict correct \
   [--reviewer NAME] [--namespace NS]

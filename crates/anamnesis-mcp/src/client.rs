@@ -66,10 +66,6 @@ impl DaemonClient {
             .ok_or_else(|| anyhow!("daemon closed the connection without responding"))?;
         proto::decode_line::<Response>(&resp_line).context("decode daemon response")
     }
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "Task 7 extraction facade is wired by Task 9")
-    )]
     /// Request a bounded extraction scan from the daemon.
     pub async fn extraction_scan(
         &mut self,
@@ -87,10 +83,6 @@ impl DaemonClient {
         .await
     }
 
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "Task 7 extraction facade is wired by Task 9")
-    )]
     /// Stage validated extraction output through the daemon.
     pub async fn stage_extraction(
         &mut self,
@@ -110,10 +102,6 @@ impl DaemonClient {
         .await
     }
 
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "Task 7 extraction facade is wired by Task 9")
-    )]
     /// Record a typed extraction failure through the daemon.
     pub async fn record_extraction_failure(
         &mut self,
@@ -140,10 +128,6 @@ impl DaemonClient {
         }
     }
 
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "Task 7 extraction facade is wired by Task 9")
-    )]
     async fn extraction_response<T>(&mut self, request: Request) -> Result<T>
     where
         T: serde::de::DeserializeOwned,

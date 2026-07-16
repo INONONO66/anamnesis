@@ -1,10 +1,3 @@
-#![cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "Task 7 error log is reached through the Task 9 CLI worker"
-    )
-)]
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::Path;
@@ -15,12 +8,11 @@ use sha2::{Digest, Sha256};
 
 pub(crate) const EXTRACT_LOG_CAP_BYTES: usize = 256 * 1024;
 
-/// The only daemon startup failures that may be recorded outside the daemon.
+/// The only daemon startup failure that may be recorded outside the daemon.
 #[derive(Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ErrorLogKind {
     Connect,
-    Launch,
 }
 
 #[derive(Serialize)]
@@ -30,7 +22,7 @@ struct ErrorLogEntry<'a> {
     socket_path_hash: &'a str,
 }
 
-/// Appends a redacted daemon connection or launch failure record.
+/// Appends a redacted daemon connection failure record.
 ///
 /// This is intentionally limited to failures that occur before a daemon can
 /// accept `RecordExtractionFailure`; daemon-reported extraction failures must
@@ -148,7 +140,7 @@ mod tests {
     }
 
     #[test]
-    fn r2_error_log_writes_only_connect_and_launch_failures_as_sanitized_json_lines() {
+    fn r2_error_log_writes_only_connect_failures_as_sanitized_json_lines() {
         let tempdir = tempfile::tempdir().expect("temporary database directory");
         let socket_path = tempdir
             .path()
@@ -156,14 +148,11 @@ mod tests {
 
         append_connect_failure(tempdir.path(), &socket_path, ErrorLogKind::Connect)
             .expect("connect failure is logged");
-        append_connect_failure(tempdir.path(), &socket_path, ErrorLogKind::Launch)
-            .expect("launch failure is logged");
 
         let entries = fs::read_to_string(log_path(tempdir.path())).expect("current error log");
         let lines = entries.lines().collect::<Vec<_>>();
-        assert_eq!(lines.len(), 2);
+        assert_eq!(lines.len(), 1);
         assert_sanitized_json_line(lines[0], &socket_path, "connect");
-        assert_sanitized_json_line(lines[1], &socket_path, "launch");
     }
 
     #[test]

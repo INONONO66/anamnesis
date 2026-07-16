@@ -1,8 +1,3 @@
-#![cfg_attr(
-    not(test),
-    allow(dead_code, reason = "Task 7 worker APIs are wired by Task 9")
-)]
-
 use std::fmt;
 use std::fs::OpenOptions;
 use std::path::Path;
@@ -13,7 +8,7 @@ use crate::config::Config;
 use crate::daemon::socket_path_for_db;
 use crate::extract::config::{ExtractCommand, ExtractConfig, ExtractMode};
 use crate::extract::error_log::{ErrorLogKind, append_connect_failure};
-use crate::extract::process::{ProcessError, ProcessOutput, run_provider};
+use crate::extract::process::{OutputStream, ProcessError, ProcessOutput, run_provider};
 use crate::extract::profile::ExtractorProfile;
 use crate::extract::prompt::build_extraction_prompt;
 use crate::extract::types::{
@@ -66,6 +61,7 @@ pub(crate) enum WorkerError {
     Profile(String),
     Runtime(String),
     Lock(String),
+    Audit,
 }
 
 impl fmt::Display for WorkerError {
@@ -79,6 +75,7 @@ impl fmt::Display for WorkerError {
             Self::Profile(_) => formatter.write_str("could not construct extraction profile"),
             Self::Runtime(_) => formatter.write_str("could not start extraction worker runtime"),
             Self::Lock(_) => formatter.write_str("could not acquire extraction worker lock"),
+            Self::Audit => formatter.write_str("could not record extraction failure audit"),
         }
     }
 }
@@ -126,7 +123,7 @@ pub(crate) fn run_worker(
     namespace: Option<&str>,
 ) -> Result<WorkerOutcome, WorkerError> {
     if ExtractMode::parse(std::env::var("ANAMNESIS_EXTRACT_MODE").ok().as_deref()).mode
-        == ExtractMode::Off
+        != ExtractMode::Shadow
     {
         return Ok(WorkerOutcome::Noop(WorkerNoop::ModeOff));
     }
@@ -168,7 +165,7 @@ pub(crate) fn run_worker_with(
     namespace: Option<&str>,
     dependencies: &mut impl WorkerDependencies,
 ) -> Result<WorkerOutcome, WorkerError> {
-    if config.mode == ExtractMode::Off {
+    if config.mode != ExtractMode::Shadow {
         return Ok(WorkerOutcome::Noop(WorkerNoop::ModeOff));
     }
 
@@ -191,7 +188,7 @@ pub(crate) fn run_worker_with(
 
     dependencies.connect(socket_path)?;
     let scan = dependencies.scan(namespace, &config.profile, MIN_TURNS, MAX_TURNS)?;
-    if scan.sources.len() < 10 {
+    if scan.sources.len() < MIN_TURNS as usize {
         return Ok(WorkerOutcome::Noop(WorkerNoop::BelowThreshold));
     }
 
@@ -200,35 +197,41 @@ pub(crate) fn run_worker_with(
     {
         Ok(success) => success,
         Err(first_failure) if first_failure.is_invalid_json() => {
-            record_invocation_failure(
+            if record_invocation_failure(
                 dependencies,
                 namespace,
                 &config.profile,
                 &scan,
                 &first_failure,
-            )?;
+            )
+            .is_err()
+            {
+                return Err(WorkerError::Audit);
+            }
             match invoke_and_validate(config, &scan, dependencies, &prompt) {
                 Ok(success) => success,
                 Err(second_failure) => {
-                    let _ = record_invocation_failure(
+                    if record_invocation_failure(
                         dependencies,
                         namespace,
                         &config.profile,
                         &scan,
                         &second_failure,
-                    );
+                    )
+                    .is_err()
+                    {
+                        return Err(WorkerError::Audit);
+                    }
                     return Err(second_failure.error);
                 }
             }
         }
         Err(failure) => {
-            let _ = record_invocation_failure(
-                dependencies,
-                namespace,
-                &config.profile,
-                &scan,
-                &failure,
-            );
+            if record_invocation_failure(dependencies, namespace, &config.profile, &scan, &failure)
+                .is_err()
+            {
+                return Err(WorkerError::Audit);
+            }
             return Err(failure.error);
         }
     };
@@ -253,15 +256,19 @@ pub(crate) fn run_worker_with(
             relation_count,
         }),
         Err(error) => {
-            let _ = record_failure(
+            if record_failure(
                 dependencies,
                 namespace,
                 &config.profile,
                 &scan,
-                ExtractionErrorKind::SchemaReject,
+                ExtractionErrorKind::StageReject,
                 true,
                 duration_ms,
-            );
+            )
+            .is_err()
+            {
+                return Err(WorkerError::Audit);
+            }
             Err(error)
         }
     }
@@ -352,9 +359,36 @@ fn record_invocation_failure(
 fn failure_kind(error: &WorkerError) -> ExtractionErrorKind {
     match error {
         WorkerError::Process(ProcessError::Spawn) => ExtractionErrorKind::Spawn,
+        WorkerError::Process(ProcessError::Stdin) => ExtractionErrorKind::Stdin,
         WorkerError::Process(ProcessError::Timeout) => ExtractionErrorKind::Timeout,
+        WorkerError::Process(ProcessError::OutputTooLarge {
+            stream: OutputStream::Stdout,
+        }) => ExtractionErrorKind::StdoutTooLarge,
+        WorkerError::Process(ProcessError::OutputTooLarge {
+            stream: OutputStream::Stderr,
+        }) => ExtractionErrorKind::StderrTooLarge,
+        WorkerError::Process(ProcessError::NonZero { .. }) => ExtractionErrorKind::NonZero,
+        WorkerError::Process(ProcessError::Wait) => ExtractionErrorKind::SchemaReject,
+        WorkerError::Validation(ValidationError::InvalidUtf8) => ExtractionErrorKind::InvalidUtf8,
         WorkerError::Validation(ValidationError::InvalidJson) => ExtractionErrorKind::InvalidJson,
-        _ => ExtractionErrorKind::SchemaReject,
+        WorkerError::Validation(
+            ValidationError::SchemaReject
+            | ValidationError::TooManyItems
+            | ValidationError::InvalidItemId
+            | ValidationError::DuplicateItemId
+            | ValidationError::InvalidContent
+            | ValidationError::InvalidConfidence
+            | ValidationError::InvalidSourceReference
+            | ValidationError::InvalidRelationReference
+            | ValidationError::SelfRelation
+            | ValidationError::DuplicateCandidateKey
+            | ValidationError::DuplicateRelation,
+        )
+        | WorkerError::Daemon(_)
+        | WorkerError::Profile(_)
+        | WorkerError::Runtime(_)
+        | WorkerError::Lock(_)
+        | WorkerError::Audit => ExtractionErrorKind::SchemaReject,
     }
 }
 
@@ -494,8 +528,8 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        PROVIDER_TIMEOUT, WorkerConfig, WorkerDependencies, WorkerError, WorkerNoop, WorkerOutcome,
-        run_worker, run_worker_with,
+        MIN_TURNS, PROVIDER_TIMEOUT, WorkerConfig, WorkerDependencies, WorkerError, WorkerNoop,
+        WorkerOutcome, failure_kind, run_worker, run_worker_with,
     };
     use crate::config::Config;
     use crate::extract::{
@@ -504,6 +538,7 @@ mod tests {
         types::{
             ExtractionScanResult, ExtractionSource, ExtractorProfileComponents, ValidatedExtraction,
         },
+        validate::ValidationError,
     };
     use crate::proto::{ExtractionErrorKind, StageExtractionResult};
 
@@ -541,7 +576,7 @@ mod tests {
             min_turns: u32,
             max_turns: u32,
         ) -> Result<ExtractionScanResult, WorkerError> {
-            assert_eq!((min_turns, max_turns), (10, 20));
+            assert_eq!((min_turns, max_turns), (MIN_TURNS, 20));
             self.scans.pop_front().expect("test supplied scan response")
         }
 
@@ -687,7 +722,7 @@ mod tests {
     #[test]
     fn r2_worker_nine_turn_scan_is_below_threshold_without_a_run() {
         let mut fake = FakeWorker {
-            scans: VecDeque::from([Ok(scan(9))]),
+            scans: VecDeque::from([Ok(scan(MIN_TURNS as usize - 1))]),
             ..Default::default()
         };
         let (_socket_directory, socket) = test_socket();
@@ -711,7 +746,7 @@ mod tests {
     #[test]
     fn r2_worker_invalid_json_records_failure_before_one_retry_then_stages_once() {
         let mut fake = FakeWorker {
-            scans: VecDeque::from([Ok(scan(10))]),
+            scans: VecDeque::from([Ok(scan(MIN_TURNS as usize))]),
             provider_outputs: VecDeque::from([
                 Ok(output(b"not json".to_vec())),
                 Ok(valid_output()),
@@ -748,13 +783,13 @@ mod tests {
             1,
             "one source ledger set is staged"
         );
-        assert_eq!(fake.staged_sources[0].len(), 10);
+        assert_eq!(fake.staged_sources[0].len(), MIN_TURNS as usize);
     }
 
     #[test]
     fn r2_worker_failure_row_write_failure_prevents_invalid_json_retry() {
         let mut fake = FakeWorker {
-            scans: VecDeque::from([Ok(scan(10))]),
+            scans: VecDeque::from([Ok(scan(MIN_TURNS as usize))]),
             provider_outputs: VecDeque::from([
                 Ok(output(b"not json".to_vec())),
                 Ok(valid_output()),
@@ -769,7 +804,7 @@ mod tests {
         let error = run_worker_with(&config(ExtractMode::Shadow), &socket, None, &mut fake)
             .expect_err("retry requires the first failure row to be durable");
 
-        assert_eq!(error, WorkerError::Daemon("record failed".into()));
+        assert_eq!(error, WorkerError::Audit);
         assert_eq!(fake.provider_calls, 1, "must not invoke the retry");
         assert_eq!(fake.recorded_failures, [ExtractionErrorKind::InvalidJson]);
         assert!(fake.staged.is_empty());
@@ -784,35 +819,35 @@ mod tests {
                 )),
                 ExtractionErrorKind::SchemaReject,
             ),
-            (Ok(output(vec![0xff])), ExtractionErrorKind::SchemaReject),
+            (Ok(output(vec![0xff])), ExtractionErrorKind::InvalidUtf8),
             (Err(ProcessError::Spawn), ExtractionErrorKind::Spawn),
-            (Err(ProcessError::Stdin), ExtractionErrorKind::SchemaReject),
+            (Err(ProcessError::Stdin), ExtractionErrorKind::Stdin),
             (Err(ProcessError::Timeout), ExtractionErrorKind::Timeout),
             (
                 Err(ProcessError::OutputTooLarge {
                     stream: OutputStream::Stdout,
                 }),
-                ExtractionErrorKind::SchemaReject,
+                ExtractionErrorKind::StdoutTooLarge,
             ),
             (
                 Err(ProcessError::OutputTooLarge {
                     stream: OutputStream::Stderr,
                 }),
-                ExtractionErrorKind::SchemaReject,
+                ExtractionErrorKind::StderrTooLarge,
             ),
             (
                 Err(ProcessError::NonZero {
                     code: Some(7),
                     stderr_bytes: 0,
                 }),
-                ExtractionErrorKind::SchemaReject,
+                ExtractionErrorKind::NonZero,
             ),
             (Err(ProcessError::Wait), ExtractionErrorKind::SchemaReject),
         ];
 
         for (provider_output, expected_failure) in cases {
             let mut fake = FakeWorker {
-                scans: VecDeque::from([Ok(scan(10))]),
+                scans: VecDeque::from([Ok(scan(MIN_TURNS as usize))]),
                 provider_outputs: VecDeque::from([provider_output]),
                 ..Default::default()
             };
@@ -832,9 +867,145 @@ mod tests {
     }
 
     #[test]
+    fn r2_worker_failure_mapping_is_exhaustive() {
+        let cases = [
+            (
+                WorkerError::Process(ProcessError::Spawn),
+                ExtractionErrorKind::Spawn,
+            ),
+            (
+                WorkerError::Process(ProcessError::Stdin),
+                ExtractionErrorKind::Stdin,
+            ),
+            (
+                WorkerError::Process(ProcessError::Timeout),
+                ExtractionErrorKind::Timeout,
+            ),
+            (
+                WorkerError::Process(ProcessError::OutputTooLarge {
+                    stream: OutputStream::Stdout,
+                }),
+                ExtractionErrorKind::StdoutTooLarge,
+            ),
+            (
+                WorkerError::Process(ProcessError::OutputTooLarge {
+                    stream: OutputStream::Stderr,
+                }),
+                ExtractionErrorKind::StderrTooLarge,
+            ),
+            (
+                WorkerError::Process(ProcessError::NonZero {
+                    code: Some(7),
+                    stderr_bytes: 0,
+                }),
+                ExtractionErrorKind::NonZero,
+            ),
+            (
+                WorkerError::Validation(ValidationError::InvalidUtf8),
+                ExtractionErrorKind::InvalidUtf8,
+            ),
+            (
+                WorkerError::Validation(ValidationError::InvalidJson),
+                ExtractionErrorKind::InvalidJson,
+            ),
+        ];
+        for (error, kind) in cases {
+            assert_eq!(failure_kind(&error), kind);
+        }
+        for validation_error in [
+            ValidationError::SchemaReject,
+            ValidationError::TooManyItems,
+            ValidationError::InvalidItemId,
+            ValidationError::DuplicateItemId,
+            ValidationError::InvalidContent,
+            ValidationError::InvalidConfidence,
+            ValidationError::InvalidSourceReference,
+            ValidationError::InvalidRelationReference,
+            ValidationError::SelfRelation,
+            ValidationError::DuplicateCandidateKey,
+            ValidationError::DuplicateRelation,
+        ] {
+            assert_eq!(
+                failure_kind(&WorkerError::Validation(validation_error)),
+                ExtractionErrorKind::SchemaReject
+            );
+        }
+    }
+
+    #[test]
+    fn r2_worker_terminal_and_stage_audit_failures_are_distinct() {
+        let mut terminal_fake = FakeWorker {
+            scans: VecDeque::from([Ok(scan(MIN_TURNS as usize))]),
+            provider_outputs: VecDeque::from([Err(ProcessError::Stdin)]),
+            failure_record_result: VecDeque::from([Err(WorkerError::Daemon(
+                "record failed".into(),
+            ))]),
+            ..Default::default()
+        };
+        let (_socket_directory, socket) = test_socket();
+
+        let terminal_error = run_worker_with(
+            &config(ExtractMode::Shadow),
+            &socket,
+            None,
+            &mut terminal_fake,
+        )
+        .expect_err("terminal failure audit must be durable");
+        assert_eq!(terminal_error, WorkerError::Audit);
+        assert_eq!(
+            terminal_fake.recorded_failures,
+            [ExtractionErrorKind::Stdin]
+        );
+
+        let mut stage_fake = FakeWorker {
+            scans: VecDeque::from([Ok(scan(MIN_TURNS as usize))]),
+            provider_outputs: VecDeque::from([Ok(valid_output())]),
+            stage_result: VecDeque::from([Err(WorkerError::Daemon("stage failed".into()))]),
+            failure_record_result: VecDeque::from([Err(WorkerError::Daemon(
+                "record failed".into(),
+            ))]),
+            ..Default::default()
+        };
+        let (_socket_directory, socket) = test_socket();
+
+        let stage_error =
+            run_worker_with(&config(ExtractMode::Shadow), &socket, None, &mut stage_fake)
+                .expect_err("stage failure audit must be durable");
+        assert_eq!(stage_error, WorkerError::Audit);
+        assert_eq!(
+            stage_fake.recorded_failures,
+            [ExtractionErrorKind::StageReject]
+        );
+    }
+
+    #[test]
+    fn r2_worker_second_attempt_audit_failure_is_distinct() {
+        let mut fake = FakeWorker {
+            scans: VecDeque::from([Ok(scan(MIN_TURNS as usize))]),
+            provider_outputs: VecDeque::from([
+                Ok(output(b"not json".to_vec())),
+                Err(ProcessError::Stdin),
+            ]),
+            failure_record_result: VecDeque::from([
+                Ok(()),
+                Err(WorkerError::Daemon("record failed".into())),
+            ]),
+            ..Default::default()
+        };
+        let (_socket_directory, socket) = test_socket();
+
+        let error = run_worker_with(&config(ExtractMode::Shadow), &socket, None, &mut fake)
+            .expect_err("second-attempt audit must be durable");
+        assert_eq!(error, WorkerError::Audit);
+        assert_eq!(
+            fake.recorded_failures,
+            [ExtractionErrorKind::InvalidJson, ExtractionErrorKind::Stdin]
+        );
+    }
+    #[test]
     fn r2_worker_returns_replay_outcome_without_duplicate_source_ledger() {
         let mut fake = FakeWorker {
-            scans: VecDeque::from([Ok(scan(10))]),
+            scans: VecDeque::from([Ok(scan(MIN_TURNS as usize))]),
             provider_outputs: VecDeque::from([Ok(valid_output())]),
             stage_result: VecDeque::from([Ok(StageExtractionResult::AlreadyStaged { run_id: 41 })]),
             ..Default::default()

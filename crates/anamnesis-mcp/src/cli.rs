@@ -3,12 +3,12 @@
 use std::sync::{Arc, Mutex};
 
 use anamnesis::embedding::EmbeddingProvider;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{ArgGroup, Parser, Subcommand};
 
 use crate::extract::audit::{ExtractionAuditResult, resolve_reviewer};
 use crate::extract::types::{AuditSupport, ContaminationCategory, RelationVerdict};
-use crate::extract::worker::{WorkerError, WorkerNoop, WorkerOutcome, run_worker};
+use crate::extract::worker::{WorkerNoop, WorkerOutcome, run_worker};
 
 use crate::config::Config;
 use crate::memory::{
@@ -332,75 +332,39 @@ pub fn is_extract_audit(cli: &Cli) -> bool {
     )
 }
 
-/// Render the extraction worker result without performing process I/O.
-struct ExtractRender {
-    exit_code: i32,
-    stdout: String,
-    stderr: String,
-}
-
-fn render_extract_outcome(result: Result<WorkerOutcome, WorkerError>) -> ExtractRender {
-    match result {
-        Ok(WorkerOutcome::Staged {
+fn render_extract_outcome(outcome: WorkerOutcome) -> String {
+    match outcome {
+        WorkerOutcome::Staged {
             run_id,
             candidate_count,
             relation_count,
-        }) => ExtractRender {
-            exit_code: 0,
-            stdout: format!(
-                "extraction staged: run_id={run_id} candidate_count={candidate_count} relation_count={relation_count}"
-            ),
-            stderr: String::new(),
-        },
-        Ok(WorkerOutcome::AlreadyStaged {
+        } => format!(
+            "extraction staged: run_id={run_id} candidate_count={candidate_count} relation_count={relation_count}"
+        ),
+        WorkerOutcome::AlreadyStaged {
             run_id,
             candidate_count,
             relation_count,
-        }) => ExtractRender {
-            exit_code: 0,
-            stdout: format!(
-                "extraction already staged: run_id={run_id} candidate_count={candidate_count} relation_count={relation_count}"
-            ),
-            stderr: String::new(),
-        },
-        Ok(WorkerOutcome::Noop(WorkerNoop::ModeOff)) => ExtractRender {
-            exit_code: 0,
-            stdout: "extraction disabled".to_owned(),
-            stderr: String::new(),
-        },
-        Ok(WorkerOutcome::Noop(WorkerNoop::WorkerBusy)) => ExtractRender {
-            exit_code: 0,
-            stdout: "extraction already running".to_owned(),
-            stderr: String::new(),
-        },
-        Ok(WorkerOutcome::Noop(WorkerNoop::BelowThreshold)) => ExtractRender {
-            exit_code: 0,
-            stdout: "extraction skipped: insufficient captured turns".to_owned(),
-            stderr: String::new(),
-        },
-        Err(error) => ExtractRender {
-            exit_code: 1,
-            stdout: String::new(),
-            stderr: error.to_string(),
-        },
+        } => format!(
+            "extraction already staged: run_id={run_id} candidate_count={candidate_count} relation_count={relation_count}"
+        ),
+        WorkerOutcome::Noop(WorkerNoop::ModeOff) => "extraction disabled".to_owned(),
+        WorkerOutcome::Noop(WorkerNoop::WorkerBusy) => "extraction already running".to_owned(),
+        WorkerOutcome::Noop(WorkerNoop::BelowThreshold) => {
+            "extraction skipped: insufficient captured turns".to_owned()
+        }
     }
 }
 
-/// Run the explicit, opt-in extraction worker. Audit requests are dispatched to
-/// the daemon instead and therefore never parse provider configuration.
+/// Run the explicit, opt-in extraction worker.
 pub fn run_extract_worker(cli: &Cli) -> Result<()> {
     let namespace = match &cli.command {
         Some(Commands::Extract { namespace, .. }) => namespace.as_deref(),
         _ => None,
     };
     let cfg = Config::from_env();
-    let rendered = render_extract_outcome(run_worker(&cfg, namespace));
-    if rendered.exit_code == 0 {
-        write_oneshot_stdout(cli, &rendered.stdout);
-        return Ok(());
-    }
-    tracing::error!(error = %rendered.stderr, "extraction worker failed");
-    Err(anyhow::anyhow!(rendered.stderr))
+    let output = render_extract_outcome(run_worker(&cfg, namespace)?);
+    write_oneshot_stdout(cli, &output)
 }
 
 /// Outcome of attempting a synchronous one-shot.
@@ -441,7 +405,6 @@ pub fn run_oneshot(cli: &Cli) -> Result<Oneshot> {
         // (there is no embedded hook mode); defer to `run_oneshot_client`.
         Some(Commands::Hook { .. }) => Ok(Oneshot::Client),
 
-        Some(Commands::Extract { .. }) => Ok(Oneshot::Client),
         // Daemon-routed one-shots: default mode defers to the async client; only
         // the embedded/no-daemon mode runs here against the DB directly.
         Some(Commands::Recall { .. } | Commands::Remember { .. })
@@ -454,13 +417,13 @@ pub fn run_oneshot(cli: &Cli) -> Result<Oneshot> {
         Some(Commands::Recall { .. }) => {
             let registry = Arc::new(Mutex::new(registry(&cfg)));
             let text = run_embedded_oneshot(cli, &registry)?;
-            write_oneshot_stdout(cli, &text);
+            write_oneshot_stdout(cli, &text)?;
             Ok(Oneshot::Done)
         }
         Some(Commands::Stats { recall: true, .. }) => {
             let registry = Arc::new(Mutex::new(registry(&cfg)));
             let text = run_embedded_oneshot(cli, &registry)?;
-            write_oneshot_stdout(cli, &text);
+            write_oneshot_stdout(cli, &text)?;
             Ok(Oneshot::Done)
         }
         Some(Commands::Remember {
@@ -499,6 +462,9 @@ pub fn run_oneshot(cli: &Cli) -> Result<Oneshot> {
             doctor(&cfg);
             Ok(Oneshot::Done)
         }
+        Some(Commands::Extract { .. }) => Err(anyhow::anyhow!(
+            "extract must be routed before synchronous one-shots"
+        )),
     }
 }
 
@@ -576,33 +542,35 @@ pub async fn run_oneshot_client(cli: &Cli) -> Result<()> {
     let req =
         oneshot_request(cli).ok_or_else(|| anyhow::anyhow!("invalid one-shot client command"))?;
     let text = call_oneshot(&cfg, req).await?;
-    write_oneshot_stdout(cli, &text);
+    write_oneshot_stdout(cli, &text)?;
     Ok(())
 }
 
-fn format_oneshot_stdout(cli: &Cli, text: &str) -> String {
-    if matches!(
-        &cli.command,
-        Some(Commands::Extract {
-            candidate: None,
-            relation: None,
-            ..
-        })
-    ) {
-        match serde_json::from_str::<ExtractionAuditResult>(text) {
-            Ok(result) => crate::extract::audit::render_audit_report(&result),
-            Err(_) => format!("{text}\n"),
-        }
+fn format_oneshot_stdout(cli: &Cli, text: &str) -> Result<String> {
+    if is_extract_audit(cli)
+        && matches!(
+            &cli.command,
+            Some(Commands::Extract {
+                candidate: None,
+                relation: None,
+                ..
+            })
+        )
+    {
+        let result = serde_json::from_str::<ExtractionAuditResult>(text)
+            .context("decode extraction audit response")?;
+        Ok(crate::extract::audit::render_audit_report(&result))
     } else if matches!(&cli.command, Some(Commands::Stats { recall: true, .. })) {
-        text.to_owned()
+        Ok(text.to_owned())
     } else {
-        format!("{text}\n")
+        Ok(format!("{text}\n"))
     }
 }
 
-fn write_oneshot_stdout(cli: &Cli, text: &str) {
-    let output = format_oneshot_stdout(cli, text);
+fn write_oneshot_stdout(cli: &Cli, text: &str) -> Result<()> {
+    let output = format_oneshot_stdout(cli, text)?;
     print!("{output}");
+    Ok(())
 }
 
 fn oneshot_request(cli: &Cli) -> Option<crate::proto::Request> {
@@ -910,8 +878,8 @@ mod tests {
         let embedded_text = run_embedded_oneshot(&recall_cli(true), &embedded_registry)
             .expect("embedded recall must dispatch locally");
 
-        let daemon_stdout = format_oneshot_stdout(&recall_cli(false), &daemon_text);
-        let embedded_stdout = format_oneshot_stdout(&recall_cli(true), &embedded_text);
+        let daemon_stdout = format_oneshot_stdout(&recall_cli(false), &daemon_text).unwrap();
+        let embedded_stdout = format_oneshot_stdout(&recall_cli(true), &embedded_text).unwrap();
         assert_eq!(
             embedded_stdout, daemon_stdout,
             "embedded and daemon recall must render byte-identical stdout"
@@ -960,7 +928,7 @@ mod tests {
             }
         ));
         assert_eq!(
-            format_oneshot_stdout(&stats_cli(false, false), "graph stats"),
+            format_oneshot_stdout(&stats_cli(false, false), "graph stats").unwrap(),
             "graph stats\n",
             "the existing daemon stats path must keep its one trailing newline"
         );
@@ -982,8 +950,9 @@ mod tests {
         let embedded_text = run_embedded_oneshot(&stats_cli(true, true), &embedded_registry)
             .expect("embedded stats --recall must dispatch locally");
 
-        let daemon_stdout = format_oneshot_stdout(&stats_cli(true, false), &daemon_text);
-        let embedded_stdout = format_oneshot_stdout(&stats_cli(true, true), &embedded_text);
+        let daemon_stdout = format_oneshot_stdout(&stats_cli(true, false), &daemon_text).unwrap();
+        let embedded_stdout =
+            format_oneshot_stdout(&stats_cli(true, true), &embedded_text).unwrap();
         assert_eq!(
             embedded_stdout, daemon_stdout,
             "embedded and daemon stats --recall must have byte-identical stdout framing"
@@ -1166,7 +1135,7 @@ mod tests {
         );
     }
     #[test]
-    fn audit_request_is_daemon_only_and_carries_no_worker_configuration() {
+    fn audit_list_is_daemon_only_and_malformed_responses_are_not_rendered() {
         use clap::Parser;
 
         let cli = Cli::try_parse_from([
@@ -1184,11 +1153,27 @@ mod tests {
                 ..
             }) if namespace == "project/resolved-namespace"
         ));
+
+        let raw_daemon_text = r#"{"candidate_rows":[not valid]"#;
+        let error = format_oneshot_stdout(&cli, raw_daemon_text)
+            .expect_err("malformed audit response must fail rather than print raw daemon text");
+        assert!(
+            !error.to_string().contains(raw_daemon_text),
+            "audit decode failure must not leak raw daemon text: {error:#}",
+        );
+
+        let worker_cli =
+            Cli::try_parse_from(["anamnesis", "extract"]).expect("plain worker CLI parses");
+        assert_eq!(
+            format_oneshot_stdout(&worker_cli, "extraction disabled")
+                .expect("worker output is not decoded as audit JSON"),
+            "extraction disabled\n"
+        );
     }
 
     #[test]
-    fn extract_outcome_rendering_keeps_successes_concise_and_failures_typed() {
-        use crate::extract::worker::{WorkerError, WorkerNoop, WorkerOutcome};
+    fn extract_outcome_rendering_keeps_successes_concise() {
+        use crate::extract::worker::{WorkerNoop, WorkerOutcome};
 
         for outcome in [
             WorkerOutcome::Staged {
@@ -1202,19 +1187,14 @@ mod tests {
                 relation_count: 4,
             },
         ] {
-            let rendered = render_extract_outcome(Ok(outcome));
-            assert_eq!(rendered.exit_code, 0);
-            assert!(rendered.stderr.is_empty());
+            let rendered = render_extract_outcome(outcome);
             assert!(
-                rendered.stdout.contains("run_id="),
-                "successful extraction must identify its run: {}",
-                rendered.stdout
+                rendered.contains("run_id="),
+                "successful extraction must identify its run: {rendered}",
             );
             assert!(
-                rendered.stdout.contains("candidate_count=")
-                    && rendered.stdout.contains("relation_count="),
-                "successful extraction must report candidate and relation counts: {}",
-                rendered.stdout
+                rendered.contains("candidate_count=") && rendered.contains("relation_count="),
+                "successful extraction must report candidate and relation counts: {rendered}",
             );
         }
 
@@ -1223,15 +1203,8 @@ mod tests {
             WorkerOutcome::Noop(WorkerNoop::WorkerBusy),
             WorkerOutcome::Noop(WorkerNoop::BelowThreshold),
         ] {
-            let rendered = render_extract_outcome(Ok(outcome));
-            assert_eq!(rendered.exit_code, 0);
-            assert!(rendered.stderr.is_empty());
-            assert!(!rendered.stdout.contains('\n'));
+            let rendered = render_extract_outcome(outcome);
+            assert!(!rendered.contains('\n'));
         }
-
-        let failed = render_extract_outcome(Err(WorkerError::Runtime("boom".into())));
-        assert_ne!(failed.exit_code, 0);
-        assert!(failed.stdout.is_empty());
-        assert!(failed.stderr.contains("runtime"));
     }
 }

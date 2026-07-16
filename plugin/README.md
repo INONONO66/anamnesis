@@ -154,14 +154,20 @@ Both Claude Code and Codex can automatically ingest your turn transcripts into a
 Enable or disable capture entirely with `ANAMNESIS_CAPTURE_ENABLED` (default `true`).
 ## R2 shadow extraction (opt-in)
 
-R2 can send a bounded batch of captured raw turns to an external extractor only with the
-explicit opt-in `ANAMNESIS_EXTRACT_MODE=shadow`; its default is `off`. `auto`, boolean-like,
-and other unrecognized values also degrade to `off`. Set `ANAMNESIS_EXTRACT_CMD` to a
-shell-style argv string when the default argv `claude -p` is not appropriate: it is parsed into
-a program plus arguments and executed directly, **never through a shell**. R2 stages resulting
-candidates only for audit; it does not change the graph, and candidates cannot appear in recall
-until R3. See [operations](../docs/06-operations/operations.md#r2-shadow-extraction-opt-in) for
-the external-transmission, batching, audit, and retention contract.
+R2 can send a bounded batch of captured raw turns to exactly one configured external extractor
+only with the explicit opt-in `ANAMNESIS_EXTRACT_MODE=shadow`; its default is `off`. `auto`,
+boolean-like, and other unrecognized values also degrade to `off`. `ANAMNESIS_EXTRACT_CMD`
+configures that one provider command (default argv `claude -p`), parsed into a program plus
+arguments and executed directly, **never through a shell and with no fallback command**. Stage-1
+raw capture remains in the graph as `Episodic` memories. Provider stdin/the raw source batch,
+raw stdout/stderr, and the raw command are transient and are not persisted or logged by R2
+policy or error records. The policy side schema persists only profile hash/components, run and
+failure scalars, validated candidates/relations, source identity/hash ledger, and audit labels.
+R2 performs no automatic pruning or cleanup; those rows persist until an operator takes a
+database lifecycle action. R2 stages candidates only for audit, does not change the graph, and
+keeps candidates out of recall until R3. See
+[operations](../docs/06-operations/operations.md#r2-shadow-extraction-opt-in) for batching and
+audit details.
 
 
 ## Configuration (environment variables)

@@ -1,9 +1,4 @@
 //! Configuration for the opt-in extraction worker.
-// Task 2 stages these configuration APIs; remove this allowance when Task 7 wires the worker.
-#![cfg_attr(
-    not(test),
-    allow(dead_code, reason = "Task 2 staged APIs are consumed by Task 7")
-)]
 
 use std::fmt;
 
@@ -19,8 +14,8 @@ pub(crate) enum ExtractMode {
 
 /// Result of parsing [`ExtractMode`].
 ///
-/// `warning` retains only the unsupported mode value, so callers can report the
-/// configuration problem without retaining command or transcript data.
+/// `warning` retains an unsupported Unicode mode value or a fixed redacted
+/// description of non-Unicode mode configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ParsedExtractMode {
     pub(crate) mode: ExtractMode,
@@ -69,6 +64,9 @@ impl ExtractCommand {
         if program.is_empty() {
             return Err(ExtractConfigError::EmptyCommand);
         }
+        if program.ends_with('/') || program.ends_with('\\') {
+            return Err(ExtractConfigError::InvalidProgramName);
+        }
 
         Ok(Self {
             program: program.clone(),
@@ -82,6 +80,8 @@ impl ExtractCommand {
 pub(crate) enum ExtractConfigError {
     EmptyCommand,
     InvalidCommand,
+    InvalidProgramName,
+    NonUnicodeCommand,
 }
 
 impl fmt::Display for ExtractConfigError {
@@ -90,6 +90,11 @@ impl fmt::Display for ExtractConfigError {
             Self::EmptyCommand => formatter.write_str("ANAMNESIS_EXTRACT_CMD must name a program"),
             Self::InvalidCommand => {
                 formatter.write_str("ANAMNESIS_EXTRACT_CMD contains invalid shell-style quoting")
+            }
+            Self::InvalidProgramName => formatter
+                .write_str("ANAMNESIS_EXTRACT_CMD must not end its program with a path separator"),
+            Self::NonUnicodeCommand => {
+                formatter.write_str("ANAMNESIS_EXTRACT_CMD must be valid Unicode in shadow mode")
             }
         }
     }
@@ -110,10 +115,24 @@ impl ExtractConfig {
     /// Resolve extraction settings from `ANAMNESIS_EXTRACT_MODE` and
     /// `ANAMNESIS_EXTRACT_CMD`.
     pub(crate) fn from_env() -> Result<Self, ExtractConfigError> {
-        let parsed_mode =
-            ExtractMode::parse(std::env::var("ANAMNESIS_EXTRACT_MODE").ok().as_deref());
-        let command =
-            ExtractCommand::parse(std::env::var("ANAMNESIS_EXTRACT_CMD").ok().as_deref())?;
+        let parsed_mode = match std::env::var("ANAMNESIS_EXTRACT_MODE") {
+            Ok(mode) => ExtractMode::parse(Some(&mode)),
+            Err(std::env::VarError::NotPresent) => ExtractMode::parse(None),
+            Err(std::env::VarError::NotUnicode(_)) => ParsedExtractMode {
+                mode: ExtractMode::Off,
+                warning: Some("ANAMNESIS_EXTRACT_MODE is not valid Unicode".to_owned()),
+            },
+        };
+        let command = match parsed_mode.mode {
+            ExtractMode::Off => ExtractCommand::parse(None)?,
+            ExtractMode::Shadow => match std::env::var("ANAMNESIS_EXTRACT_CMD") {
+                Ok(command) => ExtractCommand::parse(Some(&command))?,
+                Err(std::env::VarError::NotPresent) => ExtractCommand::parse(None)?,
+                Err(std::env::VarError::NotUnicode(_)) => {
+                    return Err(ExtractConfigError::NonUnicodeCommand);
+                }
+            },
+        };
 
         Ok(Self {
             mode: parsed_mode.mode,
@@ -124,7 +143,7 @@ impl ExtractConfig {
 }
 #[cfg(test)]
 mod tests {
-    use super::{ExtractCommand, ExtractConfig, ExtractMode};
+    use super::{ExtractCommand, ExtractConfig, ExtractConfigError, ExtractMode};
     /// Extraction configuration tests mutate process-global environment state.
     /// Serialize their set → parse → restore sequence so it cannot self-interleave.
     static ENV_EXTRACT_CONFIG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -199,7 +218,13 @@ mod tests {
 
     #[test]
     fn empty_or_invalid_commands_are_rejected() {
-        for command in ["", "   ", "extractor 'unterminated"] {
+        for command in [
+            "",
+            "   ",
+            "extractor 'unterminated",
+            "/usr/local/bin/",
+            r"extractor\",
+        ] {
             assert!(ExtractCommand::parse(Some(command)).is_err(), "{command:?}");
         }
     }
@@ -225,5 +250,70 @@ mod tests {
         assert!(config.mode_warning.is_none());
         assert_eq!(config.command.program, "extractor");
         assert_eq!(config.command.args, ["--json"]);
+    }
+    #[test]
+    fn off_or_invalid_mode_ignores_an_invalid_command() {
+        let _lock = ENV_EXTRACT_CONFIG_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _restore = EnvRestore {
+            mode: std::env::var_os("ANAMNESIS_EXTRACT_MODE"),
+            command: std::env::var_os("ANAMNESIS_EXTRACT_CMD"),
+        };
+
+        for mode in ["off", "invalid"] {
+            // SAFETY: `ENV_EXTRACT_CONFIG_LOCK` serializes this process-global
+            // environment mutation with this module's other extraction config tests.
+            unsafe {
+                std::env::set_var("ANAMNESIS_EXTRACT_MODE", mode);
+                std::env::set_var("ANAMNESIS_EXTRACT_CMD", "extractor 'unterminated");
+            }
+
+            let config = ExtractConfig::from_env().expect("off configuration");
+            assert_eq!(config.mode, ExtractMode::Off);
+            assert_eq!(
+                config.command,
+                ExtractCommand::parse(None).expect("default command")
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_unicode_environment_values_are_handled_without_retaining_their_bytes() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let _lock = ENV_EXTRACT_CONFIG_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _restore = EnvRestore {
+            mode: std::env::var_os("ANAMNESIS_EXTRACT_MODE"),
+            command: std::env::var_os("ANAMNESIS_EXTRACT_CMD"),
+        };
+        let non_unicode = std::ffi::OsString::from_vec(vec![0xff]);
+
+        // SAFETY: `ENV_EXTRACT_CONFIG_LOCK` serializes this process-global
+        // environment mutation with this module's other extraction config tests.
+        unsafe {
+            std::env::set_var("ANAMNESIS_EXTRACT_MODE", &non_unicode);
+            std::env::set_var("ANAMNESIS_EXTRACT_CMD", "extractor 'unterminated");
+        }
+        let config = ExtractConfig::from_env().expect("non-Unicode mode is fail-open");
+        assert_eq!(config.mode, ExtractMode::Off);
+        assert_eq!(
+            config.mode_warning.as_deref(),
+            Some("ANAMNESIS_EXTRACT_MODE is not valid Unicode")
+        );
+
+        // SAFETY: `ENV_EXTRACT_CONFIG_LOCK` serializes this process-global
+        // environment mutation with this module's other extraction config tests.
+        unsafe {
+            std::env::set_var("ANAMNESIS_EXTRACT_MODE", "shadow");
+            std::env::set_var("ANAMNESIS_EXTRACT_CMD", non_unicode);
+        }
+        assert_eq!(
+            ExtractConfig::from_env(),
+            Err(ExtractConfigError::NonUnicodeCommand)
+        );
     }
 }
