@@ -4,6 +4,7 @@
 
 use std::collections::HashSet;
 
+use crate::capture::META_CAPTURE;
 use anamnesis::graph::{NodeId, ScopePath, Timestamp};
 use anamnesis::memory::{Hit, Recall};
 use anamnesis::storage::SqliteStorage;
@@ -340,6 +341,6 @@ fn is_capture_node(mem: &Memory<SqliteStorage>, node_id: NodeId) -> bool {
     mem.engine()
         .graph()
         .get_node(node_id)
-        .map(|n| n.metadata.get("capture").is_some_and(|v| v == "true"))
+        .map(|n| n.metadata.get(META_CAPTURE).is_some_and(|v| v == "true"))
         .unwrap_or(true)
 }

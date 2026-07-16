@@ -1,4 +1,5 @@
 use super::*;
+use crate::capture::META_CAPTURE;
 use crate::memory::{
     AbstentionStats, AutoExposureStats, CosineStats, EventKindStats, MemoryRegistry, PolicyStore,
     PolicyStoreState, RecallStats, StubProvider, SweepPoint,
@@ -333,7 +334,7 @@ fn r1_recall_telemetry_deploy_gate_demo() {
     );
 
     let mut capture_metadata = std::collections::HashMap::new();
-    capture_metadata.insert("capture".to_string(), "true".to_string());
+    capture_metadata.insert(META_CAPTURE.to_string(), "true".to_string());
 
     ok_text(dispatch(
         &registry,
@@ -363,7 +364,7 @@ fn r1_recall_telemetry_deploy_gate_demo() {
         for id in graph.all_node_ids() {
             let node = graph.get_node(id).expect("fixture node exists");
             if node.content == query
-                && node.metadata.get("capture").map(String::as_str) == Some("true")
+                && node.metadata.get(META_CAPTURE).map(String::as_str) == Some("true")
             {
                 match node.node_type {
                     anamnesis::graph::KnowledgeType::Episodic => captured_episodic_id = Some(id),
@@ -377,7 +378,7 @@ fn r1_recall_telemetry_deploy_gate_demo() {
         let surviving_semantic_id =
             surviving_semantic_id.expect("fixture must include a captured Semantic node");
         memory_guard
-            .set_metadata(surviving_semantic_id, "capture", "false")
+            .set_metadata(surviving_semantic_id, META_CAPTURE, "false")
             .expect("mark only the Semantic fixture as durable");
         (captured_episodic_id.0, surviving_semantic_id.0)
     };
@@ -1259,7 +1260,7 @@ fn dispatch_capture_ingest_stamps_scope_and_capture_marker() {
     for node in nodes {
         assert_eq!(node.origin.scope.as_str(), "project/anamnesis");
         assert_eq!(
-            node.metadata.get("capture").map(String::as_str),
+            node.metadata.get(META_CAPTURE).map(String::as_str),
             Some("true")
         );
     }
@@ -3168,7 +3169,7 @@ fn extraction_scan_sends_only_captured_episodic_turns() {
             if node.content == "turn key impostor"
                 && matches!(&node.node_type, anamnesis::graph::KnowledgeType::Semantic)
             {
-                node.metadata.insert("capture".into(), "true".into());
+                node.metadata.insert(META_CAPTURE.into(), "true".into());
             }
         }
     }
@@ -3332,7 +3333,7 @@ fn stage_extraction_rejects_non_capture_turn_key_snapshot() {
             if node.content == "stage turn key impostor"
                 && matches!(&node.node_type, anamnesis::graph::KnowledgeType::Semantic)
             {
-                node.metadata.insert("capture".into(), "true".into());
+                node.metadata.insert(META_CAPTURE.into(), "true".into());
             }
         }
     }
