@@ -68,6 +68,7 @@ impl Fixture {
                 "test",
                 "--bin",
                 "anamnesis",
+                "--all-features",
                 "daemon::tests::shadow_extraction_daemon_harness",
                 "--",
                 "--exact",
@@ -77,7 +78,7 @@ impl Fixture {
             .env("ANAMNESIS_SHADOW_HARNESS_DB", &db)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::inherit())
             .spawn()
             .expect("start test-only real daemon harness");
 
@@ -95,7 +96,12 @@ impl Fixture {
         };
         let db_dir = fixture.db.parent().expect("database directory");
         assert!(
-            wait_until(Duration::from_secs(20), || socket_path(db_dir).is_some()),
+            wait_until(Duration::from_secs(120), || {
+                if fixture.daemon.try_wait().expect("poll daemon").is_some() {
+                    return false;
+                }
+                socket_path(db_dir).is_some()
+            }),
             "test-only daemon harness did not bind a socket"
         );
         assert!(
