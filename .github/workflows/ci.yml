@@ -39,7 +39,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: dtolnay/rust-toolchain@1.88
+      - uses: dtolnay/rust-toolchain@1.100
       - uses: Swatinem/rust-cache@v2
       # Unified workspace MSRV. 1.88 is forced by anamnesis-mcp's rmcp/schemars
       # dep tree (darling 0.23 requires rustc 1.88); the library builds on less
