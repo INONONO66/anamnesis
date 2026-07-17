@@ -39,8 +39,9 @@ exit-2 footgun.
 The plugin is **self-contained for everyone**: it declares *both* the hooks *and* the agent MCP
 server, and its wrappers **fetch the matching `anamnesis` binary from the GitHub Release on first
 use** (`bin/ensure-anamnesis.sh`). So a plain plugin install + reload gives you everything —
-proactive recall (hooks) **and** the `recall`/`remember`/`relate`/`ingest_conversation`/`stats`
-tools (MCP) — with **no separate `claude mcp add`, no `npm`/`cargo`, no global binary**.
+proactive recall (hooks) and the agent MCP server — with **no separate `claude mcp add`,
+no `npm`/`cargo`, no global binary**. See the root
+[authoritative MCP tool inventory](../README.md#mcp-tool-inventory).
 
 ```
 /plugin marketplace add INONONO66/anamnesis     # git repo (or `./plugin` for a local checkout)
@@ -219,9 +220,9 @@ stall a prompt.
 ## Use with other MCP clients
 
 The `hook` subcommand (proactive recall) is Claude-Code/Codex-specific, but the underlying
-`anamnesis serve` **stdio MCP server** — `recall` / `remember` / `relate` /
-`ingest_conversation` / `extract_pending` / `stats` — is a plain MCP server any
-MCP-compatible client can launch. No plugin, no daemon socket, no hooks required.
+`anamnesis serve` **stdio MCP server** exposes the root
+[authoritative MCP tool inventory](../README.md#mcp-tool-inventory) to any MCP-compatible
+client. No plugin, daemon socket, or hooks are required.
 
 ### Generic (any MCP-compatible client)
 
