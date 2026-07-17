@@ -6,7 +6,7 @@
   "repository": { "type": "git", "url": "git+https://github.com/INONONO66/anamnesis.git" },
   "bin": { "anamnesis": "bin/anamnesis.js" },
   "files": ["bin/install.js", "bin/anamnesis.js", "README.md"],
-  "scripts": { "postinstall": "node bin/install.js" },
+  "scripts": { "postinstall": "node bin/install.js", "test": "node test/binary-override.js" },
   "engines": { "node": ">=16" },
   "publishConfig": { "access": "public", "provenance": true }
 }

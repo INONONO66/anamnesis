@@ -148,7 +148,11 @@ function fail(message) {
   process.exit(1);
 }
 
-if (env.ANAMNESIS_MCP_SKIP_DOWNLOAD === "1" || env.ANAMNESIS_MCP_BINARY) {
+if (
+  env.ANAMNESIS_MCP_SKIP_DOWNLOAD === "1" ||
+  env.ANAMNESIS_MCP_BINARY ||
+  env.ANAMNESIS_BINARY
+) {
   process.exit(0);
 }
 
