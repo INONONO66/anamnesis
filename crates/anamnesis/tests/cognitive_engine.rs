@@ -26,6 +26,30 @@ fn make_origin(_agent: &str, project: Option<&str>) -> Origin {
     }
 }
 
+fn assert_contradiction_tension(
+    package: &anamnesis::query::ContextPackage,
+    node_a: anamnesis::graph::types::NodeId,
+    node_b: anamnesis::graph::types::NodeId,
+) {
+    let tension = package
+        .tensions
+        .iter()
+        .find(|tension| {
+            (tension.node_a == node_a && tension.node_b == node_b)
+                || (tension.node_a == node_b && tension.node_b == node_a)
+        })
+        .expect("Contradicts edge should surface its endpoint tension");
+
+    assert!(
+        tension.stress > 0.0,
+        "surfaced tension must carry positive stress"
+    );
+    assert!(
+        tension.evidence_sources.contains(&node_a) && tension.evidence_sources.contains(&node_b),
+        "tension evidence must name both contradiction endpoints"
+    );
+}
+
 fn make_obs(
     name: &str,
     kt: KnowledgeType,
@@ -379,38 +403,51 @@ fn contradicts_creates_tension() {
         .with_dedup_enabled(false);
     let mut engine = Engine::with_config(config);
 
+    let hub = make_obs(
+        "factory pattern discussion",
+        KnowledgeType::Semantic,
+        vec![1.0, 0.0, 0.0],
+        None,
+    );
     let obs1 = make_obs(
         "factory pattern is good",
         KnowledgeType::Semantic,
-        vec![1.0, 0.0],
+        vec![0.0, 1.0, 0.0],
         None,
     );
     let obs2 = make_obs(
         "factory pattern is bad",
         KnowledgeType::Semantic,
-        vec![0.9, 0.1],
+        vec![0.0, 0.0, 1.0],
         None,
     );
 
+    let IngestResult::Created(hub_ids) = engine.ingest(hub).unwrap() else {
+        panic!("expected Created");
+    };
     let IngestResult::Created(ids1) = engine.ingest(obs1).unwrap() else {
         panic!("expected Created");
     };
     let IngestResult::Created(ids2) = engine.ingest(obs2).unwrap() else {
         panic!("expected Created");
     };
+    let hub_id = hub_ids[0];
     let id1 = ids1[0];
     let id2 = ids2[0];
+    engine.link(hub_id, id1, EdgeType::Semantic).unwrap();
+    engine.link(hub_id, id2, EdgeType::Semantic).unwrap();
     engine.link(id1, id2, EdgeType::Contradicts).unwrap();
 
     let q = Query::Associative {
-        seed: id1,
+        seed: hub_id,
         budget: 50,
     };
     let pkg = engine.query(&q, &QueryConfig::default()).unwrap();
 
-    assert!(
-        !pkg.tensions.is_empty() || pkg.agent_tension >= 0.0,
-        "Contradicts edge should create tension"
+    assert_contradiction_tension(&pkg, id1, id2);
+    assert_eq!(
+        pkg.agent_tension, 0.0,
+        "semantic-only contradictions must not count as identity-scoped agent tension"
     );
 }
 
