@@ -30,6 +30,8 @@ pub const DEFAULT_HOOK_COSINE_GATE: f64 = 0.86;
 pub const DEFAULT_HOOK_SEED_COSINE_GATE: f64 = 0.80;
 /// Number of recent transcript turns folded into UserPrompt recall queries.
 pub const DEFAULT_HOOK_CONTEXT_TURNS: usize = 3;
+/// Cap on memories injected for each UserPrompt hook recall.
+pub const DEFAULT_HOOK_TOPK: usize = 3;
 /// Default embedding model for new databases and model downloads.
 pub const DEFAULT_EMBED_MODEL: &str = "multilingual-e5-small";
 
@@ -55,7 +57,7 @@ pub struct Config {
     /// Recent transcript turns included in UserPrompt recall queries.
     /// `ANAMNESIS_HOOK_CONTEXT_TURNS`; see [`DEFAULT_HOOK_CONTEXT_TURNS`].
     pub hook_context_turns: usize,
-    /// `k` — cap on injected per-turn memories. `ANAMNESIS_HOOK_TOPK` (default 3).
+    /// `k` — cap on injected per-turn memories. `ANAMNESIS_HOOK_TOPK`; see [`DEFAULT_HOOK_TOPK`].
     pub hook_topk: usize,
     /// SessionStart seed size. `ANAMNESIS_HOOK_SEED_K` (default 5).
     pub hook_seed_k: usize,
@@ -83,7 +85,7 @@ impl Config {
     /// - `ANAMNESIS_HOOK_COSINE_GATE` → `hook_cosine_gate` (default: [`DEFAULT_HOOK_COSINE_GATE`])
     /// - `ANAMNESIS_HOOK_SEED_COSINE_GATE` → `hook_seed_cosine_gate` (default: [`DEFAULT_HOOK_SEED_COSINE_GATE`])
     /// - `ANAMNESIS_HOOK_CONTEXT_TURNS` → `hook_context_turns` (default: [`DEFAULT_HOOK_CONTEXT_TURNS`])
-    /// - `ANAMNESIS_HOOK_TOPK`       → `hook_topk` (default: 3)
+    /// - `ANAMNESIS_HOOK_TOPK`       → `hook_topk` (default: [`DEFAULT_HOOK_TOPK`])
     /// - `ANAMNESIS_HOOK_SEED_K`     → `hook_seed_k` (default: 5)
     /// - `ANAMNESIS_HOOK_TIMEOUT_MS` → `hook_timeout_ms` (default: 1500)
     /// - `ANAMNESIS_EMBED_MODEL`     → `embed_model` (default: [`DEFAULT_EMBED_MODEL`])
@@ -106,7 +108,7 @@ impl Config {
         );
         let hook_context_turns =
             parse_env("ANAMNESIS_HOOK_CONTEXT_TURNS", DEFAULT_HOOK_CONTEXT_TURNS);
-        let hook_topk = parse_env("ANAMNESIS_HOOK_TOPK", 3usize);
+        let hook_topk = parse_env("ANAMNESIS_HOOK_TOPK", DEFAULT_HOOK_TOPK);
         let hook_seed_k = parse_env("ANAMNESIS_HOOK_SEED_K", 5usize);
         let hook_timeout_ms = parse_env("ANAMNESIS_HOOK_TIMEOUT_MS", 1500u64);
         let capture_enabled = match std::env::var("ANAMNESIS_CAPTURE_ENABLED") {
@@ -327,7 +329,7 @@ mod tests {
             hook_cosine_gate: DEFAULT_HOOK_COSINE_GATE,
             hook_seed_cosine_gate: DEFAULT_HOOK_SEED_COSINE_GATE,
             hook_context_turns: DEFAULT_HOOK_CONTEXT_TURNS,
-            hook_topk: 3,
+            hook_topk: DEFAULT_HOOK_TOPK,
             hook_seed_k: 5,
             hook_timeout_ms: 1500,
             capture_enabled: true,
@@ -349,7 +351,7 @@ mod tests {
             hook_cosine_gate: DEFAULT_HOOK_COSINE_GATE,
             hook_seed_cosine_gate: DEFAULT_HOOK_SEED_COSINE_GATE,
             hook_context_turns: DEFAULT_HOOK_CONTEXT_TURNS,
-            hook_topk: 3,
+            hook_topk: DEFAULT_HOOK_TOPK,
             hook_seed_k: 5,
             hook_timeout_ms: 1500,
             capture_enabled: true,
@@ -360,13 +362,23 @@ mod tests {
         assert_eq!(cfg.hook_cosine_gate, 0.86);
         assert_eq!(cfg.hook_seed_cosine_gate, 0.80);
         assert_eq!(cfg.hook_context_turns, 3);
-        assert_eq!(cfg.hook_topk, 3);
+        assert_eq!(cfg.hook_topk, DEFAULT_HOOK_TOPK);
         assert_eq!(
             parse_env(
                 "ANAMNESIS_DEFINITELY_UNSET_FOR_TEST_HOOK_COSINE",
                 DEFAULT_HOOK_COSINE_GATE,
             ),
             DEFAULT_HOOK_COSINE_GATE
+        );
+    }
+
+    #[test]
+    fn operations_hook_topk_default_matches_source() {
+        let expected = format!("| `ANAMNESIS_HOOK_TOPK` | `{DEFAULT_HOOK_TOPK}` |");
+        let operations = include_str!("../../../docs/06-operations/operations.md");
+        assert!(
+            operations.contains(&expected),
+            "operations env table must contain the source default row prefix: {expected}"
         );
     }
 

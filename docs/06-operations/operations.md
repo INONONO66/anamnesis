@@ -419,7 +419,7 @@ default, never an error).
 | `ANAMNESIS_NAMESPACE` | `default` | Namespace used when a call omits one. |
 | `ANAMNESIS_REINFORCE` | `true` | Auto-reinforce the package returned by `recall`; `0` / `false` / `no` disables. |
 | `ANAMNESIS_HOOK_THRESHOLD` | `13.0` | `τ` — the recall injection gate. A floor on the **top recall score**, which is raw ACT-R activation (~8–16 on a typical graph), **not** a 0..1 similarity; a sub-1 value silently disables the gate. **Recalibrate per graph** — activation magnitude scales with density/recency. |
-| `ANAMNESIS_HOOK_TOPK` | `5` | Cap on injected per-turn memories. |
+| `ANAMNESIS_HOOK_TOPK` | `3` | Cap on injected per-turn memories. |
 | `ANAMNESIS_HOOK_SEED_K` | `5` | SessionStart seed-recall size. |
 | `ANAMNESIS_HOOK_TIMEOUT_MS` | `1500` | Per-hook fail-open timeout (ms). |
 | `ANAMNESIS_CAPTURE_ENABLED` | `true` | Global capture kill-switch; `0` / `false` / `no` disables passive capture. |
