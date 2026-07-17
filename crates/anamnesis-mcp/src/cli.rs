@@ -378,6 +378,15 @@ pub enum Oneshot {
     Client,
 }
 
+/// Whether an embedded recall or stats command should use the shared dispatcher.
+fn uses_shared_embedded_dispatch(cli: &Cli) -> bool {
+    wants_embedded(cli)
+        && matches!(
+            &cli.command,
+            Some(Commands::Recall { .. } | Commands::Stats { .. })
+        )
+}
+
 /// Run the one-shots that are always synchronous and DB-direct (`prewarm`,
 /// `doctor`) plus the `--embedded` variants of the daemon-routed commands.
 ///
@@ -388,6 +397,13 @@ pub fn run_oneshot(cli: &Cli) -> Result<Oneshot> {
     crate::config::ensure_model_cache_dir();
     let cfg = Config::from_env();
     let embedded = wants_embedded(cli);
+
+    if uses_shared_embedded_dispatch(cli) {
+        let registry = Arc::new(Mutex::new(registry(&cfg)));
+        let text = run_embedded_oneshot(cli, &registry)?;
+        write_oneshot_stdout(cli, &text)?;
+        return Ok(Oneshot::Done);
+    }
     match &cli.command {
         // `Serve`/no-subcommand → start the async stdio server. `Daemon` and
         // `Dashboard` are intercepted earlier in `main` (each runs its own
@@ -407,25 +423,11 @@ pub fn run_oneshot(cli: &Cli) -> Result<Oneshot> {
 
         // Daemon-routed one-shots: default mode defers to the async client; only
         // the embedded/no-daemon mode runs here against the DB directly.
-        Some(Commands::Recall { .. } | Commands::Remember { .. })
-        | Some(Commands::Relate { .. } | Commands::Stats { .. })
-            if !embedded =>
-        {
+        Some(Commands::Recall { .. } | Commands::Stats { .. }) => Ok(Oneshot::Client),
+        Some(Commands::Remember { .. } | Commands::Relate { .. }) if !embedded => {
             Ok(Oneshot::Client)
         }
 
-        Some(Commands::Recall { .. }) => {
-            let registry = Arc::new(Mutex::new(registry(&cfg)));
-            let text = run_embedded_oneshot(cli, &registry)?;
-            write_oneshot_stdout(cli, &text)?;
-            Ok(Oneshot::Done)
-        }
-        Some(Commands::Stats { recall: true, .. }) => {
-            let registry = Arc::new(Mutex::new(registry(&cfg)));
-            let text = run_embedded_oneshot(cli, &registry)?;
-            write_oneshot_stdout(cli, &text)?;
-            Ok(Oneshot::Done)
-        }
         Some(Commands::Remember {
             text, namespace, ..
         }) => {
@@ -444,12 +446,6 @@ pub fn run_oneshot(cli: &Cli) -> Result<Oneshot> {
             let mut reg = registry(&cfg);
             let edge = reg.relate(*from_id, *to_id, relation, namespace.as_deref())?;
             println!("linked node {from_id} -> node {to_id} ({relation}) as edge {edge}");
-            Ok(Oneshot::Done)
-        }
-        Some(Commands::Stats { namespace, .. }) => {
-            let mut reg = registry(&cfg);
-            let stats = reg.stats(namespace.as_deref())?;
-            print!("{}", crate::dispatch::format_stats(&stats));
             Ok(Oneshot::Done)
         }
         Some(Commands::Prewarm) => {
@@ -931,6 +927,34 @@ mod tests {
             format_oneshot_stdout(&stats_cli(false, false), "graph stats").unwrap(),
             "graph stats\n",
             "the existing daemon stats path must keep its one trailing newline"
+        );
+    }
+
+    #[test]
+    fn plain_embedded_stats_selects_shared_dispatch() {
+        assert!(uses_shared_embedded_dispatch(&stats_cli(false, true)));
+    }
+
+    #[test]
+    fn embedded_and_daemon_plain_stats_render_byte_identically() {
+        let (daemon_registry, _daemon_dir) = stub_registry();
+        let (embedded_registry, _embedded_dir) = stub_registry();
+
+        let daemon_text = match crate::dispatch::dispatch(
+            &daemon_registry,
+            oneshot_request(&stats_cli(false, false))
+                .expect("plain stats must build a daemon request"),
+        ) {
+            Response::Ok { text } => text,
+            response => panic!("daemon plain stats must succeed: {response:?}"),
+        };
+        let embedded_text = run_embedded_oneshot(&stats_cli(false, true), &embedded_registry)
+            .expect("embedded plain stats must dispatch locally");
+
+        assert_eq!(
+            format_oneshot_stdout(&stats_cli(false, true), &embedded_text).unwrap(),
+            format_oneshot_stdout(&stats_cli(false, false), &daemon_text).unwrap(),
+            "embedded and daemon plain stats must have byte-identical stdout framing"
         );
     }
 
