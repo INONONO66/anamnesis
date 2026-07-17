@@ -11,7 +11,17 @@ permissions:
   id-token: write
 
 jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: validate release tag and lockstep versions
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: plugin/tests/verify_release_tag.sh "$RELEASE_TAG"
+
   build:
+    needs: preflight
     strategy:
       fail-fast: false
       matrix:
