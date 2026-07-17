@@ -5,11 +5,9 @@ cognitive memory for LLM agents.
 
 ## Tools
 
-| Tool | When the agent should call it |
-|------|-------------------------------|
-| `recall` | **Before answering** — surfaces prior decisions/lessons. Reading auto-reinforces what it returns. |
-| `remember` | **After any decision or lesson worth keeping** — stores one distilled insight. |
-| `ingest_conversation` | Hand off a full transcript (ordered turns) for the windowing recipe. |
+The root README has the [authoritative MCP tool inventory](https://github.com/INONONO66/anamnesis#mcp-tool-inventory).
+For the usual workflow, call `recall` before non-trivial answers and `remember`
+after decisions or lessons worth keeping.
 
 ## Install (Claude Desktop)
 

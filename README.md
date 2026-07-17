@@ -88,13 +88,31 @@ GitHub Release on first use — no `cargo`, no `npm`, no separate binary step.
 /reload-plugins
 ```
 
-That is the whole setup. You get proactive recall (5 hooks) **and** the six
-agent MCP tools:
+That is the whole setup. You get proactive recall (5 hooks) and all 11 agent
+MCP tools:
 
 | Surface | What ships |
 |:--|:--|
 | **Hooks** | `SessionStart` (seed recall + extraction nudge), `UserPromptSubmit` (gated recall), `Stop` / `PreCompact` / `SessionEnd` (passive turn capture) |
-| **MCP tools** | `recall`, `remember`, `relate`, `ingest_conversation`, `extract_pending`, `stats` |
+| **MCP tools** | The 11 tools in the inventory below. |
+
+### MCP tool inventory
+
+This is the authoritative inventory of tools registered by the MCP server:
+
+| Tool | Purpose |
+|:--|:--|
+| `recall` | Search memory for relevant prior knowledge. |
+| `remember` | Store a distilled insight, decision, or lesson. |
+| `ingest_conversation` | Ingest an ordered conversation transcript. |
+| `relate` | Link two remembered nodes with a typed reasoning relation. |
+| `stats` | Report read-only graph health and size statistics. |
+| `extract_pending` | Retrieve un-extracted conversation turns for reasoning extraction. |
+| `update` | Edit an existing memory's content. |
+| `forget` | Soft-delete or permanently erase a memory. |
+| `supersede` | Mark a newer memory as superseding an older one. |
+| `list` | List memories by salience with optional filters. |
+| `get` | Read one memory's full detail by node ID. |
 
 **Automatic capture.** Beyond on-demand `remember`, the plugin captures
 the session on its own in two stages. **Stage 1** is passive: `Stop`,

@@ -86,6 +86,8 @@ impl Launcher {
             "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}
         }));
         let listed = self.read();
+        assert_eq!(listed["jsonrpc"], "2.0", "tools/list response: {listed}");
+        assert_eq!(listed["id"], 2, "tools/list response: {listed}");
         listed["result"]["tools"]
             .as_array()
             .expect("tools array")
@@ -140,19 +142,22 @@ fn two_launchers_share_one_daemon_then_grace_exits() {
     let db = db_dir.join("memory.db");
 
     let expect_tools = |names: &[String]| {
-        for t in [
-            "recall",
-            "remember",
-            "relate",
-            "stats",
-            "ingest_conversation",
-            "extract_pending",
-        ] {
-            assert!(
-                names.iter().any(|n| n == t),
-                "expected tool {t:?} in {names:?}"
-            );
-        }
+        let mut actual = names.to_vec();
+        actual.sort_unstable();
+        let expected = vec![
+            "extract_pending".to_string(),
+            "forget".to_string(),
+            "get".to_string(),
+            "ingest_conversation".to_string(),
+            "list".to_string(),
+            "recall".to_string(),
+            "relate".to_string(),
+            "remember".to_string(),
+            "stats".to_string(),
+            "supersede".to_string(),
+            "update".to_string(),
+        ];
+        assert_eq!(actual, expected, "unexpected MCP tool inventory");
     };
 
     // (1) First launcher: starts (auto-spawns) the daemon, handshakes, lists tools.
