@@ -27,8 +27,9 @@ struct Launcher {
 }
 
 impl Launcher {
-    /// Spawn `anamnesis-mcp serve` (launcher mode → ensures/starts the shared
-    /// daemon and proxies stdio↔socket) against `db`, with a 1s grace window.
+    /// Spawn the external `serve` adapter, which ensures the shared daemon is
+    /// ready and proxies stdio to its socket. This is adapter startup timing, not
+    /// daemon last-client/grace timing.
     fn spawn(db: &Path) -> Self {
         let bin = env!("CARGO_BIN_EXE_anamnesis");
         let mut child = Command::new(bin)
@@ -96,14 +97,16 @@ impl Launcher {
             .collect()
     }
 
-    /// Drop our stdin (EOF → launcher exits its proxy → disconnects from the
-    /// daemon) and reap the launcher process.
-    fn close(self) {
+    /// Close the external adapter (stdin EOF) and reap it. This disconnects one
+    /// daemon client; it is distinct from the daemon's later idle-grace shutdown.
+    fn close(self) -> Duration {
+        let started = Instant::now();
         let Self {
             mut child, stdin, ..
         } = self;
         drop(stdin); // stdin EOF → the proxy's stdin→socket copy finishes → exit.
         let _ = child.wait();
+        started.elapsed()
     }
 }
 
@@ -160,22 +163,26 @@ fn two_launchers_share_one_daemon_then_grace_exits() {
         assert_eq!(actual, expected, "unexpected MCP tool inventory");
     };
 
-    // (1) First launcher: starts (auto-spawns) the daemon, handshakes, lists tools.
+    // (1) First external adapter startup: readiness includes its MCP handshake,
+    // not the daemon's later last-client/grace/unlink phases.
+    let first_ready_started = Instant::now();
     let mut a = Launcher::spawn(&db);
     expect_tools(&a.handshake_and_list_tools());
+    let first_launcher_ready = first_ready_started.elapsed();
 
     // The daemon must have bound exactly one socket in the DB dir.
     assert!(
         wait_until(Duration::from_secs(5), || sock_files(&db_dir).len() == 1),
-        "expected exactly one daemon socket after the first launcher, found {:?}",
+        "first adapter ready in {first_launcher_ready:?}, but expected exactly one daemon socket; found {:?}",
         sock_files(&db_dir)
     );
     let the_socket = sock_files(&db_dir).into_iter().next().unwrap();
 
-    // (2) Second launcher: connects to the SAME daemon (no second daemon spawns),
-    // handshakes, lists tools.
+    // (2) Second external adapter startup: it connects to the existing daemon.
+    let second_ready_started = Instant::now();
     let mut b = Launcher::spawn(&db);
     expect_tools(&b.handshake_and_list_tools());
+    let second_launcher_ready = second_ready_started.elapsed();
 
     // Still exactly ONE socket → exactly one daemon serving both clients.
     let socks = sock_files(&db_dir);
@@ -186,18 +193,42 @@ fn two_launchers_share_one_daemon_then_grace_exits() {
     );
     assert_eq!(socks[0], the_socket, "the socket identity must be stable");
 
-    // (3) Close both clients. With a 1s grace window, the now-idle daemon must
-    // exit and unlink its socket within a few seconds.
-    a.close();
-    b.close();
+    // (3) Close both external adapters and reap them. The daemon's separate
+    // last-client/grace/unlink sequence begins only after the final disconnect.
+    let first_adapter_close = a.close();
+    let second_adapter_close = b.close();
 
+    // STEP 12 timing investigation (2026-07-17, Apple M4 Max, debug build):
+    // 20 external runs had post-close unlink min/median/max
+    // 2.328/2.353/2.380s. Adapter readiness was 0.745/0.779/0.908s for the
+    // spawning adapter and 8/10/12ms for the second; both adapter reaps were
+    // <=1ms. Ten in-process daemon runs isolated last-client→grace at
+    // 1.003/1.004/1.004s, while connection joins, flush, migration drain,
+    // socket unlink, and lock release totaled 0–1ms. A correlated probe put
+    // those internal phases at 1.0033s and 0.5ms within a 2.348s external
+    // close→unlink interval: the remaining ~1.345s is the external process
+    // close→daemon EOF/client-count handoff, not the 10ms filesystem poll,
+    // grace timer, or unlink. The 20s bound is retained (not increased) for
+    // scheduler-starved CI; timeout failures print every externally observable
+    // phase, and daemon logs now emit its internal phases.
+    let socket_unlink_started = Instant::now();
+    let socket_unlinked = wait_until(Duration::from_secs(20), || !the_socket.exists());
+    let post_close_socket_unlink = socket_unlink_started.elapsed();
     assert!(
-        wait_until(Duration::from_secs(20), || !the_socket.exists()),
-        "daemon did not exit / unlink its socket {the_socket:?} within the grace window"
+        socket_unlinked,
+        "daemon socket did not unlink within the unchanged 20s bound; first_adapter_ready={first_launcher_ready:?} second_adapter_ready={second_launcher_ready:?} first_adapter_close={first_adapter_close:?} second_adapter_close={second_adapter_close:?} post_close_socket_unlink={post_close_socket_unlink:?}"
     );
     assert!(
         sock_files(&db_dir).is_empty(),
         "no daemon socket should remain after grace shutdown, found {:?}",
         sock_files(&db_dir)
+    );
+    println!(
+        "multi_client_daemon_metrics first_adapter_ready_ms={} second_adapter_ready_ms={} first_adapter_close_ms={} second_adapter_close_ms={} post_close_socket_unlink_ms={}",
+        first_launcher_ready.as_millis(),
+        second_launcher_ready.as_millis(),
+        first_adapter_close.as_millis(),
+        second_adapter_close.as_millis(),
+        post_close_socket_unlink.as_millis(),
     );
 }
