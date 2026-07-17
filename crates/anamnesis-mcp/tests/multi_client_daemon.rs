@@ -99,14 +99,26 @@ impl Launcher {
 
     /// Close the external adapter (stdin EOF) and reap it. This disconnects one
     /// daemon client; it is distinct from the daemon's later idle-grace shutdown.
+    /// The reap uses the same 20s historical CI allowance as socket observation,
+    /// so an adapter-exit regression cannot hang the test outside diagnostics.
     fn close(self) -> Duration {
         let started = Instant::now();
         let Self {
             mut child, stdin, ..
         } = self;
         drop(stdin); // stdin EOF → the proxy's stdin→socket copy finishes → exit.
-        let _ = child.wait();
-        started.elapsed()
+        let timeout = Duration::from_secs(20);
+        loop {
+            match child.try_wait().expect("poll serve adapter exit") {
+                Some(_) => return started.elapsed(),
+                None if started.elapsed() >= timeout => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("serve adapter did not exit within {timeout:?}");
+                }
+                None => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
     }
 }
 
