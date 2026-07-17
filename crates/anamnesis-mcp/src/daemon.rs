@@ -18,9 +18,9 @@ use std::hash::{Hash, Hasher};
 use std::io;
 use std::os::unix::net::UnixListener as StdUnixListener;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -312,7 +312,8 @@ impl DaemonBind {
     ///
     /// `process::exit` skips `Drop`, so on the signal path call this explicitly
     /// (mirrors how `main.rs` already flushes on SIGTERM).
-    pub fn release(self) {
+    pub fn release(self) -> Duration {
+        let started = Instant::now();
         // 2) unlink socket (best-effort; a concurrent reclaim handles a miss).
         if let Err(e) = std::fs::remove_file(&self.socket_path)
             && e.kind() != io::ErrorKind::NotFound
@@ -323,6 +324,7 @@ impl DaemonBind {
         let _ = fs4::FileExt::unlock(self.lock_file.as_ref());
         // lock_file drops here → fd closed; lock already released.
         let _ = &self.lock_path; // kept for diagnostics if extended.
+        started.elapsed()
     }
 }
 
@@ -346,6 +348,9 @@ pub struct ClientTracker {
     /// launcher's first `connect()` even lands.
     served: AtomicBool,
     idle: Notify,
+    /// Timestamp of the latest real 1→0 transition. Kept separately from the
+    /// atomic count so shutdown telemetry can attribute the full idle-grace wait.
+    last_client_zero: Mutex<Option<Instant>>,
 }
 
 impl ClientTracker {
@@ -354,6 +359,7 @@ impl ClientTracker {
             count: AtomicUsize::new(0),
             served: AtomicBool::new(false),
             idle: Notify::new(),
+            last_client_zero: Mutex::new(None),
         })
     }
 
@@ -382,14 +388,26 @@ impl ClientTracker {
     fn has_served(&self) -> bool {
         self.served.load(Ordering::SeqCst)
     }
+    fn last_client_zero_elapsed(&self) -> Option<Duration> {
+        self.last_client_zero
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .map(|at| at.elapsed())
+    }
 }
 
 pub struct ClientGuard(Arc<ClientTracker>);
 
 impl Drop for ClientGuard {
     fn drop(&mut self) {
+        let previous = self.0.count.fetch_sub(1, Ordering::SeqCst);
         // If this was the last client, wake the grace loop to start the timer.
-        if self.0.count.fetch_sub(1, Ordering::SeqCst) == 1 {
+        if previous == 1 {
+            *self
+                .0
+                .last_client_zero
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Instant::now());
             self.0.idle.notify_one();
         }
     }
@@ -499,17 +517,41 @@ pub async fn run(cfg: Config) -> Result<()> {
     Ok(())
 }
 
+/// Per-phase timings captured when the daemon exits. Values contain only monotonic
+/// durations; they deliberately exclude client data, database paths, and errors.
+#[derive(Debug, Default)]
+pub(crate) struct GraceExitMetrics {
+    pub(crate) client_zero_to_grace: Option<Duration>,
+    pub(crate) connection_join: Duration,
+    pub(crate) registry_flush: Duration,
+    pub(crate) migration_drain: Duration,
+    pub(crate) socket_release: Duration,
+    pub(crate) post_grace_teardown: Option<Duration>,
+}
+
+impl GraceExitMetrics {
+    fn emit(&self) {
+        tracing::info!(
+            client_zero_to_grace = ?self.client_zero_to_grace,
+            connection_join = ?self.connection_join,
+            registry_flush = ?self.registry_flush,
+            migration_drain = ?self.migration_drain,
+            socket_release = ?self.socket_release,
+            post_grace_teardown = ?self.post_grace_teardown,
+            "daemon shutdown phase metrics"
+        );
+    }
+}
 /// The shared accept/grace/shutdown loop, parameterized over an already-acquired
 /// [`DaemonBind`] and a pre-built registry so tests can drive it with a stub
-/// embedding provider (no model download).
-///
-/// Runs until a shutdown signal or the idle-grace window expires, then flushes
-/// memory, unlinks the socket, and releases the lock — in that order.
+/// embedding provider (no model download). Runs until a shutdown signal or the
+/// idle-grace window expires, then flushes memory, unlinks the socket, and releases
+/// the lock — in that order.
 pub(crate) async fn serve_loop(
     bind: DaemonBind,
     registry: std::sync::Arc<std::sync::Mutex<MemoryRegistry>>,
     grace: Duration,
-) {
+) -> GraceExitMetrics {
     let migrations = match MigrationRuntime::new(
         &registry,
         bind.default_db_path.clone(),
@@ -518,8 +560,15 @@ pub(crate) async fn serve_loop(
         Ok(runtime) => Arc::new(runtime),
         Err(error) => {
             tracing::error!(error = %error, "initialize migration runtime failed");
-            bind.release();
-            return;
+            let socket_release = bind.release();
+            tracing::info!(
+                ?socket_release,
+                "daemon ownership released after migration runtime initialization failure"
+            );
+            return GraceExitMetrics {
+                socket_release,
+                ..Default::default()
+            };
         }
     };
     let runtime = DispatchRuntime::daemon(DaemonRuntimeContext {
@@ -530,11 +579,12 @@ pub(crate) async fn serve_loop(
     let (connection_shutdown, connection_stopping) = tokio::sync::watch::channel(false);
     let mut connections = tokio::task::JoinSet::new();
 
-    // Distinguish the two shutdown causes: an explicit signal terminates
-    // unconditionally, whereas the idle-grace path must first DRAIN the kernel
-    // accept backlog (a connect() can complete in the kernel — handshake done,
-    // connection queued — between the grace re-check and our observing shutdown)
-    // before committing to exit, so no in-flight client is dropped.
+    // Distinguish the two shutdown causes: an explicit signal stops accepts
+    // immediately, while idle-grace first DRAINS the kernel accept backlog (a
+    // connect() can complete in the kernel — handshake done, connection queued
+    // in the listen backlog — between the grace re-check and our observing
+    // shutdown) before committing to exit. Both paths then ask established
+    // connection tasks to stop and drain in-flight blocking dispatch before flush.
     enum Stop {
         Signal,
         Grace,
@@ -557,6 +607,8 @@ pub(crate) async fn serve_loop(
     let shutdown = build_shutdown(tracker.clone(), grace);
     tokio::pin!(shutdown);
 
+    let mut client_zero_to_grace = None;
+    let mut post_grace_started = None;
     'serve: loop {
         let stop = tokio::select! {
             // `biased;` + accept FIRST closes the DECREMENT-THEN-NEW-CONNECT /
@@ -595,8 +647,9 @@ pub(crate) async fn serve_loop(
         };
 
         match stop {
-            // An explicit signal terminates now — established connections are
-            // torn down with the process; no draining.
+            // A signal stops accepting immediately. Common teardown below asks
+            // established connection tasks to stop, then waits for them so any
+            // in-flight blocking dispatch drains before flush/migration/release.
             Stop::Signal => break 'serve,
             // Idle-grace: drain anything already queued in the kernel backlog
             // before committing to exit. Each drained connection re-registers via
@@ -624,29 +677,49 @@ pub(crate) async fn serve_loop(
                     continue 'serve;
                 }
                 // Listener is truly drained and idle → commit to shutdown.
+                client_zero_to_grace = tracker.last_client_zero_elapsed();
+                post_grace_started = Some(Instant::now());
                 break 'serve;
             }
         }
     }
 
     let _ = connection_shutdown.send(true);
+    let connection_join_started = Instant::now();
     while let Some(result) = connections.join_next().await {
         if let Err(error) = result {
             tracing::error!(error = %error, "connection task failed during shutdown");
         }
     }
-    if let Ok(mut g) = registry.lock()
-        && let Err(e) = g.flush_all_open()
+    let connection_join = connection_join_started.elapsed();
+
+    let registry_flush_started = Instant::now();
+    if let Ok(mut registry) = registry.lock()
+        && let Err(e) = registry.flush_all_open()
     {
         tracing::error!(error = %e, "flush on shutdown failed");
     }
+    let registry_flush = registry_flush_started.elapsed();
+
+    let migration_drain_started = Instant::now();
     let migration_drain = Arc::clone(&migrations);
     match tokio::task::spawn_blocking(move || migration_drain.drain()).await {
         Ok(Ok(())) => {}
         Ok(Err(error)) => tracing::error!(error = %error, "migration drain failed"),
         Err(error) => tracing::error!(error = %error, "migration drain task failed"),
     }
-    bind.release(); // unlink socket + release lock
+    let migration_drain = migration_drain_started.elapsed();
+
+    let metrics = GraceExitMetrics {
+        client_zero_to_grace,
+        connection_join,
+        registry_flush,
+        migration_drain,
+        socket_release: bind.release(), // unlink socket + release lock
+        post_grace_teardown: post_grace_started.map(|started| started.elapsed()),
+    };
+    metrics.emit();
+    metrics
 }
 
 /// Serve one client connection over the bespoke [`proto`] protocol: read
@@ -898,17 +971,41 @@ mod tests {
     #[tokio::test]
     async fn idle_grace_is_canceled_by_a_new_connection() {
         let tracker = ClientTracker::new();
-        // Hold a client for longer than the grace window; the grace future must
-        // NOT resolve while a client is connected.
-        let _guard = tracker.connect();
-        let res = tokio::time::timeout(
-            Duration::from_millis(150),
-            wait_for_idle_grace(tracker.clone(), Duration::from_millis(30)),
-        )
+        let grace = Duration::from_millis(100);
+
+        // Create a real 1→0 transition, then poll the grace future until its
+        // initial notification is consumed and its timer is actively pending.
+        drop(tracker.connect());
+        let waiting = wait_for_idle_grace(tracker.clone(), grace);
+        tokio::pin!(waiting);
+        std::future::poll_fn(|cx| {
+            assert!(
+                std::future::Future::poll(waiting.as_mut(), cx).is_pending(),
+                "the first 1→0 transition must arm the grace timer"
+            );
+            std::task::Poll::Ready(())
+        })
         .await;
+
+        // Reconnect during the active window. The original deadline must pass
+        // without resolving while this connection remains active.
+        let reconnect = tracker.connect();
+        let original_deadline_passed =
+            tokio::time::timeout(Duration::from_millis(120), &mut waiting).await;
         assert!(
-            res.is_err(),
-            "grace must not fire while a client is connected"
+            original_deadline_passed.is_err(),
+            "reconnecting during grace must cancel the original idle deadline"
+        );
+
+        // Once the reconnect leaves, a new full grace window starts and resolves.
+        let fresh_grace_started = Instant::now();
+        drop(reconnect);
+        tokio::time::timeout(Duration::from_millis(200), &mut waiting)
+            .await
+            .expect("a fresh full grace window should resolve");
+        assert!(
+            fresh_grace_started.elapsed() >= grace,
+            "the reconnect's 1→0 transition must receive a full fresh grace window"
         );
     }
 
@@ -986,17 +1083,46 @@ mod tests {
             exited.is_ok(),
             "daemon did not exit within the grace window after the last client left"
         );
-        exited.unwrap().expect("serve loop task panicked");
+        let metrics = exited.unwrap().expect("serve loop task panicked");
+        let client_zero_to_grace = metrics
+            .client_zero_to_grace
+            .expect("grace shutdown records the last-client transition");
+        let post_grace_teardown = metrics
+            .post_grace_teardown
+            .expect("grace shutdown records teardown duration");
+        assert!(
+            client_zero_to_grace >= Duration::from_secs(1),
+            "idle grace resolved before its configured duration: {client_zero_to_grace:?}"
+        );
+        let measured_teardown = metrics.connection_join
+            + metrics.registry_flush
+            + metrics.migration_drain
+            + metrics.socket_release;
+        assert!(
+            post_grace_teardown >= measured_teardown,
+            "post-grace teardown must contain the sum of every sequential phase: {metrics:?}"
+        );
+        println!(
+            "grace_exit_metrics client_zero_to_grace_us={} connection_join_us={} registry_flush_us={} migration_drain_us={} socket_release_us={} post_grace_teardown_us={}",
+            client_zero_to_grace.as_micros(),
+            metrics.connection_join.as_micros(),
+            metrics.registry_flush.as_micros(),
+            metrics.migration_drain.as_micros(),
+            metrics.socket_release.as_micros(),
+            post_grace_teardown.as_micros(),
+        );
         assert!(
             !bound_socket.exists(),
             "socket file {bound_socket:?} must be unlinked on graceful shutdown"
         );
     }
 
-    /// REGRESSION (GRACE=0 startup race + accept-queue race): with grace=0 a
-    /// freshly-spawned daemon must still serve a client that connects *after* the
-    /// serve loop starts — it must not exit on the never-had-a-client startup
-    /// state — and only shut down once that client leaves.
+    /// REGRESSION (GRACE=0 startup race): with grace=0 a freshly-spawned daemon
+    /// must still serve a client that connects *after* the serve loop starts — it
+    /// must not exit on the never-had-a-client startup state — and only shut down
+    /// once that client leaves. This covers the late-first-client path, not the
+    /// exact accept-backlog boundary; that race remains guarded by accept-first
+    /// selection and is intentionally not timing-tested here.
     #[tokio::test]
     async fn daemon_with_zero_grace_serves_a_late_first_client_then_exits() {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -1193,10 +1319,14 @@ mod tests {
         );
         assert!(acquire_daemon(&db, &socket).unwrap().is_none());
         provider.release();
-        tokio::time::timeout(Duration::from_secs(5), loop_handle)
+        let metrics = tokio::time::timeout(Duration::from_secs(5), loop_handle)
             .await
             .expect("daemon exits after migration unblocks")
             .expect("serve loop task succeeds");
+        assert!(
+            metrics.migration_drain >= Duration::from_millis(100),
+            "migration drain timer must include the blocked worker wait: {metrics:?}"
+        );
         let replacement = acquire_daemon(&db, &socket)
             .unwrap()
             .expect("default lock is released after migration drain");
