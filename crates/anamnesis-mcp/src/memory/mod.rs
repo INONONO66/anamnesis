@@ -1272,6 +1272,10 @@ impl MemoryRegistry {
     /// Read-only health/size snapshot for a namespace (`Memory::stats`).
     ///
     /// Flushes pending buffers first so the counts reflect live state.
+    ///
+    /// Production dispatch reads the namespace handle directly for its phase split,
+    /// so this convenience wrapper has only test consumers in non-test builds.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn stats(&mut self, ns: Option<&str>) -> Result<MemoryStats, Error> {
         let handle = self.namespace_handle(ns)?;
         let mut mem = handle.lock().unwrap_or_else(|p| p.into_inner());

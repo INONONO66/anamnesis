@@ -43,8 +43,6 @@ mod render;
 #[cfg(test)]
 mod tests;
 
-pub use render::format_stats;
-
 #[derive(Clone)]
 pub(crate) struct DaemonRuntimeContext {
     pub(crate) registry: Arc<Mutex<MemoryRegistry>>,
