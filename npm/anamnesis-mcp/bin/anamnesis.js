@@ -32,13 +32,16 @@ function executableName(key) {
 
 const key = platformKey();
 const executable = executableName(key);
-const binaryPath = env.ANAMNESIS_BINARY || (executable && path.join(__dirname, "native", executable));
+const binaryPath =
+  env.ANAMNESIS_MCP_BINARY ||
+  env.ANAMNESIS_BINARY ||
+  (executable && path.join(__dirname, "native", executable));
 
 if (!binaryPath || !fs.existsSync(binaryPath)) {
   process.stderr.write(
     `anamnesis: no prebuilt binary for ${key}.\n` +
       `Expected the GitHub Release binary at: ${binaryPath || "(unsupported platform)"}\n` +
-      `Try reinstalling the package, or set ANAMNESIS_BINARY to a local binary.\n` +
+      `Try reinstalling the package, or set ANAMNESIS_MCP_BINARY to a local binary.\n` +
       `Supported: darwin-arm64, darwin-x64, linux-x64, linux-arm64\n`
   );
   process.exit(1);

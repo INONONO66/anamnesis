@@ -30,9 +30,11 @@ First run downloads the embedding model (~400 MB) to a per-user cache. Pre-warm
 interactively with `npx anamnesis-mcp prewarm`.
 
 The npm package is a small launcher. During install it downloads the matching
-native `anamnesis-mcp` binary from the GitHub Release for the package version.
+native `anamnesis` binary from the GitHub Release for the package version.
 Set `ANAMNESIS_MCP_BINARY` to use a locally built binary instead, or
-`ANAMNESIS_MCP_SKIP_DOWNLOAD=1` when packaging without downloading.
+`ANAMNESIS_MCP_SKIP_DOWNLOAD=1` when packaging without downloading. The legacy
+`ANAMNESIS_BINARY` override remains supported for compatibility, but
+`ANAMNESIS_MCP_BINARY` takes precedence when both are set.
 
 ## Use with other MCP clients
 
