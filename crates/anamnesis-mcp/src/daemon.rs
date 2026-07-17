@@ -560,12 +560,15 @@ pub(crate) async fn serve_loop(
         Ok(runtime) => Arc::new(runtime),
         Err(error) => {
             tracing::error!(error = %error, "initialize migration runtime failed");
-            let metrics = GraceExitMetrics {
-                socket_release: bind.release(),
+            let socket_release = bind.release();
+            tracing::info!(
+                ?socket_release,
+                "daemon ownership released after migration runtime initialization failure"
+            );
+            return GraceExitMetrics {
+                socket_release,
                 ..Default::default()
             };
-            metrics.emit();
-            return metrics;
         }
     };
     let runtime = DispatchRuntime::daemon(DaemonRuntimeContext {
@@ -691,10 +694,8 @@ pub(crate) async fn serve_loop(
     let connection_join = connection_join_started.elapsed();
 
     let registry_flush_started = Instant::now();
-    if let Err(e) = registry
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .flush_all_open()
+    if let Ok(mut registry) = registry.lock()
+        && let Err(e) = registry.flush_all_open()
     {
         tracing::error!(error = %e, "flush on shutdown failed");
     }
@@ -1093,21 +1094,22 @@ mod tests {
             client_zero_to_grace >= Duration::from_secs(1),
             "idle grace resolved before its configured duration: {client_zero_to_grace:?}"
         );
+        let measured_teardown = metrics.connection_join
+            + metrics.registry_flush
+            + metrics.migration_drain
+            + metrics.socket_release;
         assert!(
-            post_grace_teardown >= metrics.connection_join
-                && post_grace_teardown >= metrics.registry_flush
-                && post_grace_teardown >= metrics.migration_drain
-                && post_grace_teardown >= metrics.socket_release,
-            "post-grace teardown must contain every measured teardown phase: {metrics:?}"
+            post_grace_teardown >= measured_teardown,
+            "post-grace teardown must contain the sum of every sequential phase: {metrics:?}"
         );
         println!(
-            "grace_exit_metrics client_zero_to_grace_ms={} connection_join_ms={} registry_flush_ms={} migration_drain_ms={} socket_release_ms={} post_grace_teardown_ms={}",
-            client_zero_to_grace.as_millis(),
-            metrics.connection_join.as_millis(),
-            metrics.registry_flush.as_millis(),
-            metrics.migration_drain.as_millis(),
-            metrics.socket_release.as_millis(),
-            post_grace_teardown.as_millis(),
+            "grace_exit_metrics client_zero_to_grace_us={} connection_join_us={} registry_flush_us={} migration_drain_us={} socket_release_us={} post_grace_teardown_us={}",
+            client_zero_to_grace.as_micros(),
+            metrics.connection_join.as_micros(),
+            metrics.registry_flush.as_micros(),
+            metrics.migration_drain.as_micros(),
+            metrics.socket_release.as_micros(),
+            post_grace_teardown.as_micros(),
         );
         assert!(
             !bound_socket.exists(),
@@ -1317,10 +1319,14 @@ mod tests {
         );
         assert!(acquire_daemon(&db, &socket).unwrap().is_none());
         provider.release();
-        tokio::time::timeout(Duration::from_secs(5), loop_handle)
+        let metrics = tokio::time::timeout(Duration::from_secs(5), loop_handle)
             .await
             .expect("daemon exits after migration unblocks")
             .expect("serve loop task succeeds");
+        assert!(
+            metrics.migration_drain >= Duration::from_millis(100),
+            "migration drain timer must include the blocked worker wait: {metrics:?}"
+        );
         let replacement = acquire_daemon(&db, &socket)
             .unwrap()
             .expect("default lock is released after migration drain");

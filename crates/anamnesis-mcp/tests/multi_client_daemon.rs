@@ -196,27 +196,30 @@ fn two_launchers_share_one_daemon_then_grace_exits() {
     // (3) Close both external adapters and reap them. The daemon's separate
     // last-client/grace/unlink sequence begins only after the final disconnect.
     let first_adapter_close = a.close();
+    let final_close_to_unlink_started = Instant::now();
     let second_adapter_close = b.close();
 
     // STEP 12 timing investigation (2026-07-17, Apple M4 Max, debug build):
-    // 20 external runs had post-close unlink min/median/max
+    // 20 external runs had post-adapter-reap unlink min/median/max
     // 2.328/2.353/2.380s. Adapter readiness was 0.745/0.779/0.908s for the
     // spawning adapter and 8/10/12ms for the second; both adapter reaps were
     // <=1ms. Ten in-process daemon runs isolated last-client→grace at
     // 1.003/1.004/1.004s, while connection joins, flush, migration drain,
     // socket unlink, and lock release totaled 0–1ms. A correlated probe put
     // those internal phases at 1.0033s and 0.5ms within a 2.348s external
-    // close→unlink interval: the remaining ~1.345s is the external process
-    // close→daemon EOF/client-count handoff, not the 10ms filesystem poll,
-    // grace timer, or unlink. The 20s bound is retained (not increased) for
-    // scheduler-starved CI; timeout failures print every externally observable
-    // phase, and daemon logs now emit its internal phases.
+    // close→unlink interval. The remaining ~1.345s residual is consistent with
+    // the external process close→daemon EOF/client-count handoff, rather than
+    // the 10ms filesystem poll, grace timer, or unlink. The 20s bound is retained
+    // (not increased) for scheduler-starved CI; timeout failures print every
+    // externally observable phase, and daemon logs emit internal phases when
+    // tracing output is attached.
     let socket_unlink_started = Instant::now();
     let socket_unlinked = wait_until(Duration::from_secs(20), || !the_socket.exists());
-    let post_close_socket_unlink = socket_unlink_started.elapsed();
+    let post_adapter_reap_to_unlink = socket_unlink_started.elapsed();
+    let final_close_to_socket_unlink = final_close_to_unlink_started.elapsed();
     assert!(
         socket_unlinked,
-        "daemon socket did not unlink within the unchanged 20s bound; first_adapter_ready={first_launcher_ready:?} second_adapter_ready={second_launcher_ready:?} first_adapter_close={first_adapter_close:?} second_adapter_close={second_adapter_close:?} post_close_socket_unlink={post_close_socket_unlink:?}"
+        "daemon socket did not unlink within the unchanged 20s bound; first_adapter_ready={first_launcher_ready:?} second_adapter_ready={second_launcher_ready:?} first_adapter_close={first_adapter_close:?} second_adapter_close={second_adapter_close:?} post_adapter_reap_to_unlink={post_adapter_reap_to_unlink:?} final_close_to_socket_unlink={final_close_to_socket_unlink:?}"
     );
     assert!(
         sock_files(&db_dir).is_empty(),
@@ -224,11 +227,12 @@ fn two_launchers_share_one_daemon_then_grace_exits() {
         sock_files(&db_dir)
     );
     println!(
-        "multi_client_daemon_metrics first_adapter_ready_ms={} second_adapter_ready_ms={} first_adapter_close_ms={} second_adapter_close_ms={} post_close_socket_unlink_ms={}",
-        first_launcher_ready.as_millis(),
-        second_launcher_ready.as_millis(),
-        first_adapter_close.as_millis(),
-        second_adapter_close.as_millis(),
-        post_close_socket_unlink.as_millis(),
+        "multi_client_daemon_metrics first_adapter_ready_us={} second_adapter_ready_us={} first_adapter_close_us={} second_adapter_close_us={} post_adapter_reap_to_unlink_us={} final_close_to_socket_unlink_us={}",
+        first_launcher_ready.as_micros(),
+        second_launcher_ready.as_micros(),
+        first_adapter_close.as_micros(),
+        second_adapter_close.as_micros(),
+        post_adapter_reap_to_unlink.as_micros(),
+        final_close_to_socket_unlink.as_micros(),
     );
 }
