@@ -378,12 +378,7 @@ pub enum Oneshot {
     Client,
 }
 
-/// Run the one-shots that are always synchronous and DB-direct (`prewarm`,
-/// `doctor`) plus the `--embedded` variants of the daemon-routed commands.
-///
-/// Returns [`Oneshot::Client`] for a daemon-routed command in its default
-/// (non-embedded) mode — the caller then dispatches [`run_oneshot_client`] on a
-/// tokio runtime. Returns [`Oneshot::Serve`] for `Serve`/no-subcommand.
+/// Whether an embedded recall or stats command should use the shared dispatcher.
 fn uses_shared_embedded_dispatch(cli: &Cli) -> bool {
     wants_embedded(cli)
         && matches!(
@@ -392,6 +387,12 @@ fn uses_shared_embedded_dispatch(cli: &Cli) -> bool {
         )
 }
 
+/// Run the one-shots that are always synchronous and DB-direct (`prewarm`,
+/// `doctor`) plus the `--embedded` variants of the daemon-routed commands.
+///
+/// Returns [`Oneshot::Client`] for a daemon-routed command in its default
+/// (non-embedded) mode — the caller then dispatches [`run_oneshot_client`] on a
+/// tokio runtime. Returns [`Oneshot::Serve`] for `Serve`/no-subcommand.
 pub fn run_oneshot(cli: &Cli) -> Result<Oneshot> {
     crate::config::ensure_model_cache_dir();
     let cfg = Config::from_env();
