@@ -38,7 +38,9 @@ fn main() -> Result<()> {
     // The shared daemon serves the bespoke protocol over a Unix socket (async,
     // long-lived). It is NOT a one-shot, so dispatch it before the synchronous CLI.
     if matches!(cli.command, Some(Commands::Daemon)) {
-        return run_daemon();
+        config::ensure_model_cache_dir();
+        let cfg = Config::from_env();
+        return run_daemon(cfg);
     }
     // The dashboard is a long-lived daemon *client* serving a local web UI — also
     // not a one-shot. Intercept it before the synchronous CLI so it drives its own
@@ -93,9 +95,7 @@ pub(crate) fn env_flag(var: &str) -> bool {
 }
 
 #[tokio::main]
-async fn run_daemon() -> Result<()> {
-    config::ensure_model_cache_dir();
-    let cfg = Config::from_env();
+async fn run_daemon(cfg: Config) -> Result<()> {
     daemon::run(cfg).await
 }
 
@@ -197,5 +197,15 @@ pub(crate) async fn shutdown_signal() {
     #[cfg(not(unix))]
     {
         let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn daemon_runtime_requires_synchronously_prepared_config() {
+        let _: fn(Config) -> Result<()> = run_daemon;
     }
 }
