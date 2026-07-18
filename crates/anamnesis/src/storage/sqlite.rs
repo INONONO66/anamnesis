@@ -4240,7 +4240,6 @@ fn to_sql_error(error: Error) -> rusqlite::Error {
     rusqlite::Error::ToSqlConversionFailure(Box::new(error))
 }
 
-#[allow(dead_code)]
 fn table_exists(conn: &Connection, table_name: &str) -> Result<bool, Error> {
     conn.query_row(
         "SELECT 1 FROM sqlite_master WHERE name = ?1 LIMIT 1",

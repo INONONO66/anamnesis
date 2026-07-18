@@ -2,8 +2,8 @@
 
 use crate::api::EngineConfig;
 use crate::error::Error;
+use crate::query::SearchInput;
 use crate::query::types::SearchPlan;
-use crate::query::{PackagingMode, SearchInput};
 
 /// Derive a `SearchPlan` from a `SearchInput`, normalising the query text and
 /// rejecting inputs that have neither a non-empty trimmed text nor an embedding.
@@ -36,7 +36,6 @@ pub(crate) fn derive_search_plan(
         use_graph: true,
         use_persona_bias,
         seed_limit,
-        packaging_mode: PackagingMode::Balanced,
         time_cues,
     })
 }
