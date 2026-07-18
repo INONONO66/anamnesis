@@ -1100,15 +1100,24 @@ impl<S: StorageAdapter + Clone> Engine<S> {
 
     /// Store a clone of the current storage state under a label.
     pub fn snapshot(&mut self, label: &str) -> Result<SnapshotId, Error> {
+        self.snapshot_at(label, Timestamp::now())
+    }
+
+    /// Store a clone of the current storage state under a label, stamped with a
+    /// caller-supplied logical timestamp.
+    ///
+    /// `snapshot()` delegates here with wall-clock `Timestamp::now()`; bitemporal
+    /// consumers should prefer this so snapshot metadata stays comparable with
+    /// graph time.
+    pub fn snapshot_at(&mut self, label: &str, now: Timestamp) -> Result<SnapshotId, Error> {
         self.graph.storage_mut().flush()?;
-        Ok(self
-            .snapshots
-            .take(label, self.graph.storage(), Timestamp::now()))
+        let cloned = self.graph.storage().try_clone()?;
+        Ok(self.snapshots.take_owned(label, cloned, now))
     }
 
     /// Restore the graph storage from a previously captured snapshot.
     pub fn restore(&mut self, id: &SnapshotId) -> Result<(), Error> {
-        let storage = self.snapshots.restore(id)?;
+        let storage = self.snapshots.with_entry(id, |stored| stored.try_clone())?;
         self.graph.replace_storage(storage);
         Ok(())
     }
@@ -3331,14 +3340,18 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         // accessors (the cached composite `retained_action`, `conductance`,
         // `accessed_at`, the dormant `decay_checkpoint`), which the cached struct can
         // lag when marked dirty.
-        let snapshot_result = {
-            let cloned = self.graph.storage().clone();
-            match snapshot_restore_mismatch(self.graph.storage(), &cloned) {
+        let snapshot_result = match self.graph.storage().try_clone() {
+            Ok(cloned) => match snapshot_restore_mismatch(self.graph.storage(), &cloned) {
                 None => InvariantResult::ok(InvariantCheck::SnapshotRestoreConsistency),
                 Some(detail) => {
                     InvariantResult::failed(InvariantCheck::SnapshotRestoreConsistency, 1, detail)
                 }
-            }
+            },
+            Err(error) => InvariantResult::failed(
+                InvariantCheck::SnapshotRestoreConsistency,
+                1,
+                format!("try_clone failed: {error}"),
+            ),
         };
         results.push(snapshot_result);
 
