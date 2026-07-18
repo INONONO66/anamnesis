@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.1] - 2026-07-18
+
+### Fixed
+- **FastEmbed cache directory is configured before the Tokio runtime starts** (#112) — the env var is now set while the process is still single-threaded, removing the unsound post-spawn `set_var`.
+- **Embedded `anamnesis stats` output matches the daemon path byte-for-byte** (#113).
+- **npm wrapper honors a single local-binary override variable** (#114) — the two divergent override paths are unified.
+
+### Changed
+- Release workflow now fails closed when the pushed tag and manifest versions drift (#120); first-party GitHub Actions are pinned by commit SHA (#121).
+- Shadow-extraction E2E harnesses serialize their nested Cargo invocations, and daemon grace-exit phases are instrumented with measured budgets — CI flake root causes, not symptom timeouts.
+
+### Documentation
+- SQLite migration policy documented through schema v11, hook top-k default corrected to `3`, and the published MCP tool inventory refreshed to all 11 tools (#115, #116, #117).
+
 ## [0.20.0] - 2026-07-16
 
 ### Added
