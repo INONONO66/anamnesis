@@ -13,10 +13,10 @@
 
 use std::path::PathBuf;
 
+use anamnesis::Engine;
 use anamnesis::api::EngineConfig;
 use anamnesis::storage::SqliteStorage;
 use anamnesis::storage::sqlite::{EmbeddingMigrationCheckpoint, EmbeddingSelection};
-use anamnesis::Engine;
 
 fn mid_migration_checkpoint() -> EmbeddingMigrationCheckpoint {
     EmbeddingMigrationCheckpoint {

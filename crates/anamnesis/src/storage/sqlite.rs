@@ -214,6 +214,24 @@ impl SqliteStorage {
         Self::from_connection(Connection::open_in_memory().map_err(sqlite_error)?)
     }
 
+    /// Read all `embedding.migration.*` metadata pairs verbatim for the clone
+    /// path (raw copy: no validation, so a mid-migration checkpoint is carried
+    /// byte-for-byte even when partially written).
+    fn migration_metadata_pairs(&self) -> Result<Vec<(String, String)>, Error> {
+        let conn = self.lock_conn()?;
+        let mut statement = conn
+            .prepare("SELECT key, value FROM graph_metadata WHERE key LIKE 'embedding.migration.%'")
+            .map_err(sqlite_error)?;
+        let pairs = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(sqlite_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(sqlite_error)?;
+        Ok(pairs)
+    }
+
     /// Open or create a SQLite-backed storage file.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, Error> {
         Self::from_connection(Connection::open(path).map_err(sqlite_error)?)
@@ -782,37 +800,41 @@ impl SqliteStorage {
 
 impl Clone for SqliteStorage {
     fn clone(&self) -> Self {
-        let cloned = Self::in_memory()
-            .unwrap_or_else(|e| panic!("failed to clone sqlite storage into memory: {e}"));
+        self.try_clone()
+            .unwrap_or_else(|e| panic!("failed to clone sqlite storage: {e}"))
+    }
+}
+
+impl StorageAdapter for SqliteStorage {
+    fn try_clone(&self) -> Result<Self, Error> {
+        let cloned = Self::in_memory()?;
 
         {
-            let conn = cloned
-                .lock_conn()
-                .unwrap_or_else(|e| panic!("failed to lock sqlite clone: {e}"));
+            let conn = cloned.lock_conn()?;
 
             conn.execute_batch("BEGIN IMMEDIATE;")
-                .unwrap_or_else(|e| panic!("failed to begin transaction during sqlite clone: {e}"));
+                .map_err(sqlite_error)?;
 
-            let write_result = (|| -> Result<(), Box<dyn std::error::Error>> {
-                if let Some(model) = self
-                    .embedding_model_name()
-                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?
-                {
+            let write_result = (|| -> Result<(), Error> {
+                if let Some(model) = self.embedding_model_name()? {
                     conn.execute(
                         "INSERT INTO graph_metadata (key, value) VALUES (?1, ?2)",
                         params![Self::EMBEDDING_MODEL_KEY, model],
                     )
-                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+                    .map_err(sqlite_error)?;
+                }
+
+                for (key, value) in self.migration_metadata_pairs()? {
+                    conn.execute(
+                        "INSERT INTO graph_metadata (key, value) VALUES (?1, ?2)",
+                        params![key, value],
+                    )
+                    .map_err(sqlite_error)?;
                 }
 
                 for id in self.all_node_ids() {
-                    let node = self
-                        .get_node(id)
-                        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?
-                        .clone();
-                    let decay_checkpoint = self
-                        .get_decay_checkpoint(id)
-                        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+                    let node = self.get_node(id)?.clone();
+                    let decay_checkpoint = self.get_decay_checkpoint(id)?;
 
                     conn.execute(
                         "INSERT OR REPLACE INTO nodes (
@@ -843,58 +865,55 @@ impl Clone for SqliteStorage {
                             node.evidence_prior,
                         ],
                     )
-                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+                    .map_err(sqlite_error)?;
 
                     conn.execute(
                         "INSERT OR REPLACE INTO salience (node_id, salience) VALUES (?1, ?2)",
                         params![node.id.0, node.salience],
                     )
-                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+                    .map_err(sqlite_error)?;
 
                     conn.execute(
                         "INSERT OR REPLACE INTO accessed_at (node_id, accessed_at) VALUES (?1, ?2)",
                         params![node.id.0, node.accessed_at.0],
                     )
-                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+                    .map_err(sqlite_error)?;
 
                     conn.execute(
                         "INSERT OR REPLACE INTO decay_checkpoint (node_id, decay_checkpoint) VALUES (?1, ?2)",
                         params![node.id.0, decay_checkpoint.0],
                     )
-                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+                    .map_err(sqlite_error)?;
 
                     conn.execute(
                         "INSERT OR REPLACE INTO retained_action (node_id, value) VALUES (?1, ?2)",
                         params![node.id.0, node.retained_action],
                     )
-                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+                    .map_err(sqlite_error)?;
 
                     conn.execute("DELETE FROM node_fts WHERE id = ?1", [node.id.0])
-                        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+                        .map_err(sqlite_error)?;
 
                     conn.execute(
                         "INSERT INTO node_fts (id, name, content) VALUES (?1, ?2, ?3)",
                         params![node.id.0, node.name, node.content],
                     )
-                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+                    .map_err(sqlite_error)?;
 
                     conn.execute("DELETE FROM entity_tags WHERE node_id = ?1", [node.id.0])
-                        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+                        .map_err(sqlite_error)?;
 
                     for tag in unique_strings(&node.entity_tags) {
                         conn.execute(
                             "INSERT OR IGNORE INTO entity_tags (node_id, tag) VALUES (?1, ?2)",
                             params![node.id.0, tag],
                         )
-                        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+                        .map_err(sqlite_error)?;
                     }
                 }
 
                 for id in self.all_edge_ids() {
-                    let edge = self
-                        .get_edge(id)
-                        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?
-                        .clone();
+                    let edge = self.get_edge(id)?.clone();
 
                     conn.execute(
                         "INSERT OR REPLACE INTO edges (
@@ -916,7 +935,7 @@ impl Clone for SqliteStorage {
                             edge.leaked_at.0,
                         ],
                     )
-                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+                    .map_err(sqlite_error)?;
                 }
 
                 for id in &self.free_node_ids {
@@ -924,7 +943,7 @@ impl Clone for SqliteStorage {
                         "INSERT INTO free_ids (id_type, id_value) VALUES ('node', ?1)",
                         [id.0],
                     )
-                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+                    .map_err(sqlite_error)?;
                 }
 
                 for id in &self.free_edge_ids {
@@ -932,7 +951,7 @@ impl Clone for SqliteStorage {
                         "INSERT INTO free_ids (id_type, id_value) VALUES ('edge', ?1)",
                         [id.0],
                     )
-                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+                    .map_err(sqlite_error)?;
                 }
 
                 Ok(())
@@ -940,29 +959,23 @@ impl Clone for SqliteStorage {
 
             if let Err(error) = write_result {
                 let _ = conn.execute_batch("ROLLBACK;");
-                panic!("failed during sqlite clone transaction: {error}");
+                return Err(error);
             }
 
             if let Err(e) = conn.execute_batch("COMMIT;") {
                 let _ = conn.execute_batch("ROLLBACK;");
-                panic!("failed to commit sqlite clone transaction: {e}");
+                return Err(sqlite_error(e));
             }
         }
 
-        let mut result = Self::from_connection(
-            cloned
-                .conn
-                .into_inner()
-                .unwrap_or_else(|_| panic!("failed to unwrap cloned sqlite connection")),
-        )
-        .unwrap_or_else(|e| panic!("failed to load cloned sqlite storage: {e}"));
+        let mut result = Self::from_connection(cloned.conn.into_inner().map_err(|_| {
+            Error::StorageError("failed to unwrap cloned sqlite connection".to_string())
+        })?)?;
         result.next_node_counter = result.next_node_counter.max(self.next_node_counter);
         result.next_edge_counter = result.next_edge_counter.max(self.next_edge_counter);
-        result
+        Ok(result)
     }
-}
 
-impl StorageAdapter for SqliteStorage {
     fn next_node_id(&mut self) -> NodeId {
         if let Some(id) = self.free_node_ids.pop() {
             if let Ok(conn) = self.lock_conn() {
