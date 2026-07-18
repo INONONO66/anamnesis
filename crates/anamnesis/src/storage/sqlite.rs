@@ -1076,26 +1076,38 @@ impl StorageAdapter for SqliteStorage {
         }
 
         {
-            let conn = self.lock_conn()?;
-            conn.execute("DELETE FROM entity_tags WHERE node_id = ?1", [id.0])
+            let mut conn = self.lock_conn()?;
+            let transaction = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(sqlite_error)?;
-            conn.execute("DELETE FROM node_fts WHERE id = ?1", [id.0])
+            transaction
+                .execute("DELETE FROM entity_tags WHERE node_id = ?1", [id.0])
                 .map_err(sqlite_error)?;
-            conn.execute("DELETE FROM salience WHERE node_id = ?1", [id.0])
+            transaction
+                .execute("DELETE FROM node_fts WHERE id = ?1", [id.0])
                 .map_err(sqlite_error)?;
-            conn.execute("DELETE FROM accessed_at WHERE node_id = ?1", [id.0])
+            transaction
+                .execute("DELETE FROM salience WHERE node_id = ?1", [id.0])
                 .map_err(sqlite_error)?;
-            conn.execute("DELETE FROM decay_checkpoint WHERE node_id = ?1", [id.0])
+            transaction
+                .execute("DELETE FROM accessed_at WHERE node_id = ?1", [id.0])
                 .map_err(sqlite_error)?;
-            conn.execute("DELETE FROM retained_action WHERE node_id = ?1", [id.0])
+            transaction
+                .execute("DELETE FROM decay_checkpoint WHERE node_id = ?1", [id.0])
                 .map_err(sqlite_error)?;
-            conn.execute("DELETE FROM nodes WHERE id = ?1", [id.0])
+            transaction
+                .execute("DELETE FROM retained_action WHERE node_id = ?1", [id.0])
                 .map_err(sqlite_error)?;
-            conn.execute(
-                "INSERT INTO free_ids (id_type, id_value) VALUES ('node', ?1)",
-                [id.0],
-            )
-            .map_err(sqlite_error)?;
+            transaction
+                .execute("DELETE FROM nodes WHERE id = ?1", [id.0])
+                .map_err(sqlite_error)?;
+            transaction
+                .execute(
+                    "INSERT INTO free_ids (id_type, id_value) VALUES ('node', ?1)",
+                    [id.0],
+                )
+                .map_err(sqlite_error)?;
+            transaction.commit().map_err(sqlite_error)?;
         }
 
         self.nodes[idx] = None;
