@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.1] - 2026-07-18
+
+### Fixed
+- **Id counters advance past any popped free id** — after a reopen (`counter = max(live)+1`), an uncontended free-id pop could leave the counter equal to the just-issued id, letting a later counter-path allocation re-issue the now-live id so `INSERT OR REPLACE` silently overwrote the node (post-release review finding; node and edge ids) (#146).
+
 ## [0.21.0] - 2026-07-18
 
 ### Added

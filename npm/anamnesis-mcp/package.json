@@ -1,6 +1,6 @@
 {
   "name": "anamnesis-mcp",
-  "version": "0.21.0",
+  "version": "0.21.1",
   "description": "Anamnesis cognitive memory — daemon, MCP server, hooks, CLI (native Rust binary). Installs the `anamnesis` command.",
   "license": "MIT",
   "repository": { "type": "git", "url": "git+https://github.com/INONONO66/anamnesis.git" },
