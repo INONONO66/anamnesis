@@ -1,0 +1,28 @@
+{
+  "active": true,
+  "version": 2,
+  "current_phase": "goal-planning",
+  "skill": "ultragoal",
+  "cwd": "/Users/clay/dev/anamnesis",
+  "updated_at": "2026-07-16T13:04:20.159Z",
+  "session_id": "019f6b07-1b95-7000-8f96-872dd96bb590",
+  "receipt": {
+    "version": 1,
+    "skill": "ultragoal",
+    "owner": "gjc-hook",
+    "command": "gjc-skill-invocation",
+    "state_path": "/Users/clay/dev/anamnesis/.gjc/state/sessions/019f6b07-1b95-7000-8f96-872dd96bb590/skill-active-state.json",
+    "storage_path": "/Users/clay/dev/anamnesis/.gjc/state/sessions/019f6b07-1b95-7000-8f96-872dd96bb590/ultragoal-state.json",
+    "mutated_at": "2026-07-16T13:04:20.159Z",
+    "fresh_until": "2026-07-16T13:34:20.159Z",
+    "status": "fresh",
+    "mutation_id": "ultragoal:2026-07-16T13:04:20.159Z",
+    "content_sha256": {
+      "algorithm": "sha256",
+      "value": "5d1bdeb8a9caee5eb48bbf5b26d61332b8d8ede3ff8781b2047aeb0e714c7002",
+      "covered_path": "/Users/clay/dev/anamnesis/.gjc/_session-019f6b07-1b95-7000-8f96-872dd96bb590/state/ultragoal-state.json",
+      "computed_at": "2026-07-16T13:04:20.159Z"
+    }
+  },
+  "state_revision": 1
+}

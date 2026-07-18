@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "active": true,
+  "skill": "ultragoal",
+  "keyword": "/skill:ultragoal",
+  "phase": "goal-planning",
+  "activated_at": "2026-07-16T13:04:20.159Z",
+  "updated_at": "2026-07-16T13:04:20.159Z",
+  "source": "gjc-skill-invocation",
+  "session_id": "019f6b07-1b95-7000-8f96-872dd96bb590",
+  "initialized_mode": "ultragoal",
+  "initialized_state_path": "/Users/clay/dev/anamnesis/.gjc/_session-019f6b07-1b95-7000-8f96-872dd96bb590/state/ultragoal-state.json",
+  "active_skills": [
+    {
+      "skill": "ultragoal",
+      "phase": "goal-planning",
+      "active": true,
+      "activated_at": "2026-07-16T13:04:20.159Z",
+      "updated_at": "2026-07-16T13:04:20.159Z",
+      "session_id": "019f6b07-1b95-7000-8f96-872dd96bb590"
+    }
+  ],
+  "source_state_revision": 2,
+  "state_revision": 2
+}

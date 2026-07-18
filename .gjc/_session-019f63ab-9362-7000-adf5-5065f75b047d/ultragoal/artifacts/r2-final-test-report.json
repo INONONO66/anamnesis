@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "kind": "api-package-test-report",
+  "head": "510d32a65b592e5bffabe978d923ffd7f43abd08",
+  "base": "b88f53d",
+  "status": "passed",
+  "commands": [
+    {
+      "command": "cargo fmt --check",
+      "exitCode": 0
+    },
+    {
+      "command": "cargo clippy --workspace --all-targets -- -D warnings",
+      "exitCode": 0
+    },
+    {
+      "command": "cargo test --workspace",
+      "exitCode": 0,
+      "summary": "workspace tests and doctests passed"
+    },
+    {
+      "command": "cargo test -p anamnesis-mcp --test shadow_extraction -- --nocapture",
+      "exitCode": 0,
+      "summary": "6 passed; real daemon capture protocol, built CLI, zero output, invalid schema, 120-second timeout, opt-in and no-fallback scenarios"
+    },
+    {
+      "command": "git diff --check",
+      "exitCode": 0
+    },
+    {
+      "command": "forbidden R3 symbol search",
+      "exitCode": 0,
+      "summary": "zero matches for CommitExtraction|extract_source_states|ExtractMode::Auto|ANAMNESIS_AUDIT_MODE"
+    }
+  ],
+  "reviews": {
+    "cleaner": "R2CleanerFinalZero: CLEAR/APPROVE, zero blockers",
+    "architect": "R2ResolvedArchitectFinal: CLEAR/CLEAR/CLEAR, APPROVE",
+    "executorQa": "R2ResolvedExecutorQaFinal: passed/passed/passed"
+  }
+}
