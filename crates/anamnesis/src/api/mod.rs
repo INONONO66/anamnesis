@@ -41,6 +41,10 @@ pub struct EngineConfig {
     /// Similarity threshold above which ingest reinforces an existing node instead of creating one.
     pub dedup_threshold: f64,
     /// Whether ingest should detect duplicate embeddings and reinforce existing nodes.
+    ///
+    /// Note: dedup compares embeddings only — an observation without an
+    /// `embedding` skips the dedup gate entirely and always allocates a new
+    /// node (library consumers without a provider get no dedup protection).
     pub dedup_enabled: bool,
     /// Maximum number of mutation events retained for draining. Default: 10,000.
     pub max_events: usize,

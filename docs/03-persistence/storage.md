@@ -79,12 +79,15 @@ pub trait StorageAdapter: Send + Sync {
 
 | Table | Purpose |
 |---|---|
-| `nodes` | Site identity, content, type, origin, scope, time, projections |
-| `edges` | Directed relationships, type, projections, validity |
-| `node_hot` | Cache-friendly access history (bounded 32-trace window; each trace row stores its timestamp plus the per-trace decay rate `d_j`), evidence prior `P_i`, salience, access time; the retained-action base-level `B_i` is computed from access history, not stored |
-| `edge_hot` | Cache-friendly conductance, weight, access time |
-| `adjacency_from` | Outgoing edge index |
-| `adjacency_to` | Incoming edge index |
+| `nodes` | Site identity, content, type, origin, scope, time, validity, access count, access history (bounded 32-trace window; each trace stores its timestamp plus the per-trace decay rate `d_j`), evidence prior `P_i`, tier, metadata; the retained-action base-level `B_i` is computed from access history, not stored |
+| `edges` | Directed relationships, type, conductance reservoir `C_ij`, weight projection, validity, access/leak checkpoints, source |
+| `salience` | SoA hot field: per-node logistic projection (write-behind, committed by `flush`) |
+| `retained_action` | SoA hot field: per-node cached composite `A_i = B_i + P_i` (write-behind) |
+| `accessed_at` | SoA hot field: per-node last committed access (write-behind) |
+| `decay_checkpoint` | SoA hot field: retained for snapshot/back-compat; no longer load-bearing under recompute-from-history (write-behind) |
+| `entity_tags` | Tag rows used for candidate generation and cross-agent reflection |
+| `free_ids` | Deleted node/edge ids available for reuse; consumed atomically with allocation |
+| `graph_metadata` | Key-value store: embedding model, embedding-migration checkpoint (`embedding.migration.*`), peers/aliases live in their own tables |
 | `fts_nodes` | Full-text search over name, summary, content, tags |
 
 Hot fields may be folded into base tables for simple adapters, but implementations should make their update cost explicit.

@@ -54,25 +54,24 @@ pub struct Engine<S: StorageAdapter + Clone = SqliteStorage> {
     graph: Graph<S>,
     config: EngineConfig,
     snapshots: SnapshotStore<S>,
+    events: Vec<GraphEvent>,
 }
 ```
 
-Default construction uses in-memory SQLite. Persistent use passes a file-backed `SqliteStorage` or another adapter implementing the same trait.
+Default construction uses in-memory SQLite. Persistent use passes a file-backed `SqliteStorage` or another adapter implementing the same trait. Mutations buffer `GraphEvent`s, drained via `drain_events()`; their semantic order (dependencies before dependents, none on rollback) is part of the public contract.
 
 ## EngineConfig
 
 | Field | Meaning |
 |---|---|
 | `max_nodes` | Hard budget before perception rejects low-value new observations |
-| `novelty_threshold` | Backward-compatible projection of pattern-separation threshold |
+| `novelty_threshold` | Separation boundary `theta_sep`: novelty above it allocates a new site, at or below it routes to and reinforces the nearest one (default derives from the encoder distinct-pair distribution) |
 | `confidence_threshold` | Minimum origin confidence for admission |
-| `dedup_threshold` | Backward-compatible duplicate routing threshold |
-| `dedup_enabled` | Enables duplicate routing instead of unconditional allocation |
-| `decay_model` | ACT-R activation-dependent power-law dissipation model (Pavlik & Anderson 2005); the multi-trace base-level form `B_i = ln( Σ_j (now − t_j)^(−d_j) )` over the node's access-history window, where each trace stores its own decay rate `d_j = m_type·(c·e^{m_j} + α)` computed at creation from current activation |
-| `energy_model` | Readout scoring objective |
-| `spreading_model` | Activation-flow traversal model |
+| `dedup_threshold` | Similarity boundary above which ingest reinforces an existing node instead of creating one |
+| `dedup_enabled` | Enables duplicate routing instead of unconditional allocation (observations without an embedding skip dedup) |
+| `max_events` | Maximum mutation events retained for draining (default 10,000) |
 
-Not all of these are calibrated priors. `max_nodes` and `dedup_enabled` are operational knobs; `decay_model`, `energy_model`, and `spreading_model` select a formula family. The threshold fields (`novelty_threshold`, `confidence_threshold`, `dedup_threshold`) are calibrated priors that project onto the underlying behavioral priors (see [ADR-0010](../adr/0010-calibrated-priors-not-laws.md)); they are not physical constants, and consumers may refit them to their graph statistics.
+Not all of these are calibrated priors. `max_nodes` and `dedup_enabled` are operational knobs. The threshold fields (`novelty_threshold`, `confidence_threshold`, `dedup_threshold`) are calibrated priors that project onto the underlying behavioral priors (see [ADR-0010](../adr/0010-calibrated-priors-not-laws.md)); they are not physical constants, and consumers may refit them to their graph statistics.
 
 ## Core Method Contracts
 
