@@ -188,6 +188,19 @@ pub trait StorageAdapter: Send + Sync {
     /// how many times `tick` runs at the same `now`.
     fn set_edge_leaked_at(&mut self, id: EdgeId, ts: Timestamp) -> Result<(), Error>;
 
+    /// Fallible clone of the full storage state for snapshot paths.
+    ///
+    /// The default wraps `Clone::clone` (infallible). Backends whose clone
+    /// performs I/O or locking should override to surface failures as `Err`
+    /// instead of panicking. Engine snapshot/restore paths call this, never
+    /// `Clone::clone` directly.
+    fn try_clone(&self) -> Result<Self, Error>
+    where
+        Self: Sized + Clone,
+    {
+        Ok(self.clone())
+    }
+
     /// Persist any buffered hot-field writes.
     ///
     /// Storage backends that write hot fields immediately can use this default no-op.
