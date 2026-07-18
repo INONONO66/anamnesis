@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "kind": "cli-replay",
+  "replaySafe": true,
+  "command": [
+    "target/debug/anamnesis",
+    "extract",
+    "--help"
+  ],
+  "cwd": ".",
+  "env": {
+    "LC_ALL": "C"
+  },
+  "timeoutMs": 30000,
+  "expectedExitCode": 0,
+  "recordedStdout": "Review staged extraction candidates and relations without writing graph content\n",
+  "recordedStderr": "",
+  "replayExempt": {
+    "reasonCode": "non_deterministic_external",
+    "reason": "The project-built Rust CLI is outside the conservative replay allowlist and its compiled path is workspace-specific; a captured PTY transcript from the exact frozen binary provides same-surface evidence.",
+    "approvedBy": "GJC parent verifier at frozen HEAD 510d32a",
+    "fallbackArtifactRefs": [
+      "r2-cli-pty"
+    ]
+  }
+}

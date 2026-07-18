@@ -1,0 +1,549 @@
+{
+  "version": 1,
+  "brief": "Complete STEP 12 from docs/superpowers/plans/2026-07-14-codex-handoffs.md. Base every branch on latest main. Never use --admin, force push, direct main commits, required-check bypass, Co-Authored-By, R3 code, or committed docs/superpowers changes. Stop after three consecutive identical test failures; rerun recognized flakes at most three times. Reverify each issue before work; false/already-resolved claims get evidence comment and not-planned closure; design decisions get an options comment and are skipped. One branch and PR per issue, required checks before squash merge.\n\n@goal: Issue 112 — FastEmbed cache startup\nReverify #112, use TDD, fix cache environment setup before Tokio runtime startup, run full gates, open a Closes #112 PR, wait for required checks, and squash merge.\n\n@goal: Issue 113 — embedded stats parity\nReverify #113, use TDD, make embedded and daemon stats output contracts match, run full gates, open a Closes #113 PR, wait for required checks, and squash merge.\n\n@goal: Issue 118 — inert QueryConfig controls\nReverify #118. If preserving versus removing public controls requires design judgment, post concrete options and skip without changing public API; otherwise use TDD and complete one green PR.\n\n@goal: Issue 119 — contradiction tension assertion\nReverify #119, use TDD to replace the tautological assertion with behaviorally meaningful coverage, run full gates, open a Closes #119 PR, wait for required checks, and squash merge.\n\n@goal: Issue 114 — npm binary override\nReverify #114, use TDD/script evidence to unify the local binary override, run full gates, open a Closes #114 PR, wait for required checks, and squash merge.\n\n@goal: Issue 115 — migration policy v11\nReverify source and update only truthful migration policy documentation through v11, run full gates, open a Closes #115 PR, wait for required checks, and squash merge.\n\n@goal: Issue 116 — hook top-k documentation\nReverify the runtime default, correct documentation, run full gates, open a Closes #116 PR, wait for required checks, and squash merge.\n\n@goal: Issue 117 — MCP tool inventory\nReverify registered tools and align published inventories truthfully, run full gates, open a Closes #117 PR, wait for required checks, and squash merge.\n\n@goal: Issue 120 — release version preflight\nReverify #120, add fail-closed tag/version preflight with shell/workflow tests, open a Closes #120 PR, wait for required checks, and squash merge.\n\n@goal: Issue 121 — GitHub Actions pins\nReverify official/current first-party action releases, update and pin safely with workflow/script evidence, open a Closes #121 PR, wait for required checks, and squash merge.\n\n@goal: Part 2 — daemon grace-exit instrumentation\nFrom latest main, instrument grace timer, client detection, socket unlink, and teardown intervals; collect numeric evidence. Implement an evidence-based improvement or justified test comment, never a guessed timeout increase; run full gates, open PR, wait for required checks, squash merge, and report the measurements.",
+  "gjcGoalMode": "aggregate",
+  "gjcObjective": "Complete the durable ultragoal plan in .gjc/ultragoal/goals.json, including later accepted/appended stories, under the original brief constraints; use .gjc/ultragoal/ledger.jsonl as the audit trail.",
+  "goals": [
+    {
+      "id": "G001",
+      "title": "Issue 112 — FastEmbed cache startup",
+      "objective": "Reverify #112, use TDD, fix cache environment setup before Tokio runtime startup, run full gates, open a Closes #112 PR, wait for required checks, and squash merge.",
+      "status": "complete",
+      "createdAt": "2026-07-17T11:37:30.400Z",
+      "updatedAt": "2026-07-17T12:05:39.704Z",
+      "pipelineMetadata": {
+        "schemaVersion": 1,
+        "goalId": "G001",
+        "source": "legacy_brief_only",
+        "eligible": false,
+        "dependsOn": [],
+        "independentOf": [],
+        "targets": {
+          "files": [],
+          "surfaces": []
+        },
+        "overlap": "none",
+        "invalidationReason": "missing_pipeline_metadata",
+        "metadataHash": "ee22f050202eddb1df159edbc575f74df1661c7cce97b7394afe3f786d576e94"
+      },
+      "startedAt": "2026-07-17T11:37:39.136Z",
+      "completedAt": "2026-07-17T12:05:39.704Z",
+      "evidence": "Issue #112 reverified, fixed by TDD in PR #124, all required local/remote gates passed, squash-merged as 31c5ddd, and issue auto-closed. Cleaner zero blockers; architect CLEAR/APPROVE; executor QA passed.",
+      "completionVerification": {
+        "schemaVersion": 1,
+        "receiptId": "8b1304bf-75d0-4181-b19b-f47d810d2153",
+        "verifiedAt": "2026-07-17T12:05:39.704Z",
+        "goalId": "G001",
+        "receiptKind": "per-goal",
+        "goalStatusBeforeCheckpoint": "active",
+        "gjcGoalMode": "aggregate",
+        "gjcObjective": "Complete the durable ultragoal plan in .gjc/ultragoal/goals.json, including later accepted/appended stories, under the original brief constraints; use .gjc/ultragoal/ledger.jsonl as the audit trail.",
+        "qualityGateHash": "8892f762c9818f9a0366f313709938b46286e81a60ea1f03a8f1f671a6a9c382",
+        "planGeneration": "c1b2a48a7d06d050b622a0b413a74234a64a64190ce2ce6e6b37768eb4ddbc22",
+        "basis": {
+          "planHashBeforeCheckpoint": "88b7d7702df486c5c3dd30c4ef4257de47ff73b6553d61032100ec2d6fba37c6",
+          "latestRelevantLedgerEventIdBeforeCheckpoint": "18309d5a-2a17-4633-98c6-ea56cc2e0630",
+          "goalUpdatedAtBeforeCheckpoint": "2026-07-17T12:05:39.704Z",
+          "relevantGoalIdsBeforeCheckpoint": [
+            "G001"
+          ],
+          "requiredGoalSetHashBeforeCheckpoint": "32a209c688a36625c8171aaf80c466b47e5438c38e1944e90144c49f53d90a54"
+        },
+        "checkpointLedgerEventId": "5e4ad462-734a-4c17-ae2f-3713581ecb77"
+      }
+    },
+    {
+      "id": "G002",
+      "title": "Issue 113 — embedded stats parity",
+      "objective": "Reverify #113, use TDD, make embedded and daemon stats output contracts match, run full gates, open a Closes #113 PR, wait for required checks, and squash merge.",
+      "status": "complete",
+      "createdAt": "2026-07-17T11:37:30.400Z",
+      "updatedAt": "2026-07-17T13:03:23.347Z",
+      "pipelineMetadata": {
+        "schemaVersion": 1,
+        "goalId": "G002",
+        "source": "legacy_brief_only",
+        "eligible": false,
+        "dependsOn": [],
+        "independentOf": [],
+        "targets": {
+          "files": [],
+          "surfaces": []
+        },
+        "overlap": "none",
+        "invalidationReason": "missing_pipeline_metadata",
+        "metadataHash": "32cfce45a81ac11de07e654988bfca107eb12bfd830f685045cb51db5efcc23f"
+      },
+      "startedAt": "2026-07-17T12:05:39.709Z",
+      "completedAt": "2026-07-17T13:03:23.347Z",
+      "evidence": "Issue #113 reverified, fixed with TDD in PR #125, reviewed/fixed to zero findings, all local and required remote gates passed, squash-merged as 27c0ba8, and issue closed.",
+      "completionVerification": {
+        "schemaVersion": 1,
+        "receiptId": "3c6039a0-1fc7-4702-a7c8-98c9c0b4d1a1",
+        "verifiedAt": "2026-07-17T13:03:23.347Z",
+        "goalId": "G002",
+        "receiptKind": "per-goal",
+        "goalStatusBeforeCheckpoint": "active",
+        "gjcGoalMode": "aggregate",
+        "gjcObjective": "Complete the durable ultragoal plan in .gjc/ultragoal/goals.json, including later accepted/appended stories, under the original brief constraints; use .gjc/ultragoal/ledger.jsonl as the audit trail.",
+        "qualityGateHash": "a9dbe4d1a35bd933b1ef844431fd17fca683bd88d8fcd25c9ded90de9ac7acbb",
+        "planGeneration": "26a7b65527229e0810738d470868c6310241ce0838af700a4977c381857b9f3e",
+        "basis": {
+          "planHashBeforeCheckpoint": "3bbb25a0eb0e421ab146bb932c014bfa5224fe85d466fdb491fc90302ec149b4",
+          "latestRelevantLedgerEventIdBeforeCheckpoint": "d540b675-faec-4b53-bbc4-38051f33e897",
+          "goalUpdatedAtBeforeCheckpoint": "2026-07-17T13:03:23.347Z",
+          "relevantGoalIdsBeforeCheckpoint": [
+            "G002"
+          ],
+          "requiredGoalSetHashBeforeCheckpoint": "d7143affa7060bfb9e5e615101d01afbd970008c1c67c07645ed190bfa12f546"
+        },
+        "checkpointLedgerEventId": "0e50148c-94f6-4343-8d5d-5c81bfc06e86"
+      }
+    },
+    {
+      "id": "G003",
+      "title": "Issue 118 — inert QueryConfig controls",
+      "objective": "Reverify #118. If preserving versus removing public controls requires design judgment, post concrete options and skip without changing public API; otherwise use TDD and complete one green PR.",
+      "status": "complete",
+      "createdAt": "2026-07-17T11:37:30.400Z",
+      "updatedAt": "2026-07-17T13:09:40.095Z",
+      "pipelineMetadata": {
+        "schemaVersion": 1,
+        "goalId": "G003",
+        "source": "legacy_brief_only",
+        "eligible": false,
+        "dependsOn": [],
+        "independentOf": [],
+        "targets": {
+          "files": [],
+          "surfaces": []
+        },
+        "overlap": "none",
+        "invalidationReason": "missing_pipeline_metadata",
+        "metadataHash": "03494e43474210b53a2e76f8e26bfe9cefa9b14ea4a61ea2ca8b677aabe2af5f"
+      },
+      "startedAt": "2026-07-17T13:03:23.351Z",
+      "completedAt": "2026-07-17T13:09:40.095Z",
+      "evidence": "Issue #118 revalidated as a real public API design choice. Posted complete retirement-vs-preservation options in comments 5003567817 and 5003606075, explicitly covering both budget surfaces and min_activation's live role. Per STEP 12, no branch/PR/code change; issue remains open pending maintainer choice. Cleaner no-op; architect CLEAR/APPROVE; executor QA passed.",
+      "completionVerification": {
+        "schemaVersion": 1,
+        "receiptId": "d9d79011-be9a-4133-a1a6-b714a5563761",
+        "verifiedAt": "2026-07-17T13:09:40.095Z",
+        "goalId": "G003",
+        "receiptKind": "per-goal",
+        "goalStatusBeforeCheckpoint": "active",
+        "gjcGoalMode": "aggregate",
+        "gjcObjective": "Complete the durable ultragoal plan in .gjc/ultragoal/goals.json, including later accepted/appended stories, under the original brief constraints; use .gjc/ultragoal/ledger.jsonl as the audit trail.",
+        "qualityGateHash": "8f3e2f3b267a5a62da1824e4b36bed6796a88bee22ea0ec4e499f8431bd28e6d",
+        "planGeneration": "4c8f4db57d641eab5948f751d1db803e29040e29614ec1de6b436866fb945c1d",
+        "basis": {
+          "planHashBeforeCheckpoint": "188ffdfb77fdb28f4668b10f55b92c4ae397e0ef2181bae22970ee6a78ce9207",
+          "latestRelevantLedgerEventIdBeforeCheckpoint": "24945666-0d8a-4091-8c15-500a3670e7dd",
+          "goalUpdatedAtBeforeCheckpoint": "2026-07-17T13:09:40.095Z",
+          "relevantGoalIdsBeforeCheckpoint": [
+            "G003"
+          ],
+          "requiredGoalSetHashBeforeCheckpoint": "97ddd965199d1e566a039333f8ad5b2aef67ad37a2a6e8ed5864b3cb4272fb51"
+        },
+        "checkpointLedgerEventId": "a67b5255-b779-46ca-82ec-98d178031ea5"
+      }
+    },
+    {
+      "id": "G004",
+      "title": "Issue 119 — contradiction tension assertion",
+      "objective": "Reverify #119, use TDD to replace the tautological assertion with behaviorally meaningful coverage, run full gates, open a Closes #119 PR, wait for required checks, and squash merge.",
+      "status": "complete",
+      "createdAt": "2026-07-17T11:37:30.400Z",
+      "updatedAt": "2026-07-17T14:02:29.212Z",
+      "pipelineMetadata": {
+        "schemaVersion": 1,
+        "goalId": "G004",
+        "source": "legacy_brief_only",
+        "eligible": false,
+        "dependsOn": [],
+        "independentOf": [],
+        "targets": {
+          "files": [],
+          "surfaces": []
+        },
+        "overlap": "none",
+        "invalidationReason": "missing_pipeline_metadata",
+        "metadataHash": "b0dbde7889e36d44f4fc6b78b7c4bb3f3dde659eed4ed6f6b9ae6a285ff53618"
+      },
+      "startedAt": "2026-07-17T13:09:40.099Z",
+      "completedAt": "2026-07-17T14:02:29.212Z",
+      "evidence": "Issue #119 fixed in PR #126 and squash-merged as 44a0338 after exact contradiction tension regression coverage, cleaner, architect, executor QA, full local gates, and all PR checks passed.",
+      "completionVerification": {
+        "schemaVersion": 1,
+        "receiptId": "ed56d319-9055-4503-919b-06d4e0c6f6df",
+        "verifiedAt": "2026-07-17T14:02:29.212Z",
+        "goalId": "G004",
+        "receiptKind": "per-goal",
+        "goalStatusBeforeCheckpoint": "active",
+        "gjcGoalMode": "aggregate",
+        "gjcObjective": "Complete the durable ultragoal plan in .gjc/ultragoal/goals.json, including later accepted/appended stories, under the original brief constraints; use .gjc/ultragoal/ledger.jsonl as the audit trail.",
+        "qualityGateHash": "a333c770d50cae1b47aa6ac88a0c319a7af97fee9ef965c33b5da818c5f44e71",
+        "planGeneration": "fa34a7b6d772f8334f2932807a725b815db57cf6b019a9f9a00284f65b603c4b",
+        "basis": {
+          "planHashBeforeCheckpoint": "96fe22ab816c5d47abf19e0641f41b9c627807248cb2baa7528230b465719f56",
+          "latestRelevantLedgerEventIdBeforeCheckpoint": "db1d333a-20e9-4631-a642-16f8a8611e96",
+          "goalUpdatedAtBeforeCheckpoint": "2026-07-17T14:02:29.212Z",
+          "relevantGoalIdsBeforeCheckpoint": [
+            "G004"
+          ],
+          "requiredGoalSetHashBeforeCheckpoint": "a7a92b02b2b960363410a448598537297d4eeca8aef000e0e38e1cd16410effc"
+        },
+        "checkpointLedgerEventId": "b2a00fa0-1e32-43e9-a5cd-27d83f3df4aa"
+      }
+    },
+    {
+      "id": "G005",
+      "title": "Issue 114 — npm binary override",
+      "objective": "Reverify #114, use TDD/script evidence to unify the local binary override, run full gates, open a Closes #114 PR, wait for required checks, and squash merge.",
+      "status": "complete",
+      "createdAt": "2026-07-17T11:37:30.400Z",
+      "updatedAt": "2026-07-17T14:56:54.812Z",
+      "pipelineMetadata": {
+        "schemaVersion": 1,
+        "goalId": "G005",
+        "source": "legacy_brief_only",
+        "eligible": false,
+        "dependsOn": [],
+        "independentOf": [],
+        "targets": {
+          "files": [],
+          "surfaces": []
+        },
+        "overlap": "none",
+        "invalidationReason": "missing_pipeline_metadata",
+        "metadataHash": "7e7c99822502629f9018f3b7564f332a205bb16db8e0fa1b90a4ec880363bafa"
+      },
+      "startedAt": "2026-07-17T14:02:29.217Z",
+      "completedAt": "2026-07-17T14:56:54.812Z",
+      "evidence": "Issue #114 fixed in PR #127 and squash-merged as 1adc9a0 after canonical/legacy override tests, package dry-run, cleaner, architect, executor QA, full local gates, and all PR checks passed.",
+      "completionVerification": {
+        "schemaVersion": 1,
+        "receiptId": "b498869f-211a-4d9f-9fb7-7b1326deb9b5",
+        "verifiedAt": "2026-07-17T14:56:54.812Z",
+        "goalId": "G005",
+        "receiptKind": "per-goal",
+        "goalStatusBeforeCheckpoint": "active",
+        "gjcGoalMode": "aggregate",
+        "gjcObjective": "Complete the durable ultragoal plan in .gjc/ultragoal/goals.json, including later accepted/appended stories, under the original brief constraints; use .gjc/ultragoal/ledger.jsonl as the audit trail.",
+        "qualityGateHash": "0fc697c3d2e441c18240c1c7b444c494cd6e02e5cf3143db40a2d90ffde635ee",
+        "planGeneration": "c6d6bb450f5a41e7644fc89679edc3b349fac8f4ce9ff65b14efcbdebbb1f3c3",
+        "basis": {
+          "planHashBeforeCheckpoint": "836c344268cb08bbeb0b9c0eef6a77e8858f457b884a8f02d87503ac751b25e4",
+          "latestRelevantLedgerEventIdBeforeCheckpoint": "73f79ae8-d4dc-4ebc-a576-08e60b8ed84c",
+          "goalUpdatedAtBeforeCheckpoint": "2026-07-17T14:56:54.812Z",
+          "relevantGoalIdsBeforeCheckpoint": [
+            "G005"
+          ],
+          "requiredGoalSetHashBeforeCheckpoint": "9349257a77134e23cd73311ddb64e506249aef6abaccb2a054d38c839c365d89"
+        },
+        "checkpointLedgerEventId": "6c31fd88-50ea-4e1c-ab30-c2403ffecb0d"
+      }
+    },
+    {
+      "id": "G006",
+      "title": "Issue 115 — migration policy v11",
+      "objective": "Reverify source and update only truthful migration policy documentation through v11, run full gates, open a Closes #115 PR, wait for required checks, and squash merge.",
+      "status": "complete",
+      "createdAt": "2026-07-17T11:37:30.400Z",
+      "updatedAt": "2026-07-17T15:57:28.020Z",
+      "pipelineMetadata": {
+        "schemaVersion": 1,
+        "goalId": "G006",
+        "source": "legacy_brief_only",
+        "eligible": false,
+        "dependsOn": [],
+        "independentOf": [],
+        "targets": {
+          "files": [],
+          "surfaces": []
+        },
+        "overlap": "none",
+        "invalidationReason": "missing_pipeline_metadata",
+        "metadataHash": "6f0e7c7fa234fc110f703f3dce4f2f295b66d3be60c06c84998dc5c9ae6dd9c8"
+      },
+      "startedAt": "2026-07-17T14:56:54.817Z",
+      "completedAt": "2026-07-17T15:57:28.020Z",
+      "evidence": "Issue #115 documentation updated in PR #128 and squash-merged as be922ee after source-truth audit, explicit enforcement-gap disclosure, cleaner, architect, executor QA, focused migration tests, full local gates, and all PR checks passed.",
+      "completionVerification": {
+        "schemaVersion": 1,
+        "receiptId": "bbd74867-ff52-4162-9d1c-d74a6d142052",
+        "verifiedAt": "2026-07-17T15:57:28.020Z",
+        "goalId": "G006",
+        "receiptKind": "per-goal",
+        "goalStatusBeforeCheckpoint": "active",
+        "gjcGoalMode": "aggregate",
+        "gjcObjective": "Complete the durable ultragoal plan in .gjc/ultragoal/goals.json, including later accepted/appended stories, under the original brief constraints; use .gjc/ultragoal/ledger.jsonl as the audit trail.",
+        "qualityGateHash": "70cf30d15fe3125b7cb33697ed6e50da3d5ef635c2f988e35afd2a54d502f3c7",
+        "planGeneration": "799c92a576409a58fa1c477a02fefe1c0b45eb9aeb73c97766e499efd157ba31",
+        "basis": {
+          "planHashBeforeCheckpoint": "6265e8ceed9a2a01d5467215a0c4494925796c9ca75f2ba95dcbd727acf5665b",
+          "latestRelevantLedgerEventIdBeforeCheckpoint": "45867e6b-73cd-46cf-829b-ac9445a8ba16",
+          "goalUpdatedAtBeforeCheckpoint": "2026-07-17T15:57:28.020Z",
+          "relevantGoalIdsBeforeCheckpoint": [
+            "G006"
+          ],
+          "requiredGoalSetHashBeforeCheckpoint": "198ad4ead89dc3475e6f59a843f92e0e590080ca37393c0535f2ef4b9315d9d6"
+        },
+        "checkpointLedgerEventId": "bd10b171-09eb-4127-a4b2-a30dd883f544"
+      }
+    },
+    {
+      "id": "G007",
+      "title": "Issue 116 — hook top-k documentation",
+      "objective": "Reverify the runtime default, correct documentation, run full gates, open a Closes #116 PR, wait for required checks, and squash merge.",
+      "status": "complete",
+      "createdAt": "2026-07-17T11:37:30.400Z",
+      "updatedAt": "2026-07-17T16:36:43.019Z",
+      "pipelineMetadata": {
+        "schemaVersion": 1,
+        "goalId": "G007",
+        "source": "legacy_brief_only",
+        "eligible": false,
+        "dependsOn": [],
+        "independentOf": [],
+        "targets": {
+          "files": [],
+          "surfaces": []
+        },
+        "overlap": "none",
+        "invalidationReason": "missing_pipeline_metadata",
+        "metadataHash": "d02f638c2d423ba855a1ff3e831e9c36dc7a113c204f2f10bb227fe394e20b0f"
+      },
+      "startedAt": "2026-07-17T15:57:28.025Z",
+      "completedAt": "2026-07-17T16:36:43.019Z",
+      "evidence": "Issue #116 resolved by PR #129 merged as 3e59a28. Runtime and operations default are 3, seed K remains 5, source-to-doc regression added; focused/full gates and required CI passed; architect and executor QA clean.",
+      "completionVerification": {
+        "schemaVersion": 1,
+        "receiptId": "9ad8b83b-0511-4283-89f8-0f387f9d11ab",
+        "verifiedAt": "2026-07-17T16:36:43.019Z",
+        "goalId": "G007",
+        "receiptKind": "per-goal",
+        "goalStatusBeforeCheckpoint": "active",
+        "gjcGoalMode": "aggregate",
+        "gjcObjective": "Complete the durable ultragoal plan in .gjc/ultragoal/goals.json, including later accepted/appended stories, under the original brief constraints; use .gjc/ultragoal/ledger.jsonl as the audit trail.",
+        "qualityGateHash": "46b12223580980d53cc12468d9779ae4f657fcbaa8bdf73d752c4dd4af75a852",
+        "planGeneration": "a8e753d1589a3c62c32a86dc1538eb67b947db2a43f0849a9fb3c7db8c58ee27",
+        "basis": {
+          "planHashBeforeCheckpoint": "04cb07b6a623dd75ee7cb1031e5093965eabee3930f95fb6bc963e60f73a47ef",
+          "latestRelevantLedgerEventIdBeforeCheckpoint": "77b0fa0f-3ad3-4b43-aedc-797922f402c1",
+          "goalUpdatedAtBeforeCheckpoint": "2026-07-17T16:36:43.019Z",
+          "relevantGoalIdsBeforeCheckpoint": [
+            "G007"
+          ],
+          "requiredGoalSetHashBeforeCheckpoint": "79fbb3848d4337b0a9d649908600919e7e73fe571e231467de0491d9d0494d25"
+        },
+        "checkpointLedgerEventId": "aa45132f-345f-4a86-a155-587f17ff4547"
+      }
+    },
+    {
+      "id": "G008",
+      "title": "Issue 117 — MCP tool inventory",
+      "objective": "Reverify registered tools and align published inventories truthfully, run full gates, open a Closes #117 PR, wait for required checks, and squash merge.",
+      "status": "complete",
+      "createdAt": "2026-07-17T11:37:30.400Z",
+      "updatedAt": "2026-07-17T17:44:32.864Z",
+      "pipelineMetadata": {
+        "schemaVersion": 1,
+        "goalId": "G008",
+        "source": "legacy_brief_only",
+        "eligible": false,
+        "dependsOn": [],
+        "independentOf": [],
+        "targets": {
+          "files": [],
+          "surfaces": []
+        },
+        "overlap": "none",
+        "invalidationReason": "missing_pipeline_metadata",
+        "metadataHash": "4ae489a0135f1bfa706e47920e4aa87faab83cd974f2ef1748d64aa6779bcbc6"
+      },
+      "startedAt": "2026-07-17T16:36:43.023Z",
+      "completedAt": "2026-07-17T17:44:32.864Z",
+      "evidence": "Issue #117 resolved by PR #130 merged as 1aab206. Root README now authoritatively lists all 11 live MCP tools; plugin/npm link safely; tools/list exact protocol test added; review blockers fixed; full gates and required CI passed.",
+      "completionVerification": {
+        "schemaVersion": 1,
+        "receiptId": "3c252ce7-e010-411c-8129-0abfd014a923",
+        "verifiedAt": "2026-07-17T17:44:32.864Z",
+        "goalId": "G008",
+        "receiptKind": "per-goal",
+        "goalStatusBeforeCheckpoint": "active",
+        "gjcGoalMode": "aggregate",
+        "gjcObjective": "Complete the durable ultragoal plan in .gjc/ultragoal/goals.json, including later accepted/appended stories, under the original brief constraints; use .gjc/ultragoal/ledger.jsonl as the audit trail.",
+        "qualityGateHash": "c4c4fae81ec86b938fbf16c0d161b683128f1ff2e8c175e67168690c770aa39d",
+        "planGeneration": "5a8b5c82bb768f8d0ee9faa771db9a8261ae6128e2d8bc7e0bf086c68a0f5337",
+        "basis": {
+          "planHashBeforeCheckpoint": "0685380d03d48ddde3c2cd37863c9e7ce64c6ea4658e0fe44998ccf67e88eec7",
+          "latestRelevantLedgerEventIdBeforeCheckpoint": "62f9d8f0-77e6-4f8b-be20-7e3c1eef4829",
+          "goalUpdatedAtBeforeCheckpoint": "2026-07-17T17:44:32.864Z",
+          "relevantGoalIdsBeforeCheckpoint": [
+            "G008"
+          ],
+          "requiredGoalSetHashBeforeCheckpoint": "268ea912dd022d2bab09a0c59cb5e71855b85897299ca115057f2195b079847f"
+        },
+        "checkpointLedgerEventId": "57b5d9dc-870b-431d-bf36-8b95894b94e1"
+      }
+    },
+    {
+      "id": "G009",
+      "title": "Issue 120 — release version preflight",
+      "objective": "Reverify #120, add fail-closed tag/version preflight with shell/workflow tests, open a Closes #120 PR, wait for required checks, and squash merge.",
+      "status": "complete",
+      "createdAt": "2026-07-17T11:37:30.400Z",
+      "updatedAt": "2026-07-17T18:20:05.660Z",
+      "pipelineMetadata": {
+        "schemaVersion": 1,
+        "goalId": "G009",
+        "source": "legacy_brief_only",
+        "eligible": false,
+        "dependsOn": [],
+        "independentOf": [],
+        "targets": {
+          "files": [],
+          "surfaces": []
+        },
+        "overlap": "none",
+        "invalidationReason": "missing_pipeline_metadata",
+        "metadataHash": "646bf30f5d98a40d5ca5daf03813ede1560be093a9994a4aaf64312640e58f5d"
+      },
+      "startedAt": "2026-07-17T17:44:32.868Z",
+      "completedAt": "2026-07-17T18:20:05.660Z",
+      "evidence": "Issue #120 resolved by PR #131 merged as 27fd9d3. Exact stable tag validation and lockstep verification now gate build/publish through a safe env boundary; shell/workflow adversarial tests and all PR checks passed.",
+      "completionVerification": {
+        "schemaVersion": 1,
+        "receiptId": "0de3d469-fe4c-4280-920f-644f0d8dec3f",
+        "verifiedAt": "2026-07-17T18:20:05.660Z",
+        "goalId": "G009",
+        "receiptKind": "per-goal",
+        "goalStatusBeforeCheckpoint": "active",
+        "gjcGoalMode": "aggregate",
+        "gjcObjective": "Complete the durable ultragoal plan in .gjc/ultragoal/goals.json, including later accepted/appended stories, under the original brief constraints; use .gjc/ultragoal/ledger.jsonl as the audit trail.",
+        "qualityGateHash": "e91c96c03f0e3ddfd2ccdab192b7f18e636740574b43dad789c98b3a1addb8c4",
+        "planGeneration": "8809c7c4a93be0286d96b7d8a15031509a699d1757c9f751590f3be084a72d8d",
+        "basis": {
+          "planHashBeforeCheckpoint": "43994a1aed434793dd64cd3ad2e03c8d09cbe35d8600c1adf39fa301fe717f87",
+          "latestRelevantLedgerEventIdBeforeCheckpoint": "b623582f-41c5-4c80-8650-79c0b40243e5",
+          "goalUpdatedAtBeforeCheckpoint": "2026-07-17T18:20:05.660Z",
+          "relevantGoalIdsBeforeCheckpoint": [
+            "G009"
+          ],
+          "requiredGoalSetHashBeforeCheckpoint": "2c432804a344256e8857fdbbf49638fd6f35f8314aebf24da4ee071673f8751c"
+        },
+        "checkpointLedgerEventId": "56d32304-038c-4130-b702-94f8d133f5c5"
+      }
+    },
+    {
+      "id": "G010",
+      "title": "Issue 121 — GitHub Actions pins",
+      "objective": "Reverify official/current first-party action releases, update and pin safely with workflow/script evidence, open a Closes #121 PR, wait for required checks, and squash merge.",
+      "status": "complete",
+      "createdAt": "2026-07-17T11:37:30.400Z",
+      "updatedAt": "2026-07-17T18:50:51.699Z",
+      "pipelineMetadata": {
+        "schemaVersion": 1,
+        "goalId": "G010",
+        "source": "legacy_brief_only",
+        "eligible": false,
+        "dependsOn": [],
+        "independentOf": [],
+        "targets": {
+          "files": [],
+          "surfaces": []
+        },
+        "overlap": "none",
+        "invalidationReason": "missing_pipeline_metadata",
+        "metadataHash": "14ce6de65798d809deb8209d2f7a7ce45bf008a242eecb33958eb630e4c3275b"
+      },
+      "startedAt": "2026-07-17T18:20:05.665Z",
+      "completedAt": "2026-07-17T18:50:51.699Z",
+      "evidence": "Issue #121 resolved by PR #132 merged as 33705f8. Current first-party actions run from reviewed immutable SHAs with exact version comments; Gatekeeper enforces yml/yaml pins; monthly Dependabot automation added; mutation probes and all CI passed.",
+      "completionVerification": {
+        "schemaVersion": 1,
+        "receiptId": "7dc9816f-9644-4883-927b-113caebbc3d1",
+        "verifiedAt": "2026-07-17T18:50:51.699Z",
+        "goalId": "G010",
+        "receiptKind": "per-goal",
+        "goalStatusBeforeCheckpoint": "active",
+        "gjcGoalMode": "aggregate",
+        "gjcObjective": "Complete the durable ultragoal plan in .gjc/ultragoal/goals.json, including later accepted/appended stories, under the original brief constraints; use .gjc/ultragoal/ledger.jsonl as the audit trail.",
+        "qualityGateHash": "ba1c2f8f0b209c5c1fa981fa8e2355d7e73b7be997e277e452a03939580b52d4",
+        "planGeneration": "48fa4e1a2a6fac6f144f655fc9c6b6183aa44f36b951d84f285ea91ee6dc1801",
+        "basis": {
+          "planHashBeforeCheckpoint": "4ef122d9ac0682a6a73d13457edc96565b7291d36abf3ed1e61a6133cae087cb",
+          "latestRelevantLedgerEventIdBeforeCheckpoint": "7105a33d-1b0f-464f-8267-18f62cd7af68",
+          "goalUpdatedAtBeforeCheckpoint": "2026-07-17T18:50:51.699Z",
+          "relevantGoalIdsBeforeCheckpoint": [
+            "G010"
+          ],
+          "requiredGoalSetHashBeforeCheckpoint": "1526d202036e835bcd02bf7070997ae983e21c10f37dec8ad9e5f096d812b0da"
+        },
+        "checkpointLedgerEventId": "4bccb13a-2384-4a63-bd98-d37c1c23eae5"
+      }
+    },
+    {
+      "id": "G011",
+      "title": "Part 2 — daemon grace-exit instrumentation",
+      "objective": "From latest main, instrument grace timer, client detection, socket unlink, and teardown intervals; collect numeric evidence. Implement an evidence-based improvement or justified test comment, never a guessed timeout increase; run full gates, open PR, wait for required checks, squash merge, and report the measurements.",
+      "status": "complete",
+      "createdAt": "2026-07-17T11:37:30.400Z",
+      "updatedAt": "2026-07-17T21:00:31.157Z",
+      "pipelineMetadata": {
+        "schemaVersion": 1,
+        "goalId": "G011",
+        "source": "legacy_brief_only",
+        "eligible": false,
+        "dependsOn": [],
+        "independentOf": [],
+        "targets": {
+          "files": [],
+          "surfaces": []
+        },
+        "overlap": "none",
+        "invalidationReason": "missing_pipeline_metadata",
+        "metadataHash": "eeddc9fed6d382a06199fb1930518e8887ae799d1e6cdd55bdc931afe5b7f31d"
+      },
+      "startedAt": "2026-07-17T18:50:51.704Z",
+      "completedAt": "2026-07-17T21:00:31.157Z",
+      "evidence": "STEP 12 Part 2 completed via merged PR #135 at 02b0b2d. Ten internal runs measured client-zero-to-grace at 1003/1004/1004ms min/median/max and teardown at 0-1ms. Twenty external runs measured post-adapter-reap-to-unlink at 2328/2353/2380ms. Correlated residual about 1345ms is consistent with adapter-close to daemon EOF/client-zero handoff. Existing 20s timeout retained, adapter reap bounded, all local gates and CI passed. Structured receipt: /tmp/step12-g011-receipt.json.",
+      "completionVerification": {
+        "schemaVersion": 1,
+        "receiptId": "069c64db-74f4-4e17-9965-7a9397f12838",
+        "verifiedAt": "2026-07-17T21:00:31.157Z",
+        "goalId": "G011",
+        "receiptKind": "final-aggregate",
+        "goalStatusBeforeCheckpoint": "active",
+        "gjcGoalMode": "aggregate",
+        "gjcObjective": "Complete the durable ultragoal plan in .gjc/ultragoal/goals.json, including later accepted/appended stories, under the original brief constraints; use .gjc/ultragoal/ledger.jsonl as the audit trail.",
+        "qualityGateHash": "5239cd613c2a00e3f32e4bfb6be0e4d6050b9880c64a645b407f45baaaf0905b",
+        "planGeneration": "24f59acd0c5d0bdeb8351ad2e22b6a4b1c8cbe706b0548850816de47ca48e533",
+        "basis": {
+          "planHashBeforeCheckpoint": "bae1e5fcc8dcc760ca78b52d2cc4fb9d4eb12380786e5124aeb904724c52b261",
+          "latestRelevantLedgerEventIdBeforeCheckpoint": "f55eec0f-4e13-4a86-ada2-0be8e548622f",
+          "goalUpdatedAtBeforeCheckpoint": "2026-07-17T21:00:31.157Z",
+          "relevantGoalIdsBeforeCheckpoint": [
+            "G001",
+            "G002",
+            "G003",
+            "G004",
+            "G005",
+            "G006",
+            "G007",
+            "G008",
+            "G009",
+            "G010",
+            "G011"
+          ],
+          "requiredGoalSetHashBeforeCheckpoint": "068139579764eb600f60a85bf8721e6233af72b618b11da9040843b63bf20c72"
+        },
+        "checkpointLedgerEventId": "41dffa89-55b0-4e54-89e2-2cd4963a4bc2"
+      }
+    }
+  ],
+  "createdAt": "2026-07-17T11:37:30.400Z",
+  "updatedAt": "2026-07-17T21:00:31.157Z",
+  "state_revision": 69
+}

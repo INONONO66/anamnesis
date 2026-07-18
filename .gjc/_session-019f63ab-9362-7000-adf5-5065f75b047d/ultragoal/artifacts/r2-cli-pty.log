@@ -1,0 +1,27 @@
+[2J[HReview staged extraction candidates and relations without writing graph content
+
+Usage: anamnesis extract [OPTIONS]
+
+Options:
+      --audit
+          Retained for explicit audit invocation compatibility
+      --namespace <NAMESPACE>
+          Namespace to audit (defaults to the configured namespace)
+      --limit <LIMIT>
+          Maximum audit rows to return for a list request [default: 20]
+      --candidate <CANDIDATE>
+          Candidate row to review
+      --support <SUPPORT>
+          Candidate support verdict
+      --contamination <CONTAMINATION>
+          Optional contamination finding for a candidate review
+      --relation <RELATION>
+          Relation row to review
+      --relation-verdict <RELATION_VERDICT>
+          Relation review verdict
+      --reviewer <REVIEWER>
+          Reviewer identity; defaults through audit environment variables
+  -h, --help
+          Print help
+
+exit_code=0

@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-07-18
+
+### Added
+- **Fallible snapshot seam** — `StorageAdapter::try_clone` (additive, `Clone`-based default so external implementors compile unchanged) and additive `Engine::snapshot_at(label, now)` stamping caller-supplied logical time (#137, #142).
+- **Crash-recovery gate** — a kill-9 integration test proving flushed state survives exactly and unflushed dirty writes are never resurrected (#141).
+
+### Fixed
+- **Snapshot/restore preserves the embedding-migration checkpoint** — a mid-migration snapshot no longer drops the `embedding.migration.*` metadata, so restore keeps routing to migration resume instead of misreporting `DimensionMismatch` and risking a mixed-dimension graph (#137).
+- **Snapshot paths return `Err` instead of panicking** — `snapshot()`/`restore()`/`check_invariants()` no longer clone through the panicking infallible path on SQLite failures (#142).
+- **Free-id consumption is atomic with allocation** — an id is no longer assigned while still recorded free; the reopen counter collision is skipped, eliminating silent id resurrection and `INSERT OR REPLACE` overwrite of live nodes (#138).
+- **`delete_node` runs in one immediate transaction** — a mid-sequence failure rolls back instead of leaving a partially deleted node (#139).
+- **`append_access_trace` stages until the write-through succeeds** — a failed UPDATE no longer applies the trace in memory, so retries don't double-count `B_i` (#140).
+
+### Documentation
+- AGENTS.md shrunk to durable commands + invariants; `overview.md`/`storage.md` corrected to the live Engine/EngineConfig/SoA schema; `SqliteStorage::open` documents the no-engine-lock multi-process hazard; `dedup_enabled` documents that observations without an embedding skip dedup (#143).
+
+### Removed
+- Write-only `SearchPlan.packaging_mode` field, orphaned `MemoryRegistry::file_backed_unlocked` wrapper; `file_backed` is now `#[cfg(test)]` (#144).
+
 ## [0.20.1] - 2026-07-18
 
 ### Fixed
