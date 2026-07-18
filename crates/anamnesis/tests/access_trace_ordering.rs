@@ -79,7 +79,6 @@ fn failed_access_trace_write_leaves_no_trace_to_double_count() {
         "the failed call must not apply the trace in memory; otherwise a retry \
          double-counts B_i"
     );
-    drop(history);
 
     storage
         .append_access_trace(id, trace)

@@ -1297,14 +1297,14 @@ impl StorageAdapter for SqliteStorage {
         if idx >= self.nodes.len() || self.nodes[idx].is_none() {
             return Err(Error::NodeNotFound(id));
         }
-        // Append the trace (with its pre-computed per-trace decay) to the bounded
-        // 32-trace window in memory.
-        let encoded = if let Some(node) = self.nodes[idx].as_mut() {
-            node.record_access(trace);
-            encode_access_history(&node.access_history)
-        } else {
+        // Stage the trace on a copy: the in-memory window is updated only
+        // after the write-through succeeds, so a failed UPDATE leaves nothing
+        // to double-count on retry.
+        let Some(mut staged) = self.nodes[idx].clone() else {
             return Err(Error::NodeNotFound(id));
         };
+        staged.record_access(trace);
+        let encoded = encode_access_history(&staged.access_history);
         // B_i is recomputed from access_history at projection time, so the trace
         // must be durably persisted now (write-through on the nodes row column).
         {
@@ -1315,6 +1315,7 @@ impl StorageAdapter for SqliteStorage {
             )
             .map_err(sqlite_error)?;
         }
+        self.nodes[idx] = Some(staged);
         Ok(())
     }
 
