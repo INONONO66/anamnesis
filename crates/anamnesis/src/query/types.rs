@@ -479,7 +479,6 @@ pub struct SearchTrace {
 
 /// Internal search plan — auto-derived from SearchInput.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub(crate) struct SearchPlan {
     /// Trimmed query text (raw `SearchInput.text` with leading/trailing whitespace removed).
     pub text: String,
@@ -495,8 +494,6 @@ pub(crate) struct SearchPlan {
     pub use_persona_bias: bool,
     /// Resolved number of seeds to expand with graph recall.
     pub seed_limit: usize,
-    /// Packaging mode for result assembly.
-    pub packaging_mode: PackagingMode,
     /// Explicit time cues parsed from the query text (query-local, never stored).
     pub time_cues: Vec<crate::query::temporal::TimeRange>,
 }

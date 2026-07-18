@@ -764,10 +764,8 @@ pub struct MemoryRegistry {
 }
 
 impl MemoryRegistry {
-    /// Production constructor: file-backed, FastEmbed provider built lazily.
-    ///
-    /// Each opened namespace takes its own `<db>.lock` (single-writer guard for
-    /// the embedded one-shot / stdio path, where this process owns the DB).
+    /// Test-only constructor: file-backed, default embed model.
+    #[cfg(test)]
     pub fn file_backed(
         default_db: PathBuf,
         dir: PathBuf,
@@ -811,24 +809,6 @@ impl MemoryRegistry {
             ops: OpCounters::default(),
             migration_states: HashMap::new(),
             auto_migrate_embeddings: true,
-        }
-    }
-
-    /// Daemon constructor: file-backed, FastEmbed provider built lazily, with
-    /// the default database lock supplied externally.
-    ///
-    /// The daemon does not re-lock its default database, but named namespace
-    /// databases retain their own process-lifetime sibling locks.
-    #[allow(dead_code)]
-    pub fn file_backed_unlocked(
-        default_db: PathBuf,
-        dir: PathBuf,
-        default_namespace: String,
-        reinforce_on_recall: bool,
-    ) -> Self {
-        Self {
-            lock_on_open: false,
-            ..Self::file_backed(default_db, dir, default_namespace, reinforce_on_recall)
         }
     }
 

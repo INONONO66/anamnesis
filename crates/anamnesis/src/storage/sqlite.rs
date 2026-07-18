@@ -233,6 +233,14 @@ impl SqliteStorage {
     }
 
     /// Open or create a SQLite-backed storage file.
+    ///
+    /// # Multi-process warning
+    ///
+    /// This engine takes NO file lock: two processes opening the same file
+    /// both cache hot fields in memory and will clobber each other's values
+    /// on `flush()`. The fs4 advisory lock lives in the MCP layer
+    /// (`anamnesis-mcp`); embedders sharing a file across processes must add
+    /// their own coordination.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, Error> {
         Self::from_connection(Connection::open(path).map_err(sqlite_error)?)
     }
@@ -4232,7 +4240,6 @@ fn to_sql_error(error: Error) -> rusqlite::Error {
     rusqlite::Error::ToSqlConversionFailure(Box::new(error))
 }
 
-#[allow(dead_code)]
 fn table_exists(conn: &Connection, table_name: &str) -> Result<bool, Error> {
     conn.query_row(
         "SELECT 1 FROM sqlite_master WHERE name = ?1 LIMIT 1",
