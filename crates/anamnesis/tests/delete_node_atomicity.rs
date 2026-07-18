@@ -65,7 +65,10 @@ fn delete_node_rolls_back_when_a_later_statement_fails() {
         .expect("accessed_at dropped");
 
     let result = storage.delete_node(id);
-    assert!(result.is_err(), "delete_node must fail on the sabotaged table");
+    assert!(
+        result.is_err(),
+        "delete_node must fail on the sabotaged table"
+    );
 
     let probe = rusqlite::Connection::open(&path).expect("probe connection");
     let tag_rows: i64 = probe
