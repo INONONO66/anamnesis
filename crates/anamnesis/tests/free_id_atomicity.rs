@@ -92,3 +92,38 @@ fn next_node_id_never_assigns_an_id_still_recorded_free() {
         "the freed id stays queued and is consumed once its DELETE commits"
     );
 }
+
+/// Happy path, no contention: after a reopen the counter restores as
+/// `max(live)+1`, which can equal the popped free id. The pop branch must
+/// advance the counter past any id it hands out, or the counter path later
+/// re-issues the same now-live id and `INSERT OR REPLACE` silently overwrites
+/// the node.
+#[test]
+fn popped_free_id_advances_the_counter_past_itself() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("graph.db");
+
+    let mut storage = SqliteStorage::open(&path).expect("open");
+    let id0 = storage.next_node_id();
+    storage.set_node(make_node(id0)).expect("node 0 stored");
+    let id1 = storage.next_node_id();
+    storage.set_node(make_node(id1)).expect("node 1 stored");
+    storage.delete_node(id1).expect("node 1 freed");
+    storage.flush().expect("flush");
+    drop(storage);
+
+    let mut storage = SqliteStorage::open(&path).expect("reopen");
+    let popped = storage.next_node_id();
+    assert_eq!(popped, id1, "the free id is consumed uncontended");
+    storage
+        .set_node(make_node(popped))
+        .expect("node recreated at the freed id");
+
+    let next = storage.next_node_id();
+    assert_eq!(
+        next,
+        NodeId(2),
+        "the counter must not re-issue the just-popped id; re-issuing it lets \
+         INSERT OR REPLACE silently overwrite the live node"
+    );
+}

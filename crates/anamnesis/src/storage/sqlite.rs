@@ -995,6 +995,11 @@ impl StorageAdapter for SqliteStorage {
             });
             if consumed {
                 self.free_node_ids.pop();
+                // Advance the counter past the handed-out id: after a reopen it
+                // restores as max(live)+1, which can equal this id — otherwise
+                // the counter path later re-issues the now-live id and
+                // INSERT OR REPLACE silently overwrites it.
+                self.next_node_counter = self.next_node_counter.max(id.0 + 1);
                 return id;
             }
             // The DELETE could not commit: leave the id queued for retry and
@@ -1020,6 +1025,7 @@ impl StorageAdapter for SqliteStorage {
             });
             if consumed {
                 self.free_edge_ids.pop();
+                self.next_edge_counter = self.next_edge_counter.max(id.0 + 1);
                 return id;
             }
             // The DELETE could not commit: leave the id queued for retry and
