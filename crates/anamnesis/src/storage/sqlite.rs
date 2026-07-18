@@ -977,14 +977,23 @@ impl StorageAdapter for SqliteStorage {
     }
 
     fn next_node_id(&mut self) -> NodeId {
-        if let Some(id) = self.free_node_ids.pop() {
-            if let Ok(conn) = self.lock_conn() {
-                let _ = conn.execute(
+        if let Some(&id) = self.free_node_ids.last() {
+            let consumed = self.lock_conn().is_ok_and(|conn| {
+                conn.execute(
                     "DELETE FROM free_ids WHERE id_type = 'node' AND id_value = ?1",
                     [id.0],
-                );
+                )
+                .is_ok()
+            });
+            if consumed {
+                self.free_node_ids.pop();
+                return id;
             }
-            return id;
+            // The DELETE could not commit: leave the id queued for retry and
+            // fall back to a counter id that is provably not recorded free.
+        }
+        while self.free_node_ids.contains(&NodeId(self.next_node_counter)) {
+            self.next_node_counter += 1;
         }
         let id = NodeId(self.next_node_counter);
         self.next_node_counter += 1;
@@ -993,14 +1002,23 @@ impl StorageAdapter for SqliteStorage {
     }
 
     fn next_edge_id(&mut self) -> EdgeId {
-        if let Some(id) = self.free_edge_ids.pop() {
-            if let Ok(conn) = self.lock_conn() {
-                let _ = conn.execute(
+        if let Some(&id) = self.free_edge_ids.last() {
+            let consumed = self.lock_conn().is_ok_and(|conn| {
+                conn.execute(
                     "DELETE FROM free_ids WHERE id_type = 'edge' AND id_value = ?1",
                     [id.0],
-                );
+                )
+                .is_ok()
+            });
+            if consumed {
+                self.free_edge_ids.pop();
+                return id;
             }
-            return id;
+            // The DELETE could not commit: leave the id queued for retry and
+            // fall back to a counter id that is provably not recorded free.
+        }
+        while self.free_edge_ids.contains(&EdgeId(self.next_edge_counter)) {
+            self.next_edge_counter += 1;
         }
         let id = EdgeId(self.next_edge_counter);
         self.next_edge_counter += 1;
