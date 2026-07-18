@@ -199,3 +199,20 @@ fn check_invariants_reports_clone_failure_instead_of_panicking() {
          clone fails, not panic or report a pass"
     );
 }
+
+/// Gate 0.3: the additive caller-supplied timestamp API keeps snapshot
+/// metadata comparable with graph time; the existing `snapshot()` signature
+/// is unchanged (wall-clock).
+#[test]
+fn snapshot_at_stamps_caller_supplied_timestamp() {
+    let mut engine = Engine::new();
+    let id = engine
+        .snapshot_at("logical", Timestamp(4242))
+        .expect("snapshot_at");
+    let entries = engine.list_snapshots();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].0, id);
+    assert_eq!(entries[0].2, Timestamp(4242));
+
+    engine.restore(&id).expect("restore");
+}

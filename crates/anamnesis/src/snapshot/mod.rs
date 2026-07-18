@@ -58,6 +58,14 @@ impl<S: Clone> SnapshotStore<S> {
 
     /// Store a clone of the current storage state.
     pub fn take(&mut self, label: &str, storage: &S, timestamp: Timestamp) -> SnapshotId {
+        self.take_owned(label, storage.clone(), timestamp)
+    }
+
+    /// Store an already-cloned storage state (infallible: no clone happens here).
+    ///
+    /// Pair with [`StorageAdapter::try_clone`](crate::storage::StorageAdapter::try_clone)
+    /// at the call site so clone failures surface before the entry is created.
+    pub fn take_owned(&mut self, label: &str, storage: S, timestamp: Timestamp) -> SnapshotId {
         let id = SnapshotId(self.next_id);
         self.next_id += 1;
 
@@ -65,10 +73,27 @@ impl<S: Clone> SnapshotStore<S> {
             id,
             label: label.to_string(),
             timestamp,
-            storage: storage.clone(),
+            storage,
         });
 
         id
+    }
+
+    /// Run a fallible read against a stored snapshot's storage.
+    ///
+    /// Restore paths use this to re-clone through `try_clone`, so a storage
+    /// failure surfaces as `Err` instead of a panic.
+    pub fn with_entry<R>(
+        &self,
+        id: &SnapshotId,
+        f: impl FnOnce(&S) -> Result<R, Error>,
+    ) -> Result<R, Error> {
+        let entry = self
+            .entries
+            .iter()
+            .find(|entry| entry.id == *id)
+            .ok_or_else(|| Error::InvalidInput(format!("snapshot not found: {}", id.0)))?;
+        f(&entry.storage)
     }
 
     /// Return a cloned storage state for the requested snapshot.
