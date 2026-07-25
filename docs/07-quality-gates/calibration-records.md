@@ -9,6 +9,82 @@ they are multi-MB run reports). Every number is reproducible from the named
 dataset + command via `cargo bench --features embed --bench real_memory`;
 runs are deterministic for a fixed dataset and embedding model.
 
+## 2026-07-25 — local second-stage reranking (high-quality profile)
+
+- **Data:** pinned LoCoMo loader, seed 42, 50 questions per non-adversarial
+  category, 200 questions total. Frozen local Qwen3.5 35B-A3B greedy reader and
+  official deterministic LoCoMo token F1.
+- **Baseline:** shipped cognitive top 10 scored 0.3529 F1, Recall@10 0.5283,
+  hit@10 0.6450.
+- **Accepted candidate:** the first 100 cognitive readout candidates reranked
+  locally by `BAAI/bge-reranker-base`, then packaged at top 10. F1 0.4061,
+  Recall@10 0.6165, hit@10 0.7400.
+- **Paired evidence:** +0.0532 F1; question bootstrap 95% CI +0.0081 to
+  +0.1003; conversation-cluster bootstrap +0.0032 to +0.1133; 51 wins,
+  114 ties, 35 losses.
+- **Rejected fast profiles:** BGE over 20 candidates scored 0.3895
+  (+0.0366, CI crosses zero); Jina turbo over 100 candidates scored 0.3307
+  (-0.0222, CI crosses zero). Retrieval-only RRF and indiscriminate L2
+  hydration also failed the answer gate.
+- **Runtime decision:** BGE top 100 measured mean 4.01 s / p95 4.99 s and
+  occupies about 1.1 GB. It is an explicit high-quality profile, not the
+  latency-sensitive hook default.
+- **Product boundary:** no coefficient or default-model calibration changes.
+  The additive, model-agnostic `Memory::repackage_reranked` surface validates
+  consumer scores, reuses native packaging, and aligns reinforcement with the
+  final exposed fragments. The concrete reranker remains outside the engine.
+- **Evidence:** `local-answer-locomo-qwen35-bge-baseline-v0-prompt-v6-greedy-top10-n200-seed42.json`,
+  `local-answer-locomo-qwen35-bge-cross-encoder-base-product-api-v1-prompt-v6-greedy-top10-n200-seed42.json`,
+  and
+  [local-answer-reranking-n200-2026-07-25.md](local-answer-reranking-n200-2026-07-25.md).
+
+## 2026-07-25 — top-10 readout and embedding audit (no calibration change)
+
+- **Data:** current pinned LoCoMo loader, all 1,540 non-adversarial questions,
+  top 10, no warmup. Feature dump contains 200 candidates per question.
+- **Current BGE result:** Recall@10 0.6955, MRR 0.4620, NDCG@10 0.4971.
+- **Split:** even conversations train (788 questions), odd conversations dev
+  (752 questions). The shipped point (`w_a=.25`, `w_phi=16`, `w_s=w_z=0`)
+  produced dev NDCG 0.4985, MRR 0.4658, Recall@10 0.6939.
+- **Rejected base refit:** `[w_a=0, w_phi=16, w_s=.25, w_z=0]` improved train
+  NDCG but reduced dev NDCG to 0.4964, MRR to 0.4618, and recall to 0.6925.
+- **Rejected raw-signal fit:** holding shipped coefficients fixed and fitting
+  raw embedding cosine plus lexical score selected lexical weight 2. Dev NDCG
+  moved only 0.4985 → 0.4987 while recall fell 0.6939 → 0.6914. This does not
+  clear a calibration-change gate.
+- **Corrected embedding audit:** the first E5-large run was raw/unprefixed and
+  is invalid as an asymmetric E5 result. FastEmbed reports that variant as
+  `Qdrant/multilingual-e5-large-onnx`, which the old `intfloat/`-only detector
+  missed. With the real query/passage protocol, E5-large reached Recall@10
+  0.7199, MRR 0.5355, and NDCG@10 0.5543. Paired gains over BGE were +0.0244
+  Recall (95% CI +0.0127 to +0.0362), +0.0735 MRR (+0.0583 to +0.0888), and
+  +0.0571 NDCG (+0.0451 to +0.0690).
+- **Rejected default replacement:** despite the corrected retrieval gain,
+  paired greedy n=100 LoCoMo answer F1 moved 0.3488 → 0.3444 (-0.0044; 95% CI
+  -0.0652 to +0.0543). Multi-hop, open-domain, and single-hop F1 rose slightly,
+  while temporal fell. The result does not clear the reader-facing promotion
+  gate.
+- **MCP-default reference:** correctly prefixed E5-small is statistically tied
+  with BGE on full retrieval: Recall@10 0.6926, MRR 0.4761, NDCG@10 0.5034.
+  Its paired greedy n=100 answer F1 was 0.3270 versus BGE's 0.3488 (-0.0218;
+  95% CI -0.0767 to +0.0305), so it also does not clear the reader-facing
+  promotion gate.
+  FastEmbed already reported this model with the recognized `intfloat/`
+  identity, so its durable identity remains unchanged and no no-op migration is
+  introduced.
+- **Decision:** retain the 2026-06-11 v2 coefficients and BGE-base default.
+  Retain the migration-safe query/passage correctness fix for formerly raw
+  Qdrant E5 identities. Retrieval-only improvement is not sufficient; a future
+  refit or model replacement must improve paired reader-facing answer F1.
+- **Evidence:** `real-memory-locomo-official-v3-top10-20260725.json`,
+  `locomo-features-official-v4-signals-top10-20260725.jsonl`,
+  `real-memory-locomo-e5-small-query-passage-v1-official-top10-20260725.json`,
+  `local-answer-locomo-qwen35-e5-small-prompt-v6-greedy-top10-n100-seed42.json`,
+  `real-memory-locomo-e5-large-query-passage-v1-official-top10-20260725.json`,
+  `local-answer-locomo-qwen35-e5-large-query-passage-v1-prompt-v6-greedy-top10-n100-seed42.json`,
+  and
+  [local-answer-greedy-n100-2026-07-25.md](local-answer-greedy-n100-2026-07-25.md).
+
 ## 2026-06-11 v2 — readout coefficients refit (deduped NDCG objective)
 
 - **Supersedes** the v1 fit below. Tool change: `fit_readout` now replays the

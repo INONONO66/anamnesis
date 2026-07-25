@@ -72,12 +72,23 @@ pub fn parse_locomo_samples(
             for (turn_index, turn_value) in turn_values.iter().enumerate() {
                 let speaker = scalar_to_string(turn_value.get("speaker"))
                     .unwrap_or_else(|| "unknown".to_string());
-                let text = turn_value
+                let mut text = turn_value
                     .get("text")
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .trim()
                     .to_string();
+                if let Some(caption) = turn_value
+                    .get("blip_caption")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|caption| !caption.is_empty())
+                {
+                    if !text.is_empty() {
+                        text.push('\n');
+                    }
+                    text.push_str(&format!("{speaker} shared {caption}."));
+                }
                 if text.is_empty() {
                     continue;
                 }
@@ -136,10 +147,10 @@ pub fn parse_locomo_samples(
 
 pub fn locomo_category_name(category: u64) -> &'static str {
     match category {
-        1 => "single-hop",
-        2 => "multi-hop",
-        3 => "temporal",
-        4 => "world-knowledge",
+        1 => "multi-hop",
+        2 => "temporal",
+        3 => "open-domain",
+        4 => "single-hop",
         5 => "adversarial",
         _ => "unknown",
     }

@@ -101,6 +101,27 @@ fn embed_cache_defaults_to_none() {
 }
 
 #[test]
+fn embedding_model_parses() {
+    let parsed = parse_args(args(&[
+        "--dataset",
+        "locomo",
+        "--embedding-model",
+        "multilingual-e5-large",
+    ]))
+    .expect("parse succeeds")
+    .expect("args present");
+    assert_eq!(parsed.embedding_model, "multilingual-e5-large");
+}
+
+#[test]
+fn embedding_model_defaults_to_bge_base() {
+    let parsed = parse_args(args(&["--dataset", "locomo"]))
+        .expect("parse succeeds")
+        .expect("args present");
+    assert_eq!(parsed.embedding_model, "bge-base-en-v1.5");
+}
+
+#[test]
 fn dump_features_parses_to_some_path() {
     let parsed = parse_args(args(&[
         "--dataset",

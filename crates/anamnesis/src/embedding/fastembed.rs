@@ -31,7 +31,10 @@ pub struct FastEmbedProvider {
     model: Mutex<TextEmbedding>,
     dim: usize,
     name: String,
+    uses_e5_query_passage_protocol: bool,
 }
+
+const E5_QUERY_PASSAGE_PROTOCOL: &str = "query-passage-v1";
 
 #[derive(Clone, Copy)]
 enum PrefixKind {
@@ -39,8 +42,26 @@ enum PrefixKind {
     Passage,
 }
 
-fn e5_prefix(model_code: &str, kind: PrefixKind, text: &str) -> String {
-    if model_code.starts_with("intfloat/multilingual-e5") {
+fn is_multilingual_e5(model_code: &str) -> bool {
+    model_code.to_ascii_lowercase().contains("multilingual-e5")
+}
+
+fn legacy_identity_already_used_e5_protocol(model_code: &str) -> bool {
+    model_code
+        .to_ascii_lowercase()
+        .starts_with("intfloat/multilingual-e5")
+}
+
+fn embedding_space_name(model_code: &str) -> String {
+    if is_multilingual_e5(model_code) && !legacy_identity_already_used_e5_protocol(model_code) {
+        format!("{model_code}+{E5_QUERY_PASSAGE_PROTOCOL}")
+    } else {
+        model_code.to_string()
+    }
+}
+
+fn e5_prefix(uses_e5_query_passage_protocol: bool, kind: PrefixKind, text: &str) -> String {
+    if uses_e5_query_passage_protocol {
         match kind {
             PrefixKind::Query => format!("query: {text}"),
             PrefixKind::Passage => format!("passage: {text}"),
@@ -51,16 +72,20 @@ fn e5_prefix(model_code: &str, kind: PrefixKind, text: &str) -> String {
 }
 
 pub fn embed_model_from_name(name: &str) -> Result<EmbeddingModel, Error> {
-    match name.trim().to_ascii_lowercase().as_str() {
-        "multilingual-e5-small" | "intfloat/multilingual-e5-small" => {
-            Ok(EmbeddingModel::MultilingualE5Small)
-        }
-        "multilingual-e5-base" | "intfloat/multilingual-e5-base" => {
-            Ok(EmbeddingModel::MultilingualE5Base)
-        }
-        "multilingual-e5-large" | "intfloat/multilingual-e5-large" => {
-            Ok(EmbeddingModel::MultilingualE5Large)
-        }
+    let normalized = name.trim().to_ascii_lowercase();
+    let model_name = normalized
+        .strip_suffix(&format!("+{E5_QUERY_PASSAGE_PROTOCOL}"))
+        .unwrap_or(&normalized);
+    match model_name {
+        "multilingual-e5-small"
+        | "intfloat/multilingual-e5-small"
+        | "qdrant/multilingual-e5-small-onnx" => Ok(EmbeddingModel::MultilingualE5Small),
+        "multilingual-e5-base"
+        | "intfloat/multilingual-e5-base"
+        | "qdrant/multilingual-e5-base-onnx" => Ok(EmbeddingModel::MultilingualE5Base),
+        "multilingual-e5-large"
+        | "intfloat/multilingual-e5-large"
+        | "qdrant/multilingual-e5-large-onnx" => Ok(EmbeddingModel::MultilingualE5Large),
         "bge-base-en-v1.5" | "baai/bge-base-en-v1.5" => Ok(EmbeddingModel::BGEBaseENV15),
         other => Err(Error::InvalidInput(format!(
             "unsupported embedding model {other:?}; supported: multilingual-e5-small, \
@@ -90,7 +115,13 @@ impl FastEmbedProvider {
         let info = TextEmbedding::get_model_info(&model)
             .map_err(|e| Error::InvalidInput(format!("model info lookup failed: {e}")))?;
         let dim = info.dim;
-        let name = info.model_code.clone();
+        let uses_e5_query_passage_protocol = is_multilingual_e5(&info.model_code);
+        // Query/passage formatting is part of an embedding space, not merely
+        // tokenization detail. Version model codes that the legacy detector
+        // missed so a previously stored raw E5 space is migrated before it is
+        // queried. Preserve intfloat E5 identities: those already received the
+        // same protocol and do not need a no-op full re-embedding.
+        let name = embedding_space_name(&info.model_code);
         let embedding = TextEmbedding::try_new(InitOptions::new(model))
             .map_err(|e| Error::InvalidInput(format!("model init failed: {e}")))?;
 
@@ -98,6 +129,7 @@ impl FastEmbedProvider {
             model: Mutex::new(embedding),
             dim,
             name,
+            uses_e5_query_passage_protocol,
         })
     }
 }
@@ -124,11 +156,19 @@ impl EmbeddingProvider for FastEmbedProvider {
     }
 
     fn embed_query(&self, text: &str) -> Result<Vec<f32>, Error> {
-        self.embed_single(&e5_prefix(&self.name, PrefixKind::Query, text))
+        self.embed_single(&e5_prefix(
+            self.uses_e5_query_passage_protocol,
+            PrefixKind::Query,
+            text,
+        ))
     }
 
     fn embed_passage(&self, text: &str) -> Result<Vec<f32>, Error> {
-        self.embed_single(&e5_prefix(&self.name, PrefixKind::Passage, text))
+        self.embed_single(&e5_prefix(
+            self.uses_e5_query_passage_protocol,
+            PrefixKind::Passage,
+            text,
+        ))
     }
 }
 
@@ -137,22 +177,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn e5_prefix_applies_only_to_e5_models() {
+    fn e5_prefix_applies_query_and_passage_roles() {
+        assert_eq!(e5_prefix(true, PrefixKind::Query, "안녕"), "query: 안녕");
         assert_eq!(
-            e5_prefix("intfloat/multilingual-e5-small", PrefixKind::Query, "안녕"),
-            "query: 안녕"
-        );
-        assert_eq!(
-            e5_prefix(
-                "intfloat/multilingual-e5-small",
-                PrefixKind::Passage,
-                "안녕"
-            ),
+            e5_prefix(true, PrefixKind::Passage, "안녕"),
             "passage: 안녕"
         );
+        assert_eq!(e5_prefix(false, PrefixKind::Query, "hi"), "hi");
+    }
+
+    #[test]
+    fn qdrant_e5_model_codes_get_versioned_embedding_space_names() {
+        let raw = "Qdrant/multilingual-e5-large-onnx";
+        assert!(is_multilingual_e5(raw));
         assert_eq!(
-            e5_prefix("BAAI/bge-base-en-v1.5", PrefixKind::Query, "hi"),
-            "hi"
+            embedding_space_name(raw),
+            "Qdrant/multilingual-e5-large-onnx+query-passage-v1"
         );
+        assert_eq!(
+            embedding_space_name("intfloat/multilingual-e5-small"),
+            "intfloat/multilingual-e5-small"
+        );
+        assert_eq!(
+            embedding_space_name("BAAI/bge-base-en-v1.5"),
+            "BAAI/bge-base-en-v1.5"
+        );
+    }
+
+    #[test]
+    fn versioned_qdrant_e5_identity_resolves_to_the_same_weights() {
+        assert!(matches!(
+            embed_model_from_name("Qdrant/multilingual-e5-large-onnx+query-passage-v1"),
+            Ok(EmbeddingModel::MultilingualE5Large)
+        ));
     }
 }

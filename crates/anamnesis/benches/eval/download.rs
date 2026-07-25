@@ -15,12 +15,14 @@ const DEFAULT_OUTPUT_DIR: &str = "benches/eval/data";
 // The original HuggingFace repository (snap-llm-workshop/locomo) is no longer
 // available. We download from the canonical GitHub repository instead and
 // transform the data structure to match our loader expectations.
-const LOCOMO_GITHUB_URL: &str =
-    "https://raw.githubusercontent.com/snap-research/locomo/main/data/locomo10.json";
+// Pinned upstream revision: 3eb6f2c585f5e1699204e3c3bdf7adc5c28cb376.
+const LOCOMO_GITHUB_URL: &str = "https://raw.githubusercontent.com/snap-research/locomo/3eb6f2c585f5e1699204e3c3bdf7adc5c28cb376/data/locomo10.json";
 
-const LONGMEMEVAL_REPO: &str = "xiaowu0162/LongMemEval";
-const LONGMEMEVAL_REVISION: &str = "2ec2a557f339b6c0369619b1ed5793734cc87533";
-const LONGMEMEVAL_FILE: &str = "longmemeval_s";
+// The cleaned release fixes answer leakage and timestamp/data inconsistencies in
+// the original LongMemEval-S snapshot. Pin the dataset commit for reproducibility.
+const LONGMEMEVAL_REPO: &str = "xiaowu0162/longmemeval-cleaned";
+const LONGMEMEVAL_REVISION: &str = "98d7416c24c778c2fee6e6f3006e7a073259d48f";
+const LONGMEMEVAL_FILE: &str = "longmemeval_s_cleaned.json";
 
 const CONVOMEM_REPO: &str = "Salesforce/ConvoMem";
 const CONVOMEM_REVISION: &str = "e3e9b39115b02346824c70d349350de738f8be41";
@@ -148,7 +150,7 @@ Options:\n\
   -h, --help                                   Show this help\n\n\
 Datasets:\n\
   locomo       LoCoMo locomo10.json\n\
-  longmemeval  LongMemEval short split\n\
+  longmemeval  Cleaned LongMemEval-S split\n\
   convomem     First ConvoMem category evidence batch"
     );
 }
@@ -217,7 +219,7 @@ fn transform_locomo(path: &Path) -> Result<()> {
             }
             if let Some(conv) = sample.get("conversation").and_then(Value::as_object) {
                 for (key, value) in conv {
-                    if key.starts_with("session_") && !key.ends_with("_date_time") {
+                    if key.starts_with("session_") {
                         new_sample.insert(key.clone(), value.clone());
                     }
                 }
@@ -353,6 +355,7 @@ fn save_response(dataset: Dataset, mut response: Response, output_path: &Path) -
     let temp_path = output_path.with_extension("json.tmp");
     let mut file = File::create(&temp_path)?;
     let mut downloaded = 0_u64;
+    let mut next_progress = 8 * 1024 * 1024_u64;
     let mut buffer = [0_u8; 64 * 1024];
 
     print_progress(dataset, downloaded, total);
@@ -364,7 +367,10 @@ fn save_response(dataset: Dataset, mut response: Response, output_path: &Path) -
         }
         file.write_all(&buffer[..bytes_read])?;
         downloaded += bytes_read as u64;
-        print_progress(dataset, downloaded, total);
+        if downloaded >= next_progress || total.is_some_and(|total| downloaded == total) {
+            print_progress(dataset, downloaded, total);
+            next_progress = downloaded.saturating_add(8 * 1024 * 1024);
+        }
     }
 
     file.flush()?;

@@ -68,7 +68,13 @@ use crate::graph::types::SourceKind;
 use crate::graph::types::{EdgeId, PeerId};
 use crate::graph::{Edge, EdgeType, KnowledgeType, Node, NodeId, ScopePath, Timestamp};
 use crate::mechanics::social::ConfidenceLevel;
-use crate::query::{ContextPackage, Fragment, SearchInput, SearchResult, Tension};
+use crate::query::assembly::{
+    ContradictionPair, ScoredNode, apply_result_limit, assemble_context_package,
+};
+use crate::query::{
+    AccessedSite, ActivatedTension, CoReadoutPair, CommitTrace, ContextPackage, Fragment,
+    QueryConfig, SearchInput, SearchResult, Tension,
+};
 use crate::storage::{SqliteStorage, StorageAdapter};
 
 /// Per-session state for incremental window finalization.
@@ -1098,6 +1104,21 @@ pub struct Recall {
     pub package: ContextPackage,
 }
 
+/// One consumer-supplied score on the readout candidates of a [`SearchResult`].
+///
+/// Anamnesis deliberately does not own or call a reranking model. A consumer
+/// can score the candidates locally (for example with a cross-encoder), then
+/// pass the ordered scores to [`Memory::repackage_reranked`]. The cognitive
+/// readout remains available in [`SearchResult::trace`] for provenance and
+/// observability.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RerankedCandidate {
+    /// Candidate node from [`SearchResult::trace`].
+    pub node_id: NodeId,
+    /// Consumer-supplied finite ranking score; higher ranks first.
+    pub score: f64,
+}
+
 impl Recall {
     /// Render the assembled [`ContextPackage`] into a readable, agent-consumable
     /// context block.
@@ -1318,6 +1339,263 @@ impl<S: StorageAdapter + Clone> Memory<S> {
         self.engine.search(input)
     }
 
+    /// Validate consumer-supplied reranker scores and rebuild a commit-safe recall.
+    ///
+    /// The ranking must contain unique node ids drawn from `result.trace.readout`
+    /// and finite scores. Scores are sorted descending with the cognitive readout
+    /// order as the deterministic tie-breaker. Package assembly, tension endpoint
+    /// preservation, and token accounting use the same rules as native search.
+    ///
+    /// This method is intentionally model-agnostic and read-only. It does not call
+    /// an LLM or reranker. The returned package's commit trace is restricted to the
+    /// fragments actually exposed after reranking, so [`Memory::used`] never
+    /// reinforces discarded baseline results.
+    ///
+    /// Path-current reinforcement can only be preserved for edges present in the
+    /// source result's commit trace; the public search trace does not expose raw
+    /// path currents. Access and co-readout reinforcement are rebuilt from the
+    /// selected nodes and their captured activations.
+    pub fn repackage_reranked(
+        &self,
+        result: &SearchResult,
+        ranking: &[RerankedCandidate],
+        limit: usize,
+    ) -> Result<Recall, Error> {
+        if limit == 0 {
+            return Err(Error::InvalidInput(
+                "reranked result limit must be greater than zero".to_string(),
+            ));
+        }
+        if ranking.is_empty() {
+            return Err(Error::InvalidInput(
+                "reranked candidate list must not be empty".to_string(),
+            ));
+        }
+
+        let readout_positions: HashMap<NodeId, usize> = result
+            .trace
+            .readout
+            .iter()
+            .enumerate()
+            .map(|(index, candidate)| (candidate.node_id, index))
+            .collect();
+        let readout_by_id: HashMap<NodeId, _> = result
+            .trace
+            .readout
+            .iter()
+            .map(|candidate| (candidate.node_id, candidate))
+            .collect();
+        let mut seen = HashSet::new();
+        let mut ranked = Vec::with_capacity(ranking.len());
+        for candidate in ranking {
+            if !candidate.score.is_finite() {
+                return Err(Error::NonFinite(format!(
+                    "reranker score for node {:?}",
+                    candidate.node_id
+                )));
+            }
+            if !seen.insert(candidate.node_id) {
+                return Err(Error::InvalidInput(format!(
+                    "duplicate reranked node {:?}",
+                    candidate.node_id
+                )));
+            }
+            let Some(position) = readout_positions.get(&candidate.node_id).copied() else {
+                return Err(Error::InvalidInput(format!(
+                    "reranked node {:?} is absent from the search readout",
+                    candidate.node_id
+                )));
+            };
+            ranked.push((*candidate, position));
+        }
+        ranked.sort_by(|(left, left_position), (right, right_position)| {
+            right
+                .score
+                .total_cmp(&left.score)
+                .then_with(|| left_position.cmp(right_position))
+        });
+
+        let mut scored_nodes = Vec::with_capacity(ranked.len());
+        for (candidate, _) in &ranked {
+            let node = self.engine.graph().get_node(candidate.node_id)?;
+            scored_nodes.push(ScoredNode {
+                node_id: candidate.node_id,
+                name: node.name.clone(),
+                summary: node.summary.clone(),
+                content: node.content.clone(),
+                node_type: node.node_type.clone(),
+                relevance: candidate.score,
+                origin: node.origin.clone(),
+            });
+        }
+
+        let reranked_ids: HashSet<NodeId> = ranked
+            .iter()
+            .map(|(candidate, _)| candidate.node_id)
+            .collect();
+        let contradiction_pairs: Vec<_> = result
+            .package
+            .tensions
+            .iter()
+            .filter(|tension| {
+                reranked_ids.contains(&tension.node_a) && reranked_ids.contains(&tension.node_b)
+            })
+            .map(|tension| ContradictionPair {
+                node_a: tension.node_a,
+                node_b: tension.node_b,
+                edge_weight: tension.edge_weight,
+                stress: tension.stress,
+                scope_overlap: tension.scope_overlap,
+                temporal_overlap: tension.temporal_overlap,
+            })
+            .collect();
+        let identity_activations: Vec<_> = scored_nodes
+            .iter()
+            .filter(|node| matches!(node.node_type, KnowledgeType::Identity))
+            .filter_map(|node| {
+                readout_by_id
+                    .get(&node.node_id)
+                    .map(|candidate| (node.node_id, node.node_type.clone(), candidate.activation))
+            })
+            .collect();
+        let config = QueryConfig::default();
+        let mut package = assemble_context_package(
+            scored_nodes,
+            &identity_activations,
+            &contradiction_pairs,
+            config.token_budget,
+            config.chars_per_token,
+        );
+        apply_result_limit(&mut package, limit, config.chars_per_token);
+
+        let selected_ids: HashSet<NodeId> = package
+            .identity
+            .iter()
+            .chain(package.knowledge.iter())
+            .chain(package.memories.iter())
+            .map(|fragment| fragment.node_id)
+            .collect();
+        package.commit_trace = self.reranked_commit_trace(result, &selected_ids, &readout_by_id);
+
+        let hits = ranked
+            .iter()
+            .filter(|(candidate, _)| selected_ids.contains(&candidate.node_id))
+            .take(limit)
+            .map(|(candidate, _)| {
+                let node = self.engine.graph().get_node(candidate.node_id)?;
+                let readout = readout_by_id.get(&candidate.node_id).ok_or_else(|| {
+                    Error::InvalidInput(format!(
+                        "reranked node {:?} disappeared from readout",
+                        candidate.node_id
+                    ))
+                })?;
+                let (speaker, session) = parse_entity_tags(&node.entity_tags);
+                Ok(Hit {
+                    node_id: candidate.node_id,
+                    text: node.content.clone(),
+                    score: candidate.score,
+                    cosine: readout.embedding_cosine,
+                    at: node.created_at,
+                    speaker,
+                    session,
+                })
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+
+        Ok(Recall { hits, package })
+    }
+
+    fn reranked_commit_trace(
+        &self,
+        result: &SearchResult,
+        selected_ids: &HashSet<NodeId>,
+        readout_by_id: &HashMap<NodeId, &crate::query::ReadoutCandidate>,
+    ) -> CommitTrace {
+        let mut selected: Vec<_> = selected_ids.iter().copied().collect();
+        selected.sort_by_key(|node_id| {
+            result
+                .trace
+                .readout
+                .iter()
+                .position(|candidate| candidate.node_id == *node_id)
+                .unwrap_or(usize::MAX)
+        });
+
+        let accessed = selected
+            .iter()
+            .filter_map(|node_id| {
+                readout_by_id.get(node_id).map(|candidate| AccessedSite {
+                    node_id: *node_id,
+                    readout_work: candidate.activation.clamp(0.0, 1.0),
+                })
+            })
+            .collect();
+        let mut co_readout = Vec::new();
+        for (index, node_a) in selected.iter().enumerate() {
+            for node_b in &selected[index + 1..] {
+                let connected = self
+                    .engine
+                    .graph()
+                    .storage()
+                    .edges_from(*node_a)
+                    .iter()
+                    .any(|edge_id| {
+                        self.engine
+                            .graph()
+                            .storage()
+                            .get_edge(*edge_id)
+                            .is_ok_and(|edge| {
+                                edge.target == *node_b
+                                    && !matches!(edge.edge_type, EdgeType::Contradicts)
+                            })
+                    })
+                    || self
+                        .engine
+                        .graph()
+                        .storage()
+                        .edges_from(*node_b)
+                        .iter()
+                        .any(|edge_id| {
+                            self.engine
+                                .graph()
+                                .storage()
+                                .get_edge(*edge_id)
+                                .is_ok_and(|edge| {
+                                    edge.target == *node_a
+                                        && !matches!(edge.edge_type, EdgeType::Contradicts)
+                                })
+                        });
+                if connected
+                    && let (Some(a), Some(b)) =
+                        (readout_by_id.get(node_a), readout_by_id.get(node_b))
+                {
+                    co_readout.push(CoReadoutPair {
+                        node_a: *node_a,
+                        node_b: *node_b,
+                        activation_a: a.activation,
+                        activation_b: b.activation,
+                    });
+                }
+            }
+        }
+
+        CommitTrace {
+            accessed,
+            co_readout,
+            path_used: result
+                .package
+                .commit_trace
+                .path_used
+                .iter()
+                .filter(|path| {
+                    selected_ids.contains(&path.source) && selected_ids.contains(&path.target)
+                })
+                .cloned()
+                .collect(),
+            tensions_activated: package_tensions_to_trace(&result.package, selected_ids),
+        }
+    }
+
     /// Commit a [`Recall`]'s context package with [`ConfidenceLevel::Medium`] reinforcement.
     ///
     /// Call this **only** for results you actually used — reinforcement is
@@ -1363,6 +1641,24 @@ fn parse_entity_tags(tags: &[String]) -> (Option<String>, Option<String>) {
         }
     }
     (speaker, session)
+}
+
+fn package_tensions_to_trace(
+    package: &ContextPackage,
+    selected_ids: &HashSet<NodeId>,
+) -> Vec<ActivatedTension> {
+    package
+        .tensions
+        .iter()
+        .filter(|tension| {
+            selected_ids.contains(&tension.node_a) && selected_ids.contains(&tension.node_b)
+        })
+        .map(|tension| ActivatedTension {
+            node_a: tension.node_a,
+            node_b: tension.node_b,
+            stress: tension.stress,
+        })
+        .collect()
 }
 
 // ── Recipe helpers ────────────────────────────────────────────────────────────
@@ -1613,6 +1909,125 @@ mod tests {
             "cosine must be populated from the readout surface, got {}",
             top.cosine
         );
+    }
+
+    #[test]
+    fn repackage_reranked_uses_consumer_order_and_commit_matches_selected_fragments() {
+        let mut m = mem();
+        for index in 0..8 {
+            m.add_note(&format!("memory fact number {index}"), t(index + 1))
+                .unwrap();
+        }
+        let result = m
+            .search_result_at_with(
+                "memory fact",
+                5,
+                t(100),
+                &SearchTuning {
+                    seed_limit: Some(5),
+                    entity_tags: Vec::new(),
+                },
+            )
+            .unwrap();
+        assert!(result.trace.readout.len() >= 4);
+
+        let source: Vec<_> = result.trace.readout.iter().take(4).collect();
+        let ranking = vec![
+            RerankedCandidate {
+                node_id: source[3].node_id,
+                score: 4.0,
+            },
+            RerankedCandidate {
+                node_id: source[2].node_id,
+                score: 3.0,
+            },
+            RerankedCandidate {
+                node_id: source[1].node_id,
+                score: 2.0,
+            },
+            RerankedCandidate {
+                node_id: source[0].node_id,
+                score: 1.0,
+            },
+        ];
+
+        let recall = m.repackage_reranked(&result, &ranking, 2).unwrap();
+        assert_eq!(
+            recall
+                .hits
+                .iter()
+                .map(|hit| hit.node_id)
+                .collect::<Vec<_>>(),
+            vec![source[3].node_id, source[2].node_id]
+        );
+
+        let packaged_ids: HashSet<_> = recall
+            .package
+            .identity
+            .iter()
+            .chain(recall.package.knowledge.iter())
+            .chain(recall.package.memories.iter())
+            .map(|fragment| fragment.node_id)
+            .collect();
+        let accessed_ids: HashSet<_> = recall
+            .package
+            .commit_trace
+            .accessed
+            .iter()
+            .map(|site| site.node_id)
+            .collect();
+        assert_eq!(packaged_ids, accessed_ids);
+        assert_eq!(
+            packaged_ids,
+            HashSet::from([source[3].node_id, source[2].node_id])
+        );
+
+        let report = m.used(recall).unwrap();
+        assert_eq!(report.sites_accessed, 2);
+    }
+
+    #[test]
+    fn repackage_reranked_rejects_unknown_duplicate_and_non_finite_scores() {
+        let mut m = mem();
+        m.add_note("alpha memory", t(1)).unwrap();
+        m.add_note("beta memory", t(2)).unwrap();
+        let result = m
+            .search_result_at_with("memory", 2, t(100), &SearchTuning::default())
+            .unwrap();
+        let known = result.trace.readout[0].node_id;
+
+        let duplicate = [
+            RerankedCandidate {
+                node_id: known,
+                score: 2.0,
+            },
+            RerankedCandidate {
+                node_id: known,
+                score: 1.0,
+            },
+        ];
+        assert!(matches!(
+            m.repackage_reranked(&result, &duplicate, 2),
+            Err(Error::InvalidInput(_))
+        ));
+
+        let unknown = [RerankedCandidate {
+            node_id: NodeId(u64::MAX),
+            score: 1.0,
+        }];
+        assert!(matches!(
+            m.repackage_reranked(&result, &unknown, 1),
+            Err(Error::InvalidInput(_))
+        ));
+
+        let non_finite = [RerankedCandidate {
+            node_id: known,
+            score: f64::NAN,
+        }];
+        assert!(matches!(
+            m.repackage_reranked(&result, &non_finite, 1),
+            Err(Error::NonFinite(_))
+        ));
     }
 
     #[test]
