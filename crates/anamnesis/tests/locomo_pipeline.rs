@@ -4,7 +4,8 @@ mod locomo_pipeline;
 use serde_json::json;
 
 use locomo_pipeline::{
-    answer_needles, contains_any_needle, load_locomo, normalize_for_match, parse_locomo_samples,
+    answer_needles, contains_any_needle, load_locomo, locomo_category_name, normalize_for_match,
+    parse_locomo_samples,
 };
 
 #[test]
@@ -14,7 +15,11 @@ fn parse_locomo_preserves_speakers_and_numeric_session_order() {
             {"speaker": "Alice", "text": "Late session turn"}
         ],
         "session_2": [
-            {"speaker": "Bob", "text": "Earlier numeric session turn"}
+            {
+                "speaker": "Bob",
+                "text": "Earlier numeric session turn",
+                "blip_caption": "a notebook with a gratitude list"
+            }
         ],
         "qa": []
     })];
@@ -24,6 +29,10 @@ fn parse_locomo_preserves_speakers_and_numeric_session_order() {
     assert_eq!(loaded.sessions[0].session_id, "locomo-0-session_2");
     assert_eq!(loaded.sessions[1].session_id, "locomo-0-session_10");
     assert_eq!(loaded.sessions[0].turns[0].speaker, "Bob");
+    assert_eq!(
+        loaded.sessions[0].turns[0].text,
+        "Earlier numeric session turn\nBob shared a notebook with a gratitude list."
+    );
     assert_eq!(loaded.sessions[1].turns[0].speaker, "Alice");
     assert!(loaded.speakers.contains("Alice"));
     assert!(loaded.speakers.contains("Bob"));
@@ -53,6 +62,15 @@ fn normalize_for_match_casefolds_and_collapses_whitespace() {
         normalize_for_match("  Adoption\n\tAgencies  "),
         "adoption agencies"
     );
+}
+
+#[test]
+fn category_names_match_the_official_locomo_evaluator() {
+    assert_eq!(locomo_category_name(1), "multi-hop");
+    assert_eq!(locomo_category_name(2), "temporal");
+    assert_eq!(locomo_category_name(3), "open-domain");
+    assert_eq!(locomo_category_name(4), "single-hop");
+    assert_eq!(locomo_category_name(5), "adversarial");
 }
 
 #[test]

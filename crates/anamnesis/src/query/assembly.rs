@@ -393,6 +393,60 @@ pub fn assemble_context_package(
     }
 }
 
+/// Trim packaged fragments to the top `limit` while retaining both endpoints
+/// of every surfaced tension.
+///
+/// This is shared by the engine's native result assembly and the framework
+/// layer's consumer-supplied reranking path. Keeping the operation here makes
+/// both paths obey the same contradiction-preservation and token-accounting
+/// rules.
+pub(crate) fn apply_result_limit(
+    package: &mut ContextPackage,
+    limit: usize,
+    chars_per_token: usize,
+) {
+    if package.total_fragments() <= limit {
+        return;
+    }
+
+    let mut ranked: Vec<(NodeId, f64)> = package
+        .identity
+        .iter()
+        .chain(package.knowledge.iter())
+        .chain(package.memories.iter())
+        .map(|fragment| (fragment.node_id, fragment.relevance))
+        .collect();
+    ranked.sort_by(|(left_id, left_score), (right_id, right_score)| {
+        right_score
+            .total_cmp(left_score)
+            .then_with(|| left_id.cmp(right_id))
+    });
+    let mut allowed: HashSet<NodeId> = ranked
+        .into_iter()
+        .take(limit)
+        .map(|(node_id, _)| node_id)
+        .collect();
+
+    for tension in &package.tensions {
+        allowed.insert(tension.node_a);
+        allowed.insert(tension.node_b);
+    }
+
+    package
+        .identity
+        .retain(|fragment| allowed.contains(&fragment.node_id));
+    package
+        .knowledge
+        .retain(|fragment| allowed.contains(&fragment.node_id));
+    package
+        .memories
+        .retain(|fragment| allowed.contains(&fragment.node_id));
+    package
+        .tensions
+        .retain(|tension| allowed.contains(&tension.node_a) && allowed.contains(&tension.node_b));
+    recalculate_token_usage(package, chars_per_token);
+}
+
 /// Hints for mode-specific assembly that cannot be derived from scored nodes alone.
 #[derive(Debug, Clone, Default)]
 pub struct ModeContext {

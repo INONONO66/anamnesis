@@ -84,7 +84,7 @@ fn run() -> BenchResult<()> {
                 .to_string(),
         ));
     }
-    let inner = Arc::new(make_provider()?);
+    let inner = Arc::new(make_provider(&args.embedding_model)?);
     eprintln!(
         "EMBED model={} dimensions={}",
         inner.model_name(),
@@ -105,6 +105,9 @@ fn run() -> BenchResult<()> {
         seed_limit: args.seed_limit,
         dump_features: args.dump_features.is_some(),
         speaker_cues: args.speaker_cues,
+        shadow_rank_fusion: false,
+        shadow_cross_encoder: None,
+        shadow_cross_encoder_candidates: 100,
     };
 
     // One memory store per sample (LoCoMo conversation / LongMemEval haystack),
@@ -212,7 +215,9 @@ fn run() -> BenchResult<()> {
 }
 
 #[cfg(feature = "embed")]
-fn make_provider() -> BenchResult<anamnesis::engine::FastEmbedProvider> {
-    anamnesis::engine::FastEmbedProvider::new()
+fn make_provider(model_name: &str) -> BenchResult<anamnesis::engine::FastEmbedProvider> {
+    let model = anamnesis::embedding::fastembed::embed_model_from_name(model_name)
+        .map_err(|err| BenchError::Embedding(format!("embedding model: {err}")))?;
+    anamnesis::engine::FastEmbedProvider::with_model(model)
         .map_err(|err| BenchError::Embedding(format!("FastEmbed init failed: {err}")))
 }

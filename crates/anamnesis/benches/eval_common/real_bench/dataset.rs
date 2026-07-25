@@ -305,3 +305,35 @@ pub(crate) fn string_array_field(value: &Value, field: &str) -> Vec<String> {
         })
         .unwrap_or_default()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn locomo_loader_includes_official_image_caption_context() {
+        let value = json!([{
+            "session_1": [{
+                "speaker": "Sam",
+                "text": "I use this to reflect.",
+                "blip_caption": "a journal with gratitude entries",
+                "dia_id": "D1:1"
+            }],
+            "session_1_date_time": "1:00 pm on 8 May, 2023",
+            "qa": [{
+                "question": "What did Sam share?",
+                "answer": "a journal",
+                "category": 4,
+                "evidence": ["D1:1"]
+            }]
+        }]);
+
+        let loaded =
+            parse_benchmark_dataset(BenchDatasetName::Locomo, &value, None).expect("valid LoCoMo");
+        assert_eq!(
+            loaded.sessions[0].turns[0].content,
+            "I use this to reflect.\nSam shared a journal with gratitude entries."
+        );
+    }
+}

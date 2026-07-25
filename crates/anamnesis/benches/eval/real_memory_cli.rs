@@ -20,6 +20,7 @@ pub(crate) struct Args {
     pub(crate) allow_download: bool,
     pub(crate) force: bool,
     pub(crate) embed_cache: Option<PathBuf>,
+    pub(crate) embedding_model: String,
     pub(crate) dump_features: Option<PathBuf>,
     pub(crate) speaker_cues: bool,
 }
@@ -97,6 +98,10 @@ where
                 parsed.saw_arg = true;
                 parsed.embed_cache = Some(PathBuf::from(next_value(&mut iter, "--embed-cache")?));
             }
+            "--embedding-model" => {
+                parsed.saw_arg = true;
+                parsed.embedding_model = next_value(&mut iter, "--embedding-model")?;
+            }
             "--dump-features" => {
                 parsed.saw_arg = true;
                 parsed.dump_features =
@@ -139,6 +144,7 @@ struct ParsedArgs {
     allow_download: bool,
     force: bool,
     embed_cache: Option<PathBuf>,
+    embedding_model: String,
     dump_features: Option<PathBuf>,
     speaker_cues: bool,
     saw_arg: bool,
@@ -160,6 +166,7 @@ impl Default for ParsedArgs {
             allow_download: false,
             force: false,
             embed_cache: None,
+            embedding_model: "bge-base-en-v1.5".to_string(),
             dump_features: None,
             speaker_cues: false,
             saw_arg: false,
@@ -185,6 +192,7 @@ impl ParsedArgs {
             allow_download: self.allow_download,
             force: self.force,
             embed_cache: self.embed_cache,
+            embedding_model: self.embedding_model,
             dump_features: self.dump_features,
             speaker_cues: self.speaker_cues,
         })
@@ -267,6 +275,7 @@ Options:\n\
   --full                   Permit uncapped LongMemEval-S runs\n\
   --force                  Overwrite an existing report file\n\
   --embed-cache <path>     SQLite embedding cache (model-keyed; speeds reruns)\n\
+  --embedding-model <name> FastEmbed model (default: bge-base-en-v1.5)\n\
   --dump-features <path>   Write per-candidate readout feature rows (JSONL) for calibration\n\
   --speaker-cues           Inject speaker entity-tag cues from question text (ablation)\n\
   --help                   Show this usage"

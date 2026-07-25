@@ -16,8 +16,8 @@ mod eval;
 #[cfg(test)]
 pub use eval::ranked_fragments_for_test;
 pub use eval::{
-    EvalOptions, QuestionEvaluation, ReadoutFeatureRow, RetrievedMemory, WarmupReport,
-    evaluate_questions, run_warmup,
+    AnswerContext, AnswerEvidence, EvalOptions, QuestionEvaluation, ReadoutFeatureRow,
+    RetrievedMemory, WarmupReport, evaluate_question_with_context, evaluate_questions, run_warmup,
 };
 
 pub struct BuiltMemoryGraph {
@@ -196,6 +196,33 @@ impl CachingProvider {
             cache: cache.map(Mutex::new),
         }
     }
+
+    fn cached_single<F>(&self, role: &str, text: &str, embed: F) -> Result<Vec<f32>, Error>
+    where
+        F: FnOnce() -> Result<Vec<f32>, Error>,
+    {
+        let Some(cache_mutex) = &self.cache else {
+            return embed();
+        };
+        // Query and passage formatting can differ for asymmetric models. Keep
+        // their cache entries distinct and do not reuse legacy untyped rows.
+        let cache_key = format!("\u{1f}{role}:{text}");
+        let cache = cache_mutex
+            .lock()
+            .map_err(|_| Error::InvalidInput("embed cache mutex poisoned".to_string()))?;
+        if let Some(hit) = cache
+            .get(&cache_key)
+            .map_err(|err| Error::InvalidInput(err.to_string()))?
+        {
+            return Ok(hit.into_iter().map(|value| value as f32).collect());
+        }
+        let fresh = embed()?;
+        let widened: Vec<f64> = fresh.iter().map(|&value| f64::from(value)).collect();
+        cache
+            .put(&cache_key, &widened)
+            .map_err(|err| Error::InvalidInput(err.to_string()))?;
+        Ok(fresh)
+    }
 }
 
 impl EmbeddingProvider for CachingProvider {
@@ -252,6 +279,14 @@ impl EmbeddingProvider for CachingProvider {
 
     fn model_name(&self) -> &str {
         self.inner.model_name()
+    }
+
+    fn embed_query(&self, text: &str) -> Result<Vec<f32>, Error> {
+        self.cached_single("query-v1", text, || self.inner.embed_query(text))
+    }
+
+    fn embed_passage(&self, text: &str) -> Result<Vec<f32>, Error> {
+        self.cached_single("passage-v1", text, || self.inner.embed_passage(text))
     }
 }
 

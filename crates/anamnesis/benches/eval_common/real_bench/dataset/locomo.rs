@@ -76,18 +76,16 @@ fn parse_session(
         .iter()
         .enumerate()
         .filter_map(|(turn_index, turn)| {
-            let content = string_field(turn, "text").unwrap_or_default();
-            (!content.trim().is_empty()).then(|| {
-                let speaker = string_field(turn, "speaker").unwrap_or_else(|| "unknown".into());
-                BenchTurn {
-                    session_id: session_id.clone(),
-                    raw_session_id: session_key.to_string(),
-                    raw_turn_id: string_field(turn, "dia_id"),
-                    turn_index,
-                    role: speaker.clone(),
-                    speaker,
-                    content,
-                }
+            let speaker = string_field(turn, "speaker").unwrap_or_else(|| "unknown".into());
+            let content = turn_content(turn, &speaker);
+            (!content.trim().is_empty()).then(|| BenchTurn {
+                session_id: session_id.clone(),
+                raw_session_id: session_key.to_string(),
+                raw_turn_id: string_field(turn, "dia_id"),
+                turn_index,
+                role: speaker.clone(),
+                speaker,
+                content,
             })
         })
         .collect();
@@ -103,6 +101,17 @@ fn parse_session(
         turns,
         start_timestamp,
     })
+}
+
+fn turn_content(turn: &Value, speaker: &str) -> String {
+    let mut content = string_field(turn, "text").unwrap_or_default();
+    if let Some(caption) = string_field(turn, "blip_caption") {
+        if !content.is_empty() {
+            content.push('\n');
+        }
+        content.push_str(&format!("{speaker} shared {caption}."));
+    }
+    content
 }
 
 fn parse_questions(
@@ -184,10 +193,10 @@ fn evidence_turn_ids(qa: &Value) -> Vec<String> {
 
 fn locomo_category(category: u64) -> &'static str {
     match category {
-        1 => "single-hop",
-        2 => "multi-hop",
-        3 => "temporal",
-        4 => "world-knowledge",
+        1 => "multi-hop",
+        2 => "temporal",
+        3 => "open-domain",
+        4 => "single-hop",
         5 => "adversarial",
         _ => "unknown",
     }

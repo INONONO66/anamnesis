@@ -1,9 +1,13 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::Instant;
 
+use anamnesis::engine::StorageAdapter;
 use anamnesis::graph::Timestamp;
-use anamnesis::memory::SearchTuning;
-use anamnesis::query::{ContextPackage, Fragment, SearchResult};
+use anamnesis::memory::{RerankedCandidate, SearchTuning};
+use anamnesis::query::{
+    ContextPackage, Fragment, QueryConfig, ScoredNode, SearchResult, assemble_context_package,
+};
 use serde::{Deserialize, Serialize};
 
 use super::super::dataset::BenchQuestion;
@@ -12,7 +16,7 @@ use super::super::metrics::{RankedRetrieval, RetrievalMetrics, first_hit_rank, r
 use super::BuiltMemoryGraph;
 
 /// Knobs for warmup/evaluation runs, bundled to keep call sites readable.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 pub struct EvalOptions {
     pub top_k: usize,
     pub seed_limit: Option<usize>,
@@ -22,7 +26,22 @@ pub struct EvalOptions {
     /// the entity channel floods seed fusion with arbitrary same-speaker
     /// turns (measured −21pp Recall@20 on LoCoMo).
     pub speaker_cues: bool,
+    /// Benchmark-only shadow candidate: re-rank the live top-200 readout with
+    /// reciprocal-rank fusion before packaging. This is deliberately not an
+    /// engine policy; it exists to require answer-quality evidence before any
+    /// product-level scoring change is proposed.
+    pub shadow_rank_fusion: bool,
+    /// Optional local cross-encoder used only on the benchmark's live readout
+    /// surface. The engine remains model-agnostic and unchanged.
+    pub shadow_cross_encoder: Option<Arc<fastembed::TextRerank>>,
+    /// Number of cognitive readout candidates exposed to the shadow
+    /// cross-encoder.
+    pub shadow_cross_encoder_candidates: usize,
 }
+
+const SHADOW_RRF_DAMPING: f64 = 60.0;
+const SHADOW_RRF_EMBEDDING_WEIGHT: f64 = 0.25;
+const SHADOW_RRF_TEXT_WEIGHT: f64 = 1.0;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WarmupReport {
@@ -53,6 +72,10 @@ pub struct ReadoutFeatureRow {
     pub scope_weight: f64,
     pub trust_weight: f64,
     pub stress: f64,
+    /// Raw query/node embedding cosine from the readout trace.
+    pub embedding_cosine: f64,
+    /// Raw FTS/BM25 score for the exact benchmark question and node.
+    pub text_score: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -88,6 +111,29 @@ pub struct RetrievedMemory {
     pub content_chars: usize,
 }
 
+/// Product-shaped context emitted by one `Memory` search.
+///
+/// The answer benchmark persists this surface so an answer failure can be
+/// separated into retrieval, reading, and judging failures after the run.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AnswerContext {
+    pub evidence: Vec<AnswerEvidence>,
+    pub context_tokens: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AnswerEvidence {
+    pub rank: usize,
+    pub node_id: u64,
+    pub score: f64,
+    pub text: String,
+    pub session_id: Option<String>,
+    pub raw_session_id: Option<String>,
+    pub raw_turn_id: Option<String>,
+    pub relevant: bool,
+    pub matched_gold_units: Vec<String>,
+}
+
 pub fn run_warmup(
     graph: &mut BuiltMemoryGraph,
     questions: &[BenchQuestion],
@@ -119,21 +165,40 @@ pub fn evaluate_questions(
 ) -> BenchResult<Vec<QuestionEvaluation>> {
     questions
         .iter()
-        .map(|question| evaluate_question(graph, question, opts))
+        .map(|question| {
+            evaluate_question_with_context(graph, question, opts).map(|(evaluation, _)| evaluation)
+        })
         .collect()
 }
 
-fn evaluate_question(
+pub fn evaluate_question_with_context(
     graph: &mut BuiltMemoryGraph,
     question: &BenchQuestion,
     opts: &EvalOptions,
-) -> BenchResult<QuestionEvaluation> {
+) -> BenchResult<(QuestionEvaluation, AnswerContext)> {
     let start = Instant::now();
     let result = search_question(graph, question, opts)?;
+    let shadow = if let Some(reranker) = &opts.shadow_cross_encoder {
+        Some(shadow_cross_encoder(
+            &result,
+            graph,
+            question,
+            reranker,
+            opts.shadow_cross_encoder_candidates,
+            opts.top_k,
+        )?)
+    } else {
+        opts.shadow_rank_fusion
+            .then(|| shadow_rank_fusion(&result, graph, question))
+    };
     let search_latency_ms = start.elapsed().as_secs_f64() * 1000.0;
 
     // Primary surface: pre-package readout candidates
-    let retrievals = readout_retrievals(&result.trace.readout, graph, question, opts.top_k);
+    let retrievals = if let Some((ranked, _)) = &shadow {
+        build_retrievals(ranked.iter().copied(), graph, question, opts.top_k)
+    } else {
+        readout_retrievals(&result.trace.readout, graph, question, opts.top_k)
+    };
     let readout_ranked: Vec<_> = retrievals
         .iter()
         .map(|item| RankedRetrieval {
@@ -143,7 +208,10 @@ fn evaluate_question(
         .collect();
 
     // Package surface: packaged ContextPackage fragments
-    let package_retrievals = retrieved_memories(&result.package, graph, question, opts.top_k);
+    let package = shadow
+        .as_ref()
+        .map_or(&result.package, |(_, package)| package);
+    let package_retrievals = retrieved_memories(package, graph, question, opts.top_k);
     let package_ranked: Vec<_> = package_retrievals
         .iter()
         .map(|item| RankedRetrieval {
@@ -153,8 +221,20 @@ fn evaluate_question(
         .collect();
 
     let total_relevant = question.gold.total_relevant_units();
-    let returned_fragments = result.package.total_fragments();
+    let returned_fragments = package.total_fragments();
 
+    let text_scores: HashMap<_, _> = if opts.dump_features {
+        graph
+            .memory
+            .engine()
+            .graph()
+            .storage()
+            .text_search(&question.question, 200)
+            .into_iter()
+            .collect()
+    } else {
+        HashMap::new()
+    };
     let features = if opts.dump_features {
         result
             .trace
@@ -186,6 +266,8 @@ fn evaluate_question(
                     scope_weight: candidate.scope_weight,
                     trust_weight: candidate.trust_weight,
                     stress: candidate.stress,
+                    embedding_cosine: candidate.embedding_cosine,
+                    text_score: text_scores.get(&candidate.node_id).copied().unwrap_or(0.0),
                 })
             })
             .collect()
@@ -193,7 +275,7 @@ fn evaluate_question(
         Vec::new()
     };
 
-    Ok(QuestionEvaluation {
+    let evaluation = QuestionEvaluation {
         question_id: question.question_id.clone(),
         question_type: question.question_type.clone(),
         sample_index: question.sample_index,
@@ -205,7 +287,166 @@ fn evaluate_question(
         returned_fragments,
         retrievals,
         features,
-    })
+    };
+    let context = answer_context(package, graph, question, opts.top_k);
+    Ok((evaluation, context))
+}
+
+fn shadow_rank_fusion(
+    result: &SearchResult,
+    graph: &BuiltMemoryGraph,
+    question: &BenchQuestion,
+) -> (Vec<(anamnesis::graph::NodeId, f64)>, ContextPackage) {
+    let candidates: Vec<_> = result.trace.readout.iter().take(200).collect();
+    let mut embedding_order: Vec<usize> = (0..candidates.len()).collect();
+    embedding_order.sort_by(|left, right| {
+        candidates[*right]
+            .embedding_cosine
+            .total_cmp(&candidates[*left].embedding_cosine)
+            .then_with(|| left.cmp(right))
+    });
+    let mut embedding_ranks = vec![0usize; candidates.len()];
+    for (rank, index) in embedding_order.into_iter().enumerate() {
+        embedding_ranks[index] = rank + 1;
+    }
+
+    let text_scores: HashMap<_, _> = graph
+        .memory
+        .engine()
+        .graph()
+        .storage()
+        .text_search(&question.question, 200)
+        .into_iter()
+        .collect();
+    let mut text_order: Vec<usize> = (0..candidates.len())
+        .filter(|index| {
+            text_scores
+                .get(&candidates[*index].node_id)
+                .is_some_and(|score| *score > 0.0)
+        })
+        .collect();
+    text_order.sort_by(|left, right| {
+        let left_score = text_scores
+            .get(&candidates[*left].node_id)
+            .copied()
+            .unwrap_or(0.0);
+        let right_score = text_scores
+            .get(&candidates[*right].node_id)
+            .copied()
+            .unwrap_or(0.0);
+        right_score
+            .total_cmp(&left_score)
+            .then_with(|| left.cmp(right))
+    });
+    let mut text_ranks = HashMap::new();
+    for (rank, index) in text_order.into_iter().enumerate() {
+        text_ranks.insert(index, rank + 1);
+    }
+
+    let mut ranked: Vec<_> = candidates
+        .iter()
+        .enumerate()
+        .map(|(index, candidate)| {
+            let cognitive = 1.0 / (SHADOW_RRF_DAMPING + (index + 1) as f64);
+            let embedding = if candidate.embedding_cosine > 0.0 {
+                SHADOW_RRF_EMBEDDING_WEIGHT / (SHADOW_RRF_DAMPING + embedding_ranks[index] as f64)
+            } else {
+                0.0
+            };
+            let text = text_ranks.get(&index).map_or(0.0, |rank| {
+                SHADOW_RRF_TEXT_WEIGHT / (SHADOW_RRF_DAMPING + *rank as f64)
+            });
+            (candidate.node_id, cognitive + embedding + text, index)
+        })
+        .collect();
+    ranked.sort_by(|left, right| {
+        right
+            .1
+            .total_cmp(&left.1)
+            .then_with(|| left.2.cmp(&right.2))
+    });
+
+    let storage = graph.memory.engine().graph().storage();
+    let scored_nodes = ranked
+        .iter()
+        .filter_map(|(node_id, score, _)| {
+            let node = storage.get_node(*node_id).ok()?;
+            Some(ScoredNode {
+                node_id: *node_id,
+                name: node.name.clone(),
+                summary: node.summary.clone(),
+                content: node.content.clone(),
+                node_type: node.node_type.clone(),
+                relevance: *score,
+                origin: node.origin.clone(),
+            })
+        })
+        .collect();
+    let config = QueryConfig::default();
+    let package = assemble_context_package(
+        scored_nodes,
+        &[],
+        &[],
+        config.token_budget,
+        config.chars_per_token,
+    );
+    (
+        ranked
+            .into_iter()
+            .map(|(node_id, score, _)| (node_id, score))
+            .collect(),
+        package,
+    )
+}
+
+fn shadow_cross_encoder(
+    result: &SearchResult,
+    graph: &BuiltMemoryGraph,
+    question: &BenchQuestion,
+    reranker: &fastembed::TextRerank,
+    candidate_limit: usize,
+    final_limit: usize,
+) -> BenchResult<(Vec<(anamnesis::graph::NodeId, f64)>, ContextPackage)> {
+    let storage = graph.memory.engine().graph().storage();
+    let candidates: Vec<_> = result
+        .trace
+        .readout
+        .iter()
+        .take(candidate_limit)
+        .filter_map(|candidate| {
+            storage
+                .get_node(candidate.node_id)
+                .ok()
+                .map(|node| (candidate, node))
+        })
+        .collect();
+    let documents: Vec<_> = candidates
+        .iter()
+        .map(|(_, node)| node.content.clone())
+        .collect();
+    let reranked = reranker
+        .rerank(question.question.clone(), documents, false, Some(32))
+        .map_err(|err| BenchError::Embedding(format!("cross-encoder rerank failed: {err}")))?;
+
+    let ranked: Vec<_> = reranked
+        .iter()
+        .filter_map(|item| {
+            let (candidate, _) = candidates.get(item.index)?;
+            Some((candidate.node_id, f64::from(item.score)))
+        })
+        .collect();
+    let consumer_ranking: Vec<_> = ranked
+        .iter()
+        .map(|(node_id, score)| RerankedCandidate {
+            node_id: *node_id,
+            score: *score,
+        })
+        .collect();
+    let recall = graph
+        .memory
+        .repackage_reranked(result, &consumer_ranking, final_limit)
+        .map_err(|err| BenchError::Engine(err.to_string()))?;
+    Ok((ranked, recall.package))
 }
 
 fn search_question(
@@ -261,6 +502,50 @@ fn retrieved_memories(
     )
 }
 
+fn answer_context(
+    package: &ContextPackage,
+    graph: &BuiltMemoryGraph,
+    question: &BenchQuestion,
+    top_k: usize,
+) -> AnswerContext {
+    let mut seen_units = HashSet::new();
+    let evidence = ranked_fragments(package)
+        .into_iter()
+        .take(top_k)
+        .enumerate()
+        .map(|(index, fragment)| {
+            let provenance = graph.provenance_by_node.get(&fragment.node_id);
+            let matched_gold_units: Vec<_> = provenance
+                .map(|provenance| {
+                    question.gold.matched_units(
+                        &provenance.raw_session_id,
+                        provenance.raw_turn_id.as_deref(),
+                        &provenance.content,
+                    )
+                })
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|unit| seen_units.insert(unit.clone()))
+                .collect();
+            AnswerEvidence {
+                rank: index + 1,
+                node_id: fragment.node_id.0,
+                score: fragment.relevance,
+                text: fragment_text(&fragment),
+                session_id: provenance.map(|value| value.session_id.clone()),
+                raw_session_id: provenance.map(|value| value.raw_session_id.clone()),
+                raw_turn_id: provenance.and_then(|value| value.raw_turn_id.clone()),
+                relevant: !matched_gold_units.is_empty(),
+                matched_gold_units,
+            }
+        })
+        .collect();
+    AnswerContext {
+        evidence,
+        context_tokens: package.token_usage.used,
+    }
+}
+
 fn build_retrievals(
     ranked: impl Iterator<Item = (anamnesis::graph::NodeId, f64)>,
     graph: &BuiltMemoryGraph,
@@ -307,6 +592,15 @@ fn collect_fragments(package: &ContextPackage) -> Vec<Fragment> {
         .chain(package.memories.iter())
         .cloned()
         .collect()
+}
+
+fn fragment_text(fragment: &Fragment) -> String {
+    fragment
+        .content
+        .as_ref()
+        .or(fragment.summary.as_ref())
+        .unwrap_or(&fragment.name)
+        .clone()
 }
 
 fn ranked_fragments(package: &ContextPackage) -> Vec<Fragment> {

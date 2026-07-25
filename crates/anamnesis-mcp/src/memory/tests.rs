@@ -31,6 +31,13 @@ fn embed_model_from_name_maps_supported_models() {
         "MultilingualE5Large"
     );
     assert_eq!(
+        format!(
+            "{:?}",
+            embed_model_from_name("Qdrant/multilingual-e5-large-onnx+query-passage-v1").unwrap()
+        ),
+        "MultilingualE5Large"
+    );
+    assert_eq!(
         format!("{:?}", embed_model_from_name("bge-base-en-v1.5").unwrap()),
         "BGEBaseENV15"
     );

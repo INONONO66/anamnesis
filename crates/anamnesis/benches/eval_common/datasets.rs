@@ -127,11 +127,22 @@ fn parse_locomo_turns(session_data: &serde_json::Value) -> Result<Vec<Turn>, Dat
                 .get("speaker")
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown");
-            let content = turn
+            let mut content = turn
                 .get("text")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
+            if let Some(caption) = turn
+                .get("blip_caption")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|caption| !caption.is_empty())
+            {
+                if !content.is_empty() {
+                    content.push('\n');
+                }
+                content.push_str(&format!("{speaker} shared {caption}."));
+            }
             let role = if speaker == "speaker_a" {
                 "user".to_string()
             } else {
@@ -146,10 +157,10 @@ fn parse_locomo_turns(session_data: &serde_json::Value) -> Result<Vec<Turn>, Dat
 
 fn locomo_category_to_type(category: u64) -> String {
     match category {
-        1 => "single-hop",
-        2 => "multi-hop",
-        3 => "temporal",
-        4 => "world-knowledge",
+        1 => "multi-hop",
+        2 => "temporal",
+        3 => "open-domain",
+        4 => "single-hop",
         5 => "adversarial",
         _ => "unknown",
     }
@@ -399,7 +410,7 @@ mod tests {
         let (sessions, questions) = result.expect("fixture should parse");
         assert_eq!(sessions.len(), 2, "should have 2 sessions");
         assert_eq!(questions.len(), 1, "should have 1 question");
-        assert_eq!(questions[0].question_type, "single-hop");
+        assert_eq!(questions[0].question_type, "multi-hop");
     }
 
     #[test]

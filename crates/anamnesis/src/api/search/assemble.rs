@@ -13,7 +13,7 @@ use crate::api::Engine;
 use crate::error::Error;
 use crate::graph::{EdgeType, KnowledgeType, NodeId, Timestamp};
 use crate::mechanics::attraction::cosine_similarity;
-use crate::query::assembly::{ScoredNode, assemble_context_package, estimate_tokens};
+use crate::query::assembly::{ScoredNode, apply_result_limit, assemble_context_package};
 use crate::query::rwr::ActivationResponse;
 use crate::query::scoring::{ReadoutInputs, TieBreakKey, rank, readout_score, scope_weight};
 use crate::query::types::SearchPlan;
@@ -438,105 +438,6 @@ fn apply_validity_filter<S: StorageAdapter + Clone>(
         node_is_valid_at(engine, tension.node_a, now)
             && node_is_valid_at(engine, tension.node_b, now)
     });
-}
-
-/// Trim the packaged fragments down to the top-`limit` by relevance, with one
-/// exemption: **the endpoints of any tension surfaced before trimming are always
-/// retained**.
-///
-/// A tension (a surfaced `Contradicts` pair, ADR-0006) is the product's
-/// differentiator — dropping it because one endpoint ranked just below the cut
-/// would silently discard the very structure the query surfaced. So after
-/// selecting the top-`limit` fragment ids, this unions in both endpoints of every
-/// tension present in `package.tensions` at entry (post-validity-filter), so the
-/// tension and its endpoint fragments survive the retains. The tension itself is
-/// kept only when BOTH endpoints are — which the union now guarantees for every
-/// pre-trim tension — so no tension is ever resurrected, only preserved.
-///
-/// Consequence: the packaged fragment count MAY exceed `limit` by the (typically
-/// few) exempted tension endpoints. This is intentional and bounded — at most two
-/// ids per surfaced tension, and only for tensions that were real before trimming.
-/// Non-tension trimming is otherwise unchanged: no re-ranking, the top-`limit`
-/// selection stands.
-fn apply_result_limit(package: &mut ContextPackage, limit: usize, chars_per_token: usize) {
-    if package.total_fragments() <= limit {
-        return;
-    }
-
-    let mut ranked: Vec<(NodeId, f64)> = package
-        .identity
-        .iter()
-        .chain(package.knowledge.iter())
-        .chain(package.memories.iter())
-        .map(|fragment| (fragment.node_id, fragment.relevance))
-        .collect();
-    ranked.sort_by(|(left_id, left_score), (right_id, right_score)| {
-        right_score
-            .total_cmp(left_score)
-            .then_with(|| left_id.cmp(right_id))
-    });
-    let mut allowed: HashSet<NodeId> = ranked
-        .into_iter()
-        .take(limit)
-        .map(|(node_id, _)| node_id)
-        .collect();
-
-    // Exempt tension endpoints from trimming: union in both endpoints of every
-    // tension surfaced before the cut, so a contradiction pair is never dropped
-    // just because one endpoint ranked below `limit`. Package size may exceed
-    // `limit` by these endpoints (documented above).
-    for tension in &package.tensions {
-        allowed.insert(tension.node_a);
-        allowed.insert(tension.node_b);
-    }
-
-    package
-        .identity
-        .retain(|fragment| allowed.contains(&fragment.node_id));
-    package
-        .knowledge
-        .retain(|fragment| allowed.contains(&fragment.node_id));
-    package
-        .memories
-        .retain(|fragment| allowed.contains(&fragment.node_id));
-    package
-        .tensions
-        .retain(|tension| allowed.contains(&tension.node_a) && allowed.contains(&tension.node_b));
-    recalculate_token_usage(package, chars_per_token);
-}
-
-fn recalculate_token_usage(package: &mut ContextPackage, chars_per_token: usize) {
-    let total = package.token_usage.total;
-    package.token_usage = crate::query::TokenBudget::new(total);
-    package.token_usage.identity_used = package
-        .identity
-        .iter()
-        .map(|fragment| fragment_tokens(fragment, chars_per_token))
-        .sum();
-    package.token_usage.knowledge_used = package
-        .knowledge
-        .iter()
-        .map(|fragment| fragment_tokens(fragment, chars_per_token))
-        .sum();
-    package.token_usage.memories_used = package
-        .memories
-        .iter()
-        .map(|fragment| fragment_tokens(fragment, chars_per_token))
-        .sum();
-    package.token_usage.used = package.token_usage.identity_used
-        + package.token_usage.knowledge_used
-        + package.token_usage.memories_used;
-}
-
-fn fragment_tokens(fragment: &Fragment, chars_per_token: usize) -> usize {
-    let mut tokens = estimate_tokens(&fragment.name, chars_per_token);
-    if let Some(summary) = &fragment.summary {
-        tokens += estimate_tokens(summary, chars_per_token);
-    }
-    if let Some(content) = &fragment.content {
-        tokens += estimate_tokens(content, chars_per_token);
-    }
-    tokens
 }
 
 fn node_is_valid_at<S: StorageAdapter + Clone>(

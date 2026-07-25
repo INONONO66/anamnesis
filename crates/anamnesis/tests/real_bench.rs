@@ -45,6 +45,36 @@ impl EmbeddingProvider for CountingEmbedder {
     }
 }
 
+#[derive(Clone, Default)]
+struct AsymmetricEmbedder {
+    query_calls: Arc<AtomicUsize>,
+    passage_calls: Arc<AtomicUsize>,
+}
+
+impl EmbeddingProvider for AsymmetricEmbedder {
+    fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, Error> {
+        Ok(texts.iter().map(|_| vec![0.0]).collect())
+    }
+
+    fn dimensions(&self) -> usize {
+        1
+    }
+
+    fn model_name(&self) -> &str {
+        "asymmetric-test-embedder"
+    }
+
+    fn embed_query(&self, _text: &str) -> Result<Vec<f32>, Error> {
+        self.query_calls.fetch_add(1, Ordering::Relaxed);
+        Ok(vec![1.0])
+    }
+
+    fn embed_passage(&self, _text: &str) -> Result<Vec<f32>, Error> {
+        self.passage_calls.fetch_add(1, Ordering::Relaxed);
+        Ok(vec![2.0])
+    }
+}
+
 #[test]
 fn locomo_loader_preserves_evidence_turn_ids() {
     let loaded = parse_benchmark_dataset(
@@ -530,6 +560,36 @@ fn embed_cache_second_build_makes_zero_provider_calls() {
         0,
         "second build with warm cache must make 0 provider calls"
     );
+
+    std::fs::remove_dir_all(cache_dir).ok();
+}
+
+#[test]
+fn embed_cache_preserves_and_separates_query_and_passage_semantics() {
+    use eval_common::real_bench::embed_cache::EmbedCache;
+
+    let cache_dir =
+        std::env::temp_dir().join(format!("embed-cache-role-test-{}", std::process::id()));
+    std::fs::create_dir_all(&cache_dir).unwrap();
+    let cache_path = cache_dir.join("cache.sqlite");
+
+    let inner = AsymmetricEmbedder::default();
+    let cache = EmbedCache::open(&cache_path, inner.model_name()).unwrap();
+    let provider = CachingProvider::new(Arc::new(inner.clone()), Some(cache));
+    assert_eq!(provider.embed_query("same text").unwrap(), vec![1.0]);
+    assert_eq!(provider.embed_passage("same text").unwrap(), vec![2.0]);
+    assert_eq!(provider.embed_query("same text").unwrap(), vec![1.0]);
+    assert_eq!(provider.embed_passage("same text").unwrap(), vec![2.0]);
+    assert_eq!(inner.query_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(inner.passage_calls.load(Ordering::Relaxed), 1);
+
+    let warm_inner = AsymmetricEmbedder::default();
+    let warm_cache = EmbedCache::open(&cache_path, warm_inner.model_name()).unwrap();
+    let warm_provider = CachingProvider::new(Arc::new(warm_inner.clone()), Some(warm_cache));
+    assert_eq!(warm_provider.embed_query("same text").unwrap(), vec![1.0]);
+    assert_eq!(warm_provider.embed_passage("same text").unwrap(), vec![2.0]);
+    assert_eq!(warm_inner.query_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(warm_inner.passage_calls.load(Ordering::Relaxed), 0);
 
     std::fs::remove_dir_all(cache_dir).ok();
 }

@@ -1,5 +1,6 @@
 #![allow(dead_code, unused_imports)]
 
+pub mod answer_metrics;
 pub mod checkpoint;
 pub mod datasets;
 pub mod judge;
