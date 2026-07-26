@@ -19,8 +19,11 @@ pub struct RealBenchReport {
     pub evaluated_questions: usize,
     pub graph: ReportGraphStats,
     pub warmup: WarmupReport,
-    pub retrieval_metrics: RetrievalMetrics,
-    pub package_metrics: RetrievalMetrics,
+    pub candidate_metrics: RetrievalMetrics,
+    pub reranker_metrics: RetrievalMetrics,
+    pub delivered_metrics: RetrievalMetrics,
+    pub rendered_recall: f64,
+    pub rendered_hit: f64,
     pub diagnostics: DiagnosticsReport,
     pub latency_ms: LatencyReport,
     pub questions: Vec<QuestionEvaluation>,
@@ -76,8 +79,11 @@ pub struct ReportInput {
 }
 
 pub fn build_report(input: ReportInput) -> RealBenchReport {
-    let retrieval_metrics = average_metrics(&input.questions, |q| &q.retrieval_metrics);
-    let package_metrics = average_metrics(&input.questions, |q| &q.package_metrics);
+    let candidate_metrics = average_metrics(&input.questions, |q| &q.candidate_metrics);
+    let reranker_metrics = average_metrics(&input.questions, |q| &q.reranker_metrics);
+    let delivered_metrics = average_metrics(&input.questions, |q| &q.delivered_metrics);
+    let rendered_recall = average_scalar(&input.questions, |q| q.rendered_recall);
+    let rendered_hit = average_scalar(&input.questions, |q| f64::from(q.rendered_hit));
     let diagnostics = diagnostics(&input.questions);
     let latency = latency_report(&input.questions);
     RealBenchReport {
@@ -97,12 +103,25 @@ pub fn build_report(input: ReportInput) -> RealBenchReport {
             embedded_texts: input.graph_stats.embedded_texts,
         },
         warmup: input.warmup,
-        retrieval_metrics,
-        package_metrics,
+        candidate_metrics,
+        reranker_metrics,
+        delivered_metrics,
+        rendered_recall,
+        rendered_hit,
         diagnostics,
         latency_ms: latency,
         questions: input.questions,
     }
+}
+
+fn average_scalar(
+    questions: &[QuestionEvaluation],
+    accessor: impl Fn(&QuestionEvaluation) -> f64,
+) -> f64 {
+    if questions.is_empty() {
+        return 0.0;
+    }
+    questions.iter().map(accessor).sum::<f64>() / questions.len() as f64
 }
 
 fn average_metrics(
@@ -134,20 +153,20 @@ fn diagnostics(questions: &[QuestionEvaluation]) -> DiagnosticsReport {
     let hit_at = |k: usize| {
         questions
             .iter()
-            .filter(|q| q.first_hit_rank.is_some_and(|r| r <= k))
+            .filter(|q| q.reranker_first_hit_rank.is_some_and(|r| r <= k))
             .count() as f64
             / total
     };
     let ranks: Vec<f64> = questions
         .iter()
-        .filter_map(|q| q.first_hit_rank.map(|r| r as f64))
+        .filter_map(|q| q.reranker_first_hit_rank.map(|r| r as f64))
         .collect();
     let mut per_type: std::collections::BTreeMap<String, TypeBreakdown> = Default::default();
     for q in questions {
         let entry = per_type.entry(q.question_type.clone()).or_default();
         entry.questions += 1;
-        entry.recall_at_k += q.retrieval_metrics.recall_at_k;
-        entry.mrr += q.retrieval_metrics.mrr;
+        entry.recall_at_k += q.reranker_metrics.recall_at_k;
+        entry.mrr += q.reranker_metrics.mrr;
     }
     for entry in per_type.values_mut() {
         let n = entry.questions.max(1) as f64;
@@ -167,7 +186,7 @@ fn diagnostics(questions: &[QuestionEvaluation]) -> DiagnosticsReport {
         },
         avg_returned_fragments: questions
             .iter()
-            .map(|q| q.returned_fragments as f64)
+            .map(|q| q.delivered_fragments as f64)
             .sum::<f64>()
             / total,
         per_type,

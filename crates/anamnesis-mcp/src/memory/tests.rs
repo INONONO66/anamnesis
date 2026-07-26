@@ -461,16 +461,16 @@ fn policy_schema_fresh_and_v0_migration_converge() {
         fresh.schema_fingerprint().expect("fresh schema"),
         migrated.schema_fingerprint().expect("migrated schema")
     );
-    assert_eq!(fresh.schema_version().expect("fresh version"), 2);
-    assert_eq!(migrated.schema_version().expect("migrated version"), 2);
+    assert_eq!(fresh.schema_version().expect("fresh version"), 3);
+    assert_eq!(migrated.schema_version().expect("migrated version"), 3);
 }
 #[test]
-fn policy_schema_v1_to_v2_matches_fresh_v2() {
-    let fresh = PolicyStore::in_memory().expect("fresh v2");
-    let migrated = PolicyStore::from_test_connection(v1_connection()).expect("migrated v2");
+fn policy_schema_v1_to_v3_matches_fresh_v3() {
+    let fresh = PolicyStore::in_memory().expect("fresh v3");
+    let migrated = PolicyStore::from_test_connection(v1_connection()).expect("migrated v3");
 
-    assert_eq!(fresh.schema_version().expect("fresh version"), 2);
-    assert_eq!(migrated.schema_version().expect("migrated version"), 2);
+    assert_eq!(fresh.schema_version().expect("fresh version"), 3);
+    assert_eq!(migrated.schema_version().expect("migrated version"), 3);
     assert_eq!(
         fresh.schema_fingerprint().expect("fresh schema"),
         migrated.schema_fingerprint().expect("migrated schema")
@@ -572,7 +572,7 @@ fn repeated_phase_one_resolution_reuses_namespace_handles() {
 
 #[test]
 fn future_policy_schema_disables_only_policy_features() {
-    let (mut reg, _dir) = registry_with_policy_version(3);
+    let (mut reg, _dir) = registry_with_policy_version(4);
 
     reg.remember("core recall remains available", None)
         .expect("remember");
@@ -1331,6 +1331,11 @@ fn recall_packaged_returns_context_and_dedup_hits() {
         assert!(
             packaged.context.contains("##"),
             "expected a section header in context:\n{}",
+            packaged.context
+        );
+        assert!(
+            packaged.context.contains("time: observed "),
+            "product recall context must expose source time:\n{}",
             packaged.context
         );
     }

@@ -34,8 +34,8 @@ pub use crate::query::{
     AccessedSite, ActivatedTension, ActivationResponse, CandidateSource, CandidateTrace,
     CoReadoutPair, CommitTrace, ContextPackage, ConvergenceConfig, Fragment, FusedCandidate,
     GraphRecallTrace, PackagingMode, PathCurrentMap, PathUsedEdge, Query, QueryConfig,
-    ReadoutCandidate, SearchCandidate, SearchInput, SearchResult, SearchTrace, SearchTraceLevel,
-    Tension, TokenBudget, additive_rwr, additive_rwr_with_alpha, scope_weight,
+    ReadoutCandidate, SearchCandidate, SearchDiagnostics, SearchInput, SearchResult, SearchTrace,
+    SearchTraceLevel, Tension, TokenBudget, additive_rwr, additive_rwr_with_alpha, scope_weight,
 };
 
 // ── Observability / mechanics ─────────────────────────────────────────────────

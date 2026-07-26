@@ -22,11 +22,6 @@ use crate::query::{
 };
 use crate::storage::StorageAdapter;
 
-/// Trace-size memory bound for the pre-packaging readout candidate list. Not a
-/// behavioral prior (ADR-0010) — it only caps the diagnostic
-/// `SearchTrace::readout` vector and never affects packaging or result limits.
-const READOUT_TRACE_CAP: usize = 200;
-
 pub(crate) struct SearchAssemblyRequest<'a> {
     pub(crate) response: &'a ActivationResponse,
     pub(crate) seed_ids: &'a [NodeId],
@@ -34,7 +29,9 @@ pub(crate) struct SearchAssemblyRequest<'a> {
     pub(crate) input: &'a SearchInput,
     pub(crate) plan: &'a SearchPlan,
     pub(crate) strategies_used: Vec<String>,
+    pub(crate) query_variants: Vec<String>,
     pub(crate) field: &'a crate::query::field::QueryField,
+    pub(crate) readout_trace_limit: usize,
 }
 
 pub(crate) fn assemble_search_result<S: StorageAdapter + Clone>(
@@ -43,6 +40,7 @@ pub(crate) fn assemble_search_result<S: StorageAdapter + Clone>(
 ) -> Result<SearchResult, Error> {
     let trace = SearchTrace {
         strategies_used: request.strategies_used.clone(),
+        query_variants: request.query_variants,
         seed_count: request.seed_ids.len(),
         iterations: request.response.iterations,
         residual: request.response.residual,
@@ -67,6 +65,7 @@ pub(crate) fn assemble_search_result<S: StorageAdapter + Clone>(
         request.config,
         request.input,
         request.field,
+        request.readout_trace_limit,
     );
     let packaging_mode =
         crate::query::decide_packaging(&package.tensions, request.plan, &request.input.text);
@@ -112,6 +111,7 @@ fn assemble_graph_recall_package<S: StorageAdapter + Clone>(
     config: &QueryConfig,
     input: &crate::query::SearchInput,
     field: &crate::query::field::QueryField,
+    readout_trace_limit: usize,
 ) -> (ContextPackage, Vec<crate::query::ReadoutCandidate>) {
     let storage = engine.graph.storage();
     let now = config.now.unwrap_or_else(Timestamp::now);
@@ -241,11 +241,12 @@ fn assemble_graph_recall_package<S: StorageAdapter + Clone>(
     scored.sort_by(|(sa, ka, _, _), (sb, kb, _, _)| rank(*sa, ka, *sb, kb));
 
     // Capture the ranked pre-packaging readout candidate list with per-term score
-    // components (readout-scoring.md "Trace"). Capped at READOUT_TRACE_CAP as a
+    // components (readout-scoring.md "Trace"). Capped by the requested trace
+    // limit as a
     // numerical guard (ADR-0010); all packaged sites are always within this cap.
     let readout_candidates: Vec<crate::query::ReadoutCandidate> = scored
         .iter()
-        .take(READOUT_TRACE_CAP)
+        .take(readout_trace_limit)
         .map(|(_, _, candidate, _)| candidate.clone())
         .collect();
 
@@ -274,7 +275,7 @@ fn assemble_graph_recall_package<S: StorageAdapter + Clone>(
     (package, readout_candidates)
 }
 
-fn apply_packaging_mode<S: StorageAdapter + Clone>(
+pub(crate) fn apply_packaging_mode<S: StorageAdapter + Clone>(
     engine: &Engine<S>,
     packaging_mode: PackagingMode,
     package: &mut ContextPackage,
@@ -420,7 +421,7 @@ fn sort_fragments_by_created_at<S: StorageAdapter + Clone>(
     });
 }
 
-fn apply_validity_filter<S: StorageAdapter + Clone>(
+pub(crate) fn apply_validity_filter<S: StorageAdapter + Clone>(
     engine: &Engine<S>,
     package: &mut ContextPackage,
     now: Timestamp,

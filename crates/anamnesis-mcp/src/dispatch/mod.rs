@@ -159,6 +159,8 @@ fn request_namespace(req: &Request) -> Option<&str> {
         | Request::RecordExtractionFailure { namespace, .. }
         | Request::ExtractionAuditList { namespace, .. }
         | Request::UpdateExtractionCandidateAudit { namespace, .. }
+        | Request::PromoteExtractionCandidate { namespace, .. }
+        | Request::PromoteExtractionRelation { namespace, .. }
         | Request::UpdateExtractionRelationAudit { namespace, .. }
         | Request::Update { namespace, .. }
         | Request::Forget { namespace, .. }
@@ -727,6 +729,14 @@ fn dispatch_registry(registry: &Arc<Mutex<MemoryRegistry>>, req: Request) -> Res
             contamination,
             reviewer,
         ),
+        Request::PromoteExtractionCandidate {
+            namespace,
+            candidate_id,
+        } => extract::dispatch_promote_candidate(registry, namespace, candidate_id),
+        Request::PromoteExtractionRelation {
+            namespace,
+            relation_id,
+        } => extract::dispatch_promote_relation(registry, namespace, relation_id),
         Request::UpdateExtractionRelationAudit {
             namespace,
             relation_id,

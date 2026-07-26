@@ -4532,4 +4532,230 @@ mod migration_job {
             "malformed provenance rejection cannot mutate graph"
         );
     }
+
+    #[test]
+    fn reviewed_candidate_promotion_is_provenance_safe_and_idempotent() {
+        use anamnesis::engine::StorageAdapter;
+        use anamnesis::graph::{EdgeType, NodeId};
+
+        let (reg, dir) = stub_registry();
+        let (sources, _) = audit_fixture(&reg);
+        let connection = rusqlite::Connection::open(dir.path().join("memory.db"))
+            .expect("open extraction policy database");
+        connection
+            .execute(
+                "UPDATE extract_candidates
+                 SET entity_tags = '[\"Alice\"]', valid_from_ms = 10, valid_until_ms = 20
+                 WHERE item_local_id = 'one'",
+                [],
+            )
+            .expect("seed generic candidate metadata");
+        drop(connection);
+        let audit = extraction_audit_list(&reg);
+        let candidate_id = audit_candidate(&audit, "one")["id"]
+            .as_u64()
+            .expect("candidate id");
+        let second_candidate_id = audit_candidate(&audit, "two")["id"]
+            .as_u64()
+            .expect("second candidate id");
+        let relation_id = audit_relation(&audit, "one", "two")["id"]
+            .as_u64()
+            .expect("relation id");
+
+        let rejected = dispatch(
+            &reg,
+            Request::PromoteExtractionCandidate {
+                namespace: None,
+                candidate_id,
+            },
+        );
+        assert!(matches!(
+            rejected,
+            Response::Err {
+                kind: ErrKind::InvalidParams,
+                ..
+            }
+        ));
+
+        let reviewed = dispatch(
+            &reg,
+            Request::UpdateExtractionCandidateAudit {
+                namespace: None,
+                candidate_id,
+                support: crate::extract::types::AuditSupport::Supported,
+                contamination: None,
+                reviewer: "reviewer".into(),
+            },
+        );
+        assert!(matches!(reviewed, Response::Ok { .. }), "{reviewed:?}");
+
+        let first: serde_json::Value = serde_json::from_str(&ok_text(dispatch(
+            &reg,
+            Request::PromoteExtractionCandidate {
+                namespace: None,
+                candidate_id,
+            },
+        )))
+        .expect("promotion result");
+        assert_eq!(first["already_materialized"], false);
+        let derived_id = NodeId(first["node_id"].as_u64().expect("derived node id"));
+
+        let second: serde_json::Value = serde_json::from_str(&ok_text(dispatch(
+            &reg,
+            Request::PromoteExtractionCandidate {
+                namespace: None,
+                candidate_id,
+            },
+        )))
+        .expect("idempotent promotion result");
+        assert_eq!(second["node_id"], derived_id.0);
+        assert_eq!(second["already_materialized"], true);
+
+        let handle = {
+            let mut registry = reg.lock().unwrap_or_else(|poison| poison.into_inner());
+            registry.namespace_handle(None).expect("default namespace")
+        };
+        let memory = handle.lock().unwrap_or_else(|poison| poison.into_inner());
+        let derived = memory
+            .engine()
+            .graph()
+            .storage()
+            .get_node(derived_id)
+            .expect("derived node");
+        assert_eq!(derived.content, "derived one");
+        assert!(
+            derived
+                .entity_tags
+                .iter()
+                .any(|tag| tag == "anamnesis:derived")
+        );
+        assert!(derived.entity_tags.iter().any(|tag| tag == "Alice"));
+        assert_eq!(derived.valid_from, Some(anamnesis::graph::Timestamp(10)));
+        assert_eq!(derived.valid_until, Some(anamnesis::graph::Timestamp(20)));
+        assert_eq!(
+            memory
+                .engine()
+                .graph()
+                .storage()
+                .all_node_ids()
+                .into_iter()
+                .filter(|node_id| {
+                    memory
+                        .engine()
+                        .graph()
+                        .storage()
+                        .get_node(*node_id)
+                        .is_ok_and(|node| {
+                            node.metadata
+                                .get("anamnesis:extraction_idempotency_key")
+                                .is_some_and(|value| {
+                                    value
+                                        == derived
+                                            .metadata
+                                            .get("anamnesis:extraction_idempotency_key")
+                                            .expect("promoted idempotency metadata")
+                                })
+                        })
+                })
+                .count(),
+            1,
+            "promotion must create one Semantic node, not an Episodic+Semantic duplicate"
+        );
+        let source_id = NodeId(sources[0].node_id);
+        assert_eq!(
+            derived.created_at,
+            memory
+                .engine()
+                .graph()
+                .storage()
+                .get_node(source_id)
+                .expect("source timestamp")
+                .created_at,
+            "derived knowledge inherits source observation time instead of promotion time"
+        );
+        assert!(
+            memory
+                .neighbors(derived_id)
+                .expect("derived provenance")
+                .iter()
+                .any(|neighbor| {
+                    neighbor.node == source_id && neighbor.edge_type == EdgeType::ExtractedFrom
+                })
+        );
+        assert_eq!(
+            memory
+                .engine()
+                .graph()
+                .storage()
+                .get_node(source_id)
+                .expect("source remains present")
+                .content,
+            sources[0].content
+        );
+        drop(memory);
+
+        {
+            let id = second_candidate_id;
+            let reviewed = dispatch(
+                &reg,
+                Request::UpdateExtractionCandidateAudit {
+                    namespace: None,
+                    candidate_id: id,
+                    support: crate::extract::types::AuditSupport::Supported,
+                    contamination: None,
+                    reviewer: "reviewer".into(),
+                },
+            );
+            assert!(matches!(reviewed, Response::Ok { .. }), "{reviewed:?}");
+            let promoted = dispatch(
+                &reg,
+                Request::PromoteExtractionCandidate {
+                    namespace: None,
+                    candidate_id: id,
+                },
+            );
+            assert!(matches!(promoted, Response::Ok { .. }), "{promoted:?}");
+        }
+        let relation_review = dispatch(
+            &reg,
+            Request::UpdateExtractionRelationAudit {
+                namespace: None,
+                relation_id,
+                verdict: crate::extract::types::RelationVerdict::Correct,
+                reviewer: "reviewer".into(),
+            },
+        );
+        assert!(
+            matches!(relation_review, Response::Ok { .. }),
+            "{relation_review:?}"
+        );
+        let first_relation: serde_json::Value = serde_json::from_str(&ok_text(dispatch(
+            &reg,
+            Request::PromoteExtractionRelation {
+                namespace: None,
+                relation_id,
+            },
+        )))
+        .expect("relation promotion result");
+        assert_eq!(first_relation["already_materialized"], false);
+        let second_relation: serde_json::Value = serde_json::from_str(&ok_text(dispatch(
+            &reg,
+            Request::PromoteExtractionRelation {
+                namespace: None,
+                relation_id,
+            },
+        )))
+        .expect("idempotent relation promotion result");
+        assert_eq!(second_relation["edge_id"], first_relation["edge_id"]);
+        assert_eq!(second_relation["already_materialized"], true);
+        let committed = extraction_audit_list(&reg);
+        assert_eq!(
+            audit_candidate(&committed, "one")["committed_node_id"],
+            derived_id.0
+        );
+        assert_eq!(
+            audit_relation(&committed, "one", "two")["committed_edge_id"],
+            first_relation["edge_id"]
+        );
+    }
 }

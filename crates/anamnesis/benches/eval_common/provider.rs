@@ -38,7 +38,7 @@ impl Default for ProviderConfig {
     fn default() -> Self {
         ProviderConfig {
             base_url: "http://localhost:11434".to_string(),
-            model: "qwen2.5".to_string(),
+            model: "qwen3.6:35b-a3b".to_string(),
             timeout_secs: 30,
             max_retries: 3,
         }
@@ -62,7 +62,7 @@ impl OpenAiCompatibleProvider {
     pub fn from_env() -> Result<Self, ProviderError> {
         let base_url =
             std::env::var("LLM_BASE_URL").unwrap_or_else(|_| "http://localhost:11434".to_string());
-        let model = std::env::var("LLM_MODEL").unwrap_or_else(|_| "qwen2.5".to_string());
+        let model = std::env::var("LLM_MODEL").unwrap_or_else(|_| "qwen3.6:35b-a3b".to_string());
         let timeout_secs = std::env::var("LLM_TIMEOUT")
             .ok()
             .and_then(|v| v.parse().ok())

@@ -26,10 +26,27 @@
 //! before the current day.
 
 /// An inclusive UTC time range parsed from the query text.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TimeRange {
     pub start: u64,
     pub end: u64,
+}
+
+/// Granularity retained when a relative expression is resolved against one
+/// evidence observation time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RelativeTimePrecision {
+    Day,
+    Month,
+    Range,
+}
+
+/// One reference-blind relative-time resolution from evidence text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RelativeTimeResolution {
+    pub phrase: String,
+    pub range: TimeRange,
+    pub precision: RelativeTimePrecision,
 }
 
 const MONTHS: [&str; 12] = [
@@ -92,6 +109,329 @@ fn month_range(year: i64, month: u32) -> Option<TimeRange> {
     };
     let end = day_epoch(next_year, next_month, 1)? - 1;
     Some(TimeRange { start, end })
+}
+
+fn day_range(day: i64) -> Option<TimeRange> {
+    if day < 0 {
+        return None;
+    }
+    let start = day as u64 * DAY_MS;
+    Some(TimeRange {
+        start,
+        end: start + DAY_MS - 1,
+    })
+}
+
+fn calendar_day_range(year: i64, month: u32, day: u32) -> Option<TimeRange> {
+    let epoch = day_epoch(year, month, day)?;
+    let day_index = (epoch / DAY_MS) as i64;
+    (civil_from_days(day_index) == (year, month, day)).then(|| TimeRange {
+        start: epoch,
+        end: epoch + DAY_MS - 1,
+    })
+}
+
+fn ordinal_day(token: &str) -> Option<u32> {
+    ["st", "nd", "rd", "th"]
+        .iter()
+        .find_map(|suffix| token.strip_suffix(suffix))
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|day| (1..=31).contains(day))
+}
+
+fn bounded_day_range(start_day: i64, end_day: i64) -> Option<TimeRange> {
+    if start_day < 0 || end_day < start_day {
+        return None;
+    }
+    Some(TimeRange {
+        start: start_day as u64 * DAY_MS,
+        end: end_day as u64 * DAY_MS + DAY_MS - 1,
+    })
+}
+
+fn relative_count(token: &str) -> Option<i64> {
+    token
+        .parse::<i64>()
+        .ok()
+        .filter(|value| (1..=99).contains(value))
+        .or_else(|| {
+            Some(match token {
+                "a" | "an" | "one" => 1,
+                "two" => 2,
+                "three" => 3,
+                "four" => 4,
+                "five" => 5,
+                "six" => 6,
+                "seven" => 7,
+                "eight" => 8,
+                "nine" => 9,
+                "ten" => 10,
+                "eleven" => 11,
+                "twelve" => 12,
+                _ => return None,
+            })
+        })
+}
+
+fn previous_weekday(anchor_day: i64, target_monday_zero: i64) -> i64 {
+    let anchor_weekday = (anchor_day + 3).rem_euclid(7);
+    let mut distance = (anchor_weekday - target_monday_zero).rem_euclid(7);
+    if distance == 0 {
+        distance = 7;
+    }
+    anchor_day - distance
+}
+
+fn next_weekday(anchor_day: i64, target_monday_zero: i64) -> i64 {
+    let anchor_weekday = (anchor_day + 3).rem_euclid(7);
+    let mut distance = (target_monday_zero - anchor_weekday).rem_euclid(7);
+    if distance == 0 {
+        distance = 7;
+    }
+    anchor_day + distance
+}
+
+fn weekday_index(token: &str) -> Option<i64> {
+    Some(match token {
+        "monday" | "mon" => 0,
+        "tuesday" | "tue" | "tues" => 1,
+        "wednesday" | "wed" => 2,
+        "thursday" | "thu" | "thur" | "thurs" => 3,
+        "friday" | "fri" => 4,
+        "saturday" | "sat" => 5,
+        "sunday" | "sun" => 6,
+        _ => return None,
+    })
+}
+
+fn push_relative_resolution(
+    resolutions: &mut Vec<RelativeTimeResolution>,
+    phrase: impl Into<String>,
+    range: Option<TimeRange>,
+    precision: RelativeTimePrecision,
+) {
+    let Some(range) = range else {
+        return;
+    };
+    let resolution = RelativeTimeResolution {
+        phrase: phrase.into(),
+        range,
+        precision,
+    };
+    if !resolutions.iter().any(|existing| existing == &resolution) {
+        resolutions.push(resolution);
+    }
+}
+
+/// Resolve relative expressions in one evidence fragment against its immutable
+/// observation time.
+///
+/// This is deliberately narrower than natural-language temporal reasoning: it
+/// handles explicit, auditable calendar expressions and never consults the
+/// query answer or any model. The original evidence remains authoritative.
+pub(crate) fn resolve_relative_time_cues(
+    text: &str,
+    observed_at: u64,
+) -> Vec<RelativeTimeResolution> {
+    if observed_at == 0 {
+        return Vec::new();
+    }
+    let lower = text.to_lowercase();
+    let tokens: Vec<&str> = lower
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .collect();
+    if tokens.is_empty() {
+        return Vec::new();
+    }
+
+    let anchor_day = (observed_at / DAY_MS) as i64;
+    let (anchor_year, anchor_month, _) = civil_from_days(anchor_day);
+    let mut resolutions = Vec::new();
+
+    for (index, token) in tokens.iter().enumerate() {
+        if let Some(day) = ordinal_day(token) {
+            let phrase = if index >= 1 && tokens[index - 1] == "the" {
+                format!("the {token}")
+            } else {
+                (*token).to_owned()
+            };
+            push_relative_resolution(
+                &mut resolutions,
+                phrase,
+                calendar_day_range(anchor_year, anchor_month, day),
+                RelativeTimePrecision::Day,
+            );
+        }
+        match *token {
+            "today" | "tonight" => push_relative_resolution(
+                &mut resolutions,
+                *token,
+                day_range(anchor_day),
+                RelativeTimePrecision::Day,
+            ),
+            "yesterday" => push_relative_resolution(
+                &mut resolutions,
+                "yesterday",
+                day_range(anchor_day - 1),
+                RelativeTimePrecision::Day,
+            ),
+            "tomorrow" => push_relative_resolution(
+                &mut resolutions,
+                "tomorrow",
+                day_range(anchor_day + 1),
+                RelativeTimePrecision::Day,
+            ),
+            "last" if index + 1 < tokens.len() => match tokens[index + 1] {
+                "night" => push_relative_resolution(
+                    &mut resolutions,
+                    "last night",
+                    day_range(anchor_day - 1),
+                    RelativeTimePrecision::Day,
+                ),
+                "week" => push_relative_resolution(
+                    &mut resolutions,
+                    "last week",
+                    bounded_day_range(anchor_day - 7, anchor_day - 1),
+                    RelativeTimePrecision::Range,
+                ),
+                "month" => {
+                    let (year, month) = if anchor_month == 1 {
+                        (anchor_year - 1, 12)
+                    } else {
+                        (anchor_year, anchor_month - 1)
+                    };
+                    push_relative_resolution(
+                        &mut resolutions,
+                        "last month",
+                        month_range(year, month),
+                        RelativeTimePrecision::Month,
+                    );
+                }
+                "year" => push_relative_resolution(
+                    &mut resolutions,
+                    "last year",
+                    bounded_day_range(
+                        days_from_civil(anchor_year - 1, 1, 1),
+                        days_from_civil(anchor_year, 1, 1) - 1,
+                    ),
+                    RelativeTimePrecision::Range,
+                ),
+                "weekend" => {
+                    let saturday = previous_weekday(anchor_day, 5);
+                    push_relative_resolution(
+                        &mut resolutions,
+                        "last weekend",
+                        bounded_day_range(saturday, saturday + 1),
+                        RelativeTimePrecision::Range,
+                    );
+                }
+                weekday => {
+                    if let Some(weekday) = weekday_index(weekday) {
+                        push_relative_resolution(
+                            &mut resolutions,
+                            format!("last {}", tokens[index + 1]),
+                            day_range(previous_weekday(anchor_day, weekday)),
+                            RelativeTimePrecision::Day,
+                        );
+                    }
+                }
+            },
+            "this" if index + 1 < tokens.len() => match tokens[index + 1] {
+                "week" => {
+                    let weekday = (anchor_day + 3).rem_euclid(7);
+                    push_relative_resolution(
+                        &mut resolutions,
+                        "this week",
+                        bounded_day_range(anchor_day - weekday, anchor_day + (6 - weekday)),
+                        RelativeTimePrecision::Range,
+                    );
+                }
+                "month" => push_relative_resolution(
+                    &mut resolutions,
+                    "this month",
+                    month_range(anchor_year, anchor_month),
+                    RelativeTimePrecision::Month,
+                ),
+                _ => {}
+            },
+            "next" if index + 1 < tokens.len() => match tokens[index + 1] {
+                "week" => push_relative_resolution(
+                    &mut resolutions,
+                    "next week",
+                    bounded_day_range(anchor_day + 1, anchor_day + 7),
+                    RelativeTimePrecision::Range,
+                ),
+                "month" => {
+                    let (year, month) = if anchor_month == 12 {
+                        (anchor_year + 1, 1)
+                    } else {
+                        (anchor_year, anchor_month + 1)
+                    };
+                    push_relative_resolution(
+                        &mut resolutions,
+                        "next month",
+                        month_range(year, month),
+                        RelativeTimePrecision::Month,
+                    );
+                }
+                "weekend" => {
+                    let saturday = next_weekday(anchor_day, 5);
+                    push_relative_resolution(
+                        &mut resolutions,
+                        "next weekend",
+                        bounded_day_range(saturday, saturday + 1),
+                        RelativeTimePrecision::Range,
+                    );
+                }
+                weekday => {
+                    if let Some(weekday) = weekday_index(weekday) {
+                        push_relative_resolution(
+                            &mut resolutions,
+                            format!("next {}", tokens[index + 1]),
+                            day_range(next_weekday(anchor_day, weekday)),
+                            RelativeTimePrecision::Day,
+                        );
+                    }
+                }
+            },
+            "ago" | "earlier" if index >= 2 => {
+                let Some(count) = relative_count(tokens[index - 2]) else {
+                    continue;
+                };
+                let unit = tokens[index - 1];
+                match unit {
+                    "day" | "days" => push_relative_resolution(
+                        &mut resolutions,
+                        format!("{} {unit} {}", tokens[index - 2], token),
+                        day_range(anchor_day - count),
+                        RelativeTimePrecision::Day,
+                    ),
+                    "week" | "weeks" => push_relative_resolution(
+                        &mut resolutions,
+                        format!("{} {unit} {}", tokens[index - 2], token),
+                        bounded_day_range(anchor_day - count * 7 - 3, anchor_day - count * 7 + 3),
+                        RelativeTimePrecision::Range,
+                    ),
+                    "month" | "months" => {
+                        let month_index = anchor_year * 12 + i64::from(anchor_month) - 1 - count;
+                        let year = month_index.div_euclid(12);
+                        let month = month_index.rem_euclid(12) as u32 + 1;
+                        push_relative_resolution(
+                            &mut resolutions,
+                            format!("{} {unit} {}", tokens[index - 2], token),
+                            month_range(year, month),
+                            RelativeTimePrecision::Month,
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
+    resolutions
 }
 
 /// Extract explicit date cues: `YYYY-MM-DD`, `YYYY/MM/DD`,
@@ -384,6 +724,54 @@ mod tests {
         assert!(
             score > 0.5,
             "ms-scale 'yesterday' node must score high, got {score}"
+        );
+    }
+
+    #[test]
+    fn resolves_relative_evidence_expressions_against_observation_day() {
+        let june_6 = day_epoch(2023, 6, 6).unwrap();
+        let resolutions = resolve_relative_time_cues("I did yoga yesterday morning.", june_6);
+        assert_eq!(resolutions.len(), 1);
+        assert_eq!(resolutions[0].phrase, "yesterday");
+        assert_eq!(
+            resolutions[0].range,
+            day_range(days_from_civil(2023, 6, 5)).unwrap()
+        );
+        assert_eq!(resolutions[0].precision, RelativeTimePrecision::Day);
+
+        let may_11 = day_epoch(2023, 5, 11).unwrap();
+        let resolutions = resolve_relative_time_cues("The course takes place next month.", may_11);
+        assert_eq!(resolutions.len(), 1);
+        assert_eq!(resolutions[0].range, month_range(2023, 6).unwrap());
+        assert_eq!(resolutions[0].precision, RelativeTimePrecision::Month);
+
+        let october_21 = day_epoch(2022, 10, 21).unwrap();
+        let resolutions = resolve_relative_time_cues("My mother visited two days ago.", october_21);
+        assert_eq!(resolutions.len(), 1);
+        assert_eq!(
+            resolutions[0].range,
+            day_range(days_from_civil(2022, 10, 19)).unwrap()
+        );
+
+        let august_17 = day_epoch(2023, 8, 17).unwrap();
+        let resolutions =
+            resolve_relative_time_cues("I bought the console on the 17th.", august_17);
+        assert_eq!(resolutions.len(), 1);
+        assert_eq!(resolutions[0].phrase, "the 17th");
+        assert_eq!(
+            resolutions[0].range,
+            day_range(days_from_civil(2023, 8, 17)).unwrap()
+        );
+    }
+
+    #[test]
+    fn last_weekday_is_strictly_before_observation_day() {
+        let friday_june_24 = day_epoch(2022, 6, 24).unwrap();
+        let resolutions = resolve_relative_time_cues("We met last Friday.", friday_june_24);
+        assert_eq!(resolutions.len(), 1);
+        assert_eq!(
+            resolutions[0].range,
+            day_range(days_from_civil(2022, 6, 17)).unwrap()
         );
     }
 

@@ -9,7 +9,38 @@ they are multi-MB run reports). Every number is reproducible from the named
 dataset + command via `cargo bench --features embed --bench real_memory`;
 runs are deterministic for a fixed dataset and embedding model.
 
+## 2026-07-25 — timestamped Qwen 3.6 product wire (no calibration change)
+
+- **Data:** pinned LoCoMo loader, seed 42, 25 questions per non-adversarial
+  category, n=100; local `qwen3.6:35b-a3b`, BGE-base embedding and reranker,
+  candidate@100.
+- **Fidelity repairs:** dataset epoch seconds are converted to engine epoch
+  milliseconds; MCP and benchmark use `Memory::render_context` with source
+  observation/validity time; consumer reranking reassembles the final selected
+  set against the full token budget.
+- **Top-10 product wire:** raw F1 0.4314, selected recall 0.6215, true rendered
+  recall 0.7283, exact rendered Hit 0.8400. Synthetic label-only fragments are
+  0/1,000.
+- **Top-20 candidate:** raw F1 0.4712, selected recall 0.7302, true rendered
+  recall 0.7864, exact rendered Hit 0.8800.
+- **Paired evidence:** top-20 versus top-10 is +0.0399 raw F1; question
+  bootstrap 95% CI +0.0031 to +0.0818, conversation-cluster CI -0.0105 to
+  +0.1066; 14 wins, 76 ties, 10 losses.
+- **Decision:** keep top-20 as a high-quality candidate, not a promoted default.
+  Conversation-level heterogeneity and multi-hop recall/F1 divergence remain.
+- **Calibration:** no readout coefficient, embedding default, or core model
+  calibration changed. Timestamp rendering and final-set budget reclamation are
+  correctness repairs.
+- **Evidence:**
+  [local-answer-product-wire-v17-qwen36-n100-2026-07-25.md](local-answer-product-wire-v17-qwen36-n100-2026-07-25.md).
+
 ## 2026-07-25 — local second-stage reranking (high-quality profile)
+
+> Historical schema-v15 evidence. A later fidelity audit found that its answer
+> renderer was not the product `Recall::as_context()` wire and that reranked
+> packaging did not reapply validity/mode semantics. Schema v16 repairs both;
+> the result below remains evidence that second-stage ranking helped that
+> harness, but requires product-wire reconfirmation before current promotion.
 
 - **Data:** pinned LoCoMo loader, seed 42, 50 questions per non-adversarial
   category, 200 questions total. Frozen local Qwen3.5 35B-A3B greedy reader and

@@ -389,6 +389,36 @@ impl Default for SearchInput {
     }
 }
 
+/// Optional diagnostic controls for a search trace.
+///
+/// These controls affect only the amount of read-only diagnostic data retained
+/// in [`SearchTrace`]. They never change candidate generation, graph
+/// activation, ranking, packaging, or result limits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SearchDiagnostics {
+    /// Maximum number of pre-packaging readout candidates retained in the
+    /// trace. The ordinary product search path keeps 200.
+    pub readout_trace_limit: usize,
+}
+
+impl SearchDiagnostics {
+    /// Construct diagnostic controls with an explicit readout trace limit.
+    pub fn with_readout_trace_limit(readout_trace_limit: usize) -> Self {
+        Self {
+            readout_trace_limit,
+        }
+    }
+}
+
+impl Default for SearchDiagnostics {
+    fn default() -> Self {
+        Self {
+            readout_trace_limit: 200,
+        }
+    }
+}
+
 /// Packaging mode for ContextPackage assembly.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PackagingMode {
@@ -448,6 +478,12 @@ pub struct ReadoutCandidate {
 pub struct SearchTrace {
     /// Names of retrieval strategies used (e.g., "text_search", "activation_flow").
     pub strategies_used: Vec<String>,
+    /// Deterministic query variants actually used by lexical candidate
+    /// retrieval. The original user query is first and any decomposition is
+    /// additive. Consumers may use this trace to apply the same query surface
+    /// to an optional model-owned reranker without duplicating core parsing
+    /// policy.
+    pub query_variants: Vec<String>,
     /// Number of seed nodes found.
     pub seed_count: usize,
     /// Number of RWR iterations performed before convergence (or the bound).

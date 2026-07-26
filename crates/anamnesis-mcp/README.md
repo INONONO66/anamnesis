@@ -53,6 +53,7 @@ configured namespace (overridable per-request via `?namespace=`).
 |---------|--------------|
 | `doctor` | Print a setup checklist — resolved DB path, lock availability, model cache dir, config. Does **not** load the embedding model. |
 | `stats` | Open the registry and print graph health/size stats (`Memory::stats`) for the default namespace. Loads the model. |
+| `extract-preview <input.json>` | Run one explicit 1–20-source batch through the same versioned local extraction prompt/provider/validator and print validated JSON. It never scans, stages, or mutates graph content. |
 
 ## Install (Claude Desktop)
 
@@ -139,6 +140,7 @@ call the tools. Paste this into your system/project instructions so it does:
 | `ANAMNESIS_DB` | `~/.anamnesis/memory.db` | SQLite file for the default namespace. |
 | `ANAMNESIS_NAMESPACE` | `default` | Namespace when a call omits one. |
 | `ANAMNESIS_REINFORCE` | `true` | Auto-commit (reinforce) recalled results. Set `false` for receipt mode. |
+| `ANAMNESIS_CONTEXT_STYLE` | `detailed` | `evidence` emits the same validated recall package as compact session/time-grouped evidence for answer synthesis. |
 | `FASTEMBED_CACHE_DIR` | `~/.anamnesis/models` | Where the bge model is cached (~400 MB). |
 
 Everything anamnesis lives under `~/.anamnesis/` by default — the global memory DB

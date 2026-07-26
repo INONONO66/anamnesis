@@ -231,6 +231,7 @@ fn upgrade_fragment_to_l2(
 }
 
 /// Input for assembling a [`ContextPackage`].
+#[derive(Clone)]
 pub struct ScoredNode {
     pub node_id: NodeId,
     pub name: String,

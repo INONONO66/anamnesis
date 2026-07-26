@@ -10,7 +10,7 @@ use crate::extract::config::{ExtractCommand, ExtractConfig, ExtractMode};
 use crate::extract::error_log::{ErrorLogKind, append_connect_failure};
 use crate::extract::process::{OutputStream, ProcessError, ProcessOutput, run_provider};
 use crate::extract::profile::ExtractorProfile;
-use crate::extract::prompt::build_extraction_prompt;
+use crate::extract::prompt::{build_extraction_prompt, build_json_repair_prompt};
 use crate::extract::types::{
     ExtractionScanResult, ExtractionSource, ExtractorProfileComponents, ValidatedExtraction,
 };
@@ -19,7 +19,12 @@ use crate::proto::{ExtractionErrorKind, StageExtractionResult};
 
 const MIN_TURNS: u32 = 10;
 const MAX_TURNS: u32 = 20;
-const PROVIDER_TIMEOUT: Duration = Duration::from_secs(120);
+// A local 35B MoE can exceed two minutes for the maximum 20-turn structured
+// batch on a loaded workstation. Extraction is an opt-in background lane, not
+// the recall latency path, so favor a bounded successful run over premature
+// retries that duplicate model work.
+const PROVIDER_TIMEOUT: Duration = Duration::from_secs(240);
+const MAX_PROVIDER_TIMEOUT_SECS: u64 = 3_600;
 const PROVIDER_OUTPUT_LIMIT: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,6 +56,20 @@ pub(crate) enum WorkerOutcome {
         candidate_count: usize,
         relation_count: usize,
     },
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ExtractionPreviewInput {
+    pub(crate) sources: Vec<ExtractionSource>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub(crate) struct ExtractionPreviewOutput {
+    pub(crate) profile_id: String,
+    pub(crate) profile: ExtractorProfileComponents,
+    pub(crate) duration_ms: u64,
+    pub(crate) extraction: ValidatedExtraction,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,13 +151,14 @@ pub(crate) fn run_worker(
     }
     let profile = ExtractorProfile::from_command(&extract_config.command)
         .map_err(|error| WorkerError::Profile(error.to_string()))?;
+    let provider_timeout = provider_timeout_from_env()?;
     let socket_path = socket_path_for_db(&cfg.default_db)
         .map_err(|error| WorkerError::Daemon(error.to_string()))?;
     let worker_config = WorkerConfig {
         mode: extract_config.mode,
         profile: profile.components,
         command: extract_config.command,
-        provider_timeout: PROVIDER_TIMEOUT,
+        provider_timeout,
         provider_output_limit: PROVIDER_OUTPUT_LIMIT,
     };
     let config = cfg.clone();
@@ -157,6 +177,163 @@ pub(crate) fn run_worker(
         .map_err(|error| WorkerError::Runtime(error.to_string()))?
         .join()
         .map_err(|_| WorkerError::Runtime("extraction worker thread terminated".into()))?
+}
+
+/// Run the exact product prompt/provider/validator pipeline over an explicit
+/// source batch without scanning, staging, or mutating a graph.
+///
+/// This is the generic, reference-blind export seam used by offline quality
+/// adapters. Explicit invocation is the opt-in; it does not enable the
+/// background shadow worker.
+pub(crate) fn run_extraction_preview(
+    input: ExtractionPreviewInput,
+) -> Result<ExtractionPreviewOutput, WorkerError> {
+    if input.sources.is_empty() || input.sources.len() > MAX_TURNS as usize {
+        return Err(WorkerError::Profile(format!(
+            "extraction preview requires 1..={MAX_TURNS} sources"
+        )));
+    }
+    let extract_config =
+        ExtractConfig::from_env().map_err(|error| WorkerError::Profile(error.to_string()))?;
+    let profile = ExtractorProfile::from_command(&extract_config.command)
+        .map_err(|error| WorkerError::Profile(error.to_string()))?;
+    let provider_timeout = provider_timeout_from_env()?;
+    let prompt = build_extraction_prompt(&input.sources);
+    let runtime =
+        tokio::runtime::Runtime::new().map_err(|error| WorkerError::Runtime(error.to_string()))?;
+
+    let mut provider_prompt = prompt;
+    for attempt in 0..2 {
+        let output = runtime
+            .block_on(run_provider(
+                &extract_config.command,
+                provider_prompt.as_bytes(),
+                provider_timeout,
+                PROVIDER_OUTPUT_LIMIT,
+            ))
+            .map_err(WorkerError::Process)?;
+        let duration_ms = duration_ms_from_duration(output.duration);
+        match validate_provider_output(&output.stdout, &input.sources, &profile.profile_id) {
+            Ok(extraction) => {
+                return Ok(ExtractionPreviewOutput {
+                    profile_id: profile.profile_id,
+                    profile: profile.components,
+                    duration_ms,
+                    extraction,
+                });
+            }
+            Err(error @ ValidationError::InvalidJson) => {
+                let trimmed = trim_ascii_whitespace(&output.stdout);
+                let parse_error = serde_json::from_slice::<serde_json::Value>(&output.stdout)
+                    .err()
+                    .map(|value| {
+                        let bytes = json_error_bytes(&output.stdout, value.line(), value.column());
+                        (
+                            value.line(),
+                            value.column(),
+                            format!("{:?}", value.classify()),
+                            bytes,
+                        )
+                    });
+                tracing::warn!(
+                    output_bytes = output.stdout.len(),
+                    starts_object = trimmed.first() == Some(&b'{'),
+                    ends_object = trimmed.last() == Some(&b'}'),
+                    parse_error_line = parse_error.as_ref().map(|value| value.0),
+                    parse_error_column = parse_error.as_ref().map(|value| value.1),
+                    parse_error_category = parse_error.as_ref().map(|value| value.2.as_str()),
+                    parse_error_previous_byte = parse_error
+                        .as_ref()
+                        .and_then(|value| value.3.map(|bytes| bytes.0)),
+                    parse_error_byte = parse_error
+                        .as_ref()
+                        .and_then(|value| value.3.map(|bytes| bytes.1)),
+                    parse_error_next_byte = parse_error
+                        .as_ref()
+                        .and_then(|value| value.3.map(|bytes| bytes.2)),
+                    contains_markdown_fence =
+                        output.stdout.windows(3).any(|window| window == b"```"),
+                    contains_think_tag = output
+                        .stdout
+                        .windows(7)
+                        .any(|window| window.eq_ignore_ascii_case(b"<think>")),
+                    "extraction preview provider returned invalid JSON"
+                );
+                if attempt == 0 {
+                    provider_prompt = build_json_repair_prompt(&output.stdout);
+                } else {
+                    return Err(WorkerError::Validation(error));
+                }
+            }
+            Err(error) => return Err(WorkerError::Validation(error)),
+        }
+    }
+    Err(WorkerError::Validation(ValidationError::InvalidJson))
+}
+
+fn trim_ascii_whitespace(value: &[u8]) -> &[u8] {
+    let start = value
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .unwrap_or(value.len());
+    let end = value
+        .iter()
+        .rposition(|byte| !byte.is_ascii_whitespace())
+        .map_or(start, |index| index + 1);
+    &value[start..end]
+}
+
+fn json_error_bytes(value: &[u8], line: usize, column: usize) -> Option<(u8, u8, u8)> {
+    let mut current_line = 1usize;
+    let mut line_start = 0usize;
+    for (index, byte) in value.iter().copied().enumerate() {
+        if current_line == line {
+            line_start = index;
+            break;
+        }
+        if byte == b'\n' {
+            current_line += 1;
+        }
+    }
+    if current_line != line {
+        return None;
+    }
+    let index = line_start.saturating_add(column.saturating_sub(1));
+    let current = *value.get(index)?;
+    Some((
+        value
+            .get(index.saturating_sub(1))
+            .copied()
+            .unwrap_or_default(),
+        current,
+        value.get(index + 1).copied().unwrap_or_default(),
+    ))
+}
+
+fn provider_timeout_from_env() -> Result<Duration, WorkerError> {
+    match std::env::var("ANAMNESIS_EXTRACT_TIMEOUT_SECS") {
+        Ok(value) => parse_provider_timeout(Some(&value)),
+        Err(std::env::VarError::NotPresent) => parse_provider_timeout(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(WorkerError::Profile(
+            "ANAMNESIS_EXTRACT_TIMEOUT_SECS must be valid Unicode".to_owned(),
+        )),
+    }
+}
+
+fn parse_provider_timeout(value: Option<&str>) -> Result<Duration, WorkerError> {
+    let Some(value) = value else {
+        return Ok(PROVIDER_TIMEOUT);
+    };
+    value
+        .parse::<u64>()
+        .ok()
+        .filter(|seconds| (1..=MAX_PROVIDER_TIMEOUT_SECS).contains(seconds))
+        .map(Duration::from_secs)
+        .ok_or_else(|| {
+            WorkerError::Profile(
+                "ANAMNESIS_EXTRACT_TIMEOUT_SECS must be an integer in 1..=3600".to_owned(),
+            )
+        })
 }
 
 /// Deterministic worker core. The lock guard remains held through the complete pass.
@@ -209,7 +386,12 @@ pub(crate) fn run_worker_with(
             {
                 return Err(WorkerError::Audit);
             }
-            match invoke_and_validate(config, &scan, dependencies, &prompt) {
+            let repair_prompt = first_failure
+                .invalid_output
+                .as_deref()
+                .map(build_json_repair_prompt)
+                .unwrap_or_else(|| prompt.clone());
+            match invoke_and_validate(config, &scan, dependencies, &repair_prompt) {
                 Ok(success) => success,
                 Err(second_failure) => {
                     if record_invocation_failure(
@@ -278,6 +460,7 @@ pub(crate) fn run_worker_with(
 struct InvocationFailure {
     error: WorkerError,
     duration_ms: u64,
+    invalid_output: Option<Vec<u8>>,
 }
 
 impl InvocationFailure {
@@ -306,16 +489,168 @@ fn invoke_and_validate(
         .map_err(|error| InvocationFailure {
             error: WorkerError::Process(error),
             duration_ms: duration_ms(started),
+            invalid_output: None,
         })?;
     let duration_ms = duration_ms_from_duration(output.duration);
-    let extraction =
-        validate_output(&output.stdout, &scan.sources, &scan.profile_id).map_err(|error| {
+    let extraction = validate_provider_output(&output.stdout, &scan.sources, &scan.profile_id)
+        .map_err(|error| {
+            let invalid_output =
+                (error == ValidationError::InvalidJson).then(|| output.stdout.clone());
             InvocationFailure {
                 error: WorkerError::Validation(error),
                 duration_ms,
+                invalid_output,
             }
         })?;
     Ok((extraction, duration_ms))
+}
+
+fn validate_provider_output(
+    output: &[u8],
+    sources: &[ExtractionSource],
+    profile_id: &str,
+) -> Result<ValidatedExtraction, ValidationError> {
+    let sanitized = strip_ansi_control_sequences(output);
+    match validate_output(&sanitized, sources, profile_id) {
+        Err(ValidationError::InvalidJson) => {
+            let Some(repaired) = repair_json_string_syntax(&sanitized) else {
+                return Err(ValidationError::InvalidJson);
+            };
+            if repaired == sanitized {
+                return Err(ValidationError::InvalidJson);
+            }
+            let validated = match validate_output(&repaired, sources, profile_id) {
+                Err(error @ ValidationError::InvalidJson) => {
+                    if let Some(parse_error) =
+                        serde_json::from_slice::<serde_json::Value>(&repaired).err()
+                    {
+                        let bytes =
+                            json_error_bytes(&repaired, parse_error.line(), parse_error.column());
+                        tracing::warn!(
+                            repaired_bytes = repaired.len(),
+                            parse_error_line = parse_error.line(),
+                            parse_error_column = parse_error.column(),
+                            parse_error_previous_byte = bytes.map(|value| value.0),
+                            parse_error_byte = bytes.map(|value| value.1),
+                            parse_error_next_byte = bytes.map(|value| value.2),
+                            "deterministic JSON string repair remained invalid"
+                        );
+                    }
+                    return Err(error);
+                }
+                result => result?,
+            };
+            tracing::warn!(
+                original_bytes = output.len(),
+                sanitized_bytes = sanitized.len(),
+                repaired_bytes = repaired.len(),
+                "normalized provider JSON string escaping before strict validation"
+            );
+            Ok(validated)
+        }
+        Ok(validated) => {
+            if sanitized.len() != output.len() {
+                tracing::warn!(
+                    original_bytes = output.len(),
+                    sanitized_bytes = sanitized.len(),
+                    "removed ANSI control sequences from extraction provider stdout"
+                );
+            }
+            Ok(validated)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn strip_ansi_control_sequences(input: &[u8]) -> Vec<u8> {
+    let mut output = Vec::with_capacity(input.len());
+    let mut index = 0usize;
+    while index < input.len() {
+        if input[index] != 0x1b {
+            output.push(input[index]);
+            index += 1;
+            continue;
+        }
+        match input.get(index + 1).copied() {
+            Some(b'[') => {
+                index += 2;
+                while let Some(byte) = input.get(index).copied() {
+                    index += 1;
+                    if (0x40..=0x7e).contains(&byte) {
+                        break;
+                    }
+                }
+            }
+            Some(b']') => {
+                index += 2;
+                while index < input.len() {
+                    if input[index] == 0x07 {
+                        index += 1;
+                        break;
+                    }
+                    if input[index] == 0x1b && input.get(index + 1) == Some(&b'\\') {
+                        index += 2;
+                        break;
+                    }
+                    index += 1;
+                }
+            }
+            Some(_) => index += 2,
+            None => index += 1,
+        }
+    }
+    output
+}
+
+/// Repair only JSON string syntax. This does not insert/remove object fields or
+/// alter textual values after JSON decoding: ambiguous quotes and raw control
+/// characters inside a string are escaped, then the strict extraction
+/// validator remains authoritative.
+fn repair_json_string_syntax(input: &[u8]) -> Option<Vec<u8>> {
+    std::str::from_utf8(input).ok()?;
+    let mut repaired = Vec::with_capacity(input.len());
+    let mut in_string = false;
+    let mut escaped = false;
+    for (index, byte) in input.iter().copied().enumerate() {
+        if !in_string {
+            repaired.push(byte);
+            if byte == b'"' {
+                in_string = true;
+            }
+            continue;
+        }
+        if escaped {
+            repaired.push(byte);
+            escaped = false;
+            continue;
+        }
+        match byte {
+            b'\\' => {
+                repaired.push(byte);
+                escaped = true;
+            }
+            b'"' => {
+                let next = input[index + 1..]
+                    .iter()
+                    .copied()
+                    .find(|next| !next.is_ascii_whitespace());
+                if matches!(next, None | Some(b',' | b'}' | b']' | b':')) {
+                    repaired.push(byte);
+                    in_string = false;
+                } else {
+                    repaired.extend_from_slice(br#"\""#);
+                }
+            }
+            b'\n' => repaired.extend_from_slice(br"\n"),
+            b'\r' => repaired.extend_from_slice(br"\r"),
+            b'\t' => repaired.extend_from_slice(br"\t"),
+            0x00..=0x1f => {
+                repaired.extend_from_slice(format!(r"\u{byte:04x}").as_bytes());
+            }
+            _ => repaired.push(byte),
+        }
+    }
+    (!in_string && !escaped).then_some(repaired)
 }
 
 fn record_failure(
@@ -361,6 +696,10 @@ fn failure_kind(error: &WorkerError) -> ExtractionErrorKind {
     match error {
         WorkerError::Process(ProcessError::Spawn) => ExtractionErrorKind::Spawn,
         WorkerError::Process(ProcessError::Stdin) => ExtractionErrorKind::Stdin,
+        WorkerError::Process(ProcessError::ProviderRequest) => ExtractionErrorKind::ProviderRequest,
+        WorkerError::Process(ProcessError::ProviderResponse) => {
+            ExtractionErrorKind::ProviderResponse
+        }
         WorkerError::Process(ProcessError::Timeout) => ExtractionErrorKind::Timeout,
         WorkerError::Process(ProcessError::OutputTooLarge {
             stream: OutputStream::Stdout,
@@ -379,6 +718,8 @@ fn failure_kind(error: &WorkerError) -> ExtractionErrorKind {
             | ValidationError::DuplicateItemId
             | ValidationError::InvalidContent
             | ValidationError::InvalidConfidence
+            | ValidationError::InvalidEntityTags
+            | ValidationError::InvalidValidityWindow
             | ValidationError::InvalidSourceReference
             | ValidationError::InvalidRelationReference
             | ValidationError::SelfRelation
@@ -529,8 +870,10 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        MIN_TURNS, PROVIDER_TIMEOUT, WorkerConfig, WorkerDependencies, WorkerError, WorkerNoop,
-        WorkerOutcome, failure_kind, run_worker, run_worker_with,
+        ExtractionPreviewInput, MIN_TURNS, PROVIDER_TIMEOUT, WorkerConfig, WorkerDependencies,
+        WorkerError, WorkerNoop, WorkerOutcome, failure_kind, parse_provider_timeout,
+        repair_json_string_syntax, run_extraction_preview, run_worker, run_worker_with,
+        strip_ansi_control_sequences,
     };
     use crate::config::Config;
     use crate::extract::{
@@ -685,7 +1028,22 @@ mod tests {
     }
     #[test]
     fn r2_worker_provider_timeout_matches_approved_contract() {
-        assert_eq!(PROVIDER_TIMEOUT, Duration::from_secs(120));
+        assert_eq!(PROVIDER_TIMEOUT, Duration::from_secs(240));
+        assert_eq!(
+            parse_provider_timeout(None).expect("default timeout"),
+            PROVIDER_TIMEOUT
+        );
+        assert_eq!(
+            parse_provider_timeout(Some("1")).expect("minimum timeout"),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            parse_provider_timeout(Some("3600")).expect("maximum timeout"),
+            Duration::from_secs(3_600)
+        );
+        for invalid in ["0", "3601", "not-a-number"] {
+            assert!(parse_provider_timeout(Some(invalid)).is_err(), "{invalid}");
+        }
     }
     #[test]
     fn r2_worker_mode_off_does_not_connect_or_invoke_provider() {
@@ -823,6 +1181,14 @@ mod tests {
             (Ok(output(vec![0xff])), ExtractionErrorKind::InvalidUtf8),
             (Err(ProcessError::Spawn), ExtractionErrorKind::Spawn),
             (Err(ProcessError::Stdin), ExtractionErrorKind::Stdin),
+            (
+                Err(ProcessError::ProviderRequest),
+                ExtractionErrorKind::ProviderRequest,
+            ),
+            (
+                Err(ProcessError::ProviderResponse),
+                ExtractionErrorKind::ProviderResponse,
+            ),
             (Err(ProcessError::Timeout), ExtractionErrorKind::Timeout),
             (
                 Err(ProcessError::OutputTooLarge {
@@ -877,6 +1243,14 @@ mod tests {
             (
                 WorkerError::Process(ProcessError::Stdin),
                 ExtractionErrorKind::Stdin,
+            ),
+            (
+                WorkerError::Process(ProcessError::ProviderRequest),
+                ExtractionErrorKind::ProviderRequest,
+            ),
+            (
+                WorkerError::Process(ProcessError::ProviderResponse),
+                ExtractionErrorKind::ProviderResponse,
             ),
             (
                 WorkerError::Process(ProcessError::Timeout),
@@ -1030,5 +1404,40 @@ mod tests {
             1,
             "worker makes one stage request; daemon replays its source ledger"
         );
+    }
+
+    #[test]
+    fn extraction_preview_rejects_an_empty_batch_before_provider_setup() {
+        let error = run_extraction_preview(ExtractionPreviewInput {
+            sources: Vec::new(),
+        })
+        .expect_err("empty preview batch must fail");
+        assert!(matches!(error, WorkerError::Profile(_)));
+    }
+
+    #[test]
+    fn json_string_repair_escapes_syntax_without_changing_decoded_content() {
+        let invalid = br#"{"items":[{"content":"Alice said "hello"."}],"relations":[]}"#;
+        let repaired = repair_json_string_syntax(invalid).expect("UTF-8 JSON can be repaired");
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&repaired).expect("repaired JSON parses");
+        assert_eq!(parsed["items"][0]["content"], "Alice said \"hello\".");
+
+        let invalid_newline = b"{\"content\":\"line one\nline two\"}";
+        let repaired =
+            repair_json_string_syntax(invalid_newline).expect("raw newline can be repaired");
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&repaired).expect("newline repair parses");
+        assert_eq!(parsed["content"], "line one\nline two");
+    }
+
+    #[test]
+    fn provider_normalization_removes_only_terminal_control_sequences() {
+        let noisy = b"\x1b[?25l{\"it\x1b[1Gems\":[],\"relations\":[]}\x1b[?25h";
+        let clean = strip_ansi_control_sequences(noisy);
+        assert_eq!(clean, br#"{"items":[],"relations":[]}"#);
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&clean).expect("sanitized provider output parses");
+        assert_eq!(parsed["items"], serde_json::json!([]));
     }
 }

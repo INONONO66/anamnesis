@@ -43,7 +43,8 @@ pub(crate) fn derive_search_plan(
 /// Decompose a natural language query into sub-queries.
 ///
 /// Applies pattern matching to extract meaningful sub-queries:
-/// - English: "who is X", "what is X", "X of Y"
+/// - English: "who is X", "what is X", "how many times did X",
+///   "where did X", "what kind of X", "X of Y"
 /// - Korean: "X의 Y", "X이/가 누구"
 ///
 /// Returns the original query as a single-element vec if no pattern matches.
@@ -55,19 +56,43 @@ pub(crate) fn decompose_query(query: &str) -> Vec<String> {
 
     let mut results = Vec::new();
 
-    // English: "who is X" → extract X
-    if let Some(rest) = strip_prefix_ci(q, "who is ") {
-        let subject = rest.trim_end_matches('?').trim();
+    // English copular questions: "who is/was X" → extract X.
+    if let Some(rest) = strip_any_prefix_ci(q, &["who is ", "who was ", "who were "]) {
+        let subject = trim_question(rest);
         if !subject.is_empty() {
             results.push(subject.to_string());
         }
     }
 
-    // English: "what is X" → extract X
-    if let Some(rest) = strip_prefix_ci(q, "what is ") {
-        let subject = rest.trim_end_matches('?').trim();
+    // English copular questions: "what is/was X" → extract X.
+    if let Some(rest) = strip_any_prefix_ci(q, &["what is ", "what was ", "what were "]) {
+        let subject = trim_question(rest);
         if !subject.is_empty() {
             results.push(subject.to_string());
+        }
+    }
+
+    // Event/count/location questions carry low-value interrogative and
+    // auxiliary tokens. Strip only the leading wrapper; retain the full
+    // subject+predicate phrase so lexical search can match the event itself.
+    if results.is_empty()
+        && let Some(rest) = strip_any_prefix_ci(
+            q,
+            &[
+                "how many times has ",
+                "how many times have ",
+                "how many times did ",
+                "where did ",
+                "where does ",
+                "where has ",
+                "where have ",
+                "what kind of ",
+            ],
+        )
+    {
+        let event = trim_question(rest);
+        if !event.is_empty() {
+            results.push(event.to_string());
         }
     }
 
@@ -166,6 +191,24 @@ pub(crate) fn decompose_query(query: &str) -> Vec<String> {
     }
 }
 
+/// Preserve the user's complete wording and add deterministic decompositions
+/// only as auxiliary lexical-recall channels.
+pub(crate) fn query_variants(query: &str) -> Vec<String> {
+    let original = query.trim().to_string();
+    let decomposed = decompose_query(query);
+    let mut variants = Vec::with_capacity(decomposed.len().saturating_add(1));
+    variants.push(original);
+    for candidate in decomposed {
+        if !variants
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(&candidate))
+        {
+            variants.push(candidate);
+        }
+    }
+    variants
+}
+
 fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
     let sb = s.as_bytes();
     let pb = prefix.as_bytes();
@@ -174,6 +217,16 @@ fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
     } else {
         None
     }
+}
+
+fn strip_any_prefix_ci<'a>(s: &'a str, prefixes: &[&str]) -> Option<&'a str> {
+    prefixes
+        .iter()
+        .find_map(|prefix| strip_prefix_ci(s, prefix))
+}
+
+fn trim_question(value: &str) -> &str {
+    value.trim_end_matches(['?', '.', '!']).trim()
 }
 
 fn find_word_boundary(s: &str, pat: &str) -> Option<usize> {
@@ -204,6 +257,30 @@ mod tests {
     fn what_is_extracts_subject() {
         let r = decompose_query("what is the factory pattern?");
         assert_eq!(r, vec!["the factory pattern"]);
+    }
+
+    #[test]
+    fn past_copular_question_extracts_subject() {
+        let r = decompose_query("What was Alice's first job?");
+        assert_eq!(r, vec!["Alice's first job"]);
+    }
+
+    #[test]
+    fn count_question_extracts_event_phrase() {
+        let r = decompose_query("How many times has John injured his ankle?");
+        assert_eq!(r, vec!["John injured his ankle"]);
+    }
+
+    #[test]
+    fn location_question_extracts_event_phrase() {
+        let r = decompose_query("Where did Caroline buy her camera?");
+        assert_eq!(r, vec!["Caroline buy her camera"]);
+    }
+
+    #[test]
+    fn what_kind_question_extracts_subject_phrase() {
+        let r = decompose_query("What kind of pets does Alice have?");
+        assert_eq!(r, vec!["pets does Alice have"]);
     }
 
     #[test]
@@ -240,6 +317,19 @@ mod tests {
     fn no_match_returns_original() {
         let r = decompose_query("foo bar baz");
         assert_eq!(r, vec!["foo bar baz"]);
+    }
+
+    #[test]
+    fn query_variants_keep_original_before_auxiliary_decompositions() {
+        let variants = query_variants("How many times has John injured his ankle?");
+        assert_eq!(
+            variants,
+            vec![
+                "How many times has John injured his ankle?",
+                "John injured his ankle"
+            ]
+        );
+        assert_eq!(query_variants("foo bar baz"), vec!["foo bar baz"]);
     }
 
     #[test]

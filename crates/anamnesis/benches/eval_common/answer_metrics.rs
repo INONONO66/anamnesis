@@ -28,6 +28,64 @@ pub fn locomo_official_score(
     }
 }
 
+/// Canonicalize only a standalone ISO calendar date (`YYYY-MM-DD`) into the
+/// natural-language form used by LoCoMo references.
+///
+/// This transform is deliberately reference-blind and narrow: relative
+/// expressions such as `the day before 2023-06-26`, surrounding prose, invalid
+/// dates, and non-date answers are returned unchanged. Its score must be
+/// reported as a reader-surface diagnostic, never as the official raw F1.
+pub fn canonicalize_standalone_iso_date(prediction: &str) -> String {
+    let trimmed = prediction.trim();
+    let bytes = trimmed.as_bytes();
+    if bytes.len() != 10
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || bytes
+            .iter()
+            .enumerate()
+            .any(|(index, byte)| index != 4 && index != 7 && !byte.is_ascii_digit())
+    {
+        return prediction.to_string();
+    }
+    let Ok(year) = trimmed[0..4].parse::<u16>() else {
+        return prediction.to_string();
+    };
+    let Ok(month) = trimmed[5..7].parse::<u8>() else {
+        return prediction.to_string();
+    };
+    let Ok(day) = trimmed[8..10].parse::<u8>() else {
+        return prediction.to_string();
+    };
+    let month_name = match month {
+        1 => "January",
+        2 => "February",
+        3 => "March",
+        4 => "April",
+        5 => "May",
+        6 => "June",
+        7 => "July",
+        8 => "August",
+        9 => "September",
+        10 => "October",
+        11 => "November",
+        12 => "December",
+        _ => return prediction.to_string(),
+    };
+    let max_day = match month {
+        2 if year.is_multiple_of(400) || (year.is_multiple_of(4) && !year.is_multiple_of(100)) => {
+            29
+        }
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
+    if day == 0 || day > max_day {
+        return prediction.to_string();
+    }
+    format!("{day} {month_name} {year}")
+}
+
 fn multi_answer_f1(prediction: &str, reference: &str) -> f64 {
     let predictions: Vec<_> = prediction.split(',').map(str::trim).collect();
     let references: Vec<_> = reference.split(',').map(str::trim).collect();
@@ -132,5 +190,22 @@ mod tests {
             locomo_official_score("adversarial", "", "UNKNOWN"),
             Some(0.0)
         );
+    }
+
+    #[test]
+    fn canonicalizes_only_valid_standalone_iso_dates() {
+        assert_eq!(
+            canonicalize_standalone_iso_date("2023-04-02"),
+            "2 April 2023"
+        );
+        assert_eq!(
+            canonicalize_standalone_iso_date("2024-02-29"),
+            "29 February 2024"
+        );
+        assert_eq!(
+            canonicalize_standalone_iso_date("the day before 2023-06-26"),
+            "the day before 2023-06-26"
+        );
+        assert_eq!(canonicalize_standalone_iso_date("2023-02-29"), "2023-02-29");
     }
 }

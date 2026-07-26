@@ -13,6 +13,8 @@ const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 const MAX_ITEMS: usize = 10;
 const MAX_ITEM_ID_CHARS: usize = 64;
 const MAX_CONTENT_CHARS: usize = 500;
+const MAX_ENTITY_TAGS: usize = 16;
+const MAX_ENTITY_TAG_CHARS: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ValidationError {
@@ -24,6 +26,8 @@ pub(crate) enum ValidationError {
     DuplicateItemId,
     InvalidContent,
     InvalidConfidence,
+    InvalidEntityTags,
+    InvalidValidityWindow,
     InvalidSourceReference,
     InvalidRelationReference,
     SelfRelation,
@@ -41,6 +45,8 @@ impl std::fmt::Display for ValidationError {
             Self::DuplicateItemId => "duplicate-item-id",
             Self::InvalidContent => "invalid-content",
             Self::InvalidConfidence => "invalid-confidence",
+            Self::InvalidEntityTags => "invalid-entity-tags",
+            Self::InvalidValidityWindow => "invalid-validity-window",
             Self::InvalidSourceReference => "invalid-source-reference",
             Self::InvalidRelationReference => "invalid-relation-reference",
             Self::SelfRelation => "self-relation",
@@ -67,6 +73,12 @@ struct RawItem {
     content: String,
     kind: CandidateKind,
     confidence: f64,
+    #[serde(default)]
+    entity_tags: Vec<String>,
+    #[serde(default)]
+    valid_from_ms: Option<u64>,
+    #[serde(default)]
+    valid_until_ms: Option<u64>,
     source_node_ids: Vec<u64>,
 }
 
@@ -114,7 +126,10 @@ pub(crate) fn validate_output(
 
     for raw_item in raw.items {
         let item_local_id = normalize(&raw_item.item_local_id);
-        if item_local_id.is_empty() || item_local_id.chars().count() > MAX_ITEM_ID_CHARS {
+        if item_local_id.is_empty()
+            || item_local_id.chars().count() > MAX_ITEM_ID_CHARS
+            || item_local_id.chars().any(char::is_control)
+        {
             return Err(ValidationError::InvalidItemId);
         }
         if !item_ids.insert(item_local_id.clone()) {
@@ -122,11 +137,41 @@ pub(crate) fn validate_output(
         }
 
         let content = normalize(&raw_item.content);
-        if content.is_empty() || content.chars().count() > MAX_CONTENT_CHARS {
+        if content.is_empty()
+            || content.chars().count() > MAX_CONTENT_CHARS
+            || content
+                .chars()
+                .any(|character| character.is_control() && !matches!(character, '\n' | '\t'))
+        {
             return Err(ValidationError::InvalidContent);
         }
         if !raw_item.confidence.is_finite() || !(0.0..=1.0).contains(&raw_item.confidence) {
             return Err(ValidationError::InvalidConfidence);
+        }
+        if raw_item.entity_tags.len() > MAX_ENTITY_TAGS {
+            return Err(ValidationError::InvalidEntityTags);
+        }
+        let mut entity_tags = Vec::with_capacity(raw_item.entity_tags.len());
+        for tag in raw_item.entity_tags {
+            let tag = normalize(&tag);
+            if tag.is_empty()
+                || tag.chars().count() > MAX_ENTITY_TAG_CHARS
+                || tag.chars().any(char::is_control)
+            {
+                return Err(ValidationError::InvalidEntityTags);
+            }
+            if entity_tags.iter().any(|existing| existing == &tag) {
+                return Err(ValidationError::InvalidEntityTags);
+            }
+            entity_tags.push(tag);
+        }
+        entity_tags.sort();
+        if raw_item
+            .valid_from_ms
+            .zip(raw_item.valid_until_ms)
+            .is_some_and(|(from, until)| until <= from)
+        {
+            return Err(ValidationError::InvalidValidityWindow);
         }
         if raw_item.source_node_ids.is_empty() {
             return Err(ValidationError::InvalidSourceReference);
@@ -156,12 +201,23 @@ pub(crate) fn validate_output(
                 ))
         });
 
-        let idempotency_key = candidate_key(profile_id, &source_refs, &raw_item.kind, &content);
+        let idempotency_key = candidate_key(
+            profile_id,
+            &source_refs,
+            &raw_item.kind,
+            &content,
+            &entity_tags,
+            raw_item.valid_from_ms,
+            raw_item.valid_until_ms,
+        );
         items.push(ValidatedCandidate {
             item_local_id,
             content,
             kind: raw_item.kind,
             confidence: raw_item.confidence,
+            entity_tags,
+            valid_from_ms: raw_item.valid_from_ms,
+            valid_until_ms: raw_item.valid_until_ms,
             sources: source_refs,
             idempotency_key,
         });
@@ -176,6 +232,11 @@ pub(crate) fn validate_output(
     for raw_relation in raw.relations {
         let from_item_local_id = normalize(&raw_relation.from_item_local_id);
         let to_item_local_id = normalize(&raw_relation.to_item_local_id);
+        if from_item_local_id.chars().any(char::is_control)
+            || to_item_local_id.chars().any(char::is_control)
+        {
+            return Err(ValidationError::InvalidRelationReference);
+        }
         let Some(from_key) = candidate_keys_by_id.get(from_item_local_id.as_str()) else {
             return Err(ValidationError::InvalidRelationReference);
         };
@@ -227,6 +288,9 @@ fn candidate_key(
     sources: &[ExtractionSourceRef],
     kind: &CandidateKind,
     content: &str,
+    entity_tags: &[String],
+    valid_from_ms: Option<u64>,
+    valid_until_ms: Option<u64>,
 ) -> String {
     let mut hasher = Sha256::new();
     hasher.update(profile_id.as_bytes());
@@ -238,6 +302,14 @@ fn candidate_key(
     hasher.update(kind_name(kind).as_bytes());
     hasher.update([0]);
     hasher.update(content.as_bytes());
+    for tag in entity_tags {
+        hasher.update([0]);
+        hasher.update(tag.as_bytes());
+    }
+    hasher.update([u8::from(valid_from_ms.is_some())]);
+    hasher.update(valid_from_ms.unwrap_or_default().to_le_bytes());
+    hasher.update([u8::from(valid_until_ms.is_some())]);
+    hasher.update(valid_until_ms.unwrap_or_default().to_le_bytes());
     format!("{:x}", hasher.finalize())
 }
 
@@ -253,6 +325,10 @@ fn relation_key(from_key: &str, to_key: &str, relation_type: &RelationKind) -> S
 
 fn kind_name(kind: &CandidateKind) -> &'static str {
     match kind {
+        CandidateKind::Fact => "fact",
+        CandidateKind::Entity => "entity",
+        CandidateKind::Event => "event",
+        CandidateKind::Preference => "preference",
         CandidateKind::Decision => "decision",
         CandidateKind::Causal => "causal",
         CandidateKind::Lesson => "lesson",
@@ -302,6 +378,43 @@ mod tests {
 
     fn valid_output(items: &str, relations: &str) -> Vec<u8> {
         format!(r#"{{"items":[{items}],"relations":[{relations}]}}"#).into_bytes()
+    }
+
+    #[test]
+    fn generic_memory_tags_and_validity_are_canonical_and_validated() {
+        let payload = valid_output(
+            r#"{"item_local_id":"event","content":"Alice moved to Paris.","kind":"event","confidence":0.9,"entity_tags":["Paris","Alice"],"valid_from_ms":10,"valid_until_ms":20,"source_node_ids":[7]}"#,
+            "",
+        );
+        let extraction = validate(&payload).expect("generic event");
+        assert_eq!(extraction.items[0].entity_tags, ["Alice", "Paris"]);
+        assert_eq!(extraction.items[0].valid_from_ms, Some(10));
+        assert_eq!(extraction.items[0].valid_until_ms, Some(20));
+
+        let invalid_window = valid_output(
+            r#"{"item_local_id":"event","content":"Alice moved.","kind":"event","confidence":0.9,"entity_tags":[],"valid_from_ms":20,"valid_until_ms":10,"source_node_ids":[7]}"#,
+            "",
+        );
+        assert_eq!(
+            validate(&invalid_window),
+            Err(ValidationError::InvalidValidityWindow)
+        );
+        let empty_window = valid_output(
+            r#"{"item_local_id":"event","content":"Alice moved.","kind":"event","confidence":0.9,"entity_tags":[],"valid_from_ms":20,"valid_until_ms":20,"source_node_ids":[7]}"#,
+            "",
+        );
+        assert_eq!(
+            validate(&empty_window),
+            Err(ValidationError::InvalidValidityWindow)
+        );
+        let duplicate_tags = valid_output(
+            r#"{"item_local_id":"event","content":"Alice moved.","kind":"event","confidence":0.9,"entity_tags":["Alice","Alice"],"valid_from_ms":null,"valid_until_ms":null,"source_node_ids":[7]}"#,
+            "",
+        );
+        assert_eq!(
+            validate(&duplicate_tags),
+            Err(ValidationError::InvalidEntityTags)
+        );
     }
 
     fn item(id: &str, content: &str, sources: &str) -> String {
@@ -388,6 +501,11 @@ mod tests {
                 ValidationError::InvalidItemId,
             ),
             (
+                "id containing an escaped terminal control",
+                valid_output(&item("bad\\u001b", "content", SOURCE_A), ""),
+                ValidationError::InvalidItemId,
+            ),
+            (
                 "duplicate id",
                 valid_output(
                     &format!(
@@ -407,6 +525,11 @@ mod tests {
             (
                 "501 CJK characters",
                 valid_output(&item("one", &cjk_501, SOURCE_A), ""),
+                ValidationError::InvalidContent,
+            ),
+            (
+                "content containing an escaped terminal control",
+                valid_output(&item("one", "corrupt\\u001b[8D text", SOURCE_A), ""),
                 ValidationError::InvalidContent,
             ),
             (

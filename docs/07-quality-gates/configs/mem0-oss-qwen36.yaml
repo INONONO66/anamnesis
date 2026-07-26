@@ -1,0 +1,44 @@
+# Frozen local-only competitor configuration for the external-memory lane.
+#
+# Upstream harness:
+#   mem0ai/memory-benchmarks@4b61c5d31b9c668a12b4f5e78064248a02c82d2b
+# Mem0 implementation:
+#   mem0ai/mem0@b357a5a1b03c299ec8229c268e63cfac0f7c6566
+#
+# The harness commit names a removed feat/v3-pipeline branch and omits the
+# optional `ollama` Python package. It also omits the `fastembed` extra while
+# its server route advertises semantic + BM25 + entity search; without it the
+# runtime explicitly logs that BM25 is disabled. The reproducible local build
+# pins the Mem0 commit above and installs ollama>=0.6.0 plus fastembed>=0.3.1.
+# The pinned adapter also omits Ollama's `think` request field, so the local
+# image sets `think=false` to freeze the same Qwen 3.6 non-thinking generation
+# control used by Anamnesis. None of these dependency/provider repairs changes
+# Mem0's memory prompts or algorithm.
+#
+# The local harness client timeout is raised from 300s to 1800s. Mem0's OSS add
+# endpoint is synchronous, and retrying a timed-out request can duplicate a
+# write that the server later commits. This changes no request content or
+# ranking behavior; it makes slow local Qwen ingestion fail-safe.
+#
+# The upstream client sends each LoCoMo session's epoch `timestamp`, but the
+# server request model omits that field. Although the pinned Memory.add
+# signature exposes `timestamp`, its OSS implementation explicitly rejects any
+# non-null value as a platform-only temporal feature. The local comparison
+# therefore records the upstream OSS limitation and does not inject dates into
+# message text or patch Mem0's memory algorithm.
+
+version: "v1.1"
+
+llm:
+  provider: ollama
+  config:
+    model: qwen3.6:35b-a3b
+    ollama_base_url: http://host.docker.internal:11434
+    temperature: 0.0
+
+embedder:
+  provider: ollama
+  config:
+    model: nomic-embed-text
+    ollama_base_url: http://host.docker.internal:11434
+    embedding_dims: 768

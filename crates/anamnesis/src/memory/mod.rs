@@ -56,11 +56,16 @@ use std::path::Path;
 use std::sync::Arc;
 
 mod manage;
+mod readout;
 mod view;
+pub use readout::{DeepRecallOptions, EvidenceSelection, RecallIntent};
 pub use view::{ListFilter, MemoryView};
 
 use crate::Engine;
-use crate::api::{CommitReport, EngineConfig, HealthGrade, IngestResult, Observation, TickReport};
+use crate::api::{
+    CommitReport, EngineConfig, HealthGrade, IngestResult, Observation, TickReport,
+    apply_packaging_mode, apply_validity_filter,
+};
 use crate::embedding::EmbeddingProvider;
 use crate::error::Error;
 use crate::graph::node::Origin;
@@ -68,12 +73,10 @@ use crate::graph::types::SourceKind;
 use crate::graph::types::{EdgeId, PeerId};
 use crate::graph::{Edge, EdgeType, KnowledgeType, Node, NodeId, ScopePath, Timestamp};
 use crate::mechanics::social::ConfidenceLevel;
-use crate::query::assembly::{
-    ContradictionPair, ScoredNode, apply_result_limit, assemble_context_package,
-};
+use crate::query::assembly::{ScoredNode, apply_result_limit, assemble_context_package};
 use crate::query::{
     AccessedSite, ActivatedTension, CoReadoutPair, CommitTrace, ContextPackage, Fragment,
-    QueryConfig, SearchInput, SearchResult, Tension,
+    QueryConfig, SearchDiagnostics, SearchInput, SearchResult, Tension,
 };
 use crate::storage::{SqliteStorage, StorageAdapter};
 
@@ -169,7 +172,9 @@ pub struct Memory<S: StorageAdapter + Clone = SqliteStorage> {
 /// `ConsolidatedFrom`, `ReinforcedBy`, `Entity`) — those are wired automatically
 /// by the recipe and should not be authored by hand — and `Supersedes`, which is
 /// directional *and* mutates the validity window of its endpoints. Reach for
-/// [`Memory::engine_mut`] if you genuinely need those.
+/// [`Memory::link_extracted_source`] for reviewed derived knowledge that must
+/// retain source provenance. Other engine-owned relations remain outside this
+/// vocabulary.
 ///
 /// Each variant maps to exactly one engine [`EdgeType`]:
 ///
@@ -607,11 +612,75 @@ impl<S: StorageAdapter + Clone> Memory<S> {
         opts: NoteOptions,
     ) -> Result<AddReceipt, Error> {
         let session_id = format!("note-{}", at.0);
+        self.add_single_shot_note(text, at, &session_id, opts)
+    }
+
+    /// Add one reviewed, consumer-derived `Semantic` node.
+    ///
+    /// This is the provenance-preserving materialization path for knowledge
+    /// distilled from raw conversation turns that already exist as `Episodic`
+    /// nodes. It does not manufacture a second episodic copy of the derived
+    /// text. Raw sources remain authoritative and must be connected explicitly
+    /// with [`link_extracted_source`](Self::link_extracted_source).
+    ///
+    /// `source_session_id` is retained on the node origin. `opts.scope`,
+    /// `opts.tags`, and `opts.metadata` are applied to the one created
+    /// `Semantic` node.
+    pub fn add_derived_knowledge_with(
+        &mut self,
+        text: &str,
+        at: Timestamp,
+        source_session_id: &str,
+        opts: NoteOptions,
+    ) -> Result<NodeId, Error> {
+        let source_session_id = source_session_id.trim();
+        if source_session_id.is_empty() {
+            return Err(Error::InvalidInput(
+                "derived knowledge requires a non-empty source_session_id".to_owned(),
+            ));
+        }
+        let scope = opts.scope.unwrap_or_else(ScopePath::universal);
+        let mut entity_tags = entity_tags_for(source_session_id, "derived");
+        entity_tags.extend(opts.tags.iter().cloned());
+        entity_tags.push("anamnesis:derived".to_owned());
+        entity_tags.sort();
+        entity_tags.dedup();
+        let embedding = embed_one_passage(&*self.provider, text)?;
+        let semantic = ingest_node(
+            &mut self.engine,
+            text,
+            text.to_owned(),
+            embedding,
+            KnowledgeType::Semantic,
+            at,
+            entity_tags,
+            None,
+            source_session_id,
+            scope,
+        )?;
+        if !opts.metadata.is_empty() {
+            let pairs: Vec<(&str, &str)> = opts
+                .metadata
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.as_str()))
+                .collect();
+            self.set_metadata_pairs(semantic, &pairs)?;
+        }
+        Ok(semantic)
+    }
+
+    fn add_single_shot_note(
+        &mut self,
+        text: &str,
+        at: Timestamp,
+        session_id: &str,
+        opts: NoteOptions,
+    ) -> Result<AddReceipt, Error> {
         let speaker = "note";
         let speaker_text = text.to_string();
         let scope = opts.scope.unwrap_or_else(ScopePath::universal);
 
-        let mut entity_tags = entity_tags_for(&session_id, speaker);
+        let mut entity_tags = entity_tags_for(session_id, speaker);
         entity_tags.extend(opts.tags.iter().cloned());
 
         let epi_embedding = embed_one_passage(&*self.provider, &speaker_text)?;
@@ -624,7 +693,7 @@ impl<S: StorageAdapter + Clone> Memory<S> {
             at,
             entity_tags.clone(),
             None,
-            &session_id,
+            session_id,
             scope.clone(),
         )?;
 
@@ -640,7 +709,7 @@ impl<S: StorageAdapter + Clone> Memory<S> {
             at,
             entity_tags,
             None,
-            &session_id,
+            session_id,
             scope,
         )?;
         self.engine.link(sem_id, epi_id, EdgeType::ExtractedFrom)?;
@@ -769,6 +838,31 @@ impl<S: StorageAdapter + Clone> Memory<S> {
         }
         self.engine.graph_mut().storage_mut().set_node(node)
     }
+
+    /// Set or clear a node's half-open validity window.
+    ///
+    /// Observation time remains immutable. A bounded window must satisfy
+    /// `valid_from < valid_until`; either endpoint may be omitted. The base row
+    /// is written eagerly through the storage adapter.
+    pub fn set_validity_window(
+        &mut self,
+        id: NodeId,
+        valid_from: Option<Timestamp>,
+        valid_until: Option<Timestamp>,
+    ) -> Result<(), Error> {
+        if valid_from
+            .zip(valid_until)
+            .is_some_and(|(start, end)| start >= end)
+        {
+            return Err(Error::InvalidInput(
+                "validity window requires valid_from < valid_until".to_owned(),
+            ));
+        }
+        let mut node = self.engine.graph().get_node(id)?.clone();
+        node.valid_from = valid_from;
+        node.valid_until = valid_until;
+        self.engine.graph_mut().storage_mut().set_node(node)
+    }
 }
 
 // ── Relate / neighbors — typed reasoning-chain edges ─────────────────────────
@@ -798,9 +892,10 @@ impl<S: StorageAdapter + Clone> Memory<S> {
     ///
     /// [`Relation::Contradicts`] creates a constraint edge that surfaces
     /// query-local frustration stress rather than propagating activation; it is
-    /// never inhibitory. Engine-internal edge types (`Temporal`, `ExtractedFrom`,
-    /// etc.) and the time-mutating `Supersedes` are intentionally *not* reachable
-    /// here — use [`engine_mut`](Memory::engine_mut) if you genuinely need them.
+    /// never inhibitory. Engine-internal edge types (`Temporal`, etc.) and the
+    /// time-mutating `Supersedes` are intentionally *not* reachable here.
+    /// Reviewed consumer-derived knowledge can retain raw provenance through
+    /// [`link_extracted_source`](Memory::link_extracted_source).
     ///
     /// # Additive
     ///
@@ -815,6 +910,41 @@ impl<S: StorageAdapter + Clone> Memory<S> {
         relation: Relation,
     ) -> Result<EdgeId, Error> {
         self.engine.link(from, to, relation.into())
+    }
+
+    /// Link reviewed derived knowledge to one authoritative raw source turn.
+    ///
+    /// This is the narrow consumer front door for [`EdgeType::ExtractedFrom`].
+    /// It preserves the distinction between agent-authored [`Relation`] edges
+    /// and provenance edges owned by an extraction/materialization workflow.
+    /// `derived` must be a `Semantic` node and `source` must be an `Episodic`
+    /// node. Repeating the same link is idempotent and returns the existing
+    /// edge id.
+    pub fn link_extracted_source(
+        &mut self,
+        derived: NodeId,
+        source: NodeId,
+    ) -> Result<EdgeId, Error> {
+        let derived_node = self.engine.graph().get_node(derived)?;
+        let source_node = self.engine.graph().get_node(source)?;
+        if derived_node.node_type != KnowledgeType::Semantic {
+            return Err(Error::InvalidInput(
+                "derived extraction node must be Semantic".to_owned(),
+            ));
+        }
+        if source_node.node_type != KnowledgeType::Episodic {
+            return Err(Error::InvalidInput(
+                "extraction source node must be Episodic".to_owned(),
+            ));
+        }
+        if let Some(existing) = self.neighbors(derived)?.into_iter().find(|neighbor| {
+            neighbor.direction == Direction::Outgoing
+                && neighbor.node == source
+                && neighbor.edge_type == EdgeType::ExtractedFrom
+        }) {
+            return Ok(existing.edge);
+        }
+        self.engine.link(derived, source, EdgeType::ExtractedFrom)
     }
 
     /// Read a node's typed edges (both outgoing and incoming).
@@ -1104,6 +1234,45 @@ pub struct Recall {
     pub package: ContextPackage,
 }
 
+/// Consumer-selectable context rendering style.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ContextRenderStyle {
+    /// Full sections, scores, temporal metadata, and provenance.
+    #[default]
+    Detailed,
+    /// Compact evidence blocks grouped by source session and ordered by
+    /// observation time within each group.
+    Evidence,
+}
+
+/// Options for [`Memory::render_context_with`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ContextRenderOptions {
+    /// Context layout used by the consumer.
+    pub style: ContextRenderStyle,
+    /// Resolve explicit relative expressions in evidence against each
+    /// fragment's immutable observation time.
+    pub resolve_relative_times: bool,
+}
+
+impl ContextRenderOptions {
+    /// Construct options for one rendering style.
+    pub fn with_style(style: ContextRenderStyle) -> Self {
+        Self {
+            style,
+            ..Self::default()
+        }
+    }
+
+    /// Enable or disable deterministic relative-time annotations.
+    pub fn with_relative_time_resolution(mut self, enabled: bool) -> Self {
+        self.resolve_relative_times = enabled;
+        self
+    }
+}
+
 /// One consumer-supplied score on the readout candidates of a [`SearchResult`].
 ///
 /// Anamnesis deliberately does not own or call a reranking model. A consumer
@@ -1131,25 +1300,177 @@ impl Recall {
     /// optional description and the query-local stress.
     ///
     /// This is a pure read over [`Recall::package`] — it never mutates and never
-    /// fails (writing into a `String` is infallible).
+    /// fails (writing into a `String` is infallible). It intentionally preserves
+    /// the original package-only wire. Consumers that have the originating
+    /// [`Memory`] should prefer [`Memory::render_context`], which also renders
+    /// observation and validity times from the source nodes.
     pub fn as_context(&self) -> String {
-        let pkg = &self.package;
-        let mut out = String::new();
+        render_context_package(&self.package, None, None)
+    }
+}
 
-        render_section(&mut out, "IDENTITY", &pkg.identity);
-        render_section(&mut out, "KNOWLEDGE", &pkg.knowledge);
-        render_section(&mut out, "MEMORIES", &pkg.memories);
+#[derive(Debug, Clone, Copy)]
+struct FragmentTime {
+    observed_at: Timestamp,
+    valid_from: Option<Timestamp>,
+    valid_until: Option<Timestamp>,
+}
 
-        if !pkg.tensions.is_empty() {
-            out.push_str("## TENSIONS\n");
-            for tension in &pkg.tensions {
-                render_tension(&mut out, tension);
+fn render_context_package(
+    pkg: &ContextPackage,
+    times: Option<&HashMap<NodeId, FragmentTime>>,
+    relative_times: Option<&HashMap<NodeId, Vec<crate::query::temporal::RelativeTimeResolution>>>,
+) -> String {
+    let mut out = String::new();
+
+    render_section(&mut out, "IDENTITY", &pkg.identity, times, relative_times);
+    render_section(&mut out, "KNOWLEDGE", &pkg.knowledge, times, relative_times);
+    render_section(&mut out, "MEMORIES", &pkg.memories, times, relative_times);
+
+    if !pkg.tensions.is_empty() {
+        out.push_str("## TENSIONS\n");
+        for tension in &pkg.tensions {
+            render_tension(&mut out, tension);
+        }
+        out.push('\n');
+    }
+
+    out
+}
+
+fn render_evidence_context(
+    pkg: &ContextPackage,
+    times: &HashMap<NodeId, FragmentTime>,
+    relative_times: Option<&HashMap<NodeId, Vec<crate::query::temporal::RelativeTimeResolution>>>,
+) -> String {
+    let mut groups: Vec<(String, Vec<&Fragment>)> = Vec::new();
+    for fragment in pkg
+        .identity
+        .iter()
+        .chain(pkg.knowledge.iter())
+        .chain(pkg.memories.iter())
+    {
+        let session = fragment.origin.session_id.clone();
+        if let Some((_, fragments)) = groups.iter_mut().find(|(key, _)| key == &session) {
+            if !fragments
+                .iter()
+                .any(|existing| existing.node_id == fragment.node_id)
+            {
+                fragments.push(fragment);
+            }
+        } else {
+            groups.push((session, vec![fragment]));
+        }
+    }
+    for (_, fragments) in &mut groups {
+        fragments.sort_by(|left, right| {
+            times
+                .get(&left.node_id)
+                .map(|time| time.observed_at)
+                .cmp(&times.get(&right.node_id).map(|time| time.observed_at))
+                .then_with(|| right.relevance.total_cmp(&left.relevance))
+                .then_with(|| left.node_id.cmp(&right.node_id))
+        });
+    }
+    groups.sort_by(
+        |(left_session, left_fragments), (right_session, right_fragments)| {
+            let earliest = |fragments: &[&Fragment]| {
+                fragments
+                    .iter()
+                    .filter_map(|fragment| times.get(&fragment.node_id))
+                    .map(|time| time.observed_at)
+                    .min()
+            };
+            earliest(left_fragments)
+                .cmp(&earliest(right_fragments))
+                .then_with(|| left_session.cmp(right_session))
+        },
+    );
+
+    let mut out = String::new();
+    out.push_str("## EVIDENCE\n");
+    let mut evidence_index = 1usize;
+    for (session, fragments) in groups {
+        let raw_turn_lines: HashSet<String> = fragments
+            .iter()
+            .filter(|fragment| fragment.node_type == KnowledgeType::Episodic)
+            .filter_map(|fragment| fragment.content.as_deref())
+            .flat_map(|content| content.lines())
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_owned)
+            .collect();
+        let _ = writeln!(out, "### session \"{session}\"");
+        for fragment in fragments {
+            let body = evidence_fragment_body(fragment, &raw_turn_lines);
+            if body.is_empty() {
+                continue;
+            }
+            let _ = write!(
+                out,
+                "- [E{evidence_index}] [{}]",
+                node_type_label(&fragment.node_type)
+            );
+            if let Some(time) = times.get(&fragment.node_id) {
+                let _ = write!(out, " observed {}", format_timestamp_utc(time.observed_at));
+                if time.valid_from.is_some() || time.valid_until.is_some() {
+                    let valid_from = time
+                        .valid_from
+                        .map_or_else(|| "-∞".to_string(), format_timestamp_utc);
+                    let valid_until = time
+                        .valid_until
+                        .map_or_else(|| "+∞".to_string(), format_timestamp_utc);
+                    let _ = write!(out, "; valid [{valid_from}, {valid_until})");
+                }
             }
             out.push('\n');
+            for line in body.lines() {
+                let _ = writeln!(out, "    {line}");
+            }
+            render_relative_times(
+                &mut out,
+                fragment.node_id,
+                relative_times,
+                times.get(&fragment.node_id).map(|time| time.observed_at),
+                "    ",
+            );
+            evidence_index = evidence_index.saturating_add(1);
         }
-
-        out
     }
+    if !pkg.tensions.is_empty() {
+        out.push_str("## TENSIONS\n");
+        for tension in &pkg.tensions {
+            render_tension(&mut out, tension);
+        }
+    }
+    out.push('\n');
+    out
+}
+
+fn evidence_fragment_body(fragment: &Fragment, raw_turn_lines: &HashSet<String>) -> String {
+    let Some(content) = fragment.content.as_deref() else {
+        return fragment
+            .summary
+            .as_deref()
+            .unwrap_or(&fragment.name)
+            .trim()
+            .to_string();
+    };
+    if fragment.node_type != KnowledgeType::Semantic {
+        return content.trim().to_string();
+    }
+
+    // Semantic windows deliberately overlap adjacent raw turns. Keep the
+    // window-only context, but let an exact Episodic fragment be the sole
+    // rendered copy when that source turn is already in the package. This is a
+    // presentation-only coalescing pass: the package, provenance graph, commit
+    // trace, and every raw fragment remain untouched.
+    content
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !raw_turn_lines.contains(*line))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Human-readable label for a node type in rendered context output.
@@ -1166,7 +1487,13 @@ fn node_type_label(kt: &KnowledgeType) -> String {
 }
 
 /// Render one titled fragment section (skipped entirely if `frags` is empty).
-fn render_section(out: &mut String, title: &str, frags: &[Fragment]) {
+fn render_section(
+    out: &mut String,
+    title: &str,
+    frags: &[Fragment],
+    times: Option<&HashMap<NodeId, FragmentTime>>,
+    relative_times: Option<&HashMap<NodeId, Vec<crate::query::temporal::RelativeTimeResolution>>>,
+) {
     if frags.is_empty() {
         return;
     }
@@ -1187,6 +1514,32 @@ fn render_section(out: &mut String, title: &str, frags: &[Fragment]) {
         } else if let Some(summary) = &f.summary {
             let _ = writeln!(out, "    {summary}");
         }
+        if let Some(time) = times.and_then(|values| values.get(&f.node_id)) {
+            let _ = write!(
+                out,
+                "    └ time: observed {}",
+                format_timestamp_utc(time.observed_at)
+            );
+            if time.valid_from.is_some() || time.valid_until.is_some() {
+                let valid_from = time
+                    .valid_from
+                    .map_or_else(|| "-∞".to_string(), format_timestamp_utc);
+                let valid_until = time
+                    .valid_until
+                    .map_or_else(|| "+∞".to_string(), format_timestamp_utc);
+                let _ = write!(out, "; valid [{valid_from}, {valid_until})");
+            }
+            out.push('\n');
+        }
+        render_relative_times(
+            out,
+            f.node_id,
+            relative_times,
+            times
+                .and_then(|values| values.get(&f.node_id))
+                .map(|time| time.observed_at),
+            "    ",
+        );
         // Provenance line. ScopePath (origin.scope) HAS Display; SourceKind needs
         // {:?}. Scopes are flat opaque paths (hierarchy removed), so the origin
         // scope string is the whole story — there is no query-relative relation.
@@ -1203,6 +1556,145 @@ fn render_section(out: &mut String, title: &str, frags: &[Fragment]) {
     out.push('\n');
 }
 
+fn render_relative_times(
+    out: &mut String,
+    node_id: NodeId,
+    relative_times: Option<&HashMap<NodeId, Vec<crate::query::temporal::RelativeTimeResolution>>>,
+    observed_at: Option<Timestamp>,
+    indentation: &str,
+) {
+    let Some(resolutions) = relative_times.and_then(|values| values.get(&node_id)) else {
+        return;
+    };
+    for resolution in resolutions {
+        let _ = writeln!(
+            out,
+            "{indentation}└ resolved relative time: \"{}\" = {}",
+            resolution.phrase,
+            format_relative_time_resolution(resolution, observed_at)
+        );
+    }
+}
+
+fn utc_date_parts(timestamp: Timestamp) -> (i64, i64, i64) {
+    let days = (timestamp.0 / 1_000 / 86_400) as i64;
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let day_of_era = z - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    year += i64::from(month <= 2);
+    (year, month, day)
+}
+
+fn format_natural_date(timestamp: Timestamp) -> String {
+    const MONTH_NAMES: [&str; 12] = [
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+    ];
+    let (year, month, day) = utc_date_parts(timestamp);
+    let month_name = usize::try_from(month - 1)
+        .ok()
+        .and_then(|index| MONTH_NAMES.get(index))
+        .copied()
+        .unwrap_or("unknown month");
+    format!("{day} {month_name} {year}")
+}
+
+fn format_relative_time_resolution(
+    resolution: &crate::query::temporal::RelativeTimeResolution,
+    observed_at: Option<Timestamp>,
+) -> String {
+    use crate::query::temporal::RelativeTimePrecision;
+
+    let absolute = match resolution.precision {
+        RelativeTimePrecision::Day => format_natural_date(Timestamp(resolution.range.start)),
+        RelativeTimePrecision::Month => {
+            let natural = format_natural_date(Timestamp(resolution.range.start));
+            natural
+                .split_once(' ')
+                .map_or(natural.clone(), |(_, month_year)| month_year.to_owned())
+        }
+        RelativeTimePrecision::Range => format!(
+            "{} through {}",
+            format_natural_date(Timestamp(resolution.range.start)),
+            format_natural_date(Timestamp(resolution.range.end))
+        ),
+    };
+    let relation = observed_at.and_then(|observed_at| {
+        let phrase = resolution.phrase.to_lowercase();
+        let anchor = format_natural_date(observed_at);
+        match phrase.as_str() {
+            "yesterday" => Some(format!("the day before {anchor}")),
+            "last night" => Some(format!("the night before {anchor}")),
+            "tomorrow" => Some(format!("the day after {anchor}")),
+            "last week" => Some(format!("the week before {anchor}")),
+            "this week" => Some(format!("the week of {anchor}")),
+            "next week" => Some(format!("the week after {anchor}")),
+            "last weekend" => Some(format!("the weekend before {anchor}")),
+            "next weekend" => Some(format!("the weekend after {anchor}")),
+            "last month" => Some(format!("the month before {anchor}")),
+            "this month" => Some(format!("the month of {anchor}")),
+            "next month" => Some(format!("the month after {anchor}")),
+            value if value.ends_with(" ago") => Some(format!(
+                "{} before {anchor}",
+                value.trim_end_matches(" ago")
+            )),
+            value if value.starts_with("last ") => Some(format!(
+                "the {} before {anchor}",
+                weekday_display(value.trim_start_matches("last "))
+            )),
+            value if value.starts_with("next ") => Some(format!(
+                "the {} after {anchor}",
+                weekday_display(value.trim_start_matches("next "))
+            )),
+            _ => None,
+        }
+    });
+    relation.map_or(absolute.clone(), |relation| {
+        format!("{absolute}; relation: {relation}")
+    })
+}
+
+fn weekday_display(value: &str) -> &str {
+    match value {
+        "mon" => "Monday",
+        "tue" | "tues" => "Tuesday",
+        "wed" => "Wednesday",
+        "thu" | "thur" | "thurs" => "Thursday",
+        "fri" => "Friday",
+        "sat" => "Saturday",
+        "sun" => "Sunday",
+        other => other,
+    }
+}
+
+fn format_timestamp_utc(timestamp: Timestamp) -> String {
+    let total_seconds = timestamp.0 / 1_000;
+    let seconds_of_day = total_seconds % 86_400;
+    let hour = seconds_of_day / 3_600;
+    let minute = (seconds_of_day % 3_600) / 60;
+    let second = seconds_of_day % 60;
+    let (year, month, day) = utc_date_parts(timestamp);
+
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+}
+
 /// Render one tension line: `#A ⟂ #B [— description] (stress N.NN)`.
 fn render_tension(out: &mut String, tension: &Tension) {
     let _ = write!(out, "- #{} ⟂ #{}", tension.node_a.0, tension.node_b.0);
@@ -1213,6 +1705,167 @@ fn render_tension(out: &mut String, tension: &Tension) {
 }
 
 impl<S: StorageAdapter + Clone> Memory<S> {
+    fn recall_fragment_times(
+        &self,
+        recall: &Recall,
+    ) -> Result<HashMap<NodeId, FragmentTime>, Error> {
+        let mut times = HashMap::new();
+        for fragment in recall
+            .package
+            .identity
+            .iter()
+            .chain(recall.package.knowledge.iter())
+            .chain(recall.package.memories.iter())
+        {
+            if times.contains_key(&fragment.node_id) {
+                continue;
+            }
+            let node = self.engine.graph().get_node(fragment.node_id)?;
+            times.insert(
+                fragment.node_id,
+                FragmentTime {
+                    observed_at: node.created_at,
+                    valid_from: node.valid_from,
+                    valid_until: node.valid_until,
+                },
+            );
+        }
+        Ok(times)
+    }
+
+    fn recall_relative_time_resolutions(
+        &self,
+        recall: &Recall,
+        times: &HashMap<NodeId, FragmentTime>,
+        query: Option<&str>,
+    ) -> HashMap<NodeId, Vec<crate::query::temporal::RelativeTimeResolution>> {
+        const TEMPORAL_EVIDENCE_LIMIT: usize = 4;
+
+        let mut resolutions = HashMap::new();
+        let mut fragments: Vec<_> = recall
+            .package
+            .identity
+            .iter()
+            .chain(recall.package.knowledge.iter())
+            .chain(recall.package.memories.iter())
+            .collect();
+        fragments.sort_by(|left, right| {
+            right
+                .relevance
+                .total_cmp(&left.relevance)
+                .then_with(|| left.node_id.cmp(&right.node_id))
+        });
+        for fragment in fragments.into_iter().take(TEMPORAL_EVIDENCE_LIMIT) {
+            let Some(time) = times.get(&fragment.node_id) else {
+                continue;
+            };
+            let body = fragment
+                .content
+                .as_deref()
+                .or(fragment.summary.as_deref())
+                .unwrap_or(fragment.name.as_str());
+            if query.is_some_and(|query| !readout::temporal_evidence_matches(query, body)) {
+                continue;
+            }
+            let mut fragment_resolutions = Vec::new();
+            for source_line in body.lines().map(str::trim).filter(|line| !line.is_empty()) {
+                for resolution in crate::query::temporal::resolve_relative_time_cues(
+                    source_line,
+                    time.observed_at.0,
+                ) {
+                    if !fragment_resolutions.contains(&resolution) {
+                        fragment_resolutions.push(resolution);
+                    }
+                }
+            }
+            if !fragment_resolutions.is_empty() {
+                resolutions.insert(fragment.node_id, fragment_resolutions);
+            }
+        }
+        resolutions
+    }
+
+    /// Render a recall with source-node temporal metadata.
+    ///
+    /// This is the product context wire for consumers that need to resolve
+    /// relative expressions such as "last week" or "next month". It preserves
+    /// [`Recall::as_context`]'s sections and provenance, while adding each
+    /// fragment's immutable observation time and optional half-open validity
+    /// window. Source fragments added during packaging are looked up directly,
+    /// so they receive timestamps even when they were not standalone ranked
+    /// [`Hit`] values.
+    ///
+    /// The method is read-only. It returns an error if a packaged source node
+    /// can no longer be read instead of silently emitting incomplete temporal
+    /// context.
+    pub fn render_context(&self, recall: &Recall) -> Result<String, Error> {
+        self.render_context_with(recall, ContextRenderOptions::default())
+    }
+
+    /// Render context using deterministic query intent.
+    ///
+    /// Temporal questions receive reference-blind annotations that resolve
+    /// explicit relative expressions against each fragment's immutable
+    /// observation time. Other query intents are byte-for-byte equivalent to
+    /// [`render_context`](Memory::render_context). The annotations preserve the
+    /// original evidence and never inspect an expected answer or call a model.
+    pub fn render_context_for(&self, query: &str, recall: &Recall) -> Result<String, Error> {
+        self.render_context_for_with(query, recall, ContextRenderOptions::default())
+    }
+
+    /// Render one consumer-selected layout with deterministic query intent.
+    pub fn render_context_for_with(
+        &self,
+        query: &str,
+        recall: &Recall,
+        mut options: ContextRenderOptions,
+    ) -> Result<String, Error> {
+        if readout::asks_for_time_answer(query) {
+            options.resolve_relative_times = true;
+        }
+        self.render_context_internal(recall, options, Some(query))
+    }
+
+    /// Render a recall through a consumer-selected product context style.
+    ///
+    /// Both styles read the exact same validated [`ContextPackage`]. `Evidence`
+    /// changes only presentation: it groups fragments by source session,
+    /// orders sessions by their earliest evidence and fragments by observation
+    /// time, and removes score/origin prose that answer readers do not need. It
+    /// does not remove nodes from the package, alter commit traces, or mutate
+    /// graph state.
+    pub fn render_context_with(
+        &self,
+        recall: &Recall,
+        options: ContextRenderOptions,
+    ) -> Result<String, Error> {
+        self.render_context_internal(recall, options, None)
+    }
+
+    fn render_context_internal(
+        &self,
+        recall: &Recall,
+        options: ContextRenderOptions,
+        query: Option<&str>,
+    ) -> Result<String, Error> {
+        let times = self.recall_fragment_times(recall)?;
+        let relative_times = options
+            .resolve_relative_times
+            .then(|| self.recall_relative_time_resolutions(recall, &times, query));
+        match options.style {
+            ContextRenderStyle::Detailed => Ok(render_context_package(
+                &recall.package,
+                Some(&times),
+                relative_times.as_ref(),
+            )),
+            ContextRenderStyle::Evidence => Ok(render_evidence_context(
+                &recall.package,
+                &times,
+                relative_times.as_ref(),
+            )),
+        }
+    }
+
     /// Search memory at wall-clock `now`.
     ///
     /// Equivalent to `search_at(query, limit, Timestamp::now())`. For deterministic
@@ -1248,6 +1901,46 @@ impl<S: StorageAdapter + Clone> Memory<S> {
         now: Timestamp,
     ) -> Result<Recall, Error> {
         self.search_scoped_at(query, limit, None, now)
+    }
+
+    /// Run the model-free, source-aware readout at wall-clock time.
+    ///
+    /// This is the higher-quality counterpart to [`search`](Memory::search).
+    /// It uses the same engine search and package validation, then lets the
+    /// [`Memory`] facade compile the ranked graph nodes into distinct evidence
+    /// units according to [`DeepRecallOptions`]. No generative model is called.
+    pub fn search_deep(
+        &mut self,
+        query: &str,
+        options: DeepRecallOptions,
+    ) -> Result<Recall, Error> {
+        self.search_deep_at(query, options, Timestamp::now())
+    }
+
+    /// Run deterministic source-aware readout at an explicit timestamp.
+    ///
+    /// The search remains read-only. Pending turns are flushed by
+    /// [`search_result_at_with`](Memory::search_result_at_with), and the
+    /// resulting cognitive ranking is compiled through the same commit-safe
+    /// reranked package path exposed to local cross-encoder consumers.
+    pub fn search_deep_at(
+        &mut self,
+        query: &str,
+        options: DeepRecallOptions,
+        now: Timestamp,
+    ) -> Result<Recall, Error> {
+        let result =
+            self.search_result_at_with(query, options.limit, now, &SearchTuning::default())?;
+        let ranking: Vec<_> = result
+            .trace
+            .readout
+            .iter()
+            .map(|candidate| RerankedCandidate {
+                node_id: candidate.node_id,
+                score: candidate.score,
+            })
+            .collect();
+        self.repackage_reranked_deep_at(&result, &ranking, options, now)
     }
 
     fn search_scoped_at(
@@ -1323,6 +2016,28 @@ impl<S: StorageAdapter + Clone> Memory<S> {
         now: Timestamp,
         tuning: &SearchTuning,
     ) -> Result<SearchResult, Error> {
+        self.search_result_at_with_diagnostics(
+            query,
+            limit,
+            now,
+            tuning,
+            &SearchDiagnostics::default(),
+        )
+    }
+
+    /// Diagnostic variant of [`search_result_at_with`](Self::search_result_at_with).
+    ///
+    /// `diagnostics` changes only the number of pre-packaging readout rows
+    /// retained in the returned trace. It cannot change activation, ranking,
+    /// package contents, or commit semantics.
+    pub fn search_result_at_with_diagnostics(
+        &mut self,
+        query: &str,
+        limit: usize,
+        now: Timestamp,
+        tuning: &SearchTuning,
+        diagnostics: &SearchDiagnostics,
+    ) -> Result<SearchResult, Error> {
         self.flush_all()?;
 
         let embedding = embed_one_query(&*self.provider, query)?;
@@ -1336,7 +2051,7 @@ impl<S: StorageAdapter + Clone> Memory<S> {
             entity_tags: tuning.entity_tags.clone(),
             ..SearchInput::default()
         };
-        self.engine.search(input)
+        self.engine.search_with_diagnostics(input, diagnostics)
     }
 
     /// Validate consumer-supplied reranker scores and rebuild a commit-safe recall.
@@ -1351,6 +2066,11 @@ impl<S: StorageAdapter + Clone> Memory<S> {
     /// fragments actually exposed after reranking, so [`Memory::used`] never
     /// reinforces discarded baseline results.
     ///
+    /// Node validity is evaluated at [`Timestamp::now`]. Consumers replaying a
+    /// historical or deterministic query should call
+    /// [`repackage_reranked_at`](Memory::repackage_reranked_at) with the same
+    /// timestamp used for the source search.
+    ///
     /// Path-current reinforcement can only be preserved for edges present in the
     /// source result's commit trace; the public search trace does not expose raw
     /// path currents. Access and co-readout reinforcement are rebuilt from the
@@ -1360,6 +2080,70 @@ impl<S: StorageAdapter + Clone> Memory<S> {
         result: &SearchResult,
         ranking: &[RerankedCandidate],
         limit: usize,
+    ) -> Result<Recall, Error> {
+        self.repackage_reranked_at(result, ranking, limit, Timestamp::now())
+    }
+
+    /// Compile consumer scores through the model-free deep readout at wall-clock time.
+    ///
+    /// The consumer supplies only scores. Query intent detection, canonical raw
+    /// source grouping, evidence selection, validity, packaging, and commit
+    /// trace reconstruction remain owned by [`Memory`].
+    pub fn repackage_reranked_deep(
+        &self,
+        result: &SearchResult,
+        ranking: &[RerankedCandidate],
+        options: DeepRecallOptions,
+    ) -> Result<Recall, Error> {
+        self.repackage_reranked_deep_at(result, ranking, options, Timestamp::now())
+    }
+
+    /// Compile consumer scores through deterministic deep readout at `as_of`.
+    ///
+    /// [`EvidenceSelection::Auto`] reads the original query from
+    /// [`SearchTrace::query_variants`](crate::query::SearchTrace::query_variants).
+    /// It preserves pure relevance order for direct and temporal questions and
+    /// applies raw-source coverage only for explicit enumeration or relational
+    /// questions. The compiled ranking is then validated by
+    /// [`repackage_reranked_at`](Memory::repackage_reranked_at), so no source,
+    /// validity, tension, budget, or commit invariant is bypassed.
+    pub fn repackage_reranked_deep_at(
+        &self,
+        result: &SearchResult,
+        ranking: &[RerankedCandidate],
+        options: DeepRecallOptions,
+        as_of: Timestamp,
+    ) -> Result<Recall, Error> {
+        let query =
+            result.trace.query_variants.first().ok_or_else(|| {
+                Error::InvalidInput("search trace has no original query".to_owned())
+            })?;
+        let compiled = readout::compile_ranking(
+            self.engine.graph().storage(),
+            query,
+            ranking,
+            options.selection,
+        )?;
+        self.repackage_reranked_at(result, &compiled, options.limit, as_of)
+    }
+
+    /// Rebuild a commit-safe recall from consumer scores at an explicit time.
+    ///
+    /// This is the deterministic/historical counterpart to
+    /// [`repackage_reranked`](Memory::repackage_reranked). It reapplies the source
+    /// search's packaging mode, contradiction discovery, and half-open validity
+    /// windows at `as_of` before the final result limit. Passing `Timestamp(0)`
+    /// preserves the native search sentinel semantics and skips node validity
+    /// filtering while evaluating contradiction validity at the current time.
+    ///
+    /// The ranking validation and read-only guarantees are identical to
+    /// [`repackage_reranked`](Memory::repackage_reranked).
+    pub fn repackage_reranked_at(
+        &self,
+        result: &SearchResult,
+        ranking: &[RerankedCandidate],
+        limit: usize,
+        as_of: Timestamp,
     ) -> Result<Recall, Error> {
         if limit == 0 {
             return Err(Error::InvalidInput(
@@ -1429,26 +2213,21 @@ impl<S: StorageAdapter + Clone> Memory<S> {
             });
         }
 
-        let reranked_ids: HashSet<NodeId> = ranked
+        let activations: HashMap<NodeId, f64> = ranked
             .iter()
-            .map(|(candidate, _)| candidate.node_id)
-            .collect();
-        let contradiction_pairs: Vec<_> = result
-            .package
-            .tensions
-            .iter()
-            .filter(|tension| {
-                reranked_ids.contains(&tension.node_a) && reranked_ids.contains(&tension.node_b)
-            })
-            .map(|tension| ContradictionPair {
-                node_a: tension.node_a,
-                node_b: tension.node_b,
-                edge_weight: tension.edge_weight,
-                stress: tension.stress,
-                scope_overlap: tension.scope_overlap,
-                temporal_overlap: tension.temporal_overlap,
+            .filter_map(|(candidate, _)| {
+                readout_by_id
+                    .get(&candidate.node_id)
+                    .map(|readout| (candidate.node_id, readout.activation))
             })
             .collect();
+        let contradiction_time = if as_of.0 > 0 { as_of } else { Timestamp::now() };
+        let (contradiction_pairs, _) = crate::query::assembly::collect_contradiction_pairs(
+            self.engine.graph().storage(),
+            &activations,
+            0.0,
+            contradiction_time,
+        );
         let identity_activations: Vec<_> = scored_nodes
             .iter()
             .filter(|node| matches!(node.node_type, KnowledgeType::Identity))
@@ -1459,13 +2238,46 @@ impl<S: StorageAdapter + Clone> Memory<S> {
             })
             .collect();
         let config = QueryConfig::default();
-        let mut package = assemble_context_package(
-            scored_nodes,
-            &identity_activations,
-            &contradiction_pairs,
-            config.token_budget,
-            config.chars_per_token,
-        );
+        let packaging_mode = result
+            .trace
+            .packaging_mode
+            .clone()
+            .unwrap_or(crate::query::PackagingMode::Balanced);
+        let assemble = |nodes| {
+            let mut package = assemble_context_package(
+                nodes,
+                &identity_activations,
+                &contradiction_pairs,
+                config.token_budget,
+                config.chars_per_token,
+            );
+            apply_packaging_mode(&self.engine, packaging_mode.clone(), &mut package);
+            if as_of.0 > 0 {
+                apply_validity_filter(&self.engine, &mut package, as_of);
+            }
+            package
+        };
+
+        // The first pass decides the exact surviving candidate set using the
+        // established packaging-mode, validity, result-limit, and tension
+        // preservation semantics. Reassemble only that final set so candidates
+        // discarded by the result limit do not permanently consume the token
+        // budget and strand surviving Episodic fragments at synthetic L0/L1
+        // labels.
+        let mut package = assemble(scored_nodes.clone());
+        apply_result_limit(&mut package, limit, config.chars_per_token);
+        let initially_selected: HashSet<NodeId> = package
+            .identity
+            .iter()
+            .chain(package.knowledge.iter())
+            .chain(package.memories.iter())
+            .map(|fragment| fragment.node_id)
+            .collect();
+        let selected_scored_nodes = scored_nodes
+            .into_iter()
+            .filter(|node| initially_selected.contains(&node.node_id))
+            .collect();
+        package = assemble(selected_scored_nodes);
         apply_result_limit(&mut package, limit, config.chars_per_token);
 
         let selected_ids: HashSet<NodeId> = package
@@ -1987,6 +2799,406 @@ mod tests {
     }
 
     #[test]
+    fn deep_readout_groups_semantic_and_episodic_representations_by_raw_source() {
+        let mut m = mem();
+        let first = m.add_note("Alice repaired the blue bicycle", t(1)).unwrap();
+        let second = m.add_note("Bob repaired the green bicycle", t(2)).unwrap();
+        let first_semantic = first.finalized_semantic.unwrap();
+        let second_semantic = second.finalized_semantic.unwrap();
+
+        let result = m
+            .search_result_at_with(
+                "What are the bicycles that Alice and Bob repaired?",
+                10,
+                t(100),
+                &SearchTuning::default(),
+            )
+            .unwrap();
+        let live: HashSet<_> = result
+            .trace
+            .readout
+            .iter()
+            .map(|candidate| candidate.node_id)
+            .collect();
+        for expected in [
+            first_semantic,
+            first.episodic,
+            second_semantic,
+            second.episodic,
+        ] {
+            assert!(
+                live.contains(&expected),
+                "missing readout node {expected:?}"
+            );
+        }
+        assert_eq!(
+            readout::canonical_sources(m.engine().graph().storage(), first_semantic).unwrap(),
+            vec![first.episodic]
+        );
+        assert_eq!(
+            readout::canonical_sources(m.engine().graph().storage(), first.episodic).unwrap(),
+            vec![first.episodic]
+        );
+
+        let ranking = [
+            RerankedCandidate {
+                node_id: first_semantic,
+                score: 4.0,
+            },
+            RerankedCandidate {
+                node_id: first.episodic,
+                score: 3.0,
+            },
+            RerankedCandidate {
+                node_id: second_semantic,
+                score: 2.0,
+            },
+            RerankedCandidate {
+                node_id: second.episodic,
+                score: 1.0,
+            },
+        ];
+        let recall = m
+            .repackage_reranked_deep_at(
+                &result,
+                &ranking,
+                DeepRecallOptions::new(2).with_selection(EvidenceSelection::DistinctSources),
+                t(100),
+            )
+            .unwrap();
+
+        assert_eq!(
+            recall
+                .hits
+                .iter()
+                .map(|hit| hit.node_id)
+                .collect::<Vec<_>>(),
+            vec![first_semantic, second_semantic]
+        );
+        assert_eq!(recall.package.total_fragments(), 2);
+    }
+
+    #[test]
+    fn automatic_deep_readout_preserves_temporal_relevance_order() {
+        let mut m = mem();
+        let first = m.add_note("Alice moved in January", t(1)).unwrap();
+        let second = m.add_note("Alice moved in February", t(2)).unwrap();
+        let first_semantic = first.finalized_semantic.unwrap();
+        let second_semantic = second.finalized_semantic.unwrap();
+        let result = m
+            .search_result_at_with("When did Alice move?", 4, t(100), &SearchTuning::default())
+            .unwrap();
+        let ranking = [
+            RerankedCandidate {
+                node_id: first_semantic,
+                score: 4.0,
+            },
+            RerankedCandidate {
+                node_id: first.episodic,
+                score: 3.0,
+            },
+            RerankedCandidate {
+                node_id: second_semantic,
+                score: 2.0,
+            },
+            RerankedCandidate {
+                node_id: second.episodic,
+                score: 1.0,
+            },
+        ];
+        let ordinary = m
+            .repackage_reranked_at(&result, &ranking, 4, t(100))
+            .unwrap();
+        let deep = m
+            .repackage_reranked_deep_at(&result, &ranking, DeepRecallOptions::new(4), t(100))
+            .unwrap();
+
+        assert_eq!(
+            ordinary
+                .hits
+                .iter()
+                .map(|hit| hit.node_id)
+                .collect::<Vec<_>>(),
+            deep.hits.iter().map(|hit| hit.node_id).collect::<Vec<_>>()
+        );
+        assert_eq!(ordinary.package, deep.package);
+    }
+
+    #[test]
+    fn repackage_reranked_reclaims_discarded_candidate_budget() {
+        let mut m = mem();
+        for index in 0..48 {
+            let payload = format!(
+                "turn {index} carries a distinct durable detail {}",
+                "with enough context to consume package budget ".repeat(8)
+            );
+            m.add("budget-session", "alice", &payload, t(index + 1))
+                .unwrap();
+        }
+        m.flush_all().unwrap();
+
+        let result = m
+            .search_result_at_with(
+                "durable detail context",
+                20,
+                t(100),
+                &SearchTuning {
+                    seed_limit: Some(20),
+                    entity_tags: Vec::new(),
+                },
+            )
+            .unwrap();
+        let mut episodic_rank = 0usize;
+        let mut other_rank = 0usize;
+        let mut ranking = Vec::new();
+        for candidate in &result.trace.readout {
+            let node = m.engine().graph().get_node(candidate.node_id).unwrap();
+            let score = if matches!(node.node_type, KnowledgeType::Episodic) {
+                episodic_rank += 1;
+                10_000.0 - episodic_rank as f64
+            } else {
+                other_rank += 1;
+                1_000.0 - other_rank as f64
+            };
+            ranking.push(RerankedCandidate {
+                node_id: candidate.node_id,
+                score,
+            });
+        }
+
+        let recall = m
+            .repackage_reranked_at(&result, &ranking, 2, t(100))
+            .unwrap();
+        assert_eq!(recall.package.total_fragments(), 2);
+        assert_eq!(recall.package.memories.len(), 2);
+        assert!(
+            recall
+                .package
+                .memories
+                .iter()
+                .all(|fragment| fragment.content.is_some()),
+            "the final selected Episodic set must be reassembled at full resolution"
+        );
+    }
+
+    #[test]
+    fn repackage_reranked_at_reapplies_validity_windows() {
+        let mut m = mem();
+        let expired = m.add_note("expired memory fact", t(10)).unwrap();
+        let current = m.add_note("current memory fact", t(20)).unwrap();
+        for node_id in [expired.episodic, expired.finalized_semantic.unwrap()] {
+            let mut node = m.engine().graph().get_node(node_id).unwrap().clone();
+            node.valid_until = Some(t(50));
+            m.engine_mut()
+                .graph_mut()
+                .storage_mut()
+                .set_node(node)
+                .unwrap();
+        }
+
+        let result = m
+            .search_result_at_with(
+                "memory fact",
+                10,
+                t(100),
+                &SearchTuning {
+                    seed_limit: Some(10),
+                    entity_tags: Vec::new(),
+                },
+            )
+            .unwrap();
+        let readout_ids: HashSet<_> = result
+            .trace
+            .readout
+            .iter()
+            .map(|candidate| candidate.node_id)
+            .collect();
+        assert!(readout_ids.contains(&expired.episodic));
+        assert!(readout_ids.contains(&current.episodic));
+
+        let ranking = vec![
+            RerankedCandidate {
+                node_id: expired.episodic,
+                score: 2.0,
+            },
+            RerankedCandidate {
+                node_id: current.episodic,
+                score: 1.0,
+            },
+        ];
+        let historical = m
+            .repackage_reranked_at(&result, &ranking, 2, t(25))
+            .unwrap();
+        assert!(
+            historical
+                .package
+                .memories
+                .iter()
+                .any(|fragment| fragment.node_id == expired.episodic)
+        );
+
+        let current_recall = m
+            .repackage_reranked_at(&result, &ranking, 2, t(100))
+            .unwrap();
+        assert!(
+            current_recall
+                .package
+                .memories
+                .iter()
+                .all(|fragment| fragment.node_id != expired.episodic)
+        );
+        assert!(
+            current_recall
+                .package
+                .memories
+                .iter()
+                .any(|fragment| fragment.node_id == current.episodic)
+        );
+        assert!(
+            current_recall
+                .hits
+                .iter()
+                .all(|hit| hit.node_id != expired.episodic)
+        );
+    }
+
+    #[test]
+    fn repackage_reranked_at_reapplies_timeline_packaging() {
+        let mut m = mem();
+        let older = m.add_note("older history fact", t(10)).unwrap();
+        let newer = m.add_note("newer history fact", t(20)).unwrap();
+        let result = m
+            .search_result_at_with(
+                "history fact",
+                10,
+                t(100),
+                &SearchTuning {
+                    seed_limit: Some(10),
+                    entity_tags: Vec::new(),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            result.trace.packaging_mode,
+            Some(crate::query::PackagingMode::Timeline)
+        );
+        let ranking = vec![
+            RerankedCandidate {
+                node_id: newer.episodic,
+                score: 2.0,
+            },
+            RerankedCandidate {
+                node_id: older.episodic,
+                score: 1.0,
+            },
+        ];
+
+        let recall = m
+            .repackage_reranked_at(&result, &ranking, 10, t(100))
+            .unwrap();
+        let memory_ids: Vec<_> = recall
+            .package
+            .memories
+            .iter()
+            .map(|fragment| fragment.node_id)
+            .collect();
+        assert_eq!(memory_ids, [older.episodic, newer.episodic]);
+    }
+
+    #[test]
+    fn repackage_reranked_at_reapplies_knowledge_provenance() {
+        let mut m = mem();
+        let note = m
+            .add_note("source fragment for a derived fact", t(10))
+            .unwrap();
+        let semantic = note.finalized_semantic.unwrap();
+        let mut result = m
+            .search_result_at_with(
+                "derived fact",
+                10,
+                t(100),
+                &SearchTuning {
+                    seed_limit: Some(10),
+                    entity_tags: Vec::new(),
+                },
+            )
+            .unwrap();
+        assert!(
+            result
+                .trace
+                .readout
+                .iter()
+                .any(|candidate| candidate.node_id == semantic)
+        );
+        result.trace.packaging_mode = Some(crate::query::PackagingMode::KnowledgeWithProvenance);
+
+        let recall = m
+            .repackage_reranked_at(
+                &result,
+                &[RerankedCandidate {
+                    node_id: semantic,
+                    score: 1.0,
+                }],
+                10,
+                t(100),
+            )
+            .unwrap();
+
+        assert!(
+            recall
+                .package
+                .knowledge
+                .iter()
+                .any(|fragment| fragment.node_id == semantic)
+        );
+        assert!(recall.package.memories.iter().any(|fragment| {
+            fragment.node_id == note.episodic
+                && fragment.content.as_deref() == Some("source fragment for a derived fact")
+        }));
+    }
+
+    #[test]
+    fn repackage_reranked_at_rediscovers_tensions_from_readout() {
+        let mut m = mem();
+        let left = m.add_note("the release is approved", t(10)).unwrap();
+        let right = m.add_note("the release is rejected", t(20)).unwrap();
+        let left_semantic = left.finalized_semantic.unwrap();
+        let right_semantic = right.finalized_semantic.unwrap();
+        m.relate(left_semantic, right_semantic, Relation::Contradicts)
+            .unwrap();
+        let mut result = m
+            .search_result_at_with(
+                "release approved rejected",
+                10,
+                t(100),
+                &SearchTuning {
+                    seed_limit: Some(10),
+                    entity_tags: Vec::new(),
+                },
+            )
+            .unwrap();
+        result.package.tensions.clear();
+        result.trace.packaging_mode = Some(crate::query::PackagingMode::Balanced);
+        let ranking = vec![
+            RerankedCandidate {
+                node_id: left_semantic,
+                score: 2.0,
+            },
+            RerankedCandidate {
+                node_id: right_semantic,
+                score: 1.0,
+            },
+        ];
+
+        let recall = m
+            .repackage_reranked_at(&result, &ranking, 10, t(100))
+            .unwrap();
+        assert_eq!(recall.package.tensions.len(), 1);
+        assert_eq!(recall.package.tensions[0].node_a, left_semantic);
+        assert_eq!(recall.package.tensions[0].node_b, right_semantic);
+    }
+
+    #[test]
     fn repackage_reranked_rejects_unknown_duplicate_and_non_finite_scores() {
         let mut m = mem();
         m.add_note("alpha memory", t(1)).unwrap();
@@ -2132,6 +3344,85 @@ mod tests {
         // NodeId(9999) does not exist.
         let result = m.relate(a, NodeId(9999), Relation::Related);
         assert!(result.is_err(), "linking to a missing node must error");
+    }
+
+    #[test]
+    fn reviewed_extraction_source_link_is_typed_and_idempotent() {
+        let mut m = mem();
+        let source = m
+            .add("session", "alice", "Alice moved to Seoul", t(1))
+            .unwrap()
+            .episodic;
+        m.flush_all().unwrap();
+        let derived = m
+            .add_derived_knowledge_with(
+                "Alice lives in Seoul",
+                t(2),
+                "session",
+                NoteOptions::default(),
+            )
+            .unwrap();
+        assert_eq!(
+            m.engine()
+                .graph()
+                .get_node(derived)
+                .unwrap()
+                .origin
+                .session_id,
+            "session"
+        );
+
+        let first = m.link_extracted_source(derived, source).unwrap();
+        let repeated = m.link_extracted_source(derived, source).unwrap();
+        assert_eq!(first, repeated);
+        assert!(m.neighbors(derived).unwrap().iter().any(|neighbor| {
+            neighbor.edge == first
+                && neighbor.node == source
+                && neighbor.direction == Direction::Outgoing
+                && neighbor.edge_type == EdgeType::ExtractedFrom
+        }));
+        assert!(
+            m.link_extracted_source(source, source).is_err(),
+            "raw episodic nodes cannot masquerade as derived knowledge"
+        );
+    }
+
+    #[test]
+    fn reviewed_derived_knowledge_creates_one_semantic_node_without_an_episodic_copy() {
+        let mut m = mem();
+        let before = m.engine().graph().storage().all_node_ids().len();
+        let derived = m
+            .add_derived_knowledge_with(
+                "Alice lives in Seoul",
+                t(2),
+                "session",
+                NoteOptions {
+                    metadata: vec![("candidate".to_owned(), "one".to_owned())],
+                    ..NoteOptions::default()
+                },
+            )
+            .unwrap();
+        let after = m.engine().graph().storage().all_node_ids().len();
+        assert_eq!(after - before, 1);
+        let node = m.engine().graph().get_node(derived).unwrap();
+        assert_eq!(node.node_type, KnowledgeType::Semantic);
+        assert_eq!(node.origin.session_id, "session");
+        assert_eq!(
+            node.metadata.get("candidate").map(String::as_str),
+            Some("one")
+        );
+        assert!(
+            m.engine()
+                .graph()
+                .storage()
+                .all_node_ids()
+                .into_iter()
+                .all(|node_id| m
+                    .engine()
+                    .graph()
+                    .get_node(node_id)
+                    .is_ok_and(|candidate| candidate.node_type != KnowledgeType::Episodic))
+        );
     }
 
     // ── neighbors ─────────────────────────────────────────────────────────────
@@ -2382,6 +3673,116 @@ mod tests {
                 "rendered fragments must show provenance, got:\n{block}"
             );
         }
+    }
+
+    #[test]
+    fn render_context_adds_source_timestamp() {
+        let mut m = mem();
+        let observed_at = Timestamp(1_683_504_000_000);
+        m.add("s", "alice", "we deploy on fridays", observed_at)
+            .unwrap();
+        m.flush_all().unwrap();
+
+        let recall = m
+            .search_at("deploy fridays", 5, Timestamp(observed_at.0 + 86_400_000))
+            .unwrap();
+        let block = m.render_context(&recall).unwrap();
+
+        assert!(
+            block.contains("time: observed 2023-05-08T00:00:00Z"),
+            "rendered fragments must expose their observation time, got:\n{block}"
+        );
+    }
+
+    #[test]
+    fn evidence_context_groups_sessions_and_keeps_temporal_source_text() {
+        let mut m = mem();
+        let first = Timestamp(1_683_504_000_000);
+        m.add("session-a", "alice", "first deployment fact", first)
+            .unwrap();
+        m.add(
+            "session-a",
+            "alice",
+            "second deployment fact",
+            Timestamp(first.0 + 60_000),
+        )
+        .unwrap();
+        m.add(
+            "session-b",
+            "bob",
+            "deployment fact from the following day",
+            Timestamp(first.0 + 86_400_000),
+        )
+        .unwrap();
+        m.flush_all().unwrap();
+        let recall = m
+            .search_at("deployment fact", 10, Timestamp(first.0 + 2 * 86_400_000))
+            .unwrap();
+        let block = m
+            .render_context_with(
+                &recall,
+                ContextRenderOptions::with_style(ContextRenderStyle::Evidence),
+            )
+            .unwrap();
+
+        assert!(block.starts_with("## EVIDENCE\n"));
+        assert!(block.contains("### session \"session-a\""));
+        assert!(block.contains("### session \"session-b\""));
+        assert!(
+            block.find("session \"session-a\"") < block.find("session \"session-b\""),
+            "evidence sessions must follow their earliest observation time:\n{block}"
+        );
+        assert!(block.contains("[E1]"));
+        assert!(block.contains("observed 2023-05-08T00:00:00Z"));
+        assert!(block.contains("first deployment fact"));
+        assert_eq!(
+            block.matches("alice: first deployment fact").count(),
+            1,
+            "an exact raw turn must not be repeated through its semantic window:\n{block}"
+        );
+        assert!(!block.contains("relevance "));
+        assert!(!block.contains("origin: peer #"));
+    }
+
+    #[test]
+    fn timestamp_renderer_uses_epoch_milliseconds() {
+        assert_eq!(format_timestamp_utc(Timestamp(0)), "1970-01-01T00:00:00Z");
+        assert_eq!(
+            format_timestamp_utc(Timestamp(1_683_554_160_000)),
+            "2023-05-08T13:56:00Z"
+        );
+    }
+
+    #[test]
+    fn query_aware_context_resolves_relative_evidence_time_only_for_temporal_intent() {
+        let mut m = mem();
+        let observed_at = Timestamp(1_686_009_600_000); // 2023-06-06 00:00 UTC
+        m.add(
+            "session-a",
+            "alice",
+            "I did yoga yesterday morning.",
+            observed_at,
+        )
+        .unwrap();
+        m.flush_all().unwrap();
+        let recall = m
+            .search_at(
+                "When did Alice do yoga?",
+                10,
+                Timestamp(observed_at.0 + 86_400_000),
+            )
+            .unwrap();
+
+        let temporal = m
+            .render_context_for("When did Alice do yoga?", &recall)
+            .unwrap();
+        assert!(temporal.contains("resolved relative time: \"yesterday\" = 5 June 2023"));
+
+        let direct = m
+            .render_context_for("What exercise did Alice do?", &recall)
+            .unwrap();
+        assert_eq!(direct, m.render_context(&recall).unwrap());
+        assert!(!direct.contains("resolved relative time"));
     }
 
     #[test]

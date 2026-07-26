@@ -61,6 +61,9 @@ fn main() -> Result<()> {
             cli::run_extract_worker(&cli)
         };
     }
+    if let Some(Commands::ExtractPreview { input }) = &cli.command {
+        return cli::run_extract_preview(input);
+    }
     // One-shot CLI commands. The synchronous path handles `prewarm`/`doctor` and
     // the `--embedded` (DB-direct) variants of the daemon-routed commands; the
     // default daemon-routed commands run as async MCP clients.

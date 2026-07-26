@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 use nix::errno::Errno;
 use nix::sys::signal::{Signal, killpg};
 use nix::unistd::Pid;
+use serde::Deserialize;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
 
@@ -25,6 +26,8 @@ pub(crate) enum OutputStream {
 pub(crate) enum ProcessError {
     Spawn,
     Stdin,
+    ProviderRequest,
+    ProviderResponse,
     Timeout,
     OutputTooLarge {
         stream: OutputStream,
@@ -41,6 +44,12 @@ impl fmt::Display for ProcessError {
         match self {
             Self::Spawn => formatter.write_str("could not start extraction provider"),
             Self::Stdin => formatter.write_str("could not write extraction provider stdin"),
+            Self::ProviderRequest => {
+                formatter.write_str("could not request the local extraction provider")
+            }
+            Self::ProviderResponse => {
+                formatter.write_str("local extraction provider returned an invalid response")
+            }
             Self::Timeout => formatter.write_str("extraction provider timed out"),
             Self::OutputTooLarge {
                 stream: OutputStream::Stdout,
@@ -66,10 +75,22 @@ pub(super) async fn run_provider(
     timeout: Duration,
     output_limit: usize,
 ) -> Result<ProcessOutput, ProcessError> {
+    if is_ollama_structured_run(command) {
+        return run_ollama_provider(command, prompt, timeout, output_limit).await;
+    }
+    run_subprocess_provider(command, prompt, timeout, output_limit).await
+}
+
+async fn run_subprocess_provider(
+    command: &ExtractCommand,
+    prompt: &[u8],
+    timeout: Duration,
+    output_limit: usize,
+) -> Result<ProcessOutput, ProcessError> {
     let started = Instant::now();
     let mut process = Command::new(&command.program);
+    process.args(&command.args);
     process
-        .args(&command.args)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -79,12 +100,14 @@ pub(super) async fn run_provider(
     let mut child = process.spawn().map_err(|_| ProcessError::Spawn)?;
     let child_pid = child.id().ok_or(ProcessError::Wait)?;
     let process_group = i32::try_from(child_pid).map_err(|_| ProcessError::Wait)?;
-    let stdin = child.stdin.take().ok_or(ProcessError::Wait)?;
+    let stdin = child.stdin.take();
     let stdout = child.stdout.take().ok_or(ProcessError::Wait)?;
     let stderr = child.stderr.take().ok_or(ProcessError::Wait)?;
 
     let write_stdin = async {
-        let mut stdin = stdin;
+        let Some(mut stdin) = stdin else {
+            return Ok(());
+        };
         stdin
             .write_all(prompt)
             .await
@@ -189,6 +212,152 @@ pub(super) async fn run_provider(
     })
 }
 
+fn is_ollama_structured_run(command: &ExtractCommand) -> bool {
+    command
+        .program
+        .rsplit(['/', '\\'])
+        .next()
+        .is_some_and(|program| program == "ollama")
+        && command.args.len() == 5
+        && command.args.first().is_some_and(|value| value == "run")
+        && command
+            .args
+            .get(2)
+            .is_some_and(|value| value == "--think=false")
+        && command.args.get(3).is_some_and(|value| value == "--format")
+}
+
+#[derive(Deserialize)]
+struct OllamaChatResponse {
+    message: OllamaMessage,
+}
+
+#[derive(Deserialize)]
+struct OllamaMessage {
+    content: String,
+}
+
+async fn run_ollama_provider(
+    command: &ExtractCommand,
+    prompt: &[u8],
+    timeout: Duration,
+    output_limit: usize,
+) -> Result<ProcessOutput, ProcessError> {
+    let host = std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "127.0.0.1:11434".to_owned());
+    let base_url = normalize_ollama_host(&host)?;
+    run_ollama_provider_at(&base_url, command, prompt, timeout, output_limit).await
+}
+
+async fn run_ollama_provider_at(
+    base_url: &str,
+    command: &ExtractCommand,
+    prompt: &[u8],
+    timeout: Duration,
+    output_limit: usize,
+) -> Result<ProcessOutput, ProcessError> {
+    let started = Instant::now();
+    let model = command.args.get(1).ok_or(ProcessError::ProviderRequest)?;
+    let output_schema = command
+        .args
+        .get(4)
+        .ok_or(ProcessError::ProviderRequest)
+        .and_then(|value| {
+            serde_json::from_str::<serde_json::Value>(value)
+                .map_err(|_| ProcessError::ProviderRequest)
+        })?;
+    let prompt = std::str::from_utf8(prompt).map_err(|_| ProcessError::ProviderRequest)?;
+    let body = serde_json::json!({
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "stream": false,
+        "think": false,
+        "keep_alive": "10m",
+        "format": output_schema,
+        "options": {
+            "temperature": 0,
+            "seed": 42,
+            "num_ctx": 32768,
+            "num_predict": 8192
+        }
+    });
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(timeout)
+        .build()
+        .map_err(|_| ProcessError::ProviderRequest)?;
+    let mut response = client
+        .post(format!("{}/api/chat", base_url.trim_end_matches('/')))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|error| {
+            if error.is_timeout() {
+                ProcessError::Timeout
+            } else {
+                ProcessError::ProviderRequest
+            }
+        })?;
+    if !response.status().is_success() {
+        return Err(ProcessError::NonZero {
+            code: Some(i32::from(response.status().as_u16())),
+            stderr_bytes: response
+                .content_length()
+                .and_then(|value| usize::try_from(value).ok())
+                .unwrap_or(0),
+        });
+    }
+
+    let response_limit = output_limit
+        .checked_add(64 * 1024)
+        .ok_or(ProcessError::ProviderResponse)?;
+    let mut response_body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| ProcessError::ProviderResponse)?
+    {
+        if response_body.len().saturating_add(chunk.len()) > response_limit {
+            return Err(ProcessError::OutputTooLarge {
+                stream: OutputStream::Stdout,
+            });
+        }
+        response_body.extend_from_slice(&chunk);
+    }
+    let parsed = serde_json::from_slice::<OllamaChatResponse>(&response_body)
+        .map_err(|_| ProcessError::ProviderResponse)?;
+    let stdout = parsed.message.content.into_bytes();
+    if stdout.len() > output_limit {
+        return Err(ProcessError::OutputTooLarge {
+            stream: OutputStream::Stdout,
+        });
+    }
+
+    Ok(ProcessOutput {
+        stdout,
+        duration: started.elapsed(),
+    })
+}
+
+fn normalize_ollama_host(host: &str) -> Result<String, ProcessError> {
+    let host = host.trim().trim_end_matches('/');
+    let normalized = if host.starts_with("http://") || host.starts_with("https://") {
+        host.to_owned()
+    } else {
+        format!("http://{host}")
+    };
+    let parsed = reqwest::Url::parse(&normalized).map_err(|_| ProcessError::ProviderRequest)?;
+    let local = parsed.host_str().is_some_and(|host| {
+        host.eq_ignore_ascii_case("localhost")
+            || host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|address| address.is_loopback())
+    });
+    if parsed.scheme() != "http" || !local {
+        return Err(ProcessError::ProviderRequest);
+    }
+    Ok(normalized)
+}
+
 async fn read_capped(
     mut stream: impl AsyncRead + Unpin,
     output_limit: usize,
@@ -248,7 +417,12 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Duration;
 
-    use super::{OutputStream, ProcessError, run_provider};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    use super::{
+        OutputStream, ProcessError, is_ollama_structured_run, normalize_ollama_host,
+        run_ollama_provider_at, run_provider,
+    };
     use crate::extract::config::ExtractCommand;
 
     const TEST_DEADLINE: Duration = Duration::from_secs(5);
@@ -283,6 +457,134 @@ mod tests {
         tokio::time::timeout(TEST_DEADLINE, future)
             .await
             .expect("process test exceeded five-second deadline")
+    }
+
+    #[test]
+    fn only_the_default_structured_ollama_shape_uses_the_http_transport() {
+        let structured = ExtractCommand {
+            program: "/usr/local/bin/ollama".into(),
+            args: vec![
+                "run".into(),
+                "qwen3.6:35b-a3b".into(),
+                "--think=false".into(),
+                "--format".into(),
+                "{}".into(),
+            ],
+        };
+        assert!(is_ollama_structured_run(&structured));
+
+        let generic = ExtractCommand {
+            program: "custom-provider".into(),
+            args: vec!["--json".into()],
+        };
+        assert!(!is_ollama_structured_run(&generic));
+    }
+
+    #[test]
+    fn ollama_host_normalization_accepts_standard_host_and_url_shapes() {
+        assert_eq!(
+            normalize_ollama_host("127.0.0.1:11434").expect("loopback host"),
+            "http://127.0.0.1:11434"
+        );
+        assert_eq!(
+            normalize_ollama_host(" http://localhost:11434/ ").expect("localhost URL"),
+            "http://localhost:11434"
+        );
+        assert_eq!(
+            normalize_ollama_host("https://127.0.0.1:11434"),
+            Err(ProcessError::ProviderRequest)
+        );
+        assert_eq!(
+            normalize_ollama_host("http://example.com:11434"),
+            Err(ProcessError::ProviderRequest)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn structured_ollama_uses_non_streaming_chat_api_and_returns_message_content() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind fixture server");
+        let address = listener.local_addr().expect("fixture address");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept fixture request");
+            let mut request = Vec::new();
+            let (header_end, content_length) = loop {
+                let mut chunk = [0_u8; 4096];
+                let read = socket.read(&mut chunk).await.expect("read request");
+                assert!(read > 0, "request ended before HTTP body");
+                request.extend_from_slice(&chunk[..read]);
+                if let Some(header_end) = request
+                    .windows(4)
+                    .position(|window| window == b"\r\n\r\n")
+                    .map(|position| position + 4)
+                {
+                    let headers =
+                        std::str::from_utf8(&request[..header_end]).expect("UTF-8 headers");
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().expect("content length"))
+                        })
+                        .expect("content-length header");
+                    break (header_end, content_length);
+                }
+            };
+            while request.len() < header_end + content_length {
+                let mut chunk = [0_u8; 4096];
+                let read = socket.read(&mut chunk).await.expect("read request body");
+                assert!(read > 0, "request body ended early");
+                request.extend_from_slice(&chunk[..read]);
+            }
+            let body = serde_json::from_slice::<serde_json::Value>(
+                &request[header_end..header_end + content_length],
+            )
+            .expect("request JSON");
+            let response_body = br#"{"message":{"content":"{\"items\":[],\"relations\":[]}"}}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                response_body.len()
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write fixture response headers");
+            socket
+                .write_all(response_body)
+                .await
+                .expect("write fixture response body");
+            body
+        });
+        let command = ExtractCommand {
+            program: "ollama".into(),
+            args: vec![
+                "run".into(),
+                "qwen3.6:35b-a3b".into(),
+                "--think=false".into(),
+                "--format".into(),
+                r#"{"type":"object"}"#.into(),
+            ],
+        };
+
+        let output = run_ollama_provider_at(
+            &format!("http://{address}"),
+            &command,
+            b"extract this",
+            Duration::from_secs(1),
+            OUTPUT_LIMIT,
+        )
+        .await
+        .expect("structured response");
+        let request = server.await.expect("fixture server task");
+
+        assert_eq!(output.stdout, br#"{"items":[],"relations":[]}"#);
+        assert_eq!(request["model"], "qwen3.6:35b-a3b");
+        assert_eq!(request["stream"], false);
+        assert_eq!(request["think"], false);
+        assert_eq!(request["messages"][0]["content"], "extract this");
+        assert_eq!(request["format"]["type"], "object");
     }
 
     async fn assert_process_is_gone(pid: i32) {

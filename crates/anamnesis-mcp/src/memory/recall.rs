@@ -6,7 +6,7 @@ use std::collections::HashSet;
 
 use crate::capture::META_CAPTURE;
 use anamnesis::graph::{NodeId, ScopePath, Timestamp};
-use anamnesis::memory::{Hit, Recall};
+use anamnesis::memory::{ContextRenderOptions, ContextRenderStyle, Hit, Recall};
 use anamnesis::storage::SqliteStorage;
 use anamnesis::{Error, Memory};
 
@@ -261,7 +261,7 @@ fn finish_recall(
 
     // Render before `used` consumes the package; preserve the existing
     // reinforce-then-tick order.
-    let context = recall.as_context();
+    let context = mem.render_context_with(&recall, configured_context_render_options())?;
     if reinforce {
         mem.used(recall)?;
     }
@@ -272,6 +272,22 @@ fn finish_recall(
         packaged: PackagedRecall { context, hits },
         trace,
     })
+}
+
+fn configured_context_render_options() -> ContextRenderOptions {
+    let style = std::env::var("ANAMNESIS_CONTEXT_STYLE")
+        .ok()
+        .as_deref()
+        .map_or(ContextRenderStyle::Detailed, parse_context_render_style);
+    ContextRenderOptions::with_style(style)
+}
+
+fn parse_context_render_style(value: &str) -> ContextRenderStyle {
+    if value.trim().eq_ignore_ascii_case("evidence") {
+        ContextRenderStyle::Evidence
+    } else {
+        ContextRenderStyle::Detailed
+    }
 }
 
 /// Whether `node_id`'s origin scope and entity tags satisfy the requested
@@ -343,4 +359,29 @@ fn is_capture_node(mem: &Memory<SqliteStorage>, node_id: NodeId) -> bool {
         .get_node(node_id)
         .map(|n| n.metadata.get(META_CAPTURE).is_some_and(|v| v == "true"))
         .unwrap_or(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ContextRenderStyle, parse_context_render_style};
+
+    #[test]
+    fn evidence_context_style_is_explicit_and_case_insensitive() {
+        assert_eq!(
+            parse_context_render_style(" evidence "),
+            ContextRenderStyle::Evidence
+        );
+        assert_eq!(
+            parse_context_render_style("EVIDENCE"),
+            ContextRenderStyle::Evidence
+        );
+        assert_eq!(
+            parse_context_render_style("detailed"),
+            ContextRenderStyle::Detailed
+        );
+        assert_eq!(
+            parse_context_render_style("unknown"),
+            ContextRenderStyle::Detailed
+        );
+    }
 }

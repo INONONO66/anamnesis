@@ -22,17 +22,25 @@ pub(crate) struct ExtractionAuditCandidateRow {
     pub content: String,
     pub kind: CandidateKind,
     pub confidence: f64,
+    #[serde(default)]
+    pub entity_tags: Vec<String>,
+    #[serde(default)]
+    pub valid_from_ms: Option<u64>,
+    #[serde(default)]
+    pub valid_until_ms: Option<u64>,
     pub source_turn_keys: Vec<String>,
     pub source_content_hashes: Vec<String>,
     pub source_session_id: String,
     pub source_scope: String,
     pub source_node_ids: Vec<u64>,
+    pub idempotency_key: String,
     #[serde(rename = "audit_support")]
     pub support: Option<AuditSupport>,
     #[serde(rename = "contamination_category")]
     pub contamination: Option<ContaminationCategory>,
     pub reviewed_by: Option<String>,
     pub reviewed_at: Option<u64>,
+    pub committed_node_id: Option<u64>,
     #[serde(default)]
     pub sources: Vec<ExtractionAuditSource>,
 }
@@ -52,6 +60,7 @@ pub(crate) struct ExtractionAuditRelationRow {
     pub verdict: Option<RelationVerdict>,
     pub reviewed_by: Option<String>,
     pub reviewed_at: Option<u64>,
+    pub committed_edge_id: Option<u64>,
 }
 
 /// Identity and live availability of a source cited by a staged candidate.

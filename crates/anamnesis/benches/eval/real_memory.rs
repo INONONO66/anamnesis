@@ -106,8 +106,18 @@ fn run() -> BenchResult<()> {
         dump_features: args.dump_features.is_some(),
         speaker_cues: args.speaker_cues,
         shadow_rank_fusion: false,
-        shadow_cross_encoder: None,
-        shadow_cross_encoder_candidates: 100,
+        consumer_cross_encoder: None,
+        replayed_consumer_rankings: None,
+        consumer_prefilter_cross_encoder: None,
+        consumer_prefilter_k: None,
+        consumer_prefilter_query_fusion: false,
+        consumer_candidate_k: 100,
+        screen_top_k: Vec::new(),
+        screen_source_dedup: false,
+        diagnostic_readout_limit: None,
+        consumer_selection_policy:
+            eval_common::real_bench::graph::ConsumerSelectionPolicy::Relevance,
+        context_render_style: anamnesis::memory::ContextRenderStyle::Detailed,
     };
 
     // One memory store per sample (LoCoMo conversation / LongMemEval haystack),
@@ -204,12 +214,15 @@ fn run() -> BenchResult<()> {
     write_prepared_report(&report, &output, args.force)?;
 
     eprintln!(
-        "REPORT {} questions={} recall@{}={:.4} mrr={:.4}",
+        "REPORT {} questions={} reranker_recall@{}={:.4} delivered_recall={:.4} \
+         rendered_recall={:.4} mrr={:.4}",
         output.path().display(),
         report.evaluated_questions,
         args.top_k,
-        report.retrieval_metrics.recall_at_k,
-        report.retrieval_metrics.mrr
+        report.reranker_metrics.recall_at_k,
+        report.delivered_metrics.recall_at_k,
+        report.rendered_recall,
+        report.reranker_metrics.mrr
     );
     Ok(())
 }

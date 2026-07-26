@@ -44,6 +44,12 @@ pub(crate) struct ValidatedCandidate {
     pub content: String,
     pub kind: CandidateKind,
     pub confidence: f64,
+    #[serde(default)]
+    pub entity_tags: Vec<String>,
+    #[serde(default)]
+    pub valid_from_ms: Option<u64>,
+    #[serde(default)]
+    pub valid_until_ms: Option<u64>,
     pub sources: Vec<ExtractionSourceRef>,
     pub idempotency_key: String,
 }
@@ -58,6 +64,10 @@ pub(crate) struct ExtractionSourceRef {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum CandidateKind {
+    Fact,
+    Entity,
+    Event,
+    Preference,
     Decision,
     Causal,
     Lesson,
@@ -155,6 +165,10 @@ mod tests {
     #[test]
     fn candidate_kind_uses_kebab_case_and_rejects_unknown_values() {
         for (value, json) in [
+            (CandidateKind::Fact, "\"fact\""),
+            (CandidateKind::Entity, "\"entity\""),
+            (CandidateKind::Event, "\"event\""),
+            (CandidateKind::Preference, "\"preference\""),
             (CandidateKind::Decision, "\"decision\""),
             (CandidateKind::Causal, "\"causal\""),
             (CandidateKind::Lesson, "\"lesson\""),
@@ -265,6 +279,9 @@ mod tests {
             content: "candidate".into(),
             kind: CandidateKind::Decision,
             confidence: 0.75,
+            entity_tags: vec!["project".into()],
+            valid_from_ms: Some(10),
+            valid_until_ms: None,
             sources: vec![source_ref],
             idempotency_key: "candidate-key".into(),
         };
@@ -279,7 +296,7 @@ mod tests {
                 items: vec![candidate],
                 relations: vec![relation],
             },
-            r#"{"items":[{"item_local_id":"item","content":"candidate","kind":"decision","confidence":0.75,"sources":[{"node_id":7,"turn_key":"turn","content_hash":"content-hash"}],"idempotency_key":"candidate-key"}],"relations":[{"from_item_local_id":"item","to_item_local_id":"other-item","relation_type":"supports","idempotency_key":"relation-key"}]}"#,
+            r#"{"items":[{"item_local_id":"item","content":"candidate","kind":"decision","confidence":0.75,"entity_tags":["project"],"valid_from_ms":10,"valid_until_ms":null,"sources":[{"node_id":7,"turn_key":"turn","content_hash":"content-hash"}],"idempotency_key":"candidate-key"}],"relations":[{"from_item_local_id":"item","to_item_local_id":"other-item","relation_type":"supports","idempotency_key":"relation-key"}]}"#,
         );
         assert_round_trip(
             ExtractionScanResult {

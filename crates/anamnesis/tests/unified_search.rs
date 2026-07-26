@@ -1,7 +1,7 @@
 use anamnesis::api::{Engine, EngineConfig, Observation};
 use anamnesis::graph::node::Origin;
 use anamnesis::graph::{KnowledgeType, Timestamp};
-use anamnesis::query::SearchInput;
+use anamnesis::query::{SearchDiagnostics, SearchInput};
 
 fn make_obs(name: &str) -> Observation {
     Observation {
@@ -53,4 +53,59 @@ fn search_empty_text_and_no_embedding_returns_error() {
     });
 
     assert!(result.is_err());
+}
+
+#[test]
+fn diagnostic_trace_limit_is_bounded_and_behaviorally_inert() {
+    let config = EngineConfig::default().with_novelty_threshold(0.0);
+    let mut engine = Engine::with_config(config);
+    let _ = engine.ingest(make_obs("auth factory pattern")).unwrap();
+    let input = SearchInput {
+        text: "auth".into(),
+        limit: 10,
+        ..Default::default()
+    };
+
+    let baseline = engine.search(input.clone()).unwrap();
+    let diagnostic = engine
+        .search_with_diagnostics(
+            input.clone(),
+            &SearchDiagnostics::with_readout_trace_limit(512),
+        )
+        .unwrap();
+    assert_eq!(baseline.package, diagnostic.package);
+    assert_eq!(baseline.trace.readout, diagnostic.trace.readout);
+
+    let invalid =
+        engine.search_with_diagnostics(input, &SearchDiagnostics::with_readout_trace_limit(0));
+    assert!(invalid.is_err());
+}
+
+#[test]
+fn trace_exposes_the_exact_additive_query_variants() {
+    let config = EngineConfig::default().with_novelty_threshold(0.0);
+    let mut engine = Engine::with_config(config);
+    let _ = engine
+        .ingest(make_obs("John injured his ankle twice"))
+        .unwrap();
+
+    let result = engine
+        .search(SearchInput {
+            text: "How many times has John injured his ankle?".into(),
+            limit: 10,
+            ..Default::default()
+        })
+        .unwrap();
+
+    assert_eq!(
+        result.trace.query_variants.first().map(String::as_str),
+        Some("How many times has John injured his ankle?")
+    );
+    assert!(
+        result
+            .trace
+            .query_variants
+            .iter()
+            .any(|variant| variant == "John injured his ankle")
+    );
 }
