@@ -58,7 +58,9 @@ use std::sync::Arc;
 mod manage;
 mod readout;
 mod view;
-pub use readout::{DeepRecallOptions, EvidenceSelection, RecallIntent};
+pub use readout::{
+    AnswerShape, DeepRecallOptions, EvidenceDocument, EvidenceSelection, RecallIntent, RecallPlan,
+};
 pub use view::{ListFilter, MemoryView};
 
 use crate::Engine;
@@ -1818,12 +1820,27 @@ impl<S: StorageAdapter + Clone> Memory<S> {
         &self,
         query: &str,
         recall: &Recall,
+        options: ContextRenderOptions,
+    ) -> Result<String, Error> {
+        let plan = RecallPlan::infer(query);
+        self.render_context_for_plan_with(&plan, recall, options)
+    }
+
+    /// Render context using a precomputed deterministic recall plan.
+    ///
+    /// This additive route lets structured consumers provide an explicit
+    /// [`AnswerShape`] while keeping evidence matching, temporal compilation,
+    /// and rendering inside `Memory`.
+    pub fn render_context_for_plan_with(
+        &self,
+        plan: &RecallPlan,
+        recall: &Recall,
         mut options: ContextRenderOptions,
     ) -> Result<String, Error> {
-        if readout::asks_for_time_answer(query) {
+        if plan.answer_shape == AnswerShape::Temporal {
             options.resolve_relative_times = true;
         }
-        self.render_context_internal(recall, options, Some(query))
+        self.render_context_internal(recall, options, Some(&plan.query))
     }
 
     /// Render a recall through a consumer-selected product context style.
@@ -2084,6 +2101,66 @@ impl<S: StorageAdapter + Clone> Memory<S> {
         self.repackage_reranked_at(result, ranking, limit, Timestamp::now())
     }
 
+    /// Compile the live cognitive readout into canonical raw-evidence documents.
+    ///
+    /// External rerankers should prefer this source-aware surface when
+    /// overlapping Semantic windows would otherwise repeat the same raw turns.
+    /// Each returned document keeps a representative node from
+    /// `result.trace.readout`, so its score can be passed back through
+    /// [`repackage_reranked`](Memory::repackage_reranked) without consumer-side
+    /// source grouping. Raw Episodic fragments remain authoritative and are
+    /// emitted at most once in cognitive-rank order.
+    ///
+    /// The method is model-free and read-only. `candidate_limit` limits the
+    /// cognitive readout rows inspected, not the number of documents returned.
+    pub fn evidence_documents(
+        &self,
+        result: &SearchResult,
+        candidate_limit: usize,
+    ) -> Result<Vec<EvidenceDocument>, Error> {
+        if candidate_limit == 0 {
+            return Err(Error::InvalidInput(
+                "evidence document candidate limit must be greater than zero".to_owned(),
+            ));
+        }
+        readout::compile_evidence_documents(
+            self.engine.graph().storage(),
+            &result.trace.readout,
+            candidate_limit,
+        )
+    }
+
+    /// Compile reranker documents using the deterministic [`RecallPlan`].
+    ///
+    /// Enumeration and relational queries use canonical raw-evidence
+    /// documents to protect distinct facts from overlapping graph windows.
+    /// Direct and temporal queries preserve the ordinary node-document
+    /// surface. This is the recommended minimal-consumer entry point: a
+    /// consumer only scores the returned text and passes the node scores back
+    /// to [`repackage_reranked_deep`](Memory::repackage_reranked_deep).
+    pub fn rerank_documents(
+        &self,
+        result: &SearchResult,
+        candidate_limit: usize,
+    ) -> Result<Vec<EvidenceDocument>, Error> {
+        if candidate_limit == 0 {
+            return Err(Error::InvalidInput(
+                "rerank document candidate limit must be greater than zero".to_owned(),
+            ));
+        }
+        let query =
+            result.trace.query_variants.first().ok_or_else(|| {
+                Error::InvalidInput("search trace has no original query".to_owned())
+            })?;
+        let plan = RecallPlan::infer(query);
+        readout::compile_rerank_documents(
+            self.engine.graph().storage(),
+            &plan,
+            &result.trace.readout,
+            candidate_limit,
+        )
+    }
+
     /// Compile consumer scores through the model-free deep readout at wall-clock time.
     ///
     /// The consumer supplies only scores. Query intent detection, canonical raw
@@ -2118,9 +2195,10 @@ impl<S: StorageAdapter + Clone> Memory<S> {
             result.trace.query_variants.first().ok_or_else(|| {
                 Error::InvalidInput("search trace has no original query".to_owned())
             })?;
+        let plan = RecallPlan::infer(query);
         let compiled = readout::compile_ranking(
             self.engine.graph().storage(),
-            query,
+            &plan,
             ranking,
             options.selection,
         )?;
@@ -2876,6 +2954,42 @@ mod tests {
             vec![first_semantic, second_semantic]
         );
         assert_eq!(recall.package.total_fragments(), 2);
+    }
+
+    #[test]
+    fn evidence_documents_emit_each_raw_source_once() {
+        let mut m = mem();
+        let first = m.add_note("Alice repaired the blue bicycle", t(1)).unwrap();
+        let second = m.add_note("Bob repaired the green bicycle", t(2)).unwrap();
+        let result = m
+            .search_result_at_with(
+                "Which bicycles were repaired?",
+                10,
+                t(100),
+                &SearchTuning::default(),
+            )
+            .unwrap();
+
+        let documents = m.evidence_documents(&result, 10).unwrap();
+        let sources: Vec<_> = documents
+            .iter()
+            .flat_map(|document| document.source_node_ids.iter().copied())
+            .collect();
+        let unique_sources: HashSet<_> = sources.iter().copied().collect();
+
+        assert_eq!(sources.len(), unique_sources.len());
+        assert!(unique_sources.contains(&first.episodic));
+        assert!(unique_sources.contains(&second.episodic));
+        assert!(
+            documents
+                .iter()
+                .any(|document| document.text.contains("blue bicycle"))
+        );
+        assert!(
+            documents
+                .iter()
+                .any(|document| document.text.contains("green bicycle"))
+        );
     }
 
     #[test]
@@ -3783,6 +3897,20 @@ mod tests {
             .unwrap();
         assert_eq!(direct, m.render_context(&recall).unwrap());
         assert!(!direct.contains("resolved relative time"));
+
+        let wrapped = m
+            .render_context_for("Could you tell me when Alice did yoga?", &recall)
+            .unwrap();
+        assert!(wrapped.contains("resolved relative time: \"yesterday\" = 5 June 2023"));
+
+        let hinted_plan = RecallPlan::infer_with_answer_shape(
+            "Tell me about Alice's yoga.",
+            AnswerShape::Temporal,
+        );
+        let hinted = m
+            .render_context_for_plan_with(&hinted_plan, &recall, ContextRenderOptions::default())
+            .unwrap();
+        assert!(hinted.contains("resolved relative time: \"yesterday\" = 5 June 2023"));
     }
 
     #[test]

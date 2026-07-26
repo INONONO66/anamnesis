@@ -6,7 +6,7 @@ use anamnesis::engine::{SearchDiagnostics, StorageAdapter};
 use anamnesis::graph::{EdgeType, NodeId, Timestamp};
 use anamnesis::memory::{
     ContextRenderOptions, ContextRenderStyle, DeepRecallOptions, Direction, EvidenceSelection,
-    Recall, RerankedCandidate, SearchTuning,
+    Recall, RecallIntent, RecallPlan, RerankedCandidate, SearchTuning,
 };
 use anamnesis::query::{
     ContextPackage, Fragment, QueryConfig, ScoredNode, SearchResult, assemble_context_package,
@@ -62,6 +62,10 @@ pub struct EvalOptions {
     /// Number of cognitive readout candidates exposed to the consumer
     /// cross-encoder and scored by candidate-pool metrics.
     pub consumer_candidate_k: usize,
+    /// Compile overlapping graph representations into canonical raw-evidence
+    /// documents through `Memory` before the consumer cross-encoder scores
+    /// them. The returned scores still flow through normal product repackaging.
+    pub consumer_evidence_documents: bool,
     /// Additional final cutoffs to repackage from the exact same consumer
     /// ranking. Diagnostic-only: the primary product route still uses
     /// `top_k`.
@@ -95,6 +99,7 @@ impl Default for EvalOptions {
             consumer_prefilter_k: None,
             consumer_prefilter_query_fusion: false,
             consumer_candidate_k: 100,
+            consumer_evidence_documents: false,
             screen_top_k: Vec::new(),
             screen_source_dedup: false,
             diagnostic_readout_limit: None,
@@ -314,7 +319,14 @@ pub fn evaluate_question_with_context(
     let start = Instant::now();
     let result = search_question(graph, question, opts)?;
     #[cfg(feature = "embed")]
-    let shadow = if let Some(rankings) = &opts.replayed_consumer_rankings {
+    let needs_live_document_rerank = opts.consumer_evidence_documents
+        && matches!(
+            RecallPlan::infer(&question.question).recall_intent,
+            RecallIntent::Enumeration | RecallIntent::Relational
+        );
+    let shadow = if let Some(rankings) = &opts.replayed_consumer_rankings
+        && !needs_live_document_rerank
+    {
         Some(replay_consumer_ranking(
             &result, graph, question, rankings, opts.top_k,
         )?)
@@ -328,6 +340,7 @@ pub fn evaluate_question_with_context(
             opts.consumer_candidate_k,
             opts.consumer_prefilter_k,
             opts.consumer_prefilter_query_fusion,
+            opts.consumer_evidence_documents,
             opts.top_k,
         )?)
     } else {
@@ -1021,21 +1034,32 @@ fn consumer_cross_encoder_package(
     candidate_limit: usize,
     prefilter_limit: Option<usize>,
     prefilter_query_fusion: bool,
+    evidence_documents: bool,
     final_limit: usize,
 ) -> BenchResult<ConsumerPackage> {
-    let broad_candidates: Vec<_> = result
-        .trace
-        .readout
-        .iter()
-        .take(candidate_limit)
-        .map(|candidate| {
-            graph
-                .memory
-                .get(candidate.node_id)
-                .map(|node| (candidate.node_id, node.content.clone()))
-                .map_err(|err| BenchError::Engine(err.to_string()))
-        })
-        .collect::<BenchResult<_>>()?;
+    let broad_candidates: Vec<_> = if evidence_documents {
+        graph
+            .memory
+            .rerank_documents(result, candidate_limit)
+            .map_err(|err| BenchError::Engine(err.to_string()))?
+            .into_iter()
+            .map(|document| (document.node_id, document.text))
+            .collect()
+    } else {
+        result
+            .trace
+            .readout
+            .iter()
+            .take(candidate_limit)
+            .map(|candidate| {
+                graph
+                    .memory
+                    .get(candidate.node_id)
+                    .map(|node| (candidate.node_id, node.content.clone()))
+                    .map_err(|err| BenchError::Engine(err.to_string()))
+            })
+            .collect::<BenchResult<_>>()?
+    };
     let candidates = match (prefilter, prefilter_limit) {
         (Some(prefilter), Some(prefilter_limit)) => {
             let documents: Vec<_> = broad_candidates

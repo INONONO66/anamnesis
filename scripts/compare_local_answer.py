@@ -366,6 +366,119 @@ def build_retrieval_comparison(
     }
 
 
+def build_primary_retrieval_comparison(
+    baseline: dict, candidate: dict, seed: int
+) -> dict:
+    for field in ("dataset_fnv1a64",):
+        if baseline.get(field) != candidate.get(field):
+            raise ValueError(f"reports differ on {field}")
+    for field in (
+        "dataset",
+        "samples",
+        "stratify",
+        "question_type",
+        "sample_seed",
+        "skip_adversarial",
+        "context_surface",
+        "embedding_model",
+        "consumer_cross_encoder",
+        "consumer_candidate_k",
+        "first_stage_seed_limit",
+        "top_k",
+    ):
+        if baseline["config"].get(field) != candidate["config"].get(field):
+            raise ValueError(f"reports differ on controlled config field {field}")
+
+    baseline_by_id = {
+        question["question_id"]: question for question in baseline["questions"]
+    }
+    candidate_by_id = {
+        question["question_id"]: question for question in candidate["questions"]
+    }
+    if set(baseline_by_id) != set(candidate_by_id):
+        raise ValueError("reports do not contain the same question ids")
+
+    rows: list[dict] = []
+    for question_id in sorted(baseline_by_id):
+        before = baseline_by_id[question_id]
+        after = candidate_by_id[question_id]
+        if (
+            before.get("retrieval_evaluation") is None
+            or after.get("retrieval_evaluation") is None
+        ):
+            raise ValueError(f"{question_id}: retrieval evaluation is incomplete")
+        row = {
+            "question_id": question_id,
+            "sample_index": before["sample_index"],
+            "question_type": before["question_type"],
+            "rendered_hit_before": bool(
+                before["retrieval_evaluation"]["rendered_hit"]
+            ),
+            "rendered_hit_after": bool(
+                after["retrieval_evaluation"]["rendered_hit"]
+            ),
+        }
+        for stage in ("candidate", "reranker", "delivered", "rendered"):
+            before_recall = stage_recall(before, stage)
+            after_recall = stage_recall(after, stage)
+            row[f"{stage}_recall_before"] = before_recall
+            row[f"{stage}_recall_after"] = after_recall
+            row[f"{stage}_recall_delta"] = after_recall - before_recall
+        rows.append(row)
+
+    rendered_deltas = [row["rendered_recall_delta"] for row in rows]
+    by_type: dict[str, list[float]] = defaultdict(list)
+    for row in rows:
+        by_type[row["question_type"]].append(row["rendered_recall_delta"])
+
+    return {
+        "questions": len(rows),
+        "baseline_run_id": baseline["run_id"],
+        "candidate_run_id": candidate["run_id"],
+        "retrieval_cutoffs": {
+            "candidate_k": baseline["config"]["consumer_candidate_k"],
+            "final_k": baseline["config"]["top_k"],
+        },
+        "retrieval_stage_recall": {
+            stage: {
+                "baseline": mean(
+                    [row[f"{stage}_recall_before"] for row in rows]
+                ),
+                "candidate": mean(
+                    [row[f"{stage}_recall_after"] for row in rows]
+                ),
+                "paired_delta": mean(
+                    [row[f"{stage}_recall_delta"] for row in rows]
+                ),
+            }
+            for stage in ("candidate", "reranker", "delivered", "rendered")
+        },
+        "rendered_recall": {
+            "question_bootstrap_ci95": paired_question_ci(
+                rendered_deltas, seed
+            ),
+            "conversation_cluster_bootstrap_ci95": paired_cluster_ci(
+                rows, "rendered_recall_delta", seed ^ 0x9E3779B9
+            ),
+            "wins": sum(delta > EPSILON for delta in rendered_deltas),
+            "ties": sum(abs(delta) <= EPSILON for delta in rendered_deltas),
+            "losses": sum(delta < -EPSILON for delta in rendered_deltas),
+        },
+        "rendered_hit": {
+            "baseline": mean(
+                [float(row["rendered_hit_before"]) for row in rows]
+            ),
+            "candidate": mean(
+                [float(row["rendered_hit_after"]) for row in rows]
+            ),
+        },
+        "rendered_recall_paired_delta_by_type": {
+            question_type: mean(deltas)
+            for question_type, deltas in sorted(by_type.items())
+        },
+    }
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("baseline", type=Path)
@@ -375,17 +488,33 @@ def parse_args() -> argparse.Namespace:
         "--selection-variant",
         help="compare one reader-free fixed-ranking variant, e.g. top-20",
     )
+    parser.add_argument(
+        "--retrieval-primary",
+        action="store_true",
+        help="compare the primary reader-free retrieval surfaces",
+    )
     parser.add_argument("--seed", type=int, default=42)
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
+    if args.selection_variant and args.retrieval_primary:
+        print(
+            "compare_local_answer: --selection-variant and --retrieval-primary "
+            "are mutually exclusive",
+            file=sys.stderr,
+        )
+        return 2
     try:
         baseline = load_report(args.baseline)
         candidate = load_report(args.candidate)
         comparison = (
-            build_retrieval_comparison(
+            build_primary_retrieval_comparison(
+                baseline, candidate, args.seed
+            )
+            if args.retrieval_primary
+            else build_retrieval_comparison(
                 baseline, candidate, args.selection_variant, args.seed
             )
             if args.selection_variant

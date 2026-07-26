@@ -52,6 +52,10 @@ Reader-free sweeps established:
 | first-stage seed 10 → 32 → 64 | candidate recall did not improve; final rendered recall regressed | keep 10 |
 | cognitive trace top 100 / 200 / 512 | 84.07% / 89.39% / 95.65% macro gold recall | preselection/reranking is the memory-side bottleneck |
 | candidate 100 → 200 with BGE base | more candidate recall, worse final top 10/20 | do not widen a weak reranker blindly |
+| v2-m3 candidate 200 → 512, n=20 | candidate recall 87.08%→91.25%; reranker@20 and rendered recall unchanged at 73.33% / 77.08% | reject full-width scoring; recover missing hops through a bounded auxiliary lane |
+| deterministic evidence-sentence bridge + weighted multi-query RRF, multi-hop n=5 | candidate@228 recall 90.00%; every question's rendered recall unchanged, aggregate 53.33%→53.33% | reject and remove; query-time pseudo-feedback does not solve candidate-to-final transfer |
+| Memory-owned automatic rerank documents, v2-m3 n=100 | delivered recall 73.11%→76.35%; rendered 81.42%→82.60%; Hit 91%→92%; multi-hop rendered +4.74pp | retain as Answer candidate, not default: 6 wins / 93 ties / 1 loss and both retrieval CIs cross zero |
+| representative-window-only / source+window documents | n=20 improvement 0 / n=100 rendered +0.60pp, each weaker than raw-source documents | reject both; keep score/render alignment and the stronger raw-source lane |
 | source-turn dedup + backfill | +1.67pp rendered recall on n=20 top 20; +0.26pp F1, interval crosses zero | retain as opt-in diagnostic, not default |
 | deterministic count/location/type decomposition | +1.8pp multi-hop selected/rendered recall when replacing the wrapper; no candidate gain | preserve original query and use decomposition only as auxiliary recall |
 
@@ -188,6 +192,51 @@ the product facade. They:
 - delegate final validity, tension, packaging mode, token budget, commit trace,
   and source-provenance validation to the existing product repackage path.
 
+`RecallPlan` is now the single deterministic planning contract shared by deep
+selection and query-aware rendering. It separates retrieval intent from
+`AnswerShape`: a question constrained by an explicit date can request a factual
+answer, while a question asking for a date requests a temporal answer. The
+default parser uses token-sequence locale rule packs rather than sentence-prefix
+matching, so polite wrappers, inverted English questions, and spaced/unspaced
+Korean forms follow the same path. Consumers still pass only the original query;
+structured consumers may supply an optional typed answer-shape hint through
+`RecallPlan::infer_with_answer_shape`. No model call, benchmark reference, or
+expected answer enters planning.
+
+`Memory::rerank_documents` is the matching minimal-consumer contract. Direct
+and temporal queries preserve the ordinary graph-node documents. Enumeration
+and relational queries compile overlapping Semantic windows into
+speaker-qualified raw Episodic evidence documents, with each raw source emitted
+once and a live readout node retained as the score handle. The consumer only
+scores those strings. `Memory::repackage_reranked_deep_at` still owns ranking
+validation, validity windows, tensions, packaging mode, source preservation,
+and commit-trace reconstruction.
+
+The first canonical-document screen exposed and fixed a score/render mismatch:
+scoring a raw source while packaging only its Semantic representative improved
+selected recall but regressed rendered recall. The retained path uses the raw
+source node itself whenever it is present on the candidate surface, so the text
+scored by the reranker is the text delivered by the product package.
+
+The n=100 automatic-document candidate remains a frontier profile rather than
+the default:
+
+| Metric | same-prompt v2-m3 deep baseline | automatic documents | Delta |
+|---|---:|---:|---:|
+| Delivered recall@20 | 73.11% | 76.35% | +3.24pp |
+| Rendered recall | 81.42% | 82.60% | +1.18pp |
+| Rendered Hit | 91.00% | 92.00% | +1.00pp |
+| Multi-hop rendered recall | 65.64% | 70.38% | +4.74pp |
+| Qwen 3.6 raw Answer F1 | 50.69% | 52.07% | +1.38pp |
+
+The six questions whose rendered recall improved gain +10.14pp mean Answer F1,
+so the retrieval change does transmit to the reader. The overall Answer
+comparison is 6 wins / 91 ties / 3 losses. Its question bootstrap interval
+`[-0.11,+3.31]pp` and conversation-cluster interval
+`[-0.018,+2.89]pp` narrowly cross zero. The corresponding retrieval comparison
+is 6 wins / 93 ties / 1 loss and also crosses zero. An n=200 paired gate is
+therefore required before promotion.
+
 The benchmark's `memory-deep` policy invokes these exact public APIs. The
 consumer supplies only an optional externally produced ranking; it does not
 reimplement source grouping or selection. On the frozen n=100 v2-m3 ranking,
@@ -199,6 +248,13 @@ Two broader renderers were screened and removed. A replacement ledger layout
 fell to roughly 41% on n=20. A prepended query-focused excerpt index moved
 48.51% to 48.48% on n=20 (two wins, fourteen ties, four losses). Neither API,
 flag, or dead implementation remains.
+
+The benchmark reader prompt no longer contains a literal example date. A
+replay showed Qwen copying the old `15 July 2023` example into an unrelated
+answer even though the memory context contained the correct resolved date.
+Schema 32 / `official-format-v7-reference-free-temporal` keeps the temporal
+reasoning instruction but uses no calendar anchor. This is a benchmark
+fidelity fix and must be reported separately from memory retrieval gains.
 
 ### Reference-blind temporal evidence compilation
 

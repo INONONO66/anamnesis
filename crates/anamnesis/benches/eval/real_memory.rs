@@ -112,6 +112,7 @@ fn run() -> BenchResult<()> {
         consumer_prefilter_k: None,
         consumer_prefilter_query_fusion: false,
         consumer_candidate_k: 100,
+        consumer_evidence_documents: false,
         screen_top_k: Vec::new(),
         screen_source_dedup: false,
         diagnostic_readout_limit: None,

@@ -5,13 +5,32 @@
 //! Episodic fragments remain the canonical evidence units; Semantic windows and
 //! reviewed derived knowledge are representations attached to those units.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::error::Error;
 use crate::graph::{EdgeType, KnowledgeType, NodeId};
 use crate::storage::StorageAdapter;
 
 use super::{RerankedCandidate, parse_entity_tags};
+
+/// One canonical raw-evidence document for an external reranker.
+///
+/// The document keeps one live cognitive readout representation, so its score
+/// can be passed directly to
+/// [`Memory::repackage_reranked`](super::Memory::repackage_reranked). Its text
+/// is assembled only from raw Episodic sources not already represented by an
+/// earlier document. This prevents overlapping Semantic windows from spending
+/// most of a reranker's candidate budget on repeated turns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct EvidenceDocument {
+    /// Live readout node that represents this evidence document.
+    pub node_id: NodeId,
+    /// Canonical raw source nodes represented in `text`.
+    pub source_node_ids: Vec<NodeId>,
+    /// Speaker-qualified direct source evidence presented to the reranker.
+    pub text: String,
+}
 
 /// Deterministic question shape used by deep memory readout.
 ///
@@ -29,6 +48,58 @@ pub enum RecallIntent {
     Temporal,
     /// A question explicitly relating multiple entities, events, or causes.
     Relational,
+}
+
+/// Shape of the answer requested by a memory query.
+///
+/// Unlike [`RecallIntent`], this describes the requested output rather than
+/// the retrieval strategy. In particular, a query can be temporally scoped
+/// while still requesting a factual answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AnswerShape {
+    /// One fact, entity, place, or other direct answer.
+    Fact,
+    /// A calendar date, day, week, month, year, or time range.
+    Temporal,
+    /// A numeric cardinality.
+    Count,
+    /// A list or set of answers.
+    Collection,
+    /// A relationship, comparison, reason, or causal connection.
+    Relationship,
+}
+
+/// Deterministic plan shared by deep retrieval and context rendering.
+///
+/// `Memory` derives this plan from the complete query with a locale-aware,
+/// model-free parser. Consumers normally need only pass the query. A consumer
+/// with structured intent from its own UI or protocol may override the answer
+/// shape without replacing the memory-owned retrieval logic.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RecallPlan {
+    /// Original query used to derive the plan.
+    pub query: String,
+    /// Evidence-selection intent.
+    pub recall_intent: RecallIntent,
+    /// Requested answer shape.
+    pub answer_shape: AnswerShape,
+}
+
+impl RecallPlan {
+    /// Infer a deterministic plan from a natural-language query.
+    pub fn infer(query: &str) -> Self {
+        infer_plan(query, None)
+    }
+
+    /// Infer a plan while honoring a typed answer-shape hint.
+    ///
+    /// The hint changes answer presentation intent only. Temporal constraints
+    /// present in the query still participate in retrieval planning.
+    pub fn infer_with_answer_shape(query: &str, answer_shape: AnswerShape) -> Self {
+        infer_plan(query, Some(answer_shape))
+    }
 }
 
 /// Source-aware selection applied before normal package validation.
@@ -76,95 +147,129 @@ impl DeepRecallOptions {
     }
 }
 
-pub(crate) fn classify_intent(query: &str) -> RecallIntent {
+fn infer_plan(query: &str, answer_shape_hint: Option<AnswerShape>) -> RecallPlan {
     let normalized = query.trim().to_lowercase();
     let words: Vec<_> = normalized
         .split(|character: char| !character.is_alphanumeric() && character != '\'')
         .filter(|word| !word.is_empty())
         .collect();
 
-    let begins_with_any =
-        |prefixes: &[&str]| prefixes.iter().any(|prefix| normalized.starts_with(prefix));
-    let contains_word = |needle: &str| words.contains(&needle);
+    let has_word = |needle: &str| words.contains(&needle);
+    let has_sequence = |needles: &[&str]| {
+        !needles.is_empty() && words.windows(needles.len()).any(|window| window == needles)
+    };
+    let has_any_sequence =
+        |sequences: &[&[&str]]| sequences.iter().any(|sequence| has_sequence(sequence));
 
-    if !crate::query::temporal::parse_time_cues(&normalized, 1_700_000_000_000).is_empty()
-        || begins_with_any(&[
-            "when ",
-            "what date ",
-            "what day ",
-            "how long ",
-            "언제 ",
-            "언제였",
-            "몇 년",
-            "몇 달",
-            "몇 주",
-            "며칠",
-        ])
-        || contains_word("before")
-        || contains_word("after")
-        || contains_word("ago")
-        || normalized.contains("지난주")
-        || normalized.contains("지난달")
-        || normalized.contains("작년")
-    {
-        return RecallIntent::Temporal;
+    // These are locale rule packs rather than sentence prefixes: interrogative
+    // phrases may occur anywhere in a polite wrapper or inverted question.
+    const EN_TEMPORAL_TARGETS: &[&[&str]] = &[
+        &["what", "date"],
+        &["what", "day"],
+        &["what", "month"],
+        &["what", "week"],
+        &["what", "year"],
+        &["which", "date"],
+        &["which", "day"],
+        &["which", "month"],
+        &["which", "week"],
+        &["which", "year"],
+    ];
+    const EN_COUNT_TARGETS: &[&[&str]] = &[&["how", "many"], &["how", "often"], &["number", "of"]];
+    const EN_COLLECTION_TARGETS: &[&[&str]] = &[
+        &["list"],
+        &["list", "all"],
+        &["what", "are"],
+        &["which", "are"],
+    ];
+
+    let requests_temporal_answer = has_word("when")
+        || has_any_sequence(EN_TEMPORAL_TARGETS)
+        || normalized.contains("언제")
+        || normalized.contains("몇 년")
+        || normalized.contains("몇년")
+        || normalized.contains("몇 월")
+        || normalized.contains("몇월")
+        || normalized.contains("몇 주")
+        || normalized.contains("몇주")
+        || normalized.contains("며칠");
+    let requests_count = has_any_sequence(EN_COUNT_TARGETS)
+        || normalized.contains("몇 번")
+        || normalized.contains("몇번")
+        || normalized.contains("몇 개")
+        || normalized.contains("몇개");
+    let requests_plural_object = words
+        .iter()
+        .position(|word| matches!(*word, "what" | "which"))
+        .is_some_and(|start| {
+            let object_phrase: Vec<_> = words[start.saturating_add(1)..]
+                .iter()
+                .take_while(|word| {
+                    !matches!(
+                        **word,
+                        "are" | "did" | "do" | "does" | "had" | "has" | "have" | "is" | "was"
+                    )
+                })
+                .copied()
+                .collect();
+            !object_phrase.iter().any(|word| word.ends_with("'s"))
+                && object_phrase.iter().any(|word| {
+                    word.len() > 3 && word.ends_with('s') && !matches!(*word, "this" | "thus")
+                })
+        });
+    let requests_collection = has_any_sequence(EN_COLLECTION_TARGETS)
+        || has_word("all")
+        || requests_plural_object
+        || normalized.contains("무엇들이")
+        || normalized.contains("어떤 것들이");
+    let requests_relationship = has_any_sequence(&[
+        &["relationship", "between"],
+        &["connection", "between"],
+        &["in", "common"],
+    ]) || has_word("both")
+        || has_word("compare")
+        || has_word("causes")
+        || has_word("reasons")
+        || normalized.contains("관계")
+        || normalized.contains("공통")
+        || normalized.contains("원인");
+
+    let inferred_answer_shape = if requests_temporal_answer {
+        AnswerShape::Temporal
+    } else if requests_count {
+        AnswerShape::Count
+    } else if requests_collection {
+        AnswerShape::Collection
+    } else if requests_relationship {
+        AnswerShape::Relationship
+    } else {
+        AnswerShape::Fact
+    };
+    let answer_shape = answer_shape_hint.unwrap_or(inferred_answer_shape);
+
+    let has_temporal_constraint =
+        !crate::query::temporal::parse_time_cues(&normalized, 1_700_000_000_000).is_empty()
+            || has_word("before")
+            || has_word("after")
+            || has_word("ago")
+            || normalized.contains("지난주")
+            || normalized.contains("지난달")
+            || normalized.contains("작년");
+    let recall_intent = if answer_shape == AnswerShape::Temporal || has_temporal_constraint {
+        RecallIntent::Temporal
+    } else if matches!(answer_shape, AnswerShape::Count | AnswerShape::Collection) {
+        RecallIntent::Enumeration
+    } else if answer_shape == AnswerShape::Relationship {
+        RecallIntent::Relational
+    } else {
+        RecallIntent::Direct
+    };
+
+    RecallPlan {
+        query: query.trim().to_owned(),
+        recall_intent,
+        answer_shape,
     }
-
-    if begins_with_any(&[
-        "how many ",
-        "list ",
-        "list all ",
-        "what are ",
-        "which are ",
-        "몇 번 ",
-        "몇 개 ",
-        "무엇들이 ",
-        "어떤 것들이 ",
-    ]) || normalized.contains(" all ")
-    {
-        return RecallIntent::Enumeration;
-    }
-
-    if normalized.contains(" relationship between ")
-        || normalized.contains(" connection between ")
-        || normalized.contains(" in common")
-        || normalized.contains(" both ")
-        || normalized.contains(" compare ")
-        || normalized.contains(" causes ")
-        || normalized.contains(" reasons ")
-        || normalized.contains(" 관계")
-        || normalized.contains(" 공통")
-        || normalized.contains(" 원인")
-    {
-        return RecallIntent::Relational;
-    }
-
-    RecallIntent::Direct
-}
-
-pub(crate) fn asks_for_time_answer(query: &str) -> bool {
-    let normalized = query.trim().to_lowercase();
-    [
-        "when ",
-        "what date ",
-        "what day ",
-        "what month ",
-        "what week ",
-        "what year ",
-        "which date ",
-        "which day ",
-        "which month ",
-        "which week ",
-        "which year ",
-        "언제 ",
-        "언제였",
-        "몇 년",
-        "몇 월",
-        "몇 주",
-        "며칠",
-    ]
-    .iter()
-    .any(|prefix| normalized.starts_with(prefix))
 }
 
 pub(crate) fn temporal_evidence_matches(query: &str, evidence: &str) -> bool {
@@ -176,9 +281,11 @@ pub(crate) fn temporal_evidence_matches(query: &str, evidence: &str) -> bool {
             .filter(|term| {
                 !matches!(
                     term.as_str(),
-                    "after"
+                    "about"
+                        | "after"
                         | "ago"
                         | "before"
+                        | "could"
                         | "date"
                         | "day"
                         | "did"
@@ -197,6 +304,9 @@ pub(crate) fn temporal_evidence_matches(query: &str, evidence: &str) -> bool {
                         | "last"
                         | "month"
                         | "next"
+                        | "please"
+                        | "remember"
+                        | "tell"
                         | "the"
                         | "their"
                         | "this"
@@ -206,7 +316,9 @@ pub(crate) fn temporal_evidence_matches(query: &str, evidence: &str) -> bool {
                         | "what"
                         | "when"
                         | "which"
+                        | "would"
                         | "year"
+                        | "you"
                 )
             })
             .map(|term| {
@@ -240,17 +352,17 @@ pub(crate) fn temporal_evidence_matches(query: &str, evidence: &str) -> bool {
     }
     let evidence_terms = terms(evidence);
     let overlap = query_terms.intersection(&evidence_terms).count();
-    overlap >= query_terms.len().min(4)
+    overlap >= query_terms.len().min(3)
 }
 
 pub(crate) fn compile_ranking<S: StorageAdapter>(
     storage: &S,
-    query: &str,
+    plan: &RecallPlan,
     ranking: &[RerankedCandidate],
     selection: EvidenceSelection,
 ) -> Result<Vec<RerankedCandidate>, Error> {
     let resolved_selection = match selection {
-        EvidenceSelection::Auto => match classify_intent(query) {
+        EvidenceSelection::Auto => match plan.recall_intent {
             RecallIntent::Enumeration | RecallIntent::Relational => {
                 EvidenceSelection::SourceCoverage
             }
@@ -322,6 +434,117 @@ pub(super) fn canonical_sources<S: StorageAdapter>(
     sources.sort_unstable();
     sources.dedup();
     Ok(sources)
+}
+
+pub(crate) fn compile_evidence_documents<S: StorageAdapter>(
+    storage: &S,
+    ranking: &[crate::query::ReadoutCandidate],
+    limit: usize,
+) -> Result<Vec<EvidenceDocument>, Error> {
+    let candidate_surface: HashSet<_> = ranking
+        .iter()
+        .take(limit)
+        .map(|candidate| candidate.node_id)
+        .collect();
+    let mut covered_sources = HashSet::new();
+    let mut documents = Vec::new();
+    let mut document_by_node = HashMap::new();
+
+    for candidate in ranking.iter().take(limit) {
+        let candidate_sources = canonical_sources(storage, candidate.node_id)?;
+        let new_sources: Vec<_> = candidate_sources
+            .into_iter()
+            .filter(|source| covered_sources.insert(*source))
+            .collect();
+        if new_sources.is_empty() {
+            continue;
+        }
+
+        let mut fallback_sources = Vec::new();
+        for source_id in new_sources {
+            if candidate_surface.contains(&source_id) {
+                let text = render_source(storage, source_id)?;
+                let index = documents.len();
+                documents.push(EvidenceDocument {
+                    node_id: source_id,
+                    source_node_ids: vec![source_id],
+                    text,
+                });
+                document_by_node.insert(source_id, index);
+            } else {
+                fallback_sources.push(source_id);
+            }
+        }
+        if fallback_sources.is_empty() {
+            continue;
+        }
+        let fallback_text = fallback_sources
+            .iter()
+            .map(|source_id| render_source(storage, *source_id))
+            .collect::<Result<Vec<_>, _>>()?
+            .join("\n");
+        if let Some(index) = document_by_node.get(&candidate.node_id).copied() {
+            let document = &mut documents[index];
+            document.source_node_ids.extend(fallback_sources);
+            if !fallback_text.is_empty() {
+                if !document.text.is_empty() {
+                    document.text.push('\n');
+                }
+                document.text.push_str(&fallback_text);
+            }
+        } else {
+            let text = if fallback_text.trim().is_empty() {
+                storage.get_node(candidate.node_id)?.content.clone()
+            } else {
+                fallback_text
+            };
+            let index = documents.len();
+            documents.push(EvidenceDocument {
+                node_id: candidate.node_id,
+                source_node_ids: fallback_sources,
+                text,
+            });
+            document_by_node.insert(candidate.node_id, index);
+        }
+    }
+
+    Ok(documents)
+}
+
+pub(crate) fn compile_rerank_documents<S: StorageAdapter>(
+    storage: &S,
+    plan: &RecallPlan,
+    ranking: &[crate::query::ReadoutCandidate],
+    limit: usize,
+) -> Result<Vec<EvidenceDocument>, Error> {
+    if matches!(
+        plan.recall_intent,
+        RecallIntent::Enumeration | RecallIntent::Relational
+    ) {
+        return compile_evidence_documents(storage, ranking, limit);
+    }
+
+    ranking
+        .iter()
+        .take(limit)
+        .map(|candidate| {
+            let node = storage.get_node(candidate.node_id)?;
+            Ok(EvidenceDocument {
+                node_id: candidate.node_id,
+                source_node_ids: canonical_sources(storage, candidate.node_id)?,
+                text: node.content.clone(),
+            })
+        })
+        .collect()
+}
+
+fn render_source<S: StorageAdapter>(storage: &S, source_id: NodeId) -> Result<String, Error> {
+    let source = storage.get_node(source_id)?;
+    let (speaker, _) = parse_entity_tags(&source.entity_tags);
+    Ok(speaker.map_or_else(
+        || source.content.clone(),
+        |speaker| format!("{speaker}: {}", source.content),
+    ))
 }
 
 fn extracted_episodic_sources<S: StorageAdapter>(
@@ -396,19 +619,19 @@ mod tests {
     #[test]
     fn classifies_retrieval_intents_without_a_model() {
         assert_eq!(
-            classify_intent("How many times did Alice move?"),
+            RecallPlan::infer("How many times did Alice move?").recall_intent,
             RecallIntent::Enumeration
         );
         assert_eq!(
-            classify_intent("When did Alice move?"),
+            RecallPlan::infer("When did Alice move?").recall_intent,
             RecallIntent::Temporal
         );
         assert_eq!(
-            classify_intent("What is the relationship between Alice and Bob?"),
+            RecallPlan::infer("What is the relationship between Alice and Bob?").recall_intent,
             RecallIntent::Relational
         );
         assert_eq!(
-            classify_intent("Where does Alice live?"),
+            RecallPlan::infer("Where does Alice live?").recall_intent,
             RecallIntent::Direct
         );
     }
@@ -416,21 +639,73 @@ mod tests {
     #[test]
     fn temporal_precedence_prevents_coverage_reordering() {
         assert_eq!(
-            classify_intent("When did Alice and Bob meet?"),
+            RecallPlan::infer("When did Alice and Bob meet?").recall_intent,
             RecallIntent::Temporal
         );
     }
 
     #[test]
-    fn separates_temporal_retrieval_from_time_answer_rendering() {
-        assert!(asks_for_time_answer("When did Alice move?"));
-        assert!(asks_for_time_answer("Which week did Alice move?"));
-        assert!(!asks_for_time_answer(
-            "Where did Alice move four years ago?"
-        ));
-        assert!(!asks_for_time_answer(
-            "Which activity did Alice pursue on 5 June 2023?"
-        ));
+    fn separates_temporal_retrieval_from_answer_shape() {
+        assert_eq!(
+            RecallPlan::infer("When did Alice move?").answer_shape,
+            AnswerShape::Temporal
+        );
+        assert_eq!(
+            RecallPlan::infer("Could you tell me which week Alice moved?").answer_shape,
+            AnswerShape::Temporal
+        );
+        let constrained = RecallPlan::infer("Where did Alice move four years ago?");
+        assert_eq!(constrained.recall_intent, RecallIntent::Temporal);
+        assert_eq!(constrained.answer_shape, AnswerShape::Fact);
+        let dated = RecallPlan::infer("Which activity did Alice pursue on 5 June 2023?");
+        assert_eq!(dated.recall_intent, RecallIntent::Temporal);
+        assert_eq!(dated.answer_shape, AnswerShape::Fact);
+    }
+
+    #[test]
+    fn detects_answer_shapes_beyond_sentence_prefixes() {
+        assert_eq!(
+            RecallPlan::infer("Do you remember when Alice moved?").answer_shape,
+            AnswerShape::Temporal
+        );
+        assert_eq!(
+            RecallPlan::infer("Alice moved on which date?").answer_shape,
+            AnswerShape::Temporal
+        );
+        assert_eq!(
+            RecallPlan::infer("John은 몇번 이사했어?").answer_shape,
+            AnswerShape::Count
+        );
+        assert_eq!(
+            RecallPlan::infer("Please list every city Alice visited.").answer_shape,
+            AnswerShape::Collection
+        );
+        assert_eq!(
+            RecallPlan::infer("What kind of games has James developed?").answer_shape,
+            AnswerShape::Collection
+        );
+        assert_eq!(
+            RecallPlan::infer("What personal health incidents does Evan face?").answer_shape,
+            AnswerShape::Collection
+        );
+        assert_eq!(
+            RecallPlan::infer("What kind of car does Evan drive?").answer_shape,
+            AnswerShape::Fact
+        );
+        assert_eq!(
+            RecallPlan::infer("Which popular music composer's tunes does Tim enjoy?").answer_shape,
+            AnswerShape::Fact
+        );
+    }
+
+    #[test]
+    fn typed_answer_shape_hint_keeps_temporal_query_constraints() {
+        let plan = RecallPlan::infer_with_answer_shape(
+            "What happened last week?",
+            AnswerShape::Collection,
+        );
+        assert_eq!(plan.answer_shape, AnswerShape::Collection);
+        assert_eq!(plan.recall_intent, RecallIntent::Temporal);
     }
 
     #[test]

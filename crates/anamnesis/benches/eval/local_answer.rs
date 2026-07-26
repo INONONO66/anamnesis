@@ -26,9 +26,9 @@ use eval_common::real_bench::{BenchError, BenchResult};
 #[cfg(not(feature = "embed"))]
 compile_error!("local_answer requires: cargo bench --features embed --bench local_answer");
 
-const SCHEMA_VERSION: u32 = 31;
+const SCHEMA_VERSION: u32 = 32;
 const DATASET_LOADER_VERSION: &str = "locomo-caption-v2+longmemeval-cleaned-v1";
-const ANSWER_PROMPT_VERSION: &str = "official-format-v6-temporal-anchor";
+const ANSWER_PROMPT_VERSION: &str = "official-format-v7-reference-free-temporal";
 const JUDGE_PROMPT_VERSION: &str = "semantic-answer-equivalence-v2";
 const ENGINE_PACKAGE_POLICY_VERSION: &str = "timestamped-final-reassembly-v2";
 const SHADOW_RRF_POLICY_VERSION: &str = "shadow-rrf-cognitive1-embedding0.25-text1-k60-v1";
@@ -96,6 +96,8 @@ struct RunConfig {
     consumer_prefilter_k: Option<usize>,
     #[serde(default)]
     consumer_prefilter_query_fusion: bool,
+    #[serde(default)]
+    consumer_evidence_documents: bool,
     consumer_candidate_k: usize,
     first_stage_seed_limit: Option<usize>,
     dump_candidate_pool: bool,
@@ -304,6 +306,7 @@ struct Args {
     consumer_prefilter_cross_encoder: Option<String>,
     consumer_prefilter_k: Option<usize>,
     consumer_prefilter_query_fusion: bool,
+    consumer_evidence_documents: bool,
     consumer_candidate_k: usize,
     first_stage_seed_limit: Option<usize>,
     dump_candidate_pool: bool,
@@ -554,7 +557,7 @@ fn run() -> BenchResult<()> {
             "consumer ranking report embedding model differs".to_owned(),
         ));
     }
-    let consumer_cross_encoder = if ranking_replay.is_some() {
+    let consumer_cross_encoder = if ranking_replay.is_some() && !args.consumer_evidence_documents {
         None
     } else {
         args.consumer_cross_encoder
@@ -640,6 +643,7 @@ fn run() -> BenchResult<()> {
         consumer_prefilter_cross_encoder: args.consumer_prefilter_cross_encoder.clone(),
         consumer_prefilter_k: args.consumer_prefilter_k,
         consumer_prefilter_query_fusion: args.consumer_prefilter_query_fusion,
+        consumer_evidence_documents: args.consumer_evidence_documents,
         consumer_candidate_k: args.consumer_candidate_k,
         first_stage_seed_limit: args.first_stage_seed_limit,
         dump_candidate_pool: args.dump_candidate_pool,
@@ -667,12 +671,12 @@ fn run() -> BenchResult<()> {
                 args.consumer_prefilter_query_fusion,
             ) {
                 (Some(prefilter), Some(prefilter_k), query_fusion) => format!(
-                    "consumer-cascade-top{}-{prefilter}-top{prefilter_k}-{model}-query-fusion-{query_fusion}-product-path-v2",
-                    args.consumer_candidate_k
+                    "consumer-cascade-top{}-{prefilter}-top{prefilter_k}-{model}-query-fusion-{query_fusion}-evidence-documents-{}-product-path-v3",
+                    args.consumer_candidate_k, args.consumer_evidence_documents
                 ),
                 _ => format!(
-                    "consumer-cross-encoder-top{}-{model}-product-path-v2",
-                    args.consumer_candidate_k
+                    "consumer-cross-encoder-top{}-{model}-evidence-documents-{}-product-path-v3",
+                    args.consumer_candidate_k, args.consumer_evidence_documents
                 ),
             }
         } else if args.shadow_rank_fusion {
@@ -706,6 +710,7 @@ fn run() -> BenchResult<()> {
         consumer_prefilter_cross_encoder,
         consumer_prefilter_k: args.consumer_prefilter_k,
         consumer_prefilter_query_fusion: args.consumer_prefilter_query_fusion,
+        consumer_evidence_documents: args.consumer_evidence_documents,
         consumer_candidate_k: args.consumer_candidate_k,
         screen_top_k: args.screen_top_k.clone(),
         screen_source_dedup: args.screen_source_dedup,
@@ -992,6 +997,7 @@ fn run_external_memory_artifact(
         consumer_prefilter_cross_encoder: None,
         consumer_prefilter_k: None,
         consumer_prefilter_query_fusion: false,
+        consumer_evidence_documents: false,
         consumer_candidate_k: 0,
         first_stage_seed_limit: None,
         dump_candidate_pool: false,
@@ -1122,6 +1128,8 @@ fn load_consumer_ranking_replay(
         || config.skip_adversarial != args.skip_adversarial
         || config.consumer_cross_encoder != args.consumer_cross_encoder
         || config.consumer_candidate_k != args.consumer_candidate_k
+        || (config.consumer_evidence_documents != args.consumer_evidence_documents
+            && !args.consumer_evidence_documents)
         || config.first_stage_seed_limit != args.first_stage_seed_limit
         || config.derived_memory_artifact_fnv1a64.as_deref() != derived_artifact_fnv1a64
         || config.consumer_selection_policy != ConsumerSelectionPolicy::Relevance
@@ -1924,8 +1932,8 @@ fn question_type_instruction(question_type: &str) -> &'static str {
             "For this temporal question, resolve a relative expression inside an evidence item \
              against that same evidence item's date. Do not resolve evidence text against the \
              Question date. Use the Question date only for a relative expression in the question \
-             itself. Preserve the answer's requested granularity and use a natural-language date \
-             such as 'the Friday before 15 July 2023' rather than an ISO date."
+             itself. Preserve the answer's requested granularity. State the resulting date or date \
+             range directly in natural language; do not copy a date from these instructions."
         }
         "multi-hop" | "multi-session" => {
             "For this multi-evidence question, combine all relevant items before answering. \
@@ -2854,6 +2862,7 @@ where
     let mut consumer_prefilter_cross_encoder = None;
     let mut consumer_prefilter_k = None;
     let mut consumer_prefilter_query_fusion = false;
+    let mut consumer_evidence_documents = false;
     let mut consumer_candidate_k = 100usize;
     let mut first_stage_seed_limit = None;
     let mut dump_candidate_pool = false;
@@ -2977,6 +2986,7 @@ where
                 )?)
             }
             "--consumer-prefilter-query-fusion" => consumer_prefilter_query_fusion = true,
+            "--consumer-evidence-documents" => consumer_evidence_documents = true,
             "--consumer-candidate-k" | "--shadow-cross-encoder-candidates" => {
                 consumer_candidate_k =
                     parse_usize(&next_value(&mut iter, &arg)?, "--consumer-candidate-k")?
@@ -3141,6 +3151,11 @@ where
             "--shadow-rank-fusion and --consumer-cross-encoder are mutually exclusive".to_string(),
         ));
     }
+    if consumer_evidence_documents && consumer_cross_encoder.is_none() {
+        return Err(BenchError::InvalidInput(
+            "--consumer-evidence-documents requires --consumer-cross-encoder".to_owned(),
+        ));
+    }
     if consumer_ranking_report.is_some()
         && (consumer_cross_encoder.is_none()
             || shadow_rank_fusion
@@ -3275,6 +3290,7 @@ where
         consumer_prefilter_cross_encoder,
         consumer_prefilter_k,
         consumer_prefilter_query_fusion,
+        consumer_evidence_documents,
         consumer_candidate_k,
         first_stage_seed_limit,
         dump_candidate_pool,
@@ -3400,6 +3416,7 @@ Options:\n\
   --consumer-prefilter-cross-encoder <model> Fast first-stage model for a reranker cascade\n\
   --consumer-prefilter-k <N>       Documents passed from the prefilter to the quality reranker\n\
   --consumer-prefilter-query-fusion Fuse core query variants at the fast prefilter\n\
+  --consumer-evidence-documents    Score Memory-compiled canonical raw evidence documents\n\
   --consumer-candidate-k <N>       Cognitive candidate/metric cutoff (default: 100)\n\
   --first-stage-seed-limit <N>     RWR seed cutoff, independent of final top-k\n\
   --dump-candidate-pool            Persist top-200 readout feature diagnostics\n\
