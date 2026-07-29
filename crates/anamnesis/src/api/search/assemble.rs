@@ -29,7 +29,6 @@ pub(crate) struct SearchAssemblyRequest<'a> {
     pub(crate) input: &'a SearchInput,
     pub(crate) plan: &'a SearchPlan,
     pub(crate) strategies_used: Vec<String>,
-    pub(crate) query_variants: Vec<String>,
     pub(crate) field: &'a crate::query::field::QueryField,
     pub(crate) readout_trace_limit: usize,
 }
@@ -40,7 +39,6 @@ pub(crate) fn assemble_search_result<S: StorageAdapter + Clone>(
 ) -> Result<SearchResult, Error> {
     let trace = SearchTrace {
         strategies_used: request.strategies_used.clone(),
-        query_variants: request.query_variants,
         seed_count: request.seed_ids.len(),
         iterations: request.response.iterations,
         residual: request.response.residual,

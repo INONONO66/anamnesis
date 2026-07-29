@@ -82,29 +82,15 @@ fn diagnostic_trace_limit_is_bounded_and_behaviorally_inert() {
 }
 
 #[test]
-fn trace_exposes_the_exact_additive_query_variants() {
-    let config = EngineConfig::default().with_novelty_threshold(0.0);
-    let mut engine = Engine::with_config(config);
-    let _ = engine
-        .ingest(make_obs("John injured his ankle twice"))
-        .unwrap();
-
-    let result = engine
-        .search(SearchInput {
-            text: "How many times has John injured his ankle?".into(),
-            limit: 10,
-            ..Default::default()
-        })
-        .unwrap();
-
+fn public_query_variants_expose_the_exact_additive_search_surface() {
+    let variants =
+        anamnesis::query::search_query_variants("How many times has John injured his ankle?");
     assert_eq!(
-        result.trace.query_variants.first().map(String::as_str),
+        variants.first().map(String::as_str),
         Some("How many times has John injured his ankle?")
     );
     assert!(
-        result
-            .trace
-            .query_variants
+        variants
             .iter()
             .any(|variant| variant == "John injured his ankle")
     );

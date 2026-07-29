@@ -478,12 +478,6 @@ pub struct ReadoutCandidate {
 pub struct SearchTrace {
     /// Names of retrieval strategies used (e.g., "text_search", "activation_flow").
     pub strategies_used: Vec<String>,
-    /// Deterministic query variants actually used by lexical candidate
-    /// retrieval. The original user query is first and any decomposition is
-    /// additive. Consumers may use this trace to apply the same query surface
-    /// to an optional model-owned reranker without duplicating core parsing
-    /// policy.
-    pub query_variants: Vec<String>,
     /// Number of seed nodes found.
     pub seed_count: usize,
     /// Number of RWR iterations performed before convergence (or the bound).

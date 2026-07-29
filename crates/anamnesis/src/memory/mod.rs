@@ -1995,7 +1995,7 @@ impl<S: StorageAdapter + Clone> Memory<S> {
                 package: result.package,
             });
         }
-        self.repackage_reranked_deep_at(&result, &ranking, options, now)
+        self.repackage_reranked_deep_at(query, &result, &ranking, options, now)
     }
 
     /// Run the canonical production recall pipeline at wall-clock time.
@@ -2046,7 +2046,7 @@ impl<S: StorageAdapter + Clone> Memory<S> {
             &diagnostics,
             scope,
         )?;
-        self.rerank_search_result_at(&result, reranker, options, now)
+        self.rerank_search_result_at(query, &result, reranker, options, now)
     }
 
     /// Apply the canonical production rerank and deep-selection stages to an
@@ -2054,9 +2054,11 @@ impl<S: StorageAdapter + Clone> Memory<S> {
     ///
     /// Benchmarks use this overload so retrieval diagnostics can observe the
     /// same source search without re-running it. Product callers normally use
-    /// [`search_reranked`](Memory::search_reranked).
+    /// [`search_reranked`](Memory::search_reranked). `query` must be the
+    /// original query used to produce `result`.
     pub fn rerank_search_result_at(
         &self,
+        query: &str,
         result: &SearchResult,
         reranker: &dyn RerankingProvider,
         options: RerankedRecallOptions,
@@ -2073,11 +2075,7 @@ impl<S: StorageAdapter + Clone> Memory<S> {
             ));
         }
 
-        let query =
-            result.trace.query_variants.first().ok_or_else(|| {
-                Error::InvalidInput("search trace has no original query".to_owned())
-            })?;
-        let evidence = self.rerank_documents(result, options.candidate_limit)?;
+        let evidence = self.rerank_documents(query, result, options.candidate_limit)?;
         if evidence.is_empty() {
             return Ok(RerankedRecall {
                 ranking: Vec::new(),
@@ -2130,7 +2128,8 @@ impl<S: StorageAdapter + Clone> Memory<S> {
             });
         }
         ranking.sort_by(|left, right| right.score.total_cmp(&left.score));
-        let recall = self.repackage_reranked_deep_at(result, &ranking, options.deep, as_of)?;
+        let recall =
+            self.repackage_reranked_deep_at(query, result, &ranking, options.deep, as_of)?;
         let final_ids: HashSet<_> = recall.hits.iter().map(|hit| hit.node_id).collect();
         let cognitive_scores = result
             .trace
@@ -2353,6 +2352,7 @@ impl<S: StorageAdapter + Clone> Memory<S> {
     /// [`repackage_reranked_deep`](Memory::repackage_reranked_deep).
     pub fn rerank_documents(
         &self,
+        query: &str,
         result: &SearchResult,
         candidate_limit: usize,
     ) -> Result<Vec<EvidenceDocument>, Error> {
@@ -2361,10 +2361,6 @@ impl<S: StorageAdapter + Clone> Memory<S> {
                 "rerank document candidate limit must be greater than zero".to_owned(),
             ));
         }
-        let query =
-            result.trace.query_variants.first().ok_or_else(|| {
-                Error::InvalidInput("search trace has no original query".to_owned())
-            })?;
         let plan = RecallPlan::infer(query);
         readout::compile_rerank_documents(
             self.engine.graph().storage(),
@@ -2381,34 +2377,31 @@ impl<S: StorageAdapter + Clone> Memory<S> {
     /// trace reconstruction remain owned by [`Memory`].
     pub fn repackage_reranked_deep(
         &self,
+        query: &str,
         result: &SearchResult,
         ranking: &[RerankedCandidate],
         options: DeepRecallOptions,
     ) -> Result<Recall, Error> {
-        self.repackage_reranked_deep_at(result, ranking, options, Timestamp::now())
+        self.repackage_reranked_deep_at(query, result, ranking, options, Timestamp::now())
     }
 
     /// Compile consumer scores through deterministic deep readout at `as_of`.
     ///
-    /// [`EvidenceSelection::Auto`] reads the original query from
-    /// [`SearchTrace::query_variants`](crate::query::SearchTrace::query_variants).
-    /// It preserves pure relevance order for direct and date questions, applies
-    /// raw-source coverage for inference, and applies bounded source-session
-    /// coverage for frequency, explicit enumeration, or relationship
-    /// questions. The compiled ranking is then validated by
+    /// [`EvidenceSelection::Auto`] infers intent from `query`, which must be the
+    /// original query used to produce `result`. It preserves pure relevance
+    /// order for direct and date questions, applies raw-source coverage for
+    /// inference, and applies bounded source-session coverage for frequency,
+    /// explicit enumeration, or relationship questions. The compiled ranking is then validated by
     /// [`repackage_reranked_at`](Memory::repackage_reranked_at), so no source,
     /// validity, tension, budget, or commit invariant is bypassed.
     pub fn repackage_reranked_deep_at(
         &self,
+        query: &str,
         result: &SearchResult,
         ranking: &[RerankedCandidate],
         options: DeepRecallOptions,
         as_of: Timestamp,
     ) -> Result<Recall, Error> {
-        let query =
-            result.trace.query_variants.first().ok_or_else(|| {
-                Error::InvalidInput("search trace has no original query".to_owned())
-            })?;
         let plan = RecallPlan::infer(query);
         let compiled = readout::compile_ranking(
             self.engine.graph().storage(),
@@ -3247,6 +3240,7 @@ mod tests {
         ];
         let recall = m
             .repackage_reranked_deep_at(
+                "What are the bicycles that Alice and Bob repaired?",
                 &result,
                 &ranking,
                 DeepRecallOptions::new(2).with_selection(EvidenceSelection::DistinctSources),
@@ -3332,7 +3326,9 @@ mod tests {
                 },
             )
             .unwrap();
-        let documents = m.rerank_documents(&result, 20).unwrap();
+        let documents = m
+            .rerank_documents("Would Alice repair the bicycle again?", &result, 20)
+            .unwrap();
         let representative = documents
             .iter()
             .find(|document| {
@@ -3380,7 +3376,11 @@ mod tests {
             )
             .unwrap();
         let document = m
-            .rerank_documents(&result, 20)
+            .rerank_documents(
+                "Would Alice enjoy a shop related to the picture on her bookshelf?",
+                &result,
+                20,
+            )
             .unwrap()
             .into_iter()
             .find(|document| document.node_id == answer)
@@ -3423,7 +3423,13 @@ mod tests {
             .repackage_reranked_at(&result, &ranking, 4, t(100))
             .unwrap();
         let deep = m
-            .repackage_reranked_deep_at(&result, &ranking, DeepRecallOptions::new(4), t(100))
+            .repackage_reranked_deep_at(
+                "When did Alice move?",
+                &result,
+                &ranking,
+                DeepRecallOptions::new(4),
+                t(100),
+            )
             .unwrap();
 
         assert_eq!(
@@ -3492,7 +3498,13 @@ mod tests {
             score: 1.0,
         });
         let recall = m
-            .repackage_reranked_deep_at(&result, &ranking, DeepRecallOptions::new(5), t(100))
+            .repackage_reranked_deep_at(
+                "Which shared details did Alice mention?",
+                &result,
+                &ranking,
+                DeepRecallOptions::new(5),
+                t(100),
+            )
             .unwrap();
 
         assert_eq!(

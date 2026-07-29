@@ -151,7 +151,6 @@ pub(crate) fn search_with_diagnostics<S: StorageAdapter + Clone>(
             input: &input,
             plan: &plan,
             strategies_used,
-            query_variants: sub_queries,
             field: &field,
             readout_trace_limit: diagnostics.readout_trace_limit,
         },

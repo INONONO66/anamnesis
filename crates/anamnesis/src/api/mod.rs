@@ -15,6 +15,10 @@ use crate::storage::{SqliteStorage, StorageAdapter};
 mod search;
 pub(crate) use search::assemble::{apply_packaging_mode, apply_validity_filter};
 
+pub(crate) fn planned_query_variants(query: &str) -> Vec<String> {
+    search::plan::query_variants(query)
+}
+
 const ARCHIVE_SALIENCE_THRESHOLD: f64 = 0.10;
 const SALIENCE_CHANGE_EPSILON: f64 = 1e-10;
 

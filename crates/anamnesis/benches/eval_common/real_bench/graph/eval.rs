@@ -323,6 +323,7 @@ pub fn evaluate_question_with_context(
             RecallPlan::infer(&question.question).recall_intent,
             RecallIntent::Enumeration | RecallIntent::Relational
         );
+    #[cfg(feature = "embed")]
     let shadow = if let Some(rankings) = &opts.replayed_consumer_rankings
         && !needs_live_document_rerank
     {
@@ -612,6 +613,7 @@ fn apply_consumer_selection_policy(
             let recall = graph
                 .memory
                 .repackage_reranked_deep_at(
+                    &question.question,
                     result,
                     &candidates,
                     DeepRecallOptions::new(opts.top_k).with_selection(selection),
@@ -1040,6 +1042,7 @@ fn consumer_cross_encoder_package(
         let reranked = graph
             .memory
             .rerank_search_result_at(
+                &question.question,
                 result,
                 reranker,
                 RerankedRecallOptions::new(final_limit).with_candidate_limit(candidate_limit),
@@ -1057,7 +1060,7 @@ fn consumer_cross_encoder_package(
     let broad_candidates: Vec<_> = if evidence_documents {
         graph
             .memory
-            .rerank_documents(result, candidate_limit)
+            .rerank_documents(&question.question, result, candidate_limit)
             .map_err(|err| BenchError::Engine(err.to_string()))?
             .into_iter()
             .map(|document| (document.node_id, document.text))
@@ -1084,12 +1087,8 @@ fn consumer_cross_encoder_package(
                 .map(|(_, content)| content.clone())
                 .collect();
             let prefiltered_indices = if prefilter_query_fusion {
-                rerank_query_variants(
-                    prefilter,
-                    &result.trace.query_variants,
-                    &question.question,
-                    &documents,
-                )?
+                let query_variants = anamnesis::query::search_query_variants(&question.question);
+                rerank_query_variants(prefilter, &query_variants, &question.question, &documents)?
             } else {
                 prefilter
                     .rerank(question.question.clone(), documents, false, Some(32))
