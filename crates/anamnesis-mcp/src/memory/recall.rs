@@ -5,8 +5,14 @@
 use std::collections::HashSet;
 
 use crate::capture::META_CAPTURE;
+#[cfg(test)]
+use anamnesis::embedding::RerankScore;
+use anamnesis::embedding::RerankingProvider;
 use anamnesis::graph::{NodeId, ScopePath, Timestamp};
-use anamnesis::memory::{ContextRenderOptions, ContextRenderStyle, Hit, Recall};
+use anamnesis::memory::{
+    CognitiveRecallScore, ContextRenderOptions, ContextRenderStyle, Hit, Recall,
+    RerankedRecallOptions,
+};
 use anamnesis::storage::SqliteStorage;
 use anamnesis::{Error, Memory};
 
@@ -18,6 +24,44 @@ pub(crate) struct RecallFilters<'a> {
     pub(crate) scope: Option<&'a str>,
     pub(crate) tag: Option<&'a str>,
     pub(crate) knowledge_only: bool,
+}
+
+/// Test reranker that preserves the cognitive candidate order while exercising
+/// the exact production orchestration path.
+#[cfg(test)]
+pub(crate) struct CognitiveReranker;
+
+#[cfg(test)]
+impl RerankingProvider for CognitiveReranker {
+    fn rerank(&self, _query: &str, documents: &[String]) -> Result<Vec<RerankScore>, Error> {
+        Ok(documents
+            .iter()
+            .enumerate()
+            .map(|(index, _)| RerankScore::new(index, (documents.len() - index) as f64))
+            .collect())
+    }
+
+    fn model_name(&self) -> &str {
+        "test-cognitive-order"
+    }
+}
+
+#[cfg(test)]
+pub(crate) struct InflatedReranker;
+
+#[cfg(test)]
+impl RerankingProvider for InflatedReranker {
+    fn rerank(&self, _query: &str, documents: &[String]) -> Result<Vec<RerankScore>, Error> {
+        Ok(documents
+            .iter()
+            .enumerate()
+            .map(|(index, _)| RerankScore::new(index, 1_000_000.0 - index as f64))
+            .collect())
+    }
+
+    fn model_name(&self) -> &str {
+        "test-inflated-reranker"
+    }
 }
 
 impl MemoryRegistry {
@@ -118,9 +162,18 @@ impl MemoryRegistry {
             self.ops.reinforcing_recalls += 1;
         }
         let reinforce = reinforce.unwrap_or(self.reinforce_on_recall);
+        let reranker = self.reranker()?;
         let handle = self.namespace_handle(ns)?;
         let mut mem = handle.lock().unwrap_or_else(|p| p.into_inner());
-        mem_recall_packaged_gated(&mut mem, query, limit, reinforce, gate, cosine_gate)
+        mem_recall_packaged_gated(
+            &mut mem,
+            query,
+            limit,
+            reinforce,
+            gate,
+            cosine_gate,
+            reranker.as_ref(),
+        )
     }
 }
 
@@ -140,9 +193,18 @@ pub(crate) fn mem_recall_packaged_gated(
     reinforce: bool,
     gate: Option<f64>,
     cosine_gate: Option<f64>,
+    reranker: &dyn RerankingProvider,
 ) -> Result<RecallOutcome, Error> {
-    let recall = mem.search(query, limit)?;
-    finish_recall(mem, recall, reinforce, gate, cosine_gate)
+    let output = mem.search_reranked(query, reranker, RerankedRecallOptions::new(limit))?;
+    finish_recall(
+        mem,
+        query,
+        output.recall,
+        &output.cognitive_scores,
+        reinforce,
+        gate,
+        cosine_gate,
+    )
 }
 
 /// Like [`mem_recall_packaged_gated`], with a scope/tag filter applied to the
@@ -153,6 +215,7 @@ pub(crate) fn mem_recall_packaged_gated_filtered(
     limit: usize,
     reinforce: bool,
     filters: RecallFilters<'_>,
+    reranker: &dyn RerankingProvider,
 ) -> Result<RecallOutcome, Error> {
     if filters.scope.is_none() && filters.tag.is_none() && !filters.knowledge_only {
         return mem_recall_packaged_gated(
@@ -162,14 +225,17 @@ pub(crate) fn mem_recall_packaged_gated_filtered(
             reinforce,
             filters.gate,
             filters.cosine_gate,
+            reranker,
         );
     }
 
     let scope_path = filters.scope.map(ScopePath::new).transpose()?;
-    let mut recall = match scope_path {
-        Some(scope) => mem.search_scoped(query, limit, Some(scope))?,
-        None => mem.search(query, limit)?,
+    let options = match scope_path {
+        Some(scope) => RerankedRecallOptions::new(limit).with_scope(scope),
+        None => RerankedRecallOptions::new(limit),
     };
+    let output = mem.search_reranked(query, reranker, options)?;
+    let mut recall = output.recall;
 
     filter_context_package(mem, &mut recall.package, filters.scope, filters.tag);
     recall
@@ -179,7 +245,15 @@ pub(crate) fn mem_recall_packaged_gated_filtered(
         apply_knowledge_only(mem, &mut recall.package, &mut recall.hits);
     }
 
-    finish_recall(mem, recall, reinforce, filters.gate, filters.cosine_gate)
+    finish_recall(
+        mem,
+        query,
+        recall,
+        &output.cognitive_scores,
+        reinforce,
+        filters.gate,
+        filters.cosine_gate,
+    )
 }
 
 /// Compute the gate decision for the final, de-duplicated top hit.
@@ -220,13 +294,26 @@ pub(crate) fn gate_trace(
 
 fn finish_recall(
     mem: &mut Memory<SqliteStorage>,
+    query: &str,
     recall: Recall,
+    cognitive_scores: &[CognitiveRecallScore],
     reinforce: bool,
     gate: Option<f64>,
     cosine_gate: Option<f64>,
 ) -> Result<RecallOutcome, Error> {
     let hits = super::dedup_hits(recall.hits.clone());
-    let mut trace = gate_trace(hits.first(), gate, cosine_gate);
+    let cognitive_top = hits.first().map(|hit| {
+        let mut cognitive_hit = hit.clone();
+        if let Some(score) = cognitive_scores
+            .iter()
+            .find(|score| score.node_id == hit.node_id)
+        {
+            cognitive_hit.score = score.score;
+            cognitive_hit.cosine = score.cosine;
+        }
+        cognitive_hit
+    });
+    let mut trace = gate_trace(cognitive_top.as_ref(), gate, cosine_gate);
 
     if !trace.eligible {
         mem.tick(Timestamp::now())?;
@@ -261,7 +348,8 @@ fn finish_recall(
 
     // Render before `used` consumes the package; preserve the existing
     // reinforce-then-tick order.
-    let context = mem.render_context_with(&recall, configured_context_render_options())?;
+    let context =
+        mem.render_context_for_with(query, &recall, configured_context_render_options())?;
     if reinforce {
         mem.used(recall)?;
     }

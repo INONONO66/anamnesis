@@ -8,10 +8,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anamnesis::engine::EmbeddingProvider;
-use anamnesis::memory::ContextRenderStyle;
+use anamnesis::memory::{AnswerShape, ContextRenderStyle, RecallIntent, RecallPlan};
 use serde::{Deserialize, Serialize};
 
 use eval_common::answer_metrics;
+use eval_common::provider::{LlmProvider, OpenAiCompatibleProvider, ProviderConfig, ProviderError};
 use eval_common::real_bench::dataset::{
     BenchDatasetName, BenchQuestion, BenchSession, GoldEvidence, LoadedBenchmark,
     load_benchmark_dataset, restrict_to_questions, split_by_sample,
@@ -26,10 +27,11 @@ use eval_common::real_bench::{BenchError, BenchResult};
 #[cfg(not(feature = "embed"))]
 compile_error!("local_answer requires: cargo bench --features embed --bench local_answer");
 
-const SCHEMA_VERSION: u32 = 32;
+const SCHEMA_VERSION: u32 = 37;
 const DATASET_LOADER_VERSION: &str = "locomo-caption-v2+longmemeval-cleaned-v1";
-const ANSWER_PROMPT_VERSION: &str = "official-format-v7-reference-free-temporal";
-const JUDGE_PROMPT_VERSION: &str = "semantic-answer-equivalence-v2";
+const ANSWER_PROMPT_VERSION: &str = "official-format-v10-query-plan-frequency";
+const REFLECT_PROMPT_VERSION: &str = "evidence-reflect-v9-inference-contract";
+const JUDGE_PROMPT_VERSION: &str = "semantic-answer-equivalence-v3";
 const ENGINE_PACKAGE_POLICY_VERSION: &str = "timestamped-final-reassembly-v2";
 const SHADOW_RRF_POLICY_VERSION: &str = "shadow-rrf-cognitive1-embedding0.25-text1-k60-v1";
 const ROUTE_FULL_CONTEXT: &str = "0-full-context";
@@ -46,6 +48,14 @@ enum ContextSurface {
     DiagnosticFragments,
 }
 
+fn default_local_reader_backend() -> String {
+    "ollama".to_owned()
+}
+
+fn default_local_judge_backend() -> String {
+    "ollama".to_owned()
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct RunConfig {
     dataset: BenchDatasetName,
@@ -55,8 +65,16 @@ struct RunConfig {
     sample_seed: u64,
     skip_adversarial: bool,
     run_strong_reader: bool,
+    #[serde(default)]
+    strong_reader_reflect: bool,
+    #[serde(default)]
+    strong_reader_reflect_complex_only: bool,
+    #[serde(default = "default_local_reader_backend")]
+    strong_reader_backend: String,
     run_full_context: bool,
     run_local_judge: bool,
+    #[serde(default = "default_local_judge_backend")]
+    judge_backend: String,
     run_oracle_baseline: bool,
     run_retrieval_baseline: bool,
     predict_only: bool,
@@ -107,6 +125,8 @@ struct RunConfig {
     consumer_selection_policy: ConsumerSelectionPolicy,
     top_k: usize,
     answer_prompt_version: String,
+    #[serde(default)]
+    reflect_prompt_version: Option<String>,
     #[serde(default)]
     judge_prompt_version: String,
     baseline_reader_model: String,
@@ -191,6 +211,12 @@ struct RouteResult {
     /// the official memory-quality score.
     locomo_reader_surface_f1: Option<f64>,
     canonicalized_answer: Option<String>,
+    /// Reference-blind analysis emitted by the optional two-pass reflect
+    /// reader. Benchmark gold and judge feedback are never part of this text.
+    #[serde(default)]
+    reflection: Option<String>,
+    #[serde(default)]
+    reflection_latency_ms: Option<f64>,
     judge: Option<JudgeDecision>,
     /// True when this exact-input result was copied from the paired answer
     /// report instead of asking the local model to sample the same prompt
@@ -286,6 +312,12 @@ struct Args {
     sample_seed: u64,
     skip_adversarial: bool,
     run_strong_reader: bool,
+    strong_reader_reflect: bool,
+    strong_reader_reflect_complex_only: bool,
+    strong_reader_remote: bool,
+    frontier_judge: bool,
+    frontier_base_url: Option<String>,
+    frontier_max_cost_usd: Option<f64>,
     run_full_context: bool,
     run_local_judge: bool,
     run_oracle_baseline: bool,
@@ -512,16 +544,34 @@ fn run() -> BenchResult<()> {
         let client = OllamaClient::new(&args.ollama_base_url, args.timeout_secs)?;
         let version = client.version()?;
         let mut requested_models = vec![args.baseline_reader_model.as_str()];
-        if args.run_local_judge {
+        if args.run_local_judge && !args.frontier_judge {
             requested_models.push(args.judge_model.as_str());
         }
-        if args.run_strong_reader {
+        if args.run_strong_reader && !args.strong_reader_remote {
             requested_models.push(args.strong_reader_model.as_str());
         }
         let digests = client.require_models(&requested_models)?;
         eprintln!("LOCAL ollama={} models={:?}", version, requested_models);
         (Some(client), version, digests)
     };
+    let frontier_reader = args
+        .strong_reader_remote
+        .then(|| {
+            let base_url = args.frontier_base_url.as_deref().ok_or_else(|| {
+                BenchError::InvalidInput(
+                    "--frontier-reader requires --frontier-base-url or LLM_BASE_URL".to_owned(),
+                )
+            })?;
+            OpenAiCompatibleProvider::new(ProviderConfig {
+                base_url: base_url.to_owned(),
+                model: args.strong_reader_model.clone(),
+                timeout_secs: args.timeout_secs,
+                max_retries: 3,
+                max_output_tokens: Some(1_200),
+            })
+            .map_err(provider_error)
+        })
+        .transpose()?;
     eprintln!(
         "LOAD dataset={} questions={} fingerprint={}",
         args.dataset.as_str(),
@@ -563,17 +613,13 @@ fn run() -> BenchResult<()> {
         args.consumer_cross_encoder
             .as_deref()
             .map(|model_name| {
-                let model = model_name
-                    .parse::<fastembed::RerankerModel>()
+                anamnesis::embedding::fastembed::FastEmbedReranker::with_model_name(model_name)
+                    .map(|reranker| {
+                        Arc::new(reranker) as Arc<dyn anamnesis::embedding::RerankingProvider>
+                    })
                     .map_err(|err| {
-                        BenchError::InvalidInput(format!("unknown cross-encoder model: {err}"))
-                    })?;
-                fastembed::TextRerank::try_new(
-                    fastembed::RerankInitOptions::new(model)
-                        .with_cache_dir(PathBuf::from(".fastembed_cache")),
-                )
-                .map(Arc::new)
-                .map_err(|err| BenchError::Embedding(format!("cross-encoder init failed: {err}")))
+                        BenchError::Embedding(format!("cross-encoder init failed: {err}"))
+                    })
             })
             .transpose()?
     };
@@ -607,8 +653,20 @@ fn run() -> BenchResult<()> {
         sample_seed: args.sample_seed,
         skip_adversarial: args.skip_adversarial,
         run_strong_reader: args.run_strong_reader,
+        strong_reader_reflect: args.strong_reader_reflect,
+        strong_reader_reflect_complex_only: args.strong_reader_reflect_complex_only,
+        strong_reader_backend: if args.strong_reader_remote {
+            "openai-compatible".to_owned()
+        } else {
+            default_local_reader_backend()
+        },
         run_full_context: args.run_full_context,
         run_local_judge: args.run_local_judge,
+        judge_backend: if args.frontier_judge {
+            "openai-compatible".to_owned()
+        } else {
+            default_local_judge_backend()
+        },
         run_oracle_baseline: args.run_oracle_baseline,
         run_retrieval_baseline: args.run_retrieval_baseline,
         predict_only: args.predict_only,
@@ -653,6 +711,9 @@ fn run() -> BenchResult<()> {
         consumer_selection_policy: args.consumer_selection_policy,
         top_k: args.top_k,
         answer_prompt_version: ANSWER_PROMPT_VERSION.to_string(),
+        reflect_prompt_version: args
+            .strong_reader_reflect
+            .then(|| REFLECT_PROMPT_VERSION.to_owned()),
         judge_prompt_version: JUDGE_PROMPT_VERSION.to_string(),
         baseline_reader_model: args.baseline_reader_model.clone(),
         strong_reader_model: args.strong_reader_model.clone(),
@@ -819,16 +880,48 @@ fn run() -> BenchResult<()> {
                 write_report(&args.output, &report)?;
             }
             if args.run_strong_reader {
-                let ollama = require_ollama(&ollama)?;
-                run_answer(
-                    &mut report,
-                    record_index,
-                    ROUTE_RETRIEVAL_STRONG,
-                    &args.strong_reader_model,
-                    &retrieval_prompt_context,
-                    ollama,
-                    &args.reader_generation,
-                )?;
+                if let Some(provider) = frontier_reader.as_ref() {
+                    if should_reflect_question(&args, &report.questions[record_index].question) {
+                        run_provider_reflect_answer(
+                            &mut report,
+                            record_index,
+                            ROUTE_RETRIEVAL_STRONG,
+                            provider,
+                            &retrieval_prompt_context,
+                        )?;
+                    } else {
+                        run_provider_answer(
+                            &mut report,
+                            record_index,
+                            ROUTE_RETRIEVAL_STRONG,
+                            provider,
+                            &retrieval_prompt_context,
+                        )?;
+                    }
+                } else {
+                    let ollama = require_ollama(&ollama)?;
+                    if should_reflect_question(&args, &report.questions[record_index].question) {
+                        run_reflect_answer(
+                            &mut report,
+                            record_index,
+                            ROUTE_RETRIEVAL_STRONG,
+                            &args.strong_reader_model,
+                            &retrieval_prompt_context,
+                            ollama,
+                            &args.reader_generation,
+                        )?;
+                    } else {
+                        run_answer(
+                            &mut report,
+                            record_index,
+                            ROUTE_RETRIEVAL_STRONG,
+                            &args.strong_reader_model,
+                            &retrieval_prompt_context,
+                            ollama,
+                            &args.reader_generation,
+                        )?;
+                    }
+                }
                 write_report(&args.output, &report)?;
             }
         }
@@ -959,7 +1052,7 @@ fn run_external_memory_artifact(
         let client = OllamaClient::new(&args.ollama_base_url, args.timeout_secs)?;
         let version = client.version()?;
         let mut requested_models = vec![args.baseline_reader_model.as_str()];
-        if args.run_local_judge {
+        if args.run_local_judge && !args.frontier_judge {
             requested_models.push(args.judge_model.as_str());
         }
         let digests = client.require_models(&requested_models)?;
@@ -973,8 +1066,12 @@ fn run_external_memory_artifact(
         sample_seed: args.sample_seed,
         skip_adversarial: args.skip_adversarial,
         run_strong_reader: false,
+        strong_reader_reflect: false,
+        strong_reader_reflect_complex_only: false,
+        strong_reader_backend: default_local_reader_backend(),
         run_full_context: false,
         run_local_judge: args.run_local_judge,
+        judge_backend: default_local_judge_backend(),
         run_oracle_baseline: false,
         run_retrieval_baseline: true,
         predict_only: args.predict_only,
@@ -1007,6 +1104,7 @@ fn run_external_memory_artifact(
         consumer_selection_policy: ConsumerSelectionPolicy::Relevance,
         top_k: 0,
         answer_prompt_version: ANSWER_PROMPT_VERSION.to_owned(),
+        reflect_prompt_version: None,
         judge_prompt_version: JUDGE_PROMPT_VERSION.to_owned(),
         baseline_reader_model: args.baseline_reader_model.clone(),
         strong_reader_model: args.strong_reader_model.clone(),
@@ -1198,13 +1296,12 @@ fn run_answer_report(args: &Args, source_path: &Path) -> BenchResult<()> {
     if args.predict_only
         || args.run_oracle_baseline
         || args.run_full_context
-        || args.run_strong_reader
         || args.evidence_context
         || args.derived_memory_artifact.is_some()
     {
         return Err(BenchError::InvalidInput(
             "--answer-report accepts one stored product retrieval context lane only; use \
-             --retrieval-only and omit predict/oracle/full/strong/evidence/derived flags"
+             --retrieval-only and omit predict/oracle/full/evidence/derived flags"
                 .to_owned(),
         ));
     }
@@ -1213,21 +1310,33 @@ fn run_answer_report(args: &Args, source_path: &Path) -> BenchResult<()> {
             "--answer-report output must differ from its source report".to_owned(),
         ));
     }
-    if args.output.exists() && !args.force {
+    let resume_existing = args.resume && args.output.exists();
+    if args.resume && !resume_existing {
         return Err(BenchError::InvalidInput(format!(
-            "{} already exists; pass --force",
+            "cannot resume missing answer report {}",
             args.output.display()
         )));
     }
-    let text = std::fs::read_to_string(source_path).map_err(|error| {
+    if args.output.exists() && !args.force && !resume_existing {
+        return Err(BenchError::InvalidInput(format!(
+            "{} already exists; pass --force or --resume",
+            args.output.display()
+        )));
+    }
+    let input_path = if resume_existing {
+        args.output.as_path()
+    } else {
+        source_path
+    };
+    let text = std::fs::read_to_string(input_path).map_err(|error| {
         BenchError::InvalidInput(format!(
             "failed to read answer source report {}: {error}",
-            source_path.display()
+            input_path.display()
         ))
     })?;
     let mut report: RunReport =
         serde_json::from_str(&text).map_err(|error| BenchError::Parse(error.to_string()))?;
-    if report.config.dataset != args.dataset || !report.local_only {
+    if report.config.dataset != args.dataset || (!report.local_only && !resume_existing) {
         return Err(BenchError::InvalidInput(
             "answer source report dataset/locality differs".to_owned(),
         ));
@@ -1241,34 +1350,138 @@ fn run_answer_report(args: &Args, source_path: &Path) -> BenchResult<()> {
             "answer source report has incomplete retrieval contexts".to_owned(),
         ));
     }
-
-    let ollama = OllamaClient::new(&args.ollama_base_url, args.timeout_secs)?;
-    let ollama_version = ollama.version()?;
-    let mut requested_models = vec![args.baseline_reader_model.as_str()];
-    if args.run_local_judge {
-        requested_models.push(args.judge_model.as_str());
+    if resume_existing {
+        let expected_reflect_version = args
+            .strong_reader_reflect
+            .then(|| REFLECT_PROMPT_VERSION.to_owned());
+        let exact_config = report.config.run_strong_reader == args.run_strong_reader
+            && report.config.strong_reader_reflect == args.strong_reader_reflect
+            && report.config.strong_reader_reflect_complex_only
+                == args.strong_reader_reflect_complex_only
+            && report.config.run_local_judge == args.run_local_judge
+            && report.config.judge_backend
+                == if args.frontier_judge {
+                    "openai-compatible"
+                } else {
+                    "ollama"
+                }
+            && report.config.answer_prompt_version == ANSWER_PROMPT_VERSION
+            && report.config.reflect_prompt_version == expected_reflect_version
+            && report.config.judge_prompt_version == JUDGE_PROMPT_VERSION
+            && report.config.baseline_reader_model == args.baseline_reader_model
+            && report.config.strong_reader_model == args.strong_reader_model
+            && report.config.judge_model == args.judge_model
+            && report.config.reader_generation == args.reader_generation
+            && report.config.judge_generation == args.judge_generation;
+        if !exact_config {
+            return Err(BenchError::InvalidInput(
+                "answer report resume requires identical route, prompt, model, judge, and \
+                 generation settings"
+                    .to_owned(),
+            ));
+        }
     }
-    let model_digests = ollama.require_models(&requested_models)?;
-    let paired_answer_report = args
-        .paired_answer_report
-        .as_deref()
-        .map(|path| load_paired_answer_report(path, &report, args, &model_digests))
+
+    let needs_ollama = !args.strong_reader_remote || (args.run_local_judge && !args.frontier_judge);
+    let (ollama, ollama_version, model_digests) = if needs_ollama {
+        let client = OllamaClient::new(&args.ollama_base_url, args.timeout_secs)?;
+        let version = client.version()?;
+        let mut requested_models = Vec::new();
+        if !args.strong_reader_remote {
+            requested_models.push(if args.run_strong_reader {
+                args.strong_reader_model.as_str()
+            } else {
+                args.baseline_reader_model.as_str()
+            });
+        }
+        if args.run_local_judge && !args.frontier_judge {
+            requested_models.push(args.judge_model.as_str());
+        }
+        let digests = client.require_models(&requested_models)?;
+        (Some(client), version, digests)
+    } else {
+        (
+            None,
+            "not-used-frontier-answer-report".to_owned(),
+            BTreeMap::new(),
+        )
+    };
+    let frontier_reader = args
+        .strong_reader_remote
+        .then(|| {
+            let base_url = args.frontier_base_url.as_deref().ok_or_else(|| {
+                BenchError::InvalidInput(
+                    "--frontier-reader requires --frontier-base-url or LLM_BASE_URL".to_owned(),
+                )
+            })?;
+            OpenAiCompatibleProvider::new(ProviderConfig {
+                base_url: base_url.to_owned(),
+                model: args.strong_reader_model.clone(),
+                timeout_secs: args.timeout_secs,
+                max_retries: 3,
+                max_output_tokens: Some(1_200),
+            })
+            .map_err(provider_error)
+        })
         .transpose()?;
+    let frontier_judge = args
+        .frontier_judge
+        .then(|| {
+            let base_url = args.frontier_base_url.as_deref().ok_or_else(|| {
+                BenchError::InvalidInput(
+                    "--frontier-judge requires --frontier-base-url or LLM_BASE_URL".to_owned(),
+                )
+            })?;
+            OpenAiCompatibleProvider::new(ProviderConfig {
+                base_url: base_url.to_owned(),
+                model: args.judge_model.clone(),
+                timeout_secs: args.timeout_secs,
+                max_retries: 3,
+                max_output_tokens: Some(256),
+            })
+            .map_err(provider_error)
+        })
+        .transpose()?;
+    let paired_answer_report = if args.run_strong_reader {
+        None
+    } else {
+        args.paired_answer_report
+            .as_deref()
+            .map(|path| load_paired_answer_report(path, &report, args, &model_digests))
+            .transpose()?
+    };
+    let mut combined_model_digests = report.model_digests.clone();
+    combined_model_digests.extend(model_digests);
 
     report.schema_version = SCHEMA_VERSION;
-    report.run_id = format!(
-        "local-answer-{}-answer-report-{}",
-        report.config.dataset.as_str(),
-        timestamp_secs()
-    );
-    report.created_at_unix = timestamp_secs();
+    if !resume_existing {
+        report.run_id = format!(
+            "local-answer-{}-answer-report-{}",
+            report.config.dataset.as_str(),
+            timestamp_secs()
+        );
+        report.created_at_unix = timestamp_secs();
+    }
     report.completed_at_unix = None;
     report.ollama_base_url = args.ollama_base_url.clone();
     report.ollama_version = ollama_version;
-    report.model_digests = model_digests;
-    report.config.run_strong_reader = false;
+    report.model_digests = combined_model_digests;
+    report.local_only = !args.strong_reader_remote && !args.frontier_judge;
+    report.config.run_strong_reader = args.run_strong_reader;
+    report.config.strong_reader_reflect = args.strong_reader_reflect;
+    report.config.strong_reader_reflect_complex_only = args.strong_reader_reflect_complex_only;
+    report.config.strong_reader_backend = if args.strong_reader_remote {
+        "openai-compatible".to_owned()
+    } else {
+        default_local_reader_backend()
+    };
     report.config.run_full_context = false;
     report.config.run_local_judge = args.run_local_judge;
+    report.config.judge_backend = if args.frontier_judge {
+        "openai-compatible".to_owned()
+    } else {
+        default_local_judge_backend()
+    };
     report.config.run_oracle_baseline = false;
     report.config.run_retrieval_baseline = true;
     report.config.predict_only = false;
@@ -1276,16 +1489,28 @@ fn run_answer_report(args: &Args, source_path: &Path) -> BenchResult<()> {
         report.config.context_render_style = "detailed".to_owned();
     }
     report.config.answer_prompt_version = ANSWER_PROMPT_VERSION.to_owned();
+    report.config.reflect_prompt_version = args
+        .strong_reader_reflect
+        .then(|| REFLECT_PROMPT_VERSION.to_owned());
     report.config.judge_prompt_version = JUDGE_PROMPT_VERSION.to_owned();
     report.config.baseline_reader_model = args.baseline_reader_model.clone();
+    report.config.strong_reader_model = args.strong_reader_model.clone();
     report.config.judge_model = args.judge_model.clone();
     report.config.reader_generation = args.reader_generation.clone();
     report.config.judge_generation = args.judge_generation.clone();
     report.config.paired_answer_report_fnv1a64 = paired_answer_report
         .as_ref()
         .map(|(_, fingerprint)| fingerprint.clone());
-    for record in &mut report.questions {
-        record.routes.clear();
+    if !resume_existing {
+        for record in &mut report.questions {
+            if args.run_strong_reader {
+                record
+                    .routes
+                    .retain(|route, _| route == ROUTE_RETRIEVAL_BASELINE);
+            } else {
+                record.routes.clear();
+            }
+        }
     }
     let reused = paired_answer_report
         .as_ref()
@@ -1302,36 +1527,106 @@ fn run_answer_report(args: &Args, source_path: &Path) -> BenchResult<()> {
     report.summary = None;
     write_report(&args.output, &report)?;
 
+    let target_route = if args.run_strong_reader {
+        ROUTE_RETRIEVAL_STRONG
+    } else {
+        ROUTE_RETRIEVAL_BASELINE
+    };
     for record_index in 0..report.questions.len() {
+        if report.questions[record_index]
+            .routes
+            .contains_key(target_route)
+        {
+            continue;
+        }
         let context = report.questions[record_index]
             .retrieval_context
             .as_ref()
             .map(product_wire_prompt_context)
             .ok_or_else(|| BenchError::Parse("retrieval context disappeared".to_owned()))?;
-        run_answer(
-            &mut report,
-            record_index,
-            ROUTE_RETRIEVAL_BASELINE,
-            &args.baseline_reader_model,
-            &context,
-            &ollama,
-            &args.reader_generation,
-        )?;
-        if args.run_local_judge {
-            run_judge(
-                &mut report,
-                record_index,
-                ROUTE_RETRIEVAL_BASELINE,
-                &ollama,
-                args,
-            )?;
+        if let Some(provider) = frontier_reader.as_ref() {
+            ensure_frontier_budget(&report, args)?;
+            if should_reflect_question(args, &report.questions[record_index].question) {
+                run_provider_reflect_answer(
+                    &mut report,
+                    record_index,
+                    ROUTE_RETRIEVAL_STRONG,
+                    provider,
+                    &context,
+                )?;
+            } else {
+                run_provider_answer(
+                    &mut report,
+                    record_index,
+                    ROUTE_RETRIEVAL_STRONG,
+                    provider,
+                    &context,
+                )?;
+            }
+        } else {
+            let ollama = require_ollama(&ollama)?;
+            let (route, reader_model) = if args.run_strong_reader {
+                (ROUTE_RETRIEVAL_STRONG, args.strong_reader_model.as_str())
+            } else {
+                (
+                    ROUTE_RETRIEVAL_BASELINE,
+                    args.baseline_reader_model.as_str(),
+                )
+            };
+            if should_reflect_question(args, &report.questions[record_index].question) {
+                run_reflect_answer(
+                    &mut report,
+                    record_index,
+                    route,
+                    reader_model,
+                    &context,
+                    ollama,
+                    &args.reader_generation,
+                )?;
+            } else {
+                run_answer(
+                    &mut report,
+                    record_index,
+                    route,
+                    reader_model,
+                    &context,
+                    ollama,
+                    &args.reader_generation,
+                )?;
+            }
         }
         write_report(&args.output, &report)?;
+    }
+    if args.run_local_judge {
+        eprintln!("JUDGE PHASE questions={}", report.questions.len());
+        for record_index in 0..report.questions.len() {
+            let needs_judge = report.questions[record_index]
+                .routes
+                .get(target_route)
+                .is_some_and(|route| route.judge.is_none());
+            if needs_judge {
+                ensure_frontier_budget(&report, args)?;
+                if let Some(provider) = frontier_judge.as_ref() {
+                    run_provider_judge(&mut report, record_index, target_route, provider)?;
+                } else {
+                    let ollama = require_ollama(&ollama)?;
+                    run_judge(&mut report, record_index, target_route, ollama, args)?;
+                }
+                write_report(&args.output, &report)?;
+            }
+        }
     }
     report.summary = Some(build_summary(&report.questions));
     report.completed_at_unix = Some(timestamp_secs());
     write_report(&args.output, &report)?;
     print_summary(report.summary.as_ref());
+    let (input_tokens, output_tokens, cost_usd) = frontier_usage(&report);
+    if input_tokens > 0 || output_tokens > 0 {
+        eprintln!(
+            "FRONTIER USAGE input={} output={} gpt-4o-cost=${:.6}",
+            input_tokens, output_tokens, cost_usd
+        );
+    }
     eprintln!("REPORT {}", args.output.display());
     Ok(())
 }
@@ -1620,7 +1915,7 @@ fn load_or_create_report(
         ),
         created_at_unix: timestamp_secs(),
         completed_at_unix: None,
-        local_only: true,
+        local_only: !args.strong_reader_remote,
         ollama_base_url: args.ollama_base_url.clone(),
         ollama_version,
         model_digests,
@@ -1707,10 +2002,438 @@ fn run_answer(
                 locomo_official_f1,
                 locomo_reader_surface_f1,
                 canonicalized_answer,
+                reflection: None,
+                reflection_latency_ms: None,
                 judge: None,
                 reused_from_paired_report: false,
             },
         );
+    }
+    Ok(())
+}
+
+fn inference_candidate_answer(query: &str, reflection: &str) -> Option<String> {
+    if RecallPlan::infer(query).answer_shape != AnswerShape::Inference {
+        return None;
+    }
+    reflection_candidate_answer(reflection)
+}
+
+fn reflection_candidate_answer(reflection: &str) -> Option<String> {
+    let parsed: serde_json::Value = serde_json::from_str(reflection).ok()?;
+    reflection_answer_value(parsed.get("candidate_answer")?)
+}
+
+fn reflection_answer_value(value: &serde_json::Value) -> Option<String> {
+    let answer = match value {
+        serde_json::Value::String(value) => value.trim().to_owned(),
+        serde_json::Value::Number(value) => value.to_string(),
+        serde_json::Value::Bool(value) => value.to_string(),
+        serde_json::Value::Array(values) => values
+            .iter()
+            .filter_map(reflection_answer_value)
+            .collect::<Vec<_>>()
+            .join(", "),
+        serde_json::Value::Null | serde_json::Value::Object(_) => return None,
+    };
+    (!answer.is_empty()).then_some(answer)
+}
+
+fn run_reflect_answer(
+    report: &mut RunReport,
+    record_index: usize,
+    route: &str,
+    reader_model: &str,
+    context: &[PromptEvidence],
+    ollama: &OllamaClient,
+    generation: &GenerationOptions,
+) -> BenchResult<()> {
+    if report.questions[record_index].routes.contains_key(route) {
+        return Ok(());
+    }
+    let record = &report.questions[record_index];
+    eprintln!(
+        "REFLECT {} {} model={} context={}",
+        record.question_id,
+        route,
+        reader_model,
+        context.len()
+    );
+    let reflection_start = Instant::now();
+    let reflection = ollama.generate(
+        reader_model,
+        &reflection_prompt(record, context),
+        true,
+        generation,
+    )?;
+    let reflection_latency_ms = reflection_start.elapsed().as_secs_f64() * 1000.0;
+    if reflection.content.is_empty() {
+        return Err(BenchError::Parse(format!(
+            "reflect reader {reader_model} returned an empty evidence analysis"
+        )));
+    }
+
+    let (mut generated, answer_latency_ms) = if let Some(candidate) =
+        inference_candidate_answer(&record.question, &reflection.content)
+    {
+        (
+            GeneratedText {
+                content: candidate,
+                thinking_chars: 0,
+                done_reason: Some("reflection-candidate".to_owned()),
+                prompt_eval_tokens: None,
+                output_eval_tokens: None,
+            },
+            0.0,
+        )
+    } else {
+        let answer_start = Instant::now();
+        let generated = ollama.generate(
+            reader_model,
+            &reflected_answer_prompt(record, context, &reflection.content),
+            false,
+            generation,
+        )?;
+        (generated, answer_start.elapsed().as_secs_f64() * 1000.0)
+    };
+    if RecallPlan::infer(&record.question).answer_shape == AnswerShape::Collection
+        && generated
+            .content
+            .trim()
+            .eq_ignore_ascii_case("No information available")
+        && let Some(candidate) = reflection_candidate_answer(&reflection.content)
+    {
+        generated.content = candidate;
+        generated.done_reason = Some("reflection-candidate-backfill".to_owned());
+    }
+    if generated.content.is_empty() {
+        return Err(BenchError::Parse(format!(
+            "reflect reader {reader_model} returned an empty final answer"
+        )));
+    }
+
+    let locomo_official_f1 = locomo_official_score(
+        report.config.dataset,
+        &record.question_type,
+        &record.expected_answer,
+        &generated.content,
+    );
+    let canonicalized = answer_metrics::canonicalize_standalone_iso_date(&generated.content);
+    let locomo_reader_surface_f1 = locomo_official_score(
+        report.config.dataset,
+        &record.question_type,
+        &record.expected_answer,
+        &canonicalized,
+    );
+    let canonicalized_answer = (canonicalized != generated.content).then_some(canonicalized);
+    report.questions[record_index].routes.insert(
+        route.to_owned(),
+        RouteResult {
+            reader_model: reader_model.to_owned(),
+            answer: generated.content,
+            answer_latency_ms: answer_latency_ms + reflection_latency_ms,
+            context_items: context.len(),
+            context_chars: context.iter().map(|item| item.text.chars().count()).sum(),
+            thinking_chars: reflection.thinking_chars + generated.thinking_chars,
+            done_reason: generated.done_reason,
+            prompt_eval_tokens: sum_optional_counts(
+                reflection.prompt_eval_tokens,
+                generated.prompt_eval_tokens,
+            ),
+            output_eval_tokens: sum_optional_counts(
+                reflection.output_eval_tokens,
+                generated.output_eval_tokens,
+            ),
+            locomo_official_f1,
+            locomo_reader_surface_f1,
+            canonicalized_answer,
+            reflection: Some(reflection.content),
+            reflection_latency_ms: Some(reflection_latency_ms),
+            judge: None,
+            reused_from_paired_report: false,
+        },
+    );
+    Ok(())
+}
+
+fn sum_optional_counts(left: Option<u64>, right: Option<u64>) -> Option<u64> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.saturating_add(right)),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    }
+}
+
+fn run_provider_answer(
+    report: &mut RunReport,
+    record_index: usize,
+    route: &str,
+    provider: &dyn LlmProvider,
+    context: &[PromptEvidence],
+) -> BenchResult<()> {
+    if report.questions[record_index].routes.contains_key(route) {
+        return Ok(());
+    }
+    let record = &report.questions[record_index];
+    eprintln!(
+        "FRONTIER ANSWER {} {} model={} context={}",
+        record.question_id,
+        route,
+        provider.name(),
+        context.len()
+    );
+    let start = Instant::now();
+    let generation = provider
+        .generate_with_usage(&answer_prompt(record, context))
+        .map_err(provider_error)?;
+    let answer = generation.content.trim().to_owned();
+    if answer.is_empty() {
+        return Err(BenchError::Parse(format!(
+            "frontier reader {} returned an empty final answer",
+            provider.name()
+        )));
+    }
+    let answer_latency_ms = start.elapsed().as_secs_f64() * 1000.0;
+    insert_provider_route(
+        report,
+        record_index,
+        route,
+        provider.name(),
+        context,
+        answer,
+        answer_latency_ms,
+        None,
+        None,
+        generation.prompt_tokens,
+        generation.completion_tokens,
+    );
+    Ok(())
+}
+
+fn run_provider_reflect_answer(
+    report: &mut RunReport,
+    record_index: usize,
+    route: &str,
+    provider: &dyn LlmProvider,
+    context: &[PromptEvidence],
+) -> BenchResult<()> {
+    if report.questions[record_index].routes.contains_key(route) {
+        return Ok(());
+    }
+    let record = &report.questions[record_index];
+    eprintln!(
+        "FRONTIER REFLECT {} {} model={} context={}",
+        record.question_id,
+        route,
+        provider.name(),
+        context.len()
+    );
+    let reflection_start = Instant::now();
+    let reflection_generation = provider
+        .generate_with_usage(&reflection_prompt(record, context))
+        .map_err(provider_error)?;
+    let reflection = reflection_generation.content.trim().to_owned();
+    let reflection_latency_ms = reflection_start.elapsed().as_secs_f64() * 1000.0;
+    if reflection.is_empty() {
+        return Err(BenchError::Parse(format!(
+            "frontier reflect reader {} returned an empty evidence analysis",
+            provider.name()
+        )));
+    }
+    let (mut answer, answer_latency_ms, answer_prompt_tokens, answer_output_tokens) =
+        if let Some(candidate) = inference_candidate_answer(&record.question, &reflection) {
+            (candidate, 0.0, None, None)
+        } else {
+            let answer_start = Instant::now();
+            let generation = provider
+                .generate_with_usage(&reflected_answer_prompt(record, context, &reflection))
+                .map_err(provider_error)?;
+            (
+                generation.content.trim().to_owned(),
+                answer_start.elapsed().as_secs_f64() * 1000.0,
+                generation.prompt_tokens,
+                generation.completion_tokens,
+            )
+        };
+    if RecallPlan::infer(&record.question).answer_shape == AnswerShape::Collection
+        && answer
+            .trim()
+            .eq_ignore_ascii_case("No information available")
+        && let Some(candidate) = reflection_candidate_answer(&reflection)
+    {
+        answer = candidate;
+    }
+    if answer.is_empty() {
+        return Err(BenchError::Parse(format!(
+            "frontier reflect reader {} returned an empty final answer",
+            provider.name()
+        )));
+    }
+    insert_provider_route(
+        report,
+        record_index,
+        route,
+        provider.name(),
+        context,
+        answer,
+        answer_latency_ms + reflection_latency_ms,
+        Some(reflection),
+        Some(reflection_latency_ms),
+        sum_optional_counts(reflection_generation.prompt_tokens, answer_prompt_tokens),
+        sum_optional_counts(
+            reflection_generation.completion_tokens,
+            answer_output_tokens,
+        ),
+    );
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn insert_provider_route(
+    report: &mut RunReport,
+    record_index: usize,
+    route: &str,
+    reader_model: &str,
+    context: &[PromptEvidence],
+    answer: String,
+    answer_latency_ms: f64,
+    reflection: Option<String>,
+    reflection_latency_ms: Option<f64>,
+    prompt_eval_tokens: Option<u64>,
+    output_eval_tokens: Option<u64>,
+) {
+    let record = &report.questions[record_index];
+    let locomo_official_f1 = locomo_official_score(
+        report.config.dataset,
+        &record.question_type,
+        &record.expected_answer,
+        &answer,
+    );
+    let canonicalized = answer_metrics::canonicalize_standalone_iso_date(&answer);
+    let locomo_reader_surface_f1 = locomo_official_score(
+        report.config.dataset,
+        &record.question_type,
+        &record.expected_answer,
+        &canonicalized,
+    );
+    let canonicalized_answer = (canonicalized != answer).then_some(canonicalized);
+    report.questions[record_index].routes.insert(
+        route.to_owned(),
+        RouteResult {
+            reader_model: reader_model.to_owned(),
+            answer,
+            answer_latency_ms,
+            context_items: context.len(),
+            context_chars: context.iter().map(|item| item.text.chars().count()).sum(),
+            thinking_chars: 0,
+            done_reason: None,
+            prompt_eval_tokens,
+            output_eval_tokens,
+            locomo_official_f1,
+            locomo_reader_surface_f1,
+            canonicalized_answer,
+            reflection,
+            reflection_latency_ms,
+            judge: None,
+            reused_from_paired_report: false,
+        },
+    );
+}
+
+fn provider_error(error: ProviderError) -> BenchError {
+    BenchError::InvalidInput(format!("frontier provider request failed: {error}"))
+}
+
+fn run_provider_judge(
+    report: &mut RunReport,
+    record_index: usize,
+    route: &str,
+    provider: &dyn LlmProvider,
+) -> BenchResult<()> {
+    let needs_judge = report.questions[record_index]
+        .routes
+        .get(route)
+        .is_some_and(|result| result.judge.is_none());
+    if !needs_judge {
+        return Ok(());
+    }
+    let record = &report.questions[record_index];
+    let answer = record
+        .routes
+        .get(route)
+        .map(|result| result.answer.clone())
+        .ok_or_else(|| BenchError::Parse(format!("route {route} disappeared")))?;
+    eprintln!(
+        "FRONTIER JUDGE {} {} model={}",
+        record.question_id,
+        route,
+        provider.name()
+    );
+    let prompt = judge_prompt(record, &answer);
+    let start = Instant::now();
+    let generation = provider
+        .generate_with_usage(&prompt)
+        .map_err(provider_error)?;
+    if generation.content.trim().is_empty() {
+        return Err(BenchError::Parse(format!(
+            "frontier judge {} returned an empty response",
+            provider.name()
+        )));
+    }
+    let generated = GeneratedText {
+        content: generation.content,
+        thinking_chars: 0,
+        done_reason: None,
+        prompt_eval_tokens: generation.prompt_tokens,
+        output_eval_tokens: generation.completion_tokens,
+    };
+    let decision = parse_judge(
+        provider.name(),
+        generated,
+        start.elapsed().as_secs_f64() * 1000.0,
+    );
+    if let Some(result) = report.questions[record_index].routes.get_mut(route) {
+        result.judge = Some(decision);
+    }
+    Ok(())
+}
+
+fn frontier_usage(report: &RunReport) -> (u64, u64, f64) {
+    let mut input_tokens = 0u64;
+    let mut output_tokens = 0u64;
+    for record in &report.questions {
+        for route in record.routes.values() {
+            if route.reader_model == "gpt-4o" {
+                input_tokens =
+                    input_tokens.saturating_add(route.prompt_eval_tokens.unwrap_or_default());
+                output_tokens =
+                    output_tokens.saturating_add(route.output_eval_tokens.unwrap_or_default());
+            }
+            if let Some(judge) = &route.judge
+                && judge.judge_model == "gpt-4o"
+            {
+                input_tokens =
+                    input_tokens.saturating_add(judge.prompt_eval_tokens.unwrap_or_default());
+                output_tokens =
+                    output_tokens.saturating_add(judge.output_eval_tokens.unwrap_or_default());
+            }
+        }
+    }
+    let cost_usd =
+        input_tokens as f64 * 2.50 / 1_000_000.0 + output_tokens as f64 * 10.0 / 1_000_000.0;
+    (input_tokens, output_tokens, cost_usd)
+}
+
+fn ensure_frontier_budget(report: &RunReport, args: &Args) -> BenchResult<()> {
+    let Some(max_cost_usd) = args.frontier_max_cost_usd else {
+        return Ok(());
+    };
+    let (input_tokens, output_tokens, cost_usd) = frontier_usage(report);
+    if cost_usd >= max_cost_usd {
+        return Err(BenchError::InvalidInput(format!(
+            "frontier cost stop reached: ${cost_usd:.6} >= ${max_cost_usd:.6} \
+             ({input_tokens} input, {output_tokens} output tokens)"
+        )));
     }
     Ok(())
 }
@@ -1911,7 +2634,7 @@ fn answer_prompt(record: &QuestionRecord, context: &[PromptEvidence]) -> String 
          Do not mention the evidence or explain your reasoning. \
          If the evidence is insufficient, answer exactly No information available.\n\n",
     );
-    prompt.push_str(question_type_instruction(&record.question_type));
+    prompt.push_str(&query_plan_instruction(&record.question));
     prompt.push('\n');
     if let Some(date) = &record.question_date {
         prompt.push_str(&format!("Question date: {date}\n"));
@@ -1926,42 +2649,189 @@ fn answer_prompt(record: &QuestionRecord, context: &[PromptEvidence]) -> String 
     prompt
 }
 
-fn question_type_instruction(question_type: &str) -> &'static str {
-    match question_type {
-        "temporal" | "temporal-reasoning" => {
+fn reflection_prompt(record: &QuestionRecord, context: &[PromptEvidence]) -> String {
+    let mut prompt = String::from(
+        "You are the evidence-analysis stage of a memory system. Use only the supplied evidence. \
+         Do not invent personal facts absent from the evidence. You may use stable, ordinary \
+         world knowledge only to connect an explicit evidence fact to the question, such as a \
+         city's state or a commonplace implication; identify that bridge in reasoning_chain. \
+         Inspect every item internally, but write only evidence that directly helps answer the \
+         question. Return one complete JSON object of at most 600 tokens with these keys: \
+         required_slots, evidence_findings, reasoning_chain, candidate_answer, \
+         missing_or_ambiguous. Keep each required slot under eight words. Include only distinct \
+         supporting facts in evidence_findings, with one short sentence per fact; preserve names, \
+         negation, quantities, source dates, and who said or did each thing. Use at most six short \
+         reasoning_chain steps to connect those findings without inventing a personal event. Do \
+         not summarize irrelevant evidence and do not repeat a fact in multiple fields. \
+         For counts and lists, enumerate distinct completed evidence-backed items before forming \
+         candidate_answer; exclude plans, intentions, hypothetical events, and duplicate mentions \
+         of the same event unless the question explicitly asks about them. For relative dates \
+         inside evidence, resolve them against that evidence item's date, not the question date. \
+         If an item says an activity has continued for a duration, subtract that duration from \
+         the item's date to infer its start. If a duration is requested across multiple items, \
+         identify the earliest start and latest completion for the same event and calculate the \
+         elapsed time. When the question asks what is likely, might, could, or whether something \
+         is true, record the best-supported plausible implication rather than requiring explicit \
+         confirmation. Prefer a premise that the evidence explicitly links as a reason, goal, \
+         preference, or consequence over an unrelated co-occurring skill or event. Preserve all \
+         equally plausible ordinary-world alternatives when the evidence does not distinguish \
+         them. For yes/no conclusions, include the shortest supporting entity or fact in \
+         candidate_answer. \
+         Treat paraphrases and references such as home country, partner, or that event as slots \
+         to resolve to a specific value whenever the evidence permits. No benchmark annotation, \
+         reference answer, or judge feedback is available. Finish the JSON before the output \
+         limit; brevity is mandatory.\n\n",
+    );
+    prompt.push_str(&query_plan_instruction(&record.question));
+    prompt.push('\n');
+    if let Some(date) = &record.question_date {
+        prompt.push_str(&format!("Question date: {date}\n"));
+    }
+    prompt.push_str("Evidence:\n");
+    for item in context {
+        prompt.push_str(&format!("[{}]\n{}\n", item.label, item.text));
+    }
+    prompt.push_str("\nQuestion: ");
+    prompt.push_str(&record.question);
+    prompt.push_str("\nEvidence analysis JSON:");
+    prompt
+}
+
+fn reflected_answer_prompt(
+    record: &QuestionRecord,
+    context: &[PromptEvidence],
+    reflection: &str,
+) -> String {
+    let mut prompt = String::from(
+        "You are the final verification stage of a memory system. Use only the supplied evidence. \
+         The draft analysis is untrusted: check every claim against the evidence and correct it. \
+         Make sure the final answer fills every slot requested by the question. For lists and \
+         counts, include every distinct completed supported item, excluding mere plans and \
+         duplicate mentions. For temporal questions, resolve relative expressions and elapsed \
+         durations against the dated evidence items and preserve the requested granularity. \
+         Resolve descriptive references to their specific names, places, \
+         events, or values when the evidence supplies them. Match the semantic type requested by \
+         the question; for example, normalize an evidenced city to its containing country when \
+         the question asks for a country. A concise commonsense implication is \
+         allowed when the query-derived plan requests inference; do not abstain merely because the \
+         conclusion is implicit when the draft gives a complete evidence-grounded chain. Stable \
+         ordinary world knowledge may bridge an explicit evidence fact to that conclusion, but \
+         must not supply a new personal fact. Answer No information available only when neither \
+         the evidence nor a valid grounded implication bears on the requested answer. Prefer the \
+         exact wording and specificity of the evidence over a vague paraphrase. Give only the \
+         shortest direct final answer, with no explanation and no mention of the analysis or \
+         evidence.\n\n",
+    );
+    prompt.push_str(&query_plan_instruction(&record.question));
+    prompt.push('\n');
+    if let Some(date) = &record.question_date {
+        prompt.push_str(&format!("Question date: {date}\n"));
+    }
+    prompt.push_str("Evidence:\n");
+    for item in context {
+        prompt.push_str(&format!("[{}]\n{}\n", item.label, item.text));
+    }
+    prompt.push_str("\nDraft evidence analysis:\n");
+    prompt.push_str(reflection);
+    prompt.push_str("\n\nQuestion: ");
+    prompt.push_str(&record.question);
+    prompt.push_str("\nFinal answer:");
+    prompt
+}
+
+fn query_plan_instruction(query: &str) -> String {
+    let plan = RecallPlan::infer(query);
+    let answer_instruction = match plan.answer_shape {
+        AnswerShape::Temporal => {
             "For this temporal question, resolve a relative expression inside an evidence item \
              against that same evidence item's date. Do not resolve evidence text against the \
              Question date. Use the Question date only for a relative expression in the question \
-             itself. Preserve the answer's requested granularity. State the resulting date or date \
-             range directly in natural language; do not copy a date from these instructions."
+             itself. Subtract stated elapsed durations to infer starts, or compare the dated start \
+             and completion of the same event when the question asks how long it took. For a \
+             frequency question, order repeated instances of the same event by their evidence \
+             dates and state the supported cadence rather than merely counting the instances. \
+             Preserve the answer's requested granularity. State the resulting date, date range, \
+             duration, or frequency directly in natural language; do not copy a value from these \
+             instructions."
         }
-        "multi-hop" | "multi-session" => {
-            "For this multi-evidence question, combine all relevant items before answering. \
-             Count distinct events or entities explicitly when the question asks for a count. \
-             Separate distinct answer items with commas rather than joining them with 'and'."
+        AnswerShape::Frequency => {
+            "For this frequency question, identify repeated instances of the same requested event, \
+             order them by their evidence dates, and infer the supported cadence from consecutive \
+             intervals. Do not substitute a raw event count for the frequency, and do not mix in \
+             similarly named events about another person."
         }
-        "knowledge-update" => {
-            "For this update question, prefer the latest applicable fact and do not mix it with \
-             an older superseded value."
+        AnswerShape::Count => {
+            "Enumerate the distinct evidence-backed events or entities internally, deduplicate \
+             repeated descriptions of the same item, exclude plans or hypothetical future events, \
+             and answer with the resulting count."
         }
-        "preference" => {
-            "For this preference question, infer only preferences directly grounded in the \
-             supplied evidence; a concise grounded recommendation is allowed."
+        AnswerShape::Collection => {
+            "Return every distinct evidence-backed item requested by the question. Deduplicate \
+             paraphrases of the same item and separate final items with commas."
         }
-        "open-domain" => {
-            "For this open-domain question, make the shortest reasonable inference from the \
-             supplied evidence and ordinary commonsense. Do not answer UNKNOWN merely because \
-             the conclusion is implicit rather than stated word for word."
+        AnswerShape::Relationship => {
+            "Combine the evidence needed to state the requested relationship, comparison, reason, \
+             or causal connection. Do not stop at an intermediate fact."
         }
-        "adversarial" => {
-            "For this adversarial question, answer exactly No information available when the \
-             requested claim is not supported by the supplied evidence."
+        AnswerShape::Inference => {
+            "Derive the shortest reasonable conclusion whose premises are all present in the \
+             evidence. The question asks for a plausible implication, not explicit confirmation. \
+             Prefer evidence explicitly linked as a reason, goal, preference, or consequence over \
+             unrelated co-occurring facts. Stable ordinary world knowledge may connect an \
+             explicit evidence fact to the conclusion, and equally plausible alternatives should \
+             all be preserved when the evidence cannot distinguish them. State the requested \
+             conclusion, not only its intermediate premises, and do not abstain solely because \
+             the conclusion was implicit. For yes/no conclusions, include the shortest supporting \
+             entity or fact."
         }
-        _ => {
-            "Extract the exact requested fact from the supplied evidence and preserve names, \
-             numbers, units, and negation."
+        AnswerShape::Fact => {
+            "Extract the exact requested fact and preserve names, numbers, units, specificity, \
+             and negation. Match the semantic type requested by the question: if the evidence \
+             supplies a city but the question asks for its country, return the containing country."
         }
+        _ => "Answer in the shape requested by the question using only supplied evidence.",
+    };
+    let evidence_instruction = match plan.recall_intent {
+        RecallIntent::Enumeration => {
+            "Combine distinct relevant evidence items before answering; repeated source windows \
+             are not additional facts."
+        }
+        RecallIntent::Relational => {
+            "Trace the shortest complete chain between the named entities, events, or causes and \
+             verify each link against the evidence."
+        }
+        RecallIntent::Temporal => {
+            "Keep event time, observation time, and relative temporal expressions separate."
+        }
+        RecallIntent::Direct => {
+            "Prefer the most specific directly supported value; use multiple items only when they \
+             disambiguate or resolve a reference."
+        }
+        _ => "Use the smallest complete set of relevant evidence.",
+    };
+    format!(
+        "Query-derived reader plan: answer_shape={:?}, recall_intent={:?}. {answer_instruction} \
+         {evidence_instruction}",
+        plan.answer_shape, plan.recall_intent
+    )
+}
+
+fn should_reflect_question(args: &Args, query: &str) -> bool {
+    if !args.strong_reader_reflect {
+        return false;
     }
+    if !args.strong_reader_reflect_complex_only {
+        return true;
+    }
+    let plan = RecallPlan::infer(query);
+    matches!(
+        plan.answer_shape,
+        AnswerShape::Count
+            | AnswerShape::Collection
+            | AnswerShape::Frequency
+            | AnswerShape::Inference
+            | AnswerShape::Relationship
+    )
 }
 
 fn judge_prompt(record: &QuestionRecord, answer: &str) -> String {
@@ -1996,7 +2866,12 @@ fn judge_prompt(record: &QuestionRecord, answer: &str) -> String {
         }
     };
     format!(
-        "You are an impartial benchmark judge. {criterion} Return one JSON object only, with \
+        "You are an impartial benchmark judge. {criterion} Treat the reference as an answer key, \
+         not as required wording. When a yes/no or either/or candidate directly gives the same \
+         conclusion as the reference, do not require an explanatory clause that appears only \
+         after the reference conclusion. Questions that explicitly ask why or how still require \
+         the requested reason or method, and list or count questions still require all essential \
+         items. Return one JSON object only, with \
          keys verdict (\"correct\" or \"incorrect\"), confidence (0 to 1), and reason (one short \
          sentence).\n\nQuestion: {}\nReference answer: {}\nCandidate answer: {}",
         record.question, record.expected_answer, answer
@@ -2842,6 +3717,14 @@ where
     let mut sample_seed = 42u64;
     let mut skip_adversarial = false;
     let mut run_strong_reader = false;
+    let mut strong_reader_reflect = false;
+    let mut strong_reader_reflect_complex_only = false;
+    let mut strong_reader_remote = false;
+    let mut frontier_judge = false;
+    let mut frontier_base_url = std::env::var("LLM_BASE_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let mut frontier_max_cost_usd = None;
     let mut run_full_context = false;
     let mut run_local_judge = true;
     let mut run_oracle_baseline = true;
@@ -2857,19 +3740,20 @@ where
     let mut compact_retrieval_context = false;
     let mut hydrate_episodic_context = false;
     let mut shadow_rank_fusion = false;
-    let mut consumer_cross_encoder = None;
+    let mut consumer_cross_encoder =
+        Some(anamnesis::embedding::fastembed::DEFAULT_RERANKER_MODEL.to_owned());
     let mut consumer_ranking_report = None;
     let mut consumer_prefilter_cross_encoder = None;
     let mut consumer_prefilter_k = None;
     let mut consumer_prefilter_query_fusion = false;
-    let mut consumer_evidence_documents = false;
-    let mut consumer_candidate_k = 100usize;
+    let mut consumer_evidence_documents = true;
+    let mut consumer_candidate_k = 20usize;
     let mut first_stage_seed_limit = None;
     let mut dump_candidate_pool = false;
     let mut screen_top_k = Vec::new();
     let mut screen_source_dedup = false;
     let mut diagnostic_readout_limit = None;
-    let mut consumer_selection_policy = ConsumerSelectionPolicy::Relevance;
+    let mut consumer_selection_policy = ConsumerSelectionPolicy::MemoryDeep;
     let mut top_k = 20usize;
     let mut baseline_reader_model = "qwen3.6:35b-a3b".to_string();
     let mut strong_reader_model = "qwen3.6:35b-a3b".to_string();
@@ -2932,8 +3816,36 @@ where
                 sample_seed = parse_u64(&next_value(&mut iter, "--sample-seed")?, "--sample-seed")?
             }
             "--skip-adversarial" => skip_adversarial = true,
-            "--baseline-only" => run_strong_reader = false,
+            "--baseline-only" => {
+                run_strong_reader = false;
+                strong_reader_reflect = false;
+                strong_reader_reflect_complex_only = false;
+                strong_reader_remote = false;
+            }
             "--run-strong-reader" => run_strong_reader = true,
+            "--run-reflect-reader" => {
+                run_strong_reader = true;
+                strong_reader_reflect = true;
+            }
+            "--reflect-complex-only" => {
+                run_strong_reader = true;
+                strong_reader_reflect = true;
+                strong_reader_reflect_complex_only = true;
+            }
+            "--frontier-reader" => {
+                run_strong_reader = true;
+                strong_reader_remote = true;
+            }
+            "--frontier-judge" => frontier_judge = true,
+            "--frontier-base-url" => {
+                frontier_base_url = Some(next_value(&mut iter, "--frontier-base-url")?)
+            }
+            "--frontier-max-cost-usd" => {
+                frontier_max_cost_usd = Some(parse_f64(
+                    &next_value(&mut iter, "--frontier-max-cost-usd")?,
+                    "--frontier-max-cost-usd",
+                )?)
+            }
             "--full-context" => run_full_context = true,
             "--skip-local-judge" => run_local_judge = false,
             "--predict-only" => predict_only = true,
@@ -2972,6 +3884,11 @@ where
             "--shadow-rank-fusion" => shadow_rank_fusion = true,
             "--consumer-cross-encoder" | "--shadow-cross-encoder" => {
                 consumer_cross_encoder = Some(next_value(&mut iter, &arg)?)
+            }
+            "--no-product-reranker" => {
+                consumer_cross_encoder = None;
+                consumer_evidence_documents = false;
+                consumer_selection_policy = ConsumerSelectionPolicy::Relevance;
             }
             "--consumer-ranking-report" => {
                 consumer_ranking_report = Some(PathBuf::from(next_value(&mut iter, &arg)?))
@@ -3101,6 +4018,21 @@ where
             "--timeout-secs must be at least 1".to_string(),
         ));
     }
+    if frontier_max_cost_usd.is_some_and(|value| !value.is_finite() || value <= 0.0) {
+        return Err(BenchError::InvalidInput(
+            "--frontier-max-cost-usd must be a positive finite number".to_owned(),
+        ));
+    }
+    if frontier_judge && answer_report.is_none() {
+        return Err(BenchError::InvalidInput(
+            "--frontier-judge currently requires --answer-report".to_owned(),
+        ));
+    }
+    if frontier_judge && !run_local_judge {
+        return Err(BenchError::InvalidInput(
+            "--frontier-judge cannot be combined with --skip-local-judge".to_owned(),
+        ));
+    }
     if !(0.0..=2.0).contains(&reader_generation.temperature)
         || !(0.0..=1.0).contains(&reader_generation.top_p)
         || reader_generation.top_k == 0
@@ -3220,19 +4152,48 @@ where
     if diagnostic_readout_limit.is_some() {
         dump_candidate_pool = true;
     }
-    for (flag, model) in [
-        ("--baseline-reader-model", baseline_reader_model.as_str()),
-        ("--strong-reader-model", strong_reader_model.as_str()),
-        ("--judge-model", judge_model.as_str()),
-    ] {
+    for (flag, model) in [("--baseline-reader-model", baseline_reader_model.as_str())] {
         if !model.trim().to_ascii_lowercase().starts_with("qwen3.6") {
             return Err(BenchError::InvalidInput(format!(
                 "{flag} is frozen to the qwen3.6 lane"
             )));
         }
     }
+    if !frontier_judge
+        && !judge_model
+            .trim()
+            .to_ascii_lowercase()
+            .starts_with("qwen3.6")
+    {
+        return Err(BenchError::InvalidInput(
+            "--judge-model is frozen to qwen3.6 for the local lane".to_owned(),
+        ));
+    }
+    if frontier_max_cost_usd.is_some()
+        && ((strong_reader_remote && strong_reader_model != "gpt-4o")
+            || (frontier_judge && judge_model != "gpt-4o"))
+    {
+        return Err(BenchError::InvalidInput(
+            "--frontier-max-cost-usd currently uses GPT-4o pricing and requires remote models \
+             to be exactly gpt-4o"
+                .to_owned(),
+        ));
+    }
+    if !strong_reader_remote
+        && !strong_reader_model
+            .trim()
+            .to_ascii_lowercase()
+            .starts_with("qwen3.6")
+    {
+        return Err(BenchError::InvalidInput(
+            "--strong-reader-model is frozen to qwen3.6 for the local lane".to_owned(),
+        ));
+    }
     if predict_only {
         run_strong_reader = false;
+        strong_reader_reflect = false;
+        strong_reader_reflect_complex_only = false;
+        strong_reader_remote = false;
         run_full_context = false;
         run_local_judge = false;
         run_oracle_baseline = false;
@@ -3270,6 +4231,12 @@ where
         sample_seed,
         skip_adversarial,
         run_strong_reader,
+        strong_reader_reflect,
+        strong_reader_reflect_complex_only,
+        strong_reader_remote,
+        frontier_judge,
+        frontier_base_url,
+        frontier_max_cost_usd,
         run_full_context,
         run_local_judge,
         run_oracle_baseline,
@@ -3411,21 +4378,26 @@ Options:\n\
   --compact-retrieval-context      Keep the richest retrieved item per source turn\n\
   --hydrate-episodic-context       Replace packaged turn labels with source fragments\n\
   --shadow-rank-fusion             Benchmark-only top-200 cognitive/embed/text RRF candidate\n\
-  --consumer-cross-encoder <model> Consumer-owned local reranker on product readout\n\
+  --consumer-cross-encoder <model> Override the canonical product reranker\n\
+  --no-product-reranker            Ablation: disable local reranking and deep selection\n\
   --consumer-ranking-report <path> Replay frozen scores from a compatible report\n\
   --consumer-prefilter-cross-encoder <model> Fast first-stage model for a reranker cascade\n\
   --consumer-prefilter-k <N>       Documents passed from the prefilter to the quality reranker\n\
   --consumer-prefilter-query-fusion Fuse core query variants at the fast prefilter\n\
-  --consumer-evidence-documents    Score Memory-compiled canonical raw evidence documents\n\
-  --consumer-candidate-k <N>       Cognitive candidate/metric cutoff (default: 100)\n\
+  --consumer-evidence-documents    Compatibility flag; canonical evidence documents are the default\n\
+  --consumer-candidate-k <N>       Cognitive candidate/metric cutoff (default: 20)\n\
   --first-stage-seed-limit <N>     RWR seed cutoff, independent of final top-k\n\
   --dump-candidate-pool            Persist top-200 readout feature diagnostics\n\
   --screen-top-k <A,B,...>         Repackage one fixed ranking at extra final cutoffs\n\
   --screen-source-dedup            Also screen source-turn deduplication with backfill\n\
   --diagnostic-readout-limit <N>   Retain up to N trace rows without changing retrieval\n\
-  --consumer-selection <POLICY>    relevance (default), memory-deep, memory-distinct-sources,\n\
+  --consumer-selection <POLICY>    memory-deep (default), relevance, memory-distinct-sources,\n\
                                    memory-source-coverage, source-dedup, source-coverage, or provenance-guardrail\n\
-  --run-strong-reader              Add route 3 with --strong-reader-model\n\
+--run-strong-reader              Add route 3 with --strong-reader-model\n\
+--run-reflect-reader             Add route 3 with two-pass evidence reflection\n\
+--reflect-complex-only           Reflect Count, Collection, Frequency, Inference, and Relationship plans\n\
+--frontier-reader                Run route 3 through an OpenAI-compatible API\n\
+  --frontier-base-url <url>        API base URL (or set LLM_BASE_URL)\n\
   --baseline-only                  Compatibility alias: omit route 3\n\
   --top-k <N>                      Product retrieval cutoff (default: 20)\n\
   --baseline-reader-model <name>   Reader for routes 0, 1, and 2 (default: qwen3.6:35b-a3b)\n\
@@ -3454,8 +4426,10 @@ Routes:\n\
   0-full-context         Complete history + baseline local reader\n\
   1-oracle-baseline      Gold evidence + baseline local reader\n\
   2-retrieval-baseline   Memory+BGE evidence + same reader\n\
-  3-retrieval-strong     Same retrieval + stronger local reader\n\
-Route 0 is added with --full-context and route 3 with --run-strong-reader. \
+  3-retrieval-strong     Same retrieval + stronger local or frontier reader\n\
+Route 0 is added with --full-context and route 3 with --run-strong-reader, \
+--run-reflect-reader, or --reflect-complex-only. Add --frontier-reader to move route 3 to an \
+OpenAI-compatible API; the bearer token is read only from LLM_API_KEY. \
 LoCoMo routes receive the official deterministic F1; every route also receives \
 an explicitly secondary local-judge score."
     );

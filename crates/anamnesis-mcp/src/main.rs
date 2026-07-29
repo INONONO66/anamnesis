@@ -158,6 +158,7 @@ async fn serve_embedded() -> Result<()> {
         cfg.default_namespace.clone(),
         cfg.reinforce_on_recall,
         cfg.embed_model.clone(),
+        cfg.rerank_model.clone(),
     )));
     let server = AnamnesisServer::local(registry.clone());
     tracing::info!("anamnesis serving over stdio (embedded mode)");

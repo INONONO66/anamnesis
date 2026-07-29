@@ -2,9 +2,10 @@
 
 This plugin wires anamnesis into Claude Code as **activation-gated recall injection**. On
 `SessionStart` it seeds the turn with a few high-salience project memories; on every
-`UserPromptSubmit` it runs a **read-only**, **top-`k`-capped** spreading-activation recall over
-your prompt and injects the result **only when the top activation clears a need-odds threshold
-`τ`** — an off-topic prompt injects nothing. Injection never reinforces anything: hook recall is
+`UserPromptSubmit` it runs the same **read-only**, **top-`k`-capped** canonical reranked-recall
+pipeline used by the MCP tool and LoCoMo harness. It injects the result **only when the selected
+top node's cognitive activation clears a need-odds threshold `τ`** — an off-topic prompt injects
+nothing. Injection never reinforces anything: hook recall is
 strictly read-only, so it cannot drive a recommender-style feedback loop. **Reinforcement is
 agent-driven** — the injected block carries a one-line nudge asking the agent to call the
 `recall`/`relate` MCP tools when it actually uses a memory, and that deliberate call is the only
@@ -133,7 +134,7 @@ timeout = 5
 [[hooks.SessionStart.hooks]]
 type = "command"
 command = "anamnesis hook session-start"
-timeout = 10
+timeout = 5
 ```
 
 > **Visibility caveat — the one real difference from Claude Code.** Claude Code injects
@@ -184,7 +185,7 @@ laws (ADR-0010).
 | `ANAMNESIS_HOOK_CONTEXT_TURNS` | Recent transcript turns folded into the `UserPromptSubmit` recall query. | `3` |
 | `ANAMNESIS_HOOK_TOPK` | `k` — cap on injected per-turn memories. | `3` |
 | `ANAMNESIS_HOOK_SEED_K` | `SessionStart` seed size. | `5` |
-| `ANAMNESIS_HOOK_TIMEOUT_MS` | Per-hook fail-open timeout (ms); on elapse, inject nothing. | `1500` |
+| `ANAMNESIS_HOOK_TIMEOUT_MS` | Per-hook fail-open timeout (ms); on elapse, inject nothing. | `3000` |
 | `ANAMNESIS_CAPTURE_ENABLED` | Enable/disable capture hooks (Stage 1 & 2) entirely. | `true` |
 | `ANAMNESIS_EXTRACT_THRESHOLD_N` | Queue size threshold; when crossed, `SessionStart` injects extraction nudge to call `extract_pending`. | `20` |
 | `ANAMNESIS_EXTRACT_MODE` | R2 extraction mode: exact `shadow` permits raw captured content to be sent to the configured external extractor; `off` (and invalid values, including `auto`) disables it. | `off` |
@@ -212,10 +213,12 @@ The general anamnesis knobs apply to the hook too, since it talks to the same da
 | `ANAMNESIS_NAMESPACE` | Namespace scoping recall. | `default` |
 | `ANAMNESIS_DAEMON_GRACE_SECS` | How long the shared daemon stays warm after the last client disconnects. | `30` |
 | `ANAMNESIS_EMBED_MODEL` | FastEmbed model for new embeddings. Supported: `multilingual-e5-small`, `multilingual-e5-base`, `multilingual-e5-large`, `bge-base-en-v1.5`. Use `bge-base-en-v1.5` for existing 768-d databases. | `multilingual-e5-small` |
+| `ANAMNESIS_RERANK_MODEL` | Local cross-encoder used by the same canonical reranked-recall path as the MCP tool and LoCoMo harness. | `BAAI/bge-reranker-base` |
 
-The `hooks.json` `timeout` (5–10 s) is only a backstop; the real fail-open bound is
-`ANAMNESIS_HOOK_TIMEOUT_MS` (default 1500 ms), kept well under it so a hung daemon can never
-stall a prompt.
+The recall-hook `timeout` is 5 seconds as an outer backstop. The Rust hook's
+`ANAMNESIS_HOOK_TIMEOUT_MS` default is 3 seconds, so it remains the first
+fail-open boundary. The default BGE-base candidate-20 profile measured about
+0.94 seconds mean on the reference Mac.
 
 ## Use with other MCP clients
 

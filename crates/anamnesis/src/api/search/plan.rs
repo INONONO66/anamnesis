@@ -82,10 +82,19 @@ pub(crate) fn decompose_query(query: &str) -> Vec<String> {
                 "how many times has ",
                 "how many times have ",
                 "how many times did ",
+                "how often did ",
+                "how often does ",
+                "how often has ",
+                "how often have ",
+                "how did ",
+                "how has ",
+                "how have ",
                 "where did ",
                 "where does ",
                 "where has ",
                 "where have ",
+                "what has ",
+                "what have ",
                 "what kind of ",
             ],
         )
@@ -196,9 +205,15 @@ pub(crate) fn decompose_query(query: &str) -> Vec<String> {
 pub(crate) fn query_variants(query: &str) -> Vec<String> {
     let original = query.trim().to_string();
     let decomposed = decompose_query(query);
-    let mut variants = Vec::with_capacity(decomposed.len().saturating_add(1));
+    let entity_anchors = proper_noun_anchors(query);
+    let mut variants = Vec::with_capacity(
+        decomposed
+            .len()
+            .saturating_add(entity_anchors.len())
+            .saturating_add(1),
+    );
     variants.push(original);
-    for candidate in decomposed {
+    for candidate in decomposed.into_iter().chain(entity_anchors) {
         if !variants
             .iter()
             .any(|existing| existing.eq_ignore_ascii_case(&candidate))
@@ -207,6 +222,86 @@ pub(crate) fn query_variants(query: &str) -> Vec<String> {
         }
     }
     variants
+}
+
+fn proper_noun_anchors(query: &str) -> Vec<String> {
+    const QUESTION_WORDS: &[&str] = &[
+        "Am", "Are", "Can", "Could", "Did", "Do", "Does", "Has", "Have", "How", "Is", "List",
+        "May", "Might", "Should", "Was", "Were", "What", "When", "Where", "Which", "Who", "Why",
+        "Will", "Would",
+    ];
+    const MAX_ANCHORS: usize = 4;
+
+    let normalized = query.trim().to_lowercase();
+    let words: Vec<_> = normalized
+        .split(|character: char| !character.is_alphanumeric() && character != '\'')
+        .filter(|word| !word.is_empty())
+        .collect();
+    let starts_inference = words.first().is_some_and(|word| {
+        matches!(
+            *word,
+            "am" | "are"
+                | "can"
+                | "could"
+                | "did"
+                | "do"
+                | "does"
+                | "has"
+                | "have"
+                | "is"
+                | "might"
+                | "should"
+                | "was"
+                | "were"
+                | "will"
+                | "would"
+        )
+    });
+    let has_inference_cue = words.iter().any(|word| {
+        matches!(
+            *word,
+            "could" | "infer" | "imply" | "likely" | "might" | "suggest" | "would"
+        )
+    }) || normalized.starts_with("based on ")
+        || normalized.starts_with("considering ");
+    if starts_inference || has_inference_cue {
+        return Vec::new();
+    }
+
+    let mut anchors = Vec::new();
+    let mut phrase = Vec::new();
+    let flush_phrase = |phrase: &mut Vec<String>, anchors: &mut Vec<String>| {
+        if phrase.is_empty() || anchors.len() >= MAX_ANCHORS {
+            phrase.clear();
+            return;
+        }
+        let candidate = phrase.join(" ");
+        if !anchors
+            .iter()
+            .any(|existing: &String| existing.eq_ignore_ascii_case(&candidate))
+        {
+            anchors.push(candidate);
+        }
+        phrase.clear();
+    };
+
+    for raw_token in query.split_whitespace() {
+        let token = raw_token
+            .trim_matches(|character: char| !character.is_alphanumeric() && character != '\'');
+        let token = token.strip_suffix("'s").unwrap_or(token);
+        let is_anchor = token.chars().next().is_some_and(char::is_uppercase)
+            && token.chars().any(char::is_alphabetic)
+            && !QUESTION_WORDS
+                .iter()
+                .any(|word| word.eq_ignore_ascii_case(token));
+        if is_anchor {
+            phrase.push(token.to_owned());
+        } else {
+            flush_phrase(&mut phrase, &mut anchors);
+        }
+    }
+    flush_phrase(&mut phrase, &mut anchors);
+    anchors
 }
 
 fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
@@ -273,8 +368,8 @@ mod tests {
 
     #[test]
     fn location_question_extracts_event_phrase() {
-        let r = decompose_query("Where did Caroline buy her camera?");
-        assert_eq!(r, vec!["Caroline buy her camera"]);
+        let r = decompose_query("Where did Dana buy her camera?");
+        assert_eq!(r, vec!["Dana buy her camera"]);
     }
 
     #[test]
@@ -326,10 +421,43 @@ mod tests {
             variants,
             vec![
                 "How many times has John injured his ankle?",
-                "John injured his ankle"
+                "John injured his ankle",
+                "John"
             ]
         );
         assert_eq!(query_variants("foo bar baz"), vec!["foo bar baz"]);
+    }
+
+    #[test]
+    fn query_variants_add_entity_anchors_for_bridge_recall() {
+        assert_eq!(
+            query_variants("Which countries did Aria visit with Blake?"),
+            vec![
+                "Which countries did Aria visit with Blake?",
+                "Aria",
+                "Blake"
+            ]
+        );
+        assert_eq!(
+            query_variants("What advice could Rowan and Taylor share?"),
+            vec!["What advice could Rowan and Taylor share?"]
+        );
+        assert_eq!(
+            query_variants("How did Nora promote her clothes store?"),
+            vec![
+                "How did Nora promote her clothes store?",
+                "Nora promote her clothes store",
+                "Nora"
+            ]
+        );
+        assert_eq!(
+            query_variants("How often does Quinn get health checkups?"),
+            vec![
+                "How often does Quinn get health checkups?",
+                "Quinn get health checkups",
+                "Quinn"
+            ]
+        );
     }
 
     #[test]

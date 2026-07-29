@@ -2,11 +2,11 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
-use anamnesis::engine::{SearchDiagnostics, StorageAdapter};
+use anamnesis::engine::{RerankingProvider, SearchDiagnostics, StorageAdapter};
 use anamnesis::graph::{EdgeType, NodeId, Timestamp};
 use anamnesis::memory::{
     ContextRenderOptions, ContextRenderStyle, DeepRecallOptions, Direction, EvidenceSelection,
-    Recall, RecallIntent, RecallPlan, RerankedCandidate, SearchTuning,
+    Recall, RecallIntent, RecallPlan, RerankedCandidate, RerankedRecallOptions, SearchTuning,
 };
 use anamnesis::query::{
     ContextPackage, Fragment, QueryConfig, ScoredNode, SearchResult, assemble_context_package,
@@ -38,11 +38,10 @@ pub struct EvalOptions {
     /// engine policy; it exists to require answer-quality evidence before any
     /// product-level scoring change is proposed.
     pub shadow_rank_fusion: bool,
-    /// Optional consumer-owned local cross-encoder over the live product
-    /// readout. Scores are fed back through `Memory::repackage_reranked_at`;
-    /// the engine remains model-agnostic.
+    /// Optional local cross-encoder supplied to the canonical
+    /// `Memory::rerank_search_result_at` product path.
     #[cfg(feature = "embed")]
-    pub consumer_cross_encoder: Option<Arc<fastembed::TextRerank>>,
+    pub consumer_cross_encoder: Option<Arc<dyn RerankingProvider>>,
     /// Frozen consumer scores keyed by question id. This benchmark-only replay
     /// path still runs live core search and validates every node against that
     /// question's readout before product repackaging; it only avoids repeating
@@ -59,12 +58,12 @@ pub struct EvalOptions {
     /// retrieval at the optional fast prefilter. The quality reranker still
     /// sees the original complete question.
     pub consumer_prefilter_query_fusion: bool,
-    /// Number of cognitive readout candidates exposed to the consumer
-    /// cross-encoder and scored by candidate-pool metrics.
+    /// Number of cognitive readout candidates exposed to canonical local
+    /// reranking and scored by candidate-pool metrics.
     pub consumer_candidate_k: usize,
     /// Compile overlapping graph representations into canonical raw-evidence
-    /// documents through `Memory` before the consumer cross-encoder scores
-    /// them. The returned scores still flow through normal product repackaging.
+    /// documents through `Memory` before the local cross-encoder scores them.
+    /// This is the canonical product route; disabling it is an ablation.
     pub consumer_evidence_documents: bool,
     /// Additional final cutoffs to repackage from the exact same consumer
     /// ranking. Diagnostic-only: the primary product route still uses
@@ -335,7 +334,7 @@ pub fn evaluate_question_with_context(
             &result,
             graph,
             question,
-            reranker,
+            reranker.as_ref(),
             opts.consumer_prefilter_cross_encoder.as_deref(),
             opts.consumer_candidate_k,
             opts.consumer_prefilter_k,
@@ -1029,7 +1028,7 @@ fn consumer_cross_encoder_package(
     result: &SearchResult,
     graph: &BuiltMemoryGraph,
     question: &BenchQuestion,
-    reranker: &fastembed::TextRerank,
+    reranker: &dyn RerankingProvider,
     prefilter: Option<&fastembed::TextRerank>,
     candidate_limit: usize,
     prefilter_limit: Option<usize>,
@@ -1037,6 +1036,24 @@ fn consumer_cross_encoder_package(
     evidence_documents: bool,
     final_limit: usize,
 ) -> BenchResult<ConsumerPackage> {
+    if evidence_documents && prefilter.is_none() {
+        let reranked = graph
+            .memory
+            .rerank_search_result_at(
+                result,
+                reranker,
+                RerankedRecallOptions::new(final_limit).with_candidate_limit(candidate_limit),
+                question_time(question),
+            )
+            .map_err(|err| BenchError::Engine(err.to_string()))?;
+        let ranking = reranked
+            .ranking
+            .iter()
+            .map(|candidate| (candidate.node_id, candidate.score))
+            .collect();
+        return Ok((ranking, reranked.recall.package));
+    }
+
     let broad_candidates: Vec<_> = if evidence_documents {
         graph
             .memory
@@ -1096,14 +1113,14 @@ fn consumer_cross_encoder_package(
         .map(|(_, content)| content.clone())
         .collect();
     let reranked = reranker
-        .rerank(question.question.clone(), documents, false, Some(32))
+        .rerank(&question.question, &documents)
         .map_err(|err| BenchError::Embedding(format!("cross-encoder rerank failed: {err}")))?;
 
     let ranked: Vec<_> = reranked
         .iter()
         .filter_map(|item| {
             let (node_id, _) = candidates.get(item.index)?;
-            Some((*node_id, f64::from(item.score)))
+            Some((*node_id, item.score))
         })
         .collect();
     let consumer_ranking: Vec<_> = ranked

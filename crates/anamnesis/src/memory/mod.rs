@@ -3,7 +3,7 @@
 //! # Overview
 //!
 //! This module is the **validated consumer layer** of the Anamnesis crate. It
-//! implements the bench-proven ingest recipe currently living in
+//! owns the production ingest and recall pipeline exercised by
 //! `benches/eval_common/real_bench/graph.rs` and exposes it as the official
 //! front door: `anamnesis::Memory`.
 //!
@@ -11,9 +11,10 @@
 //!
 //! The encoding strategy (speaker-prefixed Episodic turn + ±1-window Semantic
 //! view, `ExtractedFrom` and `Temporal` edges, session/speaker entity tags,
-//! ingest-everything engine config) is the exact recipe validated by the
-//! LoCoMo and LongMemEval benchmark harness. Consuming `Memory` gives you
-//! those numbers out of the box.
+//! ingest-everything engine config) is the recipe validated by the LoCoMo and
+//! LongMemEval harness. The harness calls the same
+//! [`Memory::search_reranked`] pipeline as production consumers; absolute
+//! scores still depend on model and evaluation configuration.
 //!
 //! # Buffering semantics
 //!
@@ -60,6 +61,7 @@ mod readout;
 mod view;
 pub use readout::{
     AnswerShape, DeepRecallOptions, EvidenceDocument, EvidenceSelection, RecallIntent, RecallPlan,
+    RerankedRecallOptions,
 };
 pub use view::{ListFilter, MemoryView};
 
@@ -68,7 +70,7 @@ use crate::api::{
     CommitReport, EngineConfig, HealthGrade, IngestResult, Observation, TickReport,
     apply_packaging_mode, apply_validity_filter,
 };
-use crate::embedding::EmbeddingProvider;
+use crate::embedding::{EmbeddingProvider, RerankingProvider};
 use crate::error::Error;
 use crate::graph::node::Origin;
 use crate::graph::types::SourceKind;
@@ -150,7 +152,34 @@ pub struct AddReceipt {
     pub finalized_semantic: Option<NodeId>,
 }
 
-/// The framework API — bench-proven ingest recipe with incremental window
+/// Result of the canonical production reranked-recall pipeline.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct RerankedRecall {
+    /// Validated reranker ordering before source-aware final selection.
+    pub ranking: Vec<RerankedCandidate>,
+    /// Commit-safe final hits and context package.
+    pub recall: Recall,
+    /// Original cognitive score and embedding cosine for final selected nodes.
+    ///
+    /// Product gates calibrated on cognitive activation/cosine use this
+    /// sidecar; reranker scores remain authoritative for final ordering.
+    pub cognitive_scores: Vec<CognitiveRecallScore>,
+}
+
+/// Cognitive retrieval signals retained alongside a reranked final hit.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
+pub struct CognitiveRecallScore {
+    /// Final selected node.
+    pub node_id: NodeId,
+    /// Original cognitive readout score before local reranking.
+    pub score: f64,
+    /// Original query-embedding cosine before local reranking.
+    pub cosine: f64,
+}
+
+/// The framework API — validated ingest and recall with incremental window
 /// finalization.
 ///
 /// `Memory<S>` wraps an [`Engine<S>`] and manages per-session buffering so
@@ -1837,7 +1866,10 @@ impl<S: StorageAdapter + Clone> Memory<S> {
         recall: &Recall,
         mut options: ContextRenderOptions,
     ) -> Result<String, Error> {
-        if plan.answer_shape == AnswerShape::Temporal {
+        if matches!(
+            plan.answer_shape,
+            AnswerShape::Temporal | AnswerShape::Frequency
+        ) {
             options.resolve_relative_times = true;
         }
         self.render_context_internal(recall, options, Some(&plan.query))
@@ -1957,7 +1989,165 @@ impl<S: StorageAdapter + Clone> Memory<S> {
                 score: candidate.score,
             })
             .collect();
+        if ranking.is_empty() {
+            return Ok(Recall {
+                hits: Vec::new(),
+                package: result.package,
+            });
+        }
         self.repackage_reranked_deep_at(&result, &ranking, options, now)
+    }
+
+    /// Run the canonical production recall pipeline at wall-clock time.
+    ///
+    /// This performs cognitive search, compiles canonical source-aware evidence
+    /// documents, invokes the supplied local reranker, and passes its scores
+    /// through deep selection and commit-safe package reconstruction.
+    pub fn search_reranked(
+        &mut self,
+        query: &str,
+        reranker: &dyn RerankingProvider,
+        options: RerankedRecallOptions,
+    ) -> Result<RerankedRecall, Error> {
+        self.search_reranked_at(query, reranker, options, Timestamp::now())
+    }
+
+    /// Run canonical production recall at an explicit timestamp.
+    pub fn search_reranked_at(
+        &mut self,
+        query: &str,
+        reranker: &dyn RerankingProvider,
+        options: RerankedRecallOptions,
+        now: Timestamp,
+    ) -> Result<RerankedRecall, Error> {
+        if options.candidate_limit == 0 {
+            return Err(Error::InvalidInput(
+                "reranked recall candidate limit must be greater than zero".to_owned(),
+            ));
+        }
+        if options.deep.limit == 0 {
+            return Err(Error::InvalidInput(
+                "reranked recall result limit must be greater than zero".to_owned(),
+            ));
+        }
+        if options.search_limit == 0 {
+            return Err(Error::InvalidInput(
+                "reranked recall search limit must be greater than zero".to_owned(),
+            ));
+        }
+        let diagnostics =
+            SearchDiagnostics::with_readout_trace_limit(options.candidate_limit.max(200));
+        let scope = options.scope.clone().unwrap_or_else(ScopePath::universal);
+        let result = self.search_result_scoped_at_with_diagnostics(
+            query,
+            options.search_limit,
+            now,
+            &SearchTuning::default(),
+            &diagnostics,
+            scope,
+        )?;
+        self.rerank_search_result_at(&result, reranker, options, now)
+    }
+
+    /// Apply the canonical production rerank and deep-selection stages to an
+    /// existing live [`SearchResult`].
+    ///
+    /// Benchmarks use this overload so retrieval diagnostics can observe the
+    /// same source search without re-running it. Product callers normally use
+    /// [`search_reranked`](Memory::search_reranked).
+    pub fn rerank_search_result_at(
+        &self,
+        result: &SearchResult,
+        reranker: &dyn RerankingProvider,
+        options: RerankedRecallOptions,
+        as_of: Timestamp,
+    ) -> Result<RerankedRecall, Error> {
+        if options.candidate_limit == 0 {
+            return Err(Error::InvalidInput(
+                "reranked recall candidate limit must be greater than zero".to_owned(),
+            ));
+        }
+        if options.deep.limit == 0 {
+            return Err(Error::InvalidInput(
+                "reranked recall result limit must be greater than zero".to_owned(),
+            ));
+        }
+
+        let query =
+            result.trace.query_variants.first().ok_or_else(|| {
+                Error::InvalidInput("search trace has no original query".to_owned())
+            })?;
+        let evidence = self.rerank_documents(result, options.candidate_limit)?;
+        if evidence.is_empty() {
+            return Ok(RerankedRecall {
+                ranking: Vec::new(),
+                recall: Recall {
+                    hits: Vec::new(),
+                    package: result.package.clone(),
+                },
+                cognitive_scores: Vec::new(),
+            });
+        }
+
+        let documents: Vec<_> = evidence
+            .iter()
+            .map(|document| document.text.clone())
+            .collect();
+        let scores = reranker.rerank(query, &documents)?;
+        if scores.is_empty() {
+            return Err(Error::InvalidInput(format!(
+                "reranker {:?} returned no scores for {} documents",
+                reranker.model_name(),
+                documents.len()
+            )));
+        }
+
+        let mut seen = HashSet::new();
+        let mut ranking = Vec::with_capacity(scores.len());
+        for score in scores {
+            if !score.score.is_finite() {
+                return Err(Error::NonFinite(format!(
+                    "reranker score at document index {}",
+                    score.index
+                )));
+            }
+            if !seen.insert(score.index) {
+                return Err(Error::InvalidInput(format!(
+                    "reranker returned duplicate document index {}",
+                    score.index
+                )));
+            }
+            let document = evidence.get(score.index).ok_or_else(|| {
+                Error::InvalidInput(format!(
+                    "reranker returned out-of-bounds document index {} for {} documents",
+                    score.index,
+                    evidence.len()
+                ))
+            })?;
+            ranking.push(RerankedCandidate {
+                node_id: document.node_id,
+                score: score.score,
+            });
+        }
+        ranking.sort_by(|left, right| right.score.total_cmp(&left.score));
+        let recall = self.repackage_reranked_deep_at(result, &ranking, options.deep, as_of)?;
+        let final_ids: HashSet<_> = recall.hits.iter().map(|hit| hit.node_id).collect();
+        let cognitive_scores = result
+            .trace
+            .readout
+            .iter()
+            .filter(|candidate| final_ids.contains(&candidate.node_id))
+            .map(|candidate| CognitiveRecallScore {
+                node_id: candidate.node_id,
+                score: candidate.score,
+                cosine: candidate.embedding_cosine,
+            })
+            .collect();
+        Ok(RerankedRecall {
+            ranking,
+            recall,
+            cognitive_scores,
+        })
     }
 
     fn search_scoped_at(
@@ -2055,6 +2245,25 @@ impl<S: StorageAdapter + Clone> Memory<S> {
         tuning: &SearchTuning,
         diagnostics: &SearchDiagnostics,
     ) -> Result<SearchResult, Error> {
+        self.search_result_scoped_at_with_diagnostics(
+            query,
+            limit,
+            now,
+            tuning,
+            diagnostics,
+            ScopePath::universal(),
+        )
+    }
+
+    fn search_result_scoped_at_with_diagnostics(
+        &mut self,
+        query: &str,
+        limit: usize,
+        now: Timestamp,
+        tuning: &SearchTuning,
+        diagnostics: &SearchDiagnostics,
+        scope: ScopePath,
+    ) -> Result<SearchResult, Error> {
         self.flush_all()?;
 
         let embedding = embed_one_query(&*self.provider, query)?;
@@ -2065,6 +2274,7 @@ impl<S: StorageAdapter + Clone> Memory<S> {
             limit,
             seed_limit: Some(seed_limit),
             now,
+            scope,
             entity_tags: tuning.entity_tags.clone(),
             ..SearchInput::default()
         };
@@ -2134,10 +2344,13 @@ impl<S: StorageAdapter + Clone> Memory<S> {
     ///
     /// Enumeration and relational queries use canonical raw-evidence
     /// documents to protect distinct facts from overlapping graph windows.
-    /// Direct and temporal queries preserve the ordinary node-document
-    /// surface. This is the recommended minimal-consumer entry point: a
-    /// consumer only scores the returned text and passes the node scores back
-    /// to [`repackage_reranked_deep`](Memory::repackage_reranked_deep).
+    /// Inference documents retain their highest-ranked Semantic representative
+    /// while exposing only canonical raw evidence as text, so later rendering
+    /// can recover the evidence window. Direct and temporal queries preserve
+    /// the ordinary node-document surface. This is the recommended
+    /// minimal-consumer entry point: a consumer only scores the returned text
+    /// and passes the node scores back to
+    /// [`repackage_reranked_deep`](Memory::repackage_reranked_deep).
     pub fn rerank_documents(
         &self,
         result: &SearchResult,
@@ -2179,8 +2392,9 @@ impl<S: StorageAdapter + Clone> Memory<S> {
     ///
     /// [`EvidenceSelection::Auto`] reads the original query from
     /// [`SearchTrace::query_variants`](crate::query::SearchTrace::query_variants).
-    /// It preserves pure relevance order for direct and temporal questions and
-    /// applies raw-source coverage only for explicit enumeration or relational
+    /// It preserves pure relevance order for direct and date questions, applies
+    /// raw-source coverage for inference, and applies bounded source-session
+    /// coverage for frequency, explicit enumeration, or relationship
     /// questions. The compiled ranking is then validated by
     /// [`repackage_reranked_at`](Memory::repackage_reranked_at), so no source,
     /// validity, tension, budget, or commit invariant is bypassed.
@@ -2201,6 +2415,7 @@ impl<S: StorageAdapter + Clone> Memory<S> {
             &plan,
             ranking,
             options.selection,
+            options.limit,
         )?;
         self.repackage_reranked_at(result, &compiled, options.limit, as_of)
     }
@@ -2644,6 +2859,7 @@ fn ingest_node<S: StorageAdapter + Clone>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::embedding::RerankScore;
 
     /// Deterministic, model-free embedding provider.
     ///
@@ -2653,6 +2869,44 @@ mod tests {
     /// network / model download.
     struct HashEmbedProvider {
         dim: usize,
+    }
+
+    struct KeywordReranker;
+
+    impl RerankingProvider for KeywordReranker {
+        fn rerank(&self, _query: &str, documents: &[String]) -> Result<Vec<RerankScore>, Error> {
+            Ok(documents
+                .iter()
+                .enumerate()
+                .map(|(index, document)| RerankScore {
+                    index,
+                    score: if document.contains("cobalt") {
+                        10.0
+                    } else {
+                        0.0
+                    },
+                })
+                .collect())
+        }
+
+        fn model_name(&self) -> &str {
+            "keyword-test"
+        }
+    }
+
+    struct InvalidIndexReranker;
+
+    impl RerankingProvider for InvalidIndexReranker {
+        fn rerank(&self, _query: &str, documents: &[String]) -> Result<Vec<RerankScore>, Error> {
+            Ok(vec![RerankScore {
+                index: documents.len(),
+                score: 1.0,
+            }])
+        }
+
+        fn model_name(&self) -> &str {
+            "invalid-index-test"
+        }
     }
 
     impl HashEmbedProvider {
@@ -2799,6 +3053,61 @@ mod tests {
             "cosine must be populated from the readout surface, got {}",
             top.cosine
         );
+    }
+
+    #[test]
+    fn production_reranked_recall_owns_documents_scoring_and_deep_packaging() {
+        let defaults = RerankedRecallOptions::new(4);
+        assert_eq!(defaults.candidate_limit, 20);
+        assert_eq!(defaults.search_limit, 20);
+        assert_eq!(defaults.deep.limit, 4);
+
+        let mut m = mem();
+        m.add_note("The archive key is amber", t(1)).unwrap();
+        m.add_note("The deployment key is cobalt", t(2)).unwrap();
+
+        let output = m
+            .search_reranked_at(
+                "Which deployment key should I use?",
+                &KeywordReranker,
+                RerankedRecallOptions::new(4).with_candidate_limit(20),
+                t(100),
+            )
+            .unwrap();
+
+        assert!(!output.ranking.is_empty());
+        assert_eq!(output.ranking[0].score, 10.0);
+        assert!(
+            output
+                .recall
+                .hits
+                .first()
+                .is_some_and(|hit| hit.text.contains("cobalt"))
+        );
+        assert!(
+            output
+                .recall
+                .package
+                .commit_trace
+                .accessed
+                .iter()
+                .any(|site| site.node_id == output.ranking[0].node_id)
+        );
+    }
+
+    #[test]
+    fn production_reranked_recall_rejects_invalid_provider_indices() {
+        let mut m = mem();
+        m.add_note("A bounded reranker candidate", t(1)).unwrap();
+        let error = m
+            .search_reranked_at(
+                "bounded candidate",
+                &InvalidIndexReranker,
+                RerankedRecallOptions::new(2).with_candidate_limit(10),
+                t(100),
+            )
+            .unwrap_err();
+        assert!(matches!(error, Error::InvalidInput(message) if message.contains("out-of-bounds")));
     }
 
     #[test]
@@ -2993,6 +3302,96 @@ mod tests {
     }
 
     #[test]
+    fn inference_rerank_documents_keep_semantic_representatives() {
+        let mut m = mem();
+        let first = m
+            .add(
+                "repair-session",
+                "alice",
+                "I repaired the blue bicycle",
+                t(1),
+            )
+            .unwrap();
+        m.add(
+            "repair-session",
+            "bob",
+            "That repair made the bicycle safe",
+            t(2),
+        )
+        .unwrap();
+        m.flush_all().unwrap();
+
+        let result = m
+            .search_result_at_with(
+                "Would Alice repair the bicycle again?",
+                20,
+                t(100),
+                &SearchTuning {
+                    seed_limit: Some(20),
+                    entity_tags: Vec::new(),
+                },
+            )
+            .unwrap();
+        let documents = m.rerank_documents(&result, 20).unwrap();
+        let representative = documents
+            .iter()
+            .find(|document| {
+                document.source_node_ids.contains(&first.episodic)
+                    && m.get(document.node_id)
+                        .is_ok_and(|node| node.node_type == KnowledgeType::Semantic)
+            })
+            .unwrap();
+        let node = m.get(representative.node_id).unwrap();
+
+        assert_eq!(node.node_type, KnowledgeType::Semantic);
+        assert!(representative.text.contains("repaired the blue bicycle"));
+    }
+
+    #[test]
+    fn inference_rerank_documents_join_a_question_to_its_raw_answer() {
+        let mut m = mem();
+        m.add(
+            "collection-session",
+            "bob",
+            "What is the picture on your bookshelf?",
+            t(1),
+        )
+        .unwrap();
+        let answer = m
+            .add(
+                "collection-session",
+                "alice",
+                "The picture is from Atelier Nimbus",
+                t(2),
+            )
+            .unwrap()
+            .episodic;
+        m.flush_all().unwrap();
+
+        let result = m
+            .search_result_at_with(
+                "Would Alice enjoy a shop related to the picture on her bookshelf?",
+                20,
+                t(100),
+                &SearchTuning {
+                    seed_limit: Some(20),
+                    entity_tags: Vec::new(),
+                },
+            )
+            .unwrap();
+        let document = m
+            .rerank_documents(&result, 20)
+            .unwrap()
+            .into_iter()
+            .find(|document| document.node_id == answer)
+            .unwrap();
+
+        assert!(document.text.contains("What is the picture"));
+        assert!(document.text.contains("The picture is from Atelier Nimbus"));
+        assert!(document.source_node_ids.contains(&answer));
+    }
+
+    #[test]
     fn automatic_deep_readout_preserves_temporal_relevance_order() {
         let mut m = mem();
         let first = m.add_note("Alice moved in January", t(1)).unwrap();
@@ -3036,6 +3435,80 @@ mod tests {
             deep.hits.iter().map(|hit| hit.node_id).collect::<Vec<_>>()
         );
         assert_eq!(ordinary.package, deep.package);
+    }
+
+    #[test]
+    fn automatic_deep_readout_covers_sessions_before_backfilling() {
+        let mut m = mem();
+        let mut session_a = Vec::new();
+        for index in 0..5 {
+            session_a.push(
+                m.add(
+                    "session-a",
+                    "alice",
+                    &format!("shared detail alpha {index}"),
+                    t(index + 1),
+                )
+                .unwrap()
+                .episodic,
+            );
+        }
+        let session_b = m
+            .add("session-b", "alice", "shared detail beta", t(6))
+            .unwrap()
+            .episodic;
+        m.flush_all().unwrap();
+
+        let result = m
+            .search_result_at_with(
+                "Which shared details did Alice mention?",
+                20,
+                t(100),
+                &SearchTuning {
+                    seed_limit: Some(20),
+                    entity_tags: Vec::new(),
+                },
+            )
+            .unwrap();
+        let live: HashSet<_> = result
+            .trace
+            .readout
+            .iter()
+            .map(|candidate| candidate.node_id)
+            .collect();
+        assert!(session_a.iter().all(|node_id| live.contains(node_id)));
+        assert!(live.contains(&session_b));
+
+        let mut ranking: Vec<_> = session_a
+            .iter()
+            .enumerate()
+            .map(|(index, node_id)| RerankedCandidate {
+                node_id: *node_id,
+                score: 6.0 - index as f64,
+            })
+            .collect();
+        ranking.push(RerankedCandidate {
+            node_id: session_b,
+            score: 1.0,
+        });
+        let recall = m
+            .repackage_reranked_deep_at(&result, &ranking, DeepRecallOptions::new(5), t(100))
+            .unwrap();
+
+        assert_eq!(
+            recall
+                .hits
+                .iter()
+                .map(|hit| hit.node_id)
+                .collect::<Vec<_>>(),
+            vec![
+                session_a[0],
+                session_a[1],
+                session_a[2],
+                session_a[3],
+                session_b
+            ]
+        );
     }
 
     #[test]

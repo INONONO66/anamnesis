@@ -8,7 +8,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::error::Error;
-use crate::graph::{EdgeType, KnowledgeType, NodeId};
+use crate::graph::{EdgeType, KnowledgeType, NodeId, ScopePath};
 use crate::storage::StorageAdapter;
 
 use super::{RerankedCandidate, parse_entity_tags};
@@ -62,12 +62,16 @@ pub enum AnswerShape {
     Fact,
     /// A calendar date, day, week, month, year, or time range.
     Temporal,
+    /// A recurrence cadence inferred from repeated dated events.
+    Frequency,
     /// A numeric cardinality.
     Count,
     /// A list or set of answers.
     Collection,
     /// A relationship, comparison, reason, or causal connection.
     Relationship,
+    /// A concise implication or likely conclusion grounded in retrieved evidence.
+    Inference,
 }
 
 /// Deterministic plan shared by deep retrieval and context rendering.
@@ -108,8 +112,11 @@ impl RecallPlan {
 pub enum EvidenceSelection {
     /// Choose the policy from the deterministic [`RecallIntent`].
     ///
-    /// Enumeration and relational questions use [`SourceCoverage`](Self::SourceCoverage);
-    /// direct and temporal questions preserve relevance order.
+    /// Enumeration and explicit relationship questions use
+    /// [`SourceSessionCoverage`](Self::SourceSessionCoverage), grounded
+    /// inference uses [`SourceCoverage`](Self::SourceCoverage), frequency
+    /// questions use source-session coverage, and direct/date questions
+    /// preserve relevance order.
     #[default]
     Auto,
     /// Preserve the supplied ranking byte-for-byte.
@@ -119,6 +126,13 @@ pub enum EvidenceSelection {
     /// Keep a candidate only when it contributes at least one raw source that
     /// higher-ranked candidates have not covered, then backfill from later candidates.
     SourceCoverage,
+    /// Preserve a bounded burst of evidence from each source session before
+    /// backfilling additional candidates from already saturated sessions.
+    ///
+    /// This protects multi-event and multi-hop questions from spending their
+    /// entire evidence budget on overlapping turns from one conversation
+    /// without discarding a small same-session evidence chain.
+    SourceSessionCoverage,
 }
 
 /// Options for model-free deep recall through [`Memory`](super::Memory).
@@ -129,6 +143,64 @@ pub struct DeepRecallOptions {
     pub limit: usize,
     /// Source-aware selection policy.
     pub selection: EvidenceSelection,
+}
+
+/// Options for the canonical production reranked-recall pipeline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RerankedRecallOptions {
+    /// Number of cognitive readout candidates compiled into evidence documents.
+    pub candidate_limit: usize,
+    /// Cognitive search/package width before local reranking.
+    ///
+    /// This remains at least 20 by default even when a caller requests only a
+    /// few final hits, keeping candidate generation identical to the evaluated
+    /// product profile.
+    pub search_limit: usize,
+    /// Final source-aware selection and package options.
+    pub deep: DeepRecallOptions,
+    /// Optional graph scope applied during cognitive search, before reranking.
+    pub scope: Option<ScopePath>,
+}
+
+impl RerankedRecallOptions {
+    /// Build the latency-sensitive profile used by the MCP product path and benchmarks.
+    ///
+    /// Cognitive search uses at least 20 seeds/results and exposes up to 20
+    /// evidence documents to the local reranker; the final package is capped at
+    /// `limit`.
+    pub fn new(limit: usize) -> Self {
+        Self {
+            candidate_limit: 20,
+            search_limit: limit.max(20),
+            deep: DeepRecallOptions::new(limit),
+            scope: None,
+        }
+    }
+
+    /// Override the reranker candidate pool width.
+    pub fn with_candidate_limit(mut self, candidate_limit: usize) -> Self {
+        self.candidate_limit = candidate_limit;
+        self
+    }
+
+    /// Override the cognitive search width independently of the final hit cap.
+    pub fn with_search_limit(mut self, search_limit: usize) -> Self {
+        self.search_limit = search_limit;
+        self
+    }
+
+    /// Override the source-aware evidence-selection policy.
+    pub fn with_selection(mut self, selection: EvidenceSelection) -> Self {
+        self.deep.selection = selection;
+        self
+    }
+
+    /// Restrict cognitive search and all downstream reranking to `scope`.
+    pub fn with_scope(mut self, scope: ScopePath) -> Self {
+        self.scope = Some(scope);
+        self
+    }
 }
 
 impl DeepRecallOptions {
@@ -164,6 +236,8 @@ fn infer_plan(query: &str, answer_shape_hint: Option<AnswerShape>) -> RecallPlan
     // These are locale rule packs rather than sentence prefixes: interrogative
     // phrases may occur anywhere in a polite wrapper or inverted question.
     const EN_TEMPORAL_TARGETS: &[&[&str]] = &[
+        &["how", "long"],
+        &["how", "often"],
         &["what", "date"],
         &["what", "day"],
         &["what", "month"],
@@ -175,7 +249,7 @@ fn infer_plan(query: &str, answer_shape_hint: Option<AnswerShape>) -> RecallPlan
         &["which", "week"],
         &["which", "year"],
     ];
-    const EN_COUNT_TARGETS: &[&[&str]] = &[&["how", "many"], &["how", "often"], &["number", "of"]];
+    const EN_COUNT_TARGETS: &[&[&str]] = &[&["how", "many"], &["number", "of"]];
     const EN_COLLECTION_TARGETS: &[&[&str]] = &[
         &["list"],
         &["list", "all"],
@@ -207,7 +281,21 @@ fn infer_plan(query: &str, answer_shape_hint: Option<AnswerShape>) -> RecallPlan
                 .take_while(|word| {
                     !matches!(
                         **word,
-                        "are" | "did" | "do" | "does" | "had" | "has" | "have" | "is" | "was"
+                        "are"
+                            | "can"
+                            | "could"
+                            | "did"
+                            | "do"
+                            | "does"
+                            | "had"
+                            | "has"
+                            | "have"
+                            | "is"
+                            | "might"
+                            | "should"
+                            | "was"
+                            | "will"
+                            | "would"
                     )
                 })
                 .copied()
@@ -219,22 +307,66 @@ fn infer_plan(query: &str, answer_shape_hint: Option<AnswerShape>) -> RecallPlan
         });
     let requests_collection = has_any_sequence(EN_COLLECTION_TARGETS)
         || has_word("all")
+        || (matches!(words.as_slice(), ["what", "has" | "have", ..]) && has_word("done"))
         || requests_plural_object
         || normalized.contains("무엇들이")
         || normalized.contains("어떤 것들이");
-    let requests_relationship = has_any_sequence(&[
-        &["relationship", "between"],
-        &["connection", "between"],
-        &["in", "common"],
-    ]) || has_word("both")
-        || has_word("compare")
-        || has_word("causes")
-        || has_word("reasons")
-        || normalized.contains("관계")
-        || normalized.contains("공통")
-        || normalized.contains("원인");
+    let requests_relationship =
+        has_any_sequence(&[
+            &["relationship", "between"],
+            &["connection", "between"],
+            &["in", "common"],
+        ]) || matches!(words.as_slice(), ["how", "did" | "has" | "have", ..])
+            || (has_word("where") && has_word("from") && (has_word("move") || has_word("moved")))
+            || has_word("why")
+            || has_word("both")
+            || has_word("compare")
+            || has_word("causes")
+            || has_word("reasons")
+            || normalized.contains("관계")
+            || normalized.contains("공통")
+            || normalized.contains("원인");
+    let starts_yes_no_question = words.first().is_some_and(|word| {
+        matches!(
+            *word,
+            "am" | "are"
+                | "can"
+                | "could"
+                | "did"
+                | "do"
+                | "does"
+                | "has"
+                | "have"
+                | "is"
+                | "might"
+                | "should"
+                | "was"
+                | "were"
+                | "will"
+                | "would"
+        )
+    });
+    let requests_inference = has_word("likely")
+        || has_word("could")
+        || has_word("might")
+        || has_word("would")
+        || has_word("infer")
+        || has_word("imply")
+        || has_word("suggest")
+        || has_any_sequence(&[
+            &["what", "could"],
+            &["how", "might"],
+            &["how", "would"],
+            &["what", "kind", "of", "person"],
+        ])
+        || starts_yes_no_question
+        || normalized.contains("것 같")
+        || normalized.contains("가능성이");
 
-    let inferred_answer_shape = if requests_temporal_answer {
+    let requests_frequency_answer = has_sequence(&["how", "often"]);
+    let inferred_answer_shape = if requests_frequency_answer {
+        AnswerShape::Frequency
+    } else if requests_temporal_answer {
         AnswerShape::Temporal
     } else if requests_count {
         AnswerShape::Count
@@ -242,6 +374,8 @@ fn infer_plan(query: &str, answer_shape_hint: Option<AnswerShape>) -> RecallPlan
         AnswerShape::Collection
     } else if requests_relationship {
         AnswerShape::Relationship
+    } else if requests_inference {
+        AnswerShape::Inference
     } else {
         AnswerShape::Fact
     };
@@ -255,11 +389,16 @@ fn infer_plan(query: &str, answer_shape_hint: Option<AnswerShape>) -> RecallPlan
             || normalized.contains("지난주")
             || normalized.contains("지난달")
             || normalized.contains("작년");
-    let recall_intent = if answer_shape == AnswerShape::Temporal || has_temporal_constraint {
+    let recall_intent = if matches!(answer_shape, AnswerShape::Temporal | AnswerShape::Frequency)
+        || has_temporal_constraint
+    {
         RecallIntent::Temporal
     } else if matches!(answer_shape, AnswerShape::Count | AnswerShape::Collection) {
         RecallIntent::Enumeration
-    } else if answer_shape == AnswerShape::Relationship {
+    } else if matches!(
+        answer_shape,
+        AnswerShape::Relationship | AnswerShape::Inference
+    ) {
         RecallIntent::Relational
     } else {
         RecallIntent::Direct
@@ -360,11 +499,17 @@ pub(crate) fn compile_ranking<S: StorageAdapter>(
     plan: &RecallPlan,
     ranking: &[RerankedCandidate],
     selection: EvidenceSelection,
+    limit: usize,
 ) -> Result<Vec<RerankedCandidate>, Error> {
     let resolved_selection = match selection {
         EvidenceSelection::Auto => match plan.recall_intent {
-            RecallIntent::Enumeration | RecallIntent::Relational => {
+            RecallIntent::Enumeration => EvidenceSelection::SourceSessionCoverage,
+            RecallIntent::Relational if plan.answer_shape == AnswerShape::Inference => {
                 EvidenceSelection::SourceCoverage
+            }
+            RecallIntent::Relational => EvidenceSelection::SourceSessionCoverage,
+            RecallIntent::Temporal if plan.answer_shape == AnswerShape::Frequency => {
+                EvidenceSelection::SourceSessionCoverage
             }
             RecallIntent::Direct | RecallIntent::Temporal => EvidenceSelection::Relevance,
         },
@@ -375,6 +520,9 @@ pub(crate) fn compile_ranking<S: StorageAdapter>(
         EvidenceSelection::Auto | EvidenceSelection::Relevance => Ok(ranking.to_vec()),
         EvidenceSelection::DistinctSources => distinct_source_ranking(storage, ranking),
         EvidenceSelection::SourceCoverage => source_coverage_ranking(storage, ranking),
+        EvidenceSelection::SourceSessionCoverage => {
+            source_session_coverage_ranking(storage, ranking, limit)
+        }
     }
 }
 
@@ -407,6 +555,74 @@ fn source_coverage_ranking<S: StorageAdapter>(
         }
     }
     Ok(selected)
+}
+
+fn temporal_successor<S: StorageAdapter>(
+    storage: &S,
+    source: NodeId,
+) -> Result<Option<NodeId>, Error> {
+    let source_session = &storage.get_node(source)?.origin.session_id;
+    let mut successors = Vec::new();
+    for edge_id in storage.edges_from(source) {
+        let edge = storage.get_edge(*edge_id)?;
+        if edge.edge_type == EdgeType::Temporal
+            && storage.get_node(edge.target)?.node_type == KnowledgeType::Episodic
+            && storage.get_node(edge.target)?.origin.session_id == *source_session
+        {
+            successors.push(edge.target);
+        }
+    }
+    successors.sort_unstable();
+    Ok(successors.into_iter().next())
+}
+
+fn source_session_coverage_ranking<S: StorageAdapter>(
+    storage: &S,
+    ranking: &[RerankedCandidate],
+    limit: usize,
+) -> Result<Vec<RerankedCandidate>, Error> {
+    const MAX_PRIMARY_PER_SESSION: usize = 4;
+
+    let mut covered_sources = HashSet::new();
+    let mut session_counts = HashMap::new();
+    let mut primary = Vec::with_capacity(ranking.len());
+    let mut deferred = Vec::new();
+
+    for candidate in ranking {
+        let sources = canonical_sources(storage, candidate.node_id)?;
+        let new_sources: Vec<_> = sources
+            .into_iter()
+            .filter(|source| !covered_sources.contains(source))
+            .collect();
+        if new_sources.is_empty() {
+            continue;
+        }
+        covered_sources.extend(new_sources.iter().copied());
+
+        let mut sessions = Vec::new();
+        for source_id in &new_sources {
+            let session_id = storage.get_node(*source_id)?.origin.session_id.clone();
+            if !sessions.contains(&session_id) {
+                sessions.push(session_id);
+            }
+        }
+        if sessions.iter().any(|session| {
+            session_counts.get(session).copied().unwrap_or_default() < MAX_PRIMARY_PER_SESSION
+        }) {
+            for session in sessions {
+                *session_counts.entry(session).or_insert(0usize) += 1;
+            }
+            primary.push(*candidate);
+        } else {
+            deferred.push(*candidate);
+        }
+    }
+
+    if primary.len() < limit {
+        primary.extend(deferred.into_iter().take(limit - primary.len()));
+    }
+    primary.truncate(limit);
+    Ok(primary)
 }
 
 pub(super) fn canonical_sources<S: StorageAdapter>(
@@ -511,12 +727,84 @@ pub(crate) fn compile_evidence_documents<S: StorageAdapter>(
     Ok(documents)
 }
 
+fn compile_inference_documents<S: StorageAdapter>(
+    storage: &S,
+    ranking: &[crate::query::ReadoutCandidate],
+    limit: usize,
+) -> Result<Vec<EvidenceDocument>, Error> {
+    let candidates = &ranking[..ranking.len().min(limit)];
+    let candidate_surface: HashSet<_> = candidates
+        .iter()
+        .map(|candidate| candidate.node_id)
+        .collect();
+    let mut semantically_represented_sources = HashSet::new();
+    for candidate in candidates {
+        let node = storage.get_node(candidate.node_id)?;
+        if node.node_type == KnowledgeType::Semantic {
+            semantically_represented_sources.extend(canonical_sources(storage, candidate.node_id)?);
+        }
+    }
+
+    let mut seen_source_sets = HashSet::new();
+    let mut represented_nodes = HashSet::new();
+    let mut documents = Vec::new();
+    for candidate in candidates {
+        let node = storage.get_node(candidate.node_id)?;
+        if node.node_type == KnowledgeType::Episodic
+            && semantically_represented_sources.contains(&candidate.node_id)
+        {
+            continue;
+        }
+
+        let mut representative = candidate.node_id;
+        let mut source_node_ids = canonical_sources(storage, candidate.node_id)?;
+        if node.node_type == KnowledgeType::Semantic
+            && let Some(last_source) = source_node_ids.last().copied()
+            && storage
+                .get_node(last_source)?
+                .content
+                .trim_end()
+                .ends_with('?')
+            && let Some(next_source) = temporal_successor(storage, last_source)?
+            && candidate_surface.contains(&next_source)
+        {
+            representative = next_source;
+            source_node_ids.push(next_source);
+            source_node_ids.sort_unstable();
+            source_node_ids.dedup();
+        }
+        if !seen_source_sets.insert(source_node_ids.clone()) {
+            continue;
+        }
+        if !represented_nodes.insert(representative) {
+            continue;
+        }
+        let text = source_node_ids
+            .iter()
+            .map(|source_id| render_source(storage, *source_id))
+            .collect::<Result<Vec<_>, _>>()?
+            .join("\n");
+        documents.push(EvidenceDocument {
+            node_id: representative,
+            source_node_ids,
+            text,
+        });
+    }
+    Ok(documents)
+}
+
 pub(crate) fn compile_rerank_documents<S: StorageAdapter>(
     storage: &S,
     plan: &RecallPlan,
     ranking: &[crate::query::ReadoutCandidate],
     limit: usize,
 ) -> Result<Vec<EvidenceDocument>, Error> {
+    if plan.answer_shape == AnswerShape::Inference {
+        return compile_inference_documents(storage, ranking, limit);
+    }
+    if plan.answer_shape == AnswerShape::Frequency {
+        return compile_evidence_documents(storage, ranking, limit);
+    }
     if matches!(
         plan.recall_intent,
         RecallIntent::Enumeration | RecallIntent::Relational
@@ -695,6 +983,53 @@ mod tests {
         assert_eq!(
             RecallPlan::infer("Which popular music composer's tunes does Tim enjoy?").answer_shape,
             AnswerShape::Fact
+        );
+        assert_eq!(
+            RecallPlan::infer("Would Dana want to move home soon?").answer_shape,
+            AnswerShape::Inference
+        );
+        assert_eq!(
+            RecallPlan::infer("What might Alice do next?").answer_shape,
+            AnswerShape::Inference
+        );
+        assert_eq!(
+            RecallPlan::infer("Could you tell me when Alice moved?").answer_shape,
+            AnswerShape::Temporal
+        );
+        assert_eq!(
+            RecallPlan::infer("How long did the restoration take?").answer_shape,
+            AnswerShape::Temporal
+        );
+        let frequency = RecallPlan::infer("How often does Quinn get health checkups?");
+        assert_eq!(frequency.answer_shape, AnswerShape::Frequency);
+        assert_eq!(frequency.recall_intent, RecallIntent::Temporal);
+        assert_eq!(
+            RecallPlan::infer("Why did Alice move?").answer_shape,
+            AnswerShape::Relationship
+        );
+        let manner = RecallPlan::infer("How did Nora promote her clothes store?");
+        assert_eq!(manner.answer_shape, AnswerShape::Relationship);
+        assert_eq!(manner.recall_intent, RecallIntent::Relational);
+        let origin = RecallPlan::infer("Where did Dana move from 4 years ago?");
+        assert_eq!(origin.answer_shape, AnswerShape::Relationship);
+        assert_eq!(origin.recall_intent, RecallIntent::Temporal);
+        let completed = RecallPlan::infer("What has Andrew done with his dogs?");
+        assert_eq!(completed.answer_shape, AnswerShape::Collection);
+        assert_eq!(completed.recall_intent, RecallIntent::Enumeration);
+        let yes_no = RecallPlan::infer("Does James live in Connecticut?");
+        assert_eq!(yes_no.answer_shape, AnswerShape::Inference);
+        assert_eq!(yes_no.recall_intent, RecallIntent::Relational);
+        let gift = RecallPlan::infer(
+            "What electronic device could Rowan gift Quinn to help with his fitness goals?",
+        );
+        assert_eq!(gift.answer_shape, AnswerShape::Inference);
+        assert_eq!(gift.recall_intent, RecallIntent::Relational);
+        assert_eq!(
+            RecallPlan::infer(
+                "Which US states might Tim visit based on his Universal Studios plans?"
+            )
+            .answer_shape,
+            AnswerShape::Collection
         );
     }
 

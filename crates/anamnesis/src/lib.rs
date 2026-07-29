@@ -8,22 +8,23 @@
 //!
 //! | Surface | Type | When to use |
 //! |:--------|:-----|:------------|
-//! | **Framework API** | [`Memory`] | Default. Bench-proven ingest recipe out of the box. |
+//! | **Framework API** | [`Memory`] | Default. Product recall path used by quality evaluation. |
 //! | **Kernel API** | [`Engine`] | Custom node/edge types, encoding strategy, or lifecycle control. |
 //!
 //! ## Framework API — `Memory` (front door)
 //!
-//! [`Memory`] ships the encoding recipe validated by the LoCoMo and LongMemEval
-//! benchmarks: speaker-prefixed episodic turns, ±1-window semantic views,
-//! `ExtractedFrom`/`Temporal` edges, session/speaker entity tags, and
-//! ingest-everything engine config. Those benchmark numbers are what you get
-//! out of the box.
+//! [`Memory`] ships the encoding recipe and canonical reranked-recall pipeline
+//! used by the LoCoMo and LongMemEval harnesses: speaker-prefixed episodic
+//! turns, ±1-window semantic views, source-aware evidence documents, local
+//! reranking, deep selection, and commit-safe packaging. Benchmark scores still
+//! depend on the configured models, dataset split, and answer/judge settings.
 //!
 //! ```rust,no_run
 //! # #[cfg(feature = "embed")]
 //! # fn main() -> Result<(), anamnesis::Error> {
 //! use anamnesis::{Memory, Engine};
-//! use anamnesis::engine::Timestamp;
+//! use anamnesis::engine::{FastEmbedReranker, Timestamp};
+//! use anamnesis::memory::RerankedRecallOptions;
 //!
 //! // 1. Open a persistent Memory (requires feature = "embed")
 //! let mut mem = Memory::open("my-memory.db")?;
@@ -33,8 +34,13 @@
 //! mem.add("session-1", "Alice", "I prefer dark mode", now)?;
 //! mem.add("session-1", "Bob",   "Got it, dark mode it is", now)?;
 //!
-//! // 3. Search (auto-flushes pending buffers)
-//! let recall = mem.search("display preferences", 5)?;
+//! // 3. Run the same reranked product path used by quality evaluation
+//! let reranker = FastEmbedReranker::new()?;
+//! let recall = mem.search_reranked(
+//!     "display preferences",
+//!     &reranker,
+//!     RerankedRecallOptions::new(5),
+//! )?.recall;
 //! for hit in &recall.hits {
 //!     println!("{:.3}  {}", hit.score, hit.text);
 //! }
@@ -104,7 +110,7 @@ pub mod storage;
 
 /// Kernel API — full engine surface in one namespace.
 pub mod engine;
-/// Framework API — bench-proven ingest recipe with two-door entry.
+/// Framework API — validated ingest and product recall entry point.
 pub mod memory;
 
 // Root re-exports — exactly three symbols.

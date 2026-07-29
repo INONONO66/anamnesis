@@ -59,6 +59,8 @@ pub use crate::storage::{SqliteStorage, StorageAdapter};
 
 // ── Embedding ─────────────────────────────────────────────────────────────────
 
-pub use crate::embedding::EmbeddingProvider;
 #[cfg(feature = "embed")]
-pub use crate::embedding::fastembed::FastEmbedProvider;
+pub use crate::embedding::fastembed::{
+    DEFAULT_RERANKER_MODEL, FastEmbedProvider, FastEmbedReranker,
+};
+pub use crate::embedding::{EmbeddingProvider, RerankScore, RerankingProvider};

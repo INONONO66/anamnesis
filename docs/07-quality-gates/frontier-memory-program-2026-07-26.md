@@ -4,16 +4,44 @@ Date: 2026-07-26
 
 Status: active development program; no full-split or cross-system leaderboard claim
 
+## 2026-07-29 product-path decision
+
+The earlier “benchmark consumer only” disposition for the quality reranker is
+superseded. There is now one canonical production pipeline:
+
+`Memory::search_reranked` → cognitive candidate@20 → Memory-compiled evidence
+documents → `RerankingProvider` → automatic deep evidence selection →
+commit-safe packaging.
+
+`anamnesis-mcp` uses that pipeline with
+`BAAI/bge-reranker-base` by default, and the LoCoMo `local_answer` harness
+calls the corresponding existing-search overload
+`Memory::rerank_search_result_at` for retrieval diagnostics. The harness no
+longer privately assembles the headline reranker path; its default profile is
+candidate@20, evidence documents, and `memory-deep`. Benchmark-only rank
+fusion, replay, cascade, and screen modes remain explicit diagnostics.
+
+This is the latency-sensitive product profile: the prior n=200 screen measured
+roughly 0.94 s mean for BGE base over 20 candidates. The Rust hook fails open
+after 3 s and the plugin process has a 5 s outer backstop. Those limits are
+failure boundaries, not latency targets. Operators can choose another
+`ANAMNESIS_RERANK_MODEL`, but a reranker error is surfaced rather than silently
+falling back to a different retrieval policy.
+
+The `rozgo/bge-reranker-v2-m3` candidate@200 profile remains an explicit
+offline quality experiment. Its roughly 25 s mean / 34 s p95 measurement is
+not a product default and is not the default LoCoMo headline configuration.
+
 ## Product boundary
 
-The program keeps the engine model-agnostic and synchronous. Raw episodic
-fragments remain authoritative graph nodes. Local generation, reranking, and
-extraction stay in the benchmark consumer or `anamnesis-mcp`; the engine only
-accepts embeddings, rankings, observations, and typed relations. Existing
-public APIs remain compatible.
+The program keeps recall orchestration model-agnostic and synchronous. Raw
+episodic fragments remain authoritative graph nodes. The engine accepts a
+`RerankingProvider`; its optional FastEmbed adapter mirrors the existing
+embedding adapter, while generation and extraction stay in `anamnesis-mcp`.
+Existing public APIs remain compatible.
 
-The headline lane renders the exact product context through
-`Memory::render_context`. Retrieval, selection, delivered package, rendered
+The headline lane renders the exact product context returned by canonical
+reranked recall. Retrieval, selection, delivered package, rendered
 evidence, raw official-compatible Answer F1, reference-blind reader-surface F1,
 and local semantic judgment are reported separately.
 
@@ -469,3 +497,287 @@ four losses. Its question interval is `[-3.17,-0.14]pp`; the conversation
 interval is `[-2.78,0.00]pp`. This closes the broad-materialization track.
 Extraction remains shadow/review-first, and derived graph mutation is not a
 default recall path.
+
+## End-to-end 85% feasibility gate
+
+The target is now defined as at least 85% non-adversarial LoCoMo semantic
+answer accuracy on a complete end-to-end product-context lane. Raw
+official-compatible token F1 and every retrieval stage remain mandatory
+separate metrics; semantic judgment never replaces or rewrites them.
+
+The original n=100 answer prompt selected instructions from the dataset's gold
+`question_type`. Its 57% semantic accuracy and 52.07% raw F1 remain useful only
+as a historical diagnostic; they are not a deployable product baseline. The
+oracle-evidence result (66% / 55.5%) used the same leaked prompt and is likewise
+diagnostic rather than a clean model ceiling.
+
+Prompt v9 removes that dependency. It derives a public, deterministic
+`RecallPlan` from the question text and maps its `AnswerShape` and
+`RecallIntent` to reader instructions. The parser now recognizes duration,
+reason, inference, and yes/no forms without benchmark annotations. The answer,
+reflection, and final-verification prompts receive no gold type, answer, or
+judge feedback.
+
+The frozen v2-m3 n=100 replay first established the honest Q4 local boundary:
+
+| Reader lane | Semantic accuracy | Raw F1 | Mean answer latency | Paired change |
+|---|---:|---:|---:|---|
+| query-only one-pass v9 | 56% | 49.48% | 6.10 s | baseline |
+| Reflect v3 on every question | 62% | 51.01% | 24.96 s | 12 recoveries / 6 regressions |
+| query-plan-gated Reflect v3 | 61% | 52.55% | 13.39 s | 7 recoveries / 2 regressions |
+
+The gated route reflects only `Count`, `Collection`, and `Inference` plans.
+It leaves `Fact`, `Temporal`, and `Relationship` plans on the one-pass reader.
+This decision is reference-blind and uses the same public parser as retrieval.
+On n=100 it reflected 37 questions, had zero semantic regressions for
+single-hop and temporal questions, and improved F1 by 7.72pp for multi-hop and
+4.56pp for open-domain questions. Its p50 latency was 5.32 s; full Reflect's
+mean was 24.96 s.
+
+The local precision screen then held every product context, query-derived plan,
+prompt, generation option, and retrieval metric fixed while changing only the
+reader quantization. `qwen3.6:35b-a3b-q8_0` passed the frozen n=20 gate:
+one-pass reached 55% semantic accuracy and 43.1% raw F1, while gated Reflect
+reached 65% and 45.4%. On n=100, the Q8 gated route reached 66% semantic
+accuracy (95% CI 56.3%..74.5%), 51.91% raw F1, and 14.29 s mean answer latency.
+The separately rejudged Q4 gated route reached 64%, 52.55%, and 13.39 s under
+the same semantic-judge prompt. Q8 therefore adds two semantic points but loses
+0.64pp raw F1; it is a modest quality-first promotion rather than a broad
+win.
+
+The Q8 type breakdown is 88% single-hop, 80% temporal, 44% multi-hop, and 52%
+open-domain. Against the Q4 gated answers, it has four semantic recoveries and
+two regressions. Their reference-only correctness union is 68%, so even a
+perfect query-only selector between these two installed quantizations could add
+at most two more points on this sample. This makes 66% the practical local-Qwen
+headline and 66%..68% the observed local precision plateau, not an 85% path.
+
+The promotion path was gated before n=100. On the same frozen n=20 contexts,
+the honest Q4 one-pass lane scored 45% semantic accuracy and 40.7% raw F1.
+Q4 Reflect v3 scored 60% and 46.4%, with three semantic recoveries and no
+losses. Q8 one-pass then scored 55% and 43.1%, and Q8 gated Reflect scored 65%
+and 45.4%. The wider Q8 run confirmed the semantic direction, though not the
+small-screen F1 direction.
+
+These measurements also keep the evidence boundary visible. Candidate recall
+is 89.39%, delivered recall 76.35%, rendered recall 82.60%, and rendered Hit
+92%. Reader work alone cannot recover questions whose required evidence never
+reaches the prompt, while the legacy oracle lane shows that the current local
+Qwen reader is also far below the 85% target even with annotated evidence.
+
+The MCP recall path now consumes the same
+`Memory::search_reranked` orchestration and query-aware product renderer used
+by the benchmark. The engine remains synchronous and model-agnostic behind
+`RerankingProvider`; the FastEmbed adapter lives at the embedding/model
+boundary. Scoped recalls apply scope during cognitive search before reranking;
+tag and knowledge filters apply to the canonical package before gating and
+rendering. Empty searches return a normal empty `Recall` instead of failing
+reranker validation.
+
+The remaining route to 85% is:
+
+1. keep raising multi-hop/open-domain rendered evidence completeness without
+   broad context substitutions;
+2. expose the optional Reflect stage through `anamnesis-mcp`, with the model
+   adapter outside `anamnesis-engine`;
+3. run the same frozen contexts through a frontier answer/reflect model and a
+   separately versioned judge once credentials are supplied;
+4. promote only after n=200 paired question and conversation-cluster gates,
+   then run the declared full LoCoMo split.
+
+The answer harness now has an OpenAI-compatible route-3 adapter for that gate.
+It reads the bearer token only from `LLM_API_KEY`, accepts the endpoint through
+`LLM_BASE_URL` or `--frontier-base-url`, and records the route as non-local.
+`--answer-report ... --retrieval-only --frontier-reader` preserves the frozen
+route-2 answer and product context, then generates only route 3. This avoids
+rerunning ingestion, embeddings, retrieval, or the local baseline reader for
+each frontier-model screen. A one-question replay against Ollama's compatible
+endpoint verifies that the stored context is preserved and both routes are
+present in the output report. Local replays use `--run-reflect-reader` for the
+cost-insensitive lane or `--reflect-complex-only` for the balanced lane.
+
+## Multi-hop and open-domain structural gate
+
+The low Q8 type scores were not accepted as a reason to substitute a stronger
+reader immediately. A type-stratified, question-paired pass first separated
+candidate generation, reranking, context rendering, and answer synthesis on
+the same frozen 25 multi-hop and 25 open-domain questions used by the n=100
+report.
+
+The model-free changes are:
+
+- query variants add bounded proper-noun anchors for factual bridge and
+  enumeration questions, but suppress them for inference forms where an
+  entity-only channel displaced useful relational seeds;
+- inference is a first-class deterministic answer shape and relational recall
+  intent, including yes/no and modal forms;
+- enumeration and explicit relationship readout preserve up to four useful
+  candidates from one source session before covering another session, then
+  backfill by rank;
+- manner questions (`How did ...`) and completed-action questions
+  (`What has ... done`) map to relationship and collection readout
+  respectively, while recurrence questions use a separate frequency shape;
+- inference rerank documents retain the Semantic representative used for graph
+  expansion while exposing canonical raw source text and removing only exact
+  source-set duplicates;
+- when an inference Semantic window ends on a question, its rerank document
+  includes the immediate same-session raw answer and uses that raw answer as
+  the commit-safe representative. The cross-encoder therefore scores the
+  complete exchange without injecting generated text into the engine.
+
+The rejected one-per-session prototype is important: it raised candidate recall
+but reduced multi-hop reranker recall from 64.05% to 54.57%. It was removed.
+The accepted bounded-burst policy produced no question-level multi-hop
+retrieval regression:
+
+| Multi-hop stage (n=25) | Frozen baseline | Structural pass |
+|---|---:|---:|
+| candidate recall | 83.12% | 84.69% |
+| reranker/delivered recall | 64.05% | 66.62% |
+| rendered recall | 70.38% | 73.95% |
+| rendered Hit | 96% | 96% |
+
+For open-domain, the final inference path preserved candidate recall, repaired
+the question/answer truncation case, and raised both reranker and rendered
+recall:
+
+| Open-domain stage (n=25) | Frozen baseline | Structural pass |
+|---|---:|---:|
+| candidate recall | 82.45% | 82.45% |
+| reranker/delivered recall | 53.36% | 65.67% |
+| rendered recall | 68.03% | 68.76% |
+| rendered Hit | 80% | 84% |
+
+Against the immediately preceding structural report, only
+`locomo-4-qa-5` changes: reranker, delivered, and rendered recall all move from
+zero to one, with no question-level retrieval regression. The local Q8 reader
+then answers `MinaLima store`, which the Q8 semantic judge accepts against
+`House of MinaLima`. A broad 25-question answer replay has not been rerun, so
+the last fully measured semantic headlines remain 44% for multi-hop and 52%
+for open-domain; the newly recovered open-domain item is recorded separately
+rather than silently relabeling the aggregate as 56%.
+
+Two broader experiments remain rejected. One-candidate-per-session reduced
+multi-hop reranker recall to 54.57%, while final-stage query-variant RRF reduced
+multi-hop rendered recall from 73.95% to 71.29%. Neither path remains in the
+accepted implementation.
+
+The local Reflect reader now consumes its validated structured
+`candidate_answer` directly for inference questions instead of asking the same
+model to rewrite it in a second pass. Reflection is bounded to six relevant
+reasoning steps and 600 tokens. This repairs concrete final-stage destruction
+such as turning a supported “No” into an abstention or replacing “fitness
+watch” with an unsupported device. Collection questions retain final
+verification, with a non-empty reflected candidate used only when the verifier
+returns the exact abstention sentinel. `--answer-report --resume` also resumes
+only an identical route/model/prompt configuration and preserves completed
+routes.
+
+Despite the structural retrieval gains and the newly verified targeted answer
+recovery, the last full paired type answer scores are 44% for multi-hop and 52%
+for open-domain under both the Q8 and separately run Q4 judge-v3 checks. The
+remaining failures are predominantly evidence-present synthesis, unstable
+enumeration, ordinary world-knowledge bridges, and several dataset or
+image-only cases. A provider handoff is justified only for these residual
+reader failures; it is not a substitute for the retrieval defects repaired
+above or an attempt to chase an absolute score.
+
+### Local reader ceiling after structural repair
+
+The preceding 44% / 52% values are retained as the pre-repair paired baseline.
+Two complete, type-stratified n=25 answer screens now replace them for the
+local ceiling analysis; neither changes the frozen retrieval contexts.
+
+Full Q8 Reflect v8 raises multi-hop semantic accuracy from 44% to 56% and raw
+F1 from 36.41% to 39.67%. The semantic comparison has three recoveries and no
+regressions: the reader resolves `home country` to `Sweden`, combines Gina's
+promotion methods, and completes Tim's writing types. Retrieval remains
+84.69% candidate recall, 66.62% delivered recall, 73.95% rendered recall, and
+96% rendered Hit.
+
+On open-domain, the same current Reflect v8 path reaches 56% semantic accuracy.
+A narrower v9 inference contract then reaches 60% and 39.94% raw F1. Against
+v8 it recovers the road-trip implication, preserves both California and
+Florida as Universal Studios alternatives, and normalizes Boston to the United
+States; it regresses John Williams and Stamford-to-Connecticut in final
+verification, for three recoveries and two regressions. The corresponding
+retrieval surface remains 82.45% candidate recall, 65.67% delivered recall,
+68.76% rendered recall, and 84% rendered Hit.
+
+The inference contract is gold-blind. It says that `likely` / `might` / `could`
+questions request the best supported plausible implication rather than
+explicit confirmation, prefers evidence explicitly linked as a reason, goal,
+preference, or consequence, preserves indistinguishable ordinary-world
+alternatives, and requires the answer to match the semantic type named by the
+question. It contains no LoCoMo entity, expected answer, or judge feedback.
+
+A broader span-keyed findings ledger is rejected. It raised multi-hop raw F1
+from 39.67% to 44.32% but reduced semantic accuracy from 56% to 48%, with no
+semantic recovery and two regressions. The implementation and prompt version
+were removed. A subsequent Fact/Relationship abstention-backfill prototype was
+also removed without a score claim: the Q8 model could no longer load within
+the frozen 600-second timeout after memory pressure increased, so the gate did
+not complete.
+
+The last complete single-hop and temporal semantic gates remain 88% and 80%,
+and their current fixed retrieval replays remain byte-for-byte unchanged at
+96% rendered Hit for both types. Combining the four separately completed
+type screens would yield a 71% macro semantic diagnostic
+(`88/56/60/80`), but this is not promoted as a new n=100 headline until one
+unified Q8 run reproduces all four categories under the accepted v9 policy.
+
+The residual split is now explicit. Of eleven incorrect multi-hop answers, all
+eleven have at least one rendered gold hit; five have complete rendered gold
+coverage and six are partial-coverage synthesis cases. Of ten incorrect
+open-domain answers, two have no rendered gold hit, four have complete rendered
+coverage, and four have partial coverage. A frontier provider request is
+therefore scoped to evidence-present synthesis and open-world bridging; it
+does not excuse the two open-domain retrieval misses or the partial-coverage
+cases.
+
+The answer-report runner now completes all answers before starting the local
+judge phase. This preserves answers, prompts, scoring, and resume semantics
+while avoiding a Q8/Q4 model unload and reload for every question. Interrupted
+reports resume missing answers and missing judges independently.
+
+### GPT-4o provider handoff
+
+The requested GPT-4o handoff completed on the frozen seed-42 balanced n=100
+diagnostic (25 questions per non-adversarial type). The source is a mechanical
+merge of the four accepted type-specific retrieval reports; question ids,
+retrieval contexts, and retrieval measurements are preserved rather than
+recomputed. GPT-4o served as both Reflect reader and semantic judge.
+
+| Metric | GPT-4o n=100 |
+|---|---:|
+| semantic judge accuracy | 64.0% |
+| raw official LoCoMo F1 | 51.48% |
+| judge parse failures | 0 |
+| input / output tokens | 761,774 / 20,512 |
+| standard-price cost estimate | $2.109555 |
+
+| Type | Semantic accuracy | Raw F1 | Rendered recall | Rendered Hit |
+|---|---:|---:|---:|---:|
+| single-hop | 68% | 62.60% | 96.00% | 96% |
+| multi-hop | 36% | 33.69% | 73.95% | 96% |
+| open-domain | 68% | 42.76% | 68.76% | 84% |
+| temporal | 84% | 66.88% | 96.00% | 96% |
+
+The provider handoff therefore does not establish a higher aggregate ceiling:
+the preceding unified Qwen run was 66% semantic / 51.91% raw F1, while the
+latest type-specific Qwen screens were 56% multi-hop and 60% open-domain.
+GPT-4o improves open-domain to 68% but regresses multi-hop to 36%.
+
+On the identical multi-hop question set, seven cases move from correct under
+the latest Qwen screen to incorrect under GPT-4o, while two move in the other
+direction. The failures are dominated by incomplete collection answers. Two
+bounded follow-ups reject obvious reader-routing fixes: direct GPT-4o recovers
+2/7 of those regressions, while forcing a second synthesis call after Reflect
+recovers 1/7. These diagnostics cost $0.065495 and $0.150743 respectively.
+Together with the two-question smoke ($0.046805), total GPT-4o experimentation
+was $2.372598, below the declared $2.50 stop.
+
+The next multi-hop work should target evidence coverage and explicit
+list-completeness against the retrieved context, not a broader provider swap.
+This n=100 result remains a development diagnostic, not a full 1,540-question
+non-adversarial LoCoMo headline.

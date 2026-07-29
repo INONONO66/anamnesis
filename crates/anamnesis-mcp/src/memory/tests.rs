@@ -1341,6 +1341,23 @@ fn recall_packaged_returns_context_and_dedup_hits() {
     }
 }
 
+#[test]
+fn recall_packaged_uses_query_aware_temporal_rendering() {
+    let mut reg = registry(false);
+    reg.remember("Alice did yoga yesterday morning.", None)
+        .unwrap();
+
+    let packaged = reg
+        .recall_packaged("When did Alice do yoga?", 5, None)
+        .unwrap();
+
+    assert!(
+        packaged.context.contains("resolved relative time:"),
+        "MCP recall must use the same query-aware product renderer as the benchmark:\n{}",
+        packaged.context
+    );
+}
+
 // ── recall_packaged_gated (the hook recall path) ───────────────────────────
 
 /// A gate `τ` above the top hit's score ⇒ empty context AND empty hits
@@ -1468,6 +1485,7 @@ fn knowledge_only_drops_memories_tensions_and_capture_fragments() {
             tag: None,
             knowledge_only: true,
         },
+        &CognitiveReranker,
     )
     .unwrap();
 
@@ -1507,6 +1525,7 @@ fn trace_uses_filtered_top_and_preserves_both_gate_failures() {
             tag: None,
             knowledge_only: true,
         },
+        &CognitiveReranker,
     )
     .expect("recall outcome");
 
@@ -1520,6 +1539,30 @@ fn trace_uses_filtered_top_and_preserves_both_gate_failures() {
     );
     assert!(outcome.packaged.hits.is_empty());
 }
+
+#[test]
+fn gate_uses_cognitive_score_instead_of_cross_encoder_logit() {
+    let mut mem = scoped_test_memory();
+    let outcome = mem_recall_packaged_gated(
+        &mut mem,
+        "deployment",
+        5,
+        false,
+        Some(100.0),
+        None,
+        &InflatedReranker,
+    )
+    .expect("recall outcome");
+
+    assert!(outcome.trace.has_hits);
+    assert!(!outcome.trace.readout_pass);
+    assert!(
+        outcome.trace.top_score.is_some_and(|score| score < 100.0),
+        "gate must retain the cognitive score, not the million-point reranker logit"
+    );
+    assert!(outcome.packaged.hits.is_empty());
+}
+
 #[test]
 fn eligible_trace_snapshots_deduplicated_result_ids_and_auto_extract_metadata() {
     let mut mem = Memory::in_memory_with_provider(Arc::new(StubProvider)).unwrap();
@@ -1529,9 +1572,16 @@ fn eligible_trace_snapshots_deduplicated_result_ids_and_auto_extract_metadata() 
         .push(("origin".to_string(), "auto-extract".to_string()));
     mem_remember_with(&mut mem, "auto-extract recall result", auto_extract).unwrap();
 
-    let outcome =
-        mem_recall_packaged_gated(&mut mem, "auto-extract recall result", 5, false, None, None)
-            .unwrap();
+    let outcome = mem_recall_packaged_gated(
+        &mut mem,
+        "auto-extract recall result",
+        5,
+        false,
+        None,
+        None,
+        &CognitiveReranker,
+    )
+    .unwrap();
 
     let expected_ids: Vec<u64> = outcome
         .packaged
@@ -1548,8 +1598,16 @@ fn unfiltered_fast_path_has_the_same_trace_as_filtered_path() {
     let mut fast = scoped_test_memory();
     let mut filtered = scoped_test_memory();
 
-    let fast =
-        mem_recall_packaged_gated(&mut fast, "deployment", 5, false, Some(0.0), Some(0.0)).unwrap();
+    let fast = mem_recall_packaged_gated(
+        &mut fast,
+        "deployment",
+        5,
+        false,
+        Some(0.0),
+        Some(0.0),
+        &CognitiveReranker,
+    )
+    .unwrap();
     let filtered = mem_recall_packaged_gated_filtered(
         &mut filtered,
         "deployment",
@@ -1562,6 +1620,7 @@ fn unfiltered_fast_path_has_the_same_trace_as_filtered_path() {
             tag: None,
             knowledge_only: false,
         },
+        &CognitiveReranker,
     )
     .unwrap();
 
@@ -1620,6 +1679,7 @@ fn filtered_recall_gates_on_final_filtered_hits() {
             tag: None,
             knowledge_only: false,
         },
+        &CognitiveReranker,
     )
     .unwrap();
 

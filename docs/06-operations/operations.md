@@ -444,7 +444,7 @@ default, never an error).
 | `ANAMNESIS_HOOK_THRESHOLD` | `13.0` | `τ` — the recall injection gate. A floor on the **top recall score**, which is raw ACT-R activation (~8–16 on a typical graph), **not** a 0..1 similarity; a sub-1 value silently disables the gate. **Recalibrate per graph** — activation magnitude scales with density/recency. |
 | `ANAMNESIS_HOOK_TOPK` | `3` | Cap on injected per-turn memories. |
 | `ANAMNESIS_HOOK_SEED_K` | `5` | SessionStart seed-recall size. |
-| `ANAMNESIS_HOOK_TIMEOUT_MS` | `1500` | Per-hook fail-open timeout (ms). |
+| `ANAMNESIS_HOOK_TIMEOUT_MS` | `3000` | Per-hook fail-open timeout (ms) for latency-sensitive product recall. |
 | `ANAMNESIS_CAPTURE_ENABLED` | `true` | Global capture kill-switch; `0` / `false` / `no` disables passive capture. |
 | `ANAMNESIS_EXTRACT_THRESHOLD_N` | `20` | Un-extracted queue length that triggers the SessionStart extraction nudge. |
 | `ANAMNESIS_EXTRACT_REDELIVERY_MS` | `21600000` (6h) | TTL after which a pulled-but-abandoned extraction is re-queued once (attempt cap 2). |
@@ -452,6 +452,7 @@ default, never an error).
 | `ANAMNESIS_EXTRACT_CMD` | built-in local Qwen 3.6 structured profile | The built-in profile uses non-streaming Ollama HTTP on loopback. An explicitly configured non-Ollama argv is shell-word parsed and executed without a shell. |
 | `ANAMNESIS_DAEMON_GRACE_SECS` | `30` | Idle grace before a zero-client daemon exits; `0` ⇒ exit immediately. |
 | `ANAMNESIS_EMBED_MODEL` | `multilingual-e5-small` | Embedding model. Set it to the known stored model to continue without migrating. |
+| `ANAMNESIS_RERANK_MODEL` | `BAAI/bge-reranker-base` | Local cross-encoder used by canonical reranked recall. |
 | `ANAMNESIS_AUTO_MIGRATE_EMBEDDINGS` | `true` | Enables daemon migration after a model/dimension mismatch; `0` / `false` / `no` disables it without mutating the DB. |
 
 ## Troubleshooting

@@ -321,6 +321,7 @@ fn registry(cfg: &Config) -> MemoryRegistry {
         cfg.default_namespace.clone(),
         cfg.reinforce_on_recall,
         cfg.embed_model.clone(),
+        cfg.rerank_model.clone(),
     )
 }
 
