@@ -5,11 +5,12 @@
 //! [`FastEmbedProvider::new`] for details.
 
 use std::sync::Mutex;
+use std::{env, path::PathBuf};
 
 pub use fastembed::EmbeddingModel;
-use fastembed::{InitOptions, TextEmbedding};
+use fastembed::{InitOptions, RerankInitOptions, RerankerModel, TextEmbedding, TextRerank};
 
-use crate::embedding::EmbeddingProvider;
+use crate::embedding::{EmbeddingProvider, RerankScore, RerankingProvider};
 use crate::error::Error;
 
 /// Embedding provider backed by [FastEmbed](https://crates.io/crates/fastembed).
@@ -33,6 +34,20 @@ pub struct FastEmbedProvider {
     name: String,
     uses_e5_query_passage_protocol: bool,
 }
+
+/// Local FastEmbed cross-encoder used by the production reranked-recall path.
+///
+/// The production default is `BAAI/bge-reranker-base`, selected for the
+/// latency-sensitive product-path LoCoMo profile. Model weights are loaded once
+/// and shared safely across recall calls.
+pub struct FastEmbedReranker {
+    model: Mutex<TextRerank>,
+    name: String,
+    batch_size: usize,
+}
+
+/// Default local reranker for latency-sensitive production recall.
+pub const DEFAULT_RERANKER_MODEL: &str = "BAAI/bge-reranker-base";
 
 const E5_QUERY_PASSAGE_PROTOCOL: &str = "query-passage-v1";
 
@@ -134,6 +149,76 @@ impl FastEmbedProvider {
     }
 }
 
+impl FastEmbedReranker {
+    /// Create the default local quality reranker.
+    pub fn new() -> Result<Self, Error> {
+        Self::with_model_name(DEFAULT_RERANKER_MODEL)
+    }
+
+    /// Create a local reranker from a FastEmbed model identifier.
+    pub fn with_model_name(model_name: &str) -> Result<Self, Error> {
+        let normalized = model_name.trim();
+        let model = normalized.parse::<RerankerModel>().map_err(|error| {
+            Error::InvalidInput(format!(
+                "unsupported reranker model {normalized:?}: {error}"
+            ))
+        })?;
+        let cache_dir = env::var_os("FASTEMBED_CACHE_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(".fastembed_cache"));
+        let reranker = TextRerank::try_new(RerankInitOptions::new(model).with_cache_dir(cache_dir))
+            .map_err(|error| Error::InvalidInput(format!("reranker init failed: {error}")))?;
+        Ok(Self {
+            model: Mutex::new(reranker),
+            name: normalized.to_owned(),
+            batch_size: 32,
+        })
+    }
+
+    /// Override the inference batch size.
+    pub fn with_batch_size(mut self, batch_size: usize) -> Result<Self, Error> {
+        if batch_size == 0 {
+            return Err(Error::InvalidInput(
+                "reranker batch size must be greater than zero".to_owned(),
+            ));
+        }
+        self.batch_size = batch_size;
+        Ok(self)
+    }
+}
+
+impl RerankingProvider for FastEmbedReranker {
+    fn rerank(&self, query: &str, documents: &[String]) -> Result<Vec<RerankScore>, Error> {
+        if documents.is_empty() {
+            return Ok(Vec::new());
+        }
+        let model = self
+            .model
+            .lock()
+            .map_err(|error| Error::InvalidInput(format!("reranker mutex poisoned: {error}")))?;
+        model
+            .rerank(
+                query.to_owned(),
+                documents.to_vec(),
+                false,
+                Some(self.batch_size),
+            )
+            .map(|rows| {
+                rows.into_iter()
+                    .map(|row| RerankScore {
+                        index: row.index,
+                        score: f64::from(row.score),
+                    })
+                    .collect()
+            })
+            .map_err(|error| Error::InvalidInput(format!("reranking failed: {error}")))
+    }
+
+    fn model_name(&self) -> &str {
+        &self.name
+    }
+}
+
 impl EmbeddingProvider for FastEmbedProvider {
     fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, Error> {
         let model = self
@@ -210,5 +295,11 @@ mod tests {
             embed_model_from_name("Qdrant/multilingual-e5-large-onnx+query-passage-v1"),
             Ok(EmbeddingModel::MultilingualE5Large)
         ));
+    }
+
+    #[test]
+    fn production_reranker_default_is_the_fast_profile() {
+        assert_eq!(DEFAULT_RERANKER_MODEL, "BAAI/bge-reranker-base");
+        assert!(DEFAULT_RERANKER_MODEL.parse::<RerankerModel>().is_ok());
     }
 }

@@ -10,6 +10,40 @@ pub mod fastembed;
 
 use crate::error::Error;
 
+/// One document score returned by a [`RerankingProvider`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
+pub struct RerankScore {
+    /// Index into the document slice supplied to [`RerankingProvider::rerank`].
+    pub index: usize,
+    /// Finite relevance score. Larger scores rank first.
+    pub score: f64,
+}
+
+impl RerankScore {
+    /// Create a document-index score.
+    pub fn new(index: usize, score: f64) -> Self {
+        Self { index, score }
+    }
+}
+
+/// Synchronous, model-agnostic document reranker used by production recall.
+///
+/// Implementations score a query against the exact evidence documents compiled
+/// by [`Memory::rerank_documents`](crate::memory::Memory::rerank_documents).
+/// Candidate construction, score validation, evidence selection, packaging,
+/// and reinforcement remain owned by [`Memory`](crate::memory::Memory).
+pub trait RerankingProvider: Send + Sync {
+    /// Rank `documents` for `query`.
+    ///
+    /// Providers may return any number of rows, but every row must reference a
+    /// unique in-bounds document index and carry a finite score.
+    fn rerank(&self, query: &str, documents: &[String]) -> Result<Vec<RerankScore>, Error>;
+
+    /// Model name or stable provider identifier.
+    fn model_name(&self) -> &str;
+}
+
 /// Trait for embedding text into vectors.
 ///
 /// Implementations must be synchronous and thread-safe (`Send + Sync`).

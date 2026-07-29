@@ -74,7 +74,7 @@ pub(crate) struct SweepPoint {
     pub attempts: u64,
 }
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 #[cfg(test)]
 thread_local! {
@@ -345,6 +345,22 @@ impl PolicyStore {
         reviewed_at: u64,
     ) -> Result<(), Error> {
         extraction::update_relation_audit(&mut self.connection, id, verdict, reviewer, reviewed_at)
+            .map_err(PolicyStoreError::into_engine_error)
+    }
+    pub(crate) fn mark_extraction_candidate_committed(
+        &mut self,
+        id: u64,
+        node_id: u64,
+    ) -> Result<(), Error> {
+        extraction::mark_candidate_committed(&mut self.connection, id, node_id)
+            .map_err(PolicyStoreError::into_engine_error)
+    }
+    pub(crate) fn mark_extraction_relation_committed(
+        &mut self,
+        id: u64,
+        edge_id: u64,
+    ) -> Result<(), Error> {
+        extraction::mark_relation_committed(&mut self.connection, id, edge_id)
             .map_err(PolicyStoreError::into_engine_error)
     }
 

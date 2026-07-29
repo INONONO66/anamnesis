@@ -389,6 +389,36 @@ impl Default for SearchInput {
     }
 }
 
+/// Optional diagnostic controls for a search trace.
+///
+/// These controls affect only the amount of read-only diagnostic data retained
+/// in [`SearchTrace`]. They never change candidate generation, graph
+/// activation, ranking, packaging, or result limits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SearchDiagnostics {
+    /// Maximum number of pre-packaging readout candidates retained in the
+    /// trace. The ordinary product search path keeps 200.
+    pub readout_trace_limit: usize,
+}
+
+impl SearchDiagnostics {
+    /// Construct diagnostic controls with an explicit readout trace limit.
+    pub fn with_readout_trace_limit(readout_trace_limit: usize) -> Self {
+        Self {
+            readout_trace_limit,
+        }
+    }
+}
+
+impl Default for SearchDiagnostics {
+    fn default() -> Self {
+        Self {
+            readout_trace_limit: 200,
+        }
+    }
+}
+
 /// Packaging mode for ContextPackage assembly.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PackagingMode {

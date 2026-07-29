@@ -49,8 +49,14 @@ const EXTRACTION_TABLES_SQL: &str = "
         run_id INTEGER NOT NULL REFERENCES extract_runs(id),
         item_local_id TEXT NOT NULL,
         content TEXT NOT NULL,
-        kind TEXT NOT NULL CHECK(kind IN ('decision', 'causal', 'lesson', 'convention', 'gotcha')),
+        kind TEXT NOT NULL CHECK(kind IN (
+            'fact', 'entity', 'event', 'preference',
+            'decision', 'causal', 'lesson', 'convention', 'gotcha'
+        )),
         confidence REAL,
+        entity_tags TEXT NOT NULL DEFAULT '[]',
+        valid_from_ms INTEGER,
+        valid_until_ms INTEGER,
         source_turn_keys TEXT NOT NULL,
         source_session_id TEXT NOT NULL,
         source_scope TEXT NOT NULL,
@@ -156,6 +162,52 @@ pub(super) fn create_schema(transaction: &Transaction<'_>) -> Result<(), PolicyS
         .execute_batch(EXTRACTION_TABLES_SQL)
         .map_err(|error| PolicyStoreError::sqlite("create extraction policy tables", error))
 }
+
+pub(super) fn migrate_v3(transaction: &Transaction<'_>) -> Result<(), PolicyStoreError> {
+    transaction
+        .execute_batch(
+            "
+            ALTER TABLE extract_candidates RENAME TO extract_candidates_v2;
+            ALTER TABLE extract_relations RENAME TO extract_relations_v2;
+            ",
+        )
+        .map_err(|error| PolicyStoreError::sqlite("rename v2 extraction tables", error))?;
+    create_schema(transaction)?;
+    transaction
+        .execute_batch(
+            "
+            INSERT INTO extract_candidates (
+                id, run_id, item_local_id, content, kind, confidence,
+                entity_tags, valid_from_ms, valid_until_ms,
+                source_turn_keys, source_session_id, source_scope,
+                source_content_hashes, source_node_ids, idempotency_key,
+                audit_support, contamination_category, reviewed_by, reviewed_at,
+                committed_node_id
+            )
+            SELECT
+                id, run_id, item_local_id, content, kind, confidence,
+                '[]', NULL, NULL,
+                source_turn_keys, source_session_id, source_scope,
+                source_content_hashes, source_node_ids, idempotency_key,
+                audit_support, contamination_category, reviewed_by, reviewed_at,
+                committed_node_id
+            FROM extract_candidates_v2;
+
+            INSERT INTO extract_relations (
+                id, candidate_from, candidate_to, relation_type, idempotency_key,
+                audit_status, reviewed_by, reviewed_at, committed_edge_id
+            )
+            SELECT
+                id, candidate_from, candidate_to, relation_type, idempotency_key,
+                audit_status, reviewed_by, reviewed_at, committed_edge_id
+            FROM extract_relations_v2;
+
+            DROP TABLE extract_relations_v2;
+            DROP TABLE extract_candidates_v2;
+            ",
+        )
+        .map_err(|error| PolicyStoreError::sqlite("migrate v2 extraction rows", error))
+}
 pub(super) fn stage(
     connection: &mut Connection,
     profile_id: &str,
@@ -241,19 +293,32 @@ pub(super) fn stage(
                 .collect::<Vec<_>>(),
             "staged candidate source node ids",
         )?;
+        let entity_tags = serialize(&candidate.entity_tags, "staged candidate entity tags")?;
+        let valid_from_ms = candidate
+            .valid_from_ms
+            .map(|value| sqlite_u64(value, "candidate valid_from_ms"))
+            .transpose()?;
+        let valid_until_ms = candidate
+            .valid_until_ms
+            .map(|value| sqlite_u64(value, "candidate valid_until_ms"))
+            .transpose()?;
         transaction
             .execute(
                 "INSERT INTO extract_candidates
-                 (run_id, item_local_id, content, kind, confidence, source_turn_keys,
+                 (run_id, item_local_id, content, kind, confidence, entity_tags,
+                  valid_from_ms, valid_until_ms, source_turn_keys,
                   source_session_id, source_scope, source_content_hashes, source_node_ids,
                   idempotency_key)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                 params![
                     run_id_sql,
                     candidate.item_local_id,
                     candidate.content,
                     candidate_kind(&candidate.kind),
                     candidate.confidence,
+                    entity_tags,
+                    valid_from_ms,
+                    valid_until_ms,
                     source_turn_keys,
                     source.session_id,
                     source.scope,
@@ -326,9 +391,11 @@ pub(super) fn list_audit(
     let mut candidate_statement = connection
         .prepare(
             "SELECT c.id, c.run_id, r.profile_id, c.item_local_id, c.content, c.kind,
-                    c.confidence, c.source_turn_keys, c.source_content_hashes,
+                    c.confidence, c.entity_tags, c.valid_from_ms, c.valid_until_ms,
+                    c.source_turn_keys, c.source_content_hashes,
                     c.source_session_id, c.source_scope, c.source_node_ids,
-                    c.audit_support, c.contamination_category, c.reviewed_by, c.reviewed_at
+                    c.idempotency_key, c.audit_support, c.contamination_category,
+                    c.reviewed_by, c.reviewed_at, c.committed_node_id
              FROM extract_candidates c JOIN extract_runs r ON r.id = c.run_id
              ORDER BY c.id LIMIT ?1",
         )
@@ -345,13 +412,13 @@ pub(super) fn list_audit(
             .get(5)
             .map_err(|error| PolicyStoreError::sqlite("read candidate kind", error))?;
         let support: Option<String> = row
-            .get(12)
+            .get(16)
             .map_err(|error| PolicyStoreError::sqlite("read candidate audit support", error))?;
         let contamination: Option<String> = row
-            .get(13)
+            .get(17)
             .map_err(|error| PolicyStoreError::sqlite("read candidate contamination", error))?;
         let reviewed_at: Option<i64> = row
-            .get(15)
+            .get(19)
             .map_err(|error| PolicyStoreError::sqlite("read candidate reviewed_at", error))?;
         candidates.push(ExtractionAuditCandidateRow {
             id: sqlite_row_id(
@@ -377,40 +444,66 @@ pub(super) fn list_audit(
             confidence: row
                 .get(6)
                 .map_err(|error| PolicyStoreError::sqlite("read candidate confidence", error))?,
-            source_turn_keys: deserialize(
+            entity_tags: deserialize(
                 &row.get::<_, String>(7).map_err(|error| {
+                    PolicyStoreError::sqlite("read candidate entity tags", error)
+                })?,
+                "candidate entity tags",
+            )?,
+            valid_from_ms: row
+                .get::<_, Option<i64>>(8)
+                .map_err(|error| PolicyStoreError::sqlite("read candidate valid_from_ms", error))?
+                .map(|value| sqlite_row_id(value, "candidate valid_from_ms"))
+                .transpose()?,
+            valid_until_ms: row
+                .get::<_, Option<i64>>(9)
+                .map_err(|error| PolicyStoreError::sqlite("read candidate valid_until_ms", error))?
+                .map(|value| sqlite_row_id(value, "candidate valid_until_ms"))
+                .transpose()?,
+            source_turn_keys: deserialize(
+                &row.get::<_, String>(10).map_err(|error| {
                     PolicyStoreError::sqlite("read candidate source turn keys", error)
                 })?,
                 "candidate source turn keys",
             )?,
             source_content_hashes: deserialize(
-                &row.get::<_, String>(8).map_err(|error| {
+                &row.get::<_, String>(11).map_err(|error| {
                     PolicyStoreError::sqlite("read candidate source content hashes", error)
                 })?,
                 "candidate source content hashes",
             )?,
-            source_session_id: row.get(9).map_err(|error| {
+            source_session_id: row.get(12).map_err(|error| {
                 PolicyStoreError::sqlite("read candidate source session", error)
             })?,
             source_scope: row
-                .get(10)
+                .get(13)
                 .map_err(|error| PolicyStoreError::sqlite("read candidate source scope", error))?,
             source_node_ids: deserialize(
-                &row.get::<_, String>(11).map_err(|error| {
+                &row.get::<_, String>(14).map_err(|error| {
                     PolicyStoreError::sqlite("read candidate source node ids", error)
                 })?,
                 "candidate source node ids",
             )?,
+            idempotency_key: row.get(15).map_err(|error| {
+                PolicyStoreError::sqlite("read candidate idempotency key", error)
+            })?,
             support: support.as_deref().map(parse_audit_support).transpose()?,
             contamination: contamination
                 .as_deref()
                 .map(parse_contamination_category)
                 .transpose()?,
             reviewed_by: row
-                .get(14)
+                .get(18)
                 .map_err(|error| PolicyStoreError::sqlite("read candidate reviewer", error))?,
             reviewed_at: reviewed_at
                 .map(|value| sqlite_row_id(value, "candidate reviewed_at"))
+                .transpose()?,
+            committed_node_id: row
+                .get::<_, Option<i64>>(20)
+                .map_err(|error| {
+                    PolicyStoreError::sqlite("read candidate committed_node_id", error)
+                })?
+                .map(|value| sqlite_row_id(value, "candidate committed_node_id"))
                 .transpose()?,
             sources: Vec::new(),
         });
@@ -420,7 +513,7 @@ pub(super) fn list_audit(
         .prepare(
             "SELECT r.id, source.run_id, run.profile_id, r.candidate_from, r.candidate_to,
                     source.item_local_id, target.item_local_id, r.relation_type,
-                    r.audit_status, r.reviewed_by, r.reviewed_at
+                    r.audit_status, r.reviewed_by, r.reviewed_at, r.committed_edge_id
              FROM extract_relations r
              JOIN extract_candidates source ON source.id = r.candidate_from
              JOIN extract_candidates target ON target.id = r.candidate_to
@@ -482,6 +575,13 @@ pub(super) fn list_audit(
                 .map_err(|error| PolicyStoreError::sqlite("read relation reviewer", error))?,
             reviewed_at: reviewed_at
                 .map(|value| sqlite_row_id(value, "relation reviewed_at"))
+                .transpose()?,
+            committed_edge_id: row
+                .get::<_, Option<i64>>(11)
+                .map_err(|error| {
+                    PolicyStoreError::sqlite("read relation committed_edge_id", error)
+                })?
+                .map(|value| sqlite_row_id(value, "relation committed_edge_id"))
                 .transpose()?,
         });
     }
@@ -583,6 +683,54 @@ pub(super) fn update_relation_audit(
     transaction
         .commit()
         .map_err(|error| PolicyStoreError::sqlite("commit relation audit transaction", error))
+}
+
+pub(super) fn mark_candidate_committed(
+    connection: &mut Connection,
+    id: u64,
+    node_id: u64,
+) -> Result<(), PolicyStoreError> {
+    let id = sqlite_u64(id, "extraction candidate commit id")?;
+    let node_id = sqlite_u64(node_id, "extraction candidate committed node id")?;
+    let changed = connection
+        .execute(
+            "UPDATE extract_candidates
+             SET committed_node_id = ?2
+             WHERE id = ?1 AND (committed_node_id IS NULL OR committed_node_id = ?2)",
+            params![id, node_id],
+        )
+        .map_err(|error| PolicyStoreError::sqlite("mark extraction candidate committed", error))?;
+    if changed == 1 {
+        Ok(())
+    } else {
+        Err(PolicyStoreError::operation(
+            "extraction candidate commit target conflicts",
+        ))
+    }
+}
+
+pub(super) fn mark_relation_committed(
+    connection: &mut Connection,
+    id: u64,
+    edge_id: u64,
+) -> Result<(), PolicyStoreError> {
+    let id = sqlite_u64(id, "extraction relation commit id")?;
+    let edge_id = sqlite_u64(edge_id, "extraction relation committed edge id")?;
+    let changed = connection
+        .execute(
+            "UPDATE extract_relations
+             SET committed_edge_id = ?2
+             WHERE id = ?1 AND (committed_edge_id IS NULL OR committed_edge_id = ?2)",
+            params![id, edge_id],
+        )
+        .map_err(|error| PolicyStoreError::sqlite("mark extraction relation committed", error))?;
+    if changed == 1 {
+        Ok(())
+    } else {
+        Err(PolicyStoreError::operation(
+            "extraction relation commit target conflicts",
+        ))
+    }
 }
 
 fn ensure_shadow_profile_in_transaction(
@@ -759,6 +907,10 @@ fn parse_relation_verdict(value: &str) -> Result<RelationVerdict, PolicyStoreErr
 
 fn parse_candidate_kind(value: &str) -> Result<CandidateKind, PolicyStoreError> {
     match value {
+        "fact" => Ok(CandidateKind::Fact),
+        "entity" => Ok(CandidateKind::Entity),
+        "event" => Ok(CandidateKind::Event),
+        "preference" => Ok(CandidateKind::Preference),
         "decision" => Ok(CandidateKind::Decision),
         "causal" => Ok(CandidateKind::Causal),
         "lesson" => Ok(CandidateKind::Lesson),
@@ -805,6 +957,10 @@ fn relation_verdict(verdict: RelationVerdict) -> &'static str {
 }
 fn candidate_kind(kind: &CandidateKind) -> &'static str {
     match kind {
+        CandidateKind::Fact => "fact",
+        CandidateKind::Entity => "entity",
+        CandidateKind::Event => "event",
+        CandidateKind::Preference => "preference",
         CandidateKind::Decision => "decision",
         CandidateKind::Causal => "causal",
         CandidateKind::Lesson => "lesson",
@@ -826,6 +982,8 @@ fn extraction_error_kind(kind: &ExtractionErrorKind) -> &'static str {
     match kind {
         ExtractionErrorKind::Spawn => "spawn",
         ExtractionErrorKind::Stdin => "stdin",
+        ExtractionErrorKind::ProviderRequest => "provider-request",
+        ExtractionErrorKind::ProviderResponse => "provider-response",
         ExtractionErrorKind::Timeout => "timeout",
         ExtractionErrorKind::StdoutTooLarge => "stdout-too-large",
         ExtractionErrorKind::StderrTooLarge => "stderr-too-large",

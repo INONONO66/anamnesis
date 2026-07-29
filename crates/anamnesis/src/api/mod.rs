@@ -6,11 +6,18 @@ use crate::error::Error;
 use crate::graph::node::Origin;
 use crate::graph::{AccessTrace, Edge, Graph, Node};
 use crate::graph::{EdgeId, EdgeType, KnowledgeType, MemoryTier, NodeId, Timestamp};
-use crate::query::{ContextPackage, Query, QueryConfig, SearchInput, SearchResult};
+use crate::query::{
+    ContextPackage, Query, QueryConfig, SearchDiagnostics, SearchInput, SearchResult,
+};
 use crate::snapshot::{SnapshotId, SnapshotStore};
 use crate::storage::{SqliteStorage, StorageAdapter};
 
 mod search;
+pub(crate) use search::assemble::{apply_packaging_mode, apply_validity_filter};
+
+pub(crate) fn planned_query_variants(query: &str) -> Vec<String> {
+    search::plan::query_variants(query)
+}
 
 const ARCHIVE_SALIENCE_THRESHOLD: f64 = 0.10;
 const SALIENCE_CHANGE_EPSILON: f64 = 1e-10;
@@ -2808,6 +2815,19 @@ impl<S: StorageAdapter + Clone> Engine<S> {
     /// Returns `Err(Error::InvalidInput)` if both `text` is empty and `query_embedding` is `None`.
     pub fn search(&self, input: SearchInput) -> Result<SearchResult, Error> {
         search::search(self, input)
+    }
+
+    /// Unified search with an explicit diagnostic trace bound.
+    ///
+    /// The diagnostics affect only how many ranked pre-packaging candidates are
+    /// retained in [`SearchResult::trace`]. Retrieval, activation, ranking,
+    /// packaging, and final results are identical to [`search`](Self::search).
+    pub fn search_with_diagnostics(
+        &self,
+        input: SearchInput,
+        diagnostics: &SearchDiagnostics,
+    ) -> Result<SearchResult, Error> {
+        search::search_with_diagnostics(self, input, diagnostics)
     }
 
     fn query_type_filtered(

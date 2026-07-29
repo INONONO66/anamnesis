@@ -4,7 +4,21 @@ use serde::{Deserialize, Serialize};
 
 pub trait LlmProvider: Send + Sync {
     fn generate(&self, prompt: &str) -> Result<String, ProviderError>;
+    fn generate_with_usage(&self, prompt: &str) -> Result<ProviderGeneration, ProviderError> {
+        self.generate(prompt).map(|content| ProviderGeneration {
+            content,
+            prompt_tokens: None,
+            completion_tokens: None,
+        })
+    }
     fn name(&self) -> &str;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderGeneration {
+    pub content: String,
+    pub prompt_tokens: Option<u64>,
+    pub completion_tokens: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -32,15 +46,17 @@ pub struct ProviderConfig {
     pub model: String,
     pub timeout_secs: u64,
     pub max_retries: u32,
+    pub max_output_tokens: Option<u64>,
 }
 
 impl Default for ProviderConfig {
     fn default() -> Self {
         ProviderConfig {
             base_url: "http://localhost:11434".to_string(),
-            model: "qwen2.5".to_string(),
+            model: "qwen3.6:35b-a3b".to_string(),
             timeout_secs: 30,
             max_retries: 3,
+            max_output_tokens: None,
         }
     }
 }
@@ -48,21 +64,29 @@ impl Default for ProviderConfig {
 pub struct OpenAiCompatibleProvider {
     pub client: reqwest::blocking::Client,
     pub config: ProviderConfig,
+    api_key: Option<String>,
 }
 
 impl OpenAiCompatibleProvider {
     pub fn new(config: ProviderConfig) -> Result<Self, ProviderError> {
+        let api_key = std::env::var("LLM_API_KEY")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
         let client = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(config.timeout_secs))
             .build()
             .map_err(|e| ProviderError::Other(e.to_string()))?;
-        Ok(OpenAiCompatibleProvider { client, config })
+        Ok(OpenAiCompatibleProvider {
+            client,
+            config,
+            api_key,
+        })
     }
 
     pub fn from_env() -> Result<Self, ProviderError> {
         let base_url =
             std::env::var("LLM_BASE_URL").unwrap_or_else(|_| "http://localhost:11434".to_string());
-        let model = std::env::var("LLM_MODEL").unwrap_or_else(|_| "qwen2.5".to_string());
+        let model = std::env::var("LLM_MODEL").unwrap_or_else(|_| "qwen3.6:35b-a3b".to_string());
         let timeout_secs = std::env::var("LLM_TIMEOUT")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -73,24 +97,44 @@ impl OpenAiCompatibleProvider {
             model,
             timeout_secs,
             max_retries: 3,
+            max_output_tokens: None,
         };
         Self::new(config)
     }
-}
 
-impl LlmProvider for OpenAiCompatibleProvider {
-    fn generate(&self, prompt: &str) -> Result<String, ProviderError> {
-        let url = format!("{}/v1/chat/completions", self.config.base_url);
-        let body = serde_json::json!({
+    fn request(&self, prompt: &str) -> Result<ProviderGeneration, ProviderError> {
+        let base_url = self.config.base_url.trim_end_matches('/');
+        let url = if base_url.ends_with("/v1") {
+            format!("{base_url}/chat/completions")
+        } else {
+            format!("{base_url}/v1/chat/completions")
+        };
+        let mut body = serde_json::json!({
             "model": self.config.model,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.0
         });
+        if let Some(max_output_tokens) = self.config.max_output_tokens {
+            body["max_tokens"] = serde_json::Value::from(max_output_tokens);
+        }
 
         let mut last_err = ProviderError::ConnectionFailed;
         for _ in 0..=self.config.max_retries {
-            match self.client.post(&url).json(&body).send() {
+            let mut request = self.client.post(&url).json(&body);
+            if let Some(api_key) = &self.api_key {
+                request = request.bearer_auth(api_key);
+            }
+            match request.send() {
                 Ok(response) => {
+                    let status = response.status();
+                    if !status.is_success() {
+                        let detail = response
+                            .text()
+                            .unwrap_or_else(|_| "response body unavailable".to_string());
+                        return Err(ProviderError::Other(format!(
+                            "HTTP {status} from chat completions: {detail}"
+                        )));
+                    }
                     let json: serde_json::Value = response
                         .json()
                         .map_err(|e| ProviderError::InvalidResponse(e.to_string()))?;
@@ -98,8 +142,13 @@ impl LlmProvider for OpenAiCompatibleProvider {
                         .as_str()
                         .ok_or_else(|| {
                             ProviderError::InvalidResponse("missing content".to_string())
-                        })?;
-                    return Ok(content.to_string());
+                        })?
+                        .to_string();
+                    return Ok(ProviderGeneration {
+                        content,
+                        prompt_tokens: json["usage"]["prompt_tokens"].as_u64(),
+                        completion_tokens: json["usage"]["completion_tokens"].as_u64(),
+                    });
                 }
                 Err(e) if e.is_timeout() => {
                     last_err = ProviderError::Timeout;
@@ -110,6 +159,16 @@ impl LlmProvider for OpenAiCompatibleProvider {
             }
         }
         Err(last_err)
+    }
+}
+
+impl LlmProvider for OpenAiCompatibleProvider {
+    fn generate(&self, prompt: &str) -> Result<String, ProviderError> {
+        self.request(prompt).map(|generation| generation.content)
+    }
+
+    fn generate_with_usage(&self, prompt: &str) -> Result<ProviderGeneration, ProviderError> {
+        self.request(prompt)
     }
 
     fn name(&self) -> &str {
@@ -154,6 +213,7 @@ mod tests {
             model: "test".to_string(),
             timeout_secs: 1,
             max_retries: 0,
+            max_output_tokens: None,
         };
         let provider = OpenAiCompatibleProvider::new(config).expect("should create");
         let result = provider.generate("test");

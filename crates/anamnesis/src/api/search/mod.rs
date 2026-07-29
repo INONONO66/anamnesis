@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use crate::error::Error;
 use crate::graph::{KnowledgeType, NodeId};
-use crate::query::{QueryConfig, SearchCandidate, SearchInput, SearchResult};
+use crate::query::{QueryConfig, SearchCandidate, SearchDiagnostics, SearchInput, SearchResult};
 
 pub(crate) mod assemble;
 pub(crate) mod candidates;
@@ -21,6 +21,7 @@ use crate::api::Engine;
 use crate::storage::StorageAdapter;
 
 const DEFAULT_SOURCE_CANDIDATE_LIMIT: usize = 64;
+pub(crate) const MAX_READOUT_TRACE_LIMIT: usize = 4_096;
 
 /// Execute unified search — combines text search, vector similarity, and graph traversal.
 ///
@@ -32,6 +33,21 @@ pub(crate) fn search<S: StorageAdapter + Clone>(
     engine: &Engine<S>,
     input: SearchInput,
 ) -> Result<SearchResult, Error> {
+    search_with_diagnostics(engine, input, &SearchDiagnostics::default())
+}
+
+pub(crate) fn search_with_diagnostics<S: StorageAdapter + Clone>(
+    engine: &Engine<S>,
+    input: SearchInput,
+    diagnostics: &SearchDiagnostics,
+) -> Result<SearchResult, Error> {
+    if diagnostics.readout_trace_limit == 0
+        || diagnostics.readout_trace_limit > MAX_READOUT_TRACE_LIMIT
+    {
+        return Err(Error::InvalidInput(format!(
+            "readout trace limit must be in 1..={MAX_READOUT_TRACE_LIMIT}"
+        )));
+    }
     let plan = plan::derive_search_plan(&input, &engine.config)?;
 
     let mut per_source: Vec<Vec<SearchCandidate>> = Vec::new();
@@ -40,7 +56,7 @@ pub(crate) fn search<S: StorageAdapter + Clone>(
     let storage = engine.graph.storage();
 
     let sub_queries = if plan.use_text {
-        plan::decompose_query(&plan.text)
+        plan::query_variants(&plan.text)
     } else {
         Vec::new()
     };
@@ -136,6 +152,7 @@ pub(crate) fn search<S: StorageAdapter + Clone>(
             plan: &plan,
             strategies_used,
             field: &field,
+            readout_trace_limit: diagnostics.readout_trace_limit,
         },
     )
 }

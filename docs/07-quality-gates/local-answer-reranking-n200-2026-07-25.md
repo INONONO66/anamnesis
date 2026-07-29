@@ -2,8 +2,9 @@
 
 Date: 2026-07-25
 
-Status: accepted local high-quality profile; not a full-split or leaderboard
-claim, and not the latency-sensitive hook default.
+Status: historical accepted local high-quality profile under the schema-v15
+adapter renderer; product-wire schema-v16 reconfirmation required. It is not a
+full-split or leaderboard claim, and not the latency-sensitive hook default.
 
 This gate tests whether a second-stage local reranker can improve the actual
 answer delivered by Anamnesis without replacing its cognitive graph, changing
@@ -18,7 +19,7 @@ core. Retrieval metrics screen candidates; paired answer F1 decides promotion.
 | Selection | seed 42, 50 questions per non-adversarial type, 200 total |
 | First stage | shipped `Memory` cognitive readout, BGE-base embeddings |
 | Candidate surface | first 100 nodes from `SearchResult::trace.readout` |
-| Second stage | local `BAAI/bge-reranker-base`, top 32 scored results |
+| Second stage | local `BAAI/bge-reranker-base`; all 100 candidates scored, batch size 32 |
 | Final package | shared engine packaging rules, top 10 |
 | Reader | local `qwen3.5:35b-a3b`, digest `3460ffeede54…` |
 | Generation | non-thinking, temperature 0, presence penalty 1.5, seed 42 |
@@ -57,7 +58,7 @@ substantially. The small single-hop regression is retained rather than hidden:
 the predeclared overall paired gate passes, but future work should recover it
 without giving back the multi-hop/open-domain gain.
 
-## Product-Safe Integration
+## Product Integration and Subsequent Fidelity Repair
 
 The engine still does not own or initialize a reranker. The additive
 `Memory::repackage_reranked` API accepts only finite, unique
@@ -65,8 +66,7 @@ The engine still does not own or initialize a reranker. The additive
 readout. It then:
 
 - applies deterministic score ordering with cognitive order as the tie-breaker;
-- uses the same package assembly, tension-endpoint preservation, and token
-  accounting as native search;
+- uses shared package assembly, result limiting, and token accounting;
 - rebuilds access and co-readout commit evidence for only the fragments actually
   exposed;
 - retains source path-current evidence only where both endpoints survive;
@@ -80,6 +80,25 @@ final ten fragments (mean 1,030 estimated tokens, p95 1,364).
 
 No default search, embedding model, readout coefficient, graph mechanic, or
 existing public signature changes.
+
+Subsequent audit found that schema-v15 did not exercise a fully equivalent
+product wire: the benchmark fragment renderer omitted `Fragment.name` while
+adding dataset session dates unavailable in `Recall::as_context()`. The initial
+reranking API also did not reapply validity windows or the source packaging
+mode and could discover tensions only from the source final package.
+
+Schema v16 repairs these gaps additively:
+
+- `Memory::repackage_reranked_at` reapplies contradiction discovery, source
+  packaging mode, and validity at the explicit query time;
+- the existing `repackage_reranked` uses present-time validity;
+- the default answer route consumes exact `Recall::as_context()` output;
+- candidate, reranker, delivered, and final rendered coverage are reported
+  separately.
+
+The historical 40.61% result remains evidence for second-stage ranking, but its
+absolute score and +5.32-point delta must be rerun before being described as a
+current product-wire result.
 
 ## Cost and Rejected Alternatives
 
@@ -112,8 +131,8 @@ cargo bench --features embed --bench local_answer -- \
   --dataset locomo --skip-adversarial --stratify 50 --sample-seed 42 \
   --top-k 10 --skip-local-judge --retrieval-only \
   --embedding-model bge-base-en-v1.5 \
-  --shadow-cross-encoder BAAI/bge-reranker-base \
-  --shadow-cross-encoder-candidates 100 \
+  --consumer-cross-encoder BAAI/bge-reranker-base \
+  --consumer-candidate-k 100 --first-stage-seed-limit 10 \
   --baseline-reader-model qwen3.5:35b-a3b --reader-no-think \
   --reader-temperature 0 --reader-top-p 0.8 --reader-top-k 20 \
   --reader-presence-penalty 1.5 --generation-seed 42 \

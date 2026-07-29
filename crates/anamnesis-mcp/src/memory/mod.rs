@@ -18,7 +18,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use anamnesis::embedding::EmbeddingProvider;
+use anamnesis::embedding::{EmbeddingProvider, RerankingProvider};
 use anamnesis::graph::{EdgeType, KnowledgeType, NodeId, ScopePath, Timestamp};
 use anamnesis::memory::{Hit, MemoryStats};
 use anamnesis::storage::SqliteStorage;
@@ -718,6 +718,8 @@ pub(crate) struct OpCounters {
 pub struct MemoryRegistry {
     provider: Option<Arc<dyn EmbeddingProvider>>,
     source: ProviderSource,
+    reranker: Option<Arc<dyn RerankingProvider>>,
+    reranker_model: String,
     backend: Backend,
     /// `pub(crate)` so `crate::dispatch`'s phase-1 (brief global lock) can read
     /// the registry's default without needing a whole-registry method call.
@@ -778,6 +780,7 @@ impl MemoryRegistry {
             default_namespace,
             reinforce_on_recall,
             crate::config::DEFAULT_EMBED_MODEL.to_string(),
+            crate::config::DEFAULT_RERANK_MODEL.to_string(),
         )
     }
 
@@ -787,12 +790,15 @@ impl MemoryRegistry {
         default_namespace: String,
         reinforce_on_recall: bool,
         embed_model: String,
+        rerank_model: String,
     ) -> Self {
         Self {
             provider: None,
             source: ProviderSource::FastEmbedLazy {
                 model_name: embed_model,
             },
+            reranker: None,
+            reranker_model: rerank_model,
             backend: Backend::File {
                 default_db,
                 dir,
@@ -818,6 +824,7 @@ impl MemoryRegistry {
         default_namespace: String,
         reinforce_on_recall: bool,
         embed_model: String,
+        rerank_model: String,
     ) -> Self {
         Self {
             lock_on_open: false,
@@ -827,6 +834,7 @@ impl MemoryRegistry {
                 default_namespace,
                 reinforce_on_recall,
                 embed_model,
+                rerank_model,
             )
         }
     }
@@ -841,6 +849,8 @@ impl MemoryRegistry {
         Self {
             provider: Some(provider.clone()),
             source: ProviderSource::Ready(provider),
+            reranker: Some(Arc::new(crate::memory::recall::CognitiveReranker)),
+            reranker_model: "test-cognitive-order".to_owned(),
             backend: Backend::Memory,
             reinforce_on_recall,
             open: HashMap::new(),
@@ -868,6 +878,8 @@ impl MemoryRegistry {
         Self {
             provider: Some(provider.clone()),
             source: ProviderSource::Ready(provider),
+            reranker: Some(Arc::new(crate::memory::recall::CognitiveReranker)),
+            reranker_model: "test-cognitive-order".to_owned(),
             backend: Backend::File {
                 default_db,
                 dir,
@@ -925,6 +937,19 @@ impl MemoryRegistry {
         };
         self.provider = Some(p.clone());
         Ok(p)
+    }
+
+    pub(crate) fn reranker(&mut self) -> Result<Arc<dyn RerankingProvider>, Error> {
+        if let Some(reranker) = &self.reranker {
+            return Ok(Arc::clone(reranker));
+        }
+        let reranker: Arc<dyn RerankingProvider> = Arc::new(
+            anamnesis::embedding::fastembed::FastEmbedReranker::with_model_name(
+                &self.reranker_model,
+            )?,
+        );
+        self.reranker = Some(Arc::clone(&reranker));
+        Ok(reranker)
     }
 
     pub(crate) fn prepare_namespace_probe(

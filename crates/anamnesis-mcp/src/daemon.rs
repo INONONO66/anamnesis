@@ -499,6 +499,7 @@ pub async fn run(cfg: Config) -> Result<()> {
         cfg.default_namespace.clone(),
         cfg.reinforce_on_recall,
         cfg.embed_model.clone(),
+        cfg.rerank_model.clone(),
     );
     memory_registry.set_auto_migrate_embeddings(cfg.auto_migrate_embeddings);
     let registry = std::sync::Arc::new(std::sync::Mutex::new(memory_registry));

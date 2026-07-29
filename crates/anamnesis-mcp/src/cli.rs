@@ -8,7 +8,9 @@ use clap::{ArgGroup, Parser, Subcommand};
 
 use crate::extract::audit::{ExtractionAuditResult, resolve_reviewer};
 use crate::extract::types::{AuditSupport, ContaminationCategory, RelationVerdict};
-use crate::extract::worker::{WorkerNoop, WorkerOutcome, run_worker};
+use crate::extract::worker::{
+    ExtractionPreviewInput, WorkerNoop, WorkerOutcome, run_extraction_preview, run_worker,
+};
 
 use crate::config::Config;
 use crate::memory::{
@@ -168,7 +170,12 @@ pub enum Commands {
     },
     #[command(group(
         ArgGroup::new("audit_update")
-            .args(["candidate", "relation"])
+            .args([
+                "candidate",
+                "relation",
+                "promote_candidate",
+                "promote_relation",
+            ])
             .multiple(false)
     ))]
     /// Review staged extraction candidates and relations without writing graph content.
@@ -200,6 +207,20 @@ pub enum Commands {
         /// Reviewer identity; defaults through audit environment variables.
         #[arg(long, requires = "audit_update")]
         reviewer: Option<String>,
+        /// Materialize one reviewed, supported, uncontaminated candidate as
+        /// derived knowledge with source provenance.
+        #[arg(long, conflicts_with_all = ["candidate", "relation"])]
+        promote_candidate: Option<u64>,
+        /// Materialize one reviewed-correct relation between already promoted
+        /// derived candidates.
+        #[arg(long, conflicts_with_all = ["candidate", "relation", "promote_candidate"])]
+        promote_relation: Option<u64>,
+    },
+    /// Run the product extractor over one explicit 1..=20-turn JSON batch and
+    /// print validated, reference-blind JSON without staging graph mutations.
+    ExtractPreview {
+        /// JSON object with a `sources` array using the extraction source wire.
+        input: std::path::PathBuf,
     },
     /// Download/initialize the embedding model, then exit.
     Prewarm,
@@ -300,6 +321,7 @@ fn registry(cfg: &Config) -> MemoryRegistry {
         cfg.default_namespace.clone(),
         cfg.reinforce_on_recall,
         cfg.embed_model.clone(),
+        cfg.rerank_model.clone(),
     )
 }
 
@@ -365,6 +387,18 @@ pub fn run_extract_worker(cli: &Cli) -> Result<()> {
     let cfg = Config::from_env();
     let output = render_extract_outcome(run_worker(&cfg, namespace)?);
     write_oneshot_stdout(cli, &output)
+}
+
+/// Run an explicit, mutation-free extraction batch through the product
+/// prompt/provider/validator pipeline.
+pub fn run_extract_preview(input: &std::path::Path) -> Result<()> {
+    let text = std::fs::read_to_string(input)
+        .with_context(|| format!("read extraction preview input {}", input.display()))?;
+    let input: ExtractionPreviewInput =
+        serde_json::from_str(&text).context("decode extraction preview input")?;
+    let output = run_extraction_preview(input)?;
+    println!("{}", serde_json::to_string_pretty(&output)?);
+    Ok(())
 }
 
 /// Outcome of attempting a synchronous one-shot.
@@ -460,6 +494,9 @@ pub fn run_oneshot(cli: &Cli) -> Result<Oneshot> {
         }
         Some(Commands::Extract { .. }) => Err(anyhow::anyhow!(
             "extract must be routed before synchronous one-shots"
+        )),
+        Some(Commands::ExtractPreview { .. }) => Err(anyhow::anyhow!(
+            "extract-preview must be routed before synchronous one-shots"
         )),
     }
 }
@@ -622,6 +659,8 @@ fn oneshot_request(cli: &Cli) -> Option<crate::proto::Request> {
             limit,
             candidate: None,
             relation: None,
+            promote_candidate: None,
+            promote_relation: None,
             ..
         }) => Some(Request::ExtractionAuditList {
             namespace: namespace.clone(),
@@ -652,6 +691,22 @@ fn oneshot_request(cli: &Cli) -> Option<crate::proto::Request> {
             relation_id: *relation_id,
             verdict: *verdict,
             reviewer: resolve_reviewer(reviewer.as_deref()),
+        }),
+        Some(Commands::Extract {
+            namespace,
+            promote_candidate: Some(candidate_id),
+            ..
+        }) => Some(Request::PromoteExtractionCandidate {
+            namespace: namespace.clone(),
+            candidate_id: *candidate_id,
+        }),
+        Some(Commands::Extract {
+            namespace,
+            promote_relation: Some(relation_id),
+            ..
+        }) => Some(Request::PromoteExtractionRelation {
+            namespace: namespace.clone(),
+            relation_id: *relation_id,
         }),
         _ => None,
     }
@@ -1033,6 +1088,15 @@ mod tests {
             vec![
                 "anamnesis",
                 "extract",
+                "--promote-candidate",
+                "7",
+                "--namespace",
+                "project/anamnesis",
+            ],
+            vec!["anamnesis", "extract", "--promote-relation", "9"],
+            vec![
+                "anamnesis",
+                "extract",
                 "--audit",
                 "--candidate",
                 "7",
@@ -1065,6 +1129,19 @@ mod tests {
     }
 
     #[test]
+    fn extract_preview_requires_one_input_path() {
+        use clap::Parser;
+
+        let parsed = Cli::try_parse_from(["anamnesis", "extract-preview", "sources.json"])
+            .expect("extract preview parses");
+        assert!(matches!(
+            parsed.command,
+            Some(Commands::ExtractPreview { input }) if input.ends_with("sources.json")
+        ));
+        assert!(Cli::try_parse_from(["anamnesis", "extract-preview"]).is_err());
+    }
+
+    #[test]
     fn extract_audit_cli_rejects_incomplete_or_mixed_update_forms() {
         use clap::Parser;
 
@@ -1075,6 +1152,26 @@ mod tests {
                 "anamnesis",
                 "extract",
                 "--audit",
+                "--relation-verdict",
+                "correct",
+            ],
+            vec![
+                "anamnesis",
+                "extract",
+                "--promote-candidate",
+                "7",
+                "--candidate",
+                "8",
+                "--support",
+                "supported",
+            ],
+            vec![
+                "anamnesis",
+                "extract",
+                "--promote-relation",
+                "9",
+                "--relation",
+                "10",
                 "--relation-verdict",
                 "correct",
             ],

@@ -85,6 +85,85 @@ The harness can run four paired routes over the same selected questions:
 | `2-retrieval-baseline` | shipped `Memory` + FastEmbed package | same baseline model | loss attributable to retrieval/context shape |
 | `3-retrieval-strong` | exact same retrieved package as route 2 | stronger local model | reader-capability recovery |
 
+Route 2 is a **product-wire** lane by default. Dataset turns enter through the
+same `Memory::add` windowing recipe as a consumer session; queries use
+`Memory::search_result_at_with`; optional consumer reranking returns scores
+through `Memory::repackage_reranked_at`; and the reader receives the exact
+`Memory::render_context(&recall)` string used by the MCP recall path. The
+harness does not maintain a second fragment renderer or inject benchmark-only
+dates into that product context: observation and validity times come from the
+actual source nodes.
+
+`--diagnostic-fragment-context` enables the historical adapter-enriched
+per-fragment context. It is analysis-only and cannot be combined accidentally
+with a headline claim. Fragment compaction, episodic hydration, and the
+benchmark-only RRF experiment require this diagnostic lane.
+
+`--derived-memory-artifact <json>` is a separate, explicit extraction
+ablation. Schema v1 is dataset-fingerprint bound and records the exact local
+Qwen 3.6 model digest and prompt version. It may cite only raw source
+session/turn ids; the harness materializes additive derived semantic knowledge
+and typed relations through the product APIs while preserving every raw turn. Report
+artifact and no-artifact lanes separately.
+
+Generate that artifact with
+`scripts/generate_locomo_derived_artifact.py`. The generator reads conversation
+turns only (never `qa`), batches at the product extractor's 20-source limit,
+and calls `anamnesis extract-preview`, which reuses the exact versioned product
+prompt, local provider, and validator without staging graph mutations. The
+built-in Qwen 3.6 profile uses Ollama's non-streaming chat API on loopback with
+the validator's strict JSON Schema; custom provider commands retain the bounded
+no-shell subprocess path. Its sidecar checkpoint is resumable. Stable
+sample-qualified session ids are mandatory because LoCoMo reuses raw
+`session_1`/`D1:1` identifiers across samples; artifact ingest rejects
+cross-sample provenance.
+
+`--answer-report <predict-only-report.json>` consumes the product contexts
+already persisted by an exact reader-free run and executes only the frozen
+Qwen 3.6 reader/judge lane. It rejects partial contexts, dataset mismatches,
+in-place overwrite, alternate context/derived flags, and non-Qwen-3.6 models.
+This avoids rerunning an expensive deterministic reranker while keeping the
+answer report's original retrieval metrics and context bytes.
+
+`--judge-report <answered-report.json>` preserves every answer and retrieval
+field and runs only the separately versioned local semantic judge. Use it to
+apply one identical Qwen 3.6 judge lane to historical Anamnesis profiles and
+competitor-adapter outputs without paying for retrieval or reader generation
+again. The output path must differ from the source.
+
+`--external-memory-artifact <json>` is the cross-system lane for Mem0,
+Supermemory, MemKraft, and future adapters. Schema v1 is bound to the exact
+dataset fingerprint and selected question set. Each record contains only
+`question_id`, the external system's exact returned `context`, and optional
+source text/session/turn provenance. `deny_unknown_fields` rejects answer,
+reference, gold, and relevance keys. The harness does not fabricate Anamnesis
+candidate/reranker metrics for this lane; it reports only the same frozen local
+reader and semantic-judge outcomes. System name, version, and configuration
+digest are mandatory.
+
+For a local Mem0 OSS comparison, run the upstream
+`mem0ai/memory-benchmarks` LoCoMo `--predict-only` phase and pass its output
+through `scripts/export_memorybench_contexts.py`. The converter requires this
+harness's selection report, dataset fingerprint, upstream version, config
+file, and cutoff. It copies only returned memory strings and strips upstream
+ground truth, evidence annotations, answers, and judgments before producing
+the strict external artifact. Anamnesis and Mem0 can then use the same Qwen
+3.6 reader, prompt, official-compatible F1, and separately named semantic
+judge. Cloud Supermemory follows the same wire, but no comparison is valid
+without credentials plus an exact provider version/config digest.
+
+An optional consumer cascade keeps both rerankers outside core:
+`--consumer-prefilter-cross-encoder`, `--consumer-prefilter-k`, and
+`--consumer-cross-encoder`. `--consumer-prefilter-query-fusion` applies RRF to
+the exact deterministic query variants recorded in `SearchTrace` at the fast
+prefilter only; the final quality reranker still sees the complete original
+question. Cascade latency and quality are promotion gates, not defaults.
+
+Headline answer evaluation is cold/read-only: it does not call `Memory::used`
+between questions, so earlier benchmark questions cannot warm later ones.
+`real_memory --warmup N` remains the explicit lifecycle diagnostic for committed
+retrieval, and commit-trace correctness is covered separately by engine tests.
+
 Route 0 is enabled with `--full-context`; LongMemEval requires a declared
 context window of at least 131072 for that route. Route 3 is opt-in with
 `--run-strong-reader`. `--stratify N` uses a stable
@@ -102,7 +181,10 @@ upstream metric itself is model-based.
 
 The CLI rejects non-loopback Ollama URLs. The report stores model manifest
 digests, a dataset fingerprint, every gold/retrieved context item, retrieval
-metrics, raw answers, official scores, raw judge responses, parse failures,
+metrics at three named selection surfaces (`candidate@K`, `reranker@K`, and
+`delivered@K`) plus exact-text `rendered` gold coverage, the exact
+product-rendered context, raw answers, official
+scores, raw judge responses, parse failures,
 per-stage latencies, generation settings, termination reasons, prompt/output
 token counts, and hidden-thinking character counts. An empty final answer is a
 run error rather than a zero-quality answer. The report is written after every
@@ -112,17 +194,48 @@ Answer generation and judging run in separate phases. This avoids repeatedly
 swapping large local reader and judge models while preserving an incremental,
 resumable report.
 
+The headline LoCoMo score is always raw official F1. A second
+`reader_surface_f1` applies one frozen, reference-blind transform only when the
+entire answer is a valid standalone ISO date. It is reported separately and
+must not be presented as memory-quality improvement. Compare two reports with:
+
+```bash
+python3 ../../scripts/compare_local_answer.py BASELINE.json CANDIDATE.json
+```
+
+The comparison refuses mismatched datasets, question sets, reader controls,
+prompt versions, or context surfaces. It reports paired question and
+conversation-cluster intervals plus Answer-F1 changes conditional on actual
+product-rendered recall improving, tying, or regressing.
+For a reader-free fixed-ranking selection experiment, pass
+`--selection-variant top-10` (or another recorded cutoff). That lane compares
+selected, delivered, and rendered recall, rendered Hit, per-type deltas, and
+both paired intervals without requiring answer routes.
+
+`--consumer-ranking-report` replays consumer scores from a compatible report
+while still rebuilding the graph, validating the nodes against a fresh core
+readout, and repackaging through the product API. Dataset/sample controls,
+candidate surface, seed limit, extraction fingerprint, reranker identity, and
+source relevance policy must match. This is the preferred way to compare
+several consumer selection policies without repeatedly sampling a reranker.
+
+For a paired reader experiment, `--paired-answer-report BASELINE.json` may be
+combined with `--answer-report`. The harness reuses a stored answer (and,
+when compatible, its judge decision) only when the complete rendered reader
+prompt, prompt versions, local model digests, and generation settings are
+identical. Changed prompts are generated normally. The paired report
+fingerprint and per-route reuse bit are persisted, so this optimization cannot
+silently turn different contexts into ties.
+
 Example pilot runs:
 
 ```bash
 # Run from crates/anamnesis (Cargo sets this as the bench process cwd).
-ollama pull qwen2.5:latest
-ollama pull qwen3.5:35b-a3b
-ollama pull gemma3:12b
+ollama pull qwen3.6:35b-a3b
 
 cargo bench --features embed --bench local_answer -- \
   --dataset locomo --stratify 1 --skip-adversarial --full-context \
-  --baseline-reader-model qwen3.5:35b-a3b \
+  --baseline-reader-model qwen3.6:35b-a3b \
   --allow-download --embed-cache .fastembed_cache/local-answer.sqlite \
   --output benches/eval/results/local-answer-locomo-pilot.json
 
@@ -131,13 +244,24 @@ cargo bench --features embed --bench local_answer -- \
   --allow-download --embed-cache .fastembed_cache/local-answer.sqlite \
   --output benches/eval/results/local-answer-longmemeval-pilot.json
 
-# Reproducible 7B-reader diagnostic: 25 questions from each non-adversarial type.
+# Reader-free retrieval diagnosis: 25 questions from each non-adversarial type.
 cargo bench --features embed --bench local_answer -- \
   --dataset locomo --stratify 25 --sample-seed 42 \
-  --skip-adversarial --baseline-only \
-  --baseline-reader-model qwen2.5:latest --judge-model gemma3:12b \
+  --skip-adversarial --predict-only \
+  --consumer-cross-encoder BAAI/bge-reranker-base \
+  --consumer-candidate-k 100 --first-stage-seed-limit 10 \
   --allow-download --embed-cache .fastembed_cache/local-answer.sqlite \
-  --output benches/eval/results/local-answer-locomo-7b-n100-seed42.json
+  --output benches/eval/results/local-answer-locomo-retrieval-n100-seed42.json
+
+# Local semantic-answer lane. Raw official F1 remains the headline score;
+# this judge result is reported separately and applied identically to systems.
+cargo bench --features embed --bench local_answer -- \
+  --dataset locomo --stratify 25 --sample-seed 42 \
+  --skip-adversarial --retrieval-only \
+  --baseline-reader-model qwen3.6:35b-a3b \
+  --judge-model qwen3.6:35b-a3b --reader-no-think --judge-no-think \
+  --allow-download --embed-cache .fastembed_cache/local-answer.sqlite \
+  --output benches/eval/results/local-answer-locomo-qwen36-n100-seed42.json
 ```
 
 Use `--resume` with the same output and configuration after interruption.
@@ -154,6 +278,9 @@ The paired 7B versus 35B reader comparison is recorded in
 That historical run used non-thinking temperature-zero generation and a
 generic binary local judge. It is retained as harness-development evidence,
 not an official LoCoMo quality claim.
+Current local answer development and promotion runs use
+`qwen3.6:35b-a3b`. Qwen 3.5 records below are immutable historical evidence,
+not current reproduction instructions.
 The first seeded Qwen3.5 35B-A3B result using LoCoMo's official deterministic
 F1, including the top-k sweep and rejected package ablations, is recorded in
 [local-answer-official-f1-n100-2026-07-25.md](local-answer-official-f1-n100-2026-07-25.md).
@@ -164,6 +291,11 @@ recorded in
 The paired n=200 local reranking gate, accepted high-quality profile, product
 integration boundary, and rejected fast alternatives are recorded in
 [local-answer-reranking-n200-2026-07-25.md](local-answer-reranking-n200-2026-07-25.md).
+The schema-v16 product-wire contract, reranking validity repair, four-stage
+evidence accounting, and first smoke run are recorded in
+[local-answer-product-wire-v16-2026-07-25.md](local-answer-product-wire-v16-2026-07-25.md).
+The first Qwen 3.6 product-wire bottleneck decomposition is recorded in
+[local-answer-qwen36-diagnosis-n20-2026-07-25.md](local-answer-qwen36-diagnosis-n20-2026-07-25.md).
 
 LoCoMo category names follow the official evaluation code:
 `1=multi-hop`, `2=temporal`, `3=open-domain`, `4=single-hop`,

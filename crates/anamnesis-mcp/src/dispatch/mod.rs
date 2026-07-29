@@ -159,6 +159,8 @@ fn request_namespace(req: &Request) -> Option<&str> {
         | Request::RecordExtractionFailure { namespace, .. }
         | Request::ExtractionAuditList { namespace, .. }
         | Request::UpdateExtractionCandidateAudit { namespace, .. }
+        | Request::PromoteExtractionCandidate { namespace, .. }
+        | Request::PromoteExtractionRelation { namespace, .. }
         | Request::UpdateExtractionRelationAudit { namespace, .. }
         | Request::Update { namespace, .. }
         | Request::Forget { namespace, .. }
@@ -270,15 +272,22 @@ fn dispatch_registry(registry: &Arc<Mutex<MemoryRegistry>>, req: Request) -> Res
 
             // Phase 1: bump intent counters and resolve both namespace handles.
             // `namespace_handles` creates no policy database connection or schema.
-            let (handles, effective_reinforce) = {
+            let (handles, effective_reinforce, reranker) = {
                 let mut reg = registry.lock().unwrap_or_else(|p| p.into_inner());
                 reg.ops.recalls += 1;
                 if reinforce == Some(true) || (reinforce.is_none() && reg.reinforce_on_recall) {
                     reg.ops.reinforcing_recalls += 1;
                 }
                 let effective_reinforce = reinforce.unwrap_or(reg.reinforce_on_recall);
+                let reranker = match reg.reranker() {
+                    Ok(reranker) => reranker,
+                    Err(e) => {
+                        reg.ops.dispatch_errors += 1;
+                        return Response::internal(e);
+                    }
+                };
                 match reg.namespace_handles(namespace.as_deref()) {
-                    Ok(handles) => (handles, effective_reinforce),
+                    Ok(handles) => (handles, effective_reinforce, reranker),
                     Err(e) => {
                         reg.ops.dispatch_errors += 1;
                         return Response::internal(e);
@@ -302,6 +311,7 @@ fn dispatch_registry(registry: &Arc<Mutex<MemoryRegistry>>, req: Request) -> Res
                         tag: tag.as_deref(),
                         knowledge_only: knowledge_only.unwrap_or(false),
                     },
+                    reranker.as_ref(),
                 ) {
                     Ok(memory::RecallOutcome { packaged, trace }) => {
                         match render::render_recall(&packaged) {
@@ -727,6 +737,14 @@ fn dispatch_registry(registry: &Arc<Mutex<MemoryRegistry>>, req: Request) -> Res
             contamination,
             reviewer,
         ),
+        Request::PromoteExtractionCandidate {
+            namespace,
+            candidate_id,
+        } => extract::dispatch_promote_candidate(registry, namespace, candidate_id),
+        Request::PromoteExtractionRelation {
+            namespace,
+            relation_id,
+        } => extract::dispatch_promote_relation(registry, namespace, relation_id),
         Request::UpdateExtractionRelationAudit {
             namespace,
             relation_id,

@@ -7,7 +7,7 @@
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/anamnesis-hook.sh",
             "args": ["session-start"],
-            "timeout": 10
+            "timeout": 5
           }
         ]
       }

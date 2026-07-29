@@ -66,6 +66,11 @@ fn migrate(transaction: &Transaction<'_>) -> Result<(), PolicyStoreError> {
             extraction::create_schema(transaction)?;
             set_version(transaction)?;
         }
+        Some(2) => {
+            create_v1_schema(transaction)?;
+            extraction::migrate_v3(transaction)?;
+            set_version(transaction)?;
+        }
         Some(SCHEMA_VERSION) => {
             create_v1_schema(transaction)?;
             extraction::create_schema(transaction)?;
@@ -193,7 +198,7 @@ mod tests {
                     id INTEGER PRIMARY KEY CHECK(id = 1),
                     version INTEGER NOT NULL
                 );
-                INSERT INTO mcp_schema_version (id, version) VALUES (1, 3);
+                INSERT INTO mcp_schema_version (id, version) VALUES (1, 4);
                 CREATE TABLE retained_metadata (id INTEGER PRIMARY KEY, marker INTEGER NOT NULL);
                 INSERT INTO retained_metadata (id, marker) VALUES (1, 7);
                 ",
@@ -244,6 +249,83 @@ mod tests {
                 .expect("read future schema version after failed initialization"),
             version_before
         );
+    }
+
+    #[test]
+    fn v2_extraction_rows_migrate_to_generic_temporal_schema() {
+        let mut connection = Connection::open_in_memory().expect("open policy database");
+        initialize(&mut connection).expect("initialize current schema");
+        connection
+            .execute(
+                "INSERT INTO extractor_profiles
+                 (profile_id, components, status, created_at, approved_at)
+                 VALUES ('profile', '{}', 'shadow', 1, NULL)",
+                [],
+            )
+            .expect("seed profile");
+        connection
+            .execute(
+                "INSERT INTO extract_runs
+                 (id, at_ms, profile_id, mode, turn_count, candidate_count, relation_count,
+                  schema_valid, llm_invoked, error_kind, duration_ms)
+                 VALUES (1, 1, 'profile', 'shadow', 1, 1, 0, 1, 1, NULL, 1)",
+                [],
+            )
+            .expect("seed run");
+        connection
+            .execute(
+                "INSERT INTO extract_candidates
+                 (id, run_id, item_local_id, content, kind, confidence, entity_tags,
+                  valid_from_ms, valid_until_ms, source_turn_keys, source_session_id,
+                  source_scope, source_content_hashes, source_node_ids, idempotency_key)
+                 VALUES (1, 1, 'item', 'content', 'lesson', 0.9, '[]',
+                         NULL, NULL, '[\"turn\"]', 'session', '', '[\"hash\"]', '[7]', 'key')",
+                [],
+            )
+            .expect("seed candidate");
+        connection
+            .execute("UPDATE mcp_schema_version SET version = 2 WHERE id = 1", [])
+            .expect("simulate v2 marker");
+
+        initialize(&mut connection).expect("migrate v2 schema");
+
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT version FROM mcp_schema_version WHERE id = 1",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("schema version"),
+            SCHEMA_VERSION
+        );
+        let row = connection
+            .query_row(
+                "SELECT content, entity_tags, valid_from_ms, valid_until_ms
+                 FROM extract_candidates WHERE id = 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<i64>>(2)?,
+                        row.get::<_, Option<i64>>(3)?,
+                    ))
+                },
+            )
+            .expect("migrated candidate");
+        assert_eq!(row, ("content".to_owned(), "[]".to_owned(), None, None));
+        connection
+            .execute(
+                "INSERT INTO extract_candidates
+                 (run_id, item_local_id, content, kind, confidence, entity_tags,
+                  source_turn_keys, source_session_id, source_scope,
+                  source_content_hashes, source_node_ids, idempotency_key)
+                 VALUES (1, 'fact', 'fact', 'fact', 0.9, '[\"Alice\"]',
+                         '[\"turn\"]', 'session', '', '[\"hash\"]', '[7]', 'fact-key')",
+                [],
+            )
+            .expect("generic fact kind accepted after migration");
     }
 
     fn schema_snapshot(connection: &Connection) -> Vec<(String, String, String, Option<String>)> {

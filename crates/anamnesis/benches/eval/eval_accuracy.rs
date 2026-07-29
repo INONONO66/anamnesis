@@ -225,7 +225,7 @@ where
     let mut samples = None;
     let mut judge = JudgeMode::Mock;
     let mut llm_base_url = "http://localhost:11434".to_string();
-    let mut llm_model = "qwen2.5".to_string();
+    let mut llm_model = "qwen3.6:35b-a3b".to_string();
     let mut output = None;
     let mut dry_run = false;
     let mut resume = false;
@@ -281,6 +281,11 @@ where
     }
 
     let dataset = dataset.ok_or_else(|| "missing required --dataset".to_string())?;
+    if matches!(judge, JudgeMode::Llm)
+        && !llm_model.trim().to_ascii_lowercase().starts_with("qwen3.6")
+    {
+        return Err("--llm-model is frozen to the qwen3.6 lane".to_string());
+    }
     let output = match (output, resume) {
         (Some(path), _) => path,
         (None, true) => {
@@ -344,7 +349,7 @@ Options:\n\
   --samples <N>            Limit questions (default: 100 for convomem, all for others)\n\
   --judge <mock|llm>       Judge mode (default: mock)\n\
   --llm-base-url <url>     LLM base URL (default: http://localhost:11434)\n\
-  --llm-model <name>       LLM model name (default: qwen2.5)\n\
+  --llm-model <name>       LLM model name (default: qwen3.6:35b-a3b)\n\
   --output <path>          Report path (default: benches/eval/results/{{dataset}}-{{timestamp}}.json)\n\
   --dry-run                Use MockJudge and top search hit answers; no LLM calls\n\
   --resume                 Resume from the checkpoint next to --output\n\

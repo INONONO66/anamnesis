@@ -7,7 +7,7 @@
           {
             "type": "command",
             "command": "${PLUGIN_ROOT}/hooks/anamnesis-hook.sh session-start",
-            "timeout": 10,
+            "timeout": 5,
             "statusMessage": "Loading anamnesis context"
           }
         ]

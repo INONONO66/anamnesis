@@ -2,6 +2,8 @@
 
 use std::fmt;
 
+use crate::extract::prompt::EXTRACTION_OUTPUT_JSON_SCHEMA;
+
 /// Extraction execution policy.
 ///
 /// New modes must be explicitly added here: unknown values deliberately disable
@@ -52,7 +54,14 @@ impl ExtractCommand {
     /// Parse `ANAMNESIS_EXTRACT_CMD` into an argv vector.
     pub(crate) fn parse(value: Option<&str>) -> Result<Self, ExtractConfigError> {
         let argv = match value {
-            None => vec!["claude".to_owned(), "-p".to_owned()],
+            None => vec![
+                "ollama".to_owned(),
+                "run".to_owned(),
+                "qwen3.6:35b-a3b".to_owned(),
+                "--think=false".to_owned(),
+                "--format".to_owned(),
+                EXTRACTION_OUTPUT_JSON_SCHEMA.to_owned(),
+            ],
             Some(command) => {
                 shell_words::split(command).map_err(|_| ExtractConfigError::InvalidCommand)?
             }
@@ -142,7 +151,10 @@ impl ExtractConfig {
 }
 #[cfg(test)]
 mod tests {
-    use super::{ExtractCommand, ExtractConfig, ExtractConfigError, ExtractMode};
+    use super::{
+        EXTRACTION_OUTPUT_JSON_SCHEMA, ExtractCommand, ExtractConfig, ExtractConfigError,
+        ExtractMode,
+    };
     /// Extraction configuration tests mutate process-global environment state.
     /// Serialize their set → parse → restore sequence so it cannot self-interleave.
     static ENV_EXTRACT_CONFIG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -191,12 +203,18 @@ mod tests {
     }
 
     #[test]
-    fn default_command_uses_claude_prompt_argv_without_a_shell() {
+    fn default_command_uses_local_qwen36_without_a_shell() {
         assert_eq!(
             ExtractCommand::parse(None).expect("default command"),
             ExtractCommand {
-                program: "claude".into(),
-                args: vec!["-p".into()],
+                program: "ollama".into(),
+                args: vec![
+                    "run".into(),
+                    "qwen3.6:35b-a3b".into(),
+                    "--think=false".into(),
+                    "--format".into(),
+                    EXTRACTION_OUTPUT_JSON_SCHEMA.into(),
+                ],
             }
         );
     }

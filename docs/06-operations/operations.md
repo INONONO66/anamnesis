@@ -54,17 +54,22 @@ SessionEnd (Claude Code only)            ┘         (idempotent)          │
 
 ## R2 shadow extraction (opt-in)
 
-R2 extraction is a separate, **shadow-only** path for auditing prospective distilled memories.
-It is off by default. Raw captured content leaves the machine only when
-`ANAMNESIS_EXTRACT_MODE=shadow` is set exactly; `off`, `auto`, boolean-like values, and every
-other unrecognized value disable extraction. `ANAMNESIS_EXTRACT_CMD` configures exactly one
-provider command (default argv `claude -p`), shell-word parsed and executed directly: no shell
-and no fallback command.
+R2 extraction is a separate, **shadow-first** path for auditing prospective distilled memories.
+It is off by default. Extraction runs only when `ANAMNESIS_EXTRACT_MODE=shadow` is set exactly;
+`off`, `auto`, boolean-like values, and every other unrecognized value disable it.
+`ANAMNESIS_EXTRACT_CMD` configures exactly one provider profile. The default
+selects local `qwen3.6:35b-a3b`, thinking disabled, and the versioned strict
+output schema. That built-in profile calls Ollama's non-streaming chat API over
+HTTP loopback, so its output is not mixed with interactive terminal control
+sequences. A custom command is shell-word parsed and executed directly with
+bounded stdin/stdout: no shell and no fallback command. A custom command may
+send content elsewhere; the default cannot.
 
 Run one pass manually with `anamnesis extract [--namespace NS]`. A pass selects one temporal
 session-and-scope group with **10–20** eligible turns and sends at most that one batch to the
-configured extractor. The provider has a **120 s** timeout; stdout and stderr each have their
-own **1 MiB** cap. Failure, timeout, malformed output, or an over-limit stream leaves its
+configured extractor. The provider timeout defaults to **240 s** and can be
+boundedly overridden with `ANAMNESIS_EXTRACT_TIMEOUT_SECS=1..3600`; stdout and stderr each have
+their own **1 MiB** cap. Failure, timeout, malformed output, or an over-limit stream leaves its
 sources eligible for a later pass. A valid empty (`items=[]`) result is different: it records
 the selected sources in the zero-output ledger, so they are not sent again.
 
@@ -80,10 +85,10 @@ hash/components, run and failure scalars, validated candidates and relations, th
 identity/hash ledger, and audit labels. R2 performs no automatic pruning or cleanup: those rows
 persist until an operator takes a database lifecycle action.
 
-A successful R2 pass stages candidates, relations, run metadata, and source ledger records in
-the policy side schema only. It never changes graph nodes, graph edges, or
-`anamnesis:extracted` metadata. Staged candidates are invisible to recall until R3 commits an
-approved result.
+A successful extraction pass stages candidates, relations, run metadata, and source ledger
+records in the policy side schema only. It never changes graph nodes, graph edges, or
+`anamnesis:extracted` metadata. Staged candidates remain invisible to recall until an operator
+reviews and explicitly promotes one.
 
 ### Shadow audit
 
@@ -101,6 +106,23 @@ anamnesis extract --audit --candidate ID --support partial \
 anamnesis extract --audit --relation ID --relation-verdict correct \
   [--reviewer NAME] [--namespace NS]
 ```
+
+Promote only a reviewed `supported` candidate with no contamination:
+
+```bash
+anamnesis extract --promote-candidate ID [--namespace NS]
+anamnesis extract --promote-relation ID [--namespace NS]
+```
+
+Promotion is additive and idempotent. It creates derived semantic knowledge, stamps the extractor
+profile and candidate idempotency key, keeps the raw episodic turns unchanged, and links the
+derived node back to every cited source with `ExtractedFrom`. The derived node inherits the latest
+cited source observation time; the review/promotion wall clock never manufactures recency.
+Unsupported, partial, contaminated, unreviewed, unavailable, or source-mismatched candidates are
+rejected. A relation can be
+promoted only after a `correct` review and after both endpoint candidates have been promoted;
+promotion uses the engine's typed `reason`, `causal`, `contradicts`, or `supports` relation and
+is idempotent.
 
 A source marked `source-unavailable` no longer has its recorded node. A
 `source-mismatch` source still resolves by node id but no longer matches its recorded turn key,
@@ -418,17 +440,19 @@ default, never an error).
 | `ANAMNESIS_DB` | `<data_dir>/anamnesis/memory.db` (project `.anamnesis/` if found, else `~/.anamnesis/memory.db`) | SQLite file for the default namespace. |
 | `ANAMNESIS_NAMESPACE` | `default` | Namespace used when a call omits one. |
 | `ANAMNESIS_REINFORCE` | `true` | Auto-reinforce the package returned by `recall`; `0` / `false` / `no` disables. |
+| `ANAMNESIS_CONTEXT_STYLE` | `detailed` | Recall context wire. Exact `evidence` keeps the same validated package and commit trace but renders compact evidence grouped by source session and ordered by observation time; any other value uses the full diagnostic layout. |
 | `ANAMNESIS_HOOK_THRESHOLD` | `13.0` | `τ` — the recall injection gate. A floor on the **top recall score**, which is raw ACT-R activation (~8–16 on a typical graph), **not** a 0..1 similarity; a sub-1 value silently disables the gate. **Recalibrate per graph** — activation magnitude scales with density/recency. |
 | `ANAMNESIS_HOOK_TOPK` | `3` | Cap on injected per-turn memories. |
 | `ANAMNESIS_HOOK_SEED_K` | `5` | SessionStart seed-recall size. |
-| `ANAMNESIS_HOOK_TIMEOUT_MS` | `1500` | Per-hook fail-open timeout (ms). |
+| `ANAMNESIS_HOOK_TIMEOUT_MS` | `3000` | Per-hook fail-open timeout (ms) for latency-sensitive product recall. |
 | `ANAMNESIS_CAPTURE_ENABLED` | `true` | Global capture kill-switch; `0` / `false` / `no` disables passive capture. |
 | `ANAMNESIS_EXTRACT_THRESHOLD_N` | `20` | Un-extracted queue length that triggers the SessionStart extraction nudge. |
 | `ANAMNESIS_EXTRACT_REDELIVERY_MS` | `21600000` (6h) | TTL after which a pulled-but-abandoned extraction is re-queued once (attempt cap 2). |
 | `ANAMNESIS_EXTRACT_MODE` | `off` | R2 mode: only exact `shadow` permits external extraction of raw captured content; `auto`, boolean-like, and unrecognized values degrade to off. |
-| `ANAMNESIS_EXTRACT_CMD` | `claude -p` | External extractor argv, shell-word parsed and executed without a shell. |
+| `ANAMNESIS_EXTRACT_CMD` | built-in local Qwen 3.6 structured profile | The built-in profile uses non-streaming Ollama HTTP on loopback. An explicitly configured non-Ollama argv is shell-word parsed and executed without a shell. |
 | `ANAMNESIS_DAEMON_GRACE_SECS` | `30` | Idle grace before a zero-client daemon exits; `0` ⇒ exit immediately. |
 | `ANAMNESIS_EMBED_MODEL` | `multilingual-e5-small` | Embedding model. Set it to the known stored model to continue without migrating. |
+| `ANAMNESIS_RERANK_MODEL` | `BAAI/bge-reranker-base` | Local cross-encoder used by canonical reranked recall. |
 | `ANAMNESIS_AUTO_MIGRATE_EMBEDDINGS` | `true` | Enables daemon migration after a model/dimension mismatch; `0` / `false` / `no` disables it without mutating the DB. |
 
 ## Troubleshooting

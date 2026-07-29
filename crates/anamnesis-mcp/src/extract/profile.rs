@@ -10,8 +10,8 @@ struct CommandHashComponents<'a> {
     args: &'a [String],
 }
 
-pub(crate) const EXTRACT_SCHEMA_VERSION: u32 = 1;
-pub(crate) const NORMALIZATION_VERSION: u32 = 1;
+pub(crate) const EXTRACT_SCHEMA_VERSION: u32 = 3;
+pub(crate) const NORMALIZATION_VERSION: u32 = 3;
 pub(crate) const RELATION_POLICY_VERSION: u32 = 1;
 
 /// The versioned, non-secret configuration identity for an extraction run.
@@ -54,6 +54,21 @@ pub(crate) fn provider_id(command: &ExtractCommand) -> Result<String> {
 
 /// Returns the configured model, if present, or a provider-specific default marker.
 pub(crate) fn model_id(command: &ExtractCommand) -> String {
+    let provider = command
+        .program
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(command.program.as_str());
+    if provider == "ollama"
+        && command
+            .args
+            .first()
+            .is_some_and(|argument| argument == "run")
+        && let Some(model) = command.args.get(1).filter(|model| !model.is_empty())
+    {
+        return model.clone();
+    }
+
     let mut args = command.args.iter();
     while let Some(argument) = args.next() {
         if argument == "--model" {
@@ -117,7 +132,7 @@ mod tests {
     #[test]
     fn profile_components_have_a_fixed_compact_json_and_sha256_profile_id() {
         let components = test_components();
-        let json = r#"{"provider_id":"claude","model_id":"provider-default","prompt_version":2,"schema_version":1,"normalization_version":1,"relation_policy_version":1,"command_hash":"35f9a42f2b95d4001f4e33222e0c37b5e30b2f6af8c7aa1ed84d1cb2a7ce2be4"}"#;
+        let json = r#"{"provider_id":"claude","model_id":"provider-default","prompt_version":7,"schema_version":3,"normalization_version":3,"relation_policy_version":1,"command_hash":"35f9a42f2b95d4001f4e33222e0c37b5e30b2f6af8c7aa1ed84d1cb2a7ce2be4"}"#;
         assert_eq!(
             serde_json::to_string(&components).expect("components JSON"),
             json
@@ -217,6 +232,16 @@ mod tests {
                 command_hash(&command).expect("explicit command hash")
             );
         }
+    }
+
+    #[test]
+    fn profile_reads_ollama_run_positional_model() {
+        let command = ExtractCommand {
+            program: "/usr/local/bin/ollama".into(),
+            args: vec!["run".into(), "qwen3.6:35b-a3b".into()],
+        };
+        assert_eq!(provider_id(&command).expect("provider"), "ollama");
+        assert_eq!(model_id(&command), "qwen3.6:35b-a3b");
     }
     #[test]
     fn profile_rejects_a_command_with_an_empty_basename() {

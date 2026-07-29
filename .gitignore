@@ -1,4 +1,5 @@
 /target
+openai.env
 *.local.md
 .omo/
 .omx/

@@ -8,15 +8,18 @@ use std::sync::{
 };
 
 use anamnesis::embedding::EmbeddingProvider;
+use anamnesis::storage::StorageAdapter;
 use anamnesis::{Error, graph::EdgeType};
 use serde_json::json;
 
 use eval_common::real_bench::dataset::{
-    BenchDatasetName, load_benchmark_dataset, parse_benchmark_dataset, stratify_questions,
+    BenchDatasetName, LoadedBenchmark, load_benchmark_dataset, parse_benchmark_dataset,
+    stratify_questions,
 };
 use eval_common::real_bench::graph::{
-    CachingProvider, EvalOptions, build_memory_graph, evaluate_questions, run_warmup,
-    speaker_cue_tags,
+    CachingProvider, DerivedMemoryRecord, DerivedMemoryRelation, DerivedRelationKind, EvalOptions,
+    build_memory_graph, build_memory_graph_with_derived, evaluate_question_with_context,
+    evaluate_questions, run_warmup, speaker_cue_tags,
 };
 
 #[derive(Clone, Default)]
@@ -125,6 +128,206 @@ fn locomo_loader_preserves_evidence_turn_ids() {
         Some(1_683_554_160 + 86_400),
         "LoCoMo question_date must be set to max(session start) + 1 day when session is dated"
     );
+}
+
+#[test]
+fn frozen_derived_memory_is_additive_provenance_linked_and_session_preserving() {
+    let loaded = parse_benchmark_dataset(
+        BenchDatasetName::Locomo,
+        &json!([{
+            "session_1": [
+                {"dia_id": "D1:1", "speaker": "Alice", "text": "Alice moved to Seoul."},
+                {"dia_id": "D1:2", "speaker": "Bob", "text": "Alice now commutes by subway."}
+            ],
+            "qa": [{
+                "question": "Where does Alice live?",
+                "answer": "Seoul",
+                "category": 1,
+                "evidence": ["D1:1"]
+            }]
+        }]),
+        Some(1),
+    )
+    .expect("LoCoMo JSON should parse");
+    let records = vec![
+        DerivedMemoryRecord {
+            id: "home".to_owned(),
+            source_session_id: "locomo-0-session_1".to_owned(),
+            kind: "fact".to_owned(),
+            content: "Alice lives in Seoul.".to_owned(),
+            source_turn_ids: vec!["D1:1".to_owned()],
+            entity_tags: vec!["Alice".to_owned(), "Seoul".to_owned()],
+            valid_from_ms: Some(10),
+            valid_until_ms: Some(20),
+        },
+        DerivedMemoryRecord {
+            id: "commute".to_owned(),
+            source_session_id: "locomo-0-session_1".to_owned(),
+            kind: "fact".to_owned(),
+            content: "Alice commutes by subway.".to_owned(),
+            source_turn_ids: vec!["D1:2".to_owned()],
+            entity_tags: vec!["Alice".to_owned()],
+            valid_from_ms: None,
+            valid_until_ms: None,
+        },
+    ];
+    let relations = vec![DerivedMemoryRelation {
+        from: "home".to_owned(),
+        to: "commute".to_owned(),
+        kind: DerivedRelationKind::Supports,
+    }];
+    let built = build_memory_graph_with_derived(
+        &loaded,
+        Arc::new(CachingProvider::new(
+            Arc::new(CountingEmbedder::default()),
+            None,
+        )),
+        &records,
+        &relations,
+    )
+    .expect("derived graph builds");
+
+    assert_eq!(built.stats.derived_nodes_created, 2);
+    assert_eq!(built.stats.reasoning_edges_created, 1);
+    assert_eq!(
+        built
+            .provenance_by_node
+            .values()
+            .filter(|provenance| provenance.raw_turn_id.is_some())
+            .count(),
+        4,
+        "raw Episodic and Semantic provenance rows must remain"
+    );
+    let derived = built
+        .memory
+        .engine()
+        .graph()
+        .storage()
+        .all_node_ids()
+        .into_iter()
+        .filter_map(|node_id| {
+            built
+                .memory
+                .engine()
+                .graph()
+                .get_node(node_id)
+                .ok()
+                .filter(|node| {
+                    node.metadata
+                        .get("anamnesis:benchmark-derived-id")
+                        .is_some_and(|value| value == "home")
+                        && node.node_type == anamnesis::graph::KnowledgeType::Semantic
+                })
+                .map(|_| node_id)
+        })
+        .next()
+        .expect("derived Semantic node");
+    assert_eq!(
+        built
+            .memory
+            .engine()
+            .graph()
+            .storage()
+            .all_node_ids()
+            .into_iter()
+            .filter(|node_id| {
+                built
+                    .memory
+                    .engine()
+                    .graph()
+                    .get_node(*node_id)
+                    .is_ok_and(|node| {
+                        node.metadata
+                            .get("anamnesis:benchmark-derived-id")
+                            .is_some_and(|value| value == "home")
+                    })
+            })
+            .count(),
+        1,
+        "one extracted fact must materialize as one Semantic node"
+    );
+    let node = built.memory.engine().graph().get_node(derived).unwrap();
+    assert_eq!(node.origin.session_id, "session_1");
+    assert_eq!(node.valid_from, Some(anamnesis::graph::Timestamp(10)));
+    assert_eq!(node.valid_until, Some(anamnesis::graph::Timestamp(20)));
+    assert!(
+        built
+            .memory
+            .neighbors(derived)
+            .unwrap()
+            .iter()
+            .any(|neighbor| neighbor.edge_type == EdgeType::ExtractedFrom),
+        "derived knowledge must retain a raw source edge"
+    );
+}
+
+#[test]
+fn frozen_derived_memory_cannot_cross_samples_with_reused_raw_ids() {
+    let loaded = parse_benchmark_dataset(
+        BenchDatasetName::Locomo,
+        &json!([
+            {
+                "session_1": [
+                    {"dia_id": "D1:1", "speaker": "Alice", "text": "Sample zero."}
+                ],
+                "qa": [{
+                    "question": "Which sample?",
+                    "answer": "zero",
+                    "category": 1,
+                    "evidence": ["D1:1"]
+                }]
+            },
+            {
+                "session_1": [
+                    {"dia_id": "D1:1", "speaker": "Alice", "text": "Sample one."}
+                ],
+                "qa": [{
+                    "question": "Which sample?",
+                    "answer": "one",
+                    "category": 1,
+                    "evidence": ["D1:1"]
+                }]
+            }
+        ]),
+        Some(2),
+    )
+    .expect("LoCoMo JSON should parse");
+    let sample_zero = LoadedBenchmark {
+        dataset: loaded.dataset,
+        sessions: loaded
+            .sessions
+            .into_iter()
+            .filter(|session| session.sample_index == 0)
+            .collect(),
+        questions: loaded
+            .questions
+            .into_iter()
+            .filter(|question| question.sample_index == 0)
+            .collect(),
+    };
+    let records = [DerivedMemoryRecord {
+        id: "sample-one-only".to_owned(),
+        source_session_id: "locomo-1-session_1".to_owned(),
+        kind: "fact".to_owned(),
+        content: "This belongs only to sample one.".to_owned(),
+        source_turn_ids: vec!["D1:1".to_owned()],
+        entity_tags: Vec::new(),
+        valid_from_ms: None,
+        valid_until_ms: None,
+    }];
+
+    let built = build_memory_graph_with_derived(
+        &sample_zero,
+        Arc::new(CachingProvider::new(
+            Arc::new(CountingEmbedder::default()),
+            None,
+        )),
+        &records,
+        &[],
+    )
+    .expect("sample-zero graph builds");
+
+    assert_eq!(built.stats.derived_nodes_created, 0);
 }
 
 #[test]
@@ -283,8 +486,8 @@ fn graph_build_warmup_and_evaluation_use_embeddings_and_commit() {
             "ingest timestamps must be in the past"
         );
         assert!(
-            now - node.created_at.0 <= 30 * 86_400,
-            "ingest timestamps must be recent (got age {}s)",
+            now - node.created_at.0 <= 30 * 86_400_000,
+            "ingest timestamps must be recent (got age {}ms)",
             now - node.created_at.0
         );
     }
@@ -318,24 +521,44 @@ fn graph_build_warmup_and_evaluation_use_embeddings_and_commit() {
     assert_eq!(warmup.questions, 1);
     assert!(warmup.sites_accessed > 0);
 
-    let evaluated = evaluate_questions(
+    let (evaluated, answer_context) = evaluate_question_with_context(
         &mut built,
-        &loaded.questions[1..],
+        &loaded.questions[1],
         &EvalOptions {
             top_k: 3,
+            screen_top_k: vec![1, 3],
+            screen_source_dedup: true,
             ..Default::default()
         },
     )
     .expect("held-out retrieval evaluates");
-    assert_eq!(evaluated.len(), 1);
-    assert_eq!(evaluated[0].question_id, loaded.questions[1].question_id);
+    assert_eq!(evaluated.question_id, loaded.questions[1].question_id);
     // Balanced packaging preserves both knowledge and memory fragments in the
     // package, so all top-k slots are filled (4 nodes, top_k=3 → 3 retrievals).
-    assert_eq!(evaluated[0].retrievals.len(), 3);
+    assert_eq!(evaluated.reranker_retrievals.len(), 3);
     assert!(
-        evaluated[0].retrieval_metrics.mrr > 0.0,
+        evaluated.reranker_metrics.mrr > 0.0,
         "the relevant evidence turn should be recovered in the top-k"
     );
+    assert!(
+        evaluated.rendered_recall > 0.0,
+        "selected evidence must remain visible in the product-rendered context"
+    );
+    assert!(evaluated.selection_variants.contains_key("top-1"));
+    assert!(evaluated.selection_variants.contains_key("top-3"));
+    assert!(
+        evaluated
+            .selection_variants
+            .contains_key("source-dedup-top-1")
+    );
+    assert!(
+        evaluated
+            .selection_variants
+            .contains_key("source-dedup-top-3")
+    );
+    assert!(answer_context.product_context.contains("## "));
+    assert!(answer_context.product_context.contains("└ origin:"));
+    assert!(!answer_context.product_context.contains("retrieved-"));
     assert_eq!(
         embedder.calls(),
         6,

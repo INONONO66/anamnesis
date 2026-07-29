@@ -31,6 +31,8 @@ pub enum RecallEventKind {
 pub enum ExtractionErrorKind {
     Spawn,
     Stdin,
+    ProviderRequest,
+    ProviderResponse,
     Timeout,
     StdoutTooLarge,
     StderrTooLarge,
@@ -150,6 +152,16 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         contamination: Option<ContaminationCategory>,
         reviewer: String,
+    },
+    PromoteExtractionCandidate {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        namespace: Option<String>,
+        candidate_id: u64,
+    },
+    PromoteExtractionRelation {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        namespace: Option<String>,
+        relation_id: u64,
     },
     UpdateExtractionRelationAudit {
         #[serde(default, skip_serializing_if = "Option::is_none")]

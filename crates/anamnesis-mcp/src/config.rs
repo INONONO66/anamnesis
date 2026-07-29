@@ -32,8 +32,12 @@ pub const DEFAULT_HOOK_SEED_COSINE_GATE: f64 = 0.80;
 pub const DEFAULT_HOOK_CONTEXT_TURNS: usize = 3;
 /// Cap on memories injected for each UserPrompt hook recall.
 pub const DEFAULT_HOOK_TOPK: usize = 3;
+/// Fail-open budget for latency-sensitive canonical product recall.
+pub const DEFAULT_HOOK_TIMEOUT_MS: u64 = 3_000;
 /// Default embedding model for new databases and model downloads.
 pub const DEFAULT_EMBED_MODEL: &str = "multilingual-e5-small";
+/// Default local cross-encoder for canonical production recall.
+pub const DEFAULT_RERANK_MODEL: &str = anamnesis::embedding::fastembed::DEFAULT_RERANKER_MODEL;
 
 /// Resolved runtime configuration.
 #[derive(Debug, Clone)]
@@ -61,7 +65,7 @@ pub struct Config {
     pub hook_topk: usize,
     /// SessionStart seed size. `ANAMNESIS_HOOK_SEED_K` (default 5).
     pub hook_seed_k: usize,
-    /// Per-hook fail-open timeout (ms). `ANAMNESIS_HOOK_TIMEOUT_MS` (default 1500).
+    /// Per-hook fail-open timeout (ms). `ANAMNESIS_HOOK_TIMEOUT_MS` (default 3000).
     pub hook_timeout_ms: u64,
     /// Global capture kill-switch. `ANAMNESIS_CAPTURE_ENABLED` (default true).
     pub capture_enabled: bool,
@@ -70,6 +74,9 @@ pub struct Config {
     pub extract_threshold_n: usize,
     /// FastEmbed model name. `ANAMNESIS_EMBED_MODEL` (default multilingual-e5-small).
     pub embed_model: String,
+    /// FastEmbed cross-encoder used by canonical production recall.
+    /// `ANAMNESIS_RERANK_MODEL` (default BAAI/bge-reranker-base).
+    pub rerank_model: String,
     /// Automatically migrate incompatible embedding spaces in the daemon.
     /// `ANAMNESIS_AUTO_MIGRATE_EMBEDDINGS` (default true).
     pub auto_migrate_embeddings: bool,
@@ -87,8 +94,9 @@ impl Config {
     /// - `ANAMNESIS_HOOK_CONTEXT_TURNS` → `hook_context_turns` (default: [`DEFAULT_HOOK_CONTEXT_TURNS`])
     /// - `ANAMNESIS_HOOK_TOPK`       → `hook_topk` (default: [`DEFAULT_HOOK_TOPK`])
     /// - `ANAMNESIS_HOOK_SEED_K`     → `hook_seed_k` (default: 5)
-    /// - `ANAMNESIS_HOOK_TIMEOUT_MS` → `hook_timeout_ms` (default: 1500)
+    /// - `ANAMNESIS_HOOK_TIMEOUT_MS` → `hook_timeout_ms` (default: [`DEFAULT_HOOK_TIMEOUT_MS`])
     /// - `ANAMNESIS_EMBED_MODEL`     → `embed_model` (default: [`DEFAULT_EMBED_MODEL`])
+    /// - `ANAMNESIS_RERANK_MODEL`    → `rerank_model` (default: [`DEFAULT_RERANK_MODEL`])
     /// - `ANAMNESIS_AUTO_MIGRATE_EMBEDDINGS` → automatic daemon migration (default: true)
     pub fn from_env() -> Self {
         let default_db = std::env::var_os("ANAMNESIS_DB")
@@ -110,13 +118,14 @@ impl Config {
             parse_env("ANAMNESIS_HOOK_CONTEXT_TURNS", DEFAULT_HOOK_CONTEXT_TURNS);
         let hook_topk = parse_env("ANAMNESIS_HOOK_TOPK", DEFAULT_HOOK_TOPK);
         let hook_seed_k = parse_env("ANAMNESIS_HOOK_SEED_K", 5usize);
-        let hook_timeout_ms = parse_env("ANAMNESIS_HOOK_TIMEOUT_MS", 1500u64);
+        let hook_timeout_ms = parse_env("ANAMNESIS_HOOK_TIMEOUT_MS", DEFAULT_HOOK_TIMEOUT_MS);
         let capture_enabled = match std::env::var("ANAMNESIS_CAPTURE_ENABLED") {
             Ok(v) => !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no"),
             Err(_) => true,
         };
         let extract_threshold_n = parse_env("ANAMNESIS_EXTRACT_THRESHOLD_N", 20usize);
         let embed_model = parse_env_string("ANAMNESIS_EMBED_MODEL", DEFAULT_EMBED_MODEL);
+        let rerank_model = parse_env_string("ANAMNESIS_RERANK_MODEL", DEFAULT_RERANK_MODEL);
         let auto_migrate_embeddings = positive_env_enabled("ANAMNESIS_AUTO_MIGRATE_EMBEDDINGS");
         Self {
             default_db,
@@ -132,6 +141,7 @@ impl Config {
             capture_enabled,
             extract_threshold_n,
             embed_model,
+            rerank_model,
             auto_migrate_embeddings,
         }
     }
@@ -255,10 +265,11 @@ mod tests {
             hook_context_turns: DEFAULT_HOOK_CONTEXT_TURNS,
             hook_topk: 3,
             hook_seed_k: 5,
-            hook_timeout_ms: 1500,
+            hook_timeout_ms: DEFAULT_HOOK_TIMEOUT_MS,
             capture_enabled: true,
             extract_threshold_n: 20,
             embed_model: DEFAULT_EMBED_MODEL.to_string(),
+            rerank_model: DEFAULT_RERANK_MODEL.to_string(),
             auto_migrate_embeddings: true,
         };
         assert!(cfg.reinforce_on_recall);
@@ -277,10 +288,11 @@ mod tests {
             hook_context_turns: DEFAULT_HOOK_CONTEXT_TURNS,
             hook_topk: 3,
             hook_seed_k: 5,
-            hook_timeout_ms: 1500,
+            hook_timeout_ms: DEFAULT_HOOK_TIMEOUT_MS,
             capture_enabled: true,
             extract_threshold_n: 20,
             embed_model: DEFAULT_EMBED_MODEL.to_string(),
+            rerank_model: DEFAULT_RERANK_MODEL.to_string(),
             auto_migrate_embeddings: true,
         };
         assert_eq!(cfg.db_dir(), PathBuf::from("/var/lib/anamnesis"));
@@ -316,7 +328,10 @@ mod tests {
             parse_env::<f64>(name, DEFAULT_HOOK_THRESHOLD),
             DEFAULT_HOOK_THRESHOLD
         );
-        assert_eq!(parse_env(name, 1500u64), 1500);
+        assert_eq!(
+            parse_env(name, DEFAULT_HOOK_TIMEOUT_MS),
+            DEFAULT_HOOK_TIMEOUT_MS
+        );
     }
 
     #[test]
@@ -331,10 +346,11 @@ mod tests {
             hook_context_turns: DEFAULT_HOOK_CONTEXT_TURNS,
             hook_topk: DEFAULT_HOOK_TOPK,
             hook_seed_k: 5,
-            hook_timeout_ms: 1500,
+            hook_timeout_ms: DEFAULT_HOOK_TIMEOUT_MS,
             capture_enabled: true,
             extract_threshold_n: 20,
             embed_model: DEFAULT_EMBED_MODEL.to_string(),
+            rerank_model: DEFAULT_RERANK_MODEL.to_string(),
             auto_migrate_embeddings: true,
         };
         assert!(cfg.capture_enabled);
@@ -353,16 +369,19 @@ mod tests {
             hook_context_turns: DEFAULT_HOOK_CONTEXT_TURNS,
             hook_topk: DEFAULT_HOOK_TOPK,
             hook_seed_k: 5,
-            hook_timeout_ms: 1500,
+            hook_timeout_ms: DEFAULT_HOOK_TIMEOUT_MS,
             capture_enabled: true,
             extract_threshold_n: 20,
             embed_model: DEFAULT_EMBED_MODEL.to_string(),
+            rerank_model: DEFAULT_RERANK_MODEL.to_string(),
             auto_migrate_embeddings: true,
         };
         assert_eq!(cfg.hook_cosine_gate, 0.86);
         assert_eq!(cfg.hook_seed_cosine_gate, 0.80);
         assert_eq!(cfg.hook_context_turns, 3);
         assert_eq!(cfg.hook_topk, DEFAULT_HOOK_TOPK);
+        assert_eq!(cfg.hook_timeout_ms, DEFAULT_HOOK_TIMEOUT_MS);
+        assert_eq!(cfg.rerank_model, "BAAI/bge-reranker-base");
         assert_eq!(
             parse_env(
                 "ANAMNESIS_DEFINITELY_UNSET_FOR_TEST_HOOK_COSINE",

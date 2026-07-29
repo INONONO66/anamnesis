@@ -150,7 +150,11 @@ impl Fixture {
             .env("EXTRACT_MODE", provider_mode)
             .env("EXTRACT_CALLS", &self.calls)
             .env("EXTRACT_FALLBACK_CALLS", &self.fallback_calls)
-            .env("PATH", &self.provider_path);
+            .env("PATH", &self.provider_path)
+            .env_remove("ANAMNESIS_EXTRACT_TIMEOUT_SECS");
+        if provider_mode == "timeout" {
+            command.env("ANAMNESIS_EXTRACT_TIMEOUT_SECS", "1");
+        }
         if extract_mode == Some("shadow") {
             let source_ids = self.scan_source_ids();
             command.env(
@@ -416,8 +420,8 @@ fn timeout_records_no_source_ledger_and_manual_pull_does_not_change_shadow_scan(
         "PullPending must not affect shadow selection"
     );
 
-    // The fake emits valid output only after 121 seconds, so only the real 120-second
-    // provider deadline can make this invocation fail.
+    // Exercise the production timeout path through its bounded operational
+    // override while keeping this integration test fast.
     let started = Instant::now();
     let timeout = fixture.worker("timeout");
     let elapsed = started.elapsed();
@@ -426,11 +430,11 @@ fn timeout_records_no_source_ledger_and_manual_pull_does_not_change_shadow_scan(
         "provider must time out at the production boundary"
     );
     assert!(
-        elapsed >= Duration::from_secs(115),
+        elapsed >= Duration::from_millis(800),
         "timeout returned too early: {elapsed:?}"
     );
     assert!(
-        elapsed < Duration::from_secs(130),
+        elapsed < Duration::from_secs(10),
         "timeout exceeded bounded deadline: {elapsed:?}"
     );
     assert_no_provider_raw_in_cli(&timeout);
@@ -761,7 +765,7 @@ case "$EXTRACT_MODE" in
     ;;
   timeout)
     cat >/dev/null
-    sleep 121
+    sleep 2
     printf '%s\n' '{"items":[],"relations":[]}'
     ;;
 esac

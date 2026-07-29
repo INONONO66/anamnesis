@@ -1057,6 +1057,7 @@ mod tests {
             capture_enabled: true,
             extract_threshold_n: 20,
             embed_model: crate::config::DEFAULT_EMBED_MODEL.to_string(),
+            rerank_model: crate::config::DEFAULT_RERANK_MODEL.to_string(),
             auto_migrate_embeddings: true,
         }
     }

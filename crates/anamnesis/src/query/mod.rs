@@ -28,6 +28,16 @@ pub use rwr::{ActivationResponse, PathCurrentMap, additive_rwr, additive_rwr_wit
 pub use scoring::{ReadoutInputs, TieBreakKey, rank, readout_score, scope_weight, tie_break};
 pub use types::{
     AccessedSite, ActivatedTension, CoReadoutPair, CommitTrace, ContextPackage, ConvergenceConfig,
-    Fragment, PackagingMode, PathUsedEdge, Query, QueryConfig, ReadoutCandidate, SearchInput,
-    SearchResult, SearchTrace, Tension, TokenBudget,
+    Fragment, PackagingMode, PathUsedEdge, Query, QueryConfig, ReadoutCandidate, SearchDiagnostics,
+    SearchInput, SearchResult, SearchTrace, Tension, TokenBudget,
 };
+
+/// Return the deterministic lexical query surface used by unified search.
+///
+/// The original query is always first. Any count, relationship, frequency, or
+/// entity-anchor decomposition is additive and follows the same core policy as
+/// [`crate::Engine::search`]. Consumers can use this for an optional reranker
+/// without copying the engine's query parser.
+pub fn search_query_variants(query: &str) -> Vec<String> {
+    crate::api::planned_query_variants(query)
+}

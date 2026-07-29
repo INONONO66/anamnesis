@@ -28,16 +28,61 @@ pub(crate) fn decide_packaging(
         return PackagingMode::PersonaWeighted;
     }
 
-    let temporal_keywords = [
-        "최근", "언제", "when", "recent", "latest", "history", "timeline", "before", "after", "ago",
-    ];
-    let q_lower = query_text.to_lowercase();
-    if temporal_keywords
-        .iter()
-        .any(|keyword| q_lower.contains(keyword))
-    {
+    if !plan.time_cues.is_empty() || has_temporal_packaging_cue(query_text) {
         return PackagingMode::Timeline;
     }
 
     PackagingMode::Balanced
+}
+
+fn has_temporal_packaging_cue(query_text: &str) -> bool {
+    let q_lower = query_text.to_lowercase();
+    if ["최근", "언제"]
+        .iter()
+        .any(|keyword| q_lower.contains(keyword))
+    {
+        return true;
+    }
+    q_lower
+        .split(|character: char| !character.is_alphanumeric())
+        .any(|token| {
+            matches!(
+                token,
+                "when"
+                    | "recent"
+                    | "recently"
+                    | "latest"
+                    | "history"
+                    | "timeline"
+                    | "before"
+                    | "after"
+                    | "ago"
+            )
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::has_temporal_packaging_cue;
+
+    #[test]
+    fn temporal_packaging_cues_use_word_boundaries() {
+        for query in [
+            "when did it happen?",
+            "what changed recently",
+            "events before launch",
+            "언제 바뀌었어?",
+            "최근 변경사항",
+        ] {
+            assert!(has_temporal_packaging_cue(query), "{query}");
+        }
+        for query in [
+            "whenever the hook runs",
+            "afterparty planning",
+            "the latestRelease helper",
+            "a beforehand check",
+        ] {
+            assert!(!has_temporal_packaging_cue(query), "{query}");
+        }
+    }
 }
