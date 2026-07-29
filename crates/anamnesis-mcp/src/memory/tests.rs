@@ -1372,11 +1372,9 @@ fn gated_recall_below_threshold_is_empty() {
         .recall_packaged_gated("auth race condition", 5, None, Some(false), None, None)
         .unwrap();
     let top = ungated
-        .packaged
-        .hits
-        .first()
-        .map(|h| h.score)
-        .expect("a relevant hit exists");
+        .trace
+        .top_score
+        .expect("a relevant cognitive hit exists");
     let tau = top + 1.0; // strictly above the best score ⇒ gate trips.
 
     let gated = reg
