@@ -1,8 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
 use anamnesis::engine::StorageAdapter;
-use anamnesis::graph::{EdgeType, KnowledgeType, Node, NodeId, ScopePath, Timestamp};
-use anamnesis::memory::{Direction, NoteOptions, Relation};
+use anamnesis::graph::{KnowledgeType, Node, NodeId, Timestamp};
+use anamnesis::memory::AtomicFactInput;
+use anamnesis::storage::AtomicFactId;
 use sha2::{Digest, Sha256};
 
 use crate::capture::{META_CAPTURE, META_TURN_KEY};
@@ -270,8 +271,9 @@ pub(super) fn dispatch_promote_candidate(
         })
     };
     match result {
-        Ok((node_id, already_materialized)) => match serde_json::to_string(&serde_json::json!({
-            "node_id": node_id.0,
+        Ok((fact_id, already_materialized)) => match serde_json::to_string(&serde_json::json!({
+            "atomic_fact_id": fact_id.0,
+            "node_id": fact_id.0,
             "already_materialized": already_materialized,
         })) {
             Ok(text) => Response::ok(text),
@@ -334,23 +336,37 @@ pub(super) fn dispatch_promote_relation(
         else {
             return Response::invalid_params("relation target candidate was not found");
         };
-        let Some(from_node) = find_promoted_candidate(&memory, &from_candidate.idempotency_key)
-        else {
-            return Response::invalid_params("relation source candidate is not promoted");
+        let from_fact = match find_promoted_candidate(&memory, &from_candidate.idempotency_key) {
+            Ok(Some(fact_id)) => fact_id,
+            Ok(None) => {
+                return Response::invalid_params("relation source candidate is not promoted");
+            }
+            Err(error) => return Response::internal(error),
         };
-        let Some(to_node) = find_promoted_candidate(&memory, &to_candidate.idempotency_key) else {
-            return Response::invalid_params("relation target candidate is not promoted");
+        let to_fact = match find_promoted_candidate(&memory, &to_candidate.idempotency_key) {
+            Ok(Some(fact_id)) => fact_id,
+            Ok(None) => {
+                return Response::invalid_params("relation target candidate is not promoted");
+            }
+            Err(error) => return Response::internal(error),
         };
-        promote_reviewed_relation(&mut memory, from_node, to_node, &relation.relation_type)
-            .and_then(|promoted| {
-                store
-                    .mark_extraction_relation_committed(relation.id, promoted.0.0)
-                    .map(|()| promoted)
-            })
+        promote_reviewed_relation(
+            &mut memory,
+            relation.id,
+            from_fact,
+            to_fact,
+            &relation.relation_type,
+        )
+        .and_then(|promoted| {
+            store
+                .mark_extraction_relation_committed(relation.id, promoted.0)
+                .map(|()| promoted)
+        })
     };
     match result {
-        Ok((edge_id, already_materialized)) => match serde_json::to_string(&serde_json::json!({
-            "edge_id": edge_id.0,
+        Ok((relation_id, already_materialized)) => match serde_json::to_string(&serde_json::json!({
+            "atomic_relation_id": relation_id,
+            "edge_id": relation_id,
             "already_materialized": already_materialized,
         })) {
             Ok(text) => Response::ok(text),
@@ -363,50 +379,49 @@ pub(super) fn dispatch_promote_relation(
 fn promote_reviewed_candidate(
     memory: &mut anamnesis::Memory<anamnesis::storage::SqliteStorage>,
     candidate: &ExtractionAuditCandidateRow,
-) -> Result<(NodeId, bool), anamnesis::Error> {
+) -> Result<(AtomicFactId, bool), anamnesis::Error> {
     const META_KEY: &str = "anamnesis:extraction_idempotency_key";
-    let existing = find_promoted_candidate(memory, &candidate.idempotency_key);
+    let existing = find_promoted_candidate(memory, &candidate.idempotency_key)?;
     let source_ids: Vec<_> = candidate
         .source_node_ids
         .iter()
         .copied()
         .map(NodeId)
         .collect();
-    let mut sources = source_ids.iter().copied();
-    let first_source = sources.next().ok_or_else(|| {
-        anamnesis::Error::InvalidInput(
+    if source_ids.is_empty() {
+        return Err(anamnesis::Error::InvalidInput(
             "reviewed extraction candidate requires at least one raw source".to_owned(),
-        )
-    })?;
-    let mut observed_at = memory.engine().graph().get_node(first_source)?.created_at;
-    for source_id in sources {
-        observed_at = observed_at.max(memory.engine().graph().get_node(source_id)?.created_at);
+        ));
     }
 
-    let (derived_id, already_materialized) = match existing {
-        Some(node_id) => (node_id, true),
+    let (fact_id, already_materialized) = match existing {
+        Some(fact_id) => {
+            let mut fact = memory
+                .engine()
+                .graph()
+                .storage()
+                .get_atomic_fact(fact_id)?
+                .clone();
+            fact.valid_from = candidate.valid_from_ms.map(Timestamp);
+            fact.valid_until = candidate.valid_until_ms.map(Timestamp);
+            memory
+                .engine_mut()
+                .graph_mut()
+                .storage_mut()
+                .set_atomic_fact(fact)?;
+            (fact_id, true)
+        }
         None => {
-            let scope =
-                if candidate.source_scope.is_empty() || candidate.source_scope == "universal" {
-                    ScopePath::universal()
-                } else {
-                    ScopePath::new(candidate.source_scope.clone())?
-                };
             let kind = candidate_kind_label(&candidate.kind);
             let candidate_id_text = candidate.id.to_string();
-            let mut tags = candidate.entity_tags.clone();
-            tags.push("anamnesis:derived".to_owned());
-            tags.push(format!("anamnesis:kind:{kind}"));
-            tags.sort();
-            tags.dedup();
-            let derived_id = memory.add_derived_knowledge_with(
-                &candidate.content,
-                observed_at,
-                &candidate.source_session_id,
-                NoteOptions {
-                    scope: Some(scope),
-                    tags,
-                    metadata: vec![
+            let fact_id = memory.add_atomic_fact(
+                AtomicFactInput::new(&candidate.content, source_ids)
+                    .with_entity_tags(candidate.entity_tags.clone())
+                    .with_validity(
+                        candidate.valid_from_ms.map(Timestamp),
+                        candidate.valid_until_ms.map(Timestamp),
+                    )
+                    .with_metadata(vec![
                         (META_KEY.to_owned(), candidate.idempotency_key.clone()),
                         (
                             "anamnesis:extraction_candidate_id".to_owned(),
@@ -420,104 +435,78 @@ fn promote_reviewed_candidate(
                             "anamnesis:source_session_id".to_owned(),
                             candidate.source_session_id.clone(),
                         ),
-                    ],
-                },
+                        ("anamnesis:fact-kind".to_owned(), kind.to_owned()),
+                    ]),
             )?;
-            (derived_id, false)
+            (fact_id, false)
         }
     };
 
-    apply_promoted_validity(memory, candidate)?;
-    for source_id in source_ids {
-        memory.link_extracted_source(derived_id, source_id)?;
-    }
     memory.engine_mut().graph_mut().storage_mut().flush()?;
-    Ok((derived_id, already_materialized))
-}
-
-fn apply_promoted_validity(
-    memory: &mut anamnesis::Memory<anamnesis::storage::SqliteStorage>,
-    candidate: &ExtractionAuditCandidateRow,
-) -> Result<(), anamnesis::Error> {
-    const META_KEY: &str = "anamnesis:extraction_idempotency_key";
-    let node_ids: Vec<_> = memory
-        .engine()
-        .graph()
-        .storage()
-        .all_node_ids()
-        .into_iter()
-        .filter(|node_id| {
-            memory
-                .engine()
-                .graph()
-                .storage()
-                .get_node(*node_id)
-                .is_ok_and(|node| {
-                    node.metadata.get(META_KEY) == Some(&candidate.idempotency_key)
-                        && node.node_type == KnowledgeType::Semantic
-                })
-        })
-        .collect();
-    for node_id in node_ids {
-        memory.set_validity_window(
-            node_id,
-            candidate.valid_from_ms.map(Timestamp),
-            candidate.valid_until_ms.map(Timestamp),
-        )?;
-    }
-    Ok(())
+    Ok((fact_id, already_materialized))
 }
 
 fn find_promoted_candidate(
     memory: &anamnesis::Memory<anamnesis::storage::SqliteStorage>,
     idempotency_key: &str,
-) -> Option<NodeId> {
+) -> Result<Option<AtomicFactId>, anamnesis::Error> {
     const META_KEY: &str = "anamnesis:extraction_idempotency_key";
-    memory
-        .engine()
-        .graph()
-        .storage()
-        .all_node_ids()
-        .into_iter()
-        .find(|node_id| {
-            memory
-                .engine()
-                .graph()
-                .storage()
-                .get_node(*node_id)
-                .is_ok_and(|node| {
-                    node.metadata
-                        .get(META_KEY)
-                        .is_some_and(|value| value == idempotency_key)
-                        && node.node_type == KnowledgeType::Semantic
-                })
-        })
+    let storage = memory.engine().graph().storage();
+    for fact_id in storage.all_atomic_fact_ids() {
+        let fact = storage.get_atomic_fact(fact_id)?;
+        if fact
+            .metadata
+            .get(META_KEY)
+            .is_some_and(|value| value == idempotency_key)
+        {
+            return Ok(Some(fact_id));
+        }
+    }
+    Ok(None)
 }
 
 fn promote_reviewed_relation(
     memory: &mut anamnesis::Memory<anamnesis::storage::SqliteStorage>,
-    from: NodeId,
-    to: NodeId,
+    relation_id: u64,
+    from: AtomicFactId,
+    to: AtomicFactId,
     kind: &crate::extract::types::RelationKind,
-) -> Result<(anamnesis::graph::EdgeId, bool), anamnesis::Error> {
-    let (relation, edge_type) = match kind {
-        crate::extract::types::RelationKind::Reason => (Relation::Reason, EdgeType::Reason),
-        crate::extract::types::RelationKind::Causal => (Relation::Causes, EdgeType::Causal),
-        crate::extract::types::RelationKind::Contradicts => {
-            (Relation::Contradicts, EdgeType::Contradicts)
+) -> Result<(u64, bool), anamnesis::Error> {
+    let relation_key = format!("anamnesis:atomic-relation:{relation_id}");
+    let relation_value = format!("{}:{}", relation_kind_label(kind), to.0);
+    let mut source_fact = memory
+        .engine()
+        .graph()
+        .storage()
+        .get_atomic_fact(from)?
+        .clone();
+    if let Some(existing) = source_fact.metadata.get(&relation_key) {
+        if existing == &relation_value {
+            return Ok((relation_id, true));
         }
-        crate::extract::types::RelationKind::Supports => (Relation::Supports, EdgeType::Supports),
-    };
-    if let Some(existing) = memory.neighbors(from)?.into_iter().find(|neighbor| {
-        neighbor.direction == Direction::Outgoing
-            && neighbor.node == to
-            && neighbor.edge_type == edge_type
-    }) {
-        return Ok((existing.edge, true));
+        return Err(anamnesis::Error::InvalidInput(format!(
+            "atomic relation {relation_id} conflicts with an existing target"
+        )));
     }
-    let edge_id = memory.relate(from, to, relation)?;
+    memory.engine().graph().storage().get_atomic_fact(to)?;
+    source_fact.metadata.insert(relation_key, relation_value);
+    memory
+        .engine_mut()
+        .graph_mut()
+        .storage_mut()
+        .set_atomic_fact(source_fact)?;
     memory.engine_mut().graph_mut().storage_mut().flush()?;
-    Ok((edge_id, false))
+    Ok((relation_id, false))
+}
+
+fn relation_kind_label(kind: &crate::extract::types::RelationKind) -> &'static str {
+    use crate::extract::types::RelationKind;
+    match kind {
+        RelationKind::Reason => "reason",
+        RelationKind::Causal => "causal",
+        RelationKind::Contradicts => "contradicts",
+        RelationKind::Supports => "supports",
+    }
 }
 
 fn candidate_kind_label(kind: &crate::extract::types::CandidateKind) -> &'static str {

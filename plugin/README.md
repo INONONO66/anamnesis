@@ -183,9 +183,9 @@ laws (ADR-0010).
 | `ANAMNESIS_HOOK_COSINE_GATE` | Minimum query-embedding cosine for `UserPromptSubmit` injection after scope/type filters. | `0.86` |
 | `ANAMNESIS_HOOK_SEED_COSINE_GATE` | Minimum query-embedding cosine for `SessionStart` seed injection after scope/type filters. | `0.80` |
 | `ANAMNESIS_HOOK_CONTEXT_TURNS` | Recent transcript turns folded into the `UserPromptSubmit` recall query. | `3` |
-| `ANAMNESIS_HOOK_TOPK` | `k` — cap on injected per-turn memories. | `3` |
+| `ANAMNESIS_HOOK_TOPK` | `k` — cap on injected per-turn memories. | `20` |
 | `ANAMNESIS_HOOK_SEED_K` | `SessionStart` seed size. | `5` |
-| `ANAMNESIS_HOOK_TIMEOUT_MS` | Per-hook fail-open timeout (ms); on elapse, inject nothing. | `3000` |
+| `ANAMNESIS_HOOK_TIMEOUT_MS` | Per-hook fail-open timeout (ms); on elapse, inject nothing. | `4000` |
 | `ANAMNESIS_CAPTURE_ENABLED` | Enable/disable capture hooks (Stage 1 & 2) entirely. | `true` |
 | `ANAMNESIS_EXTRACT_THRESHOLD_N` | Queue size threshold; when crossed, `SessionStart` injects extraction nudge to call `extract_pending`. | `20` |
 | `ANAMNESIS_EXTRACT_MODE` | R2 extraction mode: exact `shadow` permits raw captured content to be sent to the configured external extractor; `off` (and invalid values, including `auto`) disables it. | `off` |
@@ -216,9 +216,11 @@ The general anamnesis knobs apply to the hook too, since it talks to the same da
 | `ANAMNESIS_RERANK_MODEL` | Local cross-encoder used by the same canonical reranked-recall path as the MCP tool and LoCoMo harness. | `BAAI/bge-reranker-base` |
 
 The recall-hook `timeout` is 5 seconds as an outer backstop. The Rust hook's
-`ANAMNESIS_HOOK_TIMEOUT_MS` default is 3 seconds, so it remains the first
-fail-open boundary. The default BGE-base candidate-20 profile measured about
-0.94 seconds mean on the reference Mac.
+`ANAMNESIS_HOOK_TIMEOUT_MS` default is 4 seconds, so it remains the first
+fail-open boundary. The default production path searches at 20, preselects and
+reranks 50 source-aware evidence documents, and delivers at most 20. Its
+balanced LoCoMo n=100 gate measured 1.71 seconds mean, 2.52 seconds p95, and
+2.97 seconds maximum on the reference Mac.
 
 ## Use with other MCP clients
 

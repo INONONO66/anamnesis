@@ -9,7 +9,10 @@ use std::sync::{
 
 use anamnesis::embedding::EmbeddingProvider;
 use anamnesis::storage::StorageAdapter;
-use anamnesis::{Error, graph::EdgeType};
+use anamnesis::{
+    Error,
+    graph::{EdgeType, KnowledgeType},
+};
 use serde_json::json;
 
 use eval_common::real_bench::dataset::{
@@ -187,8 +190,10 @@ fn frozen_derived_memory_is_additive_provenance_linked_and_session_preserving() 
     )
     .expect("derived graph builds");
 
-    assert_eq!(built.stats.derived_nodes_created, 2);
-    assert_eq!(built.stats.reasoning_edges_created, 1);
+    assert_eq!(built.stats.derived_nodes_created, 0);
+    assert_eq!(built.stats.atomic_facts_created, 2);
+    assert_eq!(built.stats.atomic_relations_recorded, 1);
+    assert_eq!(built.stats.reasoning_edges_created, 0);
     assert_eq!(
         built
             .provenance_by_node
@@ -198,30 +203,11 @@ fn frozen_derived_memory_is_additive_provenance_linked_and_session_preserving() 
         4,
         "raw Episodic and Semantic provenance rows must remain"
     );
-    let derived = built
-        .memory
-        .engine()
-        .graph()
-        .storage()
-        .all_node_ids()
-        .into_iter()
-        .filter_map(|node_id| {
-            built
-                .memory
-                .engine()
-                .graph()
-                .get_node(node_id)
-                .ok()
-                .filter(|node| {
-                    node.metadata
-                        .get("anamnesis:benchmark-derived-id")
-                        .is_some_and(|value| value == "home")
-                        && node.node_type == anamnesis::graph::KnowledgeType::Semantic
-                })
-                .map(|_| node_id)
-        })
-        .next()
-        .expect("derived Semantic node");
+    assert_eq!(
+        built.memory.engine().graph().storage().all_node_ids().len(),
+        4,
+        "sidecar facts must not add graph nodes"
+    );
     assert_eq!(
         built
             .memory
@@ -236,6 +222,50 @@ fn frozen_derived_memory_is_additive_provenance_linked_and_session_preserving() 
                     .engine()
                     .graph()
                     .get_node(*node_id)
+                    .is_ok_and(|node| node.metadata.contains_key("anamnesis:benchmark-derived-id"))
+            })
+            .count(),
+        0,
+        "atomic facts must never enter the graph or node FTS corpus"
+    );
+    let sidecar = built
+        .memory
+        .engine()
+        .graph()
+        .storage()
+        .all_atomic_fact_ids()
+        .into_iter()
+        .find_map(|fact_id| {
+            built
+                .memory
+                .engine()
+                .graph()
+                .storage()
+                .get_atomic_fact(fact_id)
+                .ok()
+                .filter(|fact| {
+                    fact.metadata
+                        .get("anamnesis:benchmark-derived-id")
+                        .is_some_and(|value| value == "home")
+                })
+                .cloned()
+        })
+        .expect("home atomic fact");
+    assert_eq!(
+        built
+            .memory
+            .engine()
+            .graph()
+            .storage()
+            .all_atomic_fact_ids()
+            .into_iter()
+            .filter(|fact_id| {
+                built
+                    .memory
+                    .engine()
+                    .graph()
+                    .storage()
+                    .get_atomic_fact(*fact_id)
                     .is_ok_and(|node| {
                         node.metadata
                             .get("anamnesis:benchmark-derived-id")
@@ -244,20 +274,24 @@ fn frozen_derived_memory_is_additive_provenance_linked_and_session_preserving() 
             })
             .count(),
         1,
-        "one extracted fact must materialize as one Semantic node"
+        "one extracted fact must materialize as one sidecar record"
     );
-    let node = built.memory.engine().graph().get_node(derived).unwrap();
-    assert_eq!(node.origin.session_id, "session_1");
-    assert_eq!(node.valid_from, Some(anamnesis::graph::Timestamp(10)));
-    assert_eq!(node.valid_until, Some(anamnesis::graph::Timestamp(20)));
+    assert_eq!(sidecar.source_session_id, "session_1");
+    assert_eq!(sidecar.valid_from, Some(anamnesis::graph::Timestamp(10)));
+    assert_eq!(sidecar.valid_until, Some(anamnesis::graph::Timestamp(20)));
+    assert_eq!(sidecar.source_node_ids.len(), 1);
     assert!(
-        built
+        sidecar.source_node_ids.iter().all(|source_id| built
             .memory
-            .neighbors(derived)
-            .unwrap()
-            .iter()
-            .any(|neighbor| neighbor.edge_type == EdgeType::ExtractedFrom),
-        "derived knowledge must retain a raw source edge"
+            .engine()
+            .graph()
+            .get_node(*source_id)
+            .is_ok_and(|source| source.node_type == KnowledgeType::Episodic)),
+        "sidecar provenance must cite only raw Episodic sources"
+    );
+    assert!(
+        sidecar.metadata.contains_key("anamnesis:relations"),
+        "sidecar relation metadata must remain available without graph edges"
     );
 }
 

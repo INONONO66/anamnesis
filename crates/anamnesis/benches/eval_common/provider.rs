@@ -47,6 +47,12 @@ pub struct ProviderConfig {
     pub timeout_secs: u64,
     pub max_retries: u32,
     pub max_output_tokens: Option<u64>,
+    /// Optional Qwen-compatible chat-template thinking control.
+    ///
+    /// Leave this unset for providers such as OpenAI that do not accept
+    /// `chat_template_kwargs`.
+    #[serde(default)]
+    pub chat_template_enable_thinking: Option<bool>,
 }
 
 impl Default for ProviderConfig {
@@ -57,6 +63,7 @@ impl Default for ProviderConfig {
             timeout_secs: 30,
             max_retries: 3,
             max_output_tokens: None,
+            chat_template_enable_thinking: None,
         }
     }
 }
@@ -98,6 +105,7 @@ impl OpenAiCompatibleProvider {
             timeout_secs,
             max_retries: 3,
             max_output_tokens: None,
+            chat_template_enable_thinking: None,
         };
         Self::new(config)
     }
@@ -116,6 +124,11 @@ impl OpenAiCompatibleProvider {
         });
         if let Some(max_output_tokens) = self.config.max_output_tokens {
             body["max_tokens"] = serde_json::Value::from(max_output_tokens);
+        }
+        if let Some(enable_thinking) = self.config.chat_template_enable_thinking {
+            body["chat_template_kwargs"] = serde_json::json!({
+                "enable_thinking": enable_thinking
+            });
         }
 
         let mut last_err = ProviderError::ConnectionFailed;
@@ -214,6 +227,7 @@ mod tests {
             timeout_secs: 1,
             max_retries: 0,
             max_output_tokens: None,
+            chat_template_enable_thinking: None,
         };
         let provider = OpenAiCompatibleProvider::new(config).expect("should create");
         let result = provider.generate("test");

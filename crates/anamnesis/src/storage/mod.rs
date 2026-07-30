@@ -12,7 +12,46 @@ use crate::error::Error;
 use crate::graph::{
     AccessTrace, Edge, EdgeId, KnowledgeType, Node, NodeId, PeerId, ScopePath, Timestamp,
 };
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
+
+/// Stable identifier in the isolated atomic-fact sidecar.
+///
+/// Atomic facts are retrieval representations, not graph nodes. Their IDs
+/// therefore live in a separate namespace and never consume or collide with
+/// [`NodeId`] allocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct AtomicFactId(pub u64);
+
+/// One persisted record in the isolated atomic-fact sidecar.
+///
+/// The record deliberately stores only extracted text plus raw Episodic source
+/// provenance. It is absent from graph topology, node budgets, attraction,
+/// forgetting, and the normal node FTS/vector candidate pool.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AtomicFact {
+    /// Sidecar-local identifier.
+    pub id: AtomicFactId,
+    /// Standalone atomic claim used only to route back to raw evidence.
+    pub content: String,
+    /// Passage embedding in the same vector space as the owning [`Memory`](crate::Memory).
+    pub embedding: Vec<f64>,
+    /// Authoritative raw Episodic source nodes.
+    pub source_node_ids: Vec<NodeId>,
+    /// Selective entity tags. Broad speaker/session tags do not belong here.
+    pub entity_tags: Vec<String>,
+    /// Source conversation session retained for provenance validation.
+    pub source_session_id: String,
+    /// Visibility scope inherited from the cited sources.
+    pub scope: ScopePath,
+    /// Latest observation time among the cited sources.
+    pub observed_at: Timestamp,
+    /// Optional fact-validity start.
+    pub valid_from: Option<Timestamp>,
+    /// Optional fact-validity end.
+    pub valid_until: Option<Timestamp>,
+    /// Consumer metadata such as extractor version or stable external id.
+    pub metadata: HashMap<String, String>,
+}
 
 /// Storage backend interface for the Anamnesis graph engine.
 ///
@@ -43,6 +82,45 @@ use std::collections::VecDeque;
 /// load-bearing for memory strength: `B_i` ages every trace to `now` directly, so
 /// no "as-of" baseline is needed. Engine maintenance no longer reads or advances it.
 pub trait StorageAdapter: Send + Sync {
+    // Isolated atomic-fact sidecar
+    //
+    // Default methods preserve source compatibility for third-party storage
+    // adapters. Unsupported adapters simply expose an empty read lane and return
+    // an explicit error if a consumer attempts to write an atomic fact.
+
+    /// Allocate an ID in the isolated atomic-fact namespace.
+    fn next_atomic_fact_id(&mut self) -> Result<AtomicFactId, Error> {
+        Err(Error::StorageError(
+            "storage adapter does not support atomic facts".to_string(),
+        ))
+    }
+
+    /// Persist one complete atomic-fact record.
+    fn set_atomic_fact(&mut self, _fact: AtomicFact) -> Result<(), Error> {
+        Err(Error::StorageError(
+            "storage adapter does not support atomic facts".to_string(),
+        ))
+    }
+
+    /// Retrieve one atomic fact.
+    fn get_atomic_fact(&self, _id: AtomicFactId) -> Result<&AtomicFact, Error> {
+        Err(Error::StorageError(
+            "storage adapter does not support atomic facts".to_string(),
+        ))
+    }
+
+    /// Delete one atomic fact.
+    fn delete_atomic_fact(&mut self, _id: AtomicFactId) -> Result<(), Error> {
+        Err(Error::StorageError(
+            "storage adapter does not support atomic facts".to_string(),
+        ))
+    }
+
+    /// Return all live atomic-fact IDs in ascending order.
+    fn all_atomic_fact_ids(&self) -> Vec<AtomicFactId> {
+        Vec::new()
+    }
+
     // ID allocation
     /// Allocate the next available NodeId (reuses freed IDs when available).
     fn next_node_id(&mut self) -> NodeId;

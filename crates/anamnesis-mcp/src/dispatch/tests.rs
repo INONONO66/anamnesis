@@ -4536,7 +4536,7 @@ mod migration_job {
     #[test]
     fn reviewed_candidate_promotion_is_provenance_safe_and_idempotent() {
         use anamnesis::engine::StorageAdapter;
-        use anamnesis::graph::{EdgeType, NodeId};
+        use anamnesis::graph::NodeId;
 
         let (reg, dir) = stub_registry();
         let (sources, _) = audit_fixture(&reg);
@@ -4598,7 +4598,10 @@ mod migration_job {
         )))
         .expect("promotion result");
         assert_eq!(first["already_materialized"], false);
-        let derived_id = NodeId(first["node_id"].as_u64().expect("derived node id"));
+        let fact_id = anamnesis::storage::AtomicFactId(
+            first["atomic_fact_id"].as_u64().expect("atomic fact id"),
+        );
+        assert_eq!(first["node_id"], fact_id.0, "legacy response alias");
 
         let second: serde_json::Value = serde_json::from_str(&ok_text(dispatch(
             &reg,
@@ -4608,7 +4611,7 @@ mod migration_job {
             },
         )))
         .expect("idempotent promotion result");
-        assert_eq!(second["node_id"], derived_id.0);
+        assert_eq!(second["atomic_fact_id"], fact_id.0);
         assert_eq!(second["already_materialized"], true);
 
         let handle = {
@@ -4616,41 +4619,39 @@ mod migration_job {
             registry.namespace_handle(None).expect("default namespace")
         };
         let memory = handle.lock().unwrap_or_else(|poison| poison.into_inner());
-        let derived = memory
+        let fact = memory
             .engine()
             .graph()
             .storage()
-            .get_node(derived_id)
-            .expect("derived node");
-        assert_eq!(derived.content, "derived one");
-        assert!(
-            derived
-                .entity_tags
-                .iter()
-                .any(|tag| tag == "anamnesis:derived")
+            .get_atomic_fact(fact_id)
+            .expect("atomic fact");
+        assert_eq!(fact.content, "derived one");
+        assert!(fact.entity_tags.iter().any(|tag| tag == "Alice"));
+        assert_eq!(fact.valid_from, Some(anamnesis::graph::Timestamp(10)));
+        assert_eq!(fact.valid_until, Some(anamnesis::graph::Timestamp(20)));
+        assert_eq!(
+            fact.metadata.get("anamnesis:fact-kind"),
+            Some(&"lesson".to_owned())
         );
-        assert!(derived.entity_tags.iter().any(|tag| tag == "Alice"));
-        assert_eq!(derived.valid_from, Some(anamnesis::graph::Timestamp(10)));
-        assert_eq!(derived.valid_until, Some(anamnesis::graph::Timestamp(20)));
         assert_eq!(
             memory
                 .engine()
                 .graph()
                 .storage()
-                .all_node_ids()
+                .all_atomic_fact_ids()
                 .into_iter()
-                .filter(|node_id| {
+                .filter(|fact_id| {
                     memory
                         .engine()
                         .graph()
                         .storage()
-                        .get_node(*node_id)
+                        .get_atomic_fact(*fact_id)
                         .is_ok_and(|node| {
                             node.metadata
                                 .get("anamnesis:extraction_idempotency_key")
                                 .is_some_and(|value| {
                                     value
-                                        == derived
+                                        == fact
                                             .metadata
                                             .get("anamnesis:extraction_idempotency_key")
                                             .expect("promoted idempotency metadata")
@@ -4659,11 +4660,11 @@ mod migration_job {
                 })
                 .count(),
             1,
-            "promotion must create one Semantic node, not an Episodic+Semantic duplicate"
+            "promotion must create one isolated atomic fact"
         );
         let source_id = NodeId(sources[0].node_id);
         assert_eq!(
-            derived.created_at,
+            fact.observed_at,
             memory
                 .engine()
                 .graph()
@@ -4671,16 +4672,32 @@ mod migration_job {
                 .get_node(source_id)
                 .expect("source timestamp")
                 .created_at,
-            "derived knowledge inherits source observation time instead of promotion time"
+            "atomic fact inherits source observation time instead of promotion time"
+        );
+        assert!(
+            fact.source_node_ids.contains(&source_id),
+            "atomic fact retains raw provenance without entering graph topology"
         );
         assert!(
             memory
-                .neighbors(derived_id)
-                .expect("derived provenance")
-                .iter()
-                .any(|neighbor| {
-                    neighbor.node == source_id && neighbor.edge_type == EdgeType::ExtractedFrom
-                })
+                .engine()
+                .graph()
+                .storage()
+                .all_node_ids()
+                .into_iter()
+                .all(|node_id| {
+                    memory
+                        .engine()
+                        .graph()
+                        .storage()
+                        .get_node(node_id)
+                        .is_ok_and(|node| {
+                            !node
+                                .metadata
+                                .contains_key("anamnesis:extraction_idempotency_key")
+                        })
+                }),
+            "reviewed extraction must not contaminate the graph candidate pool"
         );
         assert_eq!(
             memory
@@ -4694,7 +4711,7 @@ mod migration_job {
         );
         drop(memory);
 
-        {
+        let second_fact_id = {
             let id = second_candidate_id;
             let reviewed = dispatch(
                 &reg,
@@ -4714,8 +4731,15 @@ mod migration_job {
                     candidate_id: id,
                 },
             );
-            assert!(matches!(promoted, Response::Ok { .. }), "{promoted:?}");
-        }
+            assert!(matches!(&promoted, Response::Ok { .. }), "{promoted:?}");
+            let promoted: serde_json::Value =
+                serde_json::from_str(&ok_text(promoted)).expect("second promotion result");
+            anamnesis::storage::AtomicFactId(
+                promoted["atomic_fact_id"]
+                    .as_u64()
+                    .expect("second atomic fact id"),
+            )
+        };
         let relation_review = dispatch(
             &reg,
             Request::UpdateExtractionRelationAudit {
@@ -4748,10 +4772,32 @@ mod migration_job {
         .expect("idempotent relation promotion result");
         assert_eq!(second_relation["edge_id"], first_relation["edge_id"]);
         assert_eq!(second_relation["already_materialized"], true);
+        {
+            let handle = {
+                let mut registry = reg.lock().unwrap_or_else(|poison| poison.into_inner());
+                registry.namespace_handle(None).expect("default namespace")
+            };
+            let memory = handle.lock().unwrap_or_else(|poison| poison.into_inner());
+            let source_fact = memory
+                .engine()
+                .graph()
+                .storage()
+                .get_atomic_fact(fact_id)
+                .expect("relation source fact");
+            assert_eq!(
+                source_fact.metadata.get(&format!(
+                    "anamnesis:atomic-relation:{}",
+                    first_relation["atomic_relation_id"]
+                        .as_u64()
+                        .expect("atomic relation id")
+                )),
+                Some(&format!("supports:{}", second_fact_id.0))
+            );
+        }
         let committed = extraction_audit_list(&reg);
         assert_eq!(
             audit_candidate(&committed, "one")["committed_node_id"],
-            derived_id.0
+            fact_id.0
         );
         assert_eq!(
             audit_relation(&committed, "one", "two")["committed_edge_id"],

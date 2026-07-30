@@ -1202,12 +1202,15 @@ fn search_question(
     );
     #[cfg(not(feature = "embed"))]
     let readout_limit = opts.diagnostic_readout_limit.unwrap_or(200);
+    let search_limit = opts
+        .top_k
+        .max(anamnesis::memory::DEFAULT_RERANK_SEARCH_LIMIT);
     if readout_limit != 200 {
         graph
             .memory
             .search_result_at_with_diagnostics(
                 &question.question,
-                opts.top_k,
+                search_limit,
                 now,
                 &tuning,
                 &SearchDiagnostics::with_readout_trace_limit(readout_limit),
@@ -1216,7 +1219,7 @@ fn search_question(
     } else {
         graph
             .memory
-            .search_result_at_with(&question.question, opts.top_k, now, &tuning)
+            .search_result_at_with(&question.question, search_limit, now, &tuning)
             .map_err(|err| BenchError::Engine(err.to_string()))
     }
 }

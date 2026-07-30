@@ -60,8 +60,9 @@ mod manage;
 mod readout;
 mod view;
 pub use readout::{
-    AnswerShape, DeepRecallOptions, EvidenceDocument, EvidenceSelection, RecallIntent, RecallPlan,
-    RerankedRecallOptions,
+    AnswerShape, DEFAULT_RERANK_CANDIDATE_LIMIT, DEFAULT_RERANK_FINAL_LIMIT,
+    DEFAULT_RERANK_SEARCH_LIMIT, DeepRecallOptions, EvidenceDocument, EvidenceSelection,
+    RecallIntent, RecallPlan, RerankedRecallOptions,
 };
 pub use view::{ListFilter, MemoryView};
 
@@ -82,7 +83,8 @@ use crate::query::{
     AccessedSite, ActivatedTension, CoReadoutPair, CommitTrace, ContextPackage, Fragment,
     QueryConfig, SearchDiagnostics, SearchInput, SearchResult, Tension,
 };
-use crate::storage::{SqliteStorage, StorageAdapter};
+pub use crate::storage::AtomicFactId;
+use crate::storage::{AtomicFact, SqliteStorage, StorageAdapter};
 
 /// Per-session state for incremental window finalization.
 #[derive(Debug, Default)]
@@ -134,6 +136,67 @@ pub struct NoteOptions {
     pub tags: Vec<String>,
     /// Consumer-defined metadata key-value pairs stamped on both ingested nodes.
     pub metadata: Vec<(String, String)>,
+}
+
+/// Input for one isolated atomic fact.
+///
+/// Atomic facts are compact, reviewed extraction records used only to route a
+/// query back to authoritative raw [`KnowledgeType::Episodic`] sources. They
+/// are persisted in a separate sidecar table/index and never become graph
+/// nodes, affect normal FTS statistics, consume graph budgets, or participate
+/// in attraction and forgetting.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct AtomicFactInput {
+    /// Standalone atomic claim.
+    pub content: String,
+    /// One or more authoritative raw Episodic source nodes.
+    pub source_node_ids: Vec<NodeId>,
+    /// Selective entity names used as a small query-time boost.
+    pub entity_tags: Vec<String>,
+    /// Optional fact-validity start.
+    pub valid_from: Option<Timestamp>,
+    /// Optional fact-validity end.
+    pub valid_until: Option<Timestamp>,
+    /// Consumer metadata such as extractor version or stable external id.
+    pub metadata: Vec<(String, String)>,
+}
+
+impl AtomicFactInput {
+    /// Create an atomic fact citing raw source nodes.
+    pub fn new(content: impl Into<String>, source_node_ids: Vec<NodeId>) -> Self {
+        Self {
+            content: content.into(),
+            source_node_ids,
+            entity_tags: Vec::new(),
+            valid_from: None,
+            valid_until: None,
+            metadata: Vec::new(),
+        }
+    }
+
+    /// Attach selective entity tags.
+    pub fn with_entity_tags(mut self, entity_tags: Vec<String>) -> Self {
+        self.entity_tags = entity_tags;
+        self
+    }
+
+    /// Attach a half-open fact-validity window.
+    pub fn with_validity(
+        mut self,
+        valid_from: Option<Timestamp>,
+        valid_until: Option<Timestamp>,
+    ) -> Self {
+        self.valid_from = valid_from;
+        self.valid_until = valid_until;
+        self
+    }
+
+    /// Attach consumer metadata.
+    pub fn with_metadata(mut self, metadata: Vec<(String, String)>) -> Self {
+        self.metadata = metadata;
+        self
+    }
 }
 
 /// Receipt returned by [`Memory::add`] and [`Memory::add_note`].
@@ -698,6 +761,123 @@ impl<S: StorageAdapter + Clone> Memory<S> {
             self.set_metadata_pairs(semantic, &pairs)?;
         }
         Ok(semantic)
+    }
+
+    /// Add one reviewed atomic fact to the isolated routing sidecar.
+    ///
+    /// The fact is embedded once at ingest and remains outside the cognitive
+    /// graph. Every source must be a live Episodic node from the same session
+    /// and scope. Query-time routing may select the fact, but only its cited raw
+    /// sources can enter the normal readout/reranker lane.
+    pub fn add_atomic_fact(&mut self, input: AtomicFactInput) -> Result<AtomicFactId, Error> {
+        let content = input.content.trim();
+        if content.is_empty() {
+            return Err(Error::InvalidInput(
+                "atomic fact content must not be empty".to_string(),
+            ));
+        }
+        if input.source_node_ids.is_empty() {
+            return Err(Error::InvalidInput(
+                "atomic fact requires at least one raw source".to_string(),
+            ));
+        }
+        if let (Some(valid_from), Some(valid_until)) = (input.valid_from, input.valid_until)
+            && valid_until <= valid_from
+        {
+            return Err(Error::InvalidInput(
+                "atomic fact valid_until must be greater than valid_from".to_string(),
+            ));
+        }
+
+        let mut source_node_ids = Vec::with_capacity(input.source_node_ids.len());
+        let mut source_session_id: Option<String> = None;
+        let mut scope: Option<ScopePath> = None;
+        let mut observed_at = Timestamp(0);
+        for source_node_id in input.source_node_ids {
+            if source_node_ids.contains(&source_node_id) {
+                continue;
+            }
+            let source = self.engine.graph().get_node(source_node_id)?;
+            if source.node_type != KnowledgeType::Episodic {
+                return Err(Error::InvalidInput(format!(
+                    "atomic fact source {} must be Episodic",
+                    source_node_id.0
+                )));
+            }
+            if source_session_id
+                .as_ref()
+                .is_some_and(|session| session != &source.origin.session_id)
+            {
+                return Err(Error::InvalidInput(
+                    "atomic fact sources must belong to one session".to_string(),
+                ));
+            }
+            if scope
+                .as_ref()
+                .is_some_and(|existing| existing != &source.origin.scope)
+            {
+                return Err(Error::InvalidInput(
+                    "atomic fact sources must share one scope".to_string(),
+                ));
+            }
+            source_session_id.get_or_insert_with(|| source.origin.session_id.clone());
+            scope.get_or_insert_with(|| source.origin.scope.clone());
+            observed_at = observed_at.max(source.created_at);
+            source_node_ids.push(source_node_id);
+        }
+
+        let source_session_id = source_session_id.ok_or_else(|| {
+            Error::InvalidInput("atomic fact requires a live raw source".to_string())
+        })?;
+        let scope = scope.unwrap_or_else(ScopePath::universal);
+        let mut entity_tags: Vec<String> = input
+            .entity_tags
+            .into_iter()
+            .map(|tag| tag.trim().to_owned())
+            .filter(|tag| !tag.is_empty())
+            .filter(|tag| {
+                let normalized = tag.to_ascii_lowercase();
+                !normalized.starts_with("speaker-")
+                    && !normalized.starts_with("session-")
+                    && normalized != "anamnesis:derived"
+            })
+            .collect();
+        entity_tags.sort();
+        entity_tags.dedup();
+        let metadata = input.metadata.into_iter().collect();
+        let embedding = embed_one_passage(&*self.provider, content)?;
+        if embedding.is_empty() || !embedding.iter().all(|value| value.is_finite()) {
+            return Err(Error::InvalidInput(
+                "atomic fact embedding must be non-empty and finite".to_string(),
+            ));
+        }
+
+        let storage = self.engine.graph_mut().storage_mut();
+        let id = storage.next_atomic_fact_id()?;
+        storage.set_atomic_fact(AtomicFact {
+            id,
+            content: content.to_owned(),
+            embedding,
+            source_node_ids,
+            entity_tags,
+            source_session_id,
+            scope,
+            observed_at,
+            valid_from: input.valid_from,
+            valid_until: input.valid_until,
+            metadata,
+        })?;
+        Ok(id)
+    }
+
+    /// Delete one atomic fact from the isolated routing sidecar.
+    pub fn delete_atomic_fact(&mut self, id: AtomicFactId) -> Result<(), Error> {
+        self.engine.graph_mut().storage_mut().delete_atomic_fact(id)
+    }
+
+    /// Number of live records in the isolated atomic-fact sidecar.
+    pub fn atomic_fact_count(&self) -> usize {
+        self.engine.graph().storage().all_atomic_fact_ids().len()
     }
 
     fn add_single_shot_note(
@@ -2269,15 +2449,127 @@ impl<S: StorageAdapter + Clone> Memory<S> {
         let seed_limit = tuning.seed_limit.unwrap_or_else(|| limit.max(1));
         let input = SearchInput {
             text: query.to_string(),
-            query_embedding: Some(embedding),
+            query_embedding: Some(embedding.clone()),
             limit,
             seed_limit: Some(seed_limit),
             now,
-            scope,
+            scope: scope.clone(),
             entity_tags: tuning.entity_tags.clone(),
             ..SearchInput::default()
         };
-        self.engine.search_with_diagnostics(input, diagnostics)
+        let mut result = self.engine.search_with_diagnostics(input, diagnostics)?;
+        let plan = RecallPlan::infer(query);
+        let routed = readout::route_atomic_fact_sources(
+            self.engine.graph().storage(),
+            &plan,
+            &embedding,
+            now,
+            &scope,
+        )?;
+        if routed.is_empty() {
+            return Ok(result);
+        }
+
+        // Preserve the proven cognitive head exactly. Atomic facts only earn
+        // source slots in the deeper lane; direct/temporal shapes never reach
+        // this branch. Existing raw candidates keep their native score signals
+        // when promoted, while a source absent from the trace receives the
+        // fact-lane synthetic diagnostic score.
+        let head_limit = result.trace.readout.len().min(30);
+        let head_ids: HashSet<_> = result
+            .trace
+            .readout
+            .iter()
+            .take(head_limit)
+            .map(|candidate| candidate.node_id)
+            .collect();
+        let mut head_sources = HashSet::new();
+        for candidate in result.trace.readout.iter().take(head_limit) {
+            head_sources.extend(readout::canonical_sources(
+                self.engine.graph().storage(),
+                candidate.node_id,
+            )?);
+        }
+        // The sidecar may expose up to the complete 20-row tail for later
+        // coverage/session-bridge selection. Collections reserve twelve raw
+        // slots because each distinct fact may be a required list item; other
+        // shapes admit only four so an entity-rich fact cluster cannot replace
+        // the native tail wholesale.
+        let direct_atomic_promotion_limit = if plan.answer_shape == AnswerShape::Collection {
+            12
+        } else {
+            4
+        };
+        let mut routed_ids = Vec::new();
+        let mut promoted = Vec::new();
+        let mut deferred = Vec::new();
+        for routed_source in routed {
+            let routed_candidate = routed_source.candidate;
+            if head_ids.contains(&routed_candidate.node_id)
+                || head_sources.contains(&routed_candidate.node_id)
+                || routed_ids
+                    .iter()
+                    .any(|(node_id, _)| *node_id == routed_candidate.node_id)
+            {
+                continue;
+            }
+            routed_ids.push((routed_candidate.node_id, routed_source.kind_priority));
+            if promoted.len() < direct_atomic_promotion_limit {
+                let candidate = result
+                    .trace
+                    .readout
+                    .iter()
+                    .position(|existing| existing.node_id == routed_candidate.node_id)
+                    .map(|position| result.trace.readout.remove(position))
+                    .unwrap_or(routed_candidate);
+                promoted.push(candidate);
+            } else if !result
+                .trace
+                .readout
+                .iter()
+                .any(|existing| existing.node_id == routed_candidate.node_id)
+            {
+                deferred.push(routed_candidate);
+            }
+        }
+        for (offset, candidate) in promoted.into_iter().enumerate() {
+            result.trace.readout.insert(
+                (head_limit + offset).min(result.trace.readout.len()),
+                candidate,
+            );
+        }
+        let native_capacity = diagnostics
+            .readout_trace_limit
+            .saturating_sub(deferred.len());
+        result.trace.readout.truncate(native_capacity);
+        result.trace.readout.extend(deferred);
+        result
+            .trace
+            .readout
+            .truncate(diagnostics.readout_trace_limit);
+        routed_ids.retain(|(node_id, _)| {
+            result
+                .trace
+                .readout
+                .iter()
+                .any(|candidate| candidate.node_id == *node_id)
+        });
+        result
+            .trace
+            .strategies_used
+            .push("atomic_fact_routing".to_owned());
+        if !routed_ids.is_empty() {
+            let routed_ids = routed_ids
+                .iter()
+                .map(|(node_id, kind_priority)| format!("{}@{kind_priority}", node_id.0))
+                .collect::<Vec<_>>()
+                .join(",");
+            result
+                .trace
+                .strategies_used
+                .push(format!("atomic_fact_sources:{routed_ids}"));
+        }
+        Ok(result)
     }
 
     /// Validate consumer-supplied reranker scores and rebuild a commit-safe recall.
@@ -2362,11 +2654,36 @@ impl<S: StorageAdapter + Clone> Memory<S> {
             ));
         }
         let plan = RecallPlan::infer(query);
+        let mut routed_atomic_sources = Vec::new();
+        for strategy in &result.trace.strategies_used {
+            let Some(encoded_sources) = strategy.strip_prefix("atomic_fact_sources:") else {
+                continue;
+            };
+            for encoded_source in encoded_sources.split(',') {
+                let (encoded_id, encoded_priority) = encoded_source
+                    .split_once('@')
+                    .unwrap_or((encoded_source, "0"));
+                let Ok(source_id) = encoded_id.parse::<u64>() else {
+                    continue;
+                };
+                let Ok(kind_priority) = encoded_priority.parse::<usize>() else {
+                    continue;
+                };
+                let source = (NodeId(source_id), kind_priority);
+                if !routed_atomic_sources
+                    .iter()
+                    .any(|(node_id, _)| *node_id == source.0)
+                {
+                    routed_atomic_sources.push(source);
+                }
+            }
+        }
         readout::compile_rerank_documents(
             self.engine.graph().storage(),
             &plan,
             &result.trace.readout,
             candidate_limit,
+            &routed_atomic_sources,
         )
     }
 
@@ -2387,11 +2704,14 @@ impl<S: StorageAdapter + Clone> Memory<S> {
 
     /// Compile consumer scores through deterministic deep readout at `as_of`.
     ///
-    /// [`EvidenceSelection::Auto`] infers intent from `query`, which must be the
-    /// original query used to produce `result`. It preserves pure relevance
-    /// order for direct and date questions, applies raw-source coverage for
-    /// inference, and applies bounded source-session coverage for frequency,
-    /// explicit enumeration, or relationship questions. The compiled ranking is then validated by
+    /// [`EvidenceSelection::Auto`] preserves reranker order for direct queries
+    /// so downstream filters can retain alternate knowledge representations.
+    /// It applies canonical raw-source coverage for inference and date queries,
+    /// and bounded source-session coverage for explicit
+    /// collection/relationship/frequency queries. `query` must be the original
+    /// query used to produce `result` because the same deterministic plan also
+    /// controls evidence document compilation and query-aware rendering. The
+    /// compiled ranking is then validated by
     /// [`repackage_reranked_at`](Memory::repackage_reranked_at), so no source,
     /// validity, tension, budget, or commit invariant is bypassed.
     pub fn repackage_reranked_deep_at(
@@ -3051,8 +3371,8 @@ mod tests {
     #[test]
     fn production_reranked_recall_owns_documents_scoring_and_deep_packaging() {
         let defaults = RerankedRecallOptions::new(4);
-        assert_eq!(defaults.candidate_limit, 20);
-        assert_eq!(defaults.search_limit, 20);
+        assert_eq!(defaults.candidate_limit, DEFAULT_RERANK_CANDIDATE_LIMIT);
+        assert_eq!(defaults.search_limit, DEFAULT_RERANK_SEARCH_LIMIT);
         assert_eq!(defaults.deep.limit, 4);
 
         let mut m = mem();
@@ -3392,7 +3712,7 @@ mod tests {
     }
 
     #[test]
-    fn automatic_deep_readout_preserves_temporal_relevance_order() {
+    fn automatic_deep_readout_deduplicates_temporal_sources_in_relevance_order() {
         let mut m = mem();
         let first = m.add_note("Alice moved in January", t(1)).unwrap();
         let second = m.add_note("Alice moved in February", t(2)).unwrap();
@@ -3432,15 +3752,11 @@ mod tests {
             )
             .unwrap();
 
+        assert_eq!(ordinary.hits.len(), 4);
         assert_eq!(
-            ordinary
-                .hits
-                .iter()
-                .map(|hit| hit.node_id)
-                .collect::<Vec<_>>(),
-            deep.hits.iter().map(|hit| hit.node_id).collect::<Vec<_>>()
+            deep.hits.iter().map(|hit| hit.node_id).collect::<Vec<_>>(),
+            vec![first_semantic, second_semantic]
         );
-        assert_eq!(ordinary.package, deep.package);
     }
 
     #[test]
@@ -3984,6 +4300,113 @@ mod tests {
             m.link_extracted_source(source, source).is_err(),
             "raw episodic nodes cannot masquerade as derived knowledge"
         );
+    }
+
+    #[test]
+    fn atomic_fact_lane_routes_only_raw_sources() {
+        let mut m = mem();
+        let source = m
+            .add(
+                "session",
+                "alice",
+                "The cobalt project was completed after the launch review",
+                t(1),
+            )
+            .unwrap()
+            .episodic;
+        m.flush_all().unwrap();
+        m.add_atomic_fact(
+            AtomicFactInput::new("Alice completed the cobalt project", vec![source])
+                .with_entity_tags(vec!["Alice".to_owned(), "cobalt project".to_owned()]),
+        )
+        .unwrap();
+
+        let result = m
+            .search_result_at_with_diagnostics(
+                "What projects did Alice complete?",
+                4,
+                t(100),
+                &SearchTuning::default(),
+                &SearchDiagnostics::with_readout_trace_limit(20),
+            )
+            .unwrap();
+
+        assert!(
+            result
+                .trace
+                .strategies_used
+                .iter()
+                .any(|strategy| strategy == "atomic_fact_routing")
+        );
+        assert!(
+            result
+                .trace
+                .readout
+                .iter()
+                .any(|candidate| candidate.node_id == source)
+        );
+        assert_eq!(m.atomic_fact_count(), 1);
+    }
+
+    #[test]
+    fn derived_sidecar_leaves_direct_raw_readout_byte_identical() {
+        let mut baseline = mem();
+        let mut with_sidecar = mem();
+        let mut sidecar_sources = Vec::new();
+        for index in 0..40 {
+            let text = format!("alpha archive raw fact number {index}");
+            baseline
+                .add("session", "alice", &text, t(index + 1))
+                .unwrap();
+            let receipt = with_sidecar
+                .add("session", "alice", &text, t(index + 1))
+                .unwrap();
+            sidecar_sources.push(receipt.episodic);
+        }
+        baseline.flush_all().unwrap();
+        with_sidecar.flush_all().unwrap();
+        for index in 0..20 {
+            with_sidecar
+                .add_atomic_fact(
+                    AtomicFactInput::new(
+                        format!("Alice reviewed archive item {index}"),
+                        vec![sidecar_sources[index as usize]],
+                    )
+                    .with_entity_tags(vec!["Alice".to_owned(), "archive".to_owned()]),
+                )
+                .unwrap();
+        }
+
+        let diagnostics = SearchDiagnostics::with_readout_trace_limit(100);
+        for query in [
+            "Where is the alpha archive?",
+            "Why did Alice review the alpha archive?",
+            "What device could Alice gift Bob for the alpha archive?",
+        ] {
+            let baseline_result = baseline
+                .search_result_at_with_diagnostics(
+                    query,
+                    20,
+                    t(1_000),
+                    &SearchTuning::default(),
+                    &diagnostics,
+                )
+                .unwrap();
+            let sidecar_result = with_sidecar
+                .search_result_at_with_diagnostics(
+                    query,
+                    20,
+                    t(1_000),
+                    &SearchTuning::default(),
+                    &diagnostics,
+                )
+                .unwrap();
+
+            assert_eq!(
+                sidecar_result.trace.readout, baseline_result.trace.readout,
+                "sidecar must preserve conservative readout for {query:?}"
+            );
+        }
     }
 
     #[test]

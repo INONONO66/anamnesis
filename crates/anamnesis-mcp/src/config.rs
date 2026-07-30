@@ -31,9 +31,9 @@ pub const DEFAULT_HOOK_SEED_COSINE_GATE: f64 = 0.80;
 /// Number of recent transcript turns folded into UserPrompt recall queries.
 pub const DEFAULT_HOOK_CONTEXT_TURNS: usize = 3;
 /// Cap on memories injected for each UserPrompt hook recall.
-pub const DEFAULT_HOOK_TOPK: usize = 3;
+pub const DEFAULT_HOOK_TOPK: usize = anamnesis::memory::DEFAULT_RERANK_FINAL_LIMIT;
 /// Fail-open budget for latency-sensitive canonical product recall.
-pub const DEFAULT_HOOK_TIMEOUT_MS: u64 = 3_000;
+pub const DEFAULT_HOOK_TIMEOUT_MS: u64 = 4_000;
 /// Default embedding model for new databases and model downloads.
 pub const DEFAULT_EMBED_MODEL: &str = "multilingual-e5-small";
 /// Default local cross-encoder for canonical production recall.
@@ -65,7 +65,7 @@ pub struct Config {
     pub hook_topk: usize,
     /// SessionStart seed size. `ANAMNESIS_HOOK_SEED_K` (default 5).
     pub hook_seed_k: usize,
-    /// Per-hook fail-open timeout (ms). `ANAMNESIS_HOOK_TIMEOUT_MS` (default 3000).
+    /// Per-hook fail-open timeout (ms). `ANAMNESIS_HOOK_TIMEOUT_MS` (default 4000).
     pub hook_timeout_ms: u64,
     /// Global capture kill-switch. `ANAMNESIS_CAPTURE_ENABLED` (default true).
     pub capture_enabled: bool,

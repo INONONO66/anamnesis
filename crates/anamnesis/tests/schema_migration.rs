@@ -88,8 +88,8 @@ fn fresh_db_gets_current_schema_version() {
     let conn = Connection::open(&tmp).expect("reopen");
     assert_eq!(
         schema_version(&conn),
-        11,
-        "fresh DB should be at schema v11"
+        12,
+        "fresh DB should be at schema v12"
     );
 
     // v6 removed the peer/trust subsystem: a fresh DB has no peers tables.
@@ -114,6 +114,18 @@ fn fresh_db_gets_current_schema_version() {
     assert!(
         table_exists(&conn, "graph_metadata"),
         "fresh DB must carry the v11 graph metadata table"
+    );
+    assert!(
+        table_exists(&conn, "atomic_facts"),
+        "fresh DB must carry the isolated v12 atomic-fact sidecar"
+    );
+    assert_eq!(
+        table_indexes(&conn, "atomic_facts"),
+        vec![
+            "idx_atomic_facts_scope".to_owned(),
+            "idx_atomic_facts_session".to_owned(),
+        ],
+        "fresh atomic-fact sidecar must have only its dedicated indexes"
     );
 
     let _ = std::fs::remove_file(&tmp);
@@ -240,8 +252,8 @@ fn existing_db_migrates_from_v1_to_current() {
 
         assert_eq!(
             schema_version(&conn),
-            11,
-            "schema_version should be 11 after full v1 -> v11 migration"
+            12,
+            "schema_version should be 12 after full v1 -> v12 migration"
         );
 
         // Nodes' peer_id column (inside the Origin encoding) STAYS after the chain.
@@ -266,6 +278,10 @@ fn existing_db_migrates_from_v1_to_current() {
         assert!(
             table_exists(&conn, "graph_metadata"),
             "migrated DB must carry the v11 graph metadata table"
+        );
+        assert!(
+            table_exists(&conn, "atomic_facts"),
+            "migrated DB must carry the isolated v12 atomic-fact sidecar"
         );
     }
 
@@ -374,8 +390,8 @@ fn fresh_schema_equals_migrated_schema() {
     let fresh = Connection::open(&fresh_path).expect("reopen fresh");
     let migrated = Connection::open(&migrated_path).expect("reopen migrated");
 
-    assert_eq!(schema_version(&fresh), 11);
-    assert_eq!(schema_version(&migrated), 11);
+    assert_eq!(schema_version(&fresh), 12);
+    assert_eq!(schema_version(&migrated), 12);
 
     // Both the fresh-create and migration paths must converge on a nodes table that
     // carries the v5 evidence_prior column (legacy v1->v2 ALTERs leave the rest of
@@ -407,6 +423,11 @@ fn fresh_schema_equals_migrated_schema() {
         table_columns(&migrated, "graph_metadata"),
         "fresh and migrated graph_metadata columns must be identical"
     );
+    assert_eq!(
+        table_columns(&fresh, "atomic_facts"),
+        table_columns(&migrated, "atomic_facts"),
+        "fresh and migrated atomic_facts columns must be identical"
+    );
     // The peers tables must be absent on BOTH the fresh-create and migrated paths
     // after the v6 drop (schema convergence: neither path leaves them behind).
     for table in ["peers", "peer_aliases"] {
@@ -421,7 +442,7 @@ fn fresh_schema_equals_migrated_schema() {
     }
 
     // Index lists must match for every reservoir-touched table.
-    for table in ["nodes", "edges", "salience"] {
+    for table in ["nodes", "edges", "salience", "atomic_facts"] {
         assert_eq!(
             table_indexes(&fresh, table),
             table_indexes(&migrated, table),
@@ -598,8 +619,8 @@ fn v5_db_with_planted_peers_reopens_clean_at_v6() {
         let conn = Connection::open(&tmp).expect("reopen after migration");
         assert_eq!(
             schema_version(&conn),
-            11,
-            "DB should be at v11 after reopen"
+            12,
+            "DB should be at v12 after reopen"
         );
         assert!(
             !table_exists(&conn, "peers"),
@@ -726,7 +747,7 @@ fn v5_db_with_bare_node_type_normalizes_through_full_chain_to_v8() {
 
     {
         let conn = Connection::open(&tmp).expect("reopen raw");
-        assert_eq!(schema_version(&conn), 11, "chain must land at v11");
+        assert_eq!(schema_version(&conn), 12, "chain must land at v12");
         let enc: String = conn
             .query_row(
                 "SELECT node_type FROM nodes WHERE id = ?1",
