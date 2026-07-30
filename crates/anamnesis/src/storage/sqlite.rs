@@ -8,7 +8,7 @@ use crate::graph::{
     AccessTrace, Edge, EdgeId, EdgeType, KnowledgeType, MemoryTier, Node, NodeId, ScopePath,
     Timestamp,
 };
-use crate::storage::StorageAdapter;
+use crate::storage::{AtomicFact, AtomicFactId, StorageAdapter};
 use rusqlite::backup::Backup;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use std::collections::{HashMap, VecDeque};
@@ -171,6 +171,7 @@ pub struct EmbeddingMigrationInspection {
 pub struct SqliteStorage {
     conn: Mutex<Connection>,
 
+    atomic_facts: Vec<Option<AtomicFact>>,
     nodes: Vec<Option<Node>>,
     edges: Vec<Option<Edge>>,
     salience: Vec<f64>,
@@ -195,6 +196,7 @@ pub struct SqliteStorage {
 
     next_node_counter: u64,
     next_edge_counter: u64,
+    next_atomic_fact_counter: u64,
     free_node_ids: Vec<NodeId>,
     free_edge_ids: Vec<EdgeId>,
     live_node_count: usize,
@@ -620,6 +622,7 @@ impl SqliteStorage {
         let capacity = 0;
         let mut storage = Self {
             conn: Mutex::new(conn),
+            atomic_facts: Vec::new(),
             nodes: Vec::new(),
             edges: Vec::new(),
             salience: Vec::new(),
@@ -643,6 +646,7 @@ impl SqliteStorage {
             adjacency_in: Vec::new(),
             next_node_counter: 0,
             next_edge_counter: 0,
+            next_atomic_fact_counter: 0,
             free_node_ids: Vec::new(),
             free_edge_ids: Vec::new(),
             live_node_count: 0,
@@ -692,8 +696,9 @@ impl SqliteStorage {
     }
 
     fn load_from_db(&mut self) -> Result<(), Error> {
-        let (nodes, edges, free_nodes, free_edges) = {
+        let (atomic_facts, nodes, edges, free_nodes, free_edges) = {
             let conn = self.lock_conn()?;
+            let atomic_facts = load_atomic_facts(&conn)?;
             let nodes = load_nodes(&conn)?;
             let edges = load_edges(&conn)?;
             let free_nodes = load_free_ids(&conn, "node")?
@@ -704,8 +709,23 @@ impl SqliteStorage {
                 .into_iter()
                 .map(EdgeId)
                 .collect::<Vec<_>>();
-            (nodes, edges, free_nodes, free_edges)
+            (atomic_facts, nodes, edges, free_nodes, free_edges)
         };
+
+        for fact in atomic_facts {
+            let idx = fact.id.0 as usize;
+            if idx >= self.atomic_facts.len() {
+                self.atomic_facts.resize_with(idx + 1, || None);
+            }
+            self.atomic_facts[idx] = Some(fact);
+        }
+        self.next_atomic_fact_counter = self
+            .atomic_facts
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(idx, slot)| slot.as_ref().map(|_| idx as u64 + 1))
+            .unwrap_or(0);
 
         for (node, salience, retained_action, accessed_at, decay_checkpoint) in nodes {
             let idx = node.id.0 as usize;
@@ -838,6 +858,10 @@ impl StorageAdapter for SqliteStorage {
                         params![key, value],
                     )
                     .map_err(sqlite_error)?;
+                }
+
+                for id in self.all_atomic_fact_ids() {
+                    insert_atomic_fact_row(&conn, self.get_atomic_fact(id)?)?;
                 }
 
                 for id in self.all_node_ids() {
@@ -981,7 +1005,75 @@ impl StorageAdapter for SqliteStorage {
         })?)?;
         result.next_node_counter = result.next_node_counter.max(self.next_node_counter);
         result.next_edge_counter = result.next_edge_counter.max(self.next_edge_counter);
+        result.next_atomic_fact_counter = result
+            .next_atomic_fact_counter
+            .max(self.next_atomic_fact_counter);
         Ok(result)
+    }
+
+    fn next_atomic_fact_id(&mut self) -> Result<AtomicFactId, Error> {
+        let id = AtomicFactId(self.next_atomic_fact_counter);
+        self.next_atomic_fact_counter = self
+            .next_atomic_fact_counter
+            .checked_add(1)
+            .ok_or_else(|| Error::StorageError("atomic fact id space exhausted".to_string()))?;
+        if id.0 as usize >= self.atomic_facts.len() {
+            self.atomic_facts.resize_with(id.0 as usize + 1, || None);
+        }
+        Ok(id)
+    }
+
+    fn set_atomic_fact(&mut self, fact: AtomicFact) -> Result<(), Error> {
+        let idx = fact.id.0 as usize;
+        if idx >= self.atomic_facts.len() {
+            self.atomic_facts.resize_with(idx + 1, || None);
+        }
+        {
+            let conn = self.lock_conn()?;
+            insert_atomic_fact_row(&conn, &fact)?;
+        }
+        self.next_atomic_fact_counter = self
+            .next_atomic_fact_counter
+            .max(fact.id.0.saturating_add(1));
+        self.atomic_facts[idx] = Some(fact);
+        Ok(())
+    }
+
+    fn get_atomic_fact(&self, id: AtomicFactId) -> Result<&AtomicFact, Error> {
+        self.atomic_facts
+            .get(id.0 as usize)
+            .and_then(|slot| slot.as_ref())
+            .ok_or_else(|| Error::StorageError(format!("atomic fact {} not found", id.0)))
+    }
+
+    fn delete_atomic_fact(&mut self, id: AtomicFactId) -> Result<(), Error> {
+        let idx = id.0 as usize;
+        if self
+            .atomic_facts
+            .get(idx)
+            .and_then(|slot| slot.as_ref())
+            .is_none()
+        {
+            return Err(Error::StorageError(format!(
+                "atomic fact {} not found",
+                id.0
+            )));
+        }
+        {
+            let conn = self.lock_conn()?;
+            conn.execute("DELETE FROM atomic_facts WHERE id = ?1", [id.0])
+                .map_err(sqlite_error)?;
+        }
+        self.atomic_facts[idx] = None;
+        Ok(())
+    }
+
+    fn all_atomic_fact_ids(&self) -> Vec<AtomicFactId> {
+        self.atomic_facts
+            .iter()
+            .enumerate()
+            .filter_map(|(index, slot)| slot.as_ref().map(|_| AtomicFactId(index as u64)))
+            .collect()
     }
 
     fn next_node_id(&mut self) -> NodeId {
@@ -2481,6 +2573,84 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    #[test]
+    fn atomic_fact_sidecar_persists_clones_and_never_enters_node_fts() {
+        let path = temp_db_path("atomic-fact-sidecar");
+        let expected = {
+            let mut storage = SqliteStorage::open(&path).expect("sqlite storage opens");
+            let source_id = storage.next_node_id();
+            let mut source = make_node(source_id, 0.5);
+            source.node_type = KnowledgeType::Episodic;
+            source.content = "authoritative raw cobalt account".to_owned();
+            storage.set_node(source).expect("raw source stored");
+
+            let node_search_before = storage.text_search("cobalt", 10);
+            let fact_id = storage
+                .next_atomic_fact_id()
+                .expect("atomic-fact id allocated");
+            let fact = AtomicFact {
+                id: fact_id,
+                content: "sidecaronlyterm means Alice completed cobalt".to_owned(),
+                embedding: vec![0.25, -0.5, 0.75],
+                source_node_ids: vec![source_id],
+                entity_tags: vec!["Alice".to_owned(), "cobalt".to_owned()],
+                source_session_id: "test-session".to_owned(),
+                scope: ScopePath::universal(),
+                observed_at: Timestamp(1_000),
+                valid_from: Some(Timestamp(900)),
+                valid_until: Some(Timestamp(1_100)),
+                metadata: HashMap::from([("extractor".to_owned(), "qwen-local".to_owned())]),
+            };
+            storage
+                .set_atomic_fact(fact.clone())
+                .expect("atomic fact stored");
+
+            assert_eq!(
+                storage.text_search("cobalt", 10),
+                node_search_before,
+                "sidecar insertion must not change normal FTS scores or ordering"
+            );
+            assert!(
+                storage.text_search("sidecaronlyterm", 10).is_empty(),
+                "sidecar-only text must remain absent from node FTS"
+            );
+            assert_eq!(storage.all_node_ids(), vec![source_id]);
+
+            let cloned = storage.try_clone().expect("storage clone succeeds");
+            assert_eq!(cloned.all_atomic_fact_ids(), vec![fact_id]);
+            assert_eq!(
+                cloned.get_atomic_fact(fact_id).expect("cloned fact exists"),
+                &fact
+            );
+            fact
+        };
+
+        let mut reopened = SqliteStorage::open(&path).expect("sidecar database reopens");
+        assert_eq!(reopened.all_atomic_fact_ids(), vec![expected.id]);
+        assert_eq!(
+            reopened
+                .get_atomic_fact(expected.id)
+                .expect("persisted fact exists"),
+            &expected
+        );
+        assert_eq!(
+            reopened
+                .next_atomic_fact_id()
+                .expect("next id survives reopen"),
+            AtomicFactId(expected.id.0 + 1)
+        );
+        reopened
+            .delete_atomic_fact(expected.id)
+            .expect("atomic fact deletes");
+        drop(reopened);
+
+        let reopened = SqliteStorage::open(&path).expect("deleted sidecar database reopens");
+        assert!(reopened.all_atomic_fact_ids().is_empty());
+        assert_eq!(reopened.all_node_ids().len(), 1);
+        drop(reopened);
+        std::fs::remove_file(path).expect("temporary sidecar database removes");
+    }
+
     /// Bug #5: SQLite FTS5 `bm25()` returns MORE-NEGATIVE values for BETTER
     /// matches. `rank_to_score` must therefore be monotone-INCREASING in
     /// `(-rank)` so a strong match (the query term dense in a short document)
@@ -2542,7 +2712,7 @@ mod tests {
 /// Current on-disk schema version. The fresh-DB `create_schema` path and the
 /// incremental migration chain must converge on an IDENTICAL schema at this
 /// version (same columns, same indexes).
-const SCHEMA_VERSION: u32 = 11;
+const SCHEMA_VERSION: u32 = 12;
 
 /// Run schema migrations to bring the database up to the current version.
 ///
@@ -2589,8 +2759,11 @@ const SCHEMA_VERSION: u32 = 11;
 ///   re-subtract the same idle-window leak again, collapsing an idle edge's
 ///   conductance the more the graph was ticked). Backfilled to `accessed_at`
 ///   for existing rows. See [`migrate_v9_to_v10`].
-/// - v11 (current): `graph_metadata` key/value table for graph-wide persistent
+/// - v11: `graph_metadata` key/value table for graph-wide persistent
 ///   metadata, initially used to guard the embedding model identity.
+/// - v12 (current): isolated `atomic_facts` sidecar table. Atomic facts retain
+///   raw Episodic source IDs but never enter `nodes`, `node_fts`, graph
+///   attraction, node budgets, or activation flow.
 /// - v5: `nodes.evidence_prior REAL NOT NULL DEFAULT 0` — the persistent,
 ///   decay-exempt evidence prior `P_i` of the `A_i = B_i + P_i` decomposition
 ///   (ADR-0008). Backfilled to `0.0`: the base-level `B_i` is recomputed from
@@ -2733,6 +2906,9 @@ fn migrate_schema(conn: &Connection) -> Result<(), Error> {
             migrate_v10_to_v11(conn)?;
         }
         Some(11) => {
+            migrate_v11_to_v12(conn)?;
+        }
+        Some(12) => {
             // Already at current version — ensure schema is complete (idempotent
             // CREATE IF NOT EXISTS only; no bare ALTER that would fail twice).
             create_schema(conn)?;
@@ -2751,6 +2927,14 @@ fn migrate_schema(conn: &Connection) -> Result<(), Error> {
         .map_err(sqlite_error)?;
     if migrated_version == 10 {
         migrate_v10_to_v11(conn)?;
+    }
+    let migrated_version: u32 = conn
+        .query_row("SELECT version FROM schema_version LIMIT 1", [], |row| {
+            row.get(0)
+        })
+        .map_err(sqlite_error)?;
+    if migrated_version == 11 {
+        migrate_v11_to_v12(conn)?;
     }
 
     Ok(())
@@ -3330,6 +3514,32 @@ fn migrate_v10_to_v11(conn: &Connection) -> Result<(), Error> {
     }
 }
 
+/// Migrate v11 to v12 by adding the isolated atomic-fact sidecar.
+fn migrate_v11_to_v12(conn: &Connection) -> Result<(), Error> {
+    conn.execute_batch("BEGIN IMMEDIATE;")
+        .map_err(sqlite_error)?;
+
+    let result = (|| -> Result<(), Error> {
+        create_atomic_fact_schema(conn)?;
+        stamp_version(conn, 12)
+    })();
+
+    match result {
+        Ok(()) => {
+            conn.execute_batch("COMMIT;").map_err(sqlite_error)?;
+            Ok(())
+        }
+        Err(error) => {
+            conn.execute_batch("ROLLBACK;").map_err(|rollback_error| {
+                Error::StorageError(format!(
+                    "v11-to-v12 migration failed ({error}); rollback also failed: {rollback_error}"
+                ))
+            })?;
+            Err(error)
+        }
+    }
+}
+
 /// Stamp `schema_version` to `version`, to be called inside the caller's own
 /// migration-hop transaction just before `COMMIT`.
 ///
@@ -3436,6 +3646,20 @@ fn create_schema(conn: &Connection) -> Result<(), Error> {
         "
         PRAGMA foreign_keys = OFF;
 
+        CREATE TABLE IF NOT EXISTS atomic_facts (
+            id INTEGER PRIMARY KEY,
+            content TEXT NOT NULL,
+            embedding_json TEXT NOT NULL,
+            source_node_ids TEXT NOT NULL,
+            entity_tags TEXT NOT NULL,
+            source_session_id TEXT NOT NULL,
+            scope TEXT NOT NULL,
+            observed_at INTEGER NOT NULL,
+            valid_from INTEGER,
+            valid_until INTEGER,
+            metadata TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS nodes (
             id INTEGER PRIMARY KEY,
             name TEXT NOT NULL,
@@ -3528,9 +3752,58 @@ fn create_schema(conn: &Connection) -> Result<(), Error> {
         CREATE INDEX IF NOT EXISTS idx_nodes_valid ON nodes(valid_from, valid_until);
         CREATE INDEX IF NOT EXISTS idx_edges_valid ON edges(valid_from, valid_until);
         CREATE INDEX IF NOT EXISTS idx_salience ON salience(salience);
+        CREATE INDEX IF NOT EXISTS idx_atomic_facts_session ON atomic_facts(source_session_id);
+        CREATE INDEX IF NOT EXISTS idx_atomic_facts_scope ON atomic_facts(scope);
         ",
     )
     .map_err(sqlite_error)
+}
+
+fn create_atomic_fact_schema(conn: &Connection) -> Result<(), Error> {
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS atomic_facts (
+            id INTEGER PRIMARY KEY,
+            content TEXT NOT NULL,
+            embedding_json TEXT NOT NULL,
+            source_node_ids TEXT NOT NULL,
+            entity_tags TEXT NOT NULL,
+            source_session_id TEXT NOT NULL,
+            scope TEXT NOT NULL,
+            observed_at INTEGER NOT NULL,
+            valid_from INTEGER,
+            valid_until INTEGER,
+            metadata TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_atomic_facts_session ON atomic_facts(source_session_id);
+        CREATE INDEX IF NOT EXISTS idx_atomic_facts_scope ON atomic_facts(scope);
+        ",
+    )
+    .map_err(sqlite_error)
+}
+
+fn insert_atomic_fact_row(conn: &Connection, fact: &AtomicFact) -> Result<(), Error> {
+    conn.execute(
+        "INSERT OR REPLACE INTO atomic_facts (
+            id, content, embedding_json, source_node_ids, entity_tags,
+            source_session_id, scope, observed_at, valid_from, valid_until, metadata
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        params![
+            fact.id.0,
+            fact.content,
+            encode_embedding(Some(&fact.embedding)).unwrap_or_default(),
+            encode_node_ids(&fact.source_node_ids),
+            encode_strings(&fact.entity_tags),
+            fact.source_session_id,
+            fact.scope.as_str(),
+            fact.observed_at.0,
+            fact.valid_from.map(|timestamp| timestamp.0),
+            fact.valid_until.map(|timestamp| timestamp.0),
+            encode_map(&fact.metadata),
+        ],
+    )
+    .map_err(sqlite_error)?;
+    Ok(())
 }
 
 fn insert_node_row(
@@ -3622,6 +3895,69 @@ fn insert_node_row(
     }
 
     Ok(())
+}
+
+fn load_atomic_facts(conn: &Connection) -> Result<Vec<AtomicFact>, Error> {
+    let mut statement = conn
+        .prepare(
+            "SELECT id, content, embedding_json, source_node_ids, entity_tags,
+                    source_session_id, scope, observed_at, valid_from, valid_until, metadata
+             FROM atomic_facts
+             ORDER BY id",
+        )
+        .map_err(sqlite_error)?;
+    let encoded = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, u64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, u64>(7)?,
+                row.get::<_, Option<u64>>(8)?,
+                row.get::<_, Option<u64>>(9)?,
+                row.get::<_, String>(10)?,
+            ))
+        })
+        .map_err(sqlite_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(sqlite_error)?;
+
+    encoded
+        .into_iter()
+        .map(
+            |(
+                id,
+                content,
+                embedding,
+                source_node_ids,
+                entity_tags,
+                source_session_id,
+                scope,
+                observed_at,
+                valid_from,
+                valid_until,
+                metadata,
+            )| {
+                Ok(AtomicFact {
+                    id: AtomicFactId(id),
+                    content,
+                    embedding: decode_embedding(Some(embedding))?.unwrap_or_default(),
+                    source_node_ids: decode_node_ids(&source_node_ids)?,
+                    entity_tags: decode_strings(&entity_tags)?,
+                    source_session_id,
+                    scope: decode_scope(&scope)?,
+                    observed_at: Timestamp(observed_at),
+                    valid_from: valid_from.map(Timestamp),
+                    valid_until: valid_until.map(Timestamp),
+                    metadata: decode_map(&metadata)?,
+                })
+            },
+        )
+        .collect()
 }
 
 fn insert_edge_row(conn: &Connection, edge: &Edge) -> Result<(), Error> {
@@ -3996,6 +4332,42 @@ fn decode_access_history(value: &str) -> Result<VecDeque<AccessTrace>, Error> {
             })
         })
         .collect()
+}
+
+fn encode_node_ids(ids: &[NodeId]) -> String {
+    ids.iter()
+        .map(|id| id.0.to_string())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn decode_node_ids(value: &str) -> Result<Vec<NodeId>, Error> {
+    if value.is_empty() {
+        return Ok(Vec::new());
+    }
+    value
+        .split(',')
+        .map(|part| {
+            part.parse::<u64>().map(NodeId).map_err(|error| {
+                Error::StorageError(format!("invalid atomic-fact source id '{part}': {error}"))
+            })
+        })
+        .collect()
+}
+
+fn encode_strings(values: &[String]) -> String {
+    values
+        .iter()
+        .map(|value| escape_text(value))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn decode_strings(value: &str) -> Result<Vec<String>, Error> {
+    if value.is_empty() {
+        return Ok(Vec::new());
+    }
+    value.split('\n').map(unescape_text).collect()
 }
 
 fn encode_map(map: &HashMap<String, String>) -> String {

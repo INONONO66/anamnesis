@@ -7,4 +7,5 @@ pub mod judge;
 pub mod locomo_pipeline;
 pub mod metrics;
 pub mod provider;
+pub mod reader_contract;
 pub mod real_bench;

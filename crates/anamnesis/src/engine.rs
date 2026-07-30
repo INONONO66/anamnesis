@@ -55,7 +55,7 @@ pub use crate::snapshot::{SnapshotBackend, SnapshotEntry, SnapshotId, SnapshotSt
 
 // ── Storage ───────────────────────────────────────────────────────────────────
 
-pub use crate::storage::{SqliteStorage, StorageAdapter};
+pub use crate::storage::{AtomicFact, AtomicFactId, SqliteStorage, StorageAdapter};
 
 // ── Embedding ─────────────────────────────────────────────────────────────────
 

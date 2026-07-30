@@ -9,28 +9,150 @@ Status: active development program; no full-split or cross-system leaderboard cl
 The earlier “benchmark consumer only” disposition for the quality reranker is
 superseded. There is now one canonical production pipeline:
 
-`Memory::search_reranked` → cognitive candidate@20 → Memory-compiled evidence
-documents → `RerankingProvider` → automatic deep evidence selection →
-commit-safe packaging.
+`Memory::search_reranked` → cognitive search@20 / candidate@50 →
+Memory-compiled evidence documents → `RerankingProvider` → automatic deep
+evidence selection → final@20 commit-safe packaging.
 
 `anamnesis-mcp` uses that pipeline with
 `BAAI/bge-reranker-base` by default, and the LoCoMo `local_answer` harness
 calls the corresponding existing-search overload
 `Memory::rerank_search_result_at` for retrieval diagnostics. The harness no
-longer privately assembles the headline reranker path; its default profile is
-candidate@20, evidence documents, and `memory-deep`. Benchmark-only rank
-fusion, replay, cascade, and screen modes remain explicit diagnostics.
+longer privately assembles the headline reranker path. Its defaults reference
+the same engine constants for search width, candidate width, and final width.
+Benchmark-only rank fusion, replay, cascade, and screen modes remain explicit
+diagnostics.
 
-This is the latency-sensitive product profile: the prior n=200 screen measured
-roughly 0.94 s mean for BGE base over 20 candidates. The Rust hook fails open
-after 3 s and the plugin process has a 5 s outer backstop. Those limits are
-failure boundaries, not latency targets. Operators can choose another
-`ANAMNESIS_RERANK_MODEL`, but a reranker error is surfaced rather than silently
-falling back to a different retrieval policy.
+The final n=100 product-profile run measured 1.69 s mean, 2.68 s p95, and
+3.09 s maximum retrieval latency with BGE base over 50 candidates. The Rust
+hook therefore fails open after 4 s and the plugin process retains its 5 s
+outer backstop. Candidate@100 was rejected: it raised candidate recall but
+reached 2.77 s mean / 4.49 s p95 while adding only about 2 points of rendered
+multi-hop/open-domain recall and regressing the easy types. Operators can
+choose another `ANAMNESIS_RERANK_MODEL`, but a reranker error is surfaced
+rather than silently falling back to a different retrieval policy.
 
 The `rozgo/bge-reranker-v2-m3` candidate@200 profile remains an explicit
 offline quality experiment. Its roughly 25 s mean / 34 s p95 measurement is
 not a product default and is not the default LoCoMo headline configuration.
+
+## 2026-07-30 structural retrieval gate
+
+The production pipeline now performs coverage-aware trace@200 → document@50
+preselection for Collection, Relationship, and Inference plans. It preserves
+the first 30 cognitive rows byte-for-byte, then admits a bounded deeper tail
+using query facets, canonical raw sources, source-session bridges, and typed
+temporal neighbors. Direct, temporal, causal-why, and gift recommendation
+queries keep their prior conservative path.
+
+Reviewed extracted facts no longer share the graph candidate pool. They are
+persisted in an isolated atomic-fact sidecar with embeddings, validity,
+scope, selective entity tags, and raw Episodic source IDs. A selected fact can
+route only those live raw sources; the compact extracted text is never
+rendered as evidence, added to node FTS, or allowed to affect graph dynamics.
+The benchmark artifact and MCP review/promotion flow both use this same
+`Memory::add_atomic_fact` product API.
+
+Reader-free LoCoMo seed-42 balanced n=100:
+
+| Type | candidate@50 | delivered@20 | rendered recall | Baseline delta |
+|---|---:|---:|---:|---:|
+| multi-hop | 67.90% | 62.90% | **64.90%** | **+5.50 pp** |
+| open-domain | 58.03% | 59.67% | **61.67%** | **+5.64 pp** |
+| single-hop | 96.00% | 96.00% | **96.00%** | 0.00 pp |
+| temporal | 92.00% | 86.67% | **96.00%** | 0.00 pp |
+| **overall** | **78.48%** | **76.31%** | **79.64%** | **+2.78 pp** |
+
+Rendered Hit is 89%. Search latency is 1.71 s mean, 2.52 s p95, and
+2.97 s maximum, so the 4 s product fail-open gate passes. The two target weak
+types each improve by more than five points while single-hop and temporal
+remain byte-for-byte equal at the aggregate gate.
+
+The reader contract now requires each reflected Collection item to cite source
+IDs copied from the supplied product evidence and deterministically restores a
+validated item if final generation omits it. Inference permits a short stable
+ordinary-world bridge from an explicit personal premise while prohibiting new
+personal facts. A loopback-only OMLX
+`Qwen3.6-35B-A3B-4bit` n=8 integration smoke, with API keys removed and
+thinking disabled, produced 61.28% official F1; all four reflection outputs
+parsed as complete JSON. This is a contract/integration gate, not a replacement
+for the existing n=100 answer-quality headline.
+
+Evidence:
+`local-answer-locomo-v175-production-full-n100.json`,
+`/tmp/anamnesis-v176-omlx-qwen-gate-source-n8.json`, and
+`/tmp/anamnesis-v176-omlx-qwen-gate-answer-n8.json`.
+
+## 2026-07-29 final local product-profile gate
+
+The accepted defaults are cognitive search@20, BGE-base candidate@50,
+automatic intent-aware evidence selection, and final@20. Internal search and
+reranker widths are independent of the delivered context limit. Direct
+queries preserve reranker order so the MCP hook's post-package
+`knowledge_only` filter retains Semantic alternatives; inference and temporal
+queries use canonical-source coverage; enumeration, relationship, and
+frequency queries use bounded source-session coverage.
+
+Reader-free LoCoMo seed-42 balanced n=100:
+
+| Type | candidate@50 | delivered@20 | rendered recall | rendered Hit |
+|---|---:|---:|---:|---:|
+| multi-hop | 62.07% | 57.40% | 59.40% | 88% |
+| open-domain | 56.03% | 53.67% | 56.03% | 68% |
+| single-hop | 96.00% | 96.00% | 96.00% | 96% |
+| temporal | 92.00% | 86.67% | 96.00% | 96% |
+| **overall** | **76.53%** | **73.43%** | **76.86%** | **87%** |
+
+The final-width n=20 screen held search@20 and candidate@50 fixed. Qwen 3.6
+no-thinking semantic accuracy / official F1 were 60% / 41.71% at final@8,
+60% / 42.31% at final@12, and 65% / 43.35% at final@20. Mean prompt sizes
+were approximately 794, 1,166, and 1,841 tokens respectively. On this screen,
+shrinking the context lost evidence; final@20 did not show net context
+pollution.
+
+The unified local-reader gate used loopback OMLX
+`Qwen3.6-35B-A3B-4bit`, `enable_thinking=false`, and query-plan-gated
+reflection for 43 complex questions:
+
+| Type | Semantic accuracy | Official F1 |
+|---|---:|---:|
+| multi-hop | 48% | 36.77% |
+| open-domain | 52% | 36.33% |
+| single-hop | 84% | 72.91% |
+| temporal | 80% | 50.44% |
+| **overall** | **66%** | **49.11%** |
+
+All 100 local judge responses parsed. Of 34 judged-wrong answers, nine had no
+rendered evidence hit, ten had partial rendered coverage, and fifteen had
+complete rendered coverage.
+
+After explicit approval, the same frozen product contexts were answered by
+GPT-4o with the same complex-only reflection policy and judged by GPT-4o:
+
+| Type | Qwen official F1 | GPT-4o official F1 | GPT-4o delta |
+|---|---:|---:|---:|
+| multi-hop | 36.77% | 38.24% | +1.48 pp |
+| open-domain | 36.33% | 26.83% | -9.51 pp |
+| single-hop | 72.91% | 56.67% | -16.24 pp |
+| temporal | 50.44% | 60.03% | +9.59 pp |
+| **overall** | **49.11%** | **45.44%** | **-3.67 pp** |
+
+The GPT-4o judge marked 55% correct with zero parse failures. That semantic
+score is not directly comparable to the 66% Qwen-judged score because the
+judge changed; official F1 is deterministic and comparable. GPT-4o improved
+multi-hop and temporal F1 but regressed open-domain and single-hop. Of its 45
+judged-wrong answers, 11 had no rendered hit, 15 had partial coverage, and 19
+had complete rendered coverage. This rejects the assumption that a stronger
+provider alone closes the current synthesis residue.
+
+The frontier run used 492,561 input and 11,410 output tokens. The harness's
+declared GPT-4o pricing estimate was $1.345503, below the authorized $5 cap.
+
+Evidence:
+`local-answer-locomo-v155-final-production-default-c50-search20-final20-n100-source.json`
+and
+`local-answer-locomo-v156-final-omlx-qwen36-nothink-production-c50-final20-reflect-complex-n100-answer-judge.json`
+and
+`local-answer-locomo-v157-final-gpt4o-production-c50-final20-reflect-complex-n100-answer-judge.json`.
 
 ## Product boundary
 
@@ -358,37 +480,36 @@ Extraction remains shadow-first. Automatic graph mutation is still forbidden.
 An operator may explicitly promote only a reviewed `supported`,
 uncontaminated candidate whose source snapshots still match. Promotion:
 
-- creates additive derived semantic knowledge;
+- creates one isolated atomic-fact sidecar record, not a graph node;
 - preserves every raw episodic source;
 - restores source scope;
 - inherits the latest cited source observation time rather than promotion wall
   time, so review does not manufacture recency;
 - stamps profile, candidate, and idempotency metadata;
 - applies entity tags and validity windows;
-- links every source with `ExtractedFrom` through the narrow,
-  type-validating `Memory::link_extracted_source` API;
-- records the committed node id;
+- stores every validated raw Episodic source ID as provenance;
+- remains outside node FTS, attraction, forgetting, and graph budgets;
+- records the committed atomic-fact id;
 - is safe to retry.
 
 A reviewed-correct relation can be promoted only after both endpoints. The
-typed `reason`, `causal`, `contradicts`, and `supports` edge is recorded
-idempotently. The policy schema migrates existing v2 audit rows to v3.
+typed `reason`, `causal`, `contradicts`, or `supports` relation is recorded
+idempotently in sidecar metadata rather than as a graph edge. Compatibility
+response fields named `node_id` and `edge_id` alias the new
+`atomic_fact_id` and `atomic_relation_id`; they do not identify graph objects.
+The policy schema migrates existing v2 audit rows to v3.
 
-## Remaining promotion gates
+## Remaining release and leaderboard gates
 
-1. Recover candidate-to-final selection without a negative conversation-cluster
-   interval; wider candidates alone are insufficient.
-2. Design a selection objective that improves evidence coverage without the
-   broad context substitutions that caused source coverage to fail Answer F1.
-3. Generate a frozen benchmark artifact through the same local generic extraction
-   flow; never derive from benchmark gold.
-4. Keep the compact evidence renderer opt-in; its fixed-ranking screen
+1. Run one unified n=100 local-Qwen answer/judge pass over the new v11
+   retrieval contexts; the n=8 gate above validates integration only.
+2. Keep the compact evidence renderer opt-in; its fixed-ranking screen
    preserved retrieval but failed Answer F1 transfer.
-5. Run the semantic-answer judge as a separately versioned lane, identically
+3. Run the semantic-answer judge as a separately versioned lane, identically
    for Anamnesis and competitor adapters.
-6. Require paired question and conversation-cluster lower bounds above zero at
-   n=200 before any default change.
-7. Run the full declared LoCoMo split and competitor adapters only for the
+4. Require paired question and conversation-cluster lower bounds above zero at
+   n=200 before making a cross-system quality claim.
+5. Run the full declared LoCoMo split and competitor adapters only for the
    single n=200 winner.
 
 The competitor execution seam is implemented as a strict external-memory
@@ -407,9 +528,9 @@ to consumer-owned extraction and model-free core mechanics:
 
 | Mechanism | Anamnesis status | Promotion rule |
 |---|---|---|
-| ADD-only atomic memories | generic Qwen 3.6 shadow extraction; raw fragments retained | frozen artifact must improve held-out retrieval and paired F1 |
-| source provenance | typed `ExtractedFrom` links and source snapshot checks | already a hard materialization invariant |
-| entity linking | selective tags stored on derived nodes; explicit entity seed API exists | do not restore broad speaker cues; test exact selective query entities only |
+| ADD-only atomic memories | isolated sidecar populated by reviewed Qwen 3.6 extraction; raw fragments retained | only raw cited sources may enter the evidence lane |
+| source provenance | sidecar source IDs plus source snapshot checks | already a hard promotion and routing invariant |
+| entity linking | selective tags stored on atomic facts; explicit graph entity seed API remains | do not restore broad speaker cues; test exact selective query entities only |
 | semantic + lexical fusion | dense, FTS/BM25, and graph activation already fused | query decomposition remains auxiliary unless paired gates pass |
 | temporal state | observation and validity times reach the product context | non-seed temporal refresh stays deferred because temporal candidate recall is already 96% |
 | evidence compilation | compact product `Evidence` renderer and source-coverage selector | report retrieval and answer transfer separately |
@@ -435,12 +556,12 @@ identifiers, and typed relations; there is no answer, question, gold-unit, or
 relevance field.
 
 At ingest, every cited turn must resolve to a raw Episodic node in the declared
-session. A derived note is additive, uses the source session as its origin, and
-is linked back to every raw turn. Cross-sample relations, invalid windows,
-missing sources, duplicate ids, duplicate relations, and non-Qwen-3.6
-artifacts fail closed. The no-artifact path remains byte-for-byte the normal
-product ingest recipe, so extraction is an explicit ablation rather than a
-hidden baseline change.
+session. Each record becomes one isolated atomic fact carrying those raw source
+IDs, source scope/session, and validity bounds; it does not become a graph
+node. Cross-sample relations, invalid windows, missing sources, duplicate ids,
+duplicate relations, and non-Qwen-3.6 artifacts fail closed. The no-artifact
+path remains byte-for-byte the normal product ingest recipe, so extraction is
+an explicit ablation rather than a hidden baseline change.
 
 Artifact generation now uses the mutation-free `anamnesis extract-preview`
 command, which runs the same versioned product prompt/provider/validator over
@@ -460,12 +581,13 @@ One singleton source failed the strict schema and was omitted fail-closed with
 its sample/session/turn/hash retained in the checkpoint. No benchmark question,
 answer, or gold evidence enters extraction.
 
-Materialization exposed and fixed one modeling error: the original note API
-creates an Episodic + Semantic pair, so using it for an already-derived fact
-duplicated every extracted statement. The additive
-`Memory::add_derived_knowledge_with` API now creates exactly one Semantic node;
-raw Episodic sources remain separate and are connected by
-`ExtractedFrom`. Existing note APIs and signatures are unchanged.
+The first materialization experiment exposed one modeling error: even a single
+derived Semantic graph node changes node FTS statistics and competes with raw
+evidence. `Memory::add_derived_knowledge_with` remains available as an
+additive compatibility API, but the accepted extraction path now uses
+`Memory::add_atomic_fact`. Its records live in the isolated sidecar and route
+back to raw Episodic sources without becoming graph candidates. Existing note
+and derived-knowledge APIs and signatures are unchanged.
 
 The held-out retrieval result rejects broad materialization:
 

@@ -2,6 +2,7 @@
 mod eval_common;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::Arc;
@@ -29,9 +30,10 @@ compile_error!("local_answer requires: cargo bench --features embed --bench loca
 
 const SCHEMA_VERSION: u32 = 37;
 const DATASET_LOADER_VERSION: &str = "locomo-caption-v2+longmemeval-cleaned-v1";
-const ANSWER_PROMPT_VERSION: &str = "official-format-v10-query-plan-frequency";
-const REFLECT_PROMPT_VERSION: &str = "evidence-reflect-v9-inference-contract";
+const ANSWER_PROMPT_VERSION: &str = "official-format-v11-grounded-inference-contract";
+const REFLECT_PROMPT_VERSION: &str = "evidence-reflect-v11-source-completeness-compact";
 const JUDGE_PROMPT_VERSION: &str = "semantic-answer-equivalence-v3";
+const PROVIDER_READER_MAX_OUTPUT_TOKENS: u64 = 700;
 const ENGINE_PACKAGE_POLICY_VERSION: &str = "timestamped-final-reassembly-v2";
 const SHADOW_RRF_POLICY_VERSION: &str = "shadow-rrf-cognitive1-embedding0.25-text1-k60-v1";
 const ROUTE_FULL_CONTEXT: &str = "0-full-context";
@@ -567,7 +569,11 @@ fn run() -> BenchResult<()> {
                 model: args.strong_reader_model.clone(),
                 timeout_secs: args.timeout_secs,
                 max_retries: 3,
-                max_output_tokens: Some(1_200),
+                max_output_tokens: Some(PROVIDER_READER_MAX_OUTPUT_TOKENS),
+                chat_template_enable_thinking: qwen_chat_template_thinking(
+                    &args.strong_reader_model,
+                    args.reader_generation.think,
+                ),
             })
             .map_err(provider_error)
         })
@@ -1419,7 +1425,11 @@ fn run_answer_report(args: &Args, source_path: &Path) -> BenchResult<()> {
                 model: args.strong_reader_model.clone(),
                 timeout_secs: args.timeout_secs,
                 max_retries: 3,
-                max_output_tokens: Some(1_200),
+                max_output_tokens: Some(PROVIDER_READER_MAX_OUTPUT_TOKENS),
+                chat_template_enable_thinking: qwen_chat_template_thinking(
+                    &args.strong_reader_model,
+                    args.reader_generation.think,
+                ),
             })
             .map_err(provider_error)
         })
@@ -1438,6 +1448,10 @@ fn run_answer_report(args: &Args, source_path: &Path) -> BenchResult<()> {
                 timeout_secs: args.timeout_secs,
                 max_retries: 3,
                 max_output_tokens: Some(256),
+                chat_template_enable_thinking: qwen_chat_template_thinking(
+                    &args.judge_model,
+                    args.judge_generation.think,
+                ),
             })
             .map_err(provider_error)
         })
@@ -1466,7 +1480,7 @@ fn run_answer_report(args: &Args, source_path: &Path) -> BenchResult<()> {
     report.ollama_base_url = args.ollama_base_url.clone();
     report.ollama_version = ollama_version;
     report.model_digests = combined_model_digests;
-    report.local_only = !args.strong_reader_remote && !args.frontier_judge;
+    report.local_only = frontier_lanes_are_local(args);
     report.config.run_strong_reader = args.run_strong_reader;
     report.config.strong_reader_reflect = args.strong_reader_reflect;
     report.config.strong_reader_reflect_complex_only = args.strong_reader_reflect_complex_only;
@@ -1915,7 +1929,7 @@ fn load_or_create_report(
         ),
         created_at_unix: timestamp_secs(),
         completed_at_unix: None,
-        local_only: !args.strong_reader_remote,
+        local_only: frontier_lanes_are_local(args),
         ollama_base_url: args.ollama_base_url.clone(),
         ollama_version,
         model_digests,
@@ -2039,6 +2053,17 @@ fn reflection_answer_value(value: &serde_json::Value) -> Option<String> {
     (!answer.is_empty()).then_some(answer)
 }
 
+fn source_validated_collection_items(
+    reflection: &str,
+    context: &[PromptEvidence],
+) -> Option<Vec<String>> {
+    let allowed_source_ids: BTreeSet<_> = context
+        .iter()
+        .flat_map(|item| item.source_ids.iter().cloned())
+        .collect();
+    eval_common::reader_contract::validated_collection_items(reflection, &allowed_source_ids)
+}
+
 fn run_reflect_answer(
     report: &mut RunReport,
     record_index: usize,
@@ -2097,14 +2122,11 @@ fn run_reflect_answer(
         (generated, answer_start.elapsed().as_secs_f64() * 1000.0)
     };
     if RecallPlan::infer(&record.question).answer_shape == AnswerShape::Collection
-        && generated
-            .content
-            .trim()
-            .eq_ignore_ascii_case("No information available")
-        && let Some(candidate) = reflection_candidate_answer(&reflection.content)
+        && let Some(items) = source_validated_collection_items(&reflection.content, context)
+        && eval_common::reader_contract::collection_answer_misses_item(&generated.content, &items)
     {
-        generated.content = candidate;
-        generated.done_reason = Some("reflection-candidate-backfill".to_owned());
+        generated.content = items.join(", ");
+        generated.done_reason = Some("reflection-source-completeness-backfill".to_owned());
     }
     if generated.content.is_empty() {
         return Err(BenchError::Parse(format!(
@@ -2256,12 +2278,10 @@ fn run_provider_reflect_answer(
             )
         };
     if RecallPlan::infer(&record.question).answer_shape == AnswerShape::Collection
-        && answer
-            .trim()
-            .eq_ignore_ascii_case("No information available")
-        && let Some(candidate) = reflection_candidate_answer(&reflection)
+        && let Some(items) = source_validated_collection_items(&reflection, context)
+        && eval_common::reader_contract::collection_answer_misses_item(&answer, &items)
     {
-        answer = candidate;
+        answer = items.join(", ");
     }
     if answer.is_empty() {
         return Err(BenchError::Parse(format!(
@@ -2342,6 +2362,33 @@ fn insert_provider_route(
 
 fn provider_error(error: ProviderError) -> BenchError {
     BenchError::InvalidInput(format!("frontier provider request failed: {error}"))
+}
+
+fn qwen_chat_template_thinking(model: &str, enabled: bool) -> Option<bool> {
+    model
+        .to_ascii_lowercase()
+        .contains("qwen")
+        .then_some(enabled)
+}
+
+fn frontier_lanes_are_local(args: &Args) -> bool {
+    let loopback = args
+        .frontier_base_url
+        .as_deref()
+        .is_some_and(is_loopback_url);
+    (!args.strong_reader_remote || loopback) && (!args.frontier_judge || loopback)
+}
+
+fn is_loopback_url(base_url: &str) -> bool {
+    reqwest::Url::parse(base_url)
+        .ok()
+        .and_then(|url| url.host_str().map(ToOwned::to_owned))
+        .is_some_and(|host| {
+            host.eq_ignore_ascii_case("localhost")
+                || host
+                    .parse::<IpAddr>()
+                    .is_ok_and(|address| address.is_loopback())
+        })
 }
 
 fn run_provider_judge(
@@ -2485,6 +2532,7 @@ struct PromptEvidence {
     label: String,
     text: String,
     raw_turn_id: Option<String>,
+    source_ids: Vec<String>,
 }
 
 fn oracle_prompt_context(evidence: &[OracleEvidence]) -> Vec<PromptEvidence> {
@@ -2502,15 +2550,24 @@ fn oracle_prompt_context(evidence: &[OracleEvidence]) -> Vec<PromptEvidence> {
             ),
             text: item.content.clone(),
             raw_turn_id: item.raw_turn_id.clone(),
+            source_ids: item.raw_turn_id.iter().cloned().collect(),
         })
         .collect()
 }
 
 fn product_wire_prompt_context(context: &AnswerContext) -> Vec<PromptEvidence> {
+    let mut source_ids = BTreeSet::new();
+    for item in &context.evidence {
+        source_ids.insert(format!("node:{}", item.node_id));
+        if let Some(raw_turn_id) = &item.raw_turn_id {
+            source_ids.insert(raw_turn_id.clone());
+        }
+    }
     vec![PromptEvidence {
         label: "anamnesis-product-context".to_string(),
         text: context.product_context.clone(),
         raw_turn_id: None,
+        source_ids: source_ids.into_iter().collect(),
     }]
 }
 
@@ -2544,6 +2601,12 @@ fn diagnostic_retrieval_prompt_context(
                 ),
                 text: item.text.clone(),
                 raw_turn_id: item.raw_turn_id.clone(),
+                source_ids: item
+                    .raw_turn_id
+                    .iter()
+                    .cloned()
+                    .chain(std::iter::once(format!("node:{}", item.node_id)))
+                    .collect(),
             }
         })
         .collect()
@@ -2620,6 +2683,7 @@ fn full_prompt_context(group: &LoadedBenchmark) -> Vec<PromptEvidence> {
                 ),
                 text: turn.content.clone(),
                 raw_turn_id: turn.raw_turn_id.clone(),
+                source_ids: turn.raw_turn_id.iter().cloned().collect(),
             })
         })
         .collect()
@@ -2630,6 +2694,10 @@ fn answer_prompt(record: &QuestionRecord, context: &[PromptEvidence]) -> String 
         "You are a memory question-answering reader. Use only the supplied evidence. \
          Think briefly and reserve enough output budget for the final answer. \
          Combine multiple evidence items and reason about dates when needed. \
+         When the query-derived plan requests inference and the evidence supplies a relevant \
+         personal premise, make the shortest stable ordinary-world bridge to the requested \
+         conclusion; do not abstain merely because that conclusion is implicit. Never invent a \
+         new personal event or preference. \
          Give only the shortest direct answer that fully answers the question. \
          Do not mention the evidence or explain your reasoning. \
          If the evidence is insufficient, answer exactly No information available.\n\n",
@@ -2639,10 +2707,7 @@ fn answer_prompt(record: &QuestionRecord, context: &[PromptEvidence]) -> String 
     if let Some(date) = &record.question_date {
         prompt.push_str(&format!("Question date: {date}\n"));
     }
-    prompt.push_str("Evidence:\n");
-    for item in context {
-        prompt.push_str(&format!("[{}]\n{}\n", item.label, item.text));
-    }
+    append_prompt_evidence(&mut prompt, context);
     prompt.push_str("\nQuestion: ");
     prompt.push_str(&record.question);
     prompt.push_str("\nAnswer:");
@@ -2656,11 +2721,15 @@ fn reflection_prompt(record: &QuestionRecord, context: &[PromptEvidence]) -> Str
          world knowledge only to connect an explicit evidence fact to the question, such as a \
          city's state or a commonplace implication; identify that bridge in reasoning_chain. \
          Inspect every item internally, but write only evidence that directly helps answer the \
-         question. Return one complete JSON object of at most 600 tokens with these keys: \
-         required_slots, evidence_findings, reasoning_chain, candidate_answer, \
-         missing_or_ambiguous. Keep each required slot under eight words. Include only distinct \
-         supporting facts in evidence_findings, with one short sentence per fact; preserve names, \
-         negation, quantities, source dates, and who said or did each thing. Use at most six short \
+         question. Return one complete JSON object of at most 450 tokens with these keys: \
+         required_slots, evidence_findings, reasoning_chain, answer_items, candidate_answer, \
+         missing_or_ambiguous. For collection questions, answer_items must contain one object per \
+         distinct final item with keys value and source_ids; source_ids must be a non-empty array \
+         of at most three ids copied exactly from the supplied evidence labels. Use an empty \
+         answer_items array for other answer shapes. Keep each required slot under eight words. \
+         Include at most six distinct supporting facts in evidence_findings, with one short \
+         sentence per fact; preserve names, negation, quantities, source dates, and who said or \
+         did each thing. Use at most four short \
          reasoning_chain steps to connect those findings without inventing a personal event. Do \
          not summarize irrelevant evidence and do not repeat a fact in multiple fields. \
          For counts and lists, enumerate distinct completed evidence-backed items before forming \
@@ -2687,10 +2756,7 @@ fn reflection_prompt(record: &QuestionRecord, context: &[PromptEvidence]) -> Str
     if let Some(date) = &record.question_date {
         prompt.push_str(&format!("Question date: {date}\n"));
     }
-    prompt.push_str("Evidence:\n");
-    for item in context {
-        prompt.push_str(&format!("[{}]\n{}\n", item.label, item.text));
-    }
+    append_prompt_evidence(&mut prompt, context);
     prompt.push_str("\nQuestion: ");
     prompt.push_str(&record.question);
     prompt.push_str("\nEvidence analysis JSON:");
@@ -2727,16 +2793,28 @@ fn reflected_answer_prompt(
     if let Some(date) = &record.question_date {
         prompt.push_str(&format!("Question date: {date}\n"));
     }
-    prompt.push_str("Evidence:\n");
-    for item in context {
-        prompt.push_str(&format!("[{}]\n{}\n", item.label, item.text));
-    }
+    append_prompt_evidence(&mut prompt, context);
     prompt.push_str("\nDraft evidence analysis:\n");
     prompt.push_str(reflection);
     prompt.push_str("\n\nQuestion: ");
     prompt.push_str(&record.question);
     prompt.push_str("\nFinal answer:");
     prompt
+}
+
+fn append_prompt_evidence(prompt: &mut String, context: &[PromptEvidence]) {
+    prompt.push_str("Evidence:\n");
+    for item in context {
+        let source_ids = if item.source_ids.is_empty() {
+            "unlabeled".to_owned()
+        } else {
+            item.source_ids.join(",")
+        };
+        prompt.push_str(&format!(
+            "[{} source_ids={}]\n{}\n",
+            item.label, source_ids, item.text
+        ));
+    }
 }
 
 fn query_plan_instruction(query: &str) -> String {
@@ -3747,14 +3825,14 @@ where
     let mut consumer_prefilter_k = None;
     let mut consumer_prefilter_query_fusion = false;
     let mut consumer_evidence_documents = true;
-    let mut consumer_candidate_k = 20usize;
+    let mut consumer_candidate_k = anamnesis::memory::DEFAULT_RERANK_CANDIDATE_LIMIT;
     let mut first_stage_seed_limit = None;
     let mut dump_candidate_pool = false;
     let mut screen_top_k = Vec::new();
     let mut screen_source_dedup = false;
     let mut diagnostic_readout_limit = None;
     let mut consumer_selection_policy = ConsumerSelectionPolicy::MemoryDeep;
-    let mut top_k = 20usize;
+    let mut top_k = anamnesis::memory::DEFAULT_RERANK_FINAL_LIMIT;
     let mut baseline_reader_model = "qwen3.6:35b-a3b".to_string();
     let mut strong_reader_model = "qwen3.6:35b-a3b".to_string();
     let mut judge_model = "qwen3.6:35b-a3b".to_string();
@@ -4385,7 +4463,7 @@ Options:\n\
   --consumer-prefilter-k <N>       Documents passed from the prefilter to the quality reranker\n\
   --consumer-prefilter-query-fusion Fuse core query variants at the fast prefilter\n\
   --consumer-evidence-documents    Compatibility flag; canonical evidence documents are the default\n\
-  --consumer-candidate-k <N>       Cognitive candidate/metric cutoff (default: 20)\n\
+  --consumer-candidate-k <N>       Cognitive candidate/metric cutoff (default: production profile)\n\
   --first-stage-seed-limit <N>     RWR seed cutoff, independent of final top-k\n\
   --dump-candidate-pool            Persist top-200 readout feature diagnostics\n\
   --screen-top-k <A,B,...>         Repackage one fixed ranking at extra final cutoffs\n\
@@ -4399,7 +4477,7 @@ Options:\n\
 --frontier-reader                Run route 3 through an OpenAI-compatible API\n\
   --frontier-base-url <url>        API base URL (or set LLM_BASE_URL)\n\
   --baseline-only                  Compatibility alias: omit route 3\n\
-  --top-k <N>                      Product retrieval cutoff (default: 20)\n\
+  --top-k <N>                      Product retrieval cutoff (default: production profile)\n\
   --baseline-reader-model <name>   Reader for routes 0, 1, and 2 (default: qwen3.6:35b-a3b)\n\
   --strong-reader-model <name>     Reader for route 3 (default: qwen3.6:35b-a3b)\n\
   --judge-model <name>             Separate local judge (default: qwen3.6:35b-a3b)\n\

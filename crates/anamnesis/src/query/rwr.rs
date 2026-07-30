@@ -322,14 +322,25 @@ fn normalize_seed<S: StorageAdapter>(
     node_ids: &[NodeId],
     storage: &S,
 ) -> HashMap<NodeId, f64> {
-    let _ = node_ids;
     let mut filtered: HashMap<NodeId, f64> = HashMap::new();
     for (&id, &mass) in seed {
-        if mass.is_finite() && mass > 0.0 && storage.get_node(id).is_ok() {
+        if mass.is_finite()
+            && mass > 0.0
+            && node_ids.binary_search(&id).is_ok()
+            && storage.get_node(id).is_ok()
+        {
             *filtered.entry(id).or_insert(0.0) += mass;
         }
     }
-    let sum: f64 = filtered.values().sum();
+    // `HashMap::values()` iteration order is independently randomized for each
+    // map. Summing it directly makes otherwise identical graphs differ by a few
+    // ULPs, which then propagates through every RWR iteration. Reduce in the
+    // same NodeId order used by the solver instead.
+    let sum: f64 = node_ids
+        .iter()
+        .filter_map(|id| filtered.get(id))
+        .copied()
+        .sum();
     if !sum.is_finite() || sum <= f64::EPSILON {
         return HashMap::new();
     }

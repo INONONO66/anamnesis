@@ -9,6 +9,88 @@ they are multi-MB run reports). Every number is reproducible from the named
 dataset + command via `cargo bench --features embed --bench real_memory`;
 runs are deterministic for a fixed dataset and embedding model.
 
+## 2026-07-30 — production deep-selection and isolated atomic-fact routing
+
+- **Data:** LoCoMo seed 42, 25 questions per non-adversarial type, n=100;
+  `Xenova/bge-base-en-v1.5` embeddings, `BAAI/bge-reranker-base`, frozen
+  reference-blind Qwen 3.6 extraction artifact, and the exact
+  `Memory::search_reranked` product path.
+- **Architecture:** the first 30 cognitive rows remain unchanged. The 50
+  reranker documents are coverage-aware selections from a 200-row diagnostic
+  trace using query facets, canonical raw sources, source sessions, and a
+  bounded temporal bridge; source-aware assembly then delivers at most 20.
+  Reviewed atomic facts live in a separate SQLite sidecar and can route only
+  their cited live Episodic sources into this path; they never become graph
+  nodes or enter node FTS.
+- **Reader-free result:** overall candidate@50 / selected@20 / rendered recall
+  is **78.48% / 76.31% / 79.64%**, with rendered Hit **89%**.
+
+| Type | Baseline rendered | Current rendered | Delta |
+|---|---:|---:|---:|
+| multi-hop | 59.40% | **64.90%** | **+5.50 pp** |
+| open-domain | 56.03% | **61.67%** | **+5.64 pp** |
+| single-hop | 96.00% | **96.00%** | 0.00 pp |
+| temporal | 96.00% | **96.00%** | 0.00 pp |
+
+- **Latency:** 1.71 s mean, 2.52 s p95, and 2.97 s maximum, below the
+  production 4 s fail-open boundary.
+- **Local reader contract smoke:** loopback OMLX
+  `Qwen3.6-35B-A3B-4bit`, no API key, `enable_thinking=false`, n=8 balanced
+  integration sample. Official F1 was 61.28%; all four reflection responses
+  parsed as complete JSON, and Collection items carried source IDs present in
+  the supplied evidence. This small run validates the provider/contract path;
+  it is not promoted as an n=100 answer-quality headline.
+- **Calibration:** no graph/readout coefficient or embedding model calibration
+  changed. The gain comes from production preselection, isolated fact routing,
+  and source-aware final assembly.
+- **Evidence:** local reports
+  `local-answer-locomo-v175-production-full-n100.json`,
+  `/tmp/anamnesis-v176-omlx-qwen-gate-source-n8.json`, and
+  `/tmp/anamnesis-v176-omlx-qwen-gate-answer-n8.json`.
+
+## 2026-07-29 — production reranked-recall widths and local Qwen gate
+
+- **Data:** LoCoMo seed 42, 25 questions per non-adversarial type, n=100;
+  `Xenova/bge-base-en-v1.5` embeddings, `BAAI/bge-reranker-base`, exact
+  product `Memory::search_reranked` packaging.
+- **Width screen:** candidate@20 rendered recall was 67.98%; candidate@50
+  reached 76.86% at 1.69 s mean / 2.68 s p95; candidate@100 reached 76.14%
+  at 2.77 s mean / 4.49 s p95. Candidate@50 is promoted. Candidate@100 is
+  rejected because broader raw recall did not survive final selection and
+  exceeded the latency boundary.
+- **Final-context screen:** with search@20 and candidate@50 fixed, final@8,
+  final@12, and final@20 produced Qwen 3.6 n=20 semantic accuracy of
+  60% / 60% / 65% and official F1 of 41.71% / 42.31% / 43.35%.
+  Final@20 is promoted; prompt size averaged about 1,841 tokens.
+- **Selection:** direct queries retain relevance order for post-package
+  `knowledge_only` safety. Inference and temporal queries use canonical-source
+  coverage. Enumeration, relationship, and frequency queries use bounded
+  source-session coverage.
+- **Local reader gate:** loopback OMLX `Qwen3.6-35B-A3B-4bit`,
+  `enable_thinking=false`, complex-only reflection, n=100: 66% semantic
+  accuracy, 49.11% official F1, zero judge parse failures. Type semantic
+  accuracy is 48% multi-hop, 52% open-domain, 84% single-hop, and 80%
+  temporal.
+- **Frontier reader screen:** after explicit approval, GPT-4o answered the
+  exact frozen product contexts with the same complex-only reflection policy
+  and a GPT-4o judge. Official F1 was 45.44%, versus Qwen's 49.11%:
+  +1.48 pp multi-hop, -9.51 pp open-domain, -16.24 pp single-hop, and
+  +9.59 pp temporal. The GPT judge score was 55% with zero parse failures but
+  is not directly comparable to the Qwen-judge semantic score. The run used
+  492,561 input and 11,410 output tokens; the harness estimated $1.345503
+  under its declared GPT-4o prices, below the authorized $5 cap.
+- **Operational decision:** MCP hooks and the benchmark share engine constants
+  for search@20, candidate@50, and final@20. Hook fail-open moves from 3 s to
+  4 s under the existing 5 s plugin backstop because the measured maximum was
+  3.09 s.
+- **Calibration:** no graph/readout coefficient or embedding model calibration
+  changed. These are product orchestration and evidence-selection defaults.
+- **Evidence:** `local-answer-locomo-v155-final-production-default-c50-search20-final20-n100-source.json`
+  and
+  `local-answer-locomo-v156-final-omlx-qwen36-nothink-production-c50-final20-reflect-complex-n100-answer-judge.json`
+  and
+  `local-answer-locomo-v157-final-gpt4o-production-c50-final20-reflect-complex-n100-answer-judge.json`.
+
 ## 2026-07-25 — timestamped Qwen 3.6 product wire (no calibration change)
 
 - **Data:** pinned LoCoMo loader, seed 42, 25 questions per non-adversarial

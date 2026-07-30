@@ -114,15 +114,20 @@ anamnesis extract --promote-candidate ID [--namespace NS]
 anamnesis extract --promote-relation ID [--namespace NS]
 ```
 
-Promotion is additive and idempotent. It creates derived semantic knowledge, stamps the extractor
-profile and candidate idempotency key, keeps the raw episodic turns unchanged, and links the
-derived node back to every cited source with `ExtractedFrom`. The derived node inherits the latest
-cited source observation time; the review/promotion wall clock never manufactures recency.
+Promotion is additive and idempotent. It creates one record in the isolated atomic-fact sidecar,
+stamps the extractor profile and candidate idempotency key, and keeps every cited raw Episodic
+source ID as authoritative provenance. It creates no graph node or `ExtractedFrom` edge, does not
+enter node FTS, and cannot perturb attraction, forgetting, or the ordinary graph candidate pool.
+The sidecar record inherits the latest cited source observation time; the review/promotion wall
+clock never manufactures recency. Query-time routing may use the compact fact, but only its live,
+scope-valid raw sources can enter the production reranker/context path. The promotion response
+returns `atomic_fact_id`; `node_id` remains a compatibility alias for older clients.
 Unsupported, partial, contaminated, unreviewed, unavailable, or source-mismatched candidates are
 rejected. A relation can be
 promoted only after a `correct` review and after both endpoint candidates have been promoted;
-promotion uses the engine's typed `reason`, `causal`, `contradicts`, or `supports` relation and
-is idempotent.
+promotion records the typed `reason`, `causal`, `contradicts`, or `supports` relation in the
+source fact's sidecar metadata and is idempotent. It returns `atomic_relation_id`; `edge_id`
+remains a compatibility alias and does not identify a graph edge.
 
 A source marked `source-unavailable` no longer has its recorded node. A
 `source-mismatch` source still resolves by node id but no longer matches its recorded turn key,
@@ -442,9 +447,9 @@ default, never an error).
 | `ANAMNESIS_REINFORCE` | `true` | Auto-reinforce the package returned by `recall`; `0` / `false` / `no` disables. |
 | `ANAMNESIS_CONTEXT_STYLE` | `detailed` | Recall context wire. Exact `evidence` keeps the same validated package and commit trace but renders compact evidence grouped by source session and ordered by observation time; any other value uses the full diagnostic layout. |
 | `ANAMNESIS_HOOK_THRESHOLD` | `13.0` | `τ` — the recall injection gate. A floor on the **top recall score**, which is raw ACT-R activation (~8–16 on a typical graph), **not** a 0..1 similarity; a sub-1 value silently disables the gate. **Recalibrate per graph** — activation magnitude scales with density/recency. |
-| `ANAMNESIS_HOOK_TOPK` | `3` | Cap on injected per-turn memories. |
+| `ANAMNESIS_HOOK_TOPK` | `20` | Cap on injected per-turn memories. |
 | `ANAMNESIS_HOOK_SEED_K` | `5` | SessionStart seed-recall size. |
-| `ANAMNESIS_HOOK_TIMEOUT_MS` | `3000` | Per-hook fail-open timeout (ms) for latency-sensitive product recall. |
+| `ANAMNESIS_HOOK_TIMEOUT_MS` | `4000` | Per-hook fail-open timeout (ms) for latency-sensitive product recall. |
 | `ANAMNESIS_CAPTURE_ENABLED` | `true` | Global capture kill-switch; `0` / `false` / `no` disables passive capture. |
 | `ANAMNESIS_EXTRACT_THRESHOLD_N` | `20` | Un-extracted queue length that triggers the SessionStart extraction nudge. |
 | `ANAMNESIS_EXTRACT_REDELIVERY_MS` | `21600000` (6h) | TTL after which a pulled-but-abandoned extraction is re-queued once (attempt cap 2). |

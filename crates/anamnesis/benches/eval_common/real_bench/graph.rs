@@ -6,7 +6,7 @@ use anamnesis::Memory;
 use anamnesis::embedding::EmbeddingProvider;
 use anamnesis::engine::SqliteStorage;
 use anamnesis::graph::{KnowledgeType, NodeId, Timestamp};
-use anamnesis::memory::{NoteOptions, Relation};
+use anamnesis::memory::AtomicFactInput;
 use serde::{Deserialize, Serialize};
 
 use super::dataset::{BenchTurn, LoadedBenchmark};
@@ -36,6 +36,10 @@ pub struct GraphBuildStats {
     pub extracted_edges_created: usize,
     #[serde(default)]
     pub derived_nodes_created: usize,
+    #[serde(default)]
+    pub atomic_facts_created: usize,
+    #[serde(default)]
+    pub atomic_relations_recorded: usize,
     #[serde(default)]
     pub reasoning_edges_created: usize,
     pub embedded_texts: usize,
@@ -124,9 +128,9 @@ pub fn build_memory_graph(
 
 /// Build the product graph and add a frozen consumer extraction artifact.
 ///
-/// Derived records remain additive Semantic+Episodic notes. Every record is
-/// linked to all cited raw Episodic turns with `ExtractedFrom`; raw fragments
-/// are never replaced. Relations use the public typed reasoning vocabulary.
+/// Derived records enter the production atomic-fact sidecar and retain all
+/// cited raw Episodic source IDs. They never enter the graph candidate pool,
+/// node FTS corpus, or attraction dynamics.
 pub fn build_memory_graph_with_derived(
     dataset: &LoadedBenchmark,
     provider: Arc<dyn EmbeddingProvider>,
@@ -273,14 +277,13 @@ fn ingest_derived_memories(
     }
 
     let mut seen_ids = std::collections::HashSet::new();
-    let mut materialized = HashMap::new();
+    let mut materialized = std::collections::HashSet::new();
     for record in records {
         let Some(raw_session_id) = sessions.get(record.source_session_id.as_str()).copied() else {
             continue;
         };
         validate_derived_record(record, &mut seen_ids)?;
         let mut sources = Vec::with_capacity(record.source_turn_ids.len());
-        let mut observed_at = Timestamp(0);
         for turn_id in &record.source_turn_ids {
             let source = episodic_by_turn.get(turn_id.as_str()).ok_or_else(|| {
                 BenchError::InvalidInput(format!(
@@ -297,93 +300,64 @@ fn ingest_derived_memories(
                     record.id
                 )));
             }
-            let node = memory
-                .engine()
-                .graph()
-                .get_node(*source)
-                .map_err(|error| BenchError::Engine(error.to_string()))?;
-            observed_at = observed_at.max(node.created_at);
             sources.push(*source);
         }
 
-        let mut tags = record.entity_tags.clone();
-        tags.push("anamnesis:derived".to_owned());
-        tags.push(format!("anamnesis:kind:{}", record.kind.trim()));
-        tags.sort();
-        tags.dedup();
-        let semantic = memory
-            .add_derived_knowledge_with(
-                record.content.trim(),
-                observed_at,
-                raw_session_id,
-                NoteOptions {
-                    scope: None,
-                    tags,
-                    metadata: vec![
-                        (
-                            "anamnesis:benchmark-derived-id".to_owned(),
-                            record.id.clone(),
-                        ),
-                        (
-                            "anamnesis:benchmark-derived-kind".to_owned(),
-                            record.kind.trim().to_owned(),
-                        ),
-                    ],
-                },
-            )
-            .map_err(|error| BenchError::Engine(error.to_string()))?;
-        memory
-            .set_validity_window(
-                semantic,
-                record.valid_from_ms.map(Timestamp),
-                record.valid_until_ms.map(Timestamp),
-            )
-            .map_err(|error| BenchError::Engine(error.to_string()))?;
-        provenance_by_node.insert(
-            semantic,
-            NodeProvenance {
-                dataset: dataset.dataset.as_str().to_owned(),
-                session_id: record.source_session_id.clone(),
-                raw_session_id: raw_session_id.to_owned(),
-                raw_turn_id: None,
-                turn_index: 0,
-                speaker: "derived".to_owned(),
-                content: record.content.trim().to_owned(),
-            },
-        );
-        for source in sources {
-            memory
-                .link_extracted_source(semantic, source)
-                .map_err(|error| BenchError::Engine(error.to_string()))?;
-            stats.extracted_edges_created = stats.extracted_edges_created.saturating_add(1);
+        let relation_metadata = relations
+            .iter()
+            .filter(|relation| relation.from == record.id || relation.to == record.id)
+            .map(|relation| format!("{}>{}:{:?}", relation.from, relation.to, relation.kind))
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut metadata = vec![
+            (
+                "anamnesis:benchmark-derived-id".to_owned(),
+                record.id.clone(),
+            ),
+            (
+                "anamnesis:benchmark-derived-kind".to_owned(),
+                record.kind.trim().to_owned(),
+            ),
+            (
+                "anamnesis:fact-kind".to_owned(),
+                record.kind.trim().to_owned(),
+            ),
+            (
+                "anamnesis:source-session".to_owned(),
+                raw_session_id.to_owned(),
+            ),
+        ];
+        if !relation_metadata.is_empty() {
+            metadata.push(("anamnesis:relations".to_owned(), relation_metadata));
         }
-        stats.nodes_created = stats.nodes_created.saturating_add(1);
-        stats.derived_nodes_created = stats.derived_nodes_created.saturating_add(1);
+        memory
+            .add_atomic_fact(
+                AtomicFactInput::new(record.content.trim(), sources)
+                    .with_entity_tags(record.entity_tags.clone())
+                    .with_validity(
+                        record.valid_from_ms.map(Timestamp),
+                        record.valid_until_ms.map(Timestamp),
+                    )
+                    .with_metadata(metadata),
+            )
+            .map_err(|error| BenchError::Engine(error.to_string()))?;
+        stats.atomic_facts_created = stats.atomic_facts_created.saturating_add(1);
         stats.embedded_texts = stats.embedded_texts.saturating_add(1);
-        materialized.insert(record.id.as_str(), semantic);
+        materialized.insert(record.id.as_str());
     }
     for relation in relations {
-        let from = materialized.get(relation.from.as_str()).copied();
-        let to = materialized.get(relation.to.as_str()).copied();
-        let (Some(from), Some(to)) = (from, to) else {
-            if from.is_some() || to.is_some() {
+        let from_present = materialized.contains(relation.from.as_str());
+        let to_present = materialized.contains(relation.to.as_str());
+        if !from_present || !to_present {
+            if from_present || to_present {
                 return Err(BenchError::InvalidInput(format!(
                     "derived relation {:?}->{:?} crosses benchmark samples",
                     relation.from, relation.to
                 )));
             }
             continue;
-        };
-        let relation_kind = match relation.kind {
-            DerivedRelationKind::Reason => Relation::Reason,
-            DerivedRelationKind::Causal => Relation::Causes,
-            DerivedRelationKind::Contradicts => Relation::Contradicts,
-            DerivedRelationKind::Supports => Relation::Supports,
-        };
-        memory
-            .relate(from, to, relation_kind)
-            .map_err(|error| BenchError::Engine(error.to_string()))?;
-        stats.reasoning_edges_created = stats.reasoning_edges_created.saturating_add(1);
+        }
+        stats.atomic_relations_recorded = stats.atomic_relations_recorded.saturating_add(1);
     }
     Ok(())
 }
