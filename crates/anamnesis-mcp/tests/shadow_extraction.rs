@@ -401,11 +401,11 @@ fn invalid_schema_isolates_every_source_without_ledgering_it() {
     assert_no_provider_raw_in_cli(&invalid);
     assert_eq!(
         fixture.provider_calls(),
-        19,
-        "ten always-invalid sources require one full attempt plus the complete stable split tree"
+        9,
+        "ten always-invalid sources stop after one full attempt and the shared recovery budget"
     );
     assert_eq!(fixture.fallback_calls(), 0);
-    assert_eq!(policy_counts(&fixture.db), (19, 0, 0, 0));
+    assert_eq!(policy_counts(&fixture.db), (9, 0, 0, 0));
     assert_policy_has_no_provider_raw(&fixture.db);
     assert_graph_unchanged(&before, &fixture.graph_snapshot(), "invalid-schema failure");
     assert_eq!(
@@ -420,8 +420,8 @@ fn invalid_schema_isolates_every_source_without_ledgering_it() {
         "retry stderr: {}",
         String::from_utf8_lossy(&retry.stderr)
     );
-    assert_eq!(fixture.provider_calls(), 20);
-    assert_eq!(policy_counts(&fixture.db), (20, 10, 0, 0));
+    assert_eq!(fixture.provider_calls(), 10);
+    assert_eq!(policy_counts(&fixture.db), (10, 10, 0, 0));
     assert_graph_unchanged(&before, &fixture.graph_snapshot(), "invalid-schema retry");
 }
 

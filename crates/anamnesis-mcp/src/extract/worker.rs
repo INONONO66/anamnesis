@@ -28,6 +28,11 @@ const MAX_TURNS: u32 = 20;
 const PROVIDER_TIMEOUT: Duration = Duration::from_secs(240);
 const MAX_PROVIDER_TIMEOUT_SECS: u64 = 3_600;
 const PROVIDER_OUTPUT_LIMIT: usize = 1024 * 1024;
+// Partition recovery is a fail-closed salvage path after an invocation has
+// already failed validation. Bound all recursive branches together so one bad
+// batch cannot expand into an unbounded tree of local-provider calls while the
+// extraction lock is held.
+const MAX_PARTITION_RECOVERY_PROVIDER_INVOCATIONS: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WorkerConfig {
@@ -434,6 +439,7 @@ pub(crate) fn run_worker_with(
                             config,
                             namespace,
                             &scan,
+                            second_failure.error,
                             dependencies,
                         );
                     }
@@ -448,7 +454,13 @@ pub(crate) fn run_worker_with(
                 return Err(WorkerError::Audit);
             }
             if matches!(&failure.error, WorkerError::Validation(_)) && scan.sources.len() > 1 {
-                return recover_and_stage_partitions(config, namespace, &scan, dependencies);
+                return recover_and_stage_partitions(
+                    config,
+                    namespace,
+                    &scan,
+                    failure.error,
+                    dependencies,
+                );
             }
             return Err(failure.error);
         }
@@ -517,6 +529,42 @@ impl PartitionRecovery {
     }
 }
 
+struct PartitionRecoveryBudget {
+    remaining_provider_invocations: usize,
+    last_validation_error: WorkerError,
+}
+
+impl PartitionRecoveryBudget {
+    fn new(last_validation_error: WorkerError) -> Self {
+        Self {
+            remaining_provider_invocations: MAX_PARTITION_RECOVERY_PROVIDER_INVOCATIONS,
+            last_validation_error,
+        }
+    }
+
+    fn consume_provider_invocation(&mut self) -> bool {
+        if self.remaining_provider_invocations == 0 {
+            return false;
+        }
+        self.remaining_provider_invocations -= 1;
+        true
+    }
+
+    fn remember_validation_error(&mut self, error: &WorkerError) {
+        if matches!(error, WorkerError::Validation(_)) {
+            self.last_validation_error = error.clone();
+        }
+    }
+
+    fn exhausted_partition(&self, omitted_source_count: usize) -> PartitionRecovery {
+        PartitionRecovery {
+            omitted_source_count,
+            last_validation_error: Some(self.last_validation_error.clone()),
+            ..PartitionRecovery::default()
+        }
+    }
+}
+
 /// Isolate validation failures without weakening fact-level validation.
 ///
 /// Successful deterministic halves are staged through the normal product
@@ -526,13 +574,15 @@ fn recover_and_stage_partitions(
     config: &WorkerConfig,
     namespace: Option<&str>,
     scan: &ExtractionScanResult,
+    last_validation_error: WorkerError,
     dependencies: &mut impl WorkerDependencies,
 ) -> Result<WorkerOutcome, WorkerError> {
-    let recovery = split_and_extract(config, namespace, scan, dependencies)?;
+    let mut budget = PartitionRecoveryBudget::new(last_validation_error);
+    let recovery = split_and_extract(config, namespace, scan, dependencies, &mut budget)?;
     if recovery.partitions.is_empty() {
         return Err(recovery
             .last_validation_error
-            .unwrap_or(WorkerError::Validation(ValidationError::SchemaReject)));
+            .unwrap_or(budget.last_validation_error));
     }
 
     let mut run_ids = Vec::with_capacity(recovery.partitions.len());
@@ -587,6 +637,7 @@ fn split_and_extract(
     namespace: Option<&str>,
     scan: &ExtractionScanResult,
     dependencies: &mut impl WorkerDependencies,
+    budget: &mut PartitionRecoveryBudget,
 ) -> Result<PartitionRecovery, WorkerError> {
     let midpoint = scan.sources.len() / 2;
     let mut recovery = extract_partition(
@@ -597,6 +648,7 @@ fn split_and_extract(
             sources: scan.sources[..midpoint].to_vec(),
         },
         dependencies,
+        budget,
     )?;
     recovery.merge(extract_partition(
         config,
@@ -606,6 +658,7 @@ fn split_and_extract(
             sources: scan.sources[midpoint..].to_vec(),
         },
         dependencies,
+        budget,
     )?);
     Ok(recovery)
 }
@@ -615,7 +668,11 @@ fn extract_partition(
     namespace: Option<&str>,
     scan: &ExtractionScanResult,
     dependencies: &mut impl WorkerDependencies,
+    budget: &mut PartitionRecoveryBudget,
 ) -> Result<PartitionRecovery, WorkerError> {
+    if !budget.consume_provider_invocation() {
+        return Ok(budget.exhausted_partition(scan.sources.len()));
+    }
     let prompt = build_extraction_prompt(&scan.sources);
     let result = match invoke_and_validate(config, scan, dependencies, &prompt) {
         Ok(success) => Ok(success),
@@ -628,6 +685,7 @@ fn extract_partition(
                 &first_failure,
             )
             .map_err(|_| WorkerError::Audit)?;
+            budget.remember_validation_error(&first_failure.error);
             let repair_prompt = if first_failure.is_invalid_json() {
                 first_failure
                     .invalid_output
@@ -637,6 +695,9 @@ fn extract_partition(
             } else {
                 build_grounding_retry_prompt(&scan.sources)
             };
+            if !budget.consume_provider_invocation() {
+                return Ok(budget.exhausted_partition(scan.sources.len()));
+            }
             match invoke_and_validate(config, scan, dependencies, &repair_prompt) {
                 Ok(success) => Ok(success),
                 Err(second_failure) => {
@@ -648,6 +709,7 @@ fn extract_partition(
                         &second_failure,
                     )
                     .map_err(|_| WorkerError::Audit)?;
+                    budget.remember_validation_error(&second_failure.error);
                     Err(second_failure.error)
                 }
             }
@@ -655,6 +717,7 @@ fn extract_partition(
         Err(failure) => {
             record_invocation_failure(dependencies, namespace, &config.profile, scan, &failure)
                 .map_err(|_| WorkerError::Audit)?;
+            budget.remember_validation_error(&failure.error);
             Err(failure.error)
         }
     };
@@ -669,9 +732,8 @@ fn extract_partition(
             ..PartitionRecovery::default()
         }),
         Err(error @ WorkerError::Validation(_)) if scan.sources.len() > 1 => {
-            let mut recovery = split_and_extract(config, namespace, scan, dependencies)?;
-            recovery.last_validation_error = Some(error);
-            Ok(recovery)
+            budget.remember_validation_error(&error);
+            split_and_extract(config, namespace, scan, dependencies, budget)
         }
         Err(error @ WorkerError::Validation(_)) => Ok(PartitionRecovery {
             omitted_source_count: scan.sources.len(),
@@ -1107,10 +1169,10 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        ExtractionPreviewInput, MIN_TURNS, PROVIDER_TIMEOUT, WorkerConfig, WorkerDependencies,
-        WorkerError, WorkerNoop, WorkerOutcome, failure_kind, parse_provider_timeout,
-        repair_json_string_syntax, run_extraction_preview, run_worker, run_worker_with,
-        strip_ansi_control_sequences,
+        ExtractionPreviewInput, MAX_PARTITION_RECOVERY_PROVIDER_INVOCATIONS, MIN_TURNS,
+        PROVIDER_TIMEOUT, WorkerConfig, WorkerDependencies, WorkerError, WorkerNoop, WorkerOutcome,
+        failure_kind, parse_provider_timeout, repair_json_string_syntax, run_extraction_preview,
+        run_worker, run_worker_with, strip_ansi_control_sequences,
     };
     use crate::config::Config;
     use crate::extract::{
@@ -1457,6 +1519,93 @@ mod tests {
             [5, 5],
             "the production worker must use the same stable midpoint split as the artifact lane"
         );
+    }
+
+    #[test]
+    fn partition_grounding_failure_gets_one_retry_before_staging() {
+        let invalid_schema = || output(br#"{}"#.to_vec());
+        let invalid_grounding = || {
+            output(
+                br#"{"items":[{"item_local_id":"legacy","content":"source-0","kind":"fact","confidence":0.9,"source_node_ids":[0]}],"relations":[]}"#
+                    .to_vec(),
+            )
+        };
+        let mut fake = FakeWorker {
+            scans: VecDeque::from([Ok(scan(MIN_TURNS as usize))]),
+            provider_outputs: VecDeque::from([
+                Ok(invalid_schema()),
+                Ok(invalid_grounding()),
+                Ok(valid_output()),
+                Ok(valid_output()),
+            ]),
+            stage_result: VecDeque::from([
+                Ok(StageExtractionResult::Staged { run_id: 53 }),
+                Ok(StageExtractionResult::Staged { run_id: 54 }),
+            ]),
+            ..Default::default()
+        };
+        let (_socket_directory, socket) = test_socket();
+
+        let outcome = run_worker_with(&config(ExtractMode::Shadow), &socket, None, &mut fake)
+            .expect("repairable partition stages after its source-aware retry");
+
+        assert_eq!(
+            outcome,
+            WorkerOutcome::Recovered {
+                run_ids: vec![53, 54],
+                candidate_count: 0,
+                relation_count: 0,
+                omitted_source_count: 0,
+                already_staged_count: 0,
+            }
+        );
+        assert_eq!(fake.provider_calls, 4);
+        assert_eq!(
+            fake.recorded_failures,
+            [
+                ExtractionErrorKind::SchemaReject,
+                ExtractionErrorKind::SchemaReject,
+            ]
+        );
+        assert!(
+            fake.provider_prompts[2].contains("failed exact object/evidence validation")
+                && fake.provider_prompts[2].contains("source-0")
+        );
+        assert_eq!(
+            fake.staged_sources.iter().map(Vec::len).collect::<Vec<_>>(),
+            [5, 5]
+        );
+    }
+
+    #[test]
+    fn partition_recovery_stops_at_the_shared_provider_budget() {
+        let invalid_schema = || output(br#"{}"#.to_vec());
+        let provider_outputs = std::iter::repeat_with(|| Ok(invalid_schema()))
+            .take(1 + MAX_PARTITION_RECOVERY_PROVIDER_INVOCATIONS)
+            .collect();
+        let mut fake = FakeWorker {
+            scans: VecDeque::from([Ok(scan(MIN_TURNS as usize))]),
+            provider_outputs,
+            ..Default::default()
+        };
+        let (_socket_directory, socket) = test_socket();
+
+        let error = run_worker_with(&config(ExtractMode::Shadow), &socket, None, &mut fake)
+            .expect_err("an entirely invalid batch remains fail-closed");
+
+        assert_eq!(
+            error,
+            WorkerError::Validation(ValidationError::SchemaReject)
+        );
+        assert_eq!(
+            fake.provider_calls,
+            1 + MAX_PARTITION_RECOVERY_PROVIDER_INVOCATIONS
+        );
+        assert_eq!(
+            fake.recorded_failures.len(),
+            1 + MAX_PARTITION_RECOVERY_PROVIDER_INVOCATIONS
+        );
+        assert!(fake.staged.is_empty());
     }
 
     #[test]

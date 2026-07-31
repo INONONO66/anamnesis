@@ -2032,6 +2032,8 @@ impl<S: StorageAdapter + Clone> Memory<S> {
     fn recall_fragment_line_sources(&self, recall: &Recall) -> Result<FragmentLineSources, Error> {
         let storage = self.engine.graph().storage();
         let mut fragment_sources = HashMap::new();
+        let mut episodic_ids_by_session: HashMap<(PeerId, String, ScopePath), Vec<NodeId>> =
+            HashMap::new();
         for fragment in recall
             .package
             .identity
@@ -2057,16 +2059,30 @@ impl<S: StorageAdapter + Clone> Memory<S> {
                 "session-{}",
                 normalize_tag(fragment.origin.session_id.as_str())
             );
-            for source_id in storage.nodes_by_entity_tag(&session_tag) {
-                let source = storage.get_node(source_id)?;
-                if source.node_type == KnowledgeType::Episodic
-                    && source.origin.peer_id == fragment.origin.peer_id
-                    && source.origin.session_id == fragment.origin.session_id
-                    && source.origin.scope == fragment.origin.scope
-                {
-                    source_ids.push(source_id);
-                }
-            }
+            let session_key = (
+                fragment.origin.peer_id,
+                fragment.origin.session_id.clone(),
+                fragment.origin.scope.clone(),
+            );
+            let session_source_ids =
+                if let Some(source_ids) = episodic_ids_by_session.get(&session_key) {
+                    source_ids.clone()
+                } else {
+                    let mut eligible_ids = Vec::new();
+                    for source_id in storage.nodes_by_entity_tag(&session_tag) {
+                        let source = storage.get_node(source_id)?;
+                        if source.node_type == KnowledgeType::Episodic
+                            && source.origin.peer_id == fragment.origin.peer_id
+                            && source.origin.session_id == fragment.origin.session_id
+                            && source.origin.scope == fragment.origin.scope
+                        {
+                            eligible_ids.push(source_id);
+                        }
+                    }
+                    episodic_ids_by_session.insert(session_key, eligible_ids.clone());
+                    eligible_ids
+                };
+            source_ids.extend(session_source_ids);
             source_ids.sort_unstable();
             source_ids.dedup();
             for source_id in source_ids {

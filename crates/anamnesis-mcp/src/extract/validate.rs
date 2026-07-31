@@ -12,7 +12,10 @@ use crate::extract::types::{
 const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 const MAX_ITEMS: usize = 16;
 const MAX_ITEM_ID_CHARS: usize = 64;
-const MAX_CONTENT_CHARS: usize = 500;
+const MAX_LEGACY_CONTENT_CHARS: usize = 500;
+// Canonical claims join the independently bounded subject, relation, and
+// object with two spaces: 128 + 128 + 256 + 2.
+const MAX_CONTENT_CHARS: usize = 514;
 const MAX_SUBJECT_CHARS: usize = 128;
 const MAX_RELATION_CHARS: usize = 128;
 const MAX_OBJECT_CHARS: usize = 256;
@@ -288,14 +291,13 @@ pub(crate) fn validate_output_for_schema(
 
             let evidence_source_node_id = source_refs
                 .iter()
-                .filter_map(|source_ref| {
+                .find_map(|source_ref| {
                     batch_sources
                         .get(&source_ref.node_id)
                         .copied()
                         .filter(|source| source.content.contains(&evidence_span))
                         .map(|source| source.node_id)
                 })
-                .next()
                 .ok_or(ValidationError::InvalidEvidenceSpan)?;
             let evidence_object_is_grounded = if schema_version >= 5 {
                 evidence_span.contains(&evidence_object)
@@ -306,7 +308,7 @@ pub(crate) fn validate_output_for_schema(
                 return Err(ValidationError::InvalidEvidenceSpan);
             }
             let content = canonical_claim(&subject, &relation, &object);
-            validate_content(&content)?;
+            validate_content(&content, MAX_CONTENT_CHARS)?;
             (
                 content,
                 Some(subject),
@@ -322,7 +324,7 @@ pub(crate) fn validate_output_for_schema(
                     .as_deref()
                     .ok_or(ValidationError::InvalidContent)?,
             );
-            validate_content(&content)?;
+            validate_content(&content, MAX_LEGACY_CONTENT_CHARS)?;
             (content, None, None, None, None, None, None)
         };
 
@@ -449,9 +451,9 @@ fn normalize_validity_window(
     Ok((valid_from_ms, valid_until_ms))
 }
 
-fn validate_content(content: &str) -> Result<(), ValidationError> {
+fn validate_content(content: &str, max_chars: usize) -> Result<(), ValidationError> {
     if content.is_empty()
-        || content.chars().count() > MAX_CONTENT_CHARS
+        || content.chars().count() > max_chars
         || content
             .chars()
             .any(|character| character.is_control() && !matches!(character, '\n' | '\t'))
@@ -747,6 +749,23 @@ mod tests {
         ] {
             assert!(validate_output(&valid_output(&invalid, ""), &batch(), PROFILE_ID).is_err());
         }
+    }
+
+    #[test]
+    fn canonical_content_allows_the_sum_of_grounding_component_limits() {
+        let subject = "s".repeat(MAX_SUBJECT_CHARS);
+        let relation = "r".repeat(MAX_RELATION_CHARS);
+        let object = "o".repeat(MAX_OBJECT_CHARS);
+        validate_grounding_components(&subject, &relation, &object, &object, &object, 5)
+            .expect("individually bounded grounding components");
+
+        let content = canonical_claim(&subject, &relation, &object);
+        assert_eq!(content.chars().count(), MAX_CONTENT_CHARS);
+        assert!(validate_content(&content, MAX_CONTENT_CHARS).is_ok());
+        assert_eq!(
+            validate_content(&content, MAX_LEGACY_CONTENT_CHARS),
+            Err(ValidationError::InvalidContent)
+        );
     }
 
     #[test]

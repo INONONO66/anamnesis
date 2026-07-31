@@ -201,15 +201,20 @@ fn collect_node_source_ids_from_text(value: &str, cited: &mut BTreeSet<String>) 
 
 fn answer_polarity(answer: &str) -> Option<bool> {
     let normalized = answer.trim_start().to_ascii_lowercase();
-    if normalized.starts_with("yes") || normalized.starts_with("likely yes") {
-        Some(true)
-    } else if normalized.starts_with("no")
-        || normalized.starts_with("likely no")
-        || normalized.starts_with("unlikely")
-    {
-        Some(false)
-    } else {
-        None
+    let mut words = normalized
+        .split(|character: char| !character.is_alphabetic())
+        .filter(|word| !word.is_empty());
+    let first = words.next()?;
+    let second = words.next();
+    match (first, second) {
+        // Abstentions are not negative answers and must not trigger polarity
+        // reconciliation merely because they begin with the word "no".
+        ("no", Some("information" | "evidence" | "answer")) => None,
+        ("yes", _) => Some(true),
+        ("no", _) | ("unlikely", _) => Some(false),
+        ("likely", Some("yes")) => Some(true),
+        ("likely", Some("no")) => Some(false),
+        _ => None,
     }
 }
 
@@ -624,6 +629,22 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn polarity_requires_whole_words_and_ignores_abstentions() {
+        assert_eq!(answer_polarity("Yes; supported"), Some(true));
+        assert_eq!(
+            answer_polarity("Likely no, based on the evidence"),
+            Some(false)
+        );
+        assert_eq!(answer_polarity("No; contradicted"), Some(false));
+        assert_eq!(answer_polarity("No information available"), None);
+        assert_eq!(answer_polarity("No evidence was found"), None);
+        assert_eq!(answer_polarity("none"), None);
+        assert_eq!(answer_polarity("nothing relevant"), None);
+        assert_eq!(answer_polarity("north of the venue"), None);
+        assert_eq!(answer_polarity("not enough evidence"), None);
     }
 
     #[test]

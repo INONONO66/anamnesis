@@ -438,10 +438,7 @@ fn promote_reviewed_candidate(
                 ("anamnesis:ground-object", candidate.object.as_ref()),
                 (
                     "anamnesis:evidence-object",
-                    candidate
-                        .evidence_object
-                        .as_ref()
-                        .or(candidate.object.as_ref()),
+                    candidate.evidence_object.as_ref(),
                 ),
             ] {
                 if let Some(value) = value {

@@ -34,6 +34,13 @@ runs are deterministic for a fixed dataset and embedding model.
 | Multi-hop n=16 | **75.0%** | **41.75%** | 64.43% | 58.18% | **63.39% / 87.5%** |
 | Open-domain n=20 | **70.0%** | **44.01%** | 57.92% | 63.75% | **65.42% / 70.0%** |
 
+Candidate and delivered recall use the same annotated-gold denominator but are
+not subset surfaces: candidate recall scores provenance on the first 50 raw
+cognitive trace nodes, while delivered recall scores the hydrated and
+repackaged product fragments after canonical-source and atomic-source routing.
+That source expansion is why the verified Open-domain delivered value can be
+higher than its candidate value.
+
 - **Paired checks:** the Multi-hop question set is identical to the earlier
   v190e/v190f gate. Rendered recall rose from 59.23% to 63.39%; semantic
   accuracy rose from 56.25% to 75.0%, and the countries answer remains exactly

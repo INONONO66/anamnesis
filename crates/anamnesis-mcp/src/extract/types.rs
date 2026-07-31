@@ -38,7 +38,7 @@ impl fmt::Debug for ExtractionSource {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
 pub(crate) struct ValidatedCandidate {
     pub item_local_id: String,
     pub content: String,
@@ -72,6 +72,30 @@ pub(crate) struct ValidatedCandidate {
     pub valid_until_ms: Option<u64>,
     pub sources: Vec<ExtractionSourceRef>,
     pub idempotency_key: String,
+}
+
+impl fmt::Debug for ValidatedCandidate {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let evidence_span = self.evidence_span.as_ref().map(|_| "[REDACTED]");
+        formatter
+            .debug_struct("ValidatedCandidate")
+            .field("item_local_id", &self.item_local_id)
+            .field("content", &self.content)
+            .field("kind", &self.kind)
+            .field("confidence", &self.confidence)
+            .field("subject", &self.subject)
+            .field("relation", &self.relation)
+            .field("object", &self.object)
+            .field("evidence_object", &self.evidence_object)
+            .field("evidence_span", &evidence_span)
+            .field("evidence_source_node_id", &self.evidence_source_node_id)
+            .field("entity_tags", &self.entity_tags)
+            .field("valid_from_ms", &self.valid_from_ms)
+            .field("valid_until_ms", &self.valid_until_ms)
+            .field("sources", &self.sources)
+            .field("idempotency_key", &self.idempotency_key)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -356,5 +380,34 @@ mod tests {
         assert!(source_debug.contains("[REDACTED]"));
         assert!(!scan_debug.contains("do not expose this transcript"));
         assert!(scan_debug.contains("sources_len: 1"));
+    }
+
+    #[test]
+    fn candidate_debug_redacts_evidence_span() {
+        let candidate = ValidatedCandidate {
+            item_local_id: "item".into(),
+            content: "Alice chose tea".into(),
+            kind: CandidateKind::Decision,
+            confidence: 0.9,
+            subject: Some("Alice".into()),
+            relation: Some("chose".into()),
+            object: Some("tea".into()),
+            evidence_object: Some("tea".into()),
+            evidence_span: Some("raw private evidence must stay hidden".into()),
+            evidence_source_node_id: Some(7),
+            entity_tags: Vec::new(),
+            valid_from_ms: None,
+            valid_until_ms: None,
+            sources: vec![ExtractionSourceRef {
+                node_id: 7,
+                turn_key: "turn".into(),
+                content_hash: "content-hash".into(),
+            }],
+            idempotency_key: "candidate-key".into(),
+        };
+
+        let debug = format!("{candidate:?}");
+        assert!(!debug.contains("raw private evidence must stay hidden"));
+        assert!(debug.contains("[REDACTED]"));
     }
 }

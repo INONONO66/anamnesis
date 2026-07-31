@@ -322,10 +322,7 @@ pub(super) fn stage(
         )?;
         let entity_tags = serialize(&candidate.entity_tags, "staged candidate entity tags")?;
         let ground_object = candidate.object.as_ref();
-        let evidence_object = candidate
-            .evidence_object
-            .as_ref()
-            .or(candidate.object.as_ref());
+        let evidence_object = candidate.evidence_object.as_ref();
         let valid_from_ms = candidate
             .valid_from_ms
             .map(|value| sqlite_u64(value, "candidate valid_from_ms"))

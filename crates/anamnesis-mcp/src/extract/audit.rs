@@ -156,6 +156,7 @@ pub(crate) fn render_audit_report(result: &ExtractionAuditResult) -> String {
             Some(object),
             Some(evidence_object),
             Some(evidence_span),
+            Some(evidence_source_node_id),
         ) = (
             candidate.subject.as_deref(),
             candidate.relation.as_deref(),
@@ -165,12 +166,10 @@ pub(crate) fn render_audit_report(result: &ExtractionAuditResult) -> String {
                 .as_deref()
                 .or(candidate.object.as_deref()),
             candidate.evidence_span.as_deref(),
+            candidate.evidence_source_node_id,
         ) {
             report.push_str(&format!(
-                "  GROUNDING: {subject} | {relation} | {object}\n  EVIDENCE OBJECT: {evidence_object}\n  EVIDENCE {}: {evidence_span}\n",
-                candidate
-                    .evidence_source_node_id
-                    .map_or_else(|| "legacy".to_owned(), |node_id| node_id.to_string()),
+                "  GROUNDING: {subject} | {relation} | {object}\n  EVIDENCE OBJECT: {evidence_object}\n  EVIDENCE {evidence_source_node_id}: {evidence_span}\n",
             ));
         }
         for source in &candidate.sources {

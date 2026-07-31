@@ -2,7 +2,6 @@
 mod eval_common;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::Arc;
@@ -13,7 +12,9 @@ use anamnesis::memory::{AnswerShape, ContextRenderStyle, RecallIntent, RecallPla
 use serde::{Deserialize, Serialize};
 
 use eval_common::answer_metrics;
-use eval_common::provider::{LlmProvider, OpenAiCompatibleProvider, ProviderConfig, ProviderError};
+use eval_common::provider::{
+    LlmProvider, OpenAiCompatibleProvider, ProviderConfig, ProviderError, is_loopback_base_url,
+};
 use eval_common::real_bench::dataset::{
     BenchDatasetName, BenchQuestion, BenchSession, GoldEvidence, LoadedBenchmark,
     load_benchmark_dataset, restrict_to_questions, split_by_sample,
@@ -2193,6 +2194,7 @@ fn run_provider_answer(
         answer_latency_ms,
         None,
         None,
+        None,
         generation.prompt_tokens,
         generation.completion_tokens,
     );
@@ -2243,9 +2245,14 @@ fn run_provider_reflect_answer(
             provider.name()
         )));
     }
-    if let Some(reconciled) = reconcile_reflected_output(record, context, &reflection, &answer) {
+    let done_reason = if let Some(reconciled) =
+        reconcile_reflected_output(record, context, &reflection, &answer)
+    {
         answer = reconciled;
-    }
+        Some("source-grounded-shape-reconciliation".to_owned())
+    } else {
+        None
+    };
     insert_provider_route(
         report,
         record_index,
@@ -2254,6 +2261,7 @@ fn run_provider_reflect_answer(
         context,
         answer,
         answer_latency_ms + reflection_latency_ms,
+        done_reason,
         Some(reflection),
         Some(reflection_latency_ms),
         sum_optional_counts(reflection_generation.prompt_tokens, answer_prompt_tokens),
@@ -2312,6 +2320,7 @@ fn insert_provider_route(
     context: &[PromptEvidence],
     answer: String,
     answer_latency_ms: f64,
+    done_reason: Option<String>,
     reflection: Option<String>,
     reflection_latency_ms: Option<f64>,
     prompt_eval_tokens: Option<u64>,
@@ -2341,7 +2350,7 @@ fn insert_provider_route(
             context_items: context.len(),
             context_chars: context.iter().map(|item| item.text.chars().count()).sum(),
             thinking_chars: 0,
-            done_reason: None,
+            done_reason,
             prompt_eval_tokens,
             output_eval_tokens,
             locomo_official_f1,
@@ -2371,7 +2380,7 @@ fn frontier_lanes_are_local(args: &Args) -> bool {
     let loopback = args
         .frontier_base_url
         .as_deref()
-        .is_some_and(is_loopback_url);
+        .is_some_and(is_loopback_base_url);
     (!args.strong_reader_remote || loopback) && (!args.frontier_judge || loopback)
 }
 
@@ -2400,20 +2409,6 @@ fn extend_frontier_model_digest(
         model_digests.insert(model.to_owned(), digest.clone());
     }
     Ok(())
-}
-
-fn is_loopback_url(base_url: &str) -> bool {
-    reqwest::Url::parse(base_url)
-        .ok()
-        .and_then(|url| url.host_str().map(ToOwned::to_owned))
-        .is_some_and(|host| {
-            host.eq_ignore_ascii_case("localhost")
-                || host
-                    .trim_start_matches('[')
-                    .trim_end_matches(']')
-                    .parse::<IpAddr>()
-                    .is_ok_and(|address| address.is_loopback())
-        })
 }
 
 fn run_provider_judge(

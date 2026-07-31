@@ -221,7 +221,7 @@ impl OpenAiCompatibleProvider {
     }
 }
 
-fn is_loopback_base_url(base_url: &str) -> bool {
+pub fn is_loopback_base_url(base_url: &str) -> bool {
     reqwest::Url::parse(base_url)
         .ok()
         .and_then(|url| url.host_str().map(ToOwned::to_owned))

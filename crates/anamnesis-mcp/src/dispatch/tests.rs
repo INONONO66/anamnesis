@@ -4590,6 +4590,97 @@ mod migration_job {
     }
 
     #[test]
+    fn promotion_does_not_treat_a_canonical_object_as_verbatim_evidence() {
+        use anamnesis::engine::StorageAdapter;
+
+        let (reg, dir) = stub_registry();
+        capture_turns(&reg, "canonical-only", "scope", 10, 100, "captured");
+        let mut profile = extraction_profile();
+        profile.schema_version = 4;
+        let sources = extraction_scan(&reg, profile.clone()).sources;
+        let payload = serde_json::to_vec(&serde_json::json!({
+            "items": [{
+                "item_local_id": "canonical-only",
+                "subject": "Derived memory",
+                "relation": "cites",
+                "object": "TURN 0",
+                "evidence_span": sources[0].content,
+                "kind": "lesson",
+                "confidence": 0.9,
+                "source_node_ids": [sources[0].node_id],
+            }],
+            "relations": [],
+        }))
+        .expect("serialize schema-4 candidate");
+        let extraction = crate::extract::validate::validate_output_for_schema(
+            &payload,
+            &sources,
+            &extraction_profile_id(&profile),
+            profile.schema_version,
+        )
+        .expect("schema-4 normalized object is grounded by tokens");
+
+        staged_result(stage_extraction(&reg, profile, sources, extraction));
+        let connection = rusqlite::Connection::open(dir.path().join("memory.db"))
+            .expect("open extraction policy database");
+        let stored_evidence_object: Option<String> = connection
+            .query_row(
+                "SELECT evidence_object FROM extract_candidates
+                 WHERE item_local_id = 'canonical-only'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read staged evidence object");
+        assert_eq!(stored_evidence_object, None);
+        drop(connection);
+
+        let audit = extraction_audit_list(&reg);
+        let candidate_id = audit_candidate(&audit, "canonical-only")["id"]
+            .as_u64()
+            .expect("candidate id");
+        assert!(matches!(
+            dispatch(
+                &reg,
+                Request::UpdateExtractionCandidateAudit {
+                    namespace: None,
+                    candidate_id,
+                    support: crate::extract::types::AuditSupport::Supported,
+                    contamination: None,
+                    reviewer: "reviewer".into(),
+                },
+            ),
+            Response::Ok { .. }
+        ));
+        let promoted: serde_json::Value = serde_json::from_str(&ok_text(dispatch(
+            &reg,
+            Request::PromoteExtractionCandidate {
+                namespace: None,
+                candidate_id,
+            },
+        )))
+        .expect("promotion result");
+        let fact_id = anamnesis::storage::AtomicFactId(
+            promoted["atomic_fact_id"].as_u64().expect("atomic fact id"),
+        );
+        let handle = {
+            let mut registry = reg.lock().unwrap_or_else(|poison| poison.into_inner());
+            registry.namespace_handle(None).expect("default namespace")
+        };
+        let memory = handle.lock().unwrap_or_else(|poison| poison.into_inner());
+        let fact = memory
+            .engine()
+            .graph()
+            .storage()
+            .get_atomic_fact(fact_id)
+            .expect("atomic fact");
+        assert_eq!(
+            fact.metadata.get("anamnesis:ground-object"),
+            Some(&"TURN 0".to_owned())
+        );
+        assert!(!fact.metadata.contains_key("anamnesis:evidence-object"));
+    }
+
+    #[test]
     fn reviewed_candidate_promotion_is_provenance_safe_and_idempotent() {
         use anamnesis::engine::StorageAdapter;
         use anamnesis::graph::NodeId;

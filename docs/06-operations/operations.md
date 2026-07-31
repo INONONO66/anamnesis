@@ -85,7 +85,10 @@ fail-closed retry. If a batch still fails validation after its allowed retry,
 or has a non-repairable schema rejection, the worker recursively isolates
 deterministic halves: valid partitions are staged through the same product
 path, while an irreducible invalid source remains raw and eligible for a later
-pass. Provider failure, timeout, or an over-limit stream does not partition and
+pass. All branches share a hard budget of **8 partition-recovery provider
+invocations** (including partition grounding retries); exhaustion stops new
+calls and preserves the last durably recorded validation error. Provider
+failure, timeout, or an over-limit stream does not partition and
 leaves the complete affected batch eligible. A valid empty (`items=[]`) result
 is different: it records the selected sources in the zero-output ledger, so
 they are not sent again.

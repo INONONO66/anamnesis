@@ -209,6 +209,9 @@ def normalize_record_ids(state: dict[str, Any]) -> None:
 
 def rebuild_batches(state: dict[str, Any], batch_keys: list[str]) -> None:
     completed = set(state["completed_batches"])
+    batch_record_ids = state.setdefault("batch_record_ids", {})
+    if not isinstance(batch_record_ids, dict):
+        raise RuntimeError("checkpoint batch_record_ids must be an object")
     for batch_key in batch_keys:
         matched = BATCH_KEY_RE.fullmatch(batch_key)
         if matched is None:
@@ -217,11 +220,36 @@ def rebuild_batches(state: dict[str, Any], batch_keys: list[str]) -> None:
             raise RuntimeError(f"rebuild batch is not completed: {batch_key!r}")
         sample_index, session_id, chunk_index = matched.groups()
         record_prefix = f"locomo-{sample_index}-{session_id}-c{chunk_index}-"
-        removed_ids = {
-            record["id"]
-            for record in state["records"]
-            if record["id"].startswith(record_prefix)
-        }
+        recorded_ids = batch_record_ids.get(batch_key)
+        if recorded_ids is not None:
+            if not isinstance(recorded_ids, list) or not all(
+                isinstance(record_id, str) for record_id in recorded_ids
+            ):
+                raise RuntimeError(
+                    f"rebuild batch {batch_key!r} has an invalid record-id ledger"
+                )
+            removed_ids = set(recorded_ids)
+            existing_ids = {record["id"] for record in state["records"]}
+            missing_ids = removed_ids.difference(existing_ids)
+            if missing_ids:
+                raise RuntimeError(
+                    f"rebuild batch {batch_key!r} is missing recorded ids: "
+                    f"{sorted(missing_ids)!r}"
+                )
+        else:
+            # Legacy checkpoints predate the per-batch ledger. Prefix matching
+            # is safe only when it proves that at least one record belongs to
+            # the completed batch; bounded ids may have truncated the prefix.
+            removed_ids = {
+                record["id"]
+                for record in state["records"]
+                if record["id"].startswith(record_prefix)
+            }
+            if not removed_ids:
+                raise RuntimeError(
+                    f"rebuild batch {batch_key!r} matched no records; "
+                    "record ids may have been truncated"
+                )
         state["records"] = [
             record for record in state["records"] if record["id"] not in removed_ids
         ]
@@ -236,6 +264,7 @@ def rebuild_batches(state: dict[str, Any], batch_keys: list[str]) -> None:
             if source.get("batch_key") != batch_key
         ]
         completed.remove(batch_key)
+        batch_record_ids.pop(batch_key, None)
         print(
             f"rebuilding {batch_key}: removed_records={len(removed_ids)}",
             flush=True,
@@ -443,6 +472,7 @@ def main() -> int:
             "dataset_fnv1a64": fnv1a64(dataset_bytes),
             "source_surface_version": SOURCE_SURFACE_VERSION,
             "completed_batches": [],
+            "batch_record_ids": {},
             "records": [],
             "relations": [],
             "skipped_sources": [],
@@ -451,6 +481,7 @@ def main() -> int:
         }
 
     state.setdefault("skipped_sources", [])
+    state.setdefault("batch_record_ids", {})
     state_profile = state.get("profile")
     if state_profile is not None and state_profile.get("model_id") != args.extractor_model:
         raise RuntimeError("checkpoint extractor model differs")
@@ -529,6 +560,7 @@ def main() -> int:
                     args.timeout_secs,
                     args.transient_retries,
                 )
+                generated_record_ids: list[str] = []
                 for part_key, preview in previews:
                     if preview is None:
                         part_sources = sources
@@ -570,11 +602,22 @@ def main() -> int:
                     part_component = f"-p{part_key}" if part_key else ""
                     for item in extraction["items"]:
                         local_id = str(item["item_local_id"])
+                        evidence_node_id = item.get("evidence_source_node_id")
+                        if (
+                            not isinstance(evidence_node_id, int)
+                            or isinstance(evidence_node_id, bool)
+                            or evidence_node_id not in turn_ids
+                        ):
+                            raise RuntimeError(
+                                f"{batch_key} item {local_id!r} has no valid "
+                                "evidence_source_node_id"
+                            )
                         record_id = bounded_record_id(
                             f"locomo-{sample_index}-{raw_session_id}-c{chunk_index}"
                             f"{part_component}-{local_id}"
                         )
                         id_map[local_id] = record_id
+                        generated_record_ids.append(record_id)
                         state["records"].append(
                             {
                                 "id": record_id,
@@ -590,9 +633,7 @@ def main() -> int:
                                 "object": item.get("object"),
                                 "evidence_object": item.get("evidence_object"),
                                 "evidence_span": item.get("evidence_span"),
-                                "evidence_source_turn_id": turn_ids[
-                                    int(item["evidence_source_node_id"])
-                                ],
+                                "evidence_source_turn_id": turn_ids[evidence_node_id],
                                 "valid_from_ms": item.get("valid_from_ms"),
                                 "valid_until_ms": item.get("valid_until_ms"),
                             }
@@ -608,6 +649,7 @@ def main() -> int:
 
                 completed_batches.add(batch_key)
                 state["completed_batches"] = sorted(completed_batches)
+                state["batch_record_ids"][batch_key] = generated_record_ids
                 checkpoint(state_path, state)
                 processed_now += 1
                 print(
