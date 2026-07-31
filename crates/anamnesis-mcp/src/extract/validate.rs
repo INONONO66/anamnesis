@@ -10,9 +10,13 @@ use crate::extract::types::{
 };
 
 const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
-const MAX_ITEMS: usize = 10;
+const MAX_ITEMS: usize = 16;
 const MAX_ITEM_ID_CHARS: usize = 64;
 const MAX_CONTENT_CHARS: usize = 500;
+const MAX_SUBJECT_CHARS: usize = 128;
+const MAX_RELATION_CHARS: usize = 128;
+const MAX_OBJECT_CHARS: usize = 256;
+const MAX_EVIDENCE_SPAN_CHARS: usize = 500;
 const MAX_ENTITY_TAGS: usize = 16;
 const MAX_ENTITY_TAG_CHARS: usize = 64;
 
@@ -25,6 +29,8 @@ pub(crate) enum ValidationError {
     InvalidItemId,
     DuplicateItemId,
     InvalidContent,
+    InvalidGrounding,
+    InvalidEvidenceSpan,
     InvalidConfidence,
     InvalidEntityTags,
     InvalidValidityWindow,
@@ -44,6 +50,8 @@ impl std::fmt::Display for ValidationError {
             Self::InvalidItemId => "invalid-item-id",
             Self::DuplicateItemId => "duplicate-item-id",
             Self::InvalidContent => "invalid-content",
+            Self::InvalidGrounding => "invalid-grounding",
+            Self::InvalidEvidenceSpan => "invalid-evidence-span",
             Self::InvalidConfidence => "invalid-confidence",
             Self::InvalidEntityTags => "invalid-entity-tags",
             Self::InvalidValidityWindow => "invalid-validity-window",
@@ -70,7 +78,18 @@ struct RawExtraction {
 #[serde(deny_unknown_fields)]
 struct RawItem {
     item_local_id: String,
-    content: String,
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    subject: Option<String>,
+    #[serde(default)]
+    relation: Option<String>,
+    #[serde(default)]
+    object: Option<String>,
+    #[serde(default)]
+    evidence_object: Option<String>,
+    #[serde(default)]
+    evidence_span: Option<String>,
     kind: CandidateKind,
     confidence: f64,
     #[serde(default)]
@@ -94,6 +113,20 @@ pub(crate) fn validate_output(
     bytes: &[u8],
     batch: &[ExtractionSource],
     profile_id: &str,
+) -> Result<ValidatedExtraction, ValidationError> {
+    validate_output_for_schema(
+        bytes,
+        batch,
+        profile_id,
+        crate::extract::profile::EXTRACT_SCHEMA_VERSION,
+    )
+}
+
+pub(crate) fn validate_output_for_schema(
+    bytes: &[u8],
+    batch: &[ExtractionSource],
+    profile_id: &str,
+    schema_version: u32,
 ) -> Result<ValidatedExtraction, ValidationError> {
     if bytes.len() > MAX_OUTPUT_BYTES {
         return Err(ValidationError::SchemaReject);
@@ -121,11 +154,30 @@ pub(crate) fn validate_output(
             )
         })
         .collect();
+    let batch_sources: std::collections::HashMap<_, _> = batch
+        .iter()
+        .map(|source| (source.node_id, source))
+        .collect();
     let mut item_ids = HashSet::new();
     let mut items = Vec::with_capacity(raw.items.len());
 
     for raw_item in raw.items {
-        let item_local_id = normalize(&raw_item.item_local_id);
+        let RawItem {
+            item_local_id: raw_item_local_id,
+            content: raw_content,
+            subject: raw_subject,
+            relation: raw_relation,
+            object: raw_object,
+            evidence_object: raw_evidence_object,
+            evidence_span: raw_evidence_span,
+            kind,
+            confidence,
+            entity_tags: raw_entity_tags,
+            valid_from_ms,
+            valid_until_ms,
+            source_node_ids,
+        } = raw_item;
+        let item_local_id = normalize(&raw_item_local_id);
         if item_local_id.is_empty()
             || item_local_id.chars().count() > MAX_ITEM_ID_CHARS
             || item_local_id.chars().any(char::is_control)
@@ -136,23 +188,14 @@ pub(crate) fn validate_output(
             return Err(ValidationError::DuplicateItemId);
         }
 
-        let content = normalize(&raw_item.content);
-        if content.is_empty()
-            || content.chars().count() > MAX_CONTENT_CHARS
-            || content
-                .chars()
-                .any(|character| character.is_control() && !matches!(character, '\n' | '\t'))
-        {
-            return Err(ValidationError::InvalidContent);
-        }
-        if !raw_item.confidence.is_finite() || !(0.0..=1.0).contains(&raw_item.confidence) {
+        if !confidence.is_finite() || !(0.0..=1.0).contains(&confidence) {
             return Err(ValidationError::InvalidConfidence);
         }
-        if raw_item.entity_tags.len() > MAX_ENTITY_TAGS {
+        if raw_entity_tags.len() > MAX_ENTITY_TAGS {
             return Err(ValidationError::InvalidEntityTags);
         }
-        let mut entity_tags = Vec::with_capacity(raw_item.entity_tags.len());
-        for tag in raw_item.entity_tags {
+        let mut entity_tags = Vec::with_capacity(raw_entity_tags.len());
+        for tag in raw_entity_tags {
             let tag = normalize(&tag);
             if tag.is_empty()
                 || tag.chars().count() > MAX_ENTITY_TAG_CHARS
@@ -166,20 +209,15 @@ pub(crate) fn validate_output(
             entity_tags.push(tag);
         }
         entity_tags.sort();
-        if raw_item
-            .valid_from_ms
-            .zip(raw_item.valid_until_ms)
-            .is_some_and(|(from, until)| until <= from)
-        {
-            return Err(ValidationError::InvalidValidityWindow);
-        }
-        if raw_item.source_node_ids.is_empty() {
+        let (valid_from_ms, valid_until_ms) =
+            normalize_validity_window(schema_version, valid_from_ms, valid_until_ms)?;
+        if source_node_ids.is_empty() {
             return Err(ValidationError::InvalidSourceReference);
         }
 
-        let mut source_refs = Vec::with_capacity(raw_item.source_node_ids.len());
+        let mut source_refs = Vec::with_capacity(source_node_ids.len());
         let mut source_ids = HashSet::new();
-        for node_id in raw_item.source_node_ids {
+        for node_id in source_node_ids {
             if !source_ids.insert(node_id) {
                 return Err(ValidationError::InvalidSourceReference);
             }
@@ -201,23 +239,123 @@ pub(crate) fn validate_output(
                 ))
         });
 
+        let grounding_fields_present = [
+            raw_subject.is_some(),
+            raw_relation.is_some(),
+            raw_object.is_some(),
+            raw_evidence_span.is_some(),
+        ];
+        let base_grounding = grounding_fields_present.iter().all(|present| *present);
+        let requires_evidence_object = schema_version >= 5;
+        let has_grounding =
+            base_grounding && (!requires_evidence_object || raw_evidence_object.is_some());
+        let has_partial_grounding = grounding_fields_present.iter().any(|present| *present)
+            || raw_evidence_object.is_some();
+        if has_partial_grounding != has_grounding || (schema_version >= 4 && !has_grounding) {
+            return Err(ValidationError::InvalidGrounding);
+        }
+
+        let (
+            content,
+            subject,
+            relation,
+            object,
+            evidence_object,
+            evidence_span,
+            evidence_source_node_id,
+        ) = if has_grounding {
+            let subject = normalize(raw_subject.as_deref().unwrap_or_default());
+            let relation = if schema_version >= 5 {
+                normalize_relation(raw_relation.as_deref().unwrap_or_default())
+            } else {
+                normalize(raw_relation.as_deref().unwrap_or_default())
+            };
+            let object = normalize(raw_object.as_deref().unwrap_or_default());
+            let evidence_object = if schema_version >= 5 {
+                normalize(raw_evidence_object.as_deref().unwrap_or_default())
+            } else {
+                object.clone()
+            };
+            let evidence_span = normalize(raw_evidence_span.as_deref().unwrap_or_default());
+            validate_grounding_components(
+                &subject,
+                &relation,
+                &object,
+                &evidence_object,
+                &evidence_span,
+                schema_version,
+            )?;
+
+            let evidence_source_node_id = source_refs
+                .iter()
+                .filter_map(|source_ref| {
+                    batch_sources
+                        .get(&source_ref.node_id)
+                        .copied()
+                        .filter(|source| source.content.contains(&evidence_span))
+                        .map(|source| source.node_id)
+                })
+                .next()
+                .ok_or(ValidationError::InvalidEvidenceSpan)?;
+            let evidence_object_is_grounded = if schema_version >= 5 {
+                evidence_span.contains(&evidence_object)
+            } else {
+                phrase_tokens_contain(&evidence_span, &evidence_object)
+            };
+            if !evidence_object_is_grounded {
+                return Err(ValidationError::InvalidEvidenceSpan);
+            }
+            let content = canonical_claim(&subject, &relation, &object);
+            validate_content(&content)?;
+            (
+                content,
+                Some(subject),
+                Some(relation),
+                Some(object),
+                (schema_version >= 5).then_some(evidence_object),
+                Some(evidence_span),
+                Some(evidence_source_node_id),
+            )
+        } else {
+            let content = normalize(
+                raw_content
+                    .as_deref()
+                    .ok_or(ValidationError::InvalidContent)?,
+            );
+            validate_content(&content)?;
+            (content, None, None, None, None, None, None)
+        };
+
         let idempotency_key = candidate_key(
             profile_id,
             &source_refs,
-            &raw_item.kind,
+            &kind,
             &content,
+            GroundingKeyComponents {
+                subject: subject.as_deref(),
+                relation: relation.as_deref(),
+                object: object.as_deref(),
+                evidence_object: evidence_object.as_deref(),
+                evidence_span: evidence_span.as_deref(),
+                evidence_source_node_id,
+            },
             &entity_tags,
-            raw_item.valid_from_ms,
-            raw_item.valid_until_ms,
+            (valid_from_ms, valid_until_ms),
         );
         items.push(ValidatedCandidate {
             item_local_id,
             content,
-            kind: raw_item.kind,
-            confidence: raw_item.confidence,
+            kind,
+            confidence,
+            subject,
+            relation,
+            object,
+            evidence_object,
+            evidence_span,
+            evidence_source_node_id,
             entity_tags,
-            valid_from_ms: raw_item.valid_from_ms,
-            valid_until_ms: raw_item.valid_until_ms,
+            valid_from_ms,
+            valid_until_ms,
             sources: source_refs,
             idempotency_key,
         });
@@ -283,15 +421,171 @@ fn normalize(value: &str) -> String {
         .to_owned()
 }
 
+fn normalize_relation(value: &str) -> String {
+    normalize(value)
+        .replace('_', " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn normalize_validity_window(
+    schema_version: u32,
+    valid_from_ms: Option<u64>,
+    valid_until_ms: Option<u64>,
+) -> Result<(Option<u64>, Option<u64>), ValidationError> {
+    if valid_from_ms
+        .zip(valid_until_ms)
+        .is_some_and(|(from, until)| until <= from)
+    {
+        if schema_version >= 5 {
+            // An inverted provider interval cannot safely constrain a durable
+            // fact. Keep the grounded claim and explicitly discard only the
+            // malformed optional interval.
+            return Ok((None, None));
+        }
+        return Err(ValidationError::InvalidValidityWindow);
+    }
+    Ok((valid_from_ms, valid_until_ms))
+}
+
+fn validate_content(content: &str) -> Result<(), ValidationError> {
+    if content.is_empty()
+        || content.chars().count() > MAX_CONTENT_CHARS
+        || content
+            .chars()
+            .any(|character| character.is_control() && !matches!(character, '\n' | '\t'))
+    {
+        Err(ValidationError::InvalidContent)
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_grounding_components(
+    subject: &str,
+    relation: &str,
+    object: &str,
+    evidence_object: &str,
+    evidence_span: &str,
+    schema_version: u32,
+) -> Result<(), ValidationError> {
+    let components = [
+        (subject, MAX_SUBJECT_CHARS),
+        (relation, MAX_RELATION_CHARS),
+        (object, MAX_OBJECT_CHARS),
+        (evidence_object, MAX_OBJECT_CHARS),
+        (evidence_span, MAX_EVIDENCE_SPAN_CHARS),
+    ];
+    if components.iter().any(|(component, limit)| {
+        component.is_empty()
+            || component.chars().count() > *limit
+            || component
+                .chars()
+                .any(|character| character.is_control() && !matches!(character, '\n' | '\t'))
+    }) {
+        return Err(ValidationError::InvalidGrounding);
+    }
+
+    let subject_has_unresolved_pronoun = phrase_tokens(subject)
+        .iter()
+        .any(|token| is_unresolved_subject_token(token));
+    if subject_has_unresolved_pronoun
+        || (schema_version >= 5
+            && phrase_tokens(object)
+                .iter()
+                .any(|token| is_first_person_token(token)))
+    {
+        return Err(ValidationError::InvalidGrounding);
+    }
+    Ok(())
+}
+
+fn is_first_person_token(token: &str) -> bool {
+    matches!(
+        token,
+        "i" | "me" | "my" | "mine" | "myself" | "we" | "us" | "our" | "ours" | "ourselves"
+    )
+}
+
+fn is_unresolved_subject_token(token: &str) -> bool {
+    is_first_person_token(token)
+        || matches!(
+            token,
+            "you"
+                | "your"
+                | "yours"
+                | "yourself"
+                | "yourselves"
+                | "he"
+                | "him"
+                | "his"
+                | "himself"
+                | "she"
+                | "her"
+                | "hers"
+                | "herself"
+                | "they"
+                | "them"
+                | "their"
+                | "theirs"
+                | "themselves"
+                | "it"
+                | "its"
+                | "itself"
+        )
+}
+
+fn canonical_claim(subject: &str, relation: &str, object: &str) -> String {
+    format!("{subject} {relation} {object}")
+}
+
+fn phrase_tokens(value: &str) -> Vec<String> {
+    value
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
+fn phrase_tokens_contain(haystack: &str, needle: &str) -> bool {
+    let haystack = phrase_tokens(haystack);
+    let needle = phrase_tokens(needle);
+    !needle.is_empty()
+        && needle.len() <= haystack.len()
+        && haystack
+            .windows(needle.len())
+            .any(|window| window == needle.as_slice())
+}
+
+#[derive(Clone, Copy)]
+struct GroundingKeyComponents<'a> {
+    subject: Option<&'a str>,
+    relation: Option<&'a str>,
+    object: Option<&'a str>,
+    evidence_object: Option<&'a str>,
+    evidence_span: Option<&'a str>,
+    evidence_source_node_id: Option<u64>,
+}
+
 fn candidate_key(
     profile_id: &str,
     sources: &[ExtractionSourceRef],
     kind: &CandidateKind,
     content: &str,
+    grounding: GroundingKeyComponents<'_>,
     entity_tags: &[String],
-    valid_from_ms: Option<u64>,
-    valid_until_ms: Option<u64>,
+    validity: (Option<u64>, Option<u64>),
 ) -> String {
+    let GroundingKeyComponents {
+        subject,
+        relation,
+        object,
+        evidence_object,
+        evidence_span,
+        evidence_source_node_id,
+    } = grounding;
+    let (valid_from_ms, valid_until_ms) = validity;
     let mut hasher = Sha256::new();
     hasher.update(profile_id.as_bytes());
     for source in sources {
@@ -302,6 +596,14 @@ fn candidate_key(
     hasher.update(kind_name(kind).as_bytes());
     hasher.update([0]);
     hasher.update(content.as_bytes());
+    for component in [subject, relation, object, evidence_object, evidence_span] {
+        hasher.update([u8::from(component.is_some())]);
+        if let Some(component) = component {
+            hasher.update(component.as_bytes());
+        }
+    }
+    hasher.update([u8::from(evidence_source_node_id.is_some())]);
+    hasher.update(evidence_source_node_id.unwrap_or_default().to_le_bytes());
     for tag in entity_tags {
         hasher.update([0]);
         hasher.update(tag.as_bytes());
@@ -373,11 +675,130 @@ mod tests {
     }
 
     fn validate(bytes: &[u8]) -> Result<ValidatedExtraction, ValidationError> {
-        validate_output(bytes, &batch(), PROFILE_ID)
+        validate_output_for_schema(bytes, &batch(), PROFILE_ID, 3)
     }
 
     fn valid_output(items: &str, relations: &str) -> Vec<u8> {
         format!(r#"{{"items":[{items}],"relations":[{relations}]}}"#).into_bytes()
+    }
+
+    fn grounded_item(subject: &str, relation: &str, object: &str, evidence_span: &str) -> String {
+        grounded_item_with_evidence(subject, relation, object, object, evidence_span)
+    }
+
+    fn grounded_item_with_evidence(
+        subject: &str,
+        relation: &str,
+        object: &str,
+        evidence_object: &str,
+        evidence_span: &str,
+    ) -> String {
+        format!(
+            r#"{{"item_local_id":"grounded","subject":"{subject}","relation":"{relation}","object":"{object}","evidence_object":"{evidence_object}","evidence_span":"{evidence_span}","kind":"fact","confidence":0.9,"source_node_ids":[7]}}"#
+        )
+    }
+
+    #[test]
+    fn current_schema_derives_content_and_requires_verbatim_object_grounding() {
+        let valid = valid_output(
+            &grounded_item("Alice", "reported", "source content", "source content"),
+            "",
+        );
+        let extraction = validate_output(&valid, &batch(), PROFILE_ID).expect("grounded fact");
+        assert_eq!(extraction.items[0].content, "Alice reported source content");
+        assert_eq!(extraction.items[0].subject.as_deref(), Some("Alice"));
+        assert_eq!(
+            extraction.items[0].evidence_object.as_deref(),
+            Some("source content")
+        );
+        assert_eq!(
+            extraction.items[0].evidence_source_node_id,
+            Some(7),
+            "the validator, not the provider, resolves the evidence source"
+        );
+
+        let legacy = valid_output(&item("legacy", "content", SOURCE_A), "");
+        assert_eq!(
+            validate_output(&legacy, &batch(), PROFILE_ID),
+            Err(ValidationError::InvalidGrounding)
+        );
+        assert!(
+            validate_output_for_schema(&legacy, &batch(), PROFILE_ID, 3).is_ok(),
+            "schema-3 staged payloads remain replayable"
+        );
+
+        for invalid in [
+            grounded_item("I", "reported", "source content", "source content"),
+            grounded_item("she", "reported", "source content", "source content"),
+            grounded_item(
+                "Alice and her friend",
+                "reported",
+                "source content",
+                "source content",
+            ),
+            grounded_item(
+                "Alice and I",
+                "reported",
+                "source content",
+                "source content",
+            ),
+            grounded_item("Alice", "reported", "missing object", "source content"),
+            grounded_item("Alice", "reported", "source content", "not in source"),
+        ] {
+            assert!(validate_output(&valid_output(&invalid, ""), &batch(), PROFILE_ID).is_err());
+        }
+    }
+
+    #[test]
+    fn current_schema_separates_canonical_object_from_exact_evidence_object() {
+        let valid = valid_output(
+            &grounded_item_with_evidence(
+                "Alice",
+                "cares_for",
+                "her family",
+                "my family",
+                "source content about my family",
+            ),
+            "",
+        );
+        let extraction = validate_output(
+            &valid,
+            &[ExtractionSource {
+                content: "source content about my family".into(),
+                ..source(7, "turn-a", "hash-a")
+            }],
+            PROFILE_ID,
+        )
+        .expect("canonical and evidence objects");
+        assert_eq!(extraction.items[0].content, "Alice cares for her family");
+        assert_eq!(extraction.items[0].relation.as_deref(), Some("cares for"));
+        assert_eq!(extraction.items[0].object.as_deref(), Some("her family"));
+        assert_eq!(
+            extraction.items[0].evidence_object.as_deref(),
+            Some("my family")
+        );
+
+        let unresolved = valid_output(
+            &grounded_item_with_evidence(
+                "Alice",
+                "cares for",
+                "my family",
+                "my family",
+                "source content about my family",
+            ),
+            "",
+        );
+        assert_eq!(
+            validate_output(
+                &unresolved,
+                &[ExtractionSource {
+                    content: "source content about my family".into(),
+                    ..source(7, "turn-a", "hash-a")
+                }],
+                PROFILE_ID,
+            ),
+            Err(ValidationError::InvalidGrounding)
+        );
     }
 
     #[test]
@@ -407,6 +828,17 @@ mod tests {
             validate(&empty_window),
             Err(ValidationError::InvalidValidityWindow)
         );
+        let current_invalid_window = valid_output(
+            &grounded_item("Alice", "reported", "source content", "source content").replace(
+                r#""source_node_ids":[7]"#,
+                r#""valid_from_ms":20,"valid_until_ms":10,"source_node_ids":[7]"#,
+            ),
+            "",
+        );
+        let normalized =
+            validate_output(&current_invalid_window, &batch(), PROFILE_ID).expect("safe fallback");
+        assert_eq!(normalized.items[0].valid_from_ms, None);
+        assert_eq!(normalized.items[0].valid_until_ms, None);
         let duplicate_tags = valid_output(
             r#"{"item_local_id":"event","content":"Alice moved.","kind":"event","confidence":0.9,"entity_tags":["Alice","Alice"],"valid_from_ms":null,"valid_until_ms":null,"source_node_ids":[7]}"#,
             "",
@@ -479,15 +911,15 @@ mod tests {
 
     #[test]
     fn rejects_item_limits_ids_content_and_confidence() {
-        let eleven_items = (0..11)
+        let seventeen_items = (0..17)
             .map(|index| item(&format!("item-{index}"), "content", SOURCE_A))
             .collect::<Vec<_>>()
             .join(",");
         let cjk_501 = "界".repeat(501);
         let cases = vec![
             (
-                "eleven items",
-                valid_output(&eleven_items, ""),
+                "seventeen items",
+                valid_output(&seventeen_items, ""),
                 ValidationError::TooManyItems,
             ),
             (
@@ -678,8 +1110,8 @@ mod tests {
         );
 
         assert_eq!(
-            validate_output(&first, &batch(), PROFILE_ID).expect("first valid"),
-            validate_output(
+            validate_output_for_schema(&first, &batch(), PROFILE_ID, 3).expect("first valid"),
+            validate_output_for_schema(
                 &second,
                 &[
                     source(9, "turn-c", "hash-c"),
@@ -687,6 +1119,7 @@ mod tests {
                     source(7, "turn-a", "hash-a"),
                 ],
                 PROFILE_ID,
+                3,
             )
             .expect("second valid"),
         );
@@ -716,7 +1149,7 @@ mod tests {
         let aligned_batch = vec![source(7, "turn-b", "hash-b")];
         let bytes = valid_output(&item("one", "content", "7"), "");
 
-        let extraction = validate_output(&bytes, &aligned_batch, PROFILE_ID)
+        let extraction = validate_output_for_schema(&bytes, &aligned_batch, PROFILE_ID, 3)
             .expect("valid authoritative source");
         assert_eq!(extraction.items[0].sources[0].turn_key, "turn-b");
         assert_eq!(extraction.items[0].sources[0].content_hash, "hash-b");
@@ -729,7 +1162,7 @@ mod tests {
             "",
         );
         assert_eq!(
-            validate_output(&provider_reference_fields, &aligned_batch, PROFILE_ID),
+            validate_output_for_schema(&provider_reference_fields, &aligned_batch, PROFILE_ID, 3,),
             Err(ValidationError::SchemaReject),
         );
     }
@@ -759,6 +1192,11 @@ mod tests {
             (ValidationError::InvalidItemId, "invalid-item-id"),
             (ValidationError::DuplicateItemId, "duplicate-item-id"),
             (ValidationError::InvalidContent, "invalid-content"),
+            (ValidationError::InvalidGrounding, "invalid-grounding"),
+            (
+                ValidationError::InvalidEvidenceSpan,
+                "invalid-evidence-span",
+            ),
             (ValidationError::InvalidConfidence, "invalid-confidence"),
             (
                 ValidationError::InvalidSourceReference,

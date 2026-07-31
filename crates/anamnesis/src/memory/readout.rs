@@ -332,6 +332,32 @@ fn infer_plan(query: &str, answer_shape_hint: Option<AnswerShape>) -> RecallPlan
         || requests_plural_object
         || normalized.contains("무엇들이")
         || normalized.contains("어떤 것들이");
+    let requests_creator_attribution = words.iter().any(|word| {
+        let word = word.strip_suffix("'s").unwrap_or(word);
+        matches!(
+            word,
+            "artist" | "author" | "composer" | "creator" | "director" | "writer"
+        )
+    }) && words.iter().any(|word| {
+        matches!(
+            *word,
+            "book"
+                | "books"
+                | "film"
+                | "films"
+                | "movie"
+                | "movies"
+                | "music"
+                | "novel"
+                | "novels"
+                | "song"
+                | "songs"
+                | "theme"
+                | "themes"
+                | "tune"
+                | "tunes"
+        )
+    });
     let requests_relationship =
         has_any_sequence(&[
             &["relationship", "between"],
@@ -344,6 +370,7 @@ fn infer_plan(query: &str, answer_shape_hint: Option<AnswerShape>) -> RecallPlan
             || has_word("compare")
             || has_word("causes")
             || has_word("reasons")
+            || requests_creator_attribution
             || normalized.contains("관계")
             || normalized.contains("공통")
             || normalized.contains("원인");
@@ -367,7 +394,12 @@ fn infer_plan(query: &str, answer_shape_hint: Option<AnswerShape>) -> RecallPlan
                 | "would"
         )
     });
+    let requests_comparative_preference = has_word("prefer")
+        && (has_sequence(&["more", "than"]) || has_sequence(&["rather", "than"]));
     let requests_inference = has_word("likely")
+        || has_word("possibly")
+        || has_word("potentially")
+        || has_word("probably")
         || has_word("could")
         || has_word("might")
         || has_word("would")
@@ -381,6 +413,7 @@ fn infer_plan(query: &str, answer_shape_hint: Option<AnswerShape>) -> RecallPlan
             &["what", "kind", "of", "person"],
         ])
         || starts_yes_no_question
+        || requests_comparative_preference
         || normalized.contains("것 같")
         || normalized.contains("가능성이");
 
@@ -512,7 +545,7 @@ pub(crate) fn temporal_evidence_matches(query: &str, evidence: &str) -> bool {
     }
     let evidence_terms = terms(evidence);
     let overlap = query_terms.intersection(&evidence_terms).count();
-    overlap >= query_terms.len().min(3)
+    overlap >= query_terms.len().min(2)
 }
 
 pub(crate) fn compile_ranking<S: StorageAdapter>(
@@ -521,7 +554,9 @@ pub(crate) fn compile_ranking<S: StorageAdapter>(
     ranking: &[RerankedCandidate],
     selection: EvidenceSelection,
     limit: usize,
+    routed_atomic_sources: &[AtomicSourceMarker],
 ) -> Result<Vec<RerankedCandidate>, Error> {
+    let automatic = selection == EvidenceSelection::Auto;
     let resolved_selection = match selection {
         EvidenceSelection::Auto => match plan.recall_intent {
             RecallIntent::Enumeration => EvidenceSelection::SourceSessionCoverage,
@@ -538,13 +573,260 @@ pub(crate) fn compile_ranking<S: StorageAdapter>(
         explicit => explicit,
     };
 
-    match resolved_selection {
+    let baseline = match resolved_selection {
         EvidenceSelection::Auto | EvidenceSelection::Relevance => Ok(ranking.to_vec()),
         EvidenceSelection::DistinctSources => distinct_source_ranking(storage, ranking),
         EvidenceSelection::SourceCoverage => source_coverage_ranking(storage, ranking),
         EvidenceSelection::SourceSessionCoverage => {
             source_session_coverage_ranking(storage, ranking, limit)
         }
+    }?;
+    if !automatic {
+        return Ok(baseline);
+    }
+    claim_slot_coverage_ranking(
+        storage,
+        plan,
+        ranking,
+        &baseline,
+        limit,
+        routed_atomic_sources,
+    )
+}
+
+fn claim_slot_coverage_ranking<S: StorageAdapter>(
+    storage: &S,
+    plan: &RecallPlan,
+    ranking: &[RerankedCandidate],
+    baseline: &[RerankedCandidate],
+    limit: usize,
+    routed_atomic_sources: &[AtomicSourceMarker],
+) -> Result<Vec<RerankedCandidate>, Error> {
+    if !uses_atomic_fact_expansion(plan) || limit == 0 {
+        return Ok(baseline.to_vec());
+    }
+
+    let mut claim_sources: HashMap<AtomicFactId, HashSet<NodeId>> = HashMap::new();
+    for marker in routed_atomic_sources {
+        let Some(fact_id) = marker.fact_id else {
+            continue;
+        };
+        claim_sources
+            .entry(fact_id)
+            .or_default()
+            .insert(marker.source_node_id);
+    }
+    if claim_sources.is_empty() {
+        return Ok(baseline.to_vec());
+    }
+
+    enum ClaimCoverage {
+        Legacy,
+        Grounded {
+            evidence_source: NodeId,
+            evidence_span: String,
+        },
+        Invalid,
+    }
+    let mut claim_coverage = HashMap::new();
+    let live_node_ids: HashSet<_> = storage.all_node_ids().into_iter().collect();
+    for fact_id in claim_sources.keys().copied() {
+        let fact = storage.get_atomic_fact(fact_id)?;
+        let evidence_source = fact
+            .metadata
+            .get("anamnesis:evidence-source-node-id")
+            .and_then(|value| value.parse::<u64>().ok())
+            .map(NodeId);
+        let evidence_start = fact
+            .metadata
+            .get("anamnesis:evidence-span-start")
+            .and_then(|value| value.parse::<usize>().ok());
+        let evidence_end = fact
+            .metadata
+            .get("anamnesis:evidence-span-end")
+            .and_then(|value| value.parse::<usize>().ok());
+        let ground_object = fact.metadata.get("anamnesis:ground-object");
+        let requires_exact_object = fact.metadata.contains_key("anamnesis:evidence-object");
+        let evidence_object = fact
+            .metadata
+            .get("anamnesis:evidence-object")
+            .or(ground_object);
+        let has_grounding_metadata = evidence_source.is_some()
+            || evidence_start.is_some()
+            || evidence_end.is_some()
+            || ground_object.is_some()
+            || evidence_object.is_some();
+        let coverage = match (
+            evidence_source,
+            evidence_start,
+            evidence_end,
+            evidence_object,
+        ) {
+            (Some(evidence_source), Some(start), Some(end), Some(object))
+                if live_node_ids.contains(&evidence_source)
+                    && claim_sources
+                        .get(&fact_id)
+                        .is_some_and(|sources| sources.contains(&evidence_source)) =>
+            {
+                let source = storage.get_node(evidence_source)?;
+                match source.content.get(start..end) {
+                    Some(evidence_span)
+                        if if requires_exact_object {
+                            evidence_span.contains(object)
+                        } else {
+                            normalized_phrase(evidence_span).contains(&normalized_phrase(object))
+                        } =>
+                    {
+                        ClaimCoverage::Grounded {
+                            evidence_source,
+                            evidence_span: evidence_span.to_owned(),
+                        }
+                    }
+                    _ => ClaimCoverage::Invalid,
+                }
+            }
+            _ if !has_grounding_metadata => ClaimCoverage::Legacy,
+            _ => ClaimCoverage::Invalid,
+        };
+        claim_coverage.insert(fact_id, coverage);
+    }
+
+    let mut source_cache = HashMap::new();
+    let mut covered_claim_cache = HashMap::new();
+    for candidate in ranking.iter().chain(baseline) {
+        if let std::collections::hash_map::Entry::Vacant(entry) =
+            source_cache.entry(candidate.node_id)
+        {
+            let candidate_sources = canonical_sources(storage, candidate.node_id)?
+                .into_iter()
+                .collect::<HashSet<_>>();
+            let candidate_content = &storage.get_node(candidate.node_id)?.content;
+            let covered = claim_sources
+                .iter()
+                .filter_map(|(fact_id, sources)| {
+                    let covers = match claim_coverage.get(fact_id) {
+                        Some(ClaimCoverage::Grounded {
+                            evidence_source,
+                            evidence_span,
+                        }) => {
+                            candidate_sources.contains(evidence_source)
+                                && candidate_content.contains(evidence_span)
+                        }
+                        Some(ClaimCoverage::Legacy) => sources
+                            .iter()
+                            .any(|source| candidate_sources.contains(source)),
+                        Some(ClaimCoverage::Invalid) | None => false,
+                    };
+                    covers.then_some(*fact_id)
+                })
+                .collect::<HashSet<_>>();
+            entry.insert(candidate_sources);
+            covered_claim_cache.insert(candidate.node_id, covered);
+        }
+    }
+    let covered_claims = |node_id: NodeId| -> HashSet<AtomicFactId> {
+        covered_claim_cache
+            .get(&node_id)
+            .cloned()
+            .unwrap_or_default()
+    };
+
+    let mut selected: Vec<_> = baseline.iter().take(limit).copied().collect();
+    let mut coverage_counts = HashMap::new();
+    for candidate in &selected {
+        for fact_id in covered_claims(candidate.node_id) {
+            *coverage_counts.entry(fact_id).or_insert(0usize) += 1;
+        }
+    }
+    let mut missing: HashSet<_> = claim_sources
+        .keys()
+        .filter(|fact_id| !coverage_counts.contains_key(fact_id))
+        .copied()
+        .collect();
+    if missing.is_empty() {
+        return Ok(baseline.to_vec());
+    }
+
+    // The reranker's authoritative head is never removed. At the default
+    // twenty-fragment width this freezes the first twelve rows and lets at
+    // most four tail rows change, only when all of a victim's canonical raw
+    // evidence remains represented.
+    let head_limit = selected
+        .len()
+        .min(limit.saturating_mul(3).div_ceil(5).max(1));
+    let mut replacements = 0usize;
+    const MAX_CLAIM_REPLACEMENTS: usize = 4;
+
+    while !missing.is_empty() && replacements < MAX_CLAIM_REPLACEMENTS {
+        let selected_ids: HashSet<_> = selected.iter().map(|candidate| candidate.node_id).collect();
+        let best_candidate = ranking
+            .iter()
+            .enumerate()
+            .filter(|(_, candidate)| !selected_ids.contains(&candidate.node_id))
+            .filter_map(|(rank, candidate)| {
+                let claims = covered_claims(candidate.node_id);
+                let gain = claims
+                    .iter()
+                    .filter(|fact_id| missing.contains(fact_id))
+                    .count();
+                (gain > 0).then_some((rank, *candidate, claims, gain))
+            })
+            .max_by(|left, right| left.3.cmp(&right.3).then_with(|| right.0.cmp(&left.0)));
+        let Some((_, candidate, candidate_claims, _)) = best_candidate else {
+            break;
+        };
+
+        if selected.len() < limit {
+            selected.push(candidate);
+        } else {
+            let victim = (head_limit..selected.len()).rev().find(|index| {
+                let victim_node_id = selected[*index].node_id;
+                let victim_sources = source_cache
+                    .get(&victim_node_id)
+                    .cloned()
+                    .unwrap_or_default();
+                let mut sources_without_victim = source_cache
+                    .get(&candidate.node_id)
+                    .cloned()
+                    .unwrap_or_default();
+                for retained in selected
+                    .iter()
+                    .filter(|retained| retained.node_id != victim_node_id)
+                {
+                    if let Some(sources) = source_cache.get(&retained.node_id) {
+                        sources_without_victim.extend(sources);
+                    }
+                }
+                let preserves_raw_evidence = victim_sources
+                    .iter()
+                    .all(|source| sources_without_victim.contains(source));
+                preserves_raw_evidence
+                    && covered_claims(victim_node_id).into_iter().all(|fact_id| {
+                        coverage_counts.get(&fact_id).copied().unwrap_or_default()
+                            + usize::from(candidate_claims.contains(&fact_id))
+                            > 1
+                    })
+            });
+            let Some(victim) = victim else {
+                break;
+            };
+            selected[victim] = candidate;
+        }
+
+        replacements += 1;
+        coverage_counts.clear();
+        for selected_candidate in &selected {
+            for fact_id in covered_claims(selected_candidate.node_id) {
+                *coverage_counts.entry(fact_id).or_insert(0usize) += 1;
+            }
+        }
+        missing.retain(|fact_id| !coverage_counts.contains_key(fact_id));
+    }
+
+    if replacements == 0 {
+        Ok(baseline.to_vec())
+    } else {
+        Ok(selected)
     }
 }
 
@@ -1044,13 +1326,25 @@ struct AtomicFactCandidate {
     fact_id: AtomicFactId,
     dense_score: f64,
     lexical_overlap: usize,
+    lexical_idf_score: f64,
+    matched_terms: HashSet<String>,
     entity_matches: usize,
     kind_priority: usize,
+    source_session_id: String,
+    source_node_ids: Vec<NodeId>,
 }
 
 pub(super) struct RoutedAtomicSource {
     pub candidate: crate::query::ReadoutCandidate,
     pub kind_priority: usize,
+    pub fact_ids: Vec<AtomicFactId>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) struct AtomicSourceMarker {
+    pub source_node_id: NodeId,
+    pub kind_priority: usize,
+    pub fact_id: Option<AtomicFactId>,
 }
 
 fn normalized_phrase(value: &str) -> String {
@@ -1076,6 +1370,32 @@ fn selective_entity_matches(query: &str, entity_tags: &[String]) -> usize {
             normalized_tag.len() > 2 && normalized_query.contains(&normalized_tag)
         })
         .count()
+}
+
+fn atomic_entity_matches(
+    query: &str,
+    entity_tags: &[String],
+    metadata: &HashMap<String, String>,
+) -> usize {
+    let mut matches = selective_entity_matches(query, entity_tags);
+    let Some(subject) = metadata
+        .get("anamnesis:ground-subject")
+        .map(|subject| subject.trim())
+        .filter(|subject| !subject.is_empty())
+    else {
+        return matches;
+    };
+    let normalized_subject = normalized_phrase(subject);
+    let subject_is_tagged = entity_tags
+        .iter()
+        .any(|tag| normalized_phrase(tag) == normalized_subject);
+    if !subject_is_tagged {
+        let normalized_query = normalized_phrase(query);
+        matches += usize::from(
+            normalized_subject.len() > 2 && normalized_query.contains(&normalized_subject),
+        );
+    }
+    matches
 }
 
 fn inference_fact_kind_priority(plan: &RecallPlan, metadata: &HashMap<String, String>) -> usize {
@@ -1120,6 +1440,107 @@ fn uses_complex_expansion(plan: &RecallPlan) -> bool {
     !requests_causal_explanation && !requests_gift_recommendation
 }
 
+fn uses_atomic_fact_expansion(plan: &RecallPlan) -> bool {
+    uses_complex_expansion(plan)
+        || matches!(
+            plan.answer_shape,
+            AnswerShape::Count | AnswerShape::Frequency
+        )
+}
+
+fn requests_creator_attribution_window(plan: &RecallPlan) -> bool {
+    if plan.answer_shape != AnswerShape::Relationship {
+        return false;
+    }
+    let words: HashSet<_> = plan
+        .query
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_lowercase)
+        .collect();
+    let requests_creator = words.iter().any(|word| {
+        matches!(
+            word.as_str(),
+            "artist" | "author" | "composer" | "creator" | "director" | "writer"
+        )
+    });
+    let names_work = words.iter().any(|word| {
+        matches!(
+            word.as_str(),
+            "book"
+                | "film"
+                | "movie"
+                | "music"
+                | "novel"
+                | "song"
+                | "theme"
+                | "tune"
+                | "tunes"
+                | "work"
+        )
+    });
+    requests_creator && names_work
+}
+
+fn uses_idf_atomic_lane(plan: &RecallPlan) -> bool {
+    matches!(
+        plan.answer_shape,
+        AnswerShape::Count | AnswerShape::Frequency
+    )
+}
+
+fn uses_strict_atomic_admission(plan: &RecallPlan) -> bool {
+    matches!(
+        plan.answer_shape,
+        AnswerShape::Count | AnswerShape::Frequency
+    )
+}
+
+pub(super) fn parse_atomic_source_markers(strategies: &[String]) -> Vec<AtomicSourceMarker> {
+    let mut markers = Vec::new();
+    for strategy in strategies {
+        let Some(encoded_sources) = strategy.strip_prefix("atomic_fact_sources:") else {
+            continue;
+        };
+        for encoded_source in encoded_sources.split(',') {
+            let mut parts = encoded_source.split('@');
+            let Some(encoded_id) = parts.next() else {
+                continue;
+            };
+            let Some(encoded_priority) = parts.next() else {
+                continue;
+            };
+            let Ok(source_id) = encoded_id.parse::<u64>() else {
+                continue;
+            };
+            let Ok(kind_priority) = encoded_priority.parse::<usize>() else {
+                continue;
+            };
+            let fact_id = match parts.next() {
+                Some(encoded_fact_id) => {
+                    let Ok(fact_id) = encoded_fact_id.parse::<u64>() else {
+                        continue;
+                    };
+                    Some(AtomicFactId(fact_id))
+                }
+                None => None,
+            };
+            if parts.next().is_some() {
+                continue;
+            }
+            let marker = AtomicSourceMarker {
+                source_node_id: NodeId(source_id),
+                kind_priority,
+                fact_id,
+            };
+            if !markers.contains(&marker) {
+                markers.push(marker);
+            }
+        }
+    }
+    markers
+}
+
 fn add_atomic_rrf_scores(
     ranked: impl IntoIterator<Item = AtomicFactId>,
     scores: &mut HashMap<AtomicFactId, f64>,
@@ -1130,6 +1551,71 @@ fn add_atomic_rrf_scores(
     }
 }
 
+fn source_diverse_atomic_ranking(
+    ranked_facts: Vec<(AtomicFactId, f64)>,
+    fact_limit: usize,
+    per_session_limit: usize,
+    source_sessions: &HashMap<AtomicFactId, String>,
+    source_nodes: &HashMap<AtomicFactId, Vec<NodeId>>,
+) -> Vec<(AtomicFactId, f64)> {
+    let mut session_counts = HashMap::new();
+    let mut covered_sources = HashSet::new();
+    let mut selected = Vec::with_capacity(fact_limit);
+    let mut deferred = Vec::new();
+
+    // First preserve both session breadth and raw-evidence breadth. Multiple
+    // atomic claims can cite different spans in one raw turn, but returning
+    // that turn once already exposes every span to the reader.
+    for ranked_fact in ranked_facts {
+        let Some(session) = source_sessions.get(&ranked_fact.0) else {
+            deferred.push(ranked_fact);
+            continue;
+        };
+        let adds_source = source_nodes.get(&ranked_fact.0).is_some_and(|sources| {
+            sources
+                .iter()
+                .any(|source| !covered_sources.contains(source))
+        });
+        let count = session_counts.entry(session.clone()).or_insert(0usize);
+        if selected.len() < fact_limit && *count < per_session_limit && adds_source {
+            *count += 1;
+            if let Some(sources) = source_nodes.get(&ranked_fact.0) {
+                covered_sources.extend(sources.iter().copied());
+            }
+            selected.push(ranked_fact);
+        } else {
+            deferred.push(ranked_fact);
+        }
+    }
+
+    // If the session quota left capacity, relax it only for facts that expose
+    // another raw source. Exact-source duplicates remain the final backfill.
+    let mut duplicate_sources = Vec::new();
+    for ranked_fact in deferred {
+        let adds_source = source_nodes.get(&ranked_fact.0).is_some_and(|sources| {
+            sources
+                .iter()
+                .any(|source| !covered_sources.contains(source))
+        });
+        if selected.len() < fact_limit && adds_source {
+            if let Some(sources) = source_nodes.get(&ranked_fact.0) {
+                covered_sources.extend(sources.iter().copied());
+            }
+            selected.push(ranked_fact);
+        } else {
+            duplicate_sources.push(ranked_fact);
+        }
+    }
+    if selected.len() < fact_limit {
+        selected.extend(
+            duplicate_sources
+                .into_iter()
+                .take(fact_limit - selected.len()),
+        );
+    }
+    selected
+}
+
 pub(super) fn route_atomic_fact_sources<S: StorageAdapter>(
     storage: &S,
     plan: &RecallPlan,
@@ -1137,13 +1623,14 @@ pub(super) fn route_atomic_fact_sources<S: StorageAdapter>(
     now: crate::graph::Timestamp,
     scope: &ScopePath,
 ) -> Result<Vec<RoutedAtomicSource>, Error> {
-    if !uses_complex_expansion(plan) {
+    if !uses_atomic_fact_expansion(plan) {
         return Ok(Vec::new());
     }
     let fact_limit = match plan.answer_shape {
         AnswerShape::Collection => 16,
         AnswerShape::Relationship => 12,
         AnswerShape::Inference => 16,
+        AnswerShape::Count | AnswerShape::Frequency => 16,
         _ => return Ok(Vec::new()),
     };
     let atomic_fact_ids = storage.all_atomic_fact_ids();
@@ -1153,6 +1640,8 @@ pub(super) fn route_atomic_fact_sources<S: StorageAdapter>(
 
     let query_terms = facet_terms(&plan.query);
     let mut facts = Vec::with_capacity(atomic_fact_ids.len());
+    let mut lexical_document_frequency = HashMap::new();
+    let mut eligible_fact_count = 0usize;
     for fact_id in atomic_fact_ids {
         let fact = storage.get_atomic_fact(fact_id)?;
         if fact
@@ -1164,21 +1653,47 @@ pub(super) fn route_atomic_fact_sources<S: StorageAdapter>(
         {
             continue;
         }
+        eligible_fact_count += 1;
         let dense_score = cosine_similarity(query_embedding, &fact.embedding);
-        let lexical_overlap = query_terms
-            .intersection(&facet_terms(&fact.content))
-            .count();
-        let entity_matches = selective_entity_matches(&plan.query, &fact.entity_tags);
+        let fact_terms = facet_terms(&fact.content);
+        let matched_terms: HashSet<_> = query_terms.intersection(&fact_terms).cloned().collect();
+        for term in &matched_terms {
+            *lexical_document_frequency
+                .entry(term.clone())
+                .or_insert(0usize) += 1;
+        }
+        let lexical_overlap = matched_terms.len();
+        let entity_matches = atomic_entity_matches(&plan.query, &fact.entity_tags, &fact.metadata);
         let kind_priority = inference_fact_kind_priority(plan, &fact.metadata);
+        if uses_strict_atomic_admission(plan) && entity_matches == 0 && lexical_overlap < 2 {
+            continue;
+        }
         if dense_score > 0.0 || lexical_overlap > 0 || entity_matches > 0 {
             facts.push(AtomicFactCandidate {
                 fact_id,
                 dense_score,
                 lexical_overlap,
+                lexical_idf_score: 0.0,
+                matched_terms,
                 entity_matches,
                 kind_priority,
+                source_session_id: fact.source_session_id.clone(),
+                source_node_ids: fact.source_node_ids.clone(),
             });
         }
+    }
+    for fact in &mut facts {
+        fact.lexical_idf_score = fact
+            .matched_terms
+            .iter()
+            .map(|term| {
+                let document_frequency = lexical_document_frequency
+                    .get(term)
+                    .copied()
+                    .unwrap_or_default();
+                ((eligible_fact_count as f64 + 1.0) / (document_frequency as f64 + 1.0)).ln() + 1.0
+            })
+            .sum();
     }
 
     const LANE_DEPTH: usize = 64;
@@ -1187,6 +1702,18 @@ pub(super) fn route_atomic_fact_sources<S: StorageAdapter>(
         right
             .dense_score
             .total_cmp(&left.dense_score)
+            .then_with(|| left.fact_id.cmp(&right.fact_id))
+    });
+    let mut idf_lexical: Vec<_> = facts
+        .iter()
+        .filter(|fact| fact.lexical_idf_score > 0.0)
+        .collect();
+    idf_lexical.sort_by(|left, right| {
+        right
+            .lexical_idf_score
+            .total_cmp(&left.lexical_idf_score)
+            .then_with(|| right.lexical_overlap.cmp(&left.lexical_overlap))
+            .then_with(|| right.dense_score.total_cmp(&left.dense_score))
             .then_with(|| left.fact_id.cmp(&right.fact_id))
     });
     let mut lexical: Vec<_> = facts
@@ -1225,7 +1752,6 @@ pub(super) fn route_atomic_fact_sources<S: StorageAdapter>(
             .then_with(|| right.dense_score.total_cmp(&left.dense_score))
             .then_with(|| left.fact_id.cmp(&right.fact_id))
     });
-
     let mut fused = HashMap::new();
     add_atomic_rrf_scores(
         dense.iter().take(LANE_DEPTH).map(|fact| fact.fact_id),
@@ -1235,6 +1761,12 @@ pub(super) fn route_atomic_fact_sources<S: StorageAdapter>(
         lexical.iter().take(LANE_DEPTH).map(|fact| fact.fact_id),
         &mut fused,
     );
+    if uses_idf_atomic_lane(plan) {
+        add_atomic_rrf_scores(
+            idf_lexical.iter().take(LANE_DEPTH).map(|fact| fact.fact_id),
+            &mut fused,
+        );
+    }
     add_atomic_rrf_scores(
         entities.iter().take(LANE_DEPTH).map(|fact| fact.fact_id),
         &mut fused,
@@ -1253,6 +1785,14 @@ pub(super) fn route_atomic_fact_sources<S: StorageAdapter>(
     let kind_priority_by_id: HashMap<_, _> = facts
         .iter()
         .map(|fact| (fact.fact_id, fact.kind_priority))
+        .collect();
+    let source_sessions_by_id: HashMap<_, _> = facts
+        .iter()
+        .map(|fact| (fact.fact_id, fact.source_session_id.clone()))
+        .collect();
+    let source_nodes_by_id: HashMap<_, _> = facts
+        .iter()
+        .map(|fact| (fact.fact_id, fact.source_node_ids.clone()))
         .collect();
     // Hypothetical/preference questions need stable behavioral evidence more
     // than another semantically similar event. Reserve a small typed lane
@@ -1293,40 +1833,24 @@ pub(super) fn route_atomic_fact_sources<S: StorageAdapter>(
     let per_session_limit = match plan.answer_shape {
         AnswerShape::Inference => 2,
         AnswerShape::Collection | AnswerShape::Relationship => 2,
+        AnswerShape::Count | AnswerShape::Frequency => 4,
         _ => fact_limit,
     };
-    let mut session_counts = HashMap::new();
-    let mut session_diverse = Vec::with_capacity(fact_limit);
-    let mut deferred = Vec::new();
-    for ranked_fact in ranked_facts {
-        let session = storage
-            .get_atomic_fact(ranked_fact.0)?
-            .source_session_id
-            .clone();
-        let count = session_counts.entry(session).or_insert(0usize);
-        if *count < per_session_limit && session_diverse.len() < fact_limit {
-            *count += 1;
-            session_diverse.push(ranked_fact);
-        } else {
-            deferred.push(ranked_fact);
-        }
-    }
-    if session_diverse.len() < fact_limit {
-        session_diverse.extend(
-            deferred
-                .into_iter()
-                .take(fact_limit - session_diverse.len()),
-        );
-    }
-    let ranked_facts = session_diverse;
+    let ranked_facts = source_diverse_atomic_ranking(
+        ranked_facts,
+        fact_limit,
+        per_session_limit,
+        &source_sessions_by_id,
+        &source_nodes_by_id,
+    );
     let max_fused = ranked_facts
         .first()
         .map(|(_, score)| *score)
         .unwrap_or(1.0)
         .max(f64::EPSILON);
 
-    let mut seen_sources = HashSet::new();
-    let mut routed = Vec::new();
+    let mut routed_position_by_source: HashMap<NodeId, usize> = HashMap::new();
+    let mut routed: Vec<RoutedAtomicSource> = Vec::new();
     let live_node_ids: HashSet<_> = storage.all_node_ids().into_iter().collect();
     // The trace can retain multiple raw provenance rows per selected fact, but
     // the caller controls how many are promoted into the latency-sensitive
@@ -1335,11 +1859,28 @@ pub(super) fn route_atomic_fact_sources<S: StorageAdapter>(
     let source_limit = fact_limit.saturating_mul(2).min(20);
     for (fact_id, fused_score) in ranked_facts {
         let fact = storage.get_atomic_fact(fact_id)?;
-        for source_id in fact.source_node_ids.iter().copied() {
-            if routed.len() >= source_limit {
-                return Ok(routed);
+        let evidence_source = fact
+            .metadata
+            .get("anamnesis:evidence-source-node-id")
+            .and_then(|value| value.parse::<u64>().ok())
+            .map(NodeId);
+        let mut ordered_sources = fact.source_node_ids.clone();
+        ordered_sources.sort_by_key(|source_id| usize::from(Some(*source_id) != evidence_source));
+        for source_id in ordered_sources {
+            if let Some(position) = routed_position_by_source.get(&source_id).copied() {
+                let routed_source = &mut routed[position];
+                if !routed_source.fact_ids.contains(&fact_id) {
+                    routed_source.fact_ids.push(fact_id);
+                }
+                routed_source.kind_priority = routed_source.kind_priority.max(
+                    kind_priority_by_id
+                        .get(&fact_id)
+                        .copied()
+                        .unwrap_or_default(),
+                );
+                continue;
             }
-            if !seen_sources.insert(source_id) {
+            if routed.len() >= source_limit {
                 continue;
             }
             // Source deletion can race or outlive a reviewed sidecar record.
@@ -1379,7 +1920,9 @@ pub(super) fn route_atomic_fact_sources<S: StorageAdapter>(
                     .get(&fact_id)
                     .copied()
                     .unwrap_or_default(),
+                fact_ids: vec![fact_id],
             });
+            routed_position_by_source.insert(source_id, routed.len() - 1);
         }
     }
     Ok(routed)
@@ -1393,7 +1936,7 @@ fn coverage_preselected_ranking<S: StorageAdapter>(
     routed_atomic_sources: &[(NodeId, usize)],
 ) -> Result<Vec<crate::query::ReadoutCandidate>, Error> {
     let inspected = ranking.len().min(limit);
-    if !uses_complex_expansion(plan) || ranking.len() <= inspected || inspected < 2 {
+    if !uses_atomic_fact_expansion(plan) || ranking.len() <= inspected || inspected < 2 {
         return Ok(ranking.iter().take(inspected).cloned().collect());
     }
 
@@ -1666,6 +2209,20 @@ pub(crate) fn compile_rerank_documents<S: StorageAdapter>(
 ) -> Result<Vec<EvidenceDocument>, Error> {
     let ranking =
         coverage_preselected_ranking(storage, plan, ranking, limit, routed_atomic_sources)?;
+    if requests_creator_attribution_window(plan) {
+        return ranking
+            .iter()
+            .take(limit)
+            .map(|candidate| {
+                let node = storage.get_node(candidate.node_id)?;
+                Ok(EvidenceDocument {
+                    node_id: candidate.node_id,
+                    source_node_ids: canonical_sources(storage, candidate.node_id)?,
+                    text: node.content.clone(),
+                })
+            })
+            .collect();
+    }
     if plan.answer_shape == AnswerShape::Inference {
         return compile_inference_documents(storage, &ranking, limit);
     }
@@ -1774,7 +2331,7 @@ mod tests {
     use crate::graph::node::Origin;
     use crate::graph::{Edge, MemoryTier, Node, PeerId, Timestamp};
     use crate::query::ReadoutCandidate;
-    use crate::storage::SqliteStorage;
+    use crate::storage::{AtomicFact, SqliteStorage};
     use std::collections::VecDeque;
 
     fn fixture_node(
@@ -1858,6 +2415,94 @@ mod tests {
         )
     }
 
+    fn seed_legacy_atomic_fact(
+        storage: &mut SqliteStorage,
+        fact_id: AtomicFactId,
+        source_node_id: NodeId,
+    ) {
+        let (content, source_session_id, scope, observed_at) = {
+            let source = storage
+                .get_node(source_node_id)
+                .expect("atomic fact source");
+            (
+                source.content.clone(),
+                source.origin.session_id.clone(),
+                source.origin.scope.clone(),
+                source.created_at,
+            )
+        };
+        storage
+            .set_atomic_fact(AtomicFact {
+                id: fact_id,
+                content,
+                embedding: vec![1.0],
+                source_node_ids: vec![source_node_id],
+                entity_tags: Vec::new(),
+                source_session_id,
+                scope,
+                observed_at,
+                valid_from: None,
+                valid_until: None,
+                metadata: HashMap::new(),
+            })
+            .expect("legacy atomic fact");
+    }
+
+    fn seed_grounded_atomic_fact(
+        storage: &mut SqliteStorage,
+        fact_id: AtomicFactId,
+        source_node_id: NodeId,
+        evidence_span: &str,
+        object: &str,
+    ) {
+        let (source_session_id, scope, observed_at, start) = {
+            let source = storage
+                .get_node(source_node_id)
+                .expect("grounded atomic fact source");
+            (
+                source.origin.session_id.clone(),
+                source.origin.scope.clone(),
+                source.created_at,
+                source
+                    .content
+                    .find(evidence_span)
+                    .expect("grounded evidence span"),
+            )
+        };
+        let metadata = [
+            (
+                "anamnesis:evidence-source-node-id".to_owned(),
+                source_node_id.0.to_string(),
+            ),
+            (
+                "anamnesis:evidence-span-start".to_owned(),
+                start.to_string(),
+            ),
+            (
+                "anamnesis:evidence-span-end".to_owned(),
+                (start + evidence_span.len()).to_string(),
+            ),
+            ("anamnesis:ground-object".to_owned(), object.to_owned()),
+        ]
+        .into_iter()
+        .collect();
+        storage
+            .set_atomic_fact(AtomicFact {
+                id: fact_id,
+                content: format!("Alice completed {object}"),
+                embedding: vec![1.0],
+                source_node_ids: vec![source_node_id],
+                entity_tags: vec!["Alice".to_owned()],
+                source_session_id,
+                scope,
+                observed_at,
+                valid_from: None,
+                valid_until: None,
+                metadata,
+            })
+            .expect("grounded atomic fact");
+    }
+
     #[test]
     fn classifies_retrieval_intents_without_a_model() {
         assert_eq!(
@@ -1936,7 +2581,7 @@ mod tests {
         );
         assert_eq!(
             RecallPlan::infer("Which popular music composer's tunes does Tim enjoy?").answer_shape,
-            AnswerShape::Fact
+            AnswerShape::Relationship
         );
         assert_eq!(
             RecallPlan::infer("Would Dana want to move home soon?").answer_shape,
@@ -1944,6 +2589,15 @@ mod tests {
         );
         assert_eq!(
             RecallPlan::infer("What might Alice do next?").answer_shape,
+            AnswerShape::Inference
+        );
+        assert_eq!(
+            RecallPlan::infer("Which meat does Audrey prefer eating more than others?")
+                .answer_shape,
+            AnswerShape::Inference
+        );
+        assert_eq!(
+            RecallPlan::infer("Which state do Alice and Bob potentially live in?").answer_shape,
             AnswerShape::Inference
         );
         assert_eq!(
@@ -2008,6 +2662,283 @@ mod tests {
             query,
             "John won an intense basketball game last week."
         ));
+        assert!(temporal_evidence_matches(
+            "Which book did Jolene read in January 2023?",
+            "Jolene: Two weeks ago I read Avalanche by Neal Stephenson."
+        ));
+    }
+
+    #[test]
+    fn atomic_expansion_is_gated_to_complex_count_and_frequency_queries() {
+        for query in [
+            "What projects did Alice complete?",
+            "How many times did Alice move?",
+            "How often does Alice get a health checkup?",
+        ] {
+            assert!(
+                uses_atomic_fact_expansion(&RecallPlan::infer(query)),
+                "{query:?} should use the isolated atomic lane"
+            );
+        }
+        for query in [
+            "Where does Alice live?",
+            "When did Alice move?",
+            "Which activity did Alice pursue on 5 June 2023?",
+            "Why did Alice move?",
+            "What device could Alice gift Bob?",
+        ] {
+            assert!(
+                !uses_atomic_fact_expansion(&RecallPlan::infer(query)),
+                "{query:?} must preserve the conservative production path"
+            );
+        }
+    }
+
+    #[test]
+    fn claim_slot_selection_preserves_the_head_and_recovers_missing_fact_provenance() {
+        let (mut storage, readout, _) = ranked_fixture();
+        let mut ranking: Vec<_> = readout
+            .iter()
+            .map(|candidate| RerankedCandidate {
+                node_id: candidate.node_id,
+                score: candidate.score,
+            })
+            .collect();
+        let claim_source = storage.next_node_id();
+        storage
+            .set_node(fixture_node(
+                claim_source,
+                KnowledgeType::Episodic,
+                "Alice completed the missing cobalt project".to_owned(),
+                "claim-session".to_owned(),
+            ))
+            .expect("claim source");
+        let bridge_candidate = storage.next_node_id();
+        storage
+            .set_node(fixture_node(
+                bridge_candidate,
+                KnowledgeType::Semantic,
+                "Alice project evidence bridge".to_owned(),
+                "claim-session".to_owned(),
+            ))
+            .expect("bridge candidate");
+        for source in [ranking[19].node_id, claim_source] {
+            let edge_id = storage.next_edge_id();
+            storage
+                .set_edge(Edge::seeded(
+                    edge_id,
+                    bridge_candidate,
+                    source,
+                    EdgeType::ExtractedFrom,
+                    1.0,
+                    EdgeSource::Manual,
+                    Timestamp(1),
+                    Timestamp(1),
+                    HashMap::new(),
+                ))
+                .expect("bridge provenance");
+        }
+        ranking.push(RerankedCandidate {
+            node_id: bridge_candidate,
+            score: -1.0,
+        });
+        seed_legacy_atomic_fact(&mut storage, AtomicFactId(1), ranking[0].node_id);
+        seed_legacy_atomic_fact(&mut storage, AtomicFactId(2), claim_source);
+        let markers = [
+            AtomicSourceMarker {
+                source_node_id: ranking[0].node_id,
+                kind_priority: 0,
+                fact_id: Some(AtomicFactId(1)),
+            },
+            AtomicSourceMarker {
+                source_node_id: claim_source,
+                kind_priority: 0,
+                fact_id: Some(AtomicFactId(2)),
+            },
+        ];
+
+        let selected = compile_ranking(
+            &storage,
+            &RecallPlan::infer("How many projects did Alice complete?"),
+            &ranking,
+            EvidenceSelection::Auto,
+            20,
+            &markers,
+        )
+        .expect("claim-slot selection");
+
+        assert_eq!(selected.len(), 20);
+        assert_eq!(
+            selected[..12],
+            ranking[..12],
+            "the authoritative reranker head must not be removed"
+        );
+        assert!(
+            selected
+                .iter()
+                .any(|candidate| candidate.node_id == bridge_candidate),
+            "a candidate that adds a missing claim while preserving the victim's raw source may replace a redundant tail row"
+        );
+    }
+
+    #[test]
+    fn grounded_claim_slot_requires_the_answer_bearing_span_not_only_the_same_turn() {
+        let (mut storage, readout, _) = ranked_fixture();
+        let mut ranking: Vec<_> = readout
+            .iter()
+            .map(|candidate| RerankedCandidate {
+                node_id: candidate.node_id,
+                score: candidate.score,
+            })
+            .collect();
+        let evidence = "Alice completed the missing cobalt project";
+        let claim_source = storage.next_node_id();
+        storage
+            .set_node(fixture_node(
+                claim_source,
+                KnowledgeType::Episodic,
+                evidence.to_owned(),
+                "claim-session".to_owned(),
+            ))
+            .expect("claim source");
+        let topic_only = storage.next_node_id();
+        storage
+            .set_node(fixture_node(
+                topic_only,
+                KnowledgeType::Semantic,
+                "Alice discussed a project".to_owned(),
+                "claim-session".to_owned(),
+            ))
+            .expect("topic-only summary");
+        let topic_edge = storage.next_edge_id();
+        storage
+            .set_edge(Edge::seeded(
+                topic_edge,
+                topic_only,
+                claim_source,
+                EdgeType::ExtractedFrom,
+                1.0,
+                EdgeSource::Manual,
+                Timestamp(1),
+                Timestamp(1),
+                HashMap::new(),
+            ))
+            .expect("topic provenance");
+        ranking[18] = RerankedCandidate {
+            node_id: topic_only,
+            score: ranking[18].score,
+        };
+
+        let grounded_bridge = storage.next_node_id();
+        storage
+            .set_node(fixture_node(
+                grounded_bridge,
+                KnowledgeType::Semantic,
+                evidence.to_owned(),
+                "claim-session".to_owned(),
+            ))
+            .expect("grounded bridge");
+        for source in [ranking[19].node_id, claim_source] {
+            let edge_id = storage.next_edge_id();
+            storage
+                .set_edge(Edge::seeded(
+                    edge_id,
+                    grounded_bridge,
+                    source,
+                    EdgeType::ExtractedFrom,
+                    1.0,
+                    EdgeSource::Manual,
+                    Timestamp(1),
+                    Timestamp(1),
+                    HashMap::new(),
+                ))
+                .expect("grounded bridge provenance");
+        }
+        ranking.push(RerankedCandidate {
+            node_id: grounded_bridge,
+            score: -1.0,
+        });
+        seed_grounded_atomic_fact(
+            &mut storage,
+            AtomicFactId(1),
+            claim_source,
+            evidence,
+            "cobalt project",
+        );
+
+        let selected = compile_ranking(
+            &storage,
+            &RecallPlan::infer("How many projects did Alice complete?"),
+            &ranking,
+            EvidenceSelection::Auto,
+            20,
+            &[AtomicSourceMarker {
+                source_node_id: claim_source,
+                kind_priority: 0,
+                fact_id: Some(AtomicFactId(1)),
+            }],
+        )
+        .expect("grounded claim-slot selection");
+
+        assert!(
+            selected
+                .iter()
+                .any(|candidate| candidate.node_id == grounded_bridge),
+            "a topic-only summary sharing the same raw turn must not satisfy the claim"
+        );
+    }
+
+    #[test]
+    fn claim_slot_selection_is_byte_stable_when_the_baseline_covers_every_claim() {
+        let (mut storage, readout, _) = ranked_fixture();
+        let ranking: Vec<_> = readout
+            .iter()
+            .map(|candidate| RerankedCandidate {
+                node_id: candidate.node_id,
+                score: candidate.score,
+            })
+            .collect();
+        let marker = AtomicSourceMarker {
+            source_node_id: ranking[0].node_id,
+            kind_priority: 0,
+            fact_id: Some(AtomicFactId(1)),
+        };
+        seed_legacy_atomic_fact(&mut storage, AtomicFactId(1), ranking[0].node_id);
+
+        let selected = compile_ranking(
+            &storage,
+            &RecallPlan::infer("How many projects did Alice complete?"),
+            &ranking,
+            EvidenceSelection::Auto,
+            20,
+            &[marker],
+        )
+        .expect("claim-slot selection");
+
+        assert_eq!(selected, ranking[..20]);
+    }
+
+    #[test]
+    fn atomic_source_marker_parser_accepts_new_claim_ids_and_legacy_markers() {
+        let strategies = vec![
+            "cognitive".to_owned(),
+            "atomic_fact_sources:7@3@11,9@0".to_owned(),
+        ];
+        assert_eq!(
+            parse_atomic_source_markers(&strategies),
+            vec![
+                AtomicSourceMarker {
+                    source_node_id: NodeId(7),
+                    kind_priority: 3,
+                    fact_id: Some(AtomicFactId(11)),
+                },
+                AtomicSourceMarker {
+                    source_node_id: NodeId(9),
+                    kind_priority: 0,
+                    fact_id: None,
+                },
+            ]
+        );
     }
 
     #[test]
@@ -2117,6 +3048,51 @@ mod tests {
     }
 
     #[test]
+    fn creator_attribution_reranker_preserves_the_semantic_window() {
+        let (mut storage, ranking, _) = ranked_fixture();
+        let raw_source = ranking[0].node_id;
+        let semantic_window = ranking[6].node_id;
+        let window_text = "Tim: My favorite piano tune is a movie theme.\n\
+                           John: Which movie?\n\
+                           Tim: Harry Potter and the Philosopher's Stone.";
+        let mut window_node = storage
+            .get_node(semantic_window)
+            .expect("semantic window")
+            .clone();
+        window_node.node_type = KnowledgeType::Semantic;
+        window_node.content = window_text.to_owned();
+        storage.set_node(window_node).expect("semantic window");
+        let edge_id = storage.next_edge_id();
+        storage
+            .set_edge(Edge::seeded(
+                edge_id,
+                semantic_window,
+                raw_source,
+                EdgeType::ExtractedFrom,
+                1.0,
+                EdgeSource::Manual,
+                Timestamp(1),
+                Timestamp(1),
+                HashMap::new(),
+            ))
+            .expect("window provenance");
+
+        let plan =
+            RecallPlan::infer("Which popular music composer's tunes does Tim enjoy playing?");
+        let documents = compile_rerank_documents(&storage, &plan, &ranking, 50, &[])
+            .expect("creator documents");
+        let document = documents
+            .iter()
+            .find(|document| document.node_id == semantic_window)
+            .expect("semantic window remains independently rerankable");
+        assert_eq!(document.text, window_text);
+        assert_eq!(document.source_node_ids, vec![raw_source]);
+
+        let ordinary = RecallPlan::infer("What is Tim's relationship with John?");
+        assert!(!requests_creator_attribution_window(&ordinary));
+    }
+
+    #[test]
     fn selective_entity_matching_ignores_recipe_speaker_and_session_tags() {
         let tags = vec![
             "speaker-alice".to_owned(),
@@ -2132,6 +3108,64 @@ mod tests {
         assert_eq!(
             selective_entity_matches("What did Bob learn from pottery?", &tags),
             0
+        );
+    }
+
+    #[test]
+    fn atomic_entity_matching_uses_canonical_subject_without_double_counting() {
+        let query = "Which countries has Deborah traveled to?";
+        let mut metadata = HashMap::new();
+        metadata.insert("anamnesis:ground-subject".to_owned(), "Deborah".to_owned());
+
+        assert_eq!(
+            atomic_entity_matches(query, &["Rio de Janeiro".to_owned()], &metadata),
+            1,
+            "the canonical subject remains routable when the extractor omits it from entity tags"
+        );
+        assert_eq!(
+            atomic_entity_matches(
+                query,
+                &["Deborah".to_owned(), "Rio de Janeiro".to_owned()],
+                &metadata,
+            ),
+            1,
+            "the canonical subject must not be counted twice"
+        );
+    }
+
+    #[test]
+    fn atomic_fact_ranking_prefers_new_raw_sources_before_duplicate_claims() {
+        let ranked = vec![
+            (AtomicFactId(1), 4.0),
+            (AtomicFactId(2), 3.0),
+            (AtomicFactId(3), 2.0),
+            (AtomicFactId(4), 1.0),
+        ];
+        let source_sessions = [
+            (AtomicFactId(1), "session-a".to_owned()),
+            (AtomicFactId(2), "session-a".to_owned()),
+            (AtomicFactId(3), "session-b".to_owned()),
+            (AtomicFactId(4), "session-a".to_owned()),
+        ]
+        .into_iter()
+        .collect();
+        let source_nodes = [
+            (AtomicFactId(1), vec![NodeId(10)]),
+            (AtomicFactId(2), vec![NodeId(10)]),
+            (AtomicFactId(3), vec![NodeId(20)]),
+            (AtomicFactId(4), vec![NodeId(30)]),
+        ]
+        .into_iter()
+        .collect();
+
+        let selected = source_diverse_atomic_ranking(ranked, 3, 2, &source_sessions, &source_nodes);
+        assert_eq!(
+            selected
+                .into_iter()
+                .map(|(fact_id, _)| fact_id)
+                .collect::<Vec<_>>(),
+            [AtomicFactId(1), AtomicFactId(3), AtomicFactId(4)],
+            "a second claim from one raw turn must not consume the slot of another source"
         );
     }
 }

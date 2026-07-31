@@ -22,7 +22,9 @@ from typing import Any
 
 
 SESSION_RE = re.compile(r"^session_(\d+)$")
-MODEL = "qwen3.6:35b-a3b"
+BATCH_KEY_RE = re.compile(r"^(\d+):(session_\d+):(\d+)$")
+DEFAULT_MODEL = "qwen3.6:35b-a3b"
+SOURCE_SURFACE_VERSION = "locomo-caption-v2"
 
 
 def fnv1a64(data: bytes) -> str:
@@ -53,6 +55,29 @@ def session_timestamp_ms(value: str | None, sample_index: int, session_index: in
             pass
     fallback = dt.datetime(2020, 1, 1, tzinfo=dt.timezone.utc)
     return int(fallback.timestamp() * 1000) + sample_index * 40 * 86_400_000 + session_index * 86_400_000
+
+
+def normalized_scalar(value: Any) -> str | None:
+    if isinstance(value, str):
+        normalized = value.strip()
+    elif isinstance(value, bool):
+        normalized = "true" if value else "false"
+    elif isinstance(value, (int, float)):
+        normalized = str(value)
+    else:
+        return None
+    return normalized or None
+
+
+def product_turn_surface(turn: dict[str, Any]) -> tuple[str, str]:
+    speaker = normalized_scalar(turn.get("speaker")) or "unknown"
+    content = normalized_scalar(turn.get("text")) or ""
+    caption = normalized_scalar(turn.get("blip_caption"))
+    if caption:
+        if content:
+            content += "\n"
+        content += f"{speaker} shared {caption}."
+    return speaker, content
 
 
 def preview_batch(
@@ -105,6 +130,7 @@ def preview_parts(
     transient_retries: int,
     part_key: str = "",
 ) -> list[tuple[str, dict[str, Any] | None]]:
+    """Mirror the product worker's deterministic validation-failure isolation."""
     try:
         return [
             (
@@ -113,7 +139,12 @@ def preview_parts(
             )
         ]
     except RuntimeError as error:
-        if "schema-reject" not in str(error):
+        detail = str(error)
+        validation_failure = (
+            "schema-reject" in detail
+            or "extraction output validation failed:" in detail
+        )
+        if not validation_failure:
             raise
         if len(sources) == 1:
             source = sources[0]
@@ -150,14 +181,221 @@ def checkpoint(path: Path, state: dict[str, Any]) -> None:
     temporary.replace(path)
 
 
-def validate_final_records(records: list[dict[str, Any]]) -> None:
+def bounded_record_id(value: str) -> str:
+    if len(value) <= 64:
+        return value
+    digest = hashlib.sha256(value.encode()).hexdigest()[:16]
+    return f"{value[:47]}-{digest}"
+
+
+def normalize_record_ids(state: dict[str, Any]) -> None:
+    id_map: dict[str, str] = {}
+    bounded_ids: set[str] = set()
+    for record in state["records"]:
+        old_id = record["id"]
+        new_id = bounded_record_id(old_id)
+        if new_id in bounded_ids:
+            raise RuntimeError(f"bounded artifact record id collision: {new_id!r}")
+        bounded_ids.add(new_id)
+        id_map[old_id] = new_id
+        record["id"] = new_id
+    for relation in state["relations"]:
+        try:
+            relation["from"] = id_map[relation["from"]]
+            relation["to"] = id_map[relation["to"]]
+        except KeyError as error:
+            raise RuntimeError("artifact relation references an unknown record") from error
+
+
+def rebuild_batches(state: dict[str, Any], batch_keys: list[str]) -> None:
+    completed = set(state["completed_batches"])
+    for batch_key in batch_keys:
+        matched = BATCH_KEY_RE.fullmatch(batch_key)
+        if matched is None:
+            raise RuntimeError(f"invalid rebuild batch key: {batch_key!r}")
+        if batch_key not in completed:
+            raise RuntimeError(f"rebuild batch is not completed: {batch_key!r}")
+        sample_index, session_id, chunk_index = matched.groups()
+        record_prefix = f"locomo-{sample_index}-{session_id}-c{chunk_index}-"
+        removed_ids = {
+            record["id"]
+            for record in state["records"]
+            if record["id"].startswith(record_prefix)
+        }
+        state["records"] = [
+            record for record in state["records"] if record["id"] not in removed_ids
+        ]
+        state["relations"] = [
+            relation
+            for relation in state["relations"]
+            if relation["from"] not in removed_ids and relation["to"] not in removed_ids
+        ]
+        state["skipped_sources"] = [
+            source
+            for source in state["skipped_sources"]
+            if source.get("batch_key") != batch_key
+        ]
+        completed.remove(batch_key)
+        print(
+            f"rebuilding {batch_key}: removed_records={len(removed_ids)}",
+            flush=True,
+        )
+    state["completed_batches"] = sorted(completed)
+
+
+def product_source_surfaces(
+    samples: list[Any],
+) -> dict[tuple[str, str], str]:
+    surfaces: dict[tuple[str, str], str] = {}
+    for sample_index, sample in enumerate(samples):
+        if not isinstance(sample, dict):
+            continue
+        for session_id in (key for key in sample if SESSION_RE.match(key)):
+            turns = sample.get(session_id)
+            if not isinstance(turns, list):
+                continue
+            source_session_id = f"locomo-{sample_index}-{session_id}"
+            for turn in turns:
+                if not isinstance(turn, dict):
+                    continue
+                turn_id = normalized_scalar(turn.get("dia_id"))
+                speaker, content = product_turn_surface(turn)
+                if turn_id is None or not content.strip():
+                    continue
+                key = (source_session_id, turn_id)
+                if key in surfaces:
+                    raise RuntimeError(
+                        f"duplicate product source turn {source_session_id!r}/{turn_id!r}"
+                    )
+                surfaces[key] = f"{speaker}: {content}"
+    return surfaces
+
+
+def validate_final_records(
+    records: list[dict[str, Any]],
+    source_surfaces: dict[tuple[str, str], str],
+) -> None:
     for record in records:
-        fields = [str(record["id"]), str(record["content"])]
+        record_id = record.get("id")
+        if not isinstance(record_id, str) or not record_id or len(record_id) > 64:
+            raise RuntimeError("artifact record requires a non-empty id of at most 64 characters")
+        source_session_id = record.get("source_session_id")
+        if not isinstance(source_session_id, str) or not source_session_id:
+            raise RuntimeError(
+                f"artifact record {record_id!r} requires a source session id"
+            )
+        required_text = (
+            "content",
+            "subject",
+            "relation",
+            "object",
+            "evidence_object",
+            "evidence_span",
+            "evidence_source_turn_id",
+        )
+        values: dict[str, str] = {}
+        for field in required_text:
+            value = record.get(field)
+            if not isinstance(value, str) or not value.strip():
+                raise RuntimeError(
+                    f"artifact record {record_id!r} is missing non-empty {field}"
+                )
+            values[field] = value
+        expected_content = " ".join(
+            values[field].strip() for field in ("subject", "relation", "object")
+        )
+        if values["content"] != expected_content:
+            raise RuntimeError(
+                f"artifact record {record_id!r} content does not match grounded S/R/O"
+            )
+        if values["evidence_object"] not in values["evidence_span"]:
+            raise RuntimeError(
+                f"artifact record {record_id!r} evidence object is not verbatim "
+                "in its evidence span"
+            )
+        if "_" in values["relation"]:
+            raise RuntimeError(
+                f"artifact record {record_id!r} relation is not natural language"
+            )
+        first_person = {
+            "i",
+            "me",
+            "my",
+            "mine",
+            "myself",
+            "we",
+            "us",
+            "our",
+            "ours",
+            "ourselves",
+        }
+        unresolved_subject = first_person | {
+            "you",
+            "your",
+            "yours",
+            "yourself",
+            "yourselves",
+            "he",
+            "him",
+            "his",
+            "himself",
+            "she",
+            "her",
+            "hers",
+            "herself",
+            "they",
+            "them",
+            "their",
+            "theirs",
+            "themselves",
+            "it",
+            "its",
+            "itself",
+        }
+        subject_tokens = {
+            token.lower()
+            for token in re.split(r"[^A-Za-z0-9]+", values["subject"])
+            if token
+        }
+        object_tokens = {
+            token.lower()
+            for token in re.split(r"[^A-Za-z0-9]+", values["object"])
+            if token
+        }
+        if (
+            subject_tokens.intersection(unresolved_subject)
+            or object_tokens.intersection(first_person)
+        ):
+            raise RuntimeError(
+                f"artifact record {record_id!r} retains an unresolved canonical pronoun"
+            )
+        source_turn_ids = record.get("source_turn_ids")
+        if (
+            not isinstance(source_turn_ids, list)
+            or not source_turn_ids
+            or values["evidence_source_turn_id"] not in source_turn_ids
+        ):
+            raise RuntimeError(
+                f"artifact record {record_id!r} has an invalid evidence source"
+            )
+        surface = source_surfaces.get(
+            (source_session_id, values["evidence_source_turn_id"])
+        )
+        if surface is None:
+            raise RuntimeError(
+                f"artifact record {record_id!r} cites an unknown product source turn"
+            )
+        if values["evidence_span"] not in surface:
+            raise RuntimeError(
+                f"artifact record {record_id!r} evidence span is not verbatim "
+                "in the product LoCoMo source surface"
+            )
+        fields = [record_id, *values.values()]
         fields.extend(str(tag) for tag in record.get("entity_tags", []))
         for value in fields:
             if any(ord(char) < 32 and char not in "\n\t" for char in value):
                 raise RuntimeError(
-                    f"artifact record {record['id']!r} contains a control character"
+                    f"artifact record {record_id!r} contains a control character"
                 )
 
 
@@ -167,12 +405,24 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--binary", type=Path, default=Path("target/debug/anamnesis"))
     parser.add_argument("--ollama-base-url", default="http://127.0.0.1:11434")
+    parser.add_argument("--extractor-model", default=DEFAULT_MODEL)
+    parser.add_argument("--extractor-digest")
     parser.add_argument("--timeout-secs", type=int, default=300)
     parser.add_argument("--transient-retries", type=int, default=2)
     parser.add_argument("--max-batches", type=int)
+    parser.add_argument(
+        "--rebuild-batch",
+        action="append",
+        default=[],
+        help="remove and regenerate one completed sample:session_N:chunk batch",
+    )
     args = parser.parse_args()
     if args.timeout_secs <= 0 or args.transient_retries < 0:
         parser.error("timeout must be positive and transient retries must be non-negative")
+    if args.extractor_digest is not None and re.fullmatch(
+        r"[0-9a-f]{64}", args.extractor_digest
+    ) is None:
+        parser.error("--extractor-digest must be 64 lowercase hexadecimal characters")
 
     dataset_bytes = args.dataset.read_bytes()
     samples = json.loads(dataset_bytes)
@@ -184,17 +434,38 @@ def main() -> int:
         state = json.loads(state_path.read_text())
         if state.get("dataset_fnv1a64") != fnv1a64(dataset_bytes):
             raise RuntimeError("checkpoint dataset fingerprint differs")
+        if state.get("source_surface_version") != SOURCE_SURFACE_VERSION:
+            raise RuntimeError(
+                "checkpoint source surface differs; choose a new output path"
+            )
     else:
         state = {
             "dataset_fnv1a64": fnv1a64(dataset_bytes),
+            "source_surface_version": SOURCE_SURFACE_VERSION,
             "completed_batches": [],
             "records": [],
             "relations": [],
             "skipped_sources": [],
             "profile": None,
+            "extractor_digest": args.extractor_digest,
         }
 
     state.setdefault("skipped_sources", [])
+    state_profile = state.get("profile")
+    if state_profile is not None and state_profile.get("model_id") != args.extractor_model:
+        raise RuntimeError("checkpoint extractor model differs")
+    checkpoint_digest = state.get("extractor_digest")
+    if (
+        checkpoint_digest is not None
+        and args.extractor_digest is not None
+        and checkpoint_digest != args.extractor_digest
+    ):
+        raise RuntimeError("checkpoint extractor digest differs")
+    if checkpoint_digest is None and args.extractor_digest is not None:
+        state["extractor_digest"] = args.extractor_digest
+    if args.rebuild_batch:
+        rebuild_batches(state, args.rebuild_batch)
+        checkpoint(state_path, state)
     completed_batches = set(state["completed_batches"])
     processed_now = 0
     for sample_index, sample in enumerate(samples):
@@ -205,8 +476,19 @@ def main() -> int:
             key=lambda key: int(SESSION_RE.match(key).group(1)),  # type: ignore[union-attr]
         )
         for raw_session_id in session_keys:
-            turns = sample[raw_session_id]
-            if not isinstance(turns, list) or not turns:
+            raw_turns = sample[raw_session_id]
+            if not isinstance(raw_turns, list) or not raw_turns:
+                continue
+            turns: list[tuple[dict[str, Any], str, str]] = []
+            for turn in raw_turns:
+                if not isinstance(turn, dict):
+                    raise RuntimeError(
+                        f"{sample_index}:{raw_session_id} contains a non-object turn"
+                    )
+                speaker, turn_content = product_turn_surface(turn)
+                if turn_content.strip():
+                    turns.append((turn, speaker, turn_content))
+            if not turns:
                 continue
             session_number = int(SESSION_RE.match(raw_session_id).group(1))  # type: ignore[union-attr]
             start_ms = session_timestamp_ms(
@@ -221,12 +503,13 @@ def main() -> int:
                 chunk = turns[offset : offset + 20]
                 sources = []
                 turn_ids: dict[int, str] = {}
-                for local_index, turn in enumerate(chunk, start=1):
-                    if not isinstance(turn, dict):
-                        raise RuntimeError(f"{batch_key} contains a non-object turn")
-                    raw_turn_id = str(turn["dia_id"])
-                    speaker = str(turn.get("speaker", "speaker"))
-                    content = f"{speaker}: {turn['text']}"
+                for local_index, (turn, speaker, turn_content) in enumerate(
+                    chunk, start=1
+                ):
+                    raw_turn_id = normalized_scalar(turn.get("dia_id"))
+                    if raw_turn_id is None:
+                        raise RuntimeError(f"{batch_key} contains a turn without dia_id")
+                    content = f"{speaker}: {turn_content}"
                     turn_ids[local_index] = raw_turn_id
                     sources.append(
                         {
@@ -272,9 +555,10 @@ def main() -> int:
                         )
                         continue
                     profile = preview["profile"]
-                    if profile.get("model_id") != MODEL:
+                    if profile.get("model_id") != args.extractor_model:
                         raise RuntimeError(
-                            f"artifact extractor must be {MODEL}, got {profile.get('model_id')}"
+                            "artifact extractor must be "
+                            f"{args.extractor_model}, got {profile.get('model_id')}"
                         )
                     if state["profile"] is None:
                         state["profile"] = profile
@@ -286,7 +570,7 @@ def main() -> int:
                     part_component = f"-p{part_key}" if part_key else ""
                     for item in extraction["items"]:
                         local_id = str(item["item_local_id"])
-                        record_id = (
+                        record_id = bounded_record_id(
                             f"locomo-{sample_index}-{raw_session_id}-c{chunk_index}"
                             f"{part_component}-{local_id}"
                         )
@@ -301,6 +585,14 @@ def main() -> int:
                                     turn_ids[int(source["node_id"])] for source in item["sources"]
                                 ],
                                 "entity_tags": item.get("entity_tags", []),
+                                "subject": item.get("subject"),
+                                "relation": item.get("relation"),
+                                "object": item.get("object"),
+                                "evidence_object": item.get("evidence_object"),
+                                "evidence_span": item.get("evidence_span"),
+                                "evidence_source_turn_id": turn_ids[
+                                    int(item["evidence_source_node_id"])
+                                ],
                                 "valid_from_ms": item.get("valid_from_ms"),
                                 "valid_until_ms": item.get("valid_until_ms"),
                             }
@@ -329,15 +621,26 @@ def main() -> int:
     profile = state.get("profile")
     if not profile:
         raise RuntimeError("dataset produced no extraction batches")
-    validate_final_records(state["records"])
+    extractor_digest = state.get("extractor_digest") or args.extractor_digest
+    if not extractor_digest:
+        if profile.get("provider_id") != "ollama":
+            raise RuntimeError(
+                "--extractor-digest is required for a non-Ollama extraction provider"
+            )
+        extractor_digest = ollama_digest(args.ollama_base_url, args.extractor_model)
+    state["extractor_digest"] = extractor_digest
+    normalize_record_ids(state)
+    validate_final_records(state["records"], product_source_surfaces(samples))
+    checkpoint(state_path, state)
     artifact = {
-        "schema_version": 1,
+        "schema_version": 3,
         "dataset_fnv1a64": state["dataset_fnv1a64"],
         "extractor_model": profile["model_id"],
-        "extractor_digest": ollama_digest(args.ollama_base_url, MODEL),
+        "extractor_digest": extractor_digest,
         "prompt_version": (
             f"extract-v{profile['prompt_version']}-schema{profile['schema_version']}"
             f"-norm{profile['normalization_version']}-relations{profile['relation_policy_version']}"
+            f"-source-{SOURCE_SURFACE_VERSION}"
         ),
         "records": state["records"],
         "relations": state["relations"],

@@ -159,6 +159,12 @@ fn frozen_derived_memory_is_additive_provenance_linked_and_session_preserving() 
             kind: "fact".to_owned(),
             content: "Alice lives in Seoul.".to_owned(),
             source_turn_ids: vec!["D1:1".to_owned()],
+            subject: None,
+            relation: None,
+            object: None,
+            evidence_object: None,
+            evidence_span: None,
+            evidence_source_turn_id: None,
             entity_tags: vec!["Alice".to_owned(), "Seoul".to_owned()],
             valid_from_ms: Some(10),
             valid_until_ms: Some(20),
@@ -169,6 +175,12 @@ fn frozen_derived_memory_is_additive_provenance_linked_and_session_preserving() 
             kind: "fact".to_owned(),
             content: "Alice commutes by subway.".to_owned(),
             source_turn_ids: vec!["D1:2".to_owned()],
+            subject: None,
+            relation: None,
+            object: None,
+            evidence_object: None,
+            evidence_span: None,
+            evidence_source_turn_id: None,
             entity_tags: vec!["Alice".to_owned()],
             valid_from_ms: None,
             valid_until_ms: None,
@@ -296,6 +308,131 @@ fn frozen_derived_memory_is_additive_provenance_linked_and_session_preserving() 
 }
 
 #[test]
+fn canonical_grounded_memory_keeps_exact_live_source_ranges() {
+    let loaded = parse_benchmark_dataset(
+        BenchDatasetName::Locomo,
+        &json!([{
+            "session_1": [
+                {"dia_id": "D1:1", "speaker": "Alice", "text": "Alice moved to Seoul."}
+            ],
+            "qa": [{
+                "question": "Where did Alice move?",
+                "answer": "Seoul",
+                "category": 1,
+                "evidence": ["D1:1"]
+            }]
+        }]),
+        Some(1),
+    )
+    .expect("LoCoMo JSON should parse");
+    let record = DerivedMemoryRecord {
+        id: "grounded-home".to_owned(),
+        source_session_id: "locomo-0-session_1".to_owned(),
+        kind: "fact".to_owned(),
+        content: "Alice moved to Seoul".to_owned(),
+        source_turn_ids: vec!["D1:1".to_owned()],
+        subject: Some("Alice".to_owned()),
+        relation: Some("moved to".to_owned()),
+        object: Some("Seoul".to_owned()),
+        evidence_object: Some("Seoul".to_owned()),
+        evidence_span: Some("Alice moved to Seoul.".to_owned()),
+        evidence_source_turn_id: Some("D1:1".to_owned()),
+        entity_tags: vec!["Alice".to_owned(), "Seoul".to_owned()],
+        valid_from_ms: None,
+        valid_until_ms: None,
+    };
+
+    let built = build_memory_graph_with_derived(
+        &loaded,
+        Arc::new(CachingProvider::new(
+            Arc::new(CountingEmbedder::default()),
+            None,
+        )),
+        std::slice::from_ref(&record),
+        &[],
+    )
+    .expect("grounded graph builds");
+    let fact = built
+        .memory
+        .engine()
+        .graph()
+        .storage()
+        .all_atomic_fact_ids()
+        .into_iter()
+        .next()
+        .and_then(|fact_id| {
+            built
+                .memory
+                .engine()
+                .graph()
+                .storage()
+                .get_atomic_fact(fact_id)
+                .ok()
+        })
+        .expect("grounded atomic fact");
+    let evidence_source = fact
+        .metadata
+        .get("anamnesis:evidence-source-node-id")
+        .and_then(|value| value.parse::<u64>().ok())
+        .expect("evidence source node id");
+    let start = fact
+        .metadata
+        .get("anamnesis:evidence-span-start")
+        .and_then(|value| value.parse::<usize>().ok())
+        .expect("evidence span start");
+    let end = fact
+        .metadata
+        .get("anamnesis:evidence-span-end")
+        .and_then(|value| value.parse::<usize>().ok())
+        .expect("evidence span end");
+    let source = built
+        .memory
+        .engine()
+        .graph()
+        .get_node(anamnesis::graph::NodeId(evidence_source))
+        .expect("live evidence source");
+
+    assert_eq!(
+        source.content.get(start..end),
+        Some("Alice moved to Seoul.")
+    );
+    assert_eq!(
+        fact.metadata
+            .get("anamnesis:ground-object")
+            .map(String::as_str),
+        Some("Seoul")
+    );
+    assert_eq!(
+        fact.metadata
+            .get("anamnesis:evidence-object")
+            .map(String::as_str),
+        Some("Seoul")
+    );
+    assert!(
+        !fact.metadata.contains_key("anamnesis:evidence-span"),
+        "the sidecar must point into the live raw source instead of copying it"
+    );
+
+    for unresolved in ["Alice and I", "she", "Alice and her friend"] {
+        let mut unresolved_subject = record.clone();
+        unresolved_subject.subject = Some(unresolved.to_owned());
+        unresolved_subject.content = format!("{unresolved} moved to Seoul");
+        let error = build_memory_graph_with_derived(
+            &loaded,
+            Arc::new(CachingProvider::new(
+                Arc::new(CountingEmbedder::default()),
+                None,
+            )),
+            &[unresolved_subject],
+            &[],
+        )
+        .err()
+        .expect("pronominal canonical subjects must be rejected");
+        assert!(error.to_string().contains("invalid object grounding"));
+    }
+}
+
+#[test]
 fn frozen_derived_memory_cannot_cross_samples_with_reused_raw_ids() {
     let loaded = parse_benchmark_dataset(
         BenchDatasetName::Locomo,
@@ -345,6 +482,12 @@ fn frozen_derived_memory_cannot_cross_samples_with_reused_raw_ids() {
         kind: "fact".to_owned(),
         content: "This belongs only to sample one.".to_owned(),
         source_turn_ids: vec!["D1:1".to_owned()],
+        subject: None,
+        relation: None,
+        object: None,
+        evidence_object: None,
+        evidence_span: None,
+        evidence_source_turn_id: None,
         entity_tags: Vec::new(),
         valid_from_ms: None,
         valid_until_ms: None,

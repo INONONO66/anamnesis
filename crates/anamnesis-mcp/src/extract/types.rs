@@ -44,6 +44,26 @@ pub(crate) struct ValidatedCandidate {
     pub content: String,
     pub kind: CandidateKind,
     pub confidence: f64,
+    /// Canonical, non-pronominal subject extracted from the cited evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
+    /// Short relation phrase joining `subject` to `object`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relation: Option<String>,
+    /// Canonical, non-pronominal object used to assemble `content`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object: Option<String>,
+    /// Answer-bearing object copied verbatim from `evidence_span`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_object: Option<String>,
+    /// Verbatim substring of one cited raw source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_span: Option<String>,
+    /// Authoritative cited source that contains `evidence_span`.
+    ///
+    /// This is derived by validation rather than trusted from provider output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_source_node_id: Option<u64>,
     #[serde(default)]
     pub entity_tags: Vec<String>,
     #[serde(default)]
@@ -279,6 +299,12 @@ mod tests {
             content: "candidate".into(),
             kind: CandidateKind::Decision,
             confidence: 0.75,
+            subject: None,
+            relation: None,
+            object: None,
+            evidence_object: None,
+            evidence_span: None,
+            evidence_source_node_id: None,
             entity_tags: vec!["project".into()],
             valid_from_ms: Some(10),
             valid_until_ms: None,

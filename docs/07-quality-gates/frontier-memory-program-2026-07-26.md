@@ -903,3 +903,28 @@ The next multi-hop work should target evidence coverage and explicit
 list-completeness against the retrieved context, not a broader provider swap.
 This n=100 result remains a development diagnostic, not a full 1,540-question
 non-adversarial LoCoMo headline.
+
+### Local-only source-grounded reader follow-up
+
+The follow-up returned exclusively to loopback OMLX
+`Qwen3.6-35B-A3B-4bit`; no external API or key was used. The accepted reader
+policy scopes credential, creator, public-location, binary, alternative, and
+collection instructions to matching queries. Reflection list items carry exact
+visible source ids, final omission repair is source-validated, and a
+deterministic dialogue-ownership check prevents an interlocutor's direct reply
+from becoming the named subject's fact. The latter repaired the concrete
+James/John country contamination without suppressing explicit cross-speaker
+attributions.
+
+On the identical Multi-hop n=16 v190 gate, the final local result is 75.0%
+semantic accuracy and 41.75% official F1. Reader-free candidate,
+reranker/delivered, and rendered recall are 64.43%, 58.18%, and 63.39%, with
+87.5% rendered Hit. The exact country collection is
+`Italy, Turkey, Mexico, Canada, Greenland`.
+
+On the identical Open-domain n=20 v198 gate, semantic accuracy and official F1
+remain exactly 70.0% and 44.01%; reader-free rendered recall/Hit remain
+65.42%/70.0%. The previously recovered degree, creator, named-company,
+named-animal, explicit-alternative, and two-state Universal Studios answers are
+preserved. These are type-specific regression screens, not a replacement for
+the unified n=100 result or a full-LoCoMo claim.

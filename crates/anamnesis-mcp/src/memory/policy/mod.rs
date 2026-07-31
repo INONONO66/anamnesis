@@ -74,7 +74,7 @@ pub(crate) struct SweepPoint {
     pub attempts: u64,
 }
 
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 #[cfg(test)]
 thread_local! {

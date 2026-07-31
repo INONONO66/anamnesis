@@ -3274,9 +3274,22 @@ fn canonical_extraction(
     let items: Vec<_> = item_sources
         .iter()
         .map(|(item_local_id, source_node_id)| {
+            let source = sources
+                .iter()
+                .find(|source| source.node_id == *source_node_id)
+                .expect("canonical extraction source");
+            let object = source
+                .content
+                .split_whitespace()
+                .last()
+                .expect("canonical extraction object");
             serde_json::json!({
                 "item_local_id": item_local_id,
-                "content": format!("derived {item_local_id}"),
+                "subject": "Derived memory",
+                "relation": "cites",
+                "object": object,
+                "evidence_object": object,
+                "evidence_span": source.content,
                 "kind": crate::extract::types::CandidateKind::Lesson,
                 "confidence": 0.9,
                 "source_node_ids": [source_node_id],
@@ -4195,6 +4208,16 @@ mod migration_job {
             .content
     }
 
+    fn expected_grounded_content(source: &str) -> String {
+        format!(
+            "Derived memory cites {}",
+            source
+                .split_whitespace()
+                .last()
+                .expect("grounded source object")
+        )
+    }
+
     fn audit_relation<'a>(
         audit: &'a serde_json::Value,
         from_item_local_id: &str,
@@ -4310,6 +4333,30 @@ mod migration_job {
             ],
             "policy provenance stores only source identity, hashes, and node ids"
         );
+        let copied_span_columns: u64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('extract_candidates')
+                 WHERE name = 'evidence_span'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("inspect copied evidence columns");
+        assert_eq!(
+            copied_span_columns, 0,
+            "policy storage must retain only live-source evidence ranges and hashes"
+        );
+        let grounded_rows: u64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM extract_candidates
+                 WHERE evidence_span_start IS NOT NULL
+                   AND evidence_span_end IS NOT NULL
+                   AND evidence_span_sha256 IS NOT NULL
+                   AND evidence_source_node_id IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )
+            .expect("inspect grounded evidence ranges");
+        assert_eq!(grounded_rows, 3);
         let stored_candidate_contents: Vec<String> = connection
             .prepare("SELECT content FROM extract_candidates")
             .expect("inspect staged candidate content")
@@ -4344,7 +4391,10 @@ mod migration_job {
         let one_source = audit_source(one, one_turn_key);
         let two_source = audit_source(two, two_turn_key);
         let three_source = audit_source(three, three_turn_key);
-        assert_eq!(one["content"], "derived one");
+        assert_eq!(
+            one["content"],
+            expected_grounded_content(authoritative_source_content(&sources, one_turn_key))
+        );
         assert_eq!(one["kind"], "lesson");
         assert_eq!(one["confidence"], 0.9);
         assert_eq!(one_source["availability"], "available");
@@ -4352,13 +4402,19 @@ mod migration_job {
             one_source["content"],
             authoritative_source_content(&sources, one_turn_key)
         );
-        assert_eq!(two["content"], "derived two");
+        assert_eq!(
+            two["content"],
+            expected_grounded_content(authoritative_source_content(&sources, two_turn_key))
+        );
         assert_eq!(two_source["availability"], "available");
         assert_eq!(
             two_source["content"],
             authoritative_source_content(&sources, two_turn_key)
         );
-        assert_eq!(three["content"], "derived three");
+        assert_eq!(
+            three["content"],
+            expected_grounded_content(authoritative_source_content(&sources, three_turn_key))
+        );
         assert_eq!(three_source["availability"], "available");
         assert_eq!(
             three_source["content"],
@@ -4625,7 +4681,13 @@ mod migration_job {
             .storage()
             .get_atomic_fact(fact_id)
             .expect("atomic fact");
-        assert_eq!(fact.content, "derived one");
+        assert_eq!(fact.content, expected_grounded_content(&sources[0].content));
+        assert!(
+            fact.metadata.contains_key("anamnesis:evidence-span-start")
+                && fact.metadata.contains_key("anamnesis:evidence-span-end")
+                && !fact.metadata.contains_key("anamnesis:evidence-span"),
+            "promotion stores a live-source range, never a copied raw span"
+        );
         assert!(fact.entity_tags.iter().any(|tag| tag == "Alice"));
         assert_eq!(fact.valid_from, Some(anamnesis::graph::Timestamp(10)));
         assert_eq!(fact.valid_until, Some(anamnesis::graph::Timestamp(20)));
