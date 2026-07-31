@@ -100,11 +100,14 @@ with a headline claim. Fragment compaction, episodic hydration, and the
 benchmark-only RRF experiment require this diagnostic lane.
 
 `--derived-memory-artifact <json>` is a separate, explicit extraction
-ablation. Schema v1 is dataset-fingerprint bound and records the exact local
-Qwen 3.6 model digest and prompt version. It may cite only raw source
-session/turn ids; the harness materializes additive derived semantic knowledge
-and typed relations through the product APIs while preserving every raw turn. Report
-artifact and no-artifact lanes separately.
+ablation. The current schema v3 is dataset-fingerprint bound and records the
+exact local Qwen 3.6 model digest and prompt version; schemas v1–v2 remain
+replay-only compatibility inputs. Schema v3 separates a canonical,
+non-pronominal subject/relation/object claim from the verbatim answer-bearing
+`evidence_object` and its exact raw-source span. It may cite only raw source
+session/turn ids; the harness materializes isolated atomic facts through the
+product API while preserving every raw turn. Report artifact and no-artifact
+lanes separately.
 
 Generate that artifact with
 `scripts/generate_locomo_derived_artifact.py`. The generator reads conversation
@@ -113,10 +116,14 @@ and calls `anamnesis extract-preview`, which reuses the exact versioned product
 prompt, local provider, and validator without staging graph mutations. The
 built-in Qwen 3.6 profile uses Ollama's non-streaming chat API on loopback with
 the validator's strict JSON Schema; custom provider commands retain the bounded
-no-shell subprocess path. Its sidecar checkpoint is resumable. Stable
-sample-qualified session ids are mandatory because LoCoMo reuses raw
-`session_1`/`D1:1` identifiers across samples; artifact ingest rejects
-cross-sample provenance.
+no-shell subprocess path. `scripts/run_local_openai_extractor.py` is the
+loopback-only OMLX adapter: despite the compatible wire format, it accepts no
+key and cannot address a remote host. Validation-failure isolation mirrors the
+production worker's deterministic midpoint split; an irreducible invalid
+source is recorded as an omission rather than weakening grounding. The sidecar
+checkpoint is resumable. Stable sample-qualified session ids are mandatory
+because LoCoMo reuses raw `session_1`/`D1:1` identifiers across samples;
+artifact ingest rejects cross-sample provenance.
 
 `--answer-report <predict-only-report.json>` consumes the product contexts
 already persisted by an exact reader-free run and executes only the frozen
@@ -124,6 +131,28 @@ Qwen 3.6 reader/judge lane. It rejects partial contexts, dataset mismatches,
 in-place overwrite, alternate context/derived flags, and non-Qwen-3.6 models.
 This avoids rerunning an expensive deterministic reranker while keeping the
 answer report's original retrieval metrics and context bytes.
+
+The reflected-reader lane treats structured analysis as untrusted consumer
+state. Collection items must cite source ids visible in the supplied product
+context. Completeness backfill, binary/alternative answer-shape repair, and
+speaker-ownership repair are applied only after that validation. The ownership
+guard uses the product's exact `turn-source` sequence: a different speaker's
+direct reply to the named subject's `you`/`your` question cannot become the
+subject's event, while an explicit attribution to the subject is retained.
+These checks never receive expected answers, annotations, or judge output and
+do not alter retrieval, ranking, or product context bytes. They are a declared
+reference consumer contract because `anamnesis-engine` intentionally does not
+generate final LLM answers.
+
+OMLX uses that lane through the OpenAI-compatible transport flags with an
+explicit loopback URL; this does not make the run remote. Pass
+`--frontier-model-digest <SHA256>` to bind both the reader and judge to the
+same exact local model identity when they use one model. The report then keeps
+`local_only=true`, records that digest in `model_digests`, and records the
+temperature, top-p, top-k, presence penalty, seed, and `enable_thinking`
+choice sent to OMLX. Set `--reader-num-predict 700` for the frozen gate so the
+recorded reader budget matches the transport's 700-token cap. Loopback clients
+disable proxy and redirect handling.
 
 `--judge-report <answered-report.json>` preserves every answer and retrieval
 field and runs only the separately versioned local semantic judge. Use it to

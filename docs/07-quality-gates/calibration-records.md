@@ -9,6 +9,57 @@ they are multi-MB run reports). Every number is reproducible from the named
 dataset + command via `cargo bench --features embed --bench real_memory`;
 runs are deterministic for a fixed dataset and embedding model.
 
+## 2026-08-01 — query-scoped local reader and speaker ownership gate
+
+- **Data:** frozen LoCoMo seed-42 production contexts from the local Qwen 3.6
+  extraction artifact; Multi-hop n=16 and Open-domain n=20 type screens.
+  Retrieval uses the exact `Memory::search_reranked` product path with
+  candidate@50, reranker/delivered@20, and the product detailed renderer.
+- **Provider:** loopback OMLX `Qwen3.6-35B-A3B-4bit`, digest
+  `b8be5fc144324bb58269ab045a15ecbcf55baa6d61960757861581d389a54145`,
+  `enable_thinking=false`, temperature 0, seed 42. Reader and semantic judge
+  reports both record `local_only=true`; all API-key variables were removed
+  from the run environment. External cost was $0.
+- **Reader contract:** answer-shape rules are query-scoped rather than one
+  global instruction block. Reflection list items must cite visible
+  `turn-source` ids. Final list completeness and answer-shape reconciliation
+  are allowed only for unambiguous, source-valid reflection JSON. A
+  deterministic ownership guard rejects a different speaker's direct response
+  to the named subject's second-person question; an explicit attribution such
+  as `you will visit` remains valid. No expected answer, gold label, or judge
+  response is available to these checks.
+
+| Gate | Semantic accuracy | Official F1 | Candidate recall | Delivered recall | Rendered recall / Hit |
+|---|---:|---:|---:|---:|---:|
+| Multi-hop n=16 | **75.0%** | **41.75%** | 64.43% | 58.18% | **63.39% / 87.5%** |
+| Open-domain n=20 | **70.0%** | **44.01%** | 57.92% | 63.75% | **65.42% / 70.0%** |
+
+Candidate and delivered recall use the same annotated-gold denominator but are
+not subset surfaces: candidate recall scores provenance on the first 50 raw
+cognitive trace nodes, while delivered recall scores the hydrated and
+repackaged product fragments after canonical-source and atomic-source routing.
+That source expansion is why the verified Open-domain delivered value can be
+higher than its candidate value.
+
+- **Paired checks:** the Multi-hop question set is identical to the earlier
+  v190e/v190f gate. Rendered recall rose from 59.23% to 63.39%; semantic
+  accuracy rose from 56.25% to 75.0%, and the countries answer remains exactly
+  `Italy, Turkey, Mexico, Canada, Greenland` without cross-speaker Japan
+  contamination. On the identical Open-domain v198a set, semantic accuracy
+  and official F1 remain exactly 70.0% and 44.01%; the degree, creator,
+  explicit-alternative, named-company, named-animal, and both Universal
+  Studios state answers remain correct.
+- **Interpretation:** these small type screens are regression gates, not a new
+  unified n=100 or full-LoCoMo headline and not directly comparable to public
+  LLM-judge scores from other memory systems. The engine remains model-free;
+  the reader contract is a reference consumer policy over the exact product
+  context and provenance surface.
+- **Evidence:**
+  `local-answer-locomo-v199a-final-multi-hop-n16.json`,
+  `local-answer-locomo-v200b-subject-owned-multi-hop-n16-answer-judge.json`,
+  `local-answer-locomo-v193a-creator-window-open-domain-n20.json`, and
+  `local-answer-locomo-v201a-subject-owned-open-domain-n20-answer-judge.json`.
+
 ## 2026-07-30 — production deep-selection and isolated atomic-fact routing
 
 - **Data:** LoCoMo seed 42, 25 questions per non-adversarial type, n=100;

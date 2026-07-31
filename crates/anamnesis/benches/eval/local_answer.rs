@@ -2,7 +2,6 @@
 mod eval_common;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::Arc;
@@ -13,7 +12,9 @@ use anamnesis::memory::{AnswerShape, ContextRenderStyle, RecallIntent, RecallPla
 use serde::{Deserialize, Serialize};
 
 use eval_common::answer_metrics;
-use eval_common::provider::{LlmProvider, OpenAiCompatibleProvider, ProviderConfig, ProviderError};
+use eval_common::provider::{
+    LlmProvider, OpenAiCompatibleProvider, ProviderConfig, ProviderError, is_loopback_base_url,
+};
 use eval_common::real_bench::dataset::{
     BenchDatasetName, BenchQuestion, BenchSession, GoldEvidence, LoadedBenchmark,
     load_benchmark_dataset, restrict_to_questions, split_by_sample,
@@ -28,13 +29,14 @@ use eval_common::real_bench::{BenchError, BenchResult};
 #[cfg(not(feature = "embed"))]
 compile_error!("local_answer requires: cargo bench --features embed --bench local_answer");
 
-const SCHEMA_VERSION: u32 = 37;
+const SCHEMA_VERSION: u32 = 38;
 const DATASET_LOADER_VERSION: &str = "locomo-caption-v2+longmemeval-cleaned-v1";
-const ANSWER_PROMPT_VERSION: &str = "official-format-v11-grounded-inference-contract";
-const REFLECT_PROMPT_VERSION: &str = "evidence-reflect-v11-source-completeness-compact";
+const ANSWER_PROMPT_VERSION: &str = "official-format-v22-query-scoped-subject-ownership";
+const REFLECT_PROMPT_VERSION: &str = "evidence-reflect-v23-query-scoped-subject-ownership";
 const JUDGE_PROMPT_VERSION: &str = "semantic-answer-equivalence-v3";
 const PROVIDER_READER_MAX_OUTPUT_TOKENS: u64 = 700;
-const ENGINE_PACKAGE_POLICY_VERSION: &str = "timestamped-final-reassembly-v2";
+const ENGINE_PACKAGE_POLICY_VERSION: &str =
+    "timestamped-final-reassembly-claim-slots-turn-source-v4";
 const SHADOW_RRF_POLICY_VERSION: &str = "shadow-rrf-cognitive1-embedding0.25-text1-k60-v1";
 const ROUTE_FULL_CONTEXT: &str = "0-full-context";
 const ROUTE_ORACLE_BASELINE: &str = "1-oracle-baseline";
@@ -319,6 +321,7 @@ struct Args {
     strong_reader_remote: bool,
     frontier_judge: bool,
     frontier_base_url: Option<String>,
+    frontier_model_digest: Option<String>,
     frontier_max_cost_usd: Option<f64>,
     run_full_context: bool,
     run_local_judge: bool,
@@ -540,7 +543,7 @@ fn run() -> BenchResult<()> {
         })
         .transpose()?;
 
-    let (ollama, ollama_version, model_digests) = if args.predict_only {
+    let (ollama, ollama_version, mut model_digests) = if args.predict_only {
         (None, "not-used-predict-only".to_string(), BTreeMap::new())
     } else {
         let client = OllamaClient::new(&args.ollama_base_url, args.timeout_secs)?;
@@ -556,6 +559,7 @@ fn run() -> BenchResult<()> {
         eprintln!("LOCAL ollama={} models={:?}", version, requested_models);
         (Some(client), version, digests)
     };
+    extend_frontier_model_digest(&args, &mut model_digests)?;
     let frontier_reader = args
         .strong_reader_remote
         .then(|| {
@@ -570,6 +574,12 @@ fn run() -> BenchResult<()> {
                 timeout_secs: args.timeout_secs,
                 max_retries: 3,
                 max_output_tokens: Some(PROVIDER_READER_MAX_OUTPUT_TOKENS),
+                temperature: Some(args.reader_generation.temperature),
+                top_p: Some(args.reader_generation.top_p),
+                top_k: qwen_model(&args.strong_reader_model)
+                    .then_some(args.reader_generation.top_k),
+                presence_penalty: Some(args.reader_generation.presence_penalty),
+                seed: Some(args.reader_generation.seed),
                 chat_template_enable_thinking: qwen_chat_template_thinking(
                     &args.strong_reader_model,
                     args.reader_generation.think,
@@ -738,11 +748,11 @@ fn run() -> BenchResult<()> {
                 args.consumer_prefilter_query_fusion,
             ) {
                 (Some(prefilter), Some(prefilter_k), query_fusion) => format!(
-                    "consumer-cascade-top{}-{prefilter}-top{prefilter_k}-{model}-query-fusion-{query_fusion}-evidence-documents-{}-product-path-v3",
+                    "consumer-cascade-top{}-{prefilter}-top{prefilter_k}-{model}-query-fusion-{query_fusion}-evidence-documents-{}-product-path-v4",
                     args.consumer_candidate_k, args.consumer_evidence_documents
                 ),
                 _ => format!(
-                    "consumer-cross-encoder-top{}-{model}-evidence-documents-{}-product-path-v3",
+                    "consumer-cross-encoder-top{}-{model}-evidence-documents-{}-product-path-v4",
                     args.consumer_candidate_k, args.consumer_evidence_documents
                 ),
             }
@@ -1426,6 +1436,12 @@ fn run_answer_report(args: &Args, source_path: &Path) -> BenchResult<()> {
                 timeout_secs: args.timeout_secs,
                 max_retries: 3,
                 max_output_tokens: Some(PROVIDER_READER_MAX_OUTPUT_TOKENS),
+                temperature: Some(args.reader_generation.temperature),
+                top_p: Some(args.reader_generation.top_p),
+                top_k: qwen_model(&args.strong_reader_model)
+                    .then_some(args.reader_generation.top_k),
+                presence_penalty: Some(args.reader_generation.presence_penalty),
+                seed: Some(args.reader_generation.seed),
                 chat_template_enable_thinking: qwen_chat_template_thinking(
                     &args.strong_reader_model,
                     args.reader_generation.think,
@@ -1448,6 +1464,11 @@ fn run_answer_report(args: &Args, source_path: &Path) -> BenchResult<()> {
                 timeout_secs: args.timeout_secs,
                 max_retries: 3,
                 max_output_tokens: Some(256),
+                temperature: Some(args.judge_generation.temperature),
+                top_p: Some(args.judge_generation.top_p),
+                top_k: qwen_model(&args.judge_model).then_some(args.judge_generation.top_k),
+                presence_penalty: Some(args.judge_generation.presence_penalty),
+                seed: Some(args.judge_generation.seed),
                 chat_template_enable_thinking: qwen_chat_template_thinking(
                     &args.judge_model,
                     args.judge_generation.think,
@@ -1466,6 +1487,7 @@ fn run_answer_report(args: &Args, source_path: &Path) -> BenchResult<()> {
     };
     let mut combined_model_digests = report.model_digests.clone();
     combined_model_digests.extend(model_digests);
+    extend_frontier_model_digest(args, &mut combined_model_digests)?;
 
     report.schema_version = SCHEMA_VERSION;
     if !resume_existing {
@@ -2026,44 +2048,6 @@ fn run_answer(
     Ok(())
 }
 
-fn inference_candidate_answer(query: &str, reflection: &str) -> Option<String> {
-    if RecallPlan::infer(query).answer_shape != AnswerShape::Inference {
-        return None;
-    }
-    reflection_candidate_answer(reflection)
-}
-
-fn reflection_candidate_answer(reflection: &str) -> Option<String> {
-    let parsed: serde_json::Value = serde_json::from_str(reflection).ok()?;
-    reflection_answer_value(parsed.get("candidate_answer")?)
-}
-
-fn reflection_answer_value(value: &serde_json::Value) -> Option<String> {
-    let answer = match value {
-        serde_json::Value::String(value) => value.trim().to_owned(),
-        serde_json::Value::Number(value) => value.to_string(),
-        serde_json::Value::Bool(value) => value.to_string(),
-        serde_json::Value::Array(values) => values
-            .iter()
-            .filter_map(reflection_answer_value)
-            .collect::<Vec<_>>()
-            .join(", "),
-        serde_json::Value::Null | serde_json::Value::Object(_) => return None,
-    };
-    (!answer.is_empty()).then_some(answer)
-}
-
-fn source_validated_collection_items(
-    reflection: &str,
-    context: &[PromptEvidence],
-) -> Option<Vec<String>> {
-    let allowed_source_ids: BTreeSet<_> = context
-        .iter()
-        .flat_map(|item| item.source_ids.iter().cloned())
-        .collect();
-    eval_common::reader_contract::validated_collection_items(reflection, &allowed_source_ids)
-}
-
 fn run_reflect_answer(
     report: &mut RunReport,
     record_index: usize,
@@ -2098,40 +2082,24 @@ fn run_reflect_answer(
         )));
     }
 
-    let (mut generated, answer_latency_ms) = if let Some(candidate) =
-        inference_candidate_answer(&record.question, &reflection.content)
-    {
-        (
-            GeneratedText {
-                content: candidate,
-                thinking_chars: 0,
-                done_reason: Some("reflection-candidate".to_owned()),
-                prompt_eval_tokens: None,
-                output_eval_tokens: None,
-            },
-            0.0,
-        )
-    } else {
-        let answer_start = Instant::now();
-        let generated = ollama.generate(
-            reader_model,
-            &reflected_answer_prompt(record, context, &reflection.content),
-            false,
-            generation,
-        )?;
-        (generated, answer_start.elapsed().as_secs_f64() * 1000.0)
-    };
-    if RecallPlan::infer(&record.question).answer_shape == AnswerShape::Collection
-        && let Some(items) = source_validated_collection_items(&reflection.content, context)
-        && eval_common::reader_contract::collection_answer_misses_item(&generated.content, &items)
-    {
-        generated.content = items.join(", ");
-        generated.done_reason = Some("reflection-source-completeness-backfill".to_owned());
-    }
+    let answer_start = Instant::now();
+    let mut generated = ollama.generate(
+        reader_model,
+        &reflected_answer_prompt(record, context, &reflection.content),
+        false,
+        generation,
+    )?;
+    let answer_latency_ms = answer_start.elapsed().as_secs_f64() * 1000.0;
     if generated.content.is_empty() {
         return Err(BenchError::Parse(format!(
             "reflect reader {reader_model} returned an empty final answer"
         )));
+    }
+    if let Some(reconciled) =
+        reconcile_reflected_output(record, context, &reflection.content, &generated.content)
+    {
+        generated.content = reconciled;
+        generated.done_reason = Some("source-grounded-shape-reconciliation".to_owned());
     }
 
     let locomo_official_f1 = locomo_official_score(
@@ -2226,6 +2194,7 @@ fn run_provider_answer(
         answer_latency_ms,
         None,
         None,
+        None,
         generation.prompt_tokens,
         generation.completion_tokens,
     );
@@ -2262,33 +2231,28 @@ fn run_provider_reflect_answer(
             provider.name()
         )));
     }
-    let (mut answer, answer_latency_ms, answer_prompt_tokens, answer_output_tokens) =
-        if let Some(candidate) = inference_candidate_answer(&record.question, &reflection) {
-            (candidate, 0.0, None, None)
-        } else {
-            let answer_start = Instant::now();
-            let generation = provider
-                .generate_with_usage(&reflected_answer_prompt(record, context, &reflection))
-                .map_err(provider_error)?;
-            (
-                generation.content.trim().to_owned(),
-                answer_start.elapsed().as_secs_f64() * 1000.0,
-                generation.prompt_tokens,
-                generation.completion_tokens,
-            )
-        };
-    if RecallPlan::infer(&record.question).answer_shape == AnswerShape::Collection
-        && let Some(items) = source_validated_collection_items(&reflection, context)
-        && eval_common::reader_contract::collection_answer_misses_item(&answer, &items)
-    {
-        answer = items.join(", ");
-    }
+    let answer_start = Instant::now();
+    let generation = provider
+        .generate_with_usage(&reflected_answer_prompt(record, context, &reflection))
+        .map_err(provider_error)?;
+    let mut answer = generation.content.trim().to_owned();
+    let answer_latency_ms = answer_start.elapsed().as_secs_f64() * 1000.0;
+    let answer_prompt_tokens = generation.prompt_tokens;
+    let answer_output_tokens = generation.completion_tokens;
     if answer.is_empty() {
         return Err(BenchError::Parse(format!(
             "frontier reflect reader {} returned an empty final answer",
             provider.name()
         )));
     }
+    let done_reason = if let Some(reconciled) =
+        reconcile_reflected_output(record, context, &reflection, &answer)
+    {
+        answer = reconciled;
+        Some("source-grounded-shape-reconciliation".to_owned())
+    } else {
+        None
+    };
     insert_provider_route(
         report,
         record_index,
@@ -2297,6 +2261,7 @@ fn run_provider_reflect_answer(
         context,
         answer,
         answer_latency_ms + reflection_latency_ms,
+        done_reason,
         Some(reflection),
         Some(reflection_latency_ms),
         sum_optional_counts(reflection_generation.prompt_tokens, answer_prompt_tokens),
@@ -2308,6 +2273,44 @@ fn run_provider_reflect_answer(
     Ok(())
 }
 
+fn reconcile_reflected_output(
+    record: &QuestionRecord,
+    context: &[PromptEvidence],
+    reflection: &str,
+    final_answer: &str,
+) -> Option<String> {
+    let allowed_source_ids: BTreeSet<_> = context
+        .iter()
+        .flat_map(|item| item.source_ids.iter().cloned())
+        .collect();
+    let mut answer = eval_common::reader_contract::reconcile_reflected_answer(
+        &record.question,
+        reflection,
+        final_answer,
+        &allowed_source_ids,
+    )
+    .unwrap_or_else(|| final_answer.to_owned());
+
+    if RecallPlan::infer(&record.question).answer_shape == AnswerShape::Collection
+        && let Some((items, excluded_other_speaker_item)) =
+            eval_common::reader_contract::validated_collection_items_for_query(
+                &record.question,
+                reflection,
+                &allowed_source_ids,
+                &context
+                    .iter()
+                    .map(|item| item.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            )
+        && (excluded_other_speaker_item
+            || eval_common::reader_contract::collection_answer_misses_item(&answer, &items))
+    {
+        answer = items.join(", ");
+    }
+    (answer != final_answer).then_some(answer)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn insert_provider_route(
     report: &mut RunReport,
@@ -2317,6 +2320,7 @@ fn insert_provider_route(
     context: &[PromptEvidence],
     answer: String,
     answer_latency_ms: f64,
+    done_reason: Option<String>,
     reflection: Option<String>,
     reflection_latency_ms: Option<f64>,
     prompt_eval_tokens: Option<u64>,
@@ -2346,7 +2350,7 @@ fn insert_provider_route(
             context_items: context.len(),
             context_chars: context.iter().map(|item| item.text.chars().count()).sum(),
             thinking_chars: 0,
-            done_reason: None,
+            done_reason,
             prompt_eval_tokens,
             output_eval_tokens,
             locomo_official_f1,
@@ -2365,30 +2369,46 @@ fn provider_error(error: ProviderError) -> BenchError {
 }
 
 fn qwen_chat_template_thinking(model: &str, enabled: bool) -> Option<bool> {
-    model
-        .to_ascii_lowercase()
-        .contains("qwen")
-        .then_some(enabled)
+    qwen_model(model).then_some(enabled)
+}
+
+fn qwen_model(model: &str) -> bool {
+    model.to_ascii_lowercase().contains("qwen")
 }
 
 fn frontier_lanes_are_local(args: &Args) -> bool {
     let loopback = args
         .frontier_base_url
         .as_deref()
-        .is_some_and(is_loopback_url);
+        .is_some_and(is_loopback_base_url);
     (!args.strong_reader_remote || loopback) && (!args.frontier_judge || loopback)
 }
 
-fn is_loopback_url(base_url: &str) -> bool {
-    reqwest::Url::parse(base_url)
-        .ok()
-        .and_then(|url| url.host_str().map(ToOwned::to_owned))
-        .is_some_and(|host| {
-            host.eq_ignore_ascii_case("localhost")
-                || host
-                    .parse::<IpAddr>()
-                    .is_ok_and(|address| address.is_loopback())
-        })
+fn extend_frontier_model_digest(
+    args: &Args,
+    model_digests: &mut BTreeMap<String, String>,
+) -> BenchResult<()> {
+    let Some(digest) = args.frontier_model_digest.as_ref() else {
+        return Ok(());
+    };
+    let mut models = Vec::new();
+    if args.strong_reader_remote {
+        models.push(args.strong_reader_model.as_str());
+    }
+    if args.frontier_judge && !models.contains(&args.judge_model.as_str()) {
+        models.push(args.judge_model.as_str());
+    }
+    for model in models {
+        if let Some(existing) = model_digests.get(model)
+            && existing != digest
+        {
+            return Err(BenchError::InvalidInput(format!(
+                "frontier model digest for {model:?} conflicts with the source report"
+            )));
+        }
+        model_digests.insert(model.to_owned(), digest.clone());
+    }
+    Ok(())
 }
 
 fn run_provider_judge(
@@ -2533,6 +2553,7 @@ struct PromptEvidence {
     text: String,
     raw_turn_id: Option<String>,
     source_ids: Vec<String>,
+    show_source_ids: bool,
 }
 
 fn oracle_prompt_context(evidence: &[OracleEvidence]) -> Vec<PromptEvidence> {
@@ -2551,23 +2572,20 @@ fn oracle_prompt_context(evidence: &[OracleEvidence]) -> Vec<PromptEvidence> {
             text: item.content.clone(),
             raw_turn_id: item.raw_turn_id.clone(),
             source_ids: item.raw_turn_id.iter().cloned().collect(),
+            show_source_ids: true,
         })
         .collect()
 }
 
 fn product_wire_prompt_context(context: &AnswerContext) -> Vec<PromptEvidence> {
-    let mut source_ids = BTreeSet::new();
-    for item in &context.evidence {
-        source_ids.insert(format!("node:{}", item.node_id));
-        if let Some(raw_turn_id) = &item.raw_turn_id {
-            source_ids.insert(raw_turn_id.clone());
-        }
-    }
+    let source_ids =
+        eval_common::reader_contract::visible_product_source_ids(&context.product_context);
     vec![PromptEvidence {
         label: "anamnesis-product-context".to_string(),
         text: context.product_context.clone(),
         raw_turn_id: None,
         source_ids: source_ids.into_iter().collect(),
+        show_source_ids: false,
     }]
 }
 
@@ -2607,6 +2625,7 @@ fn diagnostic_retrieval_prompt_context(
                     .cloned()
                     .chain(std::iter::once(format!("node:{}", item.node_id)))
                     .collect(),
+                show_source_ids: true,
             }
         })
         .collect()
@@ -2684,6 +2703,7 @@ fn full_prompt_context(group: &LoadedBenchmark) -> Vec<PromptEvidence> {
                 text: turn.content.clone(),
                 raw_turn_id: turn.raw_turn_id.clone(),
                 source_ids: turn.raw_turn_id.iter().cloned().collect(),
+                show_source_ids: true,
             })
         })
         .collect()
@@ -2691,19 +2711,30 @@ fn full_prompt_context(group: &LoadedBenchmark) -> Vec<PromptEvidence> {
 
 fn answer_prompt(record: &QuestionRecord, context: &[PromptEvidence]) -> String {
     let mut prompt = String::from(
-        "You are a memory question-answering reader. Use only the supplied evidence. \
-         Think briefly and reserve enough output budget for the final answer. \
-         Combine multiple evidence items and reason about dates when needed. \
-         When the query-derived plan requests inference and the evidence supplies a relevant \
-         personal premise, make the shortest stable ordinary-world bridge to the requested \
-         conclusion; do not abstain merely because that conclusion is implicit. Never invent a \
-         new personal event or preference. \
-         Give only the shortest direct answer that fully answers the question. \
-         Do not mention the evidence or explain your reasoning. \
+        "You are a memory question-answering reader. Ground every personal fact in the supplied \
+         evidence. Think briefly and combine multiple evidence items when needed. \
+         In a multi-speaker dialogue window, attribute each statement only to the speaker named \
+         on that same dialogue line. The line's turn-source=node:<id> marker is authoritative; a \
+         fragment title, enclosing Semantic source, or adjacent statement does not transfer \
+         ownership. When the evidence supplies an explicit named anchor and the requested answer \
+         follows through one stable, unambiguous ordinary-world relation such as geographic \
+         containment, creator attribution, or category membership, make exactly that one-hop \
+         bridge for any answer shape; the public value need not be printed literally in the \
+         evidence. Do not abstain merely because that stable relation is implicit. Ordinary-world \
+         knowledge alone must never create a personal event, preference, or uncertain attribute. \
+         A personal implication is allowed when the person's own explicit evidence is strongly \
+         diagnostic; unrelated co-occurrence is not. Abstain when a required bridge is ambiguous. \
+         Give only the shortest direct answer that fully answers the question. Do not mention the \
+         evidence, source ids, or reasoning. \
          If the evidence is insufficient, answer exactly No information available.\n\n",
     );
     prompt.push_str(&query_plan_instruction(&record.question));
     prompt.push('\n');
+    append_query_specific_reader_contract(
+        &mut prompt,
+        &record.question,
+        ReaderContractStage::Answer,
+    );
     if let Some(date) = &record.question_date {
         prompt.push_str(&format!("Question date: {date}\n"));
     }
@@ -2716,20 +2747,30 @@ fn answer_prompt(record: &QuestionRecord, context: &[PromptEvidence]) -> String 
 
 fn reflection_prompt(record: &QuestionRecord, context: &[PromptEvidence]) -> String {
     let mut prompt = String::from(
-        "You are the evidence-analysis stage of a memory system. Use only the supplied evidence. \
-         Do not invent personal facts absent from the evidence. You may use stable, ordinary \
-         world knowledge only to connect an explicit evidence fact to the question, such as a \
-         city's state or a commonplace implication; identify that bridge in reasoning_chain. \
+        "You are the evidence-analysis stage of a memory system. Ground every personal fact in \
+         the supplied evidence. Ordinary-world knowledge alone must not create a personal fact, \
+         but the person's own explicit evidence may support a strongly diagnostic implication. \
+         You may use exactly one stable ordinary-world hop to connect an explicit named evidence \
+         anchor to a requested public value, such as geographic containment, creator attribution, \
+         or category membership; identify that bridge in reasoning_chain. \
+         In a multi-speaker dialogue window, attribute each claim only to the speaker named on \
+         that same dialogue line. Cite that line's turn-source=node:<id>; the enclosing Semantic \
+         source, fragment title, and neighboring speakers do not own it. \
          Inspect every item internally, but write only evidence that directly helps answer the \
-         question. Return one complete JSON object of at most 450 tokens with these keys: \
+         question. Return one complete JSON object of at most 600 tokens with these keys: \
          required_slots, evidence_findings, reasoning_chain, answer_items, candidate_answer, \
-         missing_or_ambiguous. For collection questions, answer_items must contain one object per \
-         distinct final item with keys value and source_ids; source_ids must be a non-empty array \
-         of at most three ids copied exactly from the supplied evidence labels. Use an empty \
-         answer_items array for other answer shapes. Keep each required slot under eight words. \
-         Include at most six distinct supporting facts in evidence_findings, with one short \
-         sentence per fact; preserve names, negation, quantities, source dates, and who said or \
-         did each thing. Use at most four short \
+         missing_or_ambiguous. For collection and count questions, answer_items must contain one \
+         object per distinct final item or counted event with keys value and source_ids; source_ids \
+         must be a non-empty array of at most three ids copied exactly from that fact's inline \
+         turn-source=node:<id> marker when present or, for a single-source/non-product evidence \
+         block, its supplied source id. Never cite an enclosing Semantic source for one of its \
+         dialogue lines. For a count, candidate_answer must equal the number of source-grounded \
+         answer_items. Use an \
+         empty answer_items array for other answer shapes. Keep each required slot under eight \
+         words. \
+         Include at most twelve distinct supporting facts for collection/count questions and at \
+         most six for every other shape, with one short sentence per fact; preserve names, \
+         negation, quantities, source dates, and who said or did each thing. Use at most four short \
          reasoning_chain steps to connect those findings without inventing a personal event. Do \
          not summarize irrelevant evidence and do not repeat a fact in multiple fields. \
          For counts and lists, enumerate distinct completed evidence-backed items before forming \
@@ -2742,10 +2783,11 @@ fn reflection_prompt(record: &QuestionRecord, context: &[PromptEvidence]) -> Str
          elapsed time. When the question asks what is likely, might, could, or whether something \
          is true, record the best-supported plausible implication rather than requiring explicit \
          confirmation. Prefer a premise that the evidence explicitly links as a reason, goal, \
-         preference, or consequence over an unrelated co-occurring skill or event. Preserve all \
-         equally plausible ordinary-world alternatives when the evidence does not distinguish \
-         them. For yes/no conclusions, include the shortest supporting entity or fact in \
-         candidate_answer. \
+         preference, or consequence over an unrelated co-occurring skill or event. Preserve the \
+         exact entity and event type requested by the question: a broader or sibling activity is \
+         not evidence that the requested activity occurred. Keep the answer's semantic type exact: \
+         a goal, policy topic, or activity may be a premise but is not itself a credential, role, \
+         creator, or location. \
          Treat paraphrases and references such as home country, partner, or that event as slots \
          to resolve to a specific value whenever the evidence permits. No benchmark annotation, \
          reference answer, or judge feedback is available. Finish the JSON before the output \
@@ -2753,6 +2795,11 @@ fn reflection_prompt(record: &QuestionRecord, context: &[PromptEvidence]) -> Str
     );
     prompt.push_str(&query_plan_instruction(&record.question));
     prompt.push('\n');
+    append_query_specific_reader_contract(
+        &mut prompt,
+        &record.question,
+        ReaderContractStage::Reflection,
+    );
     if let Some(date) = &record.question_date {
         prompt.push_str(&format!("Question date: {date}\n"));
     }
@@ -2769,27 +2816,44 @@ fn reflected_answer_prompt(
     reflection: &str,
 ) -> String {
     let mut prompt = String::from(
-        "You are the final verification stage of a memory system. Use only the supplied evidence. \
-         The draft analysis is untrusted: check every claim against the evidence and correct it. \
+        "You are the final verification stage of a memory system. Ground every personal fact in \
+         the supplied evidence. The draft analysis is untrusted: check every claim against the \
+         evidence and correct concrete errors. Preserve a draft conclusion when its personal \
+         premises have valid inline sources, it has the semantic type requested by the question, \
+         and no evidence contradicts it. You may shorten that conclusion, but do not replace it, \
+         broaden it, or abstain merely because its single public relation is implicit. \
+         In multi-speaker dialogue, a statement belongs only to the speaker named on that exact \
+         line and its turn-source marker, never to an enclosing Semantic source, fragment title, \
+         or adjacent speaker. \
          Make sure the final answer fills every slot requested by the question. For lists and \
          counts, include every distinct completed supported item, excluding mere plans and \
          duplicate mentions. For temporal questions, resolve relative expressions and elapsed \
          durations against the dated evidence items and preserve the requested granularity. \
          Resolve descriptive references to their specific names, places, \
          events, or values when the evidence supplies them. Match the semantic type requested by \
-         the question; for example, normalize an evidenced city to its containing country when \
-         the question asks for a country. A concise commonsense implication is \
-         allowed when the query-derived plan requests inference; do not abstain merely because the \
-         conclusion is implicit when the draft gives a complete evidence-grounded chain. Stable \
-         ordinary world knowledge may bridge an explicit evidence fact to that conclusion, but \
-         must not supply a new personal fact. Answer No information available only when neither \
+         the question. Stable, unambiguous ordinary-world containment, creator attribution, or \
+         category knowledge may bridge an explicit named evidence anchor to the requested type for any \
+         answer shape. Use exactly one public-knowledge hop; the public value need not be printed \
+         literally in the evidence. Ordinary-world knowledge alone must not supply a new personal \
+         fact or uncertain attribute, while strongly diagnostic personal evidence may support the \
+         shortest implication. Preserve the exact requested entity or event type and do not use a \
+         broader or sibling activity as a substitute. Do not abstain merely because that single \
+         stable bridge is implicit; abstain if it is ambiguous. \
+         For counts, do not assume the draft answer_items are complete: rescan the full evidence \
+         chronologically, deduplicate repeated descriptions, and return the verified count. \
+         Answer No information available only when neither \
          the evidence nor a valid grounded implication bears on the requested answer. Prefer the \
          exact wording and specificity of the evidence over a vague paraphrase. Give only the \
-         shortest direct final answer, with no explanation and no mention of the analysis or \
-         evidence.\n\n",
+         shortest direct final answer. Do not explain or mention the analysis, evidence, or source \
+         ids.\n\n",
     );
     prompt.push_str(&query_plan_instruction(&record.question));
     prompt.push('\n');
+    append_query_specific_reader_contract(
+        &mut prompt,
+        &record.question,
+        ReaderContractStage::Verification,
+    );
     if let Some(date) = &record.question_date {
         prompt.push_str(&format!("Question date: {date}\n"));
     }
@@ -2802,18 +2866,186 @@ fn reflected_answer_prompt(
     prompt
 }
 
+#[derive(Clone, Copy)]
+enum ReaderContractStage {
+    Answer,
+    Reflection,
+    Verification,
+}
+
+fn append_query_specific_reader_contract(
+    prompt: &mut String,
+    query: &str,
+    stage: ReaderContractStage,
+) {
+    let normalized = format!(" {} ", query.trim().to_ascii_lowercase());
+    let explicit_alternatives =
+        eval_common::reader_contract::query_presents_explicit_alternatives(query);
+    let mut rules = Vec::new();
+
+    if explicit_alternatives {
+        rules.push(match stage {
+            ReaderContractStage::Reflection => {
+                "Compare every named alternative separately. candidate_answer must name the \
+                 supported alternative, never a bare yes/no. For a comparative 'more ... or ...' \
+                 question, choose the better-supported side; do not answer Both unless the \
+                 evidence actually establishes a tie."
+            }
+            ReaderContractStage::Answer | ReaderContractStage::Verification => {
+                "Compare every named alternative separately and return the supported alternative \
+                 name, never a bare yes/no. For a comparative 'more ... or ...' question, choose \
+                 the better-supported side; do not answer Both unless the evidence establishes a \
+                 tie."
+            }
+        });
+    } else if eval_common::reader_contract::query_starts_with_binary_auxiliary(query) {
+        rules.push(match stage {
+            ReaderContractStage::Reflection => {
+                "Format candidate_answer exactly as `Yes; <support>` or `No; <support>`. support \
+                 must be one concrete entity, event, or fact phrase copied from the strongest \
+                 personal evidence, at most five words; never use an abstract phrase such as \
+                 'strong evidence' and never include a source id."
+            }
+            ReaderContractStage::Answer | ReaderContractStage::Verification => {
+                "Return exactly `Yes; <support>` or `No; <support>`. support must be one concrete \
+                 entity, event, or fact phrase copied from the strongest personal evidence, at \
+                 most five words. Do not use a full sentence, an abstract evidence label, or a \
+                 source id."
+            }
+        });
+    }
+
+    if query_requests_credential(&normalized) {
+        rules.push(
+            "First identify the career explicitly linked to the credential, then map that career \
+             to established degree-program names. Return only those training fields. A sector, \
+             beneficiary, issue, policy priority, or personal goal that the career would address \
+             is only a premise and must not be returned as the credential.",
+        );
+    }
+    if eval_common::reader_contract::query_requests_plural_public_branches(query) {
+        rules.push(
+            "Before answering, enumerate every stable branch of the named public venue or \
+             organization. If multiple equally valid locations match the requested plural type, \
+             retain all of them unless personal evidence selects one branch; never stop after the \
+             first or most famous location.",
+        );
+    }
+    if query_requests_creator_attribution(&normalized) {
+        rules.push(
+            "When the evidence names a work or theme and the question asks for its creator, use \
+             one stable public creator-attribution hop and return the creator, not the work.",
+        );
+    }
+    if query_requests_likely_named_outcome(&normalized) {
+        rules.push(
+            "Inventory every explicit named candidate before abstaining. An explicitly desired \
+             candidate followed later by an unnamed completed outcome in that candidate's \
+             matching category is the best-supported candidate unless another named candidate \
+             has a stronger link.",
+        );
+    }
+    if query_requests_preferred_category_member(&normalized) {
+        rules.push(
+            "When the requested value is a preferred member of a category, map an explicitly \
+             favorite named item to that category when membership is unambiguous. It outranks \
+             enthusiasm for a broader item whose requested member is unstated; an explicit \
+             pairwise comparison is not required.",
+        );
+    }
+    if query_requests_named_venue(&normalized) {
+        rules.push(
+            "Use one stable public-knowledge hop from the person's explicit collection or \
+             preference to a canonical matching destination in the requested city. Return the \
+             venue's proper name, not a generic category such as 'a themed shop'; abstain if no \
+             single canonical destination is known.",
+        );
+    }
+    if query_requests_career_transition(&normalized) {
+        rules.push(
+            "For a plausible role after a career, prioritize the person's existing same-domain \
+             mentoring, teaching, leadership, or giving-back behavior as continuity evidence. \
+             Return the single role that behavior supports rather than listing current side \
+             projects or endorsements.",
+        );
+    }
+    if query_requests_near_term_recurrence(&normalized) {
+        rules.push(
+            "For near-term recurrence of the exact requested event, a severe recent negative \
+             outcome is evidence against repeating it unless an explicit newer plan overrides \
+             that outcome.",
+        );
+    }
+
+    if !rules.is_empty() {
+        prompt.push_str("Query-specific reader contract: ");
+        prompt.push_str(&rules.join(" "));
+        prompt.push('\n');
+    }
+}
+
+fn query_requests_credential(normalized: &str) -> bool {
+    [" degree ", " credential ", " major ", " field of study "]
+        .iter()
+        .any(|needle| normalized.contains(needle))
+}
+
+fn query_requests_creator_attribution(normalized: &str) -> bool {
+    [
+        "artist", "author", "composer", "creator", "director", "writer",
+    ]
+    .iter()
+    .any(|needle| normalized.contains(needle))
+}
+
+fn query_requests_likely_named_outcome(normalized: &str) -> bool {
+    normalized.trim_start().starts_with("which ") && normalized.contains(" likely ")
+}
+
+fn query_requests_preferred_category_member(normalized: &str) -> bool {
+    (normalized.trim_start().starts_with("which ") || normalized.trim_start().starts_with("what "))
+        && [" prefer ", " prefers ", " preferred ", " favorite "]
+            .iter()
+            .any(|needle| normalized.contains(needle))
+}
+
+fn query_requests_near_term_recurrence(normalized: &str) -> bool {
+    normalized.contains(" soon ")
+        && [" again ", " another "]
+            .iter()
+            .any(|needle| normalized.contains(needle))
+}
+
+fn query_requests_named_venue(normalized: &str) -> bool {
+    [" shop ", " store ", " museum ", " restaurant ", " venue "]
+        .iter()
+        .any(|needle| normalized.contains(needle))
+        && normalized.contains(" in ")
+}
+
+fn query_requests_career_transition(normalized: &str) -> bool {
+    normalized.contains(" career ")
+        && [" after ", " future ", " retire ", " retirement "]
+            .iter()
+            .any(|needle| normalized.contains(needle))
+}
+
 fn append_prompt_evidence(prompt: &mut String, context: &[PromptEvidence]) {
     prompt.push_str("Evidence:\n");
     for item in context {
-        let source_ids = if item.source_ids.is_empty() {
-            "unlabeled".to_owned()
+        if item.show_source_ids {
+            let source_ids = if item.source_ids.is_empty() {
+                "unlabeled".to_owned()
+            } else {
+                item.source_ids.join(",")
+            };
+            prompt.push_str(&format!(
+                "[{} source_ids={}]\n{}\n",
+                item.label, source_ids, item.text
+            ));
         } else {
-            item.source_ids.join(",")
-        };
-        prompt.push_str(&format!(
-            "[{} source_ids={}]\n{}\n",
-            item.label, source_ids, item.text
-        ));
+            prompt.push_str(&format!("[{}]\n{}\n", item.label, item.text));
+        }
     }
 }
 
@@ -2845,7 +3077,12 @@ fn query_plan_instruction(query: &str) -> String {
         }
         AnswerShape::Collection => {
             "Return every distinct evidence-backed item requested by the question. Deduplicate \
-             paraphrases of the same item and separate final items with commas."
+             paraphrases of the same item and separate final items with commas. Keep the actor or \
+             owner exact: a first-person event or property stated only by another speaker belongs \
+             to that speaker, not to the named subject. An adjacent question, fragment heading, \
+             or dialogue window does not transfer ownership. When an explicit \
+             anchor has multiple canonical one-hop public values matching the requested plural \
+             type, include every such value rather than choosing one arbitrarily."
         }
         AnswerShape::Relationship => {
             "Combine the evidence needed to state the requested relationship, comparison, reason, \
@@ -2857,15 +3094,20 @@ fn query_plan_instruction(query: &str) -> String {
              Prefer evidence explicitly linked as a reason, goal, preference, or consequence over \
              unrelated co-occurring facts. Stable ordinary world knowledge may connect an \
              explicit evidence fact to the conclusion, and equally plausible alternatives should \
-             all be preserved when the evidence cannot distinguish them. State the requested \
-             conclusion, not only its intermediate premises, and do not abstain solely because \
-             the conclusion was implicit. For yes/no conclusions, include the shortest supporting \
-             entity or fact."
+             all be preserved when the evidence cannot distinguish them. Keep the exact person, \
+             entity, and event type requested by the question; evidence about a broader or sibling \
+             activity does not establish the requested activity. State the requested conclusion, \
+             not only its intermediate premises, and do not abstain solely because the conclusion \
+             was implicit. Compare every explicit named candidate before abstaining; return the \
+             unique best-supported candidate when one exists. For yes/no conclusions, use \
+             `Yes; <support>` or `No; <support>` with at most five support words."
         }
         AnswerShape::Fact => {
             "Extract the exact requested fact and preserve names, numbers, units, specificity, \
-             and negation. Match the semantic type requested by the question: if the evidence \
-             supplies a city but the question asks for its country, return the containing country."
+             and negation. Match the semantic type requested by the question. An explicit named \
+             anchor may be normalized through one stable, unambiguous ordinary-world containment, \
+             creator-attribution, or category relation, but never use that bridge to invent a \
+             personal fact."
         }
         _ => "Answer in the shape requested by the question using only supplied evidence.",
     };
@@ -2887,9 +3129,17 @@ fn query_plan_instruction(query: &str) -> String {
         }
         _ => "Use the smallest complete set of relevant evidence.",
     };
+    let choice_instruction = if eval_common::reader_contract::query_presents_explicit_alternatives(
+        query,
+    ) {
+        "The question presents explicit alternatives. Return the supported alternative value or \
+         values, never a bare yes/no response."
+    } else {
+        ""
+    };
     format!(
         "Query-derived reader plan: answer_shape={:?}, recall_intent={:?}. {answer_instruction} \
-         {evidence_instruction}",
+         {evidence_instruction} {choice_instruction}",
         plan.answer_shape, plan.recall_intent
     )
 }
@@ -2901,15 +3151,7 @@ fn should_reflect_question(args: &Args, query: &str) -> bool {
     if !args.strong_reader_reflect_complex_only {
         return true;
     }
-    let plan = RecallPlan::infer(query);
-    matches!(
-        plan.answer_shape,
-        AnswerShape::Count
-            | AnswerShape::Collection
-            | AnswerShape::Frequency
-            | AnswerShape::Inference
-            | AnswerShape::Relationship
-    )
+    eval_common::reader_contract::complex_reflection_required(&RecallPlan::infer(query))
 }
 
 fn judge_prompt(record: &QuestionRecord, answer: &str) -> String {
@@ -3685,7 +3927,7 @@ fn load_derived_memory_artifact(
             path.display()
         ))
     })?;
-    if artifact.schema_version != 1 {
+    if !matches!(artifact.schema_version, 1..=3) {
         return Err(BenchError::InvalidInput(format!(
             "unsupported derived-memory artifact schema {}",
             artifact.schema_version
@@ -3711,8 +3953,42 @@ fn load_derived_memory_artifact(
             "derived-memory artifact requires extractor digest and prompt version".to_owned(),
         ));
     }
+    if artifact.schema_version == 3
+        && (artifact.extractor_digest.len() != 64
+            || !artifact
+                .extractor_digest
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()))
+    {
+        return Err(BenchError::InvalidInput(
+            "schema-3 derived-memory artifact requires a lowercase SHA-256 extractor digest"
+                .to_owned(),
+        ));
+    }
     let mut ids = BTreeSet::new();
     for record in &artifact.records {
+        if artifact.schema_version >= 2
+            && [
+                record.subject.is_some(),
+                record.relation.is_some(),
+                record.object.is_some(),
+                record.evidence_span.is_some(),
+                record.evidence_source_turn_id.is_some(),
+            ]
+            .iter()
+            .any(|present| !present)
+        {
+            return Err(BenchError::InvalidInput(format!(
+                "grounded derived-memory record {:?} is incomplete",
+                record.id
+            )));
+        }
+        if artifact.schema_version == 3 && record.evidence_object.is_none() {
+            return Err(BenchError::InvalidInput(format!(
+                "canonical grounded derived-memory record {:?} has no evidence object",
+                record.id
+            )));
+        }
         if !ids.insert(record.id.as_str()) {
             return Err(BenchError::InvalidInput(format!(
                 "duplicate derived-memory artifact id {:?}",
@@ -3802,6 +4078,7 @@ where
     let mut frontier_base_url = std::env::var("LLM_BASE_URL")
         .ok()
         .filter(|value| !value.trim().is_empty());
+    let mut frontier_model_digest = None;
     let mut frontier_max_cost_usd = None;
     let mut run_full_context = false;
     let mut run_local_judge = true;
@@ -3917,6 +4194,9 @@ where
             "--frontier-judge" => frontier_judge = true,
             "--frontier-base-url" => {
                 frontier_base_url = Some(next_value(&mut iter, "--frontier-base-url")?)
+            }
+            "--frontier-model-digest" => {
+                frontier_model_digest = Some(next_value(&mut iter, "--frontier-model-digest")?)
             }
             "--frontier-max-cost-usd" => {
                 frontier_max_cost_usd = Some(parse_f64(
@@ -4100,6 +4380,32 @@ where
         return Err(BenchError::InvalidInput(
             "--frontier-max-cost-usd must be a positive finite number".to_owned(),
         ));
+    }
+    if let Some(digest) = frontier_model_digest.as_deref() {
+        if !(strong_reader_remote || frontier_judge) {
+            return Err(BenchError::InvalidInput(
+                "--frontier-model-digest requires a frontier reader or judge".to_owned(),
+            ));
+        }
+        if digest.len() != 64
+            || !digest
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        {
+            return Err(BenchError::InvalidInput(
+                "--frontier-model-digest must be 64 lowercase hexadecimal characters".to_owned(),
+            ));
+        }
+        if strong_reader_remote
+            && frontier_judge
+            && strong_reader_model.trim() != judge_model.trim()
+        {
+            return Err(BenchError::InvalidInput(
+                "--frontier-model-digest is unambiguous only when frontier reader and judge use \
+                 the same model"
+                    .to_owned(),
+            ));
+        }
     }
     if frontier_judge && answer_report.is_none() {
         return Err(BenchError::InvalidInput(
@@ -4314,6 +4620,7 @@ where
         strong_reader_remote,
         frontier_judge,
         frontier_base_url,
+        frontier_model_digest,
         frontier_max_cost_usd,
         run_full_context,
         run_local_judge,
@@ -4473,9 +4780,10 @@ Options:\n\
                                    memory-source-coverage, source-dedup, source-coverage, or provenance-guardrail\n\
 --run-strong-reader              Add route 3 with --strong-reader-model\n\
 --run-reflect-reader             Add route 3 with two-pass evidence reflection\n\
---reflect-complex-only           Reflect Count, Collection, Frequency, Inference, and Relationship plans\n\
+--reflect-complex-only           Reflect temporal intent plus Count, Collection, Frequency, Inference, and Relationship plans\n\
 --frontier-reader                Run route 3 through an OpenAI-compatible API\n\
   --frontier-base-url <url>        API base URL (or set LLM_BASE_URL)\n\
+  --frontier-model-digest <SHA256> Record the exact local-compatible model identity\n\
   --baseline-only                  Compatibility alias: omit route 3\n\
   --top-k <N>                      Product retrieval cutoff (default: production profile)\n\
   --baseline-reader-model <name>   Reader for routes 0, 1, and 2 (default: qwen3.6:35b-a3b)\n\

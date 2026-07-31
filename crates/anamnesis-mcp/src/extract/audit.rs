@@ -23,6 +23,24 @@ pub(crate) struct ExtractionAuditCandidateRow {
     pub kind: CandidateKind,
     pub confidence: f64,
     #[serde(default)]
+    pub subject: Option<String>,
+    #[serde(default)]
+    pub relation: Option<String>,
+    #[serde(default)]
+    pub object: Option<String>,
+    #[serde(default)]
+    pub evidence_object: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_span: Option<String>,
+    #[serde(default)]
+    pub evidence_source_node_id: Option<u64>,
+    #[serde(default)]
+    pub evidence_span_start: Option<u64>,
+    #[serde(default)]
+    pub evidence_span_end: Option<u64>,
+    #[serde(default)]
+    pub evidence_span_sha256: Option<String>,
+    #[serde(default)]
     pub entity_tags: Vec<String>,
     #[serde(default)]
     pub valid_from_ms: Option<u64>,
@@ -132,6 +150,28 @@ pub(crate) fn render_audit_report(result: &ExtractionAuditResult) -> String {
             candidate.confidence,
             candidate.content,
         ));
+        if let (
+            Some(subject),
+            Some(relation),
+            Some(object),
+            Some(evidence_object),
+            Some(evidence_span),
+            Some(evidence_source_node_id),
+        ) = (
+            candidate.subject.as_deref(),
+            candidate.relation.as_deref(),
+            candidate.object.as_deref(),
+            candidate
+                .evidence_object
+                .as_deref()
+                .or(candidate.object.as_deref()),
+            candidate.evidence_span.as_deref(),
+            candidate.evidence_source_node_id,
+        ) {
+            report.push_str(&format!(
+                "  GROUNDING: {subject} | {relation} | {object}\n  EVIDENCE OBJECT: {evidence_object}\n  EVIDENCE {evidence_source_node_id}: {evidence_span}\n",
+            ));
+        }
         for source in &candidate.sources {
             report.push_str(&format!(
                 "  SOURCE {} [{} {}]: ",

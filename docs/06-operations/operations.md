@@ -65,13 +65,33 @@ sequences. A custom command is shell-word parsed and executed directly with
 bounded stdin/stdout: no shell and no fallback command. A custom command may
 send content elsewhere; the default cannot.
 
+OMLX can be used without a key or external model service through the bundled
+loopback-only adapter:
+
+```bash
+export ANAMNESIS_EXTRACT_CMD="python3 /path/to/anamnesis/scripts/run_local_openai_extractor.py --base-url http://127.0.0.1:8000 --model Qwen3.6-35B-A3B-4bit --timeout-secs 600"
+```
+
+The adapter rejects non-loopback URLs and emits only the local Qwen response on
+stdout. Its OpenAI-compatible wire is an OMLX transport detail; no OpenAI
+credential or remote LLM is involved.
+
 Run one pass manually with `anamnesis extract [--namespace NS]`. A pass selects one temporal
 session-and-scope group with **10–20** eligible turns and sends at most that one batch to the
 configured extractor. The provider timeout defaults to **240 s** and can be
 boundedly overridden with `ANAMNESIS_EXTRACT_TIMEOUT_SECS=1..3600`; stdout and stderr each have
-their own **1 MiB** cap. Failure, timeout, malformed output, or an over-limit stream leaves its
-sources eligible for a later pass. A valid empty (`items=[]`) result is different: it records
-the selected sources in the zero-output ledger, so they are not sent again.
+their own **1 MiB** cap. Invalid JSON or exact-grounding failure receives one
+fail-closed retry. If a batch still fails validation after its allowed retry,
+or has a non-repairable schema rejection, the worker recursively isolates
+deterministic halves: valid partitions are staged through the same product
+path, while an irreducible invalid source remains raw and eligible for a later
+pass. All branches share a hard budget of **8 partition-recovery provider
+invocations** (including partition grounding retries); exhaustion stops new
+calls and preserves the last durably recorded validation error. Provider
+failure, timeout, or an over-limit stream does not partition and
+leaves the complete affected batch eligible. A valid empty (`items=[]`) result
+is different: it records the selected sources in the zero-output ledger, so
+they are not sent again.
 
 Groups with fewer than 10 turns remain permanently unprocessed in R2. This intentionally biases
 shadow audit samples toward longer sessions; account for that bias in an R3 promotion decision.
@@ -82,8 +102,11 @@ Stage-1 raw capture remains in the graph as `Episodic` memories. Provider stdin/
 batch, raw stdout/stderr, and the raw command are transient and are not persisted or logged by
 R2 policy or error records. The policy side schema persists only extractor profile
 hash/components, run and failure scalars, validated candidates and relations, the source
-identity/hash ledger, and audit labels. R2 performs no automatic pruning or cleanup: those rows
-persist until an operator takes a database lifecycle action.
+identity/hash ledger, canonical subject/relation/object fields, exact evidence-object value,
+live-source byte range and span hash, and audit labels. It does not copy the raw evidence span:
+audit and promotion reconstruct that span from the still-matching authoritative source. R2
+performs no automatic pruning or cleanup: those rows persist until an operator takes a database
+lifecycle action.
 
 A successful extraction pass stages candidates, relations, run metadata, and source ledger
 records in the policy side schema only. It never changes graph nodes, graph edges, or
@@ -118,6 +141,9 @@ Promotion is additive and idempotent. It creates one record in the isolated atom
 stamps the extractor profile and candidate idempotency key, and keeps every cited raw Episodic
 source ID as authoritative provenance. It creates no graph node or `ExtractedFrom` edge, does not
 enter node FTS, and cannot perturb attraction, forgetting, or the ordinary graph candidate pool.
+The sidecar stores the canonical claim plus the evidence source/range/hash metadata, not a copied
+raw evidence span. A richer canonical-plus-live-evidence surface may be used once to compute its
+embedding and is not persisted.
 The sidecar record inherits the latest cited source observation time; the review/promotion wall
 clock never manufactures recency. Query-time routing may use the compact fact, but only its live,
 scope-valid raw sources can enter the production reranker/context path. The promotion response

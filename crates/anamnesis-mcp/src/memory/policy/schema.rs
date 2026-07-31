@@ -71,6 +71,11 @@ fn migrate(transaction: &Transaction<'_>) -> Result<(), PolicyStoreError> {
             extraction::migrate_v3(transaction)?;
             set_version(transaction)?;
         }
+        Some(3) => {
+            create_v1_schema(transaction)?;
+            extraction::migrate_v4(transaction)?;
+            set_version(transaction)?;
+        }
         Some(SCHEMA_VERSION) => {
             create_v1_schema(transaction)?;
             extraction::create_schema(transaction)?;
@@ -148,7 +153,7 @@ fn normalize_schema_sql(sql: &str) -> String {
 mod tests {
     use rusqlite::{Connection, params};
 
-    use super::{PolicyStoreError, SCHEMA_VERSION, initialize};
+    use super::{PolicyStoreError, SCHEMA_VERSION, initialize, schema_version};
 
     #[test]
     fn schema_rejects_invalid_singleton_and_boolean_values() {
@@ -198,7 +203,7 @@ mod tests {
                     id INTEGER PRIMARY KEY CHECK(id = 1),
                     version INTEGER NOT NULL
                 );
-                INSERT INTO mcp_schema_version (id, version) VALUES (1, 4);
+                INSERT INTO mcp_schema_version (id, version) VALUES (1, 5);
                 CREATE TABLE retained_metadata (id INTEGER PRIMARY KEY, marker INTEGER NOT NULL);
                 INSERT INTO retained_metadata (id, marker) VALUES (1, 7);
                 ",
@@ -326,6 +331,68 @@ mod tests {
                 [],
             )
             .expect("generic fact kind accepted after migration");
+    }
+
+    #[test]
+    fn v3_extraction_rows_gain_grounding_ranges_without_copying_source_text() {
+        let mut connection = Connection::open_in_memory().expect("open policy database");
+        connection
+            .execute_batch(
+                "
+                CREATE TABLE mcp_schema_version (
+                    id INTEGER PRIMARY KEY CHECK(id = 1),
+                    version INTEGER NOT NULL
+                );
+                INSERT INTO mcp_schema_version (id, version) VALUES (1, 3);
+                CREATE TABLE extract_candidates (
+                    id INTEGER PRIMARY KEY,
+                    content TEXT NOT NULL
+                );
+                INSERT INTO extract_candidates (id, content) VALUES (1, 'legacy claim');
+                ",
+            )
+            .expect("seed v3 extraction row");
+
+        initialize(&mut connection).expect("migrate v3 schema");
+
+        let columns: Vec<String> = connection
+            .prepare(
+                "SELECT name FROM pragma_table_info('extract_candidates')
+                 WHERE name LIKE 'ground_%' OR name LIKE 'evidence_%'
+                 ORDER BY name",
+            )
+            .expect("inspect grounded columns")
+            .query_map([], |row| row.get(0))
+            .expect("query grounded columns")
+            .collect::<Result<_, _>>()
+            .expect("read grounded columns");
+        assert_eq!(
+            columns,
+            [
+                "evidence_object",
+                "evidence_source_node_id",
+                "evidence_span_end",
+                "evidence_span_sha256",
+                "evidence_span_start",
+                "ground_object",
+                "ground_relation",
+                "ground_subject",
+            ]
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT content FROM extract_candidates WHERE id = 1",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .expect("read migrated claim"),
+            "legacy claim"
+        );
+        assert_eq!(
+            schema_version(&connection).expect("schema version"),
+            SCHEMA_VERSION
+        );
     }
 
     fn schema_snapshot(connection: &Connection) -> Vec<(String, String, String, Option<String>)> {

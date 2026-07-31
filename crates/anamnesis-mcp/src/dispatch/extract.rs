@@ -244,7 +244,7 @@ pub(super) fn dispatch_promote_candidate(
             Ok(audit) => audit,
             Err(error) => return Response::internal(error),
         };
-        let Some(candidate) = audit
+        let Some(mut candidate) = audit
             .candidates
             .into_iter()
             .find(|candidate| candidate.id == candidate_id)
@@ -264,6 +264,8 @@ pub(super) fn dispatch_promote_candidate(
                 "extraction audit candidate sources are unavailable or mismatched",
             );
         }
+        let sources = candidate_audit_sources(&memory, &candidate, &mut None);
+        candidate.evidence_span = live_evidence_span_from_sources(&candidate, &sources);
         promote_reviewed_candidate(&mut memory, &candidate).and_then(|promoted| {
             store
                 .mark_extraction_candidate_committed(candidate.id, promoted.0.0)
@@ -414,29 +416,64 @@ fn promote_reviewed_candidate(
         None => {
             let kind = candidate_kind_label(&candidate.kind);
             let candidate_id_text = candidate.id.to_string();
+            let mut metadata = vec![
+                (META_KEY.to_owned(), candidate.idempotency_key.clone()),
+                (
+                    "anamnesis:extraction_candidate_id".to_owned(),
+                    candidate_id_text,
+                ),
+                (
+                    "anamnesis:extraction_profile_id".to_owned(),
+                    candidate.profile_id.clone(),
+                ),
+                (
+                    "anamnesis:source_session_id".to_owned(),
+                    candidate.source_session_id.clone(),
+                ),
+                ("anamnesis:fact-kind".to_owned(), kind.to_owned()),
+            ];
+            for (key, value) in [
+                ("anamnesis:ground-subject", candidate.subject.as_ref()),
+                ("anamnesis:ground-relation", candidate.relation.as_ref()),
+                ("anamnesis:ground-object", candidate.object.as_ref()),
+                (
+                    "anamnesis:evidence-object",
+                    candidate.evidence_object.as_ref(),
+                ),
+            ] {
+                if let Some(value) = value {
+                    metadata.push((key.to_owned(), value.clone()));
+                }
+            }
+            if let Some(node_id) = candidate.evidence_source_node_id {
+                metadata.push((
+                    "anamnesis:evidence-source-node-id".to_owned(),
+                    node_id.to_string(),
+                ));
+            }
+            for (key, value) in [
+                (
+                    "anamnesis:evidence-span-start",
+                    candidate.evidence_span_start,
+                ),
+                ("anamnesis:evidence-span-end", candidate.evidence_span_end),
+            ] {
+                if let Some(value) = value {
+                    metadata.push((key.to_owned(), value.to_string()));
+                }
+            }
+            if let Some(value) = candidate.evidence_span_sha256.as_ref() {
+                metadata.push(("anamnesis:evidence-span-sha256".to_owned(), value.clone()));
+            }
             let fact_id = memory.add_atomic_fact(
                 AtomicFactInput::new(&candidate.content, source_ids)
+                    .with_embedding_surface(candidate_routing_surface(candidate))
                     .with_entity_tags(candidate.entity_tags.clone())
                     .with_validity(
                         candidate.valid_from_ms.map(Timestamp),
                         candidate.valid_until_ms.map(Timestamp),
                     )
-                    .with_metadata(vec![
-                        (META_KEY.to_owned(), candidate.idempotency_key.clone()),
-                        (
-                            "anamnesis:extraction_candidate_id".to_owned(),
-                            candidate_id_text,
-                        ),
-                        (
-                            "anamnesis:extraction_profile_id".to_owned(),
-                            candidate.profile_id.clone(),
-                        ),
-                        (
-                            "anamnesis:source_session_id".to_owned(),
-                            candidate.source_session_id.clone(),
-                        ),
-                        ("anamnesis:fact-kind".to_owned(), kind.to_owned()),
-                    ]),
+                    .with_metadata(metadata),
             )?;
             (fact_id, false)
         }
@@ -444,6 +481,21 @@ fn promote_reviewed_candidate(
 
     memory.engine_mut().graph_mut().storage_mut().flush()?;
     Ok((fact_id, already_materialized))
+}
+
+fn candidate_routing_surface(candidate: &ExtractionAuditCandidateRow) -> String {
+    match candidate
+        .evidence_object
+        .as_deref()
+        .or(candidate.object.as_deref())
+        .map(str::trim)
+        .filter(|evidence_object| !evidence_object.is_empty())
+    {
+        Some(evidence_object) => {
+            format!("{}\nEvidence object: {evidence_object}", candidate.content)
+        }
+        None => candidate.content.clone(),
+    }
 }
 
 fn find_promoted_candidate(
@@ -563,6 +615,7 @@ fn enrich_audit_sources(
     let mut capture_turn_key_index = None;
     for candidate in &mut result.candidates {
         candidate.sources = candidate_audit_sources(memory, candidate, &mut capture_turn_key_index);
+        candidate.evidence_span = live_evidence_span(candidate);
     }
 }
 
@@ -571,13 +624,54 @@ fn candidate_sources_available(
     candidate: &ExtractionAuditCandidateRow,
 ) -> bool {
     let sources = candidate_audit_sources(memory, candidate, &mut None);
-    !candidate.source_turn_keys.is_empty()
+    let grounding_fields_present = [
+        candidate.subject.is_some(),
+        candidate.relation.is_some(),
+        candidate.object.is_some(),
+        candidate.evidence_source_node_id.is_some(),
+        candidate.evidence_span_start.is_some(),
+        candidate.evidence_span_end.is_some(),
+        candidate.evidence_span_sha256.is_some(),
+    ];
+    let grounding_available = if grounding_fields_present.iter().any(|present| *present) {
+        grounding_fields_present.iter().all(|present| *present)
+            && live_evidence_span_from_sources(candidate, &sources).is_some()
+    } else {
+        true
+    };
+    grounding_available
+        && !candidate.source_turn_keys.is_empty()
         && candidate.source_node_ids.len() == candidate.source_turn_keys.len()
         && candidate.source_content_hashes.len() == candidate.source_turn_keys.len()
         && sources.len() == candidate.source_turn_keys.len()
         && sources
             .iter()
             .all(|source| source.availability == ExtractionAuditSourceAvailability::Available)
+}
+
+fn live_evidence_span(candidate: &ExtractionAuditCandidateRow) -> Option<String> {
+    live_evidence_span_from_sources(candidate, &candidate.sources)
+}
+
+fn live_evidence_span_from_sources(
+    candidate: &ExtractionAuditCandidateRow,
+    sources: &[ExtractionAuditSource],
+) -> Option<String> {
+    let source_node_id = candidate.evidence_source_node_id?;
+    let start = usize::try_from(candidate.evidence_span_start?).ok()?;
+    let end = usize::try_from(candidate.evidence_span_end?).ok()?;
+    let expected_hash = candidate.evidence_span_sha256.as_deref()?;
+    let content = sources
+        .iter()
+        .find(|source| {
+            source.node_id == source_node_id
+                && source.availability == ExtractionAuditSourceAvailability::Available
+        })?
+        .content
+        .as_deref()?;
+    let span = content.get(start..end)?;
+    let actual_hash = format!("{:x}", Sha256::digest(span.as_bytes()));
+    (actual_hash == expected_hash).then(|| span.to_owned())
 }
 
 fn candidate_audit_sources(
@@ -731,7 +825,8 @@ fn stage_namespace(
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     validate_stage_snapshot(&memory, &sources)?;
-    let canonical = reconstruct_and_validate(&sources, profile_id, &extraction)?;
+    let canonical =
+        reconstruct_and_validate(&sources, profile_id, profile.schema_version, &extraction)?;
     if canonical != extraction {
         return Err(anamnesis::Error::InvalidInput(
             "extraction payload does not match its canonical validation".to_owned(),
@@ -795,6 +890,7 @@ fn validate_stage_snapshot(
 fn reconstruct_and_validate(
     sources: &[ExtractionSource],
     profile_id: &str,
+    schema_version: u32,
     extraction: &ValidatedExtraction,
 ) -> Result<ValidatedExtraction, anamnesis::Error> {
     let items: Vec<_> = extraction
@@ -804,6 +900,11 @@ fn reconstruct_and_validate(
             serde_json::json!({
                 "item_local_id": item.item_local_id,
                 "content": item.content,
+                "subject": item.subject,
+                "relation": item.relation,
+                "object": item.object,
+                "evidence_object": item.evidence_object,
+                "evidence_span": item.evidence_span,
                 "kind": item.kind,
                 "confidence": item.confidence,
                 "entity_tags": item.entity_tags,
@@ -827,7 +928,7 @@ fn reconstruct_and_validate(
     let payload =
         serde_json::to_vec(&serde_json::json!({ "items": items, "relations": relations }))
             .map_err(|error| anamnesis::Error::InvalidInput(error.to_string()))?;
-    validate::validate_output(&payload, sources, profile_id)
+    validate::validate_output_for_schema(&payload, sources, profile_id, schema_version)
         .map_err(|error| anamnesis::Error::InvalidInput(error.to_string()))
 }
 

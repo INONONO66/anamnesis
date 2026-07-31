@@ -75,7 +75,8 @@ impl Fixture {
             temp.path().display(),
             std::env::var("PATH").expect("PATH")
         );
-        let daemon = Command::new("cargo")
+        let mut daemon_command = Command::new("cargo");
+        daemon_command
             .args([
                 "test",
                 "--bin",
@@ -87,7 +88,21 @@ impl Fixture {
                 "--ignored",
             ])
             .current_dir(env!("CARGO_MANIFEST_DIR"))
-            .env("ANAMNESIS_SHADOW_HARNESS_DB", &db)
+            .env("ANAMNESIS_SHADOW_HARNESS_DB", &db);
+        // Cargo exposes package/build metadata to the outer integration test.
+        // It is not an input to this nested workspace build and retaining it
+        // creates a second dependency fingerprint. Preserve operational Cargo
+        // settings such as CARGO_HOME, offline mode, target dir, and profile.
+        for (key, _) in std::env::vars_os() {
+            let key_text = key.to_string_lossy();
+            if key_text.starts_with("CARGO_BIN_EXE_")
+                || key_text.starts_with("CARGO_MANIFEST_")
+                || key_text.starts_with("CARGO_PKG_")
+            {
+                daemon_command.env_remove(key);
+            }
+        }
+        let daemon = daemon_command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::inherit())
@@ -374,7 +389,7 @@ fn shadow_extract_zero_output_ledgers_every_source_and_is_not_resent() {
 }
 
 #[test]
-fn invalid_schema_records_no_source_ledger_and_retries_identical_sources() {
+fn invalid_schema_isolates_every_source_without_ledgering_it() {
     let fixture = Fixture::new();
     let before = fixture.graph_snapshot();
     let expected_sources = fixture.scan_source_ids();
@@ -384,9 +399,13 @@ fn invalid_schema_records_no_source_ledger_and_retries_identical_sources() {
         "invalid schema must fail the worker"
     );
     assert_no_provider_raw_in_cli(&invalid);
-    assert_eq!(fixture.provider_calls(), 1);
+    assert_eq!(
+        fixture.provider_calls(),
+        9,
+        "ten always-invalid sources stop after one full attempt and the shared recovery budget"
+    );
     assert_eq!(fixture.fallback_calls(), 0);
-    assert_eq!(policy_counts(&fixture.db), (1, 0, 0, 0));
+    assert_eq!(policy_counts(&fixture.db), (9, 0, 0, 0));
     assert_policy_has_no_provider_raw(&fixture.db);
     assert_graph_unchanged(&before, &fixture.graph_snapshot(), "invalid-schema failure");
     assert_eq!(
@@ -401,8 +420,8 @@ fn invalid_schema_records_no_source_ledger_and_retries_identical_sources() {
         "retry stderr: {}",
         String::from_utf8_lossy(&retry.stderr)
     );
-    assert_eq!(fixture.provider_calls(), 2);
-    assert_eq!(policy_counts(&fixture.db), (2, 10, 0, 0));
+    assert_eq!(fixture.provider_calls(), 10);
+    assert_eq!(policy_counts(&fixture.db), (10, 10, 0, 0));
     assert_graph_unchanged(&before, &fixture.graph_snapshot(), "invalid-schema retry");
 }
 
@@ -752,7 +771,7 @@ case "$EXTRACT_MODE" in
     IFS=$OLDIFS
     [ "$#" -ge 2 ]
     cat >/dev/null
-    printf '{"items":[{"item_local_id":"one","content":"first staged candidate","kind":"decision","confidence":0.9,"source_node_ids":[%s]},{"item_local_id":"two","content":"second staged candidate","kind":"lesson","confidence":0.8,"source_node_ids":[%s]}],"relations":[{"from_item_local_id":"one","to_item_local_id":"two","relation_type":"supports"}]}\n' "$1" "$2"
+    printf '{"items":[{"item_local_id":"one","subject":"first","relation":"staged","object":"candidate","evidence_object":"turn 0","evidence_span":"turn 0: deterministic shadow extraction source RAW_STAGE1_SOURCE_MARKER","kind":"decision","confidence":0.9,"source_node_ids":[%s]},{"item_local_id":"two","subject":"second","relation":"staged","object":"candidate","evidence_object":"turn 1","evidence_span":"turn 1: deterministic shadow extraction source","kind":"lesson","confidence":0.8,"source_node_ids":[%s]}],"relations":[{"from_item_local_id":"one","to_item_local_id":"two","relation_type":"supports"}]}\n' "$1" "$2"
     ;;
   zero)
     cat >/dev/null

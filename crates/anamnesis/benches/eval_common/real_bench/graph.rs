@@ -71,6 +71,18 @@ pub struct DerivedMemoryRecord {
     pub content: String,
     pub source_turn_ids: Vec<String>,
     #[serde(default)]
+    pub subject: Option<String>,
+    #[serde(default)]
+    pub relation: Option<String>,
+    #[serde(default)]
+    pub object: Option<String>,
+    #[serde(default)]
+    pub evidence_object: Option<String>,
+    #[serde(default)]
+    pub evidence_span: Option<String>,
+    #[serde(default)]
+    pub evidence_source_turn_id: Option<String>,
+    #[serde(default)]
     pub entity_tags: Vec<String>,
     pub valid_from_ms: Option<u64>,
     pub valid_until_ms: Option<u64>,
@@ -284,6 +296,7 @@ fn ingest_derived_memories(
         };
         validate_derived_record(record, &mut seen_ids)?;
         let mut sources = Vec::with_capacity(record.source_turn_ids.len());
+        let mut source_by_turn = HashMap::new();
         for turn_id in &record.source_turn_ids {
             let source = episodic_by_turn.get(turn_id.as_str()).ok_or_else(|| {
                 BenchError::InvalidInput(format!(
@@ -301,7 +314,9 @@ fn ingest_derived_memories(
                 )));
             }
             sources.push(*source);
+            source_by_turn.insert(turn_id.as_str(), *source);
         }
+        let evidence_reference = validate_derived_grounding(memory, record, &source_by_turn)?;
 
         let relation_metadata = relations
             .iter()
@@ -330,9 +345,31 @@ fn ingest_derived_memories(
         if !relation_metadata.is_empty() {
             metadata.push(("anamnesis:relations".to_owned(), relation_metadata));
         }
+        for (key, value) in [
+            ("anamnesis:ground-subject", record.subject.as_ref()),
+            ("anamnesis:ground-relation", record.relation.as_ref()),
+            ("anamnesis:ground-object", record.object.as_ref()),
+            ("anamnesis:evidence-object", record.evidence_object.as_ref()),
+        ] {
+            if let Some(value) = value {
+                metadata.push((key.to_owned(), value.clone()));
+            }
+        }
+        if let Some((source_node_id, start, end)) = evidence_reference {
+            metadata.push((
+                "anamnesis:evidence-source-node-id".to_owned(),
+                source_node_id.0.to_string(),
+            ));
+            metadata.push((
+                "anamnesis:evidence-span-start".to_owned(),
+                start.to_string(),
+            ));
+            metadata.push(("anamnesis:evidence-span-end".to_owned(), end.to_string()));
+        }
         memory
             .add_atomic_fact(
                 AtomicFactInput::new(record.content.trim(), sources)
+                    .with_embedding_surface(derived_routing_surface(record))
                     .with_entity_tags(record.entity_tags.clone())
                     .with_validity(
                         record.valid_from_ms.map(Timestamp),
@@ -360,6 +397,160 @@ fn ingest_derived_memories(
         stats.atomic_relations_recorded = stats.atomic_relations_recorded.saturating_add(1);
     }
     Ok(())
+}
+
+fn validate_derived_grounding(
+    memory: &Memory<SqliteStorage>,
+    record: &DerivedMemoryRecord,
+    source_by_turn: &HashMap<&str, NodeId>,
+) -> BenchResult<Option<(NodeId, usize, usize)>> {
+    let fields_present = [
+        record.subject.is_some(),
+        record.relation.is_some(),
+        record.object.is_some(),
+        record.evidence_span.is_some(),
+        record.evidence_source_turn_id.is_some(),
+    ];
+    let grounded = fields_present.iter().all(|present| *present);
+    if fields_present.iter().any(|present| *present) != grounded {
+        return Err(BenchError::InvalidInput(format!(
+            "derived record {:?} has partial grounding",
+            record.id
+        )));
+    }
+    if !grounded {
+        return Ok(None);
+    }
+
+    let subject = record.subject.as_deref().unwrap_or_default().trim();
+    let relation = record.relation.as_deref().unwrap_or_default().trim();
+    let object = record.object.as_deref().unwrap_or_default().trim();
+    let evidence_object = record.evidence_object.as_deref().unwrap_or(object).trim();
+    let evidence_span = record.evidence_span.as_deref().unwrap_or_default().trim();
+    let evidence_turn = record
+        .evidence_source_turn_id
+        .as_deref()
+        .unwrap_or_default();
+    let expected_content = format!("{subject} {relation} {object}");
+    if subject.is_empty()
+        || relation.is_empty()
+        || object.is_empty()
+        || evidence_object.is_empty()
+        || evidence_span.is_empty()
+        || record.content.trim() != expected_content
+        || record.evidence_object.as_ref().map_or_else(
+            || !phrase_tokens_contain(evidence_span, evidence_object),
+            |_| !evidence_span.contains(evidence_object),
+        )
+        || phrase_tokens(subject)
+            .iter()
+            .any(|token| is_unresolved_subject_token(token))
+        || (record.evidence_object.is_some()
+            && phrase_tokens(object)
+                .iter()
+                .any(|token| is_first_person_token(token)))
+    {
+        return Err(BenchError::InvalidInput(format!(
+            "derived record {:?} has invalid object grounding",
+            record.id
+        )));
+    }
+    let source_node_id = source_by_turn.get(evidence_turn).copied().ok_or_else(|| {
+        BenchError::InvalidInput(format!(
+            "derived record {:?} cites an invalid evidence source",
+            record.id
+        ))
+    })?;
+    let source = memory
+        .engine()
+        .graph()
+        .get_node(source_node_id)
+        .map_err(|error| BenchError::Engine(error.to_string()))?;
+    let Some(start) = source.content.find(evidence_span) else {
+        return Err(BenchError::InvalidInput(format!(
+            "derived record {:?} evidence span is not verbatim",
+            record.id
+        )));
+    };
+    let end = start.checked_add(evidence_span.len()).ok_or_else(|| {
+        BenchError::InvalidInput(format!(
+            "derived record {:?} evidence span overflows",
+            record.id
+        ))
+    })?;
+    Ok(Some((source_node_id, start, end)))
+}
+
+fn derived_routing_surface(record: &DerivedMemoryRecord) -> String {
+    match record
+        .evidence_object
+        .as_deref()
+        .or(record.object.as_deref())
+        .map(str::trim)
+        .filter(|evidence_object| !evidence_object.is_empty())
+    {
+        Some(evidence_object) => {
+            format!(
+                "{}\nEvidence object: {}",
+                record.content.trim(),
+                evidence_object.trim(),
+            )
+        }
+        None => record.content.trim().to_owned(),
+    }
+}
+
+fn phrase_tokens(value: &str) -> Vec<String> {
+    value
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
+fn is_first_person_token(token: &str) -> bool {
+    matches!(
+        token,
+        "i" | "me" | "my" | "mine" | "myself" | "we" | "us" | "our" | "ours" | "ourselves"
+    )
+}
+
+fn is_unresolved_subject_token(token: &str) -> bool {
+    is_first_person_token(token)
+        || matches!(
+            token,
+            "you"
+                | "your"
+                | "yours"
+                | "yourself"
+                | "yourselves"
+                | "he"
+                | "him"
+                | "his"
+                | "himself"
+                | "she"
+                | "her"
+                | "hers"
+                | "herself"
+                | "they"
+                | "them"
+                | "their"
+                | "theirs"
+                | "themselves"
+                | "it"
+                | "its"
+                | "itself"
+        )
+}
+
+fn phrase_tokens_contain(haystack: &str, needle: &str) -> bool {
+    let haystack = phrase_tokens(haystack);
+    let needle = phrase_tokens(needle);
+    !needle.is_empty()
+        && needle.len() <= haystack.len()
+        && haystack
+            .windows(needle.len())
+            .any(|window| window == needle.as_slice())
 }
 
 fn validate_derived_record<'a>(

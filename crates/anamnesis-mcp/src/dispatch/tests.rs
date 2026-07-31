@@ -3274,9 +3274,22 @@ fn canonical_extraction(
     let items: Vec<_> = item_sources
         .iter()
         .map(|(item_local_id, source_node_id)| {
+            let source = sources
+                .iter()
+                .find(|source| source.node_id == *source_node_id)
+                .expect("canonical extraction source");
+            let object = source
+                .content
+                .split_whitespace()
+                .last()
+                .expect("canonical extraction object");
             serde_json::json!({
                 "item_local_id": item_local_id,
-                "content": format!("derived {item_local_id}"),
+                "subject": "Derived memory",
+                "relation": "cites",
+                "object": object,
+                "evidence_object": object,
+                "evidence_span": source.content,
                 "kind": crate::extract::types::CandidateKind::Lesson,
                 "confidence": 0.9,
                 "source_node_ids": [source_node_id],
@@ -4195,6 +4208,16 @@ mod migration_job {
             .content
     }
 
+    fn expected_grounded_content(source: &str) -> String {
+        format!(
+            "Derived memory cites {}",
+            source
+                .split_whitespace()
+                .last()
+                .expect("grounded source object")
+        )
+    }
+
     fn audit_relation<'a>(
         audit: &'a serde_json::Value,
         from_item_local_id: &str,
@@ -4310,6 +4333,30 @@ mod migration_job {
             ],
             "policy provenance stores only source identity, hashes, and node ids"
         );
+        let copied_span_columns: u64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('extract_candidates')
+                 WHERE name = 'evidence_span'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("inspect copied evidence columns");
+        assert_eq!(
+            copied_span_columns, 0,
+            "policy storage must retain only live-source evidence ranges and hashes"
+        );
+        let grounded_rows: u64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM extract_candidates
+                 WHERE evidence_span_start IS NOT NULL
+                   AND evidence_span_end IS NOT NULL
+                   AND evidence_span_sha256 IS NOT NULL
+                   AND evidence_source_node_id IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )
+            .expect("inspect grounded evidence ranges");
+        assert_eq!(grounded_rows, 3);
         let stored_candidate_contents: Vec<String> = connection
             .prepare("SELECT content FROM extract_candidates")
             .expect("inspect staged candidate content")
@@ -4344,7 +4391,10 @@ mod migration_job {
         let one_source = audit_source(one, one_turn_key);
         let two_source = audit_source(two, two_turn_key);
         let three_source = audit_source(three, three_turn_key);
-        assert_eq!(one["content"], "derived one");
+        assert_eq!(
+            one["content"],
+            expected_grounded_content(authoritative_source_content(&sources, one_turn_key))
+        );
         assert_eq!(one["kind"], "lesson");
         assert_eq!(one["confidence"], 0.9);
         assert_eq!(one_source["availability"], "available");
@@ -4352,13 +4402,19 @@ mod migration_job {
             one_source["content"],
             authoritative_source_content(&sources, one_turn_key)
         );
-        assert_eq!(two["content"], "derived two");
+        assert_eq!(
+            two["content"],
+            expected_grounded_content(authoritative_source_content(&sources, two_turn_key))
+        );
         assert_eq!(two_source["availability"], "available");
         assert_eq!(
             two_source["content"],
             authoritative_source_content(&sources, two_turn_key)
         );
-        assert_eq!(three["content"], "derived three");
+        assert_eq!(
+            three["content"],
+            expected_grounded_content(authoritative_source_content(&sources, three_turn_key))
+        );
         assert_eq!(three_source["availability"], "available");
         assert_eq!(
             three_source["content"],
@@ -4534,6 +4590,97 @@ mod migration_job {
     }
 
     #[test]
+    fn promotion_does_not_treat_a_canonical_object_as_verbatim_evidence() {
+        use anamnesis::engine::StorageAdapter;
+
+        let (reg, dir) = stub_registry();
+        capture_turns(&reg, "canonical-only", "scope", 10, 100, "captured");
+        let mut profile = extraction_profile();
+        profile.schema_version = 4;
+        let sources = extraction_scan(&reg, profile.clone()).sources;
+        let payload = serde_json::to_vec(&serde_json::json!({
+            "items": [{
+                "item_local_id": "canonical-only",
+                "subject": "Derived memory",
+                "relation": "cites",
+                "object": "TURN 0",
+                "evidence_span": sources[0].content,
+                "kind": "lesson",
+                "confidence": 0.9,
+                "source_node_ids": [sources[0].node_id],
+            }],
+            "relations": [],
+        }))
+        .expect("serialize schema-4 candidate");
+        let extraction = crate::extract::validate::validate_output_for_schema(
+            &payload,
+            &sources,
+            &extraction_profile_id(&profile),
+            profile.schema_version,
+        )
+        .expect("schema-4 normalized object is grounded by tokens");
+
+        staged_result(stage_extraction(&reg, profile, sources, extraction));
+        let connection = rusqlite::Connection::open(dir.path().join("memory.db"))
+            .expect("open extraction policy database");
+        let stored_evidence_object: Option<String> = connection
+            .query_row(
+                "SELECT evidence_object FROM extract_candidates
+                 WHERE item_local_id = 'canonical-only'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read staged evidence object");
+        assert_eq!(stored_evidence_object, None);
+        drop(connection);
+
+        let audit = extraction_audit_list(&reg);
+        let candidate_id = audit_candidate(&audit, "canonical-only")["id"]
+            .as_u64()
+            .expect("candidate id");
+        assert!(matches!(
+            dispatch(
+                &reg,
+                Request::UpdateExtractionCandidateAudit {
+                    namespace: None,
+                    candidate_id,
+                    support: crate::extract::types::AuditSupport::Supported,
+                    contamination: None,
+                    reviewer: "reviewer".into(),
+                },
+            ),
+            Response::Ok { .. }
+        ));
+        let promoted: serde_json::Value = serde_json::from_str(&ok_text(dispatch(
+            &reg,
+            Request::PromoteExtractionCandidate {
+                namespace: None,
+                candidate_id,
+            },
+        )))
+        .expect("promotion result");
+        let fact_id = anamnesis::storage::AtomicFactId(
+            promoted["atomic_fact_id"].as_u64().expect("atomic fact id"),
+        );
+        let handle = {
+            let mut registry = reg.lock().unwrap_or_else(|poison| poison.into_inner());
+            registry.namespace_handle(None).expect("default namespace")
+        };
+        let memory = handle.lock().unwrap_or_else(|poison| poison.into_inner());
+        let fact = memory
+            .engine()
+            .graph()
+            .storage()
+            .get_atomic_fact(fact_id)
+            .expect("atomic fact");
+        assert_eq!(
+            fact.metadata.get("anamnesis:ground-object"),
+            Some(&"TURN 0".to_owned())
+        );
+        assert!(!fact.metadata.contains_key("anamnesis:evidence-object"));
+    }
+
+    #[test]
     fn reviewed_candidate_promotion_is_provenance_safe_and_idempotent() {
         use anamnesis::engine::StorageAdapter;
         use anamnesis::graph::NodeId;
@@ -4625,7 +4772,13 @@ mod migration_job {
             .storage()
             .get_atomic_fact(fact_id)
             .expect("atomic fact");
-        assert_eq!(fact.content, "derived one");
+        assert_eq!(fact.content, expected_grounded_content(&sources[0].content));
+        assert!(
+            fact.metadata.contains_key("anamnesis:evidence-span-start")
+                && fact.metadata.contains_key("anamnesis:evidence-span-end")
+                && !fact.metadata.contains_key("anamnesis:evidence-span"),
+            "promotion stores a live-source range, never a copied raw span"
+        );
         assert!(fact.entity_tags.iter().any(|tag| tag == "Alice"));
         assert_eq!(fact.valid_from, Some(anamnesis::graph::Timestamp(10)));
         assert_eq!(fact.valid_until, Some(anamnesis::graph::Timestamp(20)));

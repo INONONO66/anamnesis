@@ -370,6 +370,17 @@ fn render_extract_outcome(outcome: WorkerOutcome) -> String {
         } => format!(
             "extraction already staged: run_id={run_id} candidate_count={candidate_count} relation_count={relation_count}"
         ),
+        WorkerOutcome::Recovered {
+            run_ids,
+            candidate_count,
+            relation_count,
+            omitted_source_count,
+            already_staged_count,
+        } => format!(
+            "extraction recovered: run_ids={run_ids:?} candidate_count={candidate_count} \
+             relation_count={relation_count} omitted_source_count={omitted_source_count} \
+             already_staged_count={already_staged_count}"
+        ),
         WorkerOutcome::Noop(WorkerNoop::ModeOff) => "extraction disabled".to_owned(),
         WorkerOutcome::Noop(WorkerNoop::WorkerBusy) => "extraction already running".to_owned(),
         WorkerOutcome::Noop(WorkerNoop::BelowThreshold) => {
@@ -1318,6 +1329,18 @@ mod tests {
                 "successful extraction must report candidate and relation counts: {rendered}",
             );
         }
+
+        let recovered = render_extract_outcome(WorkerOutcome::Recovered {
+            run_ids: vec![51, 52],
+            candidate_count: 7,
+            relation_count: 2,
+            omitted_source_count: 1,
+            already_staged_count: 0,
+        });
+        assert!(recovered.contains("run_ids=[51, 52]"));
+        assert!(recovered.contains("candidate_count=7"));
+        assert!(recovered.contains("omitted_source_count=1"));
+        assert!(!recovered.contains('\n'));
 
         for outcome in [
             WorkerOutcome::Noop(WorkerNoop::ModeOff),

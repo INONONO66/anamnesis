@@ -10,8 +10,8 @@ struct CommandHashComponents<'a> {
     args: &'a [String],
 }
 
-pub(crate) const EXTRACT_SCHEMA_VERSION: u32 = 3;
-pub(crate) const NORMALIZATION_VERSION: u32 = 3;
+pub(crate) const EXTRACT_SCHEMA_VERSION: u32 = 5;
+pub(crate) const NORMALIZATION_VERSION: u32 = 5;
 pub(crate) const RELATION_POLICY_VERSION: u32 = 1;
 
 /// The versioned, non-secret configuration identity for an extraction run.
@@ -132,7 +132,7 @@ mod tests {
     #[test]
     fn profile_components_have_a_fixed_compact_json_and_sha256_profile_id() {
         let components = test_components();
-        let json = r#"{"provider_id":"claude","model_id":"provider-default","prompt_version":7,"schema_version":3,"normalization_version":3,"relation_policy_version":1,"command_hash":"35f9a42f2b95d4001f4e33222e0c37b5e30b2f6af8c7aa1ed84d1cb2a7ce2be4"}"#;
+        let json = r#"{"provider_id":"claude","model_id":"provider-default","prompt_version":10,"schema_version":5,"normalization_version":5,"relation_policy_version":1,"command_hash":"35f9a42f2b95d4001f4e33222e0c37b5e30b2f6af8c7aa1ed84d1cb2a7ce2be4"}"#;
         assert_eq!(
             serde_json::to_string(&components).expect("components JSON"),
             json

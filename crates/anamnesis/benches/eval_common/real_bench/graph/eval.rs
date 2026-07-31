@@ -1328,8 +1328,9 @@ fn rendered_gold_units(
     graph: &BuiltMemoryGraph,
     question: &BenchQuestion,
 ) -> Vec<String> {
+    let match_surface = strip_product_provenance_for_match(product_context);
     let normalized_context =
-        super::super::super::locomo_pipeline::normalize_for_match(product_context);
+        super::super::super::locomo_pipeline::normalize_for_match(&match_surface);
     if !question.gold.evidence_turn_ids.is_empty() {
         return question
             .gold
@@ -1369,6 +1370,34 @@ fn rendered_gold_units(
         .filter(|needle| normalized_context.contains(*needle))
         .map(|needle| format!("answer:{needle}"))
         .collect()
+}
+
+fn strip_product_provenance_for_match(product_context: &str) -> String {
+    let mut stripped = String::with_capacity(product_context.len());
+    for (index, line) in product_context.lines().enumerate() {
+        if index > 0 {
+            stripped.push('\n');
+        }
+        let Some((prefix, marker_suffix)) = line.split_once("[turn-source=node:") else {
+            stripped.push_str(line);
+            continue;
+        };
+        let digit_count = marker_suffix
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .count();
+        let after_digits = &marker_suffix[digit_count..];
+        let Some(content) = (digit_count > 0)
+            .then(|| after_digits.strip_prefix("] "))
+            .flatten()
+        else {
+            stripped.push_str(line);
+            continue;
+        };
+        stripped.push_str(prefix);
+        stripped.push_str(content);
+    }
+    stripped
 }
 
 fn build_retrievals(
@@ -1498,5 +1527,19 @@ mod tests {
         assert!(scores.iter().all(|score| score.is_finite()));
         assert!(scores.iter().all(|score| *score > 0.0 && *score < 1.0));
         assert!(scores.windows(2).all(|pair| pair[0] > pair[1]));
+    }
+
+    #[test]
+    fn rendered_match_surface_ignores_turn_source_annotations() {
+        let raw_turn = "James: We visited the sanctuary.\nJames shared a photo of a rescue dog.";
+        let rendered = "    [turn-source=node:1347] James: We visited the sanctuary.\n\
+                        [turn-source=node:1347] James shared a photo of a rescue dog.";
+        let stripped = strip_product_provenance_for_match(rendered);
+
+        assert!(
+            super::super::super::super::locomo_pipeline::normalize_for_match(&stripped).contains(
+                &super::super::super::super::locomo_pipeline::normalize_for_match(raw_turn)
+            )
+        );
     }
 }
