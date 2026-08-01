@@ -11,7 +11,9 @@ superseded. There is now one canonical production pipeline:
 
 `Memory::search_reranked` → cognitive search@20 / candidate@50 →
 Memory-compiled evidence documents → `RerankingProvider` → automatic deep
-evidence selection → final@20 commit-safe packaging.
+evidence selection → commit-safe packaging at a final maximum of 20. Direct
+one-fact queries default to a 12-fragment cap; temporal and
+completeness-sensitive plans retain the requested 20.
 
 `anamnesis-mcp` uses that pipeline with
 `BAAI/bge-reranker-base` by default, and the LoCoMo `local_answer` harness
@@ -34,6 +36,43 @@ rather than silently falling back to a different retrieval policy.
 The `rozgo/bge-reranker-v2-m3` candidate@200 profile remains an explicit
 offline quality experiment. Its roughly 25 s mean / 34 s p95 measurement is
 not a product default and is not the default LoCoMo headline configuration.
+
+## 2026-08-01 dense-query and adaptive-delivery follow-up
+
+The same canonical `Memory` source search now batches up to three dense query
+surfaces only for collection, relationship, and inference plans. It scans
+stored node embeddings once, preserves the original query as the primary lane,
+and merges all auxiliary surfaces into one deduplicated lower-prior lane.
+Direct and temporal source search remains on the single original embedding.
+Automatic direct selection freezes the reranker head and uses canonical-source
+diversity only in the tail. These policies live in `anamnesis-engine`; MCP,
+hooks, plugins, and direct `Memory::search_reranked` users do not need a
+benchmark adapter or a larger public API surface.
+
+Reader-free LoCoMo seed-42 balanced n=100, using the same frozen local Qwen 3.6
+artifact and no LLM/API invocation:
+
+| Type | candidate@50 | delivered | rendered recall | vs 2026-07-30 |
+|---|---:|---:|---:|---:|
+| multi-hop | 67.90% | 63.44% | **67.57%** | **+2.67 pp** |
+| open-domain | 59.00% | 59.67% | **63.00%** | **+1.33 pp** |
+| single-hop | 96.00% | 92.00% | **96.00%** | 0.00 pp |
+| temporal | 92.00% | 86.67% | **96.00%** | 0.00 pp |
+| **overall** | **78.73%** | **75.44%** | **80.64%** | **+1.00 pp** |
+
+Rendered Hit remains 89%, with three positive and zero negative per-question
+rendered changes. Relative to the pre-structural product baseline, cumulative
+Multi-hop/Open-domain gains are +8.17/+6.97 points. Mean delivered fragments
+fall from 20 to 18.4 and measured context tokens from 1,929 to 1,743; the
+adaptive 20-question subset drops from 2,228 to 1,444 tokens. Retrieval latency
+is 1.51 s mean / 2.26 s p95 / 2.69 s maximum, below the 4 s product boundary.
+
+The product-wire harness now records the raw reranker ranking separately and
+uses the package already selected by `Memory::rerank_search_result_at`; it no
+longer repeats deep selection. This changes the diagnostic meaning of the raw
+reranker column but not the contract of the delivered/rendered product gates.
+Evidence:
+`local-answer-locomo-v207-final-temporal-safe-dense-adaptive-production-n100.json`.
 
 ## 2026-07-30 structural retrieval gate
 

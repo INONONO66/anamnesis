@@ -21,6 +21,7 @@ use crate::api::Engine;
 use crate::storage::StorageAdapter;
 
 const DEFAULT_SOURCE_CANDIDATE_LIMIT: usize = 64;
+const AUXILIARY_DENSE_RRF_WEIGHT: f64 = 0.25;
 pub(crate) const MAX_READOUT_TRACE_LIMIT: usize = 4_096;
 
 /// Execute unified search — combines text search, vector similarity, and graph traversal.
@@ -41,6 +42,15 @@ pub(crate) fn search_with_diagnostics<S: StorageAdapter + Clone>(
     input: SearchInput,
     diagnostics: &SearchDiagnostics,
 ) -> Result<SearchResult, Error> {
+    search_with_auxiliary_query_embeddings(engine, input, diagnostics, &[])
+}
+
+pub(crate) fn search_with_auxiliary_query_embeddings<S: StorageAdapter + Clone>(
+    engine: &Engine<S>,
+    input: SearchInput,
+    diagnostics: &SearchDiagnostics,
+    auxiliary_query_embeddings: &[Vec<f64>],
+) -> Result<SearchResult, Error> {
     if diagnostics.readout_trace_limit == 0
         || diagnostics.readout_trace_limit > MAX_READOUT_TRACE_LIMIT
     {
@@ -50,7 +60,7 @@ pub(crate) fn search_with_diagnostics<S: StorageAdapter + Clone>(
     }
     let plan = plan::derive_search_plan(&input, &engine.config)?;
 
-    let mut per_source: Vec<Vec<SearchCandidate>> = Vec::new();
+    let mut per_source: Vec<(f64, Vec<SearchCandidate>)> = Vec::new();
     let mut strategies_used: Vec<String> = Vec::new();
     let mut flow_invocations = 0usize;
     let storage = engine.graph.storage();
@@ -76,7 +86,7 @@ pub(crate) fn search_with_diagnostics<S: StorageAdapter + Clone>(
                 {
                     strategies_used.push("text_search".to_string());
                 }
-                per_source.push(text_candidates);
+                per_source.push((1.0, text_candidates));
             }
         }
     }
@@ -84,12 +94,50 @@ pub(crate) fn search_with_diagnostics<S: StorageAdapter + Clone>(
     if plan.use_vector
         && let Some(ref query_embedding) = input.query_embedding
     {
-        let vector_candidates =
-            candidates::collect_vector_candidates(storage, query_embedding, source_candidate_limit);
-        if !vector_candidates.is_empty() {
-            per_source.push(vector_candidates);
+        if auxiliary_query_embeddings.is_empty() {
+            let vector_candidates = candidates::collect_vector_candidates(
+                storage,
+                query_embedding,
+                source_candidate_limit,
+            )?;
+            if !vector_candidates.is_empty() {
+                per_source.push((1.0, vector_candidates));
+            }
+        } else {
+            let mut query_embeddings = Vec::with_capacity(auxiliary_query_embeddings.len() + 1);
+            query_embeddings.push(query_embedding.as_slice());
+            query_embeddings.extend(
+                auxiliary_query_embeddings
+                    .iter()
+                    .map(|embedding| embedding.as_slice()),
+            );
+            let mut vector_lanes = candidates::collect_vector_candidate_lists(
+                storage,
+                &query_embeddings,
+                source_candidate_limit,
+            )?
+            .into_iter();
+            if let Some(primary) = vector_lanes.next()
+                && !primary.is_empty()
+            {
+                per_source.push((1.0, primary));
+            }
+            let auxiliary_lanes: Vec<_> = vector_lanes.collect();
+            let auxiliary_union = candidates::merge_auxiliary_vector_candidates(
+                &auxiliary_lanes,
+                source_candidate_limit,
+            );
+            if !auxiliary_union.is_empty() {
+                per_source.push((AUXILIARY_DENSE_RRF_WEIGHT, auxiliary_union));
+            }
         }
         strategies_used.push("vector_similarity".to_string());
+        if !auxiliary_query_embeddings.is_empty() {
+            strategies_used.push(format!(
+                "dense_query_union:{}",
+                auxiliary_query_embeddings.len() + 1
+            ));
+        }
     }
 
     if plan.use_entity {
@@ -99,12 +147,12 @@ pub(crate) fn search_with_diagnostics<S: StorageAdapter + Clone>(
             source_candidate_limit,
         );
         if !entity_candidates.is_empty() {
-            per_source.push(entity_candidates);
+            per_source.push((1.0, entity_candidates));
             strategies_used.push("entity_tags".to_string());
         }
     }
 
-    let fused = fusion::fuse_candidates(per_source);
+    let fused = fusion::fuse_weighted_candidates(per_source);
     let selected_seeds = seeds::select_recall_seeds(fused, input.seed_limit);
     let all_seed_ids: Vec<NodeId> = selected_seeds.iter().map(|c| c.node_id).collect();
 

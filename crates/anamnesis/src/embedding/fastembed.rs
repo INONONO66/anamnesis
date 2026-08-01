@@ -248,6 +248,18 @@ impl EmbeddingProvider for FastEmbedProvider {
         ))
     }
 
+    fn embed_queries(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, Error> {
+        if texts.is_empty() {
+            return Ok(Vec::new());
+        }
+        let prefixed: Vec<_> = texts
+            .iter()
+            .map(|text| e5_prefix(self.uses_e5_query_passage_protocol, PrefixKind::Query, text))
+            .collect();
+        let borrowed: Vec<_> = prefixed.iter().map(String::as_str).collect();
+        self.embed(&borrowed)
+    }
+
     fn embed_passage(&self, text: &str) -> Result<Vec<f32>, Error> {
         self.embed_single(&e5_prefix(
             self.uses_e5_query_passage_protocol,

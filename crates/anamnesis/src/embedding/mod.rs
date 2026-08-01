@@ -90,6 +90,15 @@ pub trait EmbeddingProvider: Send + Sync {
         self.embed_single(text)
     }
 
+    /// Embed multiple retrieval queries while preserving query-specific formatting.
+    ///
+    /// The default delegates to [`EmbeddingProvider::embed_query`] so existing
+    /// asymmetric providers remain correct without implementing a batch path.
+    /// Providers that support efficient batching should override this method.
+    fn embed_queries(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, Error> {
+        texts.iter().map(|text| self.embed_query(text)).collect()
+    }
+
     /// Embed text for storage as retrievable content.
     ///
     /// Providers for asymmetric embedding models can override this to apply

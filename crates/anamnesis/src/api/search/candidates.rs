@@ -6,6 +6,7 @@
 //! filter and an explicit `limit` cap.
 
 use crate::api::top_n_by_score;
+use crate::error::Error;
 use crate::mechanics::attraction::cosine_similarity;
 use crate::query::{CandidateSource, SearchCandidate};
 use crate::storage::StorageAdapter;
@@ -43,26 +44,92 @@ pub(crate) fn collect_vector_candidates<S: StorageAdapter>(
     storage: &S,
     query_embedding: &[f64],
     limit: usize,
-) -> Vec<SearchCandidate> {
-    let scores: Vec<_> = storage
-        .all_node_ids()
-        .into_iter()
-        .filter_map(|node_id| {
-            let node = storage.get_node(node_id).ok()?;
-            let embedding = node.embedding.as_ref()?;
-            Some((node_id, cosine_similarity(query_embedding, embedding)))
-        })
-        .filter(|(_, score)| *score > 0.0)
-        .collect();
+) -> Result<Vec<SearchCandidate>, Error> {
+    Ok(
+        collect_vector_candidate_lists(storage, &[query_embedding], limit)?
+            .into_iter()
+            .next()
+            .unwrap_or_default(),
+    )
+}
 
-    top_n_by_score(&scores, limit)
+/// Collect one ranked vector lane per query embedding with one storage scan.
+///
+/// Complex recall uses up to three query surfaces. Reading every SQLite node
+/// once keeps that expansion bounded; only the cosine arithmetic is repeated.
+pub(crate) fn collect_vector_candidate_lists<S: StorageAdapter>(
+    storage: &S,
+    query_embeddings: &[&[f64]],
+    limit: usize,
+) -> Result<Vec<Vec<SearchCandidate>>, Error> {
+    let mut scores = vec![Vec::new(); query_embeddings.len()];
+    for node_id in storage.all_node_ids() {
+        let node = storage.get_node(node_id)?;
+        let Some(embedding) = node.embedding.as_ref() else {
+            continue;
+        };
+        for (lane, query_embedding) in query_embeddings.iter().enumerate() {
+            let score = cosine_similarity(query_embedding, embedding);
+            if score > 0.0 {
+                scores[lane].push((node_id, score));
+            }
+        }
+    }
+
+    Ok(scores
         .into_iter()
+        .map(|lane| {
+            top_n_by_score(&lane, limit)
+                .into_iter()
+                .enumerate()
+                .map(|(rank, (node_id, score))| SearchCandidate {
+                    node_id,
+                    score,
+                    source: CandidateSource::Vector,
+                    source_rank: rank,
+                })
+                .collect()
+        })
+        .collect())
+}
+
+/// Merge auxiliary vector lanes into one bounded union.
+///
+/// Each node keeps its best auxiliary rank and strongest cosine. Reassigning
+/// one contiguous rank sequence ensures that two entity anchors do not become
+/// two independent votes for the same node during hybrid fusion.
+pub(crate) fn merge_auxiliary_vector_candidates(
+    lanes: &[Vec<SearchCandidate>],
+    limit: usize,
+) -> Vec<SearchCandidate> {
+    let mut by_node: std::collections::HashMap<crate::graph::NodeId, (usize, f64)> =
+        std::collections::HashMap::new();
+    for candidate in lanes.iter().flatten() {
+        let entry = by_node
+            .entry(candidate.node_id)
+            .or_insert((candidate.source_rank, candidate.score));
+        entry.0 = entry.0.min(candidate.source_rank);
+        entry.1 = entry.1.max(candidate.score);
+    }
+    let mut merged: Vec<_> = by_node
+        .into_iter()
+        .map(|(node_id, (best_rank, score))| (node_id, best_rank, score))
+        .collect();
+    merged.sort_by(|left, right| {
+        left.1
+            .cmp(&right.1)
+            .then_with(|| right.2.total_cmp(&left.2))
+            .then_with(|| left.0.cmp(&right.0))
+    });
+    merged
+        .into_iter()
+        .take(limit)
         .enumerate()
-        .map(|(rank, (node_id, score))| SearchCandidate {
+        .map(|(source_rank, (node_id, _, score))| SearchCandidate {
             node_id,
             score,
             source: CandidateSource::Vector,
-            source_rank: rank,
+            source_rank,
         })
         .collect()
 }
@@ -213,7 +280,7 @@ mod tests {
         });
         let storage = graph.storage();
 
-        let candidates = collect_vector_candidates(storage, &query, 10);
+        let candidates = collect_vector_candidates(storage, &query, 10).unwrap();
 
         for candidate in &candidates {
             let node = storage.get_node(candidate.node_id).unwrap();
@@ -240,6 +307,80 @@ mod tests {
                 "candidates must be ordered by score descending"
             );
         }
+    }
+
+    #[test]
+    fn collect_multiple_vector_queries_returns_one_ranked_lane_per_query() {
+        let first_query = vec![1.0_f64, 0.0, 0.0];
+        let second_query = vec![0.0_f64, 1.0, 0.0];
+        let graph = build_graph(|g| {
+            add(g, "x", "x content", Some(vec![1.0, 0.0, 0.0]), vec![]);
+            add(g, "y", "y content", Some(vec![0.0, 1.0, 0.0]), vec![]);
+            add(g, "xy", "xy content", Some(vec![0.7, 0.7, 0.0]), vec![]);
+        });
+
+        let lanes = collect_vector_candidate_lists(
+            graph.storage(),
+            &[first_query.as_slice(), second_query.as_slice()],
+            3,
+        )
+        .unwrap();
+
+        assert_eq!(lanes.len(), 2);
+        assert_eq!(lanes[0][0].node_id, NodeId(0));
+        assert_eq!(lanes[1][0].node_id, NodeId(1));
+        assert!(lanes.iter().flatten().all(|candidate| {
+            candidate.source == CandidateSource::Vector && candidate.score > 0.0
+        }));
+    }
+
+    #[test]
+    fn auxiliary_vector_union_deduplicates_nodes_and_reassigns_one_rank_sequence() {
+        let lanes = vec![
+            vec![
+                SearchCandidate {
+                    node_id: NodeId(1),
+                    score: 0.8,
+                    source: CandidateSource::Vector,
+                    source_rank: 0,
+                },
+                SearchCandidate {
+                    node_id: NodeId(2),
+                    score: 0.7,
+                    source: CandidateSource::Vector,
+                    source_rank: 1,
+                },
+            ],
+            vec![
+                SearchCandidate {
+                    node_id: NodeId(2),
+                    score: 0.9,
+                    source: CandidateSource::Vector,
+                    source_rank: 0,
+                },
+                SearchCandidate {
+                    node_id: NodeId(3),
+                    score: 0.6,
+                    source: CandidateSource::Vector,
+                    source_rank: 1,
+                },
+            ],
+        ];
+
+        let merged = merge_auxiliary_vector_candidates(&lanes, 3);
+
+        assert_eq!(merged.len(), 3);
+        assert_eq!(merged[0].node_id, NodeId(2));
+        assert_eq!(merged[0].score, 0.9);
+        assert_eq!(merged[1].node_id, NodeId(1));
+        assert_eq!(merged[2].node_id, NodeId(3));
+        assert_eq!(
+            merged
+                .iter()
+                .map(|candidate| candidate.source_rank)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
     }
 
     #[test]

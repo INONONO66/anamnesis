@@ -19,6 +19,10 @@ pub(crate) fn planned_query_variants(query: &str) -> Vec<String> {
     search::plan::query_variants(query)
 }
 
+pub(crate) fn planned_complex_dense_query_variants(query: &str) -> Vec<String> {
+    search::plan::complex_dense_query_variants(query)
+}
+
 const ARCHIVE_SALIENCE_THRESHOLD: f64 = 0.10;
 const SALIENCE_CHANGE_EPSILON: f64 = 1e-10;
 
@@ -2828,6 +2832,20 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         diagnostics: &SearchDiagnostics,
     ) -> Result<SearchResult, Error> {
         search::search_with_diagnostics(self, input, diagnostics)
+    }
+
+    pub(crate) fn search_with_auxiliary_query_embeddings(
+        &self,
+        input: SearchInput,
+        diagnostics: &SearchDiagnostics,
+        auxiliary_query_embeddings: &[Vec<f64>],
+    ) -> Result<SearchResult, Error> {
+        search::search_with_auxiliary_query_embeddings(
+            self,
+            input,
+            diagnostics,
+            auxiliary_query_embeddings,
+        )
     }
 
     fn query_type_filtered(
