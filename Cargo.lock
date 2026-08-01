@@ -60,7 +60,7 @@ dependencies = [
 
 [[package]]
 name = "anamnesis-engine"
-version = "0.21.1"
+version = "0.22.0"
 dependencies = [
  "criterion",
  "dhat",
@@ -78,7 +78,7 @@ dependencies = [
 
 [[package]]
 name = "anamnesis-mcp"
-version = "0.21.1"
+version = "0.22.0"
 dependencies = [
  "anamnesis-engine",
  "anyhow",
