@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-08-02
+
+### Added
+- **Canonical production reranked recall** — `Memory::search_reranked` now owns evidence-document compilation, local reranking, deterministic source-aware selection, and commit-safe packaging for MCP, plugin hooks, direct crate consumers, and the LoCoMo product-wire harness (#151).
+- **Grounded atomic-fact sidecar** — reviewed extracted claims retain exact answer-bearing spans and live raw-source provenance in isolated SQLite storage; they can route cited Episodic sources into complex recall without becoming graph nodes or entering node FTS (#152, #153).
+- **Bounded dense expansion for complex queries** — collection, relationship, and inference plans batch the original query with at most two deterministic entity/decomposition surfaces, scan embeddings once, and fuse one deduplicated lower-prior auxiliary lane (#154).
+- **Local answer-quality gates** — reproducible LoCoMo reader, official-F1, semantic-judge, external-memory adapter, and provider-bound report lanes document metric provenance without changing the model-free engine boundary (#149, #151–#154).
+
+### Changed
+- **Coverage-aware evidence selection** — complex recall preserves its proven cognitive head, selects 50 reranker documents from a bounded 200-row trace using query facets, canonical sources, sessions, grounded claim slots, and temporal bridges, then renders at most 20 evidence fragments (#152–#154).
+- **Adaptive direct-fact delivery** — direct one-fact queries default to at most 12 fragments while temporal and completeness-sensitive plans retain the caller's requested width; callers can disable the adaptive cap additively (#154).
+- **Grounded extraction contract** — shadow extraction uses canonical subject/relation/object claims, strict source-span validation, bounded retry, and deterministic partition recovery; the bundled local Qwen adapter remains loopback-only and accepts no API key (#153).
+
+### Fixed
+- **Product-wire path parity** — the benchmark no longer repeats deep selection after `Memory::rerank_search_result_at`; raw reranker diagnostics and the already-selected production package are recorded separately (#154).
+- **Collection completeness and speaker ownership** — source-valid reflected list items are preserved, while cross-speaker second-person replies cannot be reassigned to the named subject (#152, #153).
+
+### Performance
+- On the frozen local-only LoCoMo seed-42 reader-free n=100 gate, rendered recall is **80.64%** overall: **67.57%** Multi-hop, **63.00%** Open-domain, and **96.00%** for both Single-hop and Temporal, with 89% rendered Hit and 2.26 s p95 retrieval latency (#154).
+
 ## [0.21.1] - 2026-07-18
 
 ### Fixed
