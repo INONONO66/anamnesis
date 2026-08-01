@@ -224,7 +224,40 @@ pub(crate) fn query_variants(query: &str) -> Vec<String> {
     variants
 }
 
+/// Build the latency-bounded dense lanes used only by complex `Memory` recall.
+///
+/// Unlike ordinary lexical variants, these retain entity-only lanes for
+/// inference questions. Those lanes recover premises about each participant
+/// before the local reranker sees the union. The original query stays first
+/// and the complete surface is capped at three embeddings.
+pub(crate) fn complex_dense_query_variants(query: &str) -> Vec<String> {
+    const MAX_DENSE_VARIANTS: usize = 3;
+
+    let original = query.trim().to_owned();
+    let mut variants = Vec::with_capacity(MAX_DENSE_VARIANTS);
+    variants.push(original);
+    for candidate in proper_noun_anchors_with_inference(query, true)
+        .into_iter()
+        .chain(decompose_query(query))
+    {
+        if variants.len() >= MAX_DENSE_VARIANTS {
+            break;
+        }
+        if !variants
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(&candidate))
+        {
+            variants.push(candidate);
+        }
+    }
+    variants
+}
+
 fn proper_noun_anchors(query: &str) -> Vec<String> {
+    proper_noun_anchors_with_inference(query, false)
+}
+
+fn proper_noun_anchors_with_inference(query: &str, include_inference: bool) -> Vec<String> {
     const QUESTION_WORDS: &[&str] = &[
         "Am", "Are", "Can", "Could", "Did", "Do", "Does", "Has", "Have", "How", "Is", "List",
         "May", "Might", "Should", "Was", "Were", "What", "When", "Where", "Which", "Who", "Why",
@@ -264,7 +297,7 @@ fn proper_noun_anchors(query: &str) -> Vec<String> {
         )
     }) || normalized.starts_with("based on ")
         || normalized.starts_with("considering ");
-    if starts_inference || has_inference_cue {
+    if !include_inference && (starts_inference || has_inference_cue) {
         return Vec::new();
     }
 
@@ -457,6 +490,42 @@ mod tests {
                 "Quinn get health checkups",
                 "Quinn"
             ]
+        );
+    }
+
+    #[test]
+    fn complex_dense_variants_recover_inference_entity_lanes() {
+        assert_eq!(
+            complex_dense_query_variants("What advice could Rowan and Taylor share?"),
+            vec![
+                "What advice could Rowan and Taylor share?",
+                "Rowan",
+                "Taylor"
+            ]
+        );
+        assert_eq!(
+            complex_dense_query_variants("Which countries did Aria visit with Blake?"),
+            vec![
+                "Which countries did Aria visit with Blake?",
+                "Aria",
+                "Blake"
+            ]
+        );
+    }
+
+    #[test]
+    fn complex_dense_variants_are_bounded_and_deterministic() {
+        let query = "How did Alice and Bob compare Carol with Dana?";
+        let first = complex_dense_query_variants(query);
+        let second = complex_dense_query_variants(query);
+
+        assert_eq!(first, second);
+        assert_eq!(first.first().map(String::as_str), Some(query));
+        assert_eq!(first.get(1).map(String::as_str), Some("Alice"));
+        assert_eq!(first.get(2).map(String::as_str), Some("Bob"));
+        assert!(
+            first.len() <= 3,
+            "dense expansion must stay latency-bounded"
         );
     }
 

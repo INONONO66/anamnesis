@@ -61,8 +61,8 @@ mod readout;
 mod view;
 pub use readout::{
     AnswerShape, DEFAULT_RERANK_CANDIDATE_LIMIT, DEFAULT_RERANK_FINAL_LIMIT,
-    DEFAULT_RERANK_SEARCH_LIMIT, DeepRecallOptions, EvidenceDocument, EvidenceSelection,
-    RecallIntent, RecallPlan, RerankedRecallOptions,
+    DEFAULT_RERANK_SEARCH_LIMIT, DEFAULT_SIMPLE_DELIVERY_LIMIT, DeepRecallOptions,
+    EvidenceDocument, EvidenceSelection, RecallIntent, RecallPlan, RerankedRecallOptions,
 };
 pub use view::{ListFilter, MemoryView};
 
@@ -2481,8 +2481,16 @@ impl<S: StorageAdapter + Clone> Memory<S> {
             });
         }
         ranking.sort_by(|left, right| right.score.total_cmp(&left.score));
-        let recall =
-            self.repackage_reranked_deep_at(query, result, &ranking, options.deep, as_of)?;
+        let deep = if options.adaptive_delivery {
+            let plan = RecallPlan::infer(query);
+            DeepRecallOptions {
+                limit: readout::adaptive_delivery_limit(&plan, options.deep.limit),
+                selection: options.deep.selection,
+            }
+        } else {
+            options.deep
+        };
+        let recall = self.repackage_reranked_deep_at(query, result, &ranking, deep, as_of)?;
         let final_ids: HashSet<_> = recall.hits.iter().map(|hit| hit.node_id).collect();
         let cognitive_scores = result
             .trace
@@ -2618,7 +2626,34 @@ impl<S: StorageAdapter + Clone> Memory<S> {
     ) -> Result<SearchResult, Error> {
         self.flush_all()?;
 
-        let embedding = embed_one_query(&*self.provider, query)?;
+        let plan = RecallPlan::infer(query);
+        let query_variants = if readout::uses_dense_query_expansion(&plan) {
+            crate::api::planned_complex_dense_query_variants(query)
+        } else {
+            vec![query.trim().to_owned()]
+        };
+        let (embedding, auxiliary_query_embeddings) = if query_variants.len() > 1 {
+            let borrowed: Vec<_> = query_variants.iter().map(String::as_str).collect();
+            let embedded = self.provider.embed_queries(&borrowed)?;
+            if embedded.len() != query_variants.len() {
+                return Err(Error::InvalidInput(format!(
+                    "embedding provider returned {} query vectors for {} dense variants",
+                    embedded.len(),
+                    query_variants.len()
+                )));
+            }
+            let mut widened = embedded
+                .into_iter()
+                .map(|values| crate::embedding::widen(&values));
+            let primary = widened.next().ok_or_else(|| {
+                Error::InvalidInput(
+                    "embedding provider returned no primary query vector".to_owned(),
+                )
+            })?;
+            (primary, widened.collect())
+        } else {
+            (embed_one_query(&*self.provider, query)?, Vec::new())
+        };
         let seed_limit = tuning.seed_limit.unwrap_or_else(|| limit.max(1));
         let input = SearchInput {
             text: query.to_string(),
@@ -2630,8 +2665,11 @@ impl<S: StorageAdapter + Clone> Memory<S> {
             entity_tags: tuning.entity_tags.clone(),
             ..SearchInput::default()
         };
-        let mut result = self.engine.search_with_diagnostics(input, diagnostics)?;
-        let plan = RecallPlan::infer(query);
+        let mut result = self.engine.search_with_auxiliary_query_embeddings(
+            input,
+            diagnostics,
+            &auxiliary_query_embeddings,
+        )?;
         let routed = readout::route_atomic_fact_sources(
             self.engine.graph().storage(),
             &plan,
@@ -2881,11 +2919,11 @@ impl<S: StorageAdapter + Clone> Memory<S> {
 
     /// Compile consumer scores through deterministic deep readout at `as_of`.
     ///
-    /// [`EvidenceSelection::Auto`] preserves reranker order for direct queries
-    /// so downstream filters can retain alternate knowledge representations.
-    /// It applies canonical raw-source coverage for inference and date queries,
-    /// and bounded source-session coverage for explicit
-    /// collection/relationship/frequency queries. `query` must be the original
+    /// [`EvidenceSelection::Auto`] freezes the reranker head for direct queries
+    /// and uses canonical-source coverage only in its tail. It applies full
+    /// canonical raw-source coverage for inference and date queries, and
+    /// bounded source-session coverage for explicit collection, relationship,
+    /// and frequency queries. `query` must be the original
     /// query used to produce `result` because the same deterministic plan also
     /// controls evidence document compilation and query-aware rendering. The
     /// compiled ranking is then validated by
@@ -3366,6 +3404,8 @@ mod tests {
 
     struct KeywordReranker;
 
+    struct OrderReranker;
+
     impl RerankingProvider for KeywordReranker {
         fn rerank(&self, _query: &str, documents: &[String]) -> Result<Vec<RerankScore>, Error> {
             Ok(documents
@@ -3384,6 +3424,23 @@ mod tests {
 
         fn model_name(&self) -> &str {
             "keyword-test"
+        }
+    }
+
+    impl RerankingProvider for OrderReranker {
+        fn rerank(&self, _query: &str, documents: &[String]) -> Result<Vec<RerankScore>, Error> {
+            Ok(documents
+                .iter()
+                .enumerate()
+                .map(|(index, _)| RerankScore {
+                    index,
+                    score: (documents.len() - index) as f64,
+                })
+                .collect())
+        }
+
+        fn model_name(&self) -> &str {
+            "order-test"
         }
     }
 
@@ -3502,6 +3559,89 @@ mod tests {
         assert!(kinds.contains(&"query"), "{kinds:?}");
     }
 
+    #[test]
+    fn complex_search_batches_bounded_dense_query_variants() {
+        let (mut m, calls) = recording_mem();
+        m.add(
+            "s",
+            "user",
+            "Rowan and Taylor discussed different hobbies",
+            t(1),
+        )
+        .unwrap();
+        m.flush_all().unwrap();
+        calls.lock().unwrap().clear();
+
+        let result = m
+            .search_result_at_with_diagnostics(
+                "What advice could Rowan and Taylor share?",
+                20,
+                t(100),
+                &SearchTuning::default(),
+                &SearchDiagnostics::with_readout_trace_limit(50),
+            )
+            .unwrap();
+
+        let query_calls: Vec<_> = calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(kind, _)| *kind == "query")
+            .map(|(_, text)| text.clone())
+            .collect();
+        assert_eq!(
+            query_calls,
+            [
+                "What advice could Rowan and Taylor share?",
+                "Rowan",
+                "Taylor"
+            ]
+        );
+        assert!(
+            result
+                .trace
+                .strategies_used
+                .iter()
+                .any(|strategy| strategy == "dense_query_union:3")
+        );
+    }
+
+    #[test]
+    fn direct_and_temporal_search_keep_one_dense_query() {
+        let (mut m, calls) = recording_mem();
+        m.add("s", "user", "Rowan met Taylor in Seoul", t(1))
+            .unwrap();
+        m.flush_all().unwrap();
+
+        for query in ["Where does Rowan live?", "When did Rowan meet Taylor?"] {
+            calls.lock().unwrap().clear();
+            let result = m
+                .search_result_at_with_diagnostics(
+                    query,
+                    20,
+                    t(100),
+                    &SearchTuning::default(),
+                    &SearchDiagnostics::with_readout_trace_limit(50),
+                )
+                .unwrap();
+            let query_calls: Vec<_> = calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(kind, _)| *kind == "query")
+                .map(|(_, text)| text.clone())
+                .collect();
+            assert_eq!(query_calls, [query]);
+            assert!(
+                !result
+                    .trace
+                    .strategies_used
+                    .iter()
+                    .any(|strategy| strategy.starts_with("dense_query_union:"))
+            );
+        }
+    }
+
     fn t(ms: u64) -> Timestamp {
         Timestamp(ms)
     }
@@ -3554,6 +3694,12 @@ mod tests {
         assert_eq!(defaults.candidate_limit, DEFAULT_RERANK_CANDIDATE_LIMIT);
         assert_eq!(defaults.search_limit, DEFAULT_RERANK_SEARCH_LIMIT);
         assert_eq!(defaults.deep.limit, 4);
+        assert!(defaults.adaptive_delivery);
+        assert!(
+            !RerankedRecallOptions::new(20)
+                .with_adaptive_delivery(false)
+                .adaptive_delivery
+        );
 
         let mut m = mem();
         m.add_note("The archive key is amber", t(1)).unwrap();
@@ -3601,6 +3747,38 @@ mod tests {
             )
             .unwrap_err();
         assert!(matches!(error, Error::InvalidInput(message) if message.contains("out-of-bounds")));
+    }
+
+    #[test]
+    fn production_reranked_recall_applies_and_can_disable_adaptive_delivery() {
+        let mut m = mem();
+        for index in 0..30 {
+            m.add_note(
+                &format!("Archive record {index} is stored in location {index}"),
+                t(index + 1),
+            )
+            .unwrap();
+        }
+
+        let adaptive = m
+            .search_reranked_at(
+                "Where are the archive records stored?",
+                &OrderReranker,
+                RerankedRecallOptions::new(20),
+                t(100),
+            )
+            .unwrap();
+        let fixed = m
+            .search_reranked_at(
+                "Where are the archive records stored?",
+                &OrderReranker,
+                RerankedRecallOptions::new(20).with_adaptive_delivery(false),
+                t(100),
+            )
+            .unwrap();
+
+        assert_eq!(adaptive.recall.hits.len(), DEFAULT_SIMPLE_DELIVERY_LIMIT);
+        assert_eq!(fixed.recall.hits.len(), 20);
     }
 
     #[test]

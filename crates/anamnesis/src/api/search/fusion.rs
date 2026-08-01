@@ -27,12 +27,30 @@ type Accumulator = HashMap<NodeId, (f64, Vec<Contribution>)>;
 /// `FusedCandidate.contributing` retains the per-source `(source, source_rank,
 /// raw_score)` triples and is itself sorted by `(source, source_rank)` so that
 /// ordering does not leak `HashMap` iteration nondeterminism.
+#[cfg(test)]
 pub(crate) fn fuse_candidates(per_source: Vec<Vec<SearchCandidate>>) -> Vec<FusedCandidate> {
+    fuse_weighted_candidates(
+        per_source
+            .into_iter()
+            .map(|candidates| (1.0, candidates))
+            .collect(),
+    )
+}
+
+/// Fuse ranked lanes with fixed, internal source priors.
+///
+/// Ordinary lexical, vector, and entity lanes use weight `1.0`. The complex
+/// dense-query union uses a lower fixed prior so it can introduce missing
+/// premises without outvoting the complete query merely because two auxiliary
+/// surfaces were generated.
+pub(crate) fn fuse_weighted_candidates(
+    per_source: Vec<(f64, Vec<SearchCandidate>)>,
+) -> Vec<FusedCandidate> {
     let mut accumulator: Accumulator = HashMap::new();
 
-    for source_list in per_source {
+    for (weight, source_list) in per_source {
         for candidate in source_list {
-            let contribution = 1.0 / ((RRF_K + candidate.source_rank + 1) as f64);
+            let contribution = weight / ((RRF_K + candidate.source_rank + 1) as f64);
             let entry = accumulator
                 .entry(candidate.node_id)
                 .or_insert_with(|| (0.0, Vec::new()));
@@ -142,6 +160,22 @@ mod tests {
                 .iter()
                 .any(|c| c.0 == CandidateSource::Vector && (c.2 - 0.85).abs() < 1e-12)
         );
+    }
+
+    #[test]
+    fn weighted_lane_scales_only_its_rrf_vote() {
+        let primary = vec![cand(1, 0.9, CandidateSource::Vector, 0)];
+        let auxiliary = vec![
+            cand(1, 0.8, CandidateSource::Vector, 0),
+            cand(2, 0.85, CandidateSource::Vector, 0),
+        ];
+
+        let fused = fuse_weighted_candidates(vec![(1.0, primary), (0.25, auxiliary)]);
+
+        assert_eq!(fused[0].node_id, NodeId(1));
+        assert!((fused[0].fused_score - 1.25 / 61.0).abs() < 1e-12);
+        assert_eq!(fused[1].node_id, NodeId(2));
+        assert!((fused[1].fused_score - 0.25 / 61.0).abs() < 1e-12);
     }
 
     #[test]

@@ -5,9 +5,70 @@ calibrated prior records its data, procedure, and result here. Refit when graph
 topology, agent behavior, embedding geometry, or dataset changes.
 
 Evidence file names below refer to local benchmark outputs (not committed —
-they are multi-MB run reports). Every number is reproducible from the named
-dataset + command via `cargo bench --features embed --bench real_memory`;
-runs are deterministic for a fixed dataset and embedding model.
+they are multi-MB run reports). Retrieval/answer records use
+`cargo bench --features embed --bench local_answer`; mechanics calibration
+records use `real_memory`. Every number is reproducible from the named dataset,
+configuration, and frozen artifacts; reader-free runs are deterministic for a
+fixed dataset, embedding model, and reranker.
+
+## 2026-08-01 — bounded dense union and adaptive product delivery
+
+- **Data:** LoCoMo seed 42, 25 questions per non-adversarial type, n=100;
+  `Xenova/bge-base-en-v1.5`, `BAAI/bge-reranker-base`, the frozen
+  reference-blind Qwen 3.6 extraction artifact, candidate@50, requested
+  final@20, and the detailed product renderer. The run was `--predict-only`,
+  recorded `local_only=true`, made no reader, judge, remote-provider, or other
+  LLM call, and cost $0 externally.
+- **Production policy:** collection, relationship, and inference queries batch
+  the original query with at most two deterministic dense entity/decomposition
+  surfaces. Stored embeddings are scanned once. Auxiliary lanes are
+  deduplicated into one bounded union with a fixed 0.25 RRF prior, so multiple
+  anchors cannot outvote the complete query by vote count alone. Direct and
+  temporal source search remains unchanged.
+- **Delivery policy:** automatic direct-query selection freezes the first eight
+  reranker rows, then prefers canonical sources not already represented in the
+  tail. Direct one-fact queries use at most 12 fragments; temporal and
+  completeness-sensitive queries retain the requested 20. This is the default
+  `Memory::search_reranked` behavior used by MCP, hooks, plugins, direct
+  `Memory` callers, and the benchmark product-wire lane. A public additive
+  option disables adaptive delivery when an exact fixed width is required.
+
+| Type | candidate@50 | raw reranker@20 | delivered | rendered | vs v175 rendered |
+|---|---:|---:|---:|---:|---:|
+| multi-hop | 67.90% | 64.24% | 63.44% | **67.57%** | **+2.67 pp** |
+| open-domain | 59.00% | 53.67% | 59.67% | **63.00%** | **+1.33 pp** |
+| single-hop | 96.00% | 96.00% | 92.00% | **96.00%** | 0.00 pp |
+| temporal | 92.00% | 84.67% | 86.67% | **96.00%** | 0.00 pp |
+| **overall** | **78.73%** | **74.64%** | **75.44%** | **80.64%** | **+1.00 pp** |
+
+Rendered Hit remains **89%**. There are three positive per-question rendered
+changes and zero negative changes against v175. Relative to the pre-structural
+v155 production baseline, cumulative rendered gains are **+8.17 pp**
+Multi-hop and **+6.97 pp** Open-domain, with Single-hop and Temporal still at
+96%.
+
+- **Context:** 20 direct-fact questions receive 12 fragments and the other 80
+  receive 20, reducing the overall mean from 20 to 18.4. On those 20 adaptive
+  questions, mean product-context characters fall from 11,997 to 8,666
+  (-27.8%) and measured context tokens from 2,228 to 1,444 (-35.2%). Across all
+  questions, tokens fall from 1,929 to 1,743 (-9.6%); characters rise from
+  10,842 to 11,160 (+2.9%) because recovered complex evidence is longer.
+- **Latency:** 1.51 s mean, 2.26 s p95, and 2.69 s maximum. The required p95
+  remains below the 4 s fail-open boundary; differences from prior warm-cache
+  runs are not attributed solely to this policy.
+- **Harness correction:** the product-wire harness previously called
+  `Memory::rerank_search_result_at` and then repeated automatic deep selection.
+  It now retains the raw ranking for the reranker diagnostic and consumes the
+  already-selected production package exactly once. Consequently, the v207
+  raw-reranker column is not directly comparable to v175's old selected/reranker
+  label; delivered and rendered product surfaces remain the quality gates.
+- **Rejected variants:** independent equal-weight auxiliary lanes regressed
+  overall rendered recall to 78.81% and Open-domain to 59.00%; a broad
+  fact-shaped adaptive cap regressed Temporal. Neither remains in production.
+  The retained union is a single lower-prior lane, and the cap is restricted to
+  direct facts, including an explicit temporal classification for “over time.”
+- **Evidence:**
+  `local-answer-locomo-v207-final-temporal-safe-dense-adaptive-production-n100.json`.
 
 ## 2026-08-01 — query-scoped local reader and speaker ownership gate
 

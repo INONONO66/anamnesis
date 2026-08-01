@@ -20,7 +20,10 @@ use super::BuiltMemoryGraph;
 
 type ConsumerRanking = Vec<(NodeId, f64)>;
 type FrozenConsumerRankings = Arc<HashMap<String, ConsumerRanking>>;
-type ConsumerPackage = (ConsumerRanking, ContextPackage);
+// The boolean records that the package already passed canonical `Memory`
+// deep selection. The raw ranking remains separate for reranker metrics and
+// fixed-ranking diagnostic screens.
+type ConsumerPackage = (ConsumerRanking, ContextPackage, bool);
 
 /// Knobs for warmup/evaluation runs, bundled to keep call sites readable.
 #[derive(Clone)]
@@ -378,7 +381,7 @@ pub fn evaluate_question_with_context(
         .collect();
 
     // Reranker/selection surface: final ranking cutoff before package assembly.
-    let reranker_retrievals = if let Some((ranked, _)) = &shadow {
+    let reranker_retrievals = if let Some((ranked, _, _)) = &shadow {
         build_retrievals(ranked.iter().copied(), graph, question, opts.top_k)
     } else {
         readout_retrievals(&result.trace.readout, graph, question, opts.top_k)
@@ -394,7 +397,7 @@ pub fn evaluate_question_with_context(
     // Package surface: packaged ContextPackage fragments
     let package = shadow
         .as_ref()
-        .map_or(&result.package, |(_, package)| package);
+        .map_or(&result.package, |(_, package, _)| package);
     let delivered_retrievals = retrieved_memories(package, graph, question, opts.top_k);
     let delivered_ranked: Vec<_> = delivered_retrievals
         .iter()
@@ -421,7 +424,7 @@ pub fn evaluate_question_with_context(
     };
     let consumer_positions: HashMap<_, _> = shadow
         .as_ref()
-        .map(|(ranking, _)| {
+        .map(|(ranking, _, _)| {
             ranking
                 .iter()
                 .enumerate()
@@ -492,7 +495,7 @@ pub fn evaluate_question_with_context(
     };
     let selection_variants = fixed_ranking_selection_variants(
         &result,
-        shadow.as_ref().map(|(ranking, _)| ranking.as_slice()),
+        shadow.as_ref().map(|(ranking, _, _)| ranking.as_slice()),
         graph,
         question,
         opts,
@@ -565,7 +568,7 @@ fn replay_consumer_ranking(
         .memory
         .repackage_reranked_at(result, &candidates, top_k, question_time(question))
         .map_err(|error| BenchError::Engine(error.to_string()))?;
-    Ok((ranking.clone(), recall.package))
+    Ok((ranking.clone(), recall.package, false))
 }
 
 fn apply_consumer_selection_policy(
@@ -575,7 +578,7 @@ fn apply_consumer_selection_policy(
     question: &BenchQuestion,
     opts: &EvalOptions,
 ) -> BenchResult<Option<ConsumerPackage>> {
-    let (ranking, package) = match shadow {
+    let (ranking, package, memory_deep_applied) = match shadow {
         Some(values) => values,
         None if opts.consumer_selection_policy == ConsumerSelectionPolicy::Relevance => {
             return Ok(None);
@@ -588,10 +591,31 @@ fn apply_consumer_selection_policy(
                 .map(|candidate| (candidate.node_id, candidate.score))
                 .collect(),
             result.package.clone(),
+            false,
         ),
     };
+    if opts.consumer_selection_policy == ConsumerSelectionPolicy::MemoryDeep && memory_deep_applied
+    {
+        return Ok(Some((ranking, package, true)));
+    }
     match opts.consumer_selection_policy {
-        ConsumerSelectionPolicy::Relevance => Ok(Some((ranking, package))),
+        ConsumerSelectionPolicy::Relevance => {
+            if !memory_deep_applied {
+                return Ok(Some((ranking, package, false)));
+            }
+            let candidates: Vec<_> = ranking
+                .iter()
+                .map(|(node_id, score)| RerankedCandidate {
+                    node_id: *node_id,
+                    score: *score,
+                })
+                .collect();
+            let recall = graph
+                .memory
+                .repackage_reranked_at(result, &candidates, opts.top_k, question_time(question))
+                .map_err(|err| BenchError::Engine(err.to_string()))?;
+            Ok(Some((ranking, recall.package, false)))
+        }
         ConsumerSelectionPolicy::MemoryDeep
         | ConsumerSelectionPolicy::MemoryDistinctSources
         | ConsumerSelectionPolicy::MemorySourceCoverage => {
@@ -625,7 +649,7 @@ fn apply_consumer_selection_policy(
                 .iter()
                 .map(|hit| (hit.node_id, hit.score))
                 .collect();
-            Ok(Some((compiled_ranking, recall.package)))
+            Ok(Some((compiled_ranking, recall.package, true)))
         }
         ConsumerSelectionPolicy::SourceDedup => {
             let ranking = source_dedup_ranking(&ranking, graph)?;
@@ -640,7 +664,7 @@ fn apply_consumer_selection_policy(
                 .memory
                 .repackage_reranked_at(result, &candidates, opts.top_k, question_time(question))
                 .map_err(|err| BenchError::Engine(err.to_string()))?;
-            Ok(Some((ranking, recall.package)))
+            Ok(Some((ranking, recall.package, false)))
         }
         ConsumerSelectionPolicy::SourceCoverage => {
             let ranking = source_coverage_ranking(&ranking, graph)?;
@@ -655,7 +679,7 @@ fn apply_consumer_selection_policy(
                 .memory
                 .repackage_reranked_at(result, &candidates, opts.top_k, question_time(question))
                 .map_err(|err| BenchError::Engine(err.to_string()))?;
-            Ok(Some((ranking, recall.package)))
+            Ok(Some((ranking, recall.package, false)))
         }
         ConsumerSelectionPolicy::ProvenanceGuardrail => {
             let ranking = provenance_guardrail_ranking(&ranking, graph)?;
@@ -670,7 +694,7 @@ fn apply_consumer_selection_policy(
                 .memory
                 .repackage_reranked_at(result, &candidates, opts.top_k, question_time(question))
                 .map_err(|err| BenchError::Engine(err.to_string()))?;
-            Ok(Some((ranking, recall.package)))
+            Ok(Some((ranking, recall.package, false)))
         }
     }
 }
@@ -1021,6 +1045,7 @@ fn shadow_rank_fusion(
             .map(|(node_id, score, _)| (node_id, score))
             .collect(),
         package,
+        false,
     )
 }
 
@@ -1054,7 +1079,7 @@ fn consumer_cross_encoder_package(
             .iter()
             .map(|candidate| (candidate.node_id, candidate.score))
             .collect();
-        return Ok((ranking, reranked.recall.package));
+        return Ok((ranking, reranked.recall.package, true));
     }
 
     let broad_candidates: Vec<_> = if evidence_documents {
@@ -1138,7 +1163,7 @@ fn consumer_cross_encoder_package(
             question_time(question),
         )
         .map_err(|err| BenchError::Engine(err.to_string()))?;
-    Ok((ranked, recall.package))
+    Ok((ranked, recall.package, false))
 }
 
 #[cfg(feature = "embed")]

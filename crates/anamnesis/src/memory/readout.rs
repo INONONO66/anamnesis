@@ -34,6 +34,13 @@ pub const DEFAULT_RERANK_SEARCH_LIMIT: usize = 20;
 /// at final widths of eight and twelve.
 pub const DEFAULT_RERANK_FINAL_LIMIT: usize = 20;
 
+/// Default evidence cap for one-fact product queries.
+///
+/// Complex and completeness-sensitive shapes retain the caller's requested
+/// width. This cap only reduces redundant simple-query context after the full
+/// candidate and reranker stages have run.
+pub const DEFAULT_SIMPLE_DELIVERY_LIMIT: usize = 12;
+
 /// One canonical raw-evidence document for an external reranker.
 ///
 /// The document keeps one live cognitive readout representation, so its score
@@ -133,11 +140,11 @@ impl RecallPlan {
 pub enum EvidenceSelection {
     /// Choose the policy from the deterministic [`RecallIntent`].
     ///
-    /// Direct queries preserve reranker order so post-package product filters
-    /// can retain alternate knowledge representations. Inference and date
-    /// queries remove candidates that contribute no new canonical raw evidence.
-    /// Enumeration, relationship, and frequency queries additionally preserve
-    /// source-session diversity.
+    /// Direct queries preserve the reranker's first eight rows, then prefer
+    /// tail rows that add canonical raw evidence before backfilling redundant
+    /// representations. Inference and date queries remove candidates that
+    /// contribute no new canonical raw evidence. Enumeration, relationship,
+    /// and frequency queries additionally preserve source-session diversity.
     #[default]
     Auto,
     /// Preserve the supplied ranking byte-for-byte.
@@ -182,6 +189,9 @@ pub struct RerankedRecallOptions {
     pub deep: DeepRecallOptions,
     /// Optional graph scope applied during cognitive search, before reranking.
     pub scope: Option<ScopePath>,
+    /// Whether the production path may shrink one-fact delivery below the
+    /// caller's maximum while retaining temporal and complex-query widths.
+    pub adaptive_delivery: bool,
 }
 
 impl RerankedRecallOptions {
@@ -196,6 +206,7 @@ impl RerankedRecallOptions {
             search_limit: limit.max(DEFAULT_RERANK_SEARCH_LIMIT),
             deep: DeepRecallOptions::new(limit),
             scope: None,
+            adaptive_delivery: true,
         }
     }
 
@@ -220,6 +231,15 @@ impl RerankedRecallOptions {
     /// Restrict cognitive search and all downstream reranking to `scope`.
     pub fn with_scope(mut self, scope: ScopePath) -> Self {
         self.scope = Some(scope);
+        self
+    }
+
+    /// Enable or disable question-shape-aware final evidence caps.
+    ///
+    /// Disabling this preserves the exact caller-supplied final maximum. It
+    /// does not change cognitive search or reranker candidate widths.
+    pub fn with_adaptive_delivery(mut self, adaptive_delivery: bool) -> Self {
+        self.adaptive_delivery = adaptive_delivery;
         self
     }
 }
@@ -440,6 +460,7 @@ fn infer_plan(query: &str, answer_shape_hint: Option<AnswerShape>) -> RecallPlan
             || has_word("before")
             || has_word("after")
             || has_word("ago")
+            || has_sequence(&["over", "time"])
             || normalized.contains("지난주")
             || normalized.contains("지난달")
             || normalized.contains("작년");
@@ -462,6 +483,14 @@ fn infer_plan(query: &str, answer_shape_hint: Option<AnswerShape>) -> RecallPlan
         query: query.trim().to_owned(),
         recall_intent,
         answer_shape,
+    }
+}
+
+pub(super) fn adaptive_delivery_limit(plan: &RecallPlan, requested_limit: usize) -> usize {
+    if plan.recall_intent == RecallIntent::Direct && plan.answer_shape == AnswerShape::Fact {
+        requested_limit.min(DEFAULT_SIMPLE_DELIVERY_LIMIT)
+    } else {
+        requested_limit
     }
 }
 
@@ -584,6 +613,11 @@ pub(crate) fn compile_ranking<S: StorageAdapter>(
     if !automatic {
         return Ok(baseline);
     }
+    let baseline = if plan.recall_intent == RecallIntent::Direct {
+        head_preserving_source_coverage_ranking(storage, &baseline, limit)?
+    } else {
+        baseline
+    };
     claim_slot_coverage_ranking(
         storage,
         plan,
@@ -592,6 +626,36 @@ pub(crate) fn compile_ranking<S: StorageAdapter>(
         limit,
         routed_atomic_sources,
     )
+}
+
+fn head_preserving_source_coverage_ranking<S: StorageAdapter>(
+    storage: &S,
+    ranking: &[RerankedCandidate],
+    limit: usize,
+) -> Result<Vec<RerankedCandidate>, Error> {
+    let head_limit = ranking.len().min(limit).min(8);
+    let mut covered_sources = HashSet::new();
+    let mut selected = Vec::with_capacity(ranking.len());
+    for candidate in ranking.iter().take(head_limit) {
+        covered_sources.extend(canonical_sources(storage, candidate.node_id)?);
+        selected.push(*candidate);
+    }
+
+    let mut deferred = Vec::new();
+    for candidate in ranking.iter().skip(head_limit) {
+        let sources = canonical_sources(storage, candidate.node_id)?;
+        if sources
+            .iter()
+            .any(|source| !covered_sources.contains(source))
+        {
+            covered_sources.extend(sources);
+            selected.push(*candidate);
+        } else {
+            deferred.push(*candidate);
+        }
+    }
+    selected.extend(deferred);
+    Ok(selected)
 }
 
 fn claim_slot_coverage_ranking<S: StorageAdapter>(
@@ -1438,6 +1502,10 @@ fn uses_complex_expansion(plan: &RecallPlan) -> bool {
         plan.answer_shape == AnswerShape::Inference && padded_query.contains(" gift ");
 
     !requests_causal_explanation && !requests_gift_recommendation
+}
+
+pub(super) fn uses_dense_query_expansion(plan: &RecallPlan) -> bool {
+    plan.recall_intent != RecallIntent::Temporal && uses_complex_expansion(plan)
 }
 
 fn uses_atomic_fact_expansion(plan: &RecallPlan) -> bool {
@@ -2550,6 +2618,15 @@ mod tests {
     }
 
     #[test]
+    fn over_time_is_a_temporal_retrieval_constraint() {
+        let plan = RecallPlan::infer("What diet change did Sam adopt over time?");
+
+        assert_eq!(plan.answer_shape, AnswerShape::Fact);
+        assert_eq!(plan.recall_intent, RecallIntent::Temporal);
+        assert_eq!(adaptive_delivery_limit(&plan, 20), 20);
+    }
+
+    #[test]
     fn detects_answer_shapes_beyond_sentence_prefixes() {
         assert_eq!(
             RecallPlan::infer("Do you remember when Alice moved?").answer_shape,
@@ -2666,6 +2743,129 @@ mod tests {
             "Which book did Jolene read in January 2023?",
             "Jolene: Two weeks ago I read Avalanche by Neal Stephenson."
         ));
+    }
+
+    #[test]
+    fn adaptive_delivery_keeps_completeness_queries_wide() {
+        for query in [
+            "What projects did Alice complete?",
+            "When did Alice move?",
+            "Where did Alice move in June 2023?",
+            "How many projects did Alice complete?",
+            "How often does Alice get a health checkup?",
+            "Why did Alice move?",
+            "Would Alice enjoy a mountain retreat?",
+        ] {
+            let plan = RecallPlan::infer(query);
+            assert_eq!(adaptive_delivery_limit(&plan, 20), 20, "{query:?}");
+        }
+    }
+
+    #[test]
+    fn adaptive_delivery_caps_fact_context_without_exceeding_the_request() {
+        let plan = RecallPlan::infer("Where does Alice live?");
+        assert_eq!(adaptive_delivery_limit(&plan, 20), 12);
+        assert_eq!(adaptive_delivery_limit(&plan, 8), 8);
+    }
+
+    #[test]
+    fn direct_auto_selection_freezes_the_head_and_defers_redundant_tail_views() {
+        let mut storage = SqliteStorage::in_memory().expect("in-memory storage");
+        let mut ranking = Vec::new();
+        for index in 0..13 {
+            let id = storage.next_node_id();
+            storage
+                .set_node(fixture_node(
+                    id,
+                    KnowledgeType::Episodic,
+                    format!("direct evidence {index}"),
+                    "direct-session".to_owned(),
+                ))
+                .expect("direct evidence");
+            ranking.push(RerankedCandidate {
+                node_id: id,
+                score: 100.0 - index as f64,
+            });
+        }
+
+        let redundant_tail = storage.next_node_id();
+        storage
+            .set_node(fixture_node(
+                redundant_tail,
+                KnowledgeType::Semantic,
+                "redundant tail view".to_owned(),
+                "direct-session".to_owned(),
+            ))
+            .expect("redundant tail view");
+        let edge_id = storage.next_edge_id();
+        storage
+            .set_edge(Edge::seeded(
+                edge_id,
+                redundant_tail,
+                ranking[0].node_id,
+                EdgeType::ExtractedFrom,
+                1.0,
+                EdgeSource::Manual,
+                Timestamp(1),
+                Timestamp(1),
+                HashMap::new(),
+            ))
+            .expect("redundant provenance");
+        ranking.insert(
+            8,
+            RerankedCandidate {
+                node_id: redundant_tail,
+                score: 92.5,
+            },
+        );
+
+        let selected = compile_ranking(
+            &storage,
+            &RecallPlan::infer("Where does Alice live?"),
+            &ranking,
+            EvidenceSelection::Auto,
+            12,
+            &[],
+        )
+        .expect("direct auto selection");
+
+        assert_eq!(selected[..8], ranking[..8]);
+        assert_eq!(selected[8], ranking[9]);
+        assert!(
+            selected[..12]
+                .iter()
+                .all(|candidate| candidate.node_id != redundant_tail)
+        );
+        assert!(
+            selected
+                .iter()
+                .any(|candidate| candidate.node_id == redundant_tail),
+            "deferred representations remain available as a last-resort backfill"
+        );
+    }
+
+    #[test]
+    fn explicit_relevance_selection_preserves_direct_reranker_order() {
+        let (storage, readout, _) = ranked_fixture();
+        let ranking: Vec<_> = readout
+            .iter()
+            .map(|candidate| RerankedCandidate {
+                node_id: candidate.node_id,
+                score: candidate.score,
+            })
+            .collect();
+
+        let selected = compile_ranking(
+            &storage,
+            &RecallPlan::infer("Where does Alice live?"),
+            &ranking,
+            EvidenceSelection::Relevance,
+            12,
+            &[],
+        )
+        .expect("explicit relevance");
+
+        assert_eq!(selected, ranking);
     }
 
     #[test]

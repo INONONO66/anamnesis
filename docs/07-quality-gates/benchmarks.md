@@ -87,12 +87,29 @@ The harness can run four paired routes over the same selected questions:
 
 Route 2 is a **product-wire** lane by default. Dataset turns enter through the
 same `Memory::add` windowing recipe as a consumer session; queries use
-`Memory::search_result_at_with`; optional consumer reranking returns scores
-through `Memory::repackage_reranked_at`; and the reader receives the exact
-`Memory::render_context(&recall)` string used by the MCP recall path. The
-harness does not maintain a second fragment renderer or inject benchmark-only
-dates into that product context: observation and validity times come from the
-actual source nodes.
+the same `Memory` source search as production, retaining its `SearchResult`
+only so the report can score diagnostic candidate surfaces. Optional consumer
+reranking then calls `Memory::rerank_search_result_at`, the existing-result
+overload of the canonical `Memory::search_reranked` pipeline. The harness does
+not apply deep selection a second time: it records the raw reranker ranking and
+the already-selected product package as separate surfaces. The reader receives
+the exact `Memory::render_context(&recall)` string used by the MCP recall path.
+The harness does not maintain a second fragment renderer or inject
+benchmark-only dates into that product context: observation and validity times
+come from the actual source nodes.
+
+The production source search embeds the original query once for direct and
+temporal plans. For bounded collection, relationship, and inference plans it
+batches the original plus at most two deterministic entity/decomposition
+surfaces, scans stored embeddings once, and fuses one deduplicated auxiliary
+dense union at a fixed lower prior. Production deep selection keeps the first
+eight direct-query reranker rows stable and uses canonical-source coverage only
+in the tail. The caller's final limit is a maximum: direct one-fact queries
+default to at most 12 fragments, while temporal and completeness-sensitive
+queries retain the requested width. `RerankedRecallOptions` exposes an
+additive opt-out for consumers that require an exact fixed width. MCP, hooks,
+plugins, direct `Memory::search_reranked` callers, and this product-wire lane
+therefore share these policies; no LLM call exists in the engine path.
 
 `--diagnostic-fragment-context` enables the historical adapter-enriched
 per-fragment context. It is analysis-only and cannot be combined accidentally

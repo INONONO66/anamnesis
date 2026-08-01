@@ -752,6 +752,60 @@ impl EmbeddingProvider for CachingProvider {
         self.cached_single("query-v1", text, || self.inner.embed_query(text))
     }
 
+    fn embed_queries(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, Error> {
+        if texts.is_empty() {
+            return Ok(Vec::new());
+        }
+        let Some(cache_mutex) = &self.cache else {
+            return self.inner.embed_queries(texts);
+        };
+        let cache = cache_mutex
+            .lock()
+            .map_err(|_| Error::InvalidInput("embed cache mutex poisoned".to_string()))?;
+        let cache_keys: Vec<_> = texts
+            .iter()
+            .map(|text| format!("\u{1f}query-v1:{text}"))
+            .collect();
+        let mut results = Vec::with_capacity(texts.len());
+        let mut miss_indices = Vec::new();
+        for (index, cache_key) in cache_keys.iter().enumerate() {
+            let hit = cache
+                .get(cache_key)
+                .map_err(|error| Error::InvalidInput(error.to_string()))?
+                .map(|values| values.into_iter().map(|value| value as f32).collect());
+            if hit.is_none() {
+                miss_indices.push(index);
+            }
+            results.push(hit);
+        }
+
+        if !miss_indices.is_empty() {
+            let misses: Vec<_> = miss_indices.iter().map(|&index| texts[index]).collect();
+            let fresh = self.inner.embed_queries(&misses)?;
+            if fresh.len() != miss_indices.len() {
+                return Err(Error::InvalidInput(format!(
+                    "CachingProvider: inner provider returned {} query embeddings for {} texts",
+                    fresh.len(),
+                    miss_indices.len()
+                )));
+            }
+            for (&index, embedding) in miss_indices.iter().zip(fresh) {
+                let widened: Vec<_> = embedding.iter().map(|&value| f64::from(value)).collect();
+                cache
+                    .put(&cache_keys[index], &widened)
+                    .map_err(|error| Error::InvalidInput(error.to_string()))?;
+                results[index] = Some(embedding);
+            }
+        }
+
+        results
+            .into_iter()
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| {
+                Error::InvalidInput("CachingProvider left a query embedding slot empty".to_string())
+            })
+    }
+
     fn embed_passage(&self, text: &str) -> Result<Vec<f32>, Error> {
         self.cached_single("passage-v1", text, || self.inner.embed_passage(text))
     }
