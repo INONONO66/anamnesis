@@ -8,11 +8,12 @@ use std::collections::{HashMap, VecDeque};
 
 /// Provenance and scope of a knowledge fragment.
 ///
-/// Tracks which peer produced this node, from which session,
-/// and the hierarchical scope path it belongs to.
+/// Records the producer identifier, source kind, session, scope, and write-time
+/// confidence used to attribute the fragment. These fields are provenance; they
+/// do not imply an identity registry or a trust score.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Origin {
-    /// The peer (human or agent) that produced this knowledge fragment.
+    /// Opaque producer identifier recorded for provenance and filtering.
     pub peer_id: PeerId,
     /// The kind of source that produced this fragment.
     pub source_kind: SourceKind,
@@ -89,9 +90,9 @@ pub struct Node {
     /// (ADR-0008).
     pub retained_action: f64,
     /// Evidence prior `P_i` — a persistent, decay-EXEMPT log-odds offset holding
-    /// encoding surprise (`P_i ← k·eps` at allocation), feedback / social
-    /// reinforcement (`dP_i = eta·(lambda − predicted)`), and peer trust. It does
-    /// NOT undergo base-level decay (ADR-0008 / ADR-0009).
+    /// encoding surprise (`P_i ← k·eps` at allocation) and explicit consumer
+    /// feedback (`dP_i = eta·(lambda − predicted)`). It does NOT undergo base-level
+    /// decay (ADR-0008 / ADR-0009).
     pub evidence_prior: f64,
     /// Number of times this node has been accessed via touch().
     pub access_count: u32,
@@ -104,7 +105,7 @@ pub struct Node {
     pub tier: MemoryTier,
 
     // Provenance
-    /// Who created this node, from which session, and with what confidence.
+    /// Source attribution, session, scope, and write-time confidence.
     pub origin: Origin,
 
     // Classification

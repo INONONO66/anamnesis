@@ -1,7 +1,7 @@
 //! The rmcp/MCP adapter — the ONE place MCP lives.
 //!
 //! `AnamnesisServer` is the agent-facing MCP surface (`recall`/`remember`/
-//! `relate`/`ingest_conversation`/`stats`). It owns no engine state: each tool
+//! `relate`/ingestion/`stats`). It owns no engine state: each tool
 //! call builds a [`proto::Request`] and runs it against a [`Backend`] —
 //! `Local` (in-process `dispatch`, the `--embedded serve` path) or `Daemon` (the
 //! bespoke client to the shared daemon, the default path). Everything off this
@@ -91,6 +91,42 @@ pub struct IngestParams {
     pub namespace: Option<String>,
     #[serde(default)]
     pub scope: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct AttachmentTranscriptParams {
+    /// Immutable textual representation already produced by the consumer.
+    /// The server does not read the attachment or run OCR/vision/document
+    /// processing.
+    pub transcript: String,
+    /// Session that observed the attachment.
+    pub session: String,
+    /// Stable attachment identifier in the consumer's source system.
+    pub attachment_id: String,
+    /// SHA-256 of the exact attachment bytes, as 64 hexadecimal digits.
+    pub attachment_sha256: String,
+    /// Stable identifier for the transcript processor implementation.
+    pub processor_provider: String,
+    /// Processor model or executable identity.
+    pub processor_model: String,
+    /// Versioned processor configuration/profile identity.
+    pub processor_profile: String,
+    /// Versioned transcript schema identity.
+    pub processor_schema: String,
+    /// Producer confidence in `[0, 1]`.
+    pub confidence: f64,
+    /// Unix-millis observation/materialization time (default: server time).
+    #[serde(default)]
+    pub observed_at_ms: Option<u64>,
+    /// Isolated memory namespace (default: the server default).
+    #[serde(default)]
+    pub namespace: Option<String>,
+    /// Origin scope (default: universal).
+    #[serde(default)]
+    pub scope: Option<String>,
+    /// Selective entity tags for retrieval.
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -350,6 +386,33 @@ impl AnamnesisServer {
     }
 
     #[tool(
+        description = "Store an already-produced textual attachment transcript as one raw source. \
+                       Requires attachment and processor provenance; this tool does not read files, \
+                       fetch URLs, or run OCR, vision, document, or embedding models."
+    )]
+    async fn ingest_attachment_transcript(
+        &self,
+        Parameters(p): Parameters<AttachmentTranscriptParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let req = Request::IngestAttachmentTranscript {
+            transcript: p.transcript,
+            session: p.session,
+            attachment_id: p.attachment_id,
+            attachment_sha256: p.attachment_sha256,
+            processor_provider: p.processor_provider,
+            processor_model: p.processor_model,
+            processor_profile: p.processor_profile,
+            processor_schema: p.processor_schema,
+            confidence: p.confidence,
+            observed_at_ms: p.observed_at_ms,
+            namespace: p.namespace,
+            scope: p.scope,
+            tags: p.tags,
+        };
+        to_result(self.backend.call(req).await)
+    }
+
+    #[tool(
         description = "Link two remembered nodes with a typed reasoning relation. Pass node_ids from \
                        a prior `recall` (the NODES list) and a relation: causes, contradicts, \
                        supports, refutes, reason, rejected-alternative, belongs-to, related (or \
@@ -555,5 +618,52 @@ mod tests {
         assert!(event.knowledge_only);
         assert_eq!(event.gate_threshold, Some(0.25));
         assert_eq!(event.cosine_gate, Some(0.5));
+    }
+
+    #[tokio::test]
+    async fn mcp_attachment_transcript_uses_the_canonical_source_path() {
+        let registry = Arc::new(Mutex::new(MemoryRegistry::in_memory_with(
+            Arc::new(StubProvider),
+            false,
+        )));
+        let server = AnamnesisServer::local(registry.clone());
+
+        server
+            .ingest_attachment_transcript(Parameters(AttachmentTranscriptParams {
+                transcript: "recognized label: Boundary Waters".into(),
+                session: "mcp-attachment-session".into(),
+                attachment_id: "asset-9".into(),
+                attachment_sha256:
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
+                processor_provider: "local-ocr".into(),
+                processor_model: "ocr-v1".into(),
+                processor_profile: "signage-v1".into(),
+                processor_schema: "plain-text-v1".into(),
+                confidence: 0.8,
+                observed_at_ms: Some(900),
+                namespace: Some("mcp-attachment".into()),
+                scope: Some("project/travel".into()),
+                tags: Some(vec!["Boundary Waters".into()]),
+            }))
+            .await
+            .expect("attachment transcript should reach the local backend");
+
+        let handle = {
+            let mut registry = registry.lock().unwrap_or_else(|p| p.into_inner());
+            registry
+                .namespace_handle(Some("mcp-attachment"))
+                .expect("attachment namespace")
+        };
+        let memory = handle.lock().unwrap_or_else(|p| p.into_inner());
+        let graph = memory.engine().graph();
+        assert_eq!(graph.node_count(), 1);
+        let node_id = graph.all_node_ids()[0];
+        let node = graph.get_node(node_id).expect("attachment source");
+        assert_eq!(node.content, "recognized label: Boundary Waters");
+        assert_eq!(
+            node.origin.source_kind,
+            anamnesis::graph::SourceKind::DocumentExtract
+        );
+        assert!(node.embedding.is_none());
     }
 }

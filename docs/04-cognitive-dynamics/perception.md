@@ -4,7 +4,7 @@ Perception decides what an external observation is allowed to change when it ent
 
 Two principles define the gate:
 
-1. **Familiarity is not rejection.** Repeated knowledge routes to an existing site and reinforces it. The gate blocks untrusted input and unacceptable cost, not similarity by itself.
+1. **Familiarity is not rejection.** Repeated knowledge routes to an existing site and reinforces it. The gate blocks insufficient-confidence input and unacceptable cost, not similarity by itself.
 2. **Initial evidence prior comes from surprise.** New sites do not all receive the same seed. Their initial evidence prior `P_i` is proportional to precision-weighted prediction error.
 
 ## Inputs
@@ -33,7 +33,7 @@ The gate has two stages. Rejection happens only in stage 1. Stage 2 routes survi
 
 Stage 1 evaluates these guards in order: well-formedness, then scope validity, then confidence, then budget. The four guards correspond one-to-one with the reasons in the [Rejection Trace](#rejection-trace).
 
-Node persistent strength decomposes into two terms: `A_i = B_i + P_i`. `B_i` is the multi-trace ACT-R base-level activation over the node's access traces (it owns forgetting and use-driven reinforcement); `P_i` is the decay-exempt evidence prior (encoding surprise, feedback, peer trust). Public salience is the bounded logistic projection of the sum: `s_i = logistic(B_i + P_i)`. Perception never sets salience directly.
+Node persistent strength decomposes into two terms: `A_i = B_i + P_i`. `B_i` is the multi-trace ACT-R base-level activation over the node's access traces (it owns forgetting and use-driven reinforcement); `P_i` is the decay-exempt evidence prior (encoding surprise and explicit consumer feedback). Public salience is the bounded logistic projection of the sum: `s_i = logistic(B_i + P_i)`. Perception never sets salience directly.
 
 ## Gate Order
 

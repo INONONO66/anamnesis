@@ -1,6 +1,10 @@
 # Benchmark Design
 
-Benchmarks verify that implementations satisfy the performance budget implied by this SSOT. Measurements must be reproducible and must state graph size and query shape.
+Benchmarks verify that implementations satisfy the performance budget implied
+by this SSOT. Every measurement must state graph size, query shape, source
+revision, dataset fingerprint, configuration, and retained evidence. A report
+may claim independent reproducibility only when the named binary, model
+identity, inputs, and generated artifacts are available to the reproducer.
 
 ## Measurement Targets
 
@@ -70,296 +74,134 @@ Fast retrieval is not enough. Benchmarks also store:
 | truncation_count | resolution downgrade count |
 | residual | activation-flow convergence residual |
 
-## Local Answer-Accuracy Diagnostic
+## Local Answer Diagnostic
 
-`local_answer` is the end-to-end QA diagnostic. It is deliberately separate
-from the published retrieval table: answer accuracy depends on the selected
-reader and judge models and is not an engine-only score.
+`local_answer` measures retrieval, rendered context, and answer behavior as
+separate surfaces. Reader and judge results are not engine-only scores.
 
-The harness can run four paired routes over the same selected questions:
+| Route | Context | Purpose |
+|---|---|---|
+| `0-full-context` | complete selected history | no-retrieval diagnostic |
+| `1-oracle-baseline` | dataset-annotated evidence | reader diagnostic |
+| `2-retrieval-baseline` | canonical `Memory` package | product-path measurement |
+| `3-retrieval-strong` | the same retrieved package | optional reader configuration |
 
-| Route | Context | Reader | What it isolates |
-|---|---|---|---|
-| `0-full-context` | complete conversation history | baseline local model | no-retrieval reader upper bound |
-| `1-oracle-baseline` | dataset gold evidence | baseline local model | reader ceiling on supplied evidence |
-| `2-retrieval-baseline` | shipped `Memory` + FastEmbed package | same baseline model | loss attributable to retrieval/context shape |
-| `3-retrieval-strong` | exact same retrieved package as route 2 | stronger local model | reader-capability recovery |
+Routes 0 and 1 are diagnostics. Only route 2 exercises formation, search,
+reranking, source-aware selection, and query-aware context rendering through
+the public `Memory` surface used by direct crate consumers and MCP clients.
+The harness does not maintain a second production fragment renderer.
 
-Route 2 is a **product-wire** lane by default. Dataset turns enter through the
-same `Memory::add` windowing recipe as a consumer session; queries use
-the same `Memory` source search as production, retaining its `SearchResult`
-only so the report can score diagnostic candidate surfaces. Optional consumer
-reranking then calls `Memory::rerank_search_result_at`, the existing-result
-overload of the canonical `Memory::search_reranked` pipeline. The harness does
-not apply deep selection a second time: it records the raw reranker ranking and
-the already-selected product package as separate surfaces. The reader receives
-the exact `Memory::render_context(&recall)` string used by the MCP recall path.
-The harness does not maintain a second fragment renderer or inject
-benchmark-only dates into that product context: observation and validity times
-come from the actual source nodes.
+### Evaluation isolation
 
-The production source search embeds the original query once for direct and
-temporal plans. For bounded collection, relationship, and inference plans it
-batches the original plus at most two deterministic entity/decomposition
-surfaces, scans stored embeddings once, and fuses one deduplicated auxiliary
-dense union at a fixed lower prior. Production deep selection keeps the first
-eight direct-query reranker rows stable and uses canonical-source coverage only
-in the tail. The caller's final limit is a maximum: direct one-fact queries
-default to at most 12 fragments, while temporal and completeness-sensitive
-queries retain the requested width. `RerankedRecallOptions` exposes an
-additive opt-out for consumers that require an exact fixed width. MCP, hooks,
-plugins, direct `Memory::search_reranked` callers, and this product-wire lane
-therefore share these policies; no LLM call exists in the engine path.
+The harness enforces its input boundary with distinct types:
 
-`--diagnostic-fragment-context` enables the historical adapter-enriched
-per-fragment context. It is analysis-only and cannot be combined accidentally
-with a headline claim. Fragment compaction, episodic hydration, and the
-benchmark-only RRF experiment require this diagnostic lane.
+- `FormationInput` contains only dataset identity and normalized source
+  sessions. Graph construction cannot receive questions, expected answers,
+  categories, or relevance annotations.
+- `RetrievalInput` contains only question id, question text, and optional
+  question time. Search, reranking, selection, and product rendering cannot
+  receive expected answers, categories, or relevance annotations.
+- The evaluation layer retains gold fields and applies them only after the
+  product context or answer has been frozen.
 
-`--derived-memory-artifact <json>` is a separate, explicit extraction
-ablation. The current schema v3 is dataset-fingerprint bound and records the
-exact local Qwen 3.6 model digest and prompt version; schemas v1–v2 remain
-replay-only compatibility inputs. Schema v3 separates a canonical,
-non-pronominal subject/relation/object claim from the verbatim answer-bearing
-`evidence_object` and its exact raw-source span. It may cite only raw source
-session/turn ids; the harness materializes isolated atomic facts through the
-product API while preserving every raw turn. Report artifact and no-artifact
-lanes separately.
+Full-context and oracle-evidence routes remain explicitly labeled diagnostics
+and cannot qualify production formation or retrieval behavior.
 
-Generate that artifact with
-`scripts/generate_locomo_derived_artifact.py`. The generator reads conversation
-turns only (never `qa`), batches at the product extractor's 20-source limit,
-and calls `anamnesis extract-preview`, which reuses the exact versioned product
-prompt, local provider, and validator without staging graph mutations. The
-built-in Qwen 3.6 profile uses Ollama's non-streaming chat API on loopback with
-the validator's strict JSON Schema; custom provider commands retain the bounded
-no-shell subprocess path. `scripts/run_local_openai_extractor.py` is the
-loopback-only OMLX adapter: despite the compatible wire format, it accepts no
-key and cannot address a remote host. Validation-failure isolation mirrors the
-production worker's deterministic midpoint split; an irreducible invalid
-source is recorded as an omission rather than weakening grounding. The sidecar
-checkpoint is resumable. Stable sample-qualified session ids are mandatory
-because LoCoMo reuses raw `session_1`/`D1:1` identifiers across samples;
-artifact ingest rejects cross-sample provenance.
+A `--derived-memory-artifact` is a declared formation input. It must be bound
+to the dataset fingerprint, cite live raw sources, and enter through the same
+typed admission path as other source-grounded records. It is reported
+separately from raw-turn formation.
 
-`--answer-report <predict-only-report.json>` consumes the product contexts
-already persisted by an exact reader-free run and executes only the frozen
-Qwen 3.6 reader/judge lane. It rejects partial contexts, dataset mismatches,
-in-place overwrite, alternate context/derived flags, and non-Qwen-3.6 models.
-This avoids rerunning an expensive deterministic reranker while keeping the
-answer report's original retrieval metrics and context bytes.
+### Local model boundary
 
-The reflected-reader lane treats structured analysis as untrusted consumer
-state. Collection items must cite source ids visible in the supplied product
-context. Completeness backfill, binary/alternative answer-shape repair, and
-speaker-ownership repair are applied only after that validation. The ownership
-guard uses the product's exact `turn-source` sequence: a different speaker's
-direct reply to the named subject's `you`/`your` question cannot become the
-subject's event, while an explicit attribution to the subject is retained.
-These checks never receive expected answers, annotations, or judge output and
-do not alter retrieval, ranking, or product context bytes. They are a declared
-reference consumer contract because `anamnesis-engine` intentionally does not
-generate final LLM answers.
+Reader and judge lanes are restricted to Qwen 3.6 and local transports:
 
-OMLX uses that lane through the OpenAI-compatible transport flags with an
-explicit loopback URL; this does not make the run remote. Pass
-`--frontier-model-digest <SHA256>` to bind both the reader and judge to the
-same exact local model identity when they use one model. The report then keeps
-`local_only=true`, records that digest in `model_digests`, and records the
-temperature, top-p, top-k, presence penalty, seed, and `enable_thinking`
-choice sent to OMLX. Set `--reader-num-predict 700` for the frozen gate so the
-recorded reader budget matches the transport's 700-token cap. Loopback clients
-disable proxy and redirect handling.
+- Ollama uses `--ollama-base-url` and rejects non-loopback hosts.
+- OMLX uses `--omlx-reader` and/or `--omlx-judge` with
+  `--omlx-base-url` (or `OMLX_BASE_URL`). The compatible chat transport
+  rejects non-loopback hosts, disables proxies and redirects, and never reads
+  or sends credentials.
+- `--omlx-model-digest <SHA256>` records the exact local model identity.
 
-`--judge-report <answered-report.json>` preserves every answer and retrieval
-field and runs only the separately versioned local semantic judge. Use it to
-apply one identical Qwen 3.6 judge lane to historical Anamnesis profiles and
-competitor-adapter outputs without paying for retrieval or reader generation
-again. The output path must differ from the source.
+The optional reflected-reader route uses the same label-free `ReaderInput` as
+the direct reader. Its first pass is untrusted evidence analysis; the second
+pass verifies that draft against the same rendered context. Empty output is a
+run error, and the harness does not rewrite model answers.
 
-`--external-memory-artifact <json>` is the cross-system lane for Mem0,
-Supermemory, MemKraft, and future adapters. Schema v1 is bound to the exact
-dataset fingerprint and selected question set. Each record contains only
-`question_id`, the external system's exact returned `context`, and optional
-source text/session/turn provenance. `deny_unknown_fields` rejects answer,
-reference, gold, and relevance keys. The harness does not fabricate Anamnesis
-candidate/reranker metrics for this lane; it reports only the same frozen local
-reader and semantic-judge outcomes. System name, version, and configuration
-digest are mandatory.
+### Report integrity
 
-For a local Mem0 OSS comparison, run the upstream
-`mem0ai/memory-benchmarks` LoCoMo `--predict-only` phase and pass its output
-through `scripts/export_memorybench_contexts.py`. The converter requires this
-harness's selection report, dataset fingerprint, upstream version, config
-file, and cutoff. It copies only returned memory strings and strips upstream
-ground truth, evidence annotations, answers, and judgments before producing
-the strict external artifact. Anamnesis and Mem0 can then use the same Qwen
-3.6 reader, prompt, official-compatible F1, and separately named semantic
-judge. Cloud Supermemory follows the same wire, but no comparison is valid
-without credentials plus an exact provider version/config digest.
+Reports record dataset and model fingerprints, configuration, product context,
+retrieval surfaces, stage latencies, raw answers, judge parse state, and token
+counts. Reports are written incrementally and `--resume` requires an identical
+configuration. `--answer-report` and `--judge-report` can reuse frozen prior
+stages without exposing gold fields to formation or retrieval.
 
-An optional consumer cascade keeps both rerankers outside core:
-`--consumer-prefilter-cross-encoder`, `--consumer-prefilter-k`, and
-`--consumer-cross-encoder`. `--consumer-prefilter-query-fusion` applies RRF to
-the exact deterministic query variants recorded in `SearchTrace` at the fast
-prefilter only; the final quality reranker still sees the complete original
-question. Cascade latency and quality are promotion gates, not defaults.
+Primary runs are cold and read-only: they do not call `Memory::used` between
+questions. Lifecycle learning is measured separately with the explicit warmup
+mode and engine contract tests.
 
-Headline answer evaluation is cold/read-only: it does not call `Memory::used`
-between questions, so earlier benchmark questions cannot warm later ones.
-`real_memory --warmup N` remains the explicit lifecycle diagnostic for committed
-retrieval, and commit-trace correctness is covered separately by engine tests.
+LoCoMo uses its deterministic category-aware token F1 as the primary answer
+metric. A local semantic judge is a separately named diagnostic. LongMemEval
+uses its declared category-specific evaluation contract; reports must include
+the judge model identity because that metric is model-dependent.
 
-Route 0 is enabled with `--full-context`; LongMemEval requires a declared
-context window of at least 131072 for that route. Route 3 is opt-in with
-`--run-strong-reader`. `--stratify N` uses a stable
-hash sample within every question type; record the accompanying
-`--sample-seed` instead of taking the first N dataset rows.
-
-LoCoMo's primary answer metric is the official deterministic category-aware
-token F1, including NLTK's default Porter stemmer extensions. The separate
-local LLM judge is secondary diagnostic data, not the headline score.
-LoCoMo turns include `blip_caption` as shared-image text, matching the official
-full-context and dialog-RAG prompt construction; the image-search `query` field
-is not used. LongMemEval uses its official category-specific
-judge criteria, with the local judge model and digest disclosed because the
-upstream metric itself is model-based.
-
-The CLI rejects non-loopback Ollama URLs. The report stores model manifest
-digests, a dataset fingerprint, every gold/retrieved context item, retrieval
-metrics at three named selection surfaces (`candidate@K`, `reranker@K`, and
-`delivered@K`) plus exact-text `rendered` gold coverage, the exact
-product-rendered context, raw answers, official
-scores, raw judge responses, parse failures,
-per-stage latencies, generation settings, termination reasons, prompt/output
-token counts, and hidden-thinking character counts. An empty final answer is a
-run error rather than a zero-quality answer. The report is written after every
-answer and judgment, so an interrupted run can resume without silently
-substituting empty answers.
-Answer generation and judging run in separate phases. This avoids repeatedly
-swapping large local reader and judge models while preserving an incremental,
-resumable report.
-
-The headline LoCoMo score is always raw official F1. A second
-`reader_surface_f1` applies one frozen, reference-blind transform only when the
-entire answer is a valid standalone ISO date. It is reported separately and
-must not be presented as memory-quality improvement. Compare two reports with:
+A minimal local smoke run from `crates/anamnesis` is:
 
 ```bash
-python3 ../../scripts/compare_local_answer.py BASELINE.json CANDIDATE.json
+cargo bench --features embed --bench local_answer -- \
+  --dataset locomo --stratify 1 --skip-adversarial --predict-only \
+  --allow-download --embed-cache .fastembed_cache/local-answer.sqlite \
+  --output benches/eval/results/local-answer-locomo-smoke.json
 ```
 
-The comparison refuses mismatched datasets, question sets, reader controls,
-prompt versions, or context surfaces. It reports paired question and
-conversation-cluster intervals plus Answer-F1 changes conditional on actual
-product-rendered recall improving, tying, or regressing.
-For a reader-free fixed-ranking selection experiment, pass
-`--selection-variant top-10` (or another recorded cutoff). That lane compares
-selected, delivered, and rendered recall, rendered Hit, per-type deltas, and
-both paired intervals without requiring answer routes.
-
-`--consumer-ranking-report` replays consumer scores from a compatible report
-while still rebuilding the graph, validating the nodes against a fresh core
-readout, and repackaging through the product API. Dataset/sample controls,
-candidate surface, seed limit, extraction fingerprint, reranker identity, and
-source relevance policy must match. This is the preferred way to compare
-several consumer selection policies without repeatedly sampling a reranker.
-
-For a paired reader experiment, `--paired-answer-report BASELINE.json` may be
-combined with `--answer-report`. The harness reuses a stored answer (and,
-when compatible, its judge decision) only when the complete rendered reader
-prompt, prompt versions, local model digests, and generation settings are
-identical. Changed prompts are generated normally. The paired report
-fingerprint and per-route reuse bit are persisted, so this optimization cannot
-silently turn different contexts into ties.
-
-Example pilot runs:
-
-```bash
-# Run from crates/anamnesis (Cargo sets this as the bench process cwd).
-ollama pull qwen3.6:35b-a3b
-
-cargo bench --features embed --bench local_answer -- \
-  --dataset locomo --stratify 1 --skip-adversarial --full-context \
-  --baseline-reader-model qwen3.6:35b-a3b \
-  --allow-download --embed-cache .fastembed_cache/local-answer.sqlite \
-  --output benches/eval/results/local-answer-locomo-pilot.json
-
-cargo bench --features embed --bench local_answer -- \
-  --dataset longmemeval --stratify 1 \
-  --allow-download --embed-cache .fastembed_cache/local-answer.sqlite \
-  --output benches/eval/results/local-answer-longmemeval-pilot.json
-
-# Reader-free retrieval diagnosis: 25 questions from each non-adversarial type.
-cargo bench --features embed --bench local_answer -- \
-  --dataset locomo --stratify 25 --sample-seed 42 \
-  --skip-adversarial --predict-only \
-  --consumer-cross-encoder BAAI/bge-reranker-base \
-  --consumer-candidate-k 100 --first-stage-seed-limit 10 \
-  --allow-download --embed-cache .fastembed_cache/local-answer.sqlite \
-  --output benches/eval/results/local-answer-locomo-retrieval-n100-seed42.json
-
-# Local semantic-answer lane. Raw official F1 remains the headline score;
-# this judge result is reported separately and applied identically to systems.
-cargo bench --features embed --bench local_answer -- \
-  --dataset locomo --stratify 25 --sample-seed 42 \
-  --skip-adversarial --retrieval-only \
-  --baseline-reader-model qwen3.6:35b-a3b \
-  --judge-model qwen3.6:35b-a3b --reader-no-think --judge-no-think \
-  --allow-download --embed-cache .fastembed_cache/local-answer.sqlite \
-  --output benches/eval/results/local-answer-locomo-qwen36-n100-seed42.json
-```
-
-Use `--resume` with the same output and configuration after interruption.
-Pilot or stratified runs must be labeled as such; headline claims require the
-declared full split. An unparseable judge response is recorded as unparsed and
-excluded from the accuracy denominator, never coerced to incorrect.
-
-The first completed harness-validation run is recorded in
-[local-answer-pilot-2026-07-24.md](local-answer-pilot-2026-07-24.md).
-The first seeded 100-question 7B-reader diagnostic is recorded in
-[local-answer-7b-n100-2026-07-24.md](local-answer-7b-n100-2026-07-24.md).
-The paired 7B versus 35B reader comparison is recorded in
-[local-answer-reader-comparison-n100-2026-07-24.md](local-answer-reader-comparison-n100-2026-07-24.md).
-That historical run used non-thinking temperature-zero generation and a
-generic binary local judge. It is retained as harness-development evidence,
-not an official LoCoMo quality claim.
-Current local answer development and promotion runs use
-`qwen3.6:35b-a3b`. Qwen 3.5 records below are immutable historical evidence,
-not current reproduction instructions.
-The first seeded Qwen3.5 35B-A3B result using LoCoMo's official deterministic
-F1, including the top-k sweep and rejected package ablations, is recorded in
-[local-answer-official-f1-n100-2026-07-25.md](local-answer-official-f1-n100-2026-07-25.md).
-The reproducible greedy Qwen3.5 35B-A3B gate, corrected temporal anchoring,
-annotated-evidence ceiling, readout audit, and rejected E5-large comparison are
-recorded in
-[local-answer-greedy-n100-2026-07-25.md](local-answer-greedy-n100-2026-07-25.md).
-The paired n=200 local reranking gate, accepted high-quality profile, product
-integration boundary, and rejected fast alternatives are recorded in
-[local-answer-reranking-n200-2026-07-25.md](local-answer-reranking-n200-2026-07-25.md).
-The schema-v16 product-wire contract, reranking validity repair, four-stage
-evidence accounting, and first smoke run are recorded in
-[local-answer-product-wire-v16-2026-07-25.md](local-answer-product-wire-v16-2026-07-25.md).
-The first Qwen 3.6 product-wire bottleneck decomposition is recorded in
-[local-answer-qwen36-diagnosis-n20-2026-07-25.md](local-answer-qwen36-diagnosis-n20-2026-07-25.md).
-
-LoCoMo category names follow the official evaluation code:
-`1=multi-hop`, `2=temporal`, `3=open-domain`, `4=single-hop`,
-`5=adversarial`. The downloader preserves the dataset's
-`session_*_date_time` fields because temporal questions require them.
-LongMemEval-S is downloaded from the cleaned release at a pinned dataset
-revision; pre-cleaning snapshots must not be mixed with current results.
-The LoCoMo `1-oracle-baseline` route means dataset-annotated evidence, not a
-guaranteed perfect oracle. Upstream evidence IDs contain known noisy cases, so
-the route is diagnostic and the official full-context/retrieval answer F1
-remains the outcome metric.
+Pilot and stratified runs must be labeled as such. Qualification requires a
+declared full split, source revision, dataset fingerprint, model digest,
+configuration, and retained evidence.
 
 ## Regression Judgment
 
 - Latency is judged by p95 for each fixture.
+- Real-memory reports keep three latency boundaries distinct: `latency_ms` is
+  query through packaged evidence, `context_render_latency_ms` is exact product
+  context rendering, and `context_ready_latency_ms` is their sum. Consumer
+  prompt wrappers, tokenization, and model generation are outside all three and
+  belong in end-to-end reader measurements.
 - Output quality is judged by bucket shape and tension presence for golden queries.
 - Failures are categorized as performance-budget failures or context-shape changes.
 - Large-graph optimization must not change the public API.
+
+## Evidence-complete release gate
+
+The architecture in
+[ADR-0015](../adr/0015-evidence-grounded-formation-and-chain-retrieval.md)
+is eligible for release only when all of the following are reported
+independently:
+
+| Gate | Required evidence |
+|---|---|
+| formation parity | For identical source revisions, typed candidates, profile identity, and review records, every declared entry point uses the same admission policy/transaction and produces equivalent admitted records |
+| extractor parity | Model digest, prompt/schema version, decoding controls, batching, and validator match; this consumer contract is reported independently from formation admission |
+| grounding | Invalid span/hash/range fails closed; delivered provenance coverage is 100% |
+| admission isolation | Routing-only facts never appear without authoritative source hydration |
+| scope and time | Property tests show no scope widening, disjoint-scope chain, or invalid-time hop |
+| retrieval surfaces | Candidate, reranked, selected-chain, hydrated, rendered, and all-required-slot recall are separate |
+| chain value | A chain or tension enters final evidence only when it fills a requested slot, resolves a typed relation, or supplies a required contradiction, supersession, or validity qualifier |
+| answer transfer | Reader-free changes are accompanied by an end-to-end reader run and an oracle-evidence ceiling |
+| category floors | Direct, temporal, collection, relationship, and inference classes pass declared thresholds independently; aggregate score cannot hide a weak class |
+| generalization | Development sample, held-out/full split, and conversation-cluster intervals are distinguished |
+| regression | Direct and temporal golden queries do not regress when catalog/chain lanes are enabled |
+| graceful degradation | Empty catalog, extractor failure, and reflection failure preserve deterministic raw recall and explicit uncovered slots |
+| scale | Indexed results match an exhaustive reference on bounded fixtures; hot retrieval performs no full catalog scan |
+| latency | Every engine stage and context-ready p95 is recorded; consumer reflection/generation remains separate |
+| source lifecycle | Source revision/update/retraction/deletion and dependent eligibility, projection, index generation, and mutation events commit atomically or roll back together |
+| state recovery | Snapshot/clone/restore covers graph, source revisions, catalog/admission state, active versions, generation keys, and dependency-ordered events |
+| formation isolation | Formation sees only source turns, source metadata, and the formation profile; it cannot access questions, answers, annotations, labels, judge output, or prior results |
+| retrieval isolation | Retrieval sees the question plus admitted memory and declared runtime constraints; it cannot access expected answers, evidence annotations, labels, judge output, or evaluation-only route hints |
+| judge integrity | Parse failures count as incorrect in the emitted all-question diagnostic; semantic qualification requires 100% parse coverage |
+
+Threshold values belong to a versioned release profile and calibration record,
+not to production branching logic. Release qualification uses the full declared
+suite; a small balanced sample is a development gate only.
 
 ## Related Documents
 

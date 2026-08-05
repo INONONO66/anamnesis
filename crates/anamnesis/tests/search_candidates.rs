@@ -1,4 +1,4 @@
-//! Public smoke tests for Task 6 candidate collection.
+//! Public smoke tests for candidate collection.
 //!
 //! The three required tests (`collect_text_preserves_score`,
 //! `collect_vector_preserves_cosine`, `collect_entity_returns_correct_source_rank`)

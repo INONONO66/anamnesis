@@ -22,7 +22,6 @@ pub(crate) struct Args {
     pub(crate) embed_cache: Option<PathBuf>,
     pub(crate) embedding_model: String,
     pub(crate) dump_features: Option<PathBuf>,
-    pub(crate) speaker_cues: bool,
 }
 
 pub(crate) fn parse_args<I>(args: I) -> BenchResult<Option<Args>>
@@ -107,10 +106,6 @@ where
                 parsed.dump_features =
                     Some(PathBuf::from(next_value(&mut iter, "--dump-features")?));
             }
-            "--speaker-cues" => {
-                parsed.saw_arg = true;
-                parsed.speaker_cues = true;
-            }
             "--bench" => {}
             other => {
                 return Err(BenchError::InvalidInput(format!(
@@ -146,7 +141,6 @@ struct ParsedArgs {
     embed_cache: Option<PathBuf>,
     embedding_model: String,
     dump_features: Option<PathBuf>,
-    speaker_cues: bool,
     saw_arg: bool,
 }
 
@@ -168,7 +162,6 @@ impl Default for ParsedArgs {
             embed_cache: None,
             embedding_model: "bge-base-en-v1.5".to_string(),
             dump_features: None,
-            speaker_cues: false,
             saw_arg: false,
         }
     }
@@ -194,7 +187,6 @@ impl ParsedArgs {
             embed_cache: self.embed_cache,
             embedding_model: self.embedding_model,
             dump_features: self.dump_features,
-            speaker_cues: self.speaker_cues,
         })
     }
 }
@@ -277,7 +269,6 @@ Options:\n\
   --embed-cache <path>     SQLite embedding cache (model-keyed; speeds reruns)\n\
   --embedding-model <name> FastEmbed model (default: bge-base-en-v1.5)\n\
   --dump-features <path>   Write per-candidate readout feature rows (JSONL) for calibration\n\
-  --speaker-cues           Inject speaker entity-tag cues from question text (ablation)\n\
   --help                   Show this usage"
     );
 }

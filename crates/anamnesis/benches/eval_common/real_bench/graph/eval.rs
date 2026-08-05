@@ -2,18 +2,16 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
-use anamnesis::engine::{RerankingProvider, SearchDiagnostics, StorageAdapter};
-use anamnesis::graph::{EdgeType, NodeId, Timestamp};
+use anamnesis::engine::{AtomicFactId, RerankingProvider, SearchDiagnostics, StorageAdapter};
+use anamnesis::graph::{NodeId, Timestamp};
 use anamnesis::memory::{
-    ContextRenderOptions, ContextRenderStyle, DeepRecallOptions, Direction, EvidenceSelection,
-    Recall, RecallIntent, RecallPlan, RerankedCandidate, RerankedRecallOptions, SearchTuning,
+    ContextRenderOptions, ContextRenderStyle, DeepRecallOptions, EvidenceSelection, Recall,
+    RecallIntent, RecallPlan, RerankedCandidate, RerankedRecallOptions, SearchTuning,
 };
-use anamnesis::query::{
-    ContextPackage, Fragment, QueryConfig, ScoredNode, SearchResult, assemble_context_package,
-};
+use anamnesis::query::{ContextPackage, Fragment, SearchResult};
 use serde::{Deserialize, Serialize};
 
-use super::super::dataset::BenchQuestion;
+use super::super::dataset::{BenchQuestion, RetrievalInput};
 use super::super::error::{BenchError, BenchResult};
 use super::super::metrics::{RankedRetrieval, RetrievalMetrics, first_hit_rank, retrieval_metrics};
 use super::BuiltMemoryGraph;
@@ -31,55 +29,25 @@ pub struct EvalOptions {
     pub top_k: usize,
     pub seed_limit: Option<usize>,
     pub dump_features: bool,
-    /// Inject speaker entity-tag cues parsed from the question text.
-    /// Default OFF: with a single speaker tag matching ~half a conversation,
-    /// the entity channel floods seed fusion with arbitrary same-speaker
-    /// turns (measured −21pp Recall@20 on LoCoMo).
-    pub speaker_cues: bool,
-    /// Benchmark-only shadow candidate: re-rank the live top-200 readout with
-    /// reciprocal-rank fusion before packaging. This is deliberately not an
-    /// engine policy; it exists to require answer-quality evidence before any
-    /// product-level scoring change is proposed.
-    pub shadow_rank_fusion: bool,
     /// Optional local cross-encoder supplied to the canonical
     /// `Memory::rerank_search_result_at` product path.
     #[cfg(feature = "embed")]
     pub consumer_cross_encoder: Option<Arc<dyn RerankingProvider>>,
-    /// Frozen consumer scores keyed by question id. This benchmark-only replay
-    /// path still runs live core search and validates every node against that
-    /// question's readout before product repackaging; it only avoids repeating
-    /// an expensive deterministic cross-encoder.
+    /// Frozen deterministic-reranker scores keyed by question id. Replay still
+    /// runs live core search, validates every node against that question's
+    /// readout, and repackages through the product API.
     pub replayed_consumer_rankings: Option<FrozenConsumerRankings>,
-    /// Optional fast first-stage cross-encoder. When present, it ranks the
-    /// broad cognitive pool and only its top `consumer_prefilter_k` documents
-    /// reach the quality reranker.
-    #[cfg(feature = "embed")]
-    pub consumer_prefilter_cross_encoder: Option<Arc<fastembed::TextRerank>>,
-    /// Cascade width after the optional fast prefilter.
-    pub consumer_prefilter_k: Option<usize>,
-    /// Fuse the exact deterministic query variants used by core lexical
-    /// retrieval at the optional fast prefilter. The quality reranker still
-    /// sees the original complete question.
-    pub consumer_prefilter_query_fusion: bool,
     /// Number of cognitive readout candidates exposed to canonical local
     /// reranking and scored by candidate-pool metrics.
     pub consumer_candidate_k: usize,
-    /// Compile overlapping graph representations into canonical raw-evidence
-    /// documents through `Memory` before the local cross-encoder scores them.
-    /// This is the canonical product route; disabling it is an ablation.
-    pub consumer_evidence_documents: bool,
     /// Additional final cutoffs to repackage from the exact same consumer
     /// ranking. Diagnostic-only: the primary product route still uses
     /// `top_k`.
     pub screen_top_k: Vec<usize>,
-    /// Add a consumer-side screen that keeps the highest-ranked representation
-    /// of each raw source turn and backfills from later candidates.
-    pub screen_source_dedup: bool,
     /// Override only the number of diagnostic readout rows retained. Product
     /// behavior remains at the default trace bound when absent.
     pub diagnostic_readout_limit: Option<usize>,
-    /// Consumer-owned final ordering policy applied after the model or shadow
-    /// ranking and before core validation/packaging.
+    /// Product-API final evidence selection applied after consumer ranking.
     pub consumer_selection_policy: ConsumerSelectionPolicy,
     /// Product context presentation used for answer generation.
     pub context_render_style: ContextRenderStyle,
@@ -91,21 +59,13 @@ impl Default for EvalOptions {
             top_k: 20,
             seed_limit: None,
             dump_features: false,
-            speaker_cues: false,
-            shadow_rank_fusion: false,
             #[cfg(feature = "embed")]
             consumer_cross_encoder: None,
             replayed_consumer_rankings: None,
-            #[cfg(feature = "embed")]
-            consumer_prefilter_cross_encoder: None,
-            consumer_prefilter_k: None,
-            consumer_prefilter_query_fusion: false,
             consumer_candidate_k: 100,
-            consumer_evidence_documents: false,
             screen_top_k: Vec::new(),
-            screen_source_dedup: false,
             diagnostic_readout_limit: None,
-            consumer_selection_policy: ConsumerSelectionPolicy::Relevance,
+            consumer_selection_policy: ConsumerSelectionPolicy::MemoryDeep,
             context_render_style: ContextRenderStyle::Detailed,
         }
     }
@@ -114,35 +74,16 @@ impl Default for EvalOptions {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ConsumerSelectionPolicy {
-    #[default]
     Relevance,
     /// Delegate deterministic intent detection and source-aware evidence
     /// compilation to the public `Memory` product API.
+    #[default]
     MemoryDeep,
     /// Delegate exact canonical-source deduplication to `Memory`.
     MemoryDistinctSources,
     /// Delegate greedy canonical-source coverage to `Memory`.
     MemorySourceCoverage,
-    SourceDedup,
-    /// Preserve reranker order while skipping candidates whose entire raw
-    /// source set has already been covered. Later candidates backfill the
-    /// vacated slots. This is presentation/consumer policy only: core search,
-    /// graph activation, validity, and package validation remain unchanged.
-    SourceCoverage,
-    /// Preserve raw-fragment dominance when reviewed derived knowledge is
-    /// present. Derived candidates retain their relative order but are
-    /// deferred so they occupy at most one slot in every four selected
-    /// candidates; raw candidates backfill the vacated positions.
-    ///
-    /// This is a consumer-side extraction guardrail, not a core scoring term.
-    /// With no `anamnesis:derived` nodes the ranking is byte-for-byte
-    /// unchanged.
-    ProvenanceGuardrail,
 }
-
-const SHADOW_RRF_DAMPING: f64 = 60.0;
-const SHADOW_RRF_EMBEDDING_WEIGHT: f64 = 0.25;
-const SHADOW_RRF_TEXT_WEIGHT: f64 = 1.0;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WarmupReport {
@@ -164,8 +105,8 @@ pub struct ReadoutFeatureRow {
     /// Gold relevance of this node's provenance (independent per node — no
     /// novelty dedup, unlike the metric surface).
     pub label: bool,
-    /// Raw gold units matched by this node's provenance (NO cross-row novelty
-    /// dedup — the fit tool replays dedup in rank order, mirroring metrics.rs).
+    /// Raw gold units matched by this node's provenance. Cross-row novelty
+    /// deduplication is applied only when computing the ordered metric surface.
     pub matched_units: Vec<String>,
     /// Total relevant gold units for the question (denominator for recall/NDCG).
     pub total_relevant: usize,
@@ -183,13 +124,38 @@ pub struct ReadoutFeatureRow {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AtomicRouteFeatureRow {
+    pub rank: usize,
+    pub source_node_id: u64,
+    pub kind_priority: usize,
+    pub fact_id: u64,
+    pub source_session_id: String,
+    pub content: String,
+    pub subject: Option<String>,
+    pub relation: Option<String>,
+    pub object: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QuestionEvaluation {
     pub question_id: String,
     pub question_type: String,
     /// Sample (conversation/haystack) this question belongs to — needed for
     /// train/dev split comparisons (even = train, odd = dev).
     pub sample_index: usize,
+    /// Query-to-packaged-evidence latency. This includes query embedding,
+    /// retrieval, consumer reranking, selection, and `ContextPackage`
+    /// assembly, but excludes final string rendering.
     pub search_latency_ms: f64,
+    /// Time spent turning the packaged evidence into the exact product context
+    /// string supplied to a reader.
+    #[serde(default)]
+    pub context_render_latency_ms: f64,
+    /// Product memory latency through a reader-ready context string. This is
+    /// `search_latency_ms + context_render_latency_ms`; it still excludes any
+    /// consumer-owned prompt wrapper, tokenization, and model generation.
+    #[serde(default)]
+    pub context_ready_latency_ms: f64,
     pub total_relevant: usize,
     /// Gold coverage available anywhere in the first-stage cognitive candidate
     /// pool offered to the consumer reranker.
@@ -224,6 +190,11 @@ pub struct QuestionEvaluation {
     pub selection_variants: BTreeMap<String, SelectionVariantEvaluation>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub features: Vec<ReadoutFeatureRow>,
+    /// Query-ranked atomic facts that the production `Memory` path routed back
+    /// to raw sources. Persisted only with `--dump-candidate-pool`; never used
+    /// for selection or scoring.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub atomic_route_features: Vec<AtomicRouteFeatureRow>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -259,8 +230,26 @@ pub struct AnswerContext {
     /// Exact product renderer output from [`Recall::as_context`].
     pub product_context: String,
     pub product_context_chars: usize,
+    /// Canonical source nodes exposed by the production readout.
+    ///
+    /// These ids are reader input provenance, not relevance annotations.
+    #[serde(default)]
+    pub source_node_ids: Vec<u64>,
+    /// Trusted visible source ownership from the same production readout.
+    #[serde(default)]
+    pub source_attributions: Vec<AnswerSourceAttribution>,
     pub evidence: Vec<AnswerEvidence>,
     pub context_tokens: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnswerSourceAttribution {
+    pub source_node_id: u64,
+    pub speaker: Option<String>,
+    pub text: String,
+    pub session_id: String,
+    pub dialogue_block_node_id: u64,
+    pub line_order: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -283,7 +272,7 @@ pub fn run_warmup(
 ) -> BenchResult<WarmupReport> {
     let mut report = WarmupReport::default();
     for question in questions {
-        let result = search_question(graph, question, opts)?;
+        let result = search_question(graph, question.retrieval_input(), opts)?;
         // Commit through the framework path so the warmup measures the shipped
         // reinforcement semantics (confidence default lives in Memory::used).
         let commit = graph
@@ -318,58 +307,49 @@ pub fn evaluate_question_with_context(
     question: &BenchQuestion,
     opts: &EvalOptions,
 ) -> BenchResult<(QuestionEvaluation, AnswerContext)> {
+    let retrieval = question.retrieval_input();
     let start = Instant::now();
-    let result = search_question(graph, question, opts)?;
+    let result = search_question(graph, retrieval, opts)?;
     #[cfg(feature = "embed")]
-    let needs_live_document_rerank = opts.consumer_evidence_documents
-        && matches!(
-            RecallPlan::infer(&question.question).recall_intent,
-            RecallIntent::Enumeration | RecallIntent::Relational
-        );
+    let needs_live_document_rerank = matches!(
+        RecallPlan::infer(retrieval.question).recall_intent,
+        RecallIntent::Enumeration | RecallIntent::Relational
+    );
     #[cfg(feature = "embed")]
-    let shadow = if let Some(rankings) = &opts.replayed_consumer_rankings
+    let consumer_package = if let Some(rankings) = &opts.replayed_consumer_rankings
         && !needs_live_document_rerank
     {
         Some(replay_consumer_ranking(
-            &result, graph, question, rankings, opts.top_k,
+            &result, graph, retrieval, rankings, opts.top_k,
         )?)
     } else if let Some(reranker) = &opts.consumer_cross_encoder {
         Some(consumer_cross_encoder_package(
             &result,
             graph,
-            question,
+            retrieval,
             reranker.as_ref(),
-            opts.consumer_prefilter_cross_encoder.as_deref(),
             opts.consumer_candidate_k,
-            opts.consumer_prefilter_k,
-            opts.consumer_prefilter_query_fusion,
-            opts.consumer_evidence_documents,
             opts.top_k,
         )?)
     } else {
-        opts.shadow_rank_fusion
-            .then(|| shadow_rank_fusion(&result, graph, question))
+        None
     };
     #[cfg(not(feature = "embed"))]
-    let shadow = if let Some(rankings) = &opts.replayed_consumer_rankings {
+    let consumer_package = if let Some(rankings) = &opts.replayed_consumer_rankings {
         Some(replay_consumer_ranking(
-            &result, graph, question, rankings, opts.top_k,
+            &result, graph, retrieval, rankings, opts.top_k,
         )?)
     } else {
-        opts.shadow_rank_fusion
-            .then(|| shadow_rank_fusion(&result, graph, question))
+        None
     };
-    let shadow = apply_consumer_selection_policy(&result, shadow, graph, question, opts)?;
+    let consumer_package =
+        apply_consumer_selection_policy(&result, consumer_package, graph, retrieval, opts)?;
     let search_latency_ms = start.elapsed().as_secs_f64() * 1000.0;
 
     // Candidate surface: cognitive readout actually exposed to the consumer
     // reranker. This measures whether later stages ever had a chance to recover
     // the annotated evidence.
-    let candidate_cutoff = if opts.shadow_rank_fusion {
-        200
-    } else {
-        opts.consumer_candidate_k
-    };
+    let candidate_cutoff = opts.consumer_candidate_k;
     let candidate_retrievals =
         readout_retrievals(&result.trace.readout, graph, question, candidate_cutoff);
     let candidate_ranked: Vec<_> = candidate_retrievals
@@ -381,7 +361,7 @@ pub fn evaluate_question_with_context(
         .collect();
 
     // Reranker/selection surface: final ranking cutoff before package assembly.
-    let reranker_retrievals = if let Some((ranked, _, _)) = &shadow {
+    let reranker_retrievals = if let Some((ranked, _, _)) = &consumer_package {
         build_retrievals(ranked.iter().copied(), graph, question, opts.top_k)
     } else {
         readout_retrievals(&result.trace.readout, graph, question, opts.top_k)
@@ -395,7 +375,7 @@ pub fn evaluate_question_with_context(
         .collect();
 
     // Package surface: packaged ContextPackage fragments
-    let package = shadow
+    let package = consumer_package
         .as_ref()
         .map_or(&result.package, |(_, package, _)| package);
     let delivered_retrievals = retrieved_memories(package, graph, question, opts.top_k);
@@ -416,13 +396,13 @@ pub fn evaluate_question_with_context(
             .engine()
             .graph()
             .storage()
-            .text_search(&question.question, 200)
+            .text_search(retrieval.question, 200)
             .into_iter()
             .collect()
     } else {
         HashMap::new()
     };
-    let consumer_positions: HashMap<_, _> = shadow
+    let consumer_positions: HashMap<_, _> = consumer_package
         .as_ref()
         .map(|(ranking, _, _)| {
             ranking
@@ -477,15 +457,31 @@ pub fn evaluate_question_with_context(
     } else {
         Vec::new()
     };
+    let atomic_route_features = if opts.dump_features {
+        atomic_route_features(&result, graph)?
+    } else {
+        Vec::new()
+    };
 
+    let context_render_start = Instant::now();
+    let (product_context, source_node_ids, source_attributions) = render_product_context(
+        package,
+        graph,
+        retrieval,
+        opts.context_render_style,
+        opts.consumer_selection_policy == ConsumerSelectionPolicy::MemoryDeep,
+    )?;
     let context = answer_context(
         package,
         graph,
         question,
         opts.top_k,
-        opts.context_render_style,
-        opts.consumer_selection_policy == ConsumerSelectionPolicy::MemoryDeep,
-    )?;
+        product_context,
+        source_node_ids,
+        source_attributions,
+    );
+    let context_render_latency_ms = context_render_start.elapsed().as_secs_f64() * 1000.0;
+    let context_ready_latency_ms = search_latency_ms + context_render_latency_ms;
     let rendered_matched_gold_units =
         rendered_gold_units(&context.product_context, graph, question);
     let rendered_recall = if total_relevant == 0 {
@@ -495,7 +491,9 @@ pub fn evaluate_question_with_context(
     };
     let selection_variants = fixed_ranking_selection_variants(
         &result,
-        shadow.as_ref().map(|(ranking, _, _)| ranking.as_slice()),
+        consumer_package
+            .as_ref()
+            .map(|(ranking, _, _)| ranking.as_slice()),
         graph,
         question,
         opts,
@@ -505,6 +503,8 @@ pub fn evaluate_question_with_context(
         question_type: question.question_type.clone(),
         sample_index: question.sample_index,
         search_latency_ms,
+        context_render_latency_ms,
+        context_ready_latency_ms,
         total_relevant,
         candidate_metrics: retrieval_metrics(&candidate_ranked, total_relevant, candidate_cutoff),
         reranker_metrics: retrieval_metrics(&reranker_ranked, total_relevant, opts.top_k),
@@ -523,21 +523,82 @@ pub fn evaluate_question_with_context(
         reranker_retrievals,
         selection_variants,
         features,
+        atomic_route_features,
     };
     Ok((evaluation, context))
+}
+
+fn atomic_route_features(
+    result: &SearchResult,
+    graph: &BuiltMemoryGraph,
+) -> BenchResult<Vec<AtomicRouteFeatureRow>> {
+    let mut rows = Vec::new();
+    for strategy in &result.trace.strategies_used {
+        let Some(encoded) = strategy.strip_prefix("atomic_fact_sources:") else {
+            continue;
+        };
+        if encoded.is_empty() {
+            continue;
+        }
+        for marker in encoded.split(',') {
+            let mut fields = marker.split('@');
+            let source_node_id = fields
+                .next()
+                .and_then(|value| value.parse::<u64>().ok())
+                .ok_or_else(|| {
+                    BenchError::Parse(format!("invalid atomic source marker {marker}"))
+                })?;
+            let kind_priority = fields
+                .next()
+                .and_then(|value| value.parse::<usize>().ok())
+                .ok_or_else(|| {
+                    BenchError::Parse(format!("invalid atomic source marker {marker}"))
+                })?;
+            let fact_id = fields
+                .next()
+                .and_then(|value| value.parse::<u64>().ok())
+                .ok_or_else(|| {
+                    BenchError::Parse(format!("invalid atomic source marker {marker}"))
+                })?;
+            if fields.next().is_some() {
+                return Err(BenchError::Parse(format!(
+                    "invalid atomic source marker {marker}"
+                )));
+            }
+            let fact = graph
+                .memory
+                .engine()
+                .graph()
+                .storage()
+                .get_atomic_fact(AtomicFactId(fact_id))
+                .map_err(|error| BenchError::Engine(error.to_string()))?;
+            rows.push(AtomicRouteFeatureRow {
+                rank: rows.len() + 1,
+                source_node_id,
+                kind_priority,
+                fact_id,
+                source_session_id: fact.source_session_id.clone(),
+                content: fact.content.clone(),
+                subject: fact.metadata.get("anamnesis:ground-subject").cloned(),
+                relation: fact.metadata.get("anamnesis:ground-relation").cloned(),
+                object: fact.metadata.get("anamnesis:ground-object").cloned(),
+            });
+        }
+    }
+    Ok(rows)
 }
 
 fn replay_consumer_ranking(
     result: &SearchResult,
     graph: &BuiltMemoryGraph,
-    question: &BenchQuestion,
+    retrieval: RetrievalInput<'_>,
     rankings: &HashMap<String, ConsumerRanking>,
     top_k: usize,
 ) -> BenchResult<ConsumerPackage> {
-    let ranking = rankings.get(&question.question_id).ok_or_else(|| {
+    let ranking = rankings.get(retrieval.question_id).ok_or_else(|| {
         BenchError::InvalidInput(format!(
             "replayed ranking is missing question {:?}",
-            question.question_id
+            retrieval.question_id
         ))
     })?;
     let live_nodes: HashSet<_> = result
@@ -554,7 +615,7 @@ fn replay_consumer_ranking(
     {
         return Err(BenchError::InvalidInput(format!(
             "replayed ranking for {:?} is not a unique finite subset of live readout",
-            question.question_id
+            retrieval.question_id
         )));
     }
     let candidates: Vec<_> = ranking
@@ -566,19 +627,19 @@ fn replay_consumer_ranking(
         .collect();
     let recall = graph
         .memory
-        .repackage_reranked_at(result, &candidates, top_k, question_time(question))
+        .repackage_reranked_at(result, &candidates, top_k, question_time(retrieval))
         .map_err(|error| BenchError::Engine(error.to_string()))?;
     Ok((ranking.clone(), recall.package, false))
 }
 
 fn apply_consumer_selection_policy(
     result: &SearchResult,
-    shadow: Option<ConsumerPackage>,
+    consumer_package: Option<ConsumerPackage>,
     graph: &BuiltMemoryGraph,
-    question: &BenchQuestion,
+    retrieval: RetrievalInput<'_>,
     opts: &EvalOptions,
 ) -> BenchResult<Option<ConsumerPackage>> {
-    let (ranking, package, memory_deep_applied) = match shadow {
+    let (ranking, package, memory_deep_applied) = match consumer_package {
         Some(values) => values,
         None if opts.consumer_selection_policy == ConsumerSelectionPolicy::Relevance => {
             return Ok(None);
@@ -612,7 +673,7 @@ fn apply_consumer_selection_policy(
                 .collect();
             let recall = graph
                 .memory
-                .repackage_reranked_at(result, &candidates, opts.top_k, question_time(question))
+                .repackage_reranked_at(result, &candidates, opts.top_k, question_time(retrieval))
                 .map_err(|err| BenchError::Engine(err.to_string()))?;
             Ok(Some((ranking, recall.package, false)))
         }
@@ -637,11 +698,11 @@ fn apply_consumer_selection_policy(
             let recall = graph
                 .memory
                 .repackage_reranked_deep_at(
-                    &question.question,
+                    retrieval.question,
                     result,
                     &candidates,
                     DeepRecallOptions::new(opts.top_k).with_selection(selection),
-                    question_time(question),
+                    question_time(retrieval),
                 )
                 .map_err(|err| BenchError::Engine(err.to_string()))?;
             let compiled_ranking = recall
@@ -650,51 +711,6 @@ fn apply_consumer_selection_policy(
                 .map(|hit| (hit.node_id, hit.score))
                 .collect();
             Ok(Some((compiled_ranking, recall.package, true)))
-        }
-        ConsumerSelectionPolicy::SourceDedup => {
-            let ranking = source_dedup_ranking(&ranking, graph)?;
-            let candidates: Vec<_> = ranking
-                .iter()
-                .map(|(node_id, score)| RerankedCandidate {
-                    node_id: *node_id,
-                    score: *score,
-                })
-                .collect();
-            let recall = graph
-                .memory
-                .repackage_reranked_at(result, &candidates, opts.top_k, question_time(question))
-                .map_err(|err| BenchError::Engine(err.to_string()))?;
-            Ok(Some((ranking, recall.package, false)))
-        }
-        ConsumerSelectionPolicy::SourceCoverage => {
-            let ranking = source_coverage_ranking(&ranking, graph)?;
-            let candidates: Vec<_> = ranking
-                .iter()
-                .map(|(node_id, score)| RerankedCandidate {
-                    node_id: *node_id,
-                    score: *score,
-                })
-                .collect();
-            let recall = graph
-                .memory
-                .repackage_reranked_at(result, &candidates, opts.top_k, question_time(question))
-                .map_err(|err| BenchError::Engine(err.to_string()))?;
-            Ok(Some((ranking, recall.package, false)))
-        }
-        ConsumerSelectionPolicy::ProvenanceGuardrail => {
-            let ranking = provenance_guardrail_ranking(&ranking, graph)?;
-            let candidates: Vec<_> = ranking
-                .iter()
-                .map(|(node_id, score)| RerankedCandidate {
-                    node_id: *node_id,
-                    score: *score,
-                })
-                .collect();
-            let recall = graph
-                .memory
-                .repackage_reranked_at(result, &candidates, opts.top_k, question_time(question))
-                .map_err(|err| BenchError::Engine(err.to_string()))?;
-            Ok(Some((ranking, recall.package, false)))
         }
     }
 }
@@ -706,6 +722,7 @@ fn fixed_ranking_selection_variants(
     question: &BenchQuestion,
     opts: &EvalOptions,
 ) -> BenchResult<BTreeMap<String, SelectionVariantEvaluation>> {
+    let retrieval = question.retrieval_input();
     let mut cutoffs = opts.screen_top_k.clone();
     cutoffs.sort_unstable();
     cutoffs.dedup();
@@ -727,497 +744,117 @@ fn fixed_ranking_selection_variants(
     let total_relevant = question.gold.total_relevant_units();
     let mut variants = BTreeMap::new();
 
-    let mut policies = vec![("".to_string(), ranking.clone())];
-    if opts.screen_source_dedup {
-        policies.push((
-            "source-dedup-".to_string(),
-            source_dedup_ranking(&ranking, graph)?,
-        ));
-    }
-
-    for (name_prefix, policy_ranking) in policies {
-        let reranked_candidates: Vec<_> = policy_ranking
-            .iter()
-            .map(|(node_id, score)| RerankedCandidate {
-                node_id: *node_id,
-                score: *score,
-            })
-            .collect();
-        for &selection_k in &cutoffs {
-            let recall = graph
-                .memory
-                .repackage_reranked_at(
-                    result,
-                    &reranked_candidates,
-                    selection_k,
-                    question_time(question),
-                )
-                .map_err(|err| BenchError::Engine(err.to_string()))?;
-            let selected =
-                build_retrievals(policy_ranking.iter().copied(), graph, question, selection_k);
-            let selected_ranked: Vec<_> = selected
-                .iter()
-                .map(|item| RankedRetrieval {
-                    matched_gold_units: item.matched_gold_units.clone(),
-                    score: item.score,
-                })
-                .collect();
-            let delivered = retrieved_memories(&recall.package, graph, question, selection_k);
-            let delivered_ranked: Vec<_> = delivered
-                .iter()
-                .map(|item| RankedRetrieval {
-                    matched_gold_units: item.matched_gold_units.clone(),
-                    score: item.score,
-                })
-                .collect();
-            let context = answer_context(
-                &recall.package,
-                graph,
-                question,
-                selection_k,
-                opts.context_render_style,
-                opts.consumer_selection_policy == ConsumerSelectionPolicy::MemoryDeep,
-            )?;
-            let rendered_units = rendered_gold_units(&context.product_context, graph, question);
-            let rendered_recall = if total_relevant == 0 {
-                0.0
-            } else {
-                rendered_units.len() as f64 / total_relevant as f64
-            };
-            variants.insert(
-                format!("{name_prefix}top-{selection_k}"),
-                SelectionVariantEvaluation {
-                    selection_k,
-                    selected_metrics: retrieval_metrics(
-                        &selected_ranked,
-                        total_relevant,
-                        selection_k,
-                    ),
-                    delivered_metrics: retrieval_metrics(
-                        &delivered_ranked,
-                        total_relevant,
-                        selection_k,
-                    ),
-                    rendered_recall,
-                    rendered_hit: !rendered_units.is_empty(),
-                    delivered_fragments: recall.package.total_fragments(),
-                    context_tokens: context.context_tokens,
-                },
-            );
-        }
-    }
-    Ok(variants)
-}
-
-fn source_dedup_ranking(
-    ranking: &[(NodeId, f64)],
-    graph: &BuiltMemoryGraph,
-) -> BenchResult<ConsumerRanking> {
-    let mut seen_sources = HashSet::new();
-    let mut selected = Vec::with_capacity(ranking.len());
-    for &(node_id, score) in ranking {
-        let mut sources: Vec<_> = graph
-            .memory
-            .neighbors(node_id)
-            .map_err(|err| BenchError::Engine(err.to_string()))?
-            .into_iter()
-            .filter(|neighbor| {
-                neighbor.direction == Direction::Outgoing
-                    && neighbor.edge_type == EdgeType::ExtractedFrom
-            })
-            .map(|neighbor| neighbor.node)
-            .collect();
-        if sources.is_empty() {
-            sources.push(node_id);
-        } else {
-            sources.sort_unstable();
-            sources.dedup();
-        }
-        if seen_sources.insert(sources) {
-            selected.push((node_id, score));
-        }
-    }
-    Ok(selected)
-}
-
-fn source_coverage_ranking(
-    ranking: &[(NodeId, f64)],
-    graph: &BuiltMemoryGraph,
-) -> BenchResult<ConsumerRanking> {
-    let mut covered_sources = HashSet::new();
-    let mut selected = Vec::with_capacity(ranking.len());
-    for &(node_id, score) in ranking {
-        let mut sources: Vec<_> = graph
-            .memory
-            .neighbors(node_id)
-            .map_err(|err| BenchError::Engine(err.to_string()))?
-            .into_iter()
-            .filter(|neighbor| {
-                neighbor.direction == Direction::Outgoing
-                    && neighbor.edge_type == EdgeType::ExtractedFrom
-            })
-            .map(|neighbor| neighbor.node)
-            .collect();
-        if sources.is_empty() {
-            sources.push(node_id);
-        } else {
-            sources.sort_unstable();
-            sources.dedup();
-        }
-        if sources
-            .iter()
-            .any(|source| !covered_sources.contains(source))
-        {
-            covered_sources.extend(sources);
-            selected.push((node_id, score));
-        }
-    }
-    Ok(selected)
-}
-
-fn provenance_guardrail_ranking(
-    ranking: &[(NodeId, f64)],
-    graph: &BuiltMemoryGraph,
-) -> BenchResult<ConsumerRanking> {
-    let mut derived_ids = HashSet::new();
-    for &(node_id, _) in ranking {
-        let node = graph
-            .memory
-            .get(node_id)
-            .map_err(|err| BenchError::Engine(err.to_string()))?;
-        if node
-            .entity_tags
-            .iter()
-            .any(|tag| tag == "anamnesis:derived")
-        {
-            derived_ids.insert(node_id);
-        }
-    }
-    if derived_ids.is_empty() {
-        return Ok(ranking.to_vec());
-    }
-    let reordered = provenance_guardrail_order(ranking, |node_id| derived_ids.contains(&node_id));
-    let denominator = reordered.len().saturating_add(1) as f64;
-    Ok(reordered
-        .into_iter()
-        .enumerate()
-        .map(|(index, (node_id, _))| {
-            let score = reordered_score(index, denominator);
-            (node_id, score)
-        })
-        .collect())
-}
-
-fn reordered_score(index: usize, denominator: f64) -> f64 {
-    (denominator - index.saturating_add(1) as f64) / denominator
-}
-
-fn provenance_guardrail_order(
-    ranking: &[(NodeId, f64)],
-    is_derived: impl Fn(NodeId) -> bool,
-) -> ConsumerRanking {
-    const DERIVED_STRIDE: usize = 4;
-
-    let mut selected = Vec::with_capacity(ranking.len());
-    let mut pending_derived = std::collections::VecDeque::new();
-    let mut derived_selected = 0usize;
-
-    for &(node_id, score) in ranking {
-        if is_derived(node_id) {
-            pending_derived.push_back((node_id, score));
-        } else {
-            selected.push((node_id, score));
-        }
-
-        while derived_selected.saturating_mul(DERIVED_STRIDE) <= selected.len() {
-            let Some(candidate) = pending_derived.pop_front() else {
-                break;
-            };
-            selected.push(candidate);
-            derived_selected = derived_selected.saturating_add(1);
-        }
-    }
-    selected.extend(pending_derived);
-    selected
-}
-
-fn shadow_rank_fusion(
-    result: &SearchResult,
-    graph: &BuiltMemoryGraph,
-    question: &BenchQuestion,
-) -> ConsumerPackage {
-    let candidates: Vec<_> = result.trace.readout.iter().take(200).collect();
-    let mut embedding_order: Vec<usize> = (0..candidates.len()).collect();
-    embedding_order.sort_by(|left, right| {
-        candidates[*right]
-            .embedding_cosine
-            .total_cmp(&candidates[*left].embedding_cosine)
-            .then_with(|| left.cmp(right))
-    });
-    let mut embedding_ranks = vec![0usize; candidates.len()];
-    for (rank, index) in embedding_order.into_iter().enumerate() {
-        embedding_ranks[index] = rank + 1;
-    }
-
-    let text_scores: HashMap<_, _> = graph
-        .memory
-        .engine()
-        .graph()
-        .storage()
-        .text_search(&question.question, 200)
-        .into_iter()
-        .collect();
-    let mut text_order: Vec<usize> = (0..candidates.len())
-        .filter(|index| {
-            text_scores
-                .get(&candidates[*index].node_id)
-                .is_some_and(|score| *score > 0.0)
-        })
-        .collect();
-    text_order.sort_by(|left, right| {
-        let left_score = text_scores
-            .get(&candidates[*left].node_id)
-            .copied()
-            .unwrap_or(0.0);
-        let right_score = text_scores
-            .get(&candidates[*right].node_id)
-            .copied()
-            .unwrap_or(0.0);
-        right_score
-            .total_cmp(&left_score)
-            .then_with(|| left.cmp(right))
-    });
-    let mut text_ranks = HashMap::new();
-    for (rank, index) in text_order.into_iter().enumerate() {
-        text_ranks.insert(index, rank + 1);
-    }
-
-    let mut ranked: Vec<_> = candidates
-        .iter()
-        .enumerate()
-        .map(|(index, candidate)| {
-            let cognitive = 1.0 / (SHADOW_RRF_DAMPING + (index + 1) as f64);
-            let embedding = if candidate.embedding_cosine > 0.0 {
-                SHADOW_RRF_EMBEDDING_WEIGHT / (SHADOW_RRF_DAMPING + embedding_ranks[index] as f64)
-            } else {
-                0.0
-            };
-            let text = text_ranks.get(&index).map_or(0.0, |rank| {
-                SHADOW_RRF_TEXT_WEIGHT / (SHADOW_RRF_DAMPING + *rank as f64)
-            });
-            (candidate.node_id, cognitive + embedding + text, index)
-        })
-        .collect();
-    ranked.sort_by(|left, right| {
-        right
-            .1
-            .total_cmp(&left.1)
-            .then_with(|| left.2.cmp(&right.2))
-    });
-
-    let storage = graph.memory.engine().graph().storage();
-    let scored_nodes = ranked
-        .iter()
-        .filter_map(|(node_id, score, _)| {
-            let node = storage.get_node(*node_id).ok()?;
-            Some(ScoredNode {
-                node_id: *node_id,
-                name: node.name.clone(),
-                summary: node.summary.clone(),
-                content: node.content.clone(),
-                node_type: node.node_type.clone(),
-                relevance: *score,
-                origin: node.origin.clone(),
-            })
-        })
-        .collect();
-    let config = QueryConfig::default();
-    let package = assemble_context_package(
-        scored_nodes,
-        &[],
-        &[],
-        config.token_budget,
-        config.chars_per_token,
-    );
-    (
-        ranked
-            .into_iter()
-            .map(|(node_id, score, _)| (node_id, score))
-            .collect(),
-        package,
-        false,
-    )
-}
-
-#[cfg(feature = "embed")]
-#[allow(clippy::too_many_arguments)]
-fn consumer_cross_encoder_package(
-    result: &SearchResult,
-    graph: &BuiltMemoryGraph,
-    question: &BenchQuestion,
-    reranker: &dyn RerankingProvider,
-    prefilter: Option<&fastembed::TextRerank>,
-    candidate_limit: usize,
-    prefilter_limit: Option<usize>,
-    prefilter_query_fusion: bool,
-    evidence_documents: bool,
-    final_limit: usize,
-) -> BenchResult<ConsumerPackage> {
-    if evidence_documents && prefilter.is_none() {
-        let reranked = graph
-            .memory
-            .rerank_search_result_at(
-                &question.question,
-                result,
-                reranker,
-                RerankedRecallOptions::new(final_limit).with_candidate_limit(candidate_limit),
-                question_time(question),
-            )
-            .map_err(|err| BenchError::Engine(err.to_string()))?;
-        let ranking = reranked
-            .ranking
-            .iter()
-            .map(|candidate| (candidate.node_id, candidate.score))
-            .collect();
-        return Ok((ranking, reranked.recall.package, true));
-    }
-
-    let broad_candidates: Vec<_> = if evidence_documents {
-        graph
-            .memory
-            .rerank_documents(&question.question, result, candidate_limit)
-            .map_err(|err| BenchError::Engine(err.to_string()))?
-            .into_iter()
-            .map(|document| (document.node_id, document.text))
-            .collect()
-    } else {
-        result
-            .trace
-            .readout
-            .iter()
-            .take(candidate_limit)
-            .map(|candidate| {
-                graph
-                    .memory
-                    .get(candidate.node_id)
-                    .map(|node| (candidate.node_id, node.content.clone()))
-                    .map_err(|err| BenchError::Engine(err.to_string()))
-            })
-            .collect::<BenchResult<_>>()?
-    };
-    let candidates = match (prefilter, prefilter_limit) {
-        (Some(prefilter), Some(prefilter_limit)) => {
-            let documents: Vec<_> = broad_candidates
-                .iter()
-                .map(|(_, content)| content.clone())
-                .collect();
-            let prefiltered_indices = if prefilter_query_fusion {
-                let query_variants = anamnesis::query::search_query_variants(&question.question);
-                rerank_query_variants(prefilter, &query_variants, &question.question, &documents)?
-            } else {
-                prefilter
-                    .rerank(question.question.clone(), documents, false, Some(32))
-                    .map_err(|err| {
-                        BenchError::Embedding(format!("prefilter cross-encoder failed: {err}"))
-                    })?
-                    .into_iter()
-                    .map(|item| item.index)
-                    .collect()
-            };
-            prefiltered_indices
-                .into_iter()
-                .take(prefilter_limit)
-                .filter_map(|index| broad_candidates.get(index).cloned())
-                .collect::<Vec<_>>()
-        }
-        _ => broad_candidates,
-    };
-    let documents: Vec<_> = candidates
-        .iter()
-        .map(|(_, content)| content.clone())
-        .collect();
-    let reranked = reranker
-        .rerank(&question.question, &documents)
-        .map_err(|err| BenchError::Embedding(format!("cross-encoder rerank failed: {err}")))?;
-
-    let ranked: Vec<_> = reranked
-        .iter()
-        .filter_map(|item| {
-            let (node_id, _) = candidates.get(item.index)?;
-            Some((*node_id, item.score))
-        })
-        .collect();
-    let consumer_ranking: Vec<_> = ranked
+    let reranked_candidates: Vec<_> = ranking
         .iter()
         .map(|(node_id, score)| RerankedCandidate {
             node_id: *node_id,
             score: *score,
         })
         .collect();
-    let recall = graph
-        .memory
-        .repackage_reranked_at(
-            result,
-            &consumer_ranking,
-            final_limit,
-            question_time(question),
-        )
-        .map_err(|err| BenchError::Engine(err.to_string()))?;
-    Ok((ranked, recall.package, false))
+    for &selection_k in &cutoffs {
+        let recall = graph
+            .memory
+            .repackage_reranked_at(
+                result,
+                &reranked_candidates,
+                selection_k,
+                question_time(retrieval),
+            )
+            .map_err(|err| BenchError::Engine(err.to_string()))?;
+        let selected = build_retrievals(ranking.iter().copied(), graph, question, selection_k);
+        let selected_ranked: Vec<_> = selected
+            .iter()
+            .map(|item| RankedRetrieval {
+                matched_gold_units: item.matched_gold_units.clone(),
+                score: item.score,
+            })
+            .collect();
+        let delivered = retrieved_memories(&recall.package, graph, question, selection_k);
+        let delivered_ranked: Vec<_> = delivered
+            .iter()
+            .map(|item| RankedRetrieval {
+                matched_gold_units: item.matched_gold_units.clone(),
+                score: item.score,
+            })
+            .collect();
+        let (product_context, source_node_ids, source_attributions) = render_product_context(
+            &recall.package,
+            graph,
+            retrieval,
+            opts.context_render_style,
+            opts.consumer_selection_policy == ConsumerSelectionPolicy::MemoryDeep,
+        )?;
+        let context = answer_context(
+            &recall.package,
+            graph,
+            question,
+            selection_k,
+            product_context,
+            source_node_ids,
+            source_attributions,
+        );
+        let rendered_units = rendered_gold_units(&context.product_context, graph, question);
+        let rendered_recall = if total_relevant == 0 {
+            0.0
+        } else {
+            rendered_units.len() as f64 / total_relevant as f64
+        };
+        variants.insert(
+            format!("top-{selection_k}"),
+            SelectionVariantEvaluation {
+                selection_k,
+                selected_metrics: retrieval_metrics(&selected_ranked, total_relevant, selection_k),
+                delivered_metrics: retrieval_metrics(
+                    &delivered_ranked,
+                    total_relevant,
+                    selection_k,
+                ),
+                rendered_recall,
+                rendered_hit: !rendered_units.is_empty(),
+                delivered_fragments: recall.package.total_fragments(),
+                context_tokens: context.context_tokens,
+            },
+        );
+    }
+    Ok(variants)
 }
 
 #[cfg(feature = "embed")]
-fn rerank_query_variants(
-    reranker: &fastembed::TextRerank,
-    query_variants: &[String],
-    original_question: &str,
-    documents: &[String],
-) -> BenchResult<Vec<usize>> {
-    const RRF_DAMPING: f64 = 60.0;
-
-    let fallback;
-    let variants = if query_variants.is_empty() {
-        fallback = vec![original_question.to_owned()];
-        fallback.as_slice()
-    } else {
-        query_variants
-    };
-    let mut scores = vec![0.0_f64; documents.len()];
-    let mut best_rank = vec![usize::MAX; documents.len()];
-    for query in variants {
-        let ranked = reranker
-            .rerank(query.clone(), documents.to_vec(), false, Some(32))
-            .map_err(|err| BenchError::Embedding(format!("query-fusion rerank failed: {err}")))?;
-        for (rank, item) in ranked.into_iter().enumerate() {
-            if item.index < scores.len() {
-                scores[item.index] += 1.0 / (RRF_DAMPING + (rank + 1) as f64);
-                best_rank[item.index] = best_rank[item.index].min(rank);
-            }
-        }
-    }
-    let mut indices: Vec<_> = (0..documents.len()).collect();
-    indices.sort_by(|left, right| {
-        scores[*right]
-            .total_cmp(&scores[*left])
-            .then_with(|| best_rank[*left].cmp(&best_rank[*right]))
-            .then_with(|| left.cmp(right))
-    });
-    Ok(indices)
+fn consumer_cross_encoder_package(
+    result: &SearchResult,
+    graph: &BuiltMemoryGraph,
+    retrieval: RetrievalInput<'_>,
+    reranker: &dyn RerankingProvider,
+    candidate_limit: usize,
+    final_limit: usize,
+) -> BenchResult<ConsumerPackage> {
+    let reranked = graph
+        .memory
+        .rerank_search_result_at(
+            retrieval.question,
+            result,
+            reranker,
+            RerankedRecallOptions::new(final_limit).with_candidate_limit(candidate_limit),
+            question_time(retrieval),
+        )
+        .map_err(|err| BenchError::Engine(err.to_string()))?;
+    let ranking = reranked
+        .ranking
+        .iter()
+        .map(|candidate| (candidate.node_id, candidate.score))
+        .collect();
+    Ok((ranking, reranked.recall.package, true))
 }
 
 fn search_question(
     graph: &mut BuiltMemoryGraph,
-    question: &BenchQuestion,
+    retrieval: RetrievalInput<'_>,
     opts: &EvalOptions,
 ) -> BenchResult<SearchResult> {
-    let now = question_time(question);
+    let now = question_time(retrieval);
     let tuning = SearchTuning {
         seed_limit: opts.seed_limit,
-        entity_tags: if opts.speaker_cues {
-            super::speaker_cue_tags(&graph.speakers, &question.question)
-        } else {
-            vec![]
-        },
+        entity_tags: Vec::new(),
     };
     #[cfg(feature = "embed")]
     let readout_limit = opts.diagnostic_readout_limit.unwrap_or(200).max(
@@ -1234,7 +871,7 @@ fn search_question(
         graph
             .memory
             .search_result_at_with_diagnostics(
-                &question.question,
+                retrieval.question,
                 search_limit,
                 now,
                 &tuning,
@@ -1244,7 +881,7 @@ fn search_question(
     } else {
         graph
             .memory
-            .search_result_at_with(&question.question, search_limit, now, &tuning)
+            .search_result_at_with(retrieval.question, search_limit, now, &tuning)
             .map_err(|err| BenchError::Engine(err.to_string()))
     }
 }
@@ -1279,27 +916,59 @@ fn retrieved_memories(
     )
 }
 
+fn render_product_context(
+    package: &ContextPackage,
+    graph: &BuiltMemoryGraph,
+    retrieval: RetrievalInput<'_>,
+    render_style: ContextRenderStyle,
+    query_aware_context: bool,
+) -> BenchResult<(String, Vec<u64>, Vec<AnswerSourceAttribution>)> {
+    let recall = Recall {
+        hits: Vec::new(),
+        package: package.clone(),
+    };
+    let readout = graph
+        .memory
+        .readout_for(retrieval.question, &recall)
+        .map_err(|err| BenchError::Engine(err.to_string()))?;
+    let source_node_ids = readout
+        .source_node_ids
+        .into_iter()
+        .map(|source_id| source_id.0)
+        .collect();
+    let source_attributions = readout
+        .source_attributions
+        .into_iter()
+        .map(|source| AnswerSourceAttribution {
+            source_node_id: source.source_node_id.0,
+            speaker: source.speaker,
+            text: source.text,
+            session_id: source.session_id,
+            dialogue_block_node_id: source.dialogue_block_node_id.0,
+            line_order: source.line_order,
+        })
+        .collect();
+    let render_options = ContextRenderOptions::with_style(render_style);
+    let product_context = if query_aware_context {
+        graph
+            .memory
+            .render_context_for_with(retrieval.question, &recall, render_options)
+    } else {
+        graph.memory.render_context_with(&recall, render_options)
+    }
+    .map_err(|err| BenchError::Engine(err.to_string()))?;
+    Ok((product_context, source_node_ids, source_attributions))
+}
+
 fn answer_context(
     package: &ContextPackage,
     graph: &BuiltMemoryGraph,
     question: &BenchQuestion,
     top_k: usize,
-    render_style: ContextRenderStyle,
-    query_aware_context: bool,
-) -> BenchResult<AnswerContext> {
-    let recall = Recall {
-        hits: Vec::new(),
-        package: package.clone(),
-    };
-    let render_options = ContextRenderOptions::with_style(render_style);
-    let product_context = if query_aware_context {
-        graph
-            .memory
-            .render_context_for_with(&question.question, &recall, render_options)
-    } else {
-        graph.memory.render_context_with(&recall, render_options)
-    }
-    .map_err(|err| BenchError::Engine(err.to_string()))?;
+    product_context: String,
+    source_node_ids: Vec<u64>,
+    source_attributions: Vec<AnswerSourceAttribution>,
+) -> AnswerContext {
     let product_context_chars = product_context.chars().count();
     let mut seen_units = HashSet::new();
     let evidence = ranked_fragments(package)
@@ -1333,16 +1002,18 @@ fn answer_context(
             }
         })
         .collect();
-    Ok(AnswerContext {
+    AnswerContext {
         product_context,
         product_context_chars,
+        source_node_ids,
+        source_attributions,
         evidence,
         context_tokens: package.token_usage.used,
-    })
+    }
 }
 
-fn question_time(question: &BenchQuestion) -> Timestamp {
-    question
+fn question_time(retrieval: RetrievalInput<'_>) -> Timestamp {
+    retrieval
         .question_date
         .map(|epoch_seconds| Timestamp(epoch_seconds.saturating_mul(1_000)))
         .unwrap_or(Timestamp(0))
@@ -1503,62 +1174,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn provenance_guardrail_preserves_raw_order_and_bounds_derived_prefixes() {
-        let ranking: Vec<_> = (1..=12)
-            .map(|value| (NodeId(value), (13 - value) as f64))
-            .collect();
-        let derived: HashSet<_> = [NodeId(1), NodeId(2), NodeId(3), NodeId(4), NodeId(8)]
-            .into_iter()
-            .collect();
-        let reordered = provenance_guardrail_order(&ranking, |node_id| derived.contains(&node_id));
-
-        let raw_before: Vec<_> = ranking
-            .iter()
-            .map(|(node_id, _)| *node_id)
-            .filter(|node_id| !derived.contains(node_id))
-            .collect();
-        let raw_after: Vec<_> = reordered
-            .iter()
-            .map(|(node_id, _)| *node_id)
-            .filter(|node_id| !derived.contains(node_id))
-            .collect();
-        assert_eq!(raw_after, raw_before);
-        assert_eq!(reordered.len(), ranking.len());
-
-        // The bound applies while raw backfill remains available. Excess
-        // derived candidates are retained only at the tail so the ranking
-        // remains a lossless permutation.
-        for prefix_len in 1..=raw_before.len() {
-            let derived_count = reordered[..prefix_len]
-                .iter()
-                .filter(|(node_id, _)| derived.contains(node_id))
-                .count();
-            assert!(derived_count <= prefix_len.div_ceil(4));
-        }
-    }
-
-    #[test]
-    fn provenance_guardrail_is_identity_without_derived_nodes() {
-        let ranking = vec![(NodeId(3), 0.9), (NodeId(1), 0.8), (NodeId(2), 0.7)];
-        assert_eq!(provenance_guardrail_order(&ranking, |_| false), ranking);
-    }
-
-    #[test]
-    fn reordered_scores_are_finite_bounded_and_strictly_descending() {
-        let denominator = 5.0;
-        let scores: Vec<_> = (0..4)
-            .map(|index| reordered_score(index, denominator))
-            .collect();
-        assert!(scores.iter().all(|score| score.is_finite()));
-        assert!(scores.iter().all(|score| *score > 0.0 && *score < 1.0));
-        assert!(scores.windows(2).all(|pair| pair[0] > pair[1]));
-    }
-
-    #[test]
     fn rendered_match_surface_ignores_turn_source_annotations() {
-        let raw_turn = "James: We visited the sanctuary.\nJames shared a photo of a rescue dog.";
-        let rendered = "    [turn-source=node:1347] James: We visited the sanctuary.\n\
-                        [turn-source=node:1347] James shared a photo of a rescue dog.";
+        let raw_turn = "Alpha: We visited the sanctuary.\nAlpha shared a photo of a rescue dog.";
+        let rendered = "    [turn-source=node:1347] Alpha: We visited the sanctuary.\n\
+                        [turn-source=node:1347] Alpha shared a photo of a rescue dog.";
         let stripped = strip_product_provenance_for_match(rendered);
 
         assert!(

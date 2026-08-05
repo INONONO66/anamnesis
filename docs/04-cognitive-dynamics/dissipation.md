@@ -8,7 +8,7 @@ The persistent quantity is retained action `A_i`, which decomposes into two term
 A_i = B_i + P_i
 ```
 
-`B_i` is the multi-trace ACT-R base-level activation over the node's access-trace history; it owns forgetting and use-driven reinforcement and is computed on demand from the trace history. Each access trace carries its own decay rate, fixed at the moment the trace is created (Pavlik & Anderson 2005), so massed re-presentation forgets fast and spaced re-presentation stays durable. `P_i` is a separate persistent evidence prior (encoding surprise, feedback / social reinforcement, peer trust) that does NOT undergo base-level decay. Public salience is the bounded logistic projection of the sum:
+`B_i` is the multi-trace ACT-R base-level activation over the node's access-trace history; it owns forgetting and use-driven reinforcement and is computed on demand from the trace history. Each access trace carries its own decay rate, fixed at the moment the trace is created (Pavlik & Anderson 2005), so massed re-presentation forgets fast and spaced re-presentation stays durable. `P_i` is a separate persistent evidence prior (encoding surprise and explicit consumer feedback) that does NOT undergo base-level decay. Public salience is the bounded logistic projection of the sum:
 
 ```text
 s_i = logistic(B_i + P_i)
@@ -20,7 +20,7 @@ s_i = logistic(B_i + P_i)
 |---|---|
 | power-law memory | Use ACT-R-like multi-trace base-level decay, not arbitrary linear fading; with per-trace activation-dependent decay the trace sum reproduces power-law forgetting and the spacing effect |
 | decay-first by construction | A committed access appends a trace stamped at `now`, and `B_i` ages prior traces to `now` before adding it, so ordering is intrinsic |
-| prior separation | The evidence prior `P_i` (encoding surprise, feedback, peer trust) is decay-exempt and never charged against the use-driven base level |
+| prior separation | The evidence prior `P_i` (encoding surprise and explicit feedback) is decay-exempt and never charged against the use-driven base level |
 | tier compatibility | Allow protected tiers while preserving dynamics for ordinary sites |
 | telemetry separation | Access timestamps support reports; the access-trace history is the load-bearing input to `B_i` |
 | no deletion by default | Low-salience sites remain addressable |

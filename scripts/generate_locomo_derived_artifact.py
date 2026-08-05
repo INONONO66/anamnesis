@@ -25,6 +25,7 @@ SESSION_RE = re.compile(r"^session_(\d+)$")
 BATCH_KEY_RE = re.compile(r"^(\d+):(session_\d+):(\d+)$")
 DEFAULT_MODEL = "qwen3.6:35b-a3b"
 SOURCE_SURFACE_VERSION = "locomo-caption-v2"
+BATCH_TURNS = 10
 
 
 def fnv1a64(data: bytes) -> str:
@@ -412,12 +413,12 @@ def validate_final_records(
         )
         if surface is None:
             raise RuntimeError(
-                f"artifact record {record_id!r} cites an unknown product source turn"
+                f"artifact record {record_id!r} cites an unknown source turn"
             )
         if values["evidence_span"] not in surface:
             raise RuntimeError(
                 f"artifact record {record_id!r} evidence span is not verbatim "
-                "in the product LoCoMo source surface"
+                "in the declared LoCoMo source surface"
             )
         fields = [record_id, *values.values()]
         fields.extend(str(tag) for tag in record.get("entity_tags", []))
@@ -426,6 +427,159 @@ def validate_final_records(
                 raise RuntimeError(
                     f"artifact record {record_id!r} contains a control character"
                 )
+
+
+def batch_shard_index(batch_key: str, shard_count: int) -> int:
+    digest = hashlib.sha256(batch_key.encode()).digest()
+    return int.from_bytes(digest[:8], "big") % shard_count
+
+
+def expected_batch_keys(samples: list[Any]) -> set[str]:
+    keys: set[str] = set()
+    for sample_index, sample in enumerate(samples):
+        if not isinstance(sample, dict):
+            raise RuntimeError(f"sample {sample_index} is not an object")
+        session_keys = sorted(
+            (key for key in sample if SESSION_RE.match(key)),
+            key=lambda key: int(SESSION_RE.match(key).group(1)),  # type: ignore[union-attr]
+        )
+        for raw_session_id in session_keys:
+            raw_turns = sample[raw_session_id]
+            if not isinstance(raw_turns, list):
+                raise RuntimeError(
+                    f"{sample_index}:{raw_session_id} contains a non-array session"
+                )
+            usable_turns = sum(
+                1
+                for turn in raw_turns
+                if isinstance(turn, dict) and product_turn_surface(turn)[1].strip()
+            )
+            for chunk_index in range(0, usable_turns, BATCH_TURNS):
+                keys.add(
+                    f"{sample_index}:{raw_session_id}:{chunk_index // BATCH_TURNS}"
+                )
+    return keys
+
+
+def prompt_profile_version(profile: dict[str, Any]) -> str:
+    return (
+        f"extract-v{profile['prompt_version']}-schema{profile['schema_version']}"
+        f"-norm{profile['normalization_version']}"
+        f"-relations{profile['relation_policy_version']}"
+        f"-source-{SOURCE_SURFACE_VERSION}"
+    )
+
+
+def merge_shard_states(
+    state_paths: list[Path],
+    output: Path,
+    dataset_bytes: bytes,
+    samples: list[Any],
+) -> int:
+    if not state_paths:
+        raise RuntimeError("at least one --merge-shard-state is required")
+    fingerprint = fnv1a64(dataset_bytes)
+    states = [json.loads(path.read_text()) for path in state_paths]
+    first = states[0]
+    profile = first.get("profile")
+    extractor_digest = first.get("extractor_digest")
+    shard_count = first.get("batch_shard_count")
+    if not isinstance(profile, dict) or not extractor_digest:
+        raise RuntimeError("shard state is missing extractor identity")
+    if not isinstance(shard_count, int) or shard_count <= 1:
+        raise RuntimeError("shard state must declare batch_shard_count greater than one")
+
+    shard_indices: set[int] = set()
+    completed_batches: set[str] = set()
+    records_by_id: dict[str, dict[str, Any]] = {}
+    relations_by_key: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for path, state in zip(state_paths, states):
+        if state.get("dataset_fnv1a64") != fingerprint:
+            raise RuntimeError(f"shard dataset fingerprint differs: {path}")
+        if state.get("source_surface_version") != SOURCE_SURFACE_VERSION:
+            raise RuntimeError(f"shard source surface differs: {path}")
+        if state.get("profile") != profile or state.get("extractor_digest") != extractor_digest:
+            raise RuntimeError(f"shard extractor profile differs: {path}")
+        if state.get("batch_shard_count") != shard_count:
+            raise RuntimeError(f"shard count differs: {path}")
+        shard_index = state.get("batch_shard_index")
+        if not isinstance(shard_index, int) or not 0 <= shard_index < shard_count:
+            raise RuntimeError(f"shard index is invalid: {path}")
+        if shard_index in shard_indices:
+            raise RuntimeError(f"duplicate shard index {shard_index}")
+        shard_indices.add(shard_index)
+        state_batches = state.get("completed_batches")
+        if not isinstance(state_batches, list) or not all(
+            isinstance(batch_key, str) for batch_key in state_batches
+        ):
+            raise RuntimeError(f"shard completed batch ledger is invalid: {path}")
+        misplaced = [
+            batch_key
+            for batch_key in state_batches
+            if batch_shard_index(batch_key, shard_count) != shard_index
+        ]
+        if misplaced:
+            raise RuntimeError(
+                f"shard contains batches assigned elsewhere: {misplaced[:8]!r}"
+            )
+        duplicated = completed_batches.intersection(state_batches)
+        if duplicated:
+            raise RuntimeError(
+                f"shards repeat completed batches: {sorted(duplicated)[:8]!r}"
+            )
+        completed_batches.update(state_batches)
+        for record in state.get("records", []):
+            record_id = record.get("id")
+            if not isinstance(record_id, str):
+                raise RuntimeError(f"shard record has no string id: {path}")
+            prior = records_by_id.get(record_id)
+            if prior is not None and prior != record:
+                raise RuntimeError(f"shards disagree about record {record_id!r}")
+            records_by_id[record_id] = record
+        for relation in state.get("relations", []):
+            key = (relation.get("from"), relation.get("to"), relation.get("kind"))
+            if not all(isinstance(value, str) for value in key):
+                raise RuntimeError(f"shard relation is invalid: {path}")
+            relations_by_key[key] = relation
+
+    if shard_indices != set(range(shard_count)):
+        raise RuntimeError(
+            f"shard indices are incomplete: got {sorted(shard_indices)!r}, "
+            f"expected 0..{shard_count - 1}"
+        )
+    expected = expected_batch_keys(samples)
+    if completed_batches != expected:
+        missing = sorted(expected.difference(completed_batches))
+        extra = sorted(completed_batches.difference(expected))
+        raise RuntimeError(
+            f"shard batch coverage differs: missing={missing[:8]!r} extra={extra[:8]!r}"
+        )
+
+    records = sorted(records_by_id.values(), key=lambda record: record["id"])
+    relations = sorted(
+        relations_by_key.values(),
+        key=lambda relation: (relation["from"], relation["to"], relation["kind"]),
+    )
+    record_ids = set(records_by_id)
+    for relation in relations:
+        if relation["from"] not in record_ids or relation["to"] not in record_ids:
+            raise RuntimeError("merged relation references an unknown record")
+    validate_final_records(records, product_source_surfaces(samples))
+    artifact = {
+        "schema_version": 3,
+        "dataset_fnv1a64": fingerprint,
+        "extractor_model": profile["model_id"],
+        "extractor_digest": extractor_digest,
+        "prompt_version": prompt_profile_version(profile),
+        "records": records,
+        "relations": relations,
+    }
+    checkpoint(output, artifact)
+    print(
+        f"wrote {output}: records={len(records)} relations={len(relations)} "
+        f"merged_shards={shard_count}"
+    )
+    return 0
 
 
 def main() -> int:
@@ -439,6 +593,9 @@ def main() -> int:
     parser.add_argument("--timeout-secs", type=int, default=300)
     parser.add_argument("--transient-retries", type=int, default=2)
     parser.add_argument("--max-batches", type=int)
+    parser.add_argument("--batch-shard-count", type=int, default=1)
+    parser.add_argument("--batch-shard-index", type=int, default=0)
+    parser.add_argument("--merge-shard-state", action="append", type=Path, default=[])
     parser.add_argument(
         "--rebuild-batch",
         action="append",
@@ -448,6 +605,17 @@ def main() -> int:
     args = parser.parse_args()
     if args.timeout_secs <= 0 or args.transient_retries < 0:
         parser.error("timeout must be positive and transient retries must be non-negative")
+    if args.batch_shard_count <= 0 or not 0 <= args.batch_shard_index < args.batch_shard_count:
+        parser.error("batch shard index must be within a positive shard count")
+    if args.merge_shard_state and (
+        args.max_batches is not None
+        or args.rebuild_batch
+        or args.batch_shard_count != 1
+        or args.batch_shard_index != 0
+    ):
+        parser.error(
+            "--merge-shard-state cannot be combined with generation, rebuild, or shard flags"
+        )
     if args.extractor_digest is not None and re.fullmatch(
         r"[0-9a-f]{64}", args.extractor_digest
     ) is None:
@@ -457,6 +625,13 @@ def main() -> int:
     samples = json.loads(dataset_bytes)
     if not isinstance(samples, list):
         raise RuntimeError("LoCoMo dataset root must be an array")
+    if args.merge_shard_state:
+        return merge_shard_states(
+            args.merge_shard_state,
+            args.output,
+            dataset_bytes,
+            samples,
+        )
     state_path = args.output.with_suffix(args.output.suffix + ".state.json")
     state: dict[str, Any]
     if state_path.exists():
@@ -467,6 +642,13 @@ def main() -> int:
             raise RuntimeError(
                 "checkpoint source surface differs; choose a new output path"
             )
+        checkpoint_shard_count = state.get("batch_shard_count")
+        checkpoint_shard_index = state.get("batch_shard_index")
+        if checkpoint_shard_count is not None and (
+            checkpoint_shard_count != args.batch_shard_count
+            or checkpoint_shard_index != args.batch_shard_index
+        ):
+            raise RuntimeError("checkpoint batch shard differs")
     else:
         state = {
             "dataset_fnv1a64": fnv1a64(dataset_bytes),
@@ -479,6 +661,9 @@ def main() -> int:
             "profile": None,
             "extractor_digest": args.extractor_digest,
         }
+
+    state["batch_shard_count"] = args.batch_shard_count
+    state["batch_shard_index"] = args.batch_shard_index
 
     state.setdefault("skipped_sources", [])
     state.setdefault("batch_record_ids", {})
@@ -527,11 +712,18 @@ def main() -> int:
                 sample_index,
                 session_number,
             )
-            for chunk_index, offset in enumerate(range(0, len(turns), 20)):
+            for chunk_index, offset in enumerate(
+                range(0, len(turns), BATCH_TURNS)
+            ):
                 batch_key = f"{sample_index}:{raw_session_id}:{chunk_index}"
+                if (
+                    batch_shard_index(batch_key, args.batch_shard_count)
+                    != args.batch_shard_index
+                ):
+                    continue
                 if batch_key in completed_batches:
                     continue
-                chunk = turns[offset : offset + 20]
+                chunk = turns[offset : offset + BATCH_TURNS]
                 sources = []
                 turn_ids: dict[int, str] = {}
                 for local_index, (turn, speaker, turn_content) in enumerate(
@@ -679,14 +871,17 @@ def main() -> int:
         "dataset_fnv1a64": state["dataset_fnv1a64"],
         "extractor_model": profile["model_id"],
         "extractor_digest": extractor_digest,
-        "prompt_version": (
-            f"extract-v{profile['prompt_version']}-schema{profile['schema_version']}"
-            f"-norm{profile['normalization_version']}-relations{profile['relation_policy_version']}"
-            f"-source-{SOURCE_SURFACE_VERSION}"
-        ),
+        "prompt_version": prompt_profile_version(profile),
         "records": state["records"],
         "relations": state["relations"],
     }
+    if args.batch_shard_count > 1:
+        print(
+            f"completed shard {args.batch_shard_index}/{args.batch_shard_count}: "
+            f"records={len(artifact['records'])} relations={len(artifact['relations'])}; "
+            "merge shard state files to create the final artifact"
+        )
+        return 0
     checkpoint(args.output, artifact)
     print(
         f"wrote {args.output}: records={len(artifact['records'])} "

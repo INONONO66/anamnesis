@@ -157,8 +157,8 @@ fn assemble_graph_recall_package<S: StorageAdapter + Clone>(
             .unwrap_or_default();
 
         let base_scope_weight = scope_weight(&config.scope, &node.origin.scope);
-        // Trust reservoir removed with the peer subsystem; term is neutral pending
-        // a real trust source.
+        // The compatibility reliability input is uniform, so it contributes no
+        // relative ranking signal.
         let trust_weight = 1.0;
 
         // phi_i: query-ALIGNMENT potential bias (potential-landscape.md).

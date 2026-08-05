@@ -6,7 +6,7 @@ Anamnesis models memory as a conductive graph of fragments. Each fragment is a m
 
 ## Problem
 
-Current agent memory systems usually collapse into one of three shapes:
+Three common memory representations have distinct trade-offs:
 
 - **Vector recall** retrieves similar text but loses why fragments matter together.
 - **Conversation archives** preserve chronology but make relevance the caller's problem.
@@ -18,11 +18,12 @@ Long-running agents need fragment-level memory with natural decay, reinforcement
 
 | Principle | Meaning |
 |---|---|
-| Fragment first | Preserve individual conversation turns, extracted facts, and decisions instead of rewriting them into one summary |
+| Fragment first | Retain successfully ingested source fragments and keep derived records from replacing them |
 | Retrieval is associative | A cue should activate nearby memories, which can activate further memories through typed relations |
 | Use changes future recall | Access, commit, co-readout, and feedback leave measurable work behind |
 | Forgetting is graceful | Unused knowledge fades in salience but remains available for precise reactivation |
-| Provenance is first-class | Every site records the session, scope, and confidence that produced it, plus a `peer_id` / `source_kind` origin (multi-peer attribution and trust weighting are a roadmap goal, not yet shipped — see [ADR-0014](../adr/0014-shrink-to-product.md)) |
+| Provenance is first-class | Every site records the producer, source kind, session, scope, and confidence that produced it |
+| Evidence authority is explicit | Current atomic routing facts lead back to cited raw sources; broader admission classes remain proposed |
 | Contradiction is visible | Conflicting facts are returned as tensions instead of being silently merged |
 | Core is local and deterministic | The library performs graph storage and traversal, not LLM calls or network orchestration |
 
@@ -52,6 +53,16 @@ The graph is not a static database. It is a driven-dissipative memory substrate.
 - Keep the core synchronous and local-first.
 - Keep extraction, embedding generation, orchestration, and network APIs outside the core.
 
+## Proposed Extension: Evidence Catalog
+
+[ADR-0015](../adr/0015-evidence-grounded-formation-and-chain-retrieval.md)
+specifies canonical fact records, bounded evidence chains, and a structured
+evidence result. These are not part of the current graph, storage, or public
+result contract. Its acceptance criteria require preserved raw sources and keep
+provider-specific reasoning outside the core.
+
 ## Audience
 
-This specification is for implementers of the Anamnesis library, reviewers evaluating API behavior, and downstream consumers deciding how to integrate agent memory. It is intentionally technical: public docs can later derive a shorter guide from this SSOT.
+This specification is for implementers of the Anamnesis library, reviewers
+evaluating API behavior, and downstream consumers deciding how to integrate
+agent memory.

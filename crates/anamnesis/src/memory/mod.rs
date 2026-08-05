@@ -2,19 +2,26 @@
 //!
 //! # Overview
 //!
-//! This module is the **validated consumer layer** of the Anamnesis crate. It
-//! owns the production ingest and recall pipeline exercised by
-//! `benches/eval_common/real_bench/graph.rs` and exposes it as the official
+//! This module is the canonical consumer layer of the Anamnesis crate. It owns
+//! conversation ingestion, source-aware recall, local reranking, evidence
+//! selection, rendering, and commit-safe packaging, exposed as the official
 //! front door: `anamnesis::Memory`.
 //!
 //! # Recipe origin
 //!
-//! The encoding strategy (speaker-prefixed Episodic turn + ±1-window Semantic
-//! view, `ExtractedFrom` and `Temporal` edges, session/speaker entity tags,
-//! ingest-everything engine config) is the recipe validated by the LoCoMo and
-//! LongMemEval harness. The harness calls the same
-//! [`Memory::search_reranked`] pipeline as production consumers; absolute
-//! scores still depend on model and evaluation configuration.
+//! The encoding strategy preserves each speaker-prefixed `Episodic` turn,
+//! adds a bounded neighboring-turn `Semantic` view, links provenance and
+//! temporal sequence, and records normalized session/speaker tags. Recall uses
+//! the same [`Memory::search_reranked`] contract for every consumer surface.
+//!
+//! # Materialized source fragments
+//!
+//! [`Memory::add_source_fragment`] admits immutable textual evidence that a
+//! consumer has already materialized, such as a local OCR transcript, vision
+//! observation, or document observation. It creates one raw `Episodic` source
+//! with explicit provenance and never calls an attachment resolver or model.
+//! Conversation buffering and `Semantic` window synthesis do not apply to this
+//! path.
 //!
 //! # Buffering semantics
 //!
@@ -62,7 +69,9 @@ mod view;
 pub use readout::{
     AnswerShape, DEFAULT_RERANK_CANDIDATE_LIMIT, DEFAULT_RERANK_FINAL_LIMIT,
     DEFAULT_RERANK_SEARCH_LIMIT, DEFAULT_SIMPLE_DELIVERY_LIMIT, DeepRecallOptions,
-    EvidenceDocument, EvidenceSelection, RecallIntent, RecallPlan, RerankedRecallOptions,
+    EvidenceDocument, EvidenceSelection, GroundedAnswerDraft, GroundedAnswerItem, ReaderAnswerForm,
+    RecallIntent, RecallPlan, RecallReaderContract, RecallReaderStage, RecallSourceAttribution,
+    ReflectionRecommendation, RerankedRecallOptions,
 };
 pub use view::{ListFilter, MemoryView};
 
@@ -78,13 +87,15 @@ use crate::graph::types::SourceKind;
 use crate::graph::types::{EdgeId, PeerId};
 use crate::graph::{Edge, EdgeType, KnowledgeType, Node, NodeId, ScopePath, Timestamp};
 use crate::mechanics::social::ConfidenceLevel;
-use crate::query::assembly::{ScoredNode, apply_result_limit, assemble_context_package};
+use crate::query::assembly::{
+    ScoredNode, apply_result_limit, assemble_context_package, estimate_tokens,
+};
 use crate::query::{
     AccessedSite, ActivatedTension, CoReadoutPair, CommitTrace, ContextPackage, Fragment,
     QueryConfig, SearchDiagnostics, SearchInput, SearchResult, Tension,
 };
-pub use crate::storage::AtomicFactId;
-use crate::storage::{AtomicFact, SqliteStorage, StorageAdapter};
+use crate::storage::{AtomicFact, AtomicFactRelation, SqliteStorage, StorageAdapter};
+pub use crate::storage::{AtomicFactId, AtomicFactRelationId, AtomicFactRelationKind};
 
 /// Per-session state for incremental window finalization.
 #[derive(Debug, Default)]
@@ -136,6 +147,87 @@ pub struct NoteOptions {
     pub tags: Vec<String>,
     /// Consumer-defined metadata key-value pairs stamped on both ingested nodes.
     pub metadata: Vec<(String, String)>,
+}
+
+/// One immutable textual source fragment materialized by a consumer.
+///
+/// This is the narrow admission type for evidence that did not originate as a
+/// conversational speaker turn: for example, a local OCR transcript, a local
+/// vision observation, or a document observation. The consumer resolves any
+/// bytes, paths, URLs, and models before calling [`Memory::add_source_fragment`];
+/// the engine stores text and provenance and performs no attachment I/O or
+/// model invocation on this path.
+///
+/// Admission creates exactly one [`KnowledgeType::Episodic`] node. It does not
+/// prefix a speaker, synthesize a `Semantic` window, or participate in the
+/// pending conversation buffers maintained by [`Memory::add`].
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct SourceFragmentInput {
+    /// Full immutable textual evidence. Leading and trailing whitespace is
+    /// preserved so downstream evidence spans remain byte-addressable.
+    pub content: String,
+    /// Explicit producer, source kind, session, scope, and confidence.
+    pub origin: Origin,
+    /// Time at which the source was observed or materialized.
+    pub observed_at: Timestamp,
+    /// Optional caller-supplied embedding in this `Memory`'s vector space.
+    /// `None` stores an unembedded fragment that remains available to text search.
+    pub embedding: Option<Vec<f64>>,
+    /// Selective entity tags used for indexing and graph attraction.
+    pub entity_tags: Vec<String>,
+    /// Optional half-open fact-validity start.
+    pub valid_from: Option<Timestamp>,
+    /// Optional half-open fact-validity end.
+    pub valid_until: Option<Timestamp>,
+    /// Consumer provenance such as attachment hash, processor digest, profile,
+    /// source-turn identifier, or stable external identifier.
+    pub metadata: Vec<(String, String)>,
+}
+
+impl SourceFragmentInput {
+    /// Create an unembedded source fragment with no tags, validity, or metadata.
+    pub fn new(content: impl Into<String>, origin: Origin, observed_at: Timestamp) -> Self {
+        Self {
+            content: content.into(),
+            origin,
+            observed_at,
+            embedding: None,
+            entity_tags: Vec::new(),
+            valid_from: None,
+            valid_until: None,
+            metadata: Vec::new(),
+        }
+    }
+
+    /// Attach a caller-supplied embedding.
+    pub fn with_embedding(mut self, embedding: Vec<f64>) -> Self {
+        self.embedding = Some(embedding);
+        self
+    }
+
+    /// Attach selective entity tags.
+    pub fn with_entity_tags(mut self, entity_tags: Vec<String>) -> Self {
+        self.entity_tags = entity_tags;
+        self
+    }
+
+    /// Attach a half-open validity interval.
+    pub fn with_validity(
+        mut self,
+        valid_from: Option<Timestamp>,
+        valid_until: Option<Timestamp>,
+    ) -> Self {
+        self.valid_from = valid_from;
+        self.valid_until = valid_until;
+        self
+    }
+
+    /// Attach consumer-owned provenance metadata.
+    pub fn with_metadata(mut self, metadata: Vec<(String, String)>) -> Self {
+        self.metadata = metadata;
+        self
+    }
 }
 
 /// Input for one isolated atomic fact.
@@ -212,6 +304,79 @@ impl AtomicFactInput {
     }
 }
 
+/// Input for one reviewed relation between isolated atomic facts.
+///
+/// The relation is a routing aid, not independently renderable evidence. Its
+/// endpoints must already be admitted atomic facts, and recall may use it only
+/// to reach the live raw Episodic sources cited by those facts.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct AtomicFactRelationInput {
+    /// Directed source endpoint.
+    pub from_fact_id: AtomicFactId,
+    /// Directed target endpoint.
+    pub to_fact_id: AtomicFactId,
+    /// Reviewed relation kind.
+    pub kind: AtomicFactRelationKind,
+    /// Stable reviewer or review-process identity.
+    pub reviewed_by: String,
+    /// Versioned review policy or profile.
+    pub review_profile: String,
+    /// Time at which the relation decision was reviewed.
+    pub reviewed_at: Timestamp,
+    /// Stable key used to make promotion retry-safe.
+    pub idempotency_key: String,
+    /// Optional half-open relation-validity interval.
+    pub valid_from: Option<Timestamp>,
+    /// Optional half-open relation-validity interval.
+    pub valid_until: Option<Timestamp>,
+    /// Non-authoritative consumer audit metadata.
+    pub metadata: Vec<(String, String)>,
+}
+
+impl AtomicFactRelationInput {
+    /// Create a reviewed, directed relation between two admitted facts.
+    pub fn new(
+        from_fact_id: AtomicFactId,
+        to_fact_id: AtomicFactId,
+        kind: AtomicFactRelationKind,
+        reviewed_by: impl Into<String>,
+        review_profile: impl Into<String>,
+        reviewed_at: Timestamp,
+        idempotency_key: impl Into<String>,
+    ) -> Self {
+        Self {
+            from_fact_id,
+            to_fact_id,
+            kind,
+            reviewed_by: reviewed_by.into(),
+            review_profile: review_profile.into(),
+            reviewed_at,
+            idempotency_key: idempotency_key.into(),
+            valid_from: None,
+            valid_until: None,
+            metadata: Vec::new(),
+        }
+    }
+
+    /// Attach a half-open validity interval.
+    pub fn with_validity(
+        mut self,
+        valid_from: Option<Timestamp>,
+        valid_until: Option<Timestamp>,
+    ) -> Self {
+        self.valid_from = valid_from;
+        self.valid_until = valid_until;
+        self
+    }
+
+    /// Attach non-authoritative consumer audit metadata.
+    pub fn with_metadata(mut self, metadata: Vec<(String, String)>) -> Self {
+        self.metadata = metadata;
+        self
+    }
+}
+
 /// Receipt returned by [`Memory::add`] and [`Memory::add_note`].
 ///
 /// Contains the episodic [`NodeId`] of the current turn and, when the
@@ -239,8 +404,32 @@ pub struct RerankedRecall {
     /// Original cognitive score and embedding cosine for final selected nodes.
     ///
     /// Product gates calibrated on cognitive activation/cosine use this
-    /// sidecar; reranker scores remain authoritative for final ordering.
+    /// sidecar; reranker scores remain authoritative for final ordering. A raw
+    /// source outside the captured readout inherits the cognitive signals of
+    /// the live document representative that caused it to be delivered.
     pub cognitive_scores: Vec<CognitiveRecallScore>,
+}
+
+/// Authority snapshot for one node that contributed to a reranker document.
+///
+/// This stays internal: callers continue to exchange ordinary node ids and
+/// scores, while the canonical reranked path keeps enough information to
+/// reject a deleted, replaced, or edited evidence source after the reranker
+/// returns.
+#[derive(Debug, Clone)]
+struct BoundEvidenceNode {
+    node_id: NodeId,
+    incarnation: String,
+    node_type: KnowledgeType,
+    scope: ScopePath,
+}
+
+/// One reranker document bound to the exact graph allocations that supplied
+/// its representative and canonical evidence text.
+#[derive(Debug, Clone)]
+struct BoundEvidenceDocument {
+    representative: BoundEvidenceNode,
+    sources: Vec<BoundEvidenceNode>,
 }
 
 /// Cognitive retrieval signals retained alongside a reranked final hit.
@@ -255,12 +444,12 @@ pub struct CognitiveRecallScore {
     pub cosine: f64,
 }
 
-/// The framework API — validated ingest and recall with incremental window
+/// The framework API — canonical ingest and recall with incremental window
 /// finalization.
 ///
 /// `Memory<S>` wraps an [`Engine<S>`] and manages per-session buffering so
-/// that each `add` call produces the same graph topology as the batch benchmark
-/// recipe. The default storage type is [`SqliteStorage`] (in-memory SQLite).
+/// that each `add` call produces the same graph topology as uninterrupted
+/// batch ingestion. The default storage type is [`SqliteStorage`] (in-memory SQLite).
 ///
 /// See the [module docs](self) for design and buffering semantics.
 pub struct Memory<S: StorageAdapter + Clone = SqliteStorage> {
@@ -445,13 +634,14 @@ pub struct MemoryStats {
     pub salience_entropy: f64,
     /// Node count by origin scope (`"universal"` keys the universal scope).
     pub scope_distribution: BTreeMap<String, usize>,
-    /// Number of registered peers.
+    /// Compatibility field; always `0` because the peer registry is not part
+    /// of the current engine.
     pub peer_count: usize,
     /// Overall structural health grade (A/B/C/D).
     pub grade: HealthGrade,
 }
 
-// ── Engine config used by Memory (bench defaults) ────────────────────────────
+// ── Canonical Engine config used by Memory ───────────────────────────────────
 
 fn memory_engine_config() -> EngineConfig {
     EngineConfig {
@@ -529,7 +719,7 @@ impl Memory<SqliteStorage> {
 // ── Core API (generic over S) ─────────────────────────────────────────────────
 
 impl<S: StorageAdapter + Clone> Memory<S> {
-    /// Add a conversational turn using the bench recipe.
+    /// Add a conversational turn using the canonical incremental recipe.
     ///
     /// Steps (per the incremental window finalization design):
     /// 1. Embed and ingest an `Episodic` node for `speaker: text`.
@@ -722,6 +912,147 @@ impl<S: StorageAdapter + Clone> Memory<S> {
         self.add_single_shot_note(text, at, &session_id, opts)
     }
 
+    /// Admit one already-materialized textual evidence fragment.
+    ///
+    /// The fragment is stored as exactly one raw [`KnowledgeType::Episodic`]
+    /// node with the supplied [`Origin`], observation time, validity, tags,
+    /// metadata, and optional embedding. Unlike [`add`](Memory::add), this
+    /// method does not prefix a speaker, create a neighboring-turn `Semantic`
+    /// view, add a `Temporal` edge, or inspect or mutate any pending session
+    /// buffer. Unlike [`add_note`](Memory::add_note), it does not manufacture a
+    /// second node.
+    ///
+    /// Attachment bytes, URLs, OCR, and vision models are deliberately outside
+    /// this API. A plugin or direct crate consumer runs those operations under
+    /// its own local policy and supplies their immutable textual result and
+    /// provenance here. The resulting node is an ordinary raw source: it can be
+    /// cited by [`add_atomic_fact`](Memory::add_atomic_fact), is protected by
+    /// source-incarnation checks, and obeys normal scope, validity, retraction,
+    /// forgetting, and readout rules.
+    ///
+    /// Metadata is included in the initial base-node storage write. Engine-owned
+    /// source-incarnation keys are rejected rather than silently accepted or
+    /// overwritten.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`] for blank content or session identity,
+    /// non-finite/out-of-range confidence, an empty/non-finite/wrong-dimension
+    /// embedding, an invalid validity interval, malformed or duplicate metadata
+    /// keys, or engine-owned incarnation metadata.
+    pub fn add_source_fragment(&mut self, input: SourceFragmentInput) -> Result<NodeId, Error> {
+        let SourceFragmentInput {
+            content,
+            origin,
+            observed_at,
+            embedding,
+            entity_tags,
+            valid_from,
+            valid_until,
+            metadata,
+        } = input;
+
+        if content.trim().is_empty() {
+            return Err(Error::InvalidInput(
+                "source fragment content must not be empty".to_owned(),
+            ));
+        }
+        if origin.session_id.trim().is_empty() {
+            return Err(Error::InvalidInput(
+                "source fragment origin session_id must not be empty".to_owned(),
+            ));
+        }
+        if origin.session_id.trim() != origin.session_id {
+            return Err(Error::InvalidInput(
+                "source fragment origin session_id must not have surrounding whitespace".to_owned(),
+            ));
+        }
+        if !origin.confidence.is_finite() || !(0.0..=1.0).contains(&origin.confidence) {
+            return Err(Error::InvalidInput(
+                "source fragment origin confidence must be finite and within [0, 1]".to_owned(),
+            ));
+        }
+        if let (Some(start), Some(end)) = (valid_from, valid_until)
+            && end <= start
+        {
+            return Err(Error::InvalidInput(
+                "source fragment valid_until must be greater than valid_from".to_owned(),
+            ));
+        }
+        if let Some(values) = embedding.as_deref() {
+            if values.is_empty() || !values.iter().all(|value| value.is_finite()) {
+                return Err(Error::InvalidInput(
+                    "source fragment embedding must be non-empty and finite".to_owned(),
+                ));
+            }
+            let expected_dimensions = self.provider.dimensions();
+            if values.len() != expected_dimensions {
+                return Err(Error::InvalidInput(format!(
+                    "source fragment embedding has {} dimensions, expected {expected_dimensions}",
+                    values.len()
+                )));
+            }
+        }
+
+        let mut metadata_map = HashMap::with_capacity(metadata.len());
+        for (key, value) in metadata {
+            if key.trim().is_empty() || key.trim() != key {
+                return Err(Error::InvalidInput(
+                    "source fragment metadata keys must be non-empty without surrounding whitespace"
+                        .to_owned(),
+                ));
+            }
+            if key == crate::storage::NODE_INCARNATION_METADATA_KEY
+                || crate::storage::is_atomic_source_incarnation_key(&key)
+            {
+                return Err(Error::InvalidInput(format!(
+                    "source fragment metadata key {key:?} is engine-owned"
+                )));
+            }
+            if metadata_map.insert(key.clone(), value).is_some() {
+                return Err(Error::InvalidInput(format!(
+                    "source fragment metadata key {key:?} is duplicated"
+                )));
+            }
+        }
+
+        let mut entity_tags: Vec<String> = entity_tags
+            .into_iter()
+            .map(|tag| tag.trim().to_owned())
+            .filter(|tag| !tag.is_empty())
+            .collect();
+        entity_tags.sort();
+        entity_tags.dedup();
+
+        let observation = Observation {
+            name: make_name(&content),
+            summary: None,
+            content,
+            embedding,
+            confidence: origin.confidence,
+            node_type: KnowledgeType::Episodic,
+            entity_tags,
+            origin,
+            timestamp: observed_at,
+            valid_from,
+            valid_until,
+        };
+        match self
+            .engine
+            .ingest_with_metadata(observation, metadata_map)?
+        {
+            IngestResult::Created(ids) => match ids.as_slice() {
+                [id] => Ok(*id),
+                _ => Err(Error::InvalidInput(
+                    "source fragment admission must create exactly one node".to_owned(),
+                )),
+            },
+            IngestResult::Reinforced { .. } => Err(Error::InvalidInput(
+                "source fragment admission must allocate an immutable source node".to_owned(),
+            )),
+        }
+    }
+
     /// Add one reviewed, consumer-derived `Semantic` node.
     ///
     /// This is the provenance-preserving materialization path for knowledge
@@ -803,6 +1134,7 @@ impl<S: StorageAdapter + Clone> Memory<S> {
         }
 
         let mut source_node_ids = Vec::with_capacity(input.source_node_ids.len());
+        let mut source_incarnations = Vec::with_capacity(input.source_node_ids.len());
         let mut source_session_id: Option<String> = None;
         let mut scope: Option<ScopePath> = None;
         let mut observed_at = Timestamp(0);
@@ -836,6 +1168,13 @@ impl<S: StorageAdapter + Clone> Memory<S> {
             source_session_id.get_or_insert_with(|| source.origin.session_id.clone());
             scope.get_or_insert_with(|| source.origin.scope.clone());
             observed_at = observed_at.max(source.created_at);
+            source_incarnations.push((
+                crate::storage::atomic_source_incarnation_key(source_node_id),
+                self.engine
+                    .graph()
+                    .storage()
+                    .atomic_source_incarnation(source)?,
+            ));
             source_node_ids.push(source_node_id);
         }
 
@@ -857,7 +1196,11 @@ impl<S: StorageAdapter + Clone> Memory<S> {
             .collect();
         entity_tags.sort();
         entity_tags.dedup();
-        let metadata = input.metadata.into_iter().collect();
+        let mut metadata: HashMap<_, _> = input.metadata.into_iter().collect();
+        // Incarnation keys are engine-owned provenance. Stamp them after
+        // consumer metadata so a caller cannot grant a replacement node the
+        // authority of the source that was reviewed.
+        metadata.extend(source_incarnations);
         let embedding_surface = input
             .embedding_surface
             .as_deref()
@@ -897,6 +1240,129 @@ impl<S: StorageAdapter + Clone> Memory<S> {
     /// Number of live records in the isolated atomic-fact sidecar.
     pub fn atomic_fact_count(&self) -> usize {
         self.engine.graph().storage().all_atomic_fact_ids().len()
+    }
+
+    /// Add one reviewed typed relation to the isolated atomic-fact sidecar.
+    ///
+    /// Both endpoint facts must still resolve to live raw Episodic evidence.
+    /// Two distinct concrete scopes cannot be joined; a universal endpoint
+    /// adopts the other endpoint's concrete scope. The stored validity is the
+    /// intersection of the supplied interval and both endpoint intervals.
+    /// Repeating an identical idempotency key returns the existing relation;
+    /// reusing it for different content is rejected.
+    pub fn add_atomic_fact_relation(
+        &mut self,
+        input: AtomicFactRelationInput,
+    ) -> Result<AtomicFactRelationId, Error> {
+        if input.from_fact_id == input.to_fact_id {
+            return Err(Error::InvalidInput(
+                "atomic fact relation endpoints must be distinct".to_owned(),
+            ));
+        }
+        let reviewed_by = input.reviewed_by.trim();
+        if reviewed_by.is_empty() {
+            return Err(Error::InvalidInput(
+                "atomic fact relation reviewer must not be empty".to_owned(),
+            ));
+        }
+        let review_profile = input.review_profile.trim();
+        if review_profile.is_empty() {
+            return Err(Error::InvalidInput(
+                "atomic fact relation review profile must not be empty".to_owned(),
+            ));
+        }
+        let idempotency_key = input.idempotency_key.trim();
+        if idempotency_key.is_empty() {
+            return Err(Error::InvalidInput(
+                "atomic fact relation idempotency key must not be empty".to_owned(),
+            ));
+        }
+        if let (Some(valid_from), Some(valid_until)) = (input.valid_from, input.valid_until)
+            && valid_until <= valid_from
+        {
+            return Err(Error::InvalidInput(
+                "atomic fact relation valid_until must be greater than valid_from".to_owned(),
+            ));
+        }
+
+        let storage = self.engine.graph().storage();
+        let from_fact = storage.get_atomic_fact(input.from_fact_id)?.clone();
+        let to_fact = storage.get_atomic_fact(input.to_fact_id)?.clone();
+        ensure_atomic_fact_has_live_sources(storage, &from_fact, input.reviewed_at)?;
+        ensure_atomic_fact_has_live_sources(storage, &to_fact, input.reviewed_at)?;
+        let scope = intersect_atomic_relation_scope(&from_fact.scope, &to_fact.scope)?;
+        let valid_from = [input.valid_from, from_fact.valid_from, to_fact.valid_from]
+            .into_iter()
+            .flatten()
+            .max();
+        let valid_until = [
+            input.valid_until,
+            from_fact.valid_until,
+            to_fact.valid_until,
+        ]
+        .into_iter()
+        .flatten()
+        .min();
+        if let (Some(valid_from), Some(valid_until)) = (valid_from, valid_until)
+            && valid_until <= valid_from
+        {
+            return Err(Error::InvalidInput(
+                "atomic fact relation has no valid endpoint-time intersection".to_owned(),
+            ));
+        }
+        let metadata: HashMap<_, _> = input.metadata.into_iter().collect();
+        let candidate = AtomicFactRelation {
+            id: AtomicFactRelationId(0),
+            from_fact_id: input.from_fact_id,
+            to_fact_id: input.to_fact_id,
+            kind: input.kind,
+            reviewed_by: reviewed_by.to_owned(),
+            review_profile: review_profile.to_owned(),
+            reviewed_at: input.reviewed_at,
+            idempotency_key: idempotency_key.to_owned(),
+            scope,
+            valid_from,
+            valid_until,
+            metadata,
+        };
+
+        if let Some(existing) =
+            storage.atomic_fact_relation_by_idempotency_key(&candidate.idempotency_key)?
+        {
+            let mut expected = candidate.clone();
+            expected.id = existing.id;
+            if existing == &expected {
+                return Ok(existing.id);
+            }
+            return Err(Error::InvalidInput(format!(
+                "atomic fact relation idempotency key {:?} conflicts with an existing relation",
+                candidate.idempotency_key
+            )));
+        }
+
+        let storage = self.engine.graph_mut().storage_mut();
+        let id = storage.next_atomic_fact_relation_id()?;
+        let mut relation = candidate;
+        relation.id = id;
+        storage.set_atomic_fact_relation(relation)?;
+        Ok(id)
+    }
+
+    /// Delete one reviewed relation from the isolated atomic-fact sidecar.
+    pub fn delete_atomic_fact_relation(&mut self, id: AtomicFactRelationId) -> Result<(), Error> {
+        self.engine
+            .graph_mut()
+            .storage_mut()
+            .delete_atomic_fact_relation(id)
+    }
+
+    /// Number of live reviewed atomic-fact relations.
+    pub fn atomic_fact_relation_count(&self) -> usize {
+        self.engine
+            .graph()
+            .storage()
+            .all_atomic_fact_relation_ids()
+            .len()
     }
 
     fn add_single_shot_note(
@@ -1415,8 +1881,8 @@ impl<S: StorageAdapter + Clone> Memory<S> {
 
 /// Optional tuning knobs for [`Memory::search_result_at_with`].
 ///
-/// All fields default to the bench-validated recipe values. Override only when
-/// you have a measured reason to deviate.
+/// All fields default to the canonical framework policy. Override only when a
+/// consumer needs an explicitly measured alternative.
 #[derive(Debug, Clone, Default)]
 pub struct SearchTuning {
     /// Override the number of seed nodes to expand with graph recall.
@@ -1425,14 +1891,14 @@ pub struct SearchTuning {
     pub seed_limit: Option<usize>,
     /// Entity tags to inject as retrieval seeds (e.g. speaker cues).
     ///
-    /// Empty (default) = entity-tag retrieval OFF (bench default, speaker cues OFF).
+    /// Empty (default) keeps broad entity-tag seeding off.
     pub entity_tags: Vec<String>,
 }
 
 /// A single ranked memory hit from a [`Recall`].
 ///
 /// Returned by [`Memory::search`] and [`Memory::search_at`] from the engine's
-/// pre-packaging readout surface — the same surface the benchmarks measure.
+/// pre-packaging readout surface.
 #[derive(Debug, Clone)]
 pub struct Hit {
     /// Id of the retrieved node.
@@ -1462,6 +1928,72 @@ pub struct Recall {
     pub hits: Vec<Hit>,
     /// Assembled context package — consume via [`Memory::used`] to reinforce.
     pub package: ContextPackage,
+}
+
+/// One exact raw source line selected for query-focused reading.
+///
+/// The line is drawn only from the validated evidence already delivered in a
+/// [`Recall`]. A delivered `Semantic` line is exposed here only after it has
+/// resolved unambiguously to a live `Episodic` source with matching
+/// provenance. Selection never searches for additional evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct FocusedEvidence {
+    /// Canonical raw `Episodic` source for this line.
+    pub source_node_id: NodeId,
+    /// Immutable observation time of the raw source.
+    pub observed_at: Timestamp,
+    /// Source session retained for grouping and attribution.
+    pub session_id: String,
+    /// Exact, trimmed source line selected for reading.
+    pub text: String,
+}
+
+/// Model-free reader contract compiled from an existing [`Recall`].
+///
+/// This is the typed counterpart of the guidance and query-focused evidence
+/// appended by [`Memory::render_context_for`]. It lets direct crate, protocol,
+/// and UI consumers use the same source selection without parsing Markdown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RecallReadout {
+    /// Deterministic intent inferred from the complete query.
+    pub plan: RecallPlan,
+    /// Provider-neutral staged reading contract compiled from [`Self::plan`].
+    pub reader_contract: RecallReaderContract,
+    /// Reader guidance emitted when the recall contains evidence.
+    pub reader_guidance: Option<String>,
+    /// Canonical source nodes visibly exposed by the rendered recall.
+    ///
+    /// A source-bound line inside a `Semantic` window contributes its exact
+    /// raw `Episodic` source instead of the enclosing window node. Consumers
+    /// can use this set to validate citations in a structured reader draft.
+    pub source_node_ids: Vec<NodeId>,
+    /// Trusted ownership and ordering for every visibly source-bound line.
+    ///
+    /// Unlike [`Self::focused_evidence`], this list covers the full delivered
+    /// context and preserves its original block and line order.
+    pub source_attributions: Vec<RecallSourceAttribution>,
+    /// Bounded exact source lines in reader order.
+    pub focused_evidence: Vec<FocusedEvidence>,
+}
+
+impl RecallReadout {
+    /// Reconcile a typed draft through this readout's exact membership and
+    /// ownership metadata.
+    pub fn reconcile_grounded_draft(
+        &self,
+        draft: &GroundedAnswerDraft,
+        final_answer: &str,
+    ) -> Option<String> {
+        self.reader_contract
+            .reconcile_grounded_draft_with_attributions(
+                draft,
+                final_answer,
+                &self.source_node_ids,
+                &self.source_attributions,
+            )
+    }
 }
 
 /// Consumer-selectable context rendering style.
@@ -1547,6 +2079,554 @@ struct FragmentTime {
 }
 
 type FragmentLineSources = HashMap<NodeId, HashMap<String, NodeId>>;
+
+const CONTEXT_RENDER_CHARS_PER_TOKEN: usize = 4;
+
+#[derive(Debug)]
+struct QueryFocusedCandidate {
+    evidence: FocusedEvidence,
+    lexical_overlap: usize,
+    dialogue_reply_overlap: usize,
+    link_terms: HashSet<String>,
+    value_terms: HashSet<String>,
+    information_terms: HashSet<String>,
+    semantic_windows: HashSet<NodeId>,
+    temporal_alignment: u8,
+    temporal_distance_ms: u64,
+    relevance: f64,
+    fragment_order: usize,
+    line_order: usize,
+}
+
+fn query_focus_surface_terms(value: &str) -> HashSet<String> {
+    let mut terms = readout::facet_terms(value);
+    if let Some((speaker, _)) = value.split_once(':')
+        && speaker.len() <= 48
+    {
+        terms.extend(
+            speaker
+                .split(|character: char| !character.is_alphanumeric())
+                .filter(|term| term.len() > 1)
+                .map(str::to_lowercase),
+        );
+    }
+    terms.extend(
+        value
+            .split(|character: char| !character.is_alphanumeric() && character != '\'')
+            .filter(|term| term.len() > 1 && term.chars().next().is_some_and(char::is_uppercase))
+            .map(str::to_lowercase),
+    );
+    terms
+}
+
+fn query_focus_value_terms(value: &str) -> HashSet<String> {
+    value
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|term| !term.is_empty())
+        .map(str::to_lowercase)
+        .filter(|term| {
+            term.chars().any(|character| character.is_ascii_digit())
+                || matches!(
+                    term.as_str(),
+                    "january"
+                        | "february"
+                        | "march"
+                        | "april"
+                        | "may"
+                        | "june"
+                        | "july"
+                        | "august"
+                        | "september"
+                        | "october"
+                        | "november"
+                        | "december"
+                        | "monday"
+                        | "tuesday"
+                        | "wednesday"
+                        | "thursday"
+                        | "friday"
+                        | "saturday"
+                        | "sunday"
+                        | "today"
+                        | "yesterday"
+                        | "tomorrow"
+                        | "week"
+                        | "weekend"
+                        | "month"
+                        | "year"
+                )
+        })
+        .collect()
+}
+
+fn query_focus_connection(left: &QueryFocusedCandidate, right: &QueryFocusedCandidate) -> usize {
+    let shared_terms = left.link_terms.intersection(&right.link_terms).count();
+    let shared_values = left.value_terms.intersection(&right.value_terms).count();
+    let same_window = !left.semantic_windows.is_disjoint(&right.semantic_windows);
+    let same_session = left.evidence.session_id == right.evidence.session_id;
+    if !same_window && shared_terms == 0 && !(same_session && shared_values > 0) {
+        return 0;
+    }
+    usize::from(same_window) * 16
+        + shared_terms.saturating_mul(3)
+        + shared_values.saturating_mul(3)
+        + usize::from(same_session) * 10
+}
+
+fn query_focus_complement_limit(plan: &RecallPlan, line_limit: usize) -> usize {
+    match plan.answer_shape {
+        AnswerShape::Relationship
+        | AnswerShape::Inference
+        | AnswerShape::Temporal
+        | AnswerShape::Collection
+        | AnswerShape::Frequency
+        | AnswerShape::Count => line_limit.saturating_sub(1),
+        AnswerShape::Fact if plan.recall_intent == RecallIntent::Temporal => {
+            line_limit.saturating_sub(1)
+        }
+        AnswerShape::Fact => line_limit.saturating_sub(1),
+    }
+}
+
+fn query_focus_session_limit(plan: &RecallPlan, line_limit: usize) -> usize {
+    match plan.answer_shape {
+        AnswerShape::Relationship
+        | AnswerShape::Inference
+        | AnswerShape::Temporal
+        | AnswerShape::Collection
+        | AnswerShape::Frequency
+        | AnswerShape::Count => line_limit.div_ceil(2).max(2),
+        AnswerShape::Fact if plan.recall_intent == RecallIntent::Temporal => {
+            line_limit.div_ceil(2).max(2)
+        }
+        AnswerShape::Fact => line_limit,
+    }
+}
+
+fn query_focus_line_limit(plan: &RecallPlan) -> usize {
+    match plan.answer_shape {
+        AnswerShape::Frequency | AnswerShape::Count | AnswerShape::Collection => 8,
+        AnswerShape::Relationship | AnswerShape::Inference => 8,
+        AnswerShape::Temporal => 5,
+        AnswerShape::Fact if plan.recall_intent == RecallIntent::Temporal => 5,
+        AnswerShape::Fact => 4,
+    }
+}
+
+fn select_query_focused_evidence(
+    package: &ContextPackage,
+    times: &HashMap<NodeId, FragmentTime>,
+    line_sources: &FragmentLineSources,
+    plan: &RecallPlan,
+    token_allowance: usize,
+) -> Vec<FocusedEvidence> {
+    const HEADER: &str = "## QUERY-FOCUSED RAW EVIDENCE\n";
+    const FOOTER: &str = "\n";
+
+    let framing_tokens = estimate_tokens(HEADER, CONTEXT_RENDER_CHARS_PER_TOKEN)
+        .saturating_add(estimate_tokens(FOOTER, CONTEXT_RENDER_CHARS_PER_TOKEN));
+    if token_allowance <= framing_tokens {
+        return Vec::new();
+    }
+
+    // Stay strictly inside the already validated delivery surface. In
+    // particular, do not search the graph for a more convenient excerpt. A raw
+    // Episodic fragment is directly delivered, while a Semantic line is
+    // eligible only when the normal context renderer already bound that exact,
+    // unambiguous line to an authoritative raw source.
+    let fragments: Vec<_> = package
+        .identity
+        .iter()
+        .chain(package.knowledge.iter())
+        .chain(package.memories.iter())
+        .collect();
+    let delivered_raw: HashMap<_, _> = fragments
+        .iter()
+        .enumerate()
+        .filter_map(|(order, fragment)| {
+            (fragment.node_type == KnowledgeType::Episodic)
+                .then_some((fragment.node_id, (*fragment, order)))
+        })
+        .collect();
+    let query_facets = readout::facet_terms(&plan.query);
+    let query_time_ranges = if plan.recall_intent == RecallIntent::Temporal {
+        crate::query::temporal::parse_time_cues(&plan.query, 0)
+    } else {
+        Vec::new()
+    };
+    let range_distance = |left_start: u64, left_end: u64, right_start: u64, right_end: u64| {
+        if left_end < right_start {
+            right_start.saturating_sub(left_end)
+        } else if right_end < left_start {
+            left_start.saturating_sub(right_end)
+        } else {
+            0
+        }
+    };
+    let temporal_fit = |text: &str, observed_at: Timestamp| {
+        if query_time_ranges.is_empty() {
+            return (0, u64::MAX);
+        }
+        let mut alignment = 0u8;
+        let mut distance = u64::MAX;
+        for query_range in &query_time_ranges {
+            let observed_distance = range_distance(
+                observed_at.0,
+                observed_at.0,
+                query_range.start,
+                query_range.end,
+            );
+            if observed_distance == 0 {
+                alignment = alignment.max(1);
+            }
+            distance = distance.min(observed_distance);
+        }
+        for resolution in crate::query::temporal::resolve_relative_time_cues(text, observed_at.0) {
+            for query_range in &query_time_ranges {
+                let resolved_distance = range_distance(
+                    resolution.range.start,
+                    resolution.range.end,
+                    query_range.start,
+                    query_range.end,
+                );
+                if resolved_distance == 0 {
+                    alignment = alignment.max(2);
+                }
+                distance = distance.min(resolved_distance);
+            }
+        }
+        (alignment, distance)
+    };
+    let mut candidates: HashMap<(NodeId, String), QueryFocusedCandidate> = HashMap::new();
+    let mut admit = |source_id: NodeId,
+                     text: &str,
+                     session_id: &str,
+                     semantic_window: Option<NodeId>,
+                     relevance: f64,
+                     fragment_order: usize,
+                     line_order: usize,
+                     dialogue_reply_overlap: usize| {
+        let text = text.trim();
+        if text.is_empty() {
+            return;
+        }
+        let Some(observed_at) = times.get(&source_id).map(|time| time.observed_at) else {
+            return;
+        };
+        let lexical_overlap = query_facets
+            .intersection(&readout::facet_terms(text))
+            .count();
+        let link_terms = query_focus_surface_terms(text);
+        let value_terms = query_focus_value_terms(text);
+        let mut information_terms = link_terms.clone();
+        information_terms.extend(value_terms.iter().cloned());
+        information_terms.retain(|term| !query_facets.contains(term));
+        let semantic_windows = semantic_window.into_iter().collect();
+        let (temporal_alignment, temporal_distance_ms) = temporal_fit(text, observed_at);
+        let key = (source_id, text.to_owned());
+        let candidate = QueryFocusedCandidate {
+            evidence: FocusedEvidence {
+                source_node_id: source_id,
+                observed_at,
+                session_id: session_id.to_owned(),
+                text: text.to_owned(),
+            },
+            lexical_overlap,
+            dialogue_reply_overlap,
+            link_terms,
+            value_terms,
+            information_terms,
+            semantic_windows,
+            temporal_alignment,
+            temporal_distance_ms,
+            relevance,
+            fragment_order,
+            line_order,
+        };
+        match candidates.entry(key) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(candidate);
+            }
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                entry
+                    .get_mut()
+                    .semantic_windows
+                    .extend(candidate.semantic_windows.iter().copied());
+                let existing = entry.get();
+                if candidate.dialogue_reply_overlap > existing.dialogue_reply_overlap
+                    || (candidate.dialogue_reply_overlap == existing.dialogue_reply_overlap
+                        && candidate.relevance.total_cmp(&existing.relevance).is_gt())
+                    || (candidate.dialogue_reply_overlap == existing.dialogue_reply_overlap
+                        && candidate.relevance.total_cmp(&existing.relevance).is_eq()
+                        && (candidate.fragment_order, candidate.line_order)
+                            < (existing.fragment_order, existing.line_order))
+                {
+                    let semantic_windows = entry.get().semantic_windows.clone();
+                    let mut candidate = candidate;
+                    candidate.semantic_windows = semantic_windows;
+                    entry.insert(candidate);
+                }
+            }
+        }
+    };
+
+    for (fragment_order, fragment) in fragments.iter().enumerate() {
+        let Some(content) = fragment.content.as_deref() else {
+            continue;
+        };
+        if fragment.node_type == KnowledgeType::Episodic {
+            for (line_order, line) in content.lines().enumerate() {
+                admit(
+                    fragment.node_id,
+                    line,
+                    &fragment.origin.session_id,
+                    None,
+                    fragment.relevance,
+                    fragment_order,
+                    line_order,
+                    0,
+                );
+            }
+            continue;
+        }
+        if fragment.node_type != KnowledgeType::Semantic {
+            continue;
+        }
+        let Some(bound_lines) = line_sources.get(&fragment.node_id) else {
+            continue;
+        };
+        let lines: Vec<_> = content.lines().collect();
+        for (line_order, line) in lines.iter().copied().enumerate() {
+            let Some(source_id) = bound_lines.get(line.trim()).copied() else {
+                continue;
+            };
+            let dialogue_reply_overlap = line_order
+                .checked_sub(1)
+                .and_then(|previous| lines.get(previous).copied())
+                .filter(|previous| previous.trim_end().ends_with('?'))
+                .map(|previous| {
+                    let mut pair_terms = readout::facet_terms(previous);
+                    pair_terms.extend(readout::facet_terms(line));
+                    query_facets.intersection(&pair_terms).count()
+                })
+                .filter(|overlap| *overlap >= query_facets.len().min(2))
+                .unwrap_or_default();
+            let (relevance, source_order) =
+                if let Some((source, source_order)) = delivered_raw.get(&source_id) {
+                    if source.origin.peer_id != fragment.origin.peer_id
+                        || source.origin.session_id != fragment.origin.session_id
+                        || source.origin.scope != fragment.origin.scope
+                    {
+                        continue;
+                    }
+                    (
+                        fragment.relevance.max(source.relevance),
+                        (*source_order).min(fragment_order),
+                    )
+                } else {
+                    (fragment.relevance, fragment_order)
+                };
+            admit(
+                source_id,
+                line,
+                &fragment.origin.session_id,
+                Some(fragment.node_id),
+                relevance,
+                source_order,
+                line_order,
+                dialogue_reply_overlap,
+            );
+        }
+    }
+
+    let mut candidates: Vec<_> = candidates.into_values().collect();
+    candidates.sort_by(|left, right| {
+        right
+            .temporal_alignment
+            .cmp(&left.temporal_alignment)
+            .then_with(|| left.temporal_distance_ms.cmp(&right.temporal_distance_ms))
+            .then_with(|| {
+                right
+                    .dialogue_reply_overlap
+                    .cmp(&left.dialogue_reply_overlap)
+            })
+            .then_with(|| right.lexical_overlap.cmp(&left.lexical_overlap))
+            .then_with(|| right.relevance.total_cmp(&left.relevance))
+            .then_with(|| left.fragment_order.cmp(&right.fragment_order))
+            .then_with(|| left.line_order.cmp(&right.line_order))
+            .then_with(|| {
+                left.evidence
+                    .source_node_id
+                    .cmp(&right.evidence.source_node_id)
+            })
+            .then_with(|| left.evidence.text.cmp(&right.evidence.text))
+    });
+
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+    let line_limit = query_focus_line_limit(plan);
+    let mut ordered_indices = vec![0usize];
+    let mut selected_indices = HashSet::from([0usize]);
+    let mut covered_information = candidates[0].information_terms.clone();
+    let complement_limit = query_focus_complement_limit(plan, line_limit);
+    let session_limit = query_focus_session_limit(plan, line_limit);
+    let prioritizes_answer_values = matches!(
+        plan.answer_shape,
+        AnswerShape::Temporal
+            | AnswerShape::Frequency
+            | AnswerShape::Count
+            | AnswerShape::Collection
+    );
+    while ordered_indices.len() < line_limit
+        && ordered_indices.len().saturating_sub(1) < complement_limit
+    {
+        let best = candidates
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !selected_indices.contains(index))
+            .filter_map(|(index, candidate)| {
+                let connection = ordered_indices
+                    .iter()
+                    .map(|selected| query_focus_connection(&candidates[*selected], candidate))
+                    .max()
+                    .unwrap_or_default();
+                if connection == 0 {
+                    return None;
+                }
+                let novel_information = candidate
+                    .information_terms
+                    .difference(&covered_information)
+                    .count();
+                if novel_information == 0 {
+                    return None;
+                }
+                let novel_values = candidate
+                    .value_terms
+                    .difference(&covered_information)
+                    .count();
+                let anchor_connection = query_focus_connection(&candidates[0], candidate);
+                let session_count = ordered_indices
+                    .iter()
+                    .filter(|selected| {
+                        candidates[**selected].evidence.session_id == candidate.evidence.session_id
+                    })
+                    .count();
+                let window_count = candidate
+                    .semantic_windows
+                    .iter()
+                    .map(|window| {
+                        ordered_indices
+                            .iter()
+                            .filter(|selected| {
+                                candidates[**selected].semantic_windows.contains(window)
+                            })
+                            .count()
+                    })
+                    .max()
+                    .unwrap_or_default();
+                Some((
+                    index,
+                    window_count.saturating_sub(1),
+                    session_count.saturating_sub(session_limit.saturating_sub(1)),
+                    anchor_connection,
+                    connection,
+                    novel_values,
+                    novel_information,
+                ))
+            })
+            .max_by(|left, right| {
+                let answer_value_order = if prioritizes_answer_values {
+                    left.5.cmp(&right.5)
+                } else {
+                    std::cmp::Ordering::Equal
+                };
+                right
+                    .1
+                    .cmp(&left.1)
+                    .then_with(|| right.2.cmp(&left.2))
+                    .then(answer_value_order)
+                    .then_with(|| left.6.min(4).cmp(&right.6.min(4)))
+                    .then_with(|| left.3.cmp(&right.3))
+                    .then_with(|| left.4.cmp(&right.4))
+                    .then_with(|| left.5.cmp(&right.5))
+                    .then_with(|| left.6.cmp(&right.6))
+                    .then_with(|| {
+                        candidates[left.0]
+                            .relevance
+                            .total_cmp(&candidates[right.0].relevance)
+                    })
+                    .then_with(|| {
+                        candidates[left.0]
+                            .lexical_overlap
+                            .cmp(&candidates[right.0].lexical_overlap)
+                    })
+                    .then_with(|| right.0.cmp(&left.0))
+            });
+        let Some((index, _, _, _, _, _, _)) = best else {
+            break;
+        };
+        selected_indices.insert(index);
+        covered_information.extend(candidates[index].information_terms.iter().cloned());
+        ordered_indices.push(index);
+    }
+    ordered_indices.extend((0..candidates.len()).filter(|index| selected_indices.insert(*index)));
+
+    let mut used_tokens = framing_tokens;
+    let mut selected = Vec::new();
+    for index in ordered_indices {
+        if selected.len() >= line_limit {
+            break;
+        }
+        let candidate = &candidates[index];
+        let line = render_focused_evidence_line(&candidate.evidence);
+        let line_tokens = estimate_tokens(&line, CONTEXT_RENDER_CHARS_PER_TOKEN);
+        if used_tokens.saturating_add(line_tokens) > token_allowance {
+            continue;
+        }
+        used_tokens = used_tokens.saturating_add(line_tokens);
+        selected.push(candidate.evidence.clone());
+    }
+    selected
+}
+
+fn render_focused_evidence_line(evidence: &FocusedEvidence) -> String {
+    format!(
+        "- [source=node:{} observed {}] {}\n",
+        evidence.source_node_id.0,
+        format_timestamp_utc(evidence.observed_at),
+        evidence.text
+    )
+}
+
+fn render_query_focused_evidence(evidence: &[FocusedEvidence]) -> Option<String> {
+    const HEADER: &str = "## QUERY-FOCUSED RAW EVIDENCE\n";
+    const FOOTER: &str = "\n";
+
+    if evidence.is_empty() {
+        return None;
+    }
+
+    let mut out = String::from(HEADER);
+    for item in evidence {
+        out.push_str(&render_focused_evidence_line(item));
+    }
+    out.push_str(FOOTER);
+    Some(out)
+}
+
+#[cfg(test)]
+fn query_focused_raw_evidence(
+    package: &ContextPackage,
+    times: &HashMap<NodeId, FragmentTime>,
+    line_sources: &FragmentLineSources,
+    plan: &RecallPlan,
+    token_allowance: usize,
+) -> Option<String> {
+    let evidence =
+        select_query_focused_evidence(package, times, line_sources, plan, token_allowance);
+    render_query_focused_evidence(&evidence)
+}
 
 fn render_context_package(
     pkg: &ContextPackage,
@@ -2087,7 +3167,15 @@ impl<S: StorageAdapter + Clone> Memory<S> {
             source_ids.dedup();
             for source_id in source_ids {
                 let source = storage.get_node(source_id)?;
-                if source.node_type != KnowledgeType::Episodic {
+                if source.node_type != KnowledgeType::Episodic
+                    || source.origin.peer_id != fragment.origin.peer_id
+                    || source.origin.session_id != fragment.origin.session_id
+                    || source.origin.scope != fragment.origin.scope
+                    || source
+                        .metadata
+                        .get("retracted")
+                        .is_some_and(|value| value == "true")
+                {
                     continue;
                 }
                 for line in source
@@ -2117,6 +3205,41 @@ impl<S: StorageAdapter + Clone> Memory<S> {
             }
         }
         Ok(fragment_sources)
+    }
+
+    fn extend_line_source_times(
+        &self,
+        line_sources: &FragmentLineSources,
+        times: &mut HashMap<NodeId, FragmentTime>,
+    ) -> Result<(), Error> {
+        let storage = self.engine.graph().storage();
+        let source_ids: HashSet<_> = line_sources
+            .values()
+            .flat_map(|sources| sources.values().copied())
+            .collect();
+        for source_id in source_ids {
+            if times.contains_key(&source_id) {
+                continue;
+            }
+            let source = storage.get_node(source_id)?;
+            if source.node_type != KnowledgeType::Episodic
+                || source
+                    .metadata
+                    .get("retracted")
+                    .is_some_and(|value| value == "true")
+            {
+                continue;
+            }
+            times.insert(
+                source_id,
+                FragmentTime {
+                    observed_at: source.created_at,
+                    valid_from: source.valid_from,
+                    valid_until: source.valid_until,
+                },
+            );
+        }
+        Ok(())
     }
 
     fn recall_relative_time_resolutions(
@@ -2169,6 +3292,155 @@ impl<S: StorageAdapter + Clone> Memory<S> {
         resolutions
     }
 
+    fn compile_recall_readout(
+        &self,
+        plan: &RecallPlan,
+        recall: &Recall,
+        times: &HashMap<NodeId, FragmentTime>,
+        line_sources: &FragmentLineSources,
+    ) -> Result<RecallReadout, Error> {
+        let has_evidence = !recall.package.identity.is_empty()
+            || !recall.package.knowledge.is_empty()
+            || !recall.package.memories.is_empty();
+        let reader_contract = plan.reader_contract();
+        let reader_guidance = has_evidence.then(|| reader_contract.context_guidance());
+        let guidance_tokens = reader_guidance.as_deref().map_or(0, |guidance| {
+            let block = format!("## RECALL GUIDANCE\n- {guidance}\n\n");
+            estimate_tokens(&block, CONTEXT_RENDER_CHARS_PER_TOKEN)
+        });
+        let focused_evidence = if has_evidence {
+            select_query_focused_evidence(
+                &recall.package,
+                times,
+                line_sources,
+                plan,
+                recall
+                    .package
+                    .token_usage
+                    .remaining()
+                    .saturating_sub(guidance_tokens),
+            )
+        } else {
+            Vec::new()
+        };
+        let mut source_node_ids = Vec::new();
+        for fragment in recall
+            .package
+            .identity
+            .iter()
+            .chain(recall.package.knowledge.iter())
+            .chain(recall.package.memories.iter())
+        {
+            if fragment.node_type == KnowledgeType::Semantic
+                && let Some(bound_lines) = line_sources.get(&fragment.node_id)
+                && !bound_lines.is_empty()
+            {
+                source_node_ids.extend(bound_lines.values().copied());
+            } else {
+                source_node_ids.push(fragment.node_id);
+            }
+        }
+        source_node_ids.sort_unstable();
+        source_node_ids.dedup();
+        let storage = self.engine.graph().storage();
+        let mut source_speakers = HashMap::new();
+        for source_node_id in &source_node_ids {
+            let source = storage.get_node(*source_node_id)?;
+            if let (Some(speaker), _) = parse_entity_tags(&source.entity_tags) {
+                source_speakers.insert(*source_node_id, speaker);
+            }
+        }
+        let mut source_attributions = Vec::new();
+        for fragment in recall
+            .package
+            .identity
+            .iter()
+            .chain(recall.package.knowledge.iter())
+            .chain(recall.package.memories.iter())
+        {
+            if fragment.node_type == KnowledgeType::Semantic
+                && let Some(bound_lines) = line_sources.get(&fragment.node_id)
+                && !bound_lines.is_empty()
+            {
+                if let Some(content) = fragment.content.as_deref() {
+                    for (line_order, line) in content.lines().enumerate() {
+                        let line = line.trim();
+                        let Some(source_node_id) = bound_lines.get(line).copied() else {
+                            continue;
+                        };
+                        source_attributions.push(RecallSourceAttribution::new(
+                            source_node_id,
+                            source_speakers.get(&source_node_id).cloned(),
+                            line,
+                            fragment.origin.session_id.clone(),
+                            fragment.node_id,
+                            line_order,
+                        ));
+                    }
+                }
+            } else {
+                let body = fragment
+                    .content
+                    .as_deref()
+                    .or(fragment.summary.as_deref())
+                    .unwrap_or(fragment.name.as_str());
+                for (line_order, line) in body.lines().enumerate() {
+                    let line = line.trim();
+                    if line.is_empty() {
+                        continue;
+                    }
+                    source_attributions.push(RecallSourceAttribution::new(
+                        fragment.node_id,
+                        source_speakers.get(&fragment.node_id).cloned(),
+                        line,
+                        fragment.origin.session_id.clone(),
+                        fragment.node_id,
+                        line_order,
+                    ));
+                }
+            }
+        }
+
+        Ok(RecallReadout {
+            plan: plan.clone(),
+            reader_contract,
+            reader_guidance,
+            source_node_ids,
+            source_attributions,
+            focused_evidence,
+        })
+    }
+
+    /// Compile deterministic reader intent and exact focused evidence for a
+    /// previously retrieved [`Recall`].
+    ///
+    /// The returned [`RecallReadout`] is the structured counterpart of the
+    /// guidance and focused-evidence tail emitted by
+    /// [`render_context_for`](Memory::render_context_for). It is read-only,
+    /// performs no model or network call, and does not retrieve evidence beyond
+    /// the validated package. Source nodes needed to validate delivered
+    /// `Semantic` lines are read by id or indexed session provenance.
+    pub fn readout_for(&self, query: &str, recall: &Recall) -> Result<RecallReadout, Error> {
+        let plan = RecallPlan::infer(query);
+        self.readout_for_plan(&plan, recall)
+    }
+
+    /// Compile a structured reader contract using a precomputed recall plan.
+    ///
+    /// This is useful when a protocol already has a typed [`AnswerShape`]. The
+    /// plan affects deterministic presentation intent and focused selection but
+    /// cannot add evidence to the supplied [`Recall`].
+    pub fn readout_for_plan(
+        &self,
+        plan: &RecallPlan,
+        recall: &Recall,
+    ) -> Result<RecallReadout, Error> {
+        let mut times = self.recall_fragment_times(recall)?;
+        let line_sources = self.recall_fragment_line_sources(recall)?;
+        self.extend_line_source_times(&line_sources, &mut times)?;
+        self.compile_recall_readout(plan, recall, &times, &line_sources)
+    }
+
     /// Render a recall with source-node temporal metadata.
     ///
     /// This is the product context wire for consumers that need to resolve
@@ -2190,9 +3462,10 @@ impl<S: StorageAdapter + Clone> Memory<S> {
     ///
     /// Temporal questions receive reference-blind annotations that resolve
     /// explicit relative expressions against each fragment's immutable
-    /// observation time. Other query intents are byte-for-byte equivalent to
-    /// [`render_context`](Memory::render_context). The annotations preserve the
-    /// original evidence and never inspect an expected answer or call a model.
+    /// observation time. Query-aware rendering can also append a bounded
+    /// excerpt of exact delivered raw lines and deterministic reading guidance
+    /// after the complete evidence. Rendering without a query remains
+    /// byte-for-byte compatible with [`render_context`](Memory::render_context).
     pub fn render_context_for(&self, query: &str, recall: &Recall) -> Result<String, Error> {
         self.render_context_for_with(query, recall, ContextRenderOptions::default())
     }
@@ -2222,7 +3495,7 @@ impl<S: StorageAdapter + Clone> Memory<S> {
         if plan.recall_intent == RecallIntent::Temporal {
             options.resolve_relative_times = true;
         }
-        self.render_context_internal(recall, options, Some(&plan.query))
+        self.render_context_internal(recall, options, Some(plan))
     }
 
     /// Render a recall through a consumer-selected product context style.
@@ -2245,27 +3518,55 @@ impl<S: StorageAdapter + Clone> Memory<S> {
         &self,
         recall: &Recall,
         options: ContextRenderOptions,
-        query: Option<&str>,
+        query: Option<&RecallPlan>,
     ) -> Result<String, Error> {
-        let times = self.recall_fragment_times(recall)?;
+        let mut times = self.recall_fragment_times(recall)?;
         let line_sources = self.recall_fragment_line_sources(recall)?;
-        let relative_times = options
-            .resolve_relative_times
-            .then(|| self.recall_relative_time_resolutions(recall, &times, query));
-        match options.style {
-            ContextRenderStyle::Detailed => Ok(render_context_package(
+        self.extend_line_source_times(&line_sources, &mut times)?;
+        let relative_times = options.resolve_relative_times.then(|| {
+            self.recall_relative_time_resolutions(
+                recall,
+                &times,
+                query.map(|plan| plan.query.as_str()),
+            )
+        });
+        let mut context = match options.style {
+            ContextRenderStyle::Detailed => render_context_package(
                 &recall.package,
                 Some(&times),
                 relative_times.as_ref(),
                 Some(&line_sources),
-            )),
-            ContextRenderStyle::Evidence => Ok(render_evidence_context(
+            ),
+            ContextRenderStyle::Evidence => render_evidence_context(
                 &recall.package,
                 &times,
                 relative_times.as_ref(),
                 Some(&line_sources),
-            )),
+            ),
+        };
+        let readout = query
+            .map(|plan| self.compile_recall_readout(plan, recall, &times, &line_sources))
+            .transpose()?;
+        if let Some(guidance) = readout
+            .as_ref()
+            .and_then(|readout| readout.reader_guidance.as_deref())
+            .map(|guidance| format!("## RECALL GUIDANCE\n- {guidance}\n\n"))
+        {
+            if !context.ends_with('\n') {
+                context.push('\n');
+            }
+            context.push_str(&guidance);
         }
+        if let Some(focused) = readout
+            .as_ref()
+            .and_then(|readout| render_query_focused_evidence(&readout.focused_evidence))
+        {
+            if !context.ends_with('\n') {
+                context.push('\n');
+            }
+            context.push_str(&focused);
+        }
+        Ok(context)
     }
 
     /// Search memory at wall-clock `now`.
@@ -2290,7 +3591,7 @@ impl<S: StorageAdapter + Clone> Memory<S> {
     ///
     /// First flushes all pending session buffers so that every previously added
     /// turn is searchable (even the last unfinalized one). Then embeds the query,
-    /// runs the bench-default `SearchInput` through the engine, and maps the
+    /// runs the canonical `SearchInput` through the engine, and maps the
     /// `trace.readout` top-`limit` candidates to [`Hit`]s.
     ///
     /// The [`Recall`] contains both the ranked hits and the assembled
@@ -2405,10 +3706,11 @@ impl<S: StorageAdapter + Clone> Memory<S> {
     /// Apply the canonical production rerank and deep-selection stages to an
     /// existing live [`SearchResult`].
     ///
-    /// Benchmarks use this overload so retrieval diagnostics can observe the
-    /// same source search without re-running it. Product callers normally use
+    /// Diagnostic consumers may use this overload to inspect one existing
+    /// source search without re-running it. Ordinary callers use
     /// [`search_reranked`](Memory::search_reranked). `query` must be the
-    /// original query used to produce `result`.
+    /// original query used to produce `result`; an explicit `options.scope`
+    /// must likewise match the scope used for that source search.
     pub fn rerank_search_result_at(
         &self,
         query: &str,
@@ -2440,9 +3742,38 @@ impl<S: StorageAdapter + Clone> Memory<S> {
             });
         }
 
-        let documents: Vec<_> = evidence
+        // Bind every document to the exact source allocations used to build
+        // its text before invoking the reranker. The provider must not receive
+        // a document containing a retracted, expired, or scope-ineligible raw
+        // member, and a concurrent source replacement while the provider runs
+        // must not be able to inherit the old document's score.
+        let query_scope = options.scope.clone().unwrap_or_else(ScopePath::universal);
+        let mut bound_evidence = Vec::with_capacity(evidence.len());
+        for document in evidence {
+            let Some(binding) = bind_evidence_document(self.engine.graph().storage(), &document)?
+            else {
+                continue;
+            };
+            if bound_evidence_document_is_eligible(
+                self.engine.graph().storage(),
+                &binding,
+                &query_scope,
+                as_of,
+            )? {
+                bound_evidence.push((document, binding));
+            }
+        }
+        if bound_evidence.is_empty() {
+            return Ok(RerankedRecall {
+                ranking: Vec::new(),
+                recall: empty_reranked_recall(result),
+                cognitive_scores: Vec::new(),
+            });
+        }
+
+        let documents: Vec<_> = bound_evidence
             .iter()
-            .map(|document| document.text.clone())
+            .map(|(document, _)| document.rerank_text().to_owned())
             .collect();
         let scores = reranker.rerank(query, &documents)?;
         if scores.is_empty() {
@@ -2468,11 +3799,11 @@ impl<S: StorageAdapter + Clone> Memory<S> {
                     score.index
                 )));
             }
-            let document = evidence.get(score.index).ok_or_else(|| {
+            let (document, _) = bound_evidence.get(score.index).ok_or_else(|| {
                 Error::InvalidInput(format!(
                     "reranker returned out-of-bounds document index {} for {} documents",
                     score.index,
-                    evidence.len()
+                    bound_evidence.len()
                 ))
             })?;
             ranking.push(RerankedCandidate {
@@ -2490,11 +3821,21 @@ impl<S: StorageAdapter + Clone> Memory<S> {
         } else {
             options.deep
         };
-        let recall = self.repackage_reranked_deep_at(query, result, &ranking, deep, as_of)?;
+        let bindings: HashMap<_, _> = bound_evidence
+            .into_iter()
+            .map(|(_, binding)| (binding.representative.node_id, binding))
+            .collect();
+        let (recall, hydrated_readout) = self.repackage_bound_reranked_deep_at(
+            query,
+            result,
+            &ranking,
+            &bindings,
+            deep,
+            &query_scope,
+            as_of,
+        )?;
         let final_ids: HashSet<_> = recall.hits.iter().map(|hit| hit.node_id).collect();
-        let cognitive_scores = result
-            .trace
-            .readout
+        let cognitive_scores = hydrated_readout
             .iter()
             .filter(|candidate| final_ids.contains(&candidate.node_id))
             .map(|candidate| CognitiveRecallScore {
@@ -2510,6 +3851,139 @@ impl<S: StorageAdapter + Clone> Memory<S> {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn repackage_bound_reranked_deep_at(
+        &self,
+        query: &str,
+        result: &SearchResult,
+        ranking: &[RerankedCandidate],
+        bindings: &HashMap<NodeId, BoundEvidenceDocument>,
+        options: DeepRecallOptions,
+        query_scope: &ScopePath,
+        as_of: Timestamp,
+    ) -> Result<(Recall, Vec<crate::query::ReadoutCandidate>), Error> {
+        let storage = self.engine.graph().storage();
+        let mut seen_source_sets = HashSet::new();
+        let mut eligible_ranking = Vec::with_capacity(ranking.len());
+        let mut eligible_sources = HashMap::new();
+
+        // Revalidate after the reranker returns. Exact source-set duplicates
+        // (normally an Episodic node and an overlapping Semantic view of that
+        // same turn) keep only their highest-ranked document so the final
+        // fragment budget is spent on distinct authoritative evidence.
+        for candidate in ranking {
+            let Some(binding) = bindings.get(&candidate.node_id) else {
+                continue;
+            };
+            if !bound_evidence_document_is_eligible(storage, binding, query_scope, as_of)? {
+                continue;
+            }
+            let source_ids: Vec<_> = binding
+                .sources
+                .iter()
+                .map(|source| source.node_id)
+                .collect();
+            if source_ids.is_empty() || !seen_source_sets.insert(source_ids.clone()) {
+                continue;
+            }
+            eligible_sources.insert(candidate.node_id, source_ids);
+            eligible_ranking.push(*candidate);
+        }
+        if eligible_ranking.is_empty() {
+            return Ok((empty_reranked_recall(result), Vec::new()));
+        }
+
+        let plan = RecallPlan::infer(query);
+        let routed_atomic_sources =
+            readout::parse_atomic_source_markers(&result.trace.strategies_used);
+        let atomic_relation_paths = readout::validated_atomic_relation_paths(
+            storage,
+            &result.trace.strategies_used,
+            as_of,
+            query_scope,
+        )?;
+        let selected_documents = readout::compile_ranking_with_atomic_chains(
+            storage,
+            &plan,
+            &eligible_ranking,
+            options.selection,
+            options.limit,
+            &routed_atomic_sources,
+            &atomic_relation_paths,
+        )?;
+
+        let original_readout: HashMap<_, _> = result
+            .trace
+            .readout
+            .iter()
+            .map(|candidate| (candidate.node_id, candidate))
+            .collect();
+        let mut hydrated_ranking = Vec::new();
+        let mut hydrated_readout = Vec::new();
+        let mut delivered_nodes = HashSet::new();
+        for document in selected_documents {
+            let Some(binding) = bindings.get(&document.node_id) else {
+                continue;
+            };
+            let representative = original_readout.get(&document.node_id).ok_or_else(|| {
+                Error::InvalidInput(format!(
+                    "reranked node {:?} disappeared from the source readout",
+                    document.node_id
+                ))
+            })?;
+            // A Semantic representative is itself the bounded evidence
+            // document the reranker selected. Its exact raw lines are rendered
+            // with per-line source bindings, so replacing it with each source
+            // would spend several delivery slots on one document and discard
+            // the neighboring context that made the window useful. An
+            // Episodic representative, by contrast, is a raw-document lane
+            // (including atomic and question/answer routes), so hydrate every
+            // validated raw member of that document within the normal package
+            // limit.
+            let delivered_ids = if binding.representative.node_type == KnowledgeType::Episodic {
+                eligible_sources
+                    .get(&document.node_id)
+                    .cloned()
+                    .unwrap_or_default()
+            } else {
+                vec![document.node_id]
+            };
+            for delivered_id in delivered_ids {
+                if !delivered_nodes.insert(delivered_id) {
+                    continue;
+                }
+                hydrated_ranking.push(RerankedCandidate {
+                    node_id: delivered_id,
+                    score: document.score,
+                });
+                let mut readout = original_readout
+                    .get(&delivered_id)
+                    .copied()
+                    .unwrap_or(representative)
+                    .clone();
+                readout.node_id = delivered_id;
+                hydrated_readout.push(readout);
+            }
+        }
+        if hydrated_ranking.is_empty() {
+            return Ok((empty_reranked_recall(result), Vec::new()));
+        }
+
+        let hydrated_ranking = readout::compile_atomic_chain_source_ranking(
+            storage,
+            &plan,
+            &hydrated_ranking,
+            options.limit,
+            &atomic_relation_paths,
+        )?;
+
+        let mut hydrated_result = result.clone();
+        hydrated_result.trace.readout = hydrated_readout.clone();
+        let recall =
+            self.repackage_reranked_at(&hydrated_result, &hydrated_ranking, options.limit, as_of)?;
+        Ok((recall, hydrated_readout))
+    }
+
     fn search_scoped_at(
         &mut self,
         query: &str,
@@ -2523,8 +3997,8 @@ impl<S: StorageAdapter + Clone> Memory<S> {
         // Embed the query via the provider.
         let embedding = embed_one_query(&*self.provider, query)?;
 
-        // Build bench-default SearchInput: text + query_embedding + limit +
-        // seed_limit = Some(limit.max(1)); speaker cues OFF; now = explicit.
+        // Build the canonical SearchInput: text + query embedding + limit +
+        // seed_limit = Some(limit.max(1)); broad entity cues off; explicit now.
         let input = SearchInput {
             text: query.to_string(),
             query_embedding: Some(embedding),
@@ -2532,7 +4006,7 @@ impl<S: StorageAdapter + Clone> Memory<S> {
             seed_limit: Some(limit.max(1)),
             now,
             scope: scope.unwrap_or_else(ScopePath::universal),
-            entity_tags: Vec::new(), // speaker cues OFF (bench default)
+            entity_tags: Vec::new(), // broad entity seeding is opt-in
             ..SearchInput::default()
         };
 
@@ -2570,7 +4044,7 @@ impl<S: StorageAdapter + Clone> Memory<S> {
     /// with pre-packaging readout candidates) and accepts optional tuning knobs.
     ///
     /// Prefer [`search_at`](Memory::search_at) for ordinary use-cases. This method exists for
-    /// consumers (benchmarks, tooling) that need the full readout trace or need
+    /// consumers and diagnostic tooling that need the full readout trace or need
     /// to override seed-limit / entity-tag cues without constructing a
     /// [`SearchInput`] manually.
     ///
@@ -2627,12 +4101,17 @@ impl<S: StorageAdapter + Clone> Memory<S> {
         self.flush_all()?;
 
         let plan = RecallPlan::infer(query);
-        let query_variants = if readout::uses_dense_query_expansion(&plan) {
-            crate::api::planned_complex_dense_query_variants(query)
-        } else {
-            vec![query.trim().to_owned()]
-        };
-        let (embedding, auxiliary_query_embeddings) = if query_variants.len() > 1 {
+        let (query_variants, engine_variant_indices, atomic_variant_indices) =
+            if readout::uses_dense_query_expansion(&plan) {
+                let relation_first = matches!(
+                    plan.answer_shape,
+                    readout::AnswerShape::Relationship | readout::AnswerShape::Inference
+                );
+                crate::api::planned_complex_dense_query_variants(query, relation_first)
+            } else {
+                (vec![query.trim().to_owned()], vec![0], vec![0])
+            };
+        let query_embeddings = if query_variants.len() > 1 {
             let borrowed: Vec<_> = query_variants.iter().map(String::as_str).collect();
             let embedded = self.provider.embed_queries(&borrowed)?;
             if embedded.len() != query_variants.len() {
@@ -2642,18 +4121,25 @@ impl<S: StorageAdapter + Clone> Memory<S> {
                     query_variants.len()
                 )));
             }
-            let mut widened = embedded
+            embedded
                 .into_iter()
-                .map(|values| crate::embedding::widen(&values));
-            let primary = widened.next().ok_or_else(|| {
-                Error::InvalidInput(
-                    "embedding provider returned no primary query vector".to_owned(),
-                )
-            })?;
-            (primary, widened.collect())
+                .map(|values| crate::embedding::widen(&values))
+                .collect()
         } else {
-            (embed_one_query(&*self.provider, query)?, Vec::new())
+            vec![embed_one_query(&*self.provider, query)?]
         };
+        let embedding = query_embeddings.first().cloned().ok_or_else(|| {
+            Error::InvalidInput("embedding provider returned no primary query vector".to_owned())
+        })?;
+        let mut auxiliary_query_embeddings = Vec::new();
+        for &index in engine_variant_indices.iter().filter(|&&index| index != 0) {
+            let selected = query_embeddings.get(index).ok_or_else(|| {
+                Error::InvalidInput(format!(
+                    "engine dense variant index {index} is out of bounds"
+                ))
+            })?;
+            auxiliary_query_embeddings.push(selected.clone());
+        }
         let seed_limit = tuning.seed_limit.unwrap_or_else(|| limit.max(1));
         let input = SearchInput {
             text: query.to_string(),
@@ -2670,22 +4156,85 @@ impl<S: StorageAdapter + Clone> Memory<S> {
             diagnostics,
             &auxiliary_query_embeddings,
         )?;
-        let routed = readout::route_atomic_fact_sources(
+        let mut atomic_query_embeddings = Vec::new();
+        for &index in &atomic_variant_indices {
+            let selected = query_embeddings.get(index).ok_or_else(|| {
+                Error::InvalidInput(format!(
+                    "atomic dense variant index {index} is out of bounds"
+                ))
+            })?;
+            atomic_query_embeddings.push(selected.as_slice());
+        }
+        let primary_atomic_embedding = [embedding.as_slice()];
+        let mut routed = readout::route_atomic_fact_sources(
             self.engine.graph().storage(),
             &plan,
-            &embedding,
+            &primary_atomic_embedding,
             now,
             &scope,
         )?;
-        if routed.is_empty() {
+        if atomic_query_embeddings.len() > 1 {
+            let auxiliary_routed = readout::route_atomic_fact_sources(
+                self.engine.graph().storage(),
+                &plan,
+                &atomic_query_embeddings,
+                now,
+                &scope,
+            )?;
+            let mut routed_position_by_source: HashMap<_, _> = routed
+                .iter()
+                .enumerate()
+                .map(|(position, source)| (source.candidate.node_id, position))
+                .collect();
+            for mut auxiliary_source in auxiliary_routed {
+                if let Some(position) = routed_position_by_source
+                    .get(&auxiliary_source.candidate.node_id)
+                    .copied()
+                {
+                    let baseline_source = &mut routed[position];
+                    baseline_source.kind_priority = baseline_source
+                        .kind_priority
+                        .max(auxiliary_source.kind_priority);
+                    for fact_id in auxiliary_source.fact_ids {
+                        if !baseline_source.fact_ids.contains(&fact_id) {
+                            baseline_source.fact_ids.push(fact_id);
+                        }
+                    }
+                    continue;
+                }
+                auxiliary_source.origin = readout::AtomicRouteOrigin::AuxiliaryQuery;
+                routed_position_by_source.insert(auxiliary_source.candidate.node_id, routed.len());
+                routed.push(auxiliary_source);
+            }
+        }
+        let chain_expansion = readout::expand_atomic_fact_relation_sources(
+            self.engine.graph().storage(),
+            &plan,
+            &routed,
+            &atomic_query_embeddings,
+            now,
+            &scope,
+        )?;
+        let chain_route_count = chain_expansion.sources.len();
+        let chain_paths = chain_expansion.paths;
+        let chain_diagnostics = chain_expansion.diagnostics;
+        routed.extend(chain_expansion.sources);
+        let raw_routed = readout::route_subject_raw_sources(
+            self.engine.graph().storage(),
+            &plan,
+            &atomic_query_embeddings,
+            now,
+            &scope,
+        )?;
+        if routed.is_empty() && raw_routed.is_empty() {
             return Ok(result);
         }
 
-        // Preserve the proven cognitive head exactly. Atomic facts only earn
-        // source slots in the deeper lane; direct/temporal shapes never reach
-        // this branch. Existing raw candidates keep their native score signals
-        // when promoted, while a source absent from the trace receives the
-        // fact-lane synthetic diagnostic score.
+        // Preserve the authoritative cognitive head exactly. Atomic facts only earn
+        // source slots in the deeper lane; direct and time-constrained complex
+        // shapes never reach this branch. Existing raw candidates keep their
+        // native score signals when promoted, while a source absent from the trace
+        // receives the fact-lane synthetic diagnostic score.
         let head_limit = result.trace.readout.len().min(30);
         let head_ids: HashSet<_> = result
             .trace
@@ -2701,21 +4250,47 @@ impl<S: StorageAdapter + Clone> Memory<S> {
                 candidate.node_id,
             )?);
         }
-        // The sidecar may expose up to the complete 20-row tail for later
-        // coverage/session-bridge selection. Collections reserve twelve raw
-        // slots because each distinct fact may be a required list item.
-        // Relationship/inference queries admit eight, matching the screened
-        // sidecar lane for multi-premise recall while preserving the
-        // first thirty native rows. Conservative shapes remain capped at four.
+        // Keep four tail slots for exact-subject raw premises when that route
+        // is available. The first thirty native rows remain immutable and the
+        // complete candidate surface remains fixed at fifty.
+        let raw_promotion_limit = raw_routed.len().min(4);
+        let chain_atomic_promotion_limit = routed
+            .iter()
+            .filter(|source| matches!(source.origin, readout::AtomicRouteOrigin::Chain { .. }))
+            .map(|source| source.candidate.node_id)
+            .filter(|node_id| !head_ids.contains(node_id) && !head_sources.contains(node_id))
+            .collect::<HashSet<_>>()
+            .len()
+            .min(chain_route_count)
+            .min(8);
         let direct_atomic_promotion_limit = match plan.answer_shape {
-            AnswerShape::Collection | AnswerShape::Count | AnswerShape::Frequency => 12,
-            AnswerShape::Relationship | AnswerShape::Inference => 8,
+            AnswerShape::Collection => 12,
+            AnswerShape::Count | AnswerShape::Frequency => 12,
+            AnswerShape::Relationship => 20usize.saturating_sub(raw_promotion_limit),
+            AnswerShape::Inference => 12,
             _ => 4,
+        }
+        .saturating_sub(chain_atomic_promotion_limit);
+        // Relation-bearing query surfaces are a recovery lane, not a
+        // replacement for the complete-query route. Give novel sources
+        // a small independent quota so they cannot consume baseline atomic
+        // slots. The later production selector still decides whether any of
+        // these recovered raw sources reach the final package.
+        let auxiliary_atomic_promotion_limit = match plan.answer_shape {
+            AnswerShape::Collection => 4,
+            AnswerShape::Inference => 8usize.saturating_sub(raw_promotion_limit),
+            _ => 0,
         };
         let mut routed_markers = Vec::new();
         let mut promoted = Vec::new();
+        let mut promoted_sources = head_sources.clone();
+        let mut direct_promoted = 0usize;
+        let mut auxiliary_promoted = 0usize;
+        let mut chain_promoted = 0usize;
         let mut deferred = Vec::new();
+        let mut deferred_ids = HashSet::new();
         for routed_source in routed {
+            let route_origin = routed_source.origin;
             let routed_candidate = routed_source.candidate;
             for fact_id in routed_source.fact_ids {
                 let marker = readout::AtomicSourceMarker {
@@ -2729,10 +4304,22 @@ impl<S: StorageAdapter + Clone> Memory<S> {
             }
             if head_ids.contains(&routed_candidate.node_id)
                 || head_sources.contains(&routed_candidate.node_id)
+                || promoted_sources.contains(&routed_candidate.node_id)
             {
                 continue;
             }
-            if promoted.len() < direct_atomic_promotion_limit {
+            let has_promotion_capacity = match route_origin {
+                readout::AtomicRouteOrigin::Direct => {
+                    direct_promoted < direct_atomic_promotion_limit
+                }
+                readout::AtomicRouteOrigin::AuxiliaryQuery => {
+                    auxiliary_promoted < auxiliary_atomic_promotion_limit
+                }
+                readout::AtomicRouteOrigin::Chain { .. } => {
+                    chain_promoted < chain_atomic_promotion_limit
+                }
+            };
+            if has_promotion_capacity {
                 let candidate = result
                     .trace
                     .readout
@@ -2740,12 +4327,49 @@ impl<S: StorageAdapter + Clone> Memory<S> {
                     .position(|existing| existing.node_id == routed_candidate.node_id)
                     .map(|position| result.trace.readout.remove(position))
                     .unwrap_or(routed_candidate);
+                promoted_sources.insert(candidate.node_id);
                 promoted.push(candidate);
+                match route_origin {
+                    readout::AtomicRouteOrigin::Direct => direct_promoted += 1,
+                    readout::AtomicRouteOrigin::AuxiliaryQuery => auxiliary_promoted += 1,
+                    readout::AtomicRouteOrigin::Chain { .. } => chain_promoted += 1,
+                }
             } else if !result
                 .trace
                 .readout
                 .iter()
                 .any(|existing| existing.node_id == routed_candidate.node_id)
+                && deferred_ids.insert(routed_candidate.node_id)
+            {
+                deferred.push(routed_candidate);
+            }
+        }
+        let mut raw_promoted = 0usize;
+        let mut raw_markers = Vec::new();
+        for routed_candidate in raw_routed {
+            if head_ids.contains(&routed_candidate.node_id)
+                || promoted_sources.contains(&routed_candidate.node_id)
+            {
+                continue;
+            }
+            if raw_promoted < raw_promotion_limit {
+                let candidate = result
+                    .trace
+                    .readout
+                    .iter()
+                    .position(|existing| existing.node_id == routed_candidate.node_id)
+                    .map(|position| result.trace.readout.remove(position))
+                    .unwrap_or(routed_candidate);
+                promoted_sources.insert(candidate.node_id);
+                raw_markers.push(candidate.node_id);
+                promoted.push(candidate);
+                raw_promoted += 1;
+            } else if !result
+                .trace
+                .readout
+                .iter()
+                .any(|existing| existing.node_id == routed_candidate.node_id)
+                && deferred_ids.insert(routed_candidate.node_id)
             {
                 deferred.push(routed_candidate);
             }
@@ -2773,10 +4397,13 @@ impl<S: StorageAdapter + Clone> Memory<S> {
             )?);
         }
         routed_markers.retain(|marker| represented_sources.contains(&marker.source_node_id));
-        result
-            .trace
-            .strategies_used
-            .push("atomic_fact_routing".to_owned());
+        raw_markers.retain(|node_id| represented_sources.contains(node_id));
+        if !routed_markers.is_empty() {
+            result
+                .trace
+                .strategies_used
+                .push("atomic_fact_routing".to_owned());
+        }
         if !routed_markers.is_empty() {
             let routed_ids = routed_markers
                 .iter()
@@ -2794,6 +4421,34 @@ impl<S: StorageAdapter + Clone> Memory<S> {
                 .trace
                 .strategies_used
                 .push(format!("atomic_fact_sources:{routed_ids}"));
+        }
+        if !raw_markers.is_empty() {
+            result
+                .trace
+                .strategies_used
+                .push("subject_raw_routing".to_owned());
+            let routed_ids = raw_markers
+                .iter()
+                .map(|node_id| node_id.0.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            result
+                .trace
+                .strategies_used
+                .push(format!("subject_raw_sources:{routed_ids}"));
+        }
+        if chain_diagnostics.visited_relations > 0 {
+            result.trace.strategies_used.push(format!(
+                "atomic_relation_chain:visited={};facts={};sources={};contradictions_excluded={};truncated={}",
+                chain_diagnostics.visited_relations,
+                chain_diagnostics.expanded_facts,
+                chain_diagnostics.routed_sources,
+                chain_diagnostics.contradictions_excluded,
+                chain_diagnostics.truncated,
+            ));
+        }
+        if let Some(encoded_paths) = readout::encode_atomic_relation_paths(&chain_paths) {
+            result.trace.strategies_used.push(encoded_paths);
         }
         Ok(result)
     }
@@ -2862,11 +4517,14 @@ impl<S: StorageAdapter + Clone> Memory<S> {
     /// Enumeration and relational queries use canonical raw-evidence
     /// documents to protect distinct facts from overlapping graph windows.
     /// Inference documents retain their highest-ranked Semantic representative
-    /// while exposing only canonical raw evidence as text, so later rendering
-    /// can recover the evidence window. Direct and temporal queries preserve
-    /// the ordinary node-document surface. This is the recommended
-    /// minimal-consumer entry point: a consumer only scores the returned text
-    /// and passes the node scores back to
+    /// while exposing canonical raw evidence in [`EvidenceDocument::text`], so
+    /// later rendering can recover the evidence window. A reviewed atomic fact
+    /// with valid byte-exact grounding may add a bounded retrieval-only cue to
+    /// [`EvidenceDocument::rerank_text`] for complex enumeration, relationship,
+    /// and inference queries;
+    /// final packaging still emits only raw source evidence. Direct and temporal queries preserve the ordinary
+    /// node-document surface. This is the recommended minimal-consumer entry
+    /// point: a consumer scores `rerank_text()` and passes the node scores back to
     /// [`repackage_reranked_deep`](Memory::repackage_reranked_deep).
     pub fn rerank_documents(
         &self,
@@ -2882,23 +4540,12 @@ impl<S: StorageAdapter + Clone> Memory<S> {
         let plan = RecallPlan::infer(query);
         let routed_atomic_markers =
             readout::parse_atomic_source_markers(&result.trace.strategies_used);
-        let mut routed_atomic_sources: Vec<(NodeId, usize)> = Vec::new();
-        for marker in &routed_atomic_markers {
-            if let Some((_, priority)) = routed_atomic_sources
-                .iter_mut()
-                .find(|(node_id, _)| *node_id == marker.source_node_id)
-            {
-                *priority = (*priority).max(marker.kind_priority);
-            } else {
-                routed_atomic_sources.push((marker.source_node_id, marker.kind_priority));
-            }
-        }
         readout::compile_rerank_documents(
             self.engine.graph().storage(),
             &plan,
             &result.trace.readout,
             candidate_limit,
-            &routed_atomic_sources,
+            &routed_atomic_markers,
         )
     }
 
@@ -2940,13 +4587,20 @@ impl<S: StorageAdapter + Clone> Memory<S> {
         let plan = RecallPlan::infer(query);
         let routed_atomic_sources =
             readout::parse_atomic_source_markers(&result.trace.strategies_used);
-        let compiled = readout::compile_ranking(
+        let atomic_relation_paths = readout::validated_atomic_relation_paths(
+            self.engine.graph().storage(),
+            &result.trace.strategies_used,
+            as_of,
+            &ScopePath::universal(),
+        )?;
+        let compiled = readout::compile_ranking_with_atomic_chains(
             self.engine.graph().storage(),
             &plan,
             ranking,
             options.selection,
             options.limit,
             &routed_atomic_sources,
+            &atomic_relation_paths,
         )?;
         self.repackage_reranked_at(result, &compiled, options.limit, as_of)
     }
@@ -3261,11 +4915,178 @@ impl<S: StorageAdapter + Clone> Memory<S> {
 
 // ── Search helpers ────────────────────────────────────────────────────────────
 
+fn bind_evidence_node<S: StorageAdapter>(
+    storage: &S,
+    node_id: NodeId,
+) -> Result<Option<BoundEvidenceNode>, Error> {
+    let node = match storage.get_node(node_id) {
+        Ok(node) => node,
+        Err(Error::NodeNotFound(_)) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    Ok(Some(BoundEvidenceNode {
+        node_id,
+        incarnation: storage.atomic_source_incarnation(node)?,
+        node_type: node.node_type.clone(),
+        scope: node.origin.scope.clone(),
+    }))
+}
+
+fn bind_evidence_document<S: StorageAdapter>(
+    storage: &S,
+    document: &EvidenceDocument,
+) -> Result<Option<BoundEvidenceDocument>, Error> {
+    let Some(representative) = bind_evidence_node(storage, document.node_id)? else {
+        return Ok(None);
+    };
+    let mut sources = Vec::with_capacity(document.source_node_ids.len());
+    for source_id in &document.source_node_ids {
+        let Some(source) = bind_evidence_node(storage, *source_id)? else {
+            return Ok(None);
+        };
+        sources.push(source);
+    }
+    if sources.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(BoundEvidenceDocument {
+        representative,
+        sources,
+    }))
+}
+
+fn bound_evidence_node_is_eligible<S: StorageAdapter>(
+    storage: &S,
+    binding: &BoundEvidenceNode,
+    query_scope: &ScopePath,
+    as_of: Timestamp,
+    require_episodic: bool,
+) -> Result<bool, Error> {
+    let node = match storage.get_node(binding.node_id) {
+        Ok(node) => node,
+        Err(Error::NodeNotFound(_)) => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    if (require_episodic && node.node_type != KnowledgeType::Episodic)
+        || node.node_type != binding.node_type
+        || node.origin.scope != binding.scope
+        || storage.atomic_source_incarnation(node)? != binding.incarnation
+        || node
+            .metadata
+            .get("retracted")
+            .is_some_and(|value| value == "true")
+        || (!query_scope.is_universal()
+            && !node.origin.scope.is_universal()
+            && node.origin.scope != *query_scope)
+        || (as_of.0 > 0
+            && (node.created_at > as_of
+                || !crate::graph::valid_at(node.valid_from, node.valid_until, as_of)))
+    {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+fn bound_evidence_document_is_eligible<S: StorageAdapter>(
+    storage: &S,
+    binding: &BoundEvidenceDocument,
+    query_scope: &ScopePath,
+    as_of: Timestamp,
+) -> Result<bool, Error> {
+    if !bound_evidence_node_is_eligible(
+        storage,
+        &binding.representative,
+        query_scope,
+        as_of,
+        false,
+    )? {
+        return Ok(false);
+    }
+    for source in &binding.sources {
+        let compatible_source_scope = binding.representative.scope == source.scope
+            || binding.representative.scope.is_universal()
+            || source.scope.is_universal();
+        if !compatible_source_scope
+            || !bound_evidence_node_is_eligible(storage, source, query_scope, as_of, true)?
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn empty_reranked_recall(result: &SearchResult) -> Recall {
+    let mut package = ContextPackage::empty();
+    package.token_usage.total = result.package.token_usage.total;
+    Recall {
+        hits: Vec::new(),
+        package,
+    }
+}
+
 /// Extract `(speaker, session)` from a node's entity tags.
 ///
 /// Looks for `speaker-<norm>` and `session-<norm>` tags (the convention used
-/// by the bench recipe). Returns `None` for each if the corresponding tag is
+/// by the canonical conversation recipe). Returns `None` for each if the corresponding tag is
 /// absent.
+fn intersect_atomic_relation_scope(from: &ScopePath, to: &ScopePath) -> Result<ScopePath, Error> {
+    if from == to {
+        return Ok(from.clone());
+    }
+    if from.is_universal() {
+        return Ok(to.clone());
+    }
+    if to.is_universal() {
+        return Ok(from.clone());
+    }
+    Err(Error::InvalidInput(format!(
+        "atomic fact relation cannot join concrete scopes {from:?} and {to:?}"
+    )))
+}
+
+fn ensure_atomic_fact_has_live_sources<S: StorageAdapter>(
+    storage: &S,
+    fact: &AtomicFact,
+    reviewed_at: Timestamp,
+) -> Result<(), Error> {
+    if fact
+        .metadata
+        .get("retracted")
+        .is_some_and(|value| value == "true")
+        || fact.observed_at > reviewed_at
+        || !crate::graph::valid_at(fact.valid_from, fact.valid_until, reviewed_at)
+    {
+        return Err(Error::InvalidInput(format!(
+            "atomic fact {} was not eligible at relation review time",
+            fact.id.0
+        )));
+    }
+    for source_id in &fact.source_node_ids {
+        let source = match storage.get_node(*source_id) {
+            Ok(source) => source,
+            Err(Error::NodeNotFound(_)) => continue,
+            Err(error) => return Err(error),
+        };
+        if source.node_type == KnowledgeType::Episodic
+            && source.origin.session_id == fact.source_session_id
+            && source.origin.scope == fact.scope
+            && storage.atomic_fact_source_is_current(fact, source)?
+            && source.created_at <= reviewed_at
+            && crate::graph::valid_at(source.valid_from, source.valid_until, reviewed_at)
+            && !source
+                .metadata
+                .get("retracted")
+                .is_some_and(|value| value == "true")
+        {
+            return Ok(());
+        }
+    }
+    Err(Error::InvalidInput(format!(
+        "atomic fact {} has no live raw source at relation review time",
+        fact.id.0
+    )))
+}
+
 fn parse_entity_tags(tags: &[String]) -> (Option<String>, Option<String>) {
     let mut speaker = None;
     let mut session = None;
@@ -3312,7 +5133,7 @@ fn build_window(prev: Option<&str>, cur: &str, next: Option<&str>) -> String {
     parts.join("\n")
 }
 
-/// Entity tags: `session-<norm>` and `speaker-<norm>` (no dataset tag).
+/// Stable entity tags derived from the source session and speaker.
 fn entity_tags_for(session: &str, speaker: &str) -> Vec<String> {
     vec![
         format!("session-{}", normalize_tag(session)),
@@ -3325,7 +5146,7 @@ fn normalize_tag(value: &str) -> String {
     value.trim().to_lowercase().replace([' ', ':', '_'], "-")
 }
 
-/// First 50 chars of `content` as the node name (bench `make_name`).
+/// Derive a bounded node name from the first 50 content characters.
 fn make_name(content: &str) -> String {
     let name: String = content.chars().take(50).collect();
     if name.trim().is_empty() {
@@ -3565,7 +5386,7 @@ mod tests {
         m.add(
             "s",
             "user",
-            "Rowan and Taylor discussed different hobbies",
+            "Nimbus and the worker discussed a shared retry policy",
             t(1),
         )
         .unwrap();
@@ -3574,7 +5395,7 @@ mod tests {
 
         let result = m
             .search_result_at_with_diagnostics(
-                "What advice could Rowan and Taylor share?",
+                "What retry advice could Nimbus share with the worker?",
                 20,
                 t(100),
                 &SearchTuning::default(),
@@ -3592,9 +5413,10 @@ mod tests {
         assert_eq!(
             query_calls,
             [
-                "What advice could Rowan and Taylor share?",
-                "Rowan",
-                "Taylor"
+                "What retry advice could Nimbus share with the worker?",
+                "retry advice Nimbus share with the worker",
+                "retry advice share with worker",
+                "Nimbus"
             ]
         );
         assert!(
@@ -3602,18 +5424,21 @@ mod tests {
                 .trace
                 .strategies_used
                 .iter()
-                .any(|strategy| strategy == "dense_query_union:3")
+                .any(|strategy| strategy == "dense_query_union:4")
         );
     }
 
     #[test]
     fn direct_and_temporal_search_keep_one_dense_query() {
         let (mut m, calls) = recording_mem();
-        m.add("s", "user", "Rowan met Taylor in Seoul", t(1))
+        m.add("s", "user", "Nimbus deployed Atlas in staging", t(1))
             .unwrap();
         m.flush_all().unwrap();
 
-        for query in ["Where does Rowan live?", "When did Rowan meet Taylor?"] {
+        for query in [
+            "Where does Nimbus deploy Atlas?",
+            "When did Nimbus deploy Atlas?",
+        ] {
             calls.lock().unwrap().clear();
             let result = m
                 .search_result_at_with_diagnostics(
@@ -3644,6 +5469,28 @@ mod tests {
 
     fn t(ms: u64) -> Timestamp {
         Timestamp(ms)
+    }
+
+    fn single_readout_result(node_id: NodeId) -> SearchResult {
+        SearchResult {
+            package: ContextPackage::empty(),
+            trace: crate::query::SearchTrace {
+                packaging_mode: Some(crate::query::PackagingMode::Balanced),
+                readout: vec![crate::query::ReadoutCandidate {
+                    node_id,
+                    score: 1.0,
+                    activation: 0.8,
+                    phi: 0.4,
+                    embedding_cosine: 0.7,
+                    salience: 0.6,
+                    impedance: 0.1,
+                    scope_weight: 1.0,
+                    trust_weight: 1.0,
+                    stress: 0.0,
+                }],
+                ..crate::query::SearchTrace::default()
+            },
+        }
     }
 
     // ── Relation mapping ──────────────────────────────────────────────────────
@@ -3735,6 +5582,324 @@ mod tests {
     }
 
     #[test]
+    fn production_rerank_keeps_semantic_document_and_binds_raw_source() {
+        let mut m = mem();
+        let receipt = m.add_note("Alice repaired the blue bicycle", t(1)).unwrap();
+        let semantic = receipt.finalized_semantic.unwrap();
+        let result = single_readout_result(semantic);
+
+        let output = m
+            .rerank_search_result_at(
+                "What did Alice repair?",
+                &result,
+                &OrderReranker,
+                RerankedRecallOptions::new(4).with_adaptive_delivery(false),
+                t(100),
+            )
+            .unwrap();
+
+        let packaged_ids: HashSet<_> = output
+            .recall
+            .package
+            .identity
+            .iter()
+            .chain(output.recall.package.knowledge.iter())
+            .chain(output.recall.package.memories.iter())
+            .map(|fragment| fragment.node_id)
+            .collect();
+        let committed_ids: HashSet<_> = output
+            .recall
+            .package
+            .commit_trace
+            .accessed
+            .iter()
+            .map(|site| site.node_id)
+            .collect();
+
+        assert_eq!(packaged_ids, HashSet::from([semantic]));
+        assert_eq!(committed_ids, packaged_ids);
+        assert_eq!(output.recall.hits.len(), 1);
+        assert_eq!(output.recall.hits[0].node_id, semantic);
+        assert!(output.recall.hits[0].text.contains("blue bicycle"));
+        assert_eq!(output.recall.package.total_fragments(), 1);
+        assert!(output.recall.package.token_usage.used <= output.recall.package.token_usage.total);
+        let rendered = m
+            .render_context_for_with(
+                "What did Alice repair?",
+                &output.recall,
+                ContextRenderOptions::with_style(ContextRenderStyle::Evidence),
+            )
+            .unwrap();
+        assert!(rendered.contains("Alice repaired the blue bicycle"));
+        assert!(rendered.contains(&format!("turn-source=node:{}", receipt.episodic.0)));
+        assert!(rendered.contains(&format!("source=node:{} observed", receipt.episodic.0)));
+
+        let report = m.used(output.recall).unwrap();
+        assert_eq!(report.sites_accessed, 1);
+    }
+
+    #[test]
+    fn production_rerank_keeps_multi_line_semantic_window_with_fixed_delivery_width() {
+        let mut m = mem();
+        let first = m
+            .add(
+                "repair-session",
+                "alice",
+                "I repaired the blue bicycle",
+                t(1),
+            )
+            .unwrap();
+        let second = m
+            .add(
+                "repair-session",
+                "bob",
+                "I repaired the green bicycle",
+                t(2),
+            )
+            .unwrap();
+        let semantic = second.finalized_semantic.unwrap();
+        let result = single_readout_result(semantic);
+
+        let output = m
+            .rerank_search_result_at(
+                "What did Alice and Bob repair?",
+                &result,
+                &OrderReranker,
+                RerankedRecallOptions::new(4).with_adaptive_delivery(false),
+                t(100),
+            )
+            .unwrap();
+        let packaged_ids: HashSet<_> = output
+            .recall
+            .package
+            .knowledge
+            .iter()
+            .map(|fragment| fragment.node_id)
+            .collect();
+        let committed_ids: HashSet<_> = output
+            .recall
+            .package
+            .commit_trace
+            .accessed
+            .iter()
+            .map(|site| site.node_id)
+            .collect();
+        assert_eq!(output.recall.hits.len(), 1);
+        assert_eq!(output.recall.hits[0].node_id, semantic);
+        assert_eq!(packaged_ids, HashSet::from([semantic]));
+        assert_eq!(committed_ids, packaged_ids);
+        assert_eq!(output.recall.package.total_fragments(), 1);
+        assert!(output.recall.package.token_usage.used <= output.recall.package.token_usage.total);
+        let rendered = m
+            .render_context_for_with(
+                "What did Alice and Bob repair?",
+                &output.recall,
+                ContextRenderOptions::with_style(ContextRenderStyle::Evidence),
+            )
+            .unwrap();
+        for source_id in [first.episodic, second.episodic] {
+            assert!(
+                rendered.contains(&format!("turn-source=node:{}", source_id.0)),
+                "missing source-bound semantic line for {source_id:?}:\n{rendered}"
+            );
+            assert!(
+                rendered.contains(&format!("source=node:{} observed", source_id.0)),
+                "missing focused raw line for {source_id:?}:\n{rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn bound_evidence_fails_closed_for_stale_retracted_expired_and_scoped_sources() {
+        let mut m = mem();
+        let stale = m.add_note("stale source", t(1)).unwrap().episodic;
+        let stale_document = m
+            .rerank_documents("stale source", &single_readout_result(stale), 1)
+            .unwrap()
+            .pop()
+            .unwrap();
+        let stale_binding = bind_evidence_document(m.engine().graph().storage(), &stale_document)
+            .unwrap()
+            .unwrap();
+        m.set_metadata(stale, "evidence-revision", "2").unwrap();
+        assert!(
+            !bound_evidence_document_is_eligible(
+                m.engine().graph().storage(),
+                &stale_binding,
+                &ScopePath::universal(),
+                t(100),
+            )
+            .unwrap()
+        );
+
+        let retracted = m.add_note("retracted source", t(2)).unwrap().episodic;
+        let retracted_document = m
+            .rerank_documents("retracted source", &single_readout_result(retracted), 1)
+            .unwrap()
+            .pop()
+            .unwrap();
+        let retracted_binding =
+            bind_evidence_document(m.engine().graph().storage(), &retracted_document)
+                .unwrap()
+                .unwrap();
+        m.set_metadata(retracted, "retracted", "true").unwrap();
+        assert!(
+            !bound_evidence_document_is_eligible(
+                m.engine().graph().storage(),
+                &retracted_binding,
+                &ScopePath::universal(),
+                t(100),
+            )
+            .unwrap()
+        );
+
+        let expired = m.add_note("expired source", t(3)).unwrap().episodic;
+        m.set_validity_window(expired, Some(t(1)), Some(t(50)))
+            .unwrap();
+        let expired_document = m
+            .rerank_documents("expired source", &single_readout_result(expired), 1)
+            .unwrap()
+            .pop()
+            .unwrap();
+        let expired_binding =
+            bind_evidence_document(m.engine().graph().storage(), &expired_document)
+                .unwrap()
+                .unwrap();
+        assert!(
+            !bound_evidence_document_is_eligible(
+                m.engine().graph().storage(),
+                &expired_binding,
+                &ScopePath::universal(),
+                t(100),
+            )
+            .unwrap()
+        );
+
+        let project_a = ScopePath::new("project-a").unwrap();
+        let project_b = ScopePath::new("project-b").unwrap();
+        let scoped = m
+            .add_in_scope(
+                "scope-session",
+                "alice",
+                "scoped source",
+                t(4),
+                project_a.clone(),
+            )
+            .unwrap()
+            .episodic;
+        let scoped_document = m
+            .rerank_documents("scoped source", &single_readout_result(scoped), 1)
+            .unwrap()
+            .pop()
+            .unwrap();
+        let scoped_binding = bind_evidence_document(m.engine().graph().storage(), &scoped_document)
+            .unwrap()
+            .unwrap();
+        assert!(
+            !bound_evidence_document_is_eligible(
+                m.engine().graph().storage(),
+                &scoped_binding,
+                &project_b,
+                t(100),
+            )
+            .unwrap()
+        );
+
+        m.add_in_scope(
+            "cross-scope-representative",
+            "alice",
+            "derived premise",
+            t(6),
+            project_a.clone(),
+        )
+        .unwrap();
+        let concrete_representative = m
+            .add_in_scope(
+                "cross-scope-representative",
+                "alice",
+                "follow-up",
+                t(7),
+                project_a,
+            )
+            .unwrap()
+            .finalized_semantic
+            .unwrap();
+        let cross_scope_source = m
+            .add_in_scope(
+                "cross-scope-source",
+                "bob",
+                "other project evidence",
+                t(8),
+                project_b,
+            )
+            .unwrap()
+            .episodic;
+        let cross_scope_document = BoundEvidenceDocument {
+            representative: bind_evidence_node(
+                m.engine().graph().storage(),
+                concrete_representative,
+            )
+            .unwrap()
+            .unwrap(),
+            sources: vec![
+                bind_evidence_node(m.engine().graph().storage(), cross_scope_source)
+                    .unwrap()
+                    .unwrap(),
+            ],
+        };
+        assert!(
+            !bound_evidence_document_is_eligible(
+                m.engine().graph().storage(),
+                &cross_scope_document,
+                &ScopePath::universal(),
+                t(100),
+            )
+            .unwrap()
+        );
+
+        let future = m.add_note("future source", t(200)).unwrap().episodic;
+        let future_document = m
+            .rerank_documents("future source", &single_readout_result(future), 1)
+            .unwrap()
+            .pop()
+            .unwrap();
+        let future_binding = bind_evidence_document(m.engine().graph().storage(), &future_document)
+            .unwrap()
+            .unwrap();
+        assert!(
+            !bound_evidence_document_is_eligible(
+                m.engine().graph().storage(),
+                &future_binding,
+                &ScopePath::universal(),
+                t(100),
+            )
+            .unwrap()
+        );
+
+        let semantic = m
+            .add_note("semantic is not raw evidence", t(5))
+            .unwrap()
+            .finalized_semantic
+            .unwrap();
+        let semantic_binding = bind_evidence_node(m.engine().graph().storage(), semantic)
+            .unwrap()
+            .unwrap();
+        let non_raw_document = BoundEvidenceDocument {
+            representative: semantic_binding.clone(),
+            sources: vec![semantic_binding],
+        };
+        assert!(
+            !bound_evidence_document_is_eligible(
+                m.engine().graph().storage(),
+                &non_raw_document,
+                &ScopePath::universal(),
+                t(100),
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
     fn production_reranked_recall_rejects_invalid_provider_indices() {
         let mut m = mem();
         m.add_note("A bounded reranker candidate", t(1)).unwrap();
@@ -3778,7 +5943,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(adaptive.recall.hits.len(), DEFAULT_SIMPLE_DELIVERY_LIMIT);
-        assert_eq!(fixed.recall.hits.len(), 20);
+        assert!(fixed.recall.hits.len() > adaptive.recall.hits.len());
+        assert!(fixed.recall.hits.len() <= 20);
     }
 
     #[test]
@@ -4756,6 +6922,205 @@ mod tests {
     }
 
     #[test]
+    fn reviewed_atomic_fact_relation_is_typed_idempotent_and_cascades() {
+        let mut memory = mem();
+        let source_a = memory
+            .add("session-a", "user", "the rollout was delayed", t(1))
+            .expect("source a")
+            .episodic;
+        let source_b = memory
+            .add(
+                "session-b",
+                "user",
+                "a supplier changed the delivery terms",
+                t(2),
+            )
+            .expect("source b")
+            .episodic;
+        memory.flush_all().expect("flush sources");
+        let fact_a = memory
+            .add_atomic_fact(AtomicFactInput::new(
+                "the rollout was delayed",
+                vec![source_a],
+            ))
+            .expect("fact a");
+        let fact_b = memory
+            .add_atomic_fact(AtomicFactInput::new(
+                "a supplier changed the delivery terms",
+                vec![source_b],
+            ))
+            .expect("fact b");
+        let input = AtomicFactRelationInput::new(
+            fact_b,
+            fact_a,
+            AtomicFactRelationKind::Reason,
+            "reviewer",
+            "policy-v1",
+            t(3),
+            "relation-key",
+        );
+        let first = memory
+            .add_atomic_fact_relation(input.clone())
+            .expect("reviewed relation");
+        let repeated = memory
+            .add_atomic_fact_relation(input)
+            .expect("idempotent retry");
+        assert_eq!(first, repeated);
+        assert_eq!(memory.atomic_fact_relation_count(), 1);
+        assert!(
+            memory
+                .add_atomic_fact_relation(AtomicFactRelationInput::new(
+                    fact_b,
+                    fact_a,
+                    AtomicFactRelationKind::Supports,
+                    "reviewer",
+                    "policy-v1",
+                    t(3),
+                    "relation-key",
+                ))
+                .is_err(),
+            "an idempotency key cannot authorize different relation content"
+        );
+
+        memory
+            .delete_atomic_fact(fact_a)
+            .expect("delete endpoint fact");
+        assert_eq!(memory.atomic_fact_relation_count(), 0);
+    }
+
+    #[test]
+    fn reviewed_atomic_relation_path_survives_the_production_search_trace() {
+        let mut memory = mem();
+        let outcome_source = memory
+            .add("session-a", "user", "the rollout was delayed", t(1))
+            .expect("outcome source")
+            .episodic;
+        let reason_source = memory
+            .add(
+                "session-b",
+                "user",
+                "a supplier changed the delivery terms",
+                t(2),
+            )
+            .expect("reason source")
+            .episodic;
+        memory.flush_all().expect("flush relation sources");
+        let outcome_fact = memory
+            .add_atomic_fact(AtomicFactInput::new(
+                "the rollout was delayed",
+                vec![outcome_source],
+            ))
+            .expect("outcome fact");
+        let reason_fact = memory
+            .add_atomic_fact(AtomicFactInput::new(
+                "a supplier changed the delivery terms",
+                vec![reason_source],
+            ))
+            .expect("reason fact");
+        memory
+            .add_atomic_fact_relation(AtomicFactRelationInput::new(
+                reason_fact,
+                outcome_fact,
+                AtomicFactRelationKind::Reason,
+                "reviewer",
+                "policy-v1",
+                t(3),
+                "production-trace-link",
+            ))
+            .expect("reviewed relation");
+
+        let result = memory
+            .search_result_at_with_diagnostics(
+                "Why was the rollout delayed, given that the supplier changed the delivery terms?",
+                8,
+                t(100),
+                &SearchTuning::default(),
+                &SearchDiagnostics::with_readout_trace_limit(50),
+            )
+            .expect("relation-aware source search");
+        let paths = readout::validated_atomic_relation_paths(
+            memory.engine().graph().storage(),
+            &result.trace.strategies_used,
+            t(100),
+            &ScopePath::universal(),
+        )
+        .expect("trace relation path validation");
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0].fact_ids.len(), 2);
+        assert!(paths[0].fact_ids.contains(&outcome_fact));
+        assert!(paths[0].fact_ids.contains(&reason_fact));
+        assert_eq!(paths[0].hops[0].from_fact_id, reason_fact);
+        assert_eq!(paths[0].hops[0].to_fact_id, outcome_fact);
+    }
+
+    #[test]
+    fn reviewed_relation_rejects_reused_raw_source_incarnation() {
+        let mut memory = mem();
+        let source_a = memory
+            .add("shared-session", "user", "the rollout was delayed", t(1))
+            .expect("source a")
+            .episodic;
+        let source_b = memory
+            .add(
+                "other-session",
+                "user",
+                "a supplier changed the delivery terms",
+                t(2),
+            )
+            .expect("source b")
+            .episodic;
+        memory.flush_all().expect("flush sources");
+        let fact_a = memory
+            .add_atomic_fact(AtomicFactInput::new(
+                "the rollout was delayed",
+                vec![source_a],
+            ))
+            .expect("fact a");
+        let fact_b = memory
+            .add_atomic_fact(AtomicFactInput::new(
+                "a supplier changed the delivery terms",
+                vec![source_b],
+            ))
+            .expect("fact b");
+
+        let mut replacement = memory
+            .engine()
+            .graph()
+            .get_node(source_a)
+            .expect("original raw source")
+            .clone();
+        memory
+            .engine_mut()
+            .graph_mut()
+            .remove_node(source_a)
+            .expect("original raw source deletes");
+        let replacement_id = memory.engine_mut().graph_mut().next_node_id();
+        assert_eq!(replacement_id, source_a);
+        replacement.id = replacement_id;
+        memory
+            .engine_mut()
+            .graph_mut()
+            .add_node(replacement)
+            .expect("replacement raw source stores");
+
+        assert!(
+            memory
+                .add_atomic_fact_relation(AtomicFactRelationInput::new(
+                    fact_a,
+                    fact_b,
+                    AtomicFactRelationKind::Supports,
+                    "reviewer",
+                    "policy-v1",
+                    t(3),
+                    "reused-source-relation",
+                ))
+                .is_err(),
+            "a reused numeric node ID must not inherit reviewed source authority"
+        );
+        assert_eq!(memory.atomic_fact_relation_count(), 0);
+    }
+
+    #[test]
     fn atomic_fact_lane_serves_count_and_frequency_queries() {
         let mut m = mem();
         let source = m
@@ -4850,8 +7215,7 @@ mod tests {
         let diagnostics = SearchDiagnostics::with_readout_trace_limit(100);
         for query in [
             "Where is the alpha archive?",
-            "Why did Alice review the alpha archive?",
-            "What device could Alice gift Bob for the alpha archive?",
+            "When was the alpha archive created?",
         ] {
             let baseline_result = baseline
                 .search_result_at_with_diagnostics(
@@ -4874,7 +7238,7 @@ mod tests {
 
             assert_eq!(
                 sidecar_result.trace.readout, baseline_result.trace.readout,
-                "sidecar must preserve conservative readout for {query:?}"
+                "sidecar must preserve direct or temporal readout for {query:?}"
             );
         }
     }
@@ -5199,22 +7563,22 @@ mod tests {
         let mut m = mem();
         let first = m
             .add(
-                "travel",
-                "James",
-                "I visited Italy, Turkey, and Mexico",
+                "deploy",
+                "Alpha",
+                "I deployed to staging, canary, and production",
                 t(1),
             )
             .unwrap()
             .episodic;
         let second = m
-            .add("travel", "John", "I visited Japan", t(2))
+            .add("deploy", "Beta", "I deployed to sandbox", t(2))
             .unwrap()
             .episodic;
         let third_receipt = m
             .add(
-                "travel",
-                "James",
-                "I want to travel again\nJames shared a travel photo",
+                "deploy",
+                "Alpha",
+                "I want to deploy again\nAlpha shared a deployment chart",
                 t(3),
             )
             .unwrap();
@@ -5224,7 +7588,7 @@ mod tests {
             .expect("the third turn finalizes the middle semantic window");
         m.flush_all().unwrap();
 
-        let recall = m.search_at("visited countries travel", 10, t(100)).unwrap();
+        let recall = m.search_at("deployment environments", 10, t(100)).unwrap();
         let detailed = m.render_context(&recall).unwrap();
         let evidence = m
             .render_context_with(
@@ -5243,37 +7607,40 @@ mod tests {
 
         assert!(
             middle_block.contains(&format!(
-                "[turn-source=node:{}] James: I visited Italy, Turkey, and Mexico",
+                "[turn-source=node:{}] Alpha: I deployed to staging, canary, and production",
                 first.0
             )),
-            "James's detailed line must retain its raw source in the same semantic block:\n\
+            "Alpha's detailed line must retain its raw source in the same semantic block:\n\
              {middle_block}"
         );
         assert!(
             middle_block.contains(&format!(
-                "[turn-source=node:{}] John: I visited Japan",
+                "[turn-source=node:{}] Beta: I deployed to sandbox",
                 second.0
             )),
-            "John's detailed line must not inherit the enclosing semantic source:\n{middle_block}"
+            "Beta's detailed line must not inherit the enclosing semantic source:\n{middle_block}"
         );
         assert!(
             middle_block.contains(&format!(
-                "[turn-source=node:{}] James: I want to travel again",
+                "[turn-source=node:{}] Alpha: I want to deploy again",
                 third.0
             )),
             "the following detailed line must retain its own source:\n{middle_block}"
         );
         assert!(
             middle_block.contains(&format!(
-                "[turn-source=node:{}] James shared a travel photo",
+                "[turn-source=node:{}] Alpha shared a deployment chart",
                 third.0
             )),
             "every line of a multiline raw turn must retain its source:\n{middle_block}"
         );
         for (source, line) in [
-            (first, "James: I visited Italy, Turkey, and Mexico"),
-            (second, "John: I visited Japan"),
-            (third, "James: I want to travel again"),
+            (
+                first,
+                "Alpha: I deployed to staging, canary, and production",
+            ),
+            (second, "Beta: I deployed to sandbox"),
+            (third, "Alpha: I want to deploy again"),
         ] {
             assert!(
                 evidence.contains(&format!("[Episodic source=node:{}]", source.0))
@@ -5363,6 +7730,16 @@ mod tests {
                 Timestamp(observed_at.0 + 86_400_000),
             )
             .unwrap();
+        let readout = m.readout_for("When did Alice do yoga?", &recall).unwrap();
+        assert!(!readout.source_node_ids.is_empty());
+        assert!(
+            readout.source_attributions.iter().any(|source| {
+                source.speaker.as_deref() == Some("alice")
+                    && source.text.contains("yoga yesterday")
+                    && readout.source_node_ids.contains(&source.source_node_id)
+            }),
+            "source ownership must come from canonical speaker provenance"
+        );
 
         let temporal = m
             .render_context_for("When did Alice do yoga?", &recall)
@@ -5372,8 +7749,18 @@ mod tests {
         let direct = m
             .render_context_for("What exercise did Alice do?", &recall)
             .unwrap();
-        assert_eq!(direct, m.render_context(&recall).unwrap());
+        let query_blind = m.render_context(&recall).unwrap();
+        assert!(!query_blind.contains("## QUERY-FOCUSED RAW EVIDENCE"));
+        assert!(!query_blind.contains("## RECALL GUIDANCE"));
+        assert!(direct.contains("## QUERY-FOCUSED RAW EVIDENCE"));
+        assert!(direct.contains("requested attribute and granularity"));
         assert!(!direct.contains("resolved relative time"));
+
+        let guided = m
+            .render_context_for("Which service likely accepted the request?", &recall)
+            .unwrap();
+        assert!(guided.contains("## RECALL GUIDANCE"));
+        assert!(guided.contains("one concise conclusion"));
 
         let date_scoped_query = "Which yoga exercise did Alice do in June 2023?";
         let date_scoped_plan = RecallPlan::infer(date_scoped_query);
@@ -5398,6 +7785,497 @@ mod tests {
             .render_context_for_plan_with(&hinted_plan, &recall, ContextRenderOptions::default())
             .unwrap();
         assert!(hinted.contains("resolved relative time: \"yesterday\" = 5 June 2023"));
+    }
+
+    #[test]
+    fn query_focus_uses_only_delivered_raw_or_source_bound_lines() {
+        let raw_id = NodeId(101);
+        let semantic_id = NodeId(102);
+        let origin = Origin {
+            peer_id: PeerId(7),
+            source_kind: SourceKind::AgentObservation,
+            session_id: "session-a".to_owned(),
+            scope: ScopePath::universal(),
+            confidence: 1.0,
+        };
+        let other_origin = Origin {
+            scope: ScopePath::new("workspace/other").expect("test scope"),
+            ..origin.clone()
+        };
+        let raw_line = "Alice: The archive key is cobalt.";
+        let derived_line = "The archive probably uses a blue key.";
+        let mut package = ContextPackage::empty();
+        package.memories.push(Fragment {
+            node_id: raw_id,
+            name: "raw turn".to_owned(),
+            summary: None,
+            content: Some(raw_line.to_owned()),
+            node_type: KnowledgeType::Episodic,
+            relevance: 0.7,
+            origin: origin.clone(),
+        });
+        package.memories.push(Fragment {
+            node_id: NodeId(999),
+            name: "other scoped turn".to_owned(),
+            summary: Some(derived_line.to_owned()),
+            content: None,
+            node_type: KnowledgeType::Episodic,
+            relevance: 0.8,
+            origin: other_origin,
+        });
+        package.knowledge.push(Fragment {
+            node_id: semantic_id,
+            name: "window".to_owned(),
+            summary: None,
+            content: Some(format!("{raw_line}\n{derived_line}")),
+            node_type: KnowledgeType::Semantic,
+            relevance: 0.9,
+            origin,
+        });
+        package.token_usage.total = 4_000;
+        let times = HashMap::from([
+            (
+                raw_id,
+                FragmentTime {
+                    observed_at: Timestamp(1_683_504_000_000),
+                    valid_from: None,
+                    valid_until: None,
+                },
+            ),
+            (
+                semantic_id,
+                FragmentTime {
+                    observed_at: Timestamp(1_683_504_000_000),
+                    valid_from: None,
+                    valid_until: None,
+                },
+            ),
+            (
+                NodeId(999),
+                FragmentTime {
+                    observed_at: Timestamp(1_683_504_000_000),
+                    valid_from: None,
+                    valid_until: None,
+                },
+            ),
+        ]);
+        let line_sources = HashMap::from([(
+            semantic_id,
+            HashMap::from([
+                (raw_line.to_owned(), raw_id),
+                (derived_line.to_owned(), NodeId(999)),
+            ]),
+        )]);
+
+        let focused = query_focused_raw_evidence(
+            &package,
+            &times,
+            &line_sources,
+            &RecallPlan::infer("What is Alice's archive key?"),
+            1_000,
+        )
+        .expect("one delivered raw line is focusable");
+
+        assert_eq!(focused.matches(raw_line).count(), 1);
+        assert!(!focused.contains(derived_line));
+        assert!(!focused.contains("node:999"));
+        assert!(focused.contains("source=node:101 observed 2023-05-08T00:00:00Z"));
+    }
+
+    #[test]
+    fn structured_readout_exposes_only_live_source_bound_semantic_lines() {
+        let mut m = mem();
+        let receipt = m
+            .add("session-a", "Alice", "The archive key is cobalt.", t(10))
+            .unwrap();
+        let semantic_id = m
+            .flush_session("session-a")
+            .unwrap()
+            .expect("semantic window");
+        let semantic = m.engine().graph().get_node(semantic_id).unwrap();
+        let mut package = ContextPackage::empty();
+        package.knowledge.push(Fragment {
+            node_id: semantic_id,
+            name: "delivered semantic window".to_owned(),
+            summary: None,
+            content: Some(
+                "Alice: The archive key is cobalt.\nThe archive probably uses a blue key."
+                    .to_owned(),
+            ),
+            node_type: KnowledgeType::Semantic,
+            relevance: 0.9,
+            origin: semantic.origin.clone(),
+        });
+        package.token_usage.total = 1_000;
+        let recall = Recall {
+            hits: Vec::new(),
+            package,
+        };
+
+        let readout = m
+            .readout_for("What is Alice's archive key?", &recall)
+            .unwrap();
+
+        assert_eq!(readout.plan.answer_shape, AnswerShape::Fact);
+        assert_eq!(readout.plan.recall_intent, RecallIntent::Direct);
+        assert!(readout.reader_guidance.is_some());
+        assert_eq!(readout.focused_evidence.len(), 1);
+        let evidence = &readout.focused_evidence[0];
+        assert_eq!(evidence.source_node_id, receipt.episodic);
+        assert_eq!(evidence.observed_at, t(10));
+        assert_eq!(evidence.session_id, "session-a");
+        assert_eq!(evidence.text, "Alice: The archive key is cobalt.");
+        assert!(
+            readout
+                .focused_evidence
+                .iter()
+                .all(|evidence| !evidence.text.contains("probably"))
+        );
+    }
+
+    #[test]
+    fn query_focus_promotes_complementary_bridge_after_query_anchor() {
+        let semantic_id = NodeId(200);
+        let origin = Origin {
+            peer_id: PeerId(9),
+            source_kind: SourceKind::AgentObservation,
+            session_id: "bridge-session".to_owned(),
+            scope: ScopePath::universal(),
+            confidence: 1.0,
+        };
+        let anchor = "Alice: We discussed the bookshelf picture.";
+        let distractors = [
+            "Alice: The bookshelf picture was mentioned again.",
+            "Alice: We kept talking about the bookshelf picture.",
+            "Alice: The picture remained near the bookshelf.",
+            "Alice: The bookshelf still held the picture.",
+            "Alice: We remembered the same bookshelf picture.",
+            "Alice: The picture and bookshelf came up later.",
+        ];
+        let bridge = "Alice: It was created by Atelier Nimbus in 2021.";
+        let mut lines = vec![anchor];
+        lines.extend(distractors);
+        lines.push(bridge);
+
+        let mut package = ContextPackage::empty();
+        package.knowledge.push(Fragment {
+            node_id: semantic_id,
+            name: "source-bound semantic window".to_owned(),
+            summary: None,
+            content: Some(lines.join("\n")),
+            node_type: KnowledgeType::Semantic,
+            relevance: 0.9,
+            origin,
+        });
+        package.token_usage.total = 4_000;
+
+        let mut times = HashMap::from([(
+            semantic_id,
+            FragmentTime {
+                observed_at: Timestamp(1_683_504_000_000),
+                valid_from: None,
+                valid_until: None,
+            },
+        )]);
+        let mut bound_lines = HashMap::new();
+        for (index, line) in lines.iter().enumerate() {
+            let source_id = NodeId(201 + index as u64);
+            bound_lines.insert((*line).to_owned(), source_id);
+            times.insert(
+                source_id,
+                FragmentTime {
+                    observed_at: Timestamp(1_683_504_000_000 + index as u64),
+                    valid_from: None,
+                    valid_until: None,
+                },
+            );
+        }
+        let line_sources = HashMap::from([(semantic_id, bound_lines)]);
+        let focused = query_focused_raw_evidence(
+            &package,
+            &times,
+            &line_sources,
+            &RecallPlan::infer("How are Alice and the bookshelf picture related?"),
+            4_000,
+        )
+        .expect("source-bound bridge evidence");
+
+        assert!(focused.contains(anchor));
+        assert!(focused.contains(bridge));
+        assert!(
+            focused.find(anchor) < focused.find(bridge),
+            "the query anchor must lead its complementary bridge:\n{focused}"
+        );
+        assert_eq!(
+            focused
+                .lines()
+                .filter(|line| line.starts_with("- [source=node:"))
+                .count(),
+            query_focus_line_limit(&RecallPlan::infer(
+                "How are Alice and the bookshelf picture related?"
+            ))
+        );
+    }
+
+    #[test]
+    fn query_focus_leads_with_a_query_matching_immediate_reply() {
+        let semantic_id = NodeId(260);
+        let origin = Origin {
+            peer_id: PeerId(9),
+            source_kind: SourceKind::AgentObservation,
+            session_id: "design-session".to_owned(),
+            scope: ScopePath::universal(),
+            confidence: 1.0,
+        };
+        let distractor = "Operator: The cobalt pattern uses several colors.";
+        let question = "Reviewer: Why did you choose the cobalt pattern?";
+        let answer = "Operator: I chose it to catch attention and make users smile.";
+        let lines = [distractor, question, answer];
+        let mut package = ContextPackage::empty();
+        package.knowledge.push(Fragment {
+            node_id: semantic_id,
+            name: "source-bound dialogue".to_owned(),
+            summary: None,
+            content: Some(lines.join("\n")),
+            node_type: KnowledgeType::Semantic,
+            relevance: 0.9,
+            origin,
+        });
+        package.token_usage.total = 2_000;
+
+        let mut times = HashMap::from([(
+            semantic_id,
+            FragmentTime {
+                observed_at: Timestamp(1_683_504_000_000),
+                valid_from: None,
+                valid_until: None,
+            },
+        )]);
+        let mut bound_lines = HashMap::new();
+        for (index, line) in lines.iter().enumerate() {
+            let source_id = NodeId(261 + index as u64);
+            bound_lines.insert((*line).to_owned(), source_id);
+            times.insert(
+                source_id,
+                FragmentTime {
+                    observed_at: Timestamp(1_683_504_000_000 + index as u64),
+                    valid_from: None,
+                    valid_until: None,
+                },
+            );
+        }
+        let focused = query_focused_raw_evidence(
+            &package,
+            &times,
+            &HashMap::from([(semantic_id, bound_lines)]),
+            &RecallPlan::infer("Why did the operator choose the cobalt pattern?"),
+            2_000,
+        )
+        .expect("query-matching reply evidence");
+        let first_evidence = focused
+            .lines()
+            .find(|line| line.starts_with("- [source=node:"))
+            .expect("focused evidence line");
+
+        assert!(
+            first_evidence.contains(answer),
+            "an immediate response inherits its query-matching question only for focus ordering:\n{focused}"
+        );
+    }
+
+    #[test]
+    fn query_focus_prefers_relative_event_that_covers_explicit_query_date() {
+        let origin = Origin {
+            peer_id: PeerId(9),
+            source_kind: SourceKind::AgentObservation,
+            session_id: "dated-session".to_owned(),
+            scope: ScopePath::universal(),
+            confidence: 1.0,
+        };
+        let mut package = ContextPackage::empty();
+        let rows = [
+            (
+                NodeId(301),
+                "Alice: Her favorite activity is relaxing outdoors.",
+                Timestamp(1_655_424_000_000),
+                0.9,
+            ),
+            (
+                NodeId(302),
+                "Alice: Yesterday I went bowling after work.",
+                Timestamp(1_647_475_200_000),
+                0.2,
+            ),
+            (
+                NodeId(303),
+                "Alice: The weather was clear that day.",
+                Timestamp(1_647_388_800_000),
+                0.8,
+            ),
+        ];
+        let mut times = HashMap::new();
+        for (node_id, text, observed_at, relevance) in rows {
+            package.memories.push(Fragment {
+                node_id,
+                name: "dated raw turn".to_owned(),
+                summary: None,
+                content: Some(text.to_owned()),
+                node_type: KnowledgeType::Episodic,
+                relevance,
+                origin: origin.clone(),
+            });
+            times.insert(
+                node_id,
+                FragmentTime {
+                    observed_at,
+                    valid_from: None,
+                    valid_until: None,
+                },
+            );
+        }
+        package.token_usage.total = 4_000;
+
+        let focused = query_focused_raw_evidence(
+            &package,
+            &times,
+            &HashMap::new(),
+            &RecallPlan::infer("Which activity was Alice pursuing on 16 March 2022?"),
+            4_000,
+        )
+        .expect("dated evidence focus");
+        let first_evidence = focused
+            .lines()
+            .find(|line| line.starts_with("- [source=node:"))
+            .expect("focused evidence line");
+        assert!(
+            first_evidence.contains("Yesterday I went bowling"),
+            "a source-relative event that covers the requested date must lead:\n{focused}"
+        );
+    }
+
+    #[test]
+    fn query_focus_is_bounded_by_answer_shape_and_remaining_tokens() {
+        let origin = Origin {
+            peer_id: PeerId(1),
+            source_kind: SourceKind::AgentObservation,
+            session_id: "collection".to_owned(),
+            scope: ScopePath::universal(),
+            confidence: 1.0,
+        };
+        let mut package = ContextPackage::empty();
+        let mut times = HashMap::new();
+        for index in 0..10u64 {
+            let node_id = NodeId(index + 1);
+            let content = if index == 0 {
+                "Alice: unrelated weather note".to_owned()
+            } else {
+                format!("Alice: archive project item {index}")
+            };
+            package.memories.push(Fragment {
+                node_id,
+                name: format!("raw turn {index}"),
+                summary: None,
+                content: Some(content),
+                node_type: KnowledgeType::Episodic,
+                relevance: 1.0 - index as f64 / 100.0,
+                origin: origin.clone(),
+            });
+            times.insert(
+                node_id,
+                FragmentTime {
+                    observed_at: Timestamp(index),
+                    valid_from: None,
+                    valid_until: None,
+                },
+            );
+        }
+        package.token_usage.total = 4_000;
+        let plan = RecallPlan::infer("List every archive project item Alice mentioned.");
+        let focused = query_focused_raw_evidence(&package, &times, &HashMap::new(), &plan, 4_000)
+            .expect("collection focus");
+        assert_eq!(
+            focused
+                .lines()
+                .filter(|line| line.starts_with("- [source=node:"))
+                .count(),
+            8
+        );
+        assert!(!focused.contains("unrelated weather note"));
+        assert!(query_focused_raw_evidence(&package, &times, &HashMap::new(), &plan, 1,).is_none());
+        assert_eq!(
+            query_focus_line_limit(&RecallPlan::infer("Where does Alice live?")),
+            4
+        );
+        assert_eq!(
+            query_focus_line_limit(&RecallPlan::infer("When did Alice move?")),
+            5
+        );
+        assert_eq!(
+            query_focus_line_limit(&RecallPlan::infer("What might Alice do next?")),
+            8
+        );
+    }
+
+    #[test]
+    fn query_focus_is_identical_across_detailed_and_evidence_layouts() {
+        let mut m = mem();
+        m.add("session-a", "alice", "the archive key is cobalt", t(1))
+            .unwrap();
+        m.flush_all().unwrap();
+        let recall = m.search_at("What is the archive key?", 10, t(100)).unwrap();
+        let detailed = m
+            .render_context_for_with(
+                "What is the archive key?",
+                &recall,
+                ContextRenderOptions::with_style(ContextRenderStyle::Detailed),
+            )
+            .unwrap();
+        let evidence = m
+            .render_context_for_with(
+                "What is the archive key?",
+                &recall,
+                ContextRenderOptions::with_style(ContextRenderStyle::Evidence),
+            )
+            .unwrap();
+        let structured = m.readout_for("What is the archive key?", &recall).unwrap();
+        let focus_section = |rendered: &str| {
+            rendered
+                .split_once("## QUERY-FOCUSED RAW EVIDENCE\n")
+                .map(|(_, focus)| focus.to_owned())
+        };
+
+        assert_eq!(focus_section(&detailed), focus_section(&evidence));
+        assert!(focus_section(&detailed).is_some());
+        let structured_focus = render_query_focused_evidence(&structured.focused_evidence)
+            .expect("typed focused evidence");
+        assert_eq!(
+            focus_section(&detailed),
+            structured_focus
+                .split_once("## QUERY-FOCUSED RAW EVIDENCE\n")
+                .map(|(_, focus)| focus.to_owned())
+        );
+        for rendered in [&detailed, &evidence] {
+            assert!(
+                rendered.find("## RECALL GUIDANCE")
+                    < rendered.find("## QUERY-FOCUSED RAW EVIDENCE"),
+                "guidance must precede the exact evidence tail:\n{rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_query_aware_rendering_remains_byte_stable() {
+        let m = mem();
+        let recall = Recall {
+            hits: Vec::new(),
+            package: ContextPackage::empty(),
+        };
+
+        assert_eq!(
+            m.render_context_for("Where does Alice live?", &recall)
+                .unwrap(),
+            m.render_context(&recall).unwrap()
+        );
     }
 
     #[test]

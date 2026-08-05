@@ -1,6 +1,9 @@
 # 0002. Reservoir And Projection State
 
-*Superseded in part by [ADR-0014](0014-shrink-to-product.md) (v0.10.0 shrink): "peer trust" as a contributor to the evidence prior `P_i` no longer applies — the peer/trust subsystem was removed and the readout trust term is a neutral `1.0`. The reservoir/projection split and the access-trace base level are unchanged.*
+*Amended by [ADR-0014](0014-shrink-to-product.md): `P_i` contains encoding
+surprise and explicit consumer feedback. Producer identifiers remain provenance,
+and the compatibility reliability term is uniform. The reservoir/projection
+split and access-trace base level are unchanged.*
 
 - Status: Accepted
 - Date: 2026-06-05
@@ -19,7 +22,7 @@ Store authoritative reservoirs separately from bounded projections:
 | `retained_action A_i = B_i + P_i` | `salience s_i` |
 | `conductance C_ij` | `edge weight w_ij` |
 
-The node reservoir is no longer a single scalar. It is the node's access-trace history (a bounded 32-trace window: a creation trace plus each committed access) — from which the base-level `B_i = ln( Σ_j (now − t_j)^(−d_j) )` (per-trace activation-dependent decay) is computed on demand — together with the persistent evidence prior `P_i` (encoding surprise, feedback / social reinforcement, peer trust). `B_i` owns forgetting and use-driven reinforcement; `P_i` is a decay-exempt evidence offset.
+The node reservoir is no longer a single scalar. It is the node's access-trace history (a bounded 32-trace window: a creation trace plus each committed access) — from which the base-level `B_i = ln( Σ_j (now − t_j)^(−d_j) )` (per-trace activation-dependent decay) is computed on demand — together with the persistent evidence prior `P_i` (encoding surprise and explicit consumer feedback). `B_i` owns forgetting and use-driven reinforcement; `P_i` is a decay-exempt evidence offset.
 
 Reservoirs are changed only by interactions. Projections are derived views used by APIs, ranking, packaging, and storage indexes.
 

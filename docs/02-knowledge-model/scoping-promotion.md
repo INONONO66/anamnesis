@@ -1,81 +1,88 @@
-# Scope And Promotion
+# Scope And Proposed Promotion
 
-> **Scope hierarchy is roadmap (as of [v0.10.0](../adr/0014-shrink-to-product.md)).** The `ScopeRelation` model below — `Ancestor` / `Descendant` / `Sibling` / `Disjoint` / `Equal` / `Universal` with per-relation retrieval handling — was **removed in the v0.10.0 shrink**. What ships is the reduced form: `ScopePath` is an opaque, canonicalized string with an `is_universal()` flag, and scope scoring is a **two-branch** weight (universal vs. non-matching). Promotion (`crystallize` + `ConsolidatedFrom`) still works, but without ancestor-aware upward routing. Read the multi-relation hierarchy here as **design intent** for a future scope layer, not current behavior.
+`ScopePath` is current applicability and ranking metadata. It is neither an
+authorization system nor a confidence score. The current engine does not accept
+an authorized-scope set and does not guarantee that a nonmatching scope is
+absent from retrieval. Consumers enforce access control before calling the
+engine, for example by selecting an appropriate store or filtering the source
+surface.
 
-Scope expresses where knowledge is valid and who may see it. Promotion moves repeatedly confirmed narrow-scope knowledge into a broader scope by adding synthesis, not by overwriting the source fragment.
+## Current scope contract
 
-## Scope Path
+`ScopePath` is an opaque canonical string plus the universal scope. Current
+retrieval scoring distinguishes:
 
-A scope path is a hierarchical string:
+- identical scopes, or a pair in which either side is universal, with weight
+  `1.0`; and
+- two different concrete scopes, with attenuated weight `0.5`.
+
+Paths use `/` as a separator, trim a trailing separator, and reject empty
+segments. The current engine does not infer ancestor, descendant, or sibling
+relationships from string prefixes. A consumer that needs hierarchical
+authorization must resolve and enforce the permitted data set before calling
+the engine.
+
+The current scope value is also stamped onto atomic facts from their cited raw
+sources. It remains routing metadata; it does not turn the sidecar into an
+access-control boundary.
+
+## Proposed: Derived-Record Eligibility (ADR-0015)
+
+The evidence catalog proposed by
+[ADR-0015](../adr/0015-evidence-grounded-formation-and-chain-retrieval.md)
+would use a strict no-widening rule over a caller-supplied eligible scope set:
 
 ```text
-universal
-project/anamnesis
-project/anamnesis/session/2026-06-05
+eligible(derived) ⊆ intersection(eligible(source_1), ..., eligible(source_n))
 ```
 
-`ScopePath::universal()` is the global scope, represented by the empty path. Other paths are compared structurally by segment prefixes.
+Every proposed fact, relation, observation, and retrieval-chain hop would have
+to be eligible for the query. A universal source would not make a restricted
+companion source universal. If the intersection were empty, the derived record
+would be invalid and the chain would not be traversable. No
+`AuthorizedScopeSet` type or equivalent hard gate exists in the current API.
 
-Paths are canonical before comparison:
+## Proposed: Promotion
 
-- `/` is the only separator. Segments are matched verbatim and case-sensitively; there is no case folding and no separator escaping.
-- A trailing `/` is trimmed (`a/b/` becomes `a/b`).
-- Consecutive slashes and empty segments are rejected at construction, not collapsed (`a//b` and `a//` are errors, never `a/b` or `a`). Only `ScopePath::universal()` may produce the empty path.
+ADR-0015 proposes that promotion add a reviewed synthesis or claim without
+editing a source or silently broadening caller-supplied eligibility.
 
-Structural comparison then operates on whole segments: a path is an `Ancestor` of another when its segment sequence is a strict prefix of the other's, a `Descendant` in the reverse case, `Sibling` when both share the same parent segments but differ in the last, and `Disjoint` otherwise. The empty (universal) path takes precedence and yields `Universal` against any non-empty path.
-
-## Scope Relation
-
-Two scope paths have exactly one relation. The relation is the first match in this precedence order, which resolves the overlap between `Universal` (the empty path is a prefix of every path) and the structural `Equal`/`Ancestor` cases:
-
-1. Both paths universal → `Equal`
-2. Exactly one path universal → `Universal`
-3. Identical paths → `Equal`
-4. Self is a strict prefix of other → `Ancestor`
-5. Other is a strict prefix of self → `Descendant`
-6. Same parent, different final segment → `Sibling`
-7. Otherwise → `Disjoint`
-
-| Relation | Meaning | Retrieval Handling |
-|---|---|---|
-| `Equal` | Same scope | Strong relevance |
-| `Ancestor` | Wider than query scope | Usable if policy permits |
-| `Descendant` | Narrower than query scope | Requires visibility check |
-| `Sibling` | Same parent, different branch | Lower relevance |
-| `Disjoint` | No relation | Excluded by default |
-| `Universal` | Exactly one path is universal | Always a candidate |
-
-## Promotion Conditions
-
-| Condition | Meaning |
+| Requirement | Contract |
 |---|---|
-| repeated use | Retrieved across multiple sessions |
-| corroboration | Confirmed by multiple peers |
-| low contradiction | Few active conflict edges |
-| stable content | No recent supersession |
-| explicit approval | Consumer requested promotion |
-
-## Promotion Flow
+| evidence | Every promoted record cites its immutable sources |
+| policy | A named consumer review policy authorizes the promotion |
+| scope | The promoted record is no broader than its sources unless an external authorization decision creates a separately sourced public claim |
+| time | Validity and supersession are explicit |
+| reversibility | Revocation removes eligibility while retaining provenance |
 
 ```mermaid
 flowchart LR
-    local["Local fragments"] --> candidate["Promotion candidate"]
-    candidate --> review["Policy / approval"]
-    review --> synthesis["Broader-scope synthesis"]
-    synthesis --> sources["ConsolidatedFrom edges"]
+    source["Scoped sources"] --> candidate["Grounded candidate"]
+    candidate --> review["Review policy"]
+    review --> synthesis["Versioned reviewed claim"]
+    synthesis --> provenance["Source references"]
 ```
 
-The source nodes remain. Promotion adds a broader-scope synthesis site linked back to sources. It must not erase the original fragments or their scope.
+An external authorization decision that publishes a new claim is itself a new
+source event with its own origin, not an implicit mutation of the restricted
+sources.
 
-## Access Rules
+## Proposed Retrieval Rules
 
-- If the query scope cannot see a private fragment, that fragment is excluded.
-- Universal knowledge may be a candidate for any query.
-- Session-local state naturally moves to lower priority over time.
-- Promotion may generate candidates automatically, but final application follows consumer policy.
+- The caller supplies and vouches for an eligible query scope set.
+- Scope gates run before candidate fusion and at every chain hop.
+- Packaging rechecks the selected evidence; an ineligible source cannot leak
+  through an eligible derived summary.
+- Contradiction bundles are returned only when both sides are eligible.
+- Read-only retrieval never promotes or broadens a record.
 
-## Related Documents
+These rules are acceptance requirements for ADR-0015. They are not guarantees
+of current `ScopePath` scoring.
 
-- The origin model is defined in [peer-identity.md](peer-identity.md).
-- Synthesis and packaging are described in [pipeline.md](../05-context-retrieval/pipeline.md).
-- Storage indexes are described in [storage.md](../03-persistence/storage.md).
+## Related documents
+
+- Origin is defined in [peer-identity.md](peer-identity.md).
+- Evidence admission is defined in [evidence-model.md](evidence-model.md).
+- Temporal compatibility is defined in [temporal-model.md](temporal-model.md).
+- Retrieval packaging is defined in
+  [pipeline.md](../05-context-retrieval/pipeline.md).

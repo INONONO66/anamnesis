@@ -81,14 +81,16 @@ A graph viewer may place contradiction pairs far apart, but layout coordinates d
 - Query does not create contradiction edges.
 - Read-only retrieval does not change reservoirs.
 - Conflicting facts preserve lineage.
-- Private contradictions do not leak across unauthorized scopes.
+- Callers exclude unauthorized records before retrieval; frustration cannot
+  reintroduce an endpoint that was absent from the permitted input graph.
 - Time-filtered queries return only stress valid at that time.
 
 ## Failure Conditions
 
 - One active endpoint must not create stress.
 - `Contradicts` must not propagate activation.
-- Scope or time gate failure must prevent stress return.
+- Caller-enforced scope exclusion or a time-gate failure must prevent stress
+  return.
 - Reservoir mutation without commit violates read-only retrieval.
 
 ## Cost

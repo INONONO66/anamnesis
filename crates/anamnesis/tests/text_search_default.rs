@@ -122,8 +122,8 @@ fn text_search_stems_inflected_forms() {
 #[test]
 fn text_search_natural_question_matches_partial_tokens() {
     let mut s = SqliteStorage::new().unwrap();
-    let id = insert_node_with_content(&mut s, "Caroline: Researching adoption agencies");
-    let results = s.text_search("What did Caroline research?", 10);
+    let id = insert_node_with_content(&mut s, "Alpha: Researching adoption agencies");
+    let results = s.text_search("What did Alpha research?", 10);
     assert!(
         results.iter().any(|(nid, _)| *nid == id),
         "a natural-language question should match nodes containing only some query tokens"
@@ -133,9 +133,9 @@ fn text_search_natural_question_matches_partial_tokens() {
 #[test]
 fn text_search_ranks_more_token_overlap_higher() {
     let mut s = SqliteStorage::new().unwrap();
-    let both = insert_node_with_content(&mut s, "Caroline researched adoption agencies");
-    let one = insert_node_with_content(&mut s, "Caroline ran a charity race");
-    let results = s.text_search("What did Caroline research?", 10);
+    let both = insert_node_with_content(&mut s, "Alpha researched adoption agencies");
+    let one = insert_node_with_content(&mut s, "Alpha ran a charity race");
+    let results = s.text_search("What did Alpha research?", 10);
     let pos = |target: NodeId| results.iter().position(|(nid, _)| *nid == target);
     let both_pos = pos(both).expect("two-token match should be returned");
     if let Some(one_pos) = pos(one) {

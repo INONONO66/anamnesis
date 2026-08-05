@@ -140,7 +140,7 @@ mod tests {
     }
 
     #[test]
-    fn r2_error_log_writes_only_connect_failures_as_sanitized_json_lines() {
+    fn error_log_writes_only_connect_failures_as_sanitized_json_lines() {
         let tempdir = tempfile::tempdir().expect("temporary database directory");
         let socket_path = tempdir
             .path()
@@ -156,7 +156,7 @@ mod tests {
     }
 
     #[test]
-    fn r2_error_log_rotates_once_at_256_kib_and_never_persists_sensitive_inputs() {
+    fn error_log_rotates_once_at_256_kib_and_never_persists_sensitive_inputs() {
         let tempdir = tempfile::tempdir().expect("temporary database directory");
         let socket_path = tempdir
             .path()

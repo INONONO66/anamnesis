@@ -8,7 +8,7 @@ Interactions are the only way persistent cognitive quantities change. Read-only 
 |---|---|
 | `A_i` retained action | Composite log need-odds that site `i` will be useful; `A_i = B_i + P_i` |
 | `B_i` base-level | Multi-trace ACT-R base-level activation derived on demand from the node's access-trace history; owns forgetting and use-driven reinforcement |
-| `P_i` evidence prior | Separate persistent prior (encoding surprise, feedback / social reinforcement, peer trust); decay-exempt |
+| `P_i` evidence prior | Separate persistent prior (encoding surprise and explicit consumer feedback); decay-exempt |
 | `C_ij` conductance | Log likelihood ratio contributed by cue/path `j -> i` |
 
 Public salience is the bounded logistic projection of the sum `B_i + P_i`; edge weight projects `C_ij`. The base level is computed from the access-trace history rather than stored as a scalar, while `P_i` and `C_ij` are maintained reservoirs.
@@ -73,7 +73,7 @@ The same query can be rerun safely before commit. Commit must validate that the 
 
 ## Derived Deltas
 
-Reinforcement uses a single learning rate `eta = 1 - 0.5^(1/N)`, derived from one target co-activation count `N` as in [conductance.md](conductance.md). The same `eta` drives feedback (`dP_i`) and conductance updates. Use-driven reinforcement of `B_i` is not a scalar add: a committed access appends a trace, and repeated access is bounded by the 32-trace window. Per-channel rates are an optional later refit of one `N`, not separate constants.
+Reinforcement uses a single learning rate `eta = 1 - 0.5^(1/N)`, derived from one target co-activation count `N` as in [conductance.md](conductance.md). The same `eta` drives feedback (`dP_i`) and conductance updates. Use-driven reinforcement of `B_i` is not a scalar add: a committed access appends a trace, and repeated access is bounded by the 32-trace window. The current contract has one `N`; any per-channel calibration must be a declared joint refit rather than a set of independent constants.
 
 ### `SiteInserted` - Surprise Gate
 

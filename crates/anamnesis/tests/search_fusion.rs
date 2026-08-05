@@ -1,4 +1,4 @@
-//! Public smoke tests for Task 7 RRF candidate fusion.
+//! Public smoke tests for RRF candidate fusion.
 //!
 //! `fuse_candidates` and `RRF_K` are `pub(crate)`, so these tests cannot call
 //! the fusion primitive directly. Instead they observe its effect through
@@ -55,8 +55,8 @@ fn engine_with(setup: impl FnOnce(&mut Engine)) -> Engine {
 fn single_source_three_candidates_preserves_order() {
     // With a single source (text only), RRF contribution `1/(60+rank+1)` is
     // monotone decreasing in rank, so the fused order equals the source order.
-    // Three matching nodes must all become fused seeds. Task 10 changed graph
-    // recall to one multi-source spreading invocation for all selected seeds.
+    // Three matching nodes must all become fused seeds and graph recall uses
+    // one multi-source spreading invocation for all selected seeds.
     let engine = engine_with(|e| {
         ingest(e, "alpha", "alpha factory pattern handler", None);
         ingest(e, "beta", "beta factory utility helper", None);
@@ -77,7 +77,7 @@ fn single_source_three_candidates_preserves_order() {
     );
     assert!(
         result.trace.iterations >= 1,
-        "Task 10 runs one multi-source graph recall invocation for all selected seeds"
+        "graph recall runs one multi-source invocation for all selected seeds"
     );
     assert!(
         result
@@ -135,7 +135,7 @@ fn two_sources_a_rank_one_in_both_yields_2_over_61() {
     );
     assert!(
         result.trace.iterations >= 1,
-        "Task 10 runs one multi-source graph recall invocation"
+        "graph recall runs one multi-source invocation"
     );
 }
 
@@ -170,16 +170,16 @@ fn tie_break_node_id_ascending() {
     );
     assert!(
         result.trace.iterations >= 1,
-        "Task 10 runs one multi-source graph recall invocation for both selected seeds"
+        "graph recall runs one multi-source invocation for both selected seeds"
     );
 }
 
 #[test]
 fn fused_order_differs_from_node_id_sort() {
-    // Pre-Task-7, `Engine::search` did `all_seed_ids.sort()` (ascending NodeId)
+    // The previous implementation sorted `all_seed_ids` by ascending NodeId
     // then `.take(3)`. With four candidates that would always drop the highest
-    // NodeId. After Task 7, RRF fusion reorders candidates by fused score.
-    // After Task 8, `select_recall_seeds` applies the seed_limit (default 3)
+    // NodeId. RRF fusion reorders candidates by fused score, then
+    // `select_recall_seeds` applies the seed_limit (default 3)
     // to the fused order, so the dropped seed is the lowest-ranked one —
     // not necessarily the highest NodeId.
     //
@@ -212,7 +212,7 @@ fn fused_order_differs_from_node_id_sort() {
     );
     assert!(
         result.trace.iterations >= 1,
-        "Task 10 runs spreading activation once from all 3 selected seeds"
+        "spreading activation runs once from all 3 selected seeds"
     );
 
     let activated: HashSet<_> = result

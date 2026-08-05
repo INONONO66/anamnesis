@@ -1,4 +1,4 @@
-//! R2 shadow extraction E2E tests. Capture turns are ingested through the real
+//! Shadow-extraction E2E tests. Capture turns are ingested through the real
 //! daemon protocol. A process-isolated `#[cfg(test)]` daemon harness injects its
 //! embedding provider, so normal binaries cannot select a synthetic provider.
 use anamnesis::graph::Edge;
@@ -15,8 +15,8 @@ use std::sync::{Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const SESSION: &str = "r2-shadow-session";
-const SCOPE: &str = "project/r2-shadow";
+const SESSION: &str = "shadow-session";
+const SCOPE: &str = "project/shadow-extraction";
 const PROVIDER_RAW_OUTPUT_MARKER: &str = "PROVIDER_RAW_OUTPUT_MARKER";
 const PROVIDER_RAW_ERROR_MARKER: &str = "PROVIDER_RAW_ERROR_MARKER";
 const STAGE1_SOURCE_MARKER: &str = "RAW_STAGE1_SOURCE_MARKER";
@@ -314,9 +314,12 @@ fn shadow_extract_stages_once_without_mutating_graph_or_reinvoking_provider() {
         "worker stderr: {}",
         String::from_utf8_lossy(&first.stderr)
     );
-    assert!(String::from_utf8_lossy(&first.stdout).contains("run_id=1"));
-    assert!(String::from_utf8_lossy(&first.stdout).contains("candidate_count=2"));
-    assert!(String::from_utf8_lossy(&first.stdout).contains("relation_count=1"));
+    let first_stdout = String::from_utf8_lossy(&first.stdout);
+    assert!(first_stdout.contains("extraction drained"));
+    assert!(first_stdout.contains("batch_count=1"));
+    assert!(first_stdout.contains("run_count=1"));
+    assert!(first_stdout.contains("candidate_count=2"));
+    assert!(first_stdout.contains("relation_count=1"));
     assert_eq!(fixture.provider_calls(), 1);
     assert_eq!(policy_counts(&fixture.db), (1, 10, 2, 1));
     assert_graph_unchanged(
@@ -389,40 +392,54 @@ fn shadow_extract_zero_output_ledgers_every_source_and_is_not_resent() {
 }
 
 #[test]
-fn invalid_schema_isolates_every_source_without_ledgering_it() {
+fn invalid_schema_isolates_and_ledgers_audited_empty_source_sidecars() {
     let fixture = Fixture::new();
     let before = fixture.graph_snapshot();
-    let expected_sources = fixture.scan_source_ids();
     let invalid = fixture.worker("invalid");
     assert!(
-        !invalid.status.success(),
-        "invalid schema must fail the worker"
+        invalid.status.success(),
+        "source isolation must keep the drain live: {}",
+        String::from_utf8_lossy(&invalid.stderr)
     );
     assert_no_provider_raw_in_cli(&invalid);
+    let invalid_stdout = String::from_utf8_lossy(&invalid.stdout);
+    assert!(invalid_stdout.contains("extraction drained"));
+    assert!(invalid_stdout.contains("batch_count=1"));
+    assert!(invalid_stdout.contains("run_count=10"));
+    assert!(invalid_stdout.contains("candidate_count=0"));
+    assert!(invalid_stdout.contains("relation_count=0"));
+    assert!(invalid_stdout.contains("omitted_source_count=10"));
     assert_eq!(
         fixture.provider_calls(),
-        9,
-        "ten always-invalid sources stop after one full attempt and the shared recovery budget"
+        19,
+        "ten invalid sources require one root call and a complete deterministic split tree"
     );
     assert_eq!(fixture.fallback_calls(), 0);
-    assert_eq!(policy_counts(&fixture.db), (9, 0, 0, 0));
-    assert_policy_has_no_provider_raw(&fixture.db);
-    assert_graph_unchanged(&before, &fixture.graph_snapshot(), "invalid-schema failure");
     assert_eq!(
-        fixture.scan_source_ids(),
-        expected_sources,
-        "failed sources must remain selectable"
+        policy_counts(&fixture.db),
+        (29, 10, 0, 0),
+        "nineteen rejected attempts and ten audited empty sidecars remain observable"
     );
-
+    assert_policy_has_no_provider_raw(&fixture.db);
+    assert_graph_unchanged(
+        &before,
+        &fixture.graph_snapshot(),
+        "invalid-schema isolation",
+    );
     let retry = fixture.worker("zero");
     assert!(
         retry.status.success(),
         "retry stderr: {}",
         String::from_utf8_lossy(&retry.stderr)
     );
-    assert_eq!(fixture.provider_calls(), 10);
-    assert_eq!(policy_counts(&fixture.db), (10, 10, 0, 0));
-    assert_graph_unchanged(&before, &fixture.graph_snapshot(), "invalid-schema retry");
+    assert!(String::from_utf8_lossy(&retry.stdout).contains("insufficient captured turns"));
+    assert_eq!(fixture.provider_calls(), 19);
+    assert_eq!(policy_counts(&fixture.db), (29, 10, 0, 0));
+    assert_graph_unchanged(
+        &before,
+        &fixture.graph_snapshot(),
+        "isolated-source retry noop",
+    );
 }
 
 #[test]

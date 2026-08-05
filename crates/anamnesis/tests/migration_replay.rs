@@ -1,5 +1,5 @@
-//! Bug #6: `migrate_schema` used to stamp `schema_version` only ONCE, after the
-//! whole hop chain for a given match arm finished — every hop's DDL/data change
+//! Migration replay coverage for interrupted schema upgrades. `migrate_schema`
+//! must stamp each completed hop so every hop's DDL/data change
 //! ran as a bare (or self-contained but unstamped) statement in between. If the
 //! process crashed mid-chain, an already-applied hop's change landed durably
 //! (SQLite commits each statement outside an explicit transaction immediately)
@@ -17,6 +17,8 @@
 
 use anamnesis::storage::SqliteStorage;
 use rusqlite::Connection;
+
+const CURRENT_SCHEMA_VERSION: u32 = 13;
 
 fn schema_version(conn: &Connection) -> u32 {
     conn.query_row("SELECT version FROM schema_version LIMIT 1", [], |row| {
@@ -63,7 +65,7 @@ fn replay_after_a_stale_version_stamp_does_not_brick_an_already_migrated_db() {
     let conn = Connection::open(&tmp).expect("raw conn opens");
     assert_eq!(
         schema_version(&conn),
-        12,
+        CURRENT_SCHEMA_VERSION,
         "replay must reach the current schema version"
     );
 
@@ -97,7 +99,7 @@ fn replay_from_stale_v1_against_current_schema_does_not_brick() {
     let conn = Connection::open(&tmp).expect("raw conn opens");
     assert_eq!(
         schema_version(&conn),
-        12,
+        CURRENT_SCHEMA_VERSION,
         "replay must reach the current schema version"
     );
 

@@ -351,7 +351,8 @@ pub struct SearchInput {
     pub text: String,
     /// Agent ID for identity-biased retrieval. None = no identity bias.
     pub agent_id: Option<String>,
-    /// Peer filter — restrict results to nodes produced by these peers.
+    /// Producer-provenance filter — restrict results to nodes whose origin
+    /// carries one of these peer ids. A peer id is not a trust score.
     ///
     /// `None` = include all peers (default). Combined with `scope` as AND.
     pub peer_filter: Option<Vec<crate::graph::types::PeerId>>,
@@ -463,7 +464,8 @@ pub struct ReadoutCandidate {
     pub impedance: f64,
     /// Scope compatibility weight.
     pub scope_weight: f64,
-    /// Origin/peer reliability weight.
+    /// Reserved trust-compatibility score component. The current engine emits
+    /// the neutral value `1.0`; it has no peer-trust subsystem.
     pub trust_weight: f64,
     /// Frustration stress attached to selected contradictions.
     pub stress: f64,

@@ -1,4 +1,4 @@
-//! v0.5.0 integration test suite (T22).
+//! v0.5.0 integration test suite.
 //!
 //! End-to-end scenarios covering:
 //! - Multi-origin ingest → conflict → retract → search → health

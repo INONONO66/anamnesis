@@ -11,7 +11,9 @@ use std::time::Duration;
 #[cfg(test)]
 use std::{cell::RefCell, marker::PhantomData, rc::Rc};
 
-use crate::extract::audit::ExtractionAuditResult;
+use crate::extract::audit::{
+    ExtractionAuditCandidateRow, ExtractionAuditRelationRow, ExtractionAuditResult,
+};
 use crate::extract::types::{AuditSupport, ContaminationCategory, RelationVerdict};
 use crate::proto::RecallEventKind;
 use crate::proto::{ExtractionErrorKind, StageExtractionResult};
@@ -74,7 +76,7 @@ pub(crate) struct SweepPoint {
     pub attempts: u64,
 }
 
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 #[cfg(test)]
 thread_local! {
@@ -285,6 +287,7 @@ impl PolicyStore {
         profile_components: &crate::extract::types::ExtractorProfileComponents,
         llm_duration_ms: u64,
         sources: &[crate::extract::types::ExtractionSource],
+        source_incarnations: &std::collections::HashMap<u64, String>,
         validated_extraction: &crate::extract::types::ValidatedExtraction,
     ) -> Result<StageExtractionResult, Error> {
         extraction::stage(
@@ -293,6 +296,7 @@ impl PolicyStore {
             profile_components,
             llm_duration_ms,
             sources,
+            source_incarnations,
             validated_extraction,
         )
         .map_err(PolicyStoreError::into_engine_error)
@@ -318,6 +322,20 @@ impl PolicyStore {
     }
     pub(crate) fn list_extraction_audit(&self, limit: u32) -> Result<ExtractionAuditResult, Error> {
         extraction::list_audit(&self.connection, limit).map_err(PolicyStoreError::into_engine_error)
+    }
+    pub(crate) fn extraction_audit_candidate(
+        &self,
+        id: u64,
+    ) -> Result<Option<ExtractionAuditCandidateRow>, Error> {
+        extraction::candidate_audit_by_id(&self.connection, id)
+            .map_err(PolicyStoreError::into_engine_error)
+    }
+    pub(crate) fn extraction_audit_relation(
+        &self,
+        id: u64,
+    ) -> Result<Option<ExtractionAuditRelationRow>, Error> {
+        extraction::relation_audit_by_id(&self.connection, id)
+            .map_err(PolicyStoreError::into_engine_error)
     }
     pub(crate) fn update_extraction_candidate_audit(
         &mut self,
@@ -443,7 +461,8 @@ mod tests {
 
     use rusqlite::Connection;
 
-    use super::PolicyStoreError;
+    use super::{PolicyStore, PolicyStoreError};
+    use crate::extract::types::{AuditSupport, ContaminationCategory, RelationVerdict};
 
     #[test]
     fn sqlite_failures_retain_actionable_open_evidence_without_sql() {
@@ -466,5 +485,172 @@ mod tests {
         assert!(message.contains("sqlite category:"));
         assert!(message.contains("sqlite source:"));
         assert!(!message.contains("INSERT"));
+    }
+
+    #[test]
+    fn committed_relation_audit_is_immutable() {
+        let mut connection = Connection::open_in_memory().expect("open policy database");
+        connection
+            .execute_batch(
+                "CREATE TABLE extract_relations (
+                    id INTEGER PRIMARY KEY,
+                    audit_status TEXT,
+                    reviewed_by TEXT,
+                    reviewed_at INTEGER,
+                    committed_edge_id INTEGER
+                 );
+                 INSERT INTO extract_relations
+                    (id, audit_status, reviewed_by, reviewed_at, committed_edge_id)
+                 VALUES (1, 'correct', 'original-reviewer', 10, 42);",
+            )
+            .expect("seed committed extraction relation");
+
+        super::extraction::update_relation_audit(
+            &mut connection,
+            1,
+            RelationVerdict::WrongDirection,
+            "replacement-reviewer",
+            20,
+        )
+        .expect_err("committed relation audit must reject mutation");
+
+        let persisted: (String, String, u64, u64) = connection
+            .query_row(
+                "SELECT audit_status, reviewed_by, reviewed_at, committed_edge_id
+                 FROM extract_relations WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("read committed relation audit");
+        assert_eq!(
+            persisted,
+            ("correct".to_owned(), "original-reviewer".to_owned(), 10, 42)
+        );
+    }
+
+    #[test]
+    fn committed_candidate_audit_is_immutable() {
+        let mut connection = Connection::open_in_memory().expect("open policy database");
+        connection
+            .execute_batch(
+                "CREATE TABLE extract_candidates (
+                    id INTEGER PRIMARY KEY,
+                    audit_support TEXT,
+                    contamination_category TEXT,
+                    reviewed_by TEXT,
+                    reviewed_at INTEGER,
+                    committed_node_id INTEGER
+                 );
+                 INSERT INTO extract_candidates
+                    (id, audit_support, contamination_category, reviewed_by,
+                     reviewed_at, committed_node_id)
+                 VALUES (1, 'supported', NULL, 'original-reviewer', 10, 42);",
+            )
+            .expect("seed committed extraction candidate");
+
+        super::extraction::update_candidate_audit(
+            &mut connection,
+            1,
+            AuditSupport::Unsupported,
+            Some(ContaminationCategory::UnsupportedClaim),
+            "replacement-reviewer",
+            20,
+        )
+        .expect_err("committed candidate audit must reject mutation");
+
+        let persisted: (String, Option<String>, String, u64, u64) = connection
+            .query_row(
+                "SELECT audit_support, contamination_category, reviewed_by,
+                        reviewed_at, committed_node_id
+                 FROM extract_candidates WHERE id = 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .expect("read committed candidate audit");
+        assert_eq!(
+            persisted,
+            (
+                "supported".to_owned(),
+                None,
+                "original-reviewer".to_owned(),
+                10,
+                42,
+            )
+        );
+    }
+
+    #[test]
+    fn extraction_audit_rows_are_addressable_by_primary_key() {
+        let store = PolicyStore::in_memory().expect("open policy store");
+        store
+            .connection
+            .execute_batch(
+                "INSERT INTO extract_runs
+                    (id, at_ms, profile_id, mode, turn_count, candidate_count,
+                     relation_count, schema_valid, llm_invoked, error_kind, duration_ms)
+                 VALUES (7, 10, 'profile', 'shadow', 1, 2, 1, 1, 1, NULL, 3);
+
+                 INSERT INTO extract_candidates
+                    (id, run_id, item_local_id, content, kind, confidence, entity_tags,
+                     source_turn_keys, source_session_id, source_scope,
+                     source_content_hashes, source_node_ids, idempotency_key,
+                     audit_support, contamination_category, reviewed_by, reviewed_at,
+                     committed_node_id)
+                 VALUES
+                    (11, 7, 'first', 'first claim', 'fact', 0.8, '[\"alpha\"]',
+                     '[\"turn-1\"]', 'session', 'scope', '[\"hash-1\"]', '[1]',
+                     'candidate:first', 'supported', NULL, 'reviewer', 20, 101),
+                    (12, 7, 'second', 'second claim', 'decision', 0.9, '[\"beta\"]',
+                     '[\"turn-1\"]', 'session', 'scope', '[\"hash-1\"]', '[1]',
+                     'candidate:second', 'supported', NULL, 'reviewer', 21, 102);
+
+                 INSERT INTO extract_relations
+                    (id, candidate_from, candidate_to, relation_type, idempotency_key,
+                     audit_status, reviewed_by, reviewed_at, committed_edge_id)
+                 VALUES
+                    (13, 11, 12, 'supports', 'relation:first-second',
+                     'correct', 'reviewer', 22, 201);",
+            )
+            .expect("seed extraction audit rows");
+
+        let listed = store
+            .list_extraction_audit(10)
+            .expect("list extraction audit");
+        assert_eq!(listed.candidates.len(), 2);
+        assert_eq!(listed.relations.len(), 1);
+        assert_eq!(
+            store
+                .extraction_audit_candidate(12)
+                .expect("read candidate by id"),
+            Some(listed.candidates[1].clone())
+        );
+        assert_eq!(
+            store
+                .extraction_audit_relation(13)
+                .expect("read relation by id"),
+            Some(listed.relations[0].clone())
+        );
+        assert_eq!(
+            store
+                .extraction_audit_candidate(999)
+                .expect("missing candidate lookup"),
+            None
+        );
+        assert_eq!(
+            store
+                .extraction_audit_relation(999)
+                .expect("missing relation lookup"),
+            None
+        );
+        assert!(store.extraction_audit_candidate(u64::MAX).is_err());
+        assert!(store.extraction_audit_relation(u64::MAX).is_err());
     }
 }

@@ -71,6 +71,7 @@ const EXTRACTION_TABLES_SQL: &str = "
         source_scope TEXT NOT NULL,
         source_content_hashes TEXT NOT NULL,
         source_node_ids TEXT NOT NULL,
+        source_incarnations TEXT NOT NULL DEFAULT '[]',
         idempotency_key TEXT NOT NULL UNIQUE,
         audit_support TEXT CHECK(audit_support IN ('supported', 'partial', 'unsupported')),
         contamination_category TEXT CHECK(contamination_category IN (
@@ -235,12 +236,26 @@ pub(super) fn migrate_v4(transaction: &Transaction<'_>) -> Result<(), PolicyStor
         .map_err(|error| PolicyStoreError::sqlite("migrate v3 grounded extraction rows", error))
 }
 
+pub(super) fn migrate_v5(transaction: &Transaction<'_>) -> Result<(), PolicyStoreError> {
+    transaction
+        .execute_batch(
+            "
+            ALTER TABLE extract_candidates
+                ADD COLUMN source_incarnations TEXT NOT NULL DEFAULT '[]';
+            ",
+        )
+        .map_err(|error| {
+            PolicyStoreError::sqlite("migrate v4 extraction source incarnations", error)
+        })
+}
+
 pub(super) fn stage(
     connection: &mut Connection,
     profile_id: &str,
     profile_components: &ExtractorProfileComponents,
     llm_duration_ms: u64,
     sources: &[ExtractionSource],
+    source_incarnations: &HashMap<u64, String>,
     extraction: &ValidatedExtraction,
 ) -> Result<StageExtractionResult, PolicyStoreError> {
     let duration_ms = sqlite_u64(llm_duration_ms, "extraction llm_duration_ms")?;
@@ -320,6 +335,18 @@ pub(super) fn stage(
                 .collect::<Vec<_>>(),
             "staged candidate source node ids",
         )?;
+        let source_incarnations = serialize(
+            candidate
+                .sources
+                .iter()
+                .map(|source| {
+                    source_incarnations.get(&source.node_id).ok_or_else(|| {
+                        PolicyStoreError::operation("resolve staged candidate source incarnation")
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            "staged candidate source incarnations",
+        )?;
         let entity_tags = serialize(&candidate.entity_tags, "staged candidate entity tags")?;
         let ground_object = candidate.object.as_ref();
         let evidence_object = candidate.evidence_object.as_ref();
@@ -373,9 +400,9 @@ pub(super) fn stage(
                   evidence_span_start, evidence_span_end, evidence_span_sha256,
                   evidence_source_node_id, entity_tags, valid_from_ms, valid_until_ms, source_turn_keys,
                   source_session_id, source_scope, source_content_hashes, source_node_ids,
-                  idempotency_key)
+                  source_incarnations, idempotency_key)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
-                         ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
+                         ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
                 params![
                     run_id_sql,
                     candidate.item_local_id,
@@ -398,6 +425,7 @@ pub(super) fn stage(
                     source.scope,
                     source_content_hashes,
                     source_node_ids,
+                    source_incarnations,
                     candidate.idempotency_key,
                 ],
             )
@@ -472,7 +500,8 @@ pub(super) fn list_audit(
                     c.source_turn_keys, c.source_content_hashes,
                     c.source_session_id, c.source_scope, c.source_node_ids,
                     c.idempotency_key, c.audit_support, c.contamination_category,
-                    c.reviewed_by, c.reviewed_at, c.committed_node_id
+                    c.reviewed_by, c.reviewed_at, c.committed_node_id,
+                    c.source_incarnations
              FROM extract_candidates c JOIN extract_runs r ON r.id = c.run_id
              ORDER BY c.id LIMIT ?1",
         )
@@ -485,149 +514,15 @@ pub(super) fn list_audit(
         .next()
         .map_err(|error| PolicyStoreError::sqlite("read extraction audit candidate", error))?
     {
-        let kind: String = row
-            .get(5)
-            .map_err(|error| PolicyStoreError::sqlite("read candidate kind", error))?;
-        let support: Option<String> = row
-            .get(24)
-            .map_err(|error| PolicyStoreError::sqlite("read candidate audit support", error))?;
-        let contamination: Option<String> = row
-            .get(25)
-            .map_err(|error| PolicyStoreError::sqlite("read candidate contamination", error))?;
-        let reviewed_at: Option<i64> = row
-            .get(27)
-            .map_err(|error| PolicyStoreError::sqlite("read candidate reviewed_at", error))?;
-        candidates.push(ExtractionAuditCandidateRow {
-            id: sqlite_row_id(
-                row.get(0)
-                    .map_err(|error| PolicyStoreError::sqlite("read candidate id", error))?,
-                "candidate id",
-            )?,
-            run_id: sqlite_row_id(
-                row.get(1)
-                    .map_err(|error| PolicyStoreError::sqlite("read candidate run_id", error))?,
-                "candidate run_id",
-            )?,
-            profile_id: row
-                .get(2)
-                .map_err(|error| PolicyStoreError::sqlite("read candidate profile_id", error))?,
-            item_local_id: row
-                .get(3)
-                .map_err(|error| PolicyStoreError::sqlite("read candidate item local id", error))?,
-            content: row
-                .get(4)
-                .map_err(|error| PolicyStoreError::sqlite("read candidate content", error))?,
-            kind: parse_candidate_kind(&kind)?,
-            confidence: row
-                .get(6)
-                .map_err(|error| PolicyStoreError::sqlite("read candidate confidence", error))?,
-            subject: row
-                .get(7)
-                .map_err(|error| PolicyStoreError::sqlite("read candidate subject", error))?,
-            relation: row
-                .get(8)
-                .map_err(|error| PolicyStoreError::sqlite("read candidate relation", error))?,
-            object: row
-                .get(9)
-                .map_err(|error| PolicyStoreError::sqlite("read candidate object", error))?,
-            evidence_object: row.get(10).map_err(|error| {
-                PolicyStoreError::sqlite("read candidate evidence object", error)
-            })?,
-            evidence_span: None,
-            evidence_span_start: row
-                .get::<_, Option<i64>>(11)
-                .map_err(|error| {
-                    PolicyStoreError::sqlite("read candidate evidence span start", error)
-                })?
-                .map(|value| sqlite_row_id(value, "candidate evidence_span_start"))
-                .transpose()?,
-            evidence_span_end: row
-                .get::<_, Option<i64>>(12)
-                .map_err(|error| {
-                    PolicyStoreError::sqlite("read candidate evidence span end", error)
-                })?
-                .map(|value| sqlite_row_id(value, "candidate evidence_span_end"))
-                .transpose()?,
-            evidence_span_sha256: row.get(13).map_err(|error| {
-                PolicyStoreError::sqlite("read candidate evidence span sha256", error)
-            })?,
-            evidence_source_node_id: row
-                .get::<_, Option<i64>>(14)
-                .map_err(|error| {
-                    PolicyStoreError::sqlite("read candidate evidence source node id", error)
-                })?
-                .map(|value| sqlite_row_id(value, "candidate evidence_source_node_id"))
-                .transpose()?,
-            entity_tags: deserialize(
-                &row.get::<_, String>(15).map_err(|error| {
-                    PolicyStoreError::sqlite("read candidate entity tags", error)
-                })?,
-                "candidate entity tags",
-            )?,
-            valid_from_ms: row
-                .get::<_, Option<i64>>(16)
-                .map_err(|error| PolicyStoreError::sqlite("read candidate valid_from_ms", error))?
-                .map(|value| sqlite_row_id(value, "candidate valid_from_ms"))
-                .transpose()?,
-            valid_until_ms: row
-                .get::<_, Option<i64>>(17)
-                .map_err(|error| PolicyStoreError::sqlite("read candidate valid_until_ms", error))?
-                .map(|value| sqlite_row_id(value, "candidate valid_until_ms"))
-                .transpose()?,
-            source_turn_keys: deserialize(
-                &row.get::<_, String>(18).map_err(|error| {
-                    PolicyStoreError::sqlite("read candidate source turn keys", error)
-                })?,
-                "candidate source turn keys",
-            )?,
-            source_content_hashes: deserialize(
-                &row.get::<_, String>(19).map_err(|error| {
-                    PolicyStoreError::sqlite("read candidate source content hashes", error)
-                })?,
-                "candidate source content hashes",
-            )?,
-            source_session_id: row.get(20).map_err(|error| {
-                PolicyStoreError::sqlite("read candidate source session", error)
-            })?,
-            source_scope: row
-                .get(21)
-                .map_err(|error| PolicyStoreError::sqlite("read candidate source scope", error))?,
-            source_node_ids: deserialize(
-                &row.get::<_, String>(22).map_err(|error| {
-                    PolicyStoreError::sqlite("read candidate source node ids", error)
-                })?,
-                "candidate source node ids",
-            )?,
-            idempotency_key: row.get(23).map_err(|error| {
-                PolicyStoreError::sqlite("read candidate idempotency key", error)
-            })?,
-            support: support.as_deref().map(parse_audit_support).transpose()?,
-            contamination: contamination
-                .as_deref()
-                .map(parse_contamination_category)
-                .transpose()?,
-            reviewed_by: row
-                .get(26)
-                .map_err(|error| PolicyStoreError::sqlite("read candidate reviewer", error))?,
-            reviewed_at: reviewed_at
-                .map(|value| sqlite_row_id(value, "candidate reviewed_at"))
-                .transpose()?,
-            committed_node_id: row
-                .get::<_, Option<i64>>(28)
-                .map_err(|error| {
-                    PolicyStoreError::sqlite("read candidate committed_node_id", error)
-                })?
-                .map(|value| sqlite_row_id(value, "candidate committed_node_id"))
-                .transpose()?,
-            sources: Vec::new(),
-        });
+        candidates.push(read_candidate_audit_row(row)?);
     }
 
     let mut relation_statement = connection
         .prepare(
             "SELECT r.id, source.run_id, run.profile_id, r.candidate_from, r.candidate_to,
                     source.item_local_id, target.item_local_id, r.relation_type,
-                    r.audit_status, r.reviewed_by, r.reviewed_at, r.committed_edge_id
+                    r.idempotency_key, r.audit_status, r.reviewed_by, r.reviewed_at,
+                    r.committed_edge_id
              FROM extract_relations r
              JOIN extract_candidates source ON source.id = r.candidate_from
              JOIN extract_candidates target ON target.id = r.candidate_to
@@ -643,66 +538,270 @@ pub(super) fn list_audit(
         .next()
         .map_err(|error| PolicyStoreError::sqlite("read extraction audit relation", error))?
     {
-        let relation_type: String = row
-            .get(7)
-            .map_err(|error| PolicyStoreError::sqlite("read relation type", error))?;
-        let verdict: Option<String> = row
-            .get(8)
-            .map_err(|error| PolicyStoreError::sqlite("read relation audit verdict", error))?;
-        let reviewed_at: Option<i64> = row
-            .get(10)
-            .map_err(|error| PolicyStoreError::sqlite("read relation reviewed_at", error))?;
-        relations.push(ExtractionAuditRelationRow {
-            id: sqlite_row_id(
-                row.get(0)
-                    .map_err(|error| PolicyStoreError::sqlite("read relation id", error))?,
-                "relation id",
-            )?,
-            run_id: sqlite_row_id(
-                row.get(1)
-                    .map_err(|error| PolicyStoreError::sqlite("read relation run_id", error))?,
-                "relation run_id",
-            )?,
-            profile_id: row
-                .get(2)
-                .map_err(|error| PolicyStoreError::sqlite("read relation profile_id", error))?,
-            candidate_from: sqlite_row_id(
-                row.get(3)
-                    .map_err(|error| PolicyStoreError::sqlite("read relation source", error))?,
-                "relation source",
-            )?,
-            candidate_to: sqlite_row_id(
-                row.get(4)
-                    .map_err(|error| PolicyStoreError::sqlite("read relation target", error))?,
-                "relation target",
-            )?,
-            from_item_local_id: row.get(5).map_err(|error| {
-                PolicyStoreError::sqlite("read relation source item local id", error)
-            })?,
-            to_item_local_id: row.get(6).map_err(|error| {
-                PolicyStoreError::sqlite("read relation target item local id", error)
-            })?,
-            relation_type: parse_relation_kind(&relation_type)?,
-            verdict: verdict.as_deref().map(parse_relation_verdict).transpose()?,
-            reviewed_by: row
-                .get(9)
-                .map_err(|error| PolicyStoreError::sqlite("read relation reviewer", error))?,
-            reviewed_at: reviewed_at
-                .map(|value| sqlite_row_id(value, "relation reviewed_at"))
-                .transpose()?,
-            committed_edge_id: row
-                .get::<_, Option<i64>>(11)
-                .map_err(|error| {
-                    PolicyStoreError::sqlite("read relation committed_edge_id", error)
-                })?
-                .map(|value| sqlite_row_id(value, "relation committed_edge_id"))
-                .transpose()?,
-        });
+        relations.push(read_relation_audit_row(row)?);
     }
 
     Ok(ExtractionAuditResult {
         candidates,
         relations,
+    })
+}
+
+pub(super) fn candidate_audit_by_id(
+    connection: &Connection,
+    id: u64,
+) -> Result<Option<ExtractionAuditCandidateRow>, PolicyStoreError> {
+    let id = sqlite_u64(id, "extraction candidate audit id")?;
+    let mut statement = connection
+        .prepare(
+            "SELECT c.id, c.run_id, r.profile_id, c.item_local_id, c.content, c.kind,
+                    c.confidence, c.ground_subject, c.ground_relation, c.ground_object,
+                    c.evidence_object, c.evidence_span_start, c.evidence_span_end,
+                    c.evidence_span_sha256, c.evidence_source_node_id,
+                    c.entity_tags, c.valid_from_ms, c.valid_until_ms,
+                    c.source_turn_keys, c.source_content_hashes,
+                    c.source_session_id, c.source_scope, c.source_node_ids,
+                    c.idempotency_key, c.audit_support, c.contamination_category,
+                    c.reviewed_by, c.reviewed_at, c.committed_node_id,
+                    c.source_incarnations
+             FROM extract_candidates c JOIN extract_runs r ON r.id = c.run_id
+             WHERE c.id = ?1",
+        )
+        .map_err(|error| PolicyStoreError::sqlite("prepare extraction audit candidate", error))?;
+    let mut rows = statement
+        .query([id])
+        .map_err(|error| PolicyStoreError::sqlite("query extraction audit candidate", error))?;
+    rows.next()
+        .map_err(|error| PolicyStoreError::sqlite("read extraction audit candidate", error))?
+        .map(read_candidate_audit_row)
+        .transpose()
+}
+
+pub(super) fn relation_audit_by_id(
+    connection: &Connection,
+    id: u64,
+) -> Result<Option<ExtractionAuditRelationRow>, PolicyStoreError> {
+    let id = sqlite_u64(id, "extraction relation audit id")?;
+    let mut statement = connection
+        .prepare(
+            "SELECT r.id, source.run_id, run.profile_id, r.candidate_from, r.candidate_to,
+                    source.item_local_id, target.item_local_id, r.relation_type,
+                    r.idempotency_key, r.audit_status, r.reviewed_by, r.reviewed_at,
+                    r.committed_edge_id
+             FROM extract_relations r
+             JOIN extract_candidates source ON source.id = r.candidate_from
+             JOIN extract_candidates target ON target.id = r.candidate_to
+             JOIN extract_runs run ON run.id = source.run_id
+             WHERE r.id = ?1",
+        )
+        .map_err(|error| PolicyStoreError::sqlite("prepare extraction audit relation", error))?;
+    let mut rows = statement
+        .query([id])
+        .map_err(|error| PolicyStoreError::sqlite("query extraction audit relation", error))?;
+    rows.next()
+        .map_err(|error| PolicyStoreError::sqlite("read extraction audit relation", error))?
+        .map(read_relation_audit_row)
+        .transpose()
+}
+
+fn read_candidate_audit_row(
+    row: &rusqlite::Row<'_>,
+) -> Result<ExtractionAuditCandidateRow, PolicyStoreError> {
+    let kind: String = row
+        .get(5)
+        .map_err(|error| PolicyStoreError::sqlite("read candidate kind", error))?;
+    let support: Option<String> = row
+        .get(24)
+        .map_err(|error| PolicyStoreError::sqlite("read candidate audit support", error))?;
+    let contamination: Option<String> = row
+        .get(25)
+        .map_err(|error| PolicyStoreError::sqlite("read candidate contamination", error))?;
+    let reviewed_at: Option<i64> = row
+        .get(27)
+        .map_err(|error| PolicyStoreError::sqlite("read candidate reviewed_at", error))?;
+    Ok(ExtractionAuditCandidateRow {
+        id: sqlite_row_id(
+            row.get(0)
+                .map_err(|error| PolicyStoreError::sqlite("read candidate id", error))?,
+            "candidate id",
+        )?,
+        run_id: sqlite_row_id(
+            row.get(1)
+                .map_err(|error| PolicyStoreError::sqlite("read candidate run_id", error))?,
+            "candidate run_id",
+        )?,
+        profile_id: row
+            .get(2)
+            .map_err(|error| PolicyStoreError::sqlite("read candidate profile_id", error))?,
+        item_local_id: row
+            .get(3)
+            .map_err(|error| PolicyStoreError::sqlite("read candidate item local id", error))?,
+        content: row
+            .get(4)
+            .map_err(|error| PolicyStoreError::sqlite("read candidate content", error))?,
+        kind: parse_candidate_kind(&kind)?,
+        confidence: row
+            .get(6)
+            .map_err(|error| PolicyStoreError::sqlite("read candidate confidence", error))?,
+        subject: row
+            .get(7)
+            .map_err(|error| PolicyStoreError::sqlite("read candidate subject", error))?,
+        relation: row
+            .get(8)
+            .map_err(|error| PolicyStoreError::sqlite("read candidate relation", error))?,
+        object: row
+            .get(9)
+            .map_err(|error| PolicyStoreError::sqlite("read candidate object", error))?,
+        evidence_object: row
+            .get(10)
+            .map_err(|error| PolicyStoreError::sqlite("read candidate evidence object", error))?,
+        evidence_span: None,
+        evidence_span_start: row
+            .get::<_, Option<i64>>(11)
+            .map_err(|error| PolicyStoreError::sqlite("read candidate evidence span start", error))?
+            .map(|value| sqlite_row_id(value, "candidate evidence_span_start"))
+            .transpose()?,
+        evidence_span_end: row
+            .get::<_, Option<i64>>(12)
+            .map_err(|error| PolicyStoreError::sqlite("read candidate evidence span end", error))?
+            .map(|value| sqlite_row_id(value, "candidate evidence_span_end"))
+            .transpose()?,
+        evidence_span_sha256: row.get(13).map_err(|error| {
+            PolicyStoreError::sqlite("read candidate evidence span sha256", error)
+        })?,
+        evidence_source_node_id: row
+            .get::<_, Option<i64>>(14)
+            .map_err(|error| {
+                PolicyStoreError::sqlite("read candidate evidence source node id", error)
+            })?
+            .map(|value| sqlite_row_id(value, "candidate evidence_source_node_id"))
+            .transpose()?,
+        entity_tags: deserialize(
+            &row.get::<_, String>(15)
+                .map_err(|error| PolicyStoreError::sqlite("read candidate entity tags", error))?,
+            "candidate entity tags",
+        )?,
+        valid_from_ms: row
+            .get::<_, Option<i64>>(16)
+            .map_err(|error| PolicyStoreError::sqlite("read candidate valid_from_ms", error))?
+            .map(|value| sqlite_row_id(value, "candidate valid_from_ms"))
+            .transpose()?,
+        valid_until_ms: row
+            .get::<_, Option<i64>>(17)
+            .map_err(|error| PolicyStoreError::sqlite("read candidate valid_until_ms", error))?
+            .map(|value| sqlite_row_id(value, "candidate valid_until_ms"))
+            .transpose()?,
+        source_turn_keys: deserialize(
+            &row.get::<_, String>(18).map_err(|error| {
+                PolicyStoreError::sqlite("read candidate source turn keys", error)
+            })?,
+            "candidate source turn keys",
+        )?,
+        source_content_hashes: deserialize(
+            &row.get::<_, String>(19).map_err(|error| {
+                PolicyStoreError::sqlite("read candidate source content hashes", error)
+            })?,
+            "candidate source content hashes",
+        )?,
+        source_session_id: row
+            .get(20)
+            .map_err(|error| PolicyStoreError::sqlite("read candidate source session", error))?,
+        source_scope: row
+            .get(21)
+            .map_err(|error| PolicyStoreError::sqlite("read candidate source scope", error))?,
+        source_node_ids: deserialize(
+            &row.get::<_, String>(22).map_err(|error| {
+                PolicyStoreError::sqlite("read candidate source node ids", error)
+            })?,
+            "candidate source node ids",
+        )?,
+        idempotency_key: row
+            .get(23)
+            .map_err(|error| PolicyStoreError::sqlite("read candidate idempotency key", error))?,
+        support: support.as_deref().map(parse_audit_support).transpose()?,
+        contamination: contamination
+            .as_deref()
+            .map(parse_contamination_category)
+            .transpose()?,
+        reviewed_by: row
+            .get(26)
+            .map_err(|error| PolicyStoreError::sqlite("read candidate reviewer", error))?,
+        reviewed_at: reviewed_at
+            .map(|value| sqlite_row_id(value, "candidate reviewed_at"))
+            .transpose()?,
+        committed_node_id: row
+            .get::<_, Option<i64>>(28)
+            .map_err(|error| PolicyStoreError::sqlite("read candidate committed_node_id", error))?
+            .map(|value| sqlite_row_id(value, "candidate committed_node_id"))
+            .transpose()?,
+        source_incarnations: deserialize(
+            &row.get::<_, String>(29).map_err(|error| {
+                PolicyStoreError::sqlite("read candidate source incarnations", error)
+            })?,
+            "candidate source incarnations",
+        )?,
+        sources: Vec::new(),
+    })
+}
+
+fn read_relation_audit_row(
+    row: &rusqlite::Row<'_>,
+) -> Result<ExtractionAuditRelationRow, PolicyStoreError> {
+    let relation_type: String = row
+        .get(7)
+        .map_err(|error| PolicyStoreError::sqlite("read relation type", error))?;
+    let verdict: Option<String> = row
+        .get(9)
+        .map_err(|error| PolicyStoreError::sqlite("read relation audit verdict", error))?;
+    let reviewed_at: Option<i64> = row
+        .get(11)
+        .map_err(|error| PolicyStoreError::sqlite("read relation reviewed_at", error))?;
+    Ok(ExtractionAuditRelationRow {
+        id: sqlite_row_id(
+            row.get(0)
+                .map_err(|error| PolicyStoreError::sqlite("read relation id", error))?,
+            "relation id",
+        )?,
+        run_id: sqlite_row_id(
+            row.get(1)
+                .map_err(|error| PolicyStoreError::sqlite("read relation run_id", error))?,
+            "relation run_id",
+        )?,
+        profile_id: row
+            .get(2)
+            .map_err(|error| PolicyStoreError::sqlite("read relation profile_id", error))?,
+        candidate_from: sqlite_row_id(
+            row.get(3)
+                .map_err(|error| PolicyStoreError::sqlite("read relation source", error))?,
+            "relation source",
+        )?,
+        candidate_to: sqlite_row_id(
+            row.get(4)
+                .map_err(|error| PolicyStoreError::sqlite("read relation target", error))?,
+            "relation target",
+        )?,
+        from_item_local_id: row.get(5).map_err(|error| {
+            PolicyStoreError::sqlite("read relation source item local id", error)
+        })?,
+        to_item_local_id: row.get(6).map_err(|error| {
+            PolicyStoreError::sqlite("read relation target item local id", error)
+        })?,
+        relation_type: parse_relation_kind(&relation_type)?,
+        idempotency_key: row
+            .get(8)
+            .map_err(|error| PolicyStoreError::sqlite("read relation idempotency key", error))?,
+        verdict: verdict.as_deref().map(parse_relation_verdict).transpose()?,
+        reviewed_by: row
+            .get(10)
+            .map_err(|error| PolicyStoreError::sqlite("read relation reviewer", error))?,
+        reviewed_at: reviewed_at
+            .map(|value| sqlite_row_id(value, "relation reviewed_at"))
+            .transpose()?,
+        committed_edge_id: row
+            .get::<_, Option<i64>>(12)
+            .map_err(|error| PolicyStoreError::sqlite("read relation committed_edge_id", error))?
+            .map(|value| sqlite_row_id(value, "relation committed_edge_id"))
+            .transpose()?,
     })
 }
 pub(super) fn record_failure(
@@ -749,7 +848,7 @@ pub(super) fn update_candidate_audit(
             "UPDATE extract_candidates
              SET audit_support = ?1, contamination_category = ?2,
                  reviewed_by = ?3, reviewed_at = ?4
-             WHERE id = ?5",
+             WHERE id = ?5 AND committed_node_id IS NULL",
             params![
                 audit_support(support),
                 contamination.map(contamination_category),
@@ -785,7 +884,7 @@ pub(super) fn update_relation_audit(
         .execute(
             "UPDATE extract_relations
              SET audit_status = ?1, reviewed_by = ?2, reviewed_at = ?3
-             WHERE id = ?4",
+             WHERE id = ?4 AND committed_edge_id IS NULL",
             params![relation_verdict(verdict), reviewer, reviewed_at, id],
         )
         .map_err(|error| PolicyStoreError::sqlite("update extraction relation audit", error))?;

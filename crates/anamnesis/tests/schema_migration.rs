@@ -13,6 +13,8 @@
 use anamnesis::storage::SqliteStorage;
 use rusqlite::{Connection, OptionalExtension};
 
+const CURRENT_SCHEMA_VERSION: u32 = 13;
+
 /// Collect the column names of a table in declaration order via PRAGMA table_info.
 fn table_columns(conn: &Connection, table: &str) -> Vec<(String, String, i64, String)> {
     let mut stmt = conn
@@ -88,8 +90,8 @@ fn fresh_db_gets_current_schema_version() {
     let conn = Connection::open(&tmp).expect("reopen");
     assert_eq!(
         schema_version(&conn),
-        12,
-        "fresh DB should be at schema v12"
+        CURRENT_SCHEMA_VERSION,
+        "fresh DB should be at the current schema version"
     );
 
     // v6 removed the peer/trust subsystem: a fresh DB has no peers tables.
@@ -126,6 +128,18 @@ fn fresh_db_gets_current_schema_version() {
             "idx_atomic_facts_session".to_owned(),
         ],
         "fresh atomic-fact sidecar must have only its dedicated indexes"
+    );
+    assert!(
+        table_exists(&conn, "atomic_fact_relations"),
+        "fresh DB must carry the reviewed v13 atomic-fact relation sidecar"
+    );
+    assert_eq!(
+        table_indexes(&conn, "atomic_fact_relations"),
+        vec![
+            "idx_atomic_fact_relations_from".to_owned(),
+            "idx_atomic_fact_relations_to".to_owned(),
+        ],
+        "fresh atomic-fact relation sidecar must have only its directed adjacency indexes"
     );
 
     let _ = std::fs::remove_file(&tmp);
@@ -165,6 +179,111 @@ fn fresh_db_has_peer_id_column() {
         valid_until: None,
     });
     assert!(result.is_ok(), "ingest should succeed: {:?}", result);
+}
+
+#[test]
+fn v9_db_adds_and_backfills_edge_leak_checkpoint() {
+    let tmp = std::env::temp_dir().join(format!(
+        "anamnesis_test_v9_to_v10_{}.db",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&tmp);
+    drop(SqliteStorage::open(&tmp).expect("seed current database"));
+    {
+        let conn = Connection::open(&tmp).expect("open migration fixture");
+        conn.execute_batch(
+            "ALTER TABLE edges DROP COLUMN leaked_at;
+             UPDATE schema_version SET version = 9;",
+        )
+        .expect("install v9 edge shape");
+        assert!(
+            !table_columns(&conn, "edges")
+                .iter()
+                .any(|(name, _, _, _)| name == "leaked_at")
+        );
+    }
+
+    drop(SqliteStorage::open(&tmp).expect("migrate v9 database"));
+    let conn = Connection::open(&tmp).expect("inspect migrated database");
+    assert_eq!(schema_version(&conn), CURRENT_SCHEMA_VERSION);
+    assert!(
+        table_columns(&conn, "edges")
+            .iter()
+            .any(|(name, ty, not_null, default)| {
+                name == "leaked_at" && ty == "INTEGER" && *not_null == 1 && default == "0"
+            })
+    );
+    drop(conn);
+    std::fs::remove_file(tmp).expect("remove migration fixture");
+}
+
+#[test]
+fn v10_db_adds_graph_metadata_table() {
+    let tmp = std::env::temp_dir().join(format!(
+        "anamnesis_test_v10_to_v11_{}.db",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&tmp);
+    drop(SqliteStorage::open(&tmp).expect("seed current database"));
+    {
+        let conn = Connection::open(&tmp).expect("open migration fixture");
+        conn.execute_batch(
+            "DROP TABLE graph_metadata;
+             UPDATE schema_version SET version = 10;",
+        )
+        .expect("install v10 graph-metadata shape");
+        assert!(!table_exists(&conn, "graph_metadata"));
+    }
+
+    drop(SqliteStorage::open(&tmp).expect("migrate v10 database"));
+    let conn = Connection::open(&tmp).expect("inspect migrated database");
+    assert_eq!(schema_version(&conn), CURRENT_SCHEMA_VERSION);
+    assert_eq!(
+        table_columns(&conn, "graph_metadata"),
+        vec![
+            ("key".to_owned(), "TEXT".to_owned(), 0, String::new()),
+            ("value".to_owned(), "TEXT".to_owned(), 1, String::new()),
+        ]
+    );
+    drop(conn);
+    std::fs::remove_file(tmp).expect("remove migration fixture");
+}
+
+#[test]
+fn v11_db_adds_atomic_fact_sidecar() {
+    let tmp = std::env::temp_dir().join(format!(
+        "anamnesis_test_v11_to_v12_{}.db",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&tmp);
+    drop(SqliteStorage::open(&tmp).expect("seed current database"));
+    {
+        let conn = Connection::open(&tmp).expect("open migration fixture");
+        conn.execute_batch(
+            "DROP TABLE atomic_fact_relations;
+             DROP TABLE atomic_facts;
+             DELETE FROM graph_metadata
+                 WHERE key IN ('id.next_atomic_fact', 'id.next_atomic_fact_relation');
+             UPDATE schema_version SET version = 11;",
+        )
+        .expect("install v11 sidecar shape");
+        assert!(!table_exists(&conn, "atomic_facts"));
+    }
+
+    drop(SqliteStorage::open(&tmp).expect("migrate v11 database"));
+    let conn = Connection::open(&tmp).expect("inspect migrated database");
+    assert_eq!(schema_version(&conn), CURRENT_SCHEMA_VERSION);
+    assert!(table_exists(&conn, "atomic_facts"));
+    assert_eq!(
+        table_indexes(&conn, "atomic_facts"),
+        vec![
+            "idx_atomic_facts_scope".to_owned(),
+            "idx_atomic_facts_session".to_owned(),
+        ]
+    );
+    assert!(table_exists(&conn, "atomic_fact_relations"));
+    drop(conn);
+    std::fs::remove_file(tmp).expect("remove migration fixture");
 }
 
 // ── Migration test ────────────────────────────────────────────────────────────
@@ -252,8 +371,8 @@ fn existing_db_migrates_from_v1_to_current() {
 
         assert_eq!(
             schema_version(&conn),
-            12,
-            "schema_version should be 12 after full v1 -> v12 migration"
+            CURRENT_SCHEMA_VERSION,
+            "schema_version should be current after the full v1 migration"
         );
 
         // Nodes' peer_id column (inside the Origin encoding) STAYS after the chain.
@@ -282,6 +401,10 @@ fn existing_db_migrates_from_v1_to_current() {
         assert!(
             table_exists(&conn, "atomic_facts"),
             "migrated DB must carry the isolated v12 atomic-fact sidecar"
+        );
+        assert!(
+            table_exists(&conn, "atomic_fact_relations"),
+            "migrated DB must carry the reviewed v13 atomic-fact relation sidecar"
         );
     }
 
@@ -390,8 +513,8 @@ fn fresh_schema_equals_migrated_schema() {
     let fresh = Connection::open(&fresh_path).expect("reopen fresh");
     let migrated = Connection::open(&migrated_path).expect("reopen migrated");
 
-    assert_eq!(schema_version(&fresh), 12);
-    assert_eq!(schema_version(&migrated), 12);
+    assert_eq!(schema_version(&fresh), CURRENT_SCHEMA_VERSION);
+    assert_eq!(schema_version(&migrated), CURRENT_SCHEMA_VERSION);
 
     // Both the fresh-create and migration paths must converge on a nodes table that
     // carries the v5 evidence_prior column (legacy v1->v2 ALTERs leave the rest of
@@ -428,6 +551,11 @@ fn fresh_schema_equals_migrated_schema() {
         table_columns(&migrated, "atomic_facts"),
         "fresh and migrated atomic_facts columns must be identical"
     );
+    assert_eq!(
+        table_columns(&fresh, "atomic_fact_relations"),
+        table_columns(&migrated, "atomic_fact_relations"),
+        "fresh and migrated atomic_fact_relations columns must be identical"
+    );
     // The peers tables must be absent on BOTH the fresh-create and migrated paths
     // after the v6 drop (schema convergence: neither path leaves them behind).
     for table in ["peers", "peer_aliases"] {
@@ -442,7 +570,13 @@ fn fresh_schema_equals_migrated_schema() {
     }
 
     // Index lists must match for every reservoir-touched table.
-    for table in ["nodes", "edges", "salience", "atomic_facts"] {
+    for table in [
+        "nodes",
+        "edges",
+        "salience",
+        "atomic_facts",
+        "atomic_fact_relations",
+    ] {
         assert_eq!(
             table_indexes(&fresh, table),
             table_indexes(&migrated, table),
@@ -613,14 +747,14 @@ fn v5_db_with_planted_peers_reopens_clean_at_v6() {
         assert!(storage.is_ok(), "v5 -> v6 migration should succeed");
     }
 
-    // 4. Assertions: version is v6, both peer tables are dropped, and the node
-    //    (with its peer_id / source_kind) is intact.
+    // 4. Assertions: the chain reaches the current version, both peer tables
+    //    are dropped, and the node (with its peer_id / source_kind) is intact.
     {
         let conn = Connection::open(&tmp).expect("reopen after migration");
         assert_eq!(
             schema_version(&conn),
-            12,
-            "DB should be at v12 after reopen"
+            CURRENT_SCHEMA_VERSION,
+            "DB should be current after reopen"
         );
         assert!(
             !table_exists(&conn, "peers"),
@@ -742,12 +876,16 @@ fn v5_db_with_bare_node_type_normalizes_through_full_chain_to_v8() {
         assert_eq!(schema_version(&conn), 5, "fixture must be at v5");
     }
 
-    // Single reopen runs the whole v5→v8 chain.
-    let reopened = SqliteStorage::open(&tmp).expect("v5 -> v8 chain reopen");
+    // Single reopen runs the whole v5-to-current chain.
+    let reopened = SqliteStorage::open(&tmp).expect("v5-to-current chain reopen");
 
     {
         let conn = Connection::open(&tmp).expect("reopen raw");
-        assert_eq!(schema_version(&conn), 12, "chain must land at v12");
+        assert_eq!(
+            schema_version(&conn),
+            CURRENT_SCHEMA_VERSION,
+            "chain must land at the current version"
+        );
         let enc: String = conn
             .query_row(
                 "SELECT node_type FROM nodes WHERE id = ?1",

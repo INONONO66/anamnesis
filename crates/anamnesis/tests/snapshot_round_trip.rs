@@ -1,8 +1,8 @@
 //! Snapshot round-trip invariant tests.
 //!
 //! These tests prove that clone-based snapshot/restore preserves the
-//! observable state surface that downstream tasks (T15 scope_index,
-//! T3 decay_checkpoint, ID recycling, hot-field SoA coherence)
+//! observable state surface that scope indexing, decay checkpoints,
+//! ID recycling, and hot-field SoA coherence
 //! depend on.
 
 use anamnesis::Engine;

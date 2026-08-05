@@ -388,7 +388,7 @@ mod tests {
     /// re-queued after the TTL, delivered ONE more time (attempt cap 2), then
     /// treated as done — never an infinite redelivery loop.
     ///
-    /// Extended (P1-T4) to be namespace-scoped: captures into "projA" (not the
+    /// Namespace-scoped: captures into "projA" (not the
     /// default namespace) and asserts a sibling namespace ("projB") stays at
     /// zero backlog throughout — the redelivery machinery must operate on the
     /// REQUESTED namespace's queue, not a single global one.
@@ -504,7 +504,7 @@ mod tests {
         assert_eq!(reg.unextracted_len(), 1, "remainder stays queued");
     }
 
-    /// P1-T4 bug fix: capturing into "projA" and pulling "projB" must return
+    /// Capturing into "projA" and pulling "projB" must return
     /// EMPTY — each namespace's un-extracted queue is isolated from every
     /// other's — and vice-versa. Replaces the old
     /// `pull_pending_ignores_namespace_param` test, which asserted the BUG

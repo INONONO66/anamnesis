@@ -9,7 +9,7 @@ use anamnesis::graph::{KnowledgeType, NodeId, Timestamp};
 use anamnesis::memory::AtomicFactInput;
 use serde::{Deserialize, Serialize};
 
-use super::dataset::{BenchTurn, LoadedBenchmark};
+use super::dataset::{BenchTurn, FormationInput};
 use super::error::{BenchError, BenchResult};
 
 mod eval;
@@ -17,16 +17,15 @@ mod eval;
 #[cfg(test)]
 pub use eval::ranked_fragments_for_test;
 pub use eval::{
-    AnswerContext, AnswerEvidence, ConsumerSelectionPolicy, EvalOptions, QuestionEvaluation,
-    ReadoutFeatureRow, RetrievedMemory, WarmupReport, evaluate_question_with_context,
-    evaluate_questions, run_warmup,
+    AnswerContext, AnswerEvidence, AnswerSourceAttribution, ConsumerSelectionPolicy, EvalOptions,
+    QuestionEvaluation, ReadoutFeatureRow, RetrievedMemory, WarmupReport,
+    evaluate_question_with_context, evaluate_questions, run_warmup,
 };
 
 pub struct BuiltMemoryGraph {
     pub memory: Memory<SqliteStorage>,
     pub provenance_by_node: HashMap<NodeId, NodeProvenance>,
     pub stats: GraphBuildStats,
-    pub speakers: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,7 +38,7 @@ pub struct GraphBuildStats {
     #[serde(default)]
     pub atomic_facts_created: usize,
     #[serde(default)]
-    pub atomic_relations_recorded: usize,
+    pub derived_relations_validated: usize,
     #[serde(default)]
     pub reasoning_edges_created: usize,
     pub embedded_texts: usize,
@@ -132,10 +131,10 @@ const TURN_GAP_MS: u64 = 60_000;
 /// and query-time embeddings (called by `Memory::search_result_at_with`).
 /// Build it with [`CachingProvider::new`] before calling this function.
 pub fn build_memory_graph(
-    dataset: &LoadedBenchmark,
+    input: FormationInput<'_>,
     provider: Arc<dyn EmbeddingProvider>,
 ) -> BenchResult<BuiltMemoryGraph> {
-    build_memory_graph_with_derived(dataset, provider, &[], &[])
+    build_memory_graph_with_derived(input, provider, &[], &[])
 }
 
 /// Build the product graph and add a frozen consumer extraction artifact.
@@ -144,12 +143,12 @@ pub fn build_memory_graph(
 /// cited raw Episodic source IDs. They never enter the graph candidate pool,
 /// node FTS corpus, or attraction dynamics.
 pub fn build_memory_graph_with_derived(
-    dataset: &LoadedBenchmark,
+    input: FormationInput<'_>,
     provider: Arc<dyn EmbeddingProvider>,
     derived: &[DerivedMemoryRecord],
     relations: &[DerivedMemoryRelation],
 ) -> BenchResult<BuiltMemoryGraph> {
-    let session_turns: Vec<Vec<&BenchTurn>> = dataset
+    let session_turns: Vec<Vec<&BenchTurn>> = input
         .sessions
         .iter()
         .map(|session| {
@@ -181,7 +180,7 @@ pub fn build_memory_graph_with_derived(
     // semantic node's provenance when AddReceipt.finalized_semantic arrives
     // (one-turn lag: semantic of turn i-1 is returned when turn i is added).
     for (session_index, turns) in session_turns.iter().enumerate() {
-        let session = &dataset.sessions[session_index];
+        let session = &input.sessions[session_index];
         let session_id = &session.raw_session_id;
         let session_start = session.start_timestamp.map_or_else(
             || base_timestamp + session_index as u64 * SESSION_GAP_MS,
@@ -200,7 +199,7 @@ pub fn build_memory_graph_with_derived(
                 .map_err(|err| BenchError::Engine(err.to_string()))?;
 
             // The episodic node belongs to the current turn.
-            let epi_prov = node_provenance(dataset.dataset.as_str(), turn);
+            let epi_prov = node_provenance(input.dataset.as_str(), turn);
             provenance_by_node.insert(receipt.episodic, epi_prov.clone());
             stats.nodes_created += 1;
 
@@ -239,24 +238,15 @@ pub fn build_memory_graph_with_derived(
         &mut memory,
         &mut provenance_by_node,
         &mut stats,
-        dataset,
+        input,
         derived,
         relations,
     )?;
-
-    let speakers: Vec<String> = session_turns
-        .iter()
-        .flat_map(|turns| turns.iter().map(|turn| turn.speaker.clone()))
-        .filter(|s| !s.trim().is_empty())
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .collect();
 
     Ok(BuiltMemoryGraph {
         memory,
         provenance_by_node,
         stats,
-        speakers,
     })
 }
 
@@ -264,11 +254,11 @@ fn ingest_derived_memories(
     memory: &mut Memory<SqliteStorage>,
     provenance_by_node: &mut HashMap<NodeId, NodeProvenance>,
     stats: &mut GraphBuildStats,
-    dataset: &LoadedBenchmark,
+    input: FormationInput<'_>,
     records: &[DerivedMemoryRecord],
     relations: &[DerivedMemoryRelation],
 ) -> BenchResult<()> {
-    let sessions: HashMap<&str, &str> = dataset
+    let sessions: HashMap<&str, &str> = input
         .sessions
         .iter()
         .map(|session| (session.session_id.as_str(), session.raw_session_id.as_str()))
@@ -318,19 +308,10 @@ fn ingest_derived_memories(
         }
         let evidence_reference = validate_derived_grounding(memory, record, &source_by_turn)?;
 
-        let relation_metadata = relations
-            .iter()
-            .filter(|relation| relation.from == record.id || relation.to == record.id)
-            .map(|relation| format!("{}>{}:{:?}", relation.from, relation.to, relation.kind))
-            .collect::<Vec<_>>()
-            .join(",");
         let mut metadata = vec![
+            ("anamnesis:derived-record-id".to_owned(), record.id.clone()),
             (
-                "anamnesis:benchmark-derived-id".to_owned(),
-                record.id.clone(),
-            ),
-            (
-                "anamnesis:benchmark-derived-kind".to_owned(),
+                "anamnesis:derived-record-kind".to_owned(),
                 record.kind.trim().to_owned(),
             ),
             (
@@ -342,9 +323,6 @@ fn ingest_derived_memories(
                 raw_session_id.to_owned(),
             ),
         ];
-        if !relation_metadata.is_empty() {
-            metadata.push(("anamnesis:relations".to_owned(), relation_metadata));
-        }
         for (key, value) in [
             ("anamnesis:ground-subject", record.subject.as_ref()),
             ("anamnesis:ground-relation", record.relation.as_ref()),
@@ -394,7 +372,11 @@ fn ingest_derived_memories(
             }
             continue;
         }
-        stats.atomic_relations_recorded = stats.atomic_relations_recorded.saturating_add(1);
+        // The artifact declares a relation, but it does not carry an explicit
+        // review decision. Validate its endpoints here without granting it
+        // runtime routing authority; reviewed relations enter through the same
+        // typed admission API used by ordinary consumers.
+        stats.derived_relations_validated = stats.derived_relations_validated.saturating_add(1);
     }
     Ok(())
 }
@@ -828,39 +810,4 @@ fn node_provenance(dataset: &str, turn: &BenchTurn) -> NodeProvenance {
         speaker: turn.speaker.clone(),
         content: turn.content.clone(),
     }
-}
-
-const GENERIC_ROLES: [&str; 6] = ["user", "assistant", "system", "human", "ai", "bot"];
-
-/// Exact-match corpus speaker names in the question text and return their
-/// entity tags. Sensory cue extraction only — no gold evidence involved.
-pub fn speaker_cue_tags(speakers: &[String], question: &str) -> Vec<String> {
-    let question_lower = question.to_lowercase();
-    speakers
-        .iter()
-        .filter(|speaker| {
-            let lower = speaker.to_lowercase();
-            lower.len() >= 3
-                && !GENERIC_ROLES.contains(&lower.as_str())
-                && name_in_question(&lower, &question_lower)
-        })
-        .map(|speaker| format!("speaker-{}", normalize_tag(speaker)))
-        .collect()
-}
-
-/// Whether a lowercased speaker name appears in the lowercased question.
-/// Single-word names require a whole-token match so "Tim" never fires on
-/// "times"; multi-word names ("mary jane") use phrase containment.
-fn name_in_question(name_lower: &str, question_lower: &str) -> bool {
-    if name_lower.contains(' ') {
-        question_lower.contains(name_lower)
-    } else {
-        question_lower
-            .split(|c: char| !c.is_alphanumeric())
-            .any(|token| token == name_lower)
-    }
-}
-
-fn normalize_tag(value: &str) -> String {
-    value.trim().to_lowercase().replace([' ', ':', '_'], "-")
 }

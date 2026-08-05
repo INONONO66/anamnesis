@@ -1,101 +1,117 @@
-# Hook Triggering — making the agent actually use memory
+# Hook Triggering
 
-> Design for a Claude Code hook plugin (and equivalent IDE hooks) that drives
-> anamnesis. The *why* — and why this differs from supermemory/mem0 — is the
-> decision record [ADR-0011](../adr/0011-activation-gated-triggering.md). This
-> page is the practical strategy.
+Hooks connect best-effort capture and proactive recall to an agent host. They
+are clients of the shared daemon and use the same conversation-ingest and
+`search_reranked` paths as MCP and direct integrations. Optional derived
+formation remains a consumer/daemon concern with its own admission contract.
+The decision rationale is recorded in
+[ADR-0011](../adr/0011-activation-gated-triggering.md).
 
-## The problem a hook solves
+## Why a hook exists
 
-A general MCP server cannot make the agent *consult* memory. Tool descriptions
-and the MCP `instructions` field steer tool *selection*, not the *policy*
-"recall before answering." Measured on our own transcripts: even with `recall`
-described as `"ALWAYS call before answering"` and a recall-mandate `instructions`
-field, `recall` fired ~5× less than `remember`. Memory accumulated but was not
-read. The reliable lever — used by every serious memory product — is a
-**client-side hook**.
+MCP tools are invoked at the model's discretion. They provide deliberate read
+and write operations, but they cannot guarantee that relevant memory is
+consulted before an answer. A host hook can request recall at a stable lifecycle
+boundary and inject context only when the engine reports a useful result.
 
-## What the ecosystem does (surveyed from source)
+Always-on injection is unsafe: it adds blocking latency, consumes context, and
+can introduce topically similar distractors. The hook therefore performs a
+bounded local recall and applies an activation/relevance gate. Below the gate it
+emits no context.
 
-| tool | recall / inject | capture | per-turn recall? |
-|:--|:--|:--|:--|
-| supermemory | `SessionStart` profile pull + per-turn **directive** | `Stop` (signal-gated) | directive only — "don't search reflexively" |
-| mem0 | `SessionStart` pull + per-turn **rubric** + regex-gated pulls | every 3rd msg + `Stop` + `PreCompact` | rubric only (deduped to once/session) |
-| claude-mem | `SessionStart` index only | `PostToolUse` (every tool) + `Stop` summary | no |
-| basic-memory | `SessionStart` only | `PreCompact` only | no |
-| doobidoo | `SessionStart` + opt-in per-turn **gated** (confidence ≥ 0.6 + 30 s cooldown) | `SessionEnd` | gated only |
+## Event contract
 
-**The convergent pattern**: inject once at `SessionStart`; for per-turn, inject a
-*directive* (or a confidence-gated pull) rather than a blind search; capture
-incrementally. They avoid blind per-turn recall because of **latency** (the
-`UserPromptSubmit` hook blocks the prompt), **context bloat / token cost**, and
-**relevance** (a blind keyword search knows less than the model).
+| Hook | Action |
+|---|---|
+| `SessionStart` | Resolve namespace and seed a small project/global context when eligible. Trigger deferred formation work without blocking the session on it. |
+| `UserPromptSubmit` | Run canonical reranked recall against the prompt and inject only an eligible, token-bounded product rendering. |
+| `Stop` | Capture the recent text-bearing turn window idempotently. |
+| `PreCompact` | Flush the longer raw tail before host context compaction. |
+| `SessionEnd` | Submit a final tail when the host supports this event; other supported events remain best-effort when it is absent. |
 
-## Why anamnesis does NOT copy this
+Host-specific event support and wire shapes are adapters. Capture, formation,
+recall, selection, and rendering policy remain shared product code.
 
-The "directive, don't search" compromise is a **workaround for a missing
-relevance signal** — a flat store cannot tell whether an item is *needed*, so it
-offloads that judgment to the model. anamnesis computes the signal natively:
-activation = log posterior odds that a memory is needed in context (ACT-R), so it
-can **self-gate**. The full argument + citations: [ADR-0011](../adr/0011-activation-gated-triggering.md).
+## Recall gate
 
-## The anamnesis strategy
+The hook uses the filtered product result, not an independent keyword search:
 
-| hook | action |
-|:--|:--|
-| `SessionStart` | Seed: inject top high-**base-level** (recently/frequently used) memories scoped to the resolved project/global graph — the "what I know about this work" prime. Capped to top-`k`. |
-| `UserPromptSubmit` | **Activation-gated recall.** Spread activation seeded by the prompt; inject the readout **only if top activation ≥ `τ`** (need-odds threshold), ranked, top-`k` capped. Below `τ` → inject nothing (no bloat). If the activated set holds a `Contradicts` tension or a causal/decision chain, surface it first (`⚠️ contradicts prior X`). |
-| `PostToolUse` | Incremental capture of significant tool effects (Edit/Write/Bash/Task), signal-gated, via `remember` (insight) — conversation flow may go through `ingest_conversation` to build temporal chains. |
-| `Stop` | Capture the turn's distilled outcome (`remember`), signal-gated. **Reinforce** (`used`) only the retrievals the turn actually consumed. |
-| `PreCompact` | Safety capture of session state before the window collapses. |
-
-### Activation-score gate (the core mechanism)
-
-The readout already produces a per-candidate activation score (the same score
-`recall` ranks by). The gate is:
-
-```
-hits = recall(prompt)                  # spreading activation from the prompt
-if hits and hits[0].score >= τ:        # τ = need-odds injection threshold
-    inject(as_context(hits[:k]))       # top-k, rendered: identity / chains / tensions
+```text
+recall = search_reranked(prompt, configured_budget)
+if recall.has_evidence
+   and recall.readout_score >= readout_threshold
+   and recall.relevance >= relevance_threshold:
+    inject(render_context_for_with(prompt, recall, configured_style))
 else:
-    inject(nothing)                    # the graph said "nothing relevant" — trust it
+    inject(nothing)
 ```
 
-`τ` and `k` are **calibrated priors** ([ADR-0010](0010-calibrated-priors-not-laws.md)),
-tuned from accepted-context labels, never fixed laws. This buys the *relevance*
-benefit of per-turn recall that flat stores forgo, without the bloat — because
-below-threshold turns inject nothing.
+The readout and relevance thresholds, candidate width, and token budget are
+versioned calibrated policy. They are fitted from accepted-context labels and
+reported by recall telemetry; they are not universal constants. Rendering uses
+the query-aware `Memory::render_context_for_with` path over the selected
+package. The hook does not maintain an independent selection or rendering
+policy.
 
-### Reinforcement gate (use, not recall)
+## Formation and admission
 
-Reinforcement (`commit`/`used`, [ADR-0004](0004-query-as-field-and-commit.md))
-fires **only when a recall was injected AND used**, never on every retrieval.
-Reinforcing every recall reproduces the recommender feedback loop
-(rich-get-richer / Matthew effect); use-gating is the first brake and the
-activation-dependent (Pavlik–Anderson) decay ([ADR-0008](0008-powerlaw-dissipation.md))
-is the second — massed reinforcement self-discounts. The hook therefore tracks
-"recalled" vs "used" and only commits the latter.
+At supported capture events, the hook submits a bounded recent transcript
+window to the daemon. Repeated delivery is idempotent, but capture is
+best-effort: a missing host event, unreadable transcript, timeout, or
+unreachable daemon can leave a turn uncaptured. Once a raw source is persisted,
+later formation failure does not remove it.
 
-### Latency: why per-turn recall is affordable here
+Derived formation runs in the consumer/daemon layer and may use a configured
+provider; the shipped default is local. Under the contract proposed by
+[ADR-0015](../adr/0015-evidence-grounded-formation-and-chain-retrieval.md),
+every derived item crosses the same source-grounding and admission transaction
+used by other clients. Hook capture does not grant a derived fact a higher trust
+class and does not write directly to graph truth.
 
-The cited cost of per-turn recall is the cloud round-trip on a blocking
-`UserPromptSubmit` hook. anamnesis runs the recall against the **on-demand shared
-daemon** — graph and embedding model stay warm, so a `recall` is a local Unix-socket
-call (single-digit–ms graph traversal + one local embed), not a network hop. The
-daemon is the enabling infrastructure that makes activation-gated per-turn recall
-practical where flat cloud stores must fall back to a directive.
+## Reinforcement gate
 
-## Tunable priors (refit, don't hardcode)
+Proactive hook recall is read-only. Retrieving or injecting hook context does
+not append access traces or strengthen edges, because exposure alone does not
+show that the model consumed the evidence.
 
-- `τ` — need-odds injection threshold (per-turn recall gate).
-- `k` — top-k cap on injected memories (token budget).
-- `SessionStart` seed size and base-level floor.
-- capture signal keywords / min-length (bloat control on capture).
-- reinforcement: require explicit "used" signal.
+Explicit MCP `recall` has a separate deliberate-use contract. With the server's
+reinforcement option enabled, a successful explicit call commits the package it
+returns; disabling that option keeps the call read-only. Direct `Memory`
+consumers make the same choice explicitly by calling `Memory::used`. This
+distinction prevents proactive injection from training on its own exposure
+while preserving an intentional use signal for pull-based clients.
 
-## Open questions
+## Latency and failure
 
-- Detecting "used" cleanly from the transcript (which injected memory the turn relied on) to gate reinforcement precisely.
-- Calibrating `τ` against a labelled accepted-context set.
-- Whether `SessionStart` should also tick (advance forgetting) for long-idle graphs.
+The daemon keeps graph and local embedding/reranker state warm. Hook latency is
+measured from query receipt through exact context rendering; consumer prompt
+wrapping and model generation are separate. Every stage has a bounded budget.
+
+Hooks are fail-open with respect to the host prompt: daemon, model, formation,
+telemetry, or rendering failure emits no additional context and never blocks or
+alters the user's prompt. A capture failure is audited when possible and does
+not erase an already persisted raw source.
+
+## Policy inputs
+
+- activation/readout threshold;
+- relevance threshold;
+- candidate, final-evidence, and token limits;
+- per-event capture window;
+- formation batch and timeout limits;
+- namespace/scope resolution; and
+- reinforcement policy for explicit, pull-based recall.
+
+## Invariants
+
+- Hook, MCP, plugin, and direct crate recall share one ranking, selection, and
+  rendering policy.
+- A hook never opens the database beside the daemon.
+- Below-threshold recall injects nothing.
+- A persisted raw source survives optional formation failure; hook delivery
+  itself remains best-effort.
+- Routing-only facts can contribute only by hydrating their source evidence.
+- Proactive hook retrieval never reinforces memory. Explicit MCP and direct
+  crate calls follow their separately declared use/commit contract.
+- Telemetry stores bounded decision metadata, not raw prompts or rendered
+  context.

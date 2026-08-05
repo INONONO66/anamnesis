@@ -1,4 +1,4 @@
-//! Tests for Engine::retract() API (T10).
+//! Tests for the `Engine::retract` API.
 
 use anamnesis::Engine;
 use anamnesis::api::{IngestResult, Observation};

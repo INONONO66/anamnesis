@@ -1,12 +1,11 @@
-//! Reasoning-advantage integration test.
+//! Typed-relation integration test.
 //!
-//! Exercises the product's differentiator end-to-end through the public
-//! [`Memory`] front door: typed reasoning edges ([`Relation::Reason`]) plus
+//! Exercises typed reasoning edges ([`Relation::Reason`]) plus
 //! contradiction-as-tension ([`Relation::Contradicts`]). A ~10-turn conversation
 //! records a database decision, its rationale, then a reversal that contradicts
 //! the decision. A single "why did we switch?" query must surface the
 //! contradiction **pair** as a structured tension and expose the causal chain via
-//! typed neighbors — structure a flat cosine list cannot express.
+//! typed neighbors.
 //!
 //! Hermetic: a byte-derived deterministic embedder (no model download, no
 //! network), the same pattern the other `Memory` integration tests use
@@ -78,7 +77,7 @@ struct Scenario {
 /// typed reasoning + contradiction edges through the front door. Returns the key
 /// node ids.
 ///
-/// `wire_edges` gates the `relate` calls so the test can observe the RED state
+/// `wire_edges` gates the `relate` calls so the test can observe the baseline
 /// (no tension, no typed chain) before the reasoning edges exist.
 fn build_scenario(m: &mut Memory, wire_edges: bool) -> Scenario {
     let s = "demo";
@@ -157,10 +156,9 @@ fn build_scenario(m: &mut Memory, wire_edges: bool) -> Scenario {
     }
 }
 
-/// RED baseline: with no reasoning edges wired, the identical query surfaces NO
-/// contradiction tension. This is the "flat store" behaviour the demo improves
-/// on — and it proves the tension in the GREEN test comes from the authored
-/// edges, not from the text/embeddings alone.
+/// With no reasoning edges wired, the identical query surfaces no
+/// contradiction tension. This verifies that tensions come from authored
+/// edges rather than text or embeddings alone.
 #[test]
 fn without_edges_no_tension_surfaces() {
     let mut m = memory();
@@ -177,7 +175,7 @@ fn without_edges_no_tension_surfaces() {
     );
     assert!(
         !recall.as_context().contains("## TENSIONS"),
-        "flat recall must not render a TENSIONS block:\n{}",
+        "recall without a Contradicts edge must not render a TENSIONS block:\n{}",
         recall.as_context()
     );
 }

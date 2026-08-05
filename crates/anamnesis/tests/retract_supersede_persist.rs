@@ -1,10 +1,10 @@
-//! #7 — `retract()` and `Supersedes` validity-window mutations must survive a
+//! `retract()` and `Supersedes` validity-window mutations must survive a
 //! drop + reopen cycle.
 //!
 //! `SqliteStorage::flush()` only write-behinds the hot fields (salience /
 //! accessed_at / evidence_prior / retained_action). The retraction markers
 //! (node `metadata`) and supersede windows (`valid_from` / `valid_until`) live
-//! on the `nodes` row, which `flush()` never touches — so before the fix they
+//! on the `nodes` row, which `flush()` never touches — so before write-through they
 //! were lost on reopen (the retraction/supersede "resurrected"). These tests use
 //! a temp FILE-backed DB (NOT in-memory) so the reopen actually exercises disk.
 
@@ -130,7 +130,7 @@ fn supersede_validity_windows_persist_across_reopen() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// P1-T1 RED: `unretract()` must clear the retraction metadata and persist that
+/// `unretract()` must clear the retraction metadata and persist that
 /// removal through a drop + reopen cycle, mirroring `retract`'s write-through path.
 #[test]
 fn unretract_clears_metadata_and_persists() {
@@ -186,8 +186,8 @@ fn unretract_clears_metadata_and_persists() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// P1-T1 MANUAL-QA demo: prints the `is_retracted` state at each stage of the
-/// retract → unretract → reopen cycle for a hands-on DB-state-diff artifact.
+/// Prints the `is_retracted` state at each stage of the
+/// retract → unretract → reopen cycle for a hands-on DB-state check.
 /// Run with `cargo test -p anamnesis-engine unretract_roundtrip_demo -- --nocapture`.
 #[test]
 fn unretract_roundtrip_demo() {

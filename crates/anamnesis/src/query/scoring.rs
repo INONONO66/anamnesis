@@ -31,14 +31,13 @@ use crate::mechanics::priors::{
 
 /// Computes the scope weight for a node relative to the query context.
 ///
-/// Scopes are flat opaque paths (the hierarchy was removed — all production
-/// nodes are universal). The weight is a two-branch visibility gate:
+/// Scopes are opaque paths. The current weight is a two-branch compatibility
+/// rule:
 /// - identical scopes, or either scope universal: `1.0` (fully visible);
 /// - two different concrete scopes: `0.5` (attenuated).
 ///
-/// In production the query scope is always universal, so this always yields
-/// `1.0` — bit-identical to the previous hierarchical table's `Equal`/`Universal`
-/// rows for the universal-query case.
+/// The caller remains responsible for authorization; this value affects
+/// ranking and does not grant visibility.
 pub fn scope_weight(query_scope: &ScopePath, node_scope: &ScopePath) -> f64 {
     if query_scope == node_scope || query_scope.is_universal() || node_scope.is_universal() {
         1.0
@@ -60,7 +59,8 @@ pub struct ReadoutInputs {
     pub impedance: f64,
     /// Scope compatibility `scope_weight_i`.
     pub scope_weight: f64,
-    /// Origin/peer reliability `trust_weight_i`.
+    /// Reserved trust-compatibility input `trust_weight_i`. Current engine
+    /// paths supply the neutral value `1.0`; no peer reliability is inferred.
     pub trust_weight: f64,
     /// Frustration `stress_i` attached to selected contradictions (subtracted).
     pub stress: f64,
@@ -173,11 +173,7 @@ mod tests {
         assert_eq!(scope_weight(&proj("proj-a"), &proj("proj-a")), 1.0);
     }
 
-    /// PRODUCTION INVARIANT: every production node is universal and the query
-    /// scope is always universal, so the weight must be exactly 1.0 — bit-identical
-    /// to the pre-shrink hierarchical table (which returned `Equal` ⇒ 1.0 for the
-    /// universal-vs-universal case). This pins the shrink's zero-behavior-change
-    /// guarantee for the only scope pair that occurs in production.
+    /// Universal queries and nodes remain a full-weight compatibility case.
     #[test]
     fn universal_query_and_universal_node_is_exactly_one() {
         let u = ScopePath::universal();

@@ -1,4 +1,4 @@
-//! Bug #1a: legacy rows can carry an empty `access_history` (`decode_access_history("")`
+//! Legacy rows can carry an empty `access_history` (`decode_access_history("")`
 //! decodes to an empty `VecDeque`), which makes `compute_base_level` return
 //! `NEG_INFINITY` downstream. The v8 -> v9 migration hop backfills exactly one
 //! creation `AccessTrace` — stamped at the row's `created_at`, at the same

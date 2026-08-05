@@ -159,7 +159,7 @@ fn edges_without_validity_bounds_are_always_valid() {
 fn edge_excluded_at_exact_valid_until_boundary() {
     // Validity is half-open [valid_from, valid_until): the upper bound is
     // EXCLUSIVE, so an edge is not valid at as_of == valid_until. This pins the
-    // Phase 0 gate-unification fix (edge_valid_at previously used `<=` here).
+    // `edge_valid_at` previously used `<=` here.
     let mut engine = engine();
     let seed = ingest(&mut engine, "seed");
     let target = ingest(&mut engine, "boundary target");

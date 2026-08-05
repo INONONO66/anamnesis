@@ -1,4 +1,4 @@
-# ADR-0013: Reasoning capture pipeline — passive raw ingest + agent-side batch extraction
+# ADR-0013: Reasoning Capture Pipeline
 
 ## Status
 
@@ -6,81 +6,86 @@ Accepted (implemented 2026-06-28, v0.9.0)
 
 ## Context
 
-anamnesis's differentiator is that it preserves **reasoning** — `Causal` / `Reason` /
-`Contradicts` / `Supports` edges that record *why*, not just *what* (the edge type is a
-first-class propagation signal, see ADR-0005 / ADR-0006).
+Anamnesis represents rationale, causality, support, and contradiction as typed
+relationships. Explicit `remember`, `relate`, and `ingest_conversation` calls
+can create that structure, but a tool call cannot be assumed for every useful
+conversation turn.
 
-But today every **write** path depends on the agent *voluntarily* calling an MCP tool
-(`remember` / `relate` / `ingest_conversation`). The plugin's hooks are **read-only recall**
-only (ADR-0011) — there is no capture hook at all. Consequences:
-
-- If the agent never calls `relate`, **no reasoning edge is ever created.**
-- The automatic path (the `Memory` recipe) turns a turn into `Episodic` + `ExtractedFrom` /
-  `Temporal` edges only — flat facts, no causal/decision/contradiction structure.
-
-So **anamnesis claims to be reasoning-first, yet reasoning capture is not guaranteed** — it
-falls back to a flat fact graph whenever the agent doesn't self-annotate.
-
-Two constraints shape the fix:
-
-1. Storing **raw chain-of-thought** verbatim is wrong — noise + volume blow-up. The thing
-   worth keeping is the *distilled result structure*: decisions+rationale, cause→effect,
-   contradictions, problem→resolution.
-2. Extracting that structure needs an **LLM**, but the anamnesis engine is deliberately
-   **LLM-free** — extraction is the consumer's job, and the daemon owns the engine.
+The core engine remains LLM-free. It can persist source fragments, validate
+typed writes, and maintain graph dynamics, but extraction policy and model
+execution belong to the consumer boundary. Verbatim private reasoning is not a
+formation target; useful outputs are source-grounded decisions, rationales,
+causal relations, contradictions, and lessons.
 
 ## Decision
 
-A **two-stage** capture pipeline. Raw text is saved synchronously by hooks; reasoning
-structure is extracted in batch by the agent, not the engine.
+Use a two-stage pipeline: best-effort passive source capture followed by
+consumer-owned formation.
 
-### Stage 1 — passive raw ingest (no LLM)
+### Stage 1: passive source capture
 
-The plugin's capture hook reads the turn (user + assistant) from the transcript and `ingest`s
-it as `Episodic` into the daemon. **Idempotent**: the daemon dedups by turn id/hash, so the
-same turn arriving from multiple hooks is harmless.
+Supported client lifecycle events submit bounded transcript windows to the
+daemon. The daemon stores accepted text-bearing turns as `Episodic` sources and
+deduplicates overlapping delivery by stable turn identity and content hash.
 
-Hook event matrix (measured against CC and the Codex 0.142 binary):
+| Event | Claude Code | Codex | Role |
+|---|:---:|:---:|---|
+| `Stop` | yes | yes | Submit a recent window of at most eight turns |
+| `PreCompact` | yes | yes | Submit a wider tail before compaction |
+| `SessionEnd` | yes | no | Submit a final tail when the host exposes the event |
 
-| event       | Claude Code | Codex | role |
-|-------------|:--:|:--:|--|
-| `Stop`         | ✅ | ✅ | per-turn recent-window ingest (≤8 turns; best-effort) |
-| `PreCompact`   | ✅ | ✅ | flush + extraction trigger before context compaction |
-| `SessionEnd`   | ✅ | ❌ | end-of-session flush (CC only) |
+Each host adapter declares only events supported by that host. Repeated
+delivery is idempotent, but coverage is not absolute: a missing event,
+unreadable transcript, filtered non-text turn, timeout, or unreachable daemon
+can leave a turn uncaptured. Once the daemon persists a source, later formation
+failure cannot remove it.
 
-`Stop` captures a recent window (≤8 turns) every turn; `PreCompact` / `SessionEnd` flush a
-wider tail (≤50) before the window is compacted or closed. Dedup in the daemon makes the
-per-`Stop` overlap harmless. **`Stop` capture is best-effort given tool-turn filtering** (the
-transcript parser drops `tool_use`/`tool_result` entries, so the last 2 text-bearing turns may
-both be `assistant`); `PreCompact` / `SessionEnd` are the real backstop for full coverage.
-**Codex does not support `SessionEnd`** (absent from the binary; `PreCompact`/`PostCompact` are
-present) — it MUST be omitted from `codex-hooks.json`, because Codex's strict hook parser rejects
-unknown event keys and kills the whole hook file (cf. the `description`-field bug, #79). On Codex
-the `SessionEnd` gap is covered by `Stop` (recent window each turn) + `PreCompact` (long sessions).
+### Stage 2: consumer-owned formation
 
-### Stage 2 — agent-side batch extraction (client LLM)
+Persisted, unprocessed sources enter a namespace-scoped queue. When the queue
+crosses its configured threshold, a later `SessionStart` can prompt the agent
+to call `extract_pending`. That call returns a bounded batch; the connected
+agent may distill source-grounded memories and relations through the normal
+`remember` and `relate` surfaces.
 
-The daemon holds only an **un-extracted queue** of ingested turns. Extraction is performed by
-the **next agent that connects**, using *its own* LLM: it pulls the queue, distills
-decisions / cause→effect / contradictions / problem→resolution, and emits them as
-`relate` / `remember` calls.
+Formation is deferred and optional. A client may ignore the nudge, terminate
+before writing results, or reject every candidate. Pulled batches use bounded
+redelivery, and raw sources remain independently retrievable throughout.
 
-Trigger: the **daemon's accumulation threshold** (N un-extracted turns — the *guarantee*) plus
-`PreCompact` / `SessionEnd` hook signals (best-effort, earlier flush). The engine and daemon stay
-LLM-free; if extraction fails or no agent connects, the **raw `Episodic` still survives**
-(fail-open).
+Any configured automated extractor is also a consumer-layer formation path.
+Its output must pass the same grounding, provenance, review, and admission
+rules as equivalent direct or plugin entry points; it does not write graph
+truth merely because a model produced structured output.
+
+## Invariants
+
+- The engine performs no LLM call.
+- Passive capture never blocks or alters the host prompt.
+- Accepted raw turns remain authoritative source evidence.
+- Overlapping capture windows are idempotent.
+- Formation output cites exact persisted sources.
+- Missing formation output does not retract or mark a raw source invalid.
+- Scope and temporal eligibility cannot be widened by a derived record.
+- Client event support is explicit; absent events are not treated as delivered.
 
 ## Consequences
 
-- ✅ Closes the gap where reasoning capture depended 100% on agent volition. Raw is always safe
-  (passive), reasoning structure is filled in by batch.
-- ✅ Engine/daemon stay LLM-free and local-first — extraction is the client's responsibility,
-  consistent with the existing "extraction is the consumer's job" principle.
-- ⚠️ Extraction is **not immediate** — it lags until the next client connection / threshold.
-  Raw is immediate; only the reasoning edges are deferred.
-- ⚠️ Codex `SessionEnd` gap — accepted, covered by `Stop` + `PreCompact`.
-- **Idempotent dedup is mandatory** (multi-hook). Daemon dedups by turn id; without it the
-  multi-hook fan-out becomes a duplication storm.
-- Raw `Episodic` volume rises, so the **readout must weight raw originals low** (provenance,
-  not recall) to avoid drowning the readout — ties into the recall-weight≠evidence-weight split
-  (ADR-0010 calibration; the one external-feedback item worth adopting).
+- Useful conversation evidence can enter memory without requiring a deliberate
+  write on every turn.
+- Typed reasoning may appear after the source turn rather than in the same
+  interaction.
+- Capture completeness depends on host lifecycle delivery and daemon
+  availability, so operators monitor capture and queue health separately.
+- Raw-source volume increases; compact derived records may assist routing, but
+  reader-facing evidence retains source provenance.
+- Deduplication and bounded redelivery are correctness requirements because
+  multiple lifecycle events can submit overlapping windows.
+
+## Relationship to ADR-0015
+
+[ADR-0015](0015-evidence-grounded-formation-and-chain-retrieval.md) proposes a
+shared typed formation and admission transaction for derived facts and
+relations. It retains this ADR's source-first, consumer-owned boundary while
+making source references, validation, review state, and routing isolation
+explicit. Until an implementation satisfies ADR-0015's promotion criteria and
+is released, the shipped capture and extraction surfaces remain authoritative.

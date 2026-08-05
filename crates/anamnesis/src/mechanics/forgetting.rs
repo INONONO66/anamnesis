@@ -5,11 +5,11 @@
 //! [ADR-0008](../../docs/adr/0008-powerlaw-dissipation.md) persistent node strength
 //! decomposes as `A_i = B_i + P_i`: the base level `B_i` owns forgetting and
 //! use-driven reinforcement and is the LIVE node strength term, while `P_i` (the
-//! stored, decay-exempt `evidence_prior`) holds encoding surprise, feedback, and
-//! peer trust. `B_i` is recomputed on demand from the node's access-trace history
-//! (a creation trace plus each committed access, bounded to 32 traces); there is no
-//! scalar reservoir that maintenance decays. Salience is the logistic projection of
-//! the composite sum, `s_i = logistic(B_i + P_i)`.
+//! stored, decay-exempt `evidence_prior`) holds encoding surprise and explicit
+//! consumer feedback. `B_i` is recomputed on demand from the node's access-trace
+//! history (a creation trace plus each committed access, bounded to 32 traces); there
+//! is no scalar reservoir that maintenance decays. Salience is the logistic projection
+//! of the composite sum, `s_i = logistic(B_i + P_i)`.
 //!
 //! Each trace carries its OWN decay rate `dⱼ` ([`crate::graph::AccessTrace`]),
 //! computed ONCE at the moment the trace is laid down from the activation `mⱼ` of

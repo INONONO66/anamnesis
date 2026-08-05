@@ -1,4 +1,4 @@
-//! Reasoning-advantage demo — why a graph memory beats a flat vector list.
+//! Typed-relation and ranking-surface demo.
 //!
 //! A ~10-turn conversation picks a database (Postgres), records the *reason*, then
 //! reverses the decision (SQLite) — a reversal that **contradicts** the original
@@ -7,13 +7,13 @@
 //!   * `Relation::Reason`      — decision → its rationale (a why-chain)
 //!   * `Relation::Contradicts` — reversal → the original decision (a tension)
 //!
-//! Then we ask one question — "why did we switch databases?" — and show two views
-//! of the *same* nodes:
+//! Then we ask one question — "why did we switch databases?" — and inspect two
+//! independent views of the same nodes:
 //!
 //!   1. **Graph recall** surfaces a `## TENSIONS` block (the contradiction pair)
-//!      plus the reasoning chain — structure.
-//!   2. **Flat cosine ranking** over the same node embeddings returns a bare list:
-//!      the contradiction and the why-chain are invisible.
+//!      plus the reasoning chain.
+//!   2. **Cosine ranking** shows the embedding-only order used as a diagnostic
+//!      baseline. This is a surface comparison, not a quality claim.
 //!
 //! Runs offline and instantly — a deterministic byte-hash embedder, no model
 //! download.
@@ -83,7 +83,7 @@ fn cosine(a: &[f64], b: &[f64]) -> f64 {
 
 fn main() -> Result<(), anamnesis::Error> {
     let provider: Arc<dyn EmbeddingProvider> = Arc::new(HashEmbedder);
-    // Keep our own handle so we can embed the query for the flat-cosine contrast.
+    // Keep our own handle so we can embed the query for the cosine diagnostic.
     let query_provider = provider.clone();
     let mut m = Memory::in_memory_with_provider(provider)?;
 
@@ -160,7 +160,7 @@ fn main() -> Result<(), anamnesis::Error> {
     // ── View 1: graph recall — structure ─────────────────────────────────────
     // `recall.as_context()` renders the full IDENTITY/KNOWLEDGE/MEMORIES/TENSIONS
     // block for LLM injection; here we print a compact digest of the *structure*
-    // it exposes that a flat store cannot.
+    // it exposes through the typed-relation surface.
     println!("query: {query:?}\n");
     println!("=== graph recall (structure: tensions + reasons) ===\n");
 
@@ -194,11 +194,9 @@ fn main() -> Result<(), anamnesis::Error> {
         println!("  [{:.1}] {}", h.score, one_line(&h.text));
     }
 
-    // ── View 2: flat cosine ranking — a bare list ────────────────────────────
-    // Rank the ENTIRE episodic corpus by cosine to the query, independently of the
-    // graph — exactly what a flat vector store does. We iterate every episodic node
-    // (not the graph-surfaced recall set), so the contrast is honest: the flat list
-    // finds the relevant turns, but nothing in it says they conflict or why.
+    // ── View 2: cosine-only ranking diagnostic ────────────────────────────────
+    // Rank the episodic corpus by cosine independently of graph traversal. This
+    // makes the embedding-only ordering observable alongside typed relations.
     let q_embedding = query_provider.embed_f64(&[query])?.remove(0);
     let mut ranked: Vec<(f64, NodeId, String)> = Vec::new();
     for id in m.engine().graph().all_node_ids() {
@@ -216,12 +214,11 @@ fn main() -> Result<(), anamnesis::Error> {
     // Deterministic order: cosine desc, then node id for ties.
     ranked.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.0.cmp(&b.1.0)));
 
-    println!("\n=== flat vector ranking (cosine to the query) ===\n");
-    println!("a list with no structure — the contradiction and the why-chain are invisible:\n");
+    println!("\n=== cosine-only ranking diagnostic ===\n");
     for (sim, _id, text) in ranked.iter().take(5) {
         println!("  {sim:.3}  {text}");
     }
-    println!("\n(the flat list never says these two turns *conflict*, nor why either was chosen.)");
+    println!("\nTyped relation details are reported separately above.");
 
     Ok(())
 }

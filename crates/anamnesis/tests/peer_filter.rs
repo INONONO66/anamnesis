@@ -1,4 +1,4 @@
-//! Tests for SearchInput.peer_filter (T12).
+//! Tests for `SearchInput.peer_filter`.
 
 use anamnesis::Engine;
 use anamnesis::api::{IngestResult, Observation};

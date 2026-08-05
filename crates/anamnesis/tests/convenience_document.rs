@@ -1,4 +1,4 @@
-//! Tests for ingest_document() convenience method (T16).
+//! Tests for the `ingest_document` convenience method.
 
 use anamnesis::Engine;
 use anamnesis::api::DocumentInput;

@@ -1,7 +1,7 @@
-//! Phase 4 integration: frustration surfaces (never suppresses) and perception is
+//! Integration tests: frustration surfaces (never suppresses) and perception is
 //! surprise-gated (familiar routes, novel allocates with surprise charge).
 //!
-//! Proves the migration-design P4 MUST-invariants:
+//! Proves the migration invariants:
 //! - a Contradicts pair both appear in the result with `stress > 0`, neither has
 //!   reduced activation (ADR-0006 surface-not-suppress);
 //! - `sigma = 0` when a gate (scope) is closed;

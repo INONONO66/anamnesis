@@ -12,25 +12,36 @@ defaults live in [`config.rs`](../../crates/anamnesis-mcp/src/config.rs),
 
 ## When to use which tool
 
-The plugin exposes six MCP tools. The hooks drive capture and recall on their own;
-these are the moves the agent makes deliberately.
+The plugin exposes twelve MCP tools. Hooks drive proactive capture and recall;
+the tools below are deliberate client operations.
 
 | Tool | When | What it does |
 |:--|:--|:--|
-| `recall` | Before answering, whenever prior context could matter | Read-only spreading-activation recall. Reading reinforces the memories returned when `reinforce_on_recall` is left at its server default (`ANAMNESIS_REINFORCE` unset ⇒ on); a later `recall` / `relate` over the same nodes is the "it helped" signal. |
+| `recall` | Before answering, whenever prior context could matter | Runs canonical reranked recall. With server reinforcement enabled, a successful explicit call commits the exact returned package as deliberate use; disabling it keeps the call read-only. Proactive hook recall always requests the non-reinforcing path. |
 | `remember` | Right after a decision, convention, or lesson worth keeping | Writes a single durable memory. This is the on-demand path; passive capture handles the raw transcript separately. |
 | `relate` | To record *why* — the edge between two recalled nodes | Adds a typed reasoning edge (`causes` / `contradicts` / `supports` / …) between node ids surfaced by a prior `recall`. This is what makes why-chains traceable instead of a flat list. |
 | `ingest_conversation` | Bulk import of an external transcript | One-shot import of turns you already have. **Not the capture path** — the hooks capture live sessions; use this only to seed history. |
-| `extract_pending` | When the SessionStart nudge appears | Pulls the accumulated raw turns, distills them into reasoning and lessons, and emits `relate` / `remember` promptly. The nudge only fires once the backlog crosses the threshold; act on it in the same session so the pulled batch is not abandoned (see [Failure & recovery](#failure--recovery-semantics)). |
+| `ingest_attachment_transcript` | Admit a textual attachment transcript produced by a consumer | Stores one immutable raw source with attachment hash and processor provenance. The engine does not open files, fetch URLs, or run OCR, vision, document, or embedding models. |
+| `extract_pending` | When the SessionStart nudge appears | Returns accumulated raw turns for the connected agent to distill with `relate` / `remember`. The nudge fires after the backlog crosses the threshold; complete the batch in the same session when possible (see [Failure & recovery](#failure--recovery-semantics)). |
 | `stats` | To check health and dogfood usage | Reports graph health plus the per-daemon **usage** section (recalls / remembers / relates, `extraction backlog`, `captured total`, `stale ratio (14d)`). The presence of that usage section is also how you tell a current daemon from an old one (see [Daemon lifecycle](#daemon-lifecycle--version-skew)). |
+| `update` | When the text of an existing memory is wrong or incomplete | Replaces the selected memory's content while retaining its identity and provenance contract. |
+| `forget` | When a memory must no longer participate in recall | Soft-retracts by default or permanently deletes when explicitly requested. |
+| `supersede` | When a newer memory replaces an older one | Records the replacement and closes the older memory's validity interval. |
+| `list` | To inspect memory inventory without a query cue | Lists memories by salience with optional filters. |
+| `get` | To inspect one known node id | Returns that memory's full detail and provenance. |
+
+Explicit MCP recall and proactive hook recall share the same query-aware
+`Memory::render_context_for_with` path. `ANAMNESIS_CONTEXT_STYLE` changes only
+the layout of the validated package; it does not select a different set of
+evidence. The surfaces differ in their reinforcement contract, not their
+ranking, selection, or rendering implementation.
 
 ## Automatic capture lifecycle
 
-Capture runs without the agent asking, in two stages, and is designed so a raw
-turn is never lost:
+Capture runs without the agent asking, in two best-effort stages:
 
 ```text
-Stop (≤8-turn recent window, each turn)  ┐
+Stop (≤8-turn recent window)             ┐
 PreCompact (tail before compaction)      ├─► content-hash dedup ─► un-extracted queue
 SessionEnd (Claude Code only)            ┘         (idempotent)          │
                                                                          │  len ≥ ANAMNESIS_EXTRACT_THRESHOLD_N (20)
@@ -41,20 +52,21 @@ SessionEnd (Claude Code only)            ┘         (idempotent)          │
                                                           agent calls extract_pending → relate / remember
 ```
 
-- **Stage 1 (passive).** The `Stop` hook streams a small recent window (≤8 turns)
-  every turn; `PreCompact` flushes the tail before the context window is compacted;
-  `SessionEnd` is the Claude-Code-only backstop. Each turn is written as a raw
-  `Episodic` memory, **content-hash-deduped** in the daemon so the overlap between
-  successive `Stop` windows collapses to one row.
+- **Stage 1 (passive).** A supported `Stop` event submits a small recent window
+  (≤8 turns); `PreCompact` submits the tail before the context window is
+  compacted; `SessionEnd` is an additional Claude Code event. Accepted turns
+  are written as raw `Episodic` memories and **content-hash-deduplicated** in
+  the daemon, so overlapping windows collapse to one row. Host event delivery,
+  transcript availability, and daemon reachability are outside this guarantee.
 - **Queue + threshold.** Un-extracted turns accumulate in a queue. Once its length
   reaches `ANAMNESIS_EXTRACT_THRESHOLD_N` (default **20**), the next `SessionStart`
   injects the extraction nudge.
 - **Stage 2 (agent-driven).** The agent calls `extract_pending`, which hands back
   the raw turns to distill into reasoning (`relate`) and lessons (`remember`).
 
-## R2 shadow extraction (opt-in)
+## Shadow extraction (opt-in)
 
-R2 extraction is a separate, **shadow-first** path for auditing prospective distilled memories.
+Shadow extraction is a separate path for auditing prospective distilled memories.
 It is off by default. Extraction runs only when `ANAMNESIS_EXTRACT_MODE=shadow` is set exactly;
 `off`, `auto`, boolean-like values, and every other unrecognized value disable it.
 `ANAMNESIS_EXTRACT_CMD` configures exactly one provider profile. The default
@@ -76,37 +88,39 @@ The adapter rejects non-loopback URLs and emits only the local Qwen response on
 stdout. Its OpenAI-compatible wire is an OMLX transport detail; no OpenAI
 credential or remote LLM is involved.
 
-Run one pass manually with `anamnesis extract [--namespace NS]`. A pass selects one temporal
-session-and-scope group with **10–20** eligible turns and sends at most that one batch to the
-configured extractor. The provider timeout defaults to **240 s** and can be
+Run one pass manually with `anamnesis extract [--namespace NS]`. A pass selects
+one temporal session-and-scope group with **1–10** eligible turns and sends at
+most that one batch to the configured extractor. The background worker drains
+complete ten-source batches and then the final shorter tail. The provider
+timeout defaults to **240 s** and can be
 boundedly overridden with `ANAMNESIS_EXTRACT_TIMEOUT_SECS=1..3600`; stdout and stderr each have
 their own **1 MiB** cap. Invalid JSON or exact-grounding failure receives one
 fail-closed retry. If a batch still fails validation after its allowed retry,
 or has a non-repairable schema rejection, the worker recursively isolates
 deterministic halves: valid partitions are staged through the same product
 path, while an irreducible invalid source remains raw and eligible for a later
-pass. All branches share a hard budget of **8 partition-recovery provider
-invocations** (including partition grounding retries); exhaustion stops new
+pass. All branches share the finite partition-recovery invocation budget
+derived from the maximum batch size (including grounding retries); exhaustion stops new
 calls and preserves the last durably recorded validation error. Provider
 failure, timeout, or an over-limit stream does not partition and
 leaves the complete affected batch eligible. A valid empty (`items=[]`) result
 is different: it records the selected sources in the zero-output ledger, so
 they are not sent again.
 
-Groups with fewer than 10 turns remain permanently unprocessed in R2. This intentionally biases
-shadow audit samples toward longer sessions; account for that bias in an R3 promotion decision.
-Age-based flushing is deferred to R3 and must be reconsidered only if measurements demonstrate
-that the bias warrants it.
-
 Stage-1 raw capture remains in the graph as `Episodic` memories. Provider stdin/the raw source
 batch, raw stdout/stderr, and the raw command are transient and are not persisted or logged by
-R2 policy or error records. The policy side schema persists only extractor profile
+the extraction policy or error records. The policy side schema persists only extractor profile
 hash/components, run and failure scalars, validated candidates and relations, the source
-identity/hash ledger, canonical subject/relation/object fields, exact evidence-object value,
-live-source byte range and span hash, and audit labels. It does not copy the raw evidence span:
-audit and promotion reconstruct that span from the still-matching authoritative source. R2
+identity/hash ledger, an engine-owned binding to each exact source allocation, canonical
+subject/relation/object fields, exact evidence-object value, live-source byte range and span
+hash, and audit labels. It does not copy the raw evidence span:
+audit and promotion reconstruct that span from the still-matching authoritative source. Shadow extraction
 performs no automatic pruning or cleanup: those rows persist until an operator takes a database
 lifecycle action.
+
+Relation audit rows reference their two candidate rows by stable policy primary keys. Review and
+promotion therefore revalidate the durable source-allocation bindings of both endpoints rather
+than maintaining a second, independently mutable provenance copy.
 
 A successful extraction pass stages candidates, relations, run metadata, and source ledger
 records in the policy side schema only. It never changes graph nodes, graph edges, or
@@ -151,14 +165,18 @@ returns `atomic_fact_id`; `node_id` remains a compatibility alias for older clie
 Unsupported, partial, contaminated, unreviewed, unavailable, or source-mismatched candidates are
 rejected. A relation can be
 promoted only after a `correct` review and after both endpoint candidates have been promoted;
-promotion records the typed `reason`, `causal`, `contradicts`, or `supports` relation in the
-source fact's sidecar metadata and is idempotent. It returns `atomic_relation_id`; `edge_id`
-remains a compatibility alias and does not identify a graph edge.
+promotion writes a dedicated typed `reason`, `causal`, `contradicts`, or `supports` sidecar
+record with reviewer, review profile, review time, scope, validity, and an idempotency key.
+Free-form fact metadata never grants relation authority. It returns `atomic_relation_id`;
+`edge_id` remains a compatibility alias and does not identify a graph edge.
 
 A source marked `source-unavailable` no longer has its recorded node. A
-`source-mismatch` source still resolves by node id but no longer matches its recorded turn key,
-session, scope, or content hash. Candidate review updates are rejected while any cited source is
-unavailable or mismatched; restore the authoritative source before reviewing it.
+`source-mismatch` source resolves to a live node but no longer matches its recorded allocation,
+turn key, session, scope, or content hash. Candidate review, relation review, and promotion are
+rejected while any cited source is unavailable or mismatched. Deleting and recreating a node does
+not restore the prior allocation, even when its numeric id and public fields are identical.
+Policy rows created before allocation bindings were introduced remain listable for audit but fail
+closed for review and promotion.
 
 ## Failure & recovery semantics
 
@@ -169,9 +187,10 @@ silent no-op and the agent proceeds. Concretely:
 - **Hooks never block.** Recall injection is skipped rather than delayed past its
   timeout; capture that cannot reach the daemon is dropped for that turn, not
   retried inline. A prompt is always delivered unmodified.
-- **Raw Episodic always survives.** Whatever else fails, the passively-captured raw
-  turns persist as `Episodic` memories; distillation is best-effort on top of a
-  durable transcript, never a precondition for keeping it.
+- **Persisted sources survive downstream failure.** Once accepted by the
+  daemon, a raw turn remains an `Episodic` source even when extraction,
+  validation, review, or promotion fails. A turn that never reaches the daemon
+  is not reconstructed by this guarantee.
 - **Pulled-but-abandoned extractions are redelivered once.** When `extract_pending`
   hands out a batch, those turns are marked `pending:<epoch-ms>:<attempt>` *before*
   they leave the in-memory queue. If the agent never emits its distillation (session
@@ -181,6 +200,28 @@ silent no-op and the agent proceeds. Concretely:
   is **2** total deliveries (`EXTRACT_MAX_PULL_ATTEMPTS`); on the final attempt the
   turn is marked done regardless, so a permanently-abandoned batch cannot loop
   forever.
+
+### Evidence-catalog recovery contract
+
+The catalog proposed by
+[ADR-0015](../adr/0015-evidence-grounded-formation-and-chain-retrieval.md)
+uses raw sources as the recovery root:
+
+- a failed validation or catalog write leaves the source unchanged and
+  retrievable;
+- a source revision update, retraction, deletion, scope change, or validity
+  change atomically makes dependent records ineligible before they can be
+  served;
+- rebuild replays a named formation profile against immutable source revisions and
+  writes through the normal admission transaction;
+- routing-only records remain isolated during rebuild and never substitute for
+  missing raw evidence;
+- index rebuild is generation-stamped and becomes visible atomically; and
+- rollback restores the prior eligible catalog generation without changing
+  graph ids or source bytes.
+
+Operators inspect formation audit counts, stale-derived ratio, provenance
+coverage, and catalog generation before enabling a rebuilt index.
 
 ## Recall telemetry rollout gate
 
@@ -195,16 +236,16 @@ abstentions, threshold sweep, cosine percentiles, and auto-exposure ratios measu
 eligibility, not delivery or quality**: they cannot establish that a client rendered context, that
 an agent used it, or that an answer improved. The ordinary `stats` command omits this section.
 
-The telemetry side schema is optional. A future side-schema version, or a policy-store open,
-write, or query failure, disables or degrades telemetry only. It must never block core recall; the
+The telemetry side schema is optional and version-gated. An unsupported schema
+version, or a policy-store open, write, or query failure, disables or degrades telemetry only. It must never block core recall; the
 hook retains its fail-open contract and still delivers the user's prompt (with no injected context
 when recall itself cannot complete). The dispatch regression tests own the open/write/query
 fail-open assertions; the procedure below records a reproducible write-failure observation only.
 
-### Pre-plugin-reactivation evidence gate
+### Hook activation evidence procedure
 
-Plugin reactivation remains blocked until this fail-closed procedure succeeds against a disposable
-database. It creates one note through production CLI paths, gives its Episodic copy a valid
+Run this fail-closed procedure against a disposable database before enabling
+automatic hook injection in a new environment. It creates one note through production CLI paths, gives its Episodic copy a valid
 authoritative retained-action advantage, proves the unfiltered top, restores the same pre-observation
 snapshot, and then proves the hook's knowledge-only filter persists the Semantic copy.
 
@@ -218,13 +259,13 @@ set -euo pipefail
 
 RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/anamnesis-recall-rollout.XXXXXX")"
 export ANAMNESIS_DB="$RUN_DIR/memory.db"
-export ANAMNESIS_NAMESPACE="r1-rollout"
+export ANAMNESIS_NAMESPACE="recall-verification"
 export ANAMNESIS_DAEMON_GRACE_SECS=0
 export ANAMNESIS_REINFORCE=false
 export ANAMNESIS_HOOK_THRESHOLD=13.0
 export ANAMNESIS_HOOK_COSINE_GATE=0.86
 NS_DB="$ANAMNESIS_DB"
-NOTE="R1 rollout marker semantic recall must select this exact note"
+NOTE="Recall verification marker must select this exact note"
 
 cleanup_failed_gate() {
   sqlite3 "$NS_DB" 'DROP TRIGGER IF EXISTS recall_events_force_insert_failure;' \
@@ -280,7 +321,7 @@ sqlite3 "$NS_DB" \
 anamnesis stats --recall --namespace "$ANAMNESIS_NAMESPACE" --embedded >/dev/null
 cp "$NS_DB" "$RUN_DIR/rank-baseline.db"
 
-anamnesis recall "R1 rollout marker semantic recall" --limit 2 \
+anamnesis recall "Recall verification marker" --limit 2 \
   --namespace "$ANAMNESIS_NAMESPACE" --embedded | tee "$RUN_DIR/unfiltered-recall.txt"
 RAW_TOP_ID="$(
   python3 - "$RUN_DIR/unfiltered-recall.txt" <<'PY'
@@ -301,7 +342,7 @@ test "$(sqlite3 "$NS_DB" "SELECT node_type FROM nodes WHERE id=$RAW_TOP_ID")" = 
 cp "$RUN_DIR/rank-baseline.db" "$NS_DB"
 CONTROL_ROWS="$(sqlite3 "$NS_DB" 'SELECT COUNT(*) FROM recall_events')"
 
-printf '{"hook_event_name":"UserPromptSubmit","prompt":"R1 rollout marker semantic recall","cwd":"%s"}\n' \
+printf '{"hook_event_name":"UserPromptSubmit","prompt":"Recall verification marker","cwd":"%s"}\n' \
   "$RUN_DIR" | anamnesis hook user-prompt | tee "$RUN_DIR/hook-success.json"
 wait_for_db_lock
 
@@ -333,7 +374,7 @@ BEGIN
 END;
 SQL
 
-printf '{"hook_event_name":"UserPromptSubmit","prompt":"R1 rollout marker semantic recall","cwd":"%s"}\n' \
+printf '{"hook_event_name":"UserPromptSubmit","prompt":"Recall verification marker","cwd":"%s"}\n' \
   "$RUN_DIR" | anamnesis hook user-prompt | tee "$RUN_DIR/hook-failure.json"
 wait_for_db_lock
 
@@ -366,9 +407,9 @@ remove it with:
 rm -rf "$RUN_DIR"
 ```
 
-A real external `UserPromptSubmit` activation with the installed plugin remains pending. Do not
-reactivate the plugin from this deterministic procedure or regression output alone; collect and
-review that external activation evidence separately.
+This deterministic procedure does not establish delivery by an external hook
+host. Record external activation as a separate integration test and do not mix
+its result with entrypoint-simulation evidence.
 
 ## Daemon lifecycle & version skew
 
@@ -390,9 +431,9 @@ ingest without any error. This was observed in the field:
 - **Detection.** An old daemon's `stats` output **lacks the usage section**
   (`extraction backlog` / `captured total` / `stale ratio` absent). Cross-check
   `anamnesis --version` against the running `anamnesis daemon` process.
-- **Workaround (until #86 lands).** Kill the stale `anamnesis daemon` process; the
-  next client respawns its own, current version. The daemon is disposable — killing
-  it loses no data (the DB is on disk).
+- **Recovery.** Stop the stale `anamnesis daemon` process after a binary upgrade;
+  the next client respawns the current version. The daemon is disposable and the
+  durable database remains on disk.
 - **Codex-specific.** Freshly installed plugin hooks are **silently skipped until the
   plugin is interactively trusted** in Codex — capture and recall look inert until
   you trust it once ([#87](https://github.com/INONONO66/anamnesis/issues/87)).
@@ -470,7 +511,7 @@ default, never an error).
 |:--|:--|:--|
 | `ANAMNESIS_DB` | `<data_dir>/anamnesis/memory.db` (project `.anamnesis/` if found, else `~/.anamnesis/memory.db`) | SQLite file for the default namespace. |
 | `ANAMNESIS_NAMESPACE` | `default` | Namespace used when a call omits one. |
-| `ANAMNESIS_REINFORCE` | `true` | Auto-reinforce the package returned by `recall`; `0` / `false` / `no` disables. |
+| `ANAMNESIS_REINFORCE` | `true` | Commit the package returned by an explicit MCP/CLI `recall` as deliberate use; `0` / `false` / `no` keeps that call read-only. Proactive hook recall is non-reinforcing regardless of this default. |
 | `ANAMNESIS_CONTEXT_STYLE` | `detailed` | Recall context wire. Exact `evidence` keeps the same validated package and commit trace but renders compact evidence grouped by source session and ordered by observation time; any other value uses the full diagnostic layout. |
 | `ANAMNESIS_HOOK_THRESHOLD` | `13.0` | `τ` — the recall injection gate. A floor on the **top recall score**, which is raw ACT-R activation (~8–16 on a typical graph), **not** a 0..1 similarity; a sub-1 value silently disables the gate. **Recalibrate per graph** — activation magnitude scales with density/recency. |
 | `ANAMNESIS_HOOK_TOPK` | `20` | Cap on injected per-turn memories. |
@@ -479,7 +520,7 @@ default, never an error).
 | `ANAMNESIS_CAPTURE_ENABLED` | `true` | Global capture kill-switch; `0` / `false` / `no` disables passive capture. |
 | `ANAMNESIS_EXTRACT_THRESHOLD_N` | `20` | Un-extracted queue length that triggers the SessionStart extraction nudge. |
 | `ANAMNESIS_EXTRACT_REDELIVERY_MS` | `21600000` (6h) | TTL after which a pulled-but-abandoned extraction is re-queued once (attempt cap 2). |
-| `ANAMNESIS_EXTRACT_MODE` | `off` | R2 mode: only exact `shadow` permits external extraction of raw captured content; `auto`, boolean-like, and unrecognized values degrade to off. |
+| `ANAMNESIS_EXTRACT_MODE` | `off` | Only exact `shadow` permits configured extraction of raw captured content; `auto`, boolean-like, and unrecognized values degrade to off. |
 | `ANAMNESIS_EXTRACT_CMD` | built-in local Qwen 3.6 structured profile | The built-in profile uses non-streaming Ollama HTTP on loopback. An explicitly configured non-Ollama argv is shell-word parsed and executed without a shell. |
 | `ANAMNESIS_DAEMON_GRACE_SECS` | `30` | Idle grace before a zero-client daemon exits; `0` ⇒ exit immediately. |
 | `ANAMNESIS_EMBED_MODEL` | `multilingual-e5-small` | Embedding model. Set it to the known stored model to continue without migrating. |

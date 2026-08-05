@@ -19,8 +19,20 @@ pub(crate) fn planned_query_variants(query: &str) -> Vec<String> {
     search::plan::query_variants(query)
 }
 
-pub(crate) fn planned_complex_dense_query_variants(query: &str) -> Vec<String> {
-    search::plan::complex_dense_query_variants(query)
+pub(crate) fn planned_complex_dense_query_variants(
+    query: &str,
+    relation_first: bool,
+) -> (Vec<String>, Vec<usize>, Vec<usize>) {
+    let plan = if relation_first {
+        search::plan::complex_dense_query_plan(query)
+    } else {
+        search::plan::conservative_complex_dense_query_plan(query)
+    };
+    (
+        plan.variants,
+        plan.engine_variant_indices,
+        plan.atomic_variant_indices,
+    )
 }
 
 const ARCHIVE_SALIENCE_THRESHOLD: f64 = 0.10;
@@ -517,7 +529,7 @@ pub struct CrystallizeRequest {
     pub confidence: f64,
     /// Provenance of the synthesis.
     pub origin: Origin,
-    /// Entity tags for future linking.
+    /// Entity tags used for indexing and cross-node linking.
     pub entity_tags: Vec<String>,
     /// Timestamp of crystallization.
     pub timestamp: Timestamp,
@@ -821,9 +833,8 @@ pub struct HealthReport {
     pub retracted_count: usize,
     /// Number of nodes without an embedding vector.
     pub missing_embedding_count: usize,
-    /// Number of registered peers. Always `0` since the peer/trust subsystem was
-    /// removed (production is single-peer, `PeerId(0)`); retained for the stats
-    /// render surface.
+    /// Compatibility metric for a peer registry. The engine does not maintain such
+    /// a registry, so this value is always `0`; origin peer IDs remain provenance.
     pub peer_count: usize,
     /// Average salience across all nodes.
     pub avg_salience: f64,
@@ -1148,6 +1159,20 @@ impl<S: StorageAdapter + Clone> Engine<S> {
     /// (last 256 + entity-tag matches), scores them, and creates/strengthens
     /// up to 4 edges to the most similar candidates.
     pub fn ingest(&mut self, observation: Observation) -> Result<IngestResult, Error> {
+        self.ingest_with_metadata(observation, HashMap::new())
+    }
+
+    /// Internal admission path for framework surfaces that must persist
+    /// consumer metadata in the same base-node write as the observation.
+    ///
+    /// Keeping this crate-private preserves the public kernel API: ordinary
+    /// callers continue to use [`Engine::ingest`], whose behavior is exactly
+    /// this path with an empty metadata map.
+    pub(crate) fn ingest_with_metadata(
+        &mut self,
+        observation: Observation,
+        metadata: HashMap<String, String>,
+    ) -> Result<IngestResult, Error> {
         use crate::mechanics::attraction::{
             attraction_score, cosine_similarity, should_create_edge, tau_type,
         };
@@ -1186,7 +1211,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                 (0.0, NodeId(0), None)
             };
 
-        // ── Stage 1 of perception: reject untrusted / unaffordable-and-not-novel ──
+        // ── Stage 1 of perception: reject low-confidence / unaffordable-and-not-novel ──
         // ── plus Stage 2 routing. theta_sep is the encoder-derived separation     ──
         // ── boundary `1 - q95` (perception.md, ADR-0009); the engine defaults     ──
         // ── `novelty_threshold` to that derivation (priors::theta_sep), so the    ──
@@ -1196,8 +1221,8 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         // Surprise-gated initial evidence prior P_i = k * eps for an Allocate
         // decision (ADR-0009). eps is the precision-weighted (isotropic-fallback)
         // embedding prediction error against the nearest site; absent any prediction
-        // (no embeddings yet) the site is maximally surprising and its prior enters
-        // at the surprise ceiling (`SURPRISE_GAIN_K == INITIAL_RETAINED_ACTION`).
+        // (no embeddings yet), the engine uses the declared no-prediction fallback
+        // `INITIAL_RETAINED_ACTION`.
         let surprise_charge = match (&observation.embedding, &predicted_embedding) {
             (Some(obs), Some(pred)) => {
                 let eps = perception::bayesian_surprise(obs, pred, None);
@@ -1302,7 +1327,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             tier: crate::graph::MemoryTier::Auto,
             origin: observation.origin,
             entity_tags: observation.entity_tags.clone(),
-            metadata: HashMap::new(),
+            metadata,
         };
 
         self.graph.add_node(node)?;
@@ -2527,9 +2552,8 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                 Ok(kt) => kt.clone(),
                 Err(_) => continue,
             };
-            // Identity nodes are protected from ordinary decay (identity-based
-            // protection, ADR/B4). Manual Core-tier pinning was removed — `tier`
-            // is always `Auto` in production, so there is no tier-override branch.
+            // Identity nodes are protected from ordinary decay (ADR-0008). Stored
+            // tier is `Auto`, so protection is determined by knowledge type.
             if node_type == KnowledgeType::Identity {
                 continue;
             }
@@ -2540,10 +2564,9 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                 Ok(a) => a,
                 Err(_) => continue,
             };
-            // Deliberate departure from dissipation.md ("non-finite is an
-            // error"): a trace-less legacy node (empty access_history ⇒ B_i =
-            // -inf) must degrade to the archive floor, NOT abort the batch —
-            // recall ticks every cycle, so one bad node would brick the session.
+            // A trace-less persisted node has `B_i = -inf`. Batch maintenance maps
+            // that state to the archive floor so one invalid row does not abort the
+            // remaining nodes.
             let new_salience = if new_action.is_finite() {
                 project_salience(new_action)
             } else {
@@ -2603,7 +2626,7 @@ impl<S: StorageAdapter + Clone> Engine<S> {
         // `now - edge.leaked_at` — a per-edge leak CHECKPOINT, distinct from
         // `accessed_at` (the committed-use timestamp): repeated ticks at the same
         // `now` must charge a fixed idle window only once, not once per call
-        // (flagship bug #2 — `accessed_at` never advances on leak, so without a
+        // (`accessed_at` never advances on leak, so without a
         // checkpoint every call re-subtracted the same leak again). Edges incident
         // to a protected node (`Identity`) are exempt, mirroring node decay;
         // `Contradicts` edges are excluded (routed to frustration, not propagation
@@ -2777,9 +2800,8 @@ impl<S: StorageAdapter + Clone> Engine<S> {
             supersede_rate,
             retracted_count,
             missing_embedding_count,
-            // Peer registry removed with the peer/trust subsystem; production is
-            // always single-peer (PeerId(0)). Field retained at 0 for the stats
-            // render surface.
+            // No peer registry is maintained. Origin peer IDs are provenance only,
+            // so the compatibility metric is neutral at zero.
             peer_count: 0,
             avg_salience,
             grade,
@@ -3252,8 +3274,8 @@ impl<S: StorageAdapter + Clone> Engine<S> {
                 _ => 0.0,
             };
             let sw = scope_weight(&config.scope, &node.origin.scope);
-            // Trust reservoir removed with the peer subsystem; term is neutral
-            // pending a real trust source.
+            // The compatibility reliability input is uniform, so it contributes no
+            // relative ranking signal.
             let trust_weight = 1.0;
 
             let stress = node_stress.get(&nid).copied().unwrap_or(0.0);
@@ -3573,9 +3595,8 @@ mod tests {
         let node = engine.graph().get_node(ids[0]).unwrap();
         assert_eq!(node.name, "test node");
         // salience = logistic(B_i + P_i) (ADR-0008), never a flat 1.0. With no
-        // embedding the observation is maximally surprising, so its evidence prior
-        // P_i enters near the ceiling (k·eps fallback = INITIAL_RETAINED_ACTION) and
-        // salience ≈ logistic(B_creation ≈ 0 + P_i) ≈ 1.
+        // embedding the evidence prior uses `INITIAL_RETAINED_ACTION`, so salience
+        // ≈ logistic(B_creation ≈ 0 + P_i) ≈ 1.
         assert_eq!(
             node.salience,
             crate::mechanics::priors::project_salience(node.retained_action)
@@ -3587,6 +3608,42 @@ mod tests {
             node.evidence_prior,
             crate::mechanics::priors::INITIAL_RETAINED_ACTION,
             "encoding-surprise prior P_i ← k·eps (max-surprise fallback)"
+        );
+    }
+
+    #[test]
+    fn public_ingest_is_the_empty_metadata_behavior_of_internal_admission() {
+        let observation = make_observation("delegated ingest");
+        let mut public_engine = Engine::new();
+        let mut internal_engine = Engine::new();
+
+        let public_result = public_engine.ingest(observation.clone()).unwrap();
+        let internal_result = internal_engine
+            .ingest_with_metadata(observation, HashMap::new())
+            .unwrap();
+
+        let IngestResult::Created(public_ids) = public_result else {
+            panic!("expected public Created");
+        };
+        let IngestResult::Created(internal_ids) = internal_result else {
+            panic!("expected internal Created");
+        };
+        assert_eq!(public_ids, internal_ids);
+        assert!(
+            snapshot_restore_mismatch(
+                public_engine.graph().storage(),
+                internal_engine.graph().storage(),
+            )
+            .is_none(),
+            "the public ingest path must retain field-for-field empty-metadata behavior"
+        );
+        assert!(
+            public_engine
+                .graph()
+                .get_node(public_ids[0])
+                .unwrap()
+                .metadata
+                .is_empty()
         );
     }
 
@@ -3864,7 +3921,7 @@ mod tests {
             "supra-threshold coupling must create the auto-edge"
         );
 
-        // DoD trace: the created edge's conductance is the cold-start coupling seed
+        // The created edge's conductance is the cold-start coupling seed
         // mapped through `initialize_conductance`, and its public `weight` is the
         // bounded projection of that reservoir — `weight = project_weight(
         // initialize_conductance(coupling_seed))` (conductance.md "Cold Start",

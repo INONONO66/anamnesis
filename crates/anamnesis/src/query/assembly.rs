@@ -246,8 +246,7 @@ pub struct ScoredNode {
 ///
 /// `T_agent` is the total query-local frustration stress attached to the agent's
 /// active identity, clamped to `[0, 1]`: the sum of `sigma_ij` over surfaced
-/// contradiction pairs that have an identity node as an endpoint. This replaces the
-/// old rigidity-weighted repulsion sum — stress already carries the multiplicative
+/// contradiction pairs that have an identity node as an endpoint. Stress carries the multiplicative
 /// gates (`contradiction_weight * min(a) * scope * temporal`), so no separate
 /// rigidity term is applied (ADR-0006: contradictions are surfaced, not suppressed).
 pub fn compute_agent_tension(

@@ -6,20 +6,21 @@
 //! declares whether it is **DERIVED** (forced by a behavioral specification) or
 //! a **CALIBRATED PRIOR** (a fitted or declared default).
 //!
-//! This module is the only place a magic number may live. Constants migrate in
-//! as each migration phase touches them; nothing here may be presented as a law.
+//! This module is the only place an engine-level numeric prior may live. Each
+//! value must state its derivation or calibration basis and must not be presented
+//! as a physical law.
 //!
-//! ## Reservoir ↔ projection (Phase 1, below)
+//! ## Reservoir ↔ projection
 //!
-//! Locked conventions (see migration design Decision 5):
+//! The reservoir conventions are defined by ADR-0002:
 //! `A_i` = log need-odds (unbounded) and `salience = project_salience(A) = logistic(A)`;
 //! `C_ij` = log likelihood ratio (unbounded) and `weight = project_weight(C) = logistic(C)`;
 //! backfill inverses are `logit(clamp(x, EPS, 1-EPS))` using [`LOGIT_BACKFILL_EPS`].
-//! The doc Hebbian `(1 - C_ij)` bound is realized in **Phase 3** as `(1 - project_weight(C))`.
+//! Hebbian saturation uses `(1 - project_weight(C))`, preserving `C` in log-LR units.
 //! The unbounded reservoirs are finite-guarded by [`clamp_log_odds`]; the flow's
 //! positive-bounded transition conductance is [`project_conductance`] = `logistic(C)`.
 //!
-//! ## Phase 3 (flow + readout)
+//! ## Activation flow and readout
 //!
 //! Additive directed RWR: [`restart_alpha`] (reach-derived `alpha = 1/(L+1)`),
 //! [`edge_type_factor`] (within-row relative conductance per edge type, `Contradicts`
@@ -27,7 +28,7 @@
 //! [`SEED_SOFTMAX_TAU`] plus the `beta_*` feature weights. Readout: the seven
 //! `READOUT_W_*` coefficients of the authoritative additive log-odds score.
 //!
-//! ## Phase 4 (frustration + surprise-gated perception)
+//! ## Frustration and surprise-gated perception
 //!
 //! Frustration: [`CONTRADICTION_WEIGHT_DEFAULT`] is the declared per-edge stress
 //! gate factor when none is stored. Perception: the surprise gain [`SURPRISE_GAIN_K`]
@@ -59,8 +60,8 @@ pub const DECAY_SCALE: f64 = 2.0;
 /// reservoir should reach its saturation target. The single core learning rate is
 /// `eta = 1 - 0.5^(1/N)` ([`learning_rate`]); the same `eta` drives feedback
 /// (Rescorla-Wagner `dA`), Hebbian-Oja `dC`, and the saturating `access_gain`.
-/// Splitting into `eta_path`/`eta_pair` is an optional later refit of one `N`,
-/// not a separate base constant.
+/// Any per-channel calibration must remain a derived refit of this `N`, not an
+/// independent base constant.
 pub const TARGET_COACTIVATION_N: f64 = 10.0;
 
 /// The single core learning rate `eta = 1 - 0.5^(1/N)`, derived from the target
@@ -78,14 +79,13 @@ pub fn learning_rate(n: f64) -> f64 {
     1.0 - 0.5_f64.powf(1.0 / n)
 }
 
-/// Initial retained action `A_i` for a freshly created node (`SiteInserted`).
+/// No-prediction evidence-prior fallback for a freshly allocated node.
 ///
-/// CALIBRATED PRIOR — a new site enters with high need-odds. This is the
-/// reservoir-authoritative initial value (ADR-0002): node creation sets
-/// `retained_action = INITIAL_RETAINED_ACTION` and derives
-/// `salience = project_salience(INITIAL_RETAINED_ACTION) ≈ 1.0`, so the reservoir
-/// and its projection agree from the start. `logistic(13.8) ≈ 0.999999`. Phase 4
-/// replaces this flat prior with a Bayesian-surprise initial charge.
+/// CALIBRATED PRIOR — when allocation has no embedding prediction, the engine uses
+/// this value as `P_i` and derives the composite retained action from the creation
+/// trace plus `P_i` (ADR-0002/ADR-0008). Prediction-aware allocation instead derives
+/// `P_i` from [`SURPRISE_GAIN_K`]. `logistic(13.8) ≈ 0.999999` describes the
+/// isolated prior projection; stored salience projects the full composite action.
 pub const INITIAL_RETAINED_ACTION: f64 = 13.8;
 
 /// Log-odds reward scale for Rescorla-Wagner feedback targets.
@@ -115,10 +115,8 @@ pub fn decay_multiplier_for_type(kt: &crate::graph::KnowledgeType) -> f64 {
         // Identity / self-knowledge — protected from ordinary decay.
         KnowledgeType::Identity => 0.0,
         // Ordinary knowledge (extracted facts and consumer-labelled types) decays
-        // slowly. `Custom` folds in the former convention/decision/entity/gotcha/
-        // event knowledge variants at this same rate (Event was 0.60 pre-shrink; it
-        // now decays at the ordinary 0.40 knowledge rate — an acceptable coarsening
-        // of a policy input, not a dynamics change).
+        // slowly. `Custom` shares this rate and does not introduce another dynamics
+        // control.
         KnowledgeType::Semantic | KnowledgeType::Custom(_) => 0.40,
         // Episodic decays at the full nominal rate.
         KnowledgeType::Episodic => 1.0,
@@ -127,12 +125,11 @@ pub fn decay_multiplier_for_type(kt: &crate::graph::KnowledgeType) -> f64 {
 
 /// Random-walk-with-restart restart probability `alpha`, default.
 ///
-/// CALIBRATED PRIOR — superseded by the reach-derived [`restart_alpha`] below
-/// ([ADR-0005](../../docs/adr/0005-additive-activation-flow.md)). Retained only as
-/// the fallback when no mean-reach prior is supplied.
+/// CALIBRATED PRIOR — fallback used when no valid mean-reach input is supplied to
+/// [`restart_alpha`] ([ADR-0005](../../docs/adr/0005-additive-activation-flow.md)).
 pub const RWR_RESTART_PROBABILITY: f64 = 0.15;
 
-// --- Additive directed RWR flow (Phase 3, ADR-0005 / activation-flow.md) ----
+// --- Additive directed RWR flow (ADR-0005 / activation-flow.md) ------------
 
 /// Mean associative reach `L` — the behavioral specification from which the RWR
 /// restart rate derives ([activation-flow.md](../../docs/05-context-retrieval/activation-flow.md)).
@@ -177,7 +174,7 @@ pub const RWR_MAX_ITERATIONS: usize = 256;
 /// `Reason` > `ReinforcedBy` > `Semantic` > `Temporal` > `RejectedAlternative`.
 /// Factors are *relative within a row* (`P` is re-normalized row-stochastic), so
 /// only the ordering is load-bearing. `Contradicts` returns `0.0` — it is excluded
-/// from propagation and routed to frustration; `Refutes` is a weak debug relation.
+/// from propagation and routed to frustration; `Refutes` has weak propagation.
 /// Once per-type co-activation data exists these are refit from per-type mean `C_ij`.
 pub fn edge_type_factor(edge_type: &crate::graph::EdgeType, is_forward: bool) -> f64 {
     use crate::graph::EdgeType;
@@ -228,7 +225,7 @@ pub fn edge_type_affinity_npmi(edge_type: &crate::graph::EdgeType) -> f64 {
     (edge_type_factor(edge_type, true) / EDGE_TYPE_FACTOR_MAX).clamp(0.0, 1.0)
 }
 
-// --- Cold-start coupling seed (conductance.md, Phase 5 link()) --------------
+// --- Cold-start coupling seed (conductance.md) ------------------------------
 //
 // When a link is created before any co-activation history exists, its initial
 // conductance `C_ij` is a calibrated log-LR prior estimated from features
@@ -311,9 +308,9 @@ pub const ETA_LEAK: f64 = 0.10;
 /// DERIVED — the coupling seed is a probability-like coupling strength; its log-LR
 /// image is `logit(coupling_seed)`, the inverse of the `project_weight` logistic,
 /// so that `project_weight(initialize_conductance(s)) ≈ s`. A zero/sub-threshold
-/// seed maps to a strongly negative (near-zero weight) cold-start path; the
-/// committed Hebbian flux later replaces the prior with measured strength. Finite
-/// at the `0`/`1` ends via the clamped logit.
+/// seed maps to a strongly negative (near-zero weight) cold-start path. Committed
+/// Hebbian flux then adjusts that seed toward observed strength. Finite at the
+/// `0`/`1` ends via the clamped logit.
 #[inline]
 pub fn initialize_conductance(coupling_seed: f64) -> f64 {
     clamped_logit(coupling_seed)
@@ -366,10 +363,9 @@ pub const BETA_PRIOR: f64 = 1.0;
 // log-odds sum `posterior = prior + sum of evidence`. They are calibrated
 // priors, not laws (ADR-0010); refit from accepted-readout data.
 //
-// CALIBRATED 2026-06-11 v2 (docs/07-quality-gates/calibration-records.md):
-// coordinate search over (w_a, w_phi, w_s, w_z) on the LoCoMo-10 even-sample
-// train split (`fit_readout`, replayed novelty-deduped NDCG@20 objective);
-// live-confirmed dev Recall@20 0.526 -> 0.778, MRR 0.183 -> 0.287.
+// Versioned calibrated regression object. Dataset, split, fitting procedure,
+// paired validation, and rejected alternatives are recorded in
+// docs/07-quality-gates/calibration-records.md.
 // `w_z = 0`: the RWR approximation `Z_i = -ln(a_i)` duplicates `logit(a_i)`.
 // `w_s = 0`: in no-usage data salience projects the creation-time reservoir
 // (encoding surprise), which is noise w.r.t. query alignment — refit with
@@ -387,7 +383,9 @@ pub const READOUT_W_S: f64 = 0.0;
 pub const READOUT_W_Z: f64 = 0.0;
 /// `w_scope` — weight on the scope-compatibility term.
 pub const READOUT_W_SCOPE: f64 = 1.0;
-/// `w_trust` — weight on the origin/peer-reliability term.
+/// `w_trust` — compatibility coefficient for the reliability input. Engine
+/// assembly supplies the neutral value `1.0` uniformly, so this term has no
+/// relative ranking effect.
 pub const READOUT_W_TRUST: f64 = 1.0;
 /// `w_stress` — penalty weight on attached frustration `stress_i` (subtracted).
 pub const READOUT_W_STRESS: f64 = 1.0;
@@ -411,7 +409,7 @@ pub const CONTRADICTION_WEIGHT_DEFAULT: f64 = 1.0;
 
 // --- Surprise-gated perception (perception.md, ADR-0009) --------------------
 //
-// Perception is a two-stage gate. Stage 1 rejects only untrusted (low-confidence)
+// Perception is a two-stage gate. Stage 1 rejects only low-confidence
 // or unaffordable-and-not-novel observations. Stage 2 routes survivors: novelty
 // `> theta_sep` allocates a new site (surprise-gated charge `dA = k*eps`); novelty
 // `<= theta_sep` routes to and reinforces the nearest existing site. Familiarity
@@ -426,17 +424,14 @@ pub const CONTRADICTION_WEIGHT_DEFAULT: f64 = 1.0;
 /// matrix `Sigma`, `k` absorbs both units and variance, so it must be declared and
 /// fit from encoder statistics and the target initial-charge magnitude.
 ///
-/// Calibrated at `12.0` and DECOUPLED from [`INITIAL_RETAINED_ACTION`] so the
+/// Calibrated at `12.0` and independent of [`INITIAL_RETAINED_ACTION`] so the
 /// decay-EXEMPT prior `P_i = k * eps` does not pin `salience = logistic(B_i + P_i)`
 /// near `1.0` for ordinary captured turns. A typical distinct turn (`eps ≈ 0.6` at
 /// the encoder q95 cosine [`ENCODER_DISTINCT_PAIR_Q95`] `≈ 0.70`) enters at
 /// `P_i ≈ 7.2` and crosses the archive floor after ~6 months of disuse as `B_i`
 /// falls; a maximal-surprise site (`eps ≈ 1`) enters at `k = 12.0` and stays
-/// effectively persistent. The prior value `k = INITIAL_RETAINED_ACTION = 13.8`
-/// seeded even typical turns so high (`P_i ≈ 8.28`) that base-level forgetting
-/// could not reach the archive floor for years — `NodeArchived` never fired for
-/// the capture path. The no-prediction cold-start allocate still enters at
-/// [`INITIAL_RETAINED_ACTION`]. Replaces the old flat `salience = 1.0` init.
+/// effectively persistent. A no-prediction allocation uses
+/// [`INITIAL_RETAINED_ACTION`] as its evidence-prior fallback.
 pub const SURPRISE_GAIN_K: f64 = 12.0;
 
 /// Encoder distinct-pair cosine-similarity 95th percentile `q95`, the only input
@@ -468,8 +463,8 @@ pub fn theta_sep(q95: f64) -> f64 {
 /// Epsilon for the clamped-logit projection backfill, so that
 /// `logit(clamp(x, EPS, 1 - EPS))` stays finite at the `0`/`1` boundaries.
 ///
-/// DERIVED — bounds the inverse projection away from `±inf`. Reserved here as the
-/// single home for the Phase 1 reservoir migration (migration design Decision 5).
+/// DERIVED — bounds every inverse projection away from `±inf` with one shared
+/// finite-interior convention.
 pub const LOGIT_BACKFILL_EPS: f64 = 1e-6;
 
 /// Numerical-safety bound for the log-odds reservoirs (`A_i`, `C_ij`).
@@ -507,8 +502,8 @@ pub fn project_salience(retained_action: f64) -> f64 {
     logistic(retained_action)
 }
 
-/// Backfill inverse `A = logit(clamp(salience))`: recovers retained action from a
-/// legacy bounded salience during the v2→v3 migration. Finite at the 0/1 ends.
+/// Projection inverse `A = logit(clamp(salience))`: reconstructs retained action
+/// from a bounded persisted salience. Finite at the 0/1 ends.
 #[inline]
 pub fn salience_to_action(salience: f64) -> f64 {
     clamped_logit(salience)
@@ -521,8 +516,8 @@ pub fn project_weight(conductance: f64) -> f64 {
     logistic(conductance)
 }
 
-/// Backfill inverse `C = logit(clamp(weight))`: recovers conductance from a legacy
-/// bounded edge weight during the v2→v3 migration. Finite at the 0/1 ends.
+/// Projection inverse `C = logit(clamp(weight))`: reconstructs conductance from a
+/// bounded persisted edge weight. Finite at the 0/1 ends.
 #[inline]
 pub fn weight_to_conductance(weight: f64) -> f64 {
     clamped_logit(weight)
@@ -532,9 +527,9 @@ pub fn weight_to_conductance(weight: f64) -> f64 {
 /// LOG_ODDS_CLAMP]`. This is NOT a `[0, 1]` bound — `A_i` and `C_ij` are unbounded
 /// log-odds; this only traps numerical blowups well inside `f64` range.
 ///
-/// The doc's Hebbian Oja bound `dC = η·flux·(1 - C_ij)` (conductance.md) is
-/// realized in Phase 3 as saturation via the *projection* `(1 - project_weight(C))`,
-/// keeping `C` in log-LR units (migration design Decision 5). The Hebbian
+/// The Hebbian Oja bound `dC = η·flux·(1 - C_ij)` (conductance.md) is
+/// implemented as saturation via the *projection* `(1 - project_weight(C))`,
+/// keeping `C` in log-LR units. The Hebbian
 /// reservoir update `C_next = clamp_log_odds(C_ij + dC_ij)` (overview.md) uses this
 /// guard to keep the updated reservoir finite.
 #[inline]

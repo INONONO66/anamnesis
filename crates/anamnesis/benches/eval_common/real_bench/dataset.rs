@@ -44,6 +44,25 @@ pub struct LoadedBenchmark {
     pub questions: Vec<BenchQuestion>,
 }
 
+/// Label-free input accepted by benchmark formation code.
+///
+/// Questions, reference answers, and relevance annotations are intentionally
+/// absent so graph construction cannot observe evaluation labels.
+#[derive(Debug, Clone, Copy)]
+pub struct FormationInput<'a> {
+    pub dataset: BenchDatasetName,
+    pub sessions: &'a [BenchSession],
+}
+
+impl LoadedBenchmark {
+    pub fn formation_input(&self) -> FormationInput<'_> {
+        FormationInput {
+            dataset: self.dataset,
+            sessions: &self.sessions,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BenchSession {
     pub session_id: String,
@@ -78,6 +97,27 @@ pub struct BenchQuestion {
     /// Dataset-declared question date, epoch seconds UTC, when parseable.
     #[serde(default)]
     pub question_date: Option<u64>,
+}
+
+/// Label-free input accepted by retrieval and context-rendering code.
+///
+/// The evaluation layer keeps the reference answer and gold evidence, but
+/// the product-shaped query path receives only fields available at runtime.
+#[derive(Debug, Clone, Copy)]
+pub struct RetrievalInput<'a> {
+    pub question_id: &'a str,
+    pub question: &'a str,
+    pub question_date: Option<u64>,
+}
+
+impl BenchQuestion {
+    pub fn retrieval_input(&self) -> RetrievalInput<'_> {
+        RetrievalInput {
+            question_id: &self.question_id,
+            question: &self.question,
+            question_date: self.question_date,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

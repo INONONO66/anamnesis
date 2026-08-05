@@ -25,7 +25,14 @@ pub struct RealBenchReport {
     pub rendered_recall: f64,
     pub rendered_hit: f64,
     pub diagnostics: DiagnosticsReport,
+    /// Query-to-packaged-evidence latency.
     pub latency_ms: LatencyReport,
+    /// Exact product context string rendering latency.
+    #[serde(default)]
+    pub context_render_latency_ms: LatencyReport,
+    /// Query-to-reader-ready product context latency.
+    #[serde(default)]
+    pub context_ready_latency_ms: LatencyReport,
     pub questions: Vec<QuestionEvaluation>,
 }
 
@@ -85,7 +92,13 @@ pub fn build_report(input: ReportInput) -> RealBenchReport {
     let rendered_recall = average_scalar(&input.questions, |q| q.rendered_recall);
     let rendered_hit = average_scalar(&input.questions, |q| f64::from(q.rendered_hit));
     let diagnostics = diagnostics(&input.questions);
-    let latency = latency_report(&input.questions);
+    let latency = latency_report(&input.questions, |question| question.search_latency_ms);
+    let context_render_latency = latency_report(&input.questions, |question| {
+        question.context_render_latency_ms
+    });
+    let context_ready_latency = latency_report(&input.questions, |question| {
+        question.context_ready_latency_ms
+    });
     RealBenchReport {
         dataset: input.dataset.as_str().to_string(),
         embedding_model: input.embedding_model,
@@ -110,6 +123,8 @@ pub fn build_report(input: ReportInput) -> RealBenchReport {
         rendered_hit,
         diagnostics,
         latency_ms: latency,
+        context_render_latency_ms: context_render_latency,
+        context_ready_latency_ms: context_ready_latency,
         questions: input.questions,
     }
 }
@@ -193,10 +208,13 @@ fn diagnostics(questions: &[QuestionEvaluation]) -> DiagnosticsReport {
     }
 }
 
-fn latency_report(questions: &[QuestionEvaluation]) -> LatencyReport {
+fn latency_report(
+    questions: &[QuestionEvaluation],
+    accessor: impl Fn(&QuestionEvaluation) -> f64,
+) -> LatencyReport {
     let mut values: Vec<_> = questions
         .iter()
-        .map(|question| question.search_latency_ms)
+        .map(accessor)
         .filter(|value| value.is_finite())
         .collect();
     values.sort_by(f64::total_cmp);

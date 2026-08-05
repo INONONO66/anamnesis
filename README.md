@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  <a href="#use-in-claude-code--codex">Claude Code &amp; Codex</a> · <a href="#see-it-reason">See it reason</a> · <a href="#quick-start">Quick Start</a> · <a href="docs/README.md">Docs</a> · <a href="docs/00-foundation/vision.md">Vision</a>
+  <a href="#use-in-claude-code--codex">Claude Code &amp; Codex</a> · <a href="#typed-relation-contract">Typed relations</a> · <a href="#quick-start">Quick Start</a> · <a href="docs/README.md">Docs</a> · <a href="docs/00-foundation/vision.md">Vision</a>
 </p>
 
 ---
@@ -26,13 +26,16 @@
 
 ## Why
 
-Every LLM agent session starts from zero. Agents repeat mistakes, rediscover conventions, and lose the reasoning behind past decisions. The common answers each drop something:
+An LLM agent session does not retain prior-session state unless a consumer
+supplies it. Persistent memory must preserve source records, provenance,
+relationships between observations, temporal validity, and an explicit
+lifecycle for unused material.
 
-- **Vector stores** answer *"what was said"* but not *"why it was decided"* — the structure between facts is gone.
-- **Tiered memory** archives conversations but loses cross-session connections.
-- **Evolving playbooks** improve over time but suffer brevity bias — detail erodes with each rewrite.
-
-Anamnesis stores memory as a **graph of fragments connected by typed edges** — so a decision keeps the reason it was made, and a reversal keeps the decision it overturned. Retrieval is a hybrid: alignment scoring (keyword / embedding) finds the entry points, and the graph surfaces the *structure* around them — reasoning chains and contradictions a flat list can't express — while power-law forgetting keeps the store from growing without bound.
+Anamnesis stores memory as a **graph of fragments connected by typed edges**.
+A decision can retain its reason, and a reversal can retain the decision it
+superseded. Alignment scoring (keyword, embedding, entity, and temporal cues)
+selects entry points; graph activation surfaces related structure; power-law
+forgetting changes the priority of unused material without deleting its source.
 
 ## What
 
@@ -46,26 +49,42 @@ Anamnesis is a **Rust library — a memory kernel** — plus a ready-made **Clau
 | **Perception** | **Surprise-gated** input: an observation charges memory in proportion to prediction error, then novelty / confidence / budget decide whether it allocates a new site or routes to the nearest one. |
 | **Frustration** | Contradictions are **excluded from propagation** and surfaced as tension (`sigma_ij`), never overwritten — both sides keep their provenance. |
 
-The earned claim is narrow and real: **typed reasoning edges plus contradiction-as-tension expose structure a flat store cannot** — see [See it reason](#see-it-reason) below. Ranking itself is dominated by alignment scoring; the graph's contributions are structure surfacing and principled forgetting, not magic relevance.
+Typed reasoning edges and contradiction-as-tension preserve relationships that
+an untyped result list does not represent; see
+[Typed relation contract](#typed-relation-contract).
+Alignment scoring remains the primary ranking input. The graph layer surfaces
+structure and applies the documented forgetting dynamics.
 
 > **Reservoirs vs projections** ([ADR-0002](docs/adr/0002-reservoir-projection-state.md), [ADR-0008](docs/adr/0008-powerlaw-dissipation.md)): per node, the persistent state is the bounded access-trace history (which drives the base level `B_i`, recomputed on demand and never stored) plus a decay-exempt evidence prior `P_i`; per edge, `conductance` is an unbounded log-LR reservoir. The public `salience = logistic(B_i + P_i)` / `weight` in `[0, 1]` are bounded `logistic` projections, refreshed by the write paths (`ingest`, `link`, `touch`, `commit`, `crystallize`, `tick`). The invariant is that **read-only retrieval (`query` / `search`) never mutates persistent state** — it changes only through explicit writes and time.
 
-> **See it work** → [cognitive-fidelity results](docs/07-quality-gates/fidelity-results.md): charts of power-law forgetting, the spacing effect (with its retention-interval crossover), and the fan effect — produced by the engine itself, from the same paradigms the CI gate asserts.
+> **Fidelity evidence** → [cognitive-fidelity results](docs/07-quality-gates/fidelity-results.md): charts of power-law forgetting, the spacing effect (with its retention-interval crossover), and the fan effect, produced by the same engine paths exercised by the CI gate.
 
 ## What it is not
 
-- **Not a vector database.** Retrieval uses hybrid alignment (text + embedding + entity + temporal) plus graph-surfaced structure; if you only need top-k similarity, use a vector store — it will be simpler and faster.
-- **Not a cloud memory API.** Local-first single binary; your memories live in a SQLite file you own. There is no hosted service and none is planned.
-- **Not a QA system.** The benchmark numbers are retrieval recall over the LongMemEval / LoCoMo corpora, not answer accuracy; anamnesis returns memories and structure, the agent does the answering.
-- **Not multi-tenant / multi-agent (yet).** One graph per namespace, one writer; peer provenance and trust weighting are roadmap (see [ADR-0014](docs/adr/0014-shrink-to-product.md)).
+- **Not a vector database.** Embeddings are retrieval cues; the public contract
+  is memory ingestion, graph-aware recall, lifecycle, and evidence provenance,
+  not general-purpose vector CRUD.
+- **Not a cloud memory API.** The current product is a local-first single binary;
+  memories live in a caller-owned SQLite file.
+- **Not a QA system.** Anamnesis returns evidence and structure; a consumer does
+  the answering. Retrieval metrics and consumer-model answer diagnostics are
+  reported as separate measurement regimes.
+- **Not an identity or trust service.** A namespace has one database owner.
+  `PeerId` records producer provenance only; the engine does not authenticate
+  producers, learn peer reputation, or promote claims by majority.
 - **Not a replacement for project files.** Conventions and specs that belong in your repo (CLAUDE.md, docs) should stay there; anamnesis holds what emerges from conversations — decisions, contradictions, lessons, context.
 
 ## Success criteria
 
 What "working" means for a memory engine, in observable terms — check yours with the `stats` tool (usage section):
 
-1. **Recall earns its injection.** Session-start and per-prompt recalls surface prior decisions the agent actually builds on (the τ gate keeps irrelevant memory out; a reinforcing `recall` / `relate` after use is the signal it helped).
-2. **Capture keeps up.** The extraction backlog drains within a few sessions (`extraction backlog` low relative to `captured total`); raw turns are never lost (fail-open, redelivery).
+1. **Recall earns its injection.** Session-start and per-prompt hooks surface
+   prior decisions without training on exposure alone. Deliberate MCP recall or
+   an explicit `Memory::used` call records use under the consumer's policy.
+2. **Capture keeps up.** The extraction backlog drains within a few sessions
+   (`extraction backlog` low relative to `captured total`). Hook capture is
+   best-effort; once a raw turn is persisted, later extraction failure cannot
+   remove it.
 3. **The graph stays structured.** Contradictions surface as tensions instead of silently coexisting; `why`-chains are traceable (`relate` edges accumulate alongside captured turns).
 4. **Forgetting works.** Stale ratio stays bounded as the graph grows — old, unused memories sink (archival) instead of drowning recall.
 
@@ -76,8 +95,8 @@ coding agent.** The plugin wires Anamnesis into Claude Code (and Codex) as
 **activation-gated recall** — `SessionStart` seeds a few high-salience project
 memories, and every `UserPromptSubmit` injects a read-only spreading-activation
 recall **only when the top activation clears a threshold**, so an off-topic
-prompt injects nothing. It is **install-and-go**: the plugin carries both the
-hooks and the agent MCP tools and fetches the matching native binary from the
+prompt injects nothing. The plugin carries both the hooks and the agent MCP
+tools and fetches the matching native binary from the
 GitHub Release on first use — no `cargo`, no `npm`, no separate binary step.
 
 **Claude Code** — add the marketplace, install, reload:
@@ -88,13 +107,12 @@ GitHub Release on first use — no `cargo`, no `npm`, no separate binary step.
 /reload-plugins
 ```
 
-That is the whole setup. You get proactive recall (5 hooks) and all 11 agent
-MCP tools:
+This configuration enables five lifecycle hooks and twelve MCP tools:
 
 | Surface | What ships |
 |:--|:--|
 | **Hooks** | `SessionStart` (seed recall + extraction nudge), `UserPromptSubmit` (gated recall), `Stop` / `PreCompact` / `SessionEnd` (passive turn capture) |
-| **MCP tools** | The 11 tools in the inventory below. |
+| **MCP tools** | The 12 tools in the inventory below. |
 
 ### MCP tool inventory
 
@@ -105,6 +123,7 @@ This is the authoritative inventory of tools registered by the MCP server:
 | `recall` | Search memory for relevant prior knowledge. |
 | `remember` | Store a distilled insight, decision, or lesson. |
 | `ingest_conversation` | Ingest an ordered conversation transcript. |
+| `ingest_attachment_transcript` | Store a consumer-produced textual attachment transcript with attachment and processor provenance. |
 | `relate` | Link two remembered nodes with a typed reasoning relation. |
 | `stats` | Report read-only graph health and size statistics. |
 | `extract_pending` | Retrieve un-extracted conversation turns for reasoning extraction. |
@@ -115,10 +134,11 @@ This is the authoritative inventory of tools registered by the MCP server:
 | `get` | Read one memory's full detail by node ID. |
 
 **Automatic capture.** Beyond on-demand `remember`, the plugin captures
-the session on its own in two stages. **Stage 1** is passive: `Stop`,
-`PreCompact`, and `SessionEnd` hooks stream each turn to Anamnesis as raw
-`Episodic` memories — fire-and-forget, content-hash-deduped, and it never blocks
-a prompt. **Stage 2** is agent-driven extraction: once the un-extracted queue
+the session on its own in two stages. **Stage 1** is passive: supported `Stop`,
+`PreCompact`, and `SessionEnd` events submit bounded transcript windows as raw
+`Episodic` memories. Submission is fail-open and overlapping windows are
+content-hash-deduplicated; an unavailable hook, transcript, or daemon can leave
+a turn uncaptured. **Stage 2** is agent-driven extraction: once the un-extracted queue
 crosses a threshold, the next `SessionStart` injects a one-line nudge asking the
 agent to call the `extract_pending` MCP tool, which hands back the raw turns to
 distill into reasoning and lessons via `relate` / `remember`. Both stages are
@@ -142,92 +162,36 @@ rationale, and the Codex visibility caveat live in
 > MCP server, or `cargo run -p anamnesis-mcp -- serve` from a checkout. See
 > [`crates/anamnesis-mcp`](crates/anamnesis-mcp/README.md).
 
-## See it reason
+## Typed relation contract
 
-Vector search returns *a list*. The thing a flat store cannot represent is the
-*structure between* the results — that turn A was **reversed** by turn B, and
-**why** each was chosen. The [`reasoning_demo`](crates/anamnesis/examples/reasoning_demo.rs)
-example makes that concrete: a short conversation decides on Postgres (recording
-the reason with a `Reason` edge), then reverses to SQLite (a `Contradicts` edge
-back to the decision). One query — *"why did we switch databases?"* — is then
-answered two ways over the **same nodes**.
+The [`reasoning_demo`](crates/anamnesis/examples/reasoning_demo.rs) example
+builds a short decision history, attaches `Reason` and `Contradicts` edges
+through the public `Memory` API, and prints the resulting tension and
+reasoning chain.
 
 ```text
 cargo run -p anamnesis-engine --example reasoning_demo
 ```
 
-Graph recall surfaces the contradiction as a **tension** and walks the reasoning
-chain by typed edge:
-
-```text
-=== graph recall (structure: tensions + reasons) ===
-
-tensions (contradictions surfaced, never suppressed):
-  #5 ⟂ #11  (stress 0.03)
-    ↳ assistant: Decision: we go with Postgres.
-    ↳ assistant: We are reverting to SQLite — the ops overhead is too high ...
-
-why-chain from the reversal (typed edges):
-  reversal --because--> assistant: SQLite keeps the single-node deploy simple ...
-  reversal --contradicts--> assistant: Decision: we go with Postgres.
-```
-
-Ranking the same turns by raw cosine to the query gives a bare list — the
-conflict and the why-chain are gone:
-
-```text
-=== flat vector ranking (cosine to the query) ===
-
-a list with no structure — the contradiction and the why-chain are invisible:
-
-  1.000  assistant: Postgres because we need JSONB and row-level security.
-  1.000  assistant: We are reverting to SQLite — the ops overhead is too high ...
-  0.999  assistant: SQLite keeps the single-node deploy simple ...
-```
-
-The claim is narrow: **typed reasoning edges plus contradiction-as-tension
-expose structure a flat store cannot.** The demo runs offline with a
-deterministic stub embedder (no model download); the same behaviour is asserted
-end-to-end in [`tests/reasoning_advantage.rs`](crates/anamnesis/tests/reasoning_advantage.rs).
+It runs offline with a deterministic stub embedder. The same behavior is
+verified end-to-end in
+[`tests/reasoning_advantage.rs`](crates/anamnesis/tests/reasoning_advantage.rs).
 
 ## Benchmarks
 
-Long-term conversational memory benchmarks, **retrieval-only dry runs**: no LLM
-anywhere — ingest is raw turns + embeddings (`bge-base-en-v1.5`), retrieval is
-the engine's deterministic pipeline. Reproducible via
-`cargo bench --features embed --bench real_memory` (see
-[calibration records](docs/07-quality-gates/calibration-records.md) for full
-provenance, ablations, and negative results). These numbers are measured through
-the `Memory` framework API exactly as shipped — the benchmark harness builds and
-queries via `Memory`.
+The repository includes hermetic regression fixtures and optional dataset
+harnesses for retrieval, context rendering, and answer evaluation. Benchmark
+labels are available only to the evaluation layer; formation, retrieval, and
+product context rendering receive label-free inputs.
 
-| Benchmark | Gold granularity | Recall@20 | MRR | NDCG@20 | p50 |
-|:--|:--|--:|--:|--:|--:|
-| **LongMemEval-S** (full official split, 500 q, all 6 types) | session-level | **93.8%** | **0.872** | 0.808 | ~17 ms |
-| **LoCoMo** (full non-adversarial, 1540 q) | turn-level strict | **77.6%** | **0.291** | 0.386 | ~21 ms |
-
-Read these numbers for what they are — and, importantly, for what they are **not**. On these cold-start dry runs the ranking is carried by alignment scoring (keyword + embedding); the graph's spreading activation is a modest re-rank, not the source of the score. What the graph earns here is not measured by these tables — it is the [structure surfacing](#see-it-reason) and the [forgetting dynamics](docs/07-quality-gates/fidelity-results.md). No baselines or comparison tables are added; these are the shipped harness's own numbers.
-
-- **Retrieval metrics, not answer accuracy.** Published memory-system scores
-  (Mem0, Zep, LangMem, …) are LLM-as-judge *answer* scores — a different
-  measurement. These numbers bound what an answer stage could see in context
-  (LoCoMo hit@20 = 84.6%; LongMemEval hit@1 = 82.6%, hit@20 = 98.0%).
-- **No usage learning is measured here.** Runs are cold-start (no `commit`
-  warmup), so the readout calibration intentionally zeroes the salience
-  coefficient (`w_s = 0`) — on unused memory, salience carries only
-  encoding-time noise. Deployments that accumulate real usage should refit it
-  per [ADR-0010](docs/adr/0010-calibrated-priors-not-laws.md); the
-  reinforcement dynamics themselves are validated by the
-  [cognitive-fidelity gates](docs/07-quality-gates/fidelity-results.md), not
-  by these benchmarks.
-- Readout coefficients were fit on the even-sample half of LoCoMo and
-  validated on the held-out half (dev-half, never seen by the fit: Recall@20 /
-  MRR 0.778 / 0.287 on unseen conversations); LongMemEval numbers use the same
-  weights with zero dataset-specific tuning.
+Protocols, metric definitions, and reproducibility requirements are documented
+in [`docs/07-quality-gates/benchmarks.md`](docs/07-quality-gates/benchmarks.md).
+Generated datasets, model weights, caches, and run reports are not committed.
 
 ## Quick Start
 
-> **Anamnesis is in active development.** The core engine is functional — ingest, query pipeline, forgetting, snapshots, and unified search are all operational.
+> The current core implements ingest, query, forgetting, snapshots, and unified
+> search. The release gate below defines the supported validation surface.
 
 Add to your `Cargo.toml`:
 
@@ -246,7 +210,7 @@ use anamnesis::engine::Timestamp;
 // 1. Open a persistent Memory (feature = "embed" wires in bge-base-en-v1.5)
 let mut mem = Memory::open("my-memory.db").unwrap();
 
-// 2. Add conversational turns — the bench recipe runs automatically
+// 2. Add conversational turns through the canonical framework recipe
 let now = Timestamp::now();
 mem.add("session-1", "Alice", "I prefer dark mode", now).unwrap();
 mem.add("session-1", "Bob",   "Got it, dark mode it is", now).unwrap();
@@ -261,7 +225,7 @@ for hit in &recall.hits {
 mem.used(recall).unwrap();
 ```
 
-**Use `Memory`** — it is the validated, bench-proven consumer recipe. Drop to
+**Use `Memory`** — it is the canonical consumer recipe. Drop to
 **`Engine`** (the kernel API) only when you need custom node/edge types, your own
 ingest representation, or direct control over `link` / `crystallize` / `tick`.
 `Memory` is built entirely on `Engine`'s public API: anything it does, you can do.
@@ -304,7 +268,9 @@ This means indexes can be rebuilt or replaced without changing memory. The graph
 
 <br>
 
-Existing systems summarize conversations into compact facts — lossy by design. The reasoning, context, and rejected alternatives are discarded.
+Replacing source turns with compact facts can omit reasoning, context, and
+rejected alternatives. Those omissions cannot be reconstructed from the compact
+record alone.
 
 Anamnesis preserves **individual conversation turns as nodes**. Each retains original content, temporal position, entity references, and origin metadata. Summaries are emergent — they arise when repeated patterns consolidate into higher-level semantic nodes. The raw fragments remain.
 
@@ -339,7 +305,10 @@ Every node carries `Origin` metadata: `peer_id`, `session_id`, a `scope` path, a
 - `universal` scope means the memory participates across scopes.
 - Scoped memories can be crystallized upward: session evidence can become project knowledge, which can become universal principles. The original scoped memories remain as evidence via `ConsolidatedFrom` edges; promotion is additive, not destructive.
 
-`ScopePath` is an opaque string with a `universal` flag; scope scoring is a two-branch weight (universal vs. non-matching). A richer scope hierarchy is on the [roadmap](#roadmap), not in the shipped engine.
+`ScopePath` is an opaque string with a `universal` flag; current scope scoring
+uses exact/universal compatibility rather than inferring a hierarchy from path
+text. Consumers resolve any external authorization hierarchy before calling the
+engine.
 
 </details>
 
@@ -393,28 +362,32 @@ Beyond structural edges (semantic, temporal, causal), Anamnesis preserves decisi
 | `ConsolidatedFrom` | Derived from multiple fragments |
 | `Contradicts` | Conflict — excluded from propagation, surfaced as frustration |
 
-When a new agent session starts, it inherits not rules but *judgment*.
-
 </details>
 
-### How It Compares
+### Product Shape
 
-| | Storage Unit | Retrieval | Decay | Relationships | Reasoning | Management |
-|:--|:--|:--|:--|:--|:--|:--|
-| Mem0 | Extracted facts | Embedding similarity | None | None | Facts only | Add/update/delete (LLM-mediated) |
-| Letta | Conversation history | Text search | Archive tier | Basic | Session recall | — |
-| Stanford ACE | Monolithic playbook | Full load | Curator rewrite | None | Strategy-level | — |
-| **Anamnesis** | **[Fragments](docs/01-system-architecture/ingestion-layers.md)** | **Alignment + graph** | **[Decay + revival](docs/07-quality-gates/fidelity-results.md)** | **[Typed edges](crates/anamnesis/examples/reasoning_demo.rs)** | **Full chains** | **[update/forget/supersede/list/get](CHANGELOG.md#0120---2026-07-04)** |
+| Concern | Anamnesis contract |
+|:--|:--|
+| Storage unit | Persisted [source fragments](docs/01-system-architecture/ingestion-layers.md) plus source-grounded derived records |
+| Retrieval | Lexical/vector alignment, cognitive graph activation, local reranking, and source-aware selection |
+| Memory lifecycle | [Power-law decay and use-driven revival](docs/07-quality-gates/fidelity-results.md) |
+| Relationships | Typed graph edges with contradiction preserved as tension |
+| Evidence authority | Derived records retain exact provenance and never overwrite raw sources |
+| Management | `update`, `forget`, `supersede`, `list`, and `get` |
+| Core boundary | No LLM calls, networking, session orchestration, or provider-specific answer policy |
 
-### Positioning
+### Runtime Boundary
 
-**vs mem0** — mem0 is add-only: memories accumulate with no time-based decay or salience mechanism, so a long-running store only grows. Anamnesis ages every node through power-law dissipation with reinforcement-driven revival — access resurrects a decayed node instead of it staying stale forever; see the [cognitive-fidelity results](docs/07-quality-gates/fidelity-results.md), produced by the engine itself. Retrieval and extraction are the second structural gap: Anamnesis makes no per-operation LLM calls in its core (see [Design Principles](#design-principles), "No LLM calls") — no API key, no per-query inference cost, no cloud round-trip; when extraction happens, it piggybacks on the *consumer agent's own* in-loop LLM call rather than a separate paid one (see [Use in Claude Code & Codex](#use-in-claude-code--codex), Stage 2). Conflicting facts are held as tension, not silently overwritten: the [`reasoning_demo`](crates/anamnesis/examples/reasoning_demo.rs) example and [ADR-0006](docs/adr/0006-frustration-not-deletion.md) show a reversed decision surfaced as a `Contradicts` edge, both sides keeping their provenance. Storage is local-first — a SQLite file you own, no hosted service (see [What it is not](#what-it-is-not)). Raw fragments are preserved rather than collapsed into an LLM summary at ingest — the storage mechanism is lossless and formation (what to distill, and when) is a swappable consumer-layer policy, not a step baked into the core (see [ingestion layers](docs/01-system-architecture/ingestion-layers.md)). **New in 0.12.0**: a full agent-facing memory-management surface — `update`, `forget` (soft-retract or hard delete), `supersede`, `list`, `get` — plus per-namespace extraction-queue isolation so captured turns from one project no longer leak into another's backlog (see [CHANGELOG 0.12.0](CHANGELOG.md#0120---2026-07-04)).
+Anamnesis is a local cognitive memory engine rather than an answer generator.
+Its core retrieval path is deterministic for fixed graph state and provider
+outputs. Embeddings provide cues; the graph retains association, access history,
+typed relationships, temporal validity, and contradiction.
 
-**vs RAG pipelines** — Anamnesis makes zero LLM calls in its core. Retrieval is deterministic (alignment scoring plus graph traversal), not an inference call on every query. No embedding drift on the graph itself; embeddings are cues, not the memory.
-
-**vs LLM context documents** — Context docs require manual compilation, suffer brevity bias on every rewrite, and have no mechanism for forgetting or contradiction detection. Anamnesis handles all three: power-law dissipation ages out stale knowledge, spreading activation surfaces related fragments, and `Contradicts` edges surface tensions in query results.
-
-**vs vector-only stores** — Embedding similarity finds *similar* fragments and does the heavy lifting on ranking. Anamnesis adds what similarity alone cannot represent: the typed reasoning chains (causes, contradictions, decisions, confirmations) *between* fragments, surfaced as structure in the result.
+Once persisted, raw fragments survive formation so a failed or revised
+extraction can be replayed against the same source. Optional extraction and
+reflection belong to consumer boundaries. [ADR-0015](docs/adr/0015-evidence-grounded-formation-and-chain-retrieval.md)
+specifies a proposed evidence-complete extension based on source-grounded facts,
+relations, and post-selection source hydration.
 
 ## Architecture
 
@@ -424,7 +397,7 @@ Anamnesis exposes two API surfaces: the **Framework API** ([`anamnesis::memory::
 
 ```
 src/
-├── memory/         Memory — the Framework API (bench-proven recipe: add/search/used/tick)
+├── memory/         Memory — the canonical Framework API (add/search/used/tick)
 ├── engine.rs       anamnesis::engine — the curated Kernel API namespace
 │
 ├── api/            Engine implementation (ingest, query, commit, tick, …)
@@ -447,7 +420,9 @@ Public surface: `anamnesis::{Memory, Engine, Error}` at the root,
 Everything below the first two lines is implementation reached through them.
 ```
 
-> The top-level module tree above (`api`, `graph`, `mechanics`, `query`, `storage`, …) is the **real implementation tree** — the crate compiles against it and it carries hundreds of internal references. What changed at the two-door boundary ([v0.7](#status)) is only what is *re-exported at the root*: exactly `Memory`, `Engine`, `Error`. The module paths remain internal, not a public API.
+> The crate root re-exports exactly `Memory`, `Engine`, and `Error`. The
+> implementation modules (`api`, `graph`, `mechanics`, `query`, `storage`, …)
+> remain internal and are not part of the public API contract.
 
 <details>
 <summary><strong>Data Flow</strong></summary>
@@ -484,9 +459,13 @@ Commit ── write-back for used memories ──►
 </details>
 
 <details id="api-surface">
-<summary><strong>API Surface</strong></summary>
+<summary><strong>Selected API Surface</strong></summary>
 
 <br>
+
+The signatures below are an abridged guide to common framework and kernel
+operations. Rustdoc is authoritative for the complete public API, including the
+atomic-fact and reviewed-relation lifecycle.
 
 ```rust
 // ── Framework API (anamnesis::memory) — the front door ──────────────────────
@@ -497,16 +476,18 @@ impl Memory {
     pub fn with_provider(path: impl AsRef<Path>, provider: Arc<dyn EmbeddingProvider>) -> Result<Self, Error>;
     pub fn in_memory_with_provider(provider: Arc<dyn EmbeddingProvider>) -> Result<Self, Error>;
 
-    // Ingest (bench recipe: episodic turn + windowed semantic view)
+    // Ingest (canonical episodic turn + windowed semantic view)
     pub fn add(&mut self, session: &str, speaker: &str, text: &str, at: Timestamp) -> Result<AddReceipt, Error>;
     pub fn add_note(&mut self, text: &str, at: Timestamp) -> Result<AddReceipt, Error>;
     pub fn flush_session(&mut self, session: &str) -> Result<Option<NodeId>, Error>;
     pub fn flush_all(&mut self) -> Result<(), Error>;
 
-    // Retrieval (readout surface — what the benchmarks measure)
+    // Retrieval (canonical pre-packaging readout surface)
     pub fn search(&mut self, query: &str, limit: usize) -> Result<Recall, Error>;
     pub fn search_at(&mut self, query: &str, limit: usize, now: Timestamp) -> Result<Recall, Error>;
     pub fn search_result_at_with(&mut self, query: &str, limit: usize, now: Timestamp, tuning: &SearchTuning) -> Result<SearchResult, Error>;
+    pub fn search_reranked(&mut self, query: &str, reranker: &dyn RerankingProvider, options: RerankedRecallOptions) -> Result<RerankedRecall, Error>;
+    pub fn render_context_for_with(&self, query: &str, recall: &Recall, options: ContextRenderOptions) -> Result<String, Error>;
 
     // Reinforcement & time
     pub fn used(&mut self, recall: Recall) -> Result<CommitReport, Error>;
@@ -554,9 +535,13 @@ impl Engine {
 </details>
 
 <details>
-<summary><strong>Storage Abstraction</strong></summary>
+<summary><strong>Selected Storage Abstraction</strong></summary>
 
 <br>
+
+This is an abridged view of the graph-oriented methods. The complete
+`StorageAdapter` contract, including atomic-fact and reviewed-relation methods,
+is documented in rustdoc and the [storage design](docs/03-persistence/storage.md).
 
 ```rust
 pub trait StorageAdapter: Send + Sync {
@@ -653,32 +638,25 @@ CI also runs the MSRV check (`cargo check --all-targets --all-features` on Rust 
 
 `cargo test --all-targets` intentionally is not a release gate because this crate has `harness = false` benchmark binaries that execute long-running benchmarks when invoked as test targets. Use `cargo bench` or the manual benchmark workflow for performance runs.
 
-## Roadmap
+## Proposed Evidence-Complete Architecture
 
-These are **not yet implemented**. They are recorded here so the map matches the territory; several were deliberately removed in the [v0.10.0 shrink](docs/adr/0014-shrink-to-product.md) because they had no consumer, and will return only behind a real one:
-
-- **Multi-peer provenance & trust** — the `PeerId` / `SourceKind` fields on `Origin` persist, but the peer registry, trust levels, and the readout trust term (now a neutral `1.0`) were removed. A multi-agent deployment that actually attributes and weights sources by trust is the re-add condition.
-- **Identity tiers** — the collapsed `KnowledgeType` keeps a single `Identity` variant; the `IdentityCore` / `IdentityLearned` / `IdentityState` split (with per-tier decay policy) is future work.
-- **Scope hierarchies** — `ScopePath` is currently an opaque string with a `universal` flag. Ancestor/sibling scope scoring and upward crystallization across a real hierarchy are roadmap.
-- **Debug / hypothesis lifecycle** — the start-debug / log-hypothesis / rejected-hypothesis machinery was removed as consumer-less; a first-class reasoning-session capture may return through the [capture pipeline](docs/adr/0013-reasoning-capture-pipeline.md).
-
-See [ADR-0014](docs/adr/0014-shrink-to-product.md) for the full shrink record — what was removed, why, and the condition for each to return.
+[ADR-0015](docs/adr/0015-evidence-grounded-formation-and-chain-retrieval.md)
+specifies a proposed additive architecture: a source-grounded entity/fact catalog,
+typed evidence relations, bounded chain retrieval, post-selection raw-source
+hydration, adaptive packaging, and optional consumer-side reflection and
+multimodal formation. It is explicitly `Proposed`; the current graph and atomic
+fact APIs remain authoritative until every migration, provenance, parity,
+regression, scale, and latency gate in that ADR passes.
 
 ## Status
 
-**v0.10.x** — external-review fixes (0.10.1: doc drift, v8 bare-type normalization, tension-endpoint trimming exemption, corpus-independent demo baseline) and ops hardening (0.10.2: usage metrics in `stats`, [operations contract](docs/06-operations/operations.md), [migration policy](docs/03-persistence/migration-policy.md), flake-class fixes).
-
-**v0.10.0** — **shrink to product** ([ADR-0014](docs/adr/0014-shrink-to-product.md)). An audit found ~85% of the Engine's public surface had zero consumers — the map sold more than the territory walked. This release removes the debug/hypothesis lifecycle, the peer/trust subsystem, a large convenience API, manual memory-tier override, and the scope-relation hierarchy; collapses `KnowledgeType` from 15 variants to 4 (`Episodic` / `Semantic` / `Identity` / `Custom`); and discloses a set of by-design decay/tau coarsenings. `PeerId` storage, tier *display*, and the internal module tree survive. Breaking vs 0.9. Migrations run automatically on open (v5→v6 drops peers; v6→v7 normalizes legacy node types). See the [CHANGELOG](CHANGELOG.md) and ADR-0014.
-
-**v0.9.x** — automatic capture pipeline ([ADR-0013](docs/adr/0013-reasoning-capture-pipeline.md)): `Stop` / `PreCompact` / `SessionEnd` hooks stream turns as raw `Episodic` memories; a Stage-2 nudge asks the agent to distill them via `extract_pending`. Capture hardening (queue durability, nudge ungating, bounded I/O) in 0.9.1.
-
-**v0.8.x** — published to crates.io as **`anamnesis-engine`**; ships the Claude Code & Codex plugin (activation-gated recall) and the MCP-free internal transport ([ADR-0012](docs/adr/0012-daemon-core-mcp-plugin-clients.md)). Codex MCP-launch fixes in 0.8.1 / 0.8.2.
-
-**v0.7.0** — two-door public API surface: root re-exports exactly `Memory`, `Engine`, `Error`; `anamnesis::engine::*` is the full kernel namespace; `anamnesis::memory::*` is the framework namespace. The top-level modules (`api`, `graph`, `mechanics`, `query`, `snapshot`, `storage`, `embedding`, `error`) are the real internal tree, doc-hidden at the root boundary.
-
-**v0.6.0** — retrieval overhaul: alignment-only readout potential, ADR-0010 calibrated readout coefficients, `SearchTrace.readout` diagnostics, temporal query cues, and `Balanced` packaging.
-
-**v0.5.0** — migrated to the **conductive-network** model: additive directed RWR, log-odds reservoirs with bounded projections, power-law dissipation, commit-gated Hebbian learning, and frustration. Node strength decomposed as `A_i = B_i + P_i` ([ADR-0008](docs/adr/0008-powerlaw-dissipation.md)): the ACT-R base level `B_i` is recomputed on demand from the access-trace history, and the persistent evidence prior `P_i` is decay-exempt.
+**Current main (after v0.22.0)** — canonical production reranked recall, an
+isolated grounded atomic-fact sidecar with reviewed typed routing relations,
+bounded query and relation expansion for complex queries, and source-aware
+coverage selection. The engine remains LLM-free; configured extraction
+stays in the daemon/consumer layer and routes only to live, scope-valid raw
+sources. See the [CHANGELOG](CHANGELOG.md) for release history and exact
+migrations.
 
 ## References
 
@@ -686,8 +664,6 @@ See [ADR-0014](docs/adr/0014-shrink-to-product.md) for the full shrink record �
 - Anderson & Schooler — *Reflections of the Environment in Memory* (1991)
 - Collins & Loftus — *A Spreading-Activation Theory of Semantic Processing* (1975)
 - Tulving — *Episodic and Semantic Memory* (1972)
-- Stanford ACE — *Agentic Context Engineering* (ICLR 2026)
-- Anthropic — *Effective Context Engineering for AI Agents* (2025)
 
 ## License
 

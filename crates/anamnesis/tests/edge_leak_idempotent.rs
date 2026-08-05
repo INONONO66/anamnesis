@@ -1,4 +1,4 @@
-//! Idle-edge leak checkpoint idempotency (flagship bug #2).
+//! Idle-edge leak checkpoint idempotency.
 //!
 //! The idle-edge conductance leak in `Engine::tick` must be frequency-independent:
 //! calling `tick` multiple times at the SAME `now` must charge the idle-window

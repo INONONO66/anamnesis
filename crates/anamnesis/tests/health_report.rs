@@ -1,4 +1,4 @@
-//! Tests for Engine::health() and HealthReport (T11).
+//! Tests for `Engine::health` and `HealthReport`.
 
 use anamnesis::Engine;
 use anamnesis::api::{HealthGrade, IngestResult, Observation};

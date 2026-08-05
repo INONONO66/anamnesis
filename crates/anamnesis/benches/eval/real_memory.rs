@@ -104,20 +104,13 @@ fn run() -> BenchResult<()> {
         top_k: args.top_k,
         seed_limit: args.seed_limit,
         dump_features: args.dump_features.is_some(),
-        speaker_cues: args.speaker_cues,
-        shadow_rank_fusion: false,
         consumer_cross_encoder: None,
         replayed_consumer_rankings: None,
-        consumer_prefilter_cross_encoder: None,
-        consumer_prefilter_k: None,
-        consumer_prefilter_query_fusion: false,
         consumer_candidate_k: 100,
-        consumer_evidence_documents: false,
         screen_top_k: Vec::new(),
-        screen_source_dedup: false,
         diagnostic_readout_limit: None,
         consumer_selection_policy:
-            eval_common::real_bench::graph::ConsumerSelectionPolicy::Relevance,
+            eval_common::real_bench::graph::ConsumerSelectionPolicy::MemoryDeep,
         context_render_style: anamnesis::memory::ContextRenderStyle::Detailed,
     };
 
@@ -151,7 +144,7 @@ fn run() -> BenchResult<()> {
 
     for group in &groups {
         let sample_index = group.questions[0].sample_index;
-        let mut graph = build_memory_graph(group, provider.clone())?;
+        let mut graph = build_memory_graph(group.formation_input(), provider.clone())?;
         let (warmup_questions, eval_questions) = group.questions.split_at(args.warmup);
         let warmup = run_warmup(&mut graph, warmup_questions, &opts)?;
         let sample_evals = evaluate_questions(&mut graph, eval_questions, &opts)?;

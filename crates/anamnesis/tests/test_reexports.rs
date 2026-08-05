@@ -51,6 +51,37 @@ fn test_engine_namespace_storage() {
 }
 
 #[test]
+fn test_external_atomic_fact_relation_construction() {
+    use std::collections::HashMap;
+
+    use anamnesis::engine::{ScopePath, Timestamp};
+    use anamnesis::storage::{
+        AtomicFactId, AtomicFactRelation, AtomicFactRelationId, AtomicFactRelationKind,
+    };
+
+    let relation = AtomicFactRelation::new(
+        AtomicFactRelationId(7),
+        AtomicFactId(2),
+        AtomicFactId(3),
+        AtomicFactRelationKind::Supports,
+        "reviewer",
+        "profile-v1",
+        Timestamp(100),
+        "relation-key",
+        ScopePath::universal(),
+    )
+    .with_validity(Some(Timestamp(80)), Some(Timestamp(120)))
+    .with_metadata(HashMap::from([("source".to_owned(), "adapter".to_owned())]));
+
+    assert_eq!(relation.id, AtomicFactRelationId(7));
+    assert_eq!(relation.from_fact_id, AtomicFactId(2));
+    assert_eq!(relation.to_fact_id, AtomicFactId(3));
+    assert_eq!(relation.reviewed_by, "reviewer");
+    assert_eq!(relation.valid_from, Some(Timestamp(80)));
+    assert_eq!(relation.metadata.get("source"), Some(&"adapter".to_owned()));
+}
+
+#[test]
 fn test_error_import() {
     use anamnesis::Error;
     let _ = Error::NodeNotFound;
@@ -60,4 +91,12 @@ fn test_error_import() {
 fn test_memory_import() {
     use anamnesis::Memory;
     let _ = std::any::type_name::<Memory>();
+}
+
+#[test]
+fn test_memory_structured_readout_types() {
+    use anamnesis::memory::{FocusedEvidence, RecallReadout};
+
+    let _ = std::any::type_name::<FocusedEvidence>();
+    let _ = std::any::type_name::<RecallReadout>();
 }

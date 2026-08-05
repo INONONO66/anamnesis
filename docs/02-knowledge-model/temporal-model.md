@@ -1,6 +1,8 @@
 # Temporal Model
 
-Anamnesis separates record time, fact time, and access time. A memory can be recorded now, describe a fact valid in the past, and be reactivated later.
+The current graph separates record, validity, access, and query time. ADR-0015
+proposes additional formation, observation, and occurrence axes for catalog
+records. Unknown time axes must not be invented from the fields that exist.
 
 ## Time Axes
 
@@ -11,7 +13,28 @@ Anamnesis separates record time, fact time, and access time. A memory can be rec
 | Fact time | `valid_from`, `valid_until` | When the content is true or applicable |
 | Query time | `as_of` | Time filter requested on the search path (`SearchInput::now`) or a temporal query |
 
-Record time is not fact time. A decision recorded today can describe a policy that became valid last month.
+Record time is not validity or access time. Temporal adjacency does not imply
+causality.
+
+### Proposed additional axes
+
+The evidence catalog proposed by
+[ADR-0015](../adr/0015-evidence-grounded-formation-and-chain-retrieval.md)
+would add:
+
+| Axis | Proposed fields | Meaning |
+|---|---|---|
+| Formation time | `formed_at` | When a derived fact, relation, or observation was produced |
+| Observation time | `observed_at` | When the source producer observed or reported the claim |
+| Occurrence time | `occurred_at` / interval | When an event happened |
+
+The current node and edge API exposes record, access, validity, and query time.
+The current atomic-fact routing sidecar also stores a compatibility
+`observed_at`, set to the latest `created_at` among its cited source records.
+That field is neither occurrence time nor the richer catalog observation model
+proposed here. The additional axes are not current graph fields. Under the
+proposal, an unknown axis remains unknown; an implementation must not copy
+record time into `occurred_at`.
 
 ## Valid Intervals
 
@@ -21,7 +44,9 @@ Record time is not fact time. A decision recorded today can describe a policy th
 valid_from <= as_of < valid_until
 ```
 
-Missing bounds mean unbounded on that side. A fact with no validity interval is treated as generally valid unless scope policy says otherwise.
+Missing bounds mean unbounded on that side. A fact with no validity interval is
+treated as generally valid by temporal filtering; current scope compatibility is
+a separate ranking input.
 
 A bounded interval must be well-formed: `valid_from < valid_until`. Because the upper bound is exclusive, a zero-width interval (`valid_from == valid_until`) is empty and matches no `as_of`, so it is treated as malformed by validity-interval observability. Encode an instantaneous fact or event by leaving `valid_until` unbounded (it becomes true at `valid_from` and stays true), or, if it must expire, by giving it a minimal nonzero width (`valid_until = valid_from + 1` time unit). Never encode a point in time as a zero-width interval.
 
@@ -51,7 +76,10 @@ The persistent access-history window drives:
 - recency-aware packaging,
 - stale-site observability.
 
-The evidence prior `P_i` is a separate persistent prior (encoding surprise, feedback / social reinforcement, peer trust). It does NOT undergo base-level (use-driven) decay; it is a decay-exempt evidence offset. Public salience is the bounded logistic projection of the sum, `s_i = logistic(B_i + P_i)`.
+The evidence prior `P_i` is a separate persistent prior (encoding surprise and
+explicit feedback). It does NOT undergo base-level (use-driven) decay; it is a
+decay-exempt evidence offset. Public salience is the bounded logistic projection
+of the sum, `s_i = logistic(B_i + P_i)`.
 
 ## Tick And Access Interactions
 
@@ -85,6 +113,20 @@ The standalone `fact_at(query, as_of)` convenience wrapper was **removed in the
 bitemporal validity mechanism it wrapped is unchanged and remains the authoritative
 temporal filter on the search path.
 
+## Proposed: Evidence-Chain Time Compatibility
+
+ADR-0015 proposes that a catalog fact or chain hop be eligible only when:
+
+- its validity interval contains the query `as_of`, when one is supplied;
+- its source and derived record have well-formed time fields;
+- a typed relation's temporal constraints are satisfiable; and
+- superseded or revoked records are used only for a historical query that
+  explicitly includes their former validity.
+
+Missing occurrence or observation time does not invalidate an otherwise valid
+source, but it cannot satisfy a slot that specifically requests that axis.
+`sequence` may order compatible events; it never creates `causes` by itself.
+
 ## Design Invariants
 
 - Query-time activation is fast transient state; base-level aging is slow between-query state.
@@ -93,3 +135,6 @@ temporal filter on the search path.
 - The access-history window (bounded to 32 traces) is the persistent substrate of `B_i`; each trace stores `(timestamp, per-trace decay rate d_j)`, with `d_j` fixed at creation; `B_i` is computed from it, never maintained as an incremental scalar.
 - Time filtering applies before readout packaging.
 - Missing validity bounds are explicit unbounded intervals, not unknown errors.
+- Proposed catalog implementations must not substitute formation, observation,
+  occurrence, and validity time for one another; every proposed evidence-chain
+  hop must be independently valid at the requested query time.

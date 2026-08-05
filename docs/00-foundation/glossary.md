@@ -8,7 +8,7 @@ This glossary defines the terms used across the Anamnesis technical specificatio
 |---|---|
 | `retained_action A_i` | Persistent memory strength for site `i`; composite `A_i = B_i + P_i` of base-level activation and an evidence prior; log need-odds |
 | `base-level B_i` | Multi-trace ACT-R base-level activation over the node's access-trace history: `B_i = ln( Σ_j (now − t_j)^(−d_j) )` where each trace j stores (timestamp, per-trace decay rate `d_j`) computed at creation from current activation; owns forgetting and use-driven reinforcement; computed on demand from traces |
-| `evidence prior P_i` | Separate persistent prior holding encoding surprise, feedback / social reinforcement, and peer trust; a decay-exempt evidence offset |
+| `evidence prior P_i` | Separate persistent prior holding encoding surprise and explicit feedback; a decay-exempt evidence offset |
 | `salience s_i` | Bounded public projection of the sum `B_i + P_i`; useful for ranking and packaging, not authoritative state |
 | `conductance C_ij` | Persistent associative strength from cue `j` to target `i`; log likelihood ratio |
 | `edge weight w_ij` | Bounded public projection of `C_ij`; storage/API-facing value |
@@ -24,14 +24,15 @@ total activation    = (B_i + P_i) + sum_j W_j * S_ji
                     = log posterior need-odds
 ```
 
-`A_i` decomposes into two terms: the base-level `B_i = ln( Σ_j (now − t_j)^(−d_j) )` over the node's access traces, where each trace j stores (timestamp, per-trace decay rate `d_j`) computed from activation `m_j` at creation via `d_j = m_type · ( c · e^{m_j} + α )`, owning power-law forgetting and use-driven reinforcement; and the evidence prior `P_i` (encoding surprise, feedback, social reinforcement, peer trust). Dissipation acts on `B_i` only; `P_i` is a decay-exempt evidence offset.
+`A_i` decomposes into two terms: the base-level `B_i = ln( Σ_j (now − t_j)^(−d_j) )` over the node's access traces, where each trace j stores (timestamp, per-trace decay rate `d_j`) computed from activation `m_j` at creation via `d_j = m_type · ( c · e^{m_j} + α )`, owning power-law forgetting and use-driven reinforcement; and the evidence prior `P_i` (encoding surprise and explicit feedback). Dissipation acts on `B_i` only; `P_i` is a decay-exempt evidence offset.
 
 ## Core Terms
 
 | Term | Definition |
 |---|---|
-| site | A node in the memory graph; stores a fragment, fact, identity, hypothesis, or event |
-| fragment | Preserved source text, usually an episodic turn or extracted knowledge |
+| site | A node in the cognitive memory graph |
+| source fragment | Persisted text fragment that remains the source for any derived routing record |
+| atomic fact | Reviewed, isolated routing record that cites live raw Episodic source nodes and cannot be rendered as independent evidence |
 | cue | A seed signal from text, embedding, entity, scope, or explicit node id |
 | query field | The potential field imposed by a query over candidate sites |
 | activation flow | Query-local spreading response over the graph; read-only and transient |
@@ -42,13 +43,14 @@ total activation    = (B_i + P_i) + sum_j W_j * S_ji
 | dissipation | Time-based aging of the base-level term `B_i` as its access traces age (power-law); does not act on the evidence prior `P_i` |
 | frustration | Constraint stress when contradictory sites are active together |
 | tension | A surfaced contradiction item in returned context |
-| scope | Visibility and validity boundary such as session, project, or universal |
+| scope | Opaque applicability label used by current retrieval ranking; it is not an authorization boundary |
 | origin | Provenance tuple identifying peer, session, source kind, scope, and confidence |
 | crystallize | Create a synthesis site from selected source sites without overwriting them |
 
 ## Knowledge Types
 
-`KnowledgeType` was collapsed from 15 variants to 4 in the [v0.10.0 shrink](../adr/0014-shrink-to-product.md); the v6→v7 migration normalizes legacy rows into these.
+`KnowledgeType` is the current compact cognitive-node taxonomy. Current atomic
+facts are isolated routing records rather than additional knowledge types.
 
 | Variant | Role |
 |---|---|
@@ -56,8 +58,6 @@ total activation    = (B_i + P_i) + sum_j W_j * S_ji
 | `Semantic` | Reusable fact or generalization; the target of consolidation |
 | `Identity` | Stable retrieval anchor / operating principle; routed to a dedicated context partition and used as a retrieval prior |
 | `Custom(String)` | Consumer-defined taxonomy (renders by its bare label) |
-
-> The pre-0.10.0 finer taxonomy (`IdentityCore`/`IdentityLearned`/`IdentityState`, `Procedural`/`Convention`/`Decision`/`Gotcha`/`Entity`/`Event`, and the `DebugSession`/`Hypothesis`/`Evidence` debug family) is historical — legacy databases decode those rows as `Semantic`, `Identity`, or `Custom`. Re-introducing finer types is [roadmap](../adr/0014-shrink-to-product.md), gated on a real consumer.
 
 ## Symbols
 
@@ -81,7 +81,7 @@ total activation    = (B_i + P_i) + sum_j W_j * S_ji
 | `m_type` | per-`node_type` decay multiplier; outer factor on `d_j` (a type with `m_type = 0` is permanent) |
 | `α` | decay intercept `DECAY_INTERCEPT`; floor decay rate when activation is zero |
 | `c` | decay scale `DECAY_SCALE`; sensitivity of the decay rate to current activation `m_j` |
-| `P_i` | evidence prior for site `i`; encoding surprise, feedback / social reinforcement, and peer trust; decay-exempt (does not undergo base-level use-driven decay) |
+| `P_i` | evidence prior for site `i`; encoding surprise and explicit feedback; decay-exempt (does not undergo base-level use-driven decay) |
 | `W_j` | Attentional weight of cue `j` in the activation sum |
 | `S_ji` | Associative strength from cue `j` to target `i`; the log-LR contribution, equal to `C_ij` |
 
@@ -93,8 +93,27 @@ total activation    = (B_i + P_i) + sum_j W_j * S_ji
 | edge weight vs conductance | Weight is the public projection; conductance is the associative log-LR reservoir |
 | retrieval vs commit | Retrieval reads and computes transient activation; commit changes reservoirs using traces |
 | contradiction vs deletion | Contradiction produces stress and tension; it does not erase either fact |
-| scope vs trust | Scope controls visibility; trust controls how strongly origin evidence should count |
+| scope vs authorization | `ScopePath` influences applicability and ranking; callers enforce access control before invoking the engine |
 | vector similarity vs association | Similarity proposes seeds; conductance determines graph flow |
+| routing fact vs evidence | A routing fact helps find its persisted raw source; it is not independently authoritative |
+| record time vs occurred time | Storage time records when data entered the engine; occurred time records when an event happened |
+| candidate vs delivered evidence | Candidate representations may guide ranking; the current product context contains the selected source-backed fragments |
+
+## Proposed ADR-0015 Terms
+
+The following terms belong to the additive design proposed by
+[ADR-0015](../adr/0015-evidence-grounded-formation-and-chain-retrieval.md).
+They do not name current public types or storage tables.
+
+| Term | Proposed meaning |
+|---|---|
+| evidence catalog | Source-grounded retrieval representation for entities, facts, relations, observations, and evidence references |
+| grounded routing fact | Validated structured claim used only to route retrieval back to its source |
+| reviewed claim | Source-cited fact or relation admitted by an explicit consumer review policy |
+| observation record | Immutable versioned synthesis over cited facts or sources |
+| evidence reference | Exact source node/span or media asset/region reference with content identity |
+| evidence chain | Bounded sequence of typed, scope-eligible, time-compatible facts and source references covering requested query slots |
+| `EvidenceBundle` | Structured ledger, cited raw evidence, tensions, uncovered slots, and trace returned by proposed evidence-complete recall |
 
 ## Naming Rules
 

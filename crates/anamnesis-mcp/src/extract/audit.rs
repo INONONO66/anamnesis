@@ -51,6 +51,10 @@ pub(crate) struct ExtractionAuditCandidateRow {
     pub source_session_id: String,
     pub source_scope: String,
     pub source_node_ids: Vec<u64>,
+    /// Engine-owned source allocation bindings. These remain internal so a
+    /// caller cannot treat the authority token as portable source metadata.
+    #[serde(skip)]
+    pub source_incarnations: Vec<String>,
     pub idempotency_key: String,
     #[serde(rename = "audit_support")]
     pub support: Option<AuditSupport>,
@@ -74,6 +78,7 @@ pub(crate) struct ExtractionAuditRelationRow {
     pub from_item_local_id: String,
     pub to_item_local_id: String,
     pub relation_type: RelationKind,
+    pub idempotency_key: String,
     #[serde(rename = "audit_status")]
     pub verdict: Option<RelationVerdict>,
     pub reviewed_by: Option<String>,

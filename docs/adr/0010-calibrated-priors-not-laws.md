@@ -6,7 +6,8 @@
 
 ## Context
 
-The conductive frame borrows physical vocabulary. That can clarify the system, but it can also create false authority if constants are treated like physical laws.
+The conductive frame uses physical analogies. They clarify the system only when
+their constants and limits remain explicit.
 
 ## Decision
 
@@ -61,7 +62,7 @@ Everything else derives:
 - `phi_i` / `seed_i` from `beta_phi`.
 - `readout_score` from `w_readout`.
 
-## Physics-Borrowing Guardrails
+## Physical-Analogy Guardrails
 
 | Guardrail | Rule |
 |---|---|
@@ -80,7 +81,7 @@ Examples:
 Benefits:
 
 - Prevents arbitrary magic numbers from hiding under physical language.
-- Makes calibration and benchmarking part of the design.
+- Makes calibration and validation part of the design.
 - Keeps the spec falsifiable.
 
 Tradeoffs:

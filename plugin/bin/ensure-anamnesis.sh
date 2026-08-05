@@ -78,7 +78,7 @@ if [ ! -s "$tmp" ]; then
   exit 1
 fi
 
-# --- Fail-CLOSED checksum verification (supply-chain integrity, S1b) ----------
+# --- Fail-CLOSED checksum verification ---------------------------------------
 # Auto-executing an unverified GitHub download is an RCE-class gap for a
 # local-first tool, so the binary is verified BEFORE chmod/mv: fetch the release
 # SHA256SUMS.txt, look up the expected hash for THIS platform's asset, hash the

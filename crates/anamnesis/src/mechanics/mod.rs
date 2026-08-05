@@ -17,7 +17,8 @@
 //! - `topology`: Graph structure analysis (degree, bridge score, support score)
 //! - `health`: The nine read-only `GraphHealth` metrics (observability.md)
 //! - `observability`: `InvariantCheck` suite + `OperationalWarning`s (observability.md)
-//! - `social`: Social reinforcement scoring (multi-agent corroboration, feedback signals)
+//! - `social`: Consumer feedback signal types and a standalone corroboration-score
+//!   helper
 //! - `priors`: Calibrated priors — the single home for the engine's numeric constants (ADR-0010)
 
 pub mod attraction;

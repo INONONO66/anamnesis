@@ -76,7 +76,7 @@ jobs:
         run: |
           # Create the release if absent, then upload the platform binaries AND
           # their SHA256SUMS.txt. No --clobber: a tagged asset must never be
-          # silently overwritten (supply-chain integrity — S1a).
+          # silently overwritten (supply-chain integrity).
           gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "$TAG" --notes "Release $TAG"
           gh release upload "$TAG" dist/anamnesis-* dist/SHA256SUMS.txt
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
