@@ -1,9 +1,8 @@
 //! Edge-validity helper shared by the read-only retrieval pipeline.
 //!
-//! The legacy priority-queue BFS spreading model (`spread_activation*`), the
-//! eq-10 initial-activation kernel, salience gating, and fan-out normalization
-//! have been removed (Phase 3): retrieval is now a single additive directed
-//! Random-Walk-with-Restart over conductance (see [`crate::query::rwr`]).
+//! Retrieval uses one additive directed Random-Walk-with-Restart over
+//! conductance. This module applies the shared temporal-validity gate used by
+//! that flow (see [`crate::query::rwr`]).
 
 use crate::graph::{Edge, Timestamp};
 

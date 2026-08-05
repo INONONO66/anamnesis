@@ -53,7 +53,7 @@ pub(crate) struct ValidatedCandidate {
     /// Canonical, non-pronominal object used to assemble `content`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub object: Option<String>,
-    /// Answer-bearing object copied verbatim from `evidence_span`.
+    /// Grounding object copied verbatim from `evidence_span`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evidence_object: Option<String>,
     /// Verbatim substring of one cited raw source.

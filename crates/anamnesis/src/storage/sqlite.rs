@@ -8,10 +8,13 @@ use crate::graph::{
     AccessTrace, Edge, EdgeId, EdgeType, KnowledgeType, MemoryTier, Node, NodeId, ScopePath,
     Timestamp,
 };
-use crate::storage::{AtomicFact, AtomicFactId, StorageAdapter};
+use crate::storage::{
+    AtomicFact, AtomicFactId, AtomicFactRelation, AtomicFactRelationId, AtomicFactRelationKind,
+    StorageAdapter,
+};
 use rusqlite::backup::Backup;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::fs::OpenOptions;
 use std::io;
@@ -20,6 +23,10 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
 const EMPTY_EDGE_SLICE: &[EdgeId] = &[];
+const EMPTY_ATOMIC_FACT_RELATION_SLICE: &[AtomicFactRelationId] = &[];
+const NEXT_ATOMIC_FACT_ID_KEY: &str = "id.next_atomic_fact";
+const NEXT_ATOMIC_FACT_RELATION_ID_KEY: &str = "id.next_atomic_fact_relation";
+const NEXT_NODE_INCARNATION_KEY: &str = "id.next_node_incarnation";
 
 const EMBEDDING_MIGRATION_PHASE_KEY: &str = "embedding.migration.phase";
 const EMBEDDING_MIGRATION_SOURCE_MODEL_KEY: &str = "embedding.migration.source_model";
@@ -40,6 +47,30 @@ const EMBEDDING_MIGRATION_KEYS: [&str; 8] = [
     EMBEDDING_MIGRATION_CURSOR_KEY,
     EMBEDDING_MIGRATION_BACKUP_PATH_KEY,
 ];
+
+fn insert_relation_id(ids: &mut Vec<AtomicFactRelationId>, id: AtomicFactRelationId) {
+    if let Err(index) = ids.binary_search(&id) {
+        ids.insert(index, id);
+    }
+}
+
+fn remove_relation_id(
+    index: &mut BTreeMap<AtomicFactId, Vec<AtomicFactRelationId>>,
+    fact_id: AtomicFactId,
+    relation_id: AtomicFactRelationId,
+) {
+    let remove_entry = if let Some(ids) = index.get_mut(&fact_id) {
+        if let Ok(position) = ids.binary_search(&relation_id) {
+            ids.remove(position);
+        }
+        ids.is_empty()
+    } else {
+        false
+    };
+    if remove_entry {
+        index.remove(&fact_id);
+    }
+}
 
 /// A failure while creating or verifying a durable SQLite backup.
 #[derive(Debug)]
@@ -171,8 +202,18 @@ pub struct EmbeddingMigrationInspection {
 pub struct SqliteStorage {
     conn: Mutex<Connection>,
 
-    atomic_facts: Vec<Option<AtomicFact>>,
+    // Sidecar IDs are monotonic and can become sparse after churn. Ordered maps
+    // keep cache size and ID iteration proportional to live rows, not high water.
+    atomic_facts: BTreeMap<AtomicFactId, AtomicFact>,
+    atomic_fact_metadata_index: HashMap<String, HashMap<String, BTreeSet<AtomicFactId>>>,
+    atomic_fact_relations: BTreeMap<AtomicFactRelationId, AtomicFactRelation>,
+    atomic_fact_relation_keys: HashMap<String, AtomicFactRelationId>,
+    atomic_fact_relations_out: BTreeMap<AtomicFactId, Vec<AtomicFactRelationId>>,
+    atomic_fact_relations_in: BTreeMap<AtomicFactId, Vec<AtomicFactRelationId>>,
     nodes: Vec<Option<Node>>,
+    // Backend-owned generations are persisted inside the nodes metadata column
+    // but hidden from the public Node metadata map.
+    node_incarnations: Vec<Option<u64>>,
     edges: Vec<Option<Edge>>,
     salience: Vec<f64>,
     retained_action: Vec<f64>,
@@ -197,6 +238,8 @@ pub struct SqliteStorage {
     next_node_counter: u64,
     next_edge_counter: u64,
     next_atomic_fact_counter: u64,
+    next_atomic_fact_relation_counter: u64,
+    next_node_incarnation_counter: u64,
     free_node_ids: Vec<NodeId>,
     free_edge_ids: Vec<EdgeId>,
     live_node_count: usize,
@@ -622,8 +665,14 @@ impl SqliteStorage {
         let capacity = 0;
         let mut storage = Self {
             conn: Mutex::new(conn),
-            atomic_facts: Vec::new(),
+            atomic_facts: BTreeMap::new(),
+            atomic_fact_metadata_index: HashMap::new(),
+            atomic_fact_relations: BTreeMap::new(),
+            atomic_fact_relation_keys: HashMap::new(),
+            atomic_fact_relations_out: BTreeMap::new(),
+            atomic_fact_relations_in: BTreeMap::new(),
             nodes: Vec::new(),
+            node_incarnations: Vec::new(),
             edges: Vec::new(),
             salience: Vec::new(),
             retained_action: Vec::new(),
@@ -647,6 +696,8 @@ impl SqliteStorage {
             next_node_counter: 0,
             next_edge_counter: 0,
             next_atomic_fact_counter: 0,
+            next_atomic_fact_relation_counter: 0,
+            next_node_incarnation_counter: 0,
             free_node_ids: Vec::new(),
             free_edge_ids: Vec::new(),
             live_node_count: 0,
@@ -662,10 +713,83 @@ impl SqliteStorage {
             .map_err(|_| Error::StorageError("sqlite connection lock poisoned".to_string()))
     }
 
+    fn remove_atomic_fact_metadata_from_index(&mut self, fact: &AtomicFact) {
+        for (key, value) in &fact.metadata {
+            let remove_key = if let Some(values) = self.atomic_fact_metadata_index.get_mut(key) {
+                let remove_value = if let Some(ids) = values.get_mut(value) {
+                    ids.remove(&fact.id);
+                    ids.is_empty()
+                } else {
+                    false
+                };
+                if remove_value {
+                    values.remove(value);
+                }
+                values.is_empty()
+            } else {
+                false
+            };
+            if remove_key {
+                self.atomic_fact_metadata_index.remove(key);
+            }
+        }
+    }
+
+    fn cache_atomic_fact(&mut self, fact: AtomicFact) {
+        if let Some(previous) = self.atomic_facts.remove(&fact.id) {
+            self.remove_atomic_fact_metadata_from_index(&previous);
+        }
+        for (key, value) in &fact.metadata {
+            self.atomic_fact_metadata_index
+                .entry(key.clone())
+                .or_default()
+                .entry(value.clone())
+                .or_default()
+                .insert(fact.id);
+        }
+        self.atomic_facts.insert(fact.id, fact);
+    }
+
+    fn remove_atomic_fact_relation_from_cache(
+        &mut self,
+        id: AtomicFactRelationId,
+    ) -> Option<AtomicFactRelation> {
+        let relation = self.atomic_fact_relations.remove(&id)?;
+        self.atomic_fact_relation_keys
+            .remove(&relation.idempotency_key);
+        remove_relation_id(
+            &mut self.atomic_fact_relations_out,
+            relation.from_fact_id,
+            id,
+        );
+        remove_relation_id(&mut self.atomic_fact_relations_in, relation.to_fact_id, id);
+        Some(relation)
+    }
+
+    fn cache_atomic_fact_relation(&mut self, relation: AtomicFactRelation) {
+        self.remove_atomic_fact_relation_from_cache(relation.id);
+        self.atomic_fact_relation_keys
+            .insert(relation.idempotency_key.clone(), relation.id);
+        insert_relation_id(
+            self.atomic_fact_relations_out
+                .entry(relation.from_fact_id)
+                .or_default(),
+            relation.id,
+        );
+        insert_relation_id(
+            self.atomic_fact_relations_in
+                .entry(relation.to_fact_id)
+                .or_default(),
+            relation.id,
+        );
+        self.atomic_fact_relations.insert(relation.id, relation);
+    }
+
     fn ensure_node_capacity(&mut self, idx: usize) {
         if idx >= self.nodes.len() {
             let new_len = idx + 1;
             self.nodes.resize_with(new_len, || None);
+            self.node_incarnations.resize(new_len, None);
             self.salience.resize(new_len, 0.0);
             self.retained_action.resize(new_len, 0.0);
             self.evidence_prior.resize(new_len, 0.0);
@@ -696,9 +820,25 @@ impl SqliteStorage {
     }
 
     fn load_from_db(&mut self) -> Result<(), Error> {
-        let (atomic_facts, nodes, edges, free_nodes, free_edges) = {
+        let (
+            atomic_facts,
+            atomic_fact_relations,
+            persisted_next_atomic_fact_id,
+            persisted_next_atomic_fact_relation_id,
+            persisted_next_node_incarnation,
+            mut nodes,
+            edges,
+            free_nodes,
+            free_edges,
+        ) = {
             let conn = self.lock_conn()?;
             let atomic_facts = load_atomic_facts(&conn)?;
+            let atomic_fact_relations = load_atomic_fact_relations(&conn)?;
+            let persisted_next_atomic_fact_id = load_id_high_water(&conn, NEXT_ATOMIC_FACT_ID_KEY)?;
+            let persisted_next_atomic_fact_relation_id =
+                load_id_high_water(&conn, NEXT_ATOMIC_FACT_RELATION_ID_KEY)?;
+            let persisted_next_node_incarnation =
+                load_id_high_water(&conn, NEXT_NODE_INCARNATION_KEY)?;
             let nodes = load_nodes(&conn)?;
             let edges = load_edges(&conn)?;
             let free_nodes = load_free_ids(&conn, "node")?
@@ -709,25 +849,136 @@ impl SqliteStorage {
                 .into_iter()
                 .map(EdgeId)
                 .collect::<Vec<_>>();
-            (atomic_facts, nodes, edges, free_nodes, free_edges)
+            (
+                atomic_facts,
+                atomic_fact_relations,
+                persisted_next_atomic_fact_id,
+                persisted_next_atomic_fact_relation_id,
+                persisted_next_node_incarnation,
+                nodes,
+                edges,
+                free_nodes,
+                free_edges,
+            )
         };
 
-        for fact in atomic_facts {
-            let idx = fact.id.0 as usize;
-            if idx >= self.atomic_facts.len() {
-                self.atomic_facts.resize_with(idx + 1, || None);
+        // Node generations are storage authority, not consumer metadata. Older
+        // rows are assigned a generation exactly once on open. The high-water
+        // mark is never reduced, so deleting and recreating the same numeric ID
+        // always produces a distinct source allocation.
+        let mut seen_incarnations = HashSet::new();
+        let mut node_incarnations = Vec::with_capacity(nodes.len());
+        let mut next_node_incarnation = persisted_next_node_incarnation;
+        for (node, _, _, _, _) in &mut nodes {
+            let generation = node
+                .metadata
+                .remove(crate::storage::NODE_INCARNATION_METADATA_KEY)
+                .map(|encoded| {
+                    encoded.parse::<u64>().map_err(|_| {
+                        Error::StorageError(format!(
+                            "node {} has an invalid persisted incarnation",
+                            node.id.0
+                        ))
+                    })
+                })
+                .transpose()?;
+            if let Some(generation) = generation {
+                if !seen_incarnations.insert(generation) {
+                    return Err(Error::StorageError(format!(
+                        "node {} reuses persisted incarnation {generation}",
+                        node.id.0
+                    )));
+                }
+                next_node_incarnation =
+                    next_node_incarnation.max(generation.checked_add(1).ok_or_else(|| {
+                        Error::StorageError("node incarnation space exhausted".to_string())
+                    })?);
             }
-            self.atomic_facts[idx] = Some(fact);
+            node_incarnations.push(generation);
+        }
+
+        let mut metadata_backfills = Vec::new();
+        for ((node, _, _, _, _), generation) in nodes.iter().zip(node_incarnations.iter_mut()) {
+            if generation.is_some() {
+                continue;
+            }
+            let allocated = next_node_incarnation;
+            next_node_incarnation = next_node_incarnation.checked_add(1).ok_or_else(|| {
+                Error::StorageError("node incarnation space exhausted".to_string())
+            })?;
+            if !seen_incarnations.insert(allocated) {
+                return Err(Error::StorageError(format!(
+                    "node {} could not receive a unique incarnation",
+                    node.id.0
+                )));
+            }
+            *generation = Some(allocated);
+            metadata_backfills.push((
+                node.id,
+                encode_node_metadata_with_incarnation(node, allocated),
+            ));
+        }
+
+        {
+            let mut conn = self.lock_conn()?;
+            let transaction = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(sqlite_error)?;
+            for (node_id, metadata) in &metadata_backfills {
+                let updated = transaction
+                    .execute(
+                        "UPDATE nodes SET metadata = ?1 WHERE id = ?2",
+                        params![metadata, node_id.0],
+                    )
+                    .map_err(sqlite_error)?;
+                if updated != 1 {
+                    return Err(Error::StorageError(format!(
+                        "node {} disappeared during incarnation backfill",
+                        node_id.0
+                    )));
+                }
+            }
+            set_metadata(
+                &transaction,
+                NEXT_NODE_INCARNATION_KEY,
+                &next_node_incarnation.to_string(),
+            )?;
+            transaction.commit().map_err(sqlite_error)?;
+        }
+        self.next_node_incarnation_counter = next_node_incarnation;
+
+        for fact in atomic_facts {
+            self.cache_atomic_fact(fact);
         }
         self.next_atomic_fact_counter = self
             .atomic_facts
-            .iter()
-            .enumerate()
-            .rev()
-            .find_map(|(idx, slot)| slot.as_ref().map(|_| idx as u64 + 1))
-            .unwrap_or(0);
+            .last_key_value()
+            .map(|(id, _)| id.0.saturating_add(1))
+            .unwrap_or(0)
+            .max(persisted_next_atomic_fact_id);
 
-        for (node, salience, retained_action, accessed_at, decay_checkpoint) in nodes {
+        for relation in atomic_fact_relations {
+            validate_atomic_fact_relation_shape(&relation)?;
+            if !self.atomic_facts.contains_key(&relation.from_fact_id)
+                || !self.atomic_facts.contains_key(&relation.to_fact_id)
+            {
+                return Err(Error::StorageError(format!(
+                    "atomic fact relation {} references a missing endpoint",
+                    relation.id.0
+                )));
+            }
+            self.cache_atomic_fact_relation(relation);
+        }
+        self.next_atomic_fact_relation_counter = self
+            .atomic_fact_relations
+            .last_key_value()
+            .map(|(id, _)| id.0.saturating_add(1))
+            .unwrap_or(0)
+            .max(persisted_next_atomic_fact_relation_id);
+
+        for ((node, salience, retained_action, accessed_at, decay_checkpoint), generation) in
+            nodes.into_iter().zip(node_incarnations)
+        {
             let idx = node.id.0 as usize;
             self.ensure_node_capacity(idx);
             self.salience[idx] = salience;
@@ -736,6 +987,7 @@ impl SqliteStorage {
             self.accessed_at[idx] = accessed_at;
             self.decay_checkpoint[idx] = decay_checkpoint;
             self.node_types[idx] = Some(node.node_type.clone());
+            self.node_incarnations[idx] = generation;
             self.nodes[idx] = Some(node);
             self.live_node_count += 1;
         }
@@ -783,6 +1035,37 @@ impl SqliteStorage {
         self.dirty_edge_conductance = vec![false; self.edges.len()];
         self.dirty_edge_accessed_at = vec![false; self.edges.len()];
         self.dirty_edge_leaked_at = vec![false; self.edges.len()];
+        let desired_next_atomic_fact_id = self.next_atomic_fact_counter;
+        let desired_next_atomic_fact_relation_id = self.next_atomic_fact_relation_counter;
+        let (seeded_next_atomic_fact_id, seeded_next_atomic_fact_relation_id) = {
+            let mut conn = self.lock_conn()?;
+            let transaction = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(sqlite_error)?;
+            let seeded_next_atomic_fact_id =
+                load_id_high_water(&transaction, NEXT_ATOMIC_FACT_ID_KEY)?
+                    .max(desired_next_atomic_fact_id);
+            let seeded_next_atomic_fact_relation_id =
+                load_id_high_water(&transaction, NEXT_ATOMIC_FACT_RELATION_ID_KEY)?
+                    .max(desired_next_atomic_fact_relation_id);
+            set_metadata(
+                &transaction,
+                NEXT_ATOMIC_FACT_ID_KEY,
+                &seeded_next_atomic_fact_id.to_string(),
+            )?;
+            set_metadata(
+                &transaction,
+                NEXT_ATOMIC_FACT_RELATION_ID_KEY,
+                &seeded_next_atomic_fact_relation_id.to_string(),
+            )?;
+            transaction.commit().map_err(sqlite_error)?;
+            (
+                seeded_next_atomic_fact_id,
+                seeded_next_atomic_fact_relation_id,
+            )
+        };
+        self.next_atomic_fact_counter = seeded_next_atomic_fact_id;
+        self.next_atomic_fact_relation_counter = seeded_next_atomic_fact_relation_id;
         Ok(())
     }
 
@@ -860,13 +1143,43 @@ impl StorageAdapter for SqliteStorage {
                     .map_err(sqlite_error)?;
                 }
 
+                set_metadata(
+                    &conn,
+                    NEXT_ATOMIC_FACT_ID_KEY,
+                    &self.next_atomic_fact_counter.to_string(),
+                )?;
+                set_metadata(
+                    &conn,
+                    NEXT_ATOMIC_FACT_RELATION_ID_KEY,
+                    &self.next_atomic_fact_relation_counter.to_string(),
+                )?;
+                set_metadata(
+                    &conn,
+                    NEXT_NODE_INCARNATION_KEY,
+                    &self.next_node_incarnation_counter.to_string(),
+                )?;
+
                 for id in self.all_atomic_fact_ids() {
                     insert_atomic_fact_row(&conn, self.get_atomic_fact(id)?)?;
+                }
+
+                for id in self.all_atomic_fact_relation_ids() {
+                    insert_atomic_fact_relation_row(&conn, self.get_atomic_fact_relation(id)?)?;
                 }
 
                 for id in self.all_node_ids() {
                     let node = self.get_node(id)?.clone();
                     let decay_checkpoint = self.get_decay_checkpoint(id)?;
+                    let generation = self
+                        .node_incarnations
+                        .get(id.0 as usize)
+                        .and_then(|value| *value)
+                        .ok_or_else(|| {
+                            Error::StorageError(format!(
+                                "node {} is missing its storage incarnation",
+                                id.0
+                            ))
+                        })?;
 
                     conn.execute(
                         "INSERT OR REPLACE INTO nodes (
@@ -893,7 +1206,7 @@ impl StorageAdapter for SqliteStorage {
                             node.access_count,
                             encode_access_history(&node.access_history),
                             encode_memory_tier(&node.tier),
-                            encode_map(&node.metadata),
+                            encode_node_metadata_with_incarnation(&node, generation),
                             node.evidence_prior,
                         ],
                     )
@@ -1008,72 +1321,350 @@ impl StorageAdapter for SqliteStorage {
         result.next_atomic_fact_counter = result
             .next_atomic_fact_counter
             .max(self.next_atomic_fact_counter);
+        result.next_atomic_fact_relation_counter = result
+            .next_atomic_fact_relation_counter
+            .max(self.next_atomic_fact_relation_counter);
+        result.next_node_incarnation_counter = result
+            .next_node_incarnation_counter
+            .max(self.next_node_incarnation_counter);
         Ok(result)
     }
 
     fn next_atomic_fact_id(&mut self) -> Result<AtomicFactId, Error> {
         let id = AtomicFactId(self.next_atomic_fact_counter);
-        self.next_atomic_fact_counter = self
+        let next_counter = self
             .next_atomic_fact_counter
             .checked_add(1)
             .ok_or_else(|| Error::StorageError("atomic fact id space exhausted".to_string()))?;
-        if id.0 as usize >= self.atomic_facts.len() {
-            self.atomic_facts.resize_with(id.0 as usize + 1, || None);
+        {
+            let conn = self.lock_conn()?;
+            set_metadata(&conn, NEXT_ATOMIC_FACT_ID_KEY, &next_counter.to_string())?;
         }
+        self.next_atomic_fact_counter = next_counter;
         Ok(id)
     }
 
-    fn set_atomic_fact(&mut self, fact: AtomicFact) -> Result<(), Error> {
-        let idx = fact.id.0 as usize;
-        if idx >= self.atomic_facts.len() {
-            self.atomic_facts.resize_with(idx + 1, || None);
+    fn set_atomic_fact(&mut self, mut fact: AtomicFact) -> Result<(), Error> {
+        let existing_incarnations = self.atomic_facts.get(&fact.id).map(|existing| {
+            existing
+                .metadata
+                .iter()
+                .filter(|(key, _)| crate::storage::is_atomic_source_incarnation_key(key))
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect::<HashMap<_, _>>()
+        });
+        fact.metadata
+            .retain(|key, _| !crate::storage::is_atomic_source_incarnation_key(key));
+        let mut source_incarnations = Vec::with_capacity(fact.source_node_ids.len());
+        for source_id in &fact.source_node_ids {
+            let key = crate::storage::atomic_source_incarnation_key(*source_id);
+            if let Some(existing) = existing_incarnations
+                .as_ref()
+                .and_then(|incarnations| incarnations.get(&key))
+            {
+                source_incarnations.push((key, existing.clone()));
+                continue;
+            }
+            let source = match self.get_node(*source_id) {
+                Ok(source) => source,
+                Err(Error::NodeNotFound(_)) => continue,
+                Err(error) => return Err(error),
+            };
+            source_incarnations.push((key, self.atomic_source_incarnation(source)?));
         }
+        fact.metadata.extend(source_incarnations);
+        let next_counter = fact
+            .id
+            .0
+            .checked_add(1)
+            .ok_or_else(|| Error::StorageError("atomic fact id space exhausted".to_string()))?;
+        let persisted_next_counter = self.next_atomic_fact_counter.max(next_counter);
         {
-            let conn = self.lock_conn()?;
-            insert_atomic_fact_row(&conn, &fact)?;
+            let mut conn = self.lock_conn()?;
+            let transaction = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(sqlite_error)?;
+            insert_atomic_fact_row(&transaction, &fact)?;
+            set_metadata(
+                &transaction,
+                NEXT_ATOMIC_FACT_ID_KEY,
+                &persisted_next_counter.to_string(),
+            )?;
+            transaction.commit().map_err(sqlite_error)?;
         }
-        self.next_atomic_fact_counter = self
-            .next_atomic_fact_counter
-            .max(fact.id.0.saturating_add(1));
-        self.atomic_facts[idx] = Some(fact);
+        self.next_atomic_fact_counter = persisted_next_counter;
+        self.cache_atomic_fact(fact);
         Ok(())
     }
 
     fn get_atomic_fact(&self, id: AtomicFactId) -> Result<&AtomicFact, Error> {
         self.atomic_facts
-            .get(id.0 as usize)
-            .and_then(|slot| slot.as_ref())
+            .get(&id)
             .ok_or_else(|| Error::StorageError(format!("atomic fact {} not found", id.0)))
     }
 
     fn delete_atomic_fact(&mut self, id: AtomicFactId) -> Result<(), Error> {
-        let idx = id.0 as usize;
-        if self
+        let deleted_fact = self
             .atomic_facts
-            .get(idx)
-            .and_then(|slot| slot.as_ref())
-            .is_none()
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| Error::StorageError(format!("atomic fact {} not found", id.0)))?;
+
+        let mut incident_relation_ids = self.atomic_fact_relations_from(id).to_vec();
+        incident_relation_ids.extend_from_slice(self.atomic_fact_relations_to(id));
+        incident_relation_ids.sort_unstable();
+        incident_relation_ids.dedup();
+
         {
-            return Err(Error::StorageError(format!(
-                "atomic fact {} not found",
-                id.0
-            )));
-        }
-        {
-            let conn = self.lock_conn()?;
-            conn.execute("DELETE FROM atomic_facts WHERE id = ?1", [id.0])
+            let mut conn = self.lock_conn()?;
+            let transaction = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(sqlite_error)?;
+            transaction
+                .execute(
+                    "DELETE FROM atomic_fact_relations
+                     WHERE from_fact_id = ?1 OR to_fact_id = ?1",
+                    [id.0],
+                )
+                .map_err(sqlite_error)?;
+            transaction
+                .execute("DELETE FROM atomic_facts WHERE id = ?1", [id.0])
+                .map_err(sqlite_error)?;
+            transaction.commit().map_err(sqlite_error)?;
         }
-        self.atomic_facts[idx] = None;
+        for relation_id in incident_relation_ids {
+            self.remove_atomic_fact_relation_from_cache(relation_id);
+        }
+        self.remove_atomic_fact_metadata_from_index(&deleted_fact);
+        self.atomic_facts.remove(&id);
         Ok(())
     }
 
     fn all_atomic_fact_ids(&self) -> Vec<AtomicFactId> {
-        self.atomic_facts
-            .iter()
-            .enumerate()
-            .filter_map(|(index, slot)| slot.as_ref().map(|_| AtomicFactId(index as u64)))
-            .collect()
+        self.atomic_facts.keys().copied().collect()
+    }
+
+    fn atomic_fact_ids_by_metadata(
+        &self,
+        key: &str,
+        value: &str,
+    ) -> Result<Vec<AtomicFactId>, Error> {
+        let Some(ids) = self
+            .atomic_fact_metadata_index
+            .get(key)
+            .and_then(|values| values.get(value))
+        else {
+            return Ok(Vec::new());
+        };
+        if ids.is_empty() {
+            return Err(Error::StorageError(format!(
+                "atomic fact metadata index contains an empty entry for {key:?}"
+            )));
+        }
+
+        let mut matches = Vec::with_capacity(ids.len());
+        for id in ids {
+            let fact = self.atomic_facts.get(id).ok_or_else(|| {
+                Error::StorageError(format!(
+                    "atomic fact metadata index references missing fact {}",
+                    id.0
+                ))
+            })?;
+            if !fact
+                .metadata
+                .get(key)
+                .is_some_and(|candidate| candidate == value)
+            {
+                return Err(Error::StorageError(format!(
+                    "atomic fact metadata index entry for fact {} is stale",
+                    id.0
+                )));
+            }
+            matches.push(*id);
+        }
+        Ok(matches)
+    }
+
+    fn atomic_fact_by_metadata(
+        &self,
+        key: &str,
+        value: &str,
+    ) -> Result<Option<&AtomicFact>, Error> {
+        let Some(ids) = self
+            .atomic_fact_metadata_index
+            .get(key)
+            .and_then(|values| values.get(value))
+        else {
+            return Ok(None);
+        };
+        let Some(id) = ids.first() else {
+            return Err(Error::StorageError(format!(
+                "atomic fact metadata index contains an empty entry for {key:?}"
+            )));
+        };
+        let fact = self.atomic_facts.get(id).ok_or_else(|| {
+            Error::StorageError(format!(
+                "atomic fact metadata index references missing fact {}",
+                id.0
+            ))
+        })?;
+        if !fact
+            .metadata
+            .get(key)
+            .is_some_and(|candidate| candidate == value)
+        {
+            return Err(Error::StorageError(format!(
+                "atomic fact metadata index entry for fact {} is stale",
+                id.0
+            )));
+        }
+        Ok(Some(fact))
+    }
+
+    fn atomic_source_incarnation(&self, source: &Node) -> Result<String, Error> {
+        let incarnation = self
+            .node_incarnations
+            .get(source.id.0 as usize)
+            .and_then(|value| *value)
+            .ok_or_else(|| {
+                Error::StorageError(format!(
+                    "node {} is missing its storage incarnation",
+                    source.id.0
+                ))
+            })?;
+        Ok(crate::storage::atomic_source_incarnation(
+            source,
+            Some(incarnation),
+        ))
+    }
+
+    fn next_atomic_fact_relation_id(&mut self) -> Result<AtomicFactRelationId, Error> {
+        let id = AtomicFactRelationId(self.next_atomic_fact_relation_counter);
+        let next_counter = self
+            .next_atomic_fact_relation_counter
+            .checked_add(1)
+            .ok_or_else(|| {
+                Error::StorageError("atomic fact relation id space exhausted".to_string())
+            })?;
+        {
+            let conn = self.lock_conn()?;
+            set_metadata(
+                &conn,
+                NEXT_ATOMIC_FACT_RELATION_ID_KEY,
+                &next_counter.to_string(),
+            )?;
+        }
+        self.next_atomic_fact_relation_counter = next_counter;
+        Ok(id)
+    }
+
+    fn set_atomic_fact_relation(&mut self, relation: AtomicFactRelation) -> Result<(), Error> {
+        validate_atomic_fact_relation_shape(&relation)?;
+        let next_counter = relation.id.0.checked_add(1).ok_or_else(|| {
+            Error::StorageError("atomic fact relation id space exhausted".to_string())
+        })?;
+        let persisted_next_counter = self.next_atomic_fact_relation_counter.max(next_counter);
+        if !self.atomic_facts.contains_key(&relation.from_fact_id) {
+            return Err(Error::InvalidInput(format!(
+                "atomic fact relation source {} does not exist",
+                relation.from_fact_id.0
+            )));
+        }
+        if !self.atomic_facts.contains_key(&relation.to_fact_id) {
+            return Err(Error::InvalidInput(format!(
+                "atomic fact relation target {} does not exist",
+                relation.to_fact_id.0
+            )));
+        }
+
+        {
+            let mut conn = self.lock_conn()?;
+            let transaction = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(sqlite_error)?;
+            insert_atomic_fact_relation_row(&transaction, &relation)?;
+            set_metadata(
+                &transaction,
+                NEXT_ATOMIC_FACT_RELATION_ID_KEY,
+                &persisted_next_counter.to_string(),
+            )?;
+            transaction.commit().map_err(sqlite_error)?;
+        }
+
+        self.next_atomic_fact_relation_counter = persisted_next_counter;
+        self.cache_atomic_fact_relation(relation);
+        Ok(())
+    }
+
+    fn get_atomic_fact_relation(
+        &self,
+        id: AtomicFactRelationId,
+    ) -> Result<&AtomicFactRelation, Error> {
+        self.atomic_fact_relations
+            .get(&id)
+            .ok_or_else(|| Error::StorageError(format!("atomic fact relation {} not found", id.0)))
+    }
+
+    fn delete_atomic_fact_relation(&mut self, id: AtomicFactRelationId) -> Result<(), Error> {
+        if !self.atomic_fact_relations.contains_key(&id) {
+            return Err(Error::StorageError(format!(
+                "atomic fact relation {} not found",
+                id.0
+            )));
+        }
+
+        {
+            let mut conn = self.lock_conn()?;
+            let transaction = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(sqlite_error)?;
+            let deleted = transaction
+                .execute("DELETE FROM atomic_fact_relations WHERE id = ?1", [id.0])
+                .map_err(sqlite_error)?;
+            if deleted != 1 {
+                return Err(Error::StorageError(format!(
+                    "atomic fact relation {} is missing from SQLite",
+                    id.0
+                )));
+            }
+            transaction.commit().map_err(sqlite_error)?;
+        }
+
+        self.remove_atomic_fact_relation_from_cache(id);
+        Ok(())
+    }
+
+    fn all_atomic_fact_relation_ids(&self) -> Vec<AtomicFactRelationId> {
+        self.atomic_fact_relations.keys().copied().collect()
+    }
+
+    fn atomic_fact_relations_from(&self, id: AtomicFactId) -> &[AtomicFactRelationId] {
+        self.atomic_fact_relations_out
+            .get(&id)
+            .map(Vec::as_slice)
+            .unwrap_or(EMPTY_ATOMIC_FACT_RELATION_SLICE)
+    }
+
+    fn atomic_fact_relations_to(&self, id: AtomicFactId) -> &[AtomicFactRelationId] {
+        self.atomic_fact_relations_in
+            .get(&id)
+            .map(Vec::as_slice)
+            .unwrap_or(EMPTY_ATOMIC_FACT_RELATION_SLICE)
+    }
+
+    fn atomic_fact_relation_by_idempotency_key(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<Option<&AtomicFactRelation>, Error> {
+        let Some(id) = self.atomic_fact_relation_keys.get(idempotency_key) else {
+            return Ok(None);
+        };
+        self.atomic_fact_relations.get(id).map(Some).ok_or_else(|| {
+            Error::StorageError(format!(
+                "atomic fact relation idempotency index points to missing relation {}",
+                id.0
+            ))
+        })
     }
 
     fn next_node_id(&mut self) -> NodeId {
@@ -1132,14 +1723,32 @@ impl StorageAdapter for SqliteStorage {
         id
     }
 
-    fn set_node(&mut self, node: Node) -> Result<(), Error> {
+    fn set_node(&mut self, mut node: Node) -> Result<(), Error> {
+        node.metadata
+            .remove(crate::storage::NODE_INCARNATION_METADATA_KEY);
         let idx = node.id.0 as usize;
         self.ensure_node_capacity(idx);
         let was_empty = self.nodes[idx].is_none();
-        {
+        let existing_generation = if was_empty {
+            None
+        } else {
+            Some(self.node_incarnations[idx].ok_or_else(|| {
+                Error::StorageError(format!(
+                    "node {} is missing its storage incarnation",
+                    node.id.0
+                ))
+            })?)
+        };
+        let (generation, next_generation) = {
             let conn = self.lock_conn()?;
-            insert_node_row(&conn, &node, node.accessed_at)?;
-        }
+            insert_node_row(
+                &conn,
+                &node,
+                node.accessed_at,
+                existing_generation,
+                self.next_node_incarnation_counter,
+            )?
+        };
 
         self.salience[idx] = node.salience;
         self.retained_action[idx] = node.retained_action;
@@ -1152,7 +1761,9 @@ impl StorageAdapter for SqliteStorage {
         self.dirty_accessed_at[idx] = false;
         self.dirty_decay_checkpoint[idx] = false;
         self.node_types[idx] = Some(node.node_type.clone());
+        self.node_incarnations[idx] = Some(generation);
         self.nodes[idx] = Some(node);
+        self.next_node_incarnation_counter = next_generation;
         if was_empty {
             self.live_node_count += 1;
         }
@@ -1217,6 +1828,7 @@ impl StorageAdapter for SqliteStorage {
         }
 
         self.nodes[idx] = None;
+        self.node_incarnations[idx] = None;
         self.salience[idx] = 0.0;
         self.retained_action[idx] = 0.0;
         self.evidence_prior[idx] = 0.0;
@@ -1829,7 +2441,7 @@ mod tests {
     use super::*;
     use crate::graph::MemoryTier;
     use std::collections::{HashMap, VecDeque};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     fn make_node(id: NodeId, salience: f64) -> Node {
         Node {
@@ -1862,6 +2474,44 @@ mod tests {
         }
     }
 
+    fn make_atomic_fact(id: AtomicFactId, content: &str) -> AtomicFact {
+        AtomicFact {
+            id,
+            content: content.to_string(),
+            embedding: vec![0.25, -0.5, 0.75],
+            source_node_ids: Vec::new(),
+            entity_tags: Vec::new(),
+            source_session_id: "test-session".to_string(),
+            scope: ScopePath::universal(),
+            observed_at: Timestamp(1_000),
+            valid_from: Some(Timestamp(900)),
+            valid_until: Some(Timestamp(1_100)),
+            metadata: HashMap::new(),
+        }
+    }
+
+    fn make_atomic_fact_relation(
+        id: AtomicFactRelationId,
+        from_fact_id: AtomicFactId,
+        to_fact_id: AtomicFactId,
+        idempotency_key: &str,
+    ) -> AtomicFactRelation {
+        AtomicFactRelation {
+            id,
+            from_fact_id,
+            to_fact_id,
+            kind: AtomicFactRelationKind::Supports,
+            reviewed_by: "reviewer:test".to_string(),
+            review_profile: "review-profile:v1".to_string(),
+            reviewed_at: Timestamp(1_050),
+            idempotency_key: idempotency_key.to_string(),
+            scope: ScopePath::universal(),
+            valid_from: Some(Timestamp(900)),
+            valid_until: Some(Timestamp(1_100)),
+            metadata: HashMap::from([("provenance".to_string(), "test".to_string())]),
+        }
+    }
+
     fn temp_db_path(name: &str) -> PathBuf {
         let mut path = std::env::temp_dir();
         path.push(format!(
@@ -1870,6 +2520,47 @@ mod tests {
             Timestamp::now().0
         ));
         path
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct AtomicFactRelationSchemaSignature {
+        columns: Vec<(String, String, i64, i64)>,
+        indexes: Vec<(String, i64)>,
+    }
+
+    fn atomic_fact_relation_schema_signature(path: &Path) -> AtomicFactRelationSchemaSignature {
+        let conn = Connection::open(path).expect("schema database opens");
+        let columns = {
+            let mut statement = conn
+                .prepare("PRAGMA table_info(atomic_fact_relations)")
+                .expect("relation table_info prepares");
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(5)?,
+                    ))
+                })
+                .expect("relation columns query")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("relation columns decode")
+        };
+        let mut indexes = {
+            let mut statement = conn
+                .prepare("PRAGMA index_list(atomic_fact_relations)")
+                .expect("relation index_list prepares");
+            statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(1)?, row.get::<_, i64>(2)?))
+                })
+                .expect("relation indexes query")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("relation indexes decode")
+        };
+        indexes.sort();
+        AtomicFactRelationSchemaSignature { columns, indexes }
     }
 
     #[test]
@@ -2218,7 +2909,7 @@ mod tests {
     /// - the three legacy identity tiers keep identity semantics — explicit arms
     ///   fold `identity_core`/`identity_learned`/`identity_state` into `Identity`
     ///   rather than letting them ride the generic `Custom` fallback;
-    /// - every removed knowledge/memory wire string now falls through the B0
+    /// - every removed knowledge/memory wire string now falls through the
     ///   fallback to `Custom(<original>)` (no explicit arm), which the v6→v7
     ///   migration mirrors by rewriting the stored string to `custom:<string>`;
     /// - the explicit `custom:` prefix path is unaffected.
@@ -2242,7 +2933,7 @@ mod tests {
             );
         }
 
-        // Removed-variant wire strings now decode to Custom via the B0 fallback.
+        // Removed-variant wire strings now decode to Custom via the compatibility fallback.
         for wire in [
             "procedural",
             "entity",
@@ -2354,7 +3045,7 @@ mod tests {
         assert_eq!(decode_memory_tier("").unwrap(), MemoryTier::Auto);
     }
 
-    /// Carried B0 finding + option (a) resolution: the v6→v7 normalization migration
+    /// The v6→v7 normalization migration
     /// must rewrite legacy `node_type` strings on reopen so `nodes_by_type` — which
     /// filters SQL by the *encoded* query string — finds them immediately, with no
     /// eventual-consistency gap.
@@ -2439,7 +3130,7 @@ mod tests {
             }
         }
 
-        // The carried finding: nodes_by_type now FINDS the normalized rows.
+        // `nodes_by_type` finds the normalized rows immediately.
         assert_eq!(
             reopened.nodes_by_type(&KnowledgeType::Custom("gotcha".to_string())),
             vec![gotcha_id],
@@ -2601,9 +3292,11 @@ mod tests {
                 valid_until: Some(Timestamp(1_100)),
                 metadata: HashMap::from([("extractor".to_owned(), "qwen-local".to_owned())]),
             };
-            storage
-                .set_atomic_fact(fact.clone())
-                .expect("atomic fact stored");
+            storage.set_atomic_fact(fact).expect("atomic fact stored");
+            let fact = storage
+                .get_atomic_fact(fact_id)
+                .expect("stored fact exists")
+                .clone();
 
             assert_eq!(
                 storage.text_search("cobalt", 10),
@@ -2651,8 +3344,1260 @@ mod tests {
         std::fs::remove_file(path).expect("temporary sidecar database removes");
     }
 
-    /// Bug #5: SQLite FTS5 `bm25()` returns MORE-NEGATIVE values for BETTER
-    /// matches. `rank_to_score` must therefore be monotone-INCREASING in
+    #[test]
+    fn atomic_fact_metadata_lookup_tracks_updates_deletes_clones_and_reopens() {
+        const LOOKUP_KEY: &str = "consumer:promotion-key";
+        const SHARED_VALUE: &str = "shared";
+        const MOVED_VALUE: &str = "moved";
+
+        let path = temp_db_path("atomic-fact-metadata-index");
+        let (first_id, second_id) = {
+            let mut storage = SqliteStorage::open(&path).expect("sqlite storage opens");
+            let first_id = storage.next_atomic_fact_id().expect("first id allocates");
+            let second_id = storage.next_atomic_fact_id().expect("second id allocates");
+
+            let mut first = make_atomic_fact(first_id, "first indexed fact");
+            first
+                .metadata
+                .insert(LOOKUP_KEY.to_owned(), SHARED_VALUE.to_owned());
+            first
+                .metadata
+                .insert("consumer:secondary".to_owned(), "present".to_owned());
+
+            let mut second = make_atomic_fact(second_id, "second indexed fact");
+            second
+                .metadata
+                .insert(LOOKUP_KEY.to_owned(), SHARED_VALUE.to_owned());
+            storage.set_atomic_fact(second).expect("second fact stores");
+            storage.set_atomic_fact(first).expect("first fact stores");
+
+            assert_eq!(
+                storage
+                    .atomic_fact_ids_by_metadata(LOOKUP_KEY, SHARED_VALUE)
+                    .expect("all shared metadata lookup succeeds"),
+                vec![first_id, second_id],
+                "duplicate metadata matches preserve ascending fact-ID order"
+            );
+            assert_eq!(
+                storage
+                    .atomic_fact_by_metadata(LOOKUP_KEY, SHARED_VALUE)
+                    .expect("shared metadata lookup succeeds")
+                    .map(|fact| fact.id),
+                Some(first_id),
+                "duplicate metadata matches preserve ascending fact-ID order"
+            );
+            assert_eq!(
+                storage
+                    .atomic_fact_by_metadata("consumer:secondary", "present")
+                    .expect("secondary metadata lookup succeeds")
+                    .map(|fact| fact.id),
+                Some(first_id)
+            );
+            assert!(
+                storage
+                    .atomic_fact_ids_by_metadata(LOOKUP_KEY, "absent")
+                    .expect("empty metadata lookup succeeds")
+                    .is_empty()
+            );
+
+            let mut first = storage
+                .get_atomic_fact(first_id)
+                .expect("first fact exists")
+                .clone();
+            first.metadata.remove(LOOKUP_KEY);
+            first
+                .metadata
+                .insert(LOOKUP_KEY.to_owned(), MOVED_VALUE.to_owned());
+            storage.set_atomic_fact(first).expect("first fact updates");
+
+            assert_eq!(
+                storage
+                    .atomic_fact_ids_by_metadata(LOOKUP_KEY, SHARED_VALUE)
+                    .expect("all updated shared lookup succeeds"),
+                vec![second_id],
+                "an update removes the previous metadata entry"
+            );
+            assert_eq!(
+                storage
+                    .atomic_fact_ids_by_metadata(LOOKUP_KEY, MOVED_VALUE)
+                    .expect("all moved metadata lookup succeeds"),
+                vec![first_id]
+            );
+            assert_eq!(
+                storage
+                    .atomic_fact_by_metadata(LOOKUP_KEY, SHARED_VALUE)
+                    .expect("updated shared lookup succeeds")
+                    .map(|fact| fact.id),
+                Some(second_id),
+                "an update removes the previous metadata entry"
+            );
+            assert_eq!(
+                storage
+                    .atomic_fact_by_metadata(LOOKUP_KEY, MOVED_VALUE)
+                    .expect("moved metadata lookup succeeds")
+                    .map(|fact| fact.id),
+                Some(first_id)
+            );
+
+            let cloned = storage.try_clone().expect("storage clone succeeds");
+            assert_eq!(
+                cloned
+                    .atomic_fact_ids_by_metadata(LOOKUP_KEY, SHARED_VALUE)
+                    .expect("all cloned shared lookup succeeds"),
+                vec![second_id]
+            );
+            assert_eq!(
+                cloned
+                    .atomic_fact_ids_by_metadata(LOOKUP_KEY, MOVED_VALUE)
+                    .expect("all cloned moved lookup succeeds"),
+                vec![first_id]
+            );
+            assert_eq!(
+                cloned
+                    .atomic_fact_by_metadata(LOOKUP_KEY, SHARED_VALUE)
+                    .expect("cloned shared lookup succeeds")
+                    .map(|fact| fact.id),
+                Some(second_id)
+            );
+            assert_eq!(
+                cloned
+                    .atomic_fact_by_metadata(LOOKUP_KEY, MOVED_VALUE)
+                    .expect("cloned moved lookup succeeds")
+                    .map(|fact| fact.id),
+                Some(first_id)
+            );
+
+            (first_id, second_id)
+        };
+
+        {
+            let mut reopened = SqliteStorage::open(&path).expect("metadata-index database reopens");
+            assert_eq!(
+                reopened
+                    .atomic_fact_ids_by_metadata(LOOKUP_KEY, SHARED_VALUE)
+                    .expect("all reopened shared lookup succeeds"),
+                vec![second_id]
+            );
+            assert_eq!(
+                reopened
+                    .atomic_fact_ids_by_metadata(LOOKUP_KEY, MOVED_VALUE)
+                    .expect("all reopened moved lookup succeeds"),
+                vec![first_id]
+            );
+            assert_eq!(
+                reopened
+                    .atomic_fact_by_metadata(LOOKUP_KEY, SHARED_VALUE)
+                    .expect("reopened shared lookup succeeds")
+                    .map(|fact| fact.id),
+                Some(second_id)
+            );
+            assert_eq!(
+                reopened
+                    .atomic_fact_by_metadata(LOOKUP_KEY, MOVED_VALUE)
+                    .expect("reopened moved lookup succeeds")
+                    .map(|fact| fact.id),
+                Some(first_id)
+            );
+
+            reopened
+                .delete_atomic_fact(second_id)
+                .expect("second fact deletes");
+            assert!(
+                reopened
+                    .atomic_fact_ids_by_metadata(LOOKUP_KEY, SHARED_VALUE)
+                    .expect("all lookup after delete succeeds")
+                    .is_empty(),
+                "deletion removes the metadata index entry"
+            );
+            assert!(
+                reopened
+                    .atomic_fact_by_metadata(LOOKUP_KEY, SHARED_VALUE)
+                    .expect("lookup after delete succeeds")
+                    .is_none(),
+                "deletion removes the metadata index entry"
+            );
+        }
+
+        let reopened = SqliteStorage::open(&path).expect("database reopens after deletion");
+        assert!(
+            reopened
+                .atomic_fact_ids_by_metadata(LOOKUP_KEY, SHARED_VALUE)
+                .expect("all persisted deletion lookup succeeds")
+                .is_empty()
+        );
+        assert_eq!(
+            reopened
+                .atomic_fact_ids_by_metadata(LOOKUP_KEY, MOVED_VALUE)
+                .expect("all surviving metadata lookup succeeds"),
+            vec![first_id]
+        );
+        assert!(
+            reopened
+                .atomic_fact_by_metadata(LOOKUP_KEY, SHARED_VALUE)
+                .expect("persisted deletion lookup succeeds")
+                .is_none()
+        );
+        assert_eq!(
+            reopened
+                .atomic_fact_by_metadata(LOOKUP_KEY, MOVED_VALUE)
+                .expect("surviving metadata lookup succeeds")
+                .map(|fact| fact.id),
+            Some(first_id)
+        );
+        drop(reopened);
+        std::fs::remove_file(path).expect("temporary metadata-index database removes");
+    }
+
+    #[test]
+    fn atomic_fact_ids_by_metadata_rejects_stale_index_entries() {
+        const LOOKUP_KEY: &str = "consumer:lookup";
+        const LOOKUP_VALUE: &str = "present";
+
+        let mut storage = SqliteStorage::new().expect("sqlite storage initializes");
+        let fact_id = storage.next_atomic_fact_id().expect("fact id allocates");
+        let mut fact = make_atomic_fact(fact_id, "indexed fact");
+        fact.metadata
+            .insert(LOOKUP_KEY.to_owned(), LOOKUP_VALUE.to_owned());
+        storage.set_atomic_fact(fact).expect("fact stores");
+
+        storage
+            .atomic_fact_metadata_index
+            .get_mut(LOOKUP_KEY)
+            .expect("key index exists")
+            .get_mut(LOOKUP_VALUE)
+            .expect("value index exists")
+            .clear();
+        let error = storage
+            .atomic_fact_ids_by_metadata(LOOKUP_KEY, LOOKUP_VALUE)
+            .expect_err("empty index entry must fail");
+        assert!(error.to_string().contains("empty entry"));
+
+        let cached_fact = storage
+            .atomic_facts
+            .get(&fact_id)
+            .expect("fact remains cached")
+            .clone();
+        storage.cache_atomic_fact(cached_fact);
+        let missing_id = AtomicFactId(fact_id.0 + 100);
+        storage
+            .atomic_fact_metadata_index
+            .get_mut(LOOKUP_KEY)
+            .expect("key index exists")
+            .get_mut(LOOKUP_VALUE)
+            .expect("value index exists")
+            .insert(missing_id);
+        let error = storage
+            .atomic_fact_ids_by_metadata(LOOKUP_KEY, LOOKUP_VALUE)
+            .expect_err("missing indexed fact must fail");
+        assert!(error.to_string().contains("references missing fact"));
+
+        storage
+            .atomic_fact_metadata_index
+            .get_mut(LOOKUP_KEY)
+            .expect("key index exists")
+            .get_mut(LOOKUP_VALUE)
+            .expect("value index exists")
+            .remove(&missing_id);
+        storage
+            .atomic_facts
+            .get_mut(&fact_id)
+            .expect("fact remains cached")
+            .metadata
+            .insert(LOOKUP_KEY.to_owned(), "changed".to_owned());
+        let error = storage
+            .atomic_fact_ids_by_metadata(LOOKUP_KEY, LOOKUP_VALUE)
+            .expect_err("mismatched indexed fact must fail");
+        assert!(error.to_string().contains("is stale"));
+    }
+
+    #[test]
+    fn reopening_leaves_unverifiable_atomic_source_ineligible() {
+        let path = temp_db_path("atomic-source-incarnation-legacy");
+        let (fact_id, source_id) = {
+            let mut storage = SqliteStorage::open(&path).expect("sqlite storage opens");
+            let source_id = storage.next_node_id();
+            let mut source = make_node(source_id, 0.5);
+            source.node_type = KnowledgeType::Episodic;
+            source.content = "authoritative raw evidence".to_owned();
+            storage.set_node(source).expect("raw source stores");
+            let fact_id = storage.next_atomic_fact_id().expect("fact id allocates");
+            storage
+                .set_atomic_fact(AtomicFact {
+                    id: fact_id,
+                    content: "reviewed claim".to_owned(),
+                    embedding: vec![1.0],
+                    source_node_ids: vec![source_id],
+                    entity_tags: Vec::new(),
+                    source_session_id: "test-session".to_owned(),
+                    scope: ScopePath::universal(),
+                    observed_at: Timestamp(1_000),
+                    valid_from: None,
+                    valid_until: None,
+                    metadata: HashMap::new(),
+                })
+                .expect("fact stores");
+            {
+                let conn = storage.lock_conn().expect("sqlite connection locks");
+                conn.execute(
+                    "UPDATE atomic_facts SET metadata = '' WHERE id = ?1",
+                    [fact_id.0],
+                )
+                .expect("legacy metadata state installs");
+            }
+            (fact_id, source_id)
+        };
+
+        let reopened = SqliteStorage::open(&path).expect("legacy sidecar reopens");
+        let fact = reopened
+            .get_atomic_fact(fact_id)
+            .expect("legacy fact exists");
+        let source = reopened.get_node(source_id).expect("raw source exists");
+        assert!(
+            !reopened
+                .atomic_fact_source_is_current(fact, source)
+                .expect("source validation")
+        );
+        assert!(
+            !fact
+                .metadata
+                .contains_key(&crate::storage::atomic_source_incarnation_key(source_id)),
+            "opening must not authorize a legacy fact from the node currently occupying its ID"
+        );
+        drop(reopened);
+
+        let reopened = SqliteStorage::open(&path).expect("legacy sidecar reopens again");
+        let fact = reopened
+            .get_atomic_fact(fact_id)
+            .expect("legacy fact persists");
+        let source = reopened.get_node(source_id).expect("raw source exists");
+        assert!(
+            !reopened
+                .atomic_fact_source_is_current(fact, source)
+                .expect("source validation")
+        );
+        drop(reopened);
+        std::fs::remove_file(path).expect("temporary sidecar database removes");
+    }
+
+    #[test]
+    fn node_incarnation_is_hidden_and_stable_across_ordinary_updates() {
+        let mut storage = SqliteStorage::new().expect("sqlite storage initializes");
+        let node_id = storage.next_node_id();
+        let node = make_node(node_id, 0.5);
+        storage.set_node(node).expect("node stores");
+        let before = storage
+            .atomic_source_incarnation(storage.get_node(node_id).expect("node exists"))
+            .expect("incarnation computes");
+
+        let mut unchanged = storage.get_node(node_id).expect("node exists").clone();
+        unchanged.metadata.insert(
+            crate::storage::NODE_INCARNATION_METADATA_KEY.to_owned(),
+            "18446744073709551615".to_owned(),
+        );
+        storage.set_node(unchanged).expect("node updates");
+
+        let stored = storage.get_node(node_id).expect("updated node exists");
+        let after = storage
+            .atomic_source_incarnation(stored)
+            .expect("incarnation computes");
+        assert_eq!(before, after);
+        assert!(
+            !stored
+                .metadata
+                .contains_key(crate::storage::NODE_INCARNATION_METADATA_KEY),
+            "backend authority metadata must not leak into the public Node"
+        );
+    }
+
+    #[test]
+    fn authority_field_change_invalidates_existing_atomic_fact_binding() {
+        let mut storage = SqliteStorage::new().expect("sqlite storage initializes");
+        let source_id = storage.next_node_id();
+        let mut source = make_node(source_id, 0.5);
+        source.node_type = KnowledgeType::Episodic;
+        source.content = "original raw evidence".to_owned();
+        storage.set_node(source).expect("source stores");
+        let fact_id = storage.next_atomic_fact_id().expect("fact id allocates");
+        storage
+            .set_atomic_fact(AtomicFact {
+                id: fact_id,
+                content: "grounded claim".to_owned(),
+                embedding: vec![1.0],
+                source_node_ids: vec![source_id],
+                entity_tags: Vec::new(),
+                source_session_id: "test-session".to_owned(),
+                scope: ScopePath::universal(),
+                observed_at: Timestamp(1_000),
+                valid_from: None,
+                valid_until: None,
+                metadata: HashMap::new(),
+            })
+            .expect("fact stores");
+        assert!(
+            storage
+                .atomic_fact_source_is_current(
+                    storage.get_atomic_fact(fact_id).expect("fact exists"),
+                    storage.get_node(source_id).expect("source exists"),
+                )
+                .expect("source binding validates")
+        );
+
+        let mut changed = storage.get_node(source_id).expect("source exists").clone();
+        changed.content = "corrected raw evidence".to_owned();
+        changed.updated_at = Timestamp(changed.updated_at.0.saturating_add(1));
+        storage.set_node(changed).expect("source update stores");
+
+        assert!(
+            !storage
+                .atomic_fact_source_is_current(
+                    storage.get_atomic_fact(fact_id).expect("fact persists"),
+                    storage.get_node(source_id).expect("updated source exists"),
+                )
+                .expect("source binding validates"),
+            "an in-place evidence change must not inherit the earlier fact binding"
+        );
+    }
+
+    #[test]
+    fn byte_identical_node_id_reuse_rotates_incarnation_across_reopen() {
+        let path = temp_db_path("node-incarnation-reuse");
+        let (node_id, template, first) = {
+            let mut storage = SqliteStorage::open(&path).expect("sqlite storage opens");
+            let node_id = storage.next_node_id();
+            let template = make_node(node_id, 0.5);
+            storage
+                .set_node(template.clone())
+                .expect("first node stores");
+            let first = storage
+                .atomic_source_incarnation(storage.get_node(node_id).expect("first node exists"))
+                .expect("first incarnation");
+            storage.delete_node(node_id).expect("first node deletes");
+            (node_id, template, first)
+        };
+
+        let second = {
+            let mut storage = SqliteStorage::open(&path).expect("sqlite storage reopens");
+            assert_eq!(storage.next_node_id(), node_id);
+            storage
+                .set_node(template.clone())
+                .expect("identical replacement stores");
+            let second = storage
+                .atomic_source_incarnation(storage.get_node(node_id).expect("replacement exists"))
+                .expect("second incarnation");
+            assert_ne!(first, second);
+            storage.delete_node(node_id).expect("replacement deletes");
+            second
+        };
+
+        let mut reopened = SqliteStorage::open(&path).expect("sqlite storage reopens again");
+        assert_eq!(reopened.next_node_id(), node_id);
+        reopened
+            .set_node(template)
+            .expect("second identical replacement stores");
+        let third = reopened
+            .atomic_source_incarnation(reopened.get_node(node_id).expect("third node exists"))
+            .expect("third incarnation");
+        assert_ne!(first, third);
+        assert_ne!(second, third);
+        drop(reopened);
+        std::fs::remove_file(path).expect("temporary database removes");
+    }
+
+    #[test]
+    fn storage_clone_preserves_deleted_incarnation_high_water() {
+        let mut storage = SqliteStorage::new().expect("sqlite storage initializes");
+        let first_id = storage.next_node_id();
+        storage
+            .set_node(make_node(first_id, 0.5))
+            .expect("first node stores");
+        let deleted_id = storage.next_node_id();
+        let deleted = make_node(deleted_id, 0.6);
+        storage
+            .set_node(deleted.clone())
+            .expect("highest-generation node stores");
+        let deleted_incarnation = storage
+            .atomic_source_incarnation(storage.get_node(deleted_id).expect("node exists"))
+            .expect("deleted incarnation");
+        storage
+            .delete_node(deleted_id)
+            .expect("highest-generation node deletes");
+
+        let mut cloned = storage.try_clone().expect("storage clone succeeds");
+        assert_eq!(cloned.next_node_id(), deleted_id);
+        cloned
+            .set_node(deleted)
+            .expect("identical node stores in clone");
+        let replacement_incarnation = cloned
+            .atomic_source_incarnation(cloned.get_node(deleted_id).expect("replacement exists"))
+            .expect("replacement incarnation");
+        assert_ne!(deleted_incarnation, replacement_incarnation);
+    }
+
+    #[test]
+    fn reopening_backfills_missing_node_incarnation_once() {
+        let path = temp_db_path("node-incarnation-backfill");
+        let node_id = {
+            let mut storage = SqliteStorage::open(&path).expect("sqlite storage opens");
+            let node_id = storage.next_node_id();
+            storage
+                .set_node(make_node(node_id, 0.5))
+                .expect("node stores");
+            node_id
+        };
+        {
+            let conn = Connection::open(&path).expect("raw connection opens");
+            conn.execute("UPDATE nodes SET metadata = '' WHERE id = ?1", [node_id.0])
+                .expect("legacy node metadata installs");
+            conn.execute(
+                "DELETE FROM graph_metadata WHERE key = ?1",
+                [NEXT_NODE_INCARNATION_KEY],
+            )
+            .expect("legacy high-water state installs");
+        }
+
+        let first = {
+            let reopened = SqliteStorage::open(&path).expect("legacy database reopens");
+            let node = reopened.get_node(node_id).expect("legacy node exists");
+            assert!(
+                !node
+                    .metadata
+                    .contains_key(crate::storage::NODE_INCARNATION_METADATA_KEY)
+            );
+            reopened
+                .atomic_source_incarnation(node)
+                .expect("backfilled incarnation")
+        };
+        let reopened = SqliteStorage::open(&path).expect("database reopens again");
+        let second = reopened
+            .atomic_source_incarnation(reopened.get_node(node_id).expect("node exists"))
+            .expect("persisted incarnation");
+        assert_eq!(first, second);
+        drop(reopened);
+        std::fs::remove_file(path).expect("temporary database removes");
+    }
+
+    #[test]
+    fn reopening_rejects_malformed_or_duplicate_node_incarnations() {
+        let malformed_path = temp_db_path("node-incarnation-malformed");
+        let malformed_id = {
+            let mut storage = SqliteStorage::open(&malformed_path).expect("storage opens");
+            let node_id = storage.next_node_id();
+            storage
+                .set_node(make_node(node_id, 0.5))
+                .expect("node stores");
+            node_id
+        };
+        {
+            let conn = Connection::open(&malformed_path).expect("raw connection opens");
+            let malformed = encode_map(&HashMap::from([(
+                crate::storage::NODE_INCARNATION_METADATA_KEY.to_owned(),
+                "not-a-number".to_owned(),
+            )]));
+            conn.execute(
+                "UPDATE nodes SET metadata = ?1 WHERE id = ?2",
+                params![malformed, malformed_id.0],
+            )
+            .expect("malformed incarnation installs");
+        }
+        let malformed_error = SqliteStorage::open(&malformed_path)
+            .err()
+            .expect("malformed incarnation must fail open");
+        assert!(
+            malformed_error
+                .to_string()
+                .contains("invalid persisted incarnation")
+        );
+        std::fs::remove_file(&malformed_path).expect("malformed database removes");
+
+        let duplicate_path = temp_db_path("node-incarnation-duplicate");
+        let (first_id, second_id) = {
+            let mut storage = SqliteStorage::open(&duplicate_path).expect("storage opens");
+            let first_id = storage.next_node_id();
+            storage
+                .set_node(make_node(first_id, 0.5))
+                .expect("first node stores");
+            let second_id = storage.next_node_id();
+            storage
+                .set_node(make_node(second_id, 0.6))
+                .expect("second node stores");
+            (first_id, second_id)
+        };
+        {
+            let conn = Connection::open(&duplicate_path).expect("raw connection opens");
+            let first_metadata: String = conn
+                .query_row(
+                    "SELECT metadata FROM nodes WHERE id = ?1",
+                    [first_id.0],
+                    |row| row.get(0),
+                )
+                .expect("first metadata reads");
+            conn.execute(
+                "UPDATE nodes SET metadata = ?1 WHERE id = ?2",
+                params![first_metadata, second_id.0],
+            )
+            .expect("duplicate incarnation installs");
+        }
+        let duplicate_error = SqliteStorage::open(&duplicate_path)
+            .err()
+            .expect("duplicate incarnation must fail open");
+        assert!(
+            duplicate_error
+                .to_string()
+                .contains("reuses persisted incarnation")
+        );
+        std::fs::remove_file(duplicate_path).expect("duplicate database removes");
+    }
+
+    #[test]
+    fn atomic_fact_relation_crud_updates_directional_adjacency() {
+        let mut storage = SqliteStorage::new().expect("sqlite storage initializes");
+        let first = storage.next_atomic_fact_id().expect("first fact id");
+        let second = storage.next_atomic_fact_id().expect("second fact id");
+        let third = storage.next_atomic_fact_id().expect("third fact id");
+        storage
+            .set_atomic_fact(make_atomic_fact(first, "first fact"))
+            .expect("first fact stores");
+        storage
+            .set_atomic_fact(make_atomic_fact(second, "second fact"))
+            .expect("second fact stores");
+        storage
+            .set_atomic_fact(make_atomic_fact(third, "third fact"))
+            .expect("third fact stores");
+
+        let relation_id = storage
+            .next_atomic_fact_relation_id()
+            .expect("relation id allocates");
+        let mut relation = make_atomic_fact_relation(relation_id, first, second, "relation:crud");
+        storage
+            .set_atomic_fact_relation(relation.clone())
+            .expect("relation stores");
+        assert_eq!(storage.all_atomic_fact_relation_ids(), vec![relation_id]);
+        assert_eq!(storage.atomic_fact_relations_from(first), &[relation_id]);
+        assert_eq!(storage.atomic_fact_relations_to(second), &[relation_id]);
+        assert_eq!(
+            storage
+                .atomic_fact_relation_by_idempotency_key("relation:crud")
+                .expect("relation key lookup succeeds")
+                .map(|relation| relation.id),
+            Some(relation_id)
+        );
+        assert_eq!(
+            storage
+                .get_atomic_fact_relation(relation_id)
+                .expect("relation reads"),
+            &relation
+        );
+
+        relation.to_fact_id = third;
+        relation.kind = AtomicFactRelationKind::Causal;
+        relation.reviewed_at = Timestamp(1_075);
+        relation.idempotency_key = "relation:crud-updated".to_owned();
+        storage
+            .set_atomic_fact_relation(relation.clone())
+            .expect("relation updates");
+        assert!(storage.atomic_fact_relations_to(second).is_empty());
+        assert_eq!(storage.atomic_fact_relations_to(third), &[relation_id]);
+        assert_eq!(
+            storage
+                .get_atomic_fact_relation(relation_id)
+                .expect("updated relation reads"),
+            &relation
+        );
+        assert!(
+            storage
+                .atomic_fact_relation_by_idempotency_key("relation:crud")
+                .expect("old relation key lookup succeeds")
+                .is_none()
+        );
+        assert_eq!(
+            storage
+                .atomic_fact_relation_by_idempotency_key("relation:crud-updated")
+                .expect("updated relation key lookup succeeds")
+                .map(|relation| relation.id),
+            Some(relation_id)
+        );
+
+        storage
+            .delete_atomic_fact_relation(relation_id)
+            .expect("relation deletes");
+        assert!(storage.all_atomic_fact_relation_ids().is_empty());
+        assert!(storage.atomic_fact_relations_from(first).is_empty());
+        assert!(storage.atomic_fact_relations_to(third).is_empty());
+        assert!(storage.get_atomic_fact_relation(relation_id).is_err());
+        assert!(
+            storage
+                .atomic_fact_relation_by_idempotency_key("relation:crud")
+                .expect("deleted relation key lookup succeeds")
+                .is_none()
+        );
+        assert!(
+            storage
+                .atomic_fact_relation_by_idempotency_key("relation:crud-updated")
+                .expect("deleted updated relation key lookup succeeds")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn atomic_fact_relation_idempotency_key_is_unique() {
+        let mut storage = SqliteStorage::new().expect("sqlite storage initializes");
+        let first = storage.next_atomic_fact_id().expect("first fact id");
+        let second = storage.next_atomic_fact_id().expect("second fact id");
+        storage
+            .set_atomic_fact(make_atomic_fact(first, "first fact"))
+            .expect("first fact stores");
+        storage
+            .set_atomic_fact(make_atomic_fact(second, "second fact"))
+            .expect("second fact stores");
+
+        let first_relation_id = storage
+            .next_atomic_fact_relation_id()
+            .expect("first relation id");
+        let second_relation_id = storage
+            .next_atomic_fact_relation_id()
+            .expect("second relation id");
+        storage
+            .set_atomic_fact_relation(make_atomic_fact_relation(
+                first_relation_id,
+                first,
+                second,
+                "relation:stable-key",
+            ))
+            .expect("first relation stores");
+        let duplicate =
+            make_atomic_fact_relation(second_relation_id, second, first, "relation:stable-key");
+        assert!(storage.set_atomic_fact_relation(duplicate).is_err());
+        assert_eq!(
+            storage.all_atomic_fact_relation_ids(),
+            vec![first_relation_id]
+        );
+        assert!(
+            storage
+                .get_atomic_fact_relation(second_relation_id)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn atomic_fact_relation_writes_validate_shape_and_endpoints() {
+        let mut storage = SqliteStorage::new().expect("sqlite storage initializes");
+        let first = storage.next_atomic_fact_id().expect("first fact id");
+        let second = storage.next_atomic_fact_id().expect("second fact id");
+        storage
+            .set_atomic_fact(make_atomic_fact(first, "first fact"))
+            .expect("first fact stores");
+        let relation_id = storage.next_atomic_fact_relation_id().expect("relation id");
+
+        let missing_endpoint =
+            make_atomic_fact_relation(relation_id, first, second, "relation:missing");
+        assert!(storage.set_atomic_fact_relation(missing_endpoint).is_err());
+
+        storage
+            .set_atomic_fact(make_atomic_fact(second, "second fact"))
+            .expect("second fact stores");
+        let mut self_relation =
+            make_atomic_fact_relation(relation_id, first, first, "relation:self");
+        assert!(
+            storage
+                .set_atomic_fact_relation(self_relation.clone())
+                .is_err()
+        );
+
+        self_relation.to_fact_id = second;
+        self_relation.reviewed_by.clear();
+        assert!(
+            storage
+                .set_atomic_fact_relation(self_relation.clone())
+                .is_err()
+        );
+        self_relation.reviewed_by = "reviewer:test".to_string();
+        self_relation.review_profile = "  ".to_string();
+        assert!(
+            storage
+                .set_atomic_fact_relation(self_relation.clone())
+                .is_err()
+        );
+        self_relation.review_profile = "review-profile:v1".to_string();
+        self_relation.idempotency_key.clear();
+        assert!(
+            storage
+                .set_atomic_fact_relation(self_relation.clone())
+                .is_err()
+        );
+        self_relation.idempotency_key = "relation:interval".to_string();
+        self_relation.valid_from = Some(Timestamp(1_100));
+        self_relation.valid_until = Some(Timestamp(1_100));
+        assert!(storage.set_atomic_fact_relation(self_relation).is_err());
+        assert!(storage.all_atomic_fact_relation_ids().is_empty());
+    }
+
+    #[test]
+    fn deleting_atomic_fact_cascades_only_incident_relations() {
+        let mut storage = SqliteStorage::new().expect("sqlite storage initializes");
+        let first = storage.next_atomic_fact_id().expect("first fact id");
+        let second = storage.next_atomic_fact_id().expect("second fact id");
+        let third = storage.next_atomic_fact_id().expect("third fact id");
+        for (id, content) in [(first, "first"), (second, "second"), (third, "third")] {
+            storage
+                .set_atomic_fact(make_atomic_fact(id, content))
+                .expect("fact stores");
+        }
+
+        let outgoing = storage.next_atomic_fact_relation_id().expect("outgoing id");
+        let incoming = storage.next_atomic_fact_relation_id().expect("incoming id");
+        let unrelated = storage
+            .next_atomic_fact_relation_id()
+            .expect("unrelated id");
+        storage
+            .set_atomic_fact_relation(make_atomic_fact_relation(
+                outgoing,
+                first,
+                second,
+                "relation:outgoing",
+            ))
+            .expect("outgoing stores");
+        storage
+            .set_atomic_fact_relation(make_atomic_fact_relation(
+                incoming,
+                third,
+                first,
+                "relation:incoming",
+            ))
+            .expect("incoming stores");
+        storage
+            .set_atomic_fact_relation(make_atomic_fact_relation(
+                unrelated,
+                second,
+                third,
+                "relation:unrelated",
+            ))
+            .expect("unrelated stores");
+
+        storage
+            .delete_atomic_fact(first)
+            .expect("fact and incident relations delete");
+        assert!(storage.get_atomic_fact_relation(outgoing).is_err());
+        assert!(storage.get_atomic_fact_relation(incoming).is_err());
+        assert!(storage.get_atomic_fact_relation(unrelated).is_ok());
+        assert_eq!(storage.all_atomic_fact_relation_ids(), vec![unrelated]);
+        assert_eq!(storage.atomic_fact_relations_from(second), &[unrelated]);
+        assert_eq!(storage.atomic_fact_relations_to(third), &[unrelated]);
+        let persisted_relation_ids = {
+            let conn = storage.lock_conn().expect("sqlite connection locks");
+            let mut statement = conn
+                .prepare("SELECT id FROM atomic_fact_relations ORDER BY id")
+                .expect("persisted relation query prepares");
+            statement
+                .query_map([], |row| row.get::<_, u64>(0))
+                .expect("persisted relations query")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("persisted relation ids decode")
+        };
+        assert_eq!(persisted_relation_ids, vec![unrelated.0]);
+    }
+
+    #[test]
+    fn atomic_fact_relations_survive_reopen_and_fallible_clone() {
+        let path = temp_db_path("atomic-fact-relations-reopen");
+        let (first, second, relation_id, next_unused_relation_id, relation) = {
+            let mut storage = SqliteStorage::open(&path).expect("sqlite storage opens");
+            let first = storage.next_atomic_fact_id().expect("first fact id");
+            let second = storage.next_atomic_fact_id().expect("second fact id");
+            storage
+                .set_atomic_fact(make_atomic_fact(first, "first fact"))
+                .expect("first fact stores");
+            storage
+                .set_atomic_fact(make_atomic_fact(second, "second fact"))
+                .expect("second fact stores");
+            let relation_id = storage.next_atomic_fact_relation_id().expect("relation id");
+            let relation =
+                make_atomic_fact_relation(relation_id, first, second, "relation:persisted");
+            storage
+                .set_atomic_fact_relation(relation.clone())
+                .expect("relation stores");
+            let next_unused_relation_id = storage
+                .next_atomic_fact_relation_id()
+                .expect("unused relation id");
+
+            let mut cloned = storage.try_clone().expect("storage clone succeeds");
+            assert_eq!(
+                cloned
+                    .get_atomic_fact_relation(relation_id)
+                    .expect("cloned relation exists"),
+                &relation
+            );
+            assert_eq!(cloned.atomic_fact_relations_from(first), &[relation_id]);
+            assert_eq!(cloned.atomic_fact_relations_to(second), &[relation_id]);
+            assert_eq!(
+                cloned
+                    .atomic_fact_relation_by_idempotency_key("relation:persisted")
+                    .expect("cloned relation key lookup succeeds")
+                    .map(|relation| relation.id),
+                Some(relation_id)
+            );
+            assert_eq!(
+                cloned
+                    .next_atomic_fact_relation_id()
+                    .expect("clone preserves unused counter"),
+                AtomicFactRelationId(next_unused_relation_id.0 + 1)
+            );
+            (
+                first,
+                second,
+                relation_id,
+                next_unused_relation_id,
+                relation,
+            )
+        };
+
+        let mut reopened = SqliteStorage::open(&path).expect("relation database reopens");
+        assert_eq!(
+            reopened
+                .get_atomic_fact_relation(relation_id)
+                .expect("reopened relation exists"),
+            &relation
+        );
+        assert_eq!(reopened.atomic_fact_relations_from(first), &[relation_id]);
+        assert_eq!(reopened.atomic_fact_relations_to(second), &[relation_id]);
+        assert_eq!(
+            reopened
+                .atomic_fact_relation_by_idempotency_key("relation:persisted")
+                .expect("reopened relation key lookup succeeds")
+                .map(|relation| relation.id),
+            Some(relation_id)
+        );
+        assert_eq!(
+            reopened
+                .next_atomic_fact_relation_id()
+                .expect("reopen preserves the allocated high-water mark"),
+            AtomicFactRelationId(next_unused_relation_id.0 + 1)
+        );
+        drop(reopened);
+        std::fs::remove_file(path).expect("temporary relation database removes");
+    }
+
+    #[test]
+    fn atomic_sidecar_ids_are_not_reused_after_delete_and_reopen() {
+        let path = temp_db_path("atomic-sidecar-id-high-water");
+        let (first, deleted_fact, deleted_relation) = {
+            let mut storage = SqliteStorage::open(&path).expect("sqlite storage opens");
+            let first = storage.next_atomic_fact_id().expect("first fact id");
+            let deleted_fact = storage.next_atomic_fact_id().expect("second fact id");
+            storage
+                .set_atomic_fact(make_atomic_fact(first, "first fact"))
+                .expect("first fact stores");
+            storage
+                .set_atomic_fact(make_atomic_fact(deleted_fact, "second fact"))
+                .expect("second fact stores");
+            let deleted_relation = storage.next_atomic_fact_relation_id().expect("relation id");
+            storage
+                .set_atomic_fact_relation(make_atomic_fact_relation(
+                    deleted_relation,
+                    first,
+                    deleted_fact,
+                    "relation:deleted",
+                ))
+                .expect("relation stores");
+            storage
+                .delete_atomic_fact_relation(deleted_relation)
+                .expect("relation deletes");
+            storage
+                .delete_atomic_fact(deleted_fact)
+                .expect("fact deletes");
+            (first, deleted_fact, deleted_relation)
+        };
+
+        let mut reopened = SqliteStorage::open(&path).expect("sqlite storage reopens");
+        let replacement_fact = reopened.next_atomic_fact_id().expect("replacement fact id");
+        assert_eq!(replacement_fact, AtomicFactId(deleted_fact.0 + 1));
+        reopened
+            .set_atomic_fact(make_atomic_fact(replacement_fact, "replacement fact"))
+            .expect("replacement fact stores");
+        assert_eq!(
+            reopened
+                .next_atomic_fact_relation_id()
+                .expect("replacement relation id"),
+            AtomicFactRelationId(deleted_relation.0 + 1)
+        );
+        assert!(reopened.get_atomic_fact(first).is_ok());
+        drop(reopened);
+        std::fs::remove_file(path).expect("temporary relation database removes");
+    }
+
+    #[test]
+    fn atomic_sidecar_sparse_indexes_track_only_live_rows_in_id_order() {
+        let mut storage = SqliteStorage::new().expect("sqlite storage initializes");
+        let low_fact = AtomicFactId(7);
+        let high_fact = AtomicFactId(1_000_007);
+        storage
+            .set_atomic_fact(make_atomic_fact(high_fact, "high sparse fact"))
+            .expect("high sparse fact stores");
+        storage
+            .set_atomic_fact(make_atomic_fact(low_fact, "low sparse fact"))
+            .expect("low sparse fact stores");
+
+        let low_relation = AtomicFactRelationId(11);
+        let high_relation = AtomicFactRelationId(2_000_011);
+        storage
+            .set_atomic_fact_relation(make_atomic_fact_relation(
+                high_relation,
+                low_fact,
+                high_fact,
+                "relation:sparse-high",
+            ))
+            .expect("high sparse relation stores");
+        storage
+            .set_atomic_fact_relation(make_atomic_fact_relation(
+                low_relation,
+                low_fact,
+                high_fact,
+                "relation:sparse-low",
+            ))
+            .expect("low sparse relation stores");
+
+        assert_eq!(storage.atomic_facts.len(), 2);
+        assert_eq!(storage.all_atomic_fact_ids(), vec![low_fact, high_fact]);
+        assert_eq!(storage.atomic_fact_relations.len(), 2);
+        assert_eq!(
+            storage.all_atomic_fact_relation_ids(),
+            vec![low_relation, high_relation]
+        );
+        assert_eq!(
+            storage.atomic_fact_relations_from(low_fact),
+            &[low_relation, high_relation]
+        );
+        assert_eq!(
+            storage.atomic_fact_relations_to(high_fact),
+            &[low_relation, high_relation]
+        );
+
+        storage
+            .delete_atomic_fact_relation(high_relation)
+            .expect("high sparse relation deletes");
+        storage
+            .delete_atomic_fact_relation(low_relation)
+            .expect("low sparse relation deletes");
+        assert!(storage.atomic_fact_relations_out.is_empty());
+        assert!(storage.atomic_fact_relations_in.is_empty());
+    }
+
+    #[test]
+    fn atomic_sidecar_sparse_churn_does_not_materialize_high_water_gaps() {
+        let path = temp_db_path("atomic-sidecar-sparse-churn");
+        let sparse_fact = AtomicFactId(1_000_000);
+        let sparse_relation = AtomicFactRelationId(2_000_000);
+        let (first, second) = {
+            let mut storage = SqliteStorage::open(&path).expect("sqlite storage opens");
+            let first = storage.next_atomic_fact_id().expect("first fact id");
+            let second = storage.next_atomic_fact_id().expect("second fact id");
+            storage
+                .set_atomic_fact(make_atomic_fact(first, "first live fact"))
+                .expect("first fact stores");
+            storage
+                .set_atomic_fact(make_atomic_fact(second, "second live fact"))
+                .expect("second fact stores");
+
+            storage
+                .set_atomic_fact(make_atomic_fact(sparse_fact, "transient sparse fact"))
+                .expect("sparse fact stores");
+            storage
+                .delete_atomic_fact(sparse_fact)
+                .expect("sparse fact deletes");
+            storage
+                .set_atomic_fact_relation(make_atomic_fact_relation(
+                    sparse_relation,
+                    first,
+                    second,
+                    "relation:transient-sparse",
+                ))
+                .expect("sparse relation stores");
+            storage
+                .delete_atomic_fact_relation(sparse_relation)
+                .expect("sparse relation deletes");
+
+            assert_eq!(storage.atomic_facts.len(), 2);
+            assert!(storage.atomic_fact_relations.is_empty());
+            assert!(storage.atomic_fact_relations_out.is_empty());
+            assert!(storage.atomic_fact_relations_in.is_empty());
+            (first, second)
+        };
+
+        let mut reopened = SqliteStorage::open(&path).expect("sqlite storage reopens");
+        assert_eq!(reopened.all_atomic_fact_ids(), vec![first, second]);
+        assert_eq!(reopened.atomic_facts.len(), 2);
+        assert!(reopened.atomic_fact_relations.is_empty());
+        assert_eq!(
+            reopened.next_atomic_fact_id().expect("next fact allocates"),
+            AtomicFactId(sparse_fact.0 + 1)
+        );
+        assert_eq!(
+            reopened
+                .next_atomic_fact_relation_id()
+                .expect("next relation allocates"),
+            AtomicFactRelationId(sparse_relation.0 + 1)
+        );
+        assert_eq!(reopened.atomic_facts.len(), 2);
+        assert!(reopened.atomic_fact_relations.is_empty());
+
+        let mut cloned = reopened.try_clone().expect("sparse storage clone succeeds");
+        assert_eq!(cloned.all_atomic_fact_ids(), vec![first, second]);
+        assert_eq!(cloned.atomic_facts.len(), 2);
+        assert!(cloned.atomic_fact_relations.is_empty());
+        assert_eq!(
+            cloned.next_atomic_fact_id().expect("clone fact allocates"),
+            AtomicFactId(sparse_fact.0 + 2)
+        );
+        assert_eq!(
+            cloned
+                .next_atomic_fact_relation_id()
+                .expect("clone relation allocates"),
+            AtomicFactRelationId(sparse_relation.0 + 2)
+        );
+        assert_eq!(cloned.atomic_facts.len(), 2);
+        assert!(cloned.atomic_fact_relations.is_empty());
+
+        drop(cloned);
+        drop(reopened);
+        std::fs::remove_file(path).expect("temporary sparse database removes");
+    }
+
+    #[test]
+    fn open_durably_seeds_atomic_sidecar_high_water_from_live_rows() {
+        let path = temp_db_path("atomic-sidecar-open-high-water-seed");
+        let low_fact = AtomicFactId(10);
+        let high_fact = AtomicFactId(40);
+        let high_relation = AtomicFactRelationId(70);
+        {
+            let mut storage = SqliteStorage::open(&path).expect("sqlite storage opens");
+            storage
+                .set_atomic_fact(make_atomic_fact(low_fact, "low live fact"))
+                .expect("low fact stores");
+            storage
+                .set_atomic_fact(make_atomic_fact(high_fact, "high live fact"))
+                .expect("high fact stores");
+            storage
+                .set_atomic_fact_relation(make_atomic_fact_relation(
+                    high_relation,
+                    low_fact,
+                    high_fact,
+                    "relation:high-water-seed",
+                ))
+                .expect("high relation stores");
+        }
+        {
+            let connection = Connection::open(&path).expect("database opens raw");
+            connection
+                .execute(
+                    "DELETE FROM graph_metadata WHERE key IN (?1, ?2)",
+                    params![NEXT_ATOMIC_FACT_ID_KEY, NEXT_ATOMIC_FACT_RELATION_ID_KEY],
+                )
+                .expect("remove planted high-water metadata");
+        }
+        {
+            let mut storage = SqliteStorage::open(&path).expect("database seeds live maxima");
+            storage
+                .delete_atomic_fact_relation(high_relation)
+                .expect("highest relation deletes after seed");
+            storage
+                .delete_atomic_fact(high_fact)
+                .expect("highest fact deletes after seed");
+        }
+        {
+            let connection = Connection::open(&path).expect("seeded database opens raw");
+            assert_eq!(
+                metadata_value(&connection, NEXT_ATOMIC_FACT_ID_KEY)
+                    .expect("fact high-water reads")
+                    .as_deref(),
+                Some("41")
+            );
+            assert_eq!(
+                metadata_value(&connection, NEXT_ATOMIC_FACT_RELATION_ID_KEY)
+                    .expect("relation high-water reads")
+                    .as_deref(),
+                Some("71")
+            );
+        }
+
+        let mut reopened = SqliteStorage::open(&path).expect("seeded database reopens");
+        assert_eq!(
+            reopened.next_atomic_fact_id().expect("next fact allocates"),
+            AtomicFactId(41)
+        );
+        assert_eq!(
+            reopened
+                .next_atomic_fact_relation_id()
+                .expect("next relation allocates"),
+            AtomicFactRelationId(71)
+        );
+        assert!(reopened.get_atomic_fact(low_fact).is_ok());
+        drop(reopened);
+        std::fs::remove_file(path).expect("temporary seeded database removes");
+    }
+
+    #[test]
+    fn migration_v12_relation_schema_matches_fresh_schema() {
+        let fresh_path = temp_db_path("atomic-fact-relations-fresh-schema");
+        let migrated_path = temp_db_path("atomic-fact-relations-v12-migration");
+        drop(SqliteStorage::open(&fresh_path).expect("fresh database opens"));
+        let migrated_fact = AtomicFactId(27);
+        {
+            let mut storage =
+                SqliteStorage::open(&migrated_path).expect("migration seed database opens");
+            storage
+                .set_atomic_fact(make_atomic_fact(migrated_fact, "migrated high-water fact"))
+                .expect("migration fact stores");
+        }
+
+        {
+            let conn = Connection::open(&migrated_path).expect("migration database opens raw");
+            conn.execute_batch(
+                "DELETE FROM graph_metadata
+                    WHERE key IN ('id.next_atomic_fact', 'id.next_atomic_fact_relation');
+                 DROP TABLE atomic_fact_relations;
+                 UPDATE schema_version SET version = 12;",
+            )
+            .expect("v12 shape planted");
+        }
+
+        {
+            let mut storage =
+                SqliteStorage::open(&migrated_path).expect("v12 database migrates to v13");
+            storage
+                .delete_atomic_fact(migrated_fact)
+                .expect("migrated maximum fact deletes after high-water seed");
+        }
+        assert_eq!(
+            atomic_fact_relation_schema_signature(&migrated_path),
+            atomic_fact_relation_schema_signature(&fresh_path)
+        );
+        let conn = Connection::open(&migrated_path).expect("migrated database opens raw");
+        let version: u32 = conn
+            .query_row("SELECT version FROM schema_version", [], |row| row.get(0))
+            .expect("schema version reads");
+        assert_eq!(version, 13);
+        assert_eq!(
+            metadata_value(&conn, NEXT_ATOMIC_FACT_RELATION_ID_KEY)
+                .expect("migrated relation high-water reads")
+                .as_deref(),
+            Some("0")
+        );
+        drop(conn);
+
+        let mut reopened = SqliteStorage::open(&migrated_path).expect("migrated database reopens");
+        assert_eq!(
+            reopened
+                .next_atomic_fact_id()
+                .expect("migrated fact id allocates"),
+            AtomicFactId(migrated_fact.0 + 1)
+        );
+        drop(reopened);
+
+        std::fs::remove_file(fresh_path).expect("fresh schema database removes");
+        std::fs::remove_file(migrated_path).expect("migrated schema database removes");
+    }
+
+    /// SQLite FTS5 `bm25()` returns more-negative values for better matches.
+    /// `rank_to_score` must therefore be monotone-increasing in
     /// `(-rank)` so a strong match (the query term dense in a short document)
     /// outranks a weak match (the term appearing once amid a lot of filler),
     /// bounded to `[0, 1]`. The old `1.0 / (1.0 + rank.abs())` formula treats
@@ -2712,7 +4657,7 @@ mod tests {
 /// Current on-disk schema version. The fresh-DB `create_schema` path and the
 /// incremental migration chain must converge on an IDENTICAL schema at this
 /// version (same columns, same indexes).
-const SCHEMA_VERSION: u32 = 12;
+const SCHEMA_VERSION: u32 = 13;
 
 /// Run schema migrations to bring the database up to the current version.
 ///
@@ -2753,17 +4698,19 @@ const SCHEMA_VERSION: u32 = 12;
 ///   otherwise makes `compute_base_level` return `NEG_INFINITY`. Data only,
 ///   idempotent (`WHERE access_history = ''`). See [`migrate_v8_to_v9`].
 /// - v10: `edges.leaked_at INTEGER` — the per-edge leak checkpoint
-///   `Engine::tick`'s idle-edge leakage measures idle time from (flagship bug
-///   #2: without a checkpoint, `accessed_at` — a committed-USE marker, never
+///   `Engine::tick`'s idle-edge leakage measures idle time from (without a
+///   checkpoint, `accessed_at` — a committed-use marker, never
 ///   advanced by leakage — made every repeated `tick` at a fixed idle window
 ///   re-subtract the same idle-window leak again, collapsing an idle edge's
 ///   conductance the more the graph was ticked). Backfilled to `accessed_at`
 ///   for existing rows. See [`migrate_v9_to_v10`].
 /// - v11: `graph_metadata` key/value table for graph-wide persistent
 ///   metadata, initially used to guard the embedding model identity.
-/// - v12 (current): isolated `atomic_facts` sidecar table. Atomic facts retain
+/// - v12: isolated `atomic_facts` sidecar table. Atomic facts retain
 ///   raw Episodic source IDs but never enter `nodes`, `node_fts`, graph
 ///   attraction, node budgets, or activation flow.
+/// - v13 (current): reviewed typed relations between atomic facts, including
+///   review provenance, idempotency, scope, and validity intervals.
 /// - v5: `nodes.evidence_prior REAL NOT NULL DEFAULT 0` — the persistent,
 ///   decay-exempt evidence prior `P_i` of the `A_i = B_i + P_i` decomposition
 ///   (ADR-0008). Backfilled to `0.0`: the base-level `B_i` is recomputed from
@@ -2909,6 +4856,9 @@ fn migrate_schema(conn: &Connection) -> Result<(), Error> {
             migrate_v11_to_v12(conn)?;
         }
         Some(12) => {
+            migrate_v12_to_v13(conn)?;
+        }
+        Some(13) => {
             // Already at current version — ensure schema is complete (idempotent
             // CREATE IF NOT EXISTS only; no bare ALTER that would fail twice).
             create_schema(conn)?;
@@ -2935,6 +4885,14 @@ fn migrate_schema(conn: &Connection) -> Result<(), Error> {
         .map_err(sqlite_error)?;
     if migrated_version == 11 {
         migrate_v11_to_v12(conn)?;
+    }
+    let migrated_version: u32 = conn
+        .query_row("SELECT version FROM schema_version LIMIT 1", [], |row| {
+            row.get(0)
+        })
+        .map_err(sqlite_error)?;
+    if migrated_version == 12 {
+        migrate_v12_to_v13(conn)?;
     }
 
     Ok(())
@@ -3224,7 +5182,7 @@ fn migrate_v5_to_v6(conn: &Connection) -> Result<(), Error> {
 ///   `decision`, `gotcha`, `hypothesis`, `evidence`, `debug_session`, `event`)
 ///   becomes its canonical `custom:<string>` form.
 ///
-/// This closes the carried eventual-consistency gap (B0 review): without it, a
+/// This closes the legacy eventual-consistency gap: without it, a
 /// legacy row with a bare `gotcha` decodes in-memory to `Custom("gotcha")`, but
 /// [`nodes_by_type`](SqliteStorage::nodes_by_type) filters SQL by the *encoded*
 /// query string `custom:gotcha` and would miss the un-normalized row until it was
@@ -3436,7 +5394,7 @@ fn migrate_v8_to_v9(conn: &Connection) -> Result<(), Error> {
 
 /// Migrate a v9 database to v10: add the `edges.leaked_at INTEGER` column — the
 /// per-edge leak checkpoint [`Engine::tick`](crate::api::Engine::tick)'s
-/// idle-edge leakage now measures idle time from (flagship bug #2: without a
+/// idle-edge leakage now measures idle time from (without a
 /// checkpoint, `accessed_at` — which marks committed USE, not leak history, and
 /// is never advanced by a leak — made every repeated `tick` at a fixed idle
 /// window re-subtract the same idle-window leak again, so an idle edge's
@@ -3533,6 +5491,32 @@ fn migrate_v11_to_v12(conn: &Connection) -> Result<(), Error> {
             conn.execute_batch("ROLLBACK;").map_err(|rollback_error| {
                 Error::StorageError(format!(
                     "v11-to-v12 migration failed ({error}); rollback also failed: {rollback_error}"
+                ))
+            })?;
+            Err(error)
+        }
+    }
+}
+
+/// Migrate v12 to v13 by adding reviewed typed atomic-fact relations.
+fn migrate_v12_to_v13(conn: &Connection) -> Result<(), Error> {
+    conn.execute_batch("BEGIN IMMEDIATE;")
+        .map_err(sqlite_error)?;
+
+    let result = (|| -> Result<(), Error> {
+        create_atomic_fact_relation_schema(conn)?;
+        stamp_version(conn, 13)
+    })();
+
+    match result {
+        Ok(()) => {
+            conn.execute_batch("COMMIT;").map_err(sqlite_error)?;
+            Ok(())
+        }
+        Err(error) => {
+            conn.execute_batch("ROLLBACK;").map_err(|rollback_error| {
+                Error::StorageError(format!(
+                    "v12-to-v13 migration failed ({error}); rollback also failed: {rollback_error}"
                 ))
             })?;
             Err(error)
@@ -3660,6 +5644,23 @@ fn create_schema(conn: &Connection) -> Result<(), Error> {
             metadata TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS atomic_fact_relations (
+            id INTEGER PRIMARY KEY,
+            from_fact_id INTEGER NOT NULL REFERENCES atomic_facts(id) ON DELETE CASCADE,
+            to_fact_id INTEGER NOT NULL REFERENCES atomic_facts(id) ON DELETE CASCADE,
+            kind TEXT NOT NULL,
+            reviewed_by TEXT NOT NULL CHECK(length(trim(reviewed_by)) > 0),
+            review_profile TEXT NOT NULL CHECK(length(trim(review_profile)) > 0),
+            reviewed_at INTEGER NOT NULL,
+            idempotency_key TEXT NOT NULL UNIQUE CHECK(length(trim(idempotency_key)) > 0),
+            scope TEXT NOT NULL,
+            valid_from INTEGER,
+            valid_until INTEGER,
+            metadata TEXT NOT NULL,
+            CHECK(from_fact_id != to_fact_id),
+            CHECK(valid_from IS NULL OR valid_until IS NULL OR valid_from < valid_until)
+        );
+
         CREATE TABLE IF NOT EXISTS nodes (
             id INTEGER PRIMARY KEY,
             name TEXT NOT NULL,
@@ -3754,6 +5755,10 @@ fn create_schema(conn: &Connection) -> Result<(), Error> {
         CREATE INDEX IF NOT EXISTS idx_salience ON salience(salience);
         CREATE INDEX IF NOT EXISTS idx_atomic_facts_session ON atomic_facts(source_session_id);
         CREATE INDEX IF NOT EXISTS idx_atomic_facts_scope ON atomic_facts(scope);
+        CREATE INDEX IF NOT EXISTS idx_atomic_fact_relations_from
+            ON atomic_fact_relations(from_fact_id);
+        CREATE INDEX IF NOT EXISTS idx_atomic_fact_relations_to
+            ON atomic_fact_relations(to_fact_id);
         ",
     )
     .map_err(sqlite_error)
@@ -3777,6 +5782,34 @@ fn create_atomic_fact_schema(conn: &Connection) -> Result<(), Error> {
         );
         CREATE INDEX IF NOT EXISTS idx_atomic_facts_session ON atomic_facts(source_session_id);
         CREATE INDEX IF NOT EXISTS idx_atomic_facts_scope ON atomic_facts(scope);
+        ",
+    )
+    .map_err(sqlite_error)
+}
+
+fn create_atomic_fact_relation_schema(conn: &Connection) -> Result<(), Error> {
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS atomic_fact_relations (
+            id INTEGER PRIMARY KEY,
+            from_fact_id INTEGER NOT NULL REFERENCES atomic_facts(id) ON DELETE CASCADE,
+            to_fact_id INTEGER NOT NULL REFERENCES atomic_facts(id) ON DELETE CASCADE,
+            kind TEXT NOT NULL,
+            reviewed_by TEXT NOT NULL CHECK(length(trim(reviewed_by)) > 0),
+            review_profile TEXT NOT NULL CHECK(length(trim(review_profile)) > 0),
+            reviewed_at INTEGER NOT NULL,
+            idempotency_key TEXT NOT NULL UNIQUE CHECK(length(trim(idempotency_key)) > 0),
+            scope TEXT NOT NULL,
+            valid_from INTEGER,
+            valid_until INTEGER,
+            metadata TEXT NOT NULL,
+            CHECK(from_fact_id != to_fact_id),
+            CHECK(valid_from IS NULL OR valid_until IS NULL OR valid_from < valid_until)
+        );
+        CREATE INDEX IF NOT EXISTS idx_atomic_fact_relations_from
+            ON atomic_fact_relations(from_fact_id);
+        CREATE INDEX IF NOT EXISTS idx_atomic_fact_relations_to
+            ON atomic_fact_relations(to_fact_id);
         ",
     )
     .map_err(sqlite_error)
@@ -3806,15 +5839,78 @@ fn insert_atomic_fact_row(conn: &Connection, fact: &AtomicFact) -> Result<(), Er
     Ok(())
 }
 
+fn insert_atomic_fact_relation_row(
+    conn: &Connection,
+    relation: &AtomicFactRelation,
+) -> Result<(), Error> {
+    conn.execute(
+        "INSERT INTO atomic_fact_relations (
+            id, from_fact_id, to_fact_id, kind, reviewed_by, review_profile,
+            reviewed_at, idempotency_key, scope, valid_from, valid_until, metadata
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+        ON CONFLICT(id) DO UPDATE SET
+            from_fact_id = excluded.from_fact_id,
+            to_fact_id = excluded.to_fact_id,
+            kind = excluded.kind,
+            reviewed_by = excluded.reviewed_by,
+            review_profile = excluded.review_profile,
+            reviewed_at = excluded.reviewed_at,
+            idempotency_key = excluded.idempotency_key,
+            scope = excluded.scope,
+            valid_from = excluded.valid_from,
+            valid_until = excluded.valid_until,
+            metadata = excluded.metadata",
+        params![
+            relation.id.0,
+            relation.from_fact_id.0,
+            relation.to_fact_id.0,
+            encode_atomic_fact_relation_kind(relation.kind),
+            relation.reviewed_by,
+            relation.review_profile,
+            relation.reviewed_at.0,
+            relation.idempotency_key,
+            relation.scope.as_str(),
+            relation.valid_from.map(|timestamp| timestamp.0),
+            relation.valid_until.map(|timestamp| timestamp.0),
+            encode_map(&relation.metadata),
+        ],
+    )
+    .map_err(sqlite_error)?;
+    Ok(())
+}
+
 fn insert_node_row(
     conn: &Connection,
     node: &Node,
     decay_checkpoint: Timestamp,
-) -> Result<(), Error> {
+    existing_incarnation: Option<u64>,
+    next_incarnation_hint: u64,
+) -> Result<(u64, u64), Error> {
     conn.execute_batch("BEGIN IMMEDIATE;")
         .map_err(sqlite_error)?;
 
-    let write_result = (|| -> Result<(), Error> {
+    let write_result = (|| -> Result<(u64, u64), Error> {
+        let persisted_next = load_id_high_water(conn, NEXT_NODE_INCARNATION_KEY)?;
+        let (incarnation, next_incarnation) = match existing_incarnation {
+            Some(incarnation) => {
+                let after_existing = incarnation.checked_add(1).ok_or_else(|| {
+                    Error::StorageError("node incarnation space exhausted".to_string())
+                })?;
+                (
+                    incarnation,
+                    persisted_next
+                        .max(next_incarnation_hint)
+                        .max(after_existing),
+                )
+            }
+            None => {
+                let incarnation = persisted_next.max(next_incarnation_hint);
+                let next = incarnation.checked_add(1).ok_or_else(|| {
+                    Error::StorageError("node incarnation space exhausted".to_string())
+                })?;
+                (incarnation, next)
+            }
+        };
         conn.execute(
             "INSERT OR REPLACE INTO nodes (
                 id, name, summary, content, embedding_json, node_type, peer_id, source_kind, session_id,
@@ -3840,7 +5936,7 @@ fn insert_node_row(
                 node.access_count,
                 encode_access_history(&node.access_history),
                 encode_memory_tier(&node.tier),
-                encode_map(&node.metadata),
+                encode_node_metadata_with_incarnation(node, incarnation),
                 node.evidence_prior,
             ],
         )
@@ -3881,20 +5977,28 @@ fn insert_node_row(
             )
             .map_err(sqlite_error)?;
         }
-        Ok(())
+        set_metadata(
+            conn,
+            NEXT_NODE_INCARNATION_KEY,
+            &next_incarnation.to_string(),
+        )?;
+        Ok((incarnation, next_incarnation))
     })();
 
-    if let Err(error) = write_result {
-        let _ = conn.execute_batch("ROLLBACK;");
-        return Err(error);
-    }
+    let result = match write_result {
+        Ok(result) => result,
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK;");
+            return Err(error);
+        }
+    };
 
     if let Err(error) = conn.execute_batch("COMMIT;").map_err(sqlite_error) {
         let _ = conn.execute_batch("ROLLBACK;");
         return Err(error);
     }
 
-    Ok(())
+    Ok(result)
 }
 
 fn load_atomic_facts(conn: &Connection) -> Result<Vec<AtomicFact>, Error> {
@@ -3951,6 +6055,72 @@ fn load_atomic_facts(conn: &Connection) -> Result<Vec<AtomicFact>, Error> {
                     source_session_id,
                     scope: decode_scope(&scope)?,
                     observed_at: Timestamp(observed_at),
+                    valid_from: valid_from.map(Timestamp),
+                    valid_until: valid_until.map(Timestamp),
+                    metadata: decode_map(&metadata)?,
+                })
+            },
+        )
+        .collect()
+}
+
+fn load_atomic_fact_relations(conn: &Connection) -> Result<Vec<AtomicFactRelation>, Error> {
+    let mut statement = conn
+        .prepare(
+            "SELECT id, from_fact_id, to_fact_id, kind, reviewed_by, review_profile,
+                    reviewed_at, idempotency_key, scope, valid_from, valid_until, metadata
+             FROM atomic_fact_relations
+             ORDER BY id",
+        )
+        .map_err(sqlite_error)?;
+    let encoded = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, u64>(0)?,
+                row.get::<_, u64>(1)?,
+                row.get::<_, u64>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, u64>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, String>(8)?,
+                row.get::<_, Option<u64>>(9)?,
+                row.get::<_, Option<u64>>(10)?,
+                row.get::<_, String>(11)?,
+            ))
+        })
+        .map_err(sqlite_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(sqlite_error)?;
+
+    encoded
+        .into_iter()
+        .map(
+            |(
+                id,
+                from_fact_id,
+                to_fact_id,
+                kind,
+                reviewed_by,
+                review_profile,
+                reviewed_at,
+                idempotency_key,
+                scope,
+                valid_from,
+                valid_until,
+                metadata,
+            )| {
+                Ok(AtomicFactRelation {
+                    id: AtomicFactRelationId(id),
+                    from_fact_id: AtomicFactId(from_fact_id),
+                    to_fact_id: AtomicFactId(to_fact_id),
+                    kind: decode_atomic_fact_relation_kind(&kind)?,
+                    reviewed_by,
+                    review_profile,
+                    reviewed_at: Timestamp(reviewed_at),
+                    idempotency_key,
+                    scope: decode_scope(&scope)?,
                     valid_from: valid_from.map(Timestamp),
                     valid_until: valid_until.map(Timestamp),
                     metadata: decode_map(&metadata)?,
@@ -4182,7 +6352,7 @@ fn decode_knowledge_type(value: &str) -> Result<KnowledgeType, Error> {
         custom if custom.starts_with("custom:") => {
             KnowledgeType::Custom(unescape_text(&custom[7..])?)
         }
-        // Legacy-DB compat guard (ADR / task B0): any bare string this build does
+        // Legacy-DB compatibility guard: any bare string this build does
         // not recognize — a consumer type from another schema, or the wire string
         // of a variant deleted in the 0.10.0 shrink (`procedural`, `entity`,
         // `convention`, `decision`, `gotcha`, `hypothesis`, `evidence`,
@@ -4198,6 +6368,60 @@ fn decode_knowledge_type(value: &str) -> Result<KnowledgeType, Error> {
         // above and are unaffected.
         other => KnowledgeType::Custom(other.to_string()),
     })
+}
+
+fn encode_atomic_fact_relation_kind(value: AtomicFactRelationKind) -> &'static str {
+    match value {
+        AtomicFactRelationKind::Reason => "reason",
+        AtomicFactRelationKind::Causal => "causal",
+        AtomicFactRelationKind::Supports => "supports",
+        AtomicFactRelationKind::Contradicts => "contradicts",
+    }
+}
+
+fn decode_atomic_fact_relation_kind(value: &str) -> Result<AtomicFactRelationKind, Error> {
+    match value {
+        "reason" => Ok(AtomicFactRelationKind::Reason),
+        "causal" => Ok(AtomicFactRelationKind::Causal),
+        "supports" => Ok(AtomicFactRelationKind::Supports),
+        "contradicts" => Ok(AtomicFactRelationKind::Contradicts),
+        other => Err(Error::StorageError(format!(
+            "unknown atomic fact relation kind: {other}"
+        ))),
+    }
+}
+
+fn validate_atomic_fact_relation_shape(relation: &AtomicFactRelation) -> Result<(), Error> {
+    if relation.from_fact_id == relation.to_fact_id {
+        return Err(Error::InvalidInput(
+            "atomic fact relations cannot be self-referential".to_string(),
+        ));
+    }
+    if relation.reviewed_by.trim().is_empty() {
+        return Err(Error::InvalidInput(
+            "atomic fact relation reviewed_by cannot be empty".to_string(),
+        ));
+    }
+    if relation.review_profile.trim().is_empty() {
+        return Err(Error::InvalidInput(
+            "atomic fact relation review_profile cannot be empty".to_string(),
+        ));
+    }
+    if relation.idempotency_key.trim().is_empty() {
+        return Err(Error::InvalidInput(
+            "atomic fact relation idempotency_key cannot be empty".to_string(),
+        ));
+    }
+    if relation
+        .valid_from
+        .zip(relation.valid_until)
+        .is_some_and(|(valid_from, valid_until)| valid_from >= valid_until)
+    {
+        return Err(Error::InvalidInput(
+            "atomic fact relation valid_until must be greater than valid_from".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn encode_edge_type(value: &EdgeType) -> String {
@@ -4256,7 +6480,7 @@ fn decode_memory_tier(value: &str) -> Result<MemoryTier, Error> {
         "core" => MemoryTier::Core,
         "recall" => MemoryTier::Recall,
         "archival" => MemoryTier::Archival,
-        // Legacy-DB compat guard (task B0): an unrecognized tier string falls back
+        // Legacy-DB compatibility guard: an unrecognized tier string falls back
         // to `Auto` (the `MemoryTier::default()`) rather than erroring, mirroring
         // the node-type guard so a DB carrying a dropped/foreign tier string still
         // opens. `Auto` means "no override — tier follows salience", the safe
@@ -4380,6 +6604,15 @@ fn encode_map(map: &HashMap<String, String>) -> String {
         .join("\n")
 }
 
+fn encode_node_metadata_with_incarnation(node: &Node, incarnation: u64) -> String {
+    let mut metadata = node.metadata.clone();
+    metadata.insert(
+        crate::storage::NODE_INCARNATION_METADATA_KEY.to_string(),
+        incarnation.to_string(),
+    );
+    encode_map(&metadata)
+}
+
 fn decode_map(value: &str) -> Result<HashMap<String, String>, Error> {
     let mut map = HashMap::new();
     if value.is_empty() {
@@ -4501,6 +6734,17 @@ fn metadata_value(conn: &Connection, key: &str) -> Result<Option<String>, Error>
     )
     .optional()
     .map_err(sqlite_error)
+}
+
+fn load_id_high_water(conn: &Connection, key: &str) -> Result<u64, Error> {
+    let Some(value) = metadata_value(conn, key)? else {
+        return Ok(0);
+    };
+    value.parse::<u64>().map_err(|_| {
+        Error::StorageError(format!(
+            "invalid persisted ID high-water value for key {key:?}"
+        ))
+    })
 }
 
 fn required_metadata_value(conn: &Connection, key: &str) -> Result<String, Error> {

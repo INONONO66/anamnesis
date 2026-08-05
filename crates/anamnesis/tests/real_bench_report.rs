@@ -62,9 +62,11 @@ fn write_report_rejects_symlinked_allowed_parent() {
     ));
     std::fs::create_dir_all(&outside).expect("create outside dir");
     let link = PathBuf::from(format!(
-        ".omo/evidence/real-bench-report-link-{}",
+        "benches/eval/results/real-bench-report-link-{}",
         std::process::id()
     ));
+    std::fs::create_dir_all(link.parent().expect("report results parent"))
+        .expect("create report results parent");
     let _ = std::fs::remove_file(&link);
     std::os::unix::fs::symlink(&outside, &link).expect("create symlink");
 
@@ -116,6 +118,9 @@ fn diagnostics_hit_at_k_and_mean_first_hit_rank() {
         "mean of ranks 1 and 3"
     );
     assert_eq!(report.diagnostics.avg_returned_fragments, 0.0);
+    assert_eq!(report.latency_ms.p95, 1.0);
+    assert_eq!(report.context_render_latency_ms.p95, 0.25);
+    assert_eq!(report.context_ready_latency_ms.p95, 1.25);
 
     // Pin per-type averaging math for "single-session-user":
     //   q1: recall_at_k=1.0, mrr=1.0   q2: recall_at_k=0.0, mrr=0.0
@@ -156,6 +161,8 @@ fn question_eval(id: &str, qtype: &str, first_hit: Option<usize>) -> QuestionEva
         question_type: qtype.to_string(),
         sample_index: 0,
         search_latency_ms: 1.0,
+        context_render_latency_ms: 0.25,
+        context_ready_latency_ms: 1.25,
         total_relevant: 1,
         candidate_metrics: RetrievalMetrics {
             precision_at_k: if first_hit.is_some() { 1.0 } else { 0.0 },
@@ -184,6 +191,7 @@ fn question_eval(id: &str, qtype: &str, first_hit: Option<usize>) -> QuestionEva
         reranker_retrievals: Vec::new(),
         selection_variants: Default::default(),
         features: Vec::new(),
+        atomic_route_features: Vec::new(),
     }
 }
 
@@ -212,6 +220,8 @@ fn sample_report(model: &str) -> RealBenchReport {
         rendered_hit: 0.0,
         diagnostics: DiagnosticsReport::default(),
         latency_ms: LatencyReport::default(),
+        context_render_latency_ms: LatencyReport::default(),
+        context_ready_latency_ms: LatencyReport::default(),
         questions: Vec::new(),
     }
 }
@@ -219,7 +229,7 @@ fn sample_report(model: &str) -> RealBenchReport {
 fn test_path(suffix: &str) -> PathBuf {
     let safe_suffix = suffix.replace('/', "-");
     PathBuf::from(format!(
-        ".omo/evidence/real-bench-report-test-{}-{}/{}",
+        "benches/eval/results/real-bench-report-test-{}-{}/{}",
         std::process::id(),
         safe_suffix,
         suffix

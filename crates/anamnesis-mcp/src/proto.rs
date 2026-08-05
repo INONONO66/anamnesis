@@ -114,6 +114,30 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         scope: Option<String>,
     },
+    /// Admit an already-materialized textual representation of an attachment.
+    ///
+    /// The daemon does not resolve the attachment or invoke a processor. The
+    /// caller supplies both the immutable transcript and the provenance of the
+    /// process that produced it.
+    IngestAttachmentTranscript {
+        transcript: String,
+        session: String,
+        attachment_id: String,
+        attachment_sha256: String,
+        processor_provider: String,
+        processor_model: String,
+        processor_profile: String,
+        processor_schema: String,
+        confidence: f64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        observed_at_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        namespace: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tags: Option<Vec<String>>,
+    },
     ExtractionScan {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         namespace: Option<String>,
@@ -768,6 +792,42 @@ mod tests {
             "got: {scoped_line}"
         );
         assert_eq!(decode_line::<Request>(&scoped_line).unwrap(), scoped);
+    }
+
+    #[test]
+    fn attachment_transcript_round_trips_with_optional_fields_omitted() {
+        let request = Request::IngestAttachmentTranscript {
+            transcript: "OCR line one\nOCR line two".into(),
+            session: "session-7".into(),
+            attachment_id: "asset-42".into(),
+            attachment_sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                .into(),
+            processor_provider: "local-ocr".into(),
+            processor_model: "ocr-model-v2".into(),
+            processor_profile: "document-default-v1".into(),
+            processor_schema: "text-transcript-v1".into(),
+            confidence: 0.91,
+            observed_at_ms: None,
+            namespace: None,
+            scope: None,
+            tags: None,
+        };
+
+        let line = encode_line(&request).expect("encode attachment transcript");
+        assert!(
+            line.starts_with("{\"op\":\"ingest_attachment_transcript\""),
+            "got: {line}"
+        );
+        for absent in ["observed_at_ms", "namespace", "scope", "tags"] {
+            assert!(
+                !line.contains(&format!("\"{absent}\"")),
+                "absent optional field must not be serialized: {line}"
+            );
+        }
+        assert_eq!(
+            decode_line::<Request>(&line).expect("decode attachment transcript"),
+            request
+        );
     }
     #[test]
     fn stage_extraction_result_and_failure_kinds_round_trip_on_the_wire() {

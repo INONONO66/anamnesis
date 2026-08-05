@@ -1,6 +1,6 @@
 //! Composed multi-tier golden fixtures for the regression judges.
 //!
-//! Phase 6 quality-gates fixtures (benchmarks.md "Fixture Graphs" /
+//! Quality-gate fixtures (benchmarks.md "Fixture Graphs" /
 //! "Search Scenario"). Each tier is a self-contained, deterministic
 //! [`Engine`] that exercises the full content variety the spec requires:
 //!

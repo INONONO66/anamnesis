@@ -9,7 +9,7 @@
   /* ─────────────────────────────────────────────────────────────────────────
      Design system — a dark "instrument panel" for a cognitive-memory graph.
      All color / spacing / type / radius values are tokens; nothing is ad-hoc.
-     Phase-1 galaxy view extends the base tokens with a near-black space canvas
+     The galaxy view extends the base tokens with a near-black space canvas
      and an EMISSIVE neon node palette (color by knowledge type).
      ───────────────────────────────────────────────────────────────────────── */
   :root {
@@ -757,7 +757,7 @@
   // ── DOI focus+context ─────────────────────────────────────────────────────
   // Degree-of-interest, normalized to [0,1] across the CURRENT node set. When
   // every node scores alike (or the field is absent) all read as fully relevant,
-  // so the galaxy keeps its Phase-1 look.
+  // so the galaxy keeps its established look.
   function doiNorm(n) {
     const r = state.doiRange, v = Number(n && n.doi);
     if (!r || !Number.isFinite(v) || r.max <= r.min) return 1;
@@ -822,7 +822,7 @@
     showLabels: false,
     selected: null,       // selected node id
     lastQuery: null,      // {mode:'q'|'seed', q, depth}
-    timeline: {           // P3-T1 scrub window over created_at (ms epoch)
+    timeline: {           // scrub window over created_at (ms epoch)
       min: null, max: null,     // full data range across loaded nodes
       start: null, end: null,   // current selection window
       active: false,            // true once the window narrows the full range
@@ -1064,7 +1064,7 @@
     .nodeRelSize(5)
     .nodeColor(nodeColor)
     .nodeVal(nodeVal)
-    .nodeVisibility(timelineVisible)   // P3-T1: hide nodes outside the scrub window (no re-heat)
+    .nodeVisibility(timelineVisible)   // hide nodes outside the scrub window (no re-heat)
     .linkVisibility(linkVisible)
     .nodeOpacity(1.0)
     .nodeResolution(18)
@@ -1410,7 +1410,7 @@
     }
   }
 
-  // ── P3-T1 Timeline scrubbing ──────────────────────────────────────────────
+  // ── Timeline scrubbing ──────────────────────────────────────────────
   // A dual-handle range over node created_at (ms epoch; falls back to valid_from).
   // Scrubbing toggles node/link VISIBILITY only — never graphData — so the force
   // layout does not re-heat. Handles map a 0..1000 slider scale onto [min,max].
@@ -1531,7 +1531,7 @@
     applyTimeline();
   }
 
-  // ── P3-T2 Saved views / presets (localStorage, namespaced) ────────────────
+  // ── Saved views / presets (localStorage, namespaced) ────────────────
   // All storage access is wrapped in try/catch so a disabled or malformed store
   // degrades gracefully (empty list, toast) instead of throwing.
   const PRESET_KEY = "anamnesis.galaxy.presets." + (NS || "default");
@@ -1637,7 +1637,7 @@
     if (btn.dataset.act === "del") deletePreset(i); else loadPresetByIndex(i);
   }
 
-  // ── P3-T3 Mini-map (2D top-down projection + camera indicator) ────────────
+  // ── Mini-map (2D top-down projection + camera indicator) ────────────
   // Reads live node x/y from graphData and the camera/orbit target, throttled to
   // ~10fps by a self-stopping setTimeout loop that runs ONLY while renderAwake —
   // so it halts with the render loop on idle-pause and never defeats it.
@@ -1785,7 +1785,7 @@
   // to ForceGraph3D's own THREE.Scene. Rendered IN-SCENE (not CSS) so it survives
   // the bloom composite and is itself bloom-lit — the same cross-instance
   // vendored-three pattern the bloom module below already relies on. Fully
-  // guarded: any failure is caught and the Phase-1/2 galaxy still renders.
+  // guarded: any failure is caught and the galaxy still renders.
   //
   // Depth cue: provided by starfield parallax + the layered nebula depth + the
   // salience-driven node sizing. A scene.fog (FogExp2) depth fade was tried but

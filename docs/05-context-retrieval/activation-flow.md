@@ -1,6 +1,6 @@
 # Activation Flow
 
-Activation flow computes the transient current that moves over the conductive memory network when a query field is applied. It is read-only. It does not change retained action, conductance, salience, edge weight, timestamps, or trust.
+Activation flow computes the transient current that moves over the conductive memory network when a query field is applied. It is read-only. It does not change retained action, conductance, salience, edge weight, timestamps, or origin provenance.
 
 Persistent state contains:
 
@@ -109,7 +109,7 @@ Contradictory evidence is not added or subtracted here. It branches into frustra
 
 ## Cost
 
-Each iteration is linear in traversed frontier edges. Smaller `alpha` gives longer reach and slower convergence. Large graphs may use connected-component narrowing or forward-push approximation, preserving additive semantics.
+Each iteration is linear in the edges traversed from the active set. Smaller `alpha` gives longer reach and slower convergence. Large graphs may use connected-component narrowing or forward-push approximation, preserving additive semantics.
 
 ## Failure Conditions
 

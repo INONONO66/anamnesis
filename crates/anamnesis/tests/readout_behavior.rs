@@ -605,7 +605,7 @@ mod memory_framework {
     }
 
     // -----------------------------------------------------------------------
-    // Task-1 tests
+    // Ingestion and flush behavior
     // -----------------------------------------------------------------------
 
     /// After a 3-turn session + flush there must be exactly 6 nodes (3 epi + 3 sem).
@@ -1002,7 +1002,7 @@ mod memory_framework {
     }
 
     // -----------------------------------------------------------------------
-    // Task-2 tests: search / recall / used / tick
+    // Search, recall, usage, and tick behavior
     // -----------------------------------------------------------------------
 
     /// Helper: make a fresh in-memory Memory with the test embedder.
@@ -1182,7 +1182,7 @@ mod memory_framework {
     }
 
     // -----------------------------------------------------------------------
-    // Fix-1 test: atomic add — pending turn is never silently lost on embed error
+    // Atomic add — pending turn is never silently lost on embed error
     // -----------------------------------------------------------------------
 
     /// A failing embedder that errors on the Nth call (1-based).
@@ -1220,7 +1220,7 @@ mod memory_framework {
         }
     }
 
-    /// Fix 1 — atomic buffering: if `add` returns `Err` mid-sequence (embed
+    /// If `add` returns `Err` mid-sequence (embed
     /// failure on the *pending turn's semantic embed*, i.e. call #3 when turn 0
     /// is already buffered), the pending turn must NOT be silently dropped.
     ///
@@ -1229,7 +1229,7 @@ mod memory_framework {
     ///   call 2 — epi embed for turn 1   → ok (turn 1 processing begins)
     ///   call 3 — semantic embed for pending (turn 0's window) → FAIL
     ///              at this point, current code has already called pending.take(),
-    ///              so turn 0 would be silently lost without Fix 1.
+    ///              so turn 0 would be lost unless pending state is restored.
     ///
     /// After the error `add` returns Err. The pending (turn 0) must still be in
     /// the buffer. A subsequent flush must produce a semantic for turn 0.
@@ -1266,10 +1266,10 @@ mod memory_framework {
     }
 
     // -----------------------------------------------------------------------
-    // Fix-2 test: Drop flushes pending turns (best-effort)
+    // Drop flushes pending turns (best-effort)
     // -----------------------------------------------------------------------
 
-    /// Fix 2 — Drop must flush pending turns so the last turn's semantic is
+    /// Drop must flush pending turns so the last turn's semantic is
     /// written before the Memory is dropped.
     ///
     /// We can't inspect the engine after drop, so we use a shared storage
@@ -1303,10 +1303,10 @@ mod memory_framework {
     }
 
     // -----------------------------------------------------------------------
-    // Fix-3 tests: temporal continuity across flush / search boundaries
+    // Temporal continuity across flush / search boundaries
     // -----------------------------------------------------------------------
 
-    /// Fix 3a — Temporal edge across flush boundary:
+    /// Temporal edge across a flush boundary:
     /// add(turn 0) → flush_session → add(turn 1)
     /// must produce a Temporal edge from epi(0) → epi(1).
     #[test]
@@ -1331,7 +1331,7 @@ mod memory_framework {
         );
     }
 
-    /// Fix 3b — Window context across flush boundary:
+    /// Window context across a flush boundary:
     /// The second turn's semantic window must contain the first turn's text.
     #[test]
     fn window_contains_prev_turn_across_flush_boundary() {
@@ -1348,14 +1348,9 @@ mod memory_framework {
             .unwrap();
         mem.flush_session("s").unwrap();
 
-        // turn-1's semantic is the node finalized at the second flush.
-        // r1.finalized_semantic is None (it was the second turn added after a flush,
-        // so no pending existed to finalize at the time of add — unless continuity
-        // is maintained). After Fix 3, add after flush sees the prev from the
-        // retained state and immediately finalizes it... no, the continuity only
-        // applies to window context, not to the finalization trigger.
-        //
-        // The second flush_session finalizes turn 1 (the newly buffered pending).
+        // Turn 1's semantic is finalized by the second flush. Retained
+        // continuity supplies the previous turn's window context without
+        // changing the pending-turn finalization trigger.
         // We find it by looking at all semantic nodes.
         let g = mem.engine().graph();
         let sem_nodes: Vec<_> = g
@@ -1388,7 +1383,7 @@ mod memory_framework {
         );
     }
 
-    /// Fix 3c — Temporal edge across search boundary (search auto-flushes):
+    /// Temporal edge across search boundary (search auto-flushes):
     /// add(turn 0) → search_at (auto-flushes) → add(turn 1)
     /// must produce a Temporal edge from epi(0) → epi(1).
     #[test]

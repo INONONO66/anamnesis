@@ -68,11 +68,6 @@ name = "memory_real"
 harness = false
 
 [[bench]]
-name = "eval_accuracy"
-path = "benches/eval/eval_accuracy.rs"
-harness = false
-
-[[bench]]
 name = "search_latency"
 path = "benches/eval/search_latency.rs"
 harness = false
@@ -81,12 +76,6 @@ harness = false
 name = "download_datasets"
 path = "benches/eval/download.rs"
 harness = false
-
-[[bench]]
-name = "pre_ingest"
-path = "benches/eval/pre_ingest.rs"
-harness = false
-required-features = ["embed"]
 
 [[bench]]
 name = "real_memory"
@@ -99,11 +88,6 @@ name = "local_answer"
 path = "benches/eval/local_answer.rs"
 harness = false
 required-features = ["embed"]
-
-[[bench]]
-name = "fit_readout"
-path = "benches/eval/fit_readout.rs"
-harness = false
 
 [[bench]]
 name = "query_spreading"

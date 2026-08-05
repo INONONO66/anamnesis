@@ -1,4 +1,4 @@
-//! #4 salience recalibration: `SURPRISE_GAIN_K = 12.0` (decoupled from the cold-
+//! Salience calibration: `SURPRISE_GAIN_K = 12.0` (decoupled from the cold-
 //! start ceiling `INITIAL_RETAINED_ACTION = 13.8`) so ordinary captured turns can
 //! actually reach the archive floor as they age.
 //!
@@ -7,7 +7,7 @@
 //! the 0.10 archive floor for years — "old, unused memories sink" was inert for the
 //! capture path. With `k = 12.0` the same turn enters at `P_i ≈ 7.2` and archives
 //! after a year of disuse, while a maximal-surprise / cold-start memory
-//! (`P_i ≈ 13.8`) persists. This test is RED under the prior `k = 13.8`.
+//! (`P_i ≈ 13.8`) persists.
 
 use anamnesis::Engine;
 use anamnesis::api::{GraphEvent, Observation};
@@ -90,7 +90,7 @@ fn recalibrated_prior_lets_a_typical_turn_archive_but_a_high_prior_persists() {
     assert!(
         typical_salience < 0.10,
         "a typical turn (P_i ≈ {typical_prior:.2}) must archive (salience < 0.10) after a \
-         year of disuse; got {typical_salience:.4} — RED under the prior k = 13.8 (P_i ≈ 8.28)"
+         year of disuse; got {typical_salience:.4}"
     );
     assert!(
         events

@@ -3,28 +3,17 @@
 use std::path::{Path, PathBuf};
 
 /// Calibrated prior for the hook injection gate `τ`: a floor on the **top recall
-/// score**, which is the **unnormalized ACT-R activation** of the strongest hit
-/// (base-level + spreading log-odds), NOT a 0..1 similarity. On a typical graph
-/// the top activation lands around ~8–16, so `τ` belongs on that scale — a sub-1
-/// value silently disables the gate (everything injects). The gate keeps a hit
-/// when `top >= τ`.
-///
-/// `13.0` was calibrated live against the real global graph (verify phase): it
-/// sits below the typical relevant band (~14–16) and above the bulk of the
-/// off-topic band (~8–10), so a clearly-relevant prompt injects and an
-/// obviously-off-topic one injects nothing. The bands overlap (a strong off-topic
-/// hit can exceed a weak-but-relevant one), so `13.0` favors precision; it stays
-/// env-tunable via `ANAMNESIS_HOOK_THRESHOLD` and should be **recalibrated
-/// per-graph**, since activation magnitude scales with graph density/recency.
+/// score**, the unnormalized activation of the strongest filtered hit rather
+/// than a `0..1` similarity. `13.0` is a precision-oriented calibrated default.
+/// Activation magnitude varies with graph topology, density, and access
+/// history, so deployments can refit it through `ANAMNESIS_HOOK_THRESHOLD`.
+/// Calibration provenance belongs in the versioned quality record.
 pub const DEFAULT_HOOK_THRESHOLD: f64 = 13.0;
 /// Default query-embedding cosine gate for UserPrompt recall.
 ///
-/// e5-small calibration on 2026-07-08: direct recall pairs had related top
-/// cosine min/median `0.7805/0.8834` and unrelated max/median `0.8127/0.7840`;
-/// the hook battery's content-free project-cue prompt reached `0.8533`.
-/// `0.86` favors precision: it keeps 7/10 measured related prompts and blocks
-/// the observed content-free injection. Env-tune per graph if recall is too
-/// quiet.
+/// `0.86` is a precision-oriented calibrated default. Embedding model and
+/// corpus changes require refitting; deployments can override it through
+/// `ANAMNESIS_HOOK_COSINE_GATE`.
 pub const DEFAULT_HOOK_COSINE_GATE: f64 = 0.86;
 /// Default query-embedding cosine gate for SessionStart seed recall.
 pub const DEFAULT_HOOK_SEED_COSINE_GATE: f64 = 0.80;

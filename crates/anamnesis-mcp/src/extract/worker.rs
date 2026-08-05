@@ -19,20 +19,23 @@ use crate::extract::types::{
 use crate::extract::validate::{ValidationError, validate_output};
 use crate::proto::{ExtractionErrorKind, StageExtractionResult};
 
+#[cfg(test)]
 const MIN_TURNS: u32 = 10;
-const MAX_TURNS: u32 = 20;
-// A local 35B MoE can exceed two minutes for the maximum 20-turn structured
-// batch on a loaded workstation. Extraction is an opt-in background lane, not
-// the recall latency path, so favor a bounded successful run over premature
-// retries that duplicate model work.
+const DRAIN_MIN_TURNS: u32 = 1;
+const MAX_TURNS: u32 = 10;
+const MAX_DRAIN_BATCHES: usize = 4_096;
+// Bounded local extractors may exceed ordinary request latency for a maximum
+// structured batch. This background lane therefore has its own explicit
+// timeout and does not consume the recall latency budget.
 const PROVIDER_TIMEOUT: Duration = Duration::from_secs(240);
 const MAX_PROVIDER_TIMEOUT_SECS: u64 = 3_600;
 const PROVIDER_OUTPUT_LIMIT: usize = 1024 * 1024;
 // Partition recovery is a fail-closed salvage path after an invocation has
-// already failed validation. Bound all recursive branches together so one bad
-// batch cannot expand into an unbounded tree of local-provider calls while the
-// extraction lock is held.
-const MAX_PARTITION_RECOVERY_PROVIDER_INVOCATIONS: usize = 8;
+// already failed validation. A complete binary isolation tree over N sources
+// has 2N-2 child partitions, and each child may use one validation-repair
+// retry. This finite bound reaches every singleton without allowing unbounded
+// provider calls.
+const MAX_PARTITION_RECOVERY_PROVIDER_INVOCATIONS: usize = MAX_TURNS as usize * 4 - 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WorkerConfig {
@@ -65,6 +68,14 @@ pub(crate) enum WorkerOutcome {
     },
     Recovered {
         run_ids: Vec<u64>,
+        candidate_count: usize,
+        relation_count: usize,
+        omitted_source_count: usize,
+        already_staged_count: usize,
+    },
+    Drained {
+        batch_count: usize,
+        run_count: usize,
         candidate_count: usize,
         relation_count: usize,
         omitted_source_count: usize,
@@ -181,7 +192,7 @@ pub(crate) fn run_worker(
         .name("anamnesis-extract".into())
         .spawn(move || {
             let mut dependencies = ProductionDependencies::new(&config)?;
-            run_worker_with(
+            run_worker_until_idle_with(
                 &worker_config,
                 &socket_path,
                 namespace.as_deref(),
@@ -196,9 +207,8 @@ pub(crate) fn run_worker(
 /// Run the exact product prompt/provider/validator pipeline over an explicit
 /// source batch without scanning, staging, or mutating a graph.
 ///
-/// This is the generic, reference-blind export seam used by offline quality
-/// adapters. Explicit invocation is the opt-in; it does not enable the
-/// background shadow worker.
+/// Explicit invocation is non-mutating and does not enable the background
+/// shadow worker.
 pub(crate) fn run_extraction_preview(
     input: ExtractionPreviewInput,
 ) -> Result<ExtractionPreviewOutput, WorkerError> {
@@ -360,10 +370,138 @@ fn parse_provider_timeout(value: Option<&str>) -> Result<Duration, WorkerError> 
 }
 
 /// Deterministic worker core. The lock guard remains held through the complete pass.
+#[cfg(test)]
 pub(crate) fn run_worker_with(
     config: &WorkerConfig,
     socket_path: &Path,
     namespace: Option<&str>,
+    dependencies: &mut impl WorkerDependencies,
+) -> Result<WorkerOutcome, WorkerError> {
+    run_worker_with_min_turns(config, socket_path, namespace, MIN_TURNS, dependencies)
+}
+
+#[derive(Default)]
+struct DrainSummary {
+    batch_count: usize,
+    run_count: usize,
+    candidate_count: usize,
+    relation_count: usize,
+    omitted_source_count: usize,
+    already_staged_count: usize,
+}
+
+impl DrainSummary {
+    fn record(&mut self, outcome: WorkerOutcome) -> Result<(), WorkerError> {
+        self.batch_count = self.batch_count.saturating_add(1);
+        match outcome {
+            WorkerOutcome::Staged {
+                candidate_count,
+                relation_count,
+                ..
+            } => {
+                self.run_count = self.run_count.saturating_add(1);
+                self.candidate_count = self.candidate_count.saturating_add(candidate_count);
+                self.relation_count = self.relation_count.saturating_add(relation_count);
+            }
+            WorkerOutcome::AlreadyStaged {
+                candidate_count,
+                relation_count,
+                ..
+            } => {
+                self.run_count = self.run_count.saturating_add(1);
+                self.candidate_count = self.candidate_count.saturating_add(candidate_count);
+                self.relation_count = self.relation_count.saturating_add(relation_count);
+                self.already_staged_count = self.already_staged_count.saturating_add(1);
+            }
+            WorkerOutcome::Recovered {
+                run_ids,
+                candidate_count,
+                relation_count,
+                omitted_source_count,
+                already_staged_count,
+            } => {
+                self.run_count = self.run_count.saturating_add(run_ids.len());
+                self.candidate_count = self.candidate_count.saturating_add(candidate_count);
+                self.relation_count = self.relation_count.saturating_add(relation_count);
+                self.omitted_source_count = self
+                    .omitted_source_count
+                    .saturating_add(omitted_source_count);
+                self.already_staged_count = self
+                    .already_staged_count
+                    .saturating_add(already_staged_count);
+            }
+            WorkerOutcome::Noop(_) | WorkerOutcome::Drained { .. } => {
+                self.batch_count = self.batch_count.saturating_sub(1);
+                return Err(WorkerError::Runtime(
+                    "non-batch extraction outcome could not be aggregated".to_owned(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn into_outcome(self) -> WorkerOutcome {
+        WorkerOutcome::Drained {
+            batch_count: self.batch_count,
+            run_count: self.run_count,
+            candidate_count: self.candidate_count,
+            relation_count: self.relation_count,
+            omitted_source_count: self.omitted_source_count,
+            already_staged_count: self.already_staged_count,
+        }
+    }
+}
+
+/// Drain every eligible source group through the same bounded product batch.
+///
+/// Hooks run this path at compaction/session boundaries. Ten-turn batches keep
+/// the local extractor's attention reliable, while a minimum of one ensures a
+/// final partial session is not left permanently unprocessed.
+fn run_worker_until_idle_with(
+    config: &WorkerConfig,
+    socket_path: &Path,
+    namespace: Option<&str>,
+    dependencies: &mut impl WorkerDependencies,
+) -> Result<WorkerOutcome, WorkerError> {
+    let mut summary = DrainSummary::default();
+    for _ in 0..MAX_DRAIN_BATCHES {
+        let outcome = run_worker_with_min_turns(
+            config,
+            socket_path,
+            namespace,
+            DRAIN_MIN_TURNS,
+            dependencies,
+        )?;
+        match outcome {
+            WorkerOutcome::Noop(reason) => {
+                return if summary.batch_count == 0 {
+                    Ok(WorkerOutcome::Noop(reason))
+                } else {
+                    Ok(summary.into_outcome())
+                };
+            }
+            completed @ (WorkerOutcome::Staged { .. }
+            | WorkerOutcome::AlreadyStaged { .. }
+            | WorkerOutcome::Recovered { .. }) => summary.record(completed)?,
+            WorkerOutcome::Drained { .. } => {
+                return Err(WorkerError::Runtime(
+                    "nested extraction drain outcome".to_owned(),
+                ));
+            }
+        }
+    }
+    tracing::warn!(
+        max_batches = MAX_DRAIN_BATCHES,
+        "extraction drain reached its defensive batch limit"
+    );
+    Ok(summary.into_outcome())
+}
+
+fn run_worker_with_min_turns(
+    config: &WorkerConfig,
+    socket_path: &Path,
+    namespace: Option<&str>,
+    min_turns: u32,
     dependencies: &mut impl WorkerDependencies,
 ) -> Result<WorkerOutcome, WorkerError> {
     if config.mode != ExtractMode::Shadow {
@@ -388,8 +526,8 @@ pub(crate) fn run_worker_with(
     }
 
     dependencies.connect(socket_path)?;
-    let scan = dependencies.scan(namespace, &config.profile, MIN_TURNS, MAX_TURNS)?;
-    if scan.sources.len() < MIN_TURNS as usize {
+    let scan = dependencies.scan(namespace, &config.profile, min_turns, MAX_TURNS)?;
+    if scan.sources.len() < min_turns as usize {
         return Ok(WorkerOutcome::Noop(WorkerNoop::BelowThreshold));
     }
 
@@ -513,16 +651,15 @@ struct RecoveredPartition {
 #[derive(Default)]
 struct PartitionRecovery {
     partitions: Vec<RecoveredPartition>,
-    omitted_source_count: usize,
+    omitted_partitions: Vec<ExtractionScanResult>,
     last_validation_error: Option<WorkerError>,
 }
 
 impl PartitionRecovery {
     fn merge(&mut self, mut other: Self) {
         self.partitions.append(&mut other.partitions);
-        self.omitted_source_count = self
-            .omitted_source_count
-            .saturating_add(other.omitted_source_count);
+        self.omitted_partitions
+            .append(&mut other.omitted_partitions);
         if other.last_validation_error.is_some() {
             self.last_validation_error = other.last_validation_error;
         }
@@ -556,9 +693,9 @@ impl PartitionRecoveryBudget {
         }
     }
 
-    fn exhausted_partition(&self, omitted_source_count: usize) -> PartitionRecovery {
+    fn exhausted_partition(&self, scan: &ExtractionScanResult) -> PartitionRecovery {
         PartitionRecovery {
-            omitted_source_count,
+            omitted_partitions: vec![scan.clone()],
             last_validation_error: Some(self.last_validation_error.clone()),
             ..PartitionRecovery::default()
         }
@@ -569,7 +706,8 @@ impl PartitionRecoveryBudget {
 ///
 /// Successful deterministic halves are staged through the normal product
 /// path. An irreducible singleton remains in raw Episodic memory and stays
-/// eligible for a later extraction pass; no invalid sidecar fact is admitted.
+/// represented by an audited, trusted empty sidecar stage; no invalid sidecar
+/// fact is admitted and later batches are not blocked by repeated retries.
 fn recover_and_stage_partitions(
     config: &WorkerConfig,
     namespace: Option<&str>,
@@ -579,13 +717,19 @@ fn recover_and_stage_partitions(
 ) -> Result<WorkerOutcome, WorkerError> {
     let mut budget = PartitionRecoveryBudget::new(last_validation_error);
     let recovery = split_and_extract(config, namespace, scan, dependencies, &mut budget)?;
-    if recovery.partitions.is_empty() {
+    if recovery.partitions.is_empty() && recovery.omitted_partitions.is_empty() {
         return Err(recovery
             .last_validation_error
             .unwrap_or(budget.last_validation_error));
     }
 
-    let mut run_ids = Vec::with_capacity(recovery.partitions.len());
+    let omitted_source_count = recovery
+        .omitted_partitions
+        .iter()
+        .map(|partition| partition.sources.len())
+        .sum();
+    let mut run_ids =
+        Vec::with_capacity(recovery.partitions.len() + recovery.omitted_partitions.len());
     let mut candidate_count = 0usize;
     let mut relation_count = 0usize;
     let mut already_staged_count = 0usize;
@@ -623,11 +767,50 @@ fn recover_and_stage_partitions(
         }
     }
 
+    // A singleton that cannot produce schema-valid facts remains available as
+    // authoritative raw Episodic memory. Commit a trusted empty sidecar result
+    // after the failure audit so the drain can advance instead of retrying the
+    // same invalid source forever.
+    for omitted in recovery.omitted_partitions {
+        match dependencies.stage(
+            namespace,
+            &config.profile,
+            0,
+            omitted.sources.clone(),
+            ValidatedExtraction {
+                items: Vec::new(),
+                relations: Vec::new(),
+            },
+        ) {
+            Ok(StageExtractionResult::Staged { run_id }) => run_ids.push(run_id),
+            Ok(StageExtractionResult::AlreadyStaged { run_id }) => {
+                already_staged_count = already_staged_count.saturating_add(1);
+                run_ids.push(run_id);
+            }
+            Err(error) => {
+                if record_failure(
+                    dependencies,
+                    namespace,
+                    &config.profile,
+                    &omitted,
+                    ExtractionErrorKind::StageReject,
+                    true,
+                    0,
+                )
+                .is_err()
+                {
+                    return Err(WorkerError::Audit);
+                }
+                return Err(error);
+            }
+        }
+    }
+
     Ok(WorkerOutcome::Recovered {
         run_ids,
         candidate_count,
         relation_count,
-        omitted_source_count: recovery.omitted_source_count,
+        omitted_source_count,
         already_staged_count,
     })
 }
@@ -671,7 +854,7 @@ fn extract_partition(
     budget: &mut PartitionRecoveryBudget,
 ) -> Result<PartitionRecovery, WorkerError> {
     if !budget.consume_provider_invocation() {
-        return Ok(budget.exhausted_partition(scan.sources.len()));
+        return Ok(budget.exhausted_partition(scan));
     }
     let prompt = build_extraction_prompt(&scan.sources);
     let result = match invoke_and_validate(config, scan, dependencies, &prompt) {
@@ -696,7 +879,7 @@ fn extract_partition(
                 build_grounding_retry_prompt(&scan.sources)
             };
             if !budget.consume_provider_invocation() {
-                return Ok(budget.exhausted_partition(scan.sources.len()));
+                return Ok(budget.exhausted_partition(scan));
             }
             match invoke_and_validate(config, scan, dependencies, &repair_prompt) {
                 Ok(success) => Ok(success),
@@ -736,7 +919,7 @@ fn extract_partition(
             split_and_extract(config, namespace, scan, dependencies, budget)
         }
         Err(error @ WorkerError::Validation(_)) => Ok(PartitionRecovery {
-            omitted_source_count: scan.sources.len(),
+            omitted_partitions: vec![scan.clone()],
             last_validation_error: Some(error),
             ..PartitionRecovery::default()
         }),
@@ -1067,11 +1250,16 @@ impl WorkerDependencies for ProductionDependencies {
                 Ok(())
             }
             Err(error) => {
-                let _ = append_connect_failure(
+                if let Err(log_error) = append_connect_failure(
                     &self.config.db_dir(),
                     socket_path,
                     ErrorLogKind::Connect,
-                );
+                ) {
+                    tracing::warn!(
+                        error = %log_error,
+                        "could not append extraction daemon connection failure audit"
+                    );
+                }
                 Err(WorkerError::Daemon(error.to_string()))
             }
         }
@@ -1169,10 +1357,11 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        ExtractionPreviewInput, MAX_PARTITION_RECOVERY_PROVIDER_INVOCATIONS, MIN_TURNS,
-        PROVIDER_TIMEOUT, WorkerConfig, WorkerDependencies, WorkerError, WorkerNoop, WorkerOutcome,
-        failure_kind, parse_provider_timeout, repair_json_string_syntax, run_extraction_preview,
-        run_worker, run_worker_with, strip_ansi_control_sequences,
+        DRAIN_MIN_TURNS, ExtractionPreviewInput, MAX_PARTITION_RECOVERY_PROVIDER_INVOCATIONS,
+        MAX_TURNS, MIN_TURNS, PROVIDER_TIMEOUT, WorkerConfig, WorkerDependencies, WorkerError,
+        WorkerNoop, WorkerOutcome, failure_kind, parse_provider_timeout, repair_json_string_syntax,
+        run_extraction_preview, run_worker, run_worker_until_idle_with, run_worker_with,
+        strip_ansi_control_sequences,
     };
     use crate::config::Config;
     use crate::extract::{
@@ -1197,6 +1386,7 @@ mod tests {
         events: Vec<&'static str>,
         provider_calls: usize,
         provider_prompts: Vec<String>,
+        scan_requests: Vec<(u32, u32)>,
         scans: VecDeque<Result<ExtractionScanResult, WorkerError>>,
         provider_outputs: VecDeque<Result<ProcessOutput, ProcessError>>,
         recorded_failures: Vec<ExtractionErrorKind>,
@@ -1220,7 +1410,7 @@ mod tests {
             min_turns: u32,
             max_turns: u32,
         ) -> Result<ExtractionScanResult, WorkerError> {
-            assert_eq!((min_turns, max_turns), (MIN_TURNS, 20));
+            self.scan_requests.push((min_turns, max_turns));
             self.scans.pop_front().expect("test supplied scan response")
         }
 
@@ -1325,11 +1515,11 @@ mod tests {
     }
 
     #[test]
-    fn r2_worker_exposes_the_one_shot_entrypoint() {
+    fn worker_exposes_the_one_shot_entrypoint() {
         let _: fn(&Config, Option<&str>) -> Result<WorkerOutcome, WorkerError> = run_worker;
     }
     #[test]
-    fn r2_worker_provider_timeout_matches_approved_contract() {
+    fn worker_provider_timeout_matches_approved_contract() {
         assert_eq!(PROVIDER_TIMEOUT, Duration::from_secs(240));
         assert_eq!(
             parse_provider_timeout(None).expect("default timeout"),
@@ -1348,7 +1538,7 @@ mod tests {
         }
     }
     #[test]
-    fn r2_worker_mode_off_does_not_connect_or_invoke_provider() {
+    fn worker_mode_off_does_not_connect_or_invoke_provider() {
         let mut fake = FakeWorker::default();
         let (_socket_directory, socket) = test_socket();
 
@@ -1361,7 +1551,7 @@ mod tests {
     }
 
     #[test]
-    fn r2_worker_preheld_socket_lock_returns_busy_before_daemon_or_provider() {
+    fn worker_preheld_socket_lock_returns_busy_before_daemon_or_provider() {
         let tempdir = tempfile::tempdir().expect("temporary lock directory");
         let socket = tempdir.path().join("daemon.sock");
         let lock_path = PathBuf::from(format!("{}.extract.lock", socket.display()));
@@ -1381,7 +1571,7 @@ mod tests {
     }
 
     #[test]
-    fn r2_worker_nine_turn_scan_is_below_threshold_without_a_run() {
+    fn worker_nine_turn_scan_is_below_threshold_without_a_run() {
         let mut fake = FakeWorker {
             scans: VecDeque::from([Ok(scan(MIN_TURNS as usize - 1))]),
             ..Default::default()
@@ -1392,6 +1582,7 @@ mod tests {
             .expect("short scan is a no-op");
 
         assert_eq!(outcome, WorkerOutcome::Noop(WorkerNoop::BelowThreshold));
+        assert_eq!(fake.scan_requests, [(MIN_TURNS, MAX_TURNS)]);
         assert_eq!(fake.daemon_connects, 1);
         assert_eq!(fake.provider_calls, 0);
         assert!(
@@ -1405,7 +1596,7 @@ mod tests {
     }
 
     #[test]
-    fn r2_worker_invalid_json_records_failure_before_one_retry_then_stages_once() {
+    fn worker_invalid_json_records_failure_before_one_retry_then_stages_once() {
         let mut fake = FakeWorker {
             scans: VecDeque::from([Ok(scan(MIN_TURNS as usize))]),
             provider_outputs: VecDeque::from([
@@ -1445,6 +1636,45 @@ mod tests {
             "one source ledger set is staged"
         );
         assert_eq!(fake.staged_sources[0].len(), MIN_TURNS as usize);
+    }
+
+    #[test]
+    fn product_worker_drains_full_batches_and_the_final_partial_tail() {
+        let mut fake = FakeWorker {
+            scans: VecDeque::from([Ok(scan(10)), Ok(scan(2)), Ok(scan(0))]),
+            provider_outputs: VecDeque::from([Ok(valid_output()), Ok(valid_output())]),
+            stage_result: VecDeque::from([
+                Ok(StageExtractionResult::Staged { run_id: 51 }),
+                Ok(StageExtractionResult::Staged { run_id: 52 }),
+            ]),
+            ..Default::default()
+        };
+        let (_socket_directory, socket) = test_socket();
+
+        let outcome =
+            run_worker_until_idle_with(&config(ExtractMode::Shadow), &socket, None, &mut fake)
+                .expect("the product worker drains through the partial tail");
+
+        assert_eq!(
+            outcome,
+            WorkerOutcome::Drained {
+                batch_count: 2,
+                run_count: 2,
+                candidate_count: 0,
+                relation_count: 0,
+                omitted_source_count: 0,
+                already_staged_count: 0,
+            }
+        );
+        assert_eq!(
+            fake.scan_requests,
+            [(DRAIN_MIN_TURNS, MAX_TURNS); 3],
+            "every pass uses the same ten-turn cap and admits a final singleton tail"
+        );
+        assert_eq!(
+            fake.staged_sources.iter().map(Vec::len).collect::<Vec<_>>(),
+            [10, 2]
+        );
     }
 
     #[test]
@@ -1578,7 +1808,7 @@ mod tests {
     }
 
     #[test]
-    fn partition_recovery_stops_at_the_shared_provider_budget() {
+    fn entirely_invalid_batch_commits_audited_empty_singleton_sidecars() {
         let invalid_schema = || output(br#"{}"#.to_vec());
         let provider_outputs = std::iter::repeat_with(|| Ok(invalid_schema()))
             .take(1 + MAX_PARTITION_RECOVERY_PROVIDER_INVOCATIONS)
@@ -1586,26 +1816,41 @@ mod tests {
         let mut fake = FakeWorker {
             scans: VecDeque::from([Ok(scan(MIN_TURNS as usize))]),
             provider_outputs,
+            stage_result: (70..80)
+                .map(|run_id| Ok(StageExtractionResult::Staged { run_id }))
+                .collect(),
             ..Default::default()
         };
         let (_socket_directory, socket) = test_socket();
 
-        let error = run_worker_with(&config(ExtractMode::Shadow), &socket, None, &mut fake)
-            .expect_err("an entirely invalid batch remains fail-closed");
+        let outcome = run_worker_with(&config(ExtractMode::Shadow), &socket, None, &mut fake)
+            .expect("an entirely invalid batch remains raw-only and does not poison the drain");
 
         assert_eq!(
-            error,
-            WorkerError::Validation(ValidationError::SchemaReject)
+            outcome,
+            WorkerOutcome::Recovered {
+                run_ids: (70..80).collect(),
+                candidate_count: 0,
+                relation_count: 0,
+                omitted_source_count: MIN_TURNS as usize,
+                already_staged_count: 0,
+            }
         );
+        assert_eq!(MAX_PARTITION_RECOVERY_PROVIDER_INVOCATIONS, 36);
         assert_eq!(
-            fake.provider_calls,
-            1 + MAX_PARTITION_RECOVERY_PROVIDER_INVOCATIONS
+            fake.provider_calls, 19,
+            "one root plus a full 18-node child tree"
         );
+        assert_eq!(fake.recorded_failures.len(), 19);
         assert_eq!(
-            fake.recorded_failures.len(),
-            1 + MAX_PARTITION_RECOVERY_PROVIDER_INVOCATIONS
+            fake.staged_sources.iter().map(Vec::len).collect::<Vec<_>>(),
+            [1; 10]
         );
-        assert!(fake.staged.is_empty());
+        assert!(
+            fake.staged
+                .iter()
+                .all(|extraction| extraction.items.is_empty() && extraction.relations.is_empty())
+        );
     }
 
     #[test]
@@ -1626,6 +1871,7 @@ mod tests {
                 Ok(StageExtractionResult::Staged { run_id: 61 }),
                 Ok(StageExtractionResult::Staged { run_id: 62 }),
                 Ok(StageExtractionResult::Staged { run_id: 63 }),
+                Ok(StageExtractionResult::Staged { run_id: 64 }),
             ]),
             ..Default::default()
         };
@@ -1637,7 +1883,7 @@ mod tests {
         assert_eq!(
             outcome,
             WorkerOutcome::Recovered {
-                run_ids: vec![61, 62, 63],
+                run_ids: vec![61, 62, 63, 64],
                 candidate_count: 0,
                 relation_count: 0,
                 omitted_source_count: 1,
@@ -1646,8 +1892,11 @@ mod tests {
         );
         assert_eq!(
             fake.staged_sources.iter().map(Vec::len).collect::<Vec<_>>(),
-            [5, 2, 2]
+            [5, 2, 2, 1]
         );
+        assert!(fake.staged.last().is_some_and(|extraction| {
+            extraction.items.is_empty() && extraction.relations.is_empty()
+        }));
         assert_eq!(
             fake.recorded_failures,
             [
@@ -1660,7 +1909,7 @@ mod tests {
     }
 
     #[test]
-    fn r2_worker_failure_row_write_failure_prevents_invalid_json_retry() {
+    fn worker_failure_row_write_failure_prevents_invalid_json_retry() {
         let mut fake = FakeWorker {
             scans: VecDeque::from([Ok(scan(MIN_TURNS as usize))]),
             provider_outputs: VecDeque::from([
@@ -1684,7 +1933,7 @@ mod tests {
     }
 
     #[test]
-    fn r2_worker_each_process_error_runs_once_without_fallback_command() {
+    fn worker_each_process_error_runs_once_without_fallback_command() {
         let cases = [
             (Err(ProcessError::Spawn), ExtractionErrorKind::Spawn),
             (Err(ProcessError::Stdin), ExtractionErrorKind::Stdin),
@@ -1741,7 +1990,7 @@ mod tests {
     }
 
     #[test]
-    fn r2_worker_failure_mapping_is_exhaustive() {
+    fn worker_failure_mapping_is_exhaustive() {
         let cases = [
             (
                 WorkerError::Process(ProcessError::Spawn),
@@ -1815,7 +2064,7 @@ mod tests {
     }
 
     #[test]
-    fn r2_worker_terminal_and_stage_audit_failures_are_distinct() {
+    fn worker_terminal_and_stage_audit_failures_are_distinct() {
         let mut terminal_fake = FakeWorker {
             scans: VecDeque::from([Ok(scan(MIN_TURNS as usize))]),
             provider_outputs: VecDeque::from([Err(ProcessError::Stdin)]),
@@ -1861,7 +2110,7 @@ mod tests {
     }
 
     #[test]
-    fn r2_worker_second_attempt_audit_failure_is_distinct() {
+    fn worker_second_attempt_audit_failure_is_distinct() {
         let mut fake = FakeWorker {
             scans: VecDeque::from([Ok(scan(MIN_TURNS as usize))]),
             provider_outputs: VecDeque::from([
@@ -1885,7 +2134,7 @@ mod tests {
         );
     }
     #[test]
-    fn r2_worker_returns_replay_outcome_without_duplicate_source_ledger() {
+    fn worker_returns_replay_outcome_without_duplicate_source_ledger() {
         let mut fake = FakeWorker {
             scans: VecDeque::from([Ok(scan(MIN_TURNS as usize))]),
             provider_outputs: VecDeque::from([Ok(valid_output())]),

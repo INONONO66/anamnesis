@@ -24,16 +24,14 @@ use crate::graph::scope::ScopePath;
 /// Scope-overlap gate `scope_overlap` for a contradiction pair (frustration.md).
 ///
 /// Two claims can only frustrate each other when their scopes actually overlap.
-/// Scopes are flat opaque paths (the hierarchy was removed — all production nodes
-/// are universal), so the gate is a two-branch **safety** gate in `{0.0, 1.0}`:
+/// Scopes are flat opaque paths, so the gate is a two-branch **safety** gate in
+/// `{0.0, 1.0}`:
 /// identical or universal scopes overlap fully (`1.0`); two different concrete
 /// scopes do not overlap at all (`0.0`), so a private contradiction cannot leak
 /// across unauthorized scopes (the frustration.md safety rule). This is the
 /// conservative closed-gate choice: unlike the readout `scope_weight` (a ranking
 /// weight that only *attenuates*), this gate must *hide* cross-scope tensions, not
-/// merely down-weight them. In production the compared scopes are always
-/// universal, so this always yields `1.0` — bit-identical to the previous
-/// hierarchical table's `Equal`/`Universal` rows for that case.
+/// merely down-weight them.
 pub fn scope_overlap(a: &ScopePath, b: &ScopePath) -> f64 {
     if a == b || a.is_universal() || b.is_universal() {
         1.0

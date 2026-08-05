@@ -1,4 +1,4 @@
-//! Tests for ingest_conversation() convenience method (T16).
+//! Tests for the `ingest_conversation` convenience method.
 
 use anamnesis::Engine;
 use anamnesis::api::{ConversationInput, ExtractedFact};

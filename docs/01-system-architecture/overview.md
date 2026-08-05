@@ -16,11 +16,15 @@ Anamnesis is a synchronous Rust library for cognitive memory. It owns graph stor
 
 The core must remain deterministic for the same graph state and query input. Optional embedding providers may exist behind features, but embedding generation is a provider boundary, not a core behavior.
 
+`ScopePath` is an opaque applicability label used by retrieval scoring. It is
+not an authorization token or tenancy boundary. A consumer that stores data with
+different access rules must enforce those rules before querying the engine.
+
 ## Main Modules
 
 | Module | Responsibility |
 |---|---|
-| `memory` | **Framework API** (`Memory`) — bench-proven ingest recipe; see [framework-layer.md](framework-layer.md) |
+| `memory` | **Framework API** (`Memory`) — canonical conversation ingest, source-aware recall, reranking, and packaging; see [framework-layer.md](framework-layer.md) |
 | `graph` | Site, edge, id, origin, scope, time, and type definitions |
 | `storage` | `StorageAdapter` trait and default SQLite adapter |
 | `mechanics` | Pure scoring, decay, conductance, and interaction functions |
@@ -86,7 +90,8 @@ Not all of these are calibrated priors. `max_nodes` and `dedup_enabled` are oper
 | `crystallize` | Adds a synthesis site and `ConsolidatedFrom` edges; never overwrites sources |
 | `snapshot` / `restore` | Captures and restores cloned storage state |
 
-The debug lifecycle methods, `reflect_batch` (cross-agent entity linking), and the `fact_at` convenience wrapper (valid-time filtering) were **removed in the [v0.10.0 shrink](../adr/0014-shrink-to-product.md)** — all had no consumer; see ADR-0014 for the re-add conditions. Valid-time filtering itself survives on the `search` path (see the [temporal model](../02-knowledge-model/temporal-model.md)).
+Valid-time filtering is part of the `search` path (see the
+[temporal model](../02-knowledge-model/temporal-model.md)).
 
 ## Embedding Boundary
 
@@ -103,9 +108,25 @@ The core must not:
 - hide storage errors behind panics,
 - treat display projections as authoritative reservoirs.
 
-## Debug Lifecycle
+## Proposed: Evidence-Complete Extension (ADR-0015)
 
-> **Removed in [v0.10.0](../adr/0014-shrink-to-product.md).** Debugging was formerly modeled as first-class graph state (`DebugSession` → `Hypothesis` → `Evidence` → confirmed/rejected, inert against dissipation, with rejected hypotheses kept searchable). That lifecycle had no consumer and was removed in the shrink. A reasoning-session capture may return through the [capture pipeline](../adr/0013-reasoning-capture-pipeline.md); see ADR-0014 for the re-add condition.
+[ADR-0015](../adr/0015-evidence-grounded-formation-and-chain-retrieval.md)
+proposes an additive evidence catalog, bounded chain retrieval, and
+`EvidenceBundle`. None of those catalog types, indexes, or result fields are in
+the current public contract. If the ADR is accepted, the boundary remains:
+
+| Core responsibility | Consumer responsibility |
+|---|---|
+| Store and validate evidence references | Extract facts and relations |
+| Index canonical entities, facts, time, scope, and relation adjacency | Select extraction and review providers |
+| Enforce catalog admission, caller-supplied scope eligibility, time, and structural traversal budgets | Authorize callers and interpret images, audio, and video |
+| Build a deterministic `EvidenceBundle` | Optionally reflect or request one bounded follow-up recall |
+| Trace formation and retrieval stages | Generate the final answer |
+
+Under the proposal, derived records remain subordinate to persisted sources. A
+model-produced item cannot affect retrieval until its evidence reference and
+admission class have been validated. Optional consumer reflection cannot mutate
+core state directly.
 
 ## Data Flow
 
@@ -128,7 +149,7 @@ Storage access is orchestrated by `Engine`. Mechanics functions take typed input
 | Local-first | Default engine needs no server or network |
 | Synchronous core | No async runtime required by the library |
 | Pluggability | Storage adapters satisfy one trait |
-| Traceability | Search, tick, reflect, and commit paths expose structured reports |
+| Traceability | Search, tick, and commit paths expose structured reports; proposed catalog formation would add its own trace |
 | Bounded projections | Salience and edge weight stay in the closed public range `[0, 1]` — salience is the bounded logistic projection of the unbounded sum, `s_i = logistic(B_i + P_i)`, whose extreme values saturate to the `0`/`1` endpoints in storage (the `projection_range` invariant validates `[0, 1]`) |
 | No hidden mutation | Retrieval does not change reservoirs unless committed |
 

@@ -1,7 +1,6 @@
-//! Bug #1 end-to-end (disk-path smoke — migration policy point 4, "smoke a real
-//! pre-upgrade database"): a legacy database carrying an empty-`access_history`
-//! row, once migrated on open, must `tick()` WITHOUT dying, and the migrated node
-//! must remain recall-able (finite, bounded salience).
+//! End-to-end migration coverage for a legacy database carrying an empty
+//! `access_history` row. Once migrated on open, it must accept `tick()` and the
+//! migrated node must remain recallable with finite, bounded salience.
 //!
 //! Before the fix, `compute_base_level` returned `NEG_INFINITY` for the trace-less
 //! row, so the first `tick()` (which MCP recall calls every cycle) returned

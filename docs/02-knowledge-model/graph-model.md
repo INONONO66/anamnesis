@@ -15,7 +15,7 @@ A node is a memory site. It stores identity, source content, projections, proven
 | `node_type` | Knowledge taxonomy value |
 | `retained_action` | Persistent memory strength `A_i = B_i + P_i`; the base-level term `B_i` is computed on demand from `access_history` (not stored), the evidence prior `P_i` is stored |
 | `access_history` | Bounded 32-trace window (creation trace plus committed accesses); each trace is a pair `(timestamp, per-trace decay rate d_j)`, with `d_j` computed at creation from current activation and immutable thereafter; the persistent substrate from which `B_i` is computed |
-| `evidence_prior` | Stored evidence prior `P_i` (encoding surprise, feedback / social reinforcement, peer trust); a decay-exempt evidence offset |
+| `evidence_prior` | Stored evidence prior `P_i` (encoding surprise and explicit feedback); a decay-exempt evidence offset |
 | `salience` | Bounded logistic projection of the sum, `s_i = logistic(B_i + P_i)` |
 | `embedding` | Optional semantic vector |
 | `entity_tags` | Normalized entity labels |
@@ -33,12 +33,13 @@ Every site carries origin. Provenance is not optional.
 | `peer_id` | Human, agent, tool, or system that produced the fragment |
 | `source_kind` | Observation source category |
 | `session_id` | Session where the fragment was produced |
-| `scope` | Visibility and applicability path |
+| `scope` | Opaque applicability label used in retrieval ranking; not authorization |
 | `confidence` | Source-level confidence in `[0, 1]` |
 
 ## Node Types
 
-`KnowledgeType` collapsed from 15 variants to 4 in the [v0.10.0 shrink](../adr/0014-shrink-to-product.md); the v6→v7 migration normalizes legacy rows into these.
+`KnowledgeType` deliberately stays small. The current isolated atomic-fact
+sidecar does not add variants to the cognitive node taxonomy.
 
 | Variant | Dynamics Role |
 |---|---|
@@ -47,7 +48,13 @@ Every site carries origin. Provenance is not optional.
 | `Identity` | Retrieval prior; routed to a dedicated context partition |
 | `Custom(String)` | Consumer-defined type (renders by its bare label) |
 
-Type affects decay prior, packaging bucket, readout treatment, and conductance priors. The decay prior is the `node_type` policy multiplier `m_type` applied during per-trace `d_j` computation: it is the outer multiplier in `d_j = m_type · ( c · e^{m_j} + α )`, not an independent rate. A type with `m_type = 0` (`Identity`) yields `d_j = 0` for every trace and never decays. It must not be replaced by free-form strings at the engine boundary except through `Custom`. (The pre-0.10.0 finer taxonomy — the `IdentityCore`/`IdentityLearned`/`IdentityState` split, `Procedural`/`Convention`/`Decision`/`Gotcha`/`Entity`/`Event`, and the inert `DebugSession`/`Hypothesis`/`Evidence` debug family — is historical; ADR-0014 records the by-design decay coarsenings applied to their former `m_type` values.)
+Type affects decay prior, packaging bucket, readout treatment, and conductance
+priors. The decay prior is the `node_type` policy multiplier `m_type` applied
+during per-trace `d_j` computation: it is the outer multiplier in
+`d_j = m_type · (c · e^{m_j} + α)`, not an independent rate. A type with
+`m_type = 0` (`Identity`) yields `d_j = 0` for every trace and never decays. It
+must not be replaced by free-form strings at the engine boundary except through
+`Custom`.
 
 ## Edges
 
@@ -75,12 +82,12 @@ Edges connect sites and carry typed relationships.
 | `ReinforcedBy` | Repeated confirmation |
 | `ConsolidatedFrom` | Synthesis derived from sources |
 | `ExtractedFrom` | Extracted knowledge linked to source episode |
-| `Entity` | Shared entity link, including cross-agent reflection |
+| `Entity` | Consumer-supplied shared-entity association |
 | `Supersedes` | Replaces older knowledge |
 | `RejectedAlternative` | Considered and discarded option |
 | `Supports` | Positive evidential support for a hypothesis |
-| `Refutes` | Refuting evidence for a hypothesis; a positive conductive path that surfaces counter-evidence (inhibition is modeled by `Contradicts`/frustration, never negative conductance). Surfacing refuting evidence raises the hypothesis's *retrievability*, not its credence — recall co-activates a claim with its rebuttal; acceptance is decided only by the debug lifecycle (`confirm`/`reject`), a channel separate from activation |
-| `BelongsTo` | Debug-session membership |
+| `Refutes` | Refuting evidence; a weak positive conductive path that co-retrieves a claim with its rebuttal. It affects retrievability, not credence; inhibition is modeled by `Contradicts`/frustration, never negative conductance. |
+| `BelongsTo` | Hierarchical or containment relationship |
 | `Contradicts` | Constraint edge excluded from propagation and surfaced as frustration |
 | `Custom(String)` | Consumer-defined relationship |
 
@@ -114,6 +121,25 @@ The engine preserves multiple resolutions instead of forcing one summary:
 
 Packaging may downgrade resolution to fit budget, but the original content remains.
 
+## Proposed: Evidence Catalog Boundary (ADR-0015)
+
+The evidence catalog described below is proposed by
+[ADR-0015](../adr/0015-evidence-grounded-formation-and-chain-retrieval.md);
+it is not part of the current graph or storage contract. Under that proposal,
+the graph and catalog would have different jobs:
+
+| Cognitive graph | Evidence catalog |
+|---|---|
+| Models activation, conductance, decay, and contradiction | Models canonical entities, atomic facts, fact relations, observations, and exact source references |
+| Stores persisted source nodes and reviewed projections | Stores selective routing and provenance records |
+| Answers which memories activate together | Answers which evidence slots and typed links are covered |
+
+A future catalog record may project into the graph only with its catalog
+identity and source references intact. Grounded routing facts need not become
+nodes at all; they can remain isolated index entries that route to raw sources.
+The proposed logical contract is defined in
+[evidence-model.md](evidence-model.md).
+
 ## Query Types
 
 | Query | Purpose |
@@ -126,15 +152,16 @@ Packaging may downgrade resolution to fit budget, but the original content remai
 
 `search` is a broader entry point that gathers candidate seeds and then invokes graph recall.
 
-## SessionSummary
-
-> **Removed in [v0.10.0](../adr/0014-shrink-to-product.md).** `SessionSummary` and `reflect_batch` (metadata-only cross-agent reflection that linked sites sharing entity tags without calling an LLM) had no consumer and were removed with the peer/trust subsystem. Cross-agent linking is [roadmap](peer-identity.md), gated on a real multi-peer deployment.
-
 ## Graph Invariants
 
 - Every site has an origin.
 - Query-local activation, current, impedance, and stress are never persisted as authoritative state.
 - Public projections stay bounded.
-- Scope and valid-time filters are applied before packaging.
+- Scope compatibility contributes to ranking; valid-time filtering is applied
+  before packaging. Scope authorization is external.
 - Contradiction edges preserve both sides and do not auto-delete.
 - Synthesis nodes link to sources instead of overwriting them.
+
+The proposed catalog adds two further invariants: a derived projection cannot
+widen caller-supplied source eligibility or lose source provenance, and a
+routing-only catalog record cannot be rendered as authoritative graph evidence.

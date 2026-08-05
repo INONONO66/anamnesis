@@ -163,6 +163,7 @@ fn two_launchers_share_one_daemon_then_grace_exits() {
             "extract_pending".to_string(),
             "forget".to_string(),
             "get".to_string(),
+            "ingest_attachment_transcript".to_string(),
             "ingest_conversation".to_string(),
             "list".to_string(),
             "recall".to_string(),
@@ -211,20 +212,9 @@ fn two_launchers_share_one_daemon_then_grace_exits() {
     let final_close_to_unlink_started = Instant::now();
     let second_adapter_close = b.close();
 
-    // STEP 12 timing investigation (2026-07-17, Apple M4 Max, debug build):
-    // 20 external runs had post-adapter-reap unlink min/median/max
-    // 2.328/2.353/2.380s. Adapter readiness was 0.745/0.779/0.908s for the
-    // spawning adapter and 8/10/12ms for the second; both adapter reaps were
-    // <=1ms. Ten in-process daemon runs isolated last-client→grace at
-    // 1.003/1.004/1.004s, while connection joins, flush, migration drain,
-    // socket unlink, and lock release totaled 0–1ms. A correlated probe put
-    // those internal phases at 1.0033s and 0.5ms within a 2.348s external
-    // close→unlink interval. The remaining ~1.345s residual is consistent with
-    // the external process close→daemon EOF/client-count handoff, rather than
-    // the 10ms filesystem poll, grace timer, or unlink. The 20s bound is retained
-    // (not increased) for scheduler-starved CI; timeout failures print every
-    // externally observable phase, and daemon logs emit internal phases when
-    // tracing output is attached.
+    // The 20-second bound covers scheduler-starved CI. Timeout failures print
+    // every externally observable phase, while daemon logs expose internal
+    // shutdown phases when tracing output is attached.
     let socket_unlink_started = Instant::now();
     let socket_unlinked = wait_until(Duration::from_secs(20), || !the_socket.exists());
     let post_adapter_reap_to_unlink = socket_unlink_started.elapsed();

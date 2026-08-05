@@ -1,9 +1,9 @@
-# anamnesis — Claude Code plugin
+# anamnesis agent plugin
 
 This plugin wires anamnesis into Claude Code as **activation-gated recall injection**. On
 `SessionStart` it seeds the turn with a few high-salience project memories; on every
 `UserPromptSubmit` it runs the same **read-only**, **top-`k`-capped** canonical reranked-recall
-pipeline used by the MCP tool and LoCoMo harness. It injects the result **only when the selected
+pipeline used by the MCP tool and direct `Memory` consumers. It injects the result **only when the selected
 top node's cognitive activation clears a need-odds threshold `τ`** — an off-topic prompt injects
 nothing. Injection never reinforces anything: hook recall is
 strictly read-only, so it cannot drive a recommender-style feedback loop. **Reinforcement is
@@ -28,14 +28,13 @@ and prints the hook output JSON on stdout:
 ### The guard wrapper (why hooks don't call the binary directly)
 
 `anamnesis` is resolved at run time — the binary bundled in the plugin first, else a PATH
-`anamnesis` (npm/cargo) — so on a given machine it may be **missing** or an **older build without the `hook` subcommand**. In that case `clap` exits `2` —
-and a `UserPromptSubmit` hook that exits `2` **erases the user's prompt**. To make that impossible,
+`anamnesis` (npm/cargo) — so on a given machine it may be **missing** or an **older build without the `hook` subcommand**. A non-zero hook exit can interrupt host prompt handling, so
 `hooks.json` points at `hooks/anamnesis-hook.sh`, a three-line shim that no-ops when the binary is
-absent and **always exits 0**, so a wrong/old binary can never block or erase a prompt. All real
+absent and **always exits 0**. All product
 logic stays in the Rust binary (`crates/anamnesis-mcp/src/hook.rs`); the shim only neutralizes the
-exit-2 footgun.
+process-status boundary.
 
-## Install (install-and-go — nothing else)
+## Install
 
 The plugin is **self-contained for everyone**: it declares *both* the hooks *and* the agent MCP
 server, and its wrappers **fetch the matching `anamnesis` binary from the GitHub Release on first
@@ -68,7 +67,7 @@ the release CI). The `hook` subcommand requires the binary **`>= 0.8.0`**.
 
 ### Local development — pre-bundle to skip the fetch
 
-While hacking on anamnesis, drop a freshly-built binary into `plugin/bin/` so the wrappers use it
+For local Anamnesis development, place a freshly built binary in `plugin/bin/` so the wrappers use it
 directly (no download — `ensure-anamnesis.sh` sees it present):
 
 ```sh
@@ -88,7 +87,7 @@ nothing and no binary was fetched, check `which anamnesis` from the shell Claude
 
 ### Distribution channels
 
-- **Plugin (recommended, install-and-go):** `ensure-anamnesis.sh` fetches the binary from the Release
+- **Plugin installation:** `ensure-anamnesis.sh` fetches the binary from the Release
   on first use, so `/plugin install` is all an end user needs.
 - **npm (`anamnesis-mcp`):** a thin wrapper whose `postinstall` downloads the same release binary and
   exposes the `anamnesis` command — for the CLI/MCP without the plugin.
@@ -105,8 +104,8 @@ plugin updates, so it is bumped whenever the crate is.
 
 ## Codex (OpenAI Codex CLI)
 
-Codex adopted Claude Code's hook contract, so the **same `anamnesis hook` subcommand and the
-same guard wrapper drive Codex**. This repo ships a Codex plugin alongside the Claude Code one:
+Codex exposes a compatible hook event surface, so the **same `anamnesis hook` subcommand and the
+same guard wrapper drive Codex**. This repository ships a Codex plugin alongside the Claude Code one:
 `plugin/.codex-plugin/plugin.json` + `plugin/hooks/codex-hooks.json`, and a Codex marketplace
 manifest at `.agents/plugins/marketplace.json` (repo root) pointing at `./plugin`.
 
@@ -137,39 +136,40 @@ command = "anamnesis hook session-start"
 timeout = 5
 ```
 
-> **Visibility caveat — the one real difference from Claude Code.** Claude Code injects
+> **Visibility note.** Claude Code injects
 > `additionalContext` *silently*; Codex's TUI currently *renders* the injected recall block on
-> screen as a `hook context:` message (open Codex issues #16933 / #16486 — Codex's behavior, not
-> anamnesis's). Capture hooks (see below) fire silently in both; the extraction signal appears
+> screen as a `hook context:` message. Capture hooks (see below) fire silently in both; the extraction signal appears
 > only in SessionStart context (visible in Codex's TUI). Everything else — the `τ` gate, read-only recall, agent-driven reinforcement,
-> fail-open, the warm daemon — is identical, and the env knobs below apply unchanged. When Codex
-> makes hook context silent upstream, anamnesis needs no change.
+> fail-open behavior, and the warm daemon — uses the same Anamnesis path, and the environment knobs below apply unchanged.
 
 ## Capture hooks (Stage 1 & 2)
 
 Both Claude Code and Codex can automatically ingest your turn transcripts into anamnesis as raw episodic memories, then surface them back to you for distillation into project knowledge.
 
-**Stage 1 (Capture):** The hooks fire on each turn-end event and stream the transcript to anamnesis as raw `Episodic` memories. Claude Code fires three events: `Stop` (mid-turn), `PreCompact` (post-turn), and `SessionEnd` (session close). Codex fires two: `Stop` and `PreCompact` (it lacks `SessionEnd` in its binary; its strict schema parser would reject it, as noted in #79). Each turn is idempotently deduped by a content hash, so overlap between multi-hook firing is harmless. Capture is a fire-and-forget, read-only pipe — it cannot fail and never blocks a prompt.
+**Stage 1 (Capture):** The hooks attempt to persist each available turn as raw `Episodic` memory. Claude Code supplies `Stop`, `PreCompact`, and `SessionEnd`; the bundled Codex manifest supplies `Stop` and `PreCompact`. Successfully persisted turns are idempotently deduplicated by a content hash, so overlap between events does not create duplicate memories. Capture is fail-open: a daemon, parsing, or timeout failure is reported through diagnostics and does not block the host prompt, but that event's unpersisted turn may be absent from memory.
 
 **Stage 2 (Extraction):** The daemon holds an un-extracted queue of ingested turns. When the queue crosses `ANAMNESIS_EXTRACT_THRESHOLD_N` (default 20), the next `SessionStart` hook injects a one-line nudge into the context, asking the agent to call the `extract_pending` MCP tool. That tool returns the raw turns and marks them extracted, so the agent can distill them into reasoning or project lessons using `relate` and `remember`. Extraction is agent-driven and best-effort — the nudge is advisory only, and there is no guarantee the agent will call the tool or that extraction will be immediate.
 
 Enable or disable capture entirely with `ANAMNESIS_CAPTURE_ENABLED` (default `true`).
-## R2 shadow extraction (opt-in)
 
-R2 can send a bounded batch of captured raw turns to exactly one configured external extractor
-only with the explicit opt-in `ANAMNESIS_EXTRACT_MODE=shadow`; its default is `off`. `auto`,
-boolean-like, and other unrecognized values also degrade to `off`. `ANAMNESIS_EXTRACT_CMD`
-configures that one provider command (default argv `claude -p`), parsed into a program plus
-arguments and executed directly, **never through a shell and with no fallback command**. Stage-1
-raw capture remains in the graph as `Episodic` memories. Provider stdin/the raw source batch,
-raw stdout/stderr, and the raw command are transient and are not persisted or logged by R2
-policy or error records. The policy side schema persists only profile hash/components, run and
-failure scalars, validated candidates/relations, source identity/hash ledger, and audit labels.
-R2 performs no automatic pruning or cleanup; those rows persist until an operator takes a
-database lifecycle action. R2 stages candidates only for audit, does not change the graph, and
-keeps candidates out of recall until R3. See
-[operations](../docs/06-operations/operations.md#r2-shadow-extraction-opt-in) for batching and
-audit details.
+## Shadow extraction (opt-in)
+
+The exact opt-in `ANAMNESIS_EXTRACT_MODE=shadow` starts a detached extraction
+worker after successful `PreCompact` or `SessionEnd` capture. The default is
+`off`; unrecognized values also resolve to `off`. The worker drains bounded
+source batches through one configured command. Its default is the local
+`ollama run qwen3.6:35b-a3b --think=false` path with structured output; an
+operator may replace it with `ANAMNESIS_EXTRACT_CMD`. Exactly one command is
+parsed as an argument vector and executed without a shell.
+
+Raw captured sources remain authoritative `Episodic` memories. Provider input,
+raw output, stderr, and the raw command are transient. Persisted policy records
+contain a non-secret profile identity, run/failure scalars, validated
+candidates and relations, source identity/hash references, and review labels.
+Validated output is staged outside recall until a reviewer records support and
+explicitly promotes a candidate or relation with `anamnesis extract`. See the
+[operations guide](../docs/06-operations/operations.md) for worker, audit, and
+promotion contracts.
 
 
 ## Configuration (environment variables)
@@ -188,8 +188,8 @@ laws (ADR-0010).
 | `ANAMNESIS_HOOK_TIMEOUT_MS` | Per-hook fail-open timeout (ms); on elapse, inject nothing. | `4000` |
 | `ANAMNESIS_CAPTURE_ENABLED` | Enable/disable capture hooks (Stage 1 & 2) entirely. | `true` |
 | `ANAMNESIS_EXTRACT_THRESHOLD_N` | Queue size threshold; when crossed, `SessionStart` injects extraction nudge to call `extract_pending`. | `20` |
-| `ANAMNESIS_EXTRACT_MODE` | R2 extraction mode: exact `shadow` permits raw captured content to be sent to the configured external extractor; `off` (and invalid values, including `auto`) disables it. | `off` |
-| `ANAMNESIS_EXTRACT_CMD` | Extractor command argv. Defaults to `claude -p`; parsed as argv and executed without a shell. | `claude -p` |
+| `ANAMNESIS_EXTRACT_MODE` | Exact `shadow` enables reviewed extraction; `off` and unrecognized values disable it. The configured command receives raw captured content. | `off` |
+| `ANAMNESIS_EXTRACT_CMD` | Extractor command argv, parsed and executed without a shell. | `ollama run qwen3.6:35b-a3b --think=false --format <schema>` |
 
 > **`τ` is on the raw activation scale, not 0..1.** The gate compares the **top recall
 > score** — the unnormalized ACT-R activation of the strongest hit — against `τ`. On a typical
@@ -213,14 +213,14 @@ The general anamnesis knobs apply to the hook too, since it talks to the same da
 | `ANAMNESIS_NAMESPACE` | Namespace scoping recall. | `default` |
 | `ANAMNESIS_DAEMON_GRACE_SECS` | How long the shared daemon stays warm after the last client disconnects. | `30` |
 | `ANAMNESIS_EMBED_MODEL` | FastEmbed model for new embeddings. Supported: `multilingual-e5-small`, `multilingual-e5-base`, `multilingual-e5-large`, `bge-base-en-v1.5`. Use `bge-base-en-v1.5` for existing 768-d databases. | `multilingual-e5-small` |
-| `ANAMNESIS_RERANK_MODEL` | Local cross-encoder used by the same canonical reranked-recall path as the MCP tool and LoCoMo harness. | `BAAI/bge-reranker-base` |
+| `ANAMNESIS_RERANK_MODEL` | Local cross-encoder used by the canonical reranked-recall path. | `BAAI/bge-reranker-base` |
 
 The recall-hook `timeout` is 5 seconds as an outer backstop. The Rust hook's
 `ANAMNESIS_HOOK_TIMEOUT_MS` default is 4 seconds, so it remains the first
 fail-open boundary. The default production path searches at 20, preselects and
-reranks 50 source-aware evidence documents, and delivers at most 20. Its
-balanced LoCoMo n=100 gate measured 1.71 seconds mean, 2.52 seconds p95, and
-2.97 seconds maximum on the reference Mac.
+reranks 50 source-aware evidence documents, and delivers at most 20. Versioned
+measurements and their environment are recorded in the
+[quality-gate records](../docs/07-quality-gates/calibration-records.md).
 
 ## Use with other MCP clients
 
@@ -326,9 +326,9 @@ scope, gate outcomes, filtered top score/cosine, and `query_chars`, and retains 
 quality**. A newer telemetry side-schema, or a telemetry policy open/write/query failure, disables
 or degrades telemetry only; core recall and fail-open hook prompt delivery continue.
 
-Plugin reactivation is blocked until the operational evidence gate is complete. Follow the
-[recall telemetry rollout gate](../docs/06-operations/operations.md#recall-telemetry-rollout-gate);
-this document does not claim that live deployment observations have been collected.
+Use the [operations guide](../docs/06-operations/operations.md) to interpret
+these counters and define deployment-specific rollout gates; eligibility alone
+does not establish delivery or answer quality.
 
 ## Verify it works
 

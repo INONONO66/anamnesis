@@ -8,14 +8,24 @@ This chapter fixes what Anamnesis is responsible for and what it deliberately le
 |---|---|---|
 | G1 | Typed conductive graph | Sites and edges represent knowledge type, origin, time, scope, and conductance |
 | G2 | Perception gate | Observations branch into new site allocation, duplicate-work integration, or rejection |
-| G3 | Retained-action dynamics | Readout and time interactions act on the multi-trace base level `B_i` (committed access appends a trace whose per-trace decay rate `d_j = m_type·(c·e^{m_j} + α)` is fixed at creation from current activation; aging is power-law over the trace history). Activation-dependent decay reproduces the spacing effect — spaced re-presentation at low activation earns a low `d_j` and durable strength — subject to the documented retention-interval crossover (spaced wins only at sufficiently delayed tests). Perception seeds the separate non-decaying evidence prior `P_i` on allocation (encoding surprise), and feedback / social reinforcement update it |
+| G3 | Retained-action dynamics | Readout and time interactions act on the multi-trace base level `B_i` (committed access appends a trace whose per-trace decay rate `d_j = m_type·(c·e^{m_j} + α)` is fixed at creation from current activation; aging is power-law over the trace history). Activation-dependent decay reproduces the spacing effect — spaced re-presentation at low activation earns a low `d_j` and durable strength — subject to the documented retention-interval crossover (spaced wins only at sufficiently delayed tests). Perception seeds the separate non-decaying evidence prior `P_i` on allocation (encoding surprise), and explicit feedback can update it |
 | G4 | Associative retrieval | Text, vector, and activation-flow results merge into one context package |
 | G5 | Contradiction visibility | Conflicting relations are returned as frustration/tension instead of hidden |
-| G6 | Scoped memory | Session, project, and universal scopes affect retrieval and promotion |
-| G7 | Multi-agent provenance | Every fragment preserves producing agent and session |
+| G6 | Scope-aware ranking | Session, project, and universal scope labels influence retrieval applicability and ranking; authorization remains external |
+| G7 | Producer provenance | Every persisted fragment preserves producer and session origin |
 | G8 | Pluggable storage | Storage implementations can be swapped behind one trait |
 | G9 | Local-first default | The engine starts without a server, using in-memory or file-backed SQLite |
 | G10 | Snapshot and restore | Graph state can be captured and restored for experiments and debugging |
+
+## ADR-0015 Acceptance Criteria
+
+The following criteria apply to the proposed evidence-catalog extension and are
+not claims about the current API:
+
+| ID | Capability | Completion Criterion |
+|---|---|---|
+| E1 | Evidence-complete recall | Complex queries retrieve bounded, source-grounded fact chains that cover declared evidence slots without weakening direct recall |
+| E2 | Formation integrity | Derived facts, relations, and observations retain exact provenance, admission class, time, scope, and reversible lifecycle |
 
 ## Non-Goals
 
@@ -23,6 +33,8 @@ This chapter fixes what Anamnesis is responsible for and what it deliberately le
 - The core does not orchestrate sessions or expose an HTTP server.
 - The core does not replace vector database products.
 - The core does not automatically decide that all knowledge is true.
+- The core does not treat extracted or synthesized text as more authoritative
+  than its cited source.
 - The core does not overwrite original fragments with summaries.
 - The core does not treat visualization coordinates as semantic distance.
 - The core does not include remote sync or an authorization server.
@@ -49,6 +61,9 @@ The following can be built on top of the core but should not be placed inside it
 - UI and graph visualization.
 - Multi-tenant authorization.
 - LLM-based adjudication of conflicts.
+- Provider-specific reflection and multimodal interpretation. Consumers own
+  these today; ADR-0015 proposes a common evidence-grounding boundary for their
+  outputs.
 
 ## Design Completion Criteria
 

@@ -14,6 +14,121 @@ use crate::graph::{
 };
 use std::collections::{HashMap, VecDeque};
 
+const ATOMIC_SOURCE_INCARNATION_PREFIX: &str = "anamnesis:source-incarnation:";
+pub(crate) const NODE_INCARNATION_METADATA_KEY: &str = "anamnesis:node-incarnation";
+
+pub(crate) fn atomic_source_incarnation_key(id: NodeId) -> String {
+    format!("{ATOMIC_SOURCE_INCARNATION_PREFIX}{}", id.0)
+}
+
+pub(crate) fn is_atomic_source_incarnation_key(key: &str) -> bool {
+    key.starts_with(ATOMIC_SOURCE_INCARNATION_PREFIX)
+}
+
+/// Fingerprint of the provenance and evidence carried by a raw source node.
+///
+/// `generation` is a backend-owned, durable allocation generation when the
+/// adapter supports one. The default adapter implementation passes `None` and
+/// therefore cannot distinguish byte-identical reuse of a numeric node ID.
+pub(crate) fn atomic_source_incarnation(node: &Node, generation: Option<u64>) -> String {
+    const OFFSET_ONE: u64 = 0xcbf2_9ce4_8422_2325;
+    const OFFSET_TWO: u64 = 0x8422_2325_cbf2_9ce4;
+    const PRIME_ONE: u64 = 0x0000_0100_0000_01b3;
+    const PRIME_TWO: u64 = 0x0000_0100_0000_01e7;
+
+    fn add_field(states: &mut [u64; 2], field: &[u8]) {
+        let length = u64::try_from(field.len()).unwrap_or(u64::MAX);
+        for byte in length.to_le_bytes().iter().chain(field) {
+            states[0] ^= u64::from(*byte);
+            states[0] = states[0].wrapping_mul(PRIME_ONE);
+            states[1] ^= u64::from(*byte);
+            states[1] = states[1].wrapping_mul(PRIME_TWO);
+        }
+    }
+
+    fn source_kind_label(kind: &crate::graph::SourceKind) -> &'static [u8] {
+        use crate::graph::SourceKind;
+        match kind {
+            SourceKind::AgentObservation => b"agent-observation",
+            SourceKind::HumanInput => b"human-input",
+            SourceKind::DocumentExtract => b"document-extract",
+            SourceKind::SystemEvent => b"system-event",
+            SourceKind::Inferred => b"inferred",
+            SourceKind::External => b"external",
+        }
+    }
+
+    let mut states = [OFFSET_ONE, OFFSET_TWO];
+    match generation {
+        Some(value) => {
+            add_field(&mut states, b"generation");
+            add_field(&mut states, &value.to_le_bytes());
+        }
+        None => add_field(&mut states, b"adapter-unversioned"),
+    }
+    add_field(&mut states, &node.id.0.to_le_bytes());
+    add_field(&mut states, node.name.as_bytes());
+    match &node.summary {
+        Some(summary) => {
+            add_field(&mut states, b"summary-present");
+            add_field(&mut states, summary.as_bytes());
+        }
+        None => add_field(&mut states, b"summary-absent"),
+    }
+    add_field(&mut states, node.content.as_bytes());
+    add_field(&mut states, &node.created_at.0.to_le_bytes());
+    add_field(&mut states, &node.updated_at.0.to_le_bytes());
+    match node.valid_from {
+        Some(timestamp) => {
+            add_field(&mut states, b"valid-from");
+            add_field(&mut states, &timestamp.0.to_le_bytes());
+        }
+        None => add_field(&mut states, b"no-valid-from"),
+    }
+    match node.valid_until {
+        Some(timestamp) => {
+            add_field(&mut states, b"valid-until");
+            add_field(&mut states, &timestamp.0.to_le_bytes());
+        }
+        None => add_field(&mut states, b"no-valid-until"),
+    }
+    add_field(&mut states, &node.origin.peer_id.0.to_le_bytes());
+    add_field(&mut states, source_kind_label(&node.origin.source_kind));
+    add_field(&mut states, node.origin.session_id.as_bytes());
+    add_field(&mut states, node.origin.scope.as_str().as_bytes());
+    add_field(&mut states, &node.origin.confidence.to_bits().to_le_bytes());
+    match &node.node_type {
+        KnowledgeType::Identity => add_field(&mut states, b"identity"),
+        KnowledgeType::Semantic => add_field(&mut states, b"semantic"),
+        KnowledgeType::Episodic => add_field(&mut states, b"episodic"),
+        KnowledgeType::Custom(label) => {
+            add_field(&mut states, b"custom");
+            add_field(&mut states, label.as_bytes());
+        }
+    }
+    let mut tags = node
+        .entity_tags
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    tags.sort_unstable();
+    tags.dedup();
+    for tag in tags {
+        add_field(&mut states, tag.as_bytes());
+    }
+    let mut metadata = node
+        .metadata
+        .iter()
+        .filter(|(key, _)| key.as_str() != NODE_INCARNATION_METADATA_KEY)
+        .collect::<Vec<_>>();
+    metadata.sort_by_key(|(key, _)| *key);
+    for (key, value) in metadata {
+        add_field(&mut states, key.as_bytes());
+        add_field(&mut states, value.as_bytes());
+    }
+    format!("v2:{:016x}{:016x}", states[0], states[1])
+}
+
 /// Stable identifier in the isolated atomic-fact sidecar.
 ///
 /// Atomic facts are retrieval representations, not graph nodes. Their IDs
@@ -51,6 +166,114 @@ pub struct AtomicFact {
     pub valid_until: Option<Timestamp>,
     /// Consumer metadata such as extractor version or stable external id.
     pub metadata: HashMap<String, String>,
+}
+
+/// Stable identifier for one reviewed relation between two atomic facts.
+///
+/// Relation IDs live in their own sidecar namespace and never consume graph
+/// [`EdgeId`] values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct AtomicFactRelationId(pub u64);
+
+/// Semantic kind of a reviewed relation between two atomic facts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum AtomicFactRelationKind {
+    /// The source fact provides a reason for the target fact.
+    Reason,
+    /// The source fact causally contributes to the target fact.
+    Causal,
+    /// The source fact supports the target fact.
+    Supports,
+    /// The source fact contradicts the target fact.
+    Contradicts,
+}
+
+/// One reviewed, typed relation in the isolated atomic-fact sidecar.
+///
+/// These relations connect retrieval representations only. They do not enter
+/// graph topology, spreading activation, attraction, or forgetting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct AtomicFactRelation {
+    /// Sidecar-local relation identifier.
+    pub id: AtomicFactRelationId,
+    /// Directed source endpoint.
+    pub from_fact_id: AtomicFactId,
+    /// Directed target endpoint.
+    pub to_fact_id: AtomicFactId,
+    /// Reviewed semantic relation type.
+    pub kind: AtomicFactRelationKind,
+    /// Stable identity of the reviewer or review process.
+    pub reviewed_by: String,
+    /// Review-policy or model profile applied to this decision.
+    pub review_profile: String,
+    /// Time at which the relation was reviewed.
+    pub reviewed_at: Timestamp,
+    /// Stable consumer key used to make repeated promotion idempotent.
+    pub idempotency_key: String,
+    /// Visibility scope for this relation.
+    pub scope: ScopePath,
+    /// Optional relation-validity start.
+    pub valid_from: Option<Timestamp>,
+    /// Optional relation-validity end.
+    pub valid_until: Option<Timestamp>,
+    /// Consumer metadata such as review version or provenance identifiers.
+    pub metadata: HashMap<String, String>,
+}
+
+impl AtomicFactRelation {
+    /// Reconstruct a reviewed relation for a storage adapter.
+    ///
+    /// This constructor exposes every required persisted field while defaulting
+    /// optional validity and metadata to empty values. It does not perform the
+    /// evidence, scope, or endpoint admission enforced by
+    /// [`Memory::add_atomic_fact_relation`](crate::Memory::add_atomic_fact_relation);
+    /// consumers admitting a new relation should use that higher-level API.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        id: AtomicFactRelationId,
+        from_fact_id: AtomicFactId,
+        to_fact_id: AtomicFactId,
+        kind: AtomicFactRelationKind,
+        reviewed_by: impl Into<String>,
+        review_profile: impl Into<String>,
+        reviewed_at: Timestamp,
+        idempotency_key: impl Into<String>,
+        scope: ScopePath,
+    ) -> Self {
+        Self {
+            id,
+            from_fact_id,
+            to_fact_id,
+            kind,
+            reviewed_by: reviewed_by.into(),
+            review_profile: review_profile.into(),
+            reviewed_at,
+            idempotency_key: idempotency_key.into(),
+            scope,
+            valid_from: None,
+            valid_until: None,
+            metadata: HashMap::new(),
+        }
+    }
+
+    /// Attach a half-open validity interval reconstructed by a storage adapter.
+    pub fn with_validity(
+        mut self,
+        valid_from: Option<Timestamp>,
+        valid_until: Option<Timestamp>,
+    ) -> Self {
+        self.valid_from = valid_from;
+        self.valid_until = valid_until;
+        self
+    }
+
+    /// Attach persisted consumer metadata reconstructed by a storage adapter.
+    pub fn with_metadata(mut self, metadata: HashMap<String, String>) -> Self {
+        self.metadata = metadata;
+        self
+    }
 }
 
 /// Storage backend interface for the Anamnesis graph engine.
@@ -119,6 +342,150 @@ pub trait StorageAdapter: Send + Sync {
     /// Return all live atomic-fact IDs in ascending order.
     fn all_atomic_fact_ids(&self) -> Vec<AtomicFactId> {
         Vec::new()
+    }
+
+    /// Return every live atomic-fact ID whose metadata contains an exact
+    /// key-value pair.
+    ///
+    /// Results follow [`all_atomic_fact_ids`](Self::all_atomic_fact_ids)
+    /// ordering. The default implementation keeps third-party adapters source
+    /// compatible; adapters may override it with an indexed lookup.
+    fn atomic_fact_ids_by_metadata(
+        &self,
+        key: &str,
+        value: &str,
+    ) -> Result<Vec<AtomicFactId>, Error> {
+        let mut matches = Vec::new();
+        for fact_id in self.all_atomic_fact_ids() {
+            let fact = self.get_atomic_fact(fact_id)?;
+            if fact
+                .metadata
+                .get(key)
+                .is_some_and(|candidate| candidate == value)
+            {
+                matches.push(fact_id);
+            }
+        }
+        Ok(matches)
+    }
+
+    /// Find the first live atomic fact whose metadata contains an exact
+    /// key-value pair.
+    ///
+    /// Results follow [`all_atomic_fact_ids`](Self::all_atomic_fact_ids)
+    /// ordering. The default implementation keeps third-party adapters source
+    /// compatible; adapters may override it with an indexed lookup.
+    fn atomic_fact_by_metadata(
+        &self,
+        key: &str,
+        value: &str,
+    ) -> Result<Option<&AtomicFact>, Error> {
+        for fact_id in self.all_atomic_fact_ids() {
+            let fact = self.get_atomic_fact(fact_id)?;
+            if fact
+                .metadata
+                .get(key)
+                .is_some_and(|candidate| candidate == value)
+            {
+                return Ok(Some(fact));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Return the current authority fingerprint for one raw source node.
+    ///
+    /// The default is content/provenance based. Adapters that can reuse a
+    /// numeric [`NodeId`] must override this method and incorporate a durable,
+    /// monotonically allocated generation so byte-identical replacements do
+    /// not inherit facts attached to an earlier allocation.
+    fn atomic_source_incarnation(&self, source: &Node) -> Result<String, Error> {
+        Ok(crate::storage::atomic_source_incarnation(source, None))
+    }
+
+    /// Whether an atomic fact was bound to this exact source allocation and
+    /// the source's current authority-bearing fields.
+    ///
+    /// Missing stamps are deliberately not inferred from a live node: legacy
+    /// or partially written facts remain ineligible until they are reviewed
+    /// and written again by the consumer.
+    fn atomic_fact_source_is_current(
+        &self,
+        fact: &AtomicFact,
+        source: &Node,
+    ) -> Result<bool, Error> {
+        let Some(expected) = fact.metadata.get(&atomic_source_incarnation_key(source.id)) else {
+            return Ok(false);
+        };
+        Ok(expected == &self.atomic_source_incarnation(source)?)
+    }
+
+    // Reviewed atomic-fact relation sidecar. Defaults preserve source
+    // compatibility for third-party adapters just as the atomic-fact methods do.
+
+    /// Allocate an ID in the reviewed atomic-fact relation namespace.
+    fn next_atomic_fact_relation_id(&mut self) -> Result<AtomicFactRelationId, Error> {
+        Err(Error::StorageError(
+            "storage adapter does not support atomic fact relations".to_string(),
+        ))
+    }
+
+    /// Persist one complete reviewed atomic-fact relation.
+    fn set_atomic_fact_relation(&mut self, _relation: AtomicFactRelation) -> Result<(), Error> {
+        Err(Error::StorageError(
+            "storage adapter does not support atomic fact relations".to_string(),
+        ))
+    }
+
+    /// Retrieve one reviewed atomic-fact relation.
+    fn get_atomic_fact_relation(
+        &self,
+        _id: AtomicFactRelationId,
+    ) -> Result<&AtomicFactRelation, Error> {
+        Err(Error::StorageError(
+            "storage adapter does not support atomic fact relations".to_string(),
+        ))
+    }
+
+    /// Delete one reviewed atomic-fact relation.
+    fn delete_atomic_fact_relation(&mut self, _id: AtomicFactRelationId) -> Result<(), Error> {
+        Err(Error::StorageError(
+            "storage adapter does not support atomic fact relations".to_string(),
+        ))
+    }
+
+    /// Return all live reviewed relation IDs in ascending order.
+    fn all_atomic_fact_relation_ids(&self) -> Vec<AtomicFactRelationId> {
+        Vec::new()
+    }
+
+    /// Return reviewed relation IDs whose directed source is `id`, in ascending
+    /// relation-ID order.
+    fn atomic_fact_relations_from(&self, _id: AtomicFactId) -> &[AtomicFactRelationId] {
+        &[]
+    }
+
+    /// Return reviewed relation IDs whose directed target is `id`, in ascending
+    /// relation-ID order.
+    fn atomic_fact_relations_to(&self, _id: AtomicFactId) -> &[AtomicFactRelationId] {
+        &[]
+    }
+
+    /// Find one reviewed relation by its stable idempotency key.
+    ///
+    /// The default preserves compatibility for external adapters. Backends
+    /// with a keyed cache or index should override it.
+    fn atomic_fact_relation_by_idempotency_key(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<Option<&AtomicFactRelation>, Error> {
+        for relation_id in self.all_atomic_fact_relation_ids() {
+            let relation = self.get_atomic_fact_relation(relation_id)?;
+            if relation.idempotency_key == idempotency_key {
+                return Ok(Some(relation));
+            }
+        }
+        Ok(None)
     }
 
     // ID allocation
@@ -214,8 +581,8 @@ pub trait StorageAdapter: Send + Sync {
     // ── Persistent reservoirs (decay-exempt evidence prior P_i, conductance) ──
     //
     // `P_i` (`evidence_prior`) is the persistent, decay-exempt log-odds offset
-    // holding encoding surprise, feedback / social reinforcement, and peer trust
-    // (ADR-0008). `conductance` `C_ij` is the edge associative reservoir; `weight`
+    // holding encoding surprise and explicit consumer feedback (ADR-0008 as
+    // narrowed by ADR-0014). `conductance` `C_ij` is the edge associative reservoir; `weight`
     // is its bounded projection. The setters recompute the projection inside the
     // setter (the ADR "commit recomputes projections" step).
 

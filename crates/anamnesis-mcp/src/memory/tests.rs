@@ -1,10 +1,26 @@
 use super::*;
 use crate::proto::RecallEventKind;
-use anamnesis::memory::{ListFilter, NoteOptions, Relation};
+use anamnesis::memory::{AtomicFactInput, ListFilter, NoteOptions, Relation};
 use anamnesis::storage::StorageAdapter;
 
 fn registry(reinforce: bool) -> MemoryRegistry {
     MemoryRegistry::in_memory_with(Arc::new(StubProvider), reinforce)
+}
+
+fn total_access_count(registry: &mut MemoryRegistry) -> u64 {
+    let handle = registry
+        .namespace_handle(None)
+        .expect("default namespace handle");
+    let memory = handle
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let graph = memory.engine().graph();
+    graph
+        .storage()
+        .all_node_ids()
+        .into_iter()
+        .map(|node_id| u64::from(graph.get_node(node_id).expect("live node").access_count))
+        .sum()
 }
 
 #[test]
@@ -461,16 +477,16 @@ fn policy_schema_fresh_and_v0_migration_converge() {
         fresh.schema_fingerprint().expect("fresh schema"),
         migrated.schema_fingerprint().expect("migrated schema")
     );
-    assert_eq!(fresh.schema_version().expect("fresh version"), 4);
-    assert_eq!(migrated.schema_version().expect("migrated version"), 4);
+    assert_eq!(fresh.schema_version().expect("fresh version"), 5);
+    assert_eq!(migrated.schema_version().expect("migrated version"), 5);
 }
 #[test]
-fn policy_schema_v1_to_v4_matches_fresh_v4() {
-    let fresh = PolicyStore::in_memory().expect("fresh v4");
-    let migrated = PolicyStore::from_test_connection(v1_connection()).expect("migrated v4");
+fn policy_schema_v1_to_v5_matches_fresh_v5() {
+    let fresh = PolicyStore::in_memory().expect("fresh v5");
+    let migrated = PolicyStore::from_test_connection(v1_connection()).expect("migrated v5");
 
-    assert_eq!(fresh.schema_version().expect("fresh version"), 4);
-    assert_eq!(migrated.schema_version().expect("migrated version"), 4);
+    assert_eq!(fresh.schema_version().expect("fresh version"), 5);
+    assert_eq!(migrated.schema_version().expect("migrated version"), 5);
     assert_eq!(
         fresh.schema_fingerprint().expect("fresh schema"),
         migrated.schema_fingerprint().expect("migrated schema")
@@ -572,7 +588,7 @@ fn repeated_phase_one_resolution_reuses_namespace_handles() {
 
 #[test]
 fn future_policy_schema_disables_only_policy_features() {
-    let (mut reg, _dir) = registry_with_policy_version(5);
+    let (mut reg, _dir) = registry_with_policy_version(6);
 
     reg.remember("core recall remains available", None)
         .expect("remember");
@@ -906,6 +922,33 @@ impl EmbeddingProvider for ScopedTraceProvider {
     }
 }
 
+struct GroundedEvidenceProvider;
+
+impl EmbeddingProvider for GroundedEvidenceProvider {
+    fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, Error> {
+        Ok(texts
+            .iter()
+            .map(|text| {
+                if text.contains("attributed to Mina") {
+                    vec![1.0, 0.0]
+                } else if text.contains("background chatter") {
+                    vec![0.0, 1.0]
+                } else {
+                    vec![0.3, 0.95]
+                }
+            })
+            .collect())
+    }
+
+    fn dimensions(&self) -> usize {
+        2
+    }
+
+    fn model_name(&self) -> &str {
+        "grounded-evidence"
+    }
+}
+
 fn scoped_test_memory() -> Memory<SqliteStorage> {
     let provider: Arc<dyn EmbeddingProvider> = Arc::new(ScopedTraceProvider);
     let mut mem = Memory::in_memory_with_provider(provider).expect("create scoped test memory");
@@ -957,7 +1000,7 @@ fn verify_embedding_dim_allows_empty_and_matching_but_rejects_mismatch() {
     assert!(msg.contains("ANAMNESIS_EMBED_MODEL"), "{msg}");
 }
 
-// ── Single-tick-per-recall (flagship bug #2) ────────────────────────────
+// ── Single-tick-per-recall invariant ───────────────────────────────────
 
 #[test]
 fn recall_ticks_engine_exactly_once() {
@@ -1353,7 +1396,7 @@ fn recall_packaged_uses_query_aware_temporal_rendering() {
 
     assert!(
         packaged.context.contains("resolved relative time:"),
-        "MCP recall must use the same query-aware product renderer as the benchmark:\n{}",
+        "MCP recall must use the canonical query-aware renderer:\n{}",
         packaged.context
     );
 }
@@ -1455,27 +1498,66 @@ fn cosine_gate_trips_when_top_cosine_below_threshold() {
 }
 
 #[test]
-fn knowledge_only_drops_memories_tensions_and_capture_fragments() {
-    let mut reg = registry(false);
-    let handle = reg.namespace_handle(None).unwrap();
-    let mut mem = handle.lock().unwrap_or_else(|p| p.into_inner());
+fn knowledge_only_keeps_extracted_source_and_hides_unrelated_capture() {
+    let provider: Arc<dyn EmbeddingProvider> = Arc::new(GroundedEvidenceProvider);
+    let mut mem = Memory::in_memory_with_provider(provider).expect("create test memory");
 
-    mem_remember(&mut mem, "distilled: recall gate is cosine-based").unwrap();
-    let mut opts = NoteOptions::default();
-    opts.metadata
+    let mut capture = NoteOptions::default();
+    capture
+        .metadata
         .push(("capture".to_string(), "true".to_string()));
-    mem_remember_with(
-        &mut mem,
-        "captured conversation window about recall gate",
-        opts,
-    )
-    .unwrap();
+    let observed_at = anamnesis::graph::Timestamp::now();
+    let source = mem
+        .add_note_with(
+            "Mina approved the Orchid launch after the final review",
+            observed_at,
+            capture.clone(),
+        )
+        .expect("add captured authoritative source");
+    let unrelated = mem
+        .add_note_with(
+            "unrelated Orchid launch background chatter about lunch",
+            observed_at,
+            capture,
+        )
+        .expect("add unrelated captured chatter");
+    let source_session = mem
+        .engine()
+        .graph()
+        .get_node(source.episodic)
+        .expect("source node")
+        .origin
+        .session_id
+        .clone();
+    let derived_semantic = mem
+        .add_derived_knowledge_with(
+            "The Orchid launch approval is attributed to Mina",
+            observed_at,
+            &source_session,
+            NoteOptions::default(),
+        )
+        .expect("add reviewed knowledge");
+    mem.link_extracted_source(derived_semantic, source.episodic)
+        .expect("link reviewed knowledge to the authoritative turn");
+
+    let source_before = mem
+        .engine()
+        .graph()
+        .get_node(source.episodic)
+        .expect("source node")
+        .access_count;
+    let unrelated_before = mem
+        .engine()
+        .graph()
+        .get_node(unrelated.episodic)
+        .expect("unrelated node")
+        .access_count;
 
     let out = mem_recall_packaged_gated_filtered(
         &mut mem,
-        "recall gate",
+        "The Orchid launch approval is attributed to Mina",
         10,
-        false,
+        true,
         RecallFilters {
             gate: None,
             cosine_gate: None,
@@ -1485,26 +1567,177 @@ fn knowledge_only_drops_memories_tensions_and_capture_fragments() {
         },
         &CognitiveReranker,
     )
-    .unwrap();
+    .expect("knowledge-only production recall");
 
-    assert!(out.packaged.context.contains("## KNOWLEDGE"));
     assert!(
-        !out.packaged.context.contains("## MEMORIES"),
-        "episodic section must be dropped:\n{}",
+        out.packaged.context.contains("## MEMORIES"),
+        "grounded raw evidence must retain an evidence section:\n{}",
+        out.packaged.context
+    );
+    assert!(
+        out.packaged
+            .context
+            .contains("Mina approved the Orchid launch after the final review"),
+        "the exact ExtractedFrom source must be rendered:\n{}",
         out.packaged.context
     );
     assert!(
         !out.packaged
             .context
-            .contains("captured conversation window")
+            .contains("background chatter about lunch"),
+        "unrelated captured chatter must remain hidden:\n{}",
+        out.packaged.context
     );
     assert!(
         out.packaged
             .hits
             .iter()
-            .all(|h| !h.text.contains("captured conversation window")),
-        "capture hits must be dropped: {:?}",
+            .any(|hit| hit.node_id == source.episodic),
+        "the canonical raw representation of reviewed knowledge must remain addressable: {:?}",
         out.packaged.hits
+    );
+    assert!(
+        out.packaged
+            .hits
+            .iter()
+            .all(|hit| hit.node_id != unrelated.episodic),
+        "unrelated capture hits must be dropped: {:?}",
+        out.packaged.hits
+    );
+
+    let source_after = mem
+        .engine()
+        .graph()
+        .get_node(source.episodic)
+        .expect("source node after recall")
+        .access_count;
+    let unrelated_after = mem
+        .engine()
+        .graph()
+        .get_node(unrelated.episodic)
+        .expect("unrelated node after recall")
+        .access_count;
+    assert!(
+        source_after > source_before,
+        "delivered raw evidence must be reinforced"
+    );
+    assert_eq!(
+        unrelated_after, unrelated_before,
+        "a filtered-out capture must not survive in the commit trace"
+    );
+}
+
+#[test]
+fn knowledge_only_keeps_selected_atomic_source_and_hides_unrelated_capture() {
+    let mut reg = registry(false);
+    let handle = reg.namespace_handle(None).unwrap();
+    let mut mem = handle
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let mut capture = NoteOptions::default();
+    capture
+        .metadata
+        .push(("capture".to_string(), "true".to_string()));
+    let source = mem
+        .add_note_with(
+            "Ravi scheduled the Orchid deployment for Tuesday morning",
+            anamnesis::graph::Timestamp(10),
+            capture.clone(),
+        )
+        .expect("add captured atomic source");
+    let unrelated = mem
+        .add_note_with(
+            "unrelated Orchid deployment background chatter about lunch",
+            anamnesis::graph::Timestamp(20),
+            capture,
+        )
+        .expect("add unrelated captured chatter");
+    mem.add_atomic_fact(AtomicFactInput::new(
+        "Ravi scheduled the Orchid deployment for Tuesday morning",
+        vec![source.episodic],
+    ))
+    .expect("add reviewed atomic route");
+
+    let source_before = mem
+        .engine()
+        .graph()
+        .get_node(source.episodic)
+        .expect("atomic source node")
+        .access_count;
+    let unrelated_before = mem
+        .engine()
+        .graph()
+        .get_node(unrelated.episodic)
+        .expect("unrelated node")
+        .access_count;
+
+    let out = mem_recall_packaged_gated_filtered(
+        &mut mem,
+        "List all Orchid deployment schedule details",
+        10,
+        true,
+        RecallFilters {
+            gate: None,
+            cosine_gate: None,
+            scope: None,
+            tag: None,
+            knowledge_only: true,
+        },
+        &CognitiveReranker,
+    )
+    .expect("knowledge-only atomic production recall");
+
+    assert!(
+        out.packaged
+            .context
+            .contains("Ravi scheduled the Orchid deployment for Tuesday morning"),
+        "the selected atomic-only source must be rendered:\n{}",
+        out.packaged.context
+    );
+    assert!(
+        !out.packaged
+            .context
+            .contains("background chatter about lunch"),
+        "unrelated captured chatter must remain hidden:\n{}",
+        out.packaged.context
+    );
+    assert!(
+        out.packaged
+            .hits
+            .iter()
+            .any(|hit| hit.node_id == source.episodic),
+        "the selected atomic raw source must remain addressable: {:?}",
+        out.packaged.hits
+    );
+    assert!(
+        out.packaged
+            .hits
+            .iter()
+            .all(|hit| hit.node_id != unrelated.episodic),
+        "unrelated capture hits must be dropped: {:?}",
+        out.packaged.hits
+    );
+
+    let source_after = mem
+        .engine()
+        .graph()
+        .get_node(source.episodic)
+        .expect("atomic source node after recall")
+        .access_count;
+    let unrelated_after = mem
+        .engine()
+        .graph()
+        .get_node(unrelated.episodic)
+        .expect("unrelated node after recall")
+        .access_count;
+    assert!(
+        source_after > source_before,
+        "delivered atomic raw evidence must be reinforced"
+    );
+    assert_eq!(
+        unrelated_after, unrelated_before,
+        "a filtered-out capture must not survive in the commit trace"
     );
 }
 
@@ -1624,6 +1857,20 @@ fn unfiltered_fast_path_has_the_same_trace_as_filtered_path() {
 
     assert_eq!(fast.trace, filtered.trace);
     assert_eq!(fast.packaged.hits.len(), filtered.packaged.hits.len());
+    assert_eq!(fast.packaged.context, filtered.packaged.context);
+    assert_eq!(
+        fast.packaged
+            .hits
+            .iter()
+            .map(|hit| hit.node_id)
+            .collect::<Vec<_>>(),
+        filtered
+            .packaged
+            .hits
+            .iter()
+            .map(|hit| hit.node_id)
+            .collect::<Vec<_>>()
+    );
 }
 
 #[test]
@@ -1710,16 +1957,15 @@ fn gated_recall_none_gate_never_filters() {
     assert!(gated.packaged.context.contains("##"));
 }
 
-/// `reinforce = false` is a pure read: repeated reads never lift base-level
-/// salience (it only decays under the ticks), while `reinforce = true` does
-/// lift it via the `used()` commit.
+/// `reinforce = false` is a pure read: repeated reads never add access traces,
+/// while `reinforce = true` commits the delivered package through `used()`.
 #[test]
 fn read_only_recall_does_not_reinforce_but_reinforcing_does() {
-    // Read-only: salience must not climb across repeated reads.
+    // Read-only: ticks may decay salience, but must not append access traces.
     let mut ro = registry(false);
     ro.remember("the auth bug was a race in the middleware", None)
         .unwrap();
-    let ro_before = ro.stats(None).unwrap().avg_salience;
+    let ro_before = total_access_count(&mut ro);
     for _ in 0..3 {
         let pkg = ro
             .recall_packaged_gated("auth race condition", 5, None, Some(false), None, None)
@@ -1729,25 +1975,27 @@ fn read_only_recall_does_not_reinforce_but_reinforcing_does() {
             "each read should still return the hit"
         );
     }
-    let ro_after = ro.stats(None).unwrap().avg_salience;
-    assert!(
-        ro_after <= ro_before,
-        "read-only recall must not increase salience: {ro_before} -> {ro_after}"
+    let ro_after = total_access_count(&mut ro);
+    assert_eq!(
+        ro_after, ro_before,
+        "read-only recall must not add accesses"
     );
 
-    // Reinforcing: salience should climb under the same reads.
+    // Reinforcing: the delivered package must append access traces. Comparing
+    // graph-wide average salience is incorrect because unselected sibling
+    // representations continue to decay while selected evidence is touched.
     let mut rw = registry(false);
     rw.remember("the auth bug was a race in the middleware", None)
         .unwrap();
-    let rw_before = rw.stats(None).unwrap().avg_salience;
+    let rw_before = total_access_count(&mut rw);
     for _ in 0..3 {
         rw.recall_packaged_gated("auth race condition", 5, None, Some(true), None, None)
             .unwrap();
     }
-    let rw_after = rw.stats(None).unwrap().avg_salience;
+    let rw_after = total_access_count(&mut rw);
     assert!(
         rw_after > rw_before,
-        "reinforcing recall must increase salience: {rw_before} -> {rw_after}"
+        "reinforcing recall must append accesses: {rw_before} -> {rw_after}"
     );
 }
 
@@ -1775,22 +2023,22 @@ fn gated_out_recall_never_reinforces_even_when_asked() {
 
 /// `recall_packaged` (the classic entry) still behaves exactly as before:
 /// it delegates to the gated method with the registry's reinforce default
-/// and no gate. With `reinforce_on_recall = true` it lifts salience.
+/// and no gate. With `reinforce_on_recall = true` it commits access traces.
 #[test]
 fn recall_packaged_preserves_classic_reinforcing_behavior() {
     let mut reg = registry(true); // reinforce_on_recall = true
     reg.remember("the auth bug was a race in the middleware", None)
         .unwrap();
-    let before = reg.stats(None).unwrap().avg_salience;
+    let before = total_access_count(&mut reg);
     for _ in 0..3 {
         let pkg = reg.recall_packaged("auth race condition", 5, None).unwrap();
         assert!(!pkg.hits.is_empty());
         assert!(pkg.context.contains("##"));
     }
-    let after = reg.stats(None).unwrap().avg_salience;
+    let after = total_access_count(&mut reg);
     assert!(
         after > before,
-        "classic recall_packaged with reinforce default on must lift salience: {before} -> {after}"
+        "classic recall_packaged with reinforce default on must append accesses: {before} -> {after}"
     );
 }
 

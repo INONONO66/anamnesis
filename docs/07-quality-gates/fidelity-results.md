@@ -74,7 +74,7 @@ settled query-local activation when the random walk is seeded at the hub (read-o
 no mutation).
 
 **What it shows:** target activation falls as the cue's associative strength is
-divided across more competitors — *exactly* **1/fan**: the engine's row-stochastic RWR
+divided across more outgoing associations — *exactly* **1/fan**: the engine's row-stochastic RWR
 splits the hub's outgoing probability equally across N edges, so activation(N) =
 activation(1)/N (the dashed reference, anchored at fan = 1). This is the computational
 form of Anderson's fan effect — more associations from a cue means weaker recall of

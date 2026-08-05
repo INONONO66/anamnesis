@@ -606,7 +606,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn r2_process_passes_stdin_returns_json_and_records_duration() {
+    async fn process_passes_stdin_returns_json_and_records_duration() {
         let output = completes_within(run_provider(
             &fixture_command("valid", []),
             b"{\"message\":\"hello\"}\n",
@@ -621,7 +621,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn r2_process_nonzero_exit_exposes_only_typed_metadata() {
+    async fn process_nonzero_exit_exposes_only_typed_metadata() {
         let error = completes_within(run_provider(
             &fixture_command("nonzero", []),
             b"{}\n",
@@ -643,7 +643,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn r2_process_rejects_each_stream_over_its_independent_limit() {
+    async fn process_rejects_each_stream_over_its_independent_limit() {
         completes_within(async {
             let over_limit = OUTPUT_LIMIT * 4;
             for (script, stream) in [
@@ -670,7 +670,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn r2_process_nonzero_exit_precedes_simultaneous_stdin_close_failure() {
+    async fn process_nonzero_exit_precedes_simultaneous_stdin_close_failure() {
         let command = ExtractCommand {
             program: "/bin/sh".into(),
             args: vec!["-c".into(), "sleep 0.05; exit 7".into()],
@@ -695,7 +695,7 @@ mod tests {
         );
     }
     #[tokio::test(flavor = "multi_thread")]
-    async fn r2_process_timeout_kills_and_reaps_the_entire_process_group() {
+    async fn process_timeout_kills_and_reaps_the_entire_process_group() {
         let tempdir = tempfile::tempdir().expect("temporary pidfile directory");
         let pidfile = tempdir.path().join("background.pid");
         completes_within(async {

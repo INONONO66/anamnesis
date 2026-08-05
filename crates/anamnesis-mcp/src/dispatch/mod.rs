@@ -4,7 +4,7 @@
 //! socket, and the `--embedded serve` in-process path) produces byte-identical
 //! output. This module has NO rmcp dependency; MCP lives only in `server.rs`.
 //!
-//! # Two-phase locking (registry-lock-starvation fix, O2)
+//! # Two-phase locking
 //!
 //! `dispatch` takes `&Arc<Mutex<MemoryRegistry>>`, NOT a held `&mut
 //! MemoryRegistry` — that distinction is the whole fix. Every arm below runs in
@@ -151,6 +151,7 @@ fn request_namespace(req: &Request) -> Option<&str> {
         | Request::Remember { namespace, .. }
         | Request::Relate { namespace, .. }
         | Request::Ingest { namespace, .. }
+        | Request::IngestAttachmentTranscript { namespace, .. }
         | Request::Stats { namespace, .. }
         | Request::PullPending { namespace, .. }
         | Request::ExtractionStatus { namespace }
@@ -503,8 +504,8 @@ fn dispatch_registry(registry: &Arc<Mutex<MemoryRegistry>>, req: Request) -> Res
             // Phase 3: commit registry-shared state (captured_turns,
             // seen_turn_keys, unextracted) regardless of overall outcome, then
             // format the reply. The queue slot is enqueued under the SAME
-            // canonical key the ingest actually wrote into (P1-T4: isolated
-            // per namespace, not a single global queue).
+            // canonical key the ingest actually wrote into, isolated per
+            // namespace rather than a single global queue.
             let mut reg = registry.lock().unwrap_or_else(|p| p.into_inner());
             reg.ops.captured_turns += phase2.committed.len() as u64;
             let ns_key = reg.canonical_ns_key(namespace.as_deref());
@@ -526,6 +527,76 @@ fn dispatch_registry(registry: &Arc<Mutex<MemoryRegistry>>, req: Request) -> Res
                     reg.ops.dispatch_errors += 1;
                     reg.ops.ingest_errors += 1;
                     Response::internal(e)
+                }
+            }
+        }
+        Request::IngestAttachmentTranscript {
+            transcript,
+            session,
+            attachment_id,
+            attachment_sha256,
+            processor_provider,
+            processor_model,
+            processor_profile,
+            processor_schema,
+            confidence,
+            observed_at_ms,
+            namespace,
+            scope,
+            tags,
+        } => {
+            // Phase 1: validate caller-owned provenance before opening or
+            // locking a namespace, then resolve the canonical handle.
+            let handle_and_input = {
+                let mut reg = registry.lock().unwrap_or_else(|p| p.into_inner());
+                let input = memory::AttachmentTranscriptInput {
+                    transcript,
+                    session,
+                    attachment_id,
+                    attachment_sha256,
+                    processor_provider,
+                    processor_model,
+                    processor_profile,
+                    processor_schema,
+                    confidence,
+                    observed_at: observed_at_ms.map(Timestamp).unwrap_or_else(Timestamp::now),
+                    scope,
+                    tags,
+                };
+                let source = match memory::build_attachment_source_fragment(input) {
+                    Ok(source) => source,
+                    Err(error) => {
+                        reg.ops.dispatch_errors += 1;
+                        return Response::invalid_params(error);
+                    }
+                };
+                match reg.namespace_handle(namespace.as_deref()) {
+                    Ok(handle) => (handle, source),
+                    Err(error) => {
+                        reg.ops.dispatch_errors += 1;
+                        return Response::internal(error);
+                    }
+                }
+            };
+
+            // Phase 2: one raw Episodic source write under the namespace lock.
+            let (handle, input) = handle_and_input;
+            let result = {
+                let mut mem = handle.lock().unwrap_or_else(|p| p.into_inner());
+                memory::mem_add_source_fragment(&mut mem, input)
+            };
+
+            // Phase 3: classify input failures separately from storage faults.
+            match result {
+                Ok(id) => Response::ok(format!("stored source fragment {id}")),
+                Err(error) => {
+                    let mut reg = registry.lock().unwrap_or_else(|p| p.into_inner());
+                    reg.ops.dispatch_errors += 1;
+                    if memory::is_caller_error(&error) {
+                        Response::invalid_params(error)
+                    } else {
+                        Response::internal(error)
+                    }
                 }
             }
         }

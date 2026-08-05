@@ -1,4 +1,4 @@
-//! Additive directed RWR convergence and conservation invariants (Phase 3).
+//! Additive directed RWR convergence and conservation invariants.
 //!
 //! The retrieval flow is `a_next = alpha*seed + (1-alpha)*transpose(P)*a` over
 //! row-stochastic conductance transitions (ADR-0005). Seed mass is L1-normalized

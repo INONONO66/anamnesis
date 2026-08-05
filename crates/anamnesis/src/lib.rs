@@ -8,16 +8,15 @@
 //!
 //! | Surface | Type | When to use |
 //! |:--------|:-----|:------------|
-//! | **Framework API** | [`Memory`] | Default. Product recall path used by quality evaluation. |
+//! | **Framework API** | [`Memory`] | Default conversation ingest and source-aware recall path. |
 //! | **Kernel API** | [`Engine`] | Custom node/edge types, encoding strategy, or lifecycle control. |
 //!
 //! ## Framework API — `Memory` (front door)
 //!
-//! [`Memory`] ships the encoding recipe and canonical reranked-recall pipeline
-//! used by the LoCoMo and LongMemEval harnesses: speaker-prefixed episodic
-//! turns, ±1-window semantic views, source-aware evidence documents, local
-//! reranking, deep selection, and commit-safe packaging. Benchmark scores still
-//! depend on the configured models, dataset split, and answer/judge settings.
+//! [`Memory`] ships the canonical conversation encoding and reranked-recall
+//! pipeline: speaker-prefixed episodic turns, bounded semantic windows,
+//! source-aware evidence documents, local reranking, evidence selection, and
+//! commit-safe packaging.
 //!
 //! ```rust,no_run
 //! # #[cfg(feature = "embed")]
@@ -34,7 +33,7 @@
 //! mem.add("session-1", "Alice", "I prefer dark mode", now)?;
 //! mem.add("session-1", "Bob",   "Got it, dark mode it is", now)?;
 //!
-//! // 3. Run the same reranked product path used by quality evaluation
+//! // 3. Run canonical reranked recall
 //! let reranker = FastEmbedReranker::new()?;
 //! let recall = mem.search_reranked(
 //!     "display preferences",
@@ -55,14 +54,15 @@
 //!
 //! **Use `Memory`** unless you need custom node/edge types, your own ingest
 //! representation, or custom packaging policy — then drop to **`Engine`** (the
-//! kernel API). `Memory` is built
-//! entirely on `Engine`'s public API: anything it does, you can do.
+//! kernel API). Both surfaces use the same graph and storage semantics; the
+//! framework surface additionally owns its canonical ingest and packaging
+//! contracts.
 //!
 //! ## Kernel API — `Engine`
 //!
 //! [`Engine`] is the raw substrate: spreading activation, conductance,
 //! dissipation, frustration, identity, and debug lifecycle. Retrieval quality
-//! depends on your encoding choices — the validated recipe is [`Memory`].
+//! depends on your encoding choices — the canonical framework recipe is [`Memory`].
 //! See [`docs/`](https://github.com/INONONO66/anamnesis/tree/main/docs) for the
 //! full technical specification.
 //!
@@ -70,7 +70,7 @@
 //!
 //! | Namespace | Purpose |
 //! |:----------|:--------|
-//! | [`anamnesis::memory`](crate::memory) | Framework API — `Memory`, `Hit`, `Recall`, `SearchTuning`, `AddReceipt` |
+//! | [`anamnesis::memory`](crate::memory) | Framework API — `Memory`, source inputs, recall and rendering types |
 //! | [`anamnesis::engine`](crate::engine) | Kernel API — `Engine`, `EngineConfig`, graph types, storage, embeddings |
 //!
 //! ## Public API contract
@@ -79,7 +79,7 @@
 //! namespaces:
 //!
 //! - **Root**: [`Memory`], [`Engine`], [`Error`]
-//! - **Framework**: [`anamnesis::memory`](crate::memory) — `Memory`, `Hit`, `Recall`, `SearchTuning`, `AddReceipt`
+//! - **Framework**: [`anamnesis::memory`](crate::memory) — `Memory`, source inputs, recall and rendering types
 //! - **Kernel**: [`anamnesis::engine`](crate::engine) — `Engine`, `EngineConfig`, graph types, query types,
 //!   observability, storage, and embeddings
 //!

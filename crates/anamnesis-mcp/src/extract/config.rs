@@ -182,7 +182,7 @@ mod tests {
     }
 
     #[test]
-    fn r2_mode_recognizes_only_off_and_shadow() {
+    fn mode_recognizes_only_off_and_shadow() {
         let default = ExtractMode::parse(None);
         assert_eq!(default.mode, ExtractMode::Off);
         assert!(default.warning.is_none());

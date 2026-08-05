@@ -1,10 +1,7 @@
-//! Insight-recall quality gate (`remember` = `add_note` mode).
+//! End-to-end recall regression test for the `remember` (`add_note`) path.
 //!
-//! The published LoCoMo/LongMemEval numbers measure *conversation* ingest. The
-//! MCP server's `remember` path stores distilled insights via `add_note`, which
-//! is a different memory mode with no existing benchmark. This module is its
-//! gate: a small labeled set of insights + queries, scored with the real bge
-//! model through the same `MemoryRegistry::recall` the server uses.
+//! The fixture exercises the real embedding model and the same
+//! `MemoryRegistry::recall` path used by the server.
 //!
 //! Run it (the model lives in the repo cache):
 //! ```sh
@@ -34,7 +31,7 @@ const INSIGHTS: &[&str] = &[
     "pdf export broke on unicode filenames until we switched to content-disposition rfc 5987",
 ];
 
-/// `(query, index-into-INSIGHTS of the gold answer)`.
+/// `(query, index into INSIGHTS of the expected source)`.
 const QUERIES: &[(&str, usize)] = &[
     ("how did we solve the login concurrency bug", 0),
     ("why did we pick our database", 1),
@@ -54,9 +51,7 @@ const QUERIES: &[(&str, usize)] = &[
     ("the unicode filename export bug", 15),
 ];
 
-/// Gate: minimum Recall@5 the insight path must clear. Measured baseline on this
-/// set is 0.94 (R@1 0.375, R@10 1.0, MRR 0.51) with the dedup recall; 0.80 is the
-/// regression floor. Raise it as the recipe improves, never silently lower it.
+/// Minimum Recall@5 required by this fixed regression fixture.
 const GATE_RECALL_AT_5: f64 = 0.80;
 
 #[test]
@@ -79,10 +74,10 @@ fn insight_recall_quality_gate() {
     let mut mrr_sum = 0.0_f64;
     let mut found = 0usize;
 
-    for (query, gold) in QUERIES {
-        let gold_text = INSIGHTS[*gold];
+    for (query, expected) in QUERIES {
+        let expected_text = INSIGHTS[*expected];
         let hits = reg.recall(query, 10, None).expect("recall");
-        match hits.iter().position(|h| h.text == gold_text) {
+        match hits.iter().position(|h| h.text == expected_text) {
             Some(rank) => {
                 found += 1;
                 mrr_sum += 1.0 / (rank as f64 + 1.0);
@@ -92,7 +87,7 @@ fn insight_recall_quality_gate() {
                     }
                 }
             }
-            None => eprintln!("  MISS  q={query:?}  gold={gold_text:?}"),
+            None => eprintln!("  MISS  q={query:?}  expected={expected_text:?}"),
         }
     }
 

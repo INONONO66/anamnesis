@@ -17,7 +17,7 @@ total = (B_i + P_i) + sum_j W_j * S_ji
       = log posterior odds
 ```
 
-Retained action is prior need-odds and decomposes into two terms: the base-level `B_i = ln( Σ_j (now − t_j)^(−d_j) )` over the node's access-trace history, where each `d_j = m_type · ( c · e^{m_j} + α )` is computed from activation `m_j` at trace creation (which owns power-law forgetting and use-driven reinforcement, including the genuine spacing effect) plus the evidence prior `P_i` (encoding surprise, feedback / social reinforcement, peer trust), a decay-exempt evidence offset. Conductance is the likelihood-ratio contribution of a cue. Retrieval computes posterior need-odds. `salience` is the bounded projection of the sum, `s_i = logistic(B_i + P_i)`; `edge weight` is a bounded projection of `C_ij`.
+Retained action is prior need-odds and decomposes into two terms: the base-level `B_i = ln( Σ_j (now − t_j)^(−d_j) )` over the node's access-trace history, where each `d_j = m_type · ( c · e^{m_j} + α )` is computed from activation `m_j` at trace creation (which owns power-law forgetting and use-driven reinforcement, including the genuine spacing effect) plus the evidence prior `P_i` (encoding surprise and explicit consumer feedback), a decay-exempt evidence offset. Conductance is the likelihood-ratio contribution of a cue. Retrieval computes posterior need-odds. `salience` is the bounded projection of the sum, `s_i = logistic(B_i + P_i)`; `edge weight` is a bounded projection of `C_ij`.
 
 The resulting rule is strict: **do not set these magnitudes directly**. Graph state changes only through integrated interactions whose increments are justified by Bayesian/ACT-R meaning.
 
@@ -46,7 +46,7 @@ Retrieval settles quickly inside a query and stores nothing. Maintenance and com
 | node type | leakage prior, packaging bucket, coupling prior |
 | retained action | salience projection (`logistic(B_i + P_i)`), readout prior, maintenance; access-trace history feeds `B_i`, the evidence prior is `P_i` |
 | conductance | activation flow, path selection, consolidation |
-| origin | scope, trust, peer reflection |
+| origin | peer, session, source-kind, scope, and confidence provenance |
 | valid interval | temporal validity filtering (search path) |
 | embedding | field alignment, surprise, cold-start coupling |
 
@@ -72,7 +72,7 @@ Retrieval settles quickly inside a query and stores nothing. Maintenance and com
 | frustration | contradiction constraints, active response | tension trace | surfaced conflict | constraint stress |
 | readout | flow, impedance, scope, stress | nothing persistent | ranked sites | posterior odds crosses sink/threshold |
 | interaction | committed usage event | access trace (appended at `now` → `B_i`), evidence prior `P_i` (feedback `dP_i = eta·(lambda − predicted_i)`), conductance | update report | prediction-error and flux integration |
-| social | peer metadata | entity coupling or evidence prior `P_i` (peer trust) | reflect report | peer evidence updates coupling/`P_i` |
+| feedback | explicit consumer signal | evidence prior `P_i` | commit report | prediction-error update of durable evidence |
 
 ## Computation Style
 
@@ -116,4 +116,4 @@ The restart rate is derived from associative reach, not chosen as an arbitrary k
 - [interactions.md](interactions.md): committed work, reinforcement, and flux traces.
 - [frustration.md](frustration.md): contradiction as constraint stress.
 - [energy.md](energy.md): symmetric Lyapunov caveat vs directed RWR.
-- [social.md](social.md): peer evidence, coupling, and trust updates.
+- [social.md](social.md): explicit feedback and the boundary between provenance and trust.

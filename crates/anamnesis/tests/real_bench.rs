@@ -22,7 +22,7 @@ use eval_common::real_bench::dataset::{
 use eval_common::real_bench::graph::{
     CachingProvider, DerivedMemoryRecord, DerivedMemoryRelation, DerivedRelationKind, EvalOptions,
     build_memory_graph, build_memory_graph_with_derived, evaluate_question_with_context,
-    evaluate_questions, run_warmup, speaker_cue_tags,
+    evaluate_questions, run_warmup,
 };
 
 #[derive(Clone, Default)]
@@ -87,13 +87,13 @@ fn locomo_loader_preserves_evidence_turn_ids() {
         BenchDatasetName::Locomo,
         &json!([{
             "session_1": [
-                {"dia_id": "D1:1", "speaker": "Caroline", "text": "Opening"},
-                {"dia_id": "D1:2", "speaker": "Melanie", "text": "Caroline adopted a corgi named Pixel."},
-                {"dia_id": "D1:3", "speaker": "Caroline", "text": "Pixel joined agility class."}
+                {"dia_id": "D1:1", "speaker": "Alpha", "text": "Opening"},
+                {"dia_id": "D1:2", "speaker": "Beta", "text": "Alpha adopted a corgi named Pixel."},
+                {"dia_id": "D1:3", "speaker": "Alpha", "text": "Pixel joined agility class."}
             ],
             "session_1_date_time": "1:56 pm on 8 May, 2023",
             "qa": [{
-                "question": "What dog did Caroline adopt?",
+                "question": "What dog did Alpha adopt?",
                 "answer": "Pixel",
                 "category": 1,
                 "evidence": ["D1:2; D1:3"]
@@ -192,7 +192,7 @@ fn frozen_derived_memory_is_additive_provenance_linked_and_session_preserving() 
         kind: DerivedRelationKind::Supports,
     }];
     let built = build_memory_graph_with_derived(
-        &loaded,
+        loaded.formation_input(),
         Arc::new(CachingProvider::new(
             Arc::new(CountingEmbedder::default()),
             None,
@@ -204,7 +204,7 @@ fn frozen_derived_memory_is_additive_provenance_linked_and_session_preserving() 
 
     assert_eq!(built.stats.derived_nodes_created, 0);
     assert_eq!(built.stats.atomic_facts_created, 2);
-    assert_eq!(built.stats.atomic_relations_recorded, 1);
+    assert_eq!(built.stats.derived_relations_validated, 1);
     assert_eq!(built.stats.reasoning_edges_created, 0);
     assert_eq!(
         built
@@ -234,7 +234,7 @@ fn frozen_derived_memory_is_additive_provenance_linked_and_session_preserving() 
                     .engine()
                     .graph()
                     .get_node(*node_id)
-                    .is_ok_and(|node| node.metadata.contains_key("anamnesis:benchmark-derived-id"))
+                    .is_ok_and(|node| node.metadata.contains_key("anamnesis:derived-record-id"))
             })
             .count(),
         0,
@@ -257,7 +257,7 @@ fn frozen_derived_memory_is_additive_provenance_linked_and_session_preserving() 
                 .ok()
                 .filter(|fact| {
                     fact.metadata
-                        .get("anamnesis:benchmark-derived-id")
+                        .get("anamnesis:derived-record-id")
                         .is_some_and(|value| value == "home")
                 })
                 .cloned()
@@ -280,7 +280,7 @@ fn frozen_derived_memory_is_additive_provenance_linked_and_session_preserving() 
                     .get_atomic_fact(*fact_id)
                     .is_ok_and(|node| {
                         node.metadata
-                            .get("anamnesis:benchmark-derived-id")
+                            .get("anamnesis:derived-record-id")
                             .is_some_and(|value| value == "home")
                     })
             })
@@ -300,10 +300,6 @@ fn frozen_derived_memory_is_additive_provenance_linked_and_session_preserving() 
             .get_node(*source_id)
             .is_ok_and(|source| source.node_type == KnowledgeType::Episodic)),
         "sidecar provenance must cite only raw Episodic sources"
-    );
-    assert!(
-        sidecar.metadata.contains_key("anamnesis:relations"),
-        "sidecar relation metadata must remain available without graph edges"
     );
 }
 
@@ -343,7 +339,7 @@ fn canonical_grounded_memory_keeps_exact_live_source_ranges() {
     };
 
     let built = build_memory_graph_with_derived(
-        &loaded,
+        loaded.formation_input(),
         Arc::new(CachingProvider::new(
             Arc::new(CountingEmbedder::default()),
             None,
@@ -418,7 +414,7 @@ fn canonical_grounded_memory_keeps_exact_live_source_ranges() {
         unresolved_subject.subject = Some(unresolved.to_owned());
         unresolved_subject.content = format!("{unresolved} moved to Seoul");
         let error = build_memory_graph_with_derived(
-            &loaded,
+            loaded.formation_input(),
             Arc::new(CachingProvider::new(
                 Arc::new(CountingEmbedder::default()),
                 None,
@@ -494,7 +490,7 @@ fn frozen_derived_memory_cannot_cross_samples_with_reused_raw_ids() {
     }];
 
     let built = build_memory_graph_with_derived(
-        &sample_zero,
+        sample_zero.formation_input(),
         Arc::new(CachingProvider::new(
             Arc::new(CountingEmbedder::default()),
             None,
@@ -568,11 +564,11 @@ fn graph_build_warmup_and_evaluation_use_embeddings_and_commit() {
         BenchDatasetName::Locomo,
         &json!([{
             "session_1": [
-                {"dia_id": "D1:1", "speaker": "Caroline", "text": "Caroline adopted a corgi named Pixel."},
-                {"dia_id": "D1:2", "speaker": "Melanie", "text": "Pixel likes agility practice."}
+                {"dia_id": "D1:1", "speaker": "Alpha", "text": "Alpha adopted a corgi named Pixel."},
+                {"dia_id": "D1:2", "speaker": "Beta", "text": "Pixel likes agility practice."}
             ],
             "qa": [{
-                "question": "What is Caroline's corgi named?",
+                "question": "What is Alpha's corgi named?",
                 "answer": "Pixel",
                 "category": 1,
                 "evidence": ["D1:1"]
@@ -589,7 +585,7 @@ fn graph_build_warmup_and_evaluation_use_embeddings_and_commit() {
 
     let embedder = CountingEmbedder::default();
     let mut built = build_memory_graph(
-        &loaded,
+        loaded.formation_input(),
         Arc::new(CachingProvider::new(Arc::new(embedder.clone()), None)),
     )
     .expect("graph builds");
@@ -633,16 +629,16 @@ fn graph_build_warmup_and_evaluation_use_embeddings_and_commit() {
     assert_eq!(
         episodic_contents,
         vec![
-            "Caroline: Caroline adopted a corgi named Pixel.".to_string(),
-            "Melanie: Pixel likes agility practice.".to_string(),
+            "Alpha: Alpha adopted a corgi named Pixel.".to_string(),
+            "Beta: Pixel likes agility practice.".to_string(),
         ]
     );
     assert_eq!(
         semantic_contents,
         vec![
-            "Caroline: Caroline adopted a corgi named Pixel.\nMelanie: Pixel likes agility practice."
+            "Alpha: Alpha adopted a corgi named Pixel.\nBeta: Pixel likes agility practice."
                 .to_string(),
-            "Caroline: Caroline adopted a corgi named Pixel.\nMelanie: Pixel likes agility practice."
+            "Alpha: Alpha adopted a corgi named Pixel.\nBeta: Pixel likes agility practice."
                 .to_string(),
         ]
     );
@@ -704,7 +700,6 @@ fn graph_build_warmup_and_evaluation_use_embeddings_and_commit() {
         &EvalOptions {
             top_k: 3,
             screen_top_k: vec![1, 3],
-            screen_source_dedup: true,
             ..Default::default()
         },
     )
@@ -723,16 +718,6 @@ fn graph_build_warmup_and_evaluation_use_embeddings_and_commit() {
     );
     assert!(evaluated.selection_variants.contains_key("top-1"));
     assert!(evaluated.selection_variants.contains_key("top-3"));
-    assert!(
-        evaluated
-            .selection_variants
-            .contains_key("source-dedup-top-1")
-    );
-    assert!(
-        evaluated
-            .selection_variants
-            .contains_key("source-dedup-top-3")
-    );
     assert!(answer_context.product_context.contains("## "));
     assert!(answer_context.product_context.contains("└ origin:"));
     assert!(!answer_context.product_context.contains("retrieved-"));
@@ -793,46 +778,6 @@ fn missing_dataset_path_returns_clear_error() {
     .expect_err("missing dataset should fail");
 
     assert!(err.to_string().contains("Dataset not found"));
-}
-
-#[test]
-fn speaker_cue_tags_match_question_mentions() {
-    let speakers = vec![
-        "Caroline".to_string(),
-        "Melanie".to_string(),
-        "user".to_string(),
-    ];
-    let tags = speaker_cue_tags(&speakers, "What did Caroline say about the trip?");
-    assert_eq!(tags, vec!["speaker-caroline".to_string()]);
-    // Generic roles never become cues.
-    assert!(speaker_cue_tags(&speakers, "what did the user say").is_empty());
-}
-
-#[test]
-fn speaker_cue_tags_require_whole_token_matches() {
-    let speakers = vec!["Tim".to_string(), "Sam".to_string(), "Nate".to_string()];
-    // Substrings inside words must never fire ("times", "same", "donate").
-    assert!(speaker_cue_tags(&speakers, "How many times did they meet?").is_empty());
-    assert!(speaker_cue_tags(&speakers, "Did they order the same dish?").is_empty());
-    assert!(speaker_cue_tags(&speakers, "Did Melanie donate to charity?").is_empty());
-    // Whole-token mentions still match, including with punctuation, and the
-    // output preserves the input speaker order.
-    assert_eq!(
-        speaker_cue_tags(&speakers, "What did Tim, not Sam, decide?"),
-        vec!["speaker-tim".to_string(), "speaker-sam".to_string()]
-    );
-}
-
-#[test]
-fn speaker_cue_tags_handle_multi_word_and_short_names() {
-    let speakers = vec!["Mary Jane".to_string(), "Jo".to_string()];
-    // Multi-word names round-trip through the same normalize_tag as ingest.
-    assert_eq!(
-        speaker_cue_tags(&speakers, "Where did Mary Jane travel last summer?"),
-        vec!["speaker-mary-jane".to_string()]
-    );
-    // Names shorter than 3 chars are skipped even when mentioned.
-    assert!(speaker_cue_tags(&speakers, "What does Jo think?").is_empty());
 }
 
 #[test]
@@ -931,7 +876,7 @@ fn embed_cache_second_build_makes_zero_provider_calls() {
     let embedder1 = CountingEmbedder::default();
     let cache1 = EmbedCache::open(&cache_path, embedder1.model_name()).unwrap();
     build_memory_graph(
-        &loaded,
+        loaded.formation_input(),
         Arc::new(CachingProvider::new(
             Arc::new(embedder1.clone()),
             Some(cache1),
@@ -948,7 +893,7 @@ fn embed_cache_second_build_makes_zero_provider_calls() {
     let embedder2 = CountingEmbedder::default();
     let cache2 = EmbedCache::open(&cache_path, embedder2.model_name()).unwrap();
     build_memory_graph(
-        &loaded,
+        loaded.formation_input(),
         Arc::new(CachingProvider::new(
             Arc::new(embedder2.clone()),
             Some(cache2),
@@ -1000,11 +945,11 @@ fn dump_features_populates_matched_units_and_total_relevant() {
         BenchDatasetName::Locomo,
         &json!([{
             "session_1": [
-                {"dia_id": "D1:1", "speaker": "Caroline", "text": "Caroline adopted a corgi named Pixel."},
-                {"dia_id": "D1:2", "speaker": "Melanie", "text": "Pixel likes agility practice."}
+                {"dia_id": "D1:1", "speaker": "Alpha", "text": "Alpha adopted a corgi named Pixel."},
+                {"dia_id": "D1:2", "speaker": "Beta", "text": "Pixel likes agility practice."}
             ],
             "qa": [{
-                "question": "What is Caroline's corgi named?",
+                "question": "What is Alpha's corgi named?",
                 "answer": "Pixel",
                 "category": 1,
                 "evidence": ["D1:1"]
@@ -1016,7 +961,7 @@ fn dump_features_populates_matched_units_and_total_relevant() {
 
     let embedder = CountingEmbedder::default();
     let mut built = build_memory_graph(
-        &loaded,
+        loaded.formation_input(),
         Arc::new(CachingProvider::new(Arc::new(embedder.clone()), None)),
     )
     .expect("graph builds");

@@ -48,16 +48,16 @@ pub struct ProviderConfig {
     pub timeout_secs: u64,
     pub max_retries: u32,
     pub max_output_tokens: Option<u64>,
-    /// Sampling temperature sent to OpenAI-compatible providers.
+    /// Sampling temperature sent to the loopback chat server.
     #[serde(default)]
     pub temperature: Option<f64>,
-    /// Nucleus-sampling threshold sent to OpenAI-compatible providers.
+    /// Nucleus-sampling threshold sent to the loopback chat server.
     #[serde(default)]
     pub top_p: Option<f64>,
     /// Top-k sampling cutoff for compatible local providers.
     #[serde(default)]
     pub top_k: Option<u64>,
-    /// Presence penalty sent to OpenAI-compatible providers.
+    /// Presence penalty sent to the loopback chat server.
     #[serde(default)]
     pub presence_penalty: Option<f64>,
     /// Deterministic seed when supported by the provider.
@@ -65,7 +65,7 @@ pub struct ProviderConfig {
     pub seed: Option<u64>,
     /// Optional Qwen-compatible chat-template thinking control.
     ///
-    /// Leave this unset for providers such as OpenAI that do not accept
+    /// Leave this unset when the local server does not accept
     /// `chat_template_kwargs`.
     #[serde(default)]
     pub chat_template_enable_thinking: Option<bool>,
@@ -89,57 +89,29 @@ impl Default for ProviderConfig {
     }
 }
 
-pub struct OpenAiCompatibleProvider {
+/// OpenAI-compatible chat transport restricted to the local machine.
+///
+/// The constructor rejects non-loopback hosts, disables redirects, bypasses
+/// proxy settings, and never reads or sends credentials.
+pub struct LoopbackChatProvider {
     pub client: reqwest::blocking::Client,
     pub config: ProviderConfig,
-    api_key: Option<String>,
 }
 
-impl OpenAiCompatibleProvider {
+impl LoopbackChatProvider {
     pub fn new(config: ProviderConfig) -> Result<Self, ProviderError> {
-        let api_key = std::env::var("LLM_API_KEY")
-            .ok()
-            .filter(|value| !value.trim().is_empty());
-        let mut client_builder =
-            reqwest::blocking::Client::builder().timeout(Duration::from_secs(config.timeout_secs));
-        if is_loopback_base_url(&config.base_url) {
-            client_builder = client_builder
-                .no_proxy()
-                .redirect(reqwest::redirect::Policy::none());
+        if !is_loopback_base_url(&config.base_url) {
+            return Err(ProviderError::Other(
+                "local chat base URL must use a loopback host".to_owned(),
+            ));
         }
-        let client = client_builder
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(config.timeout_secs))
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| ProviderError::Other(e.to_string()))?;
-        Ok(OpenAiCompatibleProvider {
-            client,
-            config,
-            api_key,
-        })
-    }
-
-    pub fn from_env() -> Result<Self, ProviderError> {
-        let base_url =
-            std::env::var("LLM_BASE_URL").unwrap_or_else(|_| "http://localhost:11434".to_string());
-        let model = std::env::var("LLM_MODEL").unwrap_or_else(|_| "qwen3.6:35b-a3b".to_string());
-        let timeout_secs = std::env::var("LLM_TIMEOUT")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(30u64);
-
-        let config = ProviderConfig {
-            base_url,
-            model,
-            timeout_secs,
-            max_retries: 3,
-            max_output_tokens: None,
-            temperature: Some(0.0),
-            top_p: None,
-            top_k: None,
-            presence_penalty: None,
-            seed: None,
-            chat_template_enable_thinking: None,
-        };
-        Self::new(config)
+        Ok(Self { client, config })
     }
 
     fn request(&self, prompt: &str) -> Result<ProviderGeneration, ProviderError> {
@@ -179,11 +151,7 @@ impl OpenAiCompatibleProvider {
 
         let mut last_err = ProviderError::ConnectionFailed;
         for _ in 0..=self.config.max_retries {
-            let mut request = self.client.post(&url).json(&body);
-            if let Some(api_key) = &self.api_key {
-                request = request.bearer_auth(api_key);
-            }
-            match request.send() {
+            match self.client.post(&url).json(&body).send() {
                 Ok(response) => {
                     let status = response.status();
                     if !status.is_success() {
@@ -235,7 +203,7 @@ pub fn is_loopback_base_url(base_url: &str) -> bool {
         })
 }
 
-impl LlmProvider for OpenAiCompatibleProvider {
+impl LlmProvider for LoopbackChatProvider {
     fn generate(&self, prompt: &str) -> Result<String, ProviderError> {
         self.request(prompt).map(|generation| generation.content)
     }
@@ -280,7 +248,7 @@ mod tests {
     }
 
     #[test]
-    fn eval_common_openai_provider_timeout_returns_error() {
+    fn eval_common_loopback_provider_timeout_returns_error() {
         let config = ProviderConfig {
             base_url: "http://localhost:1".to_string(),
             model: "test".to_string(),
@@ -294,9 +262,23 @@ mod tests {
             seed: None,
             chat_template_enable_thinking: None,
         };
-        let provider = OpenAiCompatibleProvider::new(config).expect("should create");
+        let provider = LoopbackChatProvider::new(config).expect("should create");
         let result = provider.generate("test");
         assert!(result.is_err(), "should fail with connection error");
+    }
+
+    #[test]
+    fn loopback_provider_rejects_remote_hosts() {
+        let config = ProviderConfig {
+            base_url: "https://example.com".to_owned(),
+            ..ProviderConfig::default()
+        };
+
+        let result = LoopbackChatProvider::new(config);
+
+        assert!(
+            matches!(result, Err(ProviderError::Other(message)) if message.contains("loopback"))
+        );
     }
 
     #[test]

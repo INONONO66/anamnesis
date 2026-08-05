@@ -1,15 +1,12 @@
-//! Integration tests for the `Memory` management API (P1-T2):
+//! Integration tests for the `Memory` management API:
 //! `update_content` / `get` / `list` / `forget` / `unforget` / `delete_hard` /
 //! `supersede`.
 //!
 //! Hermetic: a deterministic byte-derived embedder (no model download, no
 //! network), the same pattern used by `tests/reasoning_advantage.rs`.
 //
-// allow: SIZE_OK — 8 independently-scoped test scenarios (one per public
-// method plus a baseline, an adversarial-input case, and a manual-QA demo)
-// are each required by the task spec to stay isolated per the "one mega-test"
-// anti-pattern rule; `tests/reasoning_advantage.rs` in this same suite is a
-// comparable 244-pure-LOC precedent for integration-test file size.
+// Eight independently scoped scenarios stay isolated so failures retain a
+// narrow scope.
 
 use std::sync::Arc;
 

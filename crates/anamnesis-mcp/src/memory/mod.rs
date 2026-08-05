@@ -692,18 +692,15 @@ pub(crate) struct OpCounters {
     pub(crate) relates: u64,
     pub(crate) captured_turns: u64,
     pub(crate) extraction_pulls: u64,
-    // ── Failure / anomaly counters (O1: silent-failure observability) ────────
+    // ── Failure / anomaly counters ──────────────────────────────────────────
     // Bumped by `crate::dispatch` at the request boundary, via the same
     // `pub(crate)` cross-module pattern as `extraction_pulls`. Counting is
     // fail-open: a `u64 += 1` cannot fail, so it never alters request behavior
     // or introduces a failure path.
     //
-    // These cover ONLY failures the daemon directly observes at dispatch. The
-    // hook/client-process classes — daemon-call timeout, hook-side τ gate,
-    // transcript parse-fail (all in `hook.rs`), and the shell binary-fetch —
-    // occur in a SEPARATE process and are invisible here; surfacing them would
-    // need a cross-process reporting channel (a proto message or shared file).
-    // TODO(O1): add that channel + a `hook_*` counter set when a consumer needs it.
+    // These cover only failures observed at daemon dispatch. Hook/client
+    // process failures occur outside this counter boundary and are reported by
+    // the telemetry/client surfaces that observe them.
     /// Requests that returned an error `Response` (any tool): total tool-call
     /// failures the daemon handled.
     pub(crate) dispatch_errors: u64,
@@ -725,7 +722,7 @@ pub struct MemoryRegistry {
     /// the registry's default without needing a whole-registry method call.
     pub(crate) reinforce_on_recall: bool,
     /// One `Memory` per namespace, each behind its OWN `Mutex` so different
-    /// namespaces never block each other (registry-lock-starvation fix, O2).
+    /// namespaces never block each other.
     /// See [`namespace_handle`](Self::namespace_handle) for the two-phase
     /// locking discipline this enables.
     open: HashMap<String, Arc<Mutex<Memory<SqliteStorage>>>>,
@@ -1312,7 +1309,7 @@ impl MemoryRegistry {
         ))
     }
 
-    /// Ingest a batch of conversational turns via the bench windowing recipe.
+    /// Ingest a batch of conversational turns via canonical windowing.
     ///
     /// When `capture` is `true`, each turn is deduplicated by a stable content hash
     /// (`seen_turn_keys`), stamped with `anamnesis:turn_key` and `anamnesis:extracted`
@@ -1351,7 +1348,7 @@ impl MemoryRegistry {
         // and queue slot were committed immediately after its own successful
         // `set_metadata_pairs`, not gated on the whole batch succeeding).
         // Enqueued under the SAME canonical key the ingest actually wrote
-        // into, so the backlog is isolated per namespace (P1-T4).
+        // into, so the backlog is isolated per namespace.
         self.ops.captured_turns += phase2.committed.len() as u64;
         let queue = self.unextracted.entry(ns_key).or_default();
         for (epi_id, key) in phase2.committed {
@@ -1671,8 +1668,7 @@ pub(crate) fn mem_ingest_conversation(
 
 // Test-only counter of internal `Memory::tick` invocations made by `recall` /
 // `recall_packaged_gated`. Lets tests assert the single-tick-per-recall
-// invariant (flagship bug #2: MCP `recall` ticked the engine TWICE per call,
-// doubling idle-edge leak/decay pressure on every read) directly, rather than
+// invariant directly, rather than
 // inferring it from a decay/leak side effect that the per-edge leak checkpoint
 // fix (`anamnesis::Engine::tick`) makes idempotent across near-simultaneous
 // ticks — and therefore unobservable that way.

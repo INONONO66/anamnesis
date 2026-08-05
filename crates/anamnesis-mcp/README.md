@@ -10,8 +10,9 @@ cognitive memory for LLM agents.
 | `recall` | **Before answering** — surfaces prior decisions/lessons as a readable context block plus a compact `{node_id, score}` list. Reading auto-reinforces what it returns. |
 | `remember` | **After any decision or lesson worth keeping** — stores one distilled insight. |
 | `ingest_conversation` | Hand off a full transcript (ordered turns) for the windowing recipe. |
+| `ingest_attachment_transcript` | Store an already-produced textual attachment transcript with attachment and processor provenance. The server does not read the attachment or run a media model. |
 | `relate` | Link two recalled nodes with a typed reasoning relation (`causes`, `contradicts`, `supports`, `refutes`, `reason`, `rejected-alternative`, `belongs-to`, `related`, or `custom:<label>`). Pass `node_id`s from a prior `recall`. |
-| `get` / `list` | Read one node, or list nodes by salience/type/tag/scope/metadata filter, as JSON. Both now include per-memory **provenance** — `peer_id`, `session_id`, `scope`, `confidence` (projected from `Origin`) — so a consumer can see which agent/session/scope produced each memory. This is the attribution foundation for multi-agent/team memory; multi-writer merge and trust-weighting remain roadmap. |
+| `get` / `list` | Read one node, or list nodes by salience/type/tag/scope/metadata filter, as JSON. Both include per-memory **provenance** — `peer_id`, `session_id`, `scope`, and `confidence` projected from `Origin`. |
 | `update` / `forget` / `supersede` | Edit a node's content, soft/hard-delete it, or mark one node as superseding another. |
 
 ## Local dashboard
@@ -53,7 +54,8 @@ configured namespace (overridable per-request via `?namespace=`).
 |---------|--------------|
 | `doctor` | Print a setup checklist — resolved DB path, lock availability, model cache dir, config. Does **not** load the embedding model. |
 | `stats` | Open the registry and print graph health/size stats (`Memory::stats`) for the default namespace. Loads the model. |
-| `extract-preview <input.json>` | Run one explicit 1–20-source batch through the same versioned local extraction prompt/provider/validator and print validated JSON. It never scans, stages, or mutates graph content. |
+| `extract` | Run or audit the opt-in shadow extractor through the daemon. It drains eligible captures in bounded 10-turn batches and stages validated candidates/relations outside recall; review and explicit promotion use the same command surface. |
+| `extract-preview <input.json>` | Run one explicit 1–10-source batch through the same versioned extraction prompt/provider/validator and print validated JSON. It does not scan, stage, or mutate graph content. |
 
 ## Install (Claude Desktop)
 
@@ -141,7 +143,22 @@ call the tools. Paste this into your system/project instructions so it does:
 | `ANAMNESIS_NAMESPACE` | `default` | Namespace when a call omits one. |
 | `ANAMNESIS_REINFORCE` | `true` | Auto-commit (reinforce) recalled results. Set `false` for receipt mode. |
 | `ANAMNESIS_CONTEXT_STYLE` | `detailed` | `evidence` emits the same validated recall package as compact session/time-grouped evidence for answer synthesis. |
+| `ANAMNESIS_CAPTURE_ENABLED` | `true` | Enable fail-open transcript capture from supported hook clients. |
+| `ANAMNESIS_EXTRACT_THRESHOLD_N` | `20` | Queue size that causes `SessionStart` to advertise manual extraction. |
+| `ANAMNESIS_EXTRACT_MODE` | `off` | Exact `shadow` enables background reviewed extraction after successful capture; every other non-empty mode is disabled. |
+| `ANAMNESIS_EXTRACT_CMD` | local Qwen through Ollama | Command argv used by extraction. It is parsed and executed without a shell. |
+| `ANAMNESIS_EXTRACT_TIMEOUT_SECS` | `240` | Extraction-provider timeout, constrained to 1–3600 seconds. |
+| `ANAMNESIS_EMBED_MODEL` | `multilingual-e5-small` | Embedding model for newly created or explicitly migrated databases. |
+| `ANAMNESIS_RERANK_MODEL` | `BAAI/bge-reranker-base` | Local cross-encoder for canonical reranked recall. |
 | `FASTEMBED_CACHE_DIR` | `~/.anamnesis/models` | Where the bge model is cached (~400 MB). |
+
+Shadow extraction sends the selected raw captures to the configured command.
+The default command is the loopback `ollama run qwen3.6:35b-a3b
+--think=false` path with a generated structured-output schema. Validated output
+remains staged until review and explicit promotion; raw captured memories stay
+authoritative regardless of extractor outcome. See the
+[operations guide](../../docs/06-operations/operations.md) for the persistence
+and failure contracts.
 
 Everything anamnesis lives under `~/.anamnesis/` by default — the global memory DB
 plus the model cache. **Scope is auto-selected**, the way git finds `.git`: walking

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Paired comparison for compatible local_answer product-wire reports."""
+"""Paired comparison for compatible local_answer production-path reports."""
 
 from __future__ import annotations
 
@@ -20,8 +20,8 @@ EPSILON = 1e-12
 def load_report(path: Path) -> dict:
     with path.open(encoding="utf-8") as handle:
         report = json.load(handle)
-    if report.get("schema_version", 0) < 16:
-        raise ValueError(f"{path}: schema v16 or newer is required")
+    if report.get("schema_version", 0) < 40:
+        raise ValueError(f"{path}: schema v40 or newer is required")
     return report
 
 
@@ -40,7 +40,6 @@ def validate_pair(baseline: dict, candidate: dict, route: str) -> list[str]:
         "question_type",
         "sample_seed",
         "skip_adversarial",
-        "context_surface",
         "answer_prompt_version",
         "baseline_reader_model",
         "dataset_loader_version",
@@ -147,19 +146,9 @@ def build_comparison(
         row["raw_f1_before"] = score(before, route, "locomo_official_f1")
         row["raw_f1_after"] = score(after, route, "locomo_official_f1")
         row["raw_f1_delta"] = row["raw_f1_after"] - row["raw_f1_before"]
-        row["surface_f1_before"] = score(
-            before, route, "locomo_reader_surface_f1"
-        )
-        row["surface_f1_after"] = score(
-            after, route, "locomo_reader_surface_f1"
-        )
-        row["surface_f1_delta"] = (
-            row["surface_f1_after"] - row["surface_f1_before"]
-        )
         rows.append(row)
 
     raw_deltas = [row["raw_f1_delta"] for row in rows]
-    surface_deltas = [row["surface_f1_delta"] for row in rows]
     rendered_improved = [
         row for row in rows if row["rendered_recall_delta"] > EPSILON
     ]
@@ -194,7 +183,6 @@ def build_comparison(
         "questions": len(rows),
         "baseline_run_id": baseline["run_id"],
         "candidate_run_id": candidate["run_id"],
-        "context_surface": baseline["config"]["context_surface"],
         "retrieval_cutoffs": {
             "baseline": {
                 "candidate_k": baseline["config"]["consumer_candidate_k"],
@@ -216,11 +204,6 @@ def build_comparison(
             "wins": sum(delta > EPSILON for delta in raw_deltas),
             "ties": sum(abs(delta) <= EPSILON for delta in raw_deltas),
             "losses": sum(delta < -EPSILON for delta in raw_deltas),
-        },
-        "reader_surface_f1": {
-            "baseline": mean([row["surface_f1_before"] for row in rows]),
-            "candidate": mean([row["surface_f1_after"] for row in rows]),
-            "paired_delta": mean(surface_deltas),
         },
         "retrieval_stage_recall": {
             stage: {
@@ -270,7 +253,6 @@ def build_retrieval_comparison(
         "question_type",
         "sample_seed",
         "skip_adversarial",
-        "context_surface",
         "embedding_model",
         "consumer_cross_encoder",
         "consumer_candidate_k",
@@ -379,7 +361,6 @@ def build_primary_retrieval_comparison(
         "question_type",
         "sample_seed",
         "skip_adversarial",
-        "context_surface",
         "embedding_model",
         "consumer_cross_encoder",
         "consumer_candidate_k",

@@ -1,110 +1,80 @@
-# Social Dynamics
+# Evidence Feedback And Provenance
 
-> **Partly removed / roadmap (as of [v0.10.0](../adr/0014-shrink-to-product.md)).** The peer-trust half of this document — the trust reservoir, corroboration/contradiction trust updates, trust-weighted readout, and `reflect_batch` cross-agent reflection — was **removed in the v0.10.0 shrink** (no consumer; production ran single-peer, readout trust term now a neutral `1.0`). What **survives** is the feedback + evidence-prior physics: `Origin` provenance storage (`peer_id`/`source_kind`), and the decay-exempt evidence prior `P_i` that still absorbs encoding surprise and consumer feedback (the "Feedback-Based Work" section below). Read the peer-trust and cross-agent-reflection sections as **design intent** for a future multi-peer layer, not current behavior.
-
-Social dynamics integrate peer provenance, corroboration, contradiction, and feedback. They do not replace graph dynamics; they provide evidence that affects coupling, trust, and readout.
+Anamnesis preserves producer provenance and can integrate explicit consumer
+feedback into the evidence prior. It does not infer peer trust, authenticate
+producers, or decide truth by majority.
 
 ## Origin
 
-Every site carries origin:
+Every source carries `peer_id`, `source_kind`, `session_id`, `scope`, and
+`confidence`. These fields explain where a memory came from and participate in
+admission, visibility, and audit. `PeerId` is an opaque provenance id and does
+not contribute a producer-reputation score.
+
+## Feedback-based work
+
+Feedback is a committed interaction about returned memory evidence. It updates
+the decay-exempt evidence prior `P_i` through bounded prediction error:
 
 ```text
-peer_id
-source_kind
-session_id
-scope
-confidence
+delta P_i = eta * (lambda - predicted_i)
 ```
 
-Origin allows the engine to answer who produced a fragment, where it came from, and how much initial confidence it should carry.
+Positive feedback can raise `P_i`; negative feedback can lower it. The update
+is separate from access-based reinforcement. Confirmed use appends an access
+trace to the base-level term `B_i`; read-only retrieval changes neither term.
+Neither operation updates a producer profile or treats agreement between
+producers as corroboration.
 
-## Peer Trust
+The spacing effect comes from the access-trace model, not feedback. Each new
+trace receives an activation-dependent decay rate, so spaced presentations are
+more durable than massed presentations under the documented retention
+conditions. See [dissipation.md](dissipation.md).
 
-Trust is a calibrated evidence signal, not an authorization decision.
+## Learning rate
 
-| Signal | Effect |
-|---|---|
-| source confidence | Initial weight for observation admission |
-| corroboration | Raises trust and may strengthen entity/conductance links |
-| contradiction | Creates tensions and may lower trust if repeatedly unresolved |
-| positive feedback | Raises the evidence prior `P_i` and peer reliability |
-| negative feedback | Lowers the evidence prior `P_i` or trust through prediction error |
-
-Trust updates must leave traces. The engine must not silently rewrite provenance.
-
-## Cross-Agent Reflection
-
-`reflect_batch` (removed in v0.10.0 — see the banner above; kept here as design intent) received session summaries from multiple agents and linked sites that shared entity tags:
-
-```mermaid
-flowchart LR
-    a["agent A sites"] --> reflect["reflect_batch"]
-    b["agent B sites"] --> reflect
-    reflect --> edges["Entity edges"]
-```
-
-Reflection:
-
-- uses metadata only,
-- creates edges rather than merging nodes,
-- does not call an LLM,
-- preserves each source origin,
-- returns a report of links created or skipped.
-
-## Feedback-Based Work
-
-Feedback is another committed interaction. It updates the evidence prior `P_i`, the decay-exempt term that holds feedback and social reinforcement:
+The prediction-error learning rate is derived from the declared target
+co-activation count:
 
 ```text
-dP_i = eta * (lambda - predicted_i)
+eta = 1 - 0.5^(1 / N)
 ```
 
-Positive feedback can raise the evidence prior `P_i` and trust. Negative feedback can lower them. Both are bounded and traceable. The spacing effect does not come from feedback writes: it is intrinsic to the base-level term `B_i = ln( Σ_j (now − t_j)^(−d_j) )`, where each trace's decay rate `d_j` depends on the activation `m_j` at the moment the trace is created. Spaced re-presentation occurs at low activation → low `d_j` → durable strength, while massed re-presentation lands at high activation → high `d_j` → fast decay. The testing effect is not cleanly reproduced by this model (see [dissipation.md](dissipation.md)).
+`N` and target `lambda` are calibrated policy under
+[ADR-0010](../adr/0010-calibrated-priors-not-laws.md). Feedback never writes a
+bounded salience projection directly.
 
-## Fast/Slow Learning
+## Contradiction and provenance
 
-There is one learning rate `eta = 1 - 0.5^(1/N)` derived from the target co-activation count `N`, as in [interactions.md](interactions.md) and [conductance.md](conductance.md). Fast/slow behavior is not two independent constants; it is an optional data-justified refit of the same family with a smaller `N` for fast adaptation and a larger `N` for slow consolidation, fit only once data shows the two channels strengthen at different rates:
+Feedback may change how strongly evidence is recalled, but it does not erase an
+origin or resolve a contradiction. `Contradicts` preserves both endpoints and
+their provenance; acceptance remains an external consumer decision. Derived
+claims and observations proposed by
+[ADR-0015](../adr/0015-evidence-grounded-formation-and-chain-retrieval.md)
+must cite raw evidence regardless of feedback strength.
 
-| Channel | Refit | Use |
-|---|---|---|
-| fast | small `N_fast` | recent explicit user feedback |
-| slow | large `N_slow` | accumulated peer reliability |
+## Safety rules
 
-This mirrors complementary learning systems: quick adaptation for local behavior, slow consolidation for durable trust. Both rates remain refits of one `N`, not separate base constants.
+- Scope visibility overrides confidence and feedback.
+- Feedback updates are bounded, explicit, and traceable.
+- Retrieval without commit is mutation-free.
+- Producer identity does not imply trust or authorization.
+- Contradiction remains visible until an explicit source-backed update or
+  supersession changes eligibility.
+- Agreement among producer ids is not a promotion or ranking rule.
 
-## Desirable Difficulty
+## Failure conditions
 
-Reinforcement can be larger when useful knowledge was harder to retrieve. A site that was low-salience but correct may deserve more work than a site that was already obvious.
+- Private scope leakage through a derived record.
+- Feedback applied without a matching commit trace.
+- Direct salience editing in place of an evidence-prior or access-trace update.
+- Origin removal during consolidation, supersession, or rendering.
+- Treating producer identity or confidence as a truth verdict.
 
-```text
-boost = f(retrieval_difficulty, positive_feedback)
-```
+## Related documents
 
-This must be bounded and calibrated; it must not become direct salience editing.
-
-## Safety Rules
-
-- Scope visibility overrides trust.
-- Peer trust never erases origin.
-- Cross-agent reflection creates links, not merges.
-- Feedback updates are bounded and traceable.
-- Contradiction remains tension until evidence or policy resolves it.
-
-## Cost
-
-Reflection cost is proportional to the number of session nodes and shared entity tags. Feedback updates are proportional to selected sites and paths.
-
-## Failure Conditions
-
-- Private scope leakage through cross-agent reflection.
-- Silent trust mutation without trace.
-- Automatic truth judgment from peer majority alone.
-- Feedback directly setting salience instead of updating the evidence prior `P_i` (or, for use-driven reinforcement, appending an access trace to `B_i`).
-
-## Related Documents
-
-- Origin fields are defined in [graph-model.md](../02-knowledge-model/graph-model.md).
-- Peer trust is defined in [peer-identity.md](../02-knowledge-model/peer-identity.md).
-- Scope promotion is defined in [scoping-promotion.md](../02-knowledge-model/scoping-promotion.md).
+- Origin fields are defined in
+  [peer-identity.md](../02-knowledge-model/peer-identity.md).
 - Interaction boundaries are defined in [interactions.md](interactions.md).
 - Readout integration is defined in [readout-scoring.md](readout-scoring.md).
+- Contradiction behavior is defined in [frustration.md](frustration.md).

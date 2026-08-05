@@ -37,9 +37,9 @@ pub struct FastEmbedProvider {
 
 /// Local FastEmbed cross-encoder used by the production reranked-recall path.
 ///
-/// The production default is `BAAI/bge-reranker-base`, selected for the
-/// latency-sensitive product-path LoCoMo profile. Model weights are loaded once
-/// and shared safely across recall calls.
+/// The production default is `BAAI/bge-reranker-base`, selected for a balanced
+/// local relevance, latency, and resource profile. Model weights are loaded
+/// once and shared safely across recall calls.
 pub struct FastEmbedReranker {
     model: Mutex<TextRerank>,
     name: String,

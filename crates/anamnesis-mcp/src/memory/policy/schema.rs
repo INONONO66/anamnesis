@@ -74,6 +74,12 @@ fn migrate(transaction: &Transaction<'_>) -> Result<(), PolicyStoreError> {
         Some(3) => {
             create_v1_schema(transaction)?;
             extraction::migrate_v4(transaction)?;
+            extraction::migrate_v5(transaction)?;
+            set_version(transaction)?;
+        }
+        Some(4) => {
+            create_v1_schema(transaction)?;
+            extraction::migrate_v5(transaction)?;
             set_version(transaction)?;
         }
         Some(SCHEMA_VERSION) => {
@@ -203,7 +209,7 @@ mod tests {
                     id INTEGER PRIMARY KEY CHECK(id = 1),
                     version INTEGER NOT NULL
                 );
-                INSERT INTO mcp_schema_version (id, version) VALUES (1, 5);
+                INSERT INTO mcp_schema_version (id, version) VALUES (1, 6);
                 CREATE TABLE retained_metadata (id INTEGER PRIMARY KEY, marker INTEGER NOT NULL);
                 INSERT INTO retained_metadata (id, marker) VALUES (1, 7);
                 ",
@@ -388,6 +394,61 @@ mod tests {
                 )
                 .expect("read migrated claim"),
             "legacy claim"
+        );
+        assert_eq!(
+            schema_version(&connection).expect("schema version"),
+            SCHEMA_VERSION
+        );
+    }
+
+    #[test]
+    fn v4_extraction_rows_gain_fail_closed_source_incarnation_bindings() {
+        let mut connection = Connection::open_in_memory().expect("open policy database");
+        initialize(&mut connection).expect("initialize current schema");
+        connection
+            .execute_batch(
+                "
+                INSERT INTO extractor_profiles
+                    (profile_id, components, status, created_at, approved_at)
+                VALUES ('profile', '{}', 'shadow', 1, NULL);
+                INSERT INTO extract_runs
+                    (id, at_ms, profile_id, mode, turn_count, candidate_count,
+                     relation_count, schema_valid, llm_invoked, error_kind, duration_ms)
+                VALUES (1, 1, 'profile', 'shadow', 1, 1, 0, 1, 1, NULL, 1);
+                ",
+            )
+            .expect("seed legacy run");
+        connection
+            .execute(
+                "INSERT INTO extract_candidates
+                 (id, run_id, item_local_id, content, kind, source_turn_keys,
+                  source_session_id, source_scope, source_content_hashes,
+                  source_node_ids, idempotency_key)
+                 VALUES (1, 1, 'legacy', 'legacy claim', 'fact', '[\"turn\"]',
+                         'session', '', '[\"hash\"]', '[7]', 'legacy-key')",
+                [],
+            )
+            .expect("seed legacy candidate");
+        connection
+            .execute_batch(
+                "
+                ALTER TABLE extract_candidates DROP COLUMN source_incarnations;
+                UPDATE mcp_schema_version SET version = 4 WHERE id = 1;
+                ",
+            )
+            .expect("simulate v4 policy schema");
+
+        initialize(&mut connection).expect("migrate v4 schema");
+
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT source_incarnations FROM extract_candidates WHERE id = 1",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .expect("read migrated source binding"),
+            "[]"
         );
         assert_eq!(
             schema_version(&connection).expect("schema version"),

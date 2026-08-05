@@ -1,7 +1,9 @@
-//! Social reinforcement scoring — multi-agent salience dynamics.
+//! Explicit consumer feedback and a compatibility scoring helper.
 //!
-//! When multiple distinct agents independently observe the same knowledge fragment,
-//! social support amplifies salience. Logarithmic scaling prevents popularity cascades.
+//! [`FeedbackSignal`] and [`ConfidenceLevel`] are used by commit paths. The
+//! standalone [`social_support`] calculation is retained for public API
+//! compatibility but is not called by `Engine` or `Memory` and does not mutate
+//! salience or the evidence prior.
 //!
 //! # Formula
 //!
@@ -105,7 +107,10 @@ impl From<ConfidenceLevel> for FeedbackSignal {
     }
 }
 
-/// Compute social support score from multi-agent corroboration.
+/// Compute a standalone logarithmic corroboration score.
+///
+/// This compatibility helper is not wired into engine ranking or persistence;
+/// callers that use it own the interpretation of agent identity and agreement.
 ///
 /// Formula: `ln(1 + distinct_agent_count) * agreement_score * avg_confidence`
 ///

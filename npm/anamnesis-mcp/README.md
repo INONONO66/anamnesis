@@ -1,6 +1,7 @@
 # anamnesis-mcp
 
-MCP **stdio** server (and one-shot CLI) for [anamnesis](../anamnesis) — associative
+MCP **stdio** server (and one-shot CLI) for the
+[Anamnesis engine](https://github.com/INONONO66/anamnesis/tree/main/crates/anamnesis) — associative
 cognitive memory for LLM agents.
 
 ## Tools

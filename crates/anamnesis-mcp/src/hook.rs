@@ -11,6 +11,9 @@
 //! - `hook user-prompt`   — activation-**gated** recall on the submitted prompt
 //!   (`gate = τ`, cosine gate = `τ_cos`, top-`k = ANAMNESIS_HOOK_TOPK`);
 //!   below either gate ⇒ inject nothing.
+//! - `hook attachment-transcript` — silently forward a textual attachment
+//!   representation already produced by a consumer-side processor, with its
+//!   provenance; this path does not resolve or process the attachment.
 //!
 //! **Fail-open is mandatory.** Every error path (bad stdin, daemon down/unreachable,
 //! timeout, tool error) prints a valid *empty* output (nothing) and returns
@@ -55,6 +58,7 @@ pub async fn run(event: &HookEvent) -> Result<()> {
         HookEvent::Stop | HookEvent::PreCompact | HookEvent::SessionEnd => {
             run_capture(&cfg, &stdin, event).await
         }
+        HookEvent::AttachmentTranscript => run_attachment_transcript(&cfg, &stdin).await,
     };
     // `output` is `Some(json)` only when there is something to inject; `None` is
     // the below-`τ` / error / empty no-op (print nothing, exit 0).
@@ -438,6 +442,64 @@ struct CaptureInput {
     cwd: Option<String>,
 }
 
+/// Input accepted by `hook attachment-transcript` from a processor hook.
+///
+/// The producer has already materialized `transcript`; this hook only forwards
+/// it to the canonical daemon admission path and never resolves attachment
+/// bytes or invokes a model.
+#[derive(Debug, serde::Deserialize)]
+struct AttachmentTranscriptHookInput {
+    transcript: String,
+    session: String,
+    attachment_id: String,
+    attachment_sha256: String,
+    processor_provider: String,
+    processor_model: String,
+    processor_profile: String,
+    processor_schema: String,
+    confidence: f64,
+    #[serde(default)]
+    observed_at_ms: Option<u64>,
+    #[serde(default)]
+    namespace: Option<String>,
+    #[serde(default)]
+    scope: Option<String>,
+    #[serde(default)]
+    tags: Option<Vec<String>>,
+}
+
+/// Forward one already-produced attachment transcript under the hook's
+/// fail-open time budget. Successful writes and all errors are silent because
+/// capture hooks do not inject context into the current turn.
+async fn run_attachment_transcript(cfg: &Config, stdin: &str) -> Option<String> {
+    let input: AttachmentTranscriptHookInput = serde_json::from_str(stdin.trim()).ok()?;
+    let request = Request::IngestAttachmentTranscript {
+        transcript: input.transcript,
+        session: input.session,
+        attachment_id: input.attachment_id,
+        attachment_sha256: input.attachment_sha256,
+        processor_provider: input.processor_provider,
+        processor_model: input.processor_model,
+        processor_profile: input.processor_profile,
+        processor_schema: input.processor_schema,
+        confidence: input.confidence,
+        observed_at_ms: input.observed_at_ms,
+        namespace: input
+            .namespace
+            .or_else(|| Some(cfg.default_namespace.clone())),
+        scope: input.scope,
+        tags: input.tags,
+    };
+    tokio::time::timeout(
+        Duration::from_millis(cfg.hook_timeout_ms),
+        call_oneshot(cfg, request),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    None
+}
+
 /// Parse capture stdin tolerantly. Malformed/empty JSON ⇒ `None` (fail-open).
 fn parse_capture_input(stdin: &str) -> Option<CaptureInput> {
     serde_json::from_str(stdin.trim()).ok()
@@ -550,7 +612,9 @@ async fn run_capture(cfg: &Config, stdin: &str, event: &HookEvent) -> Option<Str
         HookEvent::Stop => "Stop",
         HookEvent::PreCompact => "PreCompact",
         HookEvent::SessionEnd => "SessionEnd",
-        HookEvent::SessionStart | HookEvent::UserPrompt => return None,
+        HookEvent::SessionStart | HookEvent::UserPrompt | HookEvent::AttachmentTranscript => {
+            return None;
+        }
     };
     run_capture_with_kick(cfg, event, input, &DetachedExtractKickSpawner)
         .await
@@ -1090,6 +1154,7 @@ mod tests {
                 }
                 Request::ExtractionStatus { .. } => r#"{"pending":0}"#,
                 Request::Ingest { .. } => "",
+                Request::IngestAttachmentTranscript { .. } => "",
                 other => panic!("unexpected hook request: {other:?}"),
             };
             let response = encode_line(&Response::ok(text)).expect("mock encodes response");
@@ -1294,6 +1359,53 @@ mod tests {
             transcript_path: Some(path.to_string_lossy().into_owned()),
             cwd: Some("/tmp/Resolved Namespace".into()),
         }
+    }
+
+    #[tokio::test]
+    async fn attachment_transcript_hook_forwards_only_materialized_text_and_provenance() {
+        let temp = tempfile::tempdir().expect("temporary hook directory");
+        let cfg = live_hook_cfg(&temp);
+        let socket =
+            crate::daemon::socket_path_for_db(&cfg.default_db).expect("derive mock daemon socket");
+        let listener = UnixListener::bind(&socket).expect("bind mock daemon socket");
+        let daemon = tokio::spawn(serve_hook_requests(listener, 1));
+        let stdin = r#"{
+            "transcript":"OCR: Boundary Waters Canoe Area Wilderness",
+            "session":"attachment-session",
+            "attachment_id":"asset-9",
+            "attachment_sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "processor_provider":"local-ocr",
+            "processor_model":"ocr-v1",
+            "processor_profile":"signage-v1",
+            "processor_schema":"plain-text-v1",
+            "confidence":0.82,
+            "observed_at_ms":900,
+            "scope":"project/travel",
+            "tags":["Boundary Waters"]
+        }"#;
+
+        assert_eq!(run_attachment_transcript(&cfg, stdin).await, None);
+        let requests = daemon.await.expect("mock daemon completes");
+        let [
+            Request::IngestAttachmentTranscript {
+                transcript,
+                session,
+                attachment_id,
+                processor_provider,
+                namespace,
+                scope,
+                ..
+            },
+        ] = requests.as_slice()
+        else {
+            panic!("attachment hook must send the canonical source request: {requests:?}");
+        };
+        assert_eq!(transcript, "OCR: Boundary Waters Canoe Area Wilderness");
+        assert_eq!(session, "attachment-session");
+        assert_eq!(attachment_id, "asset-9");
+        assert_eq!(processor_provider, "local-ocr");
+        assert_eq!(namespace.as_deref(), Some("configured/canonical-namespace"));
+        assert_eq!(scope.as_deref(), Some("project/travel"));
     }
 
     #[tokio::test]

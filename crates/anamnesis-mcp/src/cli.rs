@@ -100,8 +100,8 @@ pub enum Commands {
     ///
     /// Default mode is the *launcher*: ensure the shared daemon is up and act as
     /// a transparent stdio↔socket proxy. `--embedded` (or `ANAMNESIS_NO_DAEMON=1`)
-    /// runs the old in-process server that owns the DB directly — a fallback for
-    /// debugging or environments without Unix sockets / detached spawns.
+    /// runs an optional in-process server that owns the DB directly, for
+    /// debugging and environments without Unix sockets or detached processes.
     Serve {
         /// Run in-process (own the DB directly) instead of proxying to the shared
         /// daemon. Equivalent to setting `ANAMNESIS_NO_DAEMON=1`.
@@ -216,8 +216,8 @@ pub enum Commands {
         #[arg(long, conflicts_with_all = ["candidate", "relation", "promote_candidate"])]
         promote_relation: Option<u64>,
     },
-    /// Run the product extractor over one explicit 1..=20-turn JSON batch and
-    /// print validated, reference-blind JSON without staging graph mutations.
+    /// Run the product extractor over one explicit 1..=10-turn JSON batch and
+    /// print validated, source-bound JSON without staging graph mutations.
     ExtractPreview {
         /// JSON object with a `sources` array using the extraction source wire.
         input: std::path::PathBuf,
@@ -250,8 +250,9 @@ pub enum Commands {
         #[arg(long)]
         embedded: bool,
     },
-    /// Claude Code hook entrypoint: read the hook JSON on stdin, do a gated,
-    /// read-only recall via the warm daemon, and emit the hook JSON on stdout.
+    /// Plugin hook entrypoint: read event JSON on stdin and route recall,
+    /// transcript capture, or materialized-source admission through the warm
+    /// daemon.
     ///
     /// Always exits 0 (fail-open): any error injects nothing rather than blocking
     /// or erasing the user's prompt. Always routes through the shared daemon (no
@@ -262,9 +263,8 @@ pub enum Commands {
     },
 }
 
-/// The Claude Code hook events anamnesis handles (v1). clap renders these as
-/// `hook session-start` / `hook user-prompt` (kebab-cased), matching the plugin's
-/// `hooks.json` commands.
+/// Hook entrypoints supported by the plugin binary. Clap renders these as
+/// kebab-cased `hook <event>` commands.
 #[derive(Subcommand, Clone, Debug)]
 pub enum HookEvent {
     /// `SessionStart`: seed the session with high-salience project memories.
@@ -280,6 +280,9 @@ pub enum HookEvent {
     /// `SessionEnd`: flush remaining turns at session close (Claude Code only;
     /// omitted from codex-hooks.json — Codex lacks this event).
     SessionEnd,
+    /// Admit a consumer-produced textual attachment transcript. Intended for a
+    /// processor hook that has already resolved the attachment locally.
+    AttachmentTranscript,
 }
 fn parse_audit_support(value: &str) -> Result<AuditSupport, String> {
     match value {
@@ -379,6 +382,19 @@ fn render_extract_outcome(outcome: WorkerOutcome) -> String {
         } => format!(
             "extraction recovered: run_ids={run_ids:?} candidate_count={candidate_count} \
              relation_count={relation_count} omitted_source_count={omitted_source_count} \
+             already_staged_count={already_staged_count}"
+        ),
+        WorkerOutcome::Drained {
+            batch_count,
+            run_count,
+            candidate_count,
+            relation_count,
+            omitted_source_count,
+            already_staged_count,
+        } => format!(
+            "extraction drained: batch_count={batch_count} run_count={run_count} \
+             candidate_count={candidate_count} relation_count={relation_count} \
+             omitted_source_count={omitted_source_count} \
              already_staged_count={already_staged_count}"
         ),
         WorkerOutcome::Noop(WorkerNoop::ModeOff) => "extraction disabled".to_owned(),
@@ -1062,6 +1078,7 @@ mod tests {
         ));
         assert!(Cli::try_parse_from(["anamnesis", "hook", "pre-compact"]).is_ok());
         assert!(Cli::try_parse_from(["anamnesis", "hook", "session-end"]).is_ok());
+        assert!(Cli::try_parse_from(["anamnesis", "hook", "attachment-transcript"]).is_ok());
     }
 
     #[test]
@@ -1341,6 +1358,19 @@ mod tests {
         assert!(recovered.contains("candidate_count=7"));
         assert!(recovered.contains("omitted_source_count=1"));
         assert!(!recovered.contains('\n'));
+
+        let drained = render_extract_outcome(WorkerOutcome::Drained {
+            batch_count: 3,
+            run_count: 4,
+            candidate_count: 17,
+            relation_count: 5,
+            omitted_source_count: 1,
+            already_staged_count: 1,
+        });
+        assert!(drained.contains("batch_count=3"));
+        assert!(drained.contains("run_count=4"));
+        assert!(drained.contains("candidate_count=17"));
+        assert!(!drained.contains('\n'));
 
         for outcome in [
             WorkerOutcome::Noop(WorkerNoop::ModeOff),

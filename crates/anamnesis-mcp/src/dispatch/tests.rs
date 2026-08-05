@@ -67,7 +67,7 @@ fn stub_registry_with_future_policy_schema() -> (Arc<Mutex<MemoryRegistry>>, tem
                 id INTEGER PRIMARY KEY CHECK(id = 1),
                 version INTEGER NOT NULL
             );
-            INSERT INTO mcp_schema_version (id, version) VALUES (1, 3);
+            INSERT INTO mcp_schema_version (id, version) VALUES (1, 6);
             CREATE TABLE recall_events (id INTEGER PRIMARY KEY);
             ",
         )
@@ -91,7 +91,7 @@ fn ok_text(resp: Response) -> String {
     }
 }
 
-/// C1 regression (registry-lock starvation): while namespace A's `Memory`
+/// Registry-lock regression: while namespace A's `Memory`
 /// lock is HELD (standing in for a slow PreCompact embed of ~50 turns), a
 /// namespace-B request must still COMPLETE.
 ///
@@ -101,11 +101,9 @@ fn ok_text(resp: Response) -> String {
 /// test. `dispatch` for namespace B runs on another thread and its result is
 /// observed via `std::sync::mpsc::Receiver::recv_timeout`: under the
 /// two-phase design this returns almost immediately (B's phase 2 never
-/// touches A's lock at all); under the OLD single-global-lock design (see
-/// `red_check_single_global_lock_blocks_unrelated_namespace` in the sibling
-/// crate history / this PR's description) an analogous hold of the ONE
-/// shared lock blocks a different namespace's request for as long as the
-/// hold lasts — which is exactly the registry-lock-starvation bug (C1).
+/// touches A's lock at all); under a single-global-lock design, an analogous
+/// hold of the shared lock blocks a different namespace's request for as long
+/// as the hold lasts — which is exactly the registry-lock-starvation bug.
 ///
 /// Structural assertion: `registry.try_lock()` succeeds WHILE `_guard_a` is
 /// still held — proving the global lock was already released before this
@@ -163,7 +161,7 @@ fn namespace_b_dispatch_completes_while_namespace_a_memory_lock_is_held() {
         "namespace B's dispatch must complete while namespace A's \
              Memory lock is held — a timeout here means the global \
              registry lock is being held across per-namespace work again \
-             (the C1 registry-lock-starvation regression)",
+             (the registry-lock-starvation regression)",
     );
     let text = ok_text(resp);
     assert!(text.starts_with("stored node "), "got: {text}");
@@ -319,11 +317,11 @@ fn recall_telemetry_write_failure_preserves_response_and_dispatch_counters() {
     );
 }
 #[test]
-fn r1_recall_telemetry_deploy_gate_demo() {
+fn recall_telemetry_deploy_gate_demo() {
     let (registry, _dir) = stub_registry();
-    let namespace = "r1-deploy-gate";
-    let scope = "project/r1-deploy-gate";
-    let query = "r1 filtered top rollout proof";
+    let namespace = "recall-deploy-gate";
+    let scope = "project/recall-deploy-gate";
+    let query = "filtered top recall proof";
     let canonical_namespace = {
         let registry_guard = registry.lock().unwrap_or_else(|p| p.into_inner());
         registry_guard.canonical_ns_key(Some(namespace))
@@ -348,8 +346,8 @@ fn r1_recall_telemetry_deploy_gate_demo() {
     ));
 
     // `Remember` creates an Episodic + Semantic pair. Mark only the Semantic
-    // fixture as durable so the identical, high-scoring captured Episodic node
-    // must be removed by `knowledge_only` before the final top is traced.
+    // fixture as durable so its ExtractedFrom edge makes the captured Episodic
+    // node authoritative grounded evidence under `knowledge_only`.
     let (captured_episodic_id, surviving_semantic_id) = {
         let handle = {
             let mut registry_guard = registry.lock().unwrap_or_else(|p| p.into_inner());
@@ -464,12 +462,12 @@ fn r1_recall_telemetry_deploy_gate_demo() {
         assert!(event.has_hits && event.readout_pass && event.cosine_pass && event.eligible);
         assert_eq!(
             event.result_node_ids.first().copied(),
-            Some(surviving_semantic_id),
-            "persisted filtered top must be the surviving Semantic node, not captured Episodic node {captured_episodic_id}"
+            Some(captured_episodic_id),
+            "persisted filtered top must retain the canonical grounded raw source represented by Semantic node {surviving_semantic_id}"
         );
         assert!(
-            !event.result_node_ids.contains(&captured_episodic_id),
-            "knowledge_only must exclude the captured high-scoring Episodic node"
+            event.result_node_ids.contains(&captured_episodic_id),
+            "knowledge_only must retain a captured Episodic node backed by reviewed derived knowledge"
         );
         assert!(
             event.top_score.is_some() && event.top_cosine.is_some(),
@@ -482,7 +480,8 @@ fn r1_recall_telemetry_deploy_gate_demo() {
             "recall telemetry must not retain the raw query"
         );
         println!(
-            "R1_DEPLOY_GATE filtered_top node_id={} node_type=semantic prefilter_top_node_id={} namespace={} scope={} top_score={:?} top_cosine={:?} event_kind={:?} query_chars={} has_hits={} readout_pass={} cosine_pass={} eligible={} result_node_ids={:?} event_rows={} auto_extract_node_count={}",
+            "recall_gate filtered_top node_id={} node_type=episodic grounded_by_node_id={} prefilter_top_node_id={} namespace={} scope={} top_score={:?} top_cosine={:?} event_kind={:?} query_chars={} has_hits={} readout_pass={} cosine_pass={} eligible={} result_node_ids={:?} event_rows={} auto_extract_node_count={}",
+            captured_episodic_id,
             surviving_semantic_id,
             unfiltered_top_id,
             event.namespace,
@@ -520,7 +519,7 @@ fn r1_recall_telemetry_deploy_gate_demo() {
         let mut memory_guard = handles.memory.lock().unwrap_or_else(|p| p.into_inner());
         memory_guard
             .engine_mut()
-            .snapshot("r1 deploy-gate fail-open control")
+            .snapshot("recall deploy-gate fail-open control")
             .expect("snapshot graph state before the control recall")
     };
     let event_count_before_control = {
@@ -608,7 +607,7 @@ fn r1_recall_telemetry_deploy_gate_demo() {
         "forced telemetry write failure must not leave an event row behind"
     );
     println!(
-        "R1_DEPLOY_GATE fail_open response_bytes_identical=true core_response_healthy=true control_row_increment={} insert_attempts={} event_rows_unchanged={} event_count={}",
+        "recall_gate fail_open response_bytes_identical=true core_response_healthy=true control_row_increment={} insert_attempts={} event_rows_unchanged={} event_count={}",
         event_count_after_control == event_count_before_control + 1,
         observed_insert_attempts.load(Ordering::SeqCst),
         post_failure_event_count == event_count_after_control,
@@ -1295,10 +1294,200 @@ fn ingest_invalid_scope_returns_invalid_params() {
     );
 }
 
-/// O1 (silent-failure observability): the `stats` usage surface must render
+fn attachment_transcript_request() -> Request {
+    Request::IngestAttachmentTranscript {
+        transcript: "  OCR line one\nred and purple lighting  ".into(),
+        session: "attachment-session".into(),
+        attachment_id: "asset-42".into(),
+        attachment_sha256: "ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789"
+            .into(),
+        processor_provider: "local-vision".into(),
+        processor_model: "vision-model-v2".into(),
+        processor_profile: "image-description-v3".into(),
+        processor_schema: "attachment-transcript-v1".into(),
+        confidence: 0.87,
+        observed_at_ms: Some(700),
+        namespace: None,
+        scope: Some("project/attachments".into()),
+        tags: Some(vec!["Nate".into(), "gaming room".into()]),
+    }
+}
+
+#[test]
+fn attachment_transcript_is_one_exact_unembedded_source_with_provenance() {
+    let (reg, _dir) = stub_registry();
+    let response = ok_text(dispatch(&reg, attachment_transcript_request()));
+    let node_id = response
+        .strip_prefix("stored source fragment ")
+        .and_then(|value| value.parse::<u64>().ok())
+        .expect("source node id");
+
+    let handle = {
+        let mut registry = reg.lock().unwrap_or_else(|p| p.into_inner());
+        registry.namespace_handle(None).expect("default namespace")
+    };
+    let memory = handle.lock().unwrap_or_else(|p| p.into_inner());
+    let graph = memory.engine().graph();
+    assert_eq!(
+        graph.node_count(),
+        1,
+        "must not manufacture a semantic copy"
+    );
+    assert_eq!(graph.edge_count(), 0, "must not manufacture a turn edge");
+    let node = graph
+        .get_node(anamnesis::graph::NodeId(node_id))
+        .expect("source fragment node");
+    assert_eq!(
+        node.content, "  OCR line one\nred and purple lighting  ",
+        "transcript bytes must be preserved without a speaker prefix"
+    );
+    assert_eq!(node.node_type, anamnesis::graph::KnowledgeType::Episodic);
+    assert!(
+        node.embedding.is_none(),
+        "this admission path must not invoke the configured embedding provider"
+    );
+    assert_eq!(node.created_at, anamnesis::graph::Timestamp(700));
+    assert_eq!(
+        node.origin.source_kind,
+        anamnesis::graph::SourceKind::DocumentExtract
+    );
+    assert_eq!(node.origin.session_id, "attachment-session");
+    assert_eq!(node.origin.scope.as_str(), "project/attachments");
+    assert_eq!(node.origin.confidence, 0.87);
+    assert_eq!(node.entity_tags, vec!["Nate", "gaming room"]);
+    for (key, expected) in [
+        ("attachment:id", "asset-42"),
+        (
+            "attachment:sha256",
+            "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+        ),
+        ("processor:provider", "local-vision"),
+        ("processor:model", "vision-model-v2"),
+        ("processor:profile", "image-description-v3"),
+        ("processor:schema", "attachment-transcript-v1"),
+    ] {
+        assert_eq!(node.metadata.get(key).map(String::as_str), Some(expected));
+    }
+    let admission_sha256 = node
+        .metadata
+        .get("attachment:admission-sha256")
+        .expect("stable admission fingerprint");
+    assert_eq!(admission_sha256.len(), 64);
+    assert!(
+        admission_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    );
+}
+
+#[test]
+fn attachment_transcript_retry_is_idempotent_but_changed_source_identity_is_not() {
+    let (reg, _dir) = stub_registry();
+    let first = ok_text(dispatch(&reg, attachment_transcript_request()));
+    let retry = ok_text(dispatch(&reg, attachment_transcript_request()));
+    let node_id = |response: &str| {
+        response
+            .strip_prefix("stored source fragment ")
+            .and_then(|value| value.parse::<u64>().ok())
+            .expect("source node id")
+    };
+    assert_eq!(
+        node_id(&retry),
+        node_id(&first),
+        "an exact retry must return the same node id"
+    );
+    {
+        let handle = {
+            let mut registry = reg.lock().unwrap_or_else(|p| p.into_inner());
+            registry.namespace_handle(None).expect("default namespace")
+        };
+        let memory = handle.lock().unwrap_or_else(|p| p.into_inner());
+        assert_eq!(
+            memory.engine().graph().node_count(),
+            1,
+            "an exact retry must not allocate a second source"
+        );
+    }
+
+    let mut changed_transcript = attachment_transcript_request();
+    let Request::IngestAttachmentTranscript { transcript, .. } = &mut changed_transcript else {
+        unreachable!("fixture variant")
+    };
+    transcript.push_str(" with a desk lamp");
+    let changed_transcript = ok_text(dispatch(&reg, changed_transcript));
+    assert_ne!(node_id(&changed_transcript), node_id(&first));
+
+    let mut whitespace_distinct_transcript = attachment_transcript_request();
+    let Request::IngestAttachmentTranscript { transcript, .. } =
+        &mut whitespace_distinct_transcript
+    else {
+        unreachable!("fixture variant")
+    };
+    transcript.push(' ');
+    let whitespace_distinct_transcript = ok_text(dispatch(&reg, whitespace_distinct_transcript));
+    assert_ne!(
+        node_id(&whitespace_distinct_transcript),
+        node_id(&first),
+        "idempotency must fingerprint the exact preserved transcript bytes"
+    );
+
+    let mut changed_session = attachment_transcript_request();
+    let Request::IngestAttachmentTranscript { session, .. } = &mut changed_session else {
+        unreachable!("fixture variant")
+    };
+    *session = "attachment-session-2".into();
+    let changed_session = ok_text(dispatch(&reg, changed_session));
+    assert_ne!(node_id(&changed_session), node_id(&first));
+    assert_ne!(node_id(&changed_session), node_id(&changed_transcript));
+
+    let handle = {
+        let mut registry = reg.lock().unwrap_or_else(|p| p.into_inner());
+        registry.namespace_handle(None).expect("default namespace")
+    };
+    let memory = handle.lock().unwrap_or_else(|p| p.into_inner());
+    assert_eq!(
+        memory.engine().graph().node_count(),
+        4,
+        "one exact retry plus three distinct source identities must create four nodes"
+    );
+}
+
+#[test]
+fn attachment_transcript_rejects_malformed_provenance_without_writing() {
+    let (reg, _dir) = stub_registry();
+    let mut request = attachment_transcript_request();
+    let Request::IngestAttachmentTranscript {
+        attachment_sha256, ..
+    } = &mut request
+    else {
+        unreachable!("fixture variant")
+    };
+    *attachment_sha256 = "not-a-sha256".into();
+
+    let response = dispatch(&reg, request);
+    assert!(
+        matches!(
+            response,
+            Response::Err {
+                kind: ErrKind::InvalidParams,
+                ..
+            }
+        ),
+        "got: {response:?}"
+    );
+
+    let handle = {
+        let mut registry = reg.lock().unwrap_or_else(|p| p.into_inner());
+        registry.namespace_handle(None).expect("default namespace")
+    };
+    let memory = handle.lock().unwrap_or_else(|p| p.into_inner());
+    assert_eq!(memory.engine().graph().node_count(), 0);
+}
+
+/// The `stats` usage surface must render silent-failure observability:
 /// the daemon-observed failure counters, and they must increment when the
 /// daemon handles a failing request or a recall that returns nothing to
-/// inject. RED until the counters exist + are wired into dispatch.
+/// inject.
 // ── management tools: update/forget/supersede/list/get ─────────────────
 fn remember_id(reg: &Arc<Mutex<MemoryRegistry>>, content: &str) -> u64 {
     let text = ok_text(dispatch(
@@ -1678,7 +1867,7 @@ fn get_json_surfaces_origin_provenance() {
     assert!(view["confidence"].is_number(), "got: {view}");
 }
 
-/// Manual-QA artifact: drives all 5 management tools through the real
+/// Drives all five management tools through the real
 /// `Request` → [`dispatch`] path (the same entry point `server.rs` uses)
 /// against a real in-process registry, printing each actual response.
 /// Run with `cargo test -p anamnesis-mcp mcp_mgmt_tools_demo -- --nocapture`.
@@ -1788,11 +1977,11 @@ fn mcp_mgmt_tools_demo() {
     assert!(updated.starts_with("updated node "));
 }
 
-/// Manual-QA artifact (P1-T4): proves the extraction queue is per-namespace
+/// Proves the extraction queue is per-namespace
 /// through the REAL `Request` → [`dispatch`] path (the same entry point
 /// `server.rs` uses for `ingest_conversation` / `extract_pending` /
 /// `extraction_status`). Captures a turn into "projA" and a different
-/// turn into "projB", then pulls/status-checks each — the artifact must
+/// turn into "projB", then pulls/status-checks each — the output must
 /// visibly show A's turn NOT appearing in B's pull (and vice-versa).
 /// Run with `cargo test -p anamnesis-mcp extraction_queue_per_namespace_demo -- --nocapture`.
 #[test]
@@ -1997,7 +2186,7 @@ fn stats_renders_failure_counters_that_increment() {
         "relate to a missing endpoint must error: {resp:?}"
     );
 
-    // GREEN expectation: the rendered counters reflect exactly one of each.
+    // The rendered counters reflect exactly one of each.
     let s1 = ok_text(dispatch(
         &reg,
         Request::Stats {
@@ -2015,7 +2204,7 @@ fn stats_renders_failure_counters_that_increment() {
     );
 }
 
-// ── P1-T5: metadata / tags / scope on remember + filtered list/recall ──
+// ── metadata / tags / scope on remember + filtered list/recall ──
 
 /// Helper mirroring [`remember_id`] with tags/metadata/scope set.
 fn remember_with(
@@ -2275,7 +2464,7 @@ fn scope_filter_keeps_universal_and_matching_drops_foreign() {
     );
 }
 
-// ── adversarial: malformed_input (P1-T5) ────────────────────────────────
+// ── adversarial: malformed_input ────────────────────────────────
 
 #[test]
 fn list_with_malformed_metadata_filter_errors_cleanly_not_panic() {
@@ -2360,12 +2549,12 @@ fn list_with_unknown_scope_returns_empty_not_panic() {
     assert!(items.is_empty(), "got: {items:?}");
 }
 
-/// Manual-QA artifact (P1-T5): remembers a tagged+scoped+metadata note,
+/// Remembers a tagged, scoped, metadata-bearing note,
 /// `get`s it, `list`s it via a tag filter and a scope filter, and
 /// `recall`s it via a scope filter — printing each real response. Run
-/// with `cargo test -p anamnesis-mcp p1_t5_manual_qa_demo -- --nocapture`.
+/// with `cargo test -p anamnesis-mcp metadata_scope_manual_qa_demo -- --nocapture`.
 #[test]
-fn p1_t5_manual_qa_demo() {
+fn metadata_scope_manual_qa_demo() {
     let (reg, _dir) = stub_registry();
 
     let mut metadata = std::collections::HashMap::new();
@@ -2448,7 +2637,7 @@ fn p1_t5_manual_qa_demo() {
     println!("recall (scope=projA) -> {recalled}");
 }
 
-// ── graph-viz: `Request::Graph` dispatch (RED→GREEN, start-work Wave 2) ─────
+// ── graph-viz: `Request::Graph` dispatch ─────
 
 /// By-seed path: remember two nodes, relate them, then request the subgraph
 /// rooted at the first. Asserts the canonical wire shape (`schema`, `nodes`,
@@ -2688,10 +2877,10 @@ fn graph_budget_defaults_to_250_and_caps_at_2000() {
     );
 }
 
-// ── graph-viz Phase 2: community `cluster` + `doi` enrichment ──────────────
+// ── Graph visualization: community `cluster` + `doi` enrichment ──────────────
 
 /// Every node in the `/api/graph` payload carries a numeric `cluster` and
-/// `doi` — the two Phase-2 derived fields, computed server-side.
+/// `doi` — the two derived fields computed server-side.
 #[test]
 fn graph_json_includes_cluster_and_doi() {
     let (reg, _dir) = stub_registry();
@@ -2858,7 +3047,7 @@ fn tiny_graph_single_cluster() {
     }
 }
 
-// ── R2 Task 3: daemon-mediated, read-only extraction source scan (RED) ─────
+// ── Daemon-mediated, read-only extraction source scan ───────────────
 
 fn capture_turns(
     reg: &Arc<Mutex<MemoryRegistry>>,
@@ -3223,7 +3412,7 @@ fn extraction_scan_rejects_non_shadow_status_without_approval_semantics() {
         "unsupported extraction profile status for shadow scans: Approved"
     );
 }
-// ── R2 Task 6: atomic shadow-extraction staging and failure recording (RED) ──
+// ── Atomic shadow-extraction staging and failure recording ──────────
 
 fn policy_counts(dir: &tempfile::TempDir) -> (u64, u64, u64, u64) {
     let connection =
@@ -4126,7 +4315,7 @@ mod migration_job {
         provider.release();
         migrations.drain().expect("migration completes");
     }
-    // ── R2 Task 8: extraction audit (RED) ──────────────────────────────────────
+    // ── Extraction audit ───────────────────────────────────────────────────
 
     fn extraction_audit_list(reg: &Arc<Mutex<MemoryRegistry>>) -> serde_json::Value {
         let text = ok_text(dispatch(
@@ -4246,8 +4435,53 @@ mod migration_job {
             "extraction audit candidate sources are unavailable or mismatched"
         );
     }
+
+    fn replace_capture_with_byte_identical_allocation(
+        reg: &Arc<Mutex<MemoryRegistry>>,
+        source_id: u64,
+    ) {
+        let handle = {
+            let mut registry = reg.lock().unwrap_or_else(|poison| poison.into_inner());
+            registry.namespace_handle(None).expect("default namespace")
+        };
+        let mut memory = handle.lock().unwrap_or_else(|poison| poison.into_inner());
+        let graph = memory.engine_mut().graph_mut();
+        let original = graph
+            .get_node(anamnesis::graph::NodeId(source_id))
+            .expect("staged source node")
+            .clone();
+        graph
+            .remove_node(original.id)
+            .expect("remove staged source allocation");
+        let replacement_id = graph.next_node_id();
+        assert_eq!(
+            replacement_id, original.id,
+            "fixture must reuse the numeric id"
+        );
+        graph
+            .add_node(original.clone())
+            .expect("insert byte-identical replacement allocation");
+        assert_eq!(
+            graph.get_node(replacement_id).expect("replacement source"),
+            &original,
+            "replacement must preserve every public source field"
+        );
+    }
+
+    fn atomic_sidecar_counts(reg: &Arc<Mutex<MemoryRegistry>>) -> (usize, usize) {
+        let handle = {
+            let mut registry = reg.lock().unwrap_or_else(|poison| poison.into_inner());
+            registry.namespace_handle(None).expect("default namespace")
+        };
+        let memory = handle.lock().unwrap_or_else(|poison| poison.into_inner());
+        (
+            memory.atomic_fact_count(),
+            memory.atomic_fact_relation_count(),
+        )
+    }
+
     #[test]
-    fn extraction_audit_resolves_a_unique_live_turn_key_after_node_id_changes() {
+    fn extraction_audit_rejects_a_unique_live_turn_key_from_another_allocation() {
         let (reg, _dir) = stub_registry();
         let (sources, _) = audit_fixture(&reg);
         let original = &sources[0];
@@ -4275,9 +4509,189 @@ mod migration_job {
 
         let audit = extraction_audit_list(&reg);
         let source = audit_source(audit_candidate(&audit, "one"), &original.turn_key);
-        assert_eq!(source["availability"], "available");
+        assert_eq!(source["availability"], "source-mismatch");
         assert_eq!(source["node_id"], replacement_id);
-        assert_eq!(source["content"], original.content);
+        assert_eq!(source["content"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn candidate_promotion_rejects_byte_identical_reuse_of_a_staged_source_id() {
+        let (reg, _dir) = stub_registry();
+        let (sources, audit) = audit_fixture(&reg);
+        let candidate_id = audit_candidate(&audit, "one")["id"]
+            .as_u64()
+            .expect("candidate id");
+        assert!(matches!(
+            dispatch(
+                &reg,
+                Request::UpdateExtractionCandidateAudit {
+                    namespace: None,
+                    candidate_id,
+                    support: crate::extract::types::AuditSupport::Supported,
+                    contamination: None,
+                    reviewer: "reviewer".into(),
+                },
+            ),
+            Response::Ok { .. }
+        ));
+
+        replace_capture_with_byte_identical_allocation(&reg, sources[0].node_id);
+
+        let rebound = extraction_audit_list(&reg);
+        let source = audit_source(audit_candidate(&rebound, "one"), &sources[0].turn_key);
+        assert_eq!(source["availability"], "source-mismatch");
+        assert_eq!(atomic_sidecar_counts(&reg), (0, 0));
+        let rejected = dispatch(
+            &reg,
+            Request::PromoteExtractionCandidate {
+                namespace: None,
+                candidate_id,
+            },
+        );
+        assert_audit_rejection(&rejected);
+        assert_eq!(
+            atomic_sidecar_counts(&reg),
+            (0, 0),
+            "rejected promotion must not materialize a fact"
+        );
+    }
+
+    #[test]
+    fn legacy_candidate_without_source_incarnation_binding_fails_closed() {
+        let (reg, dir) = stub_registry();
+        let (_sources, audit) = audit_fixture(&reg);
+        let candidate_id = audit_candidate(&audit, "one")["id"]
+            .as_u64()
+            .expect("candidate id");
+        assert!(matches!(
+            dispatch(
+                &reg,
+                Request::UpdateExtractionCandidateAudit {
+                    namespace: None,
+                    candidate_id,
+                    support: crate::extract::types::AuditSupport::Supported,
+                    contamination: None,
+                    reviewer: "legacy-reviewer".into(),
+                },
+            ),
+            Response::Ok { .. }
+        ));
+        rusqlite::Connection::open(dir.path().join("memory.db"))
+            .expect("open policy database")
+            .execute(
+                "UPDATE extract_candidates SET source_incarnations = '[]' WHERE id = ?1",
+                [candidate_id],
+            )
+            .expect("simulate migrated legacy candidate");
+
+        let listed = extraction_audit_list(&reg);
+        assert_eq!(
+            audit_candidate(&listed, "one")["sources"][0]["availability"],
+            "source-mismatch"
+        );
+        let rejected = dispatch(
+            &reg,
+            Request::PromoteExtractionCandidate {
+                namespace: None,
+                candidate_id,
+            },
+        );
+        assert_audit_rejection(&rejected);
+        assert_eq!(atomic_sidecar_counts(&reg), (0, 0));
+    }
+
+    #[test]
+    fn relation_promotion_rejects_byte_identical_reuse_of_an_endpoint_source_id() {
+        let (reg, _dir) = stub_registry();
+        let (sources, audit) = audit_fixture(&reg);
+        let from_candidate = audit_candidate(&audit, "one")["id"]
+            .as_u64()
+            .expect("source candidate id");
+        let to_candidate = audit_candidate(&audit, "two")["id"]
+            .as_u64()
+            .expect("target candidate id");
+        let relation_id = audit_relation(&audit, "one", "two")["id"]
+            .as_u64()
+            .expect("relation id");
+
+        for candidate_id in [from_candidate, to_candidate] {
+            assert!(matches!(
+                dispatch(
+                    &reg,
+                    Request::UpdateExtractionCandidateAudit {
+                        namespace: None,
+                        candidate_id,
+                        support: crate::extract::types::AuditSupport::Supported,
+                        contamination: None,
+                        reviewer: "reviewer".into(),
+                    },
+                ),
+                Response::Ok { .. }
+            ));
+            assert!(matches!(
+                dispatch(
+                    &reg,
+                    Request::PromoteExtractionCandidate {
+                        namespace: None,
+                        candidate_id,
+                    },
+                ),
+                Response::Ok { .. }
+            ));
+        }
+        assert!(matches!(
+            dispatch(
+                &reg,
+                Request::UpdateExtractionRelationAudit {
+                    namespace: None,
+                    relation_id,
+                    verdict: crate::extract::types::RelationVerdict::Correct,
+                    reviewer: "reviewer".into(),
+                },
+            ),
+            Response::Ok { .. }
+        ));
+        assert_eq!(atomic_sidecar_counts(&reg), (2, 0));
+
+        replace_capture_with_byte_identical_allocation(&reg, sources[0].node_id);
+
+        let rejected_review = dispatch(
+            &reg,
+            Request::UpdateExtractionRelationAudit {
+                namespace: None,
+                relation_id,
+                verdict: crate::extract::types::RelationVerdict::WrongDirection,
+                reviewer: "reviewer".into(),
+            },
+        );
+        let Response::Err { kind, message } = &rejected_review else {
+            panic!("reused endpoint allocation must reject review: {rejected_review:?}");
+        };
+        assert_eq!(*kind, ErrKind::InvalidParams);
+        assert_eq!(
+            message,
+            "relation endpoint sources are unavailable or mismatched"
+        );
+        let rejected = dispatch(
+            &reg,
+            Request::PromoteExtractionRelation {
+                namespace: None,
+                relation_id,
+            },
+        );
+        let Response::Err { kind, message } = &rejected else {
+            panic!("reused endpoint allocation must reject: {rejected:?}");
+        };
+        assert_eq!(*kind, ErrKind::InvalidParams);
+        assert_eq!(
+            message,
+            "relation endpoint sources are unavailable or mismatched"
+        );
+        assert_eq!(
+            atomic_sidecar_counts(&reg),
+            (2, 0),
+            "rejected relation promotion must not materialize adjacency"
+        );
     }
     #[test]
     fn extraction_audit_uses_a_valid_node_id_hint_when_turn_key_is_ambiguous() {
@@ -4317,7 +4731,10 @@ mod migration_job {
         let provenance_columns: Vec<String> = connection
             .prepare(
                 "SELECT name FROM pragma_table_info('extract_candidates')
-                 WHERE name IN ('source_turn_keys', 'source_content_hashes', 'source_node_ids')",
+                 WHERE name IN (
+                    'source_turn_keys', 'source_content_hashes',
+                    'source_node_ids', 'source_incarnations'
+                 )",
             )
             .expect("inspect candidate provenance schema")
             .query_map([], |row| row.get(0))
@@ -4329,9 +4746,10 @@ mod migration_job {
             [
                 "source_turn_keys",
                 "source_content_hashes",
-                "source_node_ids"
+                "source_node_ids",
+                "source_incarnations"
             ],
-            "policy provenance stores only source identity, hashes, and node ids"
+            "policy provenance stores source identity, hashes, node ids, and allocation bindings"
         );
         let copied_span_columns: u64 = connection
             .query_row(
@@ -4687,14 +5105,15 @@ mod migration_job {
 
         let (reg, dir) = stub_registry();
         let (sources, _) = audit_fixture(&reg);
+        let valid_until_ms = i64::MAX as u64;
         let connection = rusqlite::Connection::open(dir.path().join("memory.db"))
             .expect("open extraction policy database");
         connection
             .execute(
                 "UPDATE extract_candidates
-                 SET entity_tags = '[\"Alice\"]', valid_from_ms = 10, valid_until_ms = 20
+                 SET entity_tags = '[\"Alice\"]', valid_from_ms = 10, valid_until_ms = ?1
                  WHERE item_local_id = 'one'",
-                [],
+                [i64::MAX],
             )
             .expect("seed generic candidate metadata");
         drop(connection);
@@ -4781,7 +5200,10 @@ mod migration_job {
         );
         assert!(fact.entity_tags.iter().any(|tag| tag == "Alice"));
         assert_eq!(fact.valid_from, Some(anamnesis::graph::Timestamp(10)));
-        assert_eq!(fact.valid_until, Some(anamnesis::graph::Timestamp(20)));
+        assert_eq!(
+            fact.valid_until,
+            Some(anamnesis::graph::Timestamp(valid_until_ms))
+        );
         assert_eq!(
             fact.metadata.get("anamnesis:fact-kind"),
             Some(&"lesson".to_owned())
@@ -4931,21 +5353,26 @@ mod migration_job {
                 registry.namespace_handle(None).expect("default namespace")
             };
             let memory = handle.lock().unwrap_or_else(|poison| poison.into_inner());
-            let source_fact = memory
+            let relation_id = anamnesis::storage::AtomicFactRelationId(
+                first_relation["atomic_relation_id"]
+                    .as_u64()
+                    .expect("atomic relation id"),
+            );
+            let relation = memory
                 .engine()
                 .graph()
                 .storage()
-                .get_atomic_fact(fact_id)
-                .expect("relation source fact");
+                .get_atomic_fact_relation(relation_id)
+                .expect("typed reviewed relation");
+            assert_eq!(relation.from_fact_id, fact_id);
+            assert_eq!(relation.to_fact_id, second_fact_id);
             assert_eq!(
-                source_fact.metadata.get(&format!(
-                    "anamnesis:atomic-relation:{}",
-                    first_relation["atomic_relation_id"]
-                        .as_u64()
-                        .expect("atomic relation id")
-                )),
-                Some(&format!("supports:{}", second_fact_id.0))
+                relation.kind,
+                anamnesis::storage::AtomicFactRelationKind::Supports
             );
+            assert_eq!(relation.reviewed_by, "reviewer");
+            assert!(!relation.review_profile.is_empty());
+            assert!(!relation.idempotency_key.is_empty());
         }
         let committed = extraction_audit_list(&reg);
         assert_eq!(
@@ -4955,6 +5382,152 @@ mod migration_job {
         assert_eq!(
             audit_relation(&committed, "one", "two")["committed_edge_id"],
             first_relation["edge_id"]
+        );
+
+        let committed_candidate_id = audit_candidate(&committed, "one")["id"]
+            .as_u64()
+            .expect("committed candidate id");
+        let committed_candidate_update = dispatch(
+            &reg,
+            Request::UpdateExtractionCandidateAudit {
+                namespace: None,
+                candidate_id: committed_candidate_id,
+                support: crate::extract::types::AuditSupport::Unsupported,
+                contamination: Some(crate::extract::types::ContaminationCategory::UnsupportedClaim),
+                reviewer: "replacement-reviewer".into(),
+            },
+        );
+        assert!(
+            matches!(
+                &committed_candidate_update,
+                Response::Err {
+                    kind: ErrKind::Internal,
+                    ..
+                }
+            ),
+            "committed candidate authority must be immutable: {committed_candidate_update:?}"
+        );
+        let after_candidate_update = extraction_audit_list(&reg);
+        let committed_candidate = audit_candidate(&after_candidate_update, "one");
+        assert_eq!(committed_candidate["audit_support"], "supported");
+        assert_eq!(
+            committed_candidate["contamination_category"],
+            serde_json::Value::Null
+        );
+        assert_eq!(committed_candidate["committed_node_id"], fact_id.0);
+
+        let committed_audit_update = dispatch(
+            &reg,
+            Request::UpdateExtractionRelationAudit {
+                namespace: None,
+                relation_id,
+                verdict: crate::extract::types::RelationVerdict::WrongDirection,
+                reviewer: "replacement-reviewer".into(),
+            },
+        );
+        assert!(
+            matches!(
+                &committed_audit_update,
+                Response::Err {
+                    kind: ErrKind::Internal,
+                    ..
+                }
+            ),
+            "committed relation authority must be immutable: {committed_audit_update:?}"
+        );
+        let after_rejected_update = extraction_audit_list(&reg);
+        let committed_relation = audit_relation(&after_rejected_update, "one", "two");
+        assert_eq!(committed_relation["audit_status"], "correct");
+        assert_eq!(committed_relation["reviewed_by"], "reviewer");
+        assert_eq!(
+            committed_relation["committed_edge_id"],
+            first_relation["edge_id"]
+        );
+
+        let typed_relation_id = anamnesis::storage::AtomicFactRelationId(
+            first_relation["atomic_relation_id"]
+                .as_u64()
+                .expect("atomic relation id"),
+        );
+        {
+            let handle = {
+                let mut registry = reg.lock().unwrap_or_else(|poison| poison.into_inner());
+                registry.namespace_handle(None).expect("default namespace")
+            };
+            let mut memory = handle.lock().unwrap_or_else(|poison| poison.into_inner());
+            memory
+                .delete_atomic_fact_relation(typed_relation_id)
+                .expect("remove committed relation to plant policy conflict");
+            assert_eq!(memory.atomic_fact_relation_count(), 0);
+        }
+
+        let conflicting_retry = dispatch(
+            &reg,
+            Request::PromoteExtractionRelation {
+                namespace: None,
+                relation_id,
+            },
+        );
+        assert!(
+            matches!(
+                &conflicting_retry,
+                Response::Err {
+                    kind: ErrKind::Internal,
+                    ..
+                }
+            ),
+            "conflicting policy mark must reject promotion: {conflicting_retry:?}"
+        );
+        let handle = {
+            let mut registry = reg.lock().unwrap_or_else(|poison| poison.into_inner());
+            registry.namespace_handle(None).expect("default namespace")
+        };
+        let memory = handle.lock().unwrap_or_else(|poison| poison.into_inner());
+        assert_eq!(
+            memory.atomic_fact_relation_count(),
+            0,
+            "failed policy commit must compensate the newly created typed relation"
+        );
+        drop(memory);
+
+        {
+            let handle = {
+                let mut registry = reg.lock().unwrap_or_else(|poison| poison.into_inner());
+                registry.namespace_handle(None).expect("default namespace")
+            };
+            let mut memory = handle.lock().unwrap_or_else(|poison| poison.into_inner());
+            let mut changed = memory
+                .engine()
+                .graph()
+                .storage()
+                .get_atomic_fact(fact_id)
+                .expect("promoted fact")
+                .clone();
+            changed.content = "different material under the same key".to_owned();
+            memory
+                .engine_mut()
+                .graph_mut()
+                .storage_mut()
+                .set_atomic_fact(changed)
+                .expect("plant conflicting promoted fact");
+        }
+        let mismatched_candidate_retry = dispatch(
+            &reg,
+            Request::PromoteExtractionCandidate {
+                namespace: None,
+                candidate_id,
+            },
+        );
+        assert!(
+            matches!(
+                &mismatched_candidate_retry,
+                Response::Err {
+                    kind: ErrKind::Internal,
+                    ..
+                }
+            ),
+            "an idempotency key must not authorize different fact content: \
+             {mismatched_candidate_retry:?}"
         );
     }
 }

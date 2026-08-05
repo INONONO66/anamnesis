@@ -6,6 +6,12 @@ openai.env
 .omo/
 .omx/
 .sisyphus/
+.superpowers/
+.gjc/
+.senpi/
+.claude/
+.codex/
+.cursor/
 longmemeval*.json
 .fastembed_cache/
 crates/anamnesis/benches/eval/data/

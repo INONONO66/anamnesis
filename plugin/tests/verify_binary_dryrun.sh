@@ -1,6 +1,6 @@
 #!/usr/bin/env sh
 # Dry-run verification harness for the fail-CLOSED checksum gate in
-# bin/ensure-anamnesis.sh (supply-chain fix S1b), plus the S2 pin check.
+# bin/ensure-anamnesis.sh, plus the package-version pin check.
 #
 # It runs the REAL, UNMODIFIED bin/ensure-anamnesis.sh inside a throwaway
 # sandbox, with a mock `curl` on PATH that serves a local fake binary + a local
@@ -143,7 +143,7 @@ real_after="absent"
 [ -e "$REAL_BIN" ] && real_after=$(hash_of "$REAL_BIN")
 check "real binary unchanged (state: $real_before)" test "$real_after" = "$real_before"
 
-printf '== scenario (d): .codex-mcp.json pin (S2) ==\n'
+printf '== scenario (d): .codex-mcp.json version pin ==\n'
 if grep -q '@latest' "$CODEX_MCP"; then
   fno ".codex-mcp.json still contains @latest"
 else

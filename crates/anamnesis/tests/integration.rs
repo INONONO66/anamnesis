@@ -1,4 +1,4 @@
-//! Integration tests for the Phase 1 skeleton.
+//! Public API integration tests.
 //!
 //! These tests verify the full Engine lifecycle:
 //! ingest → link → touch → tick → query
@@ -83,7 +83,7 @@ fn engine_full_lifecycle() {
     let report = engine.tick(tick_time).unwrap();
     assert_eq!(report.nodes_decayed, 1);
 
-    // 5. Query — Associative returns real results in Phase 2
+    // 5. Query — associative retrieval returns real results.
     let q = Query::Associative {
         seed: ids1[0],
         budget: 100,

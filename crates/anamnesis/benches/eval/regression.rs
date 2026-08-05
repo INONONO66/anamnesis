@@ -1,4 +1,4 @@
-//! Phase 6 quality-gate regression judges over composed multi-tier fixtures.
+//! Quality-gate regression judges over composed multi-tier fixtures.
 //!
 //! Two automated judges, run as ordinary `cargo test` gates against the
 //! deterministic [`build_composed_tiers`] fixtures
@@ -6,11 +6,11 @@
 //!
 //! - [`judge_latency_regression`] — latency is judged by **p95 for each
 //!   fixture**. Each tier collects timed `Engine::search()` samples and asserts
-//!   the per-fixture p95 stays under a re-recorded floor.
+//!   the per-fixture p95 stays under a fixed recorded budget.
 //! - [`judge_quality_regression`] — output quality is judged by **bucket shape
 //!   and tension presence** for golden queries, plus aggregate `precision@5`
-//!   and `recall@10`. The floors are **re-derived on the current model**
-//!   (not loosened) and recorded in `benches/eval/baseline.md`.
+//!   and `recall@10`. The fixed boundaries and their measurement context are
+//!   recorded in `benches/eval/baseline.md`.
 //!
 //! Failures are categorized as performance-budget failures or context-shape
 //! changes, exactly as the spec requires. The fixtures carry no embeddings,
@@ -30,24 +30,21 @@ use anamnesis::query::SearchInput;
 
 use composed_fixtures::{AGENT_PEER_ID, ComposedTier, build_composed_tiers};
 
-// ── re-derived golden floors (current model) ────────────────────────────────
+// ── fixed quality regression boundaries ────────────────────────────────────
 //
-// These are recorded on the NEW Bayesian conductive-network model, not carried
-// over from the old physics. They are conservative below the observed values so
-// legitimate ranking changes that preserve cluster recall still pass, while a
-// real regression (a cluster dropping out of the top-k) trips the gate.
+// These boundaries are changed only with an explicitly recorded calibration
+// update. They leave measurement headroom while still detecting a cluster that
+// drops out of the expected top-k surface.
 
 /// Aggregate precision@5 floor over the golden quality cases.
 const PRECISION_AT_5_FLOOR: f64 = 0.55;
 /// Aggregate recall@10 floor over the golden quality cases.
 const RECALL_AT_10_FLOOR: f64 = 0.80;
 
-// ── re-recorded per-fixture p95 latency floors (current model) ──────────────
+// ── fixed per-fixture p95 latency budgets ───────────────────────────────────
 //
-// Per-fixture p95 of `Engine::search()` end-to-end on the recorded host. The
-// floors carry generous headroom over the observed p95 so machine-to-machine
-// variance does not produce false performance-budget failures, while a true
-// blow-up (an order-of-magnitude regression) still trips the gate.
+// The budgets include machine-to-machine headroom while remaining low enough
+// to detect an order-of-magnitude regression.
 
 /// p95 latency budget (ms) for the `small` tier (golden core only).
 const LATENCY_P95_FLOOR_SMALL_MS: f64 = 50.0;
@@ -240,11 +237,11 @@ fn judge_quality_regression() {
     // 1) Aggregate ranking quality (context-shape changes).
     assert!(
         agg_p5 >= PRECISION_AT_5_FLOOR,
-        "aggregate precision@5 = {agg_p5:.4} below re-derived floor {PRECISION_AT_5_FLOOR:.2}"
+        "aggregate precision@5 = {agg_p5:.4} below fixed floor {PRECISION_AT_5_FLOOR:.2}"
     );
     assert!(
         agg_r10 >= RECALL_AT_10_FLOOR,
-        "aggregate recall@10 = {agg_r10:.4} below re-derived floor {RECALL_AT_10_FLOOR:.2}"
+        "aggregate recall@10 = {agg_r10:.4} below fixed floor {RECALL_AT_10_FLOOR:.2}"
     );
 
     // 2) Per-case bucket shape + tension behavior (context-shape changes).
@@ -343,7 +340,7 @@ fn judge_latency_regression() {
         );
         assert!(
             p95 <= floor,
-            "[{}] p95 = {:.3} ms exceeds re-recorded floor {:.1} ms (performance-budget failure)",
+            "[{}] p95 = {:.3} ms exceeds fixed budget {:.1} ms (performance-budget failure)",
             tier.label,
             p95,
             floor,

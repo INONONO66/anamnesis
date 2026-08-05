@@ -1,6 +1,9 @@
 # 0001. Adopt Spreading Activation As The Theory And Conductive Network As The Representation
 
-*Superseded in part by [ADR-0014](0014-shrink-to-product.md) (v0.10.0 shrink): the "peer trust" contribution to the evidence prior `P_i` referenced below is no longer a live signal — the peer/trust subsystem was removed and the readout trust term is a neutral `1.0`. The `B_i + P_i` decomposition itself stands.*
+*Amended by [ADR-0014](0014-shrink-to-product.md): `P_i` contains encoding
+surprise and explicit consumer feedback. Producer identifiers remain provenance,
+and the compatibility reliability term is uniform. The `B_i + P_i`
+decomposition is unchanged.*
 
 - Status: Accepted
 - Date: 2026-06-05
@@ -18,7 +21,7 @@ Use **spreading activation (ACT-R)** as the theoretical substrate. Express the a
 
 The persistent quantities are:
 
-- **retained action `A_i = B_i + P_i`**: log prior need-odds, a composite of two terms. Only `B_i` is the ACT-R base-level activation, `B_i = ln( Σ_j (now − t_j)^(−d_j) )` over the node's access traces (each trace carries its own activation-dependent decay rate `d_j`); it owns forgetting and use-driven reinforcement. `P_i` is a separate, decay-exempt evidence prior (encoding surprise, feedback / social reinforcement, peer trust).
+- **retained action `A_i = B_i + P_i`**: log prior need-odds, a composite of two terms. Only `B_i` is the ACT-R base-level activation, `B_i = ln( Σ_j (now − t_j)^(−d_j) )` over the node's access traces (each trace carries its own activation-dependent decay rate `d_j`); it owns forgetting and use-driven reinforcement. `P_i` is a separate, decay-exempt evidence prior containing encoding surprise and explicit consumer feedback.
 - **conductance `C_ij`**: associative strength, log likelihood ratio.
 
 The query-local quantity is:

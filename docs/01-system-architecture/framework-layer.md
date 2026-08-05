@@ -1,14 +1,19 @@
 # Framework Layer
 
-The Framework Layer is the official consumer-layer implementation of the Anamnesis crate. It ships as `anamnesis::Memory` and is the default way to use the engine.
+The Framework Layer is the official consumer-layer implementation of the
+Anamnesis crate. It ships as `anamnesis::Memory` and is the default way to use
+the engine.
 
 ## What It Is
 
-`Memory` implements the bench-proven ingest and retrieval recipe on top of the public `Engine` API. It is not a separate system — it is an orchestration wrapper that codifies the encoding strategy validated by the LoCoMo and LongMemEval benchmarks. Every call `Memory` makes goes through the same public `Engine` paths available to any consumer.
+`Memory` implements the canonical conversation-ingest and reranked-recall
+contract on top of the public `Engine` API. It is not a separate system: every
+operation goes through the same public engine paths available to a direct crate
+consumer.
 
 **Vocabulary:**
 
-- **Framework API** — `Memory`: the validated consumer layer, ready to use. Namespace: `anamnesis::memory`.
+- **Framework API** — `Memory`: the canonical consumer layer, ready to use. Namespace: `anamnesis::memory`.
 - **Kernel API** — `Engine`: the raw substrate; all mechanics, no encoding opinion. Namespace: `anamnesis::engine`.
 
 ## The Recipe
@@ -35,7 +40,26 @@ The Framework Layer is the official consumer-layer implementation of the Anamnes
 
 ## Readout Surface
 
-`Memory::search` and `search_at` read from `trace.readout` — the same surface the benchmarks measure. Hits are returned as `Vec<Hit>` with `node_id`, `text`, `score`, `at`, `speaker`, and `session` fields. The assembled `ContextPackage` is returned in `Recall.package` for commit-gated reinforcement via `used()`.
+`Memory::search` and `search_at` read from the engine's pre-packaging readout
+surface. Hits are returned as `Vec<Hit>` with `node_id`, `text`, `score`, `at`,
+`speaker`, and `session` fields. The assembled `ContextPackage` is returned in
+`Recall.package` for commit-gated reinforcement via `used()`.
+
+`Memory::search_reranked` is the canonical quality-oriented path. It collects a
+bounded source surface, applies the configured reranker, selects source-aware
+evidence, and packages the result. Shipped MCP, hook, and plugin recall clients
+use this path. Direct crate integrations can call it without reproducing the
+ranking, selection, or packaging policy.
+
+## Proposed Result Extension
+
+The additive evidence-complete extension proposed by
+[ADR-0015](../adr/0015-evidence-grounded-formation-and-chain-retrieval.md)
+would keep this small surface. Canonical entity/fact indexes and evidence chains
+would remain internal retrieval capabilities; consumers would receive an
+`EvidenceBundle` through an additive result field or API and could continue
+using `ContextPackage` as its compatibility rendering. These types and paths are
+not implemented by the current `Memory` API.
 
 ## Commit-Gated Used
 
@@ -49,6 +73,13 @@ The Framework Layer is the official consumer-layer implementation of the Anamnes
 2. **No LLM calls.** All encoding is deterministic (text formatting + embedding provider). The crate contains no LLM API calls.
 3. **Replaceable.** Call `memory.engine_mut()` to drop below the recipe. Mix framework and raw engine calls only when you know what you are doing — the recipe's node topology assumptions no longer apply below that line.
 
-## Benchmark Attribution
+## Evaluation Parity
 
-The LoCoMo and LongMemEval benchmark harness builds and queries memory through `Memory` (via `Memory::with_provider` + `add` / `flush_all` / `search_result_at_with`). The published numbers are measurements of this layer end-to-end — not a lower-level engine path. See [calibration records](../07-quality-gates/calibration-records.md) for full provenance.
+Quality harnesses build raw conversation memory and query it through the same
+public `Memory` ingest, recall, selection, and rendering surfaces. Evaluation
+adapters may convert input records and collect diagnostics, but they must not
+own an alternate ranking or packaging policy. Every published result declares
+any derived artifact separately; replaying such an artifact does not establish
+parity with a plugin extraction or review workflow. See
+[benchmarks](../07-quality-gates/benchmarks.md) and
+[calibration records](../07-quality-gates/calibration-records.md).

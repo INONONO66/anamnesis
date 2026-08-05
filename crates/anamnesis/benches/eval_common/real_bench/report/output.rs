@@ -75,9 +75,9 @@ fn validate_report_path(path: &Path) -> BenchResult<()> {
             path.display()
         )));
     }
-    if !path.starts_with(".omo/evidence") && !path.starts_with("benches/eval/results") {
+    if !path.starts_with("benches/eval/results") {
         return Err(BenchError::InvalidInput(format!(
-            "output path must be under .omo/evidence or benches/eval/results: {}",
+            "output path must be under benches/eval/results: {}",
             path.display()
         )));
     }

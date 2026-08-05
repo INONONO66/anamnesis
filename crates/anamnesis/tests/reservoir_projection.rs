@@ -1,4 +1,4 @@
-//! Reservoir↔projection functions (Phase 1 foundation).
+//! Reservoir↔projection functions.
 //!
 //! Locked conventions (migration design Decision 5, ADR-0002/0003/0008):
 //! - `A_i` retained action = composite log need-odds `B_i + P_i`;

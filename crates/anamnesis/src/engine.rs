@@ -9,7 +9,7 @@
 //!
 //! ```text
 //! Public API = Memory / Engine / Error at root
-//!              anamnesis::memory  (Framework — Memory, Hit, Recall, SearchTuning, AddReceipt)
+//!              anamnesis::memory  (Framework — Memory, source inputs, recall and rendering types)
 //!              anamnesis::engine  (Kernel   — Engine, EngineConfig, graph types, storage, embeddings)
 //! ```
 
@@ -55,7 +55,10 @@ pub use crate::snapshot::{SnapshotBackend, SnapshotEntry, SnapshotId, SnapshotSt
 
 // ── Storage ───────────────────────────────────────────────────────────────────
 
-pub use crate::storage::{AtomicFact, AtomicFactId, SqliteStorage, StorageAdapter};
+pub use crate::storage::{
+    AtomicFact, AtomicFactId, AtomicFactRelation, AtomicFactRelationId, AtomicFactRelationKind,
+    SqliteStorage, StorageAdapter,
+};
 
 // ── Embedding ─────────────────────────────────────────────────────────────────
 

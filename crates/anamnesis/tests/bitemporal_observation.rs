@@ -1,4 +1,4 @@
-//! Tests for Observation.valid_from/valid_until + ingest() (T14).
+//! Tests for `Observation.valid_from`/`valid_until` and ingest.
 
 use anamnesis::Engine;
 use anamnesis::api::{IngestResult, Observation};

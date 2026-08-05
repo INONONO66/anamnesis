@@ -1,6 +1,9 @@
 # 0008. Forgetting Is Multi-Trace Base-Level Decay With A Separate Evidence Prior
 
-*Superseded in part by [ADR-0014](0014-shrink-to-product.md) (v0.10.0 shrink): "peer trust" is listed below as one component of the decay-exempt evidence prior `P_i`; the peer/trust subsystem that fed it was removed (readout trust term now a neutral `1.0`), so `P_i` carries only encoding surprise and feedback. ADR-0014 also discloses the by-design decay-rate coarsenings that adjusted per-type `m_type` multipliers. The multi-trace base-level model itself stands.*
+*Amended by [ADR-0014](0014-shrink-to-product.md): `P_i` contains encoding
+surprise and explicit consumer feedback, while producer identifiers remain
+provenance. ADR-0014 also records the normalized per-type `m_type` policy. The
+multi-trace base-level model is unchanged.*
 
 - Status: Accepted
 - Date: 2026-06-05
@@ -8,7 +11,7 @@
 
 ## Context
 
-Memory should fade naturally without deleting source fragments. Human and ACT-R memory literature favors power-law decay over arbitrary linear fading. Forgetting and use-driven reinforcement belong together, but encoding surprise, feedback, and peer trust are evidence that should not be eroded by disuse.
+Memory should fade naturally without deleting source fragments. Human and ACT-R memory literature favors power-law decay over arbitrary linear fading. Forgetting and use-driven reinforcement belong together, while encoding surprise and explicit consumer feedback are evidence that should not be eroded by disuse.
 
 ## Decision
 
@@ -35,7 +38,7 @@ The `t_j` are the timestamps of the node's access traces (a creation trace plus 
 
 `B_i` owns forgetting and use-driven reinforcement: it falls as traces age and rises when a committed access appends a fresh trace stamped at `now` (with its own `d_now` computed from current activation). It is computed on demand from the trace history, not maintained by incremental scalar decay.
 
-`P_i` is a separate persistent prior holding encoding surprise (`P_i ← k·eps` at allocation, ADR-0009), feedback / social reinforcement (`dP_i = eta·(lambda − predicted_i)`), and peer trust. `P_i` does NOT undergo base-level decay; it is a decay-exempt evidence offset.
+`P_i` is a separate persistent prior holding encoding surprise (`P_i ← k·eps` at allocation, ADR-0009) and explicit consumer feedback (`dP_i = eta·(lambda − predicted_i)`). `P_i` does not undergo base-level decay; it is a decay-exempt evidence offset.
 
 Public salience is the bounded logistic projection of the sum:
 
@@ -50,10 +53,10 @@ Decay-first ordering is intrinsic: a committed access appends a trace stamped at
 Benefits:
 
 - Matches ACT-R base-level memory shape.
-- The activation-dependent multi-trace sum reproduces power-law forgetting AND the spacing effect genuinely, which a single scalar reservoir cannot. The testing effect is NOT cleanly reproduced by activation-dependent decay alone; see the caveat below.
+- The activation-dependent multi-trace sum produces power-law forgetting and a retention-interval-dependent spacing effect that a single scalar reservoir cannot express. The testing effect is not produced by activation-dependent decay alone; see the boundary below.
 - Preserves source fragments for reactivation.
 - Makes stale knowledge less likely without erasing provenance.
-- Separates use-driven forgetting (`B_i`) from durable evidence (`P_i`), so encoding surprise, feedback, and peer trust are not eroded by disuse.
+- Separates use-driven forgetting (`B_i`) from durable evidence (`P_i`), so encoding surprise and explicit consumer feedback are not eroded by disuse.
 
 Tradeoffs:
 
@@ -63,16 +66,16 @@ Tradeoffs:
 - `B_i` is recomputed from traces on demand rather than read from a stored scalar.
 - Decay constants must be calibrated (now `α` and `c` rather than a single `d`).
 
-## Spacing And The Honest Testing Caveat
+## Spacing Effect And Testing-Effect Boundary
 
-The spacing effect — stronger long-term retention for spaced practice than for massed practice — is genuinely reproduced by activation-dependent decay, and it emerges from the per-trace mechanism rather than from recency:
+The activation-dependent per-trace mechanism produces stronger long-term retention for spaced practice than for massed practice without reducing the result to recency:
 
 - Massed re-presentation occurs at high activation `m_j`, producing a high `d_j`, so that trace decays fast and contributes little durable strength.
 - Spaced re-presentation occurs at low activation `m_j`, producing a low `d_j` (≈ `m_type·α`), so that trace is durable and lifts later strength.
 
-This is a true spacing × retention-interval interaction: spaced practice wins only at a sufficiently DELAYED test. Holding the last study event fixed (recency-controlled), an early test favors clustered/massed practice and a later test favors spaced practice (the crossover is around a moderate retention interval). A pure recency model cannot produce such a crossover, so the crossover is positive evidence that the win comes from activation-dependent `d_j`, not from recency. The single-trace forgetting curve remains log-linear with slope `−m_type·α`.
+This is a spacing × retention-interval interaction: spaced practice has higher retained activation only after a sufficient delay. Holding the last study event fixed (recency-controlled), an early test favors clustered practice and a later test favors spaced practice. A pure recency model cannot produce that crossover. The single-trace forgetting curve remains log-linear with slope `−m_type·α`.
 
-The testing effect — that a retrieval attempt aids retention more than an equivalent restudy at matched timing — is NOT cleanly reproduced by this model, and we do not claim it. To the base-level sum a presentation is a presentation regardless of whether it was a test or a restudy, so activation-dependent decay alone cannot dissociate the two; capturing it would require additional mechanisms (elaboration, transfer-appropriate processing) beyond what is modeled here. What the engine DOES express is a distinct commitment principle: a committed retrieval appends a durable trace and raises `B_i`, whereas a read-only retrieval mutates nothing. That is an engine invariant about commitment, explicitly NOT the human testing effect.
+The model does not distinguish a retrieval attempt from an equivalent restudy at matched timing, so it does not express the human testing effect. Such a distinction would require mechanisms beyond the base-level sum. The engine does express a separate commitment invariant: a committed retrieval appends a durable trace and raises `B_i`, whereas read-only retrieval mutates nothing.
 
 ## Alternatives Considered
 

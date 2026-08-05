@@ -7,30 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Reviewed atomic routing relations** — schema v13 stores typed, idempotent `reason`, `causal`, `supports`, and `contradicts` records outside graph topology. Relationship and inference recall may follow a fixed depth-two relation budget to live raw Episodic sources; `contradicts` never propagates positive relevance.
+- **Source-fragment admission** — the additive `Memory::add_source_fragment` / `SourceFragmentInput` API stores immutable textual evidence with consumer-supplied source and processor provenance; the engine does not fetch or interpret source media.
+- **Attachment transcript surface** — MCP clients may call `ingest_attachment_transcript`, and processor integrations may use `hook attachment-transcript`, to admit already-produced text through the same source-fragment contract.
+
+### Changed
+- **General clause facets** — complex dense-query planning derives bounded facets from punctuation and conservative connective rules instead of question-template branches.
+- **Typed relation promotion** — extraction review promotion writes dedicated relation records with reviewer, profile, time, scope, validity, and idempotency rather than granting authority through free-form fact metadata.
+
 ## [0.22.0] - 2026-08-02
 
 ### Added
-- **Canonical production reranked recall** — `Memory::search_reranked` now owns evidence-document compilation, local reranking, deterministic source-aware selection, and commit-safe packaging for MCP, plugin hooks, direct crate consumers, and the LoCoMo product-wire harness (#151).
-- **Grounded atomic-fact sidecar** — reviewed extracted claims retain exact answer-bearing spans and live raw-source provenance in isolated SQLite storage; they can route cited Episodic sources into complex recall without becoming graph nodes or entering node FTS (#152, #153).
+- **Canonical production reranked recall** — `Memory::search_reranked` now owns evidence-document compilation, local reranking, deterministic source-aware selection, and commit-safe packaging for MCP, plugin hooks, direct crate consumers, and evaluation adapters (#151).
+- **Grounded atomic-fact sidecar** — reviewed extracted claims retain exact grounded spans and live raw-source provenance in isolated SQLite storage; they can route cited Episodic sources into complex recall without becoming graph nodes or entering node FTS (#152, #153).
 - **Bounded dense expansion for complex queries** — collection, relationship, and inference plans batch the original query with at most two deterministic entity/decomposition surfaces, scan embeddings once, and fuse one deduplicated lower-prior auxiliary lane (#154).
-- **Local answer-quality gates** — reproducible LoCoMo reader, official-F1, semantic-judge, external-memory adapter, and provider-bound report lanes document metric provenance without changing the model-free engine boundary (#149, #151–#154).
+- **Answer-quality gates** — reproducible dataset adapters, deterministic and semantic metrics, provider-bound reports, and explicit metric provenance without changing the model-free engine boundary (#149, #151–#154).
 
 ### Changed
-- **Coverage-aware evidence selection** — complex recall preserves its proven cognitive head, selects 50 reranker documents from a bounded 200-row trace using query facets, canonical sources, sessions, grounded claim slots, and temporal bridges, then renders at most 20 evidence fragments (#152–#154).
+- **Coverage-aware evidence selection** — complex recall preserves its highest-ranked cognitive head, selects 50 reranker documents from a bounded 200-row trace using query facets, canonical sources, sessions, grounded claim slots, and temporal bridges, then renders at most 20 evidence fragments (#152–#154).
 - **Adaptive direct-fact delivery** — direct one-fact queries default to at most 12 fragments while temporal and completeness-sensitive plans retain the caller's requested width; callers can disable the adaptive cap additively (#154).
 - **Grounded extraction contract** — shadow extraction uses canonical subject/relation/object claims, strict source-span validation, bounded retry, and deterministic partition recovery; the bundled local Qwen adapter remains loopback-only and accepts no API key (#153).
 
 ### Fixed
-- **Product-wire path parity** — the benchmark no longer repeats deep selection after `Memory::rerank_search_result_at`; raw reranker diagnostics and the already-selected production package are recorded separately (#154).
-- **Collection completeness and speaker ownership** — source-valid reflected list items are preserved, while cross-speaker second-person replies cannot be reassigned to the named subject (#152, #153).
-
-### Performance
-- On the frozen local-only LoCoMo seed-42 reader-free n=100 gate, rendered recall is **80.64%** overall: **67.57%** Multi-hop, **63.00%** Open-domain, and **96.00%** for both Single-hop and Temporal, with 89% rendered Hit and 2.26 s p95 retrieval latency (#154).
+- **Evaluation diagnostics** — reports distinguish raw reranker diagnostics from the package selected by the public recall path (#154).
 
 ## [0.21.1] - 2026-07-18
 
 ### Fixed
-- **Id counters advance past any popped free id** — after a reopen (`counter = max(live)+1`), an uncontended free-id pop could leave the counter equal to the just-issued id, letting a later counter-path allocation re-issue the now-live id so `INSERT OR REPLACE` silently overwrote the node (post-release review finding; node and edge ids) (#146).
+- **Id counters advance past any popped free id** — after a reopen (`counter = max(live)+1`), an uncontended free-id pop could leave the counter equal to the just-issued id, letting a later counter-path allocation re-issue the now-live id so `INSERT OR REPLACE` silently overwrote the node (#146).
 
 ## [0.21.0] - 2026-07-18
 
@@ -68,8 +73,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.20.0] - 2026-07-16
 
 ### Added
-- **R1 recall telemetry (first released in 0.20.0)** — fail-open `recall_events` telemetry retains only the newest **10,000** minimized rows and never stores raw queries. `anamnesis stats --recall` reports eligibility counts and rates, abstention categories, cosine percentiles, and a threshold sweep.
-- **R2 shadow extraction** — disabled by default; opt in with `ANAMNESIS_EXTRACT_MODE=shadow` to run one configured provider over bounded captured-turn batches with bounded execution time and output size. Provider output undergoes strict validation, remains graph-nonmutating, and is reviewable with `anamnesis extract --audit`.
+- **Recall telemetry** — fail-open `recall_events` telemetry retains only the newest **10,000** minimized rows and never stores raw queries. `anamnesis stats --recall` reports eligibility counts and rates, abstention categories, cosine percentiles, and a threshold sweep.
+- **Shadow extraction** — disabled by default; opt in with `ANAMNESIS_EXTRACT_MODE=shadow` to run one configured provider over bounded captured-turn batches with bounded execution time and output size. Provider output undergoes strict validation, remains graph-nonmutating, and is reviewable with `anamnesis extract --audit`.
 
 ### Changed
 - **Nextest test-group serialization** — the shadow-extraction and latency-regression tests now share a serialized test group to avoid CI resource contention.
@@ -160,7 +165,7 @@ Additive public API (new engine method, new endpoint) → minor bump.
 - **`install.js` now verifies binary integrity** — the fetched native binary is checked against the release `SHA256SUMS.txt` before use (previously downloaded and executed with no integrity check); aborts on mismatch. Supply-chain hardening.
 
 ### Changed
-- Strengthened the README differentiation narrative (evidence-linked).
+- Clarified the README's product boundaries and supporting evidence.
 
 Additive public API (new `MemoryView` fields on a `#[non_exhaustive]` type, new subcommand); minor bump.
 
@@ -173,7 +178,7 @@ Additive public API (new `MemoryView` fields on a `#[non_exhaustive]` type, new 
 
 ### Fixed
 - Extraction queue is now per-namespace instead of a single global queue: captured turns no longer leak across projects, and a non-default namespace's un-extracted backlog is rebuilt on first open after a daemon restart.
-- README benchmark numbers reconciled to the calibration-records SSOT (LoCoMo 77.6% / MRR 0.291, LongMemEval 93.8% / MRR 0.872).
+- README measurements reconciled with the calibration-records source of truth.
 
 ### Changed
 - Internal refactor: `dispatch.rs` and `memory.rs` split into submodules (behavior-preserving).
@@ -182,8 +187,8 @@ Public API changes are purely additive (new types, methods, and a non-exhaustive
 
 ## [0.11.0]
 
-External-review findings (round 2) — verified against source; only genuine bugs
-fixed. **Breaking:** `Edge` gains a `leaked_at` field and `StorageAdapter` gains
+This release fixes engine and daemon correctness defects. **Breaking:** `Edge`
+gains a `leaked_at` field and `StorageAdapter` gains
 `leaked_at` accessors (custom storage backends and `Edge` struct-literal
 constructors must update) — hence the minor (0.x-breaking) bump.
 
@@ -192,36 +197,36 @@ Engine — cognitive-dynamics & storage correctness:
 - **tick-death on legacy DBs (#1)**: an empty `access_history` made the base level `-inf`, so the first `tick()` after an upgrade returned `Err(NonFinite)` and bricked recall. A v8→v9 migration backfills a creation trace, and a defensive tick finite-guard floors trace-less nodes instead of aborting the batch.
 - **edge-leak self-erosion (#2)**: idle-edge conductance leaked per tick-call (and MCP recall ticked twice), so the reasoning graph eroded the more it was used. A per-edge `leaked_at` checkpoint (v9→v10) makes leak elapsed-time-based and idempotent; MCP recall now ticks once.
 - **temporal ms/seconds (#3)**: the cue parser assumed seconds but `Timestamp` is milliseconds, so "yesterday" and explicit dates never matched. `temporal.rs` is now millisecond-native.
-- **BM25 inversion (#5)**: the best FTS matches received the lowest score. Fixed to be monotone-increasing in `-rank` (raises LoCoMo MRR to ~0.46).
+- **BM25 inversion (#5)**: the best FTS matches received the lowest score. Fixed to be monotone-increasing in `-rank`.
 - **migration brick (#6)**: `schema_version` was stamped once after the whole chain, so a crash mid-chain replayed a completed hop → duplicate-column → the DB never reopened. Each hop now stamps its version inside its own transaction (crash-safe replay).
 - **retract/Supersedes persistence (#7)**: both mutated the node in memory only and were lost on reopen; now the full row is persisted.
-- **salience recalibration (#4)**: `SURPRISE_GAIN_K` is decoupled from `INITIAL_RETAINED_ACTION` and set to `12.0`, so ordinary captured turns reach the archive floor after ~6 months of disuse instead of saturating salience for years (validated: LoCoMo Recall@20 77.3%, MRR 0.46; cognitive-fidelity gates unaffected).
+- **salience recalibration (#4)**: `SURPRISE_GAIN_K` is decoupled from `INITIAL_RETAINED_ACTION` and set to `12.0`, so ordinary captured turns reach the archive floor after about six months of disuse instead of saturating salience for years; cognitive-fidelity gates remain unchanged.
 
 MCP daemon & plugin — hardening:
 
-- **supply-chain (S1)**: the SessionStart hook fetched and executed a GitHub-release binary with no verification. The release workflow now emits `SHA256SUMS.txt`; the installer verifies the sha256 fail-closed before `chmod`/`mv` and drops `--clobber`.
-- **version pin (S2)**: the Codex MCP config no longer uses `anamnesis-mcp@latest`; it is pinned to the daemon version.
-- **`ANAMNESIS_SOCKET` (M1)**: documented (and suggested in the daemon's own error) but never read; the daemon now honors it.
-- **secret redaction (G1)**: raw transcript turns were ingested verbatim into plaintext SQLite; obvious secrets (`sk-`/`gh*_`/`AKIA`/`Bearer`) are now scrubbed before ingest.
-- **failure observability (O1)**: `stats` gains daemon-observed `dispatch_errors` / `ingest_errors` / `empty_recalls` counters.
-- **registry-lock starvation (C1)**: the daemon served every request under one global registry `Mutex`, so a slow ingest starved other sessions' recall. Refactored to per-namespace `Arc<Mutex<Memory>>` with a deadlock-free two-phase dispatch.
+- **supply-chain verification**: the SessionStart hook fetched and executed a GitHub-release binary with no verification. The release workflow now emits `SHA256SUMS.txt`; the installer verifies the sha256 fail-closed before `chmod`/`mv` and drops `--clobber`.
+- **version pin**: the Codex MCP config no longer uses `anamnesis-mcp@latest`; it is pinned to the daemon version.
+- **`ANAMNESIS_SOCKET`**: documented (and suggested in the daemon's own error) but never read; the daemon now honors it.
+- **secret redaction**: raw transcript turns were ingested verbatim into plaintext SQLite; obvious secrets (`sk-`/`gh*_`/`AKIA`/`Bearer`) are now scrubbed before ingest.
+- **failure observability**: `stats` gains daemon-observed `dispatch_errors` / `ingest_errors` / `empty_recalls` counters.
+- **registry-lock starvation**: the daemon served every request under one global registry `Mutex`, so a slow ingest starved other sessions' recall. Refactored to per-namespace `Arc<Mutex<Memory>>` with a deadlock-free two-phase dispatch.
 
 ## [0.10.2]
 
 Ops hardening — the product-layer gaps from the post-0.10 assessment:
 
 - **stats**: new dogfood usage section — daemon-lifetime op counters (recalls/reinforcing, remembers, relates, captured turns, extraction pulls), live extraction backlog, captured total, and a 14-day stale ratio.
-- **docs**: product-definition SSOT in the README ("What it is not" + "Success criteria"); a new [operations contract](docs/06-operations/operations.md) (tool timing, failure/recovery semantics incl. redelivery, daemon lifecycle & version-skew workaround, all env knobs); a [migration policy](docs/03-persistence/migration-policy.md) codifying the no-data-loss guarantees and declaring the existing migration/fixture tests normative.
+- **docs**: product-definition SSOT in the README ("What it is not" + "Success criteria"); a new [operations contract](docs/06-operations/operations.md) (tool timing, failure/recovery semantics including redelivery, daemon lifecycle and version-skew handling, all env knobs); a [migration policy](docs/03-persistence/migration-policy.md) codifying the no-data-loss guarantees and declaring the existing migration/fixture tests normative.
 - **tests**: killed two flake classes — capture drop-then-reopen flock races (retry helper) and fixed-tempdir namespace tests (unique tempdirs).
 
 ## [0.10.1]
 
-Fixes from post-0.10.0 external review (all four findings verified before fixing):
+Correctness fixes following the 0.10.0 release:
 
 - **docs**: removed stale `fact_at` references (method deleted in 0.10.0) across README and docs; corrected `snapshot()` signature (`Result<SnapshotId, Error>`); full README API-block signature audit.
 - **storage (breaking-safe)**: v7→v8 migration normalizes ALL bare non-canonical `node_type` strings to the canonical `custom:` encoding (Rust-side re-encode, escape-correct), so foreign/future bare types are visible to `nodes_by_type` — closes the class, not just the fixed legacy list.
 - **query**: tension endpoints are exempt from result-limit trimming — the "why did we switch?" tension now survives small `limit`s (the demo/tests no longer need an oversized limit).
-- **demo**: the flat-cosine baseline now ranks the full episodic corpus independently of graph recall.
+- **demo**: the cosine diagnostic ranks the full episodic corpus independently of graph recall.
 
 ## [0.10.0] — Shrink to product
 
@@ -259,7 +264,7 @@ Both run automatically on `SqliteStorage::open`.
 ### Added (recent releases folded in)
 
 - **Automatic capture pipeline** (0.9.x, [ADR-0013](docs/adr/0013-reasoning-capture-pipeline.md)): `Stop` / `PreCompact` / `SessionEnd` hooks stream turns to Anamnesis as raw `Episodic` memories (content-hash deduped, fire-and-forget); a Stage-2 nudge asks the agent to distill the un-extracted queue via the `extract_pending` MCP tool. Capture hardening (queue durability, nudge ungating, bounded I/O) in 0.9.1.
-- **Reasoning-advantage demo** (PR-A): `examples/reasoning_demo.rs` + `tests/reasoning_advantage.rs` — the why-query a flat vector list cannot answer, showing contradiction-as-tension and typed why-chains over the same nodes.
+- **Typed-relation contract demo** (PR-A): `examples/reasoning_demo.rs` + `tests/reasoning_advantage.rs` exercise contradiction-as-tension and typed reason chains through the public `Memory` API.
 - **`capture.rs`** — the MCP capture/extraction pipeline extracted into its own module (move-only).
 
 ## [0.5.0]

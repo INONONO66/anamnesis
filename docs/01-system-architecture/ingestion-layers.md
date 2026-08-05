@@ -1,59 +1,90 @@
-# Ingestion Layering — Storage Mechanism vs Formation Policy
+# Ingestion Layering
 
-Anamnesis separates **what is stored** from **which facts are formed, and when**. The engine
-and its write tools are a storage **mechanism**; deciding what to distill raw fragments into,
-and when, is **formation**, and formation is a **consumer-layer policy** — not an engine
-property. This document states that separation explicitly so ingestion is not mistaken for a
-fixed architectural trait.
+Anamnesis separates source persistence, consumer-owned extraction, and
+deterministic admission. The first and third layers are model-free product
+mechanisms. The middle layer is policy owned by a plugin or another consumer.
 
-## The two layers
+## Current Three-Layer Contract
 
-| Layer | Owner | Responsibility | LLM? |
+| Layer | Owner | Current responsibility | Model call? |
 |---|---|---|---|
-| **Storage mechanism** | Engine + daemon + MCP write tools (`remember`, `relate`, `ingest_conversation`) | Persist exactly what it is given — a note, an edge, a set of turns — deterministically. No opinion about fact quality or granularity. | Never — the core is LLM-free (see [overview](overview.md#core-boundary)) |
-| **Formation policy** | The consumer (the plugin, the `Memory` recipe, or any caller) | Decide *what* to write and *when* to distill raw fragments into compact facts / reasoning edges. | Consumer's choice |
+| **Raw persistence** | `Memory`, engine, daemon, and write clients | Validate an ingest request and persist the supplied turn, note, or edge with origin and time metadata | No |
+| **Consumer extraction** | Plugin or another caller | Decide whether and how to derive a compact candidate from persisted sources | Consumer choice |
+| **Deterministic admission** | Shared product APIs | Validate the narrow record type accepted by the current engine and keep it subordinate to cited source nodes | No |
 
-The mechanism is fixed and lossless. The policy is where all ingestion opinion lives, and it is
-swappable per consumer. This is the ingestion-side statement of the [daemon-core / distinct-clients
-split](../adr/0012-daemon-core-mcp-plugin-clients.md): the MCP write tools carry out calls; they do
-not judge them.
+The layers have different failure boundaries. Hook capture is best-effort before
+persistence: an unavailable daemon, an unsupported host event, or a filtered
+transcript entry can prevent a turn from reaching storage. Once a source has
+been persisted successfully, later extraction or admission failure does not
+delete or replace it.
 
-## Formation is composable, not a single strategy
+## Raw Persistence
 
-Because storage is a separate layer, a consumer may compose several formation policies over the
-same mechanism. The shipped plugin runs two at once (see
-[ADR-0013](../adr/0013-reasoning-capture-pipeline.md)):
+`Memory::add`, `add_note`, and the daemon write paths persist the input supplied
+by their caller. The engine applies its documented validation and storage
+transaction rules; it does not decide whether the text is a good fact or the
+right extraction granularity.
 
-1. **Passive raw-fragment capture.** Hooks ingest turns verbatim as `Episodic`, synchronously,
-   no LLM. Nothing is judged or dropped.
-2. **Deferred agent-side extraction.** The next connected agent distills the un-extracted queue
-   with *its own* LLM and emits `remember` / `relate` — reasoning structure, formed after the
-   fact, at no extra API cost.
+The shipped plugin uses lifecycle hooks to submit text-bearing transcript
+windows as raw `Episodic` sources. Overlapping successful submissions are
+idempotently deduplicated by the capture path. This is a plugin policy, not a
+guarantee that every host event or transcript item reaches the daemon.
 
-A consumer that wants immediate distilled facts MAY add a third policy — **synchronous
-pre-extraction** before calling the mechanism — without any engine change. All three write
-through the same mechanism; none of them is baked into the engine.
+## Consumer Extraction
 
-## Why the separation is load-bearing: fragments, not summaries
+Extraction may be immediate, deferred, local-model based, agent driven, or
+absent. Provider choice, prompts, retry policy, and review policy remain outside
+the engine crate. Extraction output is an untrusted candidate until it crosses a
+supported admission surface.
 
-Keeping storage (raw, lossless fragments) separate from formation (which facts, when) is what
-makes fragments-not-summaries hold in practice:
+The current plugin workflow described by
+[ADR-0013](../adr/0013-reasoning-capture-pipeline.md) preserves successfully
+captured raw sources independently of its deferred extraction queue. Another
+consumer can use a different extraction policy without changing graph
+mechanics.
 
-- The raw fragment is **always preserved**, so a missing, late, or wrong extraction never
-  destroys the source.
-- Formation is therefore **re-runnable**: a better policy, or a later agent, can re-distill the
-  same fragments.
+## Current Deterministic Admission
 
-Coupling storage to a single distil-at-write step would forfeit this — a formation error would be
-baked into the store with no surviving source to recover from. The layer split is precisely the
-design choice that avoids that failure mode.
+The current shared derived-record surface is deliberately narrow:
+`Memory::add_atomic_fact` admits a reviewed atomic routing fact into an isolated
+sidecar. `Memory::add_atomic_fact_relation` admits a reviewed typed routing
+relation between two such facts. Fact admission rejects empty claims, missing
+or non-Episodic sources, sources from different sessions or scopes, malformed
+validity intervals, and invalid embeddings. Relation admission rejects missing
+or self endpoints, empty review identity/profile/idempotency fields, disjoint
+concrete scopes, and validity intervals with no endpoint-time intersection. The
+extraction adapter can additionally validate byte-exact grounding metadata
+before invoking these APIs.
 
-## Rule for contributors
+Admitted atomic facts and relations remain outside graph topology, attraction,
+forgetting, normal node FTS, and graph budgets. They can route a complex query
+through bounded typed adjacency to cited raw sources, but only those raw sources
+enter the reader-facing evidence lane. This is the shared deterministic
+admission behavior exercised by direct `Memory` callers and product clients; it
+is not a general entity/fact catalog or a reviewed-claim lifecycle.
 
-Do not describe Anamnesis ingestion as a fixed "raw turns + deferred extraction" property. That
-is the **default plugin policy** — one instance of the formation layer, not an engine limit. New
-ingestion behavior is a **policy change at the consumer/plugin layer**; the storage mechanism
-stays LLM-free and lossless. New agent-write capabilities go on the MCP client, new automatic
-capture/formation goes on the plugin client, and the engine keeps storing exactly what it is told
-(cf. [ADR-0012](../adr/0012-daemon-core-mcp-plugin-clients.md),
-[ADR-0013](../adr/0013-reasoning-capture-pipeline.md), [framework-layer](framework-layer.md)).
+## Proposed: General Formation Admission (ADR-0015)
+
+[ADR-0015](../adr/0015-evidence-grounded-formation-and-chain-retrieval.md)
+proposes extending the narrow atomic-fact surface into source, grounded-routing,
+reviewed-claim, and observation classes backed by one catalog transaction. That
+transaction, its review states, catalog types, invalidation rules, and
+cross-entry-point parity are implementation promotion criteria, not current
+behavior.
+
+## Contributor Rules
+
+- Describe capture separately from persistence. Only a successfully persisted
+  source is guaranteed to survive optional formation failure.
+- Keep provider selection and inference outside the engine crate.
+- Route current derived retrieval through the public atomic-fact admission
+  surface; do not present sidecar text as independent evidence.
+- Label the general catalog, canonical relation-evidence, observation, and
+  generalized admission behavior as proposed until ADR-0015 is accepted; keep
+  the implemented narrow atomic routing-relation contract distinct.
+- Keep all deterministic admission and persistence errors observable and
+  fallible.
+
+See [ADR-0012](../adr/0012-daemon-core-mcp-plugin-clients.md),
+[ADR-0013](../adr/0013-reasoning-capture-pipeline.md), and
+[framework-layer](framework-layer.md).

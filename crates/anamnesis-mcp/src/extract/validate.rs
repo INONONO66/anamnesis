@@ -10,7 +10,7 @@ use crate::extract::types::{
 };
 
 const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
-const MAX_ITEMS: usize = 16;
+const MAX_ITEMS: usize = 32;
 const MAX_ITEM_ID_CHARS: usize = 64;
 const MAX_LEGACY_CONTENT_CHARS: usize = 500;
 // Canonical claims join the independently bounded subject, relation, and
@@ -930,15 +930,15 @@ mod tests {
 
     #[test]
     fn rejects_item_limits_ids_content_and_confidence() {
-        let seventeen_items = (0..17)
+        let thirty_three_items = (0..33)
             .map(|index| item(&format!("item-{index}"), "content", SOURCE_A))
             .collect::<Vec<_>>()
             .join(",");
         let cjk_501 = "界".repeat(501);
         let cases = vec![
             (
-                "seventeen items",
-                valid_output(&seventeen_items, ""),
+                "thirty-three items",
+                valid_output(&thirty_three_items, ""),
                 ValidationError::TooManyItems,
             ),
             (

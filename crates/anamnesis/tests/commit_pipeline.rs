@@ -1,4 +1,4 @@
-//! Phase 5 commit-pipeline integration tests.
+//! Commit-pipeline integration tests.
 //!
 //! Proves the read-only/commit boundary (ADR-0004 / interactions.md):
 //! - `query`/`search` return a `ContextPackage` with a `commit_trace` but mutate
@@ -279,7 +279,7 @@ fn commit_conductance_update_is_deterministic_for_same_graph_and_trace() {
     // Determinism MUST (ADR-0004 / interactions.md): on a single graph, the same
     // query produces the same trace, and committing that trace produces the same
     // conductance reservoir. (Cross-engine bit-equality of the RWR flow depends on
-    // stable hash-map iteration order, which is Phase-3 work; the guarantee here is
+    // stable hash-map iteration order; the guarantee here is
     // the spec's actual MUST — same graph + query => identical result.)
     let (engine, seed, _neighbor, edge) = fixture();
 

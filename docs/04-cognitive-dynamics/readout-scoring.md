@@ -15,8 +15,8 @@ The scoring layer must respect the reservoir/projection boundary. It reads retai
 | `s_i` | Salience projection |
 | `A_i` | Retained action (prior need-odds); read input and tie-breaker |
 | `Z_i` | Effective impedance |
-| `scope_weight_i` | Scope compatibility |
-| `trust_weight_i` | Origin/peer reliability |
+| `scope_weight_i` | Scope applicability used for ranking; not authorization |
+| `trust_weight_i` | Compatibility input; the current engine supplies a neutral value because it has no peer-trust subsystem |
 | `stress_i` | Frustration attached to selected contradictions |
 | resolution level | L0/L1/L2 content cost |
 
@@ -45,8 +45,8 @@ The seven coefficients are one calibrated re-ranking regression object, not seve
 | `w_phi` | query-field alignment labels |
 | `w_s` | historical usefulness / re-access |
 | `w_z` | impedance penalty needed to avoid isolated noise |
-| `w_scope` | scope policy and leakage audits |
-| `w_trust` | peer feedback and corroboration |
+| `w_scope` | scope-ranking acceptance labels |
+| `w_trust` | reserved compatibility coefficient; neutral in the current engine |
 | `w_stress` | consumer tolerance for contradiction bundles |
 
 ## Lamp Analogy
@@ -60,9 +60,36 @@ Activation is how much current reaches a lamp. Retained action is how ready the 
 | identity | Include stable identity priors and current state when relevant |
 | knowledge | Prefer high-score semantic/procedural/decision sites |
 | memories | Include episodic fragments when they explain provenance or recent context |
-| tensions | Include contradiction bundles when stress is relevant |
+| tensions | Include eligible contradiction bundles when both endpoints were activated independently |
 
 The `ContextPackage` should preserve a balanced shape instead of letting one bucket consume all budget.
+
+`EdgeType::Contradicts` never carries activation. It is excluded from the RWR
+transition matrix and evaluated by the frustration channel only after both
+endpoints are active through other cues or supportive paths.
+
+## Proposed: Evidence-Aware Selection (ADR-0015)
+
+Under the evidence-complete pipeline proposed by
+[ADR-0015](../adr/0015-evidence-grounded-formation-and-chain-retrieval.md)
+the current node score would remain one input rather than the complete selection
+objective. The proposed selector would group overlapping representations by
+canonical source and add:
+
+- marginal requested-slot coverage,
+- typed-relation compatibility,
+- temporal and scope consistency,
+- provenance completeness,
+- source novelty, and
+- token cost.
+
+The node score would continue to order relevance within a source-aware candidate
+surface. A lower-ranked source could replace a redundant tail representation
+when it fills a missing slot or completes a valid evidence chain. It could not
+replace the stable direct-query prefix for diversity alone. Routing-only facts
+would remain ineligible without their authoritative sources, and a proposed
+chain hop with incompatible scope eligibility, time, or provenance would not
+affect delivered evidence.
 
 ## Ordering Stability
 
@@ -90,9 +117,13 @@ Readout trace should include:
 
 - Absolute activation thresholds break on large graphs.
 - Readout must not mutate storage.
-- Scope-ineligible sites must not be packaged.
-- Contradictions must not be silently hidden when relevant.
+- Scope weights must be finite and applied consistently; the caller, not
+  readout scoring, excludes unauthorized data.
+- An eligible contradiction between independently active endpoints must not be
+  silently hidden.
 - Resolution downgrade must preserve provenance.
+- A current atomic routing fact must not be rendered without its authoritative
+  raw source.
 
 ## Cost
 

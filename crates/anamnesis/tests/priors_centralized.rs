@@ -17,12 +17,12 @@ fn per_trace_decay_constants_are_locked() {
 
 #[test]
 fn rwr_restart_probability_default() {
-    // RWR restart alpha default; reach-derived alpha replaces it in Phase 3 (ADR-0005).
+    // RWR restart alpha default; see ADR-0005 for its derivation.
     assert_eq!(priors::RWR_RESTART_PROBABILITY, 0.15);
 }
 
 #[test]
 fn logit_backfill_eps_reserved() {
-    // Epsilon for the clamped-logit projection backfill (Phase 1 reservoir migration).
+    // Epsilon for the clamped-logit projection backfill.
     assert_eq!(priors::LOGIT_BACKFILL_EPS, 1e-6);
 }
