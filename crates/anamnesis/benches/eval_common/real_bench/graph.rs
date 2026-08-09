@@ -5,20 +5,29 @@ use anamnesis::Error;
 use anamnesis::Memory;
 use anamnesis::embedding::EmbeddingProvider;
 use anamnesis::engine::SqliteStorage;
-use anamnesis::graph::{KnowledgeType, NodeId, Timestamp};
-use anamnesis::memory::AtomicFactInput;
+use anamnesis::graph::{KnowledgeType, NodeId, Origin, PeerId, ScopePath, SourceKind, Timestamp};
+use anamnesis::memory::{AtomicFactInput, SourceFragmentInput};
 use serde::{Deserialize, Serialize};
 
 use super::dataset::{BenchTurn, FormationInput};
 use super::error::{BenchError, BenchResult};
 
+mod attachment;
 mod eval;
+
+pub use attachment::{
+    ATTACHMENT_OBSERVATION_ARTIFACT_SCHEMA_VERSION, AttachmentCoverageCounts,
+    AttachmentCoverageDisposition, AttachmentCoverageRecord, AttachmentObservationArtifact,
+    AttachmentObservationRecord, AttachmentProcessorIdentity,
+    ValidatedAttachmentObservationArtifact, attachment_observation_output_fnv1a64,
+    load_optional_attachment_observation_artifact,
+};
 
 #[cfg(test)]
 pub use eval::ranked_fragments_for_test;
 pub use eval::{
     AnswerContext, AnswerEvidence, AnswerSourceAttribution, ConsumerSelectionPolicy, EvalOptions,
-    QuestionEvaluation, ReadoutFeatureRow, RetrievedMemory, WarmupReport,
+    FrozenConsumerRanking, QuestionEvaluation, ReadoutFeatureRow, RetrievedMemory, WarmupReport,
     evaluate_question_with_context, evaluate_questions, run_warmup,
 };
 
@@ -148,6 +157,24 @@ pub fn build_memory_graph_with_derived(
     derived: &[DerivedMemoryRecord],
     relations: &[DerivedMemoryRelation],
 ) -> BenchResult<BuiltMemoryGraph> {
+    build_memory_graph_with_derived_and_attachment_observations(
+        input, provider, derived, relations, None,
+    )
+}
+
+/// Build the product graph with frozen derived memories and independently
+/// validated attachment observations.
+///
+/// Attachment observations are admitted as unembedded source fragments after
+/// derived-memory grounding. They are never concatenated into conversation
+/// turns and cause no additional embedding or model calls.
+pub fn build_memory_graph_with_derived_and_attachment_observations(
+    input: FormationInput<'_>,
+    provider: Arc<dyn EmbeddingProvider>,
+    derived: &[DerivedMemoryRecord],
+    relations: &[DerivedMemoryRelation],
+    attachment_observations: Option<&ValidatedAttachmentObservationArtifact>,
+) -> BenchResult<BuiltMemoryGraph> {
     let session_turns: Vec<Vec<&BenchTurn>> = input
         .sessions
         .iter()
@@ -242,12 +269,171 @@ pub fn build_memory_graph_with_derived(
         derived,
         relations,
     )?;
+    if let Some(artifact) = attachment_observations {
+        ingest_attachment_observations(
+            &mut memory,
+            &mut provenance_by_node,
+            &mut stats,
+            input,
+            artifact,
+            base_timestamp,
+        )?;
+    }
 
     Ok(BuiltMemoryGraph {
         memory,
         provenance_by_node,
         stats,
     })
+}
+
+fn ingest_attachment_observations(
+    memory: &mut Memory<SqliteStorage>,
+    provenance_by_node: &mut HashMap<NodeId, NodeProvenance>,
+    stats: &mut GraphBuildStats,
+    input: FormationInput<'_>,
+    artifact: &ValidatedAttachmentObservationArtifact,
+    base_timestamp: u64,
+) -> BenchResult<()> {
+    for validated in &artifact.records {
+        let record = &validated.record;
+        let Some((session_index, session)) = input
+            .sessions
+            .iter()
+            .enumerate()
+            .find(|(_, session)| session.session_id == record.parent_session_id)
+        else {
+            // The answer harness forms one independent sample graph at a time.
+            // The validating loader already checked this record against the
+            // full label-free dataset, so records from other samples are inert.
+            continue;
+        };
+
+        let mut matching_turns = session
+            .turns
+            .iter()
+            .filter(|turn| turn.raw_turn_id.as_deref() == Some(record.parent_turn_id.as_str()));
+        let parent = matching_turns.next().ok_or_else(|| {
+            BenchError::InvalidInput(format!(
+                "validated attachment-observation record {:?} lost its parent turn",
+                record.record_id
+            ))
+        })?;
+        if matching_turns.next().is_some() {
+            return Err(BenchError::InvalidInput(format!(
+                "validated attachment-observation record {:?} has an ambiguous parent turn",
+                record.record_id
+            )));
+        }
+        let attachment = parent
+            .attachments
+            .iter()
+            .find(|attachment| attachment.attachment_index == record.attachment_index)
+            .ok_or_else(|| {
+                BenchError::InvalidInput(format!(
+                    "validated attachment-observation record {:?} lost its parent attachment",
+                    record.record_id
+                ))
+            })?;
+        if attachment.locator != validated.bound_locator {
+            return Err(BenchError::InvalidInput(format!(
+                "validated attachment-observation record {:?} parent attachment changed",
+                record.record_id
+            )));
+        }
+
+        let session_start = session.start_timestamp.map_or_else(
+            || base_timestamp + session_index as u64 * SESSION_GAP_MS,
+            |epoch_seconds| epoch_seconds.saturating_mul(MILLIS_PER_SECOND),
+        );
+        let observed_at =
+            Timestamp(session_start.saturating_add(parent.turn_index as u64 * TURN_GAP_MS));
+        let metadata = vec![
+            ("attachment:record-id".to_owned(), record.record_id.clone()),
+            (
+                "attachment:parent-session-id".to_owned(),
+                record.parent_session_id.clone(),
+            ),
+            (
+                "attachment:parent-turn-id".to_owned(),
+                record.parent_turn_id.clone(),
+            ),
+            (
+                "attachment:index".to_owned(),
+                record.attachment_index.to_string(),
+            ),
+            (
+                "attachment:asset-sha256".to_owned(),
+                record.asset_sha256.clone(),
+            ),
+            (
+                "attachment:output-fnv1a64".to_owned(),
+                record.output_fnv1a64.clone(),
+            ),
+            (
+                "attachment:dataset-fnv1a64".to_owned(),
+                artifact.dataset_fnv1a64.clone(),
+            ),
+            (
+                "processor:id".to_owned(),
+                artifact.processor.processor_id.clone(),
+            ),
+            (
+                "processor:model".to_owned(),
+                artifact.processor.model.clone(),
+            ),
+            (
+                "processor:model-sha256".to_owned(),
+                artifact.processor.model_sha256.clone(),
+            ),
+            (
+                "processor:configuration-sha256".to_owned(),
+                artifact.processor.configuration_sha256.clone(),
+            ),
+            (
+                "processor:profile".to_owned(),
+                artifact.processor.profile.clone(),
+            ),
+            (
+                "processor:output-schema".to_owned(),
+                artifact.processor.output_schema.clone(),
+            ),
+        ];
+        let node_id = memory
+            .add_source_fragment(
+                SourceFragmentInput::new(
+                    record.observation.clone(),
+                    Origin {
+                        peer_id: PeerId(0),
+                        source_kind: SourceKind::DocumentExtract,
+                        session_id: parent.raw_session_id.clone(),
+                        scope: ScopePath::universal(),
+                        confidence: record.confidence,
+                    },
+                    observed_at,
+                )
+                .with_entity_tags(vec![
+                    parent.speaker.clone(),
+                    "attachment-observation".to_owned(),
+                ])
+                .with_metadata(metadata),
+            )
+            .map_err(|error| BenchError::Engine(error.to_string()))?;
+        provenance_by_node.insert(
+            node_id,
+            NodeProvenance {
+                dataset: input.dataset.as_str().to_owned(),
+                session_id: parent.session_id.clone(),
+                raw_session_id: parent.raw_session_id.clone(),
+                raw_turn_id: parent.raw_turn_id.clone(),
+                turn_index: parent.turn_index,
+                speaker: parent.speaker.clone(),
+                content: record.observation.clone(),
+            },
+        );
+        stats.nodes_created = stats.nodes_created.saturating_add(1);
+    }
+    Ok(())
 }
 
 fn ingest_derived_memories(

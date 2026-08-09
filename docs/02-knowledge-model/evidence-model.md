@@ -36,8 +36,15 @@ retention policy may preserve the cited revision for audit or erase it and retai
 only a deletion tombstone. In the latter case, the system must not continue to
 claim raw traceability for the dependent record.
 
-The current v13 atomic-fact compatibility lane does not yet provide immutable
-`SourceRevision` records. It instead binds every cited raw node to a
+The current v13 sidecar compatibility lane does not yet provide immutable
+`SourceRevision` records. `AtomicFactInput` admits a source-bound routing record
+without engine-enforced review provenance. `ReviewedDerivationInput` adds a
+typed routing proposition, explicit review provenance, review-time source
+liveness checks, and idempotent admission. Both remain routing-only and resolve
+back to cited raw evidence; the latter is not the independently renderable
+`Reviewed claim` proposed in this document.
+
+For both current inputs, the sidecar binds every cited raw node to a
 storage-owned allocation generation plus an authority-field fingerprint.
 Deletion and byte-identical numeric-id reuse rotate the generation; relevant
 source changes alter the fingerprint. Missing legacy bindings fail closed and

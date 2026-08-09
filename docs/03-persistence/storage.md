@@ -10,7 +10,7 @@ Storage owns the durable graph state. The engine uses storage through a trait, a
 | CRUD | Store, fetch, mutate, and delete nodes and edges |
 | adjacency | Return outgoing and incoming edge ids |
 | hot fields | Read and write access history, evidence prior, cached retained action `A_i = B_i + P_i`, its salience projection, conductance, accessed time, and type (`B_i` is recomputed from access history and is not stored independently; the cached `A_i` scalar is write-behind) |
-| atomic sidecar | Persist reviewed routing facts, typed routing relations, and cited raw-source ids outside graph topology |
+| atomic sidecar | Persist source-bound routing facts, explicitly reviewed routing derivations, typed routing relations, and cited raw-source ids outside graph topology |
 | iteration | Enumerate all node and edge ids |
 | search helpers | Provide type, scope, peer, entity, and text scans |
 | flush | Commit pending writes for write-behind backends |
@@ -107,7 +107,7 @@ pub trait StorageAdapter: Send + Sync {
 | `retained_action` | SoA hot field: per-node cached composite `A_i = B_i + P_i` (write-behind) |
 | `accessed_at` | SoA hot field: per-node last committed access (write-behind) |
 | `decay_checkpoint` | SoA hot field: retained for snapshot/back-compat; no longer load-bearing under recompute-from-history (write-behind) |
-| `atomic_facts` | Isolated reviewed routing facts, embeddings, cited raw source ids, source session/scope, validity, and metadata; never graph nodes or reader evidence by themselves |
+| `atomic_facts` | Isolated source-bound routing facts and explicitly reviewed routing derivations, embeddings, cited raw source ids, source session/scope, validity, and metadata; never graph nodes or reader evidence by themselves |
 | `atomic_fact_relations` | Reviewed typed adjacency between atomic facts, including reviewer/profile/time, idempotency, scope, validity, and audit metadata; never graph edges or reader evidence by itself |
 | `entity_tags` | Tag rows used for node candidate generation |
 | `free_ids` | Deleted node/edge ids available for reuse; consumed atomically with allocation |
@@ -197,10 +197,14 @@ longer agree.
 - `flush` failures propagate to callers.
 - Backends with partial-write risk provide transactions or write batches.
 - Numeric invalidity (`NaN`, infinities where disallowed) is rejected at the engine boundary.
-- Product admission through `Memory::add_atomic_fact` validates live raw sources
-  before the sidecar record is stored and binds each citation to an engine-owned
-  source-incarnation value. The lower-level storage setter can restore legacy or
-  fixture rows, but a row without a current binding remains ineligible.
+- Product admission through `Memory::add_atomic_fact` validates that cited
+  sources exist as Episodic nodes in one session and scope, then binds each
+  citation to an engine-owned source-incarnation value. It does not establish a
+  review decision. `Memory::add_reviewed_derivation` additionally requires
+  explicit review provenance and rejects a source that was not current,
+  unretracted, and valid at the declared review time. The lower-level storage
+  setter can restore legacy or fixture rows, but a row without a current
+  binding remains ineligible.
   SQLite combines a monotonic, durable allocation generation with a fingerprint
   of authority-bearing source fields. Retrieval, retry validation, and relation
   admission require an exact current match, so neither byte-identical reuse of a

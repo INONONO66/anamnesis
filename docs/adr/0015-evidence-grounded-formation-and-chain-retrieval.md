@@ -34,11 +34,18 @@ catalog is a retrieval representation for entities, atomic facts, typed fact
 relations, observations, and their source references; it does not expand
 `KnowledgeType` into a second domain ontology.
 
-The current v13 storage schema contains a narrower compatibility slice:
-reviewed typed relations between isolated atomic routing facts, with bounded
-depth-two traversal that can route only to live raw Episodic sources. Those
-records do not carry relation-specific evidence references, are never rendered
-as evidence, and are not the canonical catalog relations decided by this ADR.
+The current v13 storage schema contains a narrower compatibility slice.
+`AtomicFactInput` admits source-bound atomic routing records without
+engine-enforced review provenance. `ReviewedDerivationInput` uses the same
+isolated sidecar for a typed proposition with polarity, modality, explicit
+review provenance, review-time source-liveness checks, and idempotent admission.
+Both are routing-only and can return only cited raw Episodic sources; the
+explicitly reviewed form is not the independently renderable `Reviewed claim`
+decided by this ADR. Reviewed typed relations connect sidecar facts, with
+bounded depth-two traversal that can route only to eligible raw sources. Those
+relations do not carry relation-specific evidence references, are never
+rendered as evidence, and are not the canonical catalog relations decided by
+this ADR.
 Each current citation is fail-closed against a storage-owned, durable source
 allocation generation and an authority-field fingerprint; a missing legacy
 binding, changed source, or reused numeric node id is ineligible. This prevents
@@ -135,8 +142,8 @@ visible.
 The canonical recall path is:
 
 1. Compile the query into a deterministic plan containing entity anchors,
-   predicate facets, requested evidence slots, temporal constraints, scope, and
-   answer shape.
+   predicate facets, requested evidence slots, temporal constraints, scope,
+   answer shape, answer-derivation policy, and bounded coverage policy.
 2. Collect bounded candidates from raw lexical/vector recall, cognitive graph
    activation, entity/fact indexes, temporal indexes, and eligible
    observations.
@@ -165,6 +172,19 @@ or reason over the immutable bundle, but it cannot present that transformation
 as new retrieved evidence. Simple direct questions may use a narrow package;
 complex and completeness-sensitive questions may use a wider package within the
 declared token budget.
+
+The current API already compiles a provider-neutral `RecallReaderContract` from
+the exact `RecallPlan`. Its deterministic draft validation establishes typed
+shape and delivered-source membership, not semantic entailment. A consumer that
+executes reflection, verification, repair, or reverification remains responsible
+for evaluating meaning against the complete delivered context; the engine only
+defines and bounds those stages.
+
+A completeness-oriented or `Exhaustive` coverage policy changes bounded
+candidate preselection and final selection within those declared structural
+budgets. It does not turn a grouped scoring surface into new evidence, imply an
+unbounded catalog scan, or guarantee that every matching record in storage is
+returned.
 
 Runtime retrieval policy depends only on declared caller inputs and versioned
 resources. Locale lexicons and grammar rules are permitted when they map to the

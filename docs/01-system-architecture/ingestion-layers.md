@@ -45,23 +45,35 @@ mechanics.
 
 ## Current Deterministic Admission
 
-The current shared derived-record surface is deliberately narrow:
-`Memory::add_atomic_fact` admits a reviewed atomic routing fact into an isolated
-sidecar. `Memory::add_atomic_fact_relation` admits a reviewed typed routing
-relation between two such facts. Fact admission rejects empty claims, missing
-or non-Episodic sources, sources from different sessions or scopes, malformed
-validity intervals, and invalid embeddings. Relation admission rejects missing
-or self endpoints, empty review identity/profile/idempotency fields, disjoint
-concrete scopes, and validity intervals with no endpoint-time intersection. The
-extraction adapter can additionally validate byte-exact grounding metadata
-before invoking these APIs.
+The current shared derived-record surface is deliberately narrow.
+`Memory::add_atomic_fact` accepts a source-bound `AtomicFactInput` into an
+isolated sidecar. This input can carry consumer metadata, but it does not carry
+or establish explicit review provenance. Admission rejects empty claims,
+missing or non-Episodic source nodes, sources from different sessions or
+scopes, malformed validity intervals, and invalid embeddings.
 
-Admitted atomic facts and relations remain outside graph topology, attraction,
-forgetting, normal node FTS, and graph budgets. They can route a complex query
-through bounded typed adjacency to cited raw sources, but only those raw sources
-enter the reader-facing evidence lane. This is the shared deterministic
-admission behavior exercised by direct `Memory` callers and product clients; it
-is not a general entity/fact catalog or a reviewed-claim lifecycle.
+`Memory::add_reviewed_derivation` accepts a `ReviewedDerivationInput` through
+the same routing-only substrate. It additionally requires a typed
+`RoutingProposition`, `ReviewProvenance`, a bounded search projection, a stable
+idempotency key bound to the complete normalized admission, and sources that
+were current, unretracted, and valid at review time. It is the API to use when
+the engine must enforce that a routing derivation was explicitly reviewed.
+`Memory::add_atomic_fact_relation` separately admits a reviewed typed routing
+relation between sidecar facts. Relation admission rejects missing or self
+endpoints, empty review identity/profile/idempotency fields, disjoint concrete
+scopes, and validity intervals with no endpoint-time intersection. A consumer
+adapter can additionally validate byte-exact grounding metadata before invoking
+these APIs.
+
+Admitted atomic facts, reviewed derivations, and routing relations remain
+outside graph topology, attraction, forgetting, normal node FTS, and graph
+budgets. They can route a query through bounded sidecar lookup and typed
+adjacency to cited raw sources, but only those raw sources enter the
+reader-facing evidence lane. An explicitly reviewed derivation is therefore not
+the independently renderable `Reviewed claim` proposed by ADR-0015. This is the
+shared deterministic admission behavior exercised by direct `Memory` callers
+and product clients; it is not a general entity/fact catalog or a complete
+reviewed-claim lifecycle.
 
 ## Proposed: General Formation Admission (ADR-0015)
 
@@ -77,8 +89,10 @@ behavior.
 - Describe capture separately from persistence. Only a successfully persisted
   source is guaranteed to survive optional formation failure.
 - Keep provider selection and inference outside the engine crate.
-- Route current derived retrieval through the public atomic-fact admission
-  surface; do not present sidecar text as independent evidence.
+- Route source-bound extraction records through `add_atomic_fact` and records
+  that require engine-enforced review provenance through
+  `add_reviewed_derivation`; do not present either sidecar representation as
+  independent evidence.
 - Label the general catalog, canonical relation-evidence, observation, and
   generalized admission behavior as proposed until ADR-0015 is accepted; keep
   the implemented narrow atomic routing-relation contract distinct.

@@ -29,10 +29,13 @@ impl RerankScore {
 
 /// Synchronous, model-agnostic document reranker used by production recall.
 ///
-/// Implementations score a query against the exact evidence documents compiled
-/// by [`Memory::rerank_documents`](crate::memory::Memory::rerank_documents).
-/// Candidate construction, score validation, evidence selection, packaging,
-/// and reinforcement remain owned by [`Memory`](crate::memory::Memory).
+/// Implementations score a query against the exact evidence documents owned by
+/// a [`PreparedRerank`](crate::memory::PreparedRerank). The canonical
+/// [`Memory::search_reranked`](crate::memory::Memory::search_reranked) path and
+/// external prepare/complete workflow share that receipt, so source binding,
+/// score validation, evidence selection, packaging, and reinforcement remain
+/// owned by [`Memory`](crate::memory::Memory). The older document-compilation
+/// methods remain available as diagnostic, unbound surfaces.
 pub trait RerankingProvider: Send + Sync {
     /// Rank `documents` for `query`.
     ///

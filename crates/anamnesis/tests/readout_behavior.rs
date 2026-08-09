@@ -534,9 +534,13 @@ mod memory_framework {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use anamnesis::Error;
-    use anamnesis::embedding::EmbeddingProvider;
+    use anamnesis::embedding::{EmbeddingProvider, RerankScore};
     use anamnesis::engine::{EdgeType, NodeId};
-    use anamnesis::memory::Memory;
+    use anamnesis::memory::{
+        AnswerShape, DerivationModality, DerivationPolarity, Memory, RecallCoverage, RecallPlan,
+        RerankedRecallOptions, ReviewProvenance, ReviewedDerivationInput, RoutingProposition,
+        SearchTuning,
+    };
 
     // -----------------------------------------------------------------------
     // Deterministic test embedder (same shape as real_bench CountingEmbedder)
@@ -856,6 +860,184 @@ mod memory_framework {
         let sem_id = receipt.finalized_semantic.unwrap();
         let edges = edges_between(&mem, sem_id, receipt.episodic);
         assert!(edges.contains(&EdgeType::ExtractedFrom));
+    }
+
+    /// A structured caller can keep one plan, including its explicit coverage,
+    /// through prepared document scoring while preserving the document's raw
+    /// source allocation and selected Semantic output representative.
+    #[test]
+    fn prepared_rerank_preserves_plan_and_source_contract() {
+        let provider: Arc<dyn EmbeddingProvider> = Arc::new(TestEmbedder::default());
+        let mut mem = Memory::in_memory_with_provider(provider).expect("in_memory_with_provider");
+        let raw_report = "I prepare compatibility reports after each release rehearsal";
+        let first = mem
+            .add("release-review", "maintainer", raw_report, Timestamp(1))
+            .unwrap();
+        mem.add(
+            "release-review",
+            "reviewer",
+            "Those reports record migration decisions for later audits",
+            Timestamp(2),
+        )
+        .unwrap();
+        mem.flush_all().unwrap();
+
+        let query = "Which reports does the maintainer prepare after release rehearsals?";
+        let ordinary_plan = RecallPlan::infer_with_answer_shape(query, AnswerShape::Collection);
+        assert_eq!(ordinary_plan.coverage, RecallCoverage::Multiple);
+        let exhaustive_plan = ordinary_plan
+            .clone()
+            .with_coverage(RecallCoverage::Exhaustive);
+        let result = mem
+            .search_result_at_with(query, 20, Timestamp(100), &SearchTuning::default())
+            .unwrap();
+
+        let ordinary_documents = mem
+            .rerank_documents_for_plan(&ordinary_plan, &result, 20)
+            .unwrap();
+        let ordinary_representative = ordinary_documents
+            .iter()
+            .find(|document| document.source_node_ids.contains(&first.episodic))
+            .expect("ordinary collection document");
+        assert_eq!(
+            mem.engine()
+                .graph()
+                .get_node(ordinary_representative.node_id)
+                .unwrap()
+                .node_type,
+            KnowledgeType::Semantic
+        );
+
+        let exhaustive_documents = mem
+            .rerank_documents_for_plan(&exhaustive_plan, &result, 20)
+            .unwrap();
+        let exhaustive_representative = exhaustive_documents
+            .iter()
+            .find(|document| document.source_node_ids.contains(&first.episodic))
+            .expect("exhaustive collection document");
+        let authoritative_raw_text = mem
+            .engine()
+            .graph()
+            .get_node(first.episodic)
+            .unwrap()
+            .content
+            .clone();
+        assert_eq!(
+            mem.engine()
+                .graph()
+                .get_node(exhaustive_representative.node_id)
+                .unwrap()
+                .node_type,
+            KnowledgeType::Semantic,
+            "coverage must not replace the Semantic scoring representative"
+        );
+        assert!(
+            exhaustive_representative
+                .text
+                .ends_with(&authoritative_raw_text),
+            "reader-facing document text must contain the authoritative raw source"
+        );
+        assert!(
+            !exhaustive_representative
+                .text
+                .contains("reviewer: Those reports record migration decisions for later audits"),
+            "scoring-only Semantic context must not enter reader-facing document text"
+        );
+        assert!(
+            exhaustive_representative
+                .rerank_text()
+                .contains("reviewer: Those reports record migration decisions for later audits"),
+            "the scoring-only Semantic window may retain bounded dialogue context"
+        );
+        let scoring_representative_id = exhaustive_representative.node_id;
+        let expected_scoring_output = mem
+            .engine()
+            .graph()
+            .get_node(scoring_representative_id)
+            .unwrap()
+            .content
+            .clone();
+
+        let prepared = mem
+            .prepare_rerank_for_plan_at(
+                &exhaustive_plan,
+                RerankedRecallOptions::new(8)
+                    .with_candidate_limit(20)
+                    .with_adaptive_delivery(false),
+                Timestamp(100),
+            )
+            .unwrap();
+        let document_count = prepared.document_count();
+        let report_index = prepared
+            .rerank_texts()
+            .position(|text| text.contains(raw_report))
+            .expect("prepared report document");
+        let scores: Vec<_> = (0..document_count)
+            .map(|index| RerankScore::new(index, if index == report_index { 10.0 } else { 0.0 }))
+            .collect();
+        let recall = mem
+            .complete_prepared_rerank(prepared, &scores)
+            .unwrap()
+            .recall;
+        assert!(recall.hits.iter().any(|hit| {
+            hit.node_id == scoring_representative_id && hit.text == expected_scoring_output
+        }));
+    }
+
+    #[test]
+    fn reviewed_observed_derivation_receives_method_priority_through_public_api() {
+        let provider: Arc<dyn EmbeddingProvider> = Arc::new(TestEmbedder::default());
+        let mut mem = Memory::in_memory_with_provider(provider).expect("in_memory_with_provider");
+        let source = mem
+            .add(
+                "workshop-session",
+                "coordinator",
+                "I sent a neighborhood newsletter after the venue confirmed the date.",
+                Timestamp(1),
+            )
+            .expect("raw action source")
+            .episodic;
+        mem.flush_all().expect("flush raw action source");
+
+        let fact_id = mem
+            .add_reviewed_derivation(
+                ReviewedDerivationInput::new(
+                    RoutingProposition::new(
+                        "coordinator",
+                        "promoted",
+                        "the workshop with a neighborhood newsletter",
+                    )
+                    .with_polarity(DerivationPolarity::Affirmed)
+                    .with_modality(DerivationModality::Observed),
+                    "The coordinator promoted the workshop with a neighborhood newsletter",
+                    vec![source],
+                    ReviewProvenance::new(
+                        "reviewer:test",
+                        "observed-action:v1",
+                        Timestamp(2),
+                        "method:newsletter:1",
+                    ),
+                )
+                .with_entity_tags(vec!["coordinator".to_owned(), "workshop".to_owned()]),
+            )
+            .expect("reviewed observed derivation");
+
+        let result = mem
+            .search_result_at_with(
+                "How did the coordinator promote the workshop?",
+                50,
+                Timestamp(100),
+                &SearchTuning::default(),
+            )
+            .expect("method search");
+        let expected_marker = format!("{}@4@{}", source.0, fact_id.0);
+        assert!(
+            result.trace.strategies_used.iter().any(|strategy| strategy
+                .strip_prefix("atomic_fact_sources:")
+                .is_some_and(|markers| markers.split(',').any(|marker| marker == expected_marker))),
+            "reviewed observed action must receive exact method priority: {:?}",
+            result.trace.strategies_used
+        );
     }
 
     /// `engine()` escape hatch returns a reference to the same engine (visible via node count).
