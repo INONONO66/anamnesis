@@ -721,6 +721,22 @@ fn graph_build_warmup_and_evaluation_use_embeddings_and_commit() {
     assert!(answer_context.product_context.contains("## "));
     assert!(answer_context.product_context.contains("└ origin:"));
     assert!(!answer_context.product_context.contains("retrieved-"));
+    assert!(
+        answer_context.recall_readout().is_some(),
+        "an in-process product context must retain its exact structured readout"
+    );
+    let serialized_context =
+        serde_json::to_string(&answer_context).expect("serialize answer context");
+    assert!(
+        !serialized_context.contains("recall_readout"),
+        "process-local validation authority must not enter report JSON"
+    );
+    let restored_context: eval_common::real_bench::graph::AnswerContext =
+        serde_json::from_str(&serialized_context).expect("deserialize answer context");
+    assert!(
+        restored_context.recall_readout().is_none(),
+        "stored reports cannot reconstruct rerank validation authority"
+    );
     assert_eq!(
         embedder.calls(),
         6,

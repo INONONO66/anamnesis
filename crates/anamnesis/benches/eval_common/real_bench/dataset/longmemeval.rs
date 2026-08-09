@@ -95,6 +95,7 @@ fn parse_turns(value: &Value, session_id: &str, raw_session_id: &str) -> Vec<Ben
                     speaker: role.clone(),
                     role,
                     content,
+                    attachments: Vec::new(),
                 }
             })
         })

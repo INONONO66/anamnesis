@@ -69,9 +69,19 @@ mod view;
 pub use readout::{
     AnswerShape, DEFAULT_RERANK_CANDIDATE_LIMIT, DEFAULT_RERANK_FINAL_LIMIT,
     DEFAULT_RERANK_SEARCH_LIMIT, DEFAULT_SIMPLE_DELIVERY_LIMIT, DeepRecallOptions,
-    EvidenceDocument, EvidenceSelection, GroundedAnswerDraft, GroundedAnswerItem, ReaderAnswerForm,
-    RecallIntent, RecallPlan, RecallReaderContract, RecallReaderStage, RecallSourceAttribution,
-    ReflectionRecommendation, RerankedRecallOptions,
+    EventBoundaryEvidence, EvidenceDocument, EvidenceSelection, GroundedAnswerDraft,
+    GroundedAnswerItem, GroundedComparedCandidate, GroundedDraftDisposition,
+    GroundedDraftRecoveryAction, GroundedDraftRecoveryState, GroundedDraftStatus,
+    GroundedDraftValidation, GroundedDraftValidationContext, GroundedDraftValidationError,
+    GroundedDraftValidationFailure, GroundedDraftValidationResult, GroundedEvidenceFinding,
+    GroundedFindingDisposition, GroundedOccurrenceActuality, GroundedOperatorInput,
+    GroundedOperatorInputRole, GroundedReadoutAction, GroundedReasoningOperator,
+    GroundedReasoningOperatorKind, ReaderAnswerForm, ReaderFinalDisposition, RecallCoverage,
+    RecallDerivation, RecallIntent, RecallPlan, RecallReaderContract, RecallReaderStage,
+    RecallSourceAttribution, ReflectionRecommendation, RequestedAnswerCardinality,
+    RequestedAnswerModality, RequestedAnswerRole, RequestedAnswerSpec,
+    RequestedTemporalGranularity, RerankedRecallOptions, TemporalBoundaryDirection,
+    TemporalConstraint, TemporalConstraintKind,
 };
 pub use view::{ListFilter, MemoryView};
 
@@ -80,6 +90,7 @@ use crate::api::{
     CommitReport, EngineConfig, HealthGrade, IngestResult, Observation, TickReport,
     apply_packaging_mode, apply_validity_filter,
 };
+pub use crate::embedding::RerankScore;
 use crate::embedding::{EmbeddingProvider, RerankingProvider};
 use crate::error::Error;
 use crate::graph::node::Origin;
@@ -96,6 +107,32 @@ use crate::query::{
 };
 use crate::storage::{AtomicFact, AtomicFactRelation, SqliteStorage, StorageAdapter};
 pub use crate::storage::{AtomicFactId, AtomicFactRelationId, AtomicFactRelationKind};
+
+pub(super) const REVIEWED_DERIVATION_METADATA_PREFIX: &str = "anamnesis:reviewed-derivation:v1:";
+pub(super) const REVIEWED_DERIVATION_SCHEMA_KEY: &str = "anamnesis:reviewed-derivation:v1:schema";
+pub(super) const REVIEWED_DERIVATION_SUBJECT_KEY: &str = "anamnesis:reviewed-derivation:v1:subject";
+pub(super) const REVIEWED_DERIVATION_PREDICATE_KEY: &str =
+    "anamnesis:reviewed-derivation:v1:predicate";
+pub(super) const REVIEWED_DERIVATION_OBJECT_KEY: &str = "anamnesis:reviewed-derivation:v1:object";
+pub(super) const REVIEWED_DERIVATION_VALUE_KIND_KEY: &str =
+    "anamnesis:reviewed-derivation:v1:value-kind";
+pub(super) const REVIEWED_DERIVATION_POLARITY_KEY: &str =
+    "anamnesis:reviewed-derivation:v1:polarity";
+pub(super) const REVIEWED_DERIVATION_MODALITY_KEY: &str =
+    "anamnesis:reviewed-derivation:v1:modality";
+pub(super) const REVIEWED_DERIVATION_REVIEWED_BY_KEY: &str =
+    "anamnesis:reviewed-derivation:v1:reviewed-by";
+pub(super) const REVIEWED_DERIVATION_REVIEW_PROFILE_KEY: &str =
+    "anamnesis:reviewed-derivation:v1:review-profile";
+pub(super) const REVIEWED_DERIVATION_REVIEWED_AT_KEY: &str =
+    "anamnesis:reviewed-derivation:v1:reviewed-at-ms";
+pub(super) const REVIEWED_DERIVATION_IDEMPOTENCY_KEY: &str =
+    "anamnesis:reviewed-derivation:v1:idempotency-key";
+
+const MAX_REVIEWED_DERIVATION_PROJECTION_CHARS: usize = 2_000;
+const MAX_REVIEWED_DERIVATION_COMPONENT_CHARS: usize = 512;
+const MAX_REVIEWED_DERIVATION_VALUE_KIND_CHARS: usize = 128;
+const MAX_REVIEW_PROVENANCE_FIELD_CHARS: usize = 512;
 
 /// Per-session state for incremental window finalization.
 #[derive(Debug, Default)]
@@ -232,9 +269,11 @@ impl SourceFragmentInput {
 
 /// Input for one isolated atomic fact.
 ///
-/// Atomic facts are compact, reviewed extraction records used only to route a
-/// query back to authoritative raw [`KnowledgeType::Episodic`] sources. They
-/// are persisted in a separate sidecar table/index and never become graph
+/// Atomic facts are compact, source-grounded extraction records used only to
+/// route a query back to authoritative raw [`KnowledgeType::Episodic`] sources.
+/// This input does not assert engine-verified review provenance; consumers that
+/// have an explicit review decision use [`ReviewedDerivationInput`]. Atomic
+/// facts are persisted in a separate sidecar table/index and never become graph
 /// nodes, affect normal FTS statistics, consume graph budgets, or participate
 /// in attraction and forgetting.
 #[derive(Debug, Clone)]
@@ -298,6 +337,236 @@ impl AtomicFactInput {
     }
 
     /// Attach consumer metadata.
+    pub fn with_metadata(mut self, metadata: Vec<(String, String)>) -> Self {
+        self.metadata = metadata;
+        self
+    }
+}
+
+/// Polarity of a reviewed routing proposition.
+///
+/// Polarity is retained as routing metadata. It does not turn the isolated
+/// sidecar record into independently renderable evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum DerivationPolarity {
+    /// The proposition is affirmed by the review decision.
+    Affirmed,
+    /// The proposition is negated by the review decision.
+    Negated,
+}
+
+impl DerivationPolarity {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Affirmed => "affirmed",
+            Self::Negated => "negated",
+        }
+    }
+}
+
+/// Modality of a reviewed routing proposition.
+///
+/// Consumers declare modality at formation so later retrieval can distinguish
+/// an observation from a plan, possibility, or reviewed inference without
+/// asking a model at query time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum DerivationModality {
+    /// Directly observed state or event.
+    Observed,
+    /// A source-attributed report.
+    Reported,
+    /// A reviewed conclusion derived from cited premises.
+    Inferred,
+    /// An uncertain claim.
+    Uncertain,
+    /// A claim that applies only under an explicit condition.
+    Conditional,
+    /// A stated plan that has not been observed as completed.
+    Planned,
+    /// A hypothetical possibility rather than an observed fact.
+    Hypothetical,
+}
+
+impl DerivationModality {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Observed => "observed",
+            Self::Reported => "reported",
+            Self::Inferred => "inferred",
+            Self::Uncertain => "uncertain",
+            Self::Conditional => "conditional",
+            Self::Planned => "planned",
+            Self::Hypothetical => "hypothetical",
+        }
+    }
+}
+
+/// Typed proposition used by a reviewed derivation routing record.
+///
+/// The proposition is a retrieval representation, not source evidence. Its
+/// subject, predicate, and object remain separately addressable so a later
+/// query planner does not need to recover their roles from one generated
+/// sentence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RoutingProposition {
+    /// Canonical subject label.
+    pub subject: String,
+    /// Canonical or consumer-namespaced predicate.
+    pub predicate: String,
+    /// Canonical object or scalar value.
+    pub object: String,
+    /// Optional consumer-defined value kind such as `person`, `place`, or a
+    /// namespaced domain kind.
+    pub value_kind: Option<String>,
+    /// Affirmed or negated meaning.
+    pub polarity: DerivationPolarity,
+    /// Observation, report, plan, possibility, or inference status.
+    pub modality: DerivationModality,
+}
+
+impl RoutingProposition {
+    /// Create an affirmed, reviewed inference.
+    pub fn new(
+        subject: impl Into<String>,
+        predicate: impl Into<String>,
+        object: impl Into<String>,
+    ) -> Self {
+        Self {
+            subject: subject.into(),
+            predicate: predicate.into(),
+            object: object.into(),
+            value_kind: None,
+            polarity: DerivationPolarity::Affirmed,
+            modality: DerivationModality::Inferred,
+        }
+    }
+
+    /// Attach an optional consumer-defined value kind.
+    pub fn with_value_kind(mut self, value_kind: impl Into<String>) -> Self {
+        self.value_kind = Some(value_kind.into());
+        self
+    }
+
+    /// Set the proposition polarity.
+    pub fn with_polarity(mut self, polarity: DerivationPolarity) -> Self {
+        self.polarity = polarity;
+        self
+    }
+
+    /// Set the proposition modality.
+    pub fn with_modality(mut self, modality: DerivationModality) -> Self {
+        self.modality = modality;
+        self
+    }
+}
+
+/// Required review provenance for one reviewed derivation.
+///
+/// The stable idempotency key binds retries to the complete admitted record.
+/// Reusing it for different content, sources, validity, or review metadata is
+/// rejected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ReviewProvenance {
+    /// Stable reviewer or review-process identity.
+    pub reviewed_by: String,
+    /// Versioned review policy or model profile.
+    pub review_profile: String,
+    /// Time at which the review decision was made.
+    pub reviewed_at: Timestamp,
+    /// Stable retry key for this complete admission decision.
+    pub idempotency_key: String,
+}
+
+impl ReviewProvenance {
+    /// Create explicit review provenance.
+    pub fn new(
+        reviewed_by: impl Into<String>,
+        review_profile: impl Into<String>,
+        reviewed_at: Timestamp,
+        idempotency_key: impl Into<String>,
+    ) -> Self {
+        Self {
+            reviewed_by: reviewed_by.into(),
+            review_profile: review_profile.into(),
+            reviewed_at,
+            idempotency_key: idempotency_key.into(),
+        }
+    }
+}
+
+/// Input for one reviewed derivation in the isolated routing sidecar.
+///
+/// A reviewed derivation may express a consumer-accepted bridge that is not a
+/// verbatim source phrase. It remains routing-only: recall can use its typed
+/// projection to find the cited live raw sources, but neither the proposition
+/// nor `search_projection` is emitted as reader evidence.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct ReviewedDerivationInput {
+    /// Typed routing proposition accepted by the review decision.
+    pub proposition: RoutingProposition,
+    /// Bounded query-facing projection embedded and stored in the isolated
+    /// sidecar.
+    pub search_projection: String,
+    /// Authoritative raw Episodic sources containing the reviewed premises.
+    pub source_node_ids: Vec<NodeId>,
+    /// Selective entity names used as a query-time boost.
+    pub entity_tags: Vec<String>,
+    /// Optional half-open derivation-validity start.
+    pub valid_from: Option<Timestamp>,
+    /// Optional half-open derivation-validity end.
+    pub valid_until: Option<Timestamp>,
+    /// Required review identity, policy, time, and retry key.
+    pub review: ReviewProvenance,
+    /// Non-authoritative consumer audit metadata. Keys must be unique and
+    /// consumer-owned; the `anamnesis:` namespace is reserved by the engine.
+    pub metadata: Vec<(String, String)>,
+}
+
+impl ReviewedDerivationInput {
+    /// Create a reviewed derivation citing raw source nodes.
+    pub fn new(
+        proposition: RoutingProposition,
+        search_projection: impl Into<String>,
+        source_node_ids: Vec<NodeId>,
+        review: ReviewProvenance,
+    ) -> Self {
+        Self {
+            proposition,
+            search_projection: search_projection.into(),
+            source_node_ids,
+            entity_tags: Vec::new(),
+            valid_from: None,
+            valid_until: None,
+            review,
+            metadata: Vec::new(),
+        }
+    }
+
+    /// Attach selective entity tags.
+    pub fn with_entity_tags(mut self, entity_tags: Vec<String>) -> Self {
+        self.entity_tags = entity_tags;
+        self
+    }
+
+    /// Attach a half-open validity interval.
+    pub fn with_validity(
+        mut self,
+        valid_from: Option<Timestamp>,
+        valid_until: Option<Timestamp>,
+    ) -> Self {
+        self.valid_from = valid_from;
+        self.valid_until = valid_until;
+        self
+    }
+
+    /// Attach non-authoritative consumer audit metadata.
+    ///
+    /// Admission rejects duplicate, whitespace-padded, or engine-owned keys.
     pub fn with_metadata(mut self, metadata: Vec<(String, String)>) -> Self {
         self.metadata = metadata;
         self
@@ -397,8 +666,22 @@ pub struct AddReceipt {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct RerankedRecall {
-    /// Validated reranker ordering before source-aware final selection.
+    /// Deterministic plan used by every stage of this recall.
+    ///
+    /// Pass this exact value to [`Memory::readout_for_plan`] or
+    /// [`Memory::render_context_for_plan_with`] so structured intent is not
+    /// inferred again after retrieval and packaging.
+    pub plan: RecallPlan,
+    /// Reranker ordering retained after completion-time document and authority
+    /// revalidation, before source-aware final selection.
     pub ranking: Vec<RerankedCandidate>,
+    /// Exact validated document surface supplied to the reranking provider.
+    ///
+    /// This sidecar is retained for local observability and deterministic
+    /// score replay. It precedes provider-side subset selection and therefore
+    /// can be wider than [`Self::ranking`]. Reader-facing evidence remains
+    /// [`Self::recall`].
+    pub rerank_documents: Vec<EvidenceDocument>,
     /// Commit-safe final hits and context package.
     pub recall: Recall,
     /// Original cognitive score and embedding cosine for final selected nodes.
@@ -408,6 +691,126 @@ pub struct RerankedRecall {
     /// source outside the captured readout inherits the cognitive signals of
     /// the live document representative that caused it to be delivered.
     pub cognitive_scores: Vec<CognitiveRecallScore>,
+    validation_context: GroundedDraftValidationContext,
+    validation_binding: Option<RerankedRecallValidationBinding>,
+}
+
+impl RerankedRecall {
+    /// Return the event-boundary source roles retained by prepared-rerank
+    /// completion, when the complete role group survived visible delivery.
+    pub fn event_boundary_evidence(&self) -> Option<&EventBoundaryEvidence> {
+        self.validation_binding
+            .as_ref()
+            .filter(|binding| {
+                binding.matches(self)
+                    && self
+                        .validation_context
+                        .is_bound_to(&binding.plan, &binding.readout.source_node_ids)
+            })
+            .and_then(|_| self.validation_context.event_boundary_evidence())
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RerankedRecallValidationBinding {
+    plan: RecallPlan,
+    ranking: Vec<RerankedCandidate>,
+    rerank_documents: Vec<EvidenceDocument>,
+    recall: Recall,
+    cognitive_scores: Vec<CognitiveRecallScore>,
+    readout: RecallReadoutValidationBinding,
+}
+
+impl RerankedRecallValidationBinding {
+    fn matches(&self, reranked: &RerankedRecall) -> bool {
+        self.plan == reranked.plan
+            && self.ranking == reranked.ranking
+            && self.rerank_documents == reranked.rerank_documents
+            && recall_surface_is_identical(&self.recall, &reranked.recall)
+            && self.cognitive_scores == reranked.cognitive_scores
+    }
+}
+
+fn recall_surface_is_identical(expected: &Recall, actual: &Recall) -> bool {
+    expected.hits.len() == actual.hits.len()
+        && expected.hits.iter().zip(&actual.hits).all(|(left, right)| {
+            left.node_id == right.node_id
+                && left.text == right.text
+                && left.score.to_bits() == right.score.to_bits()
+                && left.cosine.to_bits() == right.cosine.to_bits()
+                && left.at == right.at
+                && left.speaker == right.speaker
+                && left.session == right.session
+        })
+        && expected.package == actual.package
+}
+
+/// Opaque receipt for one externally scored production rerank.
+///
+/// A receipt owns the exact plan, source-search snapshot, evidence documents,
+/// delivered and scoring-only raw-source allocations, scope, timestamp, and
+/// recall options captured by
+/// [`Memory::prepare_rerank_for_plan_at`]. Its fields are deliberately private:
+/// consumers may inspect the immutable reranker texts, but only
+/// [`Memory::complete_prepared_rerank`] can turn document-index scores back
+/// into a commit-safe [`RerankedRecall`].
+///
+/// Preparing first ensures that no raw text is exposed to an external reranker
+/// until every contributing source's current authority, validity, and scope have
+/// been checked. Completing consumes the receipt, revalidates the same source
+/// allocations, and exactly recompiles every scored document after the reranker
+/// returns. The receipt is process-local, single-use, and can be completed only
+/// by the `Memory` instance that created it.
+pub struct PreparedRerank {
+    authority: Arc<PreparedRerankAuthority>,
+    plan: RecallPlan,
+    result: SearchResult,
+    evidence: Vec<EvidenceDocument>,
+    bindings: HashMap<NodeId, BoundEvidenceDocument>,
+    scope: ScopePath,
+    as_of: Timestamp,
+    options: RerankedRecallOptions,
+}
+
+/// Process-local capability that binds a prepared receipt to one `Memory`.
+///
+/// The allocation identity, rather than its zero-sized value, is authoritative.
+/// It remains private so a consumer cannot manufacture or transfer a receipt
+/// between independent memory namespaces.
+struct PreparedRerankAuthority;
+
+impl std::fmt::Debug for PreparedRerank {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PreparedRerank")
+            .field("document_count", &self.evidence.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl PreparedRerank {
+    /// Query text bound to the prepared plan.
+    pub fn query(&self) -> &str {
+        &self.plan.query
+    }
+
+    /// Number of validated documents awaiting scores.
+    pub fn document_count(&self) -> usize {
+        self.evidence.len()
+    }
+
+    /// Exact validated documents whose positions external scores address.
+    ///
+    /// The display text and delivery-source ids remain distinct from each
+    /// document's [`EvidenceDocument::rerank_text`] scoring surface.
+    pub fn documents(&self) -> &[EvidenceDocument] {
+        &self.evidence
+    }
+
+    /// Iterate over the exact texts whose indices [`RerankScore`] must address.
+    pub fn rerank_texts(&self) -> impl ExactSizeIterator<Item = &str> {
+        self.evidence.iter().map(|document| document.rerank_text())
+    }
 }
 
 /// Authority snapshot for one node that contributed to a reranker document.
@@ -425,11 +828,36 @@ struct BoundEvidenceNode {
 }
 
 /// One reranker document bound to the exact graph allocations that supplied
-/// its representative and canonical evidence text.
+/// its representative, canonical evidence, and scoring-only dialogue context.
 #[derive(Debug, Clone)]
 struct BoundEvidenceDocument {
     representative: BoundEvidenceNode,
     sources: Vec<BoundEvidenceNode>,
+    scoring_sources: Vec<BoundEvidenceNode>,
+    representative_text_is_bound: bool,
+}
+
+struct BoundRerankRepackage {
+    recall: Recall,
+    hydrated_readout: Vec<crate::query::ReadoutCandidate>,
+    eligible_ranking: Vec<RerankedCandidate>,
+    event_boundary_group: Option<readout::EventBoundarySourceGroup>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RerankedValidityPolicy {
+    Current,
+    HistoricalTrend,
+}
+
+impl RerankedValidityPolicy {
+    fn for_plan(plan: &RecallPlan) -> Self {
+        if readout::plan_allows_historical_expired(plan) {
+            Self::HistoricalTrend
+        } else {
+            Self::Current
+        }
+    }
 }
 
 /// Cognitive retrieval signals retained alongside a reranked final hit.
@@ -456,6 +884,7 @@ pub struct Memory<S: StorageAdapter + Clone = SqliteStorage> {
     engine: Engine<S>,
     provider: Arc<dyn EmbeddingProvider>,
     sessions: HashMap<String, SessionBuffer>,
+    prepared_rerank_authority: Arc<PreparedRerankAuthority>,
 }
 
 // ── Agent-facing relations ───────────────────────────────────────────────────
@@ -701,6 +1130,7 @@ impl Memory<SqliteStorage> {
             engine,
             provider,
             sessions: HashMap::new(),
+            prepared_rerank_authority: Arc::new(PreparedRerankAuthority),
         })
     }
 
@@ -712,6 +1142,7 @@ impl Memory<SqliteStorage> {
             engine,
             provider,
             sessions: HashMap::new(),
+            prepared_rerank_authority: Arc::new(PreparedRerankAuthority),
         })
     }
 }
@@ -1107,13 +1538,164 @@ impl<S: StorageAdapter + Clone> Memory<S> {
         Ok(semantic)
     }
 
-    /// Add one reviewed atomic fact to the isolated routing sidecar.
+    /// Add one source-grounded atomic extraction record to the routing sidecar.
     ///
     /// The fact is embedded once at ingest and remains outside the cognitive
     /// graph. Every source must be a live Episodic node from the same session
     /// and scope. Query-time routing may select the fact, but only its cited raw
-    /// sources can enter the normal readout/reranker lane.
+    /// sources can enter the normal readout/reranker lane. This method records
+    /// no engine-verified reviewer identity or decision; use
+    /// [`add_reviewed_derivation`](Self::add_reviewed_derivation) when that
+    /// provenance exists.
     pub fn add_atomic_fact(&mut self, input: AtomicFactInput) -> Result<AtomicFactId, Error> {
+        self.add_atomic_fact_internal(input, Vec::new(), None, None)
+    }
+
+    /// Add one explicitly reviewed derivation to the isolated routing sidecar.
+    ///
+    /// The proposition and search projection are routing representations only.
+    /// They never become graph nodes or independently renderable evidence;
+    /// recall may return only the cited raw Episodic sources. Every source must
+    /// exist in one session and scope, remain current and unretracted, and have
+    /// been valid when the supplied review occurred.
+    ///
+    /// The idempotency key in [`ReviewProvenance`] binds the complete normalized
+    /// input. Repeating an identical admission returns the existing id. Reusing
+    /// the key for a different proposition, projection, source allocation,
+    /// validity interval, review, tag, or metadata value is rejected.
+    /// Idempotency is serialized by the exclusive `&mut Memory` receiver; it
+    /// does not add coordination between independently opened storage instances.
+    /// File-backed embedders must follow the multi-writer contract documented by
+    /// [`SqliteStorage::open`].
+    pub fn add_reviewed_derivation(
+        &mut self,
+        input: ReviewedDerivationInput,
+    ) -> Result<AtomicFactId, Error> {
+        let ReviewedDerivationInput {
+            proposition,
+            search_projection,
+            mut source_node_ids,
+            entity_tags,
+            valid_from,
+            valid_until,
+            review,
+            metadata,
+        } = input;
+        let search_projection = normalize_reviewed_derivation_field(
+            "search projection",
+            &search_projection,
+            MAX_REVIEWED_DERIVATION_PROJECTION_CHARS,
+            true,
+        )?;
+        let subject = normalize_reviewed_derivation_field(
+            "subject",
+            &proposition.subject,
+            MAX_REVIEWED_DERIVATION_COMPONENT_CHARS,
+            false,
+        )?;
+        let predicate = normalize_reviewed_derivation_field(
+            "predicate",
+            &proposition.predicate,
+            MAX_REVIEWED_DERIVATION_COMPONENT_CHARS,
+            false,
+        )?;
+        let object = normalize_reviewed_derivation_field(
+            "object",
+            &proposition.object,
+            MAX_REVIEWED_DERIVATION_COMPONENT_CHARS,
+            false,
+        )?;
+        let value_kind = proposition
+            .value_kind
+            .as_deref()
+            .map(|value_kind| {
+                normalize_reviewed_derivation_field(
+                    "value kind",
+                    value_kind,
+                    MAX_REVIEWED_DERIVATION_VALUE_KIND_CHARS,
+                    false,
+                )
+            })
+            .transpose()?;
+        let reviewed_by = normalize_reviewed_derivation_field(
+            "reviewer",
+            &review.reviewed_by,
+            MAX_REVIEW_PROVENANCE_FIELD_CHARS,
+            false,
+        )?;
+        let review_profile = normalize_reviewed_derivation_field(
+            "review profile",
+            &review.review_profile,
+            MAX_REVIEW_PROVENANCE_FIELD_CHARS,
+            false,
+        )?;
+        let idempotency_key = normalize_reviewed_derivation_field(
+            "idempotency key",
+            &review.idempotency_key,
+            MAX_REVIEW_PROVENANCE_FIELD_CHARS,
+            false,
+        )?;
+        let metadata = validate_reviewed_derivation_metadata(metadata)?;
+
+        source_node_ids.sort_unstable();
+        source_node_ids.dedup();
+        let mut engine_metadata = vec![
+            (
+                REVIEWED_DERIVATION_SCHEMA_KEY.to_owned(),
+                "reviewed-routing-v1".to_owned(),
+            ),
+            (REVIEWED_DERIVATION_SUBJECT_KEY.to_owned(), subject),
+            (REVIEWED_DERIVATION_PREDICATE_KEY.to_owned(), predicate),
+            (REVIEWED_DERIVATION_OBJECT_KEY.to_owned(), object),
+            (
+                REVIEWED_DERIVATION_POLARITY_KEY.to_owned(),
+                proposition.polarity.as_str().to_owned(),
+            ),
+            (
+                REVIEWED_DERIVATION_MODALITY_KEY.to_owned(),
+                proposition.modality.as_str().to_owned(),
+            ),
+            (REVIEWED_DERIVATION_REVIEWED_BY_KEY.to_owned(), reviewed_by),
+            (
+                REVIEWED_DERIVATION_REVIEW_PROFILE_KEY.to_owned(),
+                review_profile,
+            ),
+            (
+                REVIEWED_DERIVATION_REVIEWED_AT_KEY.to_owned(),
+                review.reviewed_at.0.to_string(),
+            ),
+            (
+                REVIEWED_DERIVATION_IDEMPOTENCY_KEY.to_owned(),
+                idempotency_key.clone(),
+            ),
+        ];
+        if let Some(value_kind) = value_kind {
+            engine_metadata.push((REVIEWED_DERIVATION_VALUE_KIND_KEY.to_owned(), value_kind));
+        }
+        let atomic_input = AtomicFactInput {
+            content: search_projection,
+            embedding_surface: None,
+            source_node_ids,
+            entity_tags,
+            valid_from,
+            valid_until,
+            metadata,
+        };
+        self.add_atomic_fact_internal(
+            atomic_input,
+            engine_metadata,
+            Some(idempotency_key),
+            Some(review.reviewed_at),
+        )
+    }
+
+    fn add_atomic_fact_internal(
+        &mut self,
+        input: AtomicFactInput,
+        engine_metadata: Vec<(String, String)>,
+        idempotency_key: Option<String>,
+        reviewed_at: Option<Timestamp>,
+    ) -> Result<AtomicFactId, Error> {
         let content = input.content.trim();
         if content.is_empty() {
             return Err(Error::InvalidInput(
@@ -1149,6 +1731,19 @@ impl<S: StorageAdapter + Clone> Memory<S> {
                     source_node_id.0
                 )));
             }
+            if reviewed_at.is_some_and(|reviewed_at| {
+                source.created_at > reviewed_at
+                    || !crate::graph::valid_at(source.valid_from, source.valid_until, reviewed_at)
+                    || source
+                        .metadata
+                        .get("retracted")
+                        .is_some_and(|value| value == "true")
+            }) {
+                return Err(Error::InvalidInput(format!(
+                    "reviewed derivation source {} was not live at review time",
+                    source_node_id.0
+                )));
+            }
             if source_session_id
                 .as_ref()
                 .is_some_and(|session| session != &source.origin.session_id)
@@ -1177,6 +1772,14 @@ impl<S: StorageAdapter + Clone> Memory<S> {
             ));
             source_node_ids.push(source_node_id);
         }
+        // A reviewed derivation cannot be available to a historical readout
+        // before the decision that admitted it. Atomic facts have no separate
+        // admission-time column, and every current read lane already treats
+        // `observed_at` as the lower availability bound, so retain the later of
+        // source observation and review time here.
+        if let Some(reviewed_at) = reviewed_at {
+            observed_at = observed_at.max(reviewed_at);
+        }
 
         let source_session_id = source_session_id.ok_or_else(|| {
             Error::InvalidInput("atomic fact requires a live raw source".to_string())
@@ -1196,11 +1799,63 @@ impl<S: StorageAdapter + Clone> Memory<S> {
             .collect();
         entity_tags.sort();
         entity_tags.dedup();
+        if let Some((key, _)) = input
+            .metadata
+            .iter()
+            .find(|(key, _)| is_reviewed_derivation_metadata_key(key))
+        {
+            return Err(Error::InvalidInput(format!(
+                "atomic fact metadata key {key:?} is engine-owned"
+            )));
+        }
         let mut metadata: HashMap<_, _> = input.metadata.into_iter().collect();
+        for (key, value) in engine_metadata {
+            if !is_reviewed_derivation_metadata_key(&key) {
+                return Err(Error::InvalidInput(format!(
+                    "reviewed derivation engine metadata key {key:?} is outside its reserved namespace"
+                )));
+            }
+            if metadata.insert(key.clone(), value).is_some() {
+                return Err(Error::InvalidInput(format!(
+                    "reviewed derivation engine metadata key {key:?} is duplicated"
+                )));
+            }
+        }
         // Incarnation keys are engine-owned provenance. Stamp them after
         // consumer metadata so a caller cannot grant a replacement node the
         // authority of the source that was reviewed.
         metadata.extend(source_incarnations);
+        if let Some(idempotency_key) = idempotency_key.as_deref() {
+            let existing_ids = self.engine.graph().storage().atomic_fact_ids_by_metadata(
+                REVIEWED_DERIVATION_IDEMPOTENCY_KEY,
+                idempotency_key,
+            )?;
+            if existing_ids.len() > 1 {
+                return Err(Error::StorageError(format!(
+                    "reviewed derivation idempotency key {idempotency_key:?} matches multiple atomic facts"
+                )));
+            }
+            if let Some(existing_id) = existing_ids.first().copied() {
+                let existing = self.engine.graph().storage().get_atomic_fact(existing_id)?;
+                if atomic_fact_matches_admission(
+                    existing,
+                    content,
+                    &source_node_ids,
+                    &entity_tags,
+                    &source_session_id,
+                    &scope,
+                    observed_at,
+                    input.valid_from,
+                    input.valid_until,
+                    &metadata,
+                ) {
+                    return Ok(existing.id);
+                }
+                return Err(Error::InvalidInput(format!(
+                    "reviewed derivation idempotency key {idempotency_key:?} conflicts with an existing atomic fact"
+                )));
+            }
+        }
         let embedding_surface = input
             .embedding_surface
             .as_deref()
@@ -1949,6 +2604,38 @@ pub struct FocusedEvidence {
     pub text: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RecallReadoutValidationBinding {
+    plan: RecallPlan,
+    reader_contract: RecallReaderContract,
+    reader_guidance: Option<String>,
+    source_node_ids: Vec<NodeId>,
+    source_attributions: Vec<RecallSourceAttribution>,
+    focused_evidence: Vec<FocusedEvidence>,
+}
+
+impl RecallReadoutValidationBinding {
+    fn capture(readout: &RecallReadout) -> Self {
+        Self {
+            plan: readout.plan.clone(),
+            reader_contract: readout.reader_contract.clone(),
+            reader_guidance: readout.reader_guidance.clone(),
+            source_node_ids: readout.source_node_ids.clone(),
+            source_attributions: readout.source_attributions.clone(),
+            focused_evidence: readout.focused_evidence.clone(),
+        }
+    }
+
+    fn matches(&self, readout: &RecallReadout) -> bool {
+        self.plan == readout.plan
+            && self.reader_contract == readout.reader_contract
+            && self.reader_guidance == readout.reader_guidance
+            && self.source_node_ids == readout.source_node_ids
+            && self.source_attributions == readout.source_attributions
+            && self.focused_evidence == readout.focused_evidence
+    }
+}
+
 /// Model-free reader contract compiled from an existing [`Recall`].
 ///
 /// This is the typed counterpart of the guidance and query-focused evidence
@@ -1957,7 +2644,10 @@ pub struct FocusedEvidence {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RecallReadout {
-    /// Deterministic intent inferred from the complete query.
+    /// Deterministic intent used to compile this readout.
+    ///
+    /// Query-based entry points infer it, while plan-aware entry points retain
+    /// the caller-supplied plan unchanged.
     pub plan: RecallPlan,
     /// Provider-neutral staged reading contract compiled from [`Self::plan`].
     pub reader_contract: RecallReaderContract,
@@ -1976,9 +2666,88 @@ pub struct RecallReadout {
     pub source_attributions: Vec<RecallSourceAttribution>,
     /// Bounded exact source lines in reader order.
     pub focused_evidence: Vec<FocusedEvidence>,
+    validation_context: GroundedDraftValidationContext,
+    context_aware_validation: bool,
+    validation_binding: Option<RecallReadoutValidationBinding>,
 }
 
 impl RecallReadout {
+    fn validation_binding_is_current(&self) -> bool {
+        self.validation_binding
+            .as_ref()
+            .is_some_and(|binding| binding.matches(self))
+    }
+
+    /// Return the event-boundary roles only while every public readout field
+    /// still matches the exact surface bound at issuance.
+    pub fn event_boundary_evidence(&self) -> Option<&EventBoundaryEvidence> {
+        self.validation_binding_is_current()
+            .then(|| self.validation_context.event_boundary_evidence())
+            .flatten()
+    }
+
+    /// Return closed authority guidance suitable for composition with
+    /// [`RecallReaderContract::system_context_guidance`].
+    ///
+    /// The result contains only receipt direction, canonical node ids, and a
+    /// fixed citation-role contract. It never contains query or evidence text.
+    pub fn system_authority_guidance(&self) -> Option<String> {
+        self.event_boundary_evidence()
+            .map(readout::event_boundary_authority_guidance)
+    }
+
+    /// Validate a newly adjudicated draft against this readout's exact visible
+    /// source set.
+    pub fn validate_adjudicated_draft(
+        &self,
+        draft: &GroundedAnswerDraft,
+    ) -> GroundedDraftValidationResult {
+        if self.context_aware_validation && self.validation_binding_is_current() {
+            self.reader_contract
+                .validate_adjudicated_draft_with_context(
+                    draft,
+                    &self.source_node_ids,
+                    &self.validation_context,
+                )
+        } else if self.context_aware_validation {
+            self.reader_contract
+                .validate_adjudicated_draft_with_context(
+                    draft,
+                    &self.source_node_ids,
+                    &GroundedDraftValidationContext::membership_only(),
+                )
+        } else {
+            self.reader_contract
+                .validate_adjudicated_draft(draft, &self.source_node_ids)
+        }
+    }
+
+    /// Deterministically materialize a newly adjudicated draft through this
+    /// readout's exact visible source set.
+    pub fn materialize_adjudicated_draft(
+        &self,
+        draft: &GroundedAnswerDraft,
+    ) -> Result<Option<String>, GroundedDraftValidationError> {
+        if self.context_aware_validation && self.validation_binding_is_current() {
+            self.reader_contract
+                .materialize_adjudicated_draft_with_context(
+                    draft,
+                    &self.source_node_ids,
+                    &self.validation_context,
+                )
+        } else if self.context_aware_validation {
+            self.reader_contract
+                .materialize_adjudicated_draft_with_context(
+                    draft,
+                    &self.source_node_ids,
+                    &GroundedDraftValidationContext::membership_only(),
+                )
+        } else {
+            self.reader_contract
+                .materialize_adjudicated_draft(draft, &self.source_node_ids)
+        }
+    }
+
     /// Reconcile a typed draft through this readout's exact membership and
     /// ownership metadata.
     pub fn reconcile_grounded_draft(
@@ -2037,11 +2806,11 @@ impl ContextRenderOptions {
 
 /// One consumer-supplied score on the readout candidates of a [`SearchResult`].
 ///
-/// Anamnesis deliberately does not own or call a reranking model. A consumer
-/// can score the candidates locally (for example with a cross-encoder), then
-/// pass the ordered scores to [`Memory::repackage_reranked`]. The cognitive
-/// readout remains available in [`SearchResult::trace`] for provenance and
-/// observability.
+/// This node-addressed form is retained for diagnostic, unbound repackaging
+/// through [`Memory::repackage_reranked`]. The safe external production workflow
+/// scores prepared document indices as [`RerankScore`] values and completes the
+/// resulting [`PreparedRerank`] receipt. The cognitive readout remains available
+/// in [`SearchResult::trace`] for provenance and observability.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RerankedCandidate {
     /// Candidate node from [`SearchResult::trace`].
@@ -2085,6 +2854,8 @@ const CONTEXT_RENDER_CHARS_PER_TOKEN: usize = 4;
 #[derive(Debug)]
 struct QueryFocusedCandidate {
     evidence: FocusedEvidence,
+    peer_id: PeerId,
+    scope: ScopePath,
     lexical_overlap: usize,
     dialogue_reply_overlap: usize,
     link_terms: HashSet<String>,
@@ -2096,6 +2867,590 @@ struct QueryFocusedCandidate {
     relevance: f64,
     fragment_order: usize,
     line_order: usize,
+}
+
+#[derive(Debug, Clone)]
+struct QueryFocusedPreferenceSignal {
+    strength: u8,
+    relation_kinds: u8,
+    candidate_identity: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct QueryFocusedFulfillmentSignal {
+    target_overlap: usize,
+    relation_kinds: u8,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct QueryFocusedModalBridge {
+    fulfillment_index: usize,
+    preference_index: usize,
+    preference_strength: u8,
+    target_overlap: usize,
+    relation_overlap: u32,
+    preference_observed_at: u64,
+    fulfillment_observed_at: u64,
+}
+
+const QUERY_FOCUS_RELATION_AFFILIATION: u8 = 1 << 0;
+const QUERY_FOCUS_RELATION_EMPLOYMENT: u8 = 1 << 1;
+const QUERY_FOCUS_RELATION_VISIT: u8 = 1 << 2;
+const QUERY_FOCUS_RELATION_PURCHASE: u8 = 1 << 3;
+const QUERY_FOCUS_RELATION_CHOICE: u8 = 1 << 4;
+
+fn query_focus_owner(value: &str) -> Option<String> {
+    let (owner, body) = value.split_once(':')?;
+    let owner = owner.trim();
+    if owner.is_empty()
+        || owner.len() > 48
+        || body.trim().is_empty()
+        || owner
+            .chars()
+            .any(|character| !(character.is_alphanumeric() || " '-_".contains(character)))
+    {
+        return None;
+    }
+    let normalized = owner
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|part| !part.is_empty())
+        .map(str::to_lowercase)
+        .collect::<Vec<_>>();
+    (1..=4)
+        .contains(&normalized.len())
+        .then(|| normalized.join(" "))
+}
+
+fn query_focus_normalized_text(value: &str) -> String {
+    value
+        .to_lowercase()
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn query_focus_named_token_is_common(token: &str) -> bool {
+    matches!(
+        token,
+        "a" | "an"
+            | "after"
+            | "always"
+            | "and"
+            | "as"
+            | "at"
+            | "because"
+            | "before"
+            | "but"
+            | "currently"
+            | "despite"
+            | "during"
+            | "earlier"
+            | "eventually"
+            | "finally"
+            | "first"
+            | "for"
+            | "fortunately"
+            | "from"
+            | "favorite"
+            | "favourite"
+            | "great"
+            | "however"
+            | "i"
+            | "id"
+            | "ill"
+            | "im"
+            | "it"
+            | "its"
+            | "ive"
+            | "last"
+            | "later"
+            | "luckily"
+            | "my"
+            | "new"
+            | "next"
+            | "now"
+            | "of"
+            | "on"
+            | "or"
+            | "our"
+            | "really"
+            | "recently"
+            | "previously"
+            | "since"
+            | "so"
+            | "thank"
+            | "thanks"
+            | "that"
+            | "the"
+            | "then"
+            | "these"
+            | "this"
+            | "those"
+            | "today"
+            | "tomorrow"
+            | "to"
+            | "travel"
+            | "trip"
+            | "visit"
+            | "we"
+            | "when"
+            | "while"
+            | "with"
+            | "without"
+            | "work"
+            | "working"
+            | "yeah"
+            | "yes"
+            | "yesterday"
+            | "ultimately"
+            | "unfortunately"
+            | "until"
+            | "upon"
+            | "monday"
+            | "tuesday"
+            | "wednesday"
+            | "thursday"
+            | "friday"
+            | "saturday"
+            | "sunday"
+            | "january"
+            | "february"
+            | "march"
+            | "april"
+            | "may"
+            | "june"
+            | "july"
+            | "august"
+            | "september"
+            | "october"
+            | "november"
+            | "december"
+    )
+}
+
+fn query_focus_named_identities(value: &str) -> Vec<String> {
+    let mut identities = Vec::new();
+    let mut current = Vec::new();
+    let flush = |current: &mut Vec<String>, identities: &mut Vec<String>| {
+        if !current.is_empty() {
+            identities.push(current.join(" "));
+            current.clear();
+        }
+    };
+
+    for raw_token in value.split_whitespace() {
+        let token = raw_token.trim_matches(|character: char| {
+            !character.is_alphanumeric() && character != '-' && character != '\''
+        });
+        let normalized = query_focus_normalized_text(token);
+        let alphabetic_count = token
+            .chars()
+            .filter(|character| character.is_alphabetic())
+            .count();
+        let is_acronym = alphabetic_count > 1
+            && token
+                .chars()
+                .filter(|character| character.is_alphabetic())
+                .all(char::is_uppercase);
+        let starts_uppercase = token.chars().next().is_some_and(char::is_uppercase);
+        if !normalized.is_empty()
+            && (starts_uppercase || is_acronym)
+            && !query_focus_named_token_is_common(&normalized)
+        {
+            current.push(normalized);
+            if raw_token
+                .chars()
+                .last()
+                .is_some_and(|character| matches!(character, ',' | ';' | ':' | '/' | '|'))
+            {
+                flush(&mut current, &mut identities);
+            }
+        } else {
+            flush(&mut current, &mut identities);
+        }
+    }
+    flush(&mut current, &mut identities);
+    identities.sort();
+    identities.dedup();
+    identities
+}
+
+fn query_focus_contains_normalized_phrase(normalized_value: &str, phrase: &str) -> bool {
+    normalized_value == phrase
+        || normalized_value
+            .strip_prefix(phrase)
+            .is_some_and(|suffix| suffix.starts_with(' '))
+        || normalized_value
+            .strip_suffix(phrase)
+            .is_some_and(|prefix| prefix.ends_with(' '))
+        || normalized_value.contains(&format!(" {phrase} "))
+}
+
+fn query_focus_preference_is_negated_or_corrected(value: &str) -> bool {
+    let normalized = query_focus_normalized_text(value);
+    let words: HashSet<_> = normalized.split_whitespace().collect();
+    words.iter().any(|word| {
+        matches!(
+            *word,
+            "against"
+                | "avoid"
+                | "avoided"
+                | "avoiding"
+                | "cancel"
+                | "canceled"
+                | "canceling"
+                | "cancelled"
+                | "cancelling"
+                | "correction"
+                | "instead"
+                | "mistake"
+                | "mistaken"
+                | "never"
+                | "not"
+                | "reconsidered"
+                | "retract"
+                | "retracted"
+        )
+    }) || [
+        "but not",
+        "but now",
+        "changed my mind",
+        "don t",
+        "instead of",
+        "no longer",
+        "rather than",
+        "scratch that",
+    ]
+    .iter()
+    .any(|phrase| query_focus_contains_normalized_phrase(&normalized, phrase))
+}
+
+fn query_focus_relation_kinds(value: &str) -> u8 {
+    let normalized = query_focus_normalized_text(value);
+    let words: HashSet<_> = normalized.split_whitespace().collect();
+    let has_any = |needles: &[&str]| needles.iter().any(|needle| words.contains(needle));
+    let mut kinds = 0;
+    if has_any(&[
+        "collaborate",
+        "collaborated",
+        "collaboration",
+        "deal",
+        "endorse",
+        "endorsed",
+        "endorsement",
+        "partner",
+        "partnered",
+        "partnership",
+        "sponsor",
+        "sponsored",
+        "sponsorship",
+    ]) || normalized.contains("work with")
+        || normalized.contains("working with")
+        || normalized.contains("signed with")
+    {
+        kinds |= QUERY_FOCUS_RELATION_AFFILIATION;
+    }
+    if has_any(&[
+        "employ", "employed", "hire", "hired", "job", "joined", "position", "role",
+    ]) || normalized.contains("work for")
+        || normalized.contains("working for")
+    {
+        kinds |= QUERY_FOCUS_RELATION_EMPLOYMENT;
+    }
+    if has_any(&[
+        "trip",
+        "travel",
+        "traveled",
+        "travelled",
+        "visit",
+        "visited",
+    ]) {
+        kinds |= QUERY_FOCUS_RELATION_VISIT;
+    }
+    if has_any(&["bought", "buy", "order", "ordered", "purchase", "purchased"]) {
+        kinds |= QUERY_FOCUS_RELATION_PURCHASE;
+    }
+    if has_any(&[
+        "choose",
+        "chose",
+        "choice",
+        "pick",
+        "picked",
+        "prefer",
+        "preferred",
+        "select",
+        "selected",
+    ]) {
+        kinds |= QUERY_FOCUS_RELATION_CHOICE;
+    }
+    kinds
+}
+
+fn query_focus_preference_signal(value: &str) -> Option<QueryFocusedPreferenceSignal> {
+    let (_, body) = value.split_once(':')?;
+    // ASCII folding preserves byte offsets into `body`; the fixed markers are
+    // ASCII while candidate identity retains the source's original casing.
+    let lowercase = body.to_ascii_lowercase();
+    let markers = [
+        ("i've always liked ", 3),
+        ("i have always liked ", 3),
+        ("i've always loved ", 3),
+        ("i have always loved ", 3),
+        ("my first choice is ", 3),
+        ("my favorite is ", 3),
+        ("my favourite is ", 3),
+        ("i really like ", 3),
+        ("i really love ", 3),
+        ("i prefer ", 3),
+        ("i'd love to ", 2),
+        ("i would love to ", 2),
+        ("i'd like to ", 2),
+        ("i would like to ", 2),
+        ("i want to ", 2),
+        ("i hope to ", 2),
+        ("i plan to ", 2),
+        ("i intend to ", 2),
+    ];
+    let mut best = None;
+    for (marker, strength) in markers {
+        let Some(marker_start) = lowercase.find(marker) else {
+            continue;
+        };
+        let sentence_start = lowercase[..marker_start]
+            .rfind(['.', '!', '?'])
+            .map_or(0, |offset| offset.saturating_add(1));
+        let marker_end = marker_start.saturating_add(marker.len());
+        let sentence_end = lowercase[marker_end..]
+            .find(['.', '!', '?'])
+            .map_or(body.len(), |offset| marker_end.saturating_add(offset));
+        let sentence = body.get(sentence_start..sentence_end)?.trim();
+        if query_focus_preference_is_negated_or_corrected(sentence) {
+            continue;
+        }
+        let suffix = body
+            .get(marker_end..sentence_end)?
+            .chars()
+            .take(240)
+            .collect::<String>();
+        let candidate_identities = query_focus_named_identities(&suffix);
+        let [candidate_identity] = candidate_identities.as_slice() else {
+            continue;
+        };
+        let relation_kinds = query_focus_relation_kinds(sentence);
+        if relation_kinds == 0 {
+            continue;
+        }
+        let signal = QueryFocusedPreferenceSignal {
+            strength,
+            relation_kinds,
+            candidate_identity: candidate_identity.clone(),
+        };
+        if best
+            .as_ref()
+            .is_none_or(|current: &QueryFocusedPreferenceSignal| signal.strength > current.strength)
+        {
+            best = Some(signal);
+        }
+    }
+    best
+}
+
+fn query_focus_fulfillment_signal(
+    value: &str,
+    target_terms: &HashSet<String>,
+) -> Option<QueryFocusedFulfillmentSignal> {
+    let (_, body) = value.split_once(':')?;
+    let required_overlap = target_terms.len().clamp(1, 2);
+    body.split(['.', '!', '?', ';'])
+        .filter_map(|clause| {
+            let normalized = query_focus_normalized_text(clause);
+            let words: HashSet<_> = normalized.split_whitespace().collect();
+            let clause_facets = readout::facet_terms(clause);
+            let target_overlap = target_terms.intersection(&clause_facets).count();
+            if target_overlap < required_overlap
+                || !query_focus_named_identities(clause).is_empty()
+                || [
+                    "could",
+                    "hope",
+                    "hoping",
+                    "may",
+                    "might",
+                    "plan",
+                    "planned",
+                    "planning",
+                    "possible",
+                    "possibly",
+                    "potential",
+                    "would",
+                ]
+                .iter()
+                .any(|word| words.contains(word))
+                || normalized.contains("in talks")
+                || normalized.contains("did not")
+                || normalized.contains("didn't")
+                || normalized.contains("never ")
+            {
+                return None;
+            }
+            let completed = [
+                "accepted",
+                "began",
+                "booked",
+                "bought",
+                "chose",
+                "completed",
+                "finished",
+                "got",
+                "hired",
+                "joined",
+                "landed",
+                "partnered",
+                "purchased",
+                "secured",
+                "selected",
+                "signed",
+                "started",
+            ]
+            .iter()
+            .any(|word| words.contains(word));
+            let relation_kinds = query_focus_relation_kinds(clause);
+            (completed && relation_kinds != 0).then_some(QueryFocusedFulfillmentSignal {
+                target_overlap,
+                relation_kinds,
+            })
+        })
+        .max_by_key(|signal| (signal.target_overlap, signal.relation_kinds.count_ones()))
+}
+
+fn query_focus_modal_bridge(
+    candidates: &[QueryFocusedCandidate],
+    plan: &RecallPlan,
+) -> Option<QueryFocusedModalBridge> {
+    if plan.answer_shape != AnswerShape::Inference
+        || plan.derivation != RecallDerivation::GroundedInference
+    {
+        return None;
+    }
+    let contract = plan.reader_contract();
+    let requested = contract.requested_answer_spec();
+    if requested.role() != RequestedAnswerRole::Value
+        || requested.cardinality() != RequestedAnswerCardinality::One
+        || !matches!(
+            requested.modality(),
+            RequestedAnswerModality::Likely | RequestedAnswerModality::Possible
+        )
+    {
+        return None;
+    }
+    let target_terms = readout::facet_terms(requested.value_target()?);
+    let query_relation_kinds = query_focus_relation_kinds(&plan.query);
+    let normalized_query = query_focus_normalized_text(&plan.query);
+    if target_terms.is_empty() || query_relation_kinds == 0 {
+        return None;
+    }
+
+    const MAX_MODAL_SIGNALS: usize = 32;
+    let preferences = candidates
+        .iter()
+        .enumerate()
+        .filter_map(|(index, candidate)| {
+            let owner = query_focus_owner(&candidate.evidence.text)?;
+            if !query_focus_contains_normalized_phrase(&normalized_query, &owner) {
+                return None;
+            }
+            let signal = query_focus_preference_signal(&candidate.evidence.text)?;
+            ((signal.relation_kinds & query_relation_kinds) != 0).then_some((index, owner, signal))
+        })
+        .take(MAX_MODAL_SIGNALS.saturating_add(1))
+        .collect::<Vec<_>>();
+    let fulfillments = candidates
+        .iter()
+        .enumerate()
+        .filter_map(|(index, candidate)| {
+            let owner = query_focus_owner(&candidate.evidence.text)?;
+            if !query_focus_contains_normalized_phrase(&normalized_query, &owner) {
+                return None;
+            }
+            let signal = query_focus_fulfillment_signal(&candidate.evidence.text, &target_terms)?;
+            ((signal.relation_kinds & query_relation_kinds) != 0).then_some((index, owner, signal))
+        })
+        .take(MAX_MODAL_SIGNALS.saturating_add(1))
+        .collect::<Vec<_>>();
+    if preferences.len() > MAX_MODAL_SIGNALS || fulfillments.len() > MAX_MODAL_SIGNALS {
+        return None;
+    }
+
+    let mut best = None;
+    for (fulfillment_index, fulfillment_owner, fulfillment) in fulfillments {
+        let fulfillment_candidate = &candidates[fulfillment_index];
+        let qualifying = preferences
+            .iter()
+            .filter(|(preference_index, preference_owner, preference)| {
+                let preference_candidate = &candidates[*preference_index];
+                preference_owner == &fulfillment_owner
+                    && preference_candidate.peer_id == fulfillment_candidate.peer_id
+                    && preference_candidate.scope == fulfillment_candidate.scope
+                    && preference_candidate.evidence.source_node_id
+                        != fulfillment_candidate.evidence.source_node_id
+                    && preference_candidate.evidence.observed_at
+                        < fulfillment_candidate.evidence.observed_at
+                    && (preference.relation_kinds
+                        & fulfillment.relation_kinds
+                        & query_relation_kinds)
+                        != 0
+            })
+            .collect::<Vec<_>>();
+        let candidate_identities: HashSet<_> = qualifying
+            .iter()
+            .map(|(_, _, preference)| preference.candidate_identity.as_str())
+            .collect();
+        if candidate_identities.len() != 1 {
+            continue;
+        }
+        let Some((preference_index, _, preference)) =
+            qualifying
+                .into_iter()
+                .max_by(|(left_index, _, left), (right_index, _, right)| {
+                    candidates[*left_index]
+                        .evidence
+                        .observed_at
+                        .cmp(&candidates[*right_index].evidence.observed_at)
+                        .then_with(|| left.strength.cmp(&right.strength))
+                        .then_with(|| right_index.cmp(left_index))
+                })
+        else {
+            continue;
+        };
+        let preference_candidate = &candidates[*preference_index];
+        let shared_relations =
+            preference.relation_kinds & fulfillment.relation_kinds & query_relation_kinds;
+        let bridge = QueryFocusedModalBridge {
+            fulfillment_index,
+            preference_index: *preference_index,
+            preference_strength: preference.strength,
+            target_overlap: fulfillment.target_overlap,
+            relation_overlap: shared_relations.count_ones(),
+            preference_observed_at: preference_candidate.evidence.observed_at.0,
+            fulfillment_observed_at: fulfillment_candidate.evidence.observed_at.0,
+        };
+        let rank_key = |candidate: QueryFocusedModalBridge| {
+            (
+                candidate.target_overlap,
+                candidate.relation_overlap,
+                candidate.preference_observed_at,
+                candidate.fulfillment_observed_at,
+                candidate.preference_strength,
+                std::cmp::Reverse((candidate.fulfillment_index, candidate.preference_index)),
+            )
+        };
+        let better = best
+            .is_none_or(|current: QueryFocusedModalBridge| rank_key(bridge) > rank_key(current));
+        if better {
+            best = Some(bridge);
+        }
+    }
+    best
 }
 
 fn query_focus_surface_terms(value: &str) -> HashSet<String> {
@@ -2181,7 +3536,7 @@ fn query_focus_complement_limit(plan: &RecallPlan, line_limit: usize) -> usize {
         | AnswerShape::Collection
         | AnswerShape::Frequency
         | AnswerShape::Count => line_limit.saturating_sub(1),
-        AnswerShape::Fact if plan.recall_intent == RecallIntent::Temporal => {
+        AnswerShape::Fact if readout::plan_uses_temporal_readout(plan) => {
             line_limit.saturating_sub(1)
         }
         AnswerShape::Fact => line_limit.saturating_sub(1),
@@ -2196,7 +3551,7 @@ fn query_focus_session_limit(plan: &RecallPlan, line_limit: usize) -> usize {
         | AnswerShape::Collection
         | AnswerShape::Frequency
         | AnswerShape::Count => line_limit.div_ceil(2).max(2),
-        AnswerShape::Fact if plan.recall_intent == RecallIntent::Temporal => {
+        AnswerShape::Fact if readout::plan_uses_temporal_readout(plan) => {
             line_limit.div_ceil(2).max(2)
         }
         AnswerShape::Fact => line_limit,
@@ -2208,7 +3563,7 @@ fn query_focus_line_limit(plan: &RecallPlan) -> usize {
         AnswerShape::Frequency | AnswerShape::Count | AnswerShape::Collection => 8,
         AnswerShape::Relationship | AnswerShape::Inference => 8,
         AnswerShape::Temporal => 5,
-        AnswerShape::Fact if plan.recall_intent == RecallIntent::Temporal => 5,
+        AnswerShape::Fact if readout::plan_uses_temporal_readout(plan) => 5,
         AnswerShape::Fact => 4,
     }
 }
@@ -2249,7 +3604,7 @@ fn select_query_focused_evidence(
         })
         .collect();
     let query_facets = readout::facet_terms(&plan.query);
-    let query_time_ranges = if plan.recall_intent == RecallIntent::Temporal {
+    let query_time_ranges = if readout::plan_uses_temporal_readout(plan) {
         crate::query::temporal::parse_time_cues(&plan.query, 0)
     } else {
         Vec::new()
@@ -2301,6 +3656,7 @@ fn select_query_focused_evidence(
     let mut admit = |source_id: NodeId,
                      text: &str,
                      session_id: &str,
+                     origin: &Origin,
                      semantic_window: Option<NodeId>,
                      relevance: f64,
                      fragment_order: usize,
@@ -2331,6 +3687,8 @@ fn select_query_focused_evidence(
                 session_id: session_id.to_owned(),
                 text: text.to_owned(),
             },
+            peer_id: origin.peer_id,
+            scope: origin.scope.clone(),
             lexical_overlap,
             dialogue_reply_overlap,
             link_terms,
@@ -2380,6 +3738,7 @@ fn select_query_focused_evidence(
                     fragment.node_id,
                     line,
                     &fragment.origin.session_id,
+                    &fragment.origin,
                     None,
                     fragment.relevance,
                     fragment_order,
@@ -2411,7 +3770,7 @@ fn select_query_focused_evidence(
                 })
                 .filter(|overlap| *overlap >= query_facets.len().min(2))
                 .unwrap_or_default();
-            let (relevance, source_order) =
+            let (relevance, source_order, source_origin) =
                 if let Some((source, source_order)) = delivered_raw.get(&source_id) {
                     if source.origin.peer_id != fragment.origin.peer_id
                         || source.origin.session_id != fragment.origin.session_id
@@ -2422,14 +3781,16 @@ fn select_query_focused_evidence(
                     (
                         fragment.relevance.max(source.relevance),
                         (*source_order).min(fragment_order),
+                        &source.origin,
                     )
                 } else {
-                    (fragment.relevance, fragment_order)
+                    (fragment.relevance, fragment_order, &fragment.origin)
                 };
             admit(
                 source_id,
                 line,
-                &fragment.origin.session_id,
+                &source_origin.session_id,
+                source_origin,
                 Some(fragment.node_id),
                 relevance,
                 source_order,
@@ -2466,9 +3827,23 @@ fn select_query_focused_evidence(
         return Vec::new();
     }
     let line_limit = query_focus_line_limit(plan);
-    let mut ordered_indices = vec![0usize];
-    let mut selected_indices = HashSet::from([0usize]);
-    let mut covered_information = candidates[0].information_terms.clone();
+    let mut ordered_indices = Vec::new();
+    let mut selected_indices = HashSet::new();
+    if let Some(bridge) = query_focus_modal_bridge(&candidates, plan) {
+        for index in [bridge.fulfillment_index, bridge.preference_index] {
+            if selected_indices.insert(index) {
+                ordered_indices.push(index);
+            }
+        }
+    }
+    if selected_indices.insert(0) {
+        ordered_indices.push(0);
+    }
+    let query_anchor_index = ordered_indices[0];
+    let mut covered_information = HashSet::new();
+    for index in &ordered_indices {
+        covered_information.extend(candidates[*index].information_terms.iter().cloned());
+    }
     let complement_limit = query_focus_complement_limit(plan, line_limit);
     let session_limit = query_focus_session_limit(plan, line_limit);
     let prioritizes_answer_values = matches!(
@@ -2505,7 +3880,8 @@ fn select_query_focused_evidence(
                     .value_terms
                     .difference(&covered_information)
                     .count();
-                let anchor_connection = query_focus_connection(&candidates[0], candidate);
+                let anchor_connection =
+                    query_focus_connection(&candidates[query_anchor_index], candidate);
                 let session_count = ordered_indices
                     .iter()
                     .filter(|selected| {
@@ -3408,6 +4784,9 @@ impl<S: StorageAdapter + Clone> Memory<S> {
             source_node_ids,
             source_attributions,
             focused_evidence,
+            validation_context: GroundedDraftValidationContext::membership_only(),
+            context_aware_validation: false,
+            validation_binding: None,
         })
     }
 
@@ -3427,9 +4806,9 @@ impl<S: StorageAdapter + Clone> Memory<S> {
 
     /// Compile a structured reader contract using a precomputed recall plan.
     ///
-    /// This is useful when a protocol already has a typed [`AnswerShape`]. The
-    /// plan affects deterministic presentation intent and focused selection but
-    /// cannot add evidence to the supplied [`Recall`].
+    /// This is useful when a protocol already has a typed [`AnswerShape`] or
+    /// [`RecallCoverage`]. The plan affects deterministic presentation intent
+    /// and focused selection but cannot add evidence to the supplied [`Recall`].
     pub fn readout_for_plan(
         &self,
         plan: &RecallPlan,
@@ -3439,6 +4818,73 @@ impl<S: StorageAdapter + Clone> Memory<S> {
         let line_sources = self.recall_fragment_line_sources(recall)?;
         self.extend_line_source_times(&line_sources, &mut times)?;
         self.compile_recall_readout(plan, recall, &times, &line_sources)
+    }
+
+    /// Compile a structured reader contract from one completed prepared-rerank
+    /// receipt.
+    ///
+    /// Unlike [`Self::readout_for_plan`], this entry point retains commit-safe
+    /// source-role authority issued during completion. Event-boundary
+    /// collection drafts therefore validate anchor premises and target items
+    /// without reconstructing roles from ordinary recall membership.
+    pub fn readout_for_reranked(&self, reranked: &RerankedRecall) -> Result<RecallReadout, Error> {
+        let mut readout = self.readout_for_plan(&reranked.plan, &reranked.recall)?;
+        readout.context_aware_validation = true;
+        let binding_is_current = reranked.validation_binding.as_ref().is_some_and(|binding| {
+            binding.matches(reranked)
+                && binding.readout.matches(&readout)
+                && reranked
+                    .validation_context
+                    .is_bound_to(&readout.plan, &readout.source_node_ids)
+        });
+        if binding_is_current
+            && let Some(evidence) = reranked.validation_context.event_boundary_evidence()
+        {
+            readout.validation_context = reranked.validation_context.clone();
+            let authority_guidance = readout::event_boundary_authority_guidance(evidence);
+            readout.reader_guidance = Some(match readout.reader_guidance.take() {
+                Some(guidance) if !guidance.trim().is_empty() => {
+                    format!("{guidance} {authority_guidance}")
+                }
+                Some(_) | None => authority_guidance,
+            });
+            readout.validation_binding = Some(RecallReadoutValidationBinding::capture(&readout));
+        }
+        Ok(readout)
+    }
+
+    /// Render one completed prepared-rerank receipt with its commit-safe
+    /// source-role contract.
+    pub fn render_context_for_reranked(&self, reranked: &RerankedRecall) -> Result<String, Error> {
+        self.render_context_for_reranked_with(reranked, ContextRenderOptions::default())
+    }
+
+    /// Render one completed prepared-rerank receipt through a selected layout.
+    ///
+    /// When a validated event-boundary role group survived delivery, a bounded
+    /// provider-neutral section identifies only its direction and canonical
+    /// raw source ids. Internal fact ids and search-trace encodings are never
+    /// exposed. Without such a receipt, output is byte-for-byte identical to
+    /// [`Self::render_context_for_plan_with`] for the same plan, recall, and
+    /// options.
+    pub fn render_context_for_reranked_with(
+        &self,
+        reranked: &RerankedRecall,
+        options: ContextRenderOptions,
+    ) -> Result<String, Error> {
+        let readout = self.readout_for_reranked(reranked)?;
+        let mut rendered =
+            self.render_context_for_plan_with(&reranked.plan, &reranked.recall, options)?;
+        let Some(authority_guidance) = readout.system_authority_guidance() else {
+            return Ok(rendered);
+        };
+        if !rendered.ends_with('\n') {
+            rendered.push('\n');
+        }
+        rendered.push_str(&format!(
+            "## EVENT BOUNDARY SOURCE ROLES\n- {authority_guidance}\n\n",
+        ));
+        Ok(rendered)
     }
 
     /// Render a recall with source-node temporal metadata.
@@ -3484,15 +4930,15 @@ impl<S: StorageAdapter + Clone> Memory<S> {
     /// Render context using a precomputed deterministic recall plan.
     ///
     /// This additive route lets structured consumers provide an explicit
-    /// [`AnswerShape`] while keeping evidence matching, temporal compilation,
-    /// and rendering inside `Memory`.
+    /// [`AnswerShape`] and [`RecallCoverage`] while keeping evidence matching,
+    /// temporal compilation, and rendering inside `Memory`.
     pub fn render_context_for_plan_with(
         &self,
         plan: &RecallPlan,
         recall: &Recall,
         mut options: ContextRenderOptions,
     ) -> Result<String, Error> {
-        if plan.recall_intent == RecallIntent::Temporal {
+        if readout::plan_uses_temporal_readout(plan) {
             options.resolve_relative_times = true;
         }
         self.render_context_internal(recall, options, Some(plan))
@@ -3663,7 +5109,25 @@ impl<S: StorageAdapter + Clone> Memory<S> {
         reranker: &dyn RerankingProvider,
         options: RerankedRecallOptions,
     ) -> Result<RerankedRecall, Error> {
-        self.search_reranked_at(query, reranker, options, Timestamp::now())
+        let now = Timestamp::now();
+        let plan = RecallPlan::infer(query);
+        self.search_reranked_for_plan_at(&plan, reranker, options, now)
+    }
+
+    /// Run the canonical production recall pipeline with a precomputed plan.
+    ///
+    /// The plan's query is authoritative for cognitive search, local reranking,
+    /// source-aware selection, and the plan returned in [`RerankedRecall`]. This
+    /// is the structured-intent entry point for consumers that use
+    /// [`RecallPlan::infer_with_answer_shape`] or
+    /// [`RecallPlan::with_coverage`].
+    pub fn search_reranked_for_plan(
+        &mut self,
+        plan: &RecallPlan,
+        reranker: &dyn RerankingProvider,
+        options: RerankedRecallOptions,
+    ) -> Result<RerankedRecall, Error> {
+        self.search_reranked_for_plan_at(plan, reranker, options, Timestamp::now())
     }
 
     /// Run canonical production recall at an explicit timestamp.
@@ -3674,33 +5138,24 @@ impl<S: StorageAdapter + Clone> Memory<S> {
         options: RerankedRecallOptions,
         now: Timestamp,
     ) -> Result<RerankedRecall, Error> {
-        if options.candidate_limit == 0 {
-            return Err(Error::InvalidInput(
-                "reranked recall candidate limit must be greater than zero".to_owned(),
-            ));
-        }
-        if options.deep.limit == 0 {
-            return Err(Error::InvalidInput(
-                "reranked recall result limit must be greater than zero".to_owned(),
-            ));
-        }
-        if options.search_limit == 0 {
-            return Err(Error::InvalidInput(
-                "reranked recall search limit must be greater than zero".to_owned(),
-            ));
-        }
-        let diagnostics =
-            SearchDiagnostics::with_readout_trace_limit(options.candidate_limit.max(200));
-        let scope = options.scope.clone().unwrap_or_else(ScopePath::universal);
-        let result = self.search_result_scoped_at_with_diagnostics(
-            query,
-            options.search_limit,
-            now,
-            &SearchTuning::default(),
-            &diagnostics,
-            scope,
-        )?;
-        self.rerank_search_result_at(query, &result, reranker, options, now)
+        let plan = RecallPlan::infer(query);
+        self.search_reranked_for_plan_at(&plan, reranker, options, now)
+    }
+
+    /// Run canonical production recall from a precomputed plan at `now`.
+    ///
+    /// All retrieval, document compilation, adaptive delivery, and deep
+    /// selection stages consume this same plan. No model or transport behavior
+    /// is introduced by accepting the plan.
+    pub fn search_reranked_for_plan_at(
+        &mut self,
+        plan: &RecallPlan,
+        reranker: &dyn RerankingProvider,
+        options: RerankedRecallOptions,
+        now: Timestamp,
+    ) -> Result<RerankedRecall, Error> {
+        let prepared = self.prepare_rerank_for_plan_at(plan, options, now)?;
+        self.rerank_prepared_with_provider(prepared, reranker)
     }
 
     /// Apply the canonical production rerank and deep-selection stages to an
@@ -3719,63 +5174,40 @@ impl<S: StorageAdapter + Clone> Memory<S> {
         options: RerankedRecallOptions,
         as_of: Timestamp,
     ) -> Result<RerankedRecall, Error> {
-        if options.candidate_limit == 0 {
-            return Err(Error::InvalidInput(
-                "reranked recall candidate limit must be greater than zero".to_owned(),
-            ));
-        }
-        if options.deep.limit == 0 {
-            return Err(Error::InvalidInput(
-                "reranked recall result limit must be greater than zero".to_owned(),
-            ));
-        }
+        let plan = RecallPlan::infer(query);
+        self.rerank_search_result_for_plan_at(&plan, result, reranker, options, as_of)
+    }
 
-        let evidence = self.rerank_documents(query, result, options.candidate_limit)?;
-        if evidence.is_empty() {
-            return Ok(RerankedRecall {
-                ranking: Vec::new(),
-                recall: Recall {
-                    hits: Vec::new(),
-                    package: result.package.clone(),
-                },
-                cognitive_scores: Vec::new(),
-            });
-        }
-
-        // Bind every document to the exact source allocations used to build
-        // its text before invoking the reranker. The provider must not receive
-        // a document containing a retracted, expired, or scope-ineligible raw
-        // member, and a concurrent source replacement while the provider runs
-        // must not be able to inherit the old document's score.
+    fn rerank_search_result_for_plan_at(
+        &self,
+        plan: &RecallPlan,
+        result: &SearchResult,
+        reranker: &dyn RerankingProvider,
+        options: RerankedRecallOptions,
+        as_of: Timestamp,
+    ) -> Result<RerankedRecall, Error> {
         let query_scope = options.scope.clone().unwrap_or_else(ScopePath::universal);
-        let mut bound_evidence = Vec::with_capacity(evidence.len());
-        for document in evidence {
-            let Some(binding) = bind_evidence_document(self.engine.graph().storage(), &document)?
-            else {
-                continue;
-            };
-            if bound_evidence_document_is_eligible(
-                self.engine.graph().storage(),
-                &binding,
-                &query_scope,
-                as_of,
-            )? {
-                bound_evidence.push((document, binding));
-            }
-        }
-        if bound_evidence.is_empty() {
-            return Ok(RerankedRecall {
-                ranking: Vec::new(),
-                recall: empty_reranked_recall(result),
-                cognitive_scores: Vec::new(),
-            });
+        let prepared = self.prepare_rerank_from_search_result_for_plan_at(
+            plan,
+            result,
+            query_scope,
+            options,
+            as_of,
+        )?;
+        self.rerank_prepared_with_provider(prepared, reranker)
+    }
+
+    fn rerank_prepared_with_provider(
+        &self,
+        prepared: PreparedRerank,
+        reranker: &dyn RerankingProvider,
+    ) -> Result<RerankedRecall, Error> {
+        if prepared.document_count() == 0 {
+            return self.complete_prepared_rerank(prepared, &[]);
         }
 
-        let documents: Vec<_> = bound_evidence
-            .iter()
-            .map(|(document, _)| document.rerank_text().to_owned())
-            .collect();
-        let scores = reranker.rerank(query, &documents)?;
+        let documents: Vec<_> = prepared.rerank_texts().map(str::to_owned).collect();
+        let scores = reranker.rerank(prepared.query(), &documents)?;
         if scores.is_empty() {
             return Err(Error::InvalidInput(format!(
                 "reranker {:?} returned no scores for {} documents",
@@ -3783,37 +5215,218 @@ impl<S: StorageAdapter + Clone> Memory<S> {
                 documents.len()
             )));
         }
+        self.complete_prepared_rerank(prepared, &scores)
+    }
 
-        let mut seen = HashSet::new();
-        let mut ranking = Vec::with_capacity(scores.len());
-        for score in scores {
-            if !score.score.is_finite() {
-                return Err(Error::NonFinite(format!(
-                    "reranker score at document index {}",
-                    score.index
-                )));
+    /// Prepare canonical production recall for external scoring at wall-clock time.
+    pub fn prepare_rerank(
+        &mut self,
+        query: &str,
+        options: RerankedRecallOptions,
+    ) -> Result<PreparedRerank, Error> {
+        let plan = RecallPlan::infer(query);
+        self.prepare_rerank_for_plan_at(&plan, options, Timestamp::now())
+    }
+
+    /// Prepare canonical production recall for external scoring at `now`.
+    pub fn prepare_rerank_at(
+        &mut self,
+        query: &str,
+        options: RerankedRecallOptions,
+        now: Timestamp,
+    ) -> Result<PreparedRerank, Error> {
+        let plan = RecallPlan::infer(query);
+        self.prepare_rerank_for_plan_at(&plan, options, now)
+    }
+
+    /// Prepare a precomputed plan for external scoring at wall-clock time.
+    pub fn prepare_rerank_for_plan(
+        &mut self,
+        plan: &RecallPlan,
+        options: RerankedRecallOptions,
+    ) -> Result<PreparedRerank, Error> {
+        self.prepare_rerank_for_plan_at(plan, options, Timestamp::now())
+    }
+
+    /// Run canonical source search and prepare its bounded evidence for an
+    /// external reranker at `now`.
+    ///
+    /// This method owns the complete production search. The plan query, scope,
+    /// timestamp, search width, diagnostic candidate surface, and downstream
+    /// options are captured in one opaque receipt, so an external transport
+    /// cannot accidentally combine a plan with a different [`SearchResult`].
+    ///
+    /// Before any text is exposed through [`PreparedRerank::rerank_texts`],
+    /// every document representative, delivered raw source, and scoring-only
+    /// raw dialogue contributor is bound to its storage incarnation and checked
+    /// for type, scope, retraction, creation time, and validity. A Trend plan
+    /// admits expired historical evidence, but still rejects future, retracted,
+    /// malformed, or stale allocations.
+    /// `ScopePath` is a retrieval boundary, not caller authentication; the
+    /// consumer remains responsible for choosing an authorized scope.
+    pub fn prepare_rerank_for_plan_at(
+        &mut self,
+        plan: &RecallPlan,
+        options: RerankedRecallOptions,
+        as_of: Timestamp,
+    ) -> Result<PreparedRerank, Error> {
+        validate_prepared_rerank_options(&options)?;
+        validate_prepared_rerank_timestamp(as_of)?;
+        let diagnostics =
+            SearchDiagnostics::with_readout_trace_limit(options.candidate_limit.max(200));
+        let scope = options.scope.clone().unwrap_or_else(ScopePath::universal);
+        let result = self.search_result_scoped_at_with_diagnostics_for_plan(
+            plan,
+            options.search_limit,
+            as_of,
+            &SearchTuning::default(),
+            &diagnostics,
+            scope.clone(),
+        )?;
+        self.prepare_rerank_from_search_result_for_plan_at(plan, &result, scope, options, as_of)
+    }
+
+    /// Bind a diagnostic source-search result to an internal receipt.
+    ///
+    /// Only engine-owned callers reach this helper. Public external scoring
+    /// goes through [`Memory::prepare_rerank_for_plan_at`], which creates the
+    /// source search and receipt together.
+    fn prepare_rerank_from_search_result_for_plan_at(
+        &self,
+        plan: &RecallPlan,
+        result: &SearchResult,
+        scope: ScopePath,
+        options: RerankedRecallOptions,
+        as_of: Timestamp,
+    ) -> Result<PreparedRerank, Error> {
+        validate_prepared_rerank_options(&options)?;
+        validate_prepared_rerank_timestamp(as_of)?;
+        if options
+            .scope
+            .as_ref()
+            .is_some_and(|configured| configured != &scope)
+        {
+            return Err(Error::InvalidInput(
+                "prepared rerank scope must match the scope in reranked recall options".to_owned(),
+            ));
+        }
+
+        let evidence = self.rerank_documents_for_plan_at_internal(
+            plan,
+            result,
+            options.candidate_limit,
+            &scope,
+            as_of,
+        )?;
+        let validity_policy = RerankedValidityPolicy::for_plan(plan);
+        let mut eligible_evidence = Vec::with_capacity(evidence.len());
+        let mut bindings = HashMap::with_capacity(evidence.len());
+        for document in evidence {
+            let Some(binding) = bind_evidence_document(self.engine.graph().storage(), &document)?
+            else {
+                continue;
+            };
+            if !bound_evidence_document_is_eligible_with_policy(
+                self.engine.graph().storage(),
+                &binding,
+                &scope,
+                as_of,
+                validity_policy,
+            )? {
+                continue;
             }
-            if !seen.insert(score.index) {
+            if bindings
+                .insert(binding.representative.node_id, binding)
+                .is_some()
+            {
                 return Err(Error::InvalidInput(format!(
-                    "reranker returned duplicate document index {}",
-                    score.index
+                    "rerank documents contain duplicate representative node {:?}",
+                    document.node_id
                 )));
             }
-            let (document, _) = bound_evidence.get(score.index).ok_or_else(|| {
-                Error::InvalidInput(format!(
-                    "reranker returned out-of-bounds document index {} for {} documents",
-                    score.index,
-                    bound_evidence.len()
-                ))
-            })?;
-            ranking.push(RerankedCandidate {
-                node_id: document.node_id,
-                score: score.score,
+            eligible_evidence.push(document);
+        }
+
+        Ok(PreparedRerank {
+            authority: self.prepared_rerank_authority.clone(),
+            plan: plan.clone(),
+            result: result.clone(),
+            evidence: eligible_evidence,
+            bindings,
+            scope,
+            as_of,
+            options,
+        })
+    }
+
+    /// Complete an externally scored rerank through production revalidation.
+    ///
+    /// `scores` address the zero-based document order returned by
+    /// [`PreparedRerank::rerank_texts`]. Indices must be unique and in bounds,
+    /// and scores must be finite. A provider may score a non-empty subset, but
+    /// it may not return an empty set for a non-empty receipt.
+    ///
+    /// Completion consumes the receipt, revalidates every bound representative,
+    /// delivered source, and scoring-only raw contributor, and exactly
+    /// recompiles scoring context before applying adaptive delivery and deep
+    /// selection. It then rebuilds the package and commit trace from retained
+    /// evidence only. Sources deleted, retracted, replaced, reused, regrouped,
+    /// or attached to changed scoring cues after preparation are therefore not
+    /// delivered.
+    pub fn complete_prepared_rerank(
+        &self,
+        prepared: PreparedRerank,
+        scores: &[RerankScore],
+    ) -> Result<RerankedRecall, Error> {
+        let PreparedRerank {
+            authority,
+            plan,
+            result,
+            evidence,
+            bindings,
+            scope,
+            as_of,
+            options,
+        } = prepared;
+        if !Arc::ptr_eq(&self.prepared_rerank_authority, &authority) {
+            return Err(Error::InvalidInput(
+                "prepared rerank receipt belongs to a different Memory instance".to_owned(),
+            ));
+        }
+
+        let ranking = compile_prepared_rerank_scores(&evidence, scores)?;
+        if evidence.is_empty() {
+            return Ok(RerankedRecall {
+                plan,
+                ranking,
+                rerank_documents: evidence,
+                recall: empty_reranked_recall(&result),
+                cognitive_scores: Vec::new(),
+                validation_context: GroundedDraftValidationContext::membership_only(),
+                validation_binding: None,
             });
         }
-        ranking.sort_by(|left, right| right.score.total_cmp(&left.score));
+
+        // Recompile the complete scoring surface from current storage. Node
+        // incarnation checks below protect raw allocations; exact document
+        // equality additionally protects scoring-only dialogue context,
+        // reviewed atomic cues, and source-topology-derived grouping. A score
+        // never transfers to a document whose bytes or source allocation
+        // changed while an external provider was running.
+        let exact_document_ids = self.exact_current_prepared_document_ids(
+            &plan,
+            &result,
+            &evidence,
+            options.candidate_limit,
+            &scope,
+            as_of,
+        )?;
+        let ranking: Vec<_> = ranking
+            .into_iter()
+            .filter(|candidate| exact_document_ids.contains(&candidate.node_id))
+            .collect();
+
         let deep = if options.adaptive_delivery {
-            let plan = RecallPlan::infer(query);
             DeepRecallOptions {
                 limit: readout::adaptive_delivery_limit(&plan, options.deep.limit),
                 selection: options.deep.selection,
@@ -3821,21 +5434,16 @@ impl<S: StorageAdapter + Clone> Memory<S> {
         } else {
             options.deep
         };
-        let bindings: HashMap<_, _> = bound_evidence
-            .into_iter()
-            .map(|(_, binding)| (binding.representative.node_id, binding))
-            .collect();
-        let (recall, hydrated_readout) = self.repackage_bound_reranked_deep_at(
-            query,
-            result,
-            &ranking,
-            &bindings,
-            deep,
-            &query_scope,
-            as_of,
+        let BoundRerankRepackage {
+            recall,
+            hydrated_readout,
+            eligible_ranking,
+            event_boundary_group,
+        } = self.repackage_bound_reranked_deep_for_plan_at(
+            &plan, &result, &ranking, &bindings, deep, &scope, as_of,
         )?;
         let final_ids: HashSet<_> = recall.hits.iter().map(|hit| hit.node_id).collect();
-        let cognitive_scores = hydrated_readout
+        let cognitive_scores: Vec<CognitiveRecallScore> = hydrated_readout
             .iter()
             .filter(|candidate| final_ids.contains(&candidate.node_id))
             .map(|candidate| CognitiveRecallScore {
@@ -3844,25 +5452,97 @@ impl<S: StorageAdapter + Clone> Memory<S> {
                 cosine: candidate.embedding_cosine,
             })
             .collect();
+        let (validation_context, validation_readout_binding) = if event_boundary_group.is_some() {
+            let readout = self.readout_for_plan(&plan, &recall)?;
+            let context = readout::event_boundary_validation_context(
+                &plan,
+                event_boundary_group.as_ref(),
+                &readout.source_node_ids,
+            );
+            let binding = context
+                .event_boundary_evidence()
+                .map(|_| RecallReadoutValidationBinding::capture(&readout));
+            (context, binding)
+        } else {
+            (GroundedDraftValidationContext::membership_only(), None)
+        };
+        let validation_binding =
+            validation_readout_binding.map(|readout| RerankedRecallValidationBinding {
+                plan: plan.clone(),
+                ranking: eligible_ranking.clone(),
+                rerank_documents: evidence.clone(),
+                recall: recall.clone(),
+                cognitive_scores: cognitive_scores.clone(),
+                readout,
+            });
         Ok(RerankedRecall {
-            ranking,
+            plan,
+            ranking: eligible_ranking,
+            rerank_documents: evidence,
             recall,
             cognitive_scores,
+            validation_context,
+            validation_binding,
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn repackage_bound_reranked_deep_at(
+    fn exact_current_prepared_document_ids(
         &self,
-        query: &str,
+        plan: &RecallPlan,
+        result: &SearchResult,
+        prepared_evidence: &[EvidenceDocument],
+        candidate_limit: usize,
+        scope: &ScopePath,
+        as_of: Timestamp,
+    ) -> Result<HashSet<NodeId>, Error> {
+        let current_evidence = match self.rerank_documents_for_plan_at_internal(
+            plan,
+            result,
+            candidate_limit,
+            scope,
+            as_of,
+        ) {
+            Ok(evidence) => evidence,
+            Err(Error::NodeNotFound(_) | Error::EdgeNotFound(_)) => return Ok(HashSet::new()),
+            Err(error) => return Err(error),
+        };
+        let mut current_by_representative = HashMap::with_capacity(current_evidence.len());
+        for document in current_evidence {
+            let node_id = document.node_id;
+            if current_by_representative
+                .insert(node_id, document)
+                .is_some()
+            {
+                return Err(Error::InvalidInput(format!(
+                    "rerank documents contain duplicate representative node {node_id:?}"
+                )));
+            }
+        }
+
+        Ok(prepared_evidence
+            .iter()
+            .filter(|document| {
+                current_by_representative
+                    .get(&document.node_id)
+                    .is_some_and(|current| current == *document)
+            })
+            .map(|document| document.node_id)
+            .collect())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn repackage_bound_reranked_deep_for_plan_at(
+        &self,
+        plan: &RecallPlan,
         result: &SearchResult,
         ranking: &[RerankedCandidate],
         bindings: &HashMap<NodeId, BoundEvidenceDocument>,
         options: DeepRecallOptions,
         query_scope: &ScopePath,
         as_of: Timestamp,
-    ) -> Result<(Recall, Vec<crate::query::ReadoutCandidate>), Error> {
+    ) -> Result<BoundRerankRepackage, Error> {
         let storage = self.engine.graph().storage();
+        let validity_policy = RerankedValidityPolicy::for_plan(plan);
         let mut seen_source_sets = HashSet::new();
         let mut eligible_ranking = Vec::with_capacity(ranking.len());
         let mut eligible_sources = HashMap::new();
@@ -3875,7 +5555,13 @@ impl<S: StorageAdapter + Clone> Memory<S> {
             let Some(binding) = bindings.get(&candidate.node_id) else {
                 continue;
             };
-            if !bound_evidence_document_is_eligible(storage, binding, query_scope, as_of)? {
+            if !bound_evidence_document_is_eligible_with_policy(
+                storage,
+                binding,
+                query_scope,
+                as_of,
+                validity_policy,
+            )? {
                 continue;
             }
             let source_ids: Vec<_> = binding
@@ -3890,10 +5576,14 @@ impl<S: StorageAdapter + Clone> Memory<S> {
             eligible_ranking.push(*candidate);
         }
         if eligible_ranking.is_empty() {
-            return Ok((empty_reranked_recall(result), Vec::new()));
+            return Ok(BoundRerankRepackage {
+                recall: empty_reranked_recall(result),
+                hydrated_readout: Vec::new(),
+                eligible_ranking: Vec::new(),
+                event_boundary_group: None,
+            });
         }
 
-        let plan = RecallPlan::infer(query);
         let routed_atomic_sources =
             readout::parse_atomic_source_markers(&result.trace.strategies_used);
         let atomic_relation_paths = readout::validated_atomic_relation_paths(
@@ -3902,15 +5592,35 @@ impl<S: StorageAdapter + Clone> Memory<S> {
             as_of,
             query_scope,
         )?;
-        let selected_documents = readout::compile_ranking_with_atomic_chains(
+        let premise_bundle = readout::validated_premise_bundle_trace(
             storage,
-            &plan,
-            &eligible_ranking,
-            options.selection,
-            options.limit,
-            &routed_atomic_sources,
-            &atomic_relation_paths,
+            plan,
+            &result.trace.strategies_used,
+            as_of,
+            query_scope,
         )?;
+        let event_boundary_group = readout::validated_event_boundary_source_group(
+            storage,
+            plan,
+            &result.trace.strategies_used,
+            &result.trace.readout,
+            as_of,
+            query_scope,
+        )?;
+        let selected_documents =
+            readout::compile_ranking_with_atomic_chains_and_required_source_groups_at(
+                storage,
+                plan,
+                &eligible_ranking,
+                options.selection,
+                options.limit,
+                &routed_atomic_sources,
+                &atomic_relation_paths,
+                premise_bundle.as_ref(),
+                event_boundary_group.as_ref(),
+                as_of,
+                query_scope,
+            )?;
 
         let original_readout: HashMap<_, _> = result
             .trace
@@ -3931,16 +5641,14 @@ impl<S: StorageAdapter + Clone> Memory<S> {
                     document.node_id
                 ))
             })?;
-            // A Semantic representative is itself the bounded evidence
-            // document the reranker selected. Its exact raw lines are rendered
-            // with per-line source bindings, so replacing it with each source
-            // would spend several delivery slots on one document and discard
-            // the neighboring context that made the window useful. An
-            // Episodic representative, by contrast, is a raw-document lane
-            // (including atomic and question/answer routes), so hydrate every
-            // validated raw member of that document within the normal package
-            // limit.
-            let delivered_ids = if binding.representative.node_type == KnowledgeType::Episodic {
+            // A Semantic representative can be emitted only when its complete
+            // content was reconstructed from the bound raw scoring sources.
+            // Otherwise hydrate the validated authoritative sources just like
+            // an Episodic/raw document; this prevents an unbound line retained
+            // in a derived window from entering the final hit or package.
+            let delivered_ids = if binding.representative.node_type == KnowledgeType::Episodic
+                || !binding.representative_text_is_bound
+            {
                 eligible_sources
                     .get(&document.node_id)
                     .cloned()
@@ -3966,22 +5674,49 @@ impl<S: StorageAdapter + Clone> Memory<S> {
             }
         }
         if hydrated_ranking.is_empty() {
-            return Ok((empty_reranked_recall(result), Vec::new()));
+            return Ok(BoundRerankRepackage {
+                recall: empty_reranked_recall(result),
+                hydrated_readout: Vec::new(),
+                eligible_ranking,
+                event_boundary_group,
+            });
         }
 
-        let hydrated_ranking = readout::compile_atomic_chain_source_ranking(
+        let hydrated_ranking =
+            readout::compile_atomic_chain_source_ranking_with_required_source_groups(
+                storage,
+                plan,
+                &hydrated_ranking,
+                options.limit,
+                &atomic_relation_paths,
+                premise_bundle.as_ref(),
+                event_boundary_group.as_ref(),
+            )?;
+        let hydrated_ranking = readout::compile_strict_factual_action_source_ranking_at(
             storage,
-            &plan,
+            plan,
             &hydrated_ranking,
             options.limit,
-            &atomic_relation_paths,
+            &routed_atomic_sources,
+            as_of,
+            query_scope,
         )?;
 
         let mut hydrated_result = result.clone();
         hydrated_result.trace.readout = hydrated_readout.clone();
-        let recall =
-            self.repackage_reranked_at(&hydrated_result, &hydrated_ranking, options.limit, as_of)?;
-        Ok((recall, hydrated_readout))
+        let recall = self.repackage_reranked_at_with_policy(
+            &hydrated_result,
+            &hydrated_ranking,
+            options.limit,
+            as_of,
+            validity_policy,
+        )?;
+        Ok(BoundRerankRepackage {
+            recall,
+            hydrated_readout,
+            eligible_ranking,
+            event_boundary_group,
+        })
     }
 
     fn search_scoped_at(
@@ -4098,18 +5833,45 @@ impl<S: StorageAdapter + Clone> Memory<S> {
         diagnostics: &SearchDiagnostics,
         scope: ScopePath,
     ) -> Result<SearchResult, Error> {
+        let plan = RecallPlan::infer(query);
+        self.search_result_scoped_at_with_diagnostics_for_plan(
+            &plan,
+            limit,
+            now,
+            tuning,
+            diagnostics,
+            scope,
+        )
+    }
+
+    fn search_result_scoped_at_with_diagnostics_for_plan(
+        &mut self,
+        plan: &RecallPlan,
+        limit: usize,
+        now: Timestamp,
+        tuning: &SearchTuning,
+        diagnostics: &SearchDiagnostics,
+        scope: ScopePath,
+    ) -> Result<SearchResult, Error> {
         self.flush_all()?;
 
-        let plan = RecallPlan::infer(query);
-        let (query_variants, engine_variant_indices, atomic_variant_indices) =
-            if readout::uses_dense_query_expansion(&plan) {
+        let query = plan.query.as_str();
+        let (query_variants, engine_variant_indices, atomic_variant_indices, premise_slots) =
+            if readout::uses_dense_query_expansion(plan) {
                 let relation_first = matches!(
                     plan.answer_shape,
                     readout::AnswerShape::Relationship | readout::AnswerShape::Inference
                 );
-                crate::api::planned_complex_dense_query_variants(query, relation_first)
+                let dense_plan =
+                    crate::api::planned_complex_dense_query_plan(query, relation_first);
+                (
+                    dense_plan.variants,
+                    dense_plan.engine_variant_indices,
+                    dense_plan.atomic_variant_indices,
+                    dense_plan.premise_slots,
+                )
             } else {
-                (vec![query.trim().to_owned()], vec![0], vec![0])
+                (vec![query.trim().to_owned()], vec![0], vec![0], Vec::new())
             };
         let query_embeddings = if query_variants.len() > 1 {
             let borrowed: Vec<_> = query_variants.iter().map(String::as_str).collect();
@@ -4131,6 +5893,30 @@ impl<S: StorageAdapter + Clone> Memory<S> {
         let embedding = query_embeddings.first().cloned().ok_or_else(|| {
             Error::InvalidInput("embedding provider returned no primary query vector".to_owned())
         })?;
+        let mut premise_query_slots = Vec::with_capacity(premise_slots.len());
+        for premise_slot in &premise_slots {
+            let surface = query_variants
+                .get(premise_slot.variant_index)
+                .ok_or_else(|| {
+                    Error::InvalidInput(format!(
+                        "premise dense variant index {} is out of bounds",
+                        premise_slot.variant_index
+                    ))
+                })?;
+            let premise_embedding = query_embeddings
+                .get(premise_slot.variant_index)
+                .ok_or_else(|| {
+                    Error::InvalidInput(format!(
+                        "premise dense embedding index {} is out of bounds",
+                        premise_slot.variant_index
+                    ))
+                })?;
+            premise_query_slots.push(readout::PremiseBundleQuerySlot {
+                slot_id: premise_slot.id,
+                surface,
+                embedding: premise_embedding,
+            });
+        }
         let mut auxiliary_query_embeddings = Vec::new();
         for &index in engine_variant_indices.iter().filter(|&&index| index != 0) {
             let selected = query_embeddings.get(index).ok_or_else(|| {
@@ -4157,6 +5943,7 @@ impl<S: StorageAdapter + Clone> Memory<S> {
             &auxiliary_query_embeddings,
         )?;
         let mut atomic_query_embeddings = Vec::new();
+        let mut auxiliary_atomic_query_embeddings = Vec::new();
         for &index in &atomic_variant_indices {
             let selected = query_embeddings.get(index).ok_or_else(|| {
                 Error::InvalidInput(format!(
@@ -4164,20 +5951,54 @@ impl<S: StorageAdapter + Clone> Memory<S> {
                 ))
             })?;
             atomic_query_embeddings.push(selected.as_slice());
+            if index != 0 {
+                auxiliary_atomic_query_embeddings.push(selected.as_slice());
+            }
         }
         let primary_atomic_embedding = [embedding.as_slice()];
         let mut routed = readout::route_atomic_fact_sources(
             self.engine.graph().storage(),
-            &plan,
+            plan,
             &primary_atomic_embedding,
             now,
             &scope,
         )?;
-        if atomic_query_embeddings.len() > 1 {
+        let event_boundary_source_group = readout::canonical_event_boundary_source_group(
+            self.engine.graph().storage(),
+            plan,
+            now,
+            &scope,
+        )?;
+        let routed_premise_bundle = readout::route_premise_bundle(
+            self.engine.graph().storage(),
+            plan,
+            &premise_query_slots,
+            now,
+            &scope,
+        )?;
+        let action_uses_predicate_affinity = readout::is_factual_action_request(plan)
+            && !auxiliary_atomic_query_embeddings.is_empty();
+        if action_uses_predicate_affinity {
+            for source in &mut routed {
+                source.kind_priority = 0;
+                source.fact_priorities.clear();
+            }
+        }
+        let auxiliary_route_embeddings: &[&[f64]] = if action_uses_predicate_affinity {
+            &auxiliary_atomic_query_embeddings
+        } else {
+            &atomic_query_embeddings
+        };
+        let has_auxiliary_atomic_route = if action_uses_predicate_affinity {
+            !auxiliary_route_embeddings.is_empty()
+        } else {
+            atomic_query_embeddings.len() > 1
+        };
+        if has_auxiliary_atomic_route {
             let auxiliary_routed = readout::route_atomic_fact_sources(
                 self.engine.graph().storage(),
-                &plan,
-                &atomic_query_embeddings,
+                plan,
+                auxiliary_route_embeddings,
                 now,
                 &scope,
             )?;
@@ -4195,6 +6016,9 @@ impl<S: StorageAdapter + Clone> Memory<S> {
                     baseline_source.kind_priority = baseline_source
                         .kind_priority
                         .max(auxiliary_source.kind_priority);
+                    for (fact_id, priority) in auxiliary_source.fact_priorities {
+                        baseline_source.record_fact_priority(fact_id, priority);
+                    }
                     for fact_id in auxiliary_source.fact_ids {
                         if !baseline_source.fact_ids.contains(&fact_id) {
                             baseline_source.fact_ids.push(fact_id);
@@ -4209,7 +6033,7 @@ impl<S: StorageAdapter + Clone> Memory<S> {
         }
         let chain_expansion = readout::expand_atomic_fact_relation_sources(
             self.engine.graph().storage(),
-            &plan,
+            plan,
             &routed,
             &atomic_query_embeddings,
             now,
@@ -4219,23 +6043,68 @@ impl<S: StorageAdapter + Clone> Memory<S> {
         let chain_paths = chain_expansion.paths;
         let chain_diagnostics = chain_expansion.diagnostics;
         routed.extend(chain_expansion.sources);
-        let raw_routed = readout::route_subject_raw_sources(
+        let covered_atomic_source_ids: HashSet<_> = if matches!(
+            plan.answer_shape,
+            AnswerShape::Count | AnswerShape::Frequency
+        ) {
+            routed
+                .iter()
+                .map(|source| source.candidate.node_id)
+                .collect()
+        } else {
+            HashSet::new()
+        };
+        let strict_action_source_ids = readout::strict_factual_action_source_ids(
             self.engine.graph().storage(),
-            &plan,
-            &atomic_query_embeddings,
+            plan,
             now,
             &scope,
         )?;
-        if routed.is_empty() && raw_routed.is_empty() {
+        let raw_routed = readout::route_subject_raw_sources(
+            self.engine.graph().storage(),
+            plan,
+            &atomic_query_embeddings,
+            now,
+            &scope,
+            &covered_atomic_source_ids,
+            &strict_action_source_ids,
+        )?;
+        let reply_routed = readout::route_same_session_reply_sources(
+            self.engine.graph().storage(),
+            plan,
+            &result.trace.readout,
+            &atomic_query_embeddings,
+            now,
+            &scope,
+            &strict_action_source_ids,
+        )?;
+        if routed.is_empty()
+            && raw_routed.is_empty()
+            && reply_routed.is_empty()
+            && routed_premise_bundle.is_none()
+        {
             return Ok(result);
         }
+        let (premise_bundle_trace, premise_bundle_sources) = routed_premise_bundle.map_or_else(
+            || (None, Vec::new()),
+            |bundle| (Some(bundle.trace), bundle.sources),
+        );
+        let premise_bundle_source_ids: HashSet<_> = premise_bundle_trace
+            .iter()
+            .flat_map(|trace| trace.members.iter())
+            .map(|member| member.source_node_id)
+            .collect();
 
         // Preserve the authoritative cognitive head exactly. Atomic facts only earn
         // source slots in the deeper lane; direct and time-constrained complex
         // shapes never reach this branch. Existing raw candidates keep their
         // native score signals when promoted, while a source absent from the trace
         // receives the fact-lane synthetic diagnostic score.
-        let head_limit = result.trace.readout.len().min(30);
+        let head_limit = result
+            .trace
+            .readout
+            .len()
+            .min(readout::DEFAULT_RERANK_PROTECTED_HEAD_LIMIT);
         let head_ids: HashSet<_> = result
             .trace
             .readout
@@ -4250,10 +6119,10 @@ impl<S: StorageAdapter + Clone> Memory<S> {
                 candidate.node_id,
             )?);
         }
-        // Keep four tail slots for exact-subject raw premises when that route
-        // is available. The first thirty native rows remain immutable and the
-        // complete candidate surface remains fixed at fifty.
-        let raw_promotion_limit = raw_routed.len().min(4);
+        // Exact-subject raw premises retain four tail slots. The first thirty
+        // native rows remain immutable and the complete candidate surface
+        // remains fixed at fifty.
+        let raw_promotion_limit = readout::subject_raw_promotion_limit(plan, raw_routed.len());
         let chain_atomic_promotion_limit = routed
             .iter()
             .filter(|source| matches!(source.origin, readout::AtomicRouteOrigin::Chain { .. }))
@@ -4289,20 +6158,88 @@ impl<S: StorageAdapter + Clone> Memory<S> {
         let mut chain_promoted = 0usize;
         let mut deferred = Vec::new();
         let mut deferred_ids = HashSet::new();
+
+        // A complete premise bundle may occupy at most two existing auxiliary
+        // recovery slots. If more than two of its raw sources are absent from
+        // the fixed candidate surface, promote none and leave the all-or-none
+        // preselector to reject the unrepresentable bundle.
+        let mut candidate_sources = HashSet::new();
+        for candidate in result
+            .trace
+            .readout
+            .iter()
+            .take(readout::DEFAULT_RERANK_CANDIDATE_LIMIT)
+        {
+            candidate_sources.extend(readout::canonical_sources(
+                self.engine.graph().storage(),
+                candidate.node_id,
+            )?);
+        }
+        let missing_bundle_source_count = premise_bundle_sources
+            .iter()
+            .filter(|candidate| !candidate_sources.contains(&candidate.node_id))
+            .count();
+        let bundle_promotion_limit = auxiliary_atomic_promotion_limit.min(2);
+        let promote_complete_missing_bundle = missing_bundle_source_count > 0
+            && missing_bundle_source_count <= bundle_promotion_limit;
+        for routed_candidate in premise_bundle_sources {
+            let source_id = routed_candidate.node_id;
+            if head_sources.contains(&source_id) || candidate_sources.contains(&source_id) {
+                continue;
+            }
+            if promote_complete_missing_bundle {
+                let candidate = result
+                    .trace
+                    .readout
+                    .iter()
+                    .position(|existing| existing.node_id == source_id)
+                    .map(|position| result.trace.readout.remove(position))
+                    .unwrap_or(routed_candidate);
+                promoted_sources.insert(source_id);
+                candidate_sources.insert(source_id);
+                promoted.push(candidate);
+                auxiliary_promoted += 1;
+            } else if !result
+                .trace
+                .readout
+                .iter()
+                .any(|existing| existing.node_id == source_id)
+                && deferred_ids.insert(source_id)
+            {
+                deferred.push(routed_candidate);
+            }
+        }
+
+        let mut reply_markers = Vec::new();
+        for routed_candidate in reply_routed {
+            if premise_bundle_source_ids.contains(&routed_candidate.node_id)
+                || head_ids.contains(&routed_candidate.node_id)
+                || promoted_sources.contains(&routed_candidate.node_id)
+            {
+                continue;
+            }
+            let candidate = result
+                .trace
+                .readout
+                .iter()
+                .position(|existing| existing.node_id == routed_candidate.node_id)
+                .map(|position| result.trace.readout.remove(position))
+                .unwrap_or(routed_candidate);
+            promoted_sources.insert(candidate.node_id);
+            reply_markers.push(candidate.node_id);
+            promoted.push(candidate);
+        }
         for routed_source in routed {
+            let fact_markers = routed_source.fact_markers();
             let route_origin = routed_source.origin;
             let routed_candidate = routed_source.candidate;
-            for fact_id in routed_source.fact_ids {
-                let marker = readout::AtomicSourceMarker {
-                    source_node_id: routed_candidate.node_id,
-                    kind_priority: routed_source.kind_priority,
-                    fact_id: Some(fact_id),
-                };
+            for marker in fact_markers {
                 if !routed_markers.contains(&marker) {
                     routed_markers.push(marker);
                 }
             }
-            if head_ids.contains(&routed_candidate.node_id)
+            if premise_bundle_source_ids.contains(&routed_candidate.node_id)
+                || head_ids.contains(&routed_candidate.node_id)
                 || head_sources.contains(&routed_candidate.node_id)
                 || promoted_sources.contains(&routed_candidate.node_id)
             {
@@ -4398,29 +6335,43 @@ impl<S: StorageAdapter + Clone> Memory<S> {
         }
         routed_markers.retain(|marker| represented_sources.contains(&marker.source_node_id));
         raw_markers.retain(|node_id| represented_sources.contains(node_id));
+        reply_markers.retain(|node_id| represented_sources.contains(node_id));
+        if let Some(trace) = premise_bundle_trace.as_ref().filter(|trace| {
+            trace
+                .members
+                .iter()
+                .all(|member| represented_sources.contains(&member.source_node_id))
+        }) {
+            result
+                .trace
+                .strategies_used
+                .push("grounded_premise_bundle_routing".to_owned());
+            if let Some(encoded) = readout::encode_premise_bundle_trace(trace) {
+                result.trace.strategies_used.push(encoded);
+            }
+        }
+        if let Some(group) = event_boundary_source_group.as_ref()
+            && let Some(encoded) = readout::encode_represented_event_boundary_source_group(
+                self.engine.graph().storage(),
+                group,
+                &result.trace.readout,
+                readout::DEFAULT_RERANK_CANDIDATE_LIMIT,
+            )?
+        {
+            result
+                .trace
+                .strategies_used
+                .push("event_boundary_source_group_routing".to_owned());
+            result.trace.strategies_used.push(encoded);
+        }
         if !routed_markers.is_empty() {
             result
                 .trace
                 .strategies_used
                 .push("atomic_fact_routing".to_owned());
         }
-        if !routed_markers.is_empty() {
-            let routed_ids = routed_markers
-                .iter()
-                .filter_map(|marker| {
-                    marker.fact_id.map(|fact_id| {
-                        format!(
-                            "{}@{}@{}",
-                            marker.source_node_id.0, marker.kind_priority, fact_id.0
-                        )
-                    })
-                })
-                .collect::<Vec<_>>()
-                .join(",");
-            result
-                .trace
-                .strategies_used
-                .push(format!("atomic_fact_sources:{routed_ids}"));
+        if let Some(strategy) = readout::encode_atomic_source_markers(&routed_markers) {
+            result.trace.strategies_used.push(strategy);
         }
         if !raw_markers.is_empty() {
             result
@@ -4436,6 +6387,12 @@ impl<S: StorageAdapter + Clone> Memory<S> {
                 .trace
                 .strategies_used
                 .push(format!("subject_raw_sources:{routed_ids}"));
+        }
+        if !reply_markers.is_empty() {
+            result
+                .trace
+                .strategies_used
+                .push("same_session_reply_routing".to_owned());
         }
         if chain_diagnostics.visited_relations > 0 {
             result.trace.strategies_used.push(format!(
@@ -4464,6 +6421,12 @@ impl<S: StorageAdapter + Clone> Memory<S> {
     /// an LLM or reranker. The returned package's commit trace is restricted to the
     /// fragments actually exposed after reranking, so [`Memory::used`] never
     /// reinforces discarded baseline results.
+    ///
+    /// This is a diagnostic, unbound score surface: node scores alone cannot
+    /// prove which raw-source incarnations an external provider inspected.
+    /// Production external rerankers should use
+    /// [`prepare_rerank_for_plan_at`](Memory::prepare_rerank_for_plan_at) and
+    /// [`complete_prepared_rerank`](Memory::complete_prepared_rerank).
     ///
     /// Node validity is evaluated at [`Timestamp::now`]. Consumers replaying a
     /// historical or deterministic query should call
@@ -4512,23 +6475,49 @@ impl<S: StorageAdapter + Clone> Memory<S> {
         )
     }
 
-    /// Compile reranker documents using the deterministic [`RecallPlan`].
+    /// Compile reranker documents after inferring a deterministic [`RecallPlan`].
     ///
-    /// Enumeration and relational queries use canonical raw-evidence
-    /// documents to protect distinct facts from overlapping graph windows.
-    /// Inference documents retain their highest-ranked Semantic representative
-    /// while exposing canonical raw evidence in [`EvidenceDocument::text`], so
-    /// later rendering can recover the evidence window. A reviewed atomic fact
-    /// with valid byte-exact grounding may add a bounded retrieval-only cue to
-    /// [`EvidenceDocument::rerank_text`] for complex enumeration, relationship,
-    /// and inference queries;
-    /// final packaging still emits only raw source evidence. Direct and temporal queries preserve the ordinary
-    /// node-document surface. This is the recommended minimal-consumer entry
-    /// point: a consumer scores `rerank_text()` and passes the node scores back to
-    /// [`repackage_reranked_deep`](Memory::repackage_reranked_deep).
+    /// Count, frequency, and non-temporal relationship queries use canonical
+    /// raw-evidence documents to protect distinct facts from overlapping graph
+    /// windows. Ordinary collection and inference documents can retain a
+    /// highest-ranked Semantic scoring window while exposing canonical raw
+    /// evidence in [`EvidenceDocument::text`]. Explicitly exhaustive
+    /// collections instead retain distinct canonical raw documents within the
+    /// bounded candidate surface. Direct and temporal queries preserve the
+    /// ordinary node-document surface.
+    ///
+    /// A consumer with structured intent should call
+    /// [`rerank_documents_for_plan`](Memory::rerank_documents_for_plan), score
+    /// each [`EvidenceDocument::rerank_text`], and pass that same plan and the
+    /// resulting node scores to
+    /// [`repackage_reranked_deep_for_plan`](Memory::repackage_reranked_deep_for_plan).
+    /// This pair is retained as a diagnostic, unbound surface. Production
+    /// external rerankers should use
+    /// [`prepare_rerank_for_plan_at`](Memory::prepare_rerank_for_plan_at), which
+    /// binds source incarnations before exposing these texts.
     pub fn rerank_documents(
         &self,
         query: &str,
+        result: &SearchResult,
+        candidate_limit: usize,
+    ) -> Result<Vec<EvidenceDocument>, Error> {
+        let plan = RecallPlan::infer(query);
+        self.rerank_documents_for_plan(&plan, result, candidate_limit)
+    }
+
+    /// Compile reranker documents using an existing deterministic recall plan.
+    ///
+    /// The supplied plan is authoritative for answer shape, temporal state,
+    /// and bounded [`RecallCoverage`]. No intent is inferred again. Reviewed
+    /// atomic routing cues may be added only to the scoring surface; canonical
+    /// raw source nodes and [`EvidenceDocument::text`] remain authoritative.
+    ///
+    /// This method is diagnostic and unbound across an external provider call.
+    /// Use [`prepare_rerank_for_plan_at`](Memory::prepare_rerank_for_plan_at)
+    /// for production external scoring.
+    pub fn rerank_documents_for_plan(
+        &self,
+        plan: &RecallPlan,
         result: &SearchResult,
         candidate_limit: usize,
     ) -> Result<Vec<EvidenceDocument>, Error> {
@@ -4537,15 +6526,50 @@ impl<S: StorageAdapter + Clone> Memory<S> {
                 "rerank document candidate limit must be greater than zero".to_owned(),
             ));
         }
-        let plan = RecallPlan::infer(query);
+        self.rerank_documents_for_plan_at_internal(
+            plan,
+            result,
+            candidate_limit,
+            &ScopePath::universal(),
+            Timestamp::now(),
+        )
+    }
+
+    fn rerank_documents_for_plan_at_internal(
+        &self,
+        plan: &RecallPlan,
+        result: &SearchResult,
+        candidate_limit: usize,
+        scope: &ScopePath,
+        as_of: Timestamp,
+    ) -> Result<Vec<EvidenceDocument>, Error> {
         let routed_atomic_markers =
             readout::parse_atomic_source_markers(&result.trace.strategies_used);
-        readout::compile_rerank_documents(
+        let premise_bundle = readout::validated_premise_bundle_trace(
             self.engine.graph().storage(),
-            &plan,
+            plan,
+            &result.trace.strategies_used,
+            as_of,
+            scope,
+        )?;
+        let event_boundary_group = readout::validated_event_boundary_source_group(
+            self.engine.graph().storage(),
+            plan,
+            &result.trace.strategies_used,
+            &result.trace.readout,
+            as_of,
+            scope,
+        )?;
+        readout::compile_rerank_documents_with_required_source_groups_at(
+            self.engine.graph().storage(),
+            plan,
             &result.trace.readout,
             candidate_limit,
             &routed_atomic_markers,
+            premise_bundle.as_ref(),
+            event_boundary_group.as_ref(),
+            as_of,
+            scope,
         )
     }
 
@@ -4554,6 +6578,9 @@ impl<S: StorageAdapter + Clone> Memory<S> {
     /// The consumer supplies only scores. Query intent detection, canonical raw
     /// source grouping, evidence selection, validity, packaging, and commit
     /// trace reconstruction remain owned by [`Memory`].
+    ///
+    /// This scores-only overload is diagnostic and unbound. Production external
+    /// scoring should complete a [`PreparedRerank`] receipt instead.
     pub fn repackage_reranked_deep(
         &self,
         query: &str,
@@ -4564,18 +6591,35 @@ impl<S: StorageAdapter + Clone> Memory<S> {
         self.repackage_reranked_deep_at(query, result, ranking, options, Timestamp::now())
     }
 
+    /// Compile consumer scores through a precomputed plan at wall-clock time.
+    ///
+    /// Pass the same plan used by
+    /// [`rerank_documents_for_plan`](Memory::rerank_documents_for_plan) so
+    /// caller-supplied answer shape, temporal state, and bounded coverage are
+    /// retained through source-aware selection and packaging.
+    /// This scores-only overload is diagnostic and unbound; prefer
+    /// [`Memory::complete_prepared_rerank`] for external production reranking.
+    pub fn repackage_reranked_deep_for_plan(
+        &self,
+        plan: &RecallPlan,
+        result: &SearchResult,
+        ranking: &[RerankedCandidate],
+        options: DeepRecallOptions,
+    ) -> Result<Recall, Error> {
+        self.repackage_reranked_deep_for_plan_at(plan, result, ranking, options, Timestamp::now())
+    }
+
     /// Compile consumer scores through deterministic deep readout at `as_of`.
     ///
-    /// [`EvidenceSelection::Auto`] freezes the reranker head for direct queries
-    /// and uses canonical-source coverage only in its tail. It applies full
-    /// canonical raw-source coverage for inference and date queries, and
-    /// bounded source-session coverage for explicit collection, relationship,
-    /// and frequency queries. `query` must be the original
-    /// query used to produce `result` because the same deterministic plan also
-    /// controls evidence document compilation and query-aware rendering. The
-    /// compiled ranking is then validated by
+    /// `query` must be the original query used to produce `result`. This method
+    /// infers the same deterministic plan used by the query-based document
+    /// compiler. Structured consumers should instead use
+    /// [`repackage_reranked_deep_for_plan_at`](Memory::repackage_reranked_deep_for_plan_at)
+    /// with the same plan they supplied to document compilation. The compiled
+    /// ranking is validated by
     /// [`repackage_reranked_at`](Memory::repackage_reranked_at), so no source,
     /// validity, tension, budget, or commit invariant is bypassed.
+    /// This scores-only overload is diagnostic and unbound across provider work.
     pub fn repackage_reranked_deep_at(
         &self,
         query: &str,
@@ -4585,6 +6629,40 @@ impl<S: StorageAdapter + Clone> Memory<S> {
         as_of: Timestamp,
     ) -> Result<Recall, Error> {
         let plan = RecallPlan::infer(query);
+        self.repackage_reranked_deep_for_plan_at(&plan, result, ranking, options, as_of)
+    }
+
+    /// Compile consumer scores through a precomputed plan at `as_of`.
+    ///
+    /// [`EvidenceSelection::Auto`] resolves its source-aware policy from the
+    /// complete plan. The plan is consumed as supplied; answer shape, temporal
+    /// state, and bounded coverage are not inferred from query text again. The
+    /// compiled ranking is then validated by
+    /// [`repackage_reranked_at`](Memory::repackage_reranked_at), so no source,
+    /// validity, tension, budget, or commit invariant is bypassed.
+    /// This scores-only overload is diagnostic and unbound across provider work.
+    pub fn repackage_reranked_deep_for_plan_at(
+        &self,
+        plan: &RecallPlan,
+        result: &SearchResult,
+        ranking: &[RerankedCandidate],
+        options: DeepRecallOptions,
+        as_of: Timestamp,
+    ) -> Result<Recall, Error> {
+        if options.limit == 0 || ranking.is_empty() {
+            return self.repackage_reranked_at_with_policy(
+                result,
+                ranking,
+                options.limit,
+                as_of,
+                RerankedValidityPolicy::for_plan(plan),
+            );
+        }
+        // The diagnostic scores-only surface does not require callers to sort
+        // their node-addressed scores. Establish the same documented score and
+        // cognitive-readout tie order used by final packaging before any
+        // required-source group chooses its bounded target members.
+        let ranking = normalized_unbound_reranker_order(result, ranking)?;
         let routed_atomic_sources =
             readout::parse_atomic_source_markers(&result.trace.strategies_used);
         let atomic_relation_paths = readout::validated_atomic_relation_paths(
@@ -4593,16 +6671,41 @@ impl<S: StorageAdapter + Clone> Memory<S> {
             as_of,
             &ScopePath::universal(),
         )?;
-        let compiled = readout::compile_ranking_with_atomic_chains(
+        let premise_bundle = readout::validated_premise_bundle_trace(
             self.engine.graph().storage(),
-            &plan,
-            ranking,
+            plan,
+            &result.trace.strategies_used,
+            as_of,
+            &ScopePath::universal(),
+        )?;
+        let event_boundary_group = readout::validated_event_boundary_source_group(
+            self.engine.graph().storage(),
+            plan,
+            &result.trace.strategies_used,
+            &result.trace.readout,
+            as_of,
+            &ScopePath::universal(),
+        )?;
+        let compiled = readout::compile_ranking_with_atomic_chains_and_required_source_groups_at(
+            self.engine.graph().storage(),
+            plan,
+            &ranking,
             options.selection,
             options.limit,
             &routed_atomic_sources,
             &atomic_relation_paths,
+            premise_bundle.as_ref(),
+            event_boundary_group.as_ref(),
+            as_of,
+            &ScopePath::universal(),
         )?;
-        self.repackage_reranked_at(result, &compiled, options.limit, as_of)
+        self.repackage_reranked_at_with_policy(
+            result,
+            &compiled,
+            options.limit,
+            as_of,
+            RerankedValidityPolicy::for_plan(plan),
+        )
     }
 
     /// Rebuild a commit-safe recall from consumer scores at an explicit time.
@@ -4616,12 +6719,31 @@ impl<S: StorageAdapter + Clone> Memory<S> {
     ///
     /// The ranking validation and read-only guarantees are identical to
     /// [`repackage_reranked`](Memory::repackage_reranked).
+    /// This scores-only overload is diagnostic and unbound across provider work;
+    /// external production rerankers should complete a [`PreparedRerank`].
     pub fn repackage_reranked_at(
         &self,
         result: &SearchResult,
         ranking: &[RerankedCandidate],
         limit: usize,
         as_of: Timestamp,
+    ) -> Result<Recall, Error> {
+        self.repackage_reranked_at_with_policy(
+            result,
+            ranking,
+            limit,
+            as_of,
+            RerankedValidityPolicy::Current,
+        )
+    }
+
+    fn repackage_reranked_at_with_policy(
+        &self,
+        result: &SearchResult,
+        ranking: &[RerankedCandidate],
+        limit: usize,
+        as_of: Timestamp,
+        validity_policy: RerankedValidityPolicy,
     ) -> Result<Recall, Error> {
         if limit == 0 {
             return Err(Error::InvalidInput(
@@ -4647,35 +6769,21 @@ impl<S: StorageAdapter + Clone> Memory<S> {
             .iter()
             .map(|candidate| (candidate.node_id, candidate))
             .collect();
-        let mut seen = HashSet::new();
-        let mut ranked = Vec::with_capacity(ranking.len());
-        for candidate in ranking {
-            if !candidate.score.is_finite() {
-                return Err(Error::NonFinite(format!(
-                    "reranker score for node {:?}",
-                    candidate.node_id
-                )));
-            }
-            if !seen.insert(candidate.node_id) {
-                return Err(Error::InvalidInput(format!(
-                    "duplicate reranked node {:?}",
-                    candidate.node_id
-                )));
-            }
-            let Some(position) = readout_positions.get(&candidate.node_id).copied() else {
-                return Err(Error::InvalidInput(format!(
-                    "reranked node {:?} is absent from the search readout",
-                    candidate.node_id
-                )));
-            };
-            ranked.push((*candidate, position));
-        }
-        ranked.sort_by(|(left, left_position), (right, right_position)| {
-            right
-                .score
-                .total_cmp(&left.score)
-                .then_with(|| left_position.cmp(right_position))
-        });
+        let ranked = normalized_unbound_reranker_order(result, ranking)?
+            .into_iter()
+            .map(|candidate| {
+                let position = readout_positions
+                    .get(&candidate.node_id)
+                    .copied()
+                    .ok_or_else(|| {
+                        Error::InvalidInput(format!(
+                            "reranked node {:?} is absent from the search readout",
+                            candidate.node_id
+                        ))
+                    })?;
+                Ok((candidate, position))
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
 
         let mut scored_nodes = Vec::with_capacity(ranked.len());
         for (candidate, _) in &ranked {
@@ -4731,7 +6839,14 @@ impl<S: StorageAdapter + Clone> Memory<S> {
             );
             apply_packaging_mode(&self.engine, packaging_mode.clone(), &mut package);
             if as_of.0 > 0 {
-                apply_validity_filter(&self.engine, &mut package, as_of);
+                match validity_policy {
+                    RerankedValidityPolicy::Current => {
+                        apply_validity_filter(&self.engine, &mut package, as_of);
+                    }
+                    RerankedValidityPolicy::HistoricalTrend => {
+                        apply_historical_visibility_filter(&self.engine, &mut package, as_of);
+                    }
+                }
             }
             package
         };
@@ -4915,6 +7030,134 @@ impl<S: StorageAdapter + Clone> Memory<S> {
 
 // ── Search helpers ────────────────────────────────────────────────────────────
 
+fn normalized_unbound_reranker_order(
+    result: &SearchResult,
+    ranking: &[RerankedCandidate],
+) -> Result<Vec<RerankedCandidate>, Error> {
+    let readout_positions: HashMap<_, _> = result
+        .trace
+        .readout
+        .iter()
+        .enumerate()
+        .map(|(position, candidate)| (candidate.node_id, position))
+        .collect();
+    let mut seen = HashSet::new();
+    let mut ranked = Vec::with_capacity(ranking.len());
+    for candidate in ranking {
+        if !candidate.score.is_finite() {
+            return Err(Error::NonFinite(format!(
+                "reranker score for node {:?}",
+                candidate.node_id
+            )));
+        }
+        if !seen.insert(candidate.node_id) {
+            return Err(Error::InvalidInput(format!(
+                "duplicate reranked node {:?}",
+                candidate.node_id
+            )));
+        }
+        let position = readout_positions
+            .get(&candidate.node_id)
+            .copied()
+            .ok_or_else(|| {
+                Error::InvalidInput(format!(
+                    "reranked node {:?} is absent from the search readout",
+                    candidate.node_id
+                ))
+            })?;
+        ranked.push((*candidate, position));
+    }
+    ranked.sort_by(|(left, left_position), (right, right_position)| {
+        right
+            .score
+            .total_cmp(&left.score)
+            .then_with(|| left_position.cmp(right_position))
+    });
+    Ok(ranked.into_iter().map(|(candidate, _)| candidate).collect())
+}
+
+fn validate_prepared_rerank_options(options: &RerankedRecallOptions) -> Result<(), Error> {
+    if options.candidate_limit == 0 {
+        return Err(Error::InvalidInput(
+            "reranked recall candidate limit must be greater than zero".to_owned(),
+        ));
+    }
+    if options.deep.limit == 0 {
+        return Err(Error::InvalidInput(
+            "reranked recall result limit must be greater than zero".to_owned(),
+        ));
+    }
+    if options.search_limit == 0 {
+        return Err(Error::InvalidInput(
+            "reranked recall search limit must be greater than zero".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_prepared_rerank_timestamp(as_of: Timestamp) -> Result<(), Error> {
+    if as_of.0 == 0 {
+        return Err(Error::InvalidInput(
+            "prepared rerank timestamp must be non-zero so authority and validity can be checked"
+                .to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn compile_prepared_rerank_scores(
+    evidence: &[EvidenceDocument],
+    scores: &[RerankScore],
+) -> Result<Vec<RerankedCandidate>, Error> {
+    if scores.is_empty() && !evidence.is_empty() {
+        return Err(Error::InvalidInput(format!(
+            "reranker returned no scores for {} documents",
+            evidence.len()
+        )));
+    }
+
+    let mut seen = HashSet::new();
+    let mut ranking = Vec::with_capacity(scores.len());
+    for score in scores {
+        if !score.score.is_finite() {
+            return Err(Error::NonFinite(format!(
+                "reranker score at document index {}",
+                score.index
+            )));
+        }
+        if !seen.insert(score.index) {
+            return Err(Error::InvalidInput(format!(
+                "reranker returned duplicate document index {}",
+                score.index
+            )));
+        }
+        let document = evidence.get(score.index).ok_or_else(|| {
+            Error::InvalidInput(format!(
+                "reranker returned out-of-bounds document index {} for {} documents",
+                score.index,
+                evidence.len()
+            ))
+        })?;
+        ranking.push((
+            score.index,
+            RerankedCandidate {
+                node_id: document.node_id,
+                score: score.score,
+            },
+        ));
+    }
+    ranking.sort_by(|(left_index, left), (right_index, right)| {
+        right
+            .score
+            .total_cmp(&left.score)
+            .then_with(|| left_index.cmp(right_index))
+    });
+    Ok(ranking
+        .into_iter()
+        .map(|(_, candidate)| candidate)
+        .collect())
+}
+
 fn bind_evidence_node<S: StorageAdapter>(
     storage: &S,
     node_id: NodeId,
@@ -4949,18 +7192,94 @@ fn bind_evidence_document<S: StorageAdapter>(
     if sources.is_empty() {
         return Ok(None);
     }
+    let delivery_source_ids: HashSet<_> = sources.iter().map(|source| source.node_id).collect();
+    let mut seen_scoring_sources = HashSet::new();
+    let mut scoring_sources = Vec::with_capacity(document.scoring_source_node_ids().len());
+    for source_id in document.scoring_source_node_ids() {
+        if delivery_source_ids.contains(source_id) || !seen_scoring_sources.insert(*source_id) {
+            continue;
+        }
+        let Some(source) = bind_evidence_node(storage, *source_id)? else {
+            return Ok(None);
+        };
+        scoring_sources.push(source);
+    }
     Ok(Some(BoundEvidenceDocument {
         representative,
         sources,
+        scoring_sources,
+        representative_text_is_bound: document.representative_text_is_bound(),
     }))
 }
 
-fn bound_evidence_node_is_eligible<S: StorageAdapter>(
+fn node_matches_reranked_validity_policy(
+    node: &Node,
+    as_of: Timestamp,
+    policy: RerankedValidityPolicy,
+) -> bool {
+    if as_of.0 == 0 {
+        return true;
+    }
+    if node.created_at > as_of
+        || matches!(
+            (node.valid_from, node.valid_until),
+            (Some(from), Some(until)) if from >= until
+        )
+        || node.valid_from.is_some_and(|from| from > as_of)
+    {
+        return false;
+    }
+    match policy {
+        RerankedValidityPolicy::Current => {
+            crate::graph::valid_at(node.valid_from, node.valid_until, as_of)
+        }
+        RerankedValidityPolicy::HistoricalTrend => true,
+    }
+}
+
+fn package_node_matches_reranked_validity_policy<S: StorageAdapter + Clone>(
+    engine: &Engine<S>,
+    node_id: NodeId,
+    as_of: Timestamp,
+    policy: RerankedValidityPolicy,
+) -> bool {
+    engine.graph().get_node(node_id).is_ok_and(|node| {
+        !node
+            .metadata
+            .get("retracted")
+            .is_some_and(|value| value == "true")
+            && node_matches_reranked_validity_policy(node, as_of, policy)
+    })
+}
+
+fn apply_historical_visibility_filter<S: StorageAdapter + Clone>(
+    engine: &Engine<S>,
+    package: &mut ContextPackage,
+    as_of: Timestamp,
+) {
+    let policy = RerankedValidityPolicy::HistoricalTrend;
+    package.knowledge.retain(|fragment| {
+        package_node_matches_reranked_validity_policy(engine, fragment.node_id, as_of, policy)
+    });
+    package.memories.retain(|fragment| {
+        package_node_matches_reranked_validity_policy(engine, fragment.node_id, as_of, policy)
+    });
+    package.identity.retain(|fragment| {
+        package_node_matches_reranked_validity_policy(engine, fragment.node_id, as_of, policy)
+    });
+    package.tensions.retain(|tension| {
+        package_node_matches_reranked_validity_policy(engine, tension.node_a, as_of, policy)
+            && package_node_matches_reranked_validity_policy(engine, tension.node_b, as_of, policy)
+    });
+}
+
+fn bound_evidence_node_is_eligible_with_policy<S: StorageAdapter>(
     storage: &S,
     binding: &BoundEvidenceNode,
     query_scope: &ScopePath,
     as_of: Timestamp,
     require_episodic: bool,
+    validity_policy: RerankedValidityPolicy,
 ) -> Result<bool, Error> {
     let node = match storage.get_node(binding.node_id) {
         Ok(node) => node,
@@ -4978,27 +7297,43 @@ fn bound_evidence_node_is_eligible<S: StorageAdapter>(
         || (!query_scope.is_universal()
             && !node.origin.scope.is_universal()
             && node.origin.scope != *query_scope)
-        || (as_of.0 > 0
-            && (node.created_at > as_of
-                || !crate::graph::valid_at(node.valid_from, node.valid_until, as_of)))
+        || !node_matches_reranked_validity_policy(node, as_of, validity_policy)
     {
         return Ok(false);
     }
     Ok(true)
 }
 
+#[cfg(test)]
 fn bound_evidence_document_is_eligible<S: StorageAdapter>(
     storage: &S,
     binding: &BoundEvidenceDocument,
     query_scope: &ScopePath,
     as_of: Timestamp,
 ) -> Result<bool, Error> {
-    if !bound_evidence_node_is_eligible(
+    bound_evidence_document_is_eligible_with_policy(
+        storage,
+        binding,
+        query_scope,
+        as_of,
+        RerankedValidityPolicy::Current,
+    )
+}
+
+fn bound_evidence_document_is_eligible_with_policy<S: StorageAdapter>(
+    storage: &S,
+    binding: &BoundEvidenceDocument,
+    query_scope: &ScopePath,
+    as_of: Timestamp,
+    validity_policy: RerankedValidityPolicy,
+) -> Result<bool, Error> {
+    if !bound_evidence_node_is_eligible_with_policy(
         storage,
         &binding.representative,
         query_scope,
         as_of,
         false,
+        validity_policy,
     )? {
         return Ok(false);
     }
@@ -5007,7 +7342,31 @@ fn bound_evidence_document_is_eligible<S: StorageAdapter>(
             || binding.representative.scope.is_universal()
             || source.scope.is_universal();
         if !compatible_source_scope
-            || !bound_evidence_node_is_eligible(storage, source, query_scope, as_of, true)?
+            || !bound_evidence_node_is_eligible_with_policy(
+                storage,
+                source,
+                query_scope,
+                as_of,
+                true,
+                validity_policy,
+            )?
+        {
+            return Ok(false);
+        }
+    }
+    for source in &binding.scoring_sources {
+        let compatible_source_scope = binding.representative.scope == source.scope
+            || binding.representative.scope.is_universal()
+            || source.scope.is_universal();
+        if !compatible_source_scope
+            || !bound_evidence_node_is_eligible_with_policy(
+                storage,
+                source,
+                query_scope,
+                as_of,
+                true,
+                validity_policy,
+            )?
         {
             return Ok(false);
         }
@@ -5042,6 +7401,87 @@ fn intersect_atomic_relation_scope(from: &ScopePath, to: &ScopePath) -> Result<S
     Err(Error::InvalidInput(format!(
         "atomic fact relation cannot join concrete scopes {from:?} and {to:?}"
     )))
+}
+
+fn is_reviewed_derivation_metadata_key(key: &str) -> bool {
+    key.starts_with(REVIEWED_DERIVATION_METADATA_PREFIX)
+}
+
+fn validate_reviewed_derivation_metadata(
+    metadata: Vec<(String, String)>,
+) -> Result<Vec<(String, String)>, Error> {
+    let mut seen = HashSet::with_capacity(metadata.len());
+    for (key, _) in &metadata {
+        if key.trim().is_empty() || key.trim() != key {
+            return Err(Error::InvalidInput(
+                "reviewed derivation metadata keys must be non-empty without surrounding whitespace"
+                    .to_owned(),
+            ));
+        }
+        if key.starts_with("anamnesis:") {
+            return Err(Error::InvalidInput(format!(
+                "reviewed derivation metadata key {key:?} is engine-owned"
+            )));
+        }
+        if !seen.insert(key.as_str()) {
+            return Err(Error::InvalidInput(format!(
+                "reviewed derivation metadata key {key:?} is duplicated"
+            )));
+        }
+    }
+    Ok(metadata)
+}
+
+fn normalize_reviewed_derivation_field(
+    label: &str,
+    value: &str,
+    max_chars: usize,
+    allow_line_breaks: bool,
+) -> Result<String, Error> {
+    let normalized = value.trim();
+    if normalized.is_empty() {
+        return Err(Error::InvalidInput(format!(
+            "reviewed derivation {label} must not be empty"
+        )));
+    }
+    if normalized.chars().count() > max_chars {
+        return Err(Error::InvalidInput(format!(
+            "reviewed derivation {label} exceeds {max_chars} characters"
+        )));
+    }
+    let has_forbidden_control = normalized.chars().any(|character| {
+        character.is_control() && !(allow_line_breaks && matches!(character, '\n' | '\r' | '\t'))
+    });
+    if has_forbidden_control {
+        return Err(Error::InvalidInput(format!(
+            "reviewed derivation {label} contains a control character"
+        )));
+    }
+    Ok(normalized.to_owned())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn atomic_fact_matches_admission(
+    fact: &AtomicFact,
+    content: &str,
+    source_node_ids: &[NodeId],
+    entity_tags: &[String],
+    source_session_id: &str,
+    scope: &ScopePath,
+    observed_at: Timestamp,
+    valid_from: Option<Timestamp>,
+    valid_until: Option<Timestamp>,
+    metadata: &HashMap<String, String>,
+) -> bool {
+    fact.content == content
+        && fact.source_node_ids == source_node_ids
+        && fact.entity_tags == entity_tags
+        && fact.source_session_id == source_session_id
+        && &fact.scope == scope
+        && fact.observed_at == observed_at
+        && fact.valid_from == valid_from
+        && fact.valid_until == valid_until
+        && &fact.metadata == metadata
 }
 
 fn ensure_atomic_fact_has_live_sources<S: StorageAdapter>(
@@ -5472,25 +7912,132 @@ mod tests {
     }
 
     fn single_readout_result(node_id: NodeId) -> SearchResult {
+        readout_result(&[node_id])
+    }
+
+    fn readout_result(node_ids: &[NodeId]) -> SearchResult {
         SearchResult {
             package: ContextPackage::empty(),
             trace: crate::query::SearchTrace {
                 packaging_mode: Some(crate::query::PackagingMode::Balanced),
-                readout: vec![crate::query::ReadoutCandidate {
-                    node_id,
-                    score: 1.0,
-                    activation: 0.8,
-                    phi: 0.4,
-                    embedding_cosine: 0.7,
-                    salience: 0.6,
-                    impedance: 0.1,
-                    scope_weight: 1.0,
-                    trust_weight: 1.0,
-                    stress: 0.0,
-                }],
+                readout: node_ids
+                    .iter()
+                    .enumerate()
+                    .map(|(index, node_id)| crate::query::ReadoutCandidate {
+                        node_id: *node_id,
+                        score: 1.0 - index as f64 * 0.01,
+                        activation: 0.8,
+                        phi: 0.4,
+                        embedding_cosine: 0.7,
+                        salience: 0.6,
+                        impedance: 0.1,
+                        scope_weight: 1.0,
+                        trust_weight: 1.0,
+                        stress: 0.0,
+                    })
+                    .collect(),
                 ..crate::query::SearchTrace::default()
             },
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn seed_memory_event_boundary_fact(
+        memory: &mut Memory<SqliteStorage>,
+        source_node_id: NodeId,
+        subject: &str,
+        predicate: &str,
+        object: &str,
+        evidence_object: &str,
+        valid_from: Timestamp,
+    ) -> AtomicFactId {
+        let storage = memory.engine().graph().storage();
+        let source = storage
+            .get_node(source_node_id)
+            .expect("event-boundary source");
+        let source_content = source.content.clone();
+        let source_session_id = source.origin.session_id.clone();
+        let scope = source.origin.scope.clone();
+        let observed_at = source.created_at;
+        let incarnation = storage
+            .atomic_source_incarnation(source)
+            .expect("event-boundary source incarnation");
+        let storage = memory.engine_mut().graph_mut().storage_mut();
+        let fact_id = storage
+            .next_atomic_fact_id()
+            .expect("event-boundary fact id");
+        let metadata = HashMap::from([
+            (
+                REVIEWED_DERIVATION_SCHEMA_KEY.to_owned(),
+                "reviewed-routing-v1".to_owned(),
+            ),
+            (
+                REVIEWED_DERIVATION_SUBJECT_KEY.to_owned(),
+                subject.to_owned(),
+            ),
+            (
+                REVIEWED_DERIVATION_PREDICATE_KEY.to_owned(),
+                predicate.to_owned(),
+            ),
+            (REVIEWED_DERIVATION_OBJECT_KEY.to_owned(), object.to_owned()),
+            (
+                REVIEWED_DERIVATION_POLARITY_KEY.to_owned(),
+                "affirmed".to_owned(),
+            ),
+            (
+                REVIEWED_DERIVATION_MODALITY_KEY.to_owned(),
+                "observed".to_owned(),
+            ),
+            (
+                REVIEWED_DERIVATION_REVIEWED_BY_KEY.to_owned(),
+                "memory-integration-reviewer".to_owned(),
+            ),
+            (
+                REVIEWED_DERIVATION_REVIEW_PROFILE_KEY.to_owned(),
+                "memory-integration:v1".to_owned(),
+            ),
+            (
+                REVIEWED_DERIVATION_REVIEWED_AT_KEY.to_owned(),
+                observed_at.0.to_string(),
+            ),
+            (
+                REVIEWED_DERIVATION_IDEMPOTENCY_KEY.to_owned(),
+                format!("memory-event-boundary:{}", fact_id.0),
+            ),
+            (
+                "anamnesis:evidence-object".to_owned(),
+                evidence_object.to_owned(),
+            ),
+            (
+                "anamnesis:evidence-source-node-id".to_owned(),
+                source_node_id.0.to_string(),
+            ),
+            ("anamnesis:evidence-span-start".to_owned(), "0".to_owned()),
+            (
+                "anamnesis:evidence-span-end".to_owned(),
+                source_content.len().to_string(),
+            ),
+            (
+                crate::storage::atomic_source_incarnation_key(source_node_id),
+                incarnation,
+            ),
+        ]);
+        storage
+            .set_atomic_fact(AtomicFact {
+                id: fact_id,
+                content: format!("{subject} {predicate} {object}"),
+                embedding: vec![0.0; 8],
+                source_node_ids: vec![source_node_id],
+                entity_tags: vec![subject.to_owned()],
+                source_session_id,
+                scope,
+                observed_at,
+                valid_from: Some(valid_from),
+                valid_until: None,
+                metadata,
+            })
+            .expect("event-boundary atomic fact");
+        fact_id
     }
 
     // ── Relation mapping ──────────────────────────────────────────────────────
@@ -5552,15 +8099,17 @@ mod tests {
         m.add_note("The archive key is amber", t(1)).unwrap();
         m.add_note("The deployment key is cobalt", t(2)).unwrap();
 
+        let query = "Which deployment key should I use?";
         let output = m
             .search_reranked_at(
-                "Which deployment key should I use?",
+                query,
                 &KeywordReranker,
                 RerankedRecallOptions::new(4).with_candidate_limit(20),
                 t(100),
             )
             .unwrap();
 
+        assert_eq!(output.plan, RecallPlan::infer(query));
         assert!(!output.ranking.is_empty());
         assert_eq!(output.ranking[0].score, 10.0);
         assert!(
@@ -5578,6 +8127,120 @@ mod tests {
                 .accessed
                 .iter()
                 .any(|site| site.node_id == output.ranking[0].node_id)
+        );
+    }
+
+    #[test]
+    fn planned_production_recall_uses_one_structured_plan_end_to_end() {
+        let (mut m, calls) = recording_mem();
+        m.add_note("Alice writes essays and poetry", t(1)).unwrap();
+        calls.lock().unwrap().clear();
+
+        let query = "What writing does Alice do?";
+        assert_eq!(RecallPlan::infer(query).answer_shape, AnswerShape::Fact);
+        let plan = RecallPlan::infer_with_answer_shape(query, AnswerShape::Collection);
+        let output = m
+            .search_reranked_for_plan_at(
+                &plan,
+                &OrderReranker,
+                RerankedRecallOptions::new(8).with_candidate_limit(20),
+                t(100),
+            )
+            .unwrap();
+
+        let query_calls: Vec<_> = calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(kind, _)| *kind == "query")
+            .map(|(_, text)| text.clone())
+            .collect();
+        assert_eq!(query_calls.first().map(String::as_str), Some(query));
+        assert!(
+            query_calls.len() > 1,
+            "the collection plan must control source-search expansion: {query_calls:?}"
+        );
+        assert_eq!(output.plan, plan);
+        assert!(!output.recall.hits.is_empty());
+
+        let readout = m.readout_for_plan(&output.plan, &output.recall).unwrap();
+        assert_eq!(readout.plan, plan);
+        assert_eq!(
+            readout.reader_contract.plan.answer_shape,
+            AnswerShape::Collection
+        );
+    }
+
+    #[test]
+    fn trend_history_survives_the_fake_reranker_and_plan_aware_packaging() {
+        let mut m = mem();
+        let source = m
+            .add_source_fragment(
+                SourceFragmentInput::new(
+                    "Alice completed the cobalt project before it was archived",
+                    Origin {
+                        peer_id: PeerId(0),
+                        source_kind: SourceKind::HumanInput,
+                        session_id: "historical-project".to_owned(),
+                        scope: ScopePath::universal(),
+                        confidence: 0.95,
+                    },
+                    t(1),
+                )
+                .with_validity(Some(t(1)), Some(t(50))),
+            )
+            .expect("historical raw source");
+        m.add_atomic_fact(
+            AtomicFactInput::new("Alice completed the cobalt project", vec![source])
+                .with_entity_tags(vec!["Alice".to_owned(), "cobalt project".to_owned()])
+                .with_validity(Some(t(1)), Some(t(50))),
+        )
+        .expect("historical atomic fact");
+
+        let query = "How did Alice's cobalt project status change over time?";
+        let trend_plan = RecallPlan::infer_with_answer_shape(query, AnswerShape::Fact)
+            .with_temporal_constraint(TemporalConstraint::trend());
+        let trend = m
+            .search_reranked_for_plan_at(
+                &trend_plan,
+                &OrderReranker,
+                RerankedRecallOptions::new(4).with_candidate_limit(20),
+                t(100),
+            )
+            .expect("historical Trend recall");
+        assert!(
+            trend
+                .ranking
+                .iter()
+                .any(|candidate| candidate.node_id == source),
+            "the expired raw source must reach the local reranker"
+        );
+        assert!(
+            trend.recall.hits.iter().any(|hit| hit.node_id == source),
+            "the expired raw source must survive post-rerank authority checks and packaging"
+        );
+        assert!(
+            trend
+                .recall
+                .package
+                .memories
+                .iter()
+                .any(|fragment| fragment.node_id == source)
+        );
+
+        let current_plan = RecallPlan::infer_with_answer_shape(query, AnswerShape::Collection)
+            .with_temporal_constraint(TemporalConstraint::none());
+        let current = m
+            .search_reranked_for_plan_at(
+                &current_plan,
+                &OrderReranker,
+                RerankedRecallOptions::new(4).with_candidate_limit(20),
+                t(100),
+            )
+            .expect("current recall");
+        assert!(
+            current.recall.hits.iter().all(|hit| hit.node_id != source),
+            "the public current-validity route must not inherit Trend history semantics"
         );
     }
 
@@ -5707,6 +8370,1585 @@ mod tests {
                 "missing focused raw line for {source_id:?}:\n{rendered}"
             );
         }
+    }
+
+    #[test]
+    fn prepared_rerank_filters_ineligible_sources_before_exposing_text() {
+        let mut memory = mem();
+        let accepted_scope = ScopePath::new("workspace/accepted").unwrap();
+        let other_scope = ScopePath::new("workspace/other").unwrap();
+        let origin = |session: &str, scope: ScopePath| Origin {
+            peer_id: PeerId(0),
+            source_kind: SourceKind::HumanInput,
+            session_id: session.to_owned(),
+            scope,
+            confidence: 0.95,
+        };
+        let (eligible, retracted, expired, future, malformed, wrong_scope) = {
+            let mut add_source = |label: &str, at: Timestamp, scope: ScopePath| {
+                memory
+                    .add_source_fragment(SourceFragmentInput::new(label, origin(label, scope), at))
+                    .unwrap()
+            };
+            (
+                add_source("eligible record", t(10), accepted_scope.clone()),
+                add_source("retracted record", t(11), accepted_scope.clone()),
+                add_source("expired record", t(12), accepted_scope.clone()),
+                add_source("future record", t(200), accepted_scope.clone()),
+                add_source("malformed record", t(13), accepted_scope.clone()),
+                add_source("other scope record", t(14), other_scope),
+            )
+        };
+
+        memory.set_metadata(retracted, "retracted", "true").unwrap();
+        memory
+            .set_validity_window(expired, Some(t(1)), Some(t(50)))
+            .unwrap();
+        let mut malformed_node = memory.engine().graph().get_node(malformed).unwrap().clone();
+        malformed_node.valid_from = Some(t(80));
+        malformed_node.valid_until = Some(t(70));
+        memory
+            .engine_mut()
+            .graph_mut()
+            .storage_mut()
+            .set_node(malformed_node)
+            .unwrap();
+
+        let result =
+            readout_result(&[eligible, retracted, expired, future, malformed, wrong_scope]);
+        let plan = RecallPlan::infer_with_answer_shape(
+            "What is the currently eligible record?",
+            AnswerShape::Fact,
+        );
+        let prepared = memory
+            .prepare_rerank_from_search_result_for_plan_at(
+                &plan,
+                &result,
+                accepted_scope.clone(),
+                RerankedRecallOptions::new(6)
+                    .with_candidate_limit(6)
+                    .with_scope(accepted_scope),
+                t(100),
+            )
+            .unwrap();
+        let texts: Vec<_> = prepared.rerank_texts().collect();
+        assert_eq!(texts.len(), 1);
+        assert!(texts[0].contains("eligible record"));
+        let prepared_documents = prepared.documents().to_vec();
+
+        let completed = memory
+            .complete_prepared_rerank(prepared, &[RerankScore::new(0, 1.0)])
+            .unwrap();
+        assert_eq!(completed.rerank_documents, prepared_documents);
+        assert_eq!(completed.recall.hits.len(), 1);
+        assert_eq!(completed.recall.hits[0].node_id, eligible);
+    }
+
+    #[test]
+    fn prepared_rerank_rejects_node_id_reuse_between_prepare_and_complete() {
+        let mut memory = mem();
+        let source = memory
+            .add_source_fragment(SourceFragmentInput::new(
+                "original ledger entry",
+                Origin {
+                    peer_id: PeerId(0),
+                    source_kind: SourceKind::HumanInput,
+                    session_id: "ledger-original".to_owned(),
+                    scope: ScopePath::universal(),
+                    confidence: 0.95,
+                },
+                t(10),
+            ))
+            .unwrap();
+        let result = single_readout_result(source);
+        let plan =
+            RecallPlan::infer_with_answer_shape("What is the ledger entry?", AnswerShape::Fact);
+        let prepared = memory
+            .prepare_rerank_from_search_result_for_plan_at(
+                &plan,
+                &result,
+                ScopePath::universal(),
+                RerankedRecallOptions::new(1)
+                    .with_candidate_limit(1)
+                    .with_adaptive_delivery(false),
+                t(100),
+            )
+            .unwrap();
+        assert_eq!(prepared.document_count(), 1);
+        assert!(
+            prepared
+                .rerank_texts()
+                .next()
+                .is_some_and(|text| text.contains("original ledger entry"))
+        );
+
+        let mut replacement = memory.engine().graph().get_node(source).unwrap().clone();
+        memory.engine_mut().graph_mut().remove_node(source).unwrap();
+        let replacement_id = memory.engine_mut().graph_mut().next_node_id();
+        assert_eq!(replacement_id, source);
+        replacement.id = replacement_id;
+        replacement.name = "replacement ledger entry".to_owned();
+        replacement.content = "replacement ledger entry".to_owned();
+        replacement.origin.session_id = "ledger-replacement".to_owned();
+        memory
+            .engine_mut()
+            .graph_mut()
+            .add_node(replacement)
+            .unwrap();
+
+        let completed = memory
+            .complete_prepared_rerank(prepared, &[RerankScore::new(0, 1.0)])
+            .unwrap();
+        assert!(completed.ranking.is_empty());
+        assert!(completed.recall.hits.is_empty());
+        assert_eq!(completed.recall.package.total_fragments(), 0);
+    }
+
+    #[test]
+    fn prepared_rerank_validates_external_document_scores() {
+        let mut memory = mem();
+        let source = memory
+            .add_source_fragment(SourceFragmentInput::new(
+                "bounded scoring record",
+                Origin {
+                    peer_id: PeerId(0),
+                    source_kind: SourceKind::HumanInput,
+                    session_id: "bounded-scoring".to_owned(),
+                    scope: ScopePath::universal(),
+                    confidence: 0.95,
+                },
+                t(10),
+            ))
+            .unwrap();
+        let plan = RecallPlan::infer("What is the bounded scoring record?");
+        let prepare = || {
+            memory
+                .prepare_rerank_from_search_result_for_plan_at(
+                    &plan,
+                    &single_readout_result(source),
+                    ScopePath::universal(),
+                    RerankedRecallOptions::new(1).with_candidate_limit(1),
+                    t(100),
+                )
+                .unwrap()
+        };
+
+        assert!(matches!(
+            memory.complete_prepared_rerank(prepare(), &[]),
+            Err(Error::InvalidInput(message)) if message.contains("no scores")
+        ));
+        assert!(matches!(
+            memory.complete_prepared_rerank(
+                prepare(),
+                &[RerankScore::new(0, 2.0), RerankScore::new(0, 1.0)],
+            ),
+            Err(Error::InvalidInput(message)) if message.contains("duplicate")
+        ));
+        assert!(matches!(
+            memory.complete_prepared_rerank(
+                prepare(),
+                &[RerankScore::new(1, 1.0)],
+            ),
+            Err(Error::InvalidInput(message)) if message.contains("out-of-bounds")
+        ));
+        assert!(matches!(
+            memory.complete_prepared_rerank(prepare(), &[RerankScore::new(0, f64::NAN)]),
+            Err(Error::NonFinite(_))
+        ));
+    }
+
+    #[test]
+    fn prepared_rerank_fails_closed_when_source_package_has_no_documents() {
+        let mut memory = mem();
+        memory
+            .add_source_fragment(SourceFragmentInput::new(
+                "package-only confidential record",
+                Origin {
+                    peer_id: PeerId(0),
+                    source_kind: SourceKind::HumanInput,
+                    session_id: "package-only".to_owned(),
+                    scope: ScopePath::universal(),
+                    confidence: 0.95,
+                },
+                t(10),
+            ))
+            .unwrap();
+        let plan = RecallPlan::infer("What is the package-only confidential record?");
+        let mut result = memory
+            .search_result_at_with(&plan.query, 4, t(100), &SearchTuning::default())
+            .unwrap();
+        assert!(result.package.total_fragments() > 0);
+        result.trace.readout.clear();
+
+        let prepared = memory
+            .prepare_rerank_from_search_result_for_plan_at(
+                &plan,
+                &result,
+                ScopePath::universal(),
+                RerankedRecallOptions::new(4),
+                t(100),
+            )
+            .unwrap();
+        assert_eq!(prepared.document_count(), 0);
+
+        let completed = memory.complete_prepared_rerank(prepared, &[]).unwrap();
+        assert!(completed.ranking.is_empty());
+        assert!(completed.recall.hits.is_empty());
+        assert_eq!(completed.recall.package.total_fragments(), 0);
+        assert!(completed.recall.package.commit_trace.accessed.is_empty());
+    }
+
+    #[test]
+    fn prepared_rerank_is_bound_to_its_originating_memory() {
+        let mut first = mem();
+        let mut second = mem();
+        let origin = Origin {
+            peer_id: PeerId(0),
+            source_kind: SourceKind::HumanInput,
+            session_id: "receipt-origin".to_owned(),
+            scope: ScopePath::universal(),
+            confidence: 0.95,
+        };
+        for memory in [&mut first, &mut second] {
+            memory
+                .add_source_fragment(SourceFragmentInput::new(
+                    "origin-bound prepared evidence",
+                    origin.clone(),
+                    t(10),
+                ))
+                .unwrap();
+        }
+        let plan = RecallPlan::infer("What is the origin-bound prepared evidence?");
+        let prepared = first
+            .prepare_rerank_for_plan_at(
+                &plan,
+                RerankedRecallOptions::new(1)
+                    .with_candidate_limit(1)
+                    .with_search_limit(1),
+                t(100),
+            )
+            .unwrap();
+        assert_eq!(prepared.document_count(), 1);
+        let redacted = format!("{prepared:?}");
+        assert!(!redacted.contains("origin-bound prepared evidence"));
+
+        let error = second
+            .complete_prepared_rerank(prepared, &[RerankScore::new(0, 1.0)])
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            Error::InvalidInput(message) if message.contains("different Memory instance")
+        ));
+    }
+
+    #[test]
+    fn prepared_rerank_equal_scores_use_document_index_as_tie_breaker() {
+        let mut memory = mem();
+        for (session, content) in [
+            ("tie-first", "first independent prepared record"),
+            ("tie-second", "second independent prepared record"),
+        ] {
+            memory
+                .add_source_fragment(SourceFragmentInput::new(
+                    content,
+                    Origin {
+                        peer_id: PeerId(0),
+                        source_kind: SourceKind::HumanInput,
+                        session_id: session.to_owned(),
+                        scope: ScopePath::universal(),
+                        confidence: 0.95,
+                    },
+                    t(10),
+                ))
+                .unwrap();
+        }
+        let plan = RecallPlan::infer("Which independent prepared records exist?");
+        let prepared = memory
+            .prepare_rerank_for_plan_at(
+                &plan,
+                RerankedRecallOptions::new(2)
+                    .with_candidate_limit(2)
+                    .with_search_limit(2)
+                    .with_adaptive_delivery(false),
+                t(100),
+            )
+            .unwrap();
+        assert_eq!(prepared.document_count(), 2);
+        let expected = [prepared.evidence[0].node_id, prepared.evidence[1].node_id];
+
+        let completed = memory
+            .complete_prepared_rerank(
+                prepared,
+                &[RerankScore::new(1, 1.0), RerankScore::new(0, 1.0)],
+            )
+            .unwrap();
+        assert_eq!(
+            completed
+                .ranking
+                .iter()
+                .map(|candidate| candidate.node_id)
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
+
+    #[test]
+    fn event_boundary_group_survives_bound_hydration_and_unbound_score_normalization() {
+        let mut memory = mem();
+        let semantic_target_receipt = memory
+            .add(
+                "event-semantic-target",
+                "Morgan",
+                "Morgan struggled to find accessible housing.",
+                t(10),
+            )
+            .expect("semantic target source");
+        let semantic_target_source = semantic_target_receipt.episodic;
+        let semantic_target = memory
+            .add(
+                "event-semantic-target",
+                "assistant",
+                "The housing search was recorded as a difficulty.",
+                t(11),
+            )
+            .expect("semantic target window")
+            .finalized_semantic
+            .expect("semantic target representative");
+        let raw_source = |memory: &mut Memory<SqliteStorage>, content: &str, session: &str, at| {
+            memory
+                .add_source_fragment(SourceFragmentInput::new(
+                    content,
+                    Origin {
+                        peer_id: PeerId(0),
+                        source_kind: SourceKind::HumanInput,
+                        session_id: session.to_owned(),
+                        scope: ScopePath::universal(),
+                        confidence: 0.95,
+                    },
+                    at,
+                ))
+                .expect("event-boundary raw source")
+        };
+        let second_target_source = raw_source(
+            &mut memory,
+            "Morgan found choosing a veterinarian difficult.",
+            "event-target-two",
+            t(20),
+        );
+        let third_target_source = raw_source(
+            &mut memory,
+            "Morgan had difficulty arranging accessible transport.",
+            "event-target-three",
+            t(25),
+        );
+        let anchor_source = raw_source(&mut memory, "Morgan adopted Pip.", "event-anchor", t(30));
+        let after_target_source = raw_source(
+            &mut memory,
+            "After adopting Pip, Morgan had difficulty with training.",
+            "event-target-after",
+            t(35),
+        );
+        seed_memory_event_boundary_fact(
+            &mut memory,
+            semantic_target_source,
+            "Morgan",
+            "struggled",
+            "to find accessible housing",
+            "accessible housing",
+            t(10),
+        );
+        seed_memory_event_boundary_fact(
+            &mut memory,
+            second_target_source,
+            "Morgan",
+            "found difficult",
+            "choosing a veterinarian",
+            "veterinarian",
+            t(20),
+        );
+        seed_memory_event_boundary_fact(
+            &mut memory,
+            third_target_source,
+            "Morgan",
+            "had difficulty",
+            "arranging accessible transport",
+            "accessible transport",
+            t(25),
+        );
+        seed_memory_event_boundary_fact(
+            &mut memory,
+            anchor_source,
+            "Morgan",
+            "adopted",
+            "Pip",
+            "Pip",
+            t(30),
+        );
+        seed_memory_event_boundary_fact(
+            &mut memory,
+            after_target_source,
+            "Morgan",
+            "had difficulty",
+            "with training",
+            "training",
+            t(35),
+        );
+
+        let mut ordinary = Vec::new();
+        for index in 0..19 {
+            ordinary.push(raw_source(
+                &mut memory,
+                &format!("Independent event-boundary control record {index}."),
+                &format!("event-control-{index}"),
+                t(40 + index),
+            ));
+        }
+        memory.flush_all().expect("flush integration fixture");
+        assert_eq!(
+            memory
+                .engine()
+                .graph()
+                .get_node(semantic_target)
+                .expect("semantic representative")
+                .node_type,
+            KnowledgeType::Semantic
+        );
+        assert!(
+            readout::canonical_sources(memory.engine().graph().storage(), semantic_target)
+                .expect("semantic representative sources")
+                .contains(&semantic_target_source)
+        );
+
+        let plan = RecallPlan::infer("What problems did Morgan face before adopting Pip?");
+        let as_of = t(100);
+        let searched = memory
+            .search_result_at_with_diagnostics(
+                &plan.query,
+                20,
+                as_of,
+                &SearchTuning::default(),
+                &SearchDiagnostics::with_readout_trace_limit(DEFAULT_RERANK_CANDIDATE_LIMIT),
+            )
+            .expect("production event-boundary search trace");
+        assert!(
+            searched
+                .trace
+                .strategies_used
+                .iter()
+                .any(|strategy| { strategy.starts_with("event_boundary_source_group:v1:") })
+        );
+        assert!(
+            !memory
+                .rerank_documents_for_plan_at_internal(
+                    &plan,
+                    &searched,
+                    DEFAULT_RERANK_CANDIDATE_LIMIT,
+                    &ScopePath::universal(),
+                    as_of,
+                )
+                .expect("production trace document compilation")
+                .is_empty()
+        );
+
+        let mut node_ids = vec![anchor_source];
+        node_ids.extend(ordinary);
+        node_ids.extend([
+            semantic_target,
+            second_target_source,
+            third_target_source,
+            after_target_source,
+        ]);
+        let mut result = readout_result(&node_ids);
+        let group = readout::canonical_event_boundary_source_group(
+            memory.engine().graph().storage(),
+            &plan,
+            as_of,
+            &ScopePath::universal(),
+        )
+        .expect("canonical event group")
+        .expect("complete event group");
+        let encoded = readout::encode_represented_event_boundary_source_group(
+            memory.engine().graph().storage(),
+            &group,
+            &result.trace.readout,
+            DEFAULT_RERANK_CANDIDATE_LIMIT,
+        )
+        .expect("represented event group")
+        .expect("event group trace");
+        result
+            .trace
+            .strategies_used
+            .push("event_boundary_source_group_routing".to_owned());
+        result.trace.strategies_used.push(encoded);
+
+        let candidate_score = |node_id: NodeId, position: usize| {
+            if node_id == anchor_source {
+                100.0
+            } else if node_id == semantic_target {
+                3.0
+            } else if node_id == second_target_source {
+                2.0
+            } else if node_id == third_target_source {
+                1.0
+            } else {
+                50.0 - position as f64 * 0.01
+            }
+        };
+        let selected_sources = |recall: &Recall| {
+            let mut sources = HashSet::new();
+            for hit in &recall.hits {
+                sources.extend(
+                    readout::canonical_sources(memory.engine().graph().storage(), hit.node_id)
+                        .expect("selected canonical sources"),
+                );
+            }
+            sources
+        };
+
+        let prepared = memory
+            .prepare_rerank_from_search_result_for_plan_at(
+                &plan,
+                &result,
+                ScopePath::universal(),
+                RerankedRecallOptions::new(20)
+                    .with_candidate_limit(node_ids.len())
+                    .with_adaptive_delivery(false),
+                as_of,
+            )
+            .expect("bound event-group documents");
+        assert!(prepared.documents().iter().any(|document| {
+            document.node_id == semantic_target
+                && document.source_node_ids.contains(&semantic_target_source)
+        }));
+        let scores = prepared
+            .documents()
+            .iter()
+            .enumerate()
+            .map(|(index, document)| {
+                RerankScore::new(index, candidate_score(document.node_id, index))
+            })
+            .collect::<Vec<_>>();
+        let bound = memory
+            .complete_prepared_rerank(prepared, &scores)
+            .expect("bound event-group completion");
+        let bound_sources = selected_sources(&bound.recall);
+        assert!(bound_sources.contains(&semantic_target_source));
+        assert!(bound_sources.contains(&second_target_source));
+        assert!(!bound_sources.contains(&third_target_source));
+        let receipt = bound
+            .event_boundary_evidence()
+            .expect("bound completion must retain event roles");
+        assert_eq!(receipt.direction(), TemporalBoundaryDirection::Before);
+        assert!(receipt.anchor_source_node_ids().contains(&anchor_source));
+        assert!(
+            receipt
+                .target_source_node_ids()
+                .contains(&semantic_target_source)
+        );
+        assert!(
+            receipt
+                .target_source_node_ids()
+                .contains(&second_target_source)
+        );
+        assert!(
+            !receipt
+                .target_source_node_ids()
+                .contains(&third_target_source)
+        );
+
+        let bound_draft = GroundedAnswerDraft::new(
+            "accessible housing, veterinarian",
+            vec![
+                GroundedAnswerItem::new("accessible housing", vec![semantic_target_source])
+                    .with_finding_ids(vec!["housing".to_owned()]),
+                GroundedAnswerItem::new("veterinarian", vec![second_target_source])
+                    .with_finding_ids(vec!["veterinarian".to_owned()]),
+            ],
+            vec![anchor_source, semantic_target_source, second_target_source],
+            false,
+        )
+        .with_findings(vec![
+            GroundedEvidenceFinding::new(
+                "anchor",
+                "Morgan adopted Pip.",
+                vec![anchor_source],
+                GroundedFindingDisposition::Premise,
+            ),
+            GroundedEvidenceFinding::new(
+                "housing",
+                "Morgan struggled to find accessible housing.",
+                vec![semantic_target_source],
+                GroundedFindingDisposition::Item,
+            )
+            .with_answer_value("accessible housing"),
+            GroundedEvidenceFinding::new(
+                "veterinarian",
+                "Morgan found choosing a veterinarian difficult.",
+                vec![second_target_source],
+                GroundedFindingDisposition::Item,
+            )
+            .with_answer_value("veterinarian"),
+        ])
+        .with_reasoning_operator(
+            GroundedReasoningOperator::new(GroundedReasoningOperatorKind::CollectionLedger)
+                .with_inputs(vec![
+                    GroundedOperatorInput::new(
+                        GroundedOperatorInputRole::Premise,
+                        vec!["anchor".to_owned()],
+                    ),
+                    GroundedOperatorInput::new(
+                        GroundedOperatorInputRole::Item,
+                        vec!["housing".to_owned(), "veterinarian".to_owned()],
+                    ),
+                ])
+                .with_output("accessible housing, veterinarian"),
+        );
+        let bound_readout = memory
+            .readout_for_reranked(&bound)
+            .expect("bound event-role readout");
+        let system_authority = bound_readout
+            .system_authority_guidance()
+            .expect("closed event authority guidance");
+        assert!(system_authority.contains("direction=before"));
+        assert!(system_authority.contains(&format!("node:{}", anchor_source.0)));
+        assert!(!system_authority.contains(&format!("#{}", anchor_source.0)));
+        assert!(!system_authority.contains(&bound.plan.query));
+        assert!(!system_authority.contains("Morgan adopted Pip"));
+        assert!(!system_authority.contains("accessible housing"));
+        assert!(
+            bound_readout
+                .reader_guidance
+                .as_deref()
+                .is_some_and(|guidance| guidance.contains(&system_authority))
+        );
+        assert!(
+            bound_readout
+                .validate_adjudicated_draft(&bound_draft)
+                .is_ok()
+        );
+        assert_eq!(
+            bound_readout.materialize_adjudicated_draft(&bound_draft),
+            Ok(Some("accessible housing, veterinarian".to_owned()))
+        );
+        assert!(
+            memory
+                .readout_for_plan(&bound.plan, &bound.recall)
+                .expect("membership-only compatibility readout")
+                .validate_adjudicated_draft(&bound_draft)
+                .is_ok()
+        );
+        let rendered_bound = memory
+            .render_context_for_reranked(&bound)
+            .expect("render bound event roles");
+        assert!(rendered_bound.contains("## EVENT BOUNDARY SOURCE ROLES"));
+        assert!(rendered_bound.contains("direction=before"));
+        assert!(rendered_bound.contains(&format!("node:{}", anchor_source.0)));
+        assert!(!rendered_bound.contains("event_boundary_source_group:v1:"));
+
+        let mut changed_query = bound.clone();
+        changed_query.plan.query =
+            "Which unrelated records existed before another adoption?".to_owned();
+        assert!(changed_query.event_boundary_evidence().is_none());
+        let changed_query_readout = memory
+            .readout_for_reranked(&changed_query)
+            .expect("readout for mutated query surface");
+        assert!(changed_query_readout.event_boundary_evidence().is_none());
+        assert!(changed_query_readout.system_authority_guidance().is_none());
+        let error = changed_query_readout
+            .validate_adjudicated_draft(&bound_draft)
+            .expect_err("same-direction query mutation must lose receipt authority");
+        assert!(
+            error
+                .failures
+                .contains(&GroundedDraftValidationFailure::MissingEventBoundaryEvidence)
+        );
+        let changed_query_render = memory
+            .render_context_for_reranked(&changed_query)
+            .expect("render mutated query surface");
+        assert!(!changed_query_render.contains("## EVENT BOUNDARY SOURCE ROLES"));
+        assert!(!changed_query_render.contains("Event-boundary authority:"));
+
+        let mut changed_ranking = bound.clone();
+        changed_ranking.ranking.reverse();
+        assert!(changed_ranking.event_boundary_evidence().is_none());
+
+        let mut filtered_package = bound.clone();
+        let target_dialogue_block = bound_readout
+            .source_attributions
+            .iter()
+            .find(|attribution| attribution.source_node_id == semantic_target_source)
+            .map(|attribution| attribution.dialogue_block_node_id)
+            .expect("target source must have one visible dialogue block");
+        let original_fragment_count = filtered_package.recall.package.total_fragments();
+        for fragments in [
+            &mut filtered_package.recall.package.identity,
+            &mut filtered_package.recall.package.knowledge,
+            &mut filtered_package.recall.package.memories,
+        ] {
+            fragments.retain(|fragment| fragment.node_id != target_dialogue_block);
+        }
+        assert!(filtered_package.recall.package.total_fragments() < original_fragment_count);
+        assert!(filtered_package.event_boundary_evidence().is_none());
+        let filtered_render = memory
+            .render_context_for_reranked(&filtered_package)
+            .expect("render filtered event surface");
+        assert!(!filtered_render.contains("## EVENT BOUNDARY SOURCE ROLES"));
+        assert!(!filtered_render.contains("Event-boundary authority:"));
+
+        let role_ids = receipt
+            .anchor_source_node_ids()
+            .iter()
+            .chain(receipt.target_source_node_ids())
+            .copied()
+            .collect::<HashSet<_>>();
+        let role_block_ids = bound_readout
+            .source_attributions
+            .iter()
+            .filter(|attribution| role_ids.contains(&attribution.source_node_id))
+            .map(|attribution| attribution.dialogue_block_node_id)
+            .collect::<HashSet<_>>();
+        let mut role_only_reinjection = bound.clone();
+        for fragments in [
+            &mut role_only_reinjection.recall.package.identity,
+            &mut role_only_reinjection.recall.package.knowledge,
+            &mut role_only_reinjection.recall.package.memories,
+        ] {
+            fragments.retain(|fragment| role_block_ids.contains(&fragment.node_id));
+        }
+        assert!(
+            role_only_reinjection
+                .recall
+                .package
+                .identity
+                .iter()
+                .chain(&role_only_reinjection.recall.package.knowledge)
+                .chain(&role_only_reinjection.recall.package.memories)
+                .any(|fragment| role_block_ids.contains(&fragment.node_id))
+        );
+        assert!(role_only_reinjection.event_boundary_evidence().is_none());
+        assert!(
+            memory
+                .readout_for_reranked(&role_only_reinjection)
+                .expect("readout for role-id reinjection")
+                .system_authority_guidance()
+                .is_none()
+        );
+
+        let mut mutated_readout = memory
+            .readout_for_reranked(&bound)
+            .expect("mutable public readout surface");
+        mutated_readout.source_node_ids.reverse();
+        assert!(mutated_readout.event_boundary_evidence().is_none());
+        assert!(mutated_readout.system_authority_guidance().is_none());
+        let error = mutated_readout
+            .validate_adjudicated_draft(&bound_draft)
+            .expect_err("mutated readout surface must lose receipt authority");
+        assert!(
+            error
+                .failures
+                .contains(&GroundedDraftValidationFailure::MissingEventBoundaryEvidence)
+        );
+
+        let mut unsorted = result
+            .trace
+            .readout
+            .iter()
+            .enumerate()
+            .map(|(position, candidate)| RerankedCandidate {
+                node_id: candidate.node_id,
+                score: candidate_score(candidate.node_id, position),
+            })
+            .collect::<Vec<_>>();
+        unsorted.reverse();
+        let unbound = memory
+            .repackage_reranked_deep_for_plan_at(
+                &plan,
+                &result,
+                &unsorted,
+                DeepRecallOptions::new(20),
+                as_of,
+            )
+            .expect("unbound normalized event-group completion");
+        let unbound_sources = selected_sources(&unbound);
+        assert!(unbound_sources.contains(&semantic_target_source));
+        assert!(unbound_sources.contains(&second_target_source));
+        assert!(!unbound_sources.contains(&third_target_source));
+
+        let after_plan = RecallPlan::infer_with_answer_shape(
+            "What problems did Morgan face after adopting Pip?",
+            AnswerShape::Collection,
+        );
+        let mut after_result = readout_result(&node_ids);
+        let after_group = readout::canonical_event_boundary_source_group(
+            memory.engine().graph().storage(),
+            &after_plan,
+            as_of,
+            &ScopePath::universal(),
+        )
+        .expect("canonical after-event group")
+        .expect("complete after-event group");
+        let after_encoded = readout::encode_represented_event_boundary_source_group(
+            memory.engine().graph().storage(),
+            &after_group,
+            &after_result.trace.readout,
+            DEFAULT_RERANK_CANDIDATE_LIMIT,
+        )
+        .expect("represented after-event group")
+        .expect("after-event group trace");
+        after_result
+            .trace
+            .strategies_used
+            .push("event_boundary_source_group_routing".to_owned());
+        after_result.trace.strategies_used.push(after_encoded);
+        let after_prepared = memory
+            .prepare_rerank_from_search_result_for_plan_at(
+                &after_plan,
+                &after_result,
+                ScopePath::universal(),
+                RerankedRecallOptions::new(20)
+                    .with_candidate_limit(node_ids.len())
+                    .with_adaptive_delivery(false),
+                as_of,
+            )
+            .expect("bound after-event documents");
+        let after_scores = after_prepared
+            .documents()
+            .iter()
+            .enumerate()
+            .map(|(index, document)| {
+                RerankScore::new(index, candidate_score(document.node_id, index))
+            })
+            .collect::<Vec<_>>();
+        let after_bound = memory
+            .complete_prepared_rerank(after_prepared, &after_scores)
+            .expect("bound after-event completion");
+        let after_receipt = after_bound
+            .event_boundary_evidence()
+            .expect("after-event receipt");
+        assert_eq!(after_receipt.direction(), TemporalBoundaryDirection::After);
+        assert!(
+            after_receipt
+                .target_source_node_ids()
+                .contains(&after_target_source)
+        );
+        let after_draft = GroundedAnswerDraft::new(
+            "training",
+            vec![
+                GroundedAnswerItem::new("training", vec![after_target_source])
+                    .with_finding_ids(vec!["training".to_owned()]),
+            ],
+            vec![anchor_source, after_target_source],
+            false,
+        )
+        .with_findings(vec![
+            GroundedEvidenceFinding::new(
+                "anchor",
+                "Morgan adopted Pip.",
+                vec![anchor_source],
+                GroundedFindingDisposition::Premise,
+            ),
+            GroundedEvidenceFinding::new(
+                "training",
+                "Morgan had difficulty with training.",
+                vec![after_target_source],
+                GroundedFindingDisposition::Item,
+            )
+            .with_answer_value("training"),
+        ])
+        .with_reasoning_operator(
+            GroundedReasoningOperator::new(GroundedReasoningOperatorKind::CollectionLedger)
+                .with_inputs(vec![
+                    GroundedOperatorInput::new(
+                        GroundedOperatorInputRole::Premise,
+                        vec!["anchor".to_owned()],
+                    ),
+                    GroundedOperatorInput::new(
+                        GroundedOperatorInputRole::Item,
+                        vec!["training".to_owned()],
+                    ),
+                ])
+                .with_output("training"),
+        );
+        assert!(
+            memory
+                .readout_for_reranked(&after_bound)
+                .expect("after-event readout")
+                .validate_adjudicated_draft(&after_draft)
+                .is_ok()
+        );
+        assert!(
+            memory
+                .render_context_for_reranked(&after_bound)
+                .expect("render after-event roles")
+                .contains("direction=after")
+        );
+
+        let invalidated_prepared = memory
+            .prepare_rerank_from_search_result_for_plan_at(
+                &plan,
+                &result,
+                ScopePath::universal(),
+                RerankedRecallOptions::new(20)
+                    .with_candidate_limit(node_ids.len())
+                    .with_adaptive_delivery(false),
+                as_of,
+            )
+            .expect("prepare event group before source invalidation");
+        let invalidated_scores = invalidated_prepared
+            .documents()
+            .iter()
+            .enumerate()
+            .map(|(index, document)| {
+                RerankScore::new(index, candidate_score(document.node_id, index))
+            })
+            .collect::<Vec<_>>();
+        memory
+            .set_metadata(anchor_source, "retracted", "true")
+            .expect("invalidate prepared boundary anchor");
+        let invalidated = memory
+            .complete_prepared_rerank(invalidated_prepared, &invalidated_scores)
+            .expect("complete after event anchor invalidation");
+        assert!(invalidated.event_boundary_evidence().is_none());
+        let invalidated_readout = memory
+            .readout_for_reranked(&invalidated)
+            .expect("readout after anchor invalidation");
+        let error = invalidated_readout
+            .validate_adjudicated_draft(&bound_draft)
+            .expect_err("invalidated preparation cannot retain event authority");
+        assert!(
+            error
+                .failures
+                .contains(&GroundedDraftValidationFailure::MissingEventBoundaryEvidence)
+        );
+        let options = ContextRenderOptions::with_style(ContextRenderStyle::Evidence);
+        assert_eq!(
+            memory
+                .render_context_for_reranked_with(&invalidated, options)
+                .expect("render receipt-less rerank"),
+            memory
+                .render_context_for_plan_with(&invalidated.plan, &invalidated.recall, options,)
+                .expect("render membership-only control")
+        );
+    }
+
+    #[test]
+    fn prepared_temporal_fact_witness_survives_candidate_fifty_to_final_twenty() {
+        const MAY_8_2023: u64 = 1_683_504_000_000;
+        const DAY_MS: u64 = 86_400_000;
+        let mut memory = mem();
+        let mut node_ids = Vec::new();
+        for index in 0..24 {
+            node_ids.push(
+                memory
+                    .add_source_fragment(SourceFragmentInput::new(
+                        format!("Independent field log {index}."),
+                        Origin {
+                            peer_id: PeerId(0),
+                            source_kind: SourceKind::HumanInput,
+                            session_id: format!("field-log-{index}"),
+                            scope: ScopePath::universal(),
+                            confidence: 0.95,
+                        },
+                        t(MAY_8_2023 + index),
+                    ))
+                    .expect("ordinary field log"),
+            );
+        }
+        let witness_source = memory
+            .add_source_fragment(SourceFragmentInput::new(
+                "Orion pursued a coastal survey.".to_owned(),
+                Origin {
+                    peer_id: PeerId(0),
+                    source_kind: SourceKind::HumanInput,
+                    session_id: "orion-field-session".to_owned(),
+                    scope: ScopePath::universal(),
+                    confidence: 0.95,
+                },
+                t(MAY_8_2023 + 3_600_000),
+            ))
+            .expect("temporal witness source");
+        let fact_id = seed_memory_event_boundary_fact(
+            &mut memory,
+            witness_source,
+            "Orion",
+            "pursued",
+            "a coastal survey",
+            "coastal survey",
+            t(MAY_8_2023),
+        );
+        node_ids.push(witness_source);
+        memory.flush_all().expect("flush temporal witness fixture");
+
+        let plan = RecallPlan::infer_with_answer_shape(
+            "What activity was Orion pursuing on 2023-05-08?",
+            AnswerShape::Fact,
+        );
+        let mut result = readout_result(&node_ids);
+        let marker = readout::AtomicSourceMarker {
+            source_node_id: witness_source,
+            kind_priority: 0,
+            fact_id: Some(fact_id),
+        };
+        result
+            .trace
+            .strategies_used
+            .push("atomic_fact_routing".to_owned());
+        result.trace.strategies_used.push(
+            readout::encode_atomic_source_markers(&[marker])
+                .expect("temporal witness marker trace"),
+        );
+
+        let prepared = memory
+            .prepare_rerank_from_search_result_for_plan_at(
+                &plan,
+                &result,
+                ScopePath::universal(),
+                RerankedRecallOptions::new(20)
+                    .with_candidate_limit(DEFAULT_RERANK_CANDIDATE_LIMIT)
+                    .with_adaptive_delivery(false),
+                t(MAY_8_2023 + DAY_MS),
+            )
+            .expect("bound temporal witness documents");
+        assert_eq!(prepared.document_count(), 25);
+        let scores = prepared
+            .documents()
+            .iter()
+            .enumerate()
+            .map(|(index, document)| {
+                let score = if document.node_id == witness_source {
+                    -100.0
+                } else {
+                    100.0 - index as f64
+                };
+                RerankScore::new(index, score)
+            })
+            .collect::<Vec<_>>();
+        let completed = memory
+            .complete_prepared_rerank(prepared, &scores)
+            .expect("production temporal witness completion");
+        let delivered_sources: HashSet<_> = completed
+            .recall
+            .hits
+            .iter()
+            .flat_map(|hit| {
+                readout::canonical_sources(memory.engine().graph().storage(), hit.node_id)
+                    .expect("delivered temporal sources")
+            })
+            .collect();
+
+        assert_eq!(completed.recall.hits.len(), 20);
+        assert!(
+            delivered_sources.contains(&witness_source),
+            "the revalidated rank-25 witness must survive final20 production selection"
+        );
+    }
+
+    #[test]
+    fn prepared_action_marker_source_survives_multisource_hydration_at_final_cap() {
+        let mut memory = mem();
+        let setup = memory
+            .add(
+                "artifact-dialogue",
+                "technician",
+                "I reviewed the portable device requirements.",
+                t(1),
+            )
+            .expect("action setup")
+            .episodic;
+        let question_receipt = memory
+            .add(
+                "artifact-dialogue",
+                "reviewer",
+                "Which portable device did the technician complete?",
+                t(2),
+            )
+            .expect("action question");
+        let question = question_receipt.episodic;
+        let semantic = question_receipt
+            .finalized_semantic
+            .expect("question-ended semantic window");
+        memory
+            .link_extracted_source(semantic, question)
+            .expect("explicit question provenance for multi-source hydration");
+        let answer = memory
+            .add(
+                "artifact-dialogue",
+                "technician",
+                "The technician built a portable device.",
+                t(3),
+            )
+            .expect("action answer")
+            .episodic;
+        let fact_id = seed_memory_event_boundary_fact(
+            &mut memory,
+            answer,
+            "the technician",
+            "built",
+            "a portable device",
+            "portable device",
+            t(3),
+        );
+
+        let mut fillers = Vec::new();
+        for index in 0..20 {
+            fillers.push(
+                memory
+                    .add_source_fragment(SourceFragmentInput::new(
+                        format!("Independent calibration log {index}."),
+                        Origin {
+                            peer_id: PeerId(0),
+                            source_kind: SourceKind::HumanInput,
+                            session_id: format!("calibration-log-{index}"),
+                            scope: ScopePath::universal(),
+                            confidence: 0.95,
+                        },
+                        t(10 + index),
+                    ))
+                    .expect("calibration filler"),
+            );
+        }
+        memory.flush_all().expect("flush hydrated action fixture");
+
+        let mut readout_ids = fillers.clone();
+        readout_ids.extend([semantic, answer]);
+        let mut result = readout_result(&readout_ids);
+        let marker = readout::AtomicSourceMarker {
+            source_node_id: answer,
+            kind_priority: 4,
+            fact_id: Some(fact_id),
+        };
+        result
+            .trace
+            .strategies_used
+            .push("atomic_fact_routing".to_owned());
+        result.trace.strategies_used.push(
+            readout::encode_atomic_source_markers(&[marker]).expect("hydrated action marker trace"),
+        );
+        let plan = RecallPlan::infer("What kinds of devices has the technician tried to build?");
+        let prepared = memory
+            .prepare_rerank_from_search_result_for_plan_at(
+                &plan,
+                &result,
+                ScopePath::universal(),
+                RerankedRecallOptions::new(DEFAULT_RERANK_FINAL_LIMIT)
+                    .with_candidate_limit(DEFAULT_RERANK_CANDIDATE_LIMIT)
+                    .with_adaptive_delivery(false),
+                t(100),
+            )
+            .expect("prepared hydrated action documents");
+        let action_document = prepared
+            .documents()
+            .iter()
+            .find(|document| document.source_node_ids.contains(&answer))
+            .expect("multi-source action document");
+        assert!(action_document.source_node_ids.contains(&setup));
+        assert!(action_document.source_node_ids.contains(&question));
+        assert!(action_document.source_node_ids.contains(&answer));
+
+        let scores = prepared
+            .documents()
+            .iter()
+            .enumerate()
+            .map(|(index, document)| {
+                let score = if document.source_node_ids.contains(&answer) {
+                    -100.0
+                } else {
+                    100.0 - index as f64
+                };
+                RerankScore::new(index, score)
+            })
+            .collect::<Vec<_>>();
+        let completed = memory
+            .complete_prepared_rerank(prepared, &scores)
+            .expect("hydrated action completion");
+        let readout = memory
+            .readout_for_reranked(&completed)
+            .expect("hydrated action readout");
+        let rendered = memory
+            .render_context_for_reranked(&completed)
+            .expect("render hydrated action evidence");
+
+        assert_eq!(completed.recall.hits.len(), DEFAULT_RERANK_FINAL_LIMIT);
+        assert!(readout.source_node_ids.contains(&answer));
+        assert!(rendered.contains("built a portable device"));
+    }
+
+    #[test]
+    fn prepared_rerank_rejects_changed_scoring_only_dialogue_context() {
+        let mut memory = mem();
+        let question = memory
+            .add(
+                "migration-session",
+                "operator",
+                "What motivated the migration change?",
+                t(10),
+            )
+            .unwrap()
+            .episodic;
+        let answer = memory
+            .add(
+                "migration-session",
+                "maintainer",
+                "The migration reduced repeated failures.",
+                t(11),
+            )
+            .unwrap()
+            .episodic;
+        memory.flush_all().unwrap();
+
+        let result = readout_result(&[question, answer]);
+        let plan = RecallPlan::infer_with_answer_shape(
+            "What motivated the migration change?",
+            AnswerShape::Relationship,
+        );
+        let prepared = memory
+            .prepare_rerank_from_search_result_for_plan_at(
+                &plan,
+                &result,
+                ScopePath::universal(),
+                RerankedRecallOptions::new(2)
+                    .with_candidate_limit(2)
+                    .with_search_limit(2)
+                    .with_adaptive_delivery(false),
+                t(100),
+            )
+            .unwrap();
+        let answer_index = prepared
+            .rerank_texts()
+            .position(|text| {
+                text.contains("Immediate same-session question:")
+                    && text.contains("migration reduced repeated failures")
+            })
+            .expect("answer scoring surface must include the immediate question");
+
+        let temporal_edge = memory
+            .engine()
+            .graph()
+            .edges_from(question)
+            .iter()
+            .copied()
+            .find(|edge_id| {
+                memory
+                    .engine()
+                    .graph()
+                    .get_edge(*edge_id)
+                    .is_ok_and(|edge| edge.edge_type == EdgeType::Temporal && edge.target == answer)
+            })
+            .expect("question-to-answer temporal edge");
+        memory
+            .engine_mut()
+            .graph_mut()
+            .remove_edge(temporal_edge)
+            .unwrap();
+
+        let completed = memory
+            .complete_prepared_rerank(prepared, &[RerankScore::new(answer_index, 10.0)])
+            .unwrap();
+        assert!(completed.ranking.is_empty());
+        assert!(completed.recall.hits.is_empty());
+        assert_eq!(completed.recall.package.total_fragments(), 0);
+    }
+
+    #[test]
+    fn prepared_action_cue_rejects_stale_modality_and_value_kind_before_score_commit() {
+        for (metadata_key, replacement) in [
+            (REVIEWED_DERIVATION_MODALITY_KEY, "planned"),
+            (REVIEWED_DERIVATION_OBJECT_KEY, "a public website"),
+        ] {
+            let mut memory = mem();
+            let source = memory
+                .add_source_fragment(SourceFragmentInput::new(
+                    "The technician built a portable device.".to_owned(),
+                    Origin {
+                        peer_id: PeerId(0),
+                        source_kind: SourceKind::HumanInput,
+                        session_id: format!("action-cue-{metadata_key}"),
+                        scope: ScopePath::universal(),
+                        confidence: 0.95,
+                    },
+                    t(3),
+                ))
+                .expect("action cue source");
+            let fact_id = seed_memory_event_boundary_fact(
+                &mut memory,
+                source,
+                "the technician",
+                "built",
+                "a portable device",
+                "portable device",
+                t(3),
+            );
+            memory.flush_all().expect("flush action cue fixture");
+
+            let mut result = single_readout_result(source);
+            let marker = readout::AtomicSourceMarker {
+                source_node_id: source,
+                kind_priority: 4,
+                fact_id: Some(fact_id),
+            };
+            result
+                .trace
+                .strategies_used
+                .push("atomic_fact_routing".to_owned());
+            result.trace.strategies_used.push(
+                readout::encode_atomic_source_markers(&[marker]).expect("action cue marker trace"),
+            );
+            let plan =
+                RecallPlan::infer("What kinds of devices has the technician tried to build?");
+            let prepared = memory
+                .prepare_rerank_from_search_result_for_plan_at(
+                    &plan,
+                    &result,
+                    ScopePath::universal(),
+                    RerankedRecallOptions::new(1)
+                        .with_candidate_limit(1)
+                        .with_search_limit(1)
+                        .with_adaptive_delivery(false),
+                    t(100),
+                )
+                .expect("prepared action cue");
+            assert_eq!(prepared.document_count(), 1);
+            assert!(
+                prepared
+                    .rerank_texts()
+                    .any(|text| text.contains("Fact: the technician built a portable device"))
+            );
+
+            let mut stale = memory
+                .engine()
+                .graph()
+                .storage()
+                .get_atomic_fact(fact_id)
+                .expect("prepared action fact")
+                .clone();
+            stale
+                .metadata
+                .insert(metadata_key.to_owned(), replacement.to_owned());
+            memory
+                .engine_mut()
+                .graph_mut()
+                .storage_mut()
+                .set_atomic_fact(stale)
+                .expect("stale action fact updates");
+
+            let completed = memory
+                .complete_prepared_rerank(prepared, &[RerankScore::new(0, 10.0)])
+                .expect("stale action cue completion");
+            assert!(completed.ranking.is_empty(), "metadata key: {metadata_key}");
+            assert!(
+                completed.recall.hits.is_empty(),
+                "metadata key: {metadata_key}"
+            );
+            assert_eq!(
+                completed.recall.package.total_fragments(),
+                0,
+                "metadata key: {metadata_key}"
+            );
+        }
+    }
+
+    #[test]
+    fn prepared_rerank_never_exposes_cross_scope_native_semantic_context() {
+        let mut memory = mem();
+        let accepted_scope = ScopePath::new("workspace/accepted").unwrap();
+        let private_scope = ScopePath::new("workspace/private").unwrap();
+        memory
+            .add_in_scope(
+                "scope-transition",
+                "maintainer",
+                "accepted release evidence",
+                t(10),
+                accepted_scope.clone(),
+            )
+            .unwrap();
+        let private_source = memory
+            .add_in_scope(
+                "scope-transition",
+                "reviewer",
+                "private unreleased migration detail",
+                t(11),
+                private_scope,
+            )
+            .unwrap();
+        let semantic = private_source.finalized_semantic.unwrap();
+        assert!(
+            memory
+                .engine()
+                .graph()
+                .get_node(semantic)
+                .unwrap()
+                .content
+                .contains("private unreleased migration detail")
+        );
+
+        for answer_shape in [AnswerShape::Collection, AnswerShape::Fact] {
+            let plan = RecallPlan::infer_with_answer_shape(
+                "Which release evidence is accepted?",
+                answer_shape,
+            );
+            let prepared = memory
+                .prepare_rerank_from_search_result_for_plan_at(
+                    &plan,
+                    &single_readout_result(semantic),
+                    accepted_scope.clone(),
+                    RerankedRecallOptions::new(4)
+                        .with_candidate_limit(4)
+                        .with_scope(accepted_scope.clone()),
+                    t(100),
+                )
+                .unwrap();
+            assert_eq!(prepared.document_count(), 0);
+            assert!(
+                prepared
+                    .rerank_texts()
+                    .all(|text| !text.contains("private unreleased migration detail"))
+            );
+
+            let completed = memory.complete_prepared_rerank(prepared, &[]).unwrap();
+            assert!(completed.ranking.is_empty());
+            assert!(completed.recall.hits.is_empty());
+            assert_eq!(completed.recall.package.total_fragments(), 0);
+        }
+    }
+
+    #[test]
+    fn prepared_rerank_rejects_retracted_native_semantic_neighbor() {
+        let mut memory = mem();
+        memory
+            .add(
+                "retraction-window",
+                "maintainer",
+                "the release report is ready",
+                t(10),
+            )
+            .unwrap();
+        let next = memory
+            .add(
+                "retraction-window",
+                "reviewer",
+                "the reviewer approved the report",
+                t(11),
+            )
+            .unwrap();
+        let semantic = next.finalized_semantic.unwrap();
+        let plan = RecallPlan::infer_with_answer_shape(
+            "Which report did the reviewer approve?",
+            AnswerShape::Collection,
+        );
+        let prepared = memory
+            .prepare_rerank_from_search_result_for_plan_at(
+                &plan,
+                &single_readout_result(semantic),
+                ScopePath::universal(),
+                RerankedRecallOptions::new(4).with_candidate_limit(4),
+                t(100),
+            )
+            .unwrap();
+        assert_eq!(prepared.document_count(), 1);
+        assert!(
+            prepared.evidence[0]
+                .scoring_source_node_ids()
+                .contains(&next.episodic)
+        );
+        assert!(
+            prepared
+                .rerank_texts()
+                .any(|text| text.contains("the reviewer approved the report"))
+        );
+
+        memory
+            .set_metadata(next.episodic, "retracted", "true")
+            .unwrap();
+        let completed = memory
+            .complete_prepared_rerank(prepared, &[RerankScore::new(0, 1.0)])
+            .unwrap();
+        assert!(completed.ranking.is_empty());
+        assert!(completed.recall.hits.is_empty());
+        assert_eq!(completed.recall.package.total_fragments(), 0);
+    }
+
+    #[test]
+    fn prepared_rerank_rejects_changed_native_semantic_neighbor() {
+        let mut memory = mem();
+        memory
+            .add(
+                "changed-window",
+                "maintainer",
+                "the compatibility report is ready",
+                t(10),
+            )
+            .unwrap();
+        let next = memory
+            .add(
+                "changed-window",
+                "reviewer",
+                "the reviewer accepted the compatibility report",
+                t(11),
+            )
+            .unwrap();
+        let semantic = next.finalized_semantic.unwrap();
+        let plan = RecallPlan::infer_with_answer_shape(
+            "Which compatibility report was accepted?",
+            AnswerShape::Collection,
+        );
+        let prepared = memory
+            .prepare_rerank_from_search_result_for_plan_at(
+                &plan,
+                &single_readout_result(semantic),
+                ScopePath::universal(),
+                RerankedRecallOptions::new(4).with_candidate_limit(4),
+                t(100),
+            )
+            .unwrap();
+        assert_eq!(prepared.document_count(), 1);
+        assert!(
+            prepared.evidence[0]
+                .scoring_source_node_ids()
+                .contains(&next.episodic)
+        );
+
+        let mut changed = memory
+            .engine()
+            .graph()
+            .get_node(next.episodic)
+            .unwrap()
+            .clone();
+        changed.content = "reviewer: the decision is still pending".to_owned();
+        memory
+            .engine_mut()
+            .graph_mut()
+            .storage_mut()
+            .set_node(changed)
+            .unwrap();
+
+        let completed = memory
+            .complete_prepared_rerank(prepared, &[RerankScore::new(0, 1.0)])
+            .unwrap();
+        assert!(completed.ranking.is_empty());
+        assert!(completed.recall.hits.is_empty());
+        assert_eq!(completed.recall.package.total_fragments(), 0);
+    }
+
+    #[test]
+    fn prepared_rerank_requires_complete_nonzero_options() {
+        let mut memory = mem();
+        let plan = RecallPlan::infer("What is the prepared record?");
+        assert!(matches!(
+            memory.prepare_rerank_for_plan_at(
+                &plan,
+                RerankedRecallOptions::new(1).with_search_limit(0),
+                t(100),
+            ),
+            Err(Error::InvalidInput(message)) if message.contains("search limit")
+        ));
+        assert!(matches!(
+            memory.prepare_rerank_for_plan_at(
+                &plan,
+                RerankedRecallOptions::new(1),
+                Timestamp(0),
+            ),
+            Err(Error::InvalidInput(message)) if message.contains("timestamp")
+        ));
     }
 
     #[test]
@@ -5846,6 +10088,8 @@ mod tests {
                     .unwrap()
                     .unwrap(),
             ],
+            scoring_sources: Vec::new(),
+            representative_text_is_bound: false,
         };
         assert!(
             !bound_evidence_document_is_eligible(
@@ -5887,6 +10131,8 @@ mod tests {
         let non_raw_document = BoundEvidenceDocument {
             representative: semantic_binding.clone(),
             sources: vec![semantic_binding],
+            scoring_sources: Vec::new(),
+            representative_text_is_bound: false,
         };
         assert!(
             !bound_evidence_document_is_eligible(
@@ -6140,7 +10386,7 @@ mod tests {
     }
 
     #[test]
-    fn inference_rerank_documents_keep_semantic_representatives() {
+    fn inference_rerank_documents_use_a_semantic_representative_with_raw_sources() {
         let mut m = mem();
         let first = m
             .add(
@@ -6175,16 +10421,71 @@ mod tests {
             .unwrap();
         let representative = documents
             .iter()
-            .find(|document| {
-                document.source_node_ids.contains(&first.episodic)
-                    && m.get(document.node_id)
-                        .is_ok_and(|node| node.node_type == KnowledgeType::Semantic)
-            })
+            .find(|document| document.source_node_ids.contains(&first.episodic))
             .unwrap();
         let node = m.get(representative.node_id).unwrap();
 
         assert_eq!(node.node_type, KnowledgeType::Semantic);
+        assert_eq!(representative.rerank_text(), node.content);
+        for source_node_id in &representative.source_node_ids {
+            let source = m.get(*source_node_id).unwrap();
+            assert_eq!(source.node_type, KnowledgeType::Episodic);
+            assert!(representative.text.contains(&source.content));
+        }
         assert!(representative.text.contains("repaired the blue bicycle"));
+    }
+
+    #[test]
+    fn collection_rerank_documents_use_a_semantic_representative_with_raw_sources() {
+        let mut m = mem();
+        let first = m
+            .add(
+                "writing-session",
+                "alice",
+                "I write poems to relax after difficult days",
+                t(1),
+            )
+            .unwrap();
+        m.add(
+            "writing-session",
+            "bob",
+            "That writing habit also helps you process difficult experiences",
+            t(2),
+        )
+        .unwrap();
+        m.flush_all().unwrap();
+
+        let query = "What kind of writing does Alice do to relax?";
+        assert_eq!(
+            RecallPlan::infer(query).answer_shape,
+            AnswerShape::Collection
+        );
+        let result = m
+            .search_result_at_with(
+                query,
+                20,
+                t(100),
+                &SearchTuning {
+                    seed_limit: Some(20),
+                    entity_tags: Vec::new(),
+                },
+            )
+            .unwrap();
+        let documents = m.rerank_documents(query, &result, 20).unwrap();
+        let representative = documents
+            .iter()
+            .find(|document| document.source_node_ids.contains(&first.episodic))
+            .unwrap();
+        let node = m.get(representative.node_id).unwrap();
+
+        assert_eq!(node.node_type, KnowledgeType::Semantic);
+        assert_eq!(representative.rerank_text(), node.content);
+        for source_node_id in &representative.source_node_ids {
+            let source = m.get(*source_node_id).unwrap();
+            assert_eq!(source.node_type, KnowledgeType::Episodic);
+            assert!(representative.text.contains(&source.content));
+        }
+        assert!(representative.text.contains("write poems to relax"));
     }
 
     #[test]
@@ -6919,6 +11220,359 @@ mod tests {
             !fact.content.contains("private discussion"),
             "the richer evidence surface is embedding-only"
         );
+    }
+
+    fn reviewed_derivation_input(source: NodeId, idempotency_key: &str) -> ReviewedDerivationInput {
+        ReviewedDerivationInput::new(
+            RoutingProposition::new("Alice", "media:read-author", "Ursula K. Le Guin")
+                .with_value_kind("person")
+                .with_polarity(DerivationPolarity::Affirmed)
+                .with_modality(DerivationModality::Inferred),
+            "Alice has read books by author Ursula K. Le Guin",
+            vec![source],
+            ReviewProvenance::new("reviewer:test", "public-bridge:v1", t(2), idempotency_key),
+        )
+        .with_entity_tags(vec!["Alice".to_owned(), "Ursula K. Le Guin".to_owned()])
+        .with_metadata(vec![("consumer:run".to_owned(), "run-1".to_owned())])
+    }
+
+    #[test]
+    fn reviewed_derivation_admission_stamps_typed_review_provenance() {
+        let mut memory = mem();
+        let source = memory
+            .add(
+                "session",
+                "Alice",
+                "The Left Hand of Darkness is one of my favorite books",
+                t(1),
+            )
+            .expect("raw premise")
+            .episodic;
+        memory.flush_all().expect("flush raw premise");
+
+        let fact_id = memory
+            .add_reviewed_derivation(reviewed_derivation_input(source, "bridge:alice-le-guin"))
+            .expect("reviewed derivation");
+        let fact = memory
+            .engine()
+            .graph()
+            .storage()
+            .get_atomic_fact(fact_id)
+            .expect("stored reviewed derivation");
+
+        assert_eq!(
+            fact.content,
+            "Alice has read books by author Ursula K. Le Guin"
+        );
+        assert_eq!(fact.source_node_ids, vec![source]);
+        assert_eq!(
+            fact.metadata.get(REVIEWED_DERIVATION_SCHEMA_KEY),
+            Some(&"reviewed-routing-v1".to_owned())
+        );
+        assert_eq!(
+            fact.metadata.get(REVIEWED_DERIVATION_SUBJECT_KEY),
+            Some(&"Alice".to_owned())
+        );
+        assert_eq!(
+            fact.metadata.get(REVIEWED_DERIVATION_PREDICATE_KEY),
+            Some(&"media:read-author".to_owned())
+        );
+        assert_eq!(
+            fact.metadata.get(REVIEWED_DERIVATION_OBJECT_KEY),
+            Some(&"Ursula K. Le Guin".to_owned())
+        );
+        assert_eq!(
+            fact.metadata.get(REVIEWED_DERIVATION_VALUE_KIND_KEY),
+            Some(&"person".to_owned())
+        );
+        assert_eq!(
+            fact.metadata.get(REVIEWED_DERIVATION_POLARITY_KEY),
+            Some(&"affirmed".to_owned())
+        );
+        assert_eq!(
+            fact.metadata.get(REVIEWED_DERIVATION_MODALITY_KEY),
+            Some(&"inferred".to_owned())
+        );
+        assert_eq!(
+            fact.metadata.get(REVIEWED_DERIVATION_REVIEWED_BY_KEY),
+            Some(&"reviewer:test".to_owned())
+        );
+        assert_eq!(
+            fact.metadata.get(REVIEWED_DERIVATION_REVIEW_PROFILE_KEY),
+            Some(&"public-bridge:v1".to_owned())
+        );
+        assert_eq!(
+            fact.metadata.get(REVIEWED_DERIVATION_REVIEWED_AT_KEY),
+            Some(&"2".to_owned())
+        );
+        assert_eq!(
+            fact.metadata.get(REVIEWED_DERIVATION_IDEMPOTENCY_KEY),
+            Some(&"bridge:alice-le-guin".to_owned())
+        );
+        assert_eq!(fact.metadata.get("consumer:run"), Some(&"run-1".to_owned()));
+        assert_eq!(memory.atomic_fact_count(), 1);
+    }
+
+    #[test]
+    fn reviewed_derivation_is_idempotent_without_reembedding_and_conflicts_fail() {
+        let (mut memory, calls) = recording_mem();
+        let source = memory
+            .add(
+                "session",
+                "Alice",
+                "The Left Hand of Darkness is one of my favorite books",
+                t(1),
+            )
+            .expect("raw premise")
+            .episodic;
+        memory.flush_all().expect("flush raw premise");
+        calls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+
+        let input = reviewed_derivation_input(source, "bridge:idempotent");
+        let first = memory
+            .add_reviewed_derivation(input.clone())
+            .expect("first admission");
+        let repeated = memory
+            .add_reviewed_derivation(input)
+            .expect("idempotent retry");
+        assert_eq!(first, repeated);
+        assert_eq!(memory.atomic_fact_count(), 1);
+        assert_eq!(
+            calls
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_slice(),
+            [(
+                "passage",
+                "Alice has read books by author Ursula K. Le Guin".to_owned()
+            )],
+            "an idempotent retry must not invoke the embedding provider again"
+        );
+
+        let mut conflicting = reviewed_derivation_input(source, "bridge:idempotent");
+        conflicting.proposition.object = "Octavia E. Butler".to_owned();
+        conflicting.search_projection = "Alice has read books by Octavia E. Butler".to_owned();
+        assert!(
+            memory.add_reviewed_derivation(conflicting).is_err(),
+            "one retry key cannot authorize different derivation content"
+        );
+        assert_eq!(memory.atomic_fact_count(), 1);
+    }
+
+    #[test]
+    fn atomic_fact_input_cannot_spoof_reviewed_derivation_authority() {
+        let mut memory = mem();
+        let source = memory
+            .add("session", "Alice", "raw premise", t(1))
+            .expect("raw premise")
+            .episodic;
+        memory.flush_all().expect("flush raw premise");
+
+        let spoof = AtomicFactInput::new("fabricated bridge", vec![source]).with_metadata(vec![(
+            REVIEWED_DERIVATION_REVIEWED_BY_KEY.to_owned(),
+            "self-authorized".to_owned(),
+        )]);
+        assert!(memory.add_atomic_fact(spoof).is_err());
+        assert_eq!(memory.atomic_fact_count(), 0);
+    }
+
+    #[test]
+    fn reviewed_derivation_rejects_ambiguous_or_engine_owned_metadata() {
+        let mut memory = mem();
+        let source = memory
+            .add("session", "Alice", "raw premise", t(1))
+            .expect("raw premise")
+            .episodic;
+        memory.flush_all().expect("flush raw premise");
+
+        let invalid_metadata = [
+            vec![
+                ("consumer:key".to_owned(), "first".to_owned()),
+                ("consumer:key".to_owned(), "second".to_owned()),
+            ],
+            vec![(" consumer:key".to_owned(), "value".to_owned())],
+            vec![(
+                REVIEWED_DERIVATION_REVIEWED_BY_KEY.to_owned(),
+                "self-authorized".to_owned(),
+            )],
+            vec![(
+                "anamnesis:evidence-object".to_owned(),
+                "fabricated rerank cue".to_owned(),
+            )],
+            vec![(
+                crate::storage::NODE_INCARNATION_METADATA_KEY.to_owned(),
+                "forged".to_owned(),
+            )],
+            vec![(
+                crate::storage::atomic_source_incarnation_key(source),
+                "forged".to_owned(),
+            )],
+        ];
+        for (index, metadata) in invalid_metadata.into_iter().enumerate() {
+            let input = reviewed_derivation_input(source, &format!("bridge:metadata:{index}"))
+                .with_metadata(metadata);
+            assert!(memory.add_reviewed_derivation(input).is_err());
+        }
+        assert_eq!(memory.atomic_fact_count(), 0);
+    }
+
+    #[test]
+    fn reviewed_derivation_projection_never_enters_reader_evidence() {
+        const ROUTING_ONLY_SENTINEL: &str = "zxqvbridge";
+
+        let mut memory = mem();
+        let source = memory
+            .add(
+                "session",
+                "Alice",
+                "The Left Hand of Darkness is one of my favorite books",
+                t(1),
+            )
+            .expect("raw premise")
+            .episodic;
+        memory.flush_all().expect("flush raw premise");
+        let mut input = reviewed_derivation_input(source, "bridge:routing-only");
+        input.search_projection =
+            format!("{ROUTING_ONLY_SENTINEL} connects Alice to Ursula K. Le Guin");
+        memory
+            .add_reviewed_derivation(input)
+            .expect("reviewed derivation");
+
+        let recall = memory
+            .search_at(
+                "Why does zxqvbridge connect Alice to Ursula K. Le Guin?",
+                8,
+                t(100),
+            )
+            .expect("route through reviewed derivation");
+        assert!(recall.hits.iter().any(|hit| hit.node_id == source));
+        assert!(
+            recall
+                .hits
+                .iter()
+                .all(|hit| !hit.text.contains(ROUTING_ONLY_SENTINEL))
+        );
+        assert!(!recall.as_context().contains(ROUTING_ONLY_SENTINEL));
+    }
+
+    #[test]
+    fn reviewed_derivation_is_not_routable_before_its_review_time() {
+        const ROUTING_ONLY_SENTINEL: &str = "zxqvreviewclock";
+
+        let mut memory = mem();
+        let source = memory
+            .add("session", "Alice", "an unrelated raw premise", t(1))
+            .expect("raw premise")
+            .episodic;
+        memory.flush_all().expect("flush raw premise");
+        let mut input = reviewed_derivation_input(source, "bridge:review-clock");
+        input.search_projection = ROUTING_ONLY_SENTINEL.to_owned();
+        input.review.reviewed_at = t(10);
+        let fact_id = memory
+            .add_reviewed_derivation(input)
+            .expect("reviewed derivation");
+        let fact = memory
+            .engine()
+            .graph()
+            .storage()
+            .get_atomic_fact(fact_id)
+            .expect("stored reviewed derivation");
+        assert_eq!(fact.observed_at, t(10));
+
+        let before_review = memory
+            .search_result_at_with_diagnostics(
+                "Why zxqvreviewclock?",
+                8,
+                t(9),
+                &SearchTuning::default(),
+                &SearchDiagnostics::with_readout_trace_limit(20),
+            )
+            .expect("historical read before review");
+        assert!(
+            !before_review
+                .trace
+                .strategies_used
+                .iter()
+                .any(|strategy| strategy == "atomic_fact_routing")
+        );
+
+        let at_review = memory
+            .search_result_at_with_diagnostics(
+                "Why zxqvreviewclock?",
+                8,
+                t(10),
+                &SearchTuning::default(),
+                &SearchDiagnostics::with_readout_trace_limit(20),
+            )
+            .expect("read at review time");
+        assert!(
+            at_review
+                .trace
+                .strategies_used
+                .iter()
+                .any(|strategy| strategy == "atomic_fact_routing")
+        );
+    }
+
+    #[test]
+    fn reviewed_derivation_requires_complete_review_provenance() {
+        let mut memory = mem();
+        let source = memory
+            .add("session", "Alice", "raw premise", t(1))
+            .expect("raw premise")
+            .episodic;
+        memory.flush_all().expect("flush raw premise");
+
+        for (reviewed_by, review_profile, idempotency_key) in [
+            ("", "profile", "key-1"),
+            ("reviewer", "", "key-2"),
+            ("reviewer", "profile", ""),
+        ] {
+            let mut input = reviewed_derivation_input(source, idempotency_key);
+            input.review.reviewed_by = reviewed_by.to_owned();
+            input.review.review_profile = review_profile.to_owned();
+            input.review.idempotency_key = idempotency_key.to_owned();
+            assert!(memory.add_reviewed_derivation(input).is_err());
+        }
+        assert_eq!(memory.atomic_fact_count(), 0);
+    }
+
+    #[test]
+    fn reviewed_derivation_rejects_sources_not_live_at_review_time() {
+        let mut future_memory = mem();
+        let future_source = future_memory
+            .add("session", "Alice", "future premise", t(10))
+            .expect("future premise")
+            .episodic;
+        future_memory.flush_all().expect("flush future premise");
+        let mut future_input = reviewed_derivation_input(future_source, "bridge:future");
+        future_input.review.reviewed_at = t(9);
+        assert!(future_memory.add_reviewed_derivation(future_input).is_err());
+        assert_eq!(future_memory.atomic_fact_count(), 0);
+
+        let mut retracted_memory = mem();
+        let retracted_source = retracted_memory
+            .add("session", "Alice", "retracted premise", t(1))
+            .expect("retracted premise")
+            .episodic;
+        retracted_memory
+            .flush_all()
+            .expect("flush retracted premise");
+        retracted_memory
+            .set_metadata(retracted_source, "retracted", "true")
+            .expect("retract source");
+        assert!(
+            retracted_memory
+                .add_reviewed_derivation(reviewed_derivation_input(
+                    retracted_source,
+                    "bridge:retracted",
+                ))
+                .is_err()
+        );
+        assert_eq!(retracted_memory.atomic_fact_count(), 0);
     }
 
     #[test]
@@ -8015,6 +12669,370 @@ mod tests {
                 "How are Alice and the bookshelf picture related?"
             ))
         );
+    }
+
+    #[test]
+    fn modal_named_target_focus_preserves_strong_preference_and_later_fulfillment() {
+        let origin = Origin {
+            peer_id: PeerId(9),
+            source_kind: SourceKind::AgentObservation,
+            session_id: "endorsement-history".to_owned(),
+            scope: ScopePath::universal(),
+            confidence: 1.0,
+        };
+        let fulfillment = "Rowan: Last week I landed a partnership deal with a renowned outdoor equipment company.";
+        let strong_preference =
+            "Rowan: I've always liked Alpine Forge; working with them would be really exciting.";
+        let generic_list =
+            "Rowan: I am currently considering brands like Summit Works and Alpine Forge.";
+        let rows = [
+            (NodeId(401), fulfillment, Timestamp(200), 0.95),
+            (NodeId(402), generic_list, Timestamp(80), 0.94),
+            (
+                NodeId(403),
+                "Rowan: The outdoor equipment partnership discussion covered product testing.",
+                Timestamp(160),
+                0.93,
+            ),
+            (
+                NodeId(404),
+                "Rowan: The outdoor equipment company requested a forest photo session.",
+                Timestamp(170),
+                0.92,
+            ),
+            (
+                NodeId(405),
+                "Rowan: The partnership paperwork included a launch calendar.",
+                Timestamp(175),
+                0.91,
+            ),
+            (
+                NodeId(406),
+                "Rowan: The outdoor equipment samples included a weatherproof pack.",
+                Timestamp(180),
+                0.90,
+            ),
+            (
+                NodeId(407),
+                "Rowan: The company arranged a product photography schedule.",
+                Timestamp(185),
+                0.89,
+            ),
+            (
+                NodeId(408),
+                "Rowan: The partnership launch involved a trail demonstration.",
+                Timestamp(190),
+                0.88,
+            ),
+            (
+                NodeId(409),
+                "Rowan: The outdoor company provided several equipment samples.",
+                Timestamp(195),
+                0.87,
+            ),
+            (NodeId(410), strong_preference, Timestamp(100), 0.05),
+        ];
+        let mut package = ContextPackage::empty();
+        let mut times = HashMap::new();
+        for (node_id, text, observed_at, relevance) in rows {
+            package.memories.push(Fragment {
+                node_id,
+                name: format!("raw source {}", node_id.0),
+                summary: None,
+                content: Some(text.to_owned()),
+                node_type: KnowledgeType::Episodic,
+                relevance,
+                origin: origin.clone(),
+            });
+            times.insert(
+                node_id,
+                FragmentTime {
+                    observed_at,
+                    valid_from: None,
+                    valid_until: None,
+                },
+            );
+        }
+        package.token_usage.total = 4_000;
+        let plan = RecallPlan::infer(
+            "Which outdoor equipment company likely signed Rowan for a partnership?",
+        );
+        assert_eq!(plan.answer_shape, AnswerShape::Inference);
+        assert_eq!(
+            plan.reader_contract().requested_answer_spec().modality(),
+            RequestedAnswerModality::Likely
+        );
+
+        let focused = query_focused_raw_evidence(&package, &times, &HashMap::new(), &plan, 4_000)
+            .expect("modal identity evidence focus");
+        let evidence_lines = focused
+            .lines()
+            .filter(|line| line.starts_with("- [source=node:"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(evidence_lines.len(), query_focus_line_limit(&plan));
+        assert!(evidence_lines[0].contains(fulfillment));
+        assert!(evidence_lines[1].contains(strong_preference));
+        assert!(focused.contains(generic_list));
+        assert!(query_focus_preference_signal(generic_list).is_none());
+    }
+
+    fn modal_bridge_test_candidate(
+        node_id: u64,
+        text: &str,
+        observed_at: u64,
+        peer_id: u64,
+        scope: &str,
+    ) -> QueryFocusedCandidate {
+        QueryFocusedCandidate {
+            evidence: FocusedEvidence {
+                source_node_id: NodeId(node_id),
+                observed_at: Timestamp(observed_at),
+                session_id: format!("session-{node_id}"),
+                text: text.to_owned(),
+            },
+            peer_id: PeerId(peer_id),
+            scope: ScopePath::new(scope).expect("test scope"),
+            lexical_overlap: 0,
+            dialogue_reply_overlap: 0,
+            link_terms: HashSet::new(),
+            value_terms: HashSet::new(),
+            information_terms: HashSet::new(),
+            semantic_windows: HashSet::new(),
+            temporal_alignment: 0,
+            temporal_distance_ms: u64::MAX,
+            relevance: 0.0,
+            fragment_order: node_id as usize,
+            line_order: 0,
+        }
+    }
+
+    fn modal_bridge_test_plan() -> RecallPlan {
+        RecallPlan::infer("Which outdoor equipment company likely signed Rowan for a partnership?")
+    }
+
+    const MODAL_BRIDGE_TEST_PREFERENCE: &str =
+        "Rowan: I've always liked Alpine Forge; working with them would be really exciting.";
+    const MODAL_BRIDGE_TEST_FULFILLMENT: &str =
+        "Rowan: Recently, I landed a partnership deal with a renowned outdoor equipment company.";
+
+    #[test]
+    fn modal_bridge_requires_the_exact_query_owner() {
+        let candidates = [
+            modal_bridge_test_candidate(
+                1,
+                "Morgan: I've always liked Alpine Forge; working with them would be exciting.",
+                100,
+                1,
+                "workspace/a",
+            ),
+            modal_bridge_test_candidate(
+                2,
+                "Morgan: I landed a partnership deal with an outdoor equipment company.",
+                200,
+                1,
+                "workspace/a",
+            ),
+        ];
+
+        assert!(query_focus_modal_bridge(&candidates, &modal_bridge_test_plan()).is_none());
+    }
+
+    #[test]
+    fn modal_bridge_requires_matching_peer_and_scope_provenance() {
+        let preference =
+            modal_bridge_test_candidate(1, MODAL_BRIDGE_TEST_PREFERENCE, 100, 1, "workspace/a");
+        let different_peer =
+            modal_bridge_test_candidate(2, MODAL_BRIDGE_TEST_FULFILLMENT, 200, 2, "workspace/a");
+        assert!(
+            query_focus_modal_bridge(&[preference, different_peer], &modal_bridge_test_plan())
+                .is_none()
+        );
+
+        let preference =
+            modal_bridge_test_candidate(3, MODAL_BRIDGE_TEST_PREFERENCE, 100, 1, "workspace/a");
+        let different_scope =
+            modal_bridge_test_candidate(4, MODAL_BRIDGE_TEST_FULFILLMENT, 200, 1, "workspace/b");
+        assert!(
+            query_focus_modal_bridge(&[preference, different_scope], &modal_bridge_test_plan())
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn modal_bridge_rejects_negated_cancelled_and_corrected_preferences() {
+        for (index, preference) in [
+            "Rowan: I prefer not to work with Alpine Forge.",
+            "Rowan: I want to work with Alpine Forge, but that plan is cancelled.",
+            "Rowan: I've always liked Alpine Forge, but now I changed my mind about working with them.",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let candidates = [
+                modal_bridge_test_candidate(
+                    index as u64 + 1,
+                    preference,
+                    100,
+                    1,
+                    "workspace/a",
+                ),
+                modal_bridge_test_candidate(
+                    index as u64 + 10,
+                    MODAL_BRIDGE_TEST_FULFILLMENT,
+                    200,
+                    1,
+                    "workspace/a",
+                ),
+            ];
+            assert!(
+                query_focus_modal_bridge(&candidates, &modal_bridge_test_plan()).is_none(),
+                "unsafe preference was admitted: {preference}"
+            );
+        }
+    }
+
+    #[test]
+    fn modal_bridge_disables_ambiguous_competing_candidate_identities() {
+        let candidates = [
+            modal_bridge_test_candidate(1, MODAL_BRIDGE_TEST_PREFERENCE, 100, 1, "workspace/a"),
+            modal_bridge_test_candidate(
+                2,
+                "Rowan: I really like Summit Works; working with them would be exciting.",
+                150,
+                1,
+                "workspace/a",
+            ),
+            modal_bridge_test_candidate(3, MODAL_BRIDGE_TEST_FULFILLMENT, 200, 1, "workspace/a"),
+        ];
+
+        assert!(query_focus_modal_bridge(&candidates, &modal_bridge_test_plan()).is_none());
+    }
+
+    #[test]
+    fn modal_bridge_prefers_the_most_recent_repetition_of_one_candidate() {
+        let candidates = [
+            modal_bridge_test_candidate(1, MODAL_BRIDGE_TEST_PREFERENCE, 100, 1, "workspace/a"),
+            modal_bridge_test_candidate(
+                2,
+                "Rowan: I'd like to work with Alpine Forge on a partnership.",
+                150,
+                1,
+                "workspace/a",
+            ),
+            modal_bridge_test_candidate(3, MODAL_BRIDGE_TEST_FULFILLMENT, 200, 1, "workspace/a"),
+        ];
+
+        let bridge = query_focus_modal_bridge(&candidates, &modal_bridge_test_plan())
+            .expect("one repeated identity remains unambiguous");
+        assert_eq!(bridge.preference_index, 1);
+    }
+
+    #[test]
+    fn modal_bridge_requires_the_query_relation_on_both_passages() {
+        let plan = RecallPlan::infer("Which software company likely hired Rowan?");
+        let candidates = [
+            modal_bridge_test_candidate(1, MODAL_BRIDGE_TEST_PREFERENCE, 100, 1, "workspace/a"),
+            modal_bridge_test_candidate(
+                2,
+                "Rowan: I got a job at a software company.",
+                200,
+                1,
+                "workspace/a",
+            ),
+        ];
+
+        assert!(query_focus_modal_bridge(&candidates, &plan).is_none());
+    }
+
+    #[test]
+    fn modal_bridge_ignores_sentence_initial_common_words_as_entities() {
+        assert!(
+            query_focus_named_identities(
+                "Recently, I landed a partnership deal with a renowned outdoor equipment company."
+            )
+            .is_empty()
+        );
+        let candidates = [
+            modal_bridge_test_candidate(1, MODAL_BRIDGE_TEST_PREFERENCE, 100, 1, "workspace/a"),
+            modal_bridge_test_candidate(2, MODAL_BRIDGE_TEST_FULFILLMENT, 200, 1, "workspace/a"),
+        ];
+
+        assert!(query_focus_modal_bridge(&candidates, &modal_bridge_test_plan()).is_some());
+    }
+
+    #[test]
+    fn modal_named_target_focus_does_not_bridge_another_owners_preference() {
+        let rowan_origin = Origin {
+            peer_id: PeerId(9),
+            source_kind: SourceKind::AgentObservation,
+            session_id: "endorsement-history".to_owned(),
+            scope: ScopePath::universal(),
+            confidence: 1.0,
+        };
+        let fulfillment = "Rowan: Last week I landed a partnership deal with a renowned outdoor equipment company.";
+        let unrelated_preference =
+            "Morgan: I've always liked Cedar Studio; working with them would be really exciting.";
+        let mut package = ContextPackage::empty();
+        let mut times = HashMap::new();
+        for index in 0..9u64 {
+            let node_id = NodeId(451 + index);
+            let text = if index == 0 {
+                fulfillment.to_owned()
+            } else {
+                format!(
+                    "Rowan: Outdoor equipment partnership detail {index} covered a distinct launch task."
+                )
+            };
+            package.memories.push(Fragment {
+                node_id,
+                name: format!("rowan source {index}"),
+                summary: None,
+                content: Some(text),
+                node_type: KnowledgeType::Episodic,
+                relevance: 1.0 - index as f64 / 100.0,
+                origin: rowan_origin.clone(),
+            });
+            times.insert(
+                node_id,
+                FragmentTime {
+                    observed_at: Timestamp(200 + index),
+                    valid_from: None,
+                    valid_until: None,
+                },
+            );
+        }
+        let other_id = NodeId(499);
+        package.memories.push(Fragment {
+            node_id: other_id,
+            name: "other owner preference".to_owned(),
+            summary: None,
+            content: Some(unrelated_preference.to_owned()),
+            node_type: KnowledgeType::Episodic,
+            relevance: 0.01,
+            origin: Origin {
+                session_id: "other-history".to_owned(),
+                ..rowan_origin
+            },
+        });
+        times.insert(
+            other_id,
+            FragmentTime {
+                observed_at: Timestamp(100),
+                valid_from: None,
+                valid_until: None,
+            },
+        );
+        package.token_usage.total = 4_000;
+        let plan = RecallPlan::infer(
+            "Which outdoor equipment company likely signed Rowan for a partnership?",
+        );
+
+        let focused = query_focused_raw_evidence(&package, &times, &HashMap::new(), &plan, 4_000)
+            .expect("same-owner modal evidence focus");
+
+        assert!(focused.contains(fulfillment));
+        assert!(!focused.contains(unrelated_preference));
     }
 
     #[test]

@@ -11,7 +11,7 @@ use anamnesis::embedding::RerankingProvider;
 use anamnesis::graph::{EdgeType, KnowledgeType, NodeId, ScopePath, Timestamp, valid_at};
 use anamnesis::memory::{
     CognitiveRecallScore, ContextRenderOptions, ContextRenderStyle, Direction, Hit, Recall,
-    RerankedRecallOptions,
+    RecallPlan, RerankedRecall, RerankedRecallOptions,
 };
 use anamnesis::query::assembly::estimate_tokens;
 use anamnesis::query::{AccessedSite, Fragment};
@@ -197,9 +197,7 @@ pub(crate) fn mem_recall_packaged_gated(
     let output = mem.search_reranked(query, reranker, RerankedRecallOptions::new(limit))?;
     finish_recall(
         mem,
-        query,
-        output.recall,
-        &output.cognitive_scores,
+        RecallCompletion::Reranked(Box::new(output)),
         reinforce,
         gate,
         cosine_gate,
@@ -234,6 +232,8 @@ pub(crate) fn mem_recall_packaged_gated_filtered(
         None => RerankedRecallOptions::new(limit),
     };
     let output = mem.search_reranked(query, reranker, options)?;
+    let plan = output.plan;
+    let cognitive_scores = output.cognitive_scores;
     let mut recall = output.recall;
 
     filter_context_package(mem, &mut recall.package, filters.scope, filters.tag);
@@ -245,11 +245,16 @@ pub(crate) fn mem_recall_packaged_gated_filtered(
     }
     synchronize_filtered_package(&mut recall.package);
 
+    // Post-filtering invalidates the completed rerank's source-role binding.
+    // Render this deliberately as membership-only instead of projecting stale
+    // anchor/target authority onto a changed package.
     finish_recall(
         mem,
-        query,
-        recall,
-        &output.cognitive_scores,
+        RecallCompletion::Membership(Box::new(MembershipCompletion {
+            plan,
+            recall,
+            cognitive_scores,
+        })),
         reinforce,
         filters.gate,
         filters.cosine_gate,
@@ -292,19 +297,62 @@ pub(crate) fn gate_trace(
     }
 }
 
+enum RecallCompletion {
+    Reranked(Box<RerankedRecall>),
+    Membership(Box<MembershipCompletion>),
+}
+
+struct MembershipCompletion {
+    plan: RecallPlan,
+    recall: Recall,
+    cognitive_scores: Vec<CognitiveRecallScore>,
+}
+
+impl RecallCompletion {
+    fn recall(&self) -> &Recall {
+        match self {
+            Self::Reranked(output) => &output.recall,
+            Self::Membership(output) => &output.recall,
+        }
+    }
+
+    fn cognitive_scores(&self) -> &[CognitiveRecallScore] {
+        match self {
+            Self::Reranked(output) => &output.cognitive_scores,
+            Self::Membership(output) => &output.cognitive_scores,
+        }
+    }
+
+    fn render_context(&self, mem: &Memory<SqliteStorage>) -> Result<String, Error> {
+        let options = configured_context_render_options();
+        match self {
+            Self::Reranked(output) => mem.render_context_for_reranked_with(output, options),
+            Self::Membership(output) => {
+                mem.render_context_for_plan_with(&output.plan, &output.recall, options)
+            }
+        }
+    }
+
+    fn into_recall(self) -> Recall {
+        match self {
+            Self::Reranked(output) => output.recall,
+            Self::Membership(output) => output.recall,
+        }
+    }
+}
+
 fn finish_recall(
     mem: &mut Memory<SqliteStorage>,
-    query: &str,
-    recall: Recall,
-    cognitive_scores: &[CognitiveRecallScore],
+    completion: RecallCompletion,
     reinforce: bool,
     gate: Option<f64>,
     cosine_gate: Option<f64>,
 ) -> Result<RecallOutcome, Error> {
-    let hits = super::dedup_hits(recall.hits.clone());
+    let hits = super::dedup_hits(completion.recall().hits.clone());
     let cognitive_top = hits.first().map(|hit| {
         let mut cognitive_hit = hit.clone();
-        if let Some(score) = cognitive_scores
+        if let Some(score) = completion
+            .cognitive_scores()
             .iter()
             .find(|score| score.node_id == hit.node_id)
         {
@@ -348,10 +396,9 @@ fn finish_recall(
 
     // Render before `used` consumes the package; preserve the existing
     // reinforce-then-tick order.
-    let context =
-        mem.render_context_for_with(query, &recall, configured_context_render_options())?;
+    let context = completion.render_context(mem)?;
     if reinforce {
-        mem.used(recall)?;
+        mem.used(completion.into_recall())?;
     }
     mem.tick(Timestamp::now())?;
     #[cfg(test)]
@@ -523,7 +570,70 @@ fn apply_knowledge_only(
         }
     }
     let selected_extracted_sources = selected_extracted_sources(mem, &selected_hit_ids)?;
-    let atomic_sources = selected_atomic_sources(mem, &selected_hit_ids)?;
+    let atomic_source_routes = selected_atomic_sources(mem, hits, source_limit)?;
+    let atomic_sources: HashSet<NodeId> = atomic_source_routes
+        .iter()
+        .map(|(source_id, _)| *source_id)
+        .collect();
+    // An atomic fact is a storage sidecar rather than a graph fragment. Deep
+    // readout can select the paired Semantic representation without packaging
+    // the fact's raw source. Materialize only incarnation-validated sources
+    // reached from the final selection so membership-only rendering and the
+    // subsequent commit trace expose exactly the same evidence.
+    for (source_id, selected_id) in &atomic_source_routes {
+        let source = mem.engine().graph().get_node(*source_id)?;
+        let source_rank = hits
+            .iter()
+            .find(|hit| hit.node_id == *selected_id)
+            .map(|hit| (hit.score, hit.cosine));
+        let (source_score, source_cosine) = source_rank.unwrap_or((0.0, 0.0));
+        let source_relevance = source_score.clamp(0.0, 1.0);
+        if !package
+            .memories
+            .iter()
+            .any(|fragment| fragment.node_id == *source_id)
+        {
+            package.memories.push(Fragment {
+                node_id: *source_id,
+                name: source.name.clone(),
+                summary: source.summary.clone(),
+                content: Some(source.content.clone()),
+                node_type: source.node_type.clone(),
+                relevance: source_relevance,
+                origin: source.origin.clone(),
+            });
+        }
+        if !package
+            .commit_trace
+            .accessed
+            .iter()
+            .any(|site| site.node_id == *source_id)
+        {
+            package.commit_trace.accessed.push(AccessedSite {
+                node_id: *source_id,
+                readout_work: source_relevance,
+            });
+        }
+        if !hits.iter().any(|hit| hit.node_id == *source_id) {
+            let source_hit = Hit {
+                node_id: *source_id,
+                text: source.content.clone(),
+                score: source_score,
+                cosine: source_cosine,
+                at: source.created_at,
+                speaker: source
+                    .entity_tags
+                    .iter()
+                    .find_map(|tag| tag.strip_prefix("speaker-").map(str::to_owned)),
+                session: Some(source.origin.session_id.clone()),
+            };
+            let insert_at = hits
+                .iter()
+                .position(|hit| hit.node_id == *selected_id)
+                .map_or(hits.len(), |index| index + 1);
+            hits.insert(insert_at, source_hit);
+        }
+    }
     let mut grounded_sources = selected_knowledge_sources.clone();
     grounded_sources.extend(selected_extracted_sources.iter().copied());
     grounded_sources.extend(atomic_sources.iter().copied());
@@ -620,42 +730,78 @@ fn selected_extracted_sources(
 
 fn selected_atomic_sources(
     mem: &Memory<SqliteStorage>,
-    selected_hit_ids: &HashSet<NodeId>,
-) -> Result<HashSet<NodeId>, Error> {
+    selected_hits: &[Hit],
+    source_limit: usize,
+) -> Result<Vec<(NodeId, NodeId)>, Error> {
+    if source_limit == 0 {
+        return Ok(Vec::new());
+    }
     let storage = mem.engine().graph().storage();
     let now = Timestamp::now();
-    let mut sources = HashSet::new();
+    let mut sources = Vec::new();
+    let mut seen_sources = HashSet::new();
 
     // Every admitted fact is stamped with the exact incarnation fingerprint of
-    // each source it cites. Resolve only the bounded final hit set through the
-    // storage metadata index; this covers multi-source facts without scanning
-    // the full sidecar on every hook invocation. Legacy facts without the stamp
-    // remain fail-closed, matching `atomic_fact_source_is_current`.
-    for &source_id in selected_hit_ids {
-        let source = storage.get_node(source_id)?;
-        if source.node_type != KnowledgeType::Episodic
-            || source.created_at > now
-            || metadata_is_retracted(&source.metadata)
-            || !valid_at(source.valid_from, source.valid_until, now)
-        {
-            continue;
-        }
-        let source_key = format!("anamnesis:source-incarnation:{}", source_id.0);
-        let source_incarnation = storage.atomic_source_incarnation(source)?;
-        for fact_id in storage.atomic_fact_ids_by_metadata(&source_key, &source_incarnation)? {
-            let fact = storage.get_atomic_fact(fact_id)?;
-            if !fact.source_node_ids.contains(&source_id)
-                || metadata_is_retracted(&fact.metadata)
-                || fact.observed_at > now
-                || !valid_at(fact.valid_from, fact.valid_until, now)
-                || source.origin.session_id != fact.source_session_id
-                || source.origin.scope != fact.scope
-                || !storage.atomic_fact_source_is_current(fact, source)?
+    // each source it cites. Deep readout can select a Semantic representation
+    // while the atomic route itself points at its raw ExtractedFrom source, so
+    // resolve both a selected raw hit and the direct raw sources of a selected
+    // Semantic hit. The final-hit order and caller limit bound this lookup;
+    // legacy facts without an incarnation stamp remain fail-closed.
+    for selected_hit in selected_hits {
+        let selected = storage.get_node(selected_hit.node_id)?;
+        let mut candidates = match selected.node_type {
+            KnowledgeType::Episodic => vec![selected.id],
+            KnowledgeType::Semantic => mem
+                .neighbors(selected.id)?
+                .into_iter()
+                .filter(|neighbor| {
+                    neighbor.direction == Direction::Outgoing
+                        && neighbor.edge_type == EdgeType::ExtractedFrom
+                })
+                .map(|neighbor| neighbor.node)
+                .collect(),
+            _ => Vec::new(),
+        };
+        candidates.sort_unstable();
+        candidates.dedup();
+
+        for source_id in candidates {
+            if seen_sources.contains(&source_id) {
+                continue;
+            }
+            let source = storage.get_node(source_id)?;
+            if source.node_type != KnowledgeType::Episodic
+                || source.created_at > now
+                || metadata_is_retracted(&source.metadata)
+                || !valid_at(source.valid_from, source.valid_until, now)
             {
                 continue;
             }
-            sources.insert(source_id);
-            break;
+            let source_key = format!("anamnesis:source-incarnation:{}", source_id.0);
+            let source_incarnation = storage.atomic_source_incarnation(source)?;
+            let mut has_current_fact = false;
+            for fact_id in storage.atomic_fact_ids_by_metadata(&source_key, &source_incarnation)? {
+                let fact = storage.get_atomic_fact(fact_id)?;
+                if !fact.source_node_ids.contains(&source_id)
+                    || metadata_is_retracted(&fact.metadata)
+                    || fact.observed_at > now
+                    || !valid_at(fact.valid_from, fact.valid_until, now)
+                    || source.origin.session_id != fact.source_session_id
+                    || source.origin.scope != fact.scope
+                    || !storage.atomic_fact_source_is_current(fact, source)?
+                {
+                    continue;
+                }
+                has_current_fact = true;
+                break;
+            }
+            if has_current_fact {
+                seen_sources.insert(source_id);
+                sources.push((source_id, selected.id));
+                if sources.len() == source_limit {
+                    return Ok(sources);
+                }
+            }
         }
     }
     Ok(sources)
@@ -758,11 +904,18 @@ fn is_capture_node(mem: &Memory<SqliteStorage>, node_id: NodeId) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{ContextRenderStyle, parse_context_render_style, synchronize_filtered_package};
-    use anamnesis::graph::{EdgeId, EdgeType, KnowledgeType, NodeId, Origin, PeerId};
+    use super::{
+        ContextRenderStyle, RecallCompletion, configured_context_render_options, finish_recall,
+        parse_context_render_style, synchronize_filtered_package,
+    };
+    use crate::memory::StubProvider;
+    use anamnesis::Memory;
+    use anamnesis::graph::{EdgeId, EdgeType, KnowledgeType, NodeId, Origin, PeerId, Timestamp};
+    use anamnesis::memory::{AnswerShape, RecallPlan};
     use anamnesis::query::{
         AccessedSite, ActivatedTension, CoReadoutPair, ContextPackage, Fragment, PathUsedEdge,
     };
+    use std::sync::Arc;
 
     #[test]
     fn evidence_context_style_is_explicit_and_case_insensitive() {
@@ -782,6 +935,75 @@ mod tests {
             parse_context_render_style("unknown"),
             ContextRenderStyle::Detailed
         );
+    }
+
+    #[test]
+    fn finish_recall_renders_with_the_retrieval_plan() {
+        let mut memory = Memory::in_memory_with_provider(Arc::new(StubProvider))
+            .expect("create in-memory test memory");
+        memory
+            .add_note("Alice writes essays and poetry", Timestamp(1))
+            .expect("add source note");
+
+        let query = "What writing does Alice do?";
+        let recall = memory.search(query, 8).expect("search source note");
+        assert!(!recall.hits.is_empty());
+        let plan = RecallPlan::infer_with_answer_shape(query, AnswerShape::Collection);
+        let render_options = configured_context_render_options();
+        let planned = memory
+            .render_context_for_plan_with(&plan, &recall, render_options)
+            .expect("render planned context");
+        let inferred = memory
+            .render_context_for_with(query, &recall, render_options)
+            .expect("render inferred context");
+        assert_ne!(
+            planned, inferred,
+            "the typed answer shape must affect rendering"
+        );
+
+        let outcome = finish_recall(
+            &mut memory,
+            RecallCompletion::Membership(Box::new(super::MembershipCompletion {
+                plan,
+                recall,
+                cognitive_scores: Vec::new(),
+            })),
+            false,
+            None,
+            None,
+        )
+        .expect("finish planned recall");
+        assert_eq!(outcome.packaged.context, planned);
+    }
+
+    #[test]
+    fn finish_reranked_recall_uses_the_bound_render_entry_point() {
+        let mut memory = Memory::in_memory_with_provider(Arc::new(StubProvider))
+            .expect("create in-memory test memory");
+        memory
+            .add_note("Alice writes essays and poetry", Timestamp(1))
+            .expect("add source note");
+        let output = memory
+            .search_reranked(
+                "What writing does Alice do?",
+                &super::CognitiveReranker,
+                anamnesis::memory::RerankedRecallOptions::new(8),
+            )
+            .expect("canonical reranked recall");
+        let expected = memory
+            .render_context_for_reranked_with(&output, configured_context_render_options())
+            .expect("bound reranked render");
+
+        let outcome = finish_recall(
+            &mut memory,
+            RecallCompletion::Reranked(Box::new(output)),
+            false,
+            None,
+            None,
+        )
+        .expect("finish bound rerank");
+
+        assert_eq!(outcome.packaged.context, expected);
     }
 
     #[test]

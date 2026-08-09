@@ -37,21 +37,23 @@ recall, selection, and rendering policy remain shared product code.
 The hook uses the filtered product result, not an independent keyword search:
 
 ```text
-recall = search_reranked(prompt, configured_budget)
-if recall.has_evidence
-   and recall.readout_score >= readout_threshold
-   and recall.relevance >= relevance_threshold:
-    inject(render_context_for_with(prompt, recall, configured_style))
+result = search_reranked(prompt, configured_budget)
+if result.recall.has_evidence
+   and result.recall.readout_score >= readout_threshold
+   and result.recall.relevance >= relevance_threshold:
+    inject(render_context_for_plan_with(result.plan, result.recall, configured_style))
 else:
     inject(nothing)
 ```
 
 The readout and relevance thresholds, candidate width, and token budget are
 versioned calibrated policy. They are fitted from accepted-context labels and
-reported by recall telemetry; they are not universal constants. Rendering uses
-the query-aware `Memory::render_context_for_with` path over the selected
-package. The hook does not maintain an independent selection or rendering
-policy.
+reported by recall telemetry; they are not universal constants. The
+`RerankedRecall` retains the exact inferred plan, and rendering passes that plan
+to `Memory::render_context_for_plan_with` over the selected package. This keeps
+answer shape, derivation, temporal constraint, coverage, and reader guidance
+consistent across retrieval and rendering. The hook does not maintain an
+independent selection or rendering policy.
 
 ## Formation and admission
 

@@ -11,24 +11,66 @@ public product result is `RerankedRecall`, whose commit-safe `Recall` contains a
 
 | Stage | Current behavior |
 |---|---|
-| plan | Infer a deterministic `RecallPlan` and `AnswerShape` from the complete query, or accept an explicit answer-shape hint |
+| plan | Infer one deterministic `RecallPlan`, or accept a precomputed plan through the plan-aware APIs; preserve its query, answer shape, derivation policy, temporal constraint, and bounded coverage policy through search, reranking, selection, and rendering |
 | search | Collect a bounded cognitive surface from lexical, vector, entity-tag, temporal, and graph signals |
 | activate | Run additive RWR over supportive conductance; exclude `Contradicts` edges from propagation |
-| compile | Collapse overlapping graph representations into canonical raw-source `EvidenceDocument` values |
+| compile | Compile source-grounded `EvidenceDocument` values: collection and inference plans group canonical sources and may retain a bounded Semantic scoring window; count, frequency, and eligible relationship plans use canonical raw-evidence documents |
 | rerank | Ask the supplied `RerankingProvider` to score the bounded document surface |
 | select | Apply the configured source-aware policy under candidate, search, and final-result limits |
-| package | Rebuild a commit-safe `Recall` and `ContextPackage` from selected live graph nodes |
-| render | Use `render_context_for_with` or the equivalent plan-aware renderer for reader-ready context |
+| package | Rebuild a commit-safe `Recall` and `ContextPackage` from selected policy-eligible graph evidence |
+| render | Compile a provider-neutral `RecallReaderContract` and use the same plan with `render_context_for_plan_with` for reader-ready context; query-only compatibility methods infer an equivalent plan locally |
 | commit | Mutate access traces and conductance only when the caller explicitly marks the recall used |
 
 The current plan distinguishes direct, enumeration, temporal, and relational
-retrieval intent, with fact, temporal, frequency, count, collection,
-relationship, and inference answer shapes. Direct retrieval preserves a stable
-relevance prefix; completeness-sensitive shapes may use a bounded tail for new
-canonical sources. The configured `candidate_limit`, `search_limit`, final
-`limit`, selection policy, and fixed replacement caps determine membership.
-Measured elapsed time is telemetry or an external request timeout, not a
-semantic candidate-membership rule.
+retrieval intent; fact, temporal, frequency, count, collection, relationship,
+and inference answer shapes; extractive or grounded-inference derivation; and
+focused, multiple, or exhaustive coverage. Answer shape describes the requested
+output, while `RecallDerivation` controls how a reader may obtain it from
+grounded evidence. A temporal constraint, derivation, and coverage policy remain
+independent properties, so none erases the requested answer shape. `Exhaustive` selects a
+completeness-oriented policy inside the bounded surface; it is not an
+unbounded corpus scan or a guarantee that every matching stored item is
+returned. Direct retrieval preserves a stable relevance prefix, while
+completeness-sensitive plans may use a bounded tail for new canonical sources.
+The configured `candidate_limit`, `search_limit`, final `limit`, selection
+policy, token budget, and fixed replacement caps determine membership. Measured
+elapsed time is telemetry or an external request timeout, not a semantic
+candidate-membership rule.
+
+Consumers that use an external scorer prepare one bound receipt with
+`prepare_rerank_for_plan_at`, score the exact document-index order exposed by
+`PreparedRerank::rerank_texts`, and consume the receipt with
+`complete_prepared_rerank`. Preparation owns the canonical scoped source search
+and checks and binds every source before its text is exposed. Completion accepts
+the receipt only on its originating `Memory`, revalidates those allocations, and
+exactly recompiles the scoring documents before packaging. An empty document
+surface produces an empty commit-safe recall rather than exposing the source
+search package.
+The separate `rerank_documents_for_plan` and
+`repackage_reranked_deep_for_plan` surfaces remain available for unbound
+diagnostics, but are not a production boundary across an external provider
+call.
+
+### Reader contract
+
+`RecallPlan::reader_contract` compiles a model-free `RecallReaderContract` for
+the exact plan used by retrieval. The contract supplies provider-neutral
+instructions for direct answer, reflection, verification, and repair stages;
+states the requested answer role, cardinality, modality, and reasoning operator;
+and exposes whether a separate evidence-analysis pass is recommended. Query-aware
+rendering appends its concise guidance only when evidence is present. Direct
+crate consumers can use the corresponding typed `RecallReadout` instead of
+parsing rendered Markdown.
+
+`validate_grounded_draft` verifies typed draft shape and that every citation
+belongs to the delivered source set. For collection and count drafts it also
+checks the item ledger and its deterministic consistency with the candidate.
+These checks do not prove that a cited source semantically entails the proposed
+answer or that retrieval was complete. A reader-owning consumer remains
+responsible for semantic verification against the complete delivered context.
+The shared recovery policy permits at most one structural repair and one
+reverification, including an independent pass for an unresolved or answerable
+abstention; it performs no provider call itself.
 
 Complex dense planning remains bounded and model-free. Relationship and
 inference shapes batch at most four total query-derived surfaces; collection
@@ -37,24 +79,38 @@ stored embeddings are scanned once, and all auxiliary graph lanes are fused
 into one lower-prior union. Entity-only surfaces may seed graph recall but do
 not independently authorize atomic-fact routing.
 
-Current `ScopePath` handling is ranking-only. Equal scopes, or a pair involving
-universal scope, receive full compatibility; different concrete scopes are
-attenuated. The engine does not authenticate a caller or enforce an authorized
-scope set.
+Base engine search treats `ScopePath` as a ranking signal. Equal scopes, or a
+pair involving universal scope, receive full compatibility; different concrete
+scopes are attenuated. Prepared production reranking additionally rejects a
+candidate when a concrete query scope and any bound delivery or scoring source
+have different concrete scopes. Neither layer authenticates a caller or
+establishes the caller's authorized scope set.
 
 `EdgeType::Contradicts` is never a propagation hop. The frustration channel can
 surface a tension only after both endpoints become active through other cues or
 supportive paths.
 
-Reviewed atomic facts form one isolated routing lane for complex query shapes.
-They can add a bounded canonical cue to reranking and source-aware selection,
-but the sidecar text is not packaged as independent evidence. Only cited live
-raw sources enter the reader-facing package. Query time, fact observation time,
-raw-source creation time, validity, retraction, source type/session identity,
-and exact-or-universal scope compatibility are revalidated on every route.
-Time-constrained collection, relationship, and inference plans preserve the
-temporal path and do not enter complex expansion; frequency retains its
-separately bounded fact lane.
+Atomic facts form one isolated routing lane for eligible structured plans.
+`AtomicFactInput` binds a compact consumer-produced routing record to raw
+Episodic sources, but does not establish an explicit review decision.
+`ReviewedDerivationInput` uses the same routing-only substrate for a typed
+proposition with polarity, modality, review identity/profile/time, and an
+idempotency key bound to the complete normalized record. It additionally
+requires cited sources to have been live at review time. Neither the ordinary
+fact content nor the reviewed proposition or search projection is packaged as
+independent evidence; only eligible cited raw sources can enter the
+reader-facing package.
+
+Every route revalidates query time, fact observation time, raw-source creation
+time, validity, retraction, source type/session identity, and
+exact-or-universal scope compatibility. Ordinary recall admits current cited
+raw sources. Trend recall may also admit historically valid, unretracted
+evidence and can use the shape-driven dense, atomic-fact, and exact-subject
+lanes. Resolvable calendar ranges admit only facts whose validity interval or
+observation time overlaps the range; calendar, event-boundary, and unresolved
+legacy constraints do not use dense or exact-subject expansion. Reviewed
+relation-chain traversal remains disabled for every temporally constrained
+plan. Frequency retains its separately bounded fact lane.
 
 Reviewed atomic routing relations add a typed, bounded adjacency lane for
 relationship and inference plans. The traversal starts from at most eight
@@ -82,7 +138,7 @@ catalog.
 | Stage | Input | Output | Contract |
 |---|---|---|---|
 | parse | `SearchInput` or `Query` | validated input | Reject malformed scope, time, budget, or non-finite values |
-| plan | query text, scope, time, budget | deterministic recall plan | Identify intent, entity/predicate facets, requested slots, answer shape, and limits without a model call |
+| plan | query text, scope, time, budget | deterministic recall plan | Identify intent, entity/predicate facets, requested slots, answer shape, derivation policy, bounded coverage, and limits without a model call |
 | collect | plan and indexes | attributed candidates | Collect bounded raw, graph, entity/fact, temporal, and observation lanes |
 | fuse | attributed candidates | canonical-source surface | Prevent duplicate representations from multiplying source influence |
 | activate | seed distribution | graph response and tensions | Run additive RWR over scope-eligible, time-valid conductance |
@@ -118,7 +174,8 @@ The plan makes retrieval policy explicit:
 
 - recall intent: direct, temporal, collection, relationship, or inference;
 - normalized entity anchors and predicate facets;
-- requested evidence slots and answer shape;
+- requested evidence slots, answer shape, derivation policy, and bounded
+  coverage policy;
 - `as_of` and any occurred/valid-time constraints;
 - caller-supplied scope eligibility; and
 - candidate, traversal-depth, visited-record, and token budgets.

@@ -114,3 +114,8 @@ path = "benches/eval/regression.rs"
 [[test]]
 name = "eval_common"
 path = "benches/eval_common/mod.rs"
+
+[[test]]
+name = "local_answer_adapter"
+path = "tests/local_answer_adapter.rs"
+required-features = ["embed"]

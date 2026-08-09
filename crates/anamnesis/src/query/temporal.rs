@@ -5,8 +5,9 @@
 //! No LLM, no locale data.
 //!
 //! ## Explicit cues
-//! ISO dates (`YYYY-MM-DD`, `YYYY/MM/DD`), `D Month YYYY`, `Month D YYYY`,
-//! `Month YYYY`.
+//! ISO dates (`YYYY-MM-DD`, `YYYY/MM/DD`), standalone calendar years,
+//! `D Month YYYY`, `Month D YYYY`, `Month YYYY`, and ordinal calendar
+//! weekends such as `the first weekend of August 2023`.
 //!
 //! ## Relative cues
 //! Resolved against `now` (Unix epoch milliseconds). When `now == 0`, relative
@@ -128,6 +129,36 @@ fn calendar_day_range(year: i64, month: u32, day: u32) -> Option<TimeRange> {
     (civil_from_days(day_index) == (year, month, day)).then(|| TimeRange {
         start: epoch,
         end: epoch + DAY_MS - 1,
+    })
+}
+
+fn calendar_weekend_range(year: i64, month: u32, ordinal: usize) -> Option<TimeRange> {
+    if !(1..=5).contains(&ordinal) {
+        return None;
+    }
+    let first_day = days_from_civil(year, month, 1);
+    // 1970-01-01 was Thursday. Monday=0, ..., Saturday=5.
+    let first_weekday = (first_day + 3).rem_euclid(7);
+    let first_saturday = 1 + (5 - first_weekday).rem_euclid(7) as u32;
+    let saturday = first_saturday.saturating_add((ordinal.saturating_sub(1) * 7) as u32);
+    let saturday_range = calendar_day_range(year, month, saturday)?;
+    Some(TimeRange {
+        start: saturday_range.start,
+        end: saturday_range
+            .start
+            .saturating_add(DAY_MS.saturating_mul(2))
+            .saturating_sub(1),
+    })
+}
+
+fn weekend_ordinal(token: &str) -> Option<usize> {
+    Some(match token {
+        "first" | "1st" => 1,
+        "second" | "2nd" => 2,
+        "third" | "3rd" => 3,
+        "fourth" | "4th" => 4,
+        "fifth" | "5th" => 5,
+        _ => return None,
     })
 }
 
@@ -434,8 +465,9 @@ pub(crate) fn resolve_relative_time_cues(
     resolutions
 }
 
-/// Extract explicit date cues: `YYYY-MM-DD`, `YYYY/MM/DD`,
-/// `D Month YYYY`, `Month D YYYY` (comma tolerated), `Month YYYY`.
+/// Extract explicit date cues: `YYYY-MM-DD`, `YYYY/MM/DD`, a standalone
+/// calendar year, `D Month YYYY`, `Month D YYYY` (comma tolerated), and
+/// `Month YYYY`.
 /// When `now != 0`, also resolves relative expressions ("yesterday", "last week", etc.).
 /// When `now == 0`, relative cues are skipped and only explicit dates are parsed.
 pub(crate) fn parse_time_cues(text: &str, now: u64) -> Vec<TimeRange> {
@@ -467,6 +499,36 @@ pub(crate) fn parse_time_cues(text: &str, now: u64) -> Vec<TimeRange> {
             }
         }
 
+        // Standalone calendar year. Month-qualified years are handled below
+        // at their narrower granularity. Explicit before/after boundaries are
+        // not widened to the named year because this parser does not model
+        // open-ended intervals.
+        let neighbors = [
+            index.checked_sub(2),
+            index.checked_sub(1),
+            Some(index + 1),
+            Some(index + 2),
+        ]
+        .into_iter()
+        .flatten()
+        .filter_map(|neighbor| tokens.get(neighbor).copied())
+        .collect::<Vec<_>>();
+        let has_month_neighbor = neighbors.iter().any(|neighbor| MONTHS.contains(neighbor));
+        let has_boundary_neighbor = neighbors
+            .iter()
+            .any(|neighbor| matches!(*neighbor, "before" | "after"));
+        if !has_month_neighbor
+            && !has_boundary_neighbor
+            && let Ok(year) = token.parse::<i64>()
+            && (1970..=2200).contains(&year)
+            && let (Some(start), Some(next)) = (day_epoch(year, 1, 1), day_epoch(year + 1, 1, 1))
+        {
+            ranges.push(TimeRange {
+                start,
+                end: next - 1,
+            });
+        }
+
         // Month-name forms.
         if let Some(position) = MONTHS.iter().position(|m| m == token) {
             let month = position as u32 + 1;
@@ -480,14 +542,28 @@ pub(crate) fn parse_time_cues(text: &str, now: u64) -> Vec<TimeRange> {
                 .filter_map(|t| t.parse::<i64>().ok())
                 .find(|y| (1970..=2200).contains(y));
             if let Some(year) = year {
-                match day.and_then(|d| day_epoch(year, month, d)) {
-                    Some(start) => ranges.push(TimeRange {
-                        start,
-                        end: start + DAY_MS - 1,
-                    }),
-                    None => {
-                        if let Some(range) = month_range(year, month) {
-                            ranges.push(range);
+                let ordinal_weekend = index
+                    .checked_sub(3)
+                    .and_then(|ordinal_index| {
+                        let relation = tokens.get(index.saturating_sub(1))?;
+                        let weekend = tokens.get(index.saturating_sub(2))?;
+                        ((*weekend == "weekend") && matches!(*relation, "of" | "in"))
+                            .then(|| weekend_ordinal(tokens[ordinal_index]))
+                            .flatten()
+                    })
+                    .and_then(|ordinal| calendar_weekend_range(year, month, ordinal));
+                if let Some(range) = ordinal_weekend {
+                    ranges.push(range);
+                } else {
+                    match day.and_then(|d| day_epoch(year, month, d)) {
+                        Some(start) => ranges.push(TimeRange {
+                            start,
+                            end: start + DAY_MS - 1,
+                        }),
+                        None => {
+                            if let Some(range) = month_range(year, month) {
+                                ranges.push(range);
+                            }
                         }
                     }
                 }
@@ -811,6 +887,30 @@ mod tests {
     }
 
     #[test]
+    fn parses_ordinal_weekend_as_a_narrow_calendar_range() {
+        let first = parse_time_cues("during the first weekend of August 2023", 0);
+        assert_eq!(
+            first,
+            vec![TimeRange {
+                start: day_epoch(2023, 8, 5).expect("first Saturday"),
+                end: day_epoch(2023, 8, 7).expect("day after first weekend") - 1,
+            }]
+        );
+
+        let third = parse_time_cues("on the third weekend in September 2023", 0);
+        assert_eq!(
+            third,
+            vec![TimeRange {
+                start: day_epoch(2023, 9, 16).expect("third Saturday"),
+                end: day_epoch(2023, 9, 18).expect("day after third weekend") - 1,
+            }]
+        );
+
+        let month = parse_time_cues("during August 2023", 0);
+        assert_eq!(month, vec![month_range(2023, 8).expect("month range")]);
+    }
+
+    #[test]
     fn no_dates_returns_empty() {
         let cues = parse_time_cues("beach trip planning notes", 0);
         assert!(cues.is_empty(), "expected no cues, got {cues:?}");
@@ -826,12 +926,11 @@ mod tests {
     }
 
     #[test]
-    fn year_alone_produces_nothing() {
+    fn standalone_year_produces_a_calendar_range() {
         let cues = parse_time_cues("something in 2023", 0);
-        assert!(
-            cues.is_empty(),
-            "year alone without month must not produce cue"
-        );
+        assert_eq!(cues.len(), 1);
+        assert_eq!(cues[0].start, day_epoch(2023, 1, 1).expect("year start"));
+        assert_eq!(cues[0].end, day_epoch(2024, 1, 1).expect("year end") - 1);
     }
 
     #[test]
@@ -915,6 +1014,31 @@ mod tests {
         let cues = parse_time_cues("event on 2023-05-08 was notable", now_sept_15);
         assert_eq!(cues.len(), 1);
         assert_eq!(cues[0].start, MAY_8_2023);
+    }
+
+    #[test]
+    fn standalone_year_uses_the_calendar_year_without_widening_months() {
+        let year = parse_time_cues("health incidents during 2023", 0);
+        assert_eq!(year.len(), 1);
+        assert_eq!(year[0].start, day_epoch(2023, 1, 1).expect("year start"));
+        assert_eq!(year[0].end, day_epoch(2024, 1, 1).expect("year end") - 1);
+
+        let month = parse_time_cues("health incidents in May 2023", 0);
+        assert_eq!(month.len(), 1, "a month-qualified year stays month-sized");
+        assert_eq!(month[0], month_range(2023, 5).expect("month range"));
+
+        let day = parse_time_cues("activity on March 16, 2022", 0);
+        assert_eq!(day.len(), 1, "a day-qualified year stays day-sized");
+        assert_eq!(
+            day[0],
+            calendar_day_range(2022, 3, 16).expect("calendar day")
+        );
+    }
+
+    #[test]
+    fn standalone_year_does_not_guess_open_ended_boundaries() {
+        assert!(parse_time_cues("events before 2023", 0).is_empty());
+        assert!(parse_time_cues("events after 2023", 0).is_empty());
     }
 
     // ---- relative time cues ----

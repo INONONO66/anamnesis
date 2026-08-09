@@ -4,8 +4,9 @@ use serde_json::Value;
 
 use super::super::error::{BenchError, BenchResult};
 use super::{
-    BenchDatasetName, BenchQuestion, BenchSession, BenchTurn, GoldEvidence, LoadedBenchmark,
-    answer_needles_for, answer_to_string, limit, string_array_field, string_field,
+    BenchAttachmentRef, BenchDatasetName, BenchQuestion, BenchSession, BenchTurn, GoldEvidence,
+    LoadedBenchmark, answer_needles_for, answer_to_string, limit, string_array_field, string_field,
+    validate_attachment_locator,
 };
 
 pub(super) fn parse_locomo(
@@ -72,13 +73,13 @@ fn parse_session(
         .and_then(Value::as_array)
         .ok_or_else(|| BenchError::Parse(format!("{session_key} must be an array")))?;
     let session_id = format!("locomo-{sample_index}-{session_key}");
-    let turns = turns_value
-        .iter()
-        .enumerate()
-        .filter_map(|(turn_index, turn)| {
-            let speaker = string_field(turn, "speaker").unwrap_or_else(|| "unknown".into());
-            let content = turn_content(turn, &speaker);
-            (!content.trim().is_empty()).then(|| BenchTurn {
+    let mut turns = Vec::new();
+    for (turn_index, turn) in turns_value.iter().enumerate() {
+        let speaker = string_field(turn, "speaker").unwrap_or_else(|| "unknown".into());
+        let content = turn_content(turn, &speaker);
+        let attachments = attachment_refs(turn)?;
+        if !content.trim().is_empty() || !attachments.is_empty() {
+            turns.push(BenchTurn {
                 session_id: session_id.clone(),
                 raw_session_id: session_key.to_string(),
                 raw_turn_id: string_field(turn, "dia_id"),
@@ -86,9 +87,10 @@ fn parse_session(
                 role: speaker.clone(),
                 speaker,
                 content,
-            })
-        })
-        .collect();
+                attachments,
+            });
+        }
+    }
 
     let date_key = format!("{session_key}_date_time");
     let start_timestamp =
@@ -101,6 +103,51 @@ fn parse_session(
         turns,
         start_timestamp,
     })
+}
+
+fn attachment_refs(turn: &Value) -> BenchResult<Vec<BenchAttachmentRef>> {
+    let Some(raw) = turn.get("img_url") else {
+        return Ok(Vec::new());
+    };
+    let locators: Vec<(usize, &str)> = match raw {
+        Value::Null => return Ok(Vec::new()),
+        Value::String(locator) => vec![(0, locator.as_str())],
+        Value::Array(items) => items
+            .iter()
+            .enumerate()
+            .map(|(index, item)| {
+                item.as_str()
+                    .map(|locator| (index, locator))
+                    .ok_or_else(|| {
+                        BenchError::Parse(format!("img_url attachment {index} must be a string"))
+                    })
+            })
+            .collect::<BenchResult<Vec<_>>>()?,
+        _ => {
+            return Err(BenchError::Parse(
+                "img_url must be a string, an array of strings, or null".to_owned(),
+            ));
+        }
+    };
+    locators
+        .into_iter()
+        .map(|(attachment_index, locator)| {
+            let raw_locator = locator;
+            let locator = raw_locator.trim();
+            if locator.starts_with("data:") && locator != raw_locator {
+                return Err(BenchError::Parse(format!(
+                    "img_url attachment {attachment_index}: inline data URI must not have surrounding whitespace"
+                )));
+            }
+            validate_attachment_locator(locator).map_err(|error| {
+                BenchError::Parse(format!("img_url attachment {attachment_index}: {error}"))
+            })?;
+            Ok(BenchAttachmentRef {
+                attachment_index,
+                locator: locator.to_owned(),
+            })
+        })
+        .collect()
 }
 
 fn turn_content(turn: &Value, speaker: &str) -> String {

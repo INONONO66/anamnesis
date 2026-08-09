@@ -33,10 +33,14 @@ transfer to a dataset or workload that was not part of that evidence.
 
 ## Active reranked-recall profile
 
-These production defaults are shared by every supported entry point. The same
-`Memory::search_reranked` and query-aware context-rendering path is used by
-direct crate consumers, MCP, hooks, the plugin, and the production-path benchmark
-route.
+These production defaults are shared by every supported entry point. Direct
+crate consumers, MCP, hooks, and the plugin use `Memory::search_reranked` or the
+bound `PreparedRerank` handoff and preserve the resulting plan through
+plan-aware rendering. The qualifying live-reranker benchmark route uses
+`search_reranked_for_plan_at` and the same plan-aware renderer. It performs a
+second deterministic source search only after the product package and measured
+latency are frozen, solely to record candidate and feature diagnostics; that
+search cannot affect returned evidence.
 
 | Setting | Active value |
 |---|---:|
@@ -47,18 +51,28 @@ route.
 | dense query batch, relationship/inference | at most `4` total surfaces |
 | dense query batch, collection | at most `5` total surfaces |
 | auxiliary dense-union RRF prior | `0.25` |
+| bounded recall coverage | `Focused` by default, `Multiple` for ordinary collections, `Exhaustive` for count/frequency and explicitly complete collections |
+| collection and inference document compilation | canonical-source grouping with an optional bounded Semantic rerank surface; reader-facing text remains canonical raw evidence |
 | reviewed relation expansion | `8` seeds, depth `2`, `32` relations, `8` endpoint facts, `8` raw sources |
 | context-ready p95 release boundary | `4 s` |
 
-Direct and temporal plans preserve the original-query source search. Bounded
+Direct plans and calendar-, event-, or unresolved legacy-constrained temporal
+plans preserve the original-query source search. Trend plans may use the same
+bounded, shape-driven query surfaces as their answer shape. Other bounded
 collection, relationship, and inference plans may add deterministic clause,
 predicate, decomposition, or entity surfaces. Stored embeddings are scanned
 once, auxiliary results are deduplicated into one lower-prior union, and
 source-aware selection operates after reranking. Atomic facts remain in their
-isolated index and can route only to cited, live, scope-valid raw sources.
-Relationship and inference plans may additionally traverse the bounded reviewed
-relation lane; relation and fact text never becomes reader evidence.
-
+isolated index and route only to cited, scope-valid raw sources that satisfy the
+plan's validity policy: current for ordinary recall, or historically valid and
+unretracted for Trend. Eligible relationship and inference plans may
+additionally traverse the bounded reviewed relation lane; relation and fact
+text never becomes reader evidence.
+`Exhaustive` is a completeness-oriented policy inside the declared search,
+candidate, final-result, and token limits. It neither performs an unbounded
+storage scan nor guarantees corpus-complete recall. Coverage affects bounded
+preselection and final selection rather than changing the authoritative
+reader-evidence representation.
 
 ## Replacement criteria
 

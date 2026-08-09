@@ -47,9 +47,18 @@ surface. Hits are returned as `Vec<Hit>` with `node_id`, `text`, `score`, `at`,
 
 `Memory::search_reranked` is the canonical quality-oriented path. It collects a
 bounded source surface, applies the configured reranker, selects source-aware
-evidence, and packages the result. Shipped MCP, hook, and plugin recall clients
-use this path. Direct crate integrations can call it without reproducing the
-ranking, selection, or packaging policy.
+evidence, and returns the exact `RecallPlan` beside the packaged result. Shipped
+MCP, hook, and plugin recall clients use this path and pass the retained plan to
+`render_context_for_plan_with`, so rendering does not re-infer a potentially
+different policy. Direct crate integrations can use the same calls without
+reproducing ranking, selection, packaging, or reader-guidance policy.
+
+Consumers whose reranker is an external service or process use the bound
+two-step form: `prepare_rerank_for_plan_at` exposes the exact ordered scoring
+texts through `PreparedRerank::rerank_texts`, and
+`complete_prepared_rerank` validates scores and consumes that receipt on its
+originating `Memory`. The unbound document and repackaging methods are diagnostic
+surfaces, not a production handoff across an external provider call.
 
 ## Proposed Result Extension
 
@@ -75,11 +84,14 @@ not implemented by the current `Memory` API.
 
 ## Evaluation Parity
 
-Quality harnesses build raw conversation memory and query it through the same
-public `Memory` ingest, recall, selection, and rendering surfaces. Evaluation
-adapters may convert input records and collect diagnostics, but they must not
-own an alternate ranking or packaging policy. Every published result declares
-any derived artifact separately; replaying such an artifact does not establish
+Quality harnesses build raw conversation memory and run qualifying live
+reranker output through `search_reranked_for_plan_at` and plan-aware rendering.
+They may run a separate read-only source search after that package and its
+latency are frozen to measure candidate and feature surfaces; the diagnostic
+search must not alter or replace the product result. Evaluation adapters may
+convert input records and collect diagnostics, but they must not own an
+alternate ranking or packaging policy. Every published result declares any
+derived artifact separately; replaying such an artifact does not establish
 parity with a plugin extraction or review workflow. See
 [benchmarks](../07-quality-gates/benchmarks.md) and
 [calibration records](../07-quality-gates/calibration-records.md).

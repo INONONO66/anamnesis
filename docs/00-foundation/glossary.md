@@ -32,7 +32,10 @@ total activation    = (B_i + P_i) + sum_j W_j * S_ji
 |---|---|
 | site | A node in the cognitive memory graph |
 | source fragment | Persisted text fragment that remains the source for any derived routing record |
-| atomic fact | Reviewed, isolated routing record that cites live raw Episodic source nodes and cannot be rendered as independent evidence |
+| atomic fact | Source-bound routing record accepted by `AtomicFactInput` / `add_atomic_fact`; it has no engine-enforced review provenance and is never rendered as independent evidence |
+| reviewed derivation | Explicitly reviewed, typed routing proposition accepted by `ReviewedDerivationInput` / `add_reviewed_derivation`; it records review provenance and still routes only to cited raw evidence |
+| recall derivation | Query-time `RecallDerivation` policy: return evidence-stated values (`Extractive`) or permit only bounded inference from grounded personal/changing premises (`GroundedInference`) |
+| reader contract | Provider-neutral `RecallReaderContract` compiled from a `RecallPlan`; it defines staged reading instructions, typed draft structure, citation-membership checks, and bounded recovery without performing model calls |
 | cue | A seed signal from text, embedding, entity, scope, or explicit node id |
 | query field | The potential field imposed by a query over candidate sites |
 | activation flow | Query-local spreading response over the graph; read-only and transient |

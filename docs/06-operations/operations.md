@@ -30,8 +30,9 @@ the tools below are deliberate client operations.
 | `list` | To inspect memory inventory without a query cue | Lists memories by salience with optional filters. |
 | `get` | To inspect one known node id | Returns that memory's full detail and provenance. |
 
-Explicit MCP recall and proactive hook recall share the same query-aware
-`Memory::render_context_for_with` path. `ANAMNESIS_CONTEXT_STYLE` changes only
+Explicit MCP recall and proactive hook recall retain the `RecallPlan` returned
+by `Memory::search_reranked` and pass it to
+`Memory::render_context_for_plan_with`. `ANAMNESIS_CONTEXT_STYLE` changes only
 the layout of the validated package; it does not select a different set of
 evidence. The surfaces differ in their reinforcement contract, not their
 ranking, selection, or rendering implementation.
@@ -155,6 +156,9 @@ Promotion is additive and idempotent. It creates one record in the isolated atom
 stamps the extractor profile and candidate idempotency key, and keeps every cited raw Episodic
 source ID as authoritative provenance. It creates no graph node or `ExtractedFrom` edge, does not
 enter node FTS, and cannot perturb attraction, forgetting, or the ordinary graph candidate pool.
+The extraction workflow enforces its review before calling `add_atomic_fact`;
+the resulting `AtomicFactInput` does not itself carry the engine-enforced
+`ReviewProvenance` contract of `add_reviewed_derivation`.
 The sidecar stores the canonical claim plus the evidence source/range/hash metadata, not a copied
 raw evidence span. A richer canonical-plus-live-evidence surface may be used once to compute its
 embedding and is not persisted.

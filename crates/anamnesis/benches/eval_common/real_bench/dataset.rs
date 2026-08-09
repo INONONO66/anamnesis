@@ -11,6 +11,9 @@ mod locomo;
 mod longmemeval;
 
 const MAX_DATASET_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_OPAQUE_ATTACHMENT_LOCATOR_BYTES: usize = 4_096;
+const MAX_INLINE_ATTACHMENT_BYTES: usize = 64 * 1024 * 1024;
+const MAX_INLINE_BASE64_BYTES: usize = 4 * MAX_INLINE_ATTACHMENT_BYTES.div_ceil(3);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BenchDatasetName {
@@ -83,6 +86,149 @@ pub struct BenchTurn {
     pub speaker: String,
     pub role: String,
     pub content: String,
+    /// Non-text assets attached to this turn.
+    ///
+    /// The locator is retained only so an offline consumer can resolve and
+    /// fingerprint the asset. It is not concatenated into `content`, and
+    /// dataset query/gold fields are never copied into this formation type.
+    #[serde(default)]
+    pub attachments: Vec<BenchAttachmentRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BenchAttachmentRef {
+    /// Stable zero-based position within the source turn's attachment list.
+    pub attachment_index: usize,
+    /// Opaque consumer-resolved asset locator. This is provenance, not text
+    /// evidence, and is never admitted into the memory graph.
+    pub locator: String,
+}
+
+pub(super) fn validate_attachment_locator(locator: &str) -> Result<(), String> {
+    if locator.trim().is_empty()
+        || locator.trim() != locator
+        || locator.chars().any(char::is_control)
+    {
+        return Err("attachment locator is blank, untrimmed, or contains controls".to_owned());
+    }
+    if locator.starts_with("data:") {
+        decode_inline_image_data_uri(locator).map(|_| ())
+    } else if locator.len() > MAX_OPAQUE_ATTACHMENT_LOCATOR_BYTES {
+        Err(format!(
+            "opaque attachment locator exceeds {MAX_OPAQUE_ATTACHMENT_LOCATOR_BYTES} bytes"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+/// Strictly decode the bounded inline image form accepted by LoCoMo.
+///
+/// `Ok(None)` means the locator is ordinary opaque provenance. Any `data:` URI
+/// must match one of the closed image MIME prefixes and canonical padded
+/// standard Base64; malformed inline bytes fail rather than becoming an
+/// opaque path or URL.
+pub(super) fn decode_inline_image_data_uri(locator: &str) -> Result<Option<Vec<u8>>, String> {
+    let payload = if let Some(payload) = locator.strip_prefix("data:image/jpeg;base64,") {
+        payload
+    } else if let Some(payload) = locator.strip_prefix("data:image/png;base64,") {
+        payload
+    } else if let Some(payload) = locator.strip_prefix("data:image/webp;base64,") {
+        payload
+    } else if locator.starts_with("data:") {
+        return Err("inline attachment must use data:image/{jpeg,png,webp};base64,".to_owned());
+    } else {
+        return Ok(None);
+    };
+    if payload.is_empty() || payload.len() % 4 != 0 {
+        return Err("inline attachment Base64 length is invalid or oversized".to_owned());
+    }
+    let padding = if payload.ends_with("==") {
+        2
+    } else if payload.ends_with('=') {
+        1
+    } else {
+        0
+    };
+    let decoded_len = bounded_inline_decoded_len(payload.len(), padding)?;
+    if decoded_len == 0 {
+        return Err("inline attachment decoded bytes are empty or oversized".to_owned());
+    }
+
+    let mut decoded = Vec::with_capacity(decoded_len);
+    let chunks = payload.as_bytes().chunks_exact(4);
+    if !chunks.remainder().is_empty() {
+        return Err("inline attachment Base64 length is not divisible by four".to_owned());
+    }
+    let chunk_count = payload.len() / 4;
+    for (chunk_index, chunk) in chunks.enumerate() {
+        let &[raw_a, raw_b, raw_c, raw_d] = chunk else {
+            return Err("inline attachment Base64 chunk is incomplete".to_owned());
+        };
+        let last = chunk_index + 1 == chunk_count;
+        let a = base64_value(raw_a)
+            .ok_or_else(|| "inline attachment contains non-Base64 bytes".to_owned())?;
+        let b = base64_value(raw_b)
+            .ok_or_else(|| "inline attachment contains non-Base64 bytes".to_owned())?;
+        let c_padding = raw_c == b'=';
+        let d_padding = raw_d == b'=';
+        if (c_padding && !d_padding) || ((c_padding || d_padding) && !last) {
+            return Err("inline attachment has non-canonical Base64 padding".to_owned());
+        }
+        let c = if c_padding {
+            0
+        } else {
+            base64_value(raw_c)
+                .ok_or_else(|| "inline attachment contains non-Base64 bytes".to_owned())?
+        };
+        let d = if d_padding {
+            0
+        } else {
+            base64_value(raw_d)
+                .ok_or_else(|| "inline attachment contains non-Base64 bytes".to_owned())?
+        };
+        if (c_padding && (b & 0x0f) != 0) || (d_padding && !c_padding && (c & 0x03) != 0) {
+            return Err("inline attachment has non-canonical Base64 trailing bits".to_owned());
+        }
+        decoded.push((a << 2) | (b >> 4));
+        if !c_padding {
+            decoded.push((b << 4) | (c >> 2));
+        }
+        if !d_padding {
+            decoded.push((c << 6) | d);
+        }
+    }
+    if decoded.len() != decoded_len {
+        return Err("inline attachment decoded length differs".to_owned());
+    }
+    Ok(Some(decoded))
+}
+
+fn bounded_inline_decoded_len(encoded_len: usize, padding: usize) -> Result<usize, String> {
+    if encoded_len > MAX_INLINE_BASE64_BYTES || padding > 2 {
+        return Err("inline attachment Base64 length is invalid or oversized".to_owned());
+    }
+    let decoded_len = encoded_len
+        .checked_div(4)
+        .and_then(|blocks| blocks.checked_mul(3))
+        .and_then(|bytes| bytes.checked_sub(padding))
+        .ok_or_else(|| "inline attachment decoded length overflowed".to_owned())?;
+    if decoded_len > MAX_INLINE_ATTACHMENT_BYTES {
+        return Err("inline attachment decoded bytes are empty or oversized".to_owned());
+    }
+    Ok(decoded_len)
+}
+
+fn base64_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'A'..=b'Z' => Some(byte - b'A'),
+        b'a'..=b'z' => Some(byte - b'a' + 26),
+        b'0'..=b'9' => Some(byte - b'0' + 52),
+        b'+' => Some(62),
+        b'/' => Some(63),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -358,6 +504,8 @@ mod tests {
                 "speaker": "Sam",
                 "text": "I use this to reflect.",
                 "blip_caption": "a journal with gratitude entries",
+                "img_url": ["asset://fixture/one"],
+                "query": "evaluation-side image-search metadata",
                 "dia_id": "D1:1"
             }],
             "session_1_date_time": "1:00 pm on 8 May, 2023",
@@ -374,6 +522,127 @@ mod tests {
         assert_eq!(
             loaded.sessions[0].turns[0].content,
             "I use this to reflect.\nSam shared a journal with gratitude entries."
+        );
+        assert_eq!(
+            loaded.sessions[0].turns[0].attachments,
+            vec![BenchAttachmentRef {
+                attachment_index: 0,
+                locator: "asset://fixture/one".to_owned(),
+            }]
+        );
+        let formation_turn =
+            serde_json::to_string(&loaded.sessions[0].turns[0]).expect("serialize formation turn");
+        assert!(!formation_turn.contains("evaluation-side image-search metadata"));
+        assert!(
+            !loaded.sessions[0].turns[0]
+                .content
+                .contains("asset://fixture/one")
+        );
+    }
+
+    #[test]
+    fn locomo_attachment_positions_are_exact_and_malformed_entries_fail_closed() {
+        let valid = json!([{
+            "session_1": [{
+                "speaker": "Sam",
+                "text": "Two source assets are attached.",
+                "img_url": [" asset://fixture/first ", "asset://fixture/second"],
+                "dia_id": "D1:1"
+            }],
+            "qa": []
+        }]);
+        let loaded = parse_benchmark_dataset(BenchDatasetName::Locomo, &valid, None)
+            .expect("valid attachment array");
+        assert_eq!(
+            loaded.sessions[0].turns[0].attachments,
+            vec![
+                BenchAttachmentRef {
+                    attachment_index: 0,
+                    locator: "asset://fixture/first".to_owned(),
+                },
+                BenchAttachmentRef {
+                    attachment_index: 1,
+                    locator: "asset://fixture/second".to_owned(),
+                },
+            ]
+        );
+
+        for invalid in [
+            json!([{
+                "session_1": [{
+                    "speaker": "Sam",
+                    "img_url": ["asset://fixture/first", null, "asset://fixture/third"],
+                    "dia_id": "D1:1"
+                }],
+                "qa": []
+            }]),
+            json!([{
+                "session_1": [{
+                    "speaker": "Sam",
+                    "img_url": ["asset://fixture/first", "   "],
+                    "dia_id": "D1:1"
+                }],
+                "qa": []
+            }]),
+            json!([{
+                "session_1": [{
+                    "speaker": "Sam",
+                    "img_url": {"path": "asset://fixture/first"},
+                    "dia_id": "D1:1"
+                }],
+                "qa": []
+            }]),
+        ] {
+            assert!(matches!(
+                parse_benchmark_dataset(BenchDatasetName::Locomo, &invalid, None),
+                Err(BenchError::Parse(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn attachment_locator_validation_separates_opaque_and_inline_limits() {
+        let inline = "data:image/png;base64,aGVsbG8=";
+        assert_eq!(
+            decode_inline_image_data_uri(inline).expect("valid inline image bytes"),
+            Some(b"hello".to_vec())
+        );
+        assert!(validate_attachment_locator(inline).is_ok());
+        let loaded = parse_benchmark_dataset(
+            BenchDatasetName::Locomo,
+            &json!([{
+                "session_1": [{
+                    "speaker": "Sam",
+                    "img_url": inline,
+                    "dia_id": "D1:1"
+                }],
+                "qa": []
+            }]),
+            None,
+        )
+        .expect("strict scalar inline attachment should survive dataset loading");
+        assert_eq!(loaded.sessions[0].turns[0].attachments[0].locator, inline);
+        assert!(validate_attachment_locator(&"x".repeat(4_096)).is_ok());
+        assert!(validate_attachment_locator(&"x".repeat(4_097)).is_err());
+        for invalid in [
+            "data:text/plain;base64,aGVsbG8=",
+            "data:image/jpg;base64,aGVsbG8=",
+            "data:image/png;charset=utf-8;base64,aGVsbG8=",
+            "data:image/png,aGVsbG8=",
+            "data:image/png;base64,aGVs bG8=",
+            "data:image/png;base64,!!!!",
+            "data:image/png;base64,Zh==",
+            "data:image/png;base64,",
+            " data:image/png;base64,aGVsbG8= ",
+        ] {
+            assert!(
+                validate_attachment_locator(invalid).is_err(),
+                "invalid inline locator was accepted: {invalid:?}"
+            );
+        }
+        assert!(
+            bounded_inline_decoded_len(MAX_INLINE_BASE64_BYTES + 4, 0).is_err(),
+            "encoded-size cap must be checked without allocating an oversized fixture"
         );
     }
 }

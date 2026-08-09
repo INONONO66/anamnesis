@@ -14,25 +14,21 @@ use crate::storage::{SqliteStorage, StorageAdapter};
 
 mod search;
 pub(crate) use search::assemble::{apply_packaging_mode, apply_validity_filter};
+pub(crate) use search::plan::{ComplexDenseQueryPlan, DensePremiseSlotId};
 
 pub(crate) fn planned_query_variants(query: &str) -> Vec<String> {
     search::plan::query_variants(query)
 }
 
-pub(crate) fn planned_complex_dense_query_variants(
+pub(crate) fn planned_complex_dense_query_plan(
     query: &str,
     relation_first: bool,
-) -> (Vec<String>, Vec<usize>, Vec<usize>) {
-    let plan = if relation_first {
+) -> ComplexDenseQueryPlan {
+    if relation_first {
         search::plan::complex_dense_query_plan(query)
     } else {
         search::plan::conservative_complex_dense_query_plan(query)
-    };
-    (
-        plan.variants,
-        plan.engine_variant_indices,
-        plan.atomic_variant_indices,
-    )
+    }
 }
 
 const ARCHIVE_SALIENCE_THRESHOLD: f64 = 0.10;

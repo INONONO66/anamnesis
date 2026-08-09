@@ -231,7 +231,33 @@ pub(crate) fn query_variants(query: &str) -> Vec<String> {
     variants
 }
 
+/// Query-local identity for a strong relation-clause premise.
+///
+/// The ordinal is assigned in deterministic clause order and remains attached
+/// to that premise as the plan moves through later retrieval stages. It is not
+/// inferred from the premise's position in the complete variant batch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct DensePremiseSlotId(usize);
+
+impl DensePremiseSlotId {
+    pub(crate) const fn from_ordinal(ordinal: usize) -> Self {
+        Self(ordinal)
+    }
+
+    pub(crate) const fn ordinal(self) -> usize {
+        self.0
+    }
+}
+
+/// Associates one premise slot with an already-planned dense variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DensePremiseSlot {
+    pub id: DensePremiseSlotId,
+    pub variant_index: usize,
+}
+
 /// A latency-bounded dense-query plan for complex `Memory` recall.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ComplexDenseQueryPlan {
     /// All surfaces embedded together in one provider batch.
     pub variants: Vec<String>,
@@ -239,6 +265,8 @@ pub(crate) struct ComplexDenseQueryPlan {
     pub engine_variant_indices: Vec<usize>,
     /// Surfaces participating in isolated atomic-fact routing.
     pub atomic_variant_indices: Vec<usize>,
+    /// Strong clause premises mapped to their existing dense variants.
+    pub premise_slots: Vec<DensePremiseSlot>,
 }
 
 /// Build the latency-bounded dense lanes used only by complex `Memory` recall.
@@ -256,9 +284,25 @@ pub(crate) fn complex_dense_query_plan(query: &str) -> ComplexDenseQueryPlan {
     let entity_anchors = proper_noun_anchors_with_inference(query, true);
     let semantic_variant_limit =
         MAX_DENSE_VARIANTS.saturating_sub(usize::from(!entity_anchors.is_empty()));
-    for candidate in relation_clause_dense_surfaces(query)
+    let mut premise_slots = Vec::with_capacity(MAX_DENSE_VARIANTS.saturating_sub(1));
+    for candidate in relation_clause_dense_surfaces(query) {
+        if variants.len() >= semantic_variant_limit {
+            break;
+        }
+        if !variants
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(&candidate))
+        {
+            let variant_index = variants.len();
+            variants.push(candidate);
+            premise_slots.push(DensePremiseSlot {
+                id: DensePremiseSlotId::from_ordinal(premise_slots.len()),
+                variant_index,
+            });
+        }
+    }
+    for candidate in decompose_query(query)
         .into_iter()
-        .chain(decompose_query(query))
         .chain(relation_bearing_dense_surface(query))
         .chain(predicate_dense_surface(query))
     {
@@ -287,6 +331,7 @@ pub(crate) fn complex_dense_query_plan(query: &str) -> ComplexDenseQueryPlan {
     ComplexDenseQueryPlan {
         engine_variant_indices: (0..variants.len()).collect(),
         atomic_variant_indices: (0..atomic_variant_count).collect(),
+        premise_slots,
         variants,
     }
 }
@@ -470,12 +515,192 @@ fn contains_normalized_phrase(value: &str, phrase: &str) -> bool {
 /// surface. The primary embedding still contains the complete question; this
 /// facet prevents a person's frequently repeated name from overwhelming the
 /// requested action or object in a dense atomic-fact lane.
+fn control_action_dense_surface(query: &str) -> Option<String> {
+    let words: Vec<_> = query
+        .split(|character: char| !character.is_alphanumeric() && character != '\'')
+        .filter(|word| !word.is_empty())
+        .map(str::to_lowercase)
+        .collect();
+    if !words
+        .first()
+        .is_some_and(|word| matches!(word.as_str(), "what" | "which"))
+    {
+        return None;
+    }
+    let auxiliary_positions = words
+        .iter()
+        .enumerate()
+        .skip(2)
+        .filter_map(|(index, word)| {
+            matches!(word.as_str(), "did" | "had" | "has" | "have").then_some(index)
+        })
+        .collect::<Vec<_>>();
+    let [auxiliary_index] = auxiliary_positions.as_slice() else {
+        return None;
+    };
+    let controls = words
+        .windows(3)
+        .enumerate()
+        .skip(auxiliary_index.saturating_add(1))
+        .filter_map(|(index, window)| {
+            if matches!(
+                window[0].as_str(),
+                "attempt" | "attempted" | "attempts" | "try" | "tried" | "tries"
+            ) && window[1] == "to"
+            {
+                match window[2].as_str() {
+                    "build" | "builds" | "building" | "built" => Some((index, "build")),
+                    "create" | "created" | "creates" | "creating" => Some((index, "create")),
+                    "develop" | "developed" | "developing" | "develops" => Some((index, "develop")),
+                    "make" | "made" | "makes" | "making" => Some((index, "make")),
+                    "produce" | "produced" | "produces" | "producing" => Some((index, "produce")),
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    let [(control_index, action_head)] = controls.as_slice() else {
+        return None;
+    };
+    if *control_index + 3 != words.len()
+        || words.iter().any(|word| {
+            matches!(
+                word.as_str(),
+                "can't"
+                    | "cannot"
+                    | "could"
+                    | "couldn't"
+                    | "didn't"
+                    | "doesn't"
+                    | "don't"
+                    | "future"
+                    | "hadn't"
+                    | "hasn't"
+                    | "haven't"
+                    | "if"
+                    | "intend"
+                    | "intended"
+                    | "intending"
+                    | "intends"
+                    | "may"
+                    | "might"
+                    | "never"
+                    | "not"
+                    | "plan"
+                    | "planned"
+                    | "planning"
+                    | "plans"
+                    | "possible"
+                    | "possibly"
+                    | "potentially"
+                    | "should"
+                    | "shouldn't"
+                    | "unless"
+                    | "want"
+                    | "wanted"
+                    | "wanting"
+                    | "wants"
+                    | "will"
+                    | "won't"
+                    | "would"
+                    | "wouldn't"
+            )
+        })
+    {
+        return None;
+    }
+    let subject_words = &words[auxiliary_index.saturating_add(1)..*control_index];
+    if subject_words.is_empty()
+        || subject_words.iter().any(|word| {
+            matches!(
+                word.as_str(),
+                "and"
+                    | "are"
+                    | "been"
+                    | "being"
+                    | "could"
+                    | "has"
+                    | "have"
+                    | "if"
+                    | "is"
+                    | "may"
+                    | "might"
+                    | "or"
+                    | "possibly"
+                    | "potentially"
+                    | "should"
+                    | "to"
+                    | "unless"
+                    | "was"
+                    | "were"
+                    | "will"
+                    | "would"
+            )
+        })
+        || !subject_words.iter().any(|word| {
+            !matches!(
+                word.as_str(),
+                "a" | "an"
+                    | "he"
+                    | "her"
+                    | "hers"
+                    | "him"
+                    | "his"
+                    | "it"
+                    | "its"
+                    | "our"
+                    | "ours"
+                    | "she"
+                    | "the"
+                    | "their"
+                    | "theirs"
+                    | "them"
+                    | "they"
+                    | "we"
+                    | "you"
+                    | "your"
+                    | "yours"
+            )
+        })
+    {
+        return None;
+    }
+
+    let target_terms = words[1..*auxiliary_index]
+        .iter()
+        .filter(|word| {
+            !matches!(
+                word.as_str(),
+                "a" | "an"
+                    | "category"
+                    | "categories"
+                    | "kind"
+                    | "kinds"
+                    | "of"
+                    | "sort"
+                    | "sorts"
+                    | "the"
+                    | "type"
+                    | "types"
+            )
+        })
+        .take(3)
+        .cloned()
+        .collect::<Vec<_>>();
+    (!target_terms.is_empty()).then(|| format!("{action_head} {}", target_terms.join(" ")))
+}
+
 fn predicate_dense_surface(query: &str) -> Option<String> {
     const LOW_INFORMATION_TERMS: &[&str] = &[
         "a", "an", "he", "her", "hers", "his", "its", "my", "our", "ours", "she", "that", "the",
         "their", "theirs", "they", "your", "yours",
     ];
 
+    if let Some(surface) = control_action_dense_surface(query) {
+        return Some(surface);
+    }
     let relation_surface = relation_bearing_dense_surface(query)?;
     let anchors = proper_noun_anchors_with_inference(query, true);
     if anchors.len() != 1 {
@@ -568,6 +793,7 @@ pub(crate) fn conservative_complex_dense_query_plan(query: &str) -> ComplexDense
         variants,
         engine_variant_indices,
         atomic_variant_indices,
+        premise_slots: Vec::new(),
     }
 }
 
@@ -818,6 +1044,7 @@ mod tests {
     fn comma_context_and_consequence_become_query_derived_facets() {
         let query =
             "Based on Nimbus deployment logs, which retry policy would reduce queue failures?";
+        let plan = complex_dense_query_plan(query);
 
         assert_eq!(decompose_query(query), vec!["Nimbus deployment logs"]);
         assert_eq!(
@@ -828,12 +1055,25 @@ mod tests {
             ]
         );
         assert_eq!(
-            complex_dense_query_variants(query),
+            plan.variants,
             vec![
                 query,
                 "Nimbus deployment logs",
                 "Nimbus retry policy reduce queue failures",
                 "Nimbus"
+            ]
+        );
+        assert_eq!(
+            plan.premise_slots,
+            vec![
+                DensePremiseSlot {
+                    id: DensePremiseSlotId::from_ordinal(0),
+                    variant_index: 1,
+                },
+                DensePremiseSlot {
+                    id: DensePremiseSlotId::from_ordinal(1),
+                    variant_index: 2,
+                },
             ]
         );
     }
@@ -927,6 +1167,83 @@ mod tests {
         );
         assert_eq!(plan.engine_variant_indices, vec![0, 1, 2, 3]);
         assert_eq!(plan.atomic_variant_indices, vec![0, 1, 2]);
+        assert!(plan.premise_slots.is_empty());
+    }
+
+    #[test]
+    fn attempted_artifact_queries_replace_the_predicate_surface_with_the_action_head() {
+        let query = "What kinds of tools has the technician tried to build?";
+        assert_eq!(
+            control_action_dense_surface(query).as_deref(),
+            Some("build tools")
+        );
+        assert_eq!(
+            predicate_dense_surface(query).as_deref(),
+            Some("build tools")
+        );
+
+        let plan = conservative_complex_dense_query_plan(query);
+        let atomic_surfaces = plan
+            .atomic_variant_indices
+            .iter()
+            .map(|&index| plan.variants[index].as_str())
+            .collect::<Vec<_>>();
+        assert!(atomic_surfaces.contains(&query));
+        assert!(atomic_surfaces.contains(&"build tools"));
+        assert_eq!(
+            atomic_surfaces
+                .iter()
+                .filter(|surface| **surface == "build tools")
+                .count(),
+            1,
+            "normalization replaces one bounded predicate surface"
+        );
+        assert!(plan.variants.len() <= 5);
+
+        for (query, expected) in [
+            (
+                "What kinds of tools has the technician tried to develop?",
+                "develop tools",
+            ),
+            (
+                "What kinds of tools did the technician attempt to create?",
+                "create tools",
+            ),
+            (
+                "What kinds of tools has the technician tried to make?",
+                "make tools",
+            ),
+            (
+                "What kinds of tools had the technician attempted to produce?",
+                "produce tools",
+            ),
+        ] {
+            assert_eq!(
+                control_action_dense_surface(query).as_deref(),
+                Some(expected),
+                "query: {query}"
+            );
+        }
+    }
+
+    #[test]
+    fn action_head_normalization_fails_closed_for_unbounded_query_shapes() {
+        for query in [
+            "What tools did the technician try?",
+            "What tools might the technician try to build?",
+            "What tools has the technician and the designer tried to build?",
+            "What tools have been attempted by the technician?",
+            "What tools has the technician tried to repair?",
+            "What tools has the technician tried to build but never completed?",
+            "What tools has the technician not tried to build?",
+            "What tools has the technician planned and tried to build?",
+            "What tools has the technician tried to build for the designer?",
+        ] {
+            assert!(
+                control_action_dense_surface(query).is_none(),
+                "query unexpectedly normalized: {query}"
+            );
+        }
     }
 
     #[test]
@@ -957,6 +1274,18 @@ mod tests {
 
         assert!(clause_facets(query).is_empty());
         assert!(relation_clause_dense_surfaces(query).is_empty());
+        assert!(complex_dense_query_plan(query).premise_slots.is_empty());
+    }
+
+    #[test]
+    fn only_strong_relation_clauses_receive_premise_slots() {
+        let inference_plan =
+            complex_dense_query_plan("What deployment advice could Nimbus and Atlas share?");
+        assert!(inference_plan.premise_slots.is_empty());
+
+        let query = "Which rollout should Nimbus pause while error rates are elevated?";
+        let conservative_plan = conservative_complex_dense_query_plan(query);
+        assert!(conservative_plan.premise_slots.is_empty());
     }
 
     #[test]
@@ -977,9 +1306,50 @@ mod tests {
             );
         }
 
-        let variants = complex_dense_query_variants(query);
-        assert_eq!(variants.first().map(String::as_str), Some(query));
-        assert!(variants.len() <= 4, "dense variants must remain capped");
+        let plan = complex_dense_query_plan(query);
+        assert_eq!(plan.variants.first().map(String::as_str), Some(query));
+        assert!(
+            plan.variants.len() <= 4,
+            "dense variants must remain capped"
+        );
+        assert!(plan.premise_slots.len() <= 3);
+        for (ordinal, slot) in plan.premise_slots.iter().enumerate() {
+            assert_eq!(slot.id, DensePremiseSlotId::from_ordinal(ordinal));
+            assert!(plan.atomic_variant_indices.contains(&slot.variant_index));
+            assert!(slot.variant_index > 0);
+        }
+    }
+
+    #[test]
+    fn premise_slots_are_deterministic_and_bounded_by_the_existing_batch() {
+        let query = "Given deployment logs, queues stall because workers retry; alerts rise?";
+        let first = complex_dense_query_plan(query);
+        let second = complex_dense_query_plan(query);
+
+        assert_eq!(first, second);
+        assert_eq!(first.variants.len(), 4);
+        assert_eq!(first.premise_slots.len(), 3);
+        assert_eq!(
+            first
+                .premise_slots
+                .iter()
+                .enumerate()
+                .map(|(ordinal, slot)| (slot.id, ordinal, slot.variant_index))
+                .collect::<Vec<_>>(),
+            vec![
+                (DensePremiseSlotId::from_ordinal(0), 0, 1),
+                (DensePremiseSlotId::from_ordinal(1), 1, 2),
+                (DensePremiseSlotId::from_ordinal(2), 2, 3),
+            ]
+        );
+        assert_eq!(
+            first
+                .premise_slots
+                .iter()
+                .map(|slot| first.variants[slot.variant_index].as_str())
+                .collect::<Vec<_>>(),
+            vec!["deployment logs", "queues stall", "workers retry"]
+        );
     }
 
     #[test]
@@ -999,6 +1369,7 @@ mod tests {
         );
         assert_eq!(plan.engine_variant_indices, vec![0, 1]);
         assert_eq!(plan.atomic_variant_indices, vec![0, 2, 3]);
+        assert!(plan.premise_slots.is_empty());
     }
 
     #[test]
