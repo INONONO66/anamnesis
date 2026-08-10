@@ -69,19 +69,20 @@ mod view;
 pub use readout::{
     AnswerShape, DEFAULT_RERANK_CANDIDATE_LIMIT, DEFAULT_RERANK_FINAL_LIMIT,
     DEFAULT_RERANK_SEARCH_LIMIT, DEFAULT_SIMPLE_DELIVERY_LIMIT, DeepRecallOptions,
-    EventBoundaryEvidence, EvidenceDocument, EvidenceSelection, GroundedAnswerDraft,
-    GroundedAnswerItem, GroundedComparedCandidate, GroundedDraftDisposition,
-    GroundedDraftRecoveryAction, GroundedDraftRecoveryState, GroundedDraftStatus,
-    GroundedDraftValidation, GroundedDraftValidationContext, GroundedDraftValidationError,
-    GroundedDraftValidationFailure, GroundedDraftValidationResult, GroundedEvidenceFinding,
-    GroundedFindingDisposition, GroundedOccurrenceActuality, GroundedOperatorInput,
-    GroundedOperatorInputRole, GroundedReadoutAction, GroundedReasoningOperator,
-    GroundedReasoningOperatorKind, ReaderAnswerForm, ReaderFinalDisposition, RecallCoverage,
-    RecallDerivation, RecallIntent, RecallPlan, RecallReaderContract, RecallReaderStage,
-    RecallSourceAttribution, ReflectionRecommendation, RequestedAnswerCardinality,
-    RequestedAnswerModality, RequestedAnswerRole, RequestedAnswerSpec,
-    RequestedTemporalGranularity, RerankedRecallOptions, TemporalBoundaryDirection,
-    TemporalConstraint, TemporalConstraintKind,
+    EventBoundaryEvidence, EvidenceDocument, EvidenceSelection, GroundedAdjudicationShadowAction,
+    GroundedAdjudicationShadowAssessment, GroundedAnswerDraft, GroundedAnswerItem,
+    GroundedCandidateSurfaceRelation, GroundedClaimAuthority, GroundedClaimAuthorityProvenance,
+    GroundedComparedCandidate, GroundedDraftDisposition, GroundedDraftRecoveryAction,
+    GroundedDraftRecoveryState, GroundedDraftStatus, GroundedDraftValidation,
+    GroundedDraftValidationContext, GroundedDraftValidationError, GroundedDraftValidationFailure,
+    GroundedDraftValidationResult, GroundedEvidenceFinding, GroundedFindingDisposition,
+    GroundedOccurrenceActuality, GroundedOperatorInput, GroundedOperatorInputRole,
+    GroundedReadoutAction, GroundedReasoningOperator, GroundedReasoningOperatorKind,
+    ReaderAnswerForm, ReaderFinalDisposition, RecallCoverage, RecallDerivation, RecallIntent,
+    RecallPlan, RecallReaderContract, RecallReaderStage, RecallSourceAttribution,
+    ReflectionRecommendation, RequestedAnswerCardinality, RequestedAnswerModality,
+    RequestedAnswerRole, RequestedAnswerSpec, RequestedTemporalGranularity, RerankedRecallOptions,
+    TemporalBoundaryDirection, TemporalConstraint, TemporalConstraintKind,
 };
 pub use view::{ListFilter, MemoryView};
 
@@ -2684,6 +2685,64 @@ impl RecallReadout {
         self.validation_binding_is_current()
             .then(|| self.validation_context.event_boundary_evidence())
             .flatten()
+    }
+
+    /// Return the strongest claim authority retained by this exact readout.
+    ///
+    /// Any mutation of the public readout surface invalidates commit-bound
+    /// source-role authority and conservatively falls back to membership-only.
+    pub fn grounded_claim_authority(&self) -> GroundedClaimAuthority {
+        if self.context_aware_validation && self.validation_binding_is_current() {
+            self.validation_context.claim_authority()
+        } else {
+            GroundedClaimAuthority::MembershipOnly
+        }
+    }
+
+    /// Return why this exact readout has its current claim-authority level.
+    ///
+    /// A previously issued role receipt is reported as invalidated when any
+    /// public readout field no longer matches its issuance snapshot. Ordinary
+    /// readouts that never carried such a receipt remain membership-only.
+    pub fn grounded_claim_authority_provenance(&self) -> GroundedClaimAuthorityProvenance {
+        match self.validation_binding.as_ref() {
+            Some(_) if !self.validation_binding_is_current() => {
+                GroundedClaimAuthorityProvenance::InvalidatedReceipt
+            }
+            Some(_) => match self.validation_context.claim_authority() {
+                GroundedClaimAuthority::SourceRoleBound => {
+                    GroundedClaimAuthorityProvenance::SourceRoleReceipt
+                }
+                GroundedClaimAuthority::ManifestEntailed => {
+                    GroundedClaimAuthorityProvenance::ManifestReceipt
+                }
+                GroundedClaimAuthority::MembershipOnly => {
+                    GroundedClaimAuthorityProvenance::MembershipValidation
+                }
+            },
+            None => GroundedClaimAuthorityProvenance::MembershipValidation,
+        }
+    }
+
+    /// Assess one materialized typed answer with authority derived from this
+    /// exact readout binding.
+    ///
+    /// This is observational and does not alter the direct-first transition.
+    /// Consumers that validated and materialized through a [`RecallReadout`]
+    /// should prefer this method to passing a separately assembled authority
+    /// value to [`RecallReaderContract::assess_adjudicated_materialization`].
+    pub fn assess_adjudicated_materialization(
+        &self,
+        direct_disposition: ReaderFinalDisposition,
+        direct_candidate: Option<&str>,
+        materialized_answer: Option<&str>,
+    ) -> GroundedAdjudicationShadowAssessment {
+        self.reader_contract.assess_adjudicated_materialization(
+            direct_disposition,
+            direct_candidate,
+            materialized_answer,
+            self.grounded_claim_authority(),
+        )
     }
 
     /// Return closed authority guidance suitable for composition with
@@ -9137,9 +9196,45 @@ mod tests {
         let mut mutated_readout = memory
             .readout_for_reranked(&bound)
             .expect("mutable public readout surface");
+        assert_eq!(
+            mutated_readout.grounded_claim_authority(),
+            GroundedClaimAuthority::SourceRoleBound
+        );
+        assert_eq!(
+            mutated_readout.grounded_claim_authority_provenance(),
+            GroundedClaimAuthorityProvenance::SourceRoleReceipt
+        );
+        assert_eq!(
+            mutated_readout
+                .assess_adjudicated_materialization(
+                    ReaderFinalDisposition::Answer,
+                    Some("old"),
+                    Some("new"),
+                )
+                .authority(),
+            GroundedClaimAuthority::SourceRoleBound
+        );
         mutated_readout.source_node_ids.reverse();
         assert!(mutated_readout.event_boundary_evidence().is_none());
         assert!(mutated_readout.system_authority_guidance().is_none());
+        assert_eq!(
+            mutated_readout.grounded_claim_authority(),
+            GroundedClaimAuthority::MembershipOnly
+        );
+        assert_eq!(
+            mutated_readout.grounded_claim_authority_provenance(),
+            GroundedClaimAuthorityProvenance::InvalidatedReceipt
+        );
+        assert_eq!(
+            mutated_readout
+                .assess_adjudicated_materialization(
+                    ReaderFinalDisposition::Answer,
+                    Some("old"),
+                    Some("new"),
+                )
+                .authority(),
+            GroundedClaimAuthority::MembershipOnly
+        );
         let error = mutated_readout
             .validate_adjudicated_draft(&bound_draft)
             .expect_err("mutated readout surface must lose receipt authority");
