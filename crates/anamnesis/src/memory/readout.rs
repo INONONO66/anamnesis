@@ -199,6 +199,21 @@ pub enum AnswerShape {
     Inference,
 }
 
+impl AnswerShape {
+    /// Return the stable lowercase name used by observational reader telemetry.
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            Self::Fact => "fact",
+            Self::Relationship => "relationship",
+            Self::Inference => "inference",
+            Self::Temporal => "temporal",
+            Self::Frequency => "frequency",
+            Self::Count => "count",
+            Self::Collection => "collection",
+        }
+    }
+}
+
 /// How a reader may derive the requested answer from grounded evidence.
 ///
 /// This is independent of [`AnswerShape`]: a collection can enumerate values
@@ -697,6 +712,69 @@ fn normalized_adjudication_surface(value: &str) -> String {
     normalize_collection_item(&materialized_scalar_candidate(value))
 }
 
+fn trim_collection_segment(value: &str) -> &str {
+    let mut trimmed = value.trim();
+    if trimmed
+        .get(..4)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("and "))
+        && let Some(remainder) = trimmed.get(4..)
+    {
+        trimmed = remainder.trim();
+    }
+    trimmed.trim_start_matches(['-', '*', '\u{2022}']).trim()
+}
+
+fn explicit_collection_surface(value: &str) -> Option<Vec<String>> {
+    let materialized = materialized_scalar_candidate(value);
+    let has_hard_separator = materialized
+        .chars()
+        .any(|character| matches!(character, ',' | ';' | '\n'));
+    if !has_hard_separator {
+        return None;
+    }
+
+    let mut normalized = materialized
+        .split([',', ';', '\n'])
+        .map(|segment| normalize_collection_item(trim_collection_segment(segment)))
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+    (normalized.len() > 1).then(|| {
+        normalized.sort_unstable();
+        normalized
+    })
+}
+
+fn collection_surface_relation(
+    direct: &str,
+    materialized: &str,
+) -> GroundedCandidateSurfaceRelation {
+    let Some(direct_items) = explicit_collection_surface(direct) else {
+        return GroundedCandidateSurfaceRelation::NotComparable;
+    };
+    let Some(materialized_items) = explicit_collection_surface(materialized) else {
+        return GroundedCandidateSurfaceRelation::NotComparable;
+    };
+    if direct_items == materialized_items {
+        return GroundedCandidateSurfaceRelation::Convergent;
+    }
+
+    let mut direct_token_arity = direct_items
+        .iter()
+        .map(|item| item.split_whitespace().count())
+        .collect::<Vec<_>>();
+    let mut materialized_token_arity = materialized_items
+        .iter()
+        .map(|item| item.split_whitespace().count())
+        .collect::<Vec<_>>();
+    direct_token_arity.sort_unstable();
+    materialized_token_arity.sort_unstable();
+    if direct_token_arity == materialized_token_arity {
+        GroundedCandidateSurfaceRelation::Different
+    } else {
+        GroundedCandidateSurfaceRelation::NotComparable
+    }
+}
+
 impl RecallReaderContract {
     /// Compile a reader contract from a deterministic recall plan.
     pub fn from_plan(plan: &RecallPlan) -> Self {
@@ -912,18 +990,22 @@ impl RecallReaderContract {
             Some(_) if direct_disposition == ReaderFinalDisposition::Abstention => {
                 GroundedCandidateSurfaceRelation::NoDirectCandidate
             }
-            Some(materialized) => direct_candidate.map_or(
-                GroundedCandidateSurfaceRelation::NoDirectCandidate,
-                |direct| {
-                    if normalized_adjudication_surface(direct)
-                        == normalized_adjudication_surface(materialized)
-                    {
-                        GroundedCandidateSurfaceRelation::Convergent
-                    } else {
-                        GroundedCandidateSurfaceRelation::Different
-                    }
-                },
-            ),
+            Some(materialized) => direct_candidate
+                .filter(|direct| !normalized_adjudication_surface(direct).is_empty())
+                .map_or(
+                    GroundedCandidateSurfaceRelation::NoDirectCandidate,
+                    |direct| {
+                        if normalized_adjudication_surface(direct)
+                            == normalized_adjudication_surface(materialized)
+                        {
+                            GroundedCandidateSurfaceRelation::Convergent
+                        } else if self.plan.answer_shape == AnswerShape::Collection {
+                            collection_surface_relation(direct, materialized)
+                        } else {
+                            GroundedCandidateSurfaceRelation::Different
+                        }
+                    },
+                ),
         };
         let action = match surface_relation {
             GroundedCandidateSurfaceRelation::NoMaterializedAnswer => {
@@ -933,11 +1015,13 @@ impl RecallReaderContract {
                 GroundedAdjudicationShadowAction::AcceptConvergentAnswer
             }
             GroundedCandidateSurfaceRelation::Different
+            | GroundedCandidateSurfaceRelation::NotComparable
                 if authority.permits_semantic_overwrite() =>
             {
                 GroundedAdjudicationShadowAction::AcceptAuthoritativeCorrection
             }
-            GroundedCandidateSurfaceRelation::Different => {
+            GroundedCandidateSurfaceRelation::Different
+            | GroundedCandidateSurfaceRelation::NotComparable => {
                 GroundedAdjudicationShadowAction::VerifyConflictBeforeOverwrite
             }
             GroundedCandidateSurfaceRelation::NoDirectCandidate
@@ -3907,6 +3991,45 @@ impl GroundedClaimAuthority {
     pub const fn permits_semantic_overwrite(self) -> bool {
         matches!(self, Self::ManifestEntailed)
     }
+
+    /// Return the stable lowercase name used by observational telemetry.
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            Self::MembershipOnly => "membership_only",
+            Self::SourceRoleBound => "source_role_bound",
+            Self::ManifestEntailed => "manifest_entailed",
+        }
+    }
+}
+
+/// Provenance of the strongest authority retained by one exact readout.
+///
+/// This distinguishes ordinary membership validation from a commit-bound
+/// receipt that was later invalidated by public readout mutation. It remains
+/// observational and grants no authority beyond [`GroundedClaimAuthority`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum GroundedClaimAuthorityProvenance {
+    /// No commit-bound source-role receipt was issued for this readout.
+    MembershipValidation,
+    /// A receipt was issued but no longer matches the public readout surface.
+    InvalidatedReceipt,
+    /// A current engine-issued receipt binds closed source roles.
+    SourceRoleReceipt,
+    /// A future current engine-issued manifest binds an entailed typed claim.
+    ManifestReceipt,
+}
+
+impl GroundedClaimAuthorityProvenance {
+    /// Return the stable lowercase name used by observational telemetry.
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            Self::MembershipValidation => "membership_validation",
+            Self::InvalidatedReceipt => "invalidated_receipt",
+            Self::SourceRoleReceipt => "source_role_receipt",
+            Self::ManifestReceipt => "manifest_receipt",
+        }
+    }
 }
 
 /// Narrow surface relationship between a direct candidate and a materialized
@@ -3920,8 +4043,24 @@ pub enum GroundedCandidateSurfaceRelation {
     NoDirectCandidate,
     /// Conservative scalar normalization produced the same surface value.
     Convergent,
+    /// The collection surfaces could not be safely segmented into comparable
+    /// item lists, so no disagreement is asserted.
+    NotComparable,
     /// The two normalized surfaces differ.
     Different,
+}
+
+impl GroundedCandidateSurfaceRelation {
+    /// Return the stable lowercase name used by observational telemetry.
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            Self::NoMaterializedAnswer => "no_materialized_answer",
+            Self::NoDirectCandidate => "no_direct_candidate",
+            Self::Convergent => "convergent",
+            Self::NotComparable => "not_comparable",
+            Self::Different => "different",
+        }
+    }
 }
 
 /// Authority-aware action recommended by the non-mutating shadow policy.
@@ -3942,9 +4081,26 @@ pub enum GroundedAdjudicationShadowAction {
     RequireEntailmentBeforeIndependentAnswer,
 }
 
+impl GroundedAdjudicationShadowAction {
+    /// Return the stable lowercase name used by observational telemetry.
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            Self::PreserveAbstention => "preserve_abstention",
+            Self::AcceptConvergentAnswer => "accept_convergent_answer",
+            Self::AcceptAuthoritativeCorrection => "accept_authoritative_correction",
+            Self::VerifyConflictBeforeOverwrite => "verify_conflict_before_overwrite",
+            Self::AcceptAuthoritativeIndependentAnswer => "accept_authoritative_independent_answer",
+            Self::RequireEntailmentBeforeIndependentAnswer => {
+                "require_entailment_before_independent_answer"
+            }
+        }
+    }
+}
+
 /// Observational result of the authority-aware adjudication shadow policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
+#[must_use]
 pub struct GroundedAdjudicationShadowAssessment {
     authority: GroundedClaimAuthority,
     surface_relation: GroundedCandidateSurfaceRelation,
@@ -21772,6 +21928,122 @@ mod tests {
             GroundedAdjudicationShadowAction::AcceptConvergentAnswer
         );
         assert!(!assessment.authority().permits_semantic_overwrite());
+    }
+
+    #[test]
+    fn authority_shadow_compares_explicit_collection_items_without_order() {
+        let contract = RecallPlan::infer_with_answer_shape(
+            "What cities did Alice visit?",
+            AnswerShape::Collection,
+        )
+        .reader_contract();
+        let reordered = contract.assess_adjudicated_materialization(
+            ReaderFinalDisposition::Answer,
+            Some("Porto; Lisbon"),
+            Some("Lisbon, Porto"),
+            GroundedClaimAuthority::MembershipOnly,
+        );
+        assert_eq!(
+            reordered.surface_relation(),
+            GroundedCandidateSurfaceRelation::Convergent
+        );
+        assert_eq!(
+            reordered.action(),
+            GroundedAdjudicationShadowAction::AcceptConvergentAnswer
+        );
+        let compound_label = contract.assess_adjudicated_materialization(
+            ReaderFinalDisposition::Answer,
+            Some("Spain; Research and Development"),
+            Some("Research and Development, Spain"),
+            GroundedClaimAuthority::MembershipOnly,
+        );
+        assert_eq!(
+            compound_label.surface_relation(),
+            GroundedCandidateSurfaceRelation::Convergent
+        );
+
+        let different = contract.assess_adjudicated_materialization(
+            ReaderFinalDisposition::Answer,
+            Some("Lisbon; Braga"),
+            Some("Lisbon, Porto"),
+            GroundedClaimAuthority::MembershipOnly,
+        );
+        assert_eq!(
+            different.surface_relation(),
+            GroundedCandidateSurfaceRelation::Different
+        );
+    }
+
+    #[test]
+    fn authority_shadow_does_not_call_collection_prose_a_conflict() {
+        let contract = RecallPlan::infer_with_answer_shape(
+            "What cities did Alice visit?",
+            AnswerShape::Collection,
+        )
+        .reader_contract();
+        let assessment = contract.assess_adjudicated_materialization(
+            ReaderFinalDisposition::Answer,
+            Some("Alice visited Lisbon, Porto"),
+            Some("Lisbon, Porto"),
+            GroundedClaimAuthority::MembershipOnly,
+        );
+        assert_eq!(
+            assessment.surface_relation(),
+            GroundedCandidateSurfaceRelation::NotComparable
+        );
+        assert_eq!(
+            assessment.action(),
+            GroundedAdjudicationShadowAction::VerifyConflictBeforeOverwrite
+        );
+
+        let conjunction_only = contract.assess_adjudicated_materialization(
+            ReaderFinalDisposition::Answer,
+            Some("Porto and Lisbon"),
+            Some("Lisbon, Porto"),
+            GroundedClaimAuthority::MembershipOnly,
+        );
+        assert_eq!(
+            conjunction_only.surface_relation(),
+            GroundedCandidateSurfaceRelation::NotComparable
+        );
+    }
+
+    #[test]
+    fn authority_shadow_treats_blank_direct_as_no_candidate() {
+        let contract = RecallPlan::infer("In which country is Alice located?").reader_contract();
+        let assessment = contract.assess_adjudicated_materialization(
+            ReaderFinalDisposition::Answer,
+            Some(" \t\n "),
+            Some("Portugal"),
+            GroundedClaimAuthority::MembershipOnly,
+        );
+        assert_eq!(
+            assessment.surface_relation(),
+            GroundedCandidateSurfaceRelation::NoDirectCandidate
+        );
+        assert_eq!(
+            assessment.action(),
+            GroundedAdjudicationShadowAction::RequireEntailmentBeforeIndependentAnswer
+        );
+    }
+
+    #[test]
+    fn authority_shadow_preserves_abstention_without_materialization() {
+        let contract = RecallPlan::infer("In which country is Alice located?").reader_contract();
+        let assessment = contract.assess_adjudicated_materialization(
+            ReaderFinalDisposition::Abstention,
+            None,
+            None,
+            GroundedClaimAuthority::MembershipOnly,
+        );
+        assert_eq!(
+            assessment.surface_relation(),
+            GroundedCandidateSurfaceRelation::NoMaterializedAnswer
+        );
+        assert_eq!(
+            assessment.action(),
+            GroundedAdjudicationShadowAction::PreserveAbstention
+        );
     }
 
     #[test]
