@@ -693,6 +693,10 @@ fn materialized_scalar_candidate(candidate: &str) -> String {
     unquoted.unwrap_or(trimmed).trim().to_owned()
 }
 
+fn normalized_adjudication_surface(value: &str) -> String {
+    normalize_collection_item(&materialized_scalar_candidate(value))
+}
+
 impl RecallReaderContract {
     /// Compile a reader contract from a deterministic recall plan.
     pub fn from_plan(plan: &RecallPlan) -> Self {
@@ -885,6 +889,70 @@ impl RecallReaderContract {
                     GroundedReadoutAction::PreserveAbstention
                 }
             }
+        }
+    }
+
+    /// Classify what an authority-aware policy would need to do with one
+    /// structurally valid materialized answer.
+    ///
+    /// This method is deliberately observational: it does not change the
+    /// direct-first transition selected by [`Self::action_after_adjudicated_draft`].
+    /// A consumer can record the result in shadow mode before enabling any
+    /// stricter overwrite policy. Surface convergence is intentionally narrow
+    /// and proves no semantic equivalence.
+    pub fn assess_adjudicated_materialization(
+        &self,
+        direct_disposition: ReaderFinalDisposition,
+        direct_candidate: Option<&str>,
+        materialized_answer: Option<&str>,
+        authority: GroundedClaimAuthority,
+    ) -> GroundedAdjudicationShadowAssessment {
+        let surface_relation = match materialized_answer {
+            None => GroundedCandidateSurfaceRelation::NoMaterializedAnswer,
+            Some(_) if direct_disposition == ReaderFinalDisposition::Abstention => {
+                GroundedCandidateSurfaceRelation::NoDirectCandidate
+            }
+            Some(materialized) => direct_candidate.map_or(
+                GroundedCandidateSurfaceRelation::NoDirectCandidate,
+                |direct| {
+                    if normalized_adjudication_surface(direct)
+                        == normalized_adjudication_surface(materialized)
+                    {
+                        GroundedCandidateSurfaceRelation::Convergent
+                    } else {
+                        GroundedCandidateSurfaceRelation::Different
+                    }
+                },
+            ),
+        };
+        let action = match surface_relation {
+            GroundedCandidateSurfaceRelation::NoMaterializedAnswer => {
+                GroundedAdjudicationShadowAction::PreserveAbstention
+            }
+            GroundedCandidateSurfaceRelation::Convergent => {
+                GroundedAdjudicationShadowAction::AcceptConvergentAnswer
+            }
+            GroundedCandidateSurfaceRelation::Different
+                if authority.permits_semantic_overwrite() =>
+            {
+                GroundedAdjudicationShadowAction::AcceptAuthoritativeCorrection
+            }
+            GroundedCandidateSurfaceRelation::Different => {
+                GroundedAdjudicationShadowAction::VerifyConflictBeforeOverwrite
+            }
+            GroundedCandidateSurfaceRelation::NoDirectCandidate
+                if authority.permits_semantic_overwrite() =>
+            {
+                GroundedAdjudicationShadowAction::AcceptAuthoritativeIndependentAnswer
+            }
+            GroundedCandidateSurfaceRelation::NoDirectCandidate => {
+                GroundedAdjudicationShadowAction::RequireEntailmentBeforeIndependentAnswer
+            }
+        };
+        GroundedAdjudicationShadowAssessment {
+            authority,
+            surface_relation,
+            action,
         }
     }
 
@@ -3815,6 +3883,91 @@ pub enum ReaderFinalDisposition {
     Abstention,
 }
 
+/// Authority available to a structurally valid grounded adjudication.
+///
+/// Source membership and commit-bound source roles are useful validation
+/// constraints, but neither proves that the cited prose semantically entails
+/// a generated answer. [`Self::ManifestEntailed`] is reserved for a future
+/// engine-issued claim manifest that binds a typed proposition to the exact
+/// readout receipt. Merely constructing this enum never creates such proof.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum GroundedClaimAuthority {
+    /// Validation proves only that every citation belongs to delivered input.
+    MembershipOnly,
+    /// An engine-issued receipt additionally binds closed source roles.
+    SourceRoleBound,
+    /// An engine-issued manifest proves the typed claim is entailed.
+    ManifestEntailed,
+}
+
+impl GroundedClaimAuthority {
+    /// Return whether this authority can independently justify replacing a
+    /// useful direct candidate in a future enforcement policy.
+    pub const fn permits_semantic_overwrite(self) -> bool {
+        matches!(self, Self::ManifestEntailed)
+    }
+}
+
+/// Narrow surface relationship between a direct candidate and a materialized
+/// typed answer. This classification is telemetry, not semantic equivalence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum GroundedCandidateSurfaceRelation {
+    /// The typed draft materialized to no answer.
+    NoMaterializedAnswer,
+    /// The direct reader abstained or supplied no candidate to compare.
+    NoDirectCandidate,
+    /// Conservative scalar normalization produced the same surface value.
+    Convergent,
+    /// The two normalized surfaces differ.
+    Different,
+}
+
+/// Authority-aware action recommended by the non-mutating shadow policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum GroundedAdjudicationShadowAction {
+    /// No materialized answer exists, so abstention remains appropriate.
+    PreserveAbstention,
+    /// The typed answer converges with the direct candidate.
+    AcceptConvergentAnswer,
+    /// Entailed authority permits a correction to replace the direct answer.
+    AcceptAuthoritativeCorrection,
+    /// A differing membership-only answer needs independent conflict proof.
+    VerifyConflictBeforeOverwrite,
+    /// Entailed authority permits an answer after an independent abstention.
+    AcceptAuthoritativeIndependentAnswer,
+    /// Membership or source-role authority cannot resolve an abstention alone.
+    RequireEntailmentBeforeIndependentAnswer,
+}
+
+/// Observational result of the authority-aware adjudication shadow policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct GroundedAdjudicationShadowAssessment {
+    authority: GroundedClaimAuthority,
+    surface_relation: GroundedCandidateSurfaceRelation,
+    action: GroundedAdjudicationShadowAction,
+}
+
+impl GroundedAdjudicationShadowAssessment {
+    /// Authority available to the validated draft.
+    pub const fn authority(&self) -> GroundedClaimAuthority {
+        self.authority
+    }
+
+    /// Conservative surface relationship to the direct candidate.
+    pub const fn surface_relation(&self) -> GroundedCandidateSurfaceRelation {
+        self.surface_relation
+    }
+
+    /// Action a future authority-aware policy would require.
+    pub const fn action(&self) -> GroundedAdjudicationShadowAction {
+        self.action
+    }
+}
+
 /// Next operation in the direct-first grounded readout protocol.
 ///
 /// The protocol keeps provider calls outside the engine. A reader-owning
@@ -3971,6 +4124,19 @@ impl GroundedDraftValidationContext {
     /// Return the commit-safe event-boundary source roles, when available.
     pub const fn event_boundary_evidence(&self) -> Option<&EventBoundaryEvidence> {
         self.event_boundary_evidence.as_ref()
+    }
+
+    /// Return the strongest authority this exact validation context carries.
+    ///
+    /// Event-boundary evidence binds source roles but still does not prove
+    /// free-form semantic entailment, so it cannot authorize an overwrite by
+    /// itself.
+    pub const fn claim_authority(&self) -> GroundedClaimAuthority {
+        if self.event_boundary_evidence.is_some() {
+            GroundedClaimAuthority::SourceRoleBound
+        } else {
+            GroundedClaimAuthority::MembershipOnly
+        }
     }
 
     pub(super) fn with_event_boundary_evidence(
@@ -21383,6 +21549,15 @@ mod tests {
         let draft = event_boundary_collection_draft();
         let delivered = [NodeId(7), NodeId(9), NodeId(11)];
 
+        assert_eq!(
+            GroundedDraftValidationContext::membership_only().claim_authority(),
+            GroundedClaimAuthority::MembershipOnly
+        );
+        assert_eq!(
+            event_boundary_context(TemporalBoundaryDirection::Before).claim_authority(),
+            GroundedClaimAuthority::SourceRoleBound
+        );
+
         let wrong_direction = event_boundary_context(TemporalBoundaryDirection::After);
         let error = contract
             .validate_adjudicated_draft_with_context(&draft, &delivered, &wrong_direction)
@@ -21577,6 +21752,72 @@ mod tests {
         );
         assert!(!unresolved.repair_attempted());
         assert!(!unresolved.reverification_attempted());
+    }
+
+    #[test]
+    fn authority_shadow_accepts_surface_convergence_without_entailment() {
+        let contract = RecallPlan::infer("In which country is Alice located?").reader_contract();
+        let assessment = contract.assess_adjudicated_materialization(
+            ReaderFinalDisposition::Answer,
+            Some("  \"Portugal\" "),
+            Some("portugal"),
+            GroundedClaimAuthority::MembershipOnly,
+        );
+        assert_eq!(
+            assessment.surface_relation(),
+            GroundedCandidateSurfaceRelation::Convergent
+        );
+        assert_eq!(
+            assessment.action(),
+            GroundedAdjudicationShadowAction::AcceptConvergentAnswer
+        );
+        assert!(!assessment.authority().permits_semantic_overwrite());
+    }
+
+    #[test]
+    fn authority_shadow_flags_membership_conflict_and_independent_answer() {
+        let contract = RecallPlan::infer("In which country is Alice located?").reader_contract();
+        let conflict = contract.assess_adjudicated_materialization(
+            ReaderFinalDisposition::Answer,
+            Some("Portugal"),
+            Some("Spain"),
+            GroundedClaimAuthority::SourceRoleBound,
+        );
+        assert_eq!(
+            conflict.surface_relation(),
+            GroundedCandidateSurfaceRelation::Different
+        );
+        assert_eq!(
+            conflict.action(),
+            GroundedAdjudicationShadowAction::VerifyConflictBeforeOverwrite
+        );
+
+        let independent = contract.assess_adjudicated_materialization(
+            ReaderFinalDisposition::Abstention,
+            None,
+            Some("Portugal"),
+            GroundedClaimAuthority::MembershipOnly,
+        );
+        assert_eq!(
+            independent.action(),
+            GroundedAdjudicationShadowAction::RequireEntailmentBeforeIndependentAnswer
+        );
+    }
+
+    #[test]
+    fn authority_shadow_reserves_overwrite_for_manifest_entailment() {
+        let contract = RecallPlan::infer("In which country is Alice located?").reader_contract();
+        let corrected = contract.assess_adjudicated_materialization(
+            ReaderFinalDisposition::Answer,
+            Some("Spain"),
+            Some("Portugal"),
+            GroundedClaimAuthority::ManifestEntailed,
+        );
+        assert!(corrected.authority().permits_semantic_overwrite());
+        assert_eq!(
+            corrected.action(),
+            GroundedAdjudicationShadowAction::AcceptAuthoritativeCorrection
+        );
     }
 
     #[test]

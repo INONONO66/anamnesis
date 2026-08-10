@@ -9,9 +9,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anamnesis::engine::EmbeddingProvider;
 use anamnesis::memory::{
-    AnswerShape, ContextRenderStyle, GroundedDraftRecoveryState, GroundedReadoutAction,
-    GroundedReasoningOperatorKind, ReaderAnswerForm, ReaderFinalDisposition, RecallPlan,
-    RecallReaderContract, RecallReaderStage, RecallReadout, RequestedTemporalGranularity,
+    AnswerShape, ContextRenderStyle, GroundedAdjudicationShadowAction,
+    GroundedCandidateSurfaceRelation, GroundedClaimAuthority, GroundedDraftRecoveryState,
+    GroundedReadoutAction, GroundedReasoningOperatorKind, ReaderAnswerForm, ReaderFinalDisposition,
+    RecallPlan, RecallReaderContract, RecallReaderStage, RecallReadout,
+    RequestedTemporalGranularity,
 };
 use serde::{Deserialize, Serialize};
 
@@ -38,7 +40,7 @@ use eval_common::real_bench::{BenchError, BenchResult};
 #[cfg(not(feature = "embed"))]
 compile_error!("local_answer requires: cargo bench --features embed --bench local_answer");
 
-const SCHEMA_VERSION: u32 = 47;
+const SCHEMA_VERSION: u32 = 48;
 const DATASET_LOADER_VERSION: &str = "locomo-caption-attachment-v3+longmemeval-cleaned-v1";
 const ANSWER_PROMPT_VERSION: &str = "shared-source-grounded-contract-v11";
 const REFLECT_PROMPT_VERSION: &str = "direct-first-grounded-adjudication-v28";
@@ -357,6 +359,10 @@ struct RouteResult {
     /// Deterministic post-generation operations applied by the reader adapter.
     #[serde(default)]
     transformations: Vec<String>,
+    /// Non-mutating authority assessment for a structurally valid typed
+    /// materialization. This never changes the answer stored in this route.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    adjudication_authority_shadow: Option<AdjudicationAuthorityShadow>,
     prompt_eval_tokens: Option<u64>,
     output_eval_tokens: Option<u64>,
     /// Reference-compatible deterministic LoCoMo score. LongMemEval uses its judge metric instead.
@@ -384,6 +390,13 @@ struct RouteResult {
     /// Non-product reader context, when this route is diagnostic-only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     diagnostic_context: Option<StrongReaderContext>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct AdjudicationAuthorityShadow {
+    authority: String,
+    surface_relation: String,
+    recommended_action: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2534,6 +2547,7 @@ fn run_answer(
                 thinking_chars: generated.thinking_chars,
                 done_reason: generated.done_reason,
                 transformations: Vec::new(),
+                adjudication_authority_shadow: None,
                 prompt_eval_tokens: generated.prompt_eval_tokens,
                 output_eval_tokens: generated.output_eval_tokens,
                 locomo_official_f1,
@@ -2609,6 +2623,7 @@ fn run_grounded_readout_answer(
                 thinking_chars: direct_generation.thinking_chars,
                 done_reason: direct_done_reason,
                 transformations: Vec::new(),
+                adjudication_authority_shadow: None,
                 prompt_eval_tokens: direct_generation.prompt_eval_tokens,
                 output_eval_tokens: direct_generation.output_eval_tokens,
                 locomo_official_f1,
@@ -2677,6 +2692,7 @@ fn run_grounded_readout_answer(
         0.0
     };
     let mut transformations = vec!["typed-draft-adjudication".to_owned()];
+    let mut adjudication_authority_shadow = None;
     let mut recovery_state = GroundedDraftRecoveryState::new();
 
     let (answer, final_done_reason) =
@@ -2747,6 +2763,20 @@ fn run_grounded_readout_answer(
                     ),
                 }
                 .map_err(|error| BenchError::Parse(error.to_string()))?;
+                    let authority = product_readout
+                        .as_ref()
+                        .map_or(GroundedClaimAuthority::MembershipOnly, |readout| {
+                            readout.grounded_claim_authority()
+                        });
+                    adjudication_authority_shadow = Some(authority_shadow_wire(
+                        contract.assess_adjudicated_materialization(
+                            direct_disposition,
+                            (direct_disposition == ReaderFinalDisposition::Answer)
+                                .then_some(direct_answer.as_str()),
+                            materialized.as_deref(),
+                            authority,
+                        ),
+                    ));
                     transformations.push("deterministic-draft-materialization".to_owned());
                     break (
                         materialized.unwrap_or_else(|| "No information available.".to_owned()),
@@ -2792,6 +2822,7 @@ fn run_grounded_readout_answer(
             thinking_chars,
             done_reason: final_done_reason,
             transformations,
+            adjudication_authority_shadow,
             prompt_eval_tokens,
             output_eval_tokens,
             locomo_official_f1,
@@ -2805,6 +2836,46 @@ fn run_grounded_readout_answer(
         },
     );
     Ok(())
+}
+
+fn authority_shadow_wire(
+    assessment: anamnesis::memory::GroundedAdjudicationShadowAssessment,
+) -> AdjudicationAuthorityShadow {
+    let authority = match assessment.authority() {
+        GroundedClaimAuthority::MembershipOnly => "membership_only",
+        GroundedClaimAuthority::SourceRoleBound => "source_role_bound",
+        GroundedClaimAuthority::ManifestEntailed => "manifest_entailed",
+        _ => "unknown",
+    };
+    let surface_relation = match assessment.surface_relation() {
+        GroundedCandidateSurfaceRelation::NoMaterializedAnswer => "no_materialized_answer",
+        GroundedCandidateSurfaceRelation::NoDirectCandidate => "no_direct_candidate",
+        GroundedCandidateSurfaceRelation::Convergent => "convergent",
+        GroundedCandidateSurfaceRelation::Different => "different",
+        _ => "unknown",
+    };
+    let recommended_action = match assessment.action() {
+        GroundedAdjudicationShadowAction::PreserveAbstention => "preserve_abstention",
+        GroundedAdjudicationShadowAction::AcceptConvergentAnswer => "accept_convergent_answer",
+        GroundedAdjudicationShadowAction::AcceptAuthoritativeCorrection => {
+            "accept_authoritative_correction"
+        }
+        GroundedAdjudicationShadowAction::VerifyConflictBeforeOverwrite => {
+            "verify_conflict_before_overwrite"
+        }
+        GroundedAdjudicationShadowAction::AcceptAuthoritativeIndependentAnswer => {
+            "accept_authoritative_independent_answer"
+        }
+        GroundedAdjudicationShadowAction::RequireEntailmentBeforeIndependentAnswer => {
+            "require_entailment_before_independent_answer"
+        }
+        _ => "unknown",
+    };
+    AdjudicationAuthorityShadow {
+        authority: authority.to_owned(),
+        surface_relation: surface_relation.to_owned(),
+        recommended_action: recommended_action.to_owned(),
+    }
 }
 
 fn run_reflect_answer(
@@ -2942,6 +3013,7 @@ fn insert_omlx_route(
             thinking_chars: 0,
             done_reason,
             transformations,
+            adjudication_authority_shadow: None,
             prompt_eval_tokens,
             output_eval_tokens,
             locomo_official_f1,
@@ -6149,7 +6221,7 @@ mod grounded_readout_adapter_tests {
 
     #[test]
     fn v28_prompt_scopes_occurrence_metadata_to_count_contracts() {
-        assert_eq!(SCHEMA_VERSION, 47);
+        assert_eq!(SCHEMA_VERSION, 48);
         assert_eq!(ANSWER_PROMPT_VERSION, "shared-source-grounded-contract-v11");
         assert_eq!(
             REFLECT_PROMPT_VERSION,
@@ -6651,6 +6723,7 @@ mod grounded_readout_adapter_tests {
         assert_eq!(route.recovery_model_calls, 0);
         assert_eq!(route.recovery_latency_ms, 0.0);
         assert!(route.reflection.is_none());
+        assert!(route.adjudication_authority_shadow.is_none());
         assert_eq!(backend.call_formats(), vec![ReaderOutputFormat::Text]);
         let prompts = backend.call_prompts();
         assert_eq!(prompts.len(), 1);
@@ -6753,6 +6826,14 @@ mod grounded_readout_adapter_tests {
             route.reflection_latency_ms.unwrap()
         );
         assert_eq!(
+            route.adjudication_authority_shadow,
+            Some(AdjudicationAuthorityShadow {
+                authority: "membership_only".to_owned(),
+                surface_relation: "no_direct_candidate".to_owned(),
+                recommended_action: "require_entailment_before_independent_answer".to_owned(),
+            })
+        );
+        assert_eq!(
             backend.call_formats(),
             [ReaderOutputFormat::Text, ReaderOutputFormat::GroundedJson]
         );
@@ -6804,6 +6885,14 @@ mod grounded_readout_adapter_tests {
                 <= route
                     .reflection_latency_ms
                     .expect("typed-stage latency metadata")
+        );
+        assert_eq!(
+            route.adjudication_authority_shadow,
+            Some(AdjudicationAuthorityShadow {
+                authority: "membership_only".to_owned(),
+                surface_relation: "different".to_owned(),
+                recommended_action: "verify_conflict_before_overwrite".to_owned(),
+            })
         );
         assert_eq!(
             backend.call_formats(),
@@ -7568,6 +7657,7 @@ mod attachment_observation_cli_tests {
             thinking_chars: 0,
             done_reason: Some("stop".to_owned()),
             transformations: vec!["frozen-transform".to_owned()],
+            adjudication_authority_shadow: None,
             prompt_eval_tokens: Some(10),
             output_eval_tokens: Some(3),
             locomo_official_f1: Some(1.0),
@@ -7716,7 +7806,7 @@ mod attachment_observation_cli_tests {
 
     #[test]
     fn attachment_version_fences_are_current() {
-        assert_eq!(SCHEMA_VERSION, 47);
+        assert_eq!(SCHEMA_VERSION, 48);
         assert_eq!(
             DATASET_LOADER_VERSION,
             "locomo-caption-attachment-v3+longmemeval-cleaned-v1"

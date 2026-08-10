@@ -69,17 +69,18 @@ mod view;
 pub use readout::{
     AnswerShape, DEFAULT_RERANK_CANDIDATE_LIMIT, DEFAULT_RERANK_FINAL_LIMIT,
     DEFAULT_RERANK_SEARCH_LIMIT, DEFAULT_SIMPLE_DELIVERY_LIMIT, DeepRecallOptions,
-    EventBoundaryEvidence, EvidenceDocument, EvidenceSelection, GroundedAnswerDraft,
-    GroundedAnswerItem, GroundedComparedCandidate, GroundedDraftDisposition,
-    GroundedDraftRecoveryAction, GroundedDraftRecoveryState, GroundedDraftStatus,
-    GroundedDraftValidation, GroundedDraftValidationContext, GroundedDraftValidationError,
-    GroundedDraftValidationFailure, GroundedDraftValidationResult, GroundedEvidenceFinding,
-    GroundedFindingDisposition, GroundedOccurrenceActuality, GroundedOperatorInput,
-    GroundedOperatorInputRole, GroundedReadoutAction, GroundedReasoningOperator,
-    GroundedReasoningOperatorKind, ReaderAnswerForm, ReaderFinalDisposition, RecallCoverage,
-    RecallDerivation, RecallIntent, RecallPlan, RecallReaderContract, RecallReaderStage,
-    RecallSourceAttribution, ReflectionRecommendation, RequestedAnswerCardinality,
-    RequestedAnswerModality, RequestedAnswerRole, RequestedAnswerSpec,
+    EventBoundaryEvidence, EvidenceDocument, EvidenceSelection, GroundedAdjudicationShadowAction,
+    GroundedAdjudicationShadowAssessment, GroundedAnswerDraft, GroundedAnswerItem,
+    GroundedCandidateSurfaceRelation, GroundedClaimAuthority, GroundedComparedCandidate,
+    GroundedDraftDisposition, GroundedDraftRecoveryAction, GroundedDraftRecoveryState,
+    GroundedDraftStatus, GroundedDraftValidation, GroundedDraftValidationContext,
+    GroundedDraftValidationError, GroundedDraftValidationFailure, GroundedDraftValidationResult,
+    GroundedEvidenceFinding, GroundedFindingDisposition, GroundedOccurrenceActuality,
+    GroundedOperatorInput, GroundedOperatorInputRole, GroundedReadoutAction,
+    GroundedReasoningOperator, GroundedReasoningOperatorKind, ReaderAnswerForm,
+    ReaderFinalDisposition, RecallCoverage, RecallDerivation, RecallIntent, RecallPlan,
+    RecallReaderContract, RecallReaderStage, RecallSourceAttribution, ReflectionRecommendation,
+    RequestedAnswerCardinality, RequestedAnswerModality, RequestedAnswerRole, RequestedAnswerSpec,
     RequestedTemporalGranularity, RerankedRecallOptions, TemporalBoundaryDirection,
     TemporalConstraint, TemporalConstraintKind,
 };
@@ -2684,6 +2685,18 @@ impl RecallReadout {
         self.validation_binding_is_current()
             .then(|| self.validation_context.event_boundary_evidence())
             .flatten()
+    }
+
+    /// Return the strongest claim authority retained by this exact readout.
+    ///
+    /// Any mutation of the public readout surface invalidates commit-bound
+    /// source-role authority and conservatively falls back to membership-only.
+    pub fn grounded_claim_authority(&self) -> GroundedClaimAuthority {
+        if self.context_aware_validation && self.validation_binding_is_current() {
+            self.validation_context.claim_authority()
+        } else {
+            GroundedClaimAuthority::MembershipOnly
+        }
     }
 
     /// Return closed authority guidance suitable for composition with
@@ -9137,9 +9150,17 @@ mod tests {
         let mut mutated_readout = memory
             .readout_for_reranked(&bound)
             .expect("mutable public readout surface");
+        assert_eq!(
+            mutated_readout.grounded_claim_authority(),
+            GroundedClaimAuthority::SourceRoleBound
+        );
         mutated_readout.source_node_ids.reverse();
         assert!(mutated_readout.event_boundary_evidence().is_none());
         assert!(mutated_readout.system_authority_guidance().is_none());
+        assert_eq!(
+            mutated_readout.grounded_claim_authority(),
+            GroundedClaimAuthority::MembershipOnly
+        );
         let error = mutated_readout
             .validate_adjudicated_draft(&bound_draft)
             .expect_err("mutated readout surface must lose receipt authority");
