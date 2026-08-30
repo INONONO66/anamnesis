@@ -1,13 +1,10 @@
-export { Vault, VaultRecordInput } from "./vault.ts";
+export { Store } from "./store.ts";
 export type {
-  VaultRecord,
-  AppendResult,
-  OutboxEntry,
+  StoreOptions,
+  PutResult,
+  SearchHit,
   IntegrityIssue,
-} from "./vault.ts";
+} from "./store.ts";
 
-export { MemoryStore } from "./store.ts";
-export type { SearchHit, StoredLink } from "./store.ts";
-
-export { Engine, defaultRoot } from "./engine.ts";
+export { Engine, RememberInput, envConfig } from "./engine.ts";
 export type { EngineOptions } from "./engine.ts";

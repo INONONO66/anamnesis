@@ -5,12 +5,14 @@
     "packages/*"
   ],
   "scripts": {
-    "test": "bun test",
+    "test": "bun scripts/ensure-test-db.ts && bun test packages",
     "typecheck": "tsc --build",
-    "schemas": "bun run packages/protocol/scripts/export-schemas.ts"
+    "schemas": "bun run packages/protocol/scripts/export-schemas.ts",
+    "test:db": "bun scripts/ensure-test-db.ts"
   },
   "devDependencies": {
-    "typescript": "^5.9.2",
-    "@types/bun": "^1.2.21"
+    "@types/bun": "^1.2.21",
+    "neo4j-driver": "^6.2.0",
+    "typescript": "^5.9.2"
   }
 }

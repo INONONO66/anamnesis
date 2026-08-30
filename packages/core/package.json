@@ -8,6 +8,7 @@
   },
   "dependencies": {
     "@anamnesis/protocol": "workspace:*",
+    "neo4j-driver": "^6.2.0",
     "uuid": "^11.1.0",
     "zod": "^4.1.5"
   }
