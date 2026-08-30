@@ -7,11 +7,15 @@
  Claude Code ───┤                                        │
  (MCP stdio 브리지)│  anamnesisd  (Node 프로세스, 상주)       │
  커스텀 에이전트 ──┤                                        │
- (UDS/HTTP 직결)  │  단일 라이터: vault / memory / vectors  │
- CLI ───────────┤  상주 상태: links 그래프 인메모리,        │
- 어댑터·워처 ────┤            PPR 인덱스, LanceDB 핸들     │
-                 │  백그라운드: outbox 소화, dreaming,      │
-                 │            임베딩 백필                  │
+ (UDS/HTTP 직결)  │  단일 라이터: Neo4j bolt 커넥션 보유     │
+ CLI ───────────┤  백그라운드: outbox 소화, dreaming,      │
+ 어댑터·워처 ────┤            임베딩 백필                  │
+                 └───────────────────┬────────────────────┘
+                                     │ bolt (localhost)
+                 ┌───────────────────▼────────────────────┐
+                 │  Neo4j 5.26+ (Docker, localhost-only)   │
+                 │  그래프 + 벡터(HNSW) + 전문검색(Lucene)  │
+                 │  + GDS 플러그인 (PPR, Leiden)           │
                  └────────────────────────────────────────┘
 ```
 
@@ -45,81 +49,65 @@
 핵심 RPC: `remember`(즉시 vault append 후 리턴 — ms 단위, 추출은 비동기),
 `recall`(warm 인덱스로 즉답), `snapshot`, `status`, `digest`(수동 배치 트리거).
 
-## 저장소 배치
+## 저장소: Neo4j 단일 스토어
+
+> 결정 이력: SQLite+LanceDB(초안) → 단일 SQLite + 불변 트리거 → **Neo4j
+> 단일 스토어** (docker-없이 제약 해제, docs/08 §4 갱신). graphiti가 검증한
+> 방식 그대로 — 임베딩과 전문검색 인덱스가 그래프 DB 안에 산다. 별도 벡터
+> DB(Qdrant 등)는 벡터 수억 규모가 실측될 때 recall seam 뒤에 붙인다.
 
 ```text
 ~/.anamnesis/
-├── sock                       UDS
-├── vault/                     ── 불변 금고 ──
-│   ├── vault.db               SQLite. records 장부 + outbox. INSERT만
-│   └── objects/sha256/…       원본 바이트 (content-addressed)
-└── memory/                    ── 전부 파생, 삭제→재구축 가능 ──
-    ├── memory.db              SQLite. elements / links / scores / FTS5
-    └── vectors/               LanceDB 디렉토리 (임베딩 projection)
+├── sock                    UDS
+├── neo4j/                  Neo4j 볼륨 (data/, 백업 dump)
+└── compose.yaml            CLI가 관리하는 Neo4j 컨테이너 정의
+
+Neo4j 안:
+(:Element {id, schema, time_value, time_utc, time_precision, content,
+           origin_*, mass, properties, payload_hash, digest,
+           embedding})                        ← 에피소드+가공 전부. 원소 하나 = 노드 하나
+(:Element)-[:LINK {id, role, content, weight, embedding}]->(:Element)
+           role ∈ provenance | about | invalidates | semantic
+(:Payload {hash, bytes})                      원본 바이트 (content-addressed)
+(:Outbox …)                                   콜드패스 커서 (가변)
+
+인덱스: origin 3-튜플 unique 제약(멱등 재유입),
+       vector index (element.embedding, link.embedding — HNSW),
+       fulltext index (content — Lucene, CJK 대응),
+       time_utc range index (시점 절단)
 ```
 
-### 저장소 선택 근거
+### 선택 근거
 
-- **vault = SQLite**: 평생 보존 대상은 포맷 수명이 성능보다 중요하다.
-  SQLite는 2050년까지 후방 호환을 공식 보장하는 유일한 DB이고, 단일 파일이라
-  복사가 곧 백업이다. `journal_mode=WAL`, 스냅샷은 `VACUUM INTO`.
-- **memory.db = SQLite**: 원소·링크·질량·FTS5. 관계형 질의와 전문검색.
-- **vectors = LanceDB**: 벡터 전용 임베디드 DB (공식 JS SDK — Rust 코어에
-  napi 바인딩, 서버 없음).
-  진짜 ANN 인덱스(IVF-PQ/HNSW), 시점 절단용 프리필터 지원. 포맷 수명이
-  SQLite만 못한 약점은 무관하다 — **재생성 가능한 projection이라 금고가
-  아니기 때문**. 통째로 지워도 정보 손실이 없다.
-- **그래프 = 전용 DB 없음**: links 테이블을 데몬이 메모리에 올려 PPR/BFS를
-  직접 돌린다. 개인 규모(기억 수백만)에서 인메모리 그래프는 수십 MB이며,
-  HippoRAG도 그래프 DB 없이 인메모리 PPR로 SOTA를 냈다.
+- **그래프+벡터+전문검색이 한 시스템**: graphiti는 fact_embedding을 Neo4j
+  벡터 인덱스에, 전문검색을 내장 Lucene에 둔다. 벡터 DB를 따로 두면 동기화
+  배관만 늘고 얻는 게 없다 (hermes-graphiti 수개월 운영으로 검증).
+- **GDS 플러그인 (무료)**: PPR/PageRank, Leiden/Louvain이 내장 —
+  recall의 그래프 확산과 dreaming의 커뮤니티 검출을 손으로 짜지 않는다.
+- **검증된 운영 설정 차용**: hermes-graphiti의 compose 구성, JVM 메모리
+  튜닝, `neo4j-admin database dump` 백업, autoheal 패턴을 그대로 가져온다.
+- **임베디드 그래프 DB는 기각**: Kuzu 붕괴 사례 (docs/08 교훈 A).
 
-### vault.db 스키마
+### 불변성 규율
 
-```sql
-CREATE TABLE records (
-  id             TEXT PRIMARY KEY,            -- UUIDv7
-  time_value     TEXT NOT NULL,
-  time_precision TEXT NOT NULL,
-  content        TEXT NOT NULL,
-  origin_source  TEXT NOT NULL,
-  origin_session TEXT NOT NULL,
-  origin_actor   TEXT NOT NULL,
-  origin_record  TEXT NOT NULL,
-  payload_hash   TEXT,                        -- objects/ 참조
-  content_digest TEXT NOT NULL,
-  UNIQUE (origin_source, origin_session, origin_record)  -- 멱등 재유입
-);
+SQLite 시절의 DB-트리거 봉인은 Neo4j Community에 없다. 불변성은 두 겹으로
+지킨다:
 
-CREATE TABLE outbox (                         -- 콜드패스 커서
-  seq INTEGER PRIMARY KEY AUTOINCREMENT,
-  record_id TEXT NOT NULL,
-  processed_at TEXT
-);
-```
+1. **데몬이 유일한 쓰기 경로** — bolt는 localhost 전용이고 데몬만 잡는다.
+2. **데몬 코드에 UPDATE/DELETE Cypher가 존재하지 않는다** — Element·LINK·
+   Payload는 CREATE만. 틀린 사실은 invalidates 이벤트로, 오폭 수리는 그
+   무효화를 다시 무효화하는 이벤트로 (docs/08 교훈 B — graphiti의 in-place
+   `invalid_at` 갱신이 10만 엣지 수리 스크립트를 부른 사고의 교훈).
 
-vault 모듈이 INSERT만 노출한다. UPDATE/DELETE 경로 자체가 없다.
-무결성은 record별 SHA-256으로 검증한다.
-
-### memory.db 스키마 (요지)
-
-```sql
-CREATE TABLE elements ( id, schema, time_value, time_precision, content,
-                        origin_source, origin_session, origin_actor,
-                        origin_record, properties );
-CREATE TABLE links    ( id, from_id, to_id,
-                        role CHECK (role IN ('provenance','about',
-                                             'invalidates','semantic')),
-                        content, weight );
-CREATE TABLE scores   ( element_id, mass REAL, computed_at, model );
-CREATE VIRTUAL TABLE fts USING fts5(content, ...);
-```
+무결성은 원소별 SHA-256 digest 전수 감사(verify)로 확인한다.
 
 ## 외부 의존
 
-LLM/임베딩 API 키 하나 (또는 로컬 ollama). 그 외 런타임 시스템 의존성은
-Node LTS뿐 — better-sqlite3와 @lancedb/lancedb는 자체 prebuilt를 제공한다.
+- Docker (Neo4j 컨테이너 — CLI `anamnesis daemon`이 compose 수명을 관리)
+- LLM/임베딩 API 키 하나 (또는 로컬 ollama)
+- Node LTS
 
 ## 멀티 디바이스 (스코프 밖, 구조만 확보)
 
-vault가 append-only + `origin` unique이므로 두 머신의 금고는 레코드 머지로
+원소가 append-only + `origin` unique이므로 두 머신의 기억은 노드 머지로
 합칠 수 있다. 동기화 제품화는 로드맵 밖이지만 설계가 막지 않는다.

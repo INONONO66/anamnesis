@@ -84,9 +84,16 @@ queue(bulkhead)로 폭주 차단. 우리 outbox에 추가할 것: digest 핸들�
 
 ## 4. 결정 — 그래프 DB 전환 여부
 
-**논리 아키텍처(3계층, 사실=자연어+임베딩, 하이브리드 검색+재정렬, single-writer
-데몬, 지연 유지보수)는 graphiti에서 통째로 차용한다. 물리 저장소는 Neo4j로
-바꾸지 않는다.**
+> **[갱신 2026-08-30]** "도커 없이 npm 설치" 제약이 해제되어 아래 초기 결정을
+> 뒤집는다. **Neo4j 단일 스토어로 전환한다** (그래프+벡터 HNSW+전문검색
+> Lucene+GDS를 한 시스템에). Qdrant 등 별도 벡터 DB는 채택하지 않는다 —
+> graphiti 본가·hermes-graphiti 모두 임베딩을 그래프 DB 안에 두며, 분리하면
+> 동기화 배관만 는다. 벡터 수억 규모가 실측되면 recall seam 뒤에 재검토.
+> 상세는 docs/02 저장소 절.
+
+초기 결정(제약 유효 당시): 논리 아키텍처(3계층, 사실=자연어+임베딩, 하이브리드
+검색+재정렬, single-writer 데몬, 지연 유지보수)는 graphiti에서 통째로 차용하되
+물리 저장소는 Neo4j로 바꾸지 않는다 —
 
 - hermes-graphiti의 Neo4j 스택 = Docker compose + JVM(8GB+ RAM) + autoheal
   사이드카 + systemd 타이머. "도커 없이 npm 설치로 바로 실행" 제약과 정면 충돌.
@@ -94,8 +101,7 @@ queue(bulkhead)로 폭주 차단. 우리 outbox에 추가할 것: digest 핸들�
   라우팅"(ADR-036 트레이드오프 표) — 우리는 데몬 단일화로 이미 해결.
 - 수천만 원소 규모까지: SQLite 인접 리스트 + typed-array PPR(HippoRAG 방식) +
   LanceDB ANN(IVF-PQ). 그래프 순회는 recall seam 뒤에 있으므로, 실측 한계가
-  오면 FalkorDB 등으로 그 지점만 교체한다 — hermes-graphiti도 백엔드 교체를
-  driver 한 곳에 몰아놨다 (재검토 트리거 명시 방식도 차용).
+  오면 FalkorDB 등으로 그 지점만 교체한다.
 
 ## 5. 로드맵 반영
 
