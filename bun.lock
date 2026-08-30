@@ -9,6 +9,15 @@
         "typescript": "^5.9.2",
       },
     },
+    "packages/core": {
+      "name": "@anamnesis/core",
+      "version": "0.1.0",
+      "dependencies": {
+        "@anamnesis/protocol": "workspace:*",
+        "uuid": "^11.1.0",
+        "zod": "^4.1.5",
+      },
+    },
     "packages/protocol": {
       "name": "@anamnesis/protocol",
       "version": "0.1.0",
@@ -18,6 +27,8 @@
     },
   },
   "packages": {
+    "@anamnesis/core": ["@anamnesis/core@workspace:packages/core"],
+
     "@anamnesis/protocol": ["@anamnesis/protocol@workspace:packages/protocol"],
 
     "@types/bun": ["@types/bun@1.4.0", "", { "dependencies": { "bun-types": "1.4.0" } }, "sha512-K+lZULY23vRgK/CfTjFIV+tyifaNdSMlPh9j+6mQ/cLfpOznLyAuzgV/JQysyECpkBQLVMSyvjlr2fBUSA9wFQ=="],
@@ -29,6 +40,8 @@
     "typescript": ["typescript@5.9.3", "", { "bin": { "tsc": "bin/tsc", "tsserver": "bin/tsserver" } }, "sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw=="],
 
     "undici-types": ["undici-types@8.3.0", "", {}, "sha512-j375ScV60dom+YkPFIfTLcOiPxkN/buHz5GobjLhixFuANaNs3C9l4GmrWqejgXWJ7BbJcFYpTEUkS1Ge8bpZQ=="],
+
+    "uuid": ["uuid@11.1.1", "", { "bin": { "uuid": "dist/esm/bin/uuid" } }, "sha512-vIYxrBCC/N/K+Js3qSN88go7kIfNPssr/hHCesKCQNAjmgvYS2oqr69kIufEG+O4+PfezOH4EbIeHCfFov8ZgQ=="],
 
     "zod": ["zod@4.5.4", "", {}, "sha512-sC95tT5iHHH9gtpj6A81kh+NEaRAUFN+qlUPDUbRfOMvNf5QCBqsb3WgvnpVtK5Y+4UfA6KqufotuTvMGiTlsA=="],
   }

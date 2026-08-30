@@ -1,0 +1,14 @@
+{
+  "name": "@anamnesis/core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@anamnesis/protocol": "workspace:*",
+    "uuid": "^11.1.0",
+    "zod": "^4.1.5"
+  }
+}
