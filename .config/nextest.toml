@@ -1,6 +1,0 @@
-[test-groups]
-shadow-extraction-and-latency = { max-threads = 1 }
-
-[[profile.default.overrides]]
-filter = "binary(shadow_extraction) | test(judge_latency_regression)"
-test-group = "shadow-extraction-and-latency"

@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "anamnesis": {
-      "command": "npx",
-      "args": ["-y", "-p", "anamnesis-mcp@0.22.0", "anamnesis", "serve"]
-    }
-  }
-}
