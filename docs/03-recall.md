@@ -1,7 +1,7 @@
 # 03 — Recall
 
 회상은 단일 벡터 검색이 아니라 **후보 생성 → 그래프 확산 → 가중 재정렬 →
-조립**의 합성 파이프라인이며, 전 과정이 Rust 코어에서 LLM 호출 없이 돈다.
+조립**의 합성 파이프라인이며, 전 과정이 데몬 안에서 LLM 호출 없이 돈다.
 (Zep의 search→rerank→construct, HippoRAG의 PPR을 종합한 구조.)
 
 ## 파이프라인
@@ -35,8 +35,11 @@
 ## mass(T): 저장이 아닌 평가
 
 ```text
-mass(T) = base × decay(T − last_reinforced) + Σ reinforcement(events ≤ T)
+mass(T) = element.mass × decay(T − last_reinforced) + Σ reinforcement(events ≤ T)
 ```
+
+`element.mass`는 생성 시 LLM이 한 번 평가한 불변의 고유 질량이다
+(01-data-model). 동적 성분만 읽기 시점에 계산한다:
 
 - 시간의 결정론적 함수이므로 **읽기 시점에 T를 넣어 평가**한다.
   백그라운드 tick으로 깎아 내려쓰는 데몬 작업이 존재하지 않는다.

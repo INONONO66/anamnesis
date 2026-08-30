@@ -5,7 +5,7 @@
 ```text
                  ┌────────────────────────────────────────┐
  Claude Code ───┤                                        │
- (MCP stdio 브리지)│  anamnesisd  (Rust 단일 바이너리, 상주)  │
+ (MCP stdio 브리지)│  anamnesisd  (Node 프로세스, 상주)       │
  커스텀 에이전트 ──┤                                        │
  (UDS/HTTP 직결)  │  단일 라이터: vault / memory / vectors  │
  CLI ───────────┤  상주 상태: links 그래프 인메모리,        │
@@ -22,7 +22,8 @@
 
 - **spawn-on-demand**: 클라이언트가 소켓에 붙어보고 없으면 데몬을 띄운다
   (ollama 방식). 사용자는 데몬의 존재를 몰라도 된다.
-- **수명 정책**: 기본 keep-alive (24시간 상주 — idle Rust 프로세스는 수십 MB).
+- **수명 정책**: 기본 keep-alive (24시간 상주 — idle Node 프로세스 수준의
+  메모리는 개인 머신에서 무시 가능).
   설정으로 idle-timeout 가능. OS 스케줄러(launchd/systemd)는 쓰지 않는다.
 - **단일 라이터**: 모든 쓰기가 데몬을 통과한다. CLI + MCP + 어댑터가 동시에
   붙어도 WAL 락 경합이 원천적으로 없다.
@@ -63,7 +64,8 @@
   SQLite는 2050년까지 후방 호환을 공식 보장하는 유일한 DB이고, 단일 파일이라
   복사가 곧 백업이다. `journal_mode=WAL`, 스냅샷은 `VACUUM INTO`.
 - **memory.db = SQLite**: 원소·링크·질량·FTS5. 관계형 질의와 전문검색.
-- **vectors = LanceDB**: 벡터 전용 임베디드 DB (Rust crate, 서버 없음).
+- **vectors = LanceDB**: 벡터 전용 임베디드 DB (공식 JS SDK — Rust 코어에
+  napi 바인딩, 서버 없음).
   진짜 ANN 인덱스(IVF-PQ/HNSW), 시점 절단용 프리필터 지원. 포맷 수명이
   SQLite만 못한 약점은 무관하다 — **재생성 가능한 projection이라 금고가
   아니기 때문**. 통째로 지워도 정보 손실이 없다.
@@ -95,7 +97,7 @@ CREATE TABLE outbox (                         -- 콜드패스 커서
 );
 ```
 
-Rust API가 INSERT만 노출한다. UPDATE/DELETE 경로 자체가 없다.
+vault 모듈이 INSERT만 노출한다. UPDATE/DELETE 경로 자체가 없다.
 무결성은 record별 SHA-256으로 검증한다.
 
 ### memory.db 스키마 (요지)
@@ -114,9 +116,8 @@ CREATE VIRTUAL TABLE fts USING fts5(content, ...);
 
 ## 외부 의존
 
-LLM/임베딩 API 키 하나 (또는 로컬 ollama). 그 외 런타임 시스템 의존성 0 —
-SQLite는 rusqlite `bundled`, LanceDB는 crate 정적 링크, Linux는 musl 정적
-빌드.
+LLM/임베딩 API 키 하나 (또는 로컬 ollama). 그 외 런타임 시스템 의존성은
+Node LTS뿐 — better-sqlite3와 @lancedb/lancedb는 자체 prebuilt를 제공한다.
 
 ## 멀티 디바이스 (스코프 밖, 구조만 확보)
 

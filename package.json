@@ -1,0 +1,16 @@
+{
+  "name": "anamnesis-monorepo",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --build",
+    "schemas": "bun run packages/protocol/scripts/export-schemas.ts"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.2",
+    "@types/bun": "^1.2.21"
+  }
+}

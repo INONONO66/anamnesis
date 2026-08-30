@@ -17,7 +17,7 @@ over a single event-time axis.
   time; contradictions are recorded as dated invalidation events, never as
   destructive updates; `snapshot(T)` reconstructs what was true at any moment.
 - **No servers, no Docker** — one npm install, one resident daemon
-  (`anamnesisd`, Rust), two SQLite files, one LanceDB directory. Everything
+  (`anamnesisd`, TypeScript/Node), two SQLite files, one LanceDB directory. Everything
   lives in `~/.anamnesis/` and a directory copy is a full backup.
 
 ## Documents
@@ -38,4 +38,4 @@ Design documentation lives in [`docs/`](docs/):
 ## Status
 
 Design phase. This branch (`anamnesis2`) is a ground-up redesign; documents
-first, code second.
+first, code second. The contract types (`packages/protocol`) are in place.

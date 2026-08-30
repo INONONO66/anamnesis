@@ -3,7 +3,7 @@
 ## v0.1 — 뼈대가 도는 최소 엔진
 
 ```text
-protocol   MemoryElement/Link/RPC의 Rust 정의 + JSON Schema + TS 코드젠
+protocol   MemoryElement/Link/RPC의 zod 정의 + JSON Schema export  [✓ 원소/링크]
 vault      append + objects 저장 + 멱등 유입 + 무결성 검증
 memory     elements/links/scores/FTS5 스키마 + LanceDB projection
 daemon     UDS JSON-RPC (remember/recall/snapshot/status/digest),
