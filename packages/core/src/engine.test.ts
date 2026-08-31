@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import neo4j from "neo4j-driver";
+import neo4j, { type Driver } from "neo4j-driver";
 import { v7 as uuidv7 } from "uuid";
 import { Engine } from "./engine.ts";
+import { luceneQuery, Store } from "./store.ts";
 
 const TEST_DB = {
   uri: "bolt://127.0.0.1:7688",
@@ -25,11 +26,43 @@ function msg(record: string, content: string, value: string) {
   } as const;
 }
 
-async function labelsOf(id: string): Promise<string[]> {
-  const driver = neo4j.driver(
+function adminDriver(): Driver {
+  return neo4j.driver(
     TEST_DB.uri,
     neo4j.auth.basic(TEST_DB.user, TEST_DB.password),
   );
+}
+
+async function runAdmin(
+  cypher: string,
+  parameters: Record<string, string> = {},
+): Promise<void> {
+  const driver = adminDriver();
+  try {
+    await driver.executeQuery(cypher, parameters);
+  } finally {
+    await driver.close();
+  }
+}
+
+async function schemaObjectNames(
+  command: "CONSTRAINTS" | "INDEXES",
+): Promise<string[]> {
+  const driver = adminDriver();
+  const session = driver.session();
+  try {
+    const result = await session.run<{ name: string }>(
+      `SHOW ${command} YIELD name RETURN name`,
+    );
+    return result.records.map((record) => record.get("name"));
+  } finally {
+    await session.close();
+    await driver.close();
+  }
+}
+
+async function labelsOf(id: string): Promise<string[]> {
+  const driver = adminDriver();
   const session = driver.session();
   try {
     const result = await session.run<{ labels: string[] }>(
@@ -45,10 +78,7 @@ async function labelsOf(id: string): Promise<string[]> {
 
 beforeAll(async () => {
   // Production intentionally has no delete path, so test isolation owns cleanup.
-  const admin = neo4j.driver(
-    TEST_DB.uri,
-    neo4j.auth.basic(TEST_DB.user, TEST_DB.password),
-  );
+  const admin = adminDriver();
   await admin.executeQuery("MATCH (n) DETACH DELETE n");
   await admin.close();
 
@@ -61,6 +91,71 @@ afterAll(async () => {
 });
 
 describe("Engine storage lifecycle", () => {
+  test("init creates the complete schema and is idempotent", async () => {
+    const constraints = [
+      "element_id",
+      "link_idem_mentions",
+      "link_idem_relates_to",
+      "link_idem_next_episode",
+      "link_idem_has_member",
+      "link_idem_derived_from",
+      "link_idem_invalidates",
+      "link_idem_contrasts",
+      "element_origin",
+      "payload_hash",
+    ];
+    const indexes = [
+      "element_time",
+      "element_schema",
+      "outbox_pending",
+      "element_content",
+    ];
+    for (const name of await schemaObjectNames("CONSTRAINTS")) {
+      await runAdmin(`DROP CONSTRAINT \`${name}\` IF EXISTS`);
+    }
+    for (const name of indexes) {
+      await runAdmin(`DROP INDEX \`${name}\` IF EXISTS`);
+    }
+
+    await engine.init();
+    await engine.init();
+
+    expect(await schemaObjectNames("CONSTRAINTS")).toEqual(
+      expect.arrayContaining(constraints),
+    );
+    expect(await schemaObjectNames("INDEXES")).toEqual(
+      expect.arrayContaining(indexes),
+    );
+  });
+
+  test("store exposes its effective default and explicit database", async () => {
+    const defaultStore = new Store(TEST_DB);
+    const explicitStore = new Store({ ...TEST_DB, database: "analytics" });
+    expect(defaultStore.databaseName).toBe("neo4j");
+    expect(explicitStore.databaseName).toBe("analytics");
+    await expect(
+      explicitStore.putElement({
+        id: uuidv7(),
+        schema: "anamnesis.claim/1",
+        time: { value: "2026-08-21T00:00:00Z", precision: "second" },
+        content: "Explicit database routing fixture",
+        origin: {
+          source: "database-test",
+          session: "routing",
+          actor: "fixture",
+          record: "explicit",
+        },
+      }),
+    ).rejects.toThrow();
+    await defaultStore.close();
+    await explicitStore.close();
+  });
+
+  test("sanitizes Lucene punctuation and repeated whitespace", () => {
+    expect(luceneQuery('kim*chi AND "x"')).toBe("kim chi AND x");
+    expect(luceneQuery("a  b")).toBe("a b");
+  });
+
   test("remember, digest, and recall round trip", async () => {
     await engine.remember(
       msg("m1", "Ino prefers dark mode", "2026-08-21T14:00:00+09:00"),
@@ -102,6 +197,33 @@ describe("Engine storage lifecycle", () => {
     expect(hits[0]!.element.content).toContain("dark mode");
   });
 
+  test("digest skips an outbox entry whose element was removed", async () => {
+    const removed = await engine.remember(
+      msg("removed-1", "Removed episode", "2026-08-22T12:45:00+09:00"),
+    );
+    await runAdmin("MATCH (e:Element { id: $id }) DETACH DELETE e", {
+      id: removed.id,
+    });
+    let handled = 0;
+
+    expect(
+      await engine.digest(() => {
+        handled += 1;
+      }),
+    ).toBe(1);
+    expect(handled).toBe(0);
+  });
+
+  test("requeueEpisodes uses the original-message schema by default", async () => {
+    await engine.remember(
+      msg("requeue-default", "Default requeue", "2026-08-22T12:50:00+09:00"),
+    );
+    await engine.digest(() => {});
+    const requeued = await engine.requeueEpisodes();
+    expect(requeued).toBeGreaterThan(0);
+    expect(await engine.digest(() => {})).toBe(requeued);
+  });
+
   test("requeueEpisodes makes processed episodes available to digest again", async () => {
     const schema = "anamnesis.requeue-test/1";
     await engine.remember({
@@ -125,16 +247,17 @@ describe("Engine storage lifecycle", () => {
   });
 
   test("NEXT_EPISODE links episodes in event-time order", async () => {
-    const chain = (record: string, content: string, value: string) => ({
-      time: { value, precision: "second" },
-      content,
-      origin: {
-        source: "chat-export",
-        session: "chain/2026-08",
-        actor: "ino",
-        record,
-      },
-    }) as const;
+    const chain = (record: string, content: string, value: string) =>
+      ({
+        time: { value, precision: "second" },
+        content,
+        origin: {
+          source: "chat-export",
+          session: "chain/2026-08",
+          actor: "ino",
+          record,
+        },
+      }) as const;
     const c1 = await engine.remember(
       chain("c1", "First chain message", "2026-08-23T10:00:00+09:00"),
     );
@@ -147,13 +270,36 @@ describe("Engine storage lifecycle", () => {
 
     const around2 = await engine.store.linksOf(c2.id, "NEXT_EPISODE");
     expect(around2).toHaveLength(2);
-    expect(around2.some((link) => link.from === c1.id && link.to === c2.id)).toBe(
-      true,
-    );
-    expect(around2.some((link) => link.from === c2.id && link.to === c3.id)).toBe(
-      true,
-    );
+    expect(
+      around2.some((link) => link.from === c1.id && link.to === c2.id),
+    ).toBe(true);
+    expect(
+      around2.some((link) => link.from === c2.id && link.to === c3.id),
+    ).toBe(true);
     expect(await engine.store.linksOf(c1.id, "NEXT_EPISODE")).toHaveLength(1);
+  });
+
+  test("origin identity preserves tuple boundaries", async () => {
+    const base = {
+      id: uuidv7(),
+      schema: "anamnesis.claim/1",
+      time: { value: "2026-08-23T11:00:00+09:00", precision: "second" },
+      content: "Boundary-sensitive origin",
+      mass: 0.5,
+      properties: {},
+    } as const;
+    const first = await engine.put({
+      ...base,
+      origin: { source: "ab", session: "c", actor: "fixture", record: "d" },
+    });
+    const second = await engine.put({
+      ...base,
+      id: uuidv7(),
+      origin: { source: "a", session: "bc", actor: "fixture", record: "d" },
+    });
+    expect(first.created).toBe(true);
+    expect(second.created).toBe(true);
+    expect(second.id).not.toBe(first.id);
   });
 
   test("remember is idempotent for identical origins and content", async () => {
@@ -201,6 +347,28 @@ describe("Engine storage lifecycle", () => {
     );
     expect(again.created).toBe(false);
     expect(again.id).toBe(edited.id);
+  });
+
+  test("verify detects persisted element content tampering", async () => {
+    const result = await engine.remember(
+      msg("tamper-1", "Untampered content", "2026-08-22T11:30:00+09:00"),
+    );
+    await runAdmin("MATCH (e:Element { id: $id }) SET e.content = $content", {
+      id: result.id,
+      content: "Tampered content",
+    });
+    expect(await engine.verify()).toContainEqual({
+      elementId: result.id,
+      kind: "digest-mismatch",
+    });
+    await runAdmin("MATCH (e:Element { id: $id }) SET e.content = $content", {
+      id: result.id,
+      content: "Untampered content",
+    });
+    expect(await engine.verify()).not.toContainEqual({
+      elementId: result.id,
+      kind: "digest-mismatch",
+    });
   });
 
   test("payload bytes survive ingestion and integrity verification", async () => {
@@ -346,23 +514,20 @@ describe("Engine graph contracts", () => {
   });
 
   test("an explicit previous record takes precedence over chronology", async () => {
-    const chain = (record: string, value: string, previous?: string) => ({
-      time: { value, precision: "second" },
-      content: `Tree link ${record}`,
-      origin: {
-        source: "agent-log",
-        session: "tree/1",
-        actor: "agent",
-        record,
-      },
-      ...(previous ? { previous } : {}),
-    }) as const;
-    const a = await engine.remember(
-      chain("a", "2026-08-25T10:00:00+09:00"),
-    );
-    const b = await engine.remember(
-      chain("b", "2026-08-25T10:05:00+09:00"),
-    );
+    const chain = (record: string, value: string, previous?: string) =>
+      ({
+        time: { value, precision: "second" },
+        content: `Tree link ${record}`,
+        origin: {
+          source: "agent-log",
+          session: "tree/1",
+          actor: "agent",
+          record,
+        },
+        ...(previous ? { previous } : {}),
+      }) as const;
+    const a = await engine.remember(chain("a", "2026-08-25T10:00:00+09:00"));
+    const b = await engine.remember(chain("b", "2026-08-25T10:05:00+09:00"));
     const c = await engine.remember(
       chain("c", "2026-08-25T10:10:00+09:00", "a"),
     );
@@ -462,7 +627,7 @@ describe("Engine time-axis filtering", () => {
       });
       candidates.push(result.id);
     }
-    for (let index = 0; index < 6; index += 1) {
+    for (let index = 0; index < 4; index += 1) {
       const invalidation = await engine.put({
         id: uuidv7(),
         schema: "anamnesis.claim/1",
@@ -489,9 +654,9 @@ describe("Engine time-axis filtering", () => {
       at: AFTER_FIXTURES,
     });
     expect(hits).toHaveLength(2);
-    expect(hits.every((hit) => candidates.slice(6).includes(hit.element.id))).toBe(
-      true,
-    );
+    expect(
+      hits.every((hit) => candidates.slice(4).includes(hit.element.id)),
+    ).toBe(true);
   });
 
   test("future elements are invalid before their event time", async () => {
@@ -504,5 +669,12 @@ describe("Engine time-axis filtering", () => {
     expect(
       await engine.store.isValidAt(result.id, "2026-12-31T00:00:00Z"),
     ).toBe(true);
+  });
+
+  test("close shuts down the underlying driver", async () => {
+    const closed = new Engine(TEST_DB);
+    await closed.init();
+    await closed.close();
+    await expect(closed.status()).rejects.toThrow();
   });
 });

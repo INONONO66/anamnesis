@@ -124,7 +124,7 @@ function linkIdemKey(l: {
   role: string;
   content: string;
 }): string {
-  return sha256([l.from, l.to, l.role, l.content].join("\u0000"));
+  return sha256(JSON.stringify([l.from, l.to, l.role, l.content]));
 }
 
 function celestialOf(schema: string): Celestial | null {
@@ -140,7 +140,7 @@ function toUtc(isoWithOffset: string): string {
   return new Date(isoWithOffset).toISOString();
 }
 
-function luceneQuery(raw: string): string {
+export function luceneQuery(raw: string): string {
   return raw
     .replace(/[+\-&|!(){}\[\]^"~*?:\\\/]/g, " ")
     .split(/\s+/)
@@ -159,6 +159,10 @@ export class Store {
       { disableLosslessIntegers: true },
     );
     this.database = opts.database ?? "neo4j";
+  }
+
+  get databaseName(): string {
+    return this.database;
   }
 
   async init(): Promise<void> {
@@ -183,83 +187,77 @@ export class Store {
     const now = new Date().toISOString();
     const celestial = celestialOf(el.schema);
 
-    const session = this.driver.session({ database: this.database });
-    try {
-      return await session.executeWrite(async (tx) => {
-
-        const existing = await tx.run<{
-          id: string;
-          content: string;
-          schema: string;
-        }>(
-          `MATCH (e:Element { origin_key: $originKey })
+    return this.withWriteTx(async (tx) => {
+      const existing = await tx.run<{
+        id: string;
+        content: string;
+        schema: string;
+      }>(
+        `MATCH (e:Element { origin_key: $originKey })
            RETURN e.id AS id, e.content AS content, e.schema AS schema`,
-          { originKey: originKey(el.origin) },
-        );
+        { originKey: originKey(el.origin) },
+      );
 
-        if (existing.records.length > 0) {
-          const rec = existing.records[0]!;
-          const oldId = rec.get("id");
-          const oldContent = rec.get("content");
-          if (sha256(oldContent) === sha256(el.content)) {
-            return { id: oldId, created: false };
-          }
-
-          const hash8 = sha256(el.content).slice(0, 8);
-          const derivedRecord = `${el.origin.record}#h${hash8}`;
-          const dup = await tx.run<{ id: string }>(
-            `MATCH (e:Element { origin_key: $originKey }) RETURN e.id AS id`,
-            {
-              originKey: originKey({ ...el.origin, record: derivedRecord }),
-            },
-          );
-          if (dup.records.length > 0) {
-            return {
-              id: dup.records[0]!.get("id"),
-              created: false,
-              diverged: true,
-            };
-          }
-          const divergedEl = {
-            ...el,
-            id: uuidv7(),
-            origin: { ...el.origin, record: derivedRecord },
-            properties: { ...el.properties, diverged_at: now },
-          };
-          await this.createElementTx(tx, divergedEl, payloadHash, opts);
-          const oldCelestial = celestialOf(rec.get("schema"));
-          const invalidated =
-            celestial &&
-            oldCelestial &&
-            LINK_LATTICE.INVALIDATES.from.includes(celestial) &&
-            LINK_LATTICE.INVALIDATES.to.includes(oldCelestial)
-              ? oldId
-              : null;
-          if (invalidated) {
-            await this.mergeLinkTx(tx, {
-              id: uuidv7(),
-              from: divergedEl.id,
-              to: invalidated,
-              role: "INVALIDATES",
-              content:
-                "Different content at the same origin was detected as a divergence",
-              weight: 1,
-            });
-          }
-          return {
-            id: divergedEl.id,
-            created: true,
-            diverged: true,
-            ...(invalidated ? { invalidated } : {}),
-          };
+      if (existing.records.length > 0) {
+        const rec = existing.records[0]!;
+        const oldId = rec.get("id");
+        const oldContent = rec.get("content");
+        if (sha256(oldContent) === sha256(el.content)) {
+          return { id: oldId, created: false };
         }
 
-        await this.createElementTx(tx, el, payloadHash, opts);
-        return { id: el.id, created: true };
-      });
-    } finally {
-      await session.close();
-    }
+        const hash8 = sha256(el.content).slice(0, 8);
+        const derivedRecord = `${el.origin.record}#h${hash8}`;
+        const dup = await tx.run<{ id: string }>(
+          `MATCH (e:Element { origin_key: $originKey }) RETURN e.id AS id`,
+          {
+            originKey: originKey({ ...el.origin, record: derivedRecord }),
+          },
+        );
+        if (dup.records.length > 0) {
+          return {
+            id: dup.records[0]!.get("id"),
+            created: false,
+            diverged: true,
+          };
+        }
+        const divergedEl = {
+          ...el,
+          id: uuidv7(),
+          origin: { ...el.origin, record: derivedRecord },
+          properties: { ...el.properties, diverged_at: now },
+        };
+        await this.createElementTx(tx, divergedEl, payloadHash, opts);
+        const oldCelestial = celestialOf(rec.get("schema"));
+        const invalidated =
+          celestial &&
+          oldCelestial &&
+          LINK_LATTICE.INVALIDATES.from.includes(celestial) &&
+          LINK_LATTICE.INVALIDATES.to.includes(oldCelestial)
+            ? oldId
+            : null;
+        if (invalidated) {
+          await this.mergeLinkTx(tx, {
+            id: uuidv7(),
+            from: divergedEl.id,
+            to: invalidated,
+            role: "INVALIDATES",
+            content:
+              "Different content at the same origin was detected as a divergence",
+            weight: 1,
+          });
+        }
+        return {
+          id: divergedEl.id,
+          created: true,
+          diverged: true,
+          ...(invalidated ? { invalidated } : {}),
+        };
+      }
+
+      await this.createElementTx(tx, el, payloadHash, opts);
+      return { id: el.id, created: true };
+    });
   }
 
   private async createElementTx(
@@ -272,7 +270,10 @@ export class Store {
       await tx.run(
         `MERGE (p:Payload { hash: $hash })
          ON CREATE SET p.bytes = $bytes`,
-        { hash: payloadHash, bytes: Buffer.from(opts.payload).toString("base64") },
+        {
+          hash: payloadHash,
+          bytes: Buffer.from(opts.payload).toString("base64"),
+        },
       );
     }
     await tx.run(
@@ -316,7 +317,6 @@ export class Store {
 
     if (celestialOf(el.schema) === "Episode") {
       if (opts.previous) {
-
         await tx.run(
           `MATCH (e:Element { id: $id })
            MATCH (p:Element:Episode)
@@ -335,7 +335,6 @@ export class Store {
           },
         );
       } else {
-
         await tx.run(
           `MATCH (e:Element { id: $id })
            MATCH (p:Element:Episode)
@@ -362,18 +361,24 @@ export class Store {
 
   async putLink(input: MemoryLinkInput): Promise<MemoryLink> {
     const link = MemoryLink.parse(input);
+    return this.withWriteTx(async (tx) => {
+      const rows = await this.mergeLinkTx(tx, link);
+      if (rows.length === 0) {
+        throw new Error(
+          `link rejected (endpoints missing or lattice violation): ` +
+            `${link.from} -[${link.role}]-> ${link.to}`,
+        );
+      }
+      return { ...link, id: rows[0]!.id };
+    });
+  }
+
+  private async withWriteTx<Result>(
+    work: (tx: ManagedTransaction) => Promise<Result>,
+  ): Promise<Result> {
     const session = this.driver.session({ database: this.database });
     try {
-      return await session.executeWrite(async (tx) => {
-        const rows = await this.mergeLinkTx(tx, link);
-        if (rows.length === 0) {
-          throw new Error(
-            `link rejected (endpoints missing or lattice violation): ` +
-              `${link.from} -[${link.role}]-> ${link.to}`,
-          );
-        }
-        return { ...link, id: rows[0]!.id };
-      });
+      return await session.executeWrite(work);
     } finally {
       await session.close();
     }
@@ -546,7 +551,11 @@ export class Store {
     return issues;
   }
 
-  async counts(): Promise<{ elements: number; links: number; pending: number }> {
+  async counts(): Promise<{
+    elements: number;
+    links: number;
+    pending: number;
+  }> {
     const rows = await this.run<{
       elements: number;
       links: number;
