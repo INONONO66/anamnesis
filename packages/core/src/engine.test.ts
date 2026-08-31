@@ -1,7 +1,11 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import neo4j, { type Driver } from "neo4j-driver";
+import neo4j, {
+  type Driver,
+  type Session,
+  type SessionConfig,
+} from "neo4j-driver";
 import { v7 as uuidv7 } from "uuid";
-import { Engine } from "./engine.ts";
+import { Engine, envConfig, RememberInput } from "./engine.ts";
 import { luceneQuery, Store } from "./store.ts";
 
 const TEST_DB = {
@@ -76,6 +80,53 @@ async function labelsOf(id: string): Promise<string[]> {
   }
 }
 
+describe("Engine configuration", () => {
+  test("uses defaults and honors every environment override", () => {
+    const keys = [
+      "ANAMNESIS_NEO4J_URI",
+      "ANAMNESIS_NEO4J_USER",
+      "ANAMNESIS_NEO4J_PASSWORD",
+      "ANAMNESIS_NEO4J_DATABASE",
+    ] as const;
+    const saved = keys.map((key) => process.env[key]);
+    try {
+      for (const key of keys) delete process.env[key];
+      expect(envConfig()).toEqual({
+        uri: "bolt://127.0.0.1:7687",
+        user: "neo4j",
+        password: "anamnesis",
+        database: "neo4j",
+      });
+
+      process.env["ANAMNESIS_NEO4J_URI"] = "bolt://db.example:9999";
+      process.env["ANAMNESIS_NEO4J_USER"] = "configured-user";
+      process.env["ANAMNESIS_NEO4J_PASSWORD"] = "configured-password";
+      process.env["ANAMNESIS_NEO4J_DATABASE"] = "configured-database";
+      expect(envConfig()).toEqual({
+        uri: "bolt://db.example:9999",
+        user: "configured-user",
+        password: "configured-password",
+        database: "configured-database",
+      });
+    } finally {
+      keys.forEach((key, index) => {
+        const value = saved[index];
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      });
+    }
+  });
+
+  test("accepts a short explicit previous record", () => {
+    expect(
+      RememberInput.parse({
+        ...msg("config-previous", "Previous fixture", "2026-08-20T00:00:00Z"),
+        previous: "xy",
+      }).previous,
+    ).toBe("xy");
+  });
+});
+
 beforeAll(async () => {
   // Production intentionally has no delete path, so test isolation owns cleanup.
   const admin = adminDriver();
@@ -147,13 +198,47 @@ describe("Engine storage lifecycle", () => {
         },
       }),
     ).rejects.toThrow();
+    await expect(explicitStore.counts()).rejects.toThrow();
     await defaultStore.close();
     await explicitStore.close();
   });
 
   test("sanitizes Lucene punctuation and repeated whitespace", () => {
     expect(luceneQuery('kim*chi AND "x"')).toBe("kim chi AND x");
-    expect(luceneQuery("a  b")).toBe("a b");
+    expect(luceneQuery("a  \t b")).toBe("a b");
+  });
+
+  test("closes write sessions on success", async () => {
+    const driver = adminDriver();
+    const openSession = driver.session.bind(driver);
+    let closes = 0;
+    driver.session = (config?: SessionConfig): Session => {
+      const session = openSession(config);
+      const close = session.close.bind(session);
+      session.close = async () => {
+        closes += 1;
+        await close();
+      };
+      return session;
+    };
+    const store = new Store(TEST_DB, driver);
+    await store.putElement({
+      id: uuidv7(),
+      schema: "anamnesis.claim/1",
+      time: { value: "2026-08-21T00:00:00Z", precision: "second" },
+      content: "Session closure fixture",
+      origin: {
+        source: "session-test",
+        session: "closure",
+        actor: "fixture",
+        record: "success",
+      },
+    });
+    expect(closes).toBe(1);
+    await runAdmin(
+      "MATCH (e:Element { origin_source: 'session-test' }) DETACH DELETE e",
+    );
+    await store.close();
   });
 
   test("remember, digest, and recall round trip", async () => {
@@ -184,7 +269,7 @@ describe("Engine storage lifecycle", () => {
         role: "DERIVED_FROM",
         content: "This claim was extracted from the source message",
       });
-    });
+    }, 1);
     expect(processed).toBe(2);
     expect(await engine.status()).toMatchObject({
       elements: 4,
@@ -347,6 +432,49 @@ describe("Engine storage lifecycle", () => {
     );
     expect(again.created).toBe(false);
     expect(again.id).toBe(edited.id);
+    expect(again.diverged).toBe(true);
+  });
+
+  test("does not invalidate divergences outside the lattice", async () => {
+    const cases = [
+      {
+        record: "entity-to-fact",
+        before: "anamnesis.entity/1",
+        after: "anamnesis.claim/1",
+      },
+      {
+        record: "fact-to-entity",
+        before: "anamnesis.claim/1",
+        after: "anamnesis.entity/1",
+      },
+    ] as const;
+    for (const fixture of cases) {
+      const origin = {
+        source: "divergence-test",
+        session: "non-invalidating",
+        actor: "fixture",
+        record: fixture.record,
+      } as const;
+      const original = await engine.put({
+        id: uuidv7(),
+        schema: fixture.before,
+        time: { value: "2026-08-22T11:00:00Z", precision: "second" },
+        content: `Original ${fixture.record}`,
+        origin,
+      });
+      const changed = await engine.put({
+        id: uuidv7(),
+        schema: fixture.after,
+        time: { value: "2026-08-22T11:00:00Z", precision: "second" },
+        content: `Changed ${fixture.record}`,
+        origin,
+      });
+      expect(changed).toMatchObject({ created: true, diverged: true });
+      expect(changed.invalidated).toBeUndefined();
+      expect(await engine.store.linksOf(original.id, "INVALIDATES")).toEqual(
+        [],
+      );
+    }
   });
 
   test("verify detects persisted element content tampering", async () => {
@@ -382,6 +510,27 @@ describe("Engine storage lifecycle", () => {
     expect(payloadHash).toBeString();
     expect(await engine.store.getPayload(payloadHash as string)).toEqual(bytes);
     expect(await engine.verify()).toEqual([]);
+
+    await runAdmin("MATCH (p:Payload { hash: $hash }) DELETE p", {
+      hash: payloadHash as string,
+    });
+    expect(await engine.verify()).toContainEqual({
+      elementId: result.id,
+      kind: "missing-payload",
+    });
+
+    const mismatch = await engine.remember({
+      ...msg("p2", "Mismatched payload", "2026-08-22T12:01:00+09:00"),
+      payload: bytes,
+    });
+    await runAdmin(
+      "MATCH (e:Element { id: $id }), (p:Payload { hash: e.payload_hash }) SET p.bytes = 'd3Jvbmc='",
+      { id: mismatch.id },
+    );
+    expect(await engine.verify()).toContainEqual({
+      elementId: mismatch.id,
+      kind: "payload-hash-mismatch",
+    });
   });
 
   test("recall matches CJK content", async () => {
@@ -420,6 +569,56 @@ describe("Engine graph contracts", () => {
     );
   });
 
+  test("round-trips explicit mass and tolerates absent stored properties", async () => {
+    const result = await engine.put({
+      id: uuidv7(),
+      schema: "anamnesis.claim/1",
+      time: { value: "2026-08-24T10:15:00+09:00", precision: "second" },
+      content: "Property decoding fixture",
+      origin: {
+        source: "agent",
+        session: "decoding",
+        actor: "fixture",
+        record: "decode-1",
+      },
+      mass: 0.73,
+      properties: { pinned: true },
+    });
+    expect(await engine.store.getElement(result.id)).toMatchObject({
+      mass: 0.73,
+      properties: { pinned: true },
+    });
+    await runAdmin("MATCH (e:Element { id: $id }) REMOVE e.properties", {
+      id: result.id,
+    });
+    expect((await engine.store.getElement(result.id))!.properties).toEqual({});
+  });
+
+  test("does not create episode links for a non-episode", async () => {
+    const parent = await engine.remember(
+      msg("claim-parent", "Episode parent", "2026-08-24T10:20:00+09:00"),
+    );
+    const claim = await engine.store.putElement(
+      {
+        id: uuidv7(),
+        schema: "anamnesis.claim/1",
+        time: { value: "2026-08-24T10:21:00+09:00", precision: "second" },
+        content: "Non-episode with previous option",
+        origin: {
+          source: "chat-export",
+          session: "friends/2026-08",
+          actor: "fixture",
+          record: "claim-child",
+        },
+      },
+      { previous: "claim-parent" },
+    );
+    expect(await engine.store.linksOf(claim.id, "NEXT_EPISODE")).toEqual([]);
+    expect(await engine.store.linksOf(parent.id, "NEXT_EPISODE")).not.toContainEqual(
+      expect.objectContaining({ to: claim.id }),
+    );
+  });
+
   test("unknown schemas receive only the Element label", async () => {
     const result = await engine.put({
       id: uuidv7(),
@@ -452,12 +651,19 @@ describe("Engine graph contracts", () => {
         record: "lat-c1",
       },
     });
-    await engine.link({
+    const accepted = await engine.link({
       id: uuidv7(),
       from: claim.id,
       to: episode.id,
       role: "DERIVED_FROM",
       content: "The claim came from the episode",
+    });
+    expect(accepted).toMatchObject({
+      from: claim.id,
+      to: episode.id,
+      role: "DERIVED_FROM",
+      content: "The claim came from the episode",
+      weight: 1,
     });
     await expect(
       engine.link({
@@ -472,15 +678,18 @@ describe("Engine graph contracts", () => {
     const otherEpisode = await engine.remember(
       msg("lat-2", "Other lattice episode", "2026-08-24T11:01:00+09:00"),
     );
+    const rejectedId = uuidv7();
     await expect(
       engine.link({
-        id: uuidv7(),
+        id: rejectedId,
         from: episode.id,
         to: otherEpisode.id,
         role: "RELATES_TO",
         content: "Invalid lattice pair",
       }),
-    ).rejects.toThrow("link rejected (endpoints missing or lattice violation)");
+    ).rejects.toThrow(
+      `link rejected (endpoints missing or lattice violation): ${episode.id} -[RELATES_TO]-> ${otherEpisode.id}`,
+    );
   });
 
   test("link identity is stable across extraction retries", async () => {
@@ -505,12 +714,17 @@ describe("Engine graph contracts", () => {
       to: episode.id,
       role: "DERIVED_FROM" as const,
       content: "The claim came from the episode",
+      weight: 0.42,
     });
     const first = await engine.link(makeLink());
     const second = await engine.link(makeLink());
     expect(second.id).toBe(first.id);
     const links = await engine.store.linksOf(claim.id, "DERIVED_FROM");
     expect(links.filter((link) => link.to === episode.id)).toHaveLength(1);
+    expect(links[0]!.weight).toBe(0.42);
+    expect((await engine.store.linksOf(claim.id))[0]!.role).toBe(
+      "DERIVED_FROM",
+    );
   });
 
   test("an explicit previous record takes precedence over chronology", async () => {
@@ -531,11 +745,16 @@ describe("Engine graph contracts", () => {
     const c = await engine.remember(
       chain("c", "2026-08-25T10:10:00+09:00", "a"),
     );
+    const d = await engine.remember(
+      chain("d", "2026-08-25T10:15:00+09:00", "a"),
+    );
 
     const fromA = (await engine.store.linksOf(a.id, "NEXT_EPISODE")).filter(
       (link) => link.from === a.id,
     );
-    expect(fromA.map((link) => link.to).sort()).toEqual([b.id, c.id].sort());
+    expect(fromA.map((link) => link.to).sort()).toEqual(
+      [b.id, c.id, d.id].sort(),
+    );
     expect(
       (await engine.store.linksOf(b.id, "NEXT_EPISODE")).some(
         (link) => link.from === b.id && link.to === c.id,
@@ -545,6 +764,46 @@ describe("Engine graph contracts", () => {
 });
 
 describe("Engine time-axis filtering", () => {
+  test("empty search is exact and unfiltered search includes invalidated data", async () => {
+    expect(await engine.store.searchText(" \\ / * ")).toEqual([]);
+    const original = await engine.put({
+      id: uuidv7(),
+      schema: "anamnesis.claim/1",
+      time: { value: "2026-02-01T00:00:00Z", precision: "second" },
+      content: "Unfiltered invalidated sentinel",
+      origin: {
+        source: "search-test",
+        session: "defaults",
+        actor: "fixture",
+        record: "original",
+      },
+    });
+    const replacement = await engine.put({
+      id: uuidv7(),
+      schema: "anamnesis.claim/1",
+      time: { value: "2026-02-02T00:00:00Z", precision: "second" },
+      content: "Replacement sentinel",
+      origin: {
+        source: "search-test",
+        session: "defaults",
+        actor: "fixture",
+        record: "replacement",
+      },
+    });
+    await engine.link({
+      id: uuidv7(),
+      from: replacement.id,
+      to: original.id,
+      role: "INVALIDATES",
+      content: "Replacement invalidates original",
+    });
+    expect(
+      (await engine.store.searchText("Unfiltered invalidated sentinel")).some(
+        (hit) => hit.element.id === original.id,
+      ),
+    ).toBe(true);
+  });
+
   test("snapshot recall excludes memories after the cutoff", async () => {
     await engine.remember(
       msg("t1", "A distant archival memory", "2026-01-01T10:00:00+09:00"),
@@ -657,6 +916,10 @@ describe("Engine time-axis filtering", () => {
     expect(
       hits.every((hit) => candidates.slice(4).includes(hit.element.id)),
     ).toBe(true);
+  });
+
+  test("a missing element is not valid", async () => {
+    expect(await engine.store.isValidAt(uuidv7(), AFTER_FIXTURES)).toBe(false);
   });
 
   test("future elements are invalid before their event time", async () => {

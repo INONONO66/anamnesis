@@ -66,18 +66,14 @@ export class Engine {
     handler: (episode: MemoryElement, store: Store) => Promise<void> | void,
     batchSize = 200,
   ): Promise<number> {
-    let total = 0;
-    for (;;) {
-      const batch = await this.store.pending(batchSize);
-      if (batch.length === 0) break;
-      for (const id of batch) {
-        const episode = await this.store.getElement(id);
-        if (episode) await handler(episode, this.store);
-        total += 1;
-      }
-      await this.store.markProcessed(batch);
+    const batch = await this.store.pending(batchSize);
+    if (batch.length === 0) return 0;
+    for (const id of batch) {
+      const episode = await this.store.getElement(id);
+      if (episode) await handler(episode, this.store);
     }
-    return total;
+    await this.store.markProcessed(batch);
+    return batch.length + (await this.digest(handler, batchSize));
   }
 
   async recall(

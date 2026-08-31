@@ -143,7 +143,7 @@ function toUtc(isoWithOffset: string): string {
 export function luceneQuery(raw: string): string {
   return raw
     .replace(/[+\-&|!(){}\[\]^"~*?:\\\/]/g, " ")
-    .split(/\s+/)
+    .split(/\s/)
     .filter(Boolean)
     .join(" ");
 }
@@ -152,12 +152,12 @@ export class Store {
   private readonly driver: Driver;
   private readonly database: string;
 
-  constructor(opts: StoreOptions) {
-    this.driver = neo4j.driver(
-      opts.uri,
-      neo4j.auth.basic(opts.user, opts.password),
-      { disableLosslessIntegers: true },
-    );
+  constructor(opts: StoreOptions, driver?: Driver) {
+    this.driver =
+      driver ??
+      neo4j.driver(opts.uri, neo4j.auth.basic(opts.user, opts.password), {
+        disableLosslessIntegers: true,
+      });
     this.database = opts.database ?? "neo4j";
   }
 
@@ -230,28 +230,27 @@ export class Store {
         await this.createElementTx(tx, divergedEl, payloadHash, opts);
         const oldCelestial = celestialOf(rec.get("schema"));
         const invalidated =
-          celestial &&
-          oldCelestial &&
-          LINK_LATTICE.INVALIDATES.from.includes(celestial) &&
-          LINK_LATTICE.INVALIDATES.to.includes(oldCelestial)
+          LINK_LATTICE.INVALIDATES.from.some((label) => label === celestial) &&
+          LINK_LATTICE.INVALIDATES.to.some((label) => label === oldCelestial)
             ? oldId
             : null;
-        if (invalidated) {
-          await this.mergeLinkTx(tx, {
-            id: uuidv7(),
-            from: divergedEl.id,
-            to: invalidated,
-            role: "INVALIDATES",
-            content:
-              "Different content at the same origin was detected as a divergence",
-            weight: 1,
-          });
+        if (!invalidated) {
+          return { id: divergedEl.id, created: true, diverged: true };
         }
+        await this.mergeLinkTx(tx, {
+          id: uuidv7(),
+          from: divergedEl.id,
+          to: invalidated,
+          role: "INVALIDATES",
+          content:
+            "Different content at the same origin was detected as a divergence",
+          weight: 1,
+        });
         return {
           id: divergedEl.id,
           created: true,
           diverged: true,
-          ...(invalidated ? { invalidated } : {}),
+          invalidated,
         };
       }
 

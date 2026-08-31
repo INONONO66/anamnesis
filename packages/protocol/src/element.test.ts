@@ -1,5 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import { MemoryElement, MemoryLink, KNOWN_SCHEMAS } from "./index.ts";
+import {
+  Celestial,
+  ClaimSubKind,
+  KNOWN_SCHEMAS,
+  MemoryElement,
+  MemoryLink,
+  SCHEMA_LABELS,
+  TimePrecision,
+} from "./index.ts";
+import { LINK_LATTICE, LinkRole } from "./link.ts";
 
 const validElement = {
   id: "0192f3a1-5e7b-7c3d-9f21-8a4b6c2d1e0f",
@@ -15,6 +24,49 @@ const validElement = {
 } as const;
 
 describe("MemoryElement", () => {
+  test("pins the schema registry and closed vocabularies", () => {
+    expect(TimePrecision.options).toEqual([
+      "second",
+      "minute",
+      "day",
+      "month",
+      "year",
+    ]);
+    expect(Celestial.options).toEqual([
+      "Episode",
+      "Entity",
+      "Fact",
+      "Community",
+    ]);
+    expect(ClaimSubKind.options).toEqual([
+      "fact",
+      "state",
+      "event",
+      "preference",
+      "procedure",
+      "decision",
+      "summary",
+    ]);
+    expect(KNOWN_SCHEMAS).toEqual([
+      "anamnesis.original-message/1",
+      "anamnesis.original-document/1",
+      "anamnesis.entity/1",
+      "anamnesis.claim/1",
+      "anamnesis.mapping/1",
+      "anamnesis.synthesis/1",
+      "anamnesis.community/1",
+    ]);
+    expect(SCHEMA_LABELS).toEqual({
+      "anamnesis.original-message/1": "Episode",
+      "anamnesis.original-document/1": "Episode",
+      "anamnesis.entity/1": "Entity",
+      "anamnesis.claim/1": "Fact",
+      "anamnesis.mapping/1": "Fact",
+      "anamnesis.synthesis/1": "Fact",
+      "anamnesis.community/1": "Community",
+    });
+  });
+
   test("applies properties and mass defaults", () => {
     const el = MemoryElement.parse(validElement);
     expect(el.properties).toEqual({});
@@ -45,10 +97,17 @@ describe("MemoryElement", () => {
       "anamnesis.Claim/1",
       "anamnesis.claim",
       "anamnesis.claim/0",
+      "xanamnesis.claim/1",
+      "anamnesis.claim/1-suffix",
+      "anamnesis.claim/1a",
     ]) {
-      expect(() =>
-        MemoryElement.parse({ ...validElement, schema }),
-      ).toThrow();
+      const result = MemoryElement.safeParse({ ...validElement, schema });
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.error.issues[0]!.message).toBe(
+          "expected `anamnesis.<kind>/<version>` (e.g. anamnesis.claim/1)",
+        );
+      }
     }
   });
 
@@ -99,19 +158,42 @@ describe("MemoryElement", () => {
     }
   });
 
-  test("validates claim sub_kind values", () => {
-    expect(() =>
-      MemoryElement.parse({
+  test("validates every claim sub_kind and reports the exact issue", () => {
+    for (const subKind of ClaimSubKind.options) {
+      expect(
+        MemoryElement.safeParse({
+          ...validElement,
+          properties: { sub_kind: subKind },
+        }).success,
+      ).toBe(true);
+    }
+
+    const invalid = MemoryElement.safeParse({
+      ...validElement,
+      properties: { sub_kind: "opinion" },
+    });
+    expect(invalid.success).toBe(false);
+    if (!invalid.success) {
+      expect(invalid.error.issues).toContainEqual({
+        code: "custom",
+        path: ["properties", "sub_kind"],
+        message: "expected a recognized claim sub_kind",
+      });
+    }
+
+    expect(
+      MemoryElement.safeParse({
         ...validElement,
-        properties: { sub_kind: "event" },
-      }),
-    ).not.toThrow();
-    expect(() =>
-      MemoryElement.parse({
-        ...validElement,
+        schema: "anamnesis.entity/1",
         properties: { sub_kind: "opinion" },
-      }),
-    ).toThrow();
+      }).success,
+    ).toBe(true);
+    expect(
+      MemoryElement.safeParse({
+        ...validElement,
+        properties: {},
+      }).success,
+    ).toBe(true);
   });
 });
 
@@ -124,6 +206,30 @@ const validLink = {
 } as const;
 
 describe("MemoryLink", () => {
+  test("pins the complete role vocabulary and lattice", () => {
+    expect(LinkRole.options).toEqual([
+      "MENTIONS",
+      "RELATES_TO",
+      "NEXT_EPISODE",
+      "HAS_MEMBER",
+      "DERIVED_FROM",
+      "INVALIDATES",
+      "CONTRASTS",
+    ]);
+    expect(LINK_LATTICE).toEqual({
+      NEXT_EPISODE: { from: ["Episode"], to: ["Episode"] },
+      MENTIONS: { from: ["Episode", "Fact"], to: ["Entity"] },
+      RELATES_TO: { from: ["Fact", "Entity"], to: ["Fact", "Entity"] },
+      HAS_MEMBER: { from: ["Community"], to: ["Entity", "Fact"] },
+      DERIVED_FROM: { from: ["Fact"], to: ["Episode", "Fact"] },
+      INVALIDATES: {
+        from: ["Fact", "Episode"],
+        to: ["Fact", "Episode"],
+      },
+      CONTRASTS: { from: ["Fact"], to: ["Fact"] },
+    });
+  });
+
   test("applies the default weight", () => {
     const link = MemoryLink.parse(validLink);
     expect(link.weight).toBe(1);
@@ -138,10 +244,12 @@ describe("MemoryLink", () => {
     ).toThrow();
   });
 
-  test("rejects self-links", () => {
-    expect(() =>
-      MemoryLink.parse({ ...validLink, to: validLink.from }),
-    ).toThrow();
+  test("rejects self-links with the contract message", () => {
+    const result = MemoryLink.safeParse({ ...validLink, to: validLink.from });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues[0]!.message).toBe("self-link is not allowed");
+    }
   });
 
   test("rejects non-positive weights", () => {
