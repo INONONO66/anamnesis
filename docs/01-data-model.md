@@ -60,23 +60,23 @@ anamnesis.invalidation/1       무효화 사건
   "id": "0192f3b2-…",
   "from": "<element-id>",
   "to": "<element-id>",
-  "role": "provenance",     // 아래 4종
+  "role": "DERIVED_FROM",   // 아래 7종 — Neo4j 관계 실타입으로 물질화
   "content": "이 주장은 해당 메시지에서 추출되었다.", // 자연어 설명
   "weight": 1.0
 }
 ```
 
-### role 4종 (이 이상 늘리지 않는다)
+### role 7종 (graphiti 어휘 차용, 이 이상 늘리지 않는다 — docs/09 §4)
 
 | role | 방향 | 의미 |
 |---|---|---|
-| `provenance` | 파생물 → 근거 | 추출 주장 → 원본, 통합 사실 → 주장들 |
-| `about` | 기억 → 대상 | 매핑·주장이 무엇에 관한 것인지 |
-| `invalidates` | 무효화 사건 → 대상 사실 | 대상이 이 사건의 시각부터 유효하지 않음 |
-| `semantic` | 양방향 취급 | 자유 자연어 관계. content가 관계를 서술 |
-
-`timeline`은 링크로 저장하지 않는다 — `origin.session` + `time` 정렬로
-질의 시점에 계산한다.
+| `NEXT_EPISODE` | 에피소드 → 직후 에피소드 | 같은 세션 시계열 사슬. remember() 자동 배선 |
+| `MENTIONS` | 기억 → 엔티티 | 매핑·주장이 무엇에 관한 것인지 |
+| `RELATES_TO` | 양방향 취급 | 자유 자연어 관계. content가 관계를 서술 |
+| `HAS_MEMBER` | 커뮤니티 → 구성원 | dreaming이 생성하는 은하 소속 (v0.3) |
+| `DERIVED_FROM` | 파생물 → 근거 | 추출 주장 → 원본, 통합 사실 → 주장들 |
+| `INVALIDATES` | 무효화 사건 → 대상 사실 | 대상이 이 사건의 시각부터 유효하지 않음 |
+| `CONTRASTS` | 양방향 취급 | 미해소 모순의 보존. 증거 축적 후 INVALIDATES 승격 |
 
 ## 무효화 모델
 
@@ -86,12 +86,12 @@ Zep의 bi-temporal(4-타임스탬프)과 같은 표현력을, "객체당 시간 
 ```text
 사실 A: "이노는 커피를 끊었다"            time = 2026-03-01
 사건 X: "이노가 커피를 다시 마시기 시작했다" time = 2026-08-15
-링크:   X --invalidates--> A
+링크:   X --INVALIDATES--> A
 ```
 
 - A는 한 바이트도 바뀌지 않는다.
-- `valid_at(A, T)` = A.time <= T **이고** T보다 이른 invalidates 사건이 없음.
-- "언제까지 그랬는가"는 invalidates 사건의 시각이 답한다.
+- `valid_at(A, T)` = A.time <= T **이고** T보다 이른 INVALIDATES 사건이 없음.
+- "언제까지 그랬는가"는 INVALIDATES 사건의 시각이 답한다.
 - 시한부 기억("내일 시험 있어")은 추출 시점에 미래 시각을 가진 무효화
   사건을 함께 생성하는 것으로 표현한다 (Supermemory의 forgetAfter 상당).
 

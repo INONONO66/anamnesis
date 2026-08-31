@@ -14,12 +14,12 @@
 |---|---|---|
 | EpisodicNode (raw) | 에피소드 원소 (original-message 등) | 둘 다 원본 비손실 |
 | EntityNode (name + summary + name_embedding) | 매핑/통합 원소 | 엔티티도 자연어 요약 중심 |
-| **EntityEdge.fact (자연어 문장) + fact_embedding** | semantic 링크의 content | "사실은 엣지에 자연어로" — 우리 원칙과 동일 |
+| **EntityEdge.fact (자연어 문장) + fact_embedding** | RELATES_TO 링크의 content | "사실은 엣지에 자연어로" — 우리 원칙과 동일 |
 | valid_at / invalid_at / expired_at (제자리 갱신) | invalidation-as-event (불변) | 우리가 우월 — §3 사고 기록 참조 |
 | CommunityNode (클러스터 요약) | dreaming의 통합 계층 | |
 | 계층별 하이브리드 검색 (BM25+cosine+BFS) → RRF/MMR/cross-encoder | recall 4단 파이프라인 | 레시피 구조 차용 |
 
-**차용 1 — 링크 임베딩.** graphiti의 fact_embedding처럼 semantic 링크의
+**차용 1 — 링크 임베딩.** graphiti의 fact_embedding처럼 RELATES_TO 링크의
 content도 임베딩해서 벡터 검색 대상에 넣는다. 회상 후보가 "원소"만이 아니라
 "관계 서술"에서도 나와야 한다.
 

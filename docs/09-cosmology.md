@@ -42,19 +42,25 @@
 (연결된 사실·에피소드의 m(T) 합). 딸린 행성이 많으면 저절로 항성이 되고,
 관심사가 바뀌면 자연히 식는다. 수동 승격 없음.
 
-## 4. 링크 role — 6종 확정
+## 4. 링크 role — 7종 확정 (graphiti 어휘 차용)
+
+> [갱신 2026-08-31] 자체 명명(sequence/provenance/about/semantic) 대신
+> graphiti 엣지 체계를 차용하고, 개네한테 없는 우리 시그니처 3종을 더한
+> 합집합. 저장 시 role 프로퍼티가 아니라 **Neo4j 관계 실타입**(UPPER_SNAKE)
+> 으로 물질화 — 타입 기반 순회 필터와 GDS projection이 정석.
 
 | role | 축 | 연결 | 비고 |
 |---|---|---|---|
-| `sequence` | 시계열 | 에피소드 → 같은 세션 직전 에피소드 | remember() 자동. graphiti NEXT_EPISODE 대응 — PPR이 대화 흐름을 타게 하는 물질화 |
-| `provenance` | 의미 | 가공물 → 근거 원본 | 출처 사슬 |
-| `about` | 의미 | 원소 → 엔티티 | graphiti MENTIONS 대응. PPR 시딩 연료 |
-| `semantic` | 의미 | 원소 ↔ 원소, content에 자연어 관계 문장 | graphiti RELATES_TO(fact-on-edge) 대응 |
-| `invalidates` | 의미×시간 | 무효화 사건 → 사실 | 판정 끝난 무효화. 유일한 "수정" 수단 |
-| `contrasts` | 의미 | 미해소 모순의 양쪽 보존 + 사유 문장 | graphiti에 없는 우리 시그니처. 증거가 쌓이면 dreaming이 invalidates로 승격 |
+| `NEXT_EPISODE` | 시계열 | 에피소드 → 같은 세션 직후 에피소드 | remember() 자동 배선. PPR이 대화 흐름을 타게 하는 물질화 |
+| `MENTIONS` | 의미 | 에피소드/사실 → 엔티티 | PPR 시딩 연료 |
+| `RELATES_TO` | 의미 | 원소 ↔ 원소, content에 자연어 관계 문장 | graphiti fact-on-edge 대응. 임베딩 대상 |
+| `HAS_MEMBER` | 구조 | 커뮤니티(은하) → 구성원 | dreaming이 생성 (v0.3) |
+| `DERIVED_FROM` | 의미 | 가공물 → 근거 원본 | 출처 사슬. graphiti에 없음(개네는 엣지 프로퍼티) — 우리 확장 |
+| `INVALIDATES` | 의미×시간 | 무효화 사건 → 사실 | 판정 끝난 무효화. 유일한 "수정" 수단. 우리 시그니처 |
+| `CONTRASTS` | 의미 | 미해소 모순의 양쪽 보존 + 사유 문장 | 증거가 쌓이면 dreaming이 INVALIDATES로 승격. 우리 시그니처 |
 
-구조적 의미가 있는 것만 role로 잠그고(위 6), 관계의 다양성은 전부
-semantic의 자연어 content로 흡수한다.
+구조적 의미가 있는 것만 role로 잠그고(위 7), 관계의 다양성은 전부
+RELATES_TO의 자연어 content로 흡수한다.
 
 ## 5. 망각 역학 — mass(T)
 
@@ -85,7 +91,7 @@ hits)` 프로퍼티는 원장에서 언제든 재생되는 캐시다. 원소·�
 
 ## 6. 공간 배치 — 임베딩이 곱 좌표다
 
-모든 원소(와 semantic 링크)의 `embedding` 프로퍼티가 의미 공간에서의
+모든 원소(와 RELATES_TO 링크)의 `embedding` 프로퍼티가 의미 공간에서의
 좌표다. Neo4j 벡터 인덱스(HNSW)가 공간 인덱스 역할을 하므로 별도 벡터
 DB에 배치를 복제하지 않는다 — **그래프 노드 자체가 공간상의 천체다.**
 

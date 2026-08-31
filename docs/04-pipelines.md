@@ -30,10 +30,10 @@ outbox에서 record 배치 획득
       1. entity resolution (아래)
       2. 유사 기존 주장 top-k 조회 (벡터 + FTS)
       3. LLM 판정: 신규 / 중복(강화) / 보강 / 모순
-         · 신규   → claim 원소 + provenance 링크 생성
+         · 신규   → claim 원소 + DERIVED_FROM 링크 생성
          · 중복   → 기존 주장 강화(reinforcement 이벤트)만 기록
-         · 보강   → 신규 생성 + semantic 링크 ("~를 보강한다")
-         · 모순   → 신규 생성 + invalidation 사건 + invalidates 링크
+         · 보강   → 신규 생성 + RELATES_TO 링크 ("~를 보강한다")
+         · 모순   → 신규 생성 + invalidation 사건 + INVALIDATES 링크
                     (기존 주장은 불변 — Mem0식 UPDATE/DELETE 금지)
   → 임베딩 계산 → LanceDB upsert
   → outbox processed 마킹
@@ -51,7 +51,7 @@ outbox 커서 리셋 후 전체 재소화.
   → 후보 검색: 이름 임베딩 + FTS로 기존 엔티티·매핑 기억 조회
   → LLM 동일성 판정
   → 동일 판정 시: mapping 기억 (anamnesis.mapping/1) 생성
-     "U098765는 김철수다" + about 링크
+     "U098765는 김철수다" + MENTIONS 링크
   → 원본의 origin.actor는 절대 수정하지 않는다
 ```
 
@@ -64,7 +64,7 @@ outbox 커서 리셋 후 전체 재소화.
 해치지 않는다.
 
 ```text
-- 통합: 주장 클러스터 → 상위 사실(synthesis) 생성 + provenance 링크
+- 통합: 주장 클러스터 → 상위 사실(synthesis) 생성 + DERIVED_FROM 링크
 - 프로필 캐시 재실체화 (정적/동적)
 - 미해소 모순 스캔: 신규 유입 시 놓친 장거리 모순 탐지
 - 임베딩 백필: 모델 교체 시 점진 재투영

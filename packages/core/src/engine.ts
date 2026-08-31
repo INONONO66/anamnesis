@@ -65,14 +65,21 @@ export class Engine {
     await this.store.init();
   }
 
-  /** hot path — 에피소드 저장 + 콜드패스 등록. LLM 없음. */
+  /**
+   * hot path — 에피소드 저장 + 시계열 사슬 자동 배선 + 콜드패스 등록.
+   * LLM 없음. NEXT_EPISODE는 같은 세션의 직전 에피소드로부터 자동.
+   */
   async remember(input: RememberInput): Promise<PutResult> {
     const rec = RememberInput.parse(input);
     const { payload, ...element } = rec;
-    return this.store.putElement(
+    const result = await this.store.putElement(
       { ...element, id: uuidv7() },
       { ...(payload ? { payload } : {}), enqueue: true },
     );
+    if (result.created) {
+      await this.store.wireNextEpisode(result.id, uuidv7());
+    }
+    return result;
   }
 
   /**

@@ -229,9 +229,9 @@ https://arxiv.org/abs/2502.14802):
 
 | role | 전파 | 비고 |
 |---|---|---|
-| sequence / about / semantic / provenance | ○ (role별 가중 캘리브레이션) | |
-| invalidates | × | 판정 링크. 활성화를 나르면 죽은 사실이 되살아난다 |
-| contrasts | × | 모순 링크는 전도체가 아니다 (main의 Contradicts 배제 승계). 양끝이 독립적으로 활성일 때만 함께 노출 |
+| NEXT_EPISODE / MENTIONS / RELATES_TO / DERIVED_FROM / HAS_MEMBER | ○ (role별 가중 캘리브레이션) | |
+| INVALIDATES | × | 판정 링크. 활성화를 나르면 죽은 사실이 되살아난다 |
+| CONTRASTS | × | 모순 링크는 전도체가 아니다 (main의 Contradicts 배제 승계). 양끝이 독립적으로 활성일 때만 함께 노출 |
 
 ---
 
@@ -300,7 +300,7 @@ vector 유사도(코사인), BM25(비유계), PPR(그래프 크기에 따라 수
 - **이론적 근거**: 이 곱셈 구조는 합리적 분석(서두 지붕)의 필요 확률
   분해 — 문맥 연관성(rel) × 사전 필요 오즈(m(T)) — 그대로다.
 - temporal 근접성이 필요한 질의(시간 추론)는 별도 채널이 아니라 snapshot(T)
-  절단 + sequence 링크를 타는 PPR이 이미 나른다. 부족이 실측되면 시간
+  절단 + NEXT_EPISODE 링크를 타는 PPR이 이미 나른다. 부족이 실측되면 시간
   근접 rank 채널을 RRF에 4번째로 추가 — 구조 변경 없음.
 
 ### 실패 조건
@@ -324,7 +324,7 @@ vector 유사도(코사인), BM25(비유계), PPR(그래프 크기에 따라 수
    https://www.cell.com/neuron/fulltext/S0896-6273(13)01186-0)**:
    깨어 있는 동안 순증가한 연결 강도를 수면이 일괄 하향 재정규화해
    신호 대 잡음을 회복한다. 우리 대응: dreaming이 **링크를 만드는 만큼
-   정리한다** — 중복 semantic 링크 병합, contrasts의 invalidates 승격,
+   정리한다** — 중복 RELATES_TO 링크 병합, CONTRASTS의 INVALIDATES 승격,
    저질량 고아 링크 감쇠. 원소 질량의 재정규화는 불필요하다 (감쇠가
    읽기 시점 수식으로 이미 연속 작동 — tick 없는 설계의 이점).
 
@@ -338,7 +338,7 @@ https://www.sciencedirect.com/science/article/pii/S1364661317300785).
 - digest의 모순 후보 대조는 전체 그래프가 아니라 **직전 recall에서
   히트된 사실들**부터 본다 — 새 발화가 방금 꺼낸 기억과 충돌할 확률이
   가장 높다.
-- dreaming의 contrasts → invalidates 승격 큐도 최근 히트된 모순부터
+- dreaming의 CONTRASTS → INVALIDATES 승격 큐도 최근 히트된 모순부터
   처리한다.
 
 판정 비용을 줄이면서 인지적으로 올바른 순서다.

@@ -9,10 +9,10 @@ A-MEM, MemOS, Cognee, Memobase. 출처는 문서 말미.
 |---|---|---|---|---|---|---|---|---|---|
 | 원본 보존 | 물리 분리 불변 금고 | Episode 노드 (같은 DB) | **버림** | Document 계층 (클라우드) | 대화 이력 | 패시지 보존 | 노트만 | relational store | blob |
 | 파생 재구축 | **전체 삭제→재구축** | 불가 | 불가 | 불가 | 불가 | 인덱스만 | 불가 | 부분 | 부분 |
-| 시간 모델 | 사건 시간 단일축 + invalidates | bi-temporal 4-타임스탬프 | createdAt뿐 | 논문상 2중, 코드엔 부재 | 없음 | 없음 | 생성 시각 | ingest 중심 | 이벤트 타임라인 |
+| 시간 모델 | 사건 시간 단일축 + INVALIDATES | bi-temporal 4-타임스탬프 | createdAt뿐 | 논문상 2중, 코드엔 부재 | 없음 | 없음 | 생성 시각 | ingest 중심 | 이벤트 타임라인 |
 | 모순 처리 | invalidation 사건 (불변) | edge invalidation | **UPDATE/DELETE (이력 파괴)** | updates 링크 + isLatest | 에이전트 재량 | 없음 | 노트 수정 (이력 파괴) | 없음 | 프로필 덮어쓰기 |
 | 망각 | mass(T) 읽기시점 평가 | 없음 | 삭제뿐 | forgetAfter + cron | 없음 | 없음 | 없음 | 없음 | 프로필 갱신 |
-| 관계 모델 | 자연어 링크 + role 4종 | 온톨로지 fact edge + 커뮤니티 | 옵션 triplet | 사실 위의 사실 3종 | 없음 | schemaless triplet | 의미 링크+태그 | 온톨로지 그래프 | 없음 |
+| 관계 모델 | 자연어 링크 + role 7종(graphiti 어휘) | 온톨로지 fact edge + 커뮤니티 | 옵션 triplet | 사실 위의 사실 3종 | 없음 | schemaless triplet | 의미 링크+태그 | 온톨로지 그래프 | 없음 |
 | 회상 | vec+FTS+시드 → PPR → 가중합성 | vec+BM25+BFS → 5종 리랭커 | 벡터 top-k | 사실검색→원본 재주입 | tool call | PPR (원조) | 유사도 | vec+Cypher | 프로필 주입 |
 | 배포 | **npm, 로컬 데몬, 서버 0** | 서버+Neo4j | 서버/SaaS | 클라우드 SaaS | 서버+Postgres | 연구 코드 | 연구 코드 | 서버+3종 DB | 서버+Postgres |
 | 데이터 주권 | 전부 로컬, 복사=백업 | 무거운 자체호스팅 | SaaS 중심 | 없음 | 자체호스팅 | 로컬 | 로컬 | 자체호스팅 | 자체호스팅 |
@@ -34,7 +34,7 @@ Mem0는 "언제까지 그랬는가"에 답할 수 없고 파이프라인 개선�
 
 **Supermemory — 데이터 모델 수렴, 형태는 정반대.** 원본/사실 2계층, 사실
 위의 사실 링크(updates/extends/derives), 최소 관계 타입, 프로필 캐시 —
-우리 invalidates·시한부 기억·프로필 실체화가 이쪽 검증에서 왔다.
+우리 INVALIDATES·시한부 기억·프로필 실체화가 이쪽 검증에서 왔다.
 LongMemEval에서 Zep 대폭 우세(multi-session 71.4% vs 57.9%, temporal
 76.7% vs 62.4%)가 "최소 구조 + 자연어" 노선의 증거. 차이: 클라우드
 블랙박스 vs 우리의 로컬 파일 (열람·수정·백업 가능), cron 마킹 망각 vs

@@ -27,8 +27,8 @@
   │     α..δ는 질의 유형별 프로파일 (사실 조회 / 시간 추론 / 인물 중심 …)
   │
   └─ 4. 조립
-        invalidates 반영해 유효 사실만 채택 (요청 시 이력 포함),
-        각 사실에 provenance 원본 참조 첨부,
+        INVALIDATES 반영해 유효 사실만 채택 (요청 시 이력 포함),
+        각 사실에 DERIVED_FROM 원본 참조 첨부,
         컨텍스트 문자열 또는 구조화 응답으로 반환.
 ```
 
@@ -43,7 +43,7 @@ mass(T) = element.mass × decay(T − last_reinforced) + Σ reinforcement(events
 
 - 시간의 결정론적 함수이므로 **읽기 시점에 T를 넣어 평가**한다.
   백그라운드 tick으로 깎아 내려쓰는 데몬 작업이 존재하지 않는다.
-- 강화 이벤트: 재언급(provenance 증가), 회상 적중, dreaming의 승격.
+- 강화 이벤트: 재언급(DERIVED_FROM 증가), 회상 적중, dreaming의 승격.
 - `scores` 테이블은 캐시일 뿐이며 언제든 재계산된다.
 
 ## snapshot(T)
@@ -51,7 +51,7 @@ mass(T) = element.mass × decay(T − last_reinforced) + Σ reinforcement(events
 `recall(query, at: T)`는 T 시점의 세계에서 답한다:
 
 - 원소·링크 모두 `time <= T`만 사용.
-- invalidates 사건도 T 이전 것만 반영 — "그때는 아직 참이었던 사실"이
+- INVALIDATES 사건도 T 이전 것만 반영 — "그때는 아직 참이었던 사실"이
   올바르게 살아난다.
 - 백필로 과거 데이터를 나중에 넣으면 과거 snapshot이 풍부해진다. 의도된
   동작이다.
@@ -60,7 +60,7 @@ mass(T) = element.mass × decay(T − last_reinforced) + Σ reinforcement(events
 
 ```text
 valid(fact, T) = fact.time <= T
-              ∧ ¬∃ inv: (inv --invalidates--> fact ∧ inv.time <= T)
+              ∧ ¬∃ inv: (inv --INVALIDATES--> fact ∧ inv.time <= T)
 ```
 
 기본 회상은 유효 사실만 반환하고, `include_history` 옵션이 버전 사슬

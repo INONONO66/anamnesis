@@ -64,7 +64,7 @@ describe("Engine on Neo4j — 기본 축적", () => {
         id: uuidv7(),
         from: claim.id,
         to: episode.id,
-        role: "provenance",
+        role: "DERIVED_FROM",
         content: "이 주장은 해당 원본 메시지에서 추출되었다",
       });
     });
@@ -78,6 +78,29 @@ describe("Engine on Neo4j — 기본 축적", () => {
     const hits = await engine.recall("다크 모드");
     expect(hits.length).toBeGreaterThanOrEqual(1);
     expect(hits[0]!.element.content).toContain("다크 모드");
+  });
+
+  test("NEXT_EPISODE — 같은 세션의 에피소드가 사건 시각 순으로 사슬 연결", async () => {
+    const chain = (record: string, content: string, value: string) => ({
+      time: { value, precision: "second" },
+      content,
+      origin: {
+        source: "kakao-export",
+        session: "체인방/2026-08",
+        actor: "이노",
+        record,
+      },
+    }) as const;
+    const c1 = await engine.remember(chain("c1", "체인 첫째 메시지", "2026-08-23T10:00:00+09:00"));
+    const c2 = await engine.remember(chain("c2", "체인 둘째 메시지", "2026-08-23T10:05:00+09:00"));
+    const c3 = await engine.remember(chain("c3", "체인 셋째 메시지", "2026-08-23T10:10:00+09:00"));
+
+    const around2 = await engine.store.linksOf(c2.id, "NEXT_EPISODE");
+    expect(around2).toHaveLength(2);
+    expect(around2.some((l) => l.from === c1.id && l.to === c2.id)).toBe(true);
+    expect(around2.some((l) => l.from === c2.id && l.to === c3.id)).toBe(true);
+    // 체인 끝단은 한 쪽만
+    expect(await engine.store.linksOf(c1.id, "NEXT_EPISODE")).toHaveLength(1);
   });
 
   test("remember는 origin 멱등 — 재유입해도 중복·덮어쓰기 없음", async () => {
@@ -137,7 +160,7 @@ describe("Engine on Neo4j — 시간축 필터링", () => {
       id: uuidv7(),
       from: inv.id,
       to: fact.id,
-      role: "invalidates",
+      role: "INVALIDATES",
       content: "커피를 다시 마시므로 끊었다는 사실은 더 이상 유효하지 않다",
     });
 

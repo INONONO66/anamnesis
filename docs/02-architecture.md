@@ -67,7 +67,7 @@ Neo4j 안:
            origin_*, mass, properties, payload_hash, digest,
            embedding})                        ← 에피소드+가공 전부. 원소 하나 = 노드 하나
 (:Element)-[:LINK {id, role, content, weight, embedding}]->(:Element)
-           role ∈ provenance | about | invalidates | semantic
+           role ∈ NEXT_EPISODE | MENTIONS | RELATES_TO | HAS_MEMBER | DERIVED_FROM | INVALIDATES | CONTRASTS
 (:Payload {hash, bytes})                      원본 바이트 (content-addressed)
 (:Outbox …)                                   콜드패스 커서 (가변)
 
@@ -95,7 +95,7 @@ SQLite 시절의 DB-트리거 봉인은 Neo4j Community에 없다. 불변성은 
 
 1. **데몬이 유일한 쓰기 경로** — bolt는 localhost 전용이고 데몬만 잡는다.
 2. **데몬 코드에 UPDATE/DELETE Cypher가 존재하지 않는다** — Element·LINK·
-   Payload는 CREATE만. 틀린 사실은 invalidates 이벤트로, 오폭 수리는 그
+   Payload는 CREATE만. 틀린 사실은 INVALIDATES 이벤트로, 오폭 수리는 그
    무효화를 다시 무효화하는 이벤트로 (docs/08 교훈 B — graphiti의 in-place
    `invalid_at` 갱신이 10만 엣지 수리 스크립트를 부른 사고의 교훈).
 

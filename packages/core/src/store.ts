@@ -195,13 +195,17 @@ export class Store {
     return { id, created };
   }
 
-  /** 링크 쓰기 — id 멱등, ON CREATE만 (덮어쓰기 없음) */
+  /**
+   * 링크 쓰기 — id 멱등, ON CREATE만 (덮어쓰기 없음).
+   * role은 Neo4j 관계 실타입으로 물질화된다 (graphiti 방식) —
+   * 보간은 zod enum 검증을 통과한 값만 가능하므로 안전하다.
+   */
   async putLink(input: unknown): Promise<MemoryLink> {
     const link = MemoryLink.parse(input);
     const rows = await this.run(
       `MATCH (a:Element { id: $from }), (b:Element { id: $to })
-       MERGE (a)-[l:LINK { id: $id }]->(b)
-       ON CREATE SET l += { role: $role, content: $content, weight: $weight }
+       MERGE (a)-[l:${link.role} { id: $id }]->(b)
+       ON CREATE SET l += { content: $content, weight: $weight }
        RETURN l.id AS id`,
       { ...link },
     );
@@ -260,11 +264,11 @@ export class Store {
 
   async linksOf(id: string, role?: LinkRole): Promise<MemoryLink[]> {
     const rows = await this.run(
-      `MATCH (a:Element)-[l:LINK]-(b:Element)
+      `MATCH (a:Element)-[l]-(b:Element)
        WHERE (a.id = $id OR b.id = $id)
-         AND ($role IS NULL OR l.role = $role)
+         AND ($role IS NULL OR type(l) = $role)
        WITH DISTINCT l, startNode(l) AS s, endNode(l) AS t
-       RETURN l, s.id AS from, t.id AS to`,
+       RETURN l, type(l) AS role, s.id AS from, t.id AS to`,
       { id, role: role ?? null },
     );
     return rows.map((r) => {
@@ -273,11 +277,40 @@ export class Store {
         id: p["id"],
         from: r["from"],
         to: r["to"],
-        role: p["role"],
+        role: r["role"],
         content: p["content"],
         weight: p["weight"],
       });
     });
+  }
+
+  /**
+   * 시계열 사슬 배선 — 같은 (source, session, schema)에서 사건 시각이
+   * 직전인 에피소드로부터 NEXT_EPISODE를 건다. 순서대로 유입되는 소스를
+   * 가정한다 (역순 유입 시 사슬 복구는 dreaming 몶, v0.3).
+   */
+  async wireNextEpisode(
+    elementId: string,
+    linkId: string,
+  ): Promise<string | null> {
+    const rows = await this.run(
+      `MATCH (e:Element { id: $id })
+       MATCH (p:Element)
+       WHERE p.schema = e.schema
+         AND p.origin_source = e.origin_source
+         AND p.origin_session = e.origin_session
+         AND p.id <> e.id
+         AND (p.time_utc < e.time_utc
+              OR (p.time_utc = e.time_utc AND p.id < e.id))
+       WITH e, p ORDER BY p.time_utc DESC, p.id DESC LIMIT 1
+       MERGE (p)-[l:NEXT_EPISODE]->(e)
+       ON CREATE SET l += { id: $linkId,
+         content: '같은 세션에서 바로 다음에 일어난 에피소드다',
+         weight: 1.0 }
+       RETURN p.id AS prev`,
+      { id: elementId, linkId },
+    );
+    return rows.length ? (rows[0]!["prev"] as string) : null;
   }
 
   /**
@@ -290,7 +323,7 @@ export class Store {
       `MATCH (e:Element { id: $id })
        RETURN e.time_utc <= $at
               AND NOT EXISTS {
-                MATCH (inv:Element)-[l:LINK { role: 'invalidates' }]->(e)
+                MATCH (inv:Element)-[:INVALIDATES]->(e)
                 WHERE inv.time_utc <= $at
               } AS valid`,
       { id, at: atUtc },
@@ -354,7 +387,7 @@ export class Store {
   async counts(): Promise<{ elements: number; links: number; pending: number }> {
     const rows = await this.run(
       `CALL () { MATCH (e:Element) RETURN count(e) AS elements }
-       CALL () { MATCH ()-[l:LINK]->() RETURN count(l) AS links }
+       CALL () { MATCH (:Element)-[l]->(:Element) RETURN count(l) AS links }
        CALL () { MATCH (o:Outbox) WHERE o.processed_at IS NULL
                  RETURN count(o) AS pending }
        RETURN elements, links, pending`,

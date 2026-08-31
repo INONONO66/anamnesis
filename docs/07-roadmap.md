@@ -8,8 +8,8 @@ vault      append + objects 저장 + 멱등 유입 + 무결성 검증
 memory     elements/links/scores/FTS5 스키마 + LanceDB projection
 daemon     UDS JSON-RPC (remember/recall/snapshot/status/digest),
            spawn-on-demand + keep-alive, 단일 라이터
-extraction outbox 콜드패스: 주장 추출 + 중복/보강/모순 판정 + invalidates
-recall     vec + FTS 후보 → 가중 재정렬 → invalidates 반영 조립 (PPR 제외)
+extraction outbox 콜드패스: 주장 추출 + 중복/보강/모순 판정 + INVALIDATES
+recall     vec + FTS 후보 → 가중 재정렬 → INVALIDATES 반영 조립 (PPR 제외)
 client     TS 소켓 클라이언트 + 데몬 발견/스폰
 cli        init / ingest / recall / daemon / digest
 mcp        stdio 브리지 (remember / recall 툴)

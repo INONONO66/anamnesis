@@ -80,7 +80,7 @@ const validLink = {
   id: "0192f3b2-6f8c-7d4e-a032-9b5c7d3e2f10",
   from: "0192f3a1-5e7b-7c3d-9f21-8a4b6c2d1e0f",
   to: "0192f3a1-5e7b-7c3d-9f21-8a4b6c2d1e10",
-  role: "provenance",
+  role: "DERIVED_FROM",
   content: "이 주장은 해당 메시지에서 추출되었다.",
 } as const;
 
@@ -90,9 +90,12 @@ describe("MemoryLink", () => {
     expect(link.weight).toBe(1);
   });
 
-  test("role 4종 외를 거부한다", () => {
+  test("role 7종 외를 거부한다", () => {
     expect(() =>
       MemoryLink.parse({ ...validLink, role: "timeline" }),
+    ).toThrow();
+    expect(() =>
+      MemoryLink.parse({ ...validLink, role: "provenance" }),
     ).toThrow();
   });
 

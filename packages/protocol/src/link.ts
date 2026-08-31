@@ -1,23 +1,31 @@
 /**
  * MemoryLink — 원소 사이의 관계. 노드에 관계를 내장하지 않는다.
  *
- * role은 이 4종에서 늘리지 않는다. 의미의 다양성은 `content`(자연어)가
- * 담당하고, role은 엔진이 기계적으로 소비하는 최소 구조만 남긴다.
+ * role 어휘는 graphiti의 엣지 체계를 차용한다 (docs/08·09). 저장 시
+ * Neo4j 관계 실타입(UPPER_SNAKE)으로 물질화되며, 이 7종에서 늘리지
+ * 않는다. 의미의 다양성은 `content`(자연어)가 담당하고, role은 엔진이
+ * 기계적으로 소비하는 최소 구조만 남긴다.
  *
- * `timeline`은 링크로 저장하지 않는다 — origin.session + time 정렬로
- * 질의 시점에 계산한다.
+ * 세션 시계열은 NEXT_EPISODE로 물질화한다 — 정렬 질의로 유도 가능하지만
+ * 그래프 확산(PPR)이 대화 흐름을 연결성으로 밟게 하려면 엣지여야 한다.
  */
 import { z } from "zod";
 
 export const LinkRole = z.enum([
-  /** 파생물 → 근거. 주장 → 원본, 통합 → 주장들. */
-  "provenance",
-  /** 기억 → 대상. 매핑·주장이 무엇에 관한 것인지. */
-  "about",
-  /** 무효화 사건 → 대상 사실. 사건 시각부터 대상이 유효하지 않음. */
-  "invalidates",
-  /** 자유 자연어 관계. content가 관계를 서술. 양방향 취급. */
-  "semantic",
+  /** 에피소드/사실 → 엔티티. 무엇을 언급/관여하는가. PPR 시딩 연료. (graphiti MENTIONS) */
+  "MENTIONS",
+  /** 원소 ↔ 원소 자유 자연어 관계. content가 관계 문장. 양방향 취급. (graphiti RELATES_TO) */
+  "RELATES_TO",
+  /** 에피소드 → 같은 세션의 직후 에피소드. 시계열 사슬. (graphiti NEXT_EPISODE) */
+  "NEXT_EPISODE",
+  /** 커뮤니티(은하) → 구성원. dreaming이 생성. (graphiti HAS_MEMBER) */
+  "HAS_MEMBER",
+  /** 파생물 → 근거. 주장 → 원본, 통합 → 주장들. (graphiti에 없음 — 우리 출처 사슬) */
+  "DERIVED_FROM",
+  /** 무효화 사건 → 대상 사실. 사건 시각부터 대상이 유효하지 않음. (우리 시그니처) */
+  "INVALIDATES",
+  /** 미해소 모순의 양쪽 보존. content에 긴장의 사유. (우리 시그니처) */
+  "CONTRASTS",
 ]);
 export type LinkRole = z.infer<typeof LinkRole>;
 
