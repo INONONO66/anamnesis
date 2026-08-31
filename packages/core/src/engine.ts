@@ -38,6 +38,12 @@ export const RememberInput = z
     properties: z.record(z.string(), z.unknown()).default({}),
     /** 소스 원본 바이트 (선택) — Payload 노드에 불변 보존 */
     payload: z.instanceof(Uint8Array).optional(),
+    /**
+     * NEXT_EPISODE 부모 record 명시 (선택) — 에이전트 세션 로그처럼
+     * 부모를 아는 소스. 없으면 같은 세션의 직전 에피소드로 폴백
+     * (docs/01 §시계열 사슬은 나무다).
+     */
+    previous: z.string().min(1).optional(),
   })
   .strict();
 export type RememberInput = z.input<typeof RememberInput>;
@@ -66,20 +72,21 @@ export class Engine {
   }
 
   /**
-   * hot path — 에피소드 저장 + 시계열 사슬 자동 배선 + 콜드패스 등록.
-   * LLM 없음. NEXT_EPISODE는 같은 세션의 직전 에피소드로부터 자동.
+   * hot path — 에피소드 저장 + 시계열 사슬 자동 배선 + 콜드패스 등록을
+   * 단일 트랜잭션으로 (docs/04). LLM 없음. NEXT_EPISODE는 입력의
+   * previous(부모 record) 우선, 없으면 같은 세션의 직전 에피소드.
    */
   async remember(input: RememberInput): Promise<PutResult> {
     const rec = RememberInput.parse(input);
-    const { payload, ...element } = rec;
-    const result = await this.store.putElement(
+    const { payload, previous, ...element } = rec;
+    return this.store.putElement(
       { ...element, id: uuidv7() },
-      { ...(payload ? { payload } : {}), enqueue: true },
+      {
+        ...(payload ? { payload } : {}),
+        ...(previous ? { previous } : {}),
+        enqueue: true,
+      },
     );
-    if (result.created) {
-      await this.store.wireNextEpisode(result.id, uuidv7());
-    }
-    return result;
   }
 
   /**

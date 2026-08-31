@@ -103,18 +103,49 @@ describe("Engine on Neo4j — 기본 축적", () => {
     expect(await engine.store.linksOf(c1.id, "NEXT_EPISODE")).toHaveLength(1);
   });
 
-  test("remember는 origin 멱등 — 재유입해도 중복·덮어쓰기 없음", async () => {
+  test("remember는 origin 멱등 — 같은 내용 재유입은 no-op", async () => {
     const first = await engine.remember(
       msg("dup-1", "원본 내용", "2026-08-22T10:00:00+09:00"),
     );
     const again = await engine.remember(
-      msg("dup-1", "다른 내용으로 위조 시도", "2026-08-22T11:00:00+09:00"),
+      msg("dup-1", "원본 내용", "2026-08-22T10:00:00+09:00"),
     );
     expect(first.created).toBe(true);
     expect(again.created).toBe(false);
     expect(again.id).toBe(first.id);
-    const stored = await engine.store.getElement(first.id);
-    expect(stored!.content).toBe("원본 내용"); // ON CREATE만 — 덮어쓰기 불가
+  });
+
+  test("2단 멱등 — 같은 origin, 다른 내용은 분기: 새 Episode + 자동 INVALIDATES", async () => {
+    const first = await engine.remember(
+      msg("div-1", "원래 보낸 내용", "2026-08-22T10:00:00+09:00"),
+    );
+    const edited = await engine.remember(
+      msg("div-1", "수정된 내용", "2026-08-22T10:00:00+09:00"),
+    );
+    expect(edited.created).toBe(true);
+    expect(edited.diverged).toBe(true);
+    expect(edited.invalidated).toBe(first.id);
+
+    // 새 에피소드: record 접미 + 사건 시각은 원래 보낸 시각 유지
+    const fresh = await engine.store.getElement(edited.id);
+    expect(fresh!.content).toBe("수정된 내용");
+    expect(fresh!.origin.record).toMatch(/^div-1#h[0-9a-f]{8}$/);
+    expect(fresh!.time.value).toBe("2026-08-22T10:00:00+09:00");
+    expect(fresh!.properties["diverged_at"]).toBeString();
+
+    // (새것)-[:INVALIDATES]->(원본) 자동 배선 — 원본은 무효화됐지만 보존
+    const invLinks = await engine.store.linksOf(first.id, "INVALIDATES");
+    expect(invLinks.some((l) => l.from === edited.id && l.to === first.id)).toBe(true);
+    const old = await engine.store.getElement(first.id);
+    expect(old!.content).toBe("원래 보낸 내용"); // 덮어쓰기 없음
+    expect(await engine.store.isValidAt(first.id, new Date().toISOString())).toBe(false);
+
+    // 분기된 내용의 재유입도 멱등 — 세 번째 원소가 생기지 않는다
+    const again = await engine.remember(
+      msg("div-1", "수정된 내용", "2026-08-22T10:00:00+09:00"),
+    );
+    expect(again.created).toBe(false);
+    expect(again.id).toBe(edited.id);
   });
 
   test("payload 보존 및 verify() 무결성 감사 통과", async () => {
@@ -127,6 +158,107 @@ describe("Engine on Neo4j — 기본 축적", () => {
     expect(el).not.toBeNull();
     const issues = await engine.verify();
     expect(issues).toEqual([]);
+  });
+});
+
+describe("Engine on Neo4j — 정본 구조 (라벨·격자·멱등)", () => {
+  test("천체 라벨 이중 물질화 — :Element + :Episode/:Fact", async () => {
+    const ep = await engine.remember(
+      msg("lbl-1", "라벨 확인용 메시지", "2026-08-24T10:00:00+09:00"),
+    );
+    const claim = await engine.put({
+      id: uuidv7(),
+      schema: "anamnesis.claim/1",
+      time: { value: "2026-08-24T10:00:00+09:00", precision: "second" },
+      content: "라벨 확인용 주장",
+      origin: { source: "agent", session: "s", actor: "extractor", record: "lbl-c1" },
+    });
+    expect(await engine.store.labelsOf(ep.id)).toEqual(
+      expect.arrayContaining(["Element", "Episode"]),
+    );
+    expect(await engine.store.labelsOf(claim.id)).toEqual(
+      expect.arrayContaining(["Element", "Fact"]),
+    );
+  });
+
+  test("격자 — 허용 쌍은 생성, 위반 쌍은 거부", async () => {
+    const ep = await engine.remember(
+      msg("lat-1", "격자 확인용 메시지", "2026-08-24T11:00:00+09:00"),
+    );
+    const claim = await engine.put({
+      id: uuidv7(),
+      schema: "anamnesis.claim/1",
+      time: { value: "2026-08-24T11:00:00+09:00", precision: "second" },
+      content: "격자 확인용 주장",
+      origin: { source: "agent", session: "s", actor: "extractor", record: "lat-c1" },
+    });
+    // 허용: Fact --DERIVED_FROM--> Episode
+    await engine.link({
+      id: uuidv7(),
+      from: claim.id,
+      to: ep.id,
+      role: "DERIVED_FROM",
+      content: "이 주장은 해당 메시지에서 추출되었다",
+    });
+    // 위반: Episode --RELATES_TO--> Episode (격자: Fact|Entity만)
+    await expect(
+      engine.link({
+        id: uuidv7(),
+        from: ep.id,
+        to: ep.id,
+        role: "RELATES_TO",
+        content: "격자 위반 시도",
+      }),
+    ).rejects.toThrow();
+  });
+
+  test("링크 멱등 — 같은 (from, to, role, content) 재실행은 중복 생성 없음", async () => {
+    const ep = await engine.remember(
+      msg("idem-1", "멱등 확인용 메시지", "2026-08-24T12:00:00+09:00"),
+    );
+    const claim = await engine.put({
+      id: uuidv7(),
+      schema: "anamnesis.claim/1",
+      time: { value: "2026-08-24T12:00:00+09:00", precision: "second" },
+      content: "멱등 확인용 주장",
+      origin: { source: "agent", session: "s", actor: "extractor", record: "idem-c1" },
+    });
+    const mk = () => ({
+      id: uuidv7(), // 호출마다 새 id를 줘도
+      from: claim.id,
+      to: ep.id,
+      role: "DERIVED_FROM" as const,
+      content: "이 주장은 해당 메시지에서 추출되었다",
+    });
+    const l1 = await engine.link(mk());
+    const l2 = await engine.link(mk());
+    expect(l2.id).toBe(l1.id); // 멱등 키로 같은 링크 반환
+    const links = await engine.store.linksOf(claim.id, "DERIVED_FROM");
+    expect(links.filter((l) => l.to === ep.id)).toHaveLength(1);
+  });
+
+  test("NEXT_EPISODE — previous 명시가 폴백보다 우선 (나무 배선)", async () => {
+    const chain = (record: string, value: string, previous?: string) => ({
+      time: { value, precision: "second" },
+      content: `나무 배선 ${record}`,
+      origin: { source: "agent-log", session: "sess/1", actor: "agent", record },
+      ...(previous ? { previous } : {}),
+    }) as const;
+    const a = await engine.remember(chain("a", "2026-08-25T10:00:00+09:00"));
+    // b는 시각상 a 다음이지만, 부모를 명시하지 않으면 폴백으로 a에 붙는다
+    const b = await engine.remember(chain("b", "2026-08-25T10:05:00+09:00"));
+    // c는 시각상 b 다음이지만 previous=a를 명시 → a에서 가지가 뻗는다
+    const c = await engine.remember(chain("c", "2026-08-25T10:10:00+09:00", "a"));
+
+    const fromA = (await engine.store.linksOf(a.id, "NEXT_EPISODE")).filter(
+      (l) => l.from === a.id,
+    );
+    expect(fromA.map((l) => l.to).sort()).toEqual([b.id, c.id].sort()); // 가지 2개
+    expect(
+      (await engine.store.linksOf(b.id, "NEXT_EPISODE")).some(
+        (l) => l.from === b.id && l.to === c.id,
+      ),
+    ).toBe(false); // b→c 사슬은 없다
   });
 });
 
@@ -148,10 +280,10 @@ describe("Engine on Neo4j — 시간축 필터링", () => {
       msg("f1", "이노는 커피를 끊었다", "2026-03-01T09:00:00+09:00"),
     );
 
-    // 무효화 사건 (2026-08-15) + invalidates 링크
+    // 무효화 사건 (2026-08-15) + INVALIDATES 링크 — 사건도 그냥 claim이다
     const inv = await engine.put({
       id: uuidv7(),
-      schema: "anamnesis.invalidation/1",
+      schema: "anamnesis.claim/1",
       time: { value: "2026-08-15T10:00:00+09:00", precision: "second" },
       content: "이노가 커피를 다시 마시기 시작했다",
       origin: { source: "agent", session: "s", actor: "extractor", record: "inv-1" },
