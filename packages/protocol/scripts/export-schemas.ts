@@ -1,7 +1,4 @@
-/**
- * zod 계약 → JSON Schema export.
- * TS 밖의 소비자(도구·문서·향후 다른 언어 구현)를 위한 언어 중립 계약.
- */
+/** JSON Schema keeps the protocol consumable outside TypeScript. */
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
