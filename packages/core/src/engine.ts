@@ -1,21 +1,10 @@
-/**
- * Engine — Neo4j 단일 스토어 위의 기억 수명 관리 (docs/02).
- *
- * 흐름:
- *   remember() ── hot path. 에피소드 CREATE + outbox 등록. LLM 없음.
- *   digest()   ── cold path. outbox의 에피소드를 핸들러(추출기)에 넘긴다.
- *                 v0.2에서 LLM 추출이 이 자리에 들어온다.
- *   recall()   ── 전문검색 후보 + snapshot(T) 절단 + invalidates 필터
- *                 (v0.2에서 벡터·PPR·가중합성으로 확장)
- */
 import { v7 as uuidv7 } from "uuid";
 import { z } from "zod";
 import {
-  ElementSchemaId,
-  Origin,
-  TimePoint,
-  type MemoryElement,
+  MemoryElement,
+  type MemoryElementInput,
   type MemoryLink,
+  type MemoryLinkInput,
 } from "@anamnesis/protocol";
 import {
   Store,
@@ -25,24 +14,15 @@ import {
   type StoreOptions,
 } from "./store.ts";
 
-/** remember() 입력 — 어댑터가 소스를 정규화한 형태 */
 export const RememberInput = z
-  .object({
-    time: TimePoint,
-    /** 정규화된 자연어 content */
-    content: z.string().min(1),
-    origin: Origin,
-    /** 에피소드 종류. 기본 original-message */
-    schema: ElementSchemaId.default("anamnesis.original-message/1"),
-    mass: z.number().min(0).max(1).default(0.5),
-    properties: z.record(z.string(), z.unknown()).default({}),
-    /** 소스 원본 바이트 (선택) — Payload 노드에 불변 보존 */
+  .object(MemoryElement.shape)
+  .omit({ id: true })
+  .extend({
+    schema: MemoryElement.shape.schema.default(
+      "anamnesis.original-message/1",
+    ),
     payload: z.instanceof(Uint8Array).optional(),
-    /**
-     * NEXT_EPISODE 부모 record 명시 (선택) — 에이전트 세션 로그처럼
-     * 부모를 아는 소스. 없으면 같은 세션의 직전 에피소드로 폴백
-     * (docs/01 §시계열 사슬은 나무다).
-     */
+    /** The parent record takes precedence over inferred chronological order. */
     previous: z.string().min(1).optional(),
   })
   .strict();
@@ -66,36 +46,24 @@ export class Engine {
     this.store = new Store({ ...envConfig(), ...opts });
   }
 
-  /** 제약·인덱스 보장. 기동 시 1회. */
   async init(): Promise<void> {
     await this.store.init();
   }
 
-  /**
-   * hot path — 에피소드 저장 + 시계열 사슬 자동 배선 + 콜드패스 등록을
-   * 단일 트랜잭션으로 (docs/04). LLM 없음. NEXT_EPISODE는 입력의
-   * previous(부모 record) 우선, 없으면 같은 세션의 직전 에피소드.
-   */
   async remember(input: RememberInput): Promise<PutResult> {
     const rec = RememberInput.parse(input);
-    const { payload, previous, ...element } = rec;
-    return this.store.putElement(
-      { ...element, id: uuidv7() },
-      {
-        ...(payload ? { payload } : {}),
-        ...(previous ? { previous } : {}),
-        enqueue: true,
-      },
-    );
+    const { payload, previous, ...fields } = rec;
+    const element: MemoryElement = { ...fields, id: uuidv7() };
+    return this.store.putParsedElement(element, {
+      ...(payload ? { payload } : {}),
+      ...(previous ? { previous } : {}),
+      enqueue: true,
+    });
   }
 
-  /**
-   * cold path — outbox의 에피소드를 핸들러에 넘긴다.
-   * 핸들러(v0.2: LLM 추출기)는 store.putElement/putLink로 파생을 쓴다.
-   * 핸들러가 던지면 해당 배치는 마킹되지 않아 다음 digest가 재시도한다.
-   */
+  /** Failed handlers leave their whole fetched batch pending for retry. */
   async digest(
-    handler?: (episode: MemoryElement, store: Store) => Promise<void> | void,
+    handler: (episode: MemoryElement, store: Store) => Promise<void> | void,
     batchSize = 200,
   ): Promise<number> {
     let total = 0;
@@ -104,7 +72,7 @@ export class Engine {
       if (batch.length === 0) break;
       for (const id of batch) {
         const episode = await this.store.getElement(id);
-        if (episode && handler) await handler(episode, this.store);
+        if (episode) await handler(episode, this.store);
         total += 1;
       }
       await this.store.markProcessed(batch);
@@ -112,35 +80,26 @@ export class Engine {
     return total;
   }
 
-  /** 회상. at을 주면 snapshot(T)에서 답한다 — 그 이후의 기억·무효화는 없던 것. */
   async recall(
     query: string,
     opts: { limit?: number; at?: string } = {},
   ): Promise<SearchHit[]> {
-    const at = opts.at ?? new Date().toISOString();
-    const limit = opts.limit ?? 10;
-    const hits = await this.store.searchText(query, {
-      limit: limit * 2, // 무효화 필터 여유분
-      until: at,
+    return this.store.searchText(query, {
+      limit: opts.limit ?? 10,
+      until: opts.at ?? new Date().toISOString(),
+      validOnly: true,
     });
-    const out: SearchHit[] = [];
-    for (const h of hits) {
-      if (await this.store.isValidAt(h.element.id, at)) out.push(h);
-      if (out.length >= limit) break;
-    }
-    return out;
   }
 
-  /** 파생 쓰기 (추출기·dreaming용 통로) */
-  async put(element: unknown): Promise<PutResult> {
+  async put(element: MemoryElementInput): Promise<PutResult> {
     return this.store.putElement(element);
   }
 
-  async link(link: unknown): Promise<MemoryLink> {
+  async link(link: MemoryLinkInput): Promise<MemoryLink> {
     return this.store.putLink(link);
   }
 
-  /** 추출 파이프라인 개선 시 재추출 — 데이터는 불변, 커서만 되돌린다 */
+  /** Re-extraction rewinds only the mutable cursor, never memory data. */
   async requeueEpisodes(
     schema = "anamnesis.original-message/1",
   ): Promise<number> {
