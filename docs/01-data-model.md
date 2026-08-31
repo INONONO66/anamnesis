@@ -6,7 +6,19 @@
 
 ## MemoryElement
 
-기억 공간의 유일한 노드 타입. 원본·추출 주장·통합 사실 모두 이 형태다.
+기억 공간의 유일한 원소 계약. 원본·추출 주장·통합 사실 모두 이 형태다.
+저장 시에는 공통 라벨 `:Element`에 더해 **천체 라벨**(docs/09)이 이중으로
+물질화된다 — 엣지를 관계 실타입으로 물질화한 것과 같은 원리.
+
+```text
+(:Element:Episode)    먼지 — 불변 원본 (메시지·문서)
+(:Element:Entity)     돌덩이 — 무시간 앵커 (사람·사물·개념)
+(:Element:Fact)       행성 — 파생 서술. 사건 시각 = 참이 된 때
+(:Element:Community)  은하 — dreaming이 만드는 주제 덩어리 요약 (v0.3)
+```
+
+전역 질의(전문검색·시간축 절단·감사)는 `:Element`로 한 방, 천체별
+질의·GDS projection은 세부 라벨로 탄다.
 
 ```jsonc
 {
@@ -28,16 +40,21 @@
 }
 ```
 
-### schema 레지스트리 (초기)
+### schema 레지스트리 (천체 라벨 매핑)
 
-```text
-anamnesis.original-message/1   원본 대화 메시지
-anamnesis.original-document/1  원본 문서·파일
-anamnesis.claim/1              추출된 주장 (자연어 사실)
-anamnesis.mapping/1            actor ↔ 인물 매핑 기억
-anamnesis.synthesis/1          통합 사실·요약 (dreaming 산출물)
-anamnesis.invalidation/1       무효화 사건
-```
+| schema | 라벨 | 내용 |
+|---|---|---|
+| `anamnesis.original-message/1` | Episode | 원본 대화 메시지 |
+| `anamnesis.original-document/1` | Episode | 원본 문서·파일 (리비전당 한 에피소드) |
+| `anamnesis.entity/1` | Entity | 사람·사물·개념 앵커 |
+| `anamnesis.claim/1` | Fact | 추출된 주장. **무효화 사건도 그냥 claim이다** — 특별함은 INVALIDATES 엣지가 나간다는 것뿐 (invalidation schema 폐기) |
+| `anamnesis.mapping/1` | Fact | actor ↔ 인물 매핑 주장 |
+| `anamnesis.synthesis/1` | Fact | 여러 근거를 합친 상위 사실 (DERIVED_FROM 다수) |
+| `anamnesis.community/1` | Community | 주제 덩어리 요약. HAS_MEMBER로 구성원 소유 |
+
+이전 초안의 `invalidation/1`은 폐기 — 노드 종류가 아니라 엣지가 역할을
+말한다. `synthesis`(사실 수준 통합 = Fact)와 `community`(주제 수준 요약 =
+Community)는 서로 다른 것으로 분리한다.
 
 ### 시간 부여 규칙
 
@@ -50,6 +67,51 @@ anamnesis.invalidation/1       무효화 사건
 상대 시간 환산은 원본 메시지의 시각을 기준점으로 한다 (Graphiti와 동일).
 운영 타임스탬프(ingested_at 등)는 모델 밖이며, 필요하면 저장 계층의 로컬
 컬럼으로만 존재하고 계약에는 나타나지 않는다.
+
+## 유입 의미론 — 멱등, 수정, 분기
+
+### 2단 멱등 (분기 감지)
+
+소스가 수정을 노출하지 않는다(카톡 export: 같은 id·같은 보낸 시각에 내용만
+다름). 따라서 분기 감지는 엔진 몫이다:
+
+```text
+같은 origin 키 재유입 시:
+├─ 내용 해시 동일 → 진짜 재유입(백업 재임포트). no-op
+└─ 내용 해시 다름 → 분기 감지. 버리지 않고:
+    • 새 Episode 생성 (record를 엔진이 파생: "msg-123#h<내용해시8>")
+    • 사건 시각 = 원래 보낸 시각 (사슬 위치 유지)
+    • (새것)-[:INVALIDATES]->(원본) 자동 배선
+    • 분기 관측 시각은 properties에만 기록 (사건 시각으로 승격 금지 —
+      수정 시각은 복원 불가능하므로 추정치로 시간축을 오염하지 않는다)
+```
+
+수정을 명시적으로 알려주는 소스(웹훅 등)는 리비전을 record에 직접 박아도
+된다 — 선택 계약. 비교: graphiti는 같은 uuid 재저장 시 `SET n = {…}` 제자리
+덮어쓰기 + `remove_episode` 연쇄 물리 삭제 — 이력 소멸. 우리는 보존.
+
+### 시계열 사슬은 나무다 (NEXT_EPISODE)
+
+- 배선 우선순위: ① remember 입력의 `previous`(부모 record 명시 — 에이전트
+  세션 로그처럼 부모를 아는 소스) ② 폴백: 같은 (source, session, schema)에서
+  사건 시각이 직전인 에피소드 (카톡 export처럼 부모를 모르는 소스).
+- 한 노드에서 가지가 여럿 뻗을 수 있다 — 되감기/되돌리기 = 삭제가 아니라
+  분기. 버려진 가지도 실제로 일어난 일이므로 보존되고, 히트가 없어 질량이
+  식으며 저절로 가라앉는다 (풍화가 gc 역할).
+
+### 가지 서열 (branch index) — 읽기 시점 유도, 저장 금지
+
+```text
+분기점에서 나가는 가지들의 서열:
+  각 가지의 "끝단 시각" = 후손 중 가장 최신 말단의 사건 시각
+  index 0 = 끝단이 가장 최신인 가지 (본선 — 살아서 자라는 줄기)
+  index 1, 2, 3… = 나머지를 끝단 시각 순으로
+```
+
+새 메시지 하나에 서열이 바뀌는 값이므로 엣지에 저장하면 CREATE-only가
+깨진다 — m(T)·R과 같은 계보로 **읽기 시점 계산** (docs/10 D2). 소비:
+맥락 조립은 기본 index 0만(본선 = 정사), PPR은 index로 가지 진입 가중을
+감쇠. 느려지면 Outbox급 가변 캐시로 강등 가능(재계산 가능하므로 무손실).
 
 ## MemoryLink
 
@@ -77,6 +139,20 @@ anamnesis.invalidation/1       무효화 사건
 | `DERIVED_FROM` | 파생물 → 근거 | 추출 주장 → 원본, 통합 사실 → 주장들 |
 | `INVALIDATES` | 무효화 사건 → 대상 사실 | 대상이 이 사건의 시각부터 유효하지 않음 |
 | `CONTRASTS` | 양방향 취급 | 미해소 모순의 보존. 증거 축적 후 INVALIDATES 승격 |
+
+### 격자 — 허용되는 (출발 라벨, 엣지, 도착 라벨) 쌍
+
+graphiti처럼 엣지마다 출발/도착 천체를 고정한다. 이 격자 밖은 계약 위반.
+
+```text
+Episode --NEXT_EPISODE--> Episode
+Episode|Fact --MENTIONS--> Entity
+Fact|Entity --RELATES_TO--> Fact|Entity
+Community --HAS_MEMBER--> Entity|Fact
+Fact --DERIVED_FROM--> Episode|Fact
+Fact|Episode --INVALIDATES--> Fact|Episode   ← Episode 포함: 수정·분기 감지용
+Fact --CONTRASTS--> Fact
+```
 
 ## 무효화 모델
 

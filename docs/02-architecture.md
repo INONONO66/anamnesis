@@ -101,6 +101,16 @@ SQLite 시절의 DB-트리거 봉인은 Neo4j Community에 없다. 불변성은 
 
 무결성은 원소별 SHA-256 digest 전수 감사(verify)로 확인한다.
 
+## 계층 순수성 — core에는 수식이 없다
+
+`@anamnesis/core`는 **순수하게 Neo4j 구성·구축만** 담는다: 스키마(라벨·
+인덱스·제약), CREATE-only 쓰기, 멱등·분기 감지, 사슬 배선, 시간축 절단,
+감사. docs/10의 역학 수식(풍화 R, 간격 효과, PPR 가중, RRF 융합, 가지
+서열 계산)은 core에 들어가지 않는다 — 읽기 계층(추후 `@anamnesis/dynamics`)
+이 Cypher 질의 안에서 또는 그 위에서 계산한다. 경계: core가 아는 유일한
+수치는 저장 필드로서의 m₀와 weight뿐이고, 이들을 소비하는 함수는 전부
+밖이다. 수식 캐리브레이션이 저장 계층을 건드리지 않게 하는 격리다.
+
 ## 외부 의존
 
 - Docker (Neo4j 컨테이너 — CLI `anamnesis daemon`이 compose 수명을 관리)
