@@ -56,6 +56,30 @@
 말한다. `synthesis`(사실 수준 통합 = Fact)와 `community`(주제 수준 요약 =
 Community)는 서로 다른 것으로 분리한다.
 
+### claim의 sub_kind (태그, 7종 — omni MemoryKind 차용)
+
+타입 증식 규칙: **감쇠·무효화 거동이 다르지 않으면 타입이 아니라
+태그다** (omni knowledge-model). 아래 7종은 거동이 실제로 다르므로
+`properties.sub_kind`로 부여하고, 역학 입력(S_base 보정, docs/10 카드 2)
+으로 쓴다. 새 schema를 만들지 않는다:
+
+| sub_kind | 무효화 거동 | 안정도 경향 |
+|---|---|---|
+| `fact` | 반증 시 INVALIDATES | 기본 |
+| `state` | 후속 상태가 자연 대체 (INVALIDATES 빈번) | 짧음 |
+| `event` | 일어난 일은 번복 불가 — 무효화 거의 없음 | 김 (침강만) |
+| `preference` | 취향 변화 시 INVALIDATES | 김 |
+| `procedure` | 절차 개선 시 INVALIDATES | 김 |
+| `decision` | 번복 시 INVALIDATES (이유 보존 중요) | 김 |
+| `summary` | 재생성으로 대체 (synthesis 계열) | 재계산 가능 |
+
+### origin.source → 확신 프라이어 (omni SourceKind 차용)
+
+출처 종류는 "얼마나 믿나"의 초기 프라이어만 정한다 — 진위(INVALIDATES)
+·침강(m)과 섞지 않는다. 어댑터가 `properties.confidence` 초기값을 출처
+종류로 부여한다: 사용자 직접 발화 > 문서 추출 > 에이전트 관찰 >
+시스템 이벤트 > 추론(inferred) 순. 정확한 수치는 캘리브레이션 대상.
+
 ### 시간 부여 규칙
 
 | 계층 | time.value |
@@ -116,6 +140,10 @@ Community)는 서로 다른 것으로 분리한다.
 ## MemoryLink
 
 관계는 노드가 아니라 별도 링크다. 원본 배열(basis 등)을 내장하지 않는다.
+
+**멱등성**: 링크의 멱등 키는 `(from, to, role, content 해시)` — 원소의
+origin unique와 같은 급의 unique 제약으로 잡는다. 추출 파이프라인이
+재실행돼도 같은 링크가 중복 생성되지 않는다 (no-op).
 
 ```jsonc
 {
@@ -178,15 +206,20 @@ Zep의 bi-temporal(4-타임스탬프)과 같은 표현력을, "객체당 시간 
 평가하며(원본·기본값 0.5), 이후 변하지 않는다.
 
 변하는 부분(감쇠·강화)은 저장하지 않는다. 회상 시점의 유효 질량은
-`mass(T) = mass × decay + Σ 강화`로 읽기 시점에 평가된다 (03-recall).
-이 분해 덕에 질량이 있어도 원소 불변성이 유지되고 tick 데몬이 필요 없다.
+`m(T) = m₀ × R(t, S)` 멱법칙으로 읽기 시점에 평가된다 (정본: docs/10
+카드 1·2, 요약: docs/09 §5). 이 분해 덕에 질량이 있어도 원소 불변성이
+유지되고 tick 데몬이 필요 없다.
 
 ## 파생 저장물 (계약 밖, 재생성 가능)
 
 | 이름 | 내용 | 재생성 |
 |---|---|---|
-| projection | 임베딩 벡터 (모델별) | 모델 교체 시 전체 재투영 |
-| score | mass 계산 캐시 | 언제든 재계산 |
-| fts index | 전문검색 인덱스 | DDL 재실행 |
+| embedding 프로퍼티 | 임베딩 벡터 (모델별) | 모델 교체 시 점진 재투영(백필) |
+| (s, t_last_hit, hit_count) | 히트 원장 캐시 (docs/10 카드 2) | 원장에서 재생 |
+| 항성 PPV 캐시 | 정체성 시드 PPR 사전 계산 (docs/11 §3) | dreaming이 재계산 |
+| vector/fulltext/range 인덱스 | Neo4j 내장 인덱스 | DDL 재실행 |
+
+히트 원장(:Hit)은 여기 속하지 **않는다** — 원소·링크와 같은 급의 보존
+대상이다 (유실되면 m(T)가 비가역 손실, docs/09 §5).
 
 이들은 MemoryElement/Link가 아니며, 삭제가 정보 손실이 아니다.

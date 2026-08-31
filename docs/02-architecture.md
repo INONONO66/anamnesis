@@ -46,7 +46,8 @@
 3. HTTP localhost   127.0.0.1:<port> (opt-in) 소켓 못 쓰는 런타임용. SSE 스트리밍
 ```
 
-핵심 RPC: `remember`(즉시 vault append 후 리턴 — ms 단위, 추출은 비동기),
+핵심 RPC: `remember`(원본층 CREATE 단일 트랜잭션 후 즉시 리턴 — ms 단위,
+추출은 비동기),
 `recall`(warm 인덱스로 즉답), `snapshot`, `status`, `digest`(수동 배치 트리거).
 
 ## 저장소: Neo4j 단일 스토어
@@ -65,13 +66,18 @@
 Neo4j 안:
 (:Element {id, schema, time_value, time_utc, time_precision, content,
            origin_*, mass, properties, payload_hash, digest,
-           embedding})                        ← 에피소드+가공 전부. 원소 하나 = 노드 하나
-(:Element)-[:LINK {id, role, content, weight, embedding}]->(:Element)
-           role ∈ NEXT_EPISODE | MENTIONS | RELATES_TO | HAS_MEMBER | DERIVED_FROM | INVALIDATES | CONTRASTS
+           embedding,                         ← 파생 캐시 (재투영 가능)
+           s, t_last_hit, hit_count})         ← 히트 원장 캐시 (docs/10 카드 2)
+(:Element)-[:NEXT_EPISODE|MENTIONS|RELATES_TO|HAS_MEMBER
+            |DERIVED_FROM|INVALIDATES|CONTRASTS
+            {id, content, weight, embedding}]->(:Element)
+           ← role은 프로퍼티가 아니라 관계 실타입 (docs/09 §4)
 (:Payload {hash, bytes})                      원본 바이트 (content-addressed)
+(:Hit {element_id, t_utc, kind})              히트 원장. CREATE-only 보존 대상
 (:Outbox …)                                   콜드패스 커서 (가변)
 
 인덱스: origin 3-튜플 unique 제약(멱등 재유입),
+       링크 멱등 키 (from, to, role, content 해시) unique — 재실행 안전,
        vector index (element.embedding, link.embedding — HNSW),
        fulltext index (content — Lucene, CJK 대응),
        time_utc range index (시점 절단)
@@ -94,8 +100,9 @@ SQLite 시절의 DB-트리거 봉인은 Neo4j Community에 없다. 불변성은 
 지킨다:
 
 1. **데몬이 유일한 쓰기 경로** — bolt는 localhost 전용이고 데몬만 잡는다.
-2. **데몬 코드에 UPDATE/DELETE Cypher가 존재하지 않는다** — Element·LINK·
-   Payload는 CREATE만. 틀린 사실은 INVALIDATES 이벤트로, 오폭 수리는 그
+2. **데몬 코드에 UPDATE/DELETE Cypher가 존재하지 않는다** — Element·링크·
+   Payload·Hit는 CREATE만. 유일한 SET은 명시적 캐시 예외
+   (embedding, (s, t_last_hit, hit_count), Outbox 커서 — 전부 재생 가능). 틀린 사실은 INVALIDATES 이벤트로, 오폭 수리는 그
    무효화를 다시 무효화하는 이벤트로 (docs/08 교훈 B — graphiti의 in-place
    `invalid_at` 갱신이 10만 엣지 수리 스크립트를 부른 사고의 교훈).
 

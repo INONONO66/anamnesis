@@ -11,20 +11,20 @@
   │
   ├─ 0. 시점 절단: snapshot(T) — time <= T 원소·링크만
   │
-  ├─ 1. 후보 생성 (병렬)
-  │     a. LanceDB 벡터 유사도 (시점 프리필터)
-  │     b. FTS5 키워드/BM25
+  ├─ 1. 후보 생성 (병렬, 전부 Neo4j 내장 인덱스)
+  │     a. 벡터 유사도 — db.index.vector.queryNodes (HNSW, 시점 후필터)
+  │     b. 키워드/BM25 — db.index.fulltext.queryNodes (Lucene, CJK)
   │     c. 그래프 시드: 최근 세션·질의 엔티티의 이웃 확장
   │
-  ├─ 2. PPR 확산
-  │     후보를 시드로 인메모리 links 그래프에 Personalized PageRank.
-  │     다중 홉 연상을 LLM 반복 호출 없이 그래프 연산 한 번으로.
-  │     node specificity(희귀 노드 가중) 반영.
+  ├─ 2. PPR 확산 (GDS pageRank — docs/10 카드 3, docs/11 §3)
+  │     시드 성분(질의/세션/항성)별 분리 실행 → 선형 결합 (정확).
+  │     다중 홉 연상을 LLM 반복 호출 없이 그래프 연산으로.
+  │     node specificity(허브 억제)는 시드 선정에서 반영.
   │
-  ├─ 3. 가중 재정렬
-  │     score = α·semantic + β·temporal + γ·graph(PPR) + δ·entity
-  │             + mass(T) 보정
-  │     α..δ는 질의 유형별 프로파일 (사실 조회 / 시간 추론 / 인물 중심 …)
+  ├─ 3. 가중 재정렬 (docs/10 카드 5 — 가법 혼합 폐기)
+  │     rel = RRF(vector, bm25, ppr)   ← 랭크 공간 융합 (스케일 무관)
+  │     score = rel × m(T)^γ           ← 곱셈 가중, 하드 필터 금지
+  │     채널 가중 w_c는 질의 유형별 프로파일 (사실 조회 / 시간 추론 / 인물 …)
   │
   └─ 4. 조립
         INVALIDATES 반영해 유효 사실만 채택 (요청 시 이력 포함),
@@ -35,16 +35,20 @@
 ## mass(T): 저장이 아닌 평가
 
 ```text
-mass(T) = element.mass × decay(T − last_reinforced) + Σ reinforcement(events ≤ T)
+m(T)   = m₀ × R(t, S),  t = T − t_last_hit (days)
+R(t,S) = (1 + FACTOR·t/S)^DECAY        ← 멱법칙 (정본: docs/10 카드 1·2)
 ```
 
-`element.mass`는 생성 시 LLM이 한 번 평가한 불변의 고유 질량이다
-(01-data-model). 동적 성분만 읽기 시점에 계산한다:
+`m₀`는 생성 시 한 번 평가되는 불변의 고유 질량이다 (01-data-model,
+docs/10 카드 4). 동적 성분만 읽기 시점에 계산한다:
 
-- 시간의 결정론적 함수이므로 **읽기 시점에 T를 넣어 평가**한다.
-  백그라운드 tick으로 깎아 내려쓰는 데몬 작업이 존재하지 않는다.
-- 강화 이벤트: 재언급(DERIVED_FROM 증가), 회상 적중, dreaming의 승격.
-- `scores` 테이블은 캐시일 뿐이며 언제든 재계산된다.
+- 시간의 결정론적 함수이므로 **읽기 시점에 T를 넣어 평가**한다
+  (recall 쿼리 안 Cypher 한 줄 — docs/11 §2). 백그라운드 tick으로 깎아
+  내려쓰는 데몬 작업이 존재하지 않는다.
+- 강화 = 히트 원장 커밋: 회상 적중(κ=1.0) > 재언급(0.5) > 승격(0.3) —
+  회수 > 재노출 (테스팅 효과, docs/10 카드 2).
+- `(s, t_last_hit, hit_count)` 프로퍼티는 캐시일 뿐이며 히트 원장에서
+  언제든 재생된다.
 
 ## snapshot(T)
 
@@ -69,10 +73,12 @@ valid(fact, T) = fact.time <= T
 
 ## 성능 전제
 
-- links 그래프는 데몬 시작 시 메모리 적재, 쓰기 시 증분 갱신 — 항상 warm.
-- 개인 규모(원소 수백만)에서 PPR은 ms~수십 ms.
-- LanceDB ANN + FTS5로 후보 생성도 수십 ms — 목표 p50 < 100ms (Mem0의
+- GDS 프로젝션은 그래프 카탈로그에 상주, dreaming 주기에 재구축 —
+  항상 warm. 항성 성분 PPV는 사전 계산 캐시 (docs/11 §3).
+- 개인 규모(원소 수백만)에서 GDS PPR은 ms~수십 ms.
+- HNSW ANN + Lucene으로 후보 생성도 수십 ms — 목표 p50 < 100ms (Mem0의
   0.148s보다 빠르게, 로컬이라 네트워크 왕복 0).
+- 적응적 깊이: S1(vector/bm25) 합의가 강하면 PPR 생략 (docs/10 카드 5).
 
 ## 프로필: 실체화된 뷰
 

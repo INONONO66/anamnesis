@@ -4,12 +4,13 @@
 
 ```text
 protocol   MemoryElement/Link/RPC의 zod 정의 + JSON Schema export  [✓ 원소/링크]
-vault      append + objects 저장 + 멱등 유입 + 무결성 검증
-memory     elements/links/scores/FTS5 스키마 + LanceDB projection
+원본층     Episode·Payload CREATE-only + 멱등 유입 + digest 감사
+스키마     Neo4j 라벨·관계 실타입·unique 제약 + vector/fulltext/range 인덱스
 daemon     UDS JSON-RPC (remember/recall/snapshot/status/digest),
            spawn-on-demand + keep-alive, 단일 라이터
 extraction outbox 콜드패스: 주장 추출 + 중복/보강/모순 판정 + INVALIDATES
-recall     vec + FTS 후보 → 가중 재정렬 → INVALIDATES 반영 조립 (PPR 제외)
+recall     vector + Lucene 후보 → RRF × m(T)^γ 재정렬 → INVALIDATES 반영
+           조립 (PPR 제외)
 client     TS 소켓 클라이언트 + 데몬 발견/스폰
 cli        init / ingest / recall / daemon / digest
 mcp        stdio 브리지 (remember / recall 툴)
@@ -34,13 +35,15 @@ adapter    slack, 에이전트 훅 1종 추가
 
 ```text
 bench      LongMemEval 하네스 — Zep(58~62%), Supermemory(71~77%)와 동일 표
-release    npm 정식 배포 (플랫폼 5종 prebuilt), 문서 사이트
-hardening  크래시 복구 시나리오, vault 무결성 감사 명령, 마이그레이션 정책
+release    npm 정식 배포 (네이티브 의존 없음 — prebuilt 매트릭스 불필요),
+           문서 사이트
+hardening  크래시 복구 시나리오, digest 전수 감사 명령, 마이그레이션 정책
 ```
 
 ## 스코프 밖 (설계는 막지 않음)
 
-- 멀티 디바이스 동기화 (vault 머지 가능 구조만 확보)
+- 멀티 디바이스 동기화 (append-only + origin unique로 그래프 머지 가능
+  구조만 확보)
 - 멀티유저/팀 공유
 - activation/parameter 메모리 (MemOS류)
 - 클라우드 호스팅

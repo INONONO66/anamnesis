@@ -25,7 +25,7 @@ anamnesis/
 │   │   ├── src/{element,link}.ts
 │   │   ├── schemas/*.schema.json   # export 산출물 (커밋함)
 │   │   └── scripts/export-schemas.ts
-│   ├── core/                   # vault, store, recall, dream
+│   ├── core/                   # Neo4j 스키마·CREATE-only 쓰기·멱등·배선·감사
 │   ├── daemon/                 # anamnesisd: UDS/HTTP JSON-RPC + 백그라운드 루프
 │   ├── client/                 # 소켓 클라이언트 + 데몬 spawn/발견
 │   ├── cli/                    # bin "anamnesis"
@@ -46,8 +46,8 @@ export해 언어 중립 계약을 유지한다 (커밋된 `schemas/`가 산출�
 - **개발**: bun (워크스페이스·테스트·스크립트 일체). 버전은 mise로 핀.
 - **배포 타깃**: Node LTS — MCP 호스트·범용 호환성 기준. CLI는
   `bun build --target=node` 단일 번들.
-- **네이티브 의존**: better-sqlite3, @lancedb/lancedb — 둘 다 자체 prebuilt
-  제공. 우리가 관리하는 빌드 매트릭스는 없다.
+- **네이티브 의존 없음**: 저장소는 Neo4j 서버이고 neo4j-driver는 순수
+  JS다. 우리가 관리하는 prebuilt 빌드 매트릭스는 없다.
 
 ## 배포
 
@@ -60,7 +60,9 @@ export해 언어 중립 계약을 유지한다 (커밋된 `schemas/`가 산출�
 ```
 
 - 설치 경험: `npm i -g @anamnesis/cli` → `anamnesis init` 끝.
-  Docker 없음, 시스템 데몬 등록 없음, postinstall 스크립트 없음.
+  시스템 데몬 등록 없음, postinstall 스크립트 없음. Docker는 유일한
+  외부 전제(Neo4j 컨테이너) — init가 compose를 깔고 수명을 관리한다
+  (docs/02).
 - 데몬도 같은 패키지의 JS 엔트리(`anamnesisd.js`)다 — 클라이언트가
   spawn-on-demand로 띄운다. 개발 오버라이드: `ANAMNESIS_DAEMON_PATH`.
 

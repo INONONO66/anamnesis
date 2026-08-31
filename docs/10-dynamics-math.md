@@ -4,6 +4,7 @@
 > 카드 규약은 omni-anamnesis math-conventions를 따른다: 기호표·단위 명시,
 > 역방향(가역성) 3종, 실패 조건, 캘리브레이션 대상 명시, 매직 넘버 금지.
 > 여기 수식이 코드의 정본이며, docs/09 §5의 요약은 이 문서를 따른다.
+> Neo4j 위의 실행 배치(어디서 어떻게 계산하나)는 [docs/11](11-neo4j-dynamics.md).
 
 ## 관례 (전 카드 공통)
 
@@ -31,6 +32,17 @@ Anderson & Schooler의 합리적 분석(1991): 인간 기억의 recency·frequen
 - 캘리브레이션의 원리적 근거: 히트 원장은 곧 "이 사용자의 환경 통계"다.
   DECAY·S_base를 원장에서 재피팅하는 건 튜닝이 아니라 이론이 요구하는
   행위다.
+
+보조 지붕 둘:
+
+- **자유에너지 원리** (Friston,
+  https://www.nature.com/articles/nrn2787): 부호화는 서프라이즈가
+  구동한다 — 카드 4의 이론 지붕. 단 FEP는 메타이론이므로 프레임으로만
+  쓰고, 정량 수식은 벤치 검증된 것(FSRS·PPR)만 쓴다.
+- **확장된 마음** (Clark & Chalmers 1998, Analysis 58(1):7-19,
+  https://academic.oup.com/analysis/article-abstract/58/1/7/153111): 외부 저장소가 상시 접근 가능·자동 신뢰·즉시 인출이면
+  그것은 도구가 아니라 인지의 구성 요소다(Otto의 노트북). 상시 가용·
+  낮은 지연·데이터 주권이 왜 타협 불가 요구사항인지의 철학적 정식화.
 
 ---
 
@@ -125,8 +137,9 @@ https://journals.sagepub.com/doi/10.1111/j.1467-9280.2006.01693.x).
 그래서 히트 종류는 원장 메타데이터가 아니라 강화식의 입력이다.
 κ 벡터는 캘리브레이션 대상.
 
-**기호표**: S_base(레벨) = 먼지 1일 / 행성 30일 / 엔티티 ∞ (풍화 없음) —
-캘리브레이션 대상; λ = 고유 질량의 초기 안정도 기여 (기본 1.0);
+**기호표**: S_base(레벨, sub_kind) — 레벨 기본값 먼지 1일 / 행성 30일 /
+엔티티 ∞ (풍화 없음)에 claim의 sub_kind 보정 곱(docs/01 표: state 짧음,
+event/preference/procedure/decision 김)을 적용 — 전부 캘리브레이션 대상; λ = 고유 질량의 초기 안정도 기여 (기본 1.0);
 κ(kind) = 히트 종류별 강화 계수 (위);
 a = 강화 스케일, b = 간격 민감도, c ∈ [0,1) = 포화 지수 — 전부
 캘리브레이션 대상 (FSRS-6 대응 항: e^{w8}, w10, w9).
@@ -146,7 +159,11 @@ a = 강화 스케일, b = 간격 민감도, c ∈ [0,1) = 포화 지수 — 전�
   같은 세션 연속 노출로 S를 부풀릴 수 없다 (massed 재노출 무력화).
 - **포화**: S^{−c} 항이 커진 S의 추가 강화를 눌러 S 폭주를 막는다.
 - **부활**: m(T) → 0으로 식은 먼지도 히트 한 번이면 t_last_hit 리셋 +
-  최대폭 강화로 살아난다 (망각 ≠ 삭제와 정합).
+  최대폭 강화로 살아난다 (망각 ≠ 삭제와 정합). 생물학적 대응물이
+  **silent engram** — 저장되어 있으나 자연 단서로 접근 불가한 엔그램
+  (Josselyn & Tonegawa, Science 2020,
+  https://www.science.org/doi/10.1126/science.aaw4325). "삭제 대신
+  접근성 감쇠"는 은유가 아니라 뇌의 실제 동작이다.
 
 ### 원장 계약 (Neo4j 통합)
 
@@ -201,6 +218,9 @@ Pavlik-Anderson의 교훈(omni 카드 1): 정확한 역학 평가에는 **전체
    β₁v₁+β₂v₂ 정확 분해. 시드를 "질의 질량 + 최근 세션 질량 + 항성(정체성)
    질량"으로 혼합해도 기여분을 사후 분리할 수 있고, 섭동이 ‖Δs‖₁로
    선형 유계 — "개인화는 순위만 바꾼다"의 정량형.
+   **실행 트릭**: 이 정리 덕분에 시드 성분별로 PPR을 분리 실행해 선형
+   결합해도 결과가 정확히 같다 — 항성 성분 PPV는 dreaming 때 미리 계산해
+   캐시한다 (docs/11 §3).
 
 ### 시딩 — HippoRAG 2 반영
 
@@ -259,10 +279,11 @@ arousal    ∈ [0,1]  : 정서 각성 — importance와 같은 digest LLM 호출
 - "이미 아는 얘기의 재탕"은 m₀가 낮게 태어나고, 대신 재언급 히트(카드 2)로
   기존 원소의 S를 강화한다 — 신규 생성 vs 기존 강화의 분업.
 - novelty 항은 고립 효과(von Restorff — 특이한 것이 잘 남는다)의 구현이기도 하다.
-- arousal 항의 근거는 정서 각성의 기억 응고 변조(McGaugh 편도체 변조 계열) —
+- arousal 항의 근거는 정서 각성의 기억 응고 변조 (McGaugh 2004,
+  Annu. Rev. Neurosci. 27:1-28,
+  https://www.annualreviews.org/content/journals/10.1146/annurev.neuro.27.070203.144157) —
   개인 기억에서 감정적으로 격한 에피소드는 중요도·novelty와 독립인 보존
-  신호다. **핀 인용 미확보(미검증 표기)** — 규범 인용 전 McGaugh 2004 등
-  원본 대조 필요.
+  신호다.
 - β 벡터는 독립 노브가 아니라 하나의 캘리브레이션 회귀 (main ADR-0010
   "calibrated priors, not laws" 승계).
 
@@ -270,7 +291,7 @@ arousal    ∈ [0,1]  : 정서 각성 — importance와 같은 digest LLM 호출
 
 ## 카드 5 — 재정렬 융합: 가법 혼합 → RRF × m(T)
 
-**지위: 확정 제안.** docs/03의 `α·semantic + β·temporal + γ·graph + δ·entity
+**지위: 확정.** docs/03 초안의 `α·semantic + β·temporal + γ·graph + δ·entity
 + mass 보정`을 대체한다.
 
 ### 왜 가법 혼합이 아닌가
@@ -306,21 +327,46 @@ vector 유사도(코사인), BM25(비유계), PPR(그래프 크기에 따라 수
 ### 실패 조건
 
 - 채널 하나가 빈 결과: 해당 항 0 (RRF는 결측에 자연 강건).
+
+### 적응적 깊이 — 이중과정 구조
+
+vector/bm25 = Type 1(빠른 직관), PPR+judge = Type 2(느린 숙고)
+(Evans & Stanovich 2013,
+https://journals.sagepub.com/doi/10.1177/1745691612460685).
+S1 두 채널의 상위가 강하게 일치하면 PPR·judge를 생략하는 조기 종료
+경로를 열어둔다 — 지연·비용은 질의 난이도에 비례해야 한다. 예산 제한
+컴텍스트 자체는 글로벌 워크스페이스의 병목 기능과 동형 — 좁은 무대를
+놓고 경쟁해서 이긴 것만 방송된다 (GWT; LLM 적용
+https://arxiv.org/pdf/2410.11407).
 - **CI 픽스처**: 스케일 불변성 (임의 채널 점수를 단조 변환해도 순위 불변),
   m(T)=0 원소가 압도적 rel로 여전히 상위 노출 가능.
 
 ---
 
-## 카드 6 — dreaming 재정규화: 수면의 두 기능
+## 카드 6 — dreaming: 수면의 세 작업
 
 **지위: 방향 확정, 수식은 v0.2.**
 
-수면 신경과학의 두 축을 dreaming의 두 작업에 대응시킨다:
+수면·판정 신경과학을 dreaming의 세 작업에 대응시킨다:
 
 1. **시스템 통합 (해마→신피질)**: 반복 패턴의 먼지에서 사실(행성)을
    추출·승격. HippoRAG의 neocortex/hippocampus 분업 프레이밍과 동일 —
    승격은 카드 2의 promotion 히트로 기록되어 원본 먼지도 강화된다.
-2. **시냅스 재정규화 (SHY, Tononi & Cirelli 2014, Neuron,
+   **승격 기준은 반복 횟수가 아니라 일반화 이득**이다 — 예측 가능한
+   규칙성만 신피질(행성)로 보내고 예외는 해마(먼지)에 남긴다
+   (Nature Neuroscience 2023,
+   https://www.nature.com/articles/s41593-023-01382-9).
+   또한 회상은 재구성이고 통합될수록 스키마 왜곡이 커진다
+   (Spens & Burgess, Nature Human Behaviour 2024,
+   https://www.nature.com/articles/s41562-023-01799-z) — 그래서
+   synthesis는 원본을 대체하면 안 되고 DERIVED_FROM으로 원본 먼지에
+   항상 되돌아갈 수 있어야 한다 (기존 설계의 근거 보강).
+2. **모순 판정의 절차**: contrasts → invalidates 승격에서 **고질량
+   사실의 무효화는 단일 judge가 아니라 debate 2-패스** — 복수 LLM의
+   상호 비판이 사실성을 유의미하게 개선한다 (Du et al. 2023,
+   https://arxiv.org/abs/2305.14325). hermes의 54% 오무효화가 단일
+   judge의 한계였다. 저질량 사실은 단일 판정 유지로 비용 통제.
+3. **시냅스 재정규화 (SHY, Tononi & Cirelli 2014, Neuron,
    https://www.cell.com/neuron/fulltext/S0896-6273(13)01186-0)**:
    깨어 있는 동안 순증가한 연결 강도를 수면이 일괄 하향 재정규화해
    신호 대 잡음을 회복한다. 우리 대응: dreaming이 **링크를 만드는 만큼
@@ -365,7 +411,7 @@ https://www.sciencedirect.com/science/article/pii/S1364661317300785).
 | 파라미터 | 카드 | 기본값 | 피팅 원료 |
 |---|---|---|---|
 | DECAY | 1 | −0.5 | 히트 원장 log-loss MLE |
-| S_base(레벨), λ | 2 | 1d / 30d / ∞, 1.0 | 〃 |
+| S_base(레벨, sub_kind), λ | 2+7 | 1d / 30d / ∞ × sub_kind 곱, 1.0 | 〃 |
 | a, b, c | 2 | 문헌 대응 초기값에서 시작 | 〃 |
 | κ(kind) | 2 | 1.0 / 0.5 / 0.3 | 〃 |
 | α (damping) | 3 | 0.85 (상한 0.95) | 회상 채택 라벨 |

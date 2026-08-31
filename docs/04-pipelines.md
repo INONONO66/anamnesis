@@ -1,6 +1,6 @@
 # 04 — Pipelines
 
-원칙: **hot path에는 LLM이 없다.** `remember`는 vault append 후 즉시
+원칙: **hot path에는 LLM이 없다.** `remember`는 원본층 CREATE 후 즉시
 리턴하고(ms), 지능이 필요한 모든 작업은 데몬의 콜드패스가 수행한다.
 (Zep의 "반영까지 수 시간" 문제와 Memobase의 buffer/flush 교훈 반영 —
 단, 우리는 원본이 즉시 존재하므로 추출 전에도 FTS·타임라인 회상이 된다.)
@@ -10,11 +10,16 @@
 ```text
 remember(payload)
   → 정규화 (어댑터가 소스 형식 → 자연어 content + origin + time)
-  → vault.records INSERT (origin unique로 멱등 — 재유입 안전)
-  → 원본 바이트 objects/sha256/ 저장
-  → outbox enqueue
+  → Neo4j 단일 트랜잭션 (원자적 — 부분 유입 상태 불가):
+      · (:Element:Episode) CREATE  (origin unique로 멱등 — 재유입 no-op)
+      · (:Payload) CREATE          (원본 바이트, content-addressed)
+      · NEXT_EPISODE 자동 배선     (docs/01 유입 의미론)
+      · Outbox enqueue
   → 리턴
 ```
+
+트랜잭션이 깨지면 전체 롤백 — "에피소드는 있는데 payload가 없다" 같은
+반쪽 상태가 존재할 수 없다. 멱등성 + 원자성으로 재시도가 항상 안전하다.
 
 어댑터는 TS로 작성한다 (v0.1: kakao export 파일. 이후 slack, 에이전트 훅).
 
@@ -31,15 +36,23 @@ outbox에서 record 배치 획득
       2. 유사 기존 주장 top-k 조회 (벡터 + FTS)
       3. LLM 판정: 신규 / 중복(강화) / 보강 / 모순
          · 신규   → claim 원소 + DERIVED_FROM 링크 생성
-         · 중복   → 기존 주장 강화(reinforcement 이벤트)만 기록
+         · 중복   → 기존 주장에 재언급 히트 커밋 (κ=re_mention,
+                    docs/10 카드 2 — 원소 생성 없음)
          · 보강   → 신규 생성 + RELATES_TO 링크 ("~를 보강한다")
-         · 모순   → 신규 생성 + invalidation 사건 + INVALIDATES 링크
-                    (기존 주장은 불변 — Mem0식 UPDATE/DELETE 금지)
-  → 임베딩 계산 → LanceDB upsert
+         · 모순   → 신규 claim 생성 + INVALIDATES 또는 CONTRASTS 링크
+                    (무효화도 그냥 claim이다 — docs/01. 기존 주장 불변,
+                    Mem0식 UPDATE/DELETE 금지. 판정 모델은 추출 이상 —
+                    docs/08 교훈 B)
+  → 임베딩 계산 → embedding 프로퍼티 기록 (명시적 캐시 예외 — docs/02)
   → outbox processed 마킹
 ```
 
-멱등성: 파이프라인 전체가 record 단위 재실행 안전. memory 재구축 =
+생성되는 모든 claim의 properties에 **`extraction_version`**(프롬프트·
+모델 조합 식별자)을 박는다 — 파이프라인 개선 후 재소화하면 신버전
+claim이 생성되고, 구버전과의 중복·모순은 위 판정 단계가 흡수한다.
+어느 추출기가 만든 주장인지 감사 가능 + 버전별 품질 비교 가능.
+
+멱등성: 파이프라인 전체가 record 단위 재실행 안전. 파생층 재구축 =
 outbox 커서 리셋 후 전체 재소화.
 
 ## Entity Resolution (전용 단계)
@@ -68,7 +81,7 @@ outbox 커서 리셋 후 전체 재소화.
 - 프로필 캐시 재실체화 (정적/동적)
 - 미해소 모순 스캔: 신규 유입 시 놓친 장거리 모순 탐지
 - 임베딩 백필: 모델 교체 시 점진 재투영
-- scores 재계산
+- 항성 PPV 캐시 재계산 + 히트 캐시 검증/재생 (docs/11 §6)
 ```
 
 산출물은 전부 synthesis 원소이거나 캐시 — **기존 주장·원본을 수정하는

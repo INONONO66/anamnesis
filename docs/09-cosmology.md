@@ -121,7 +121,8 @@ Qdrant(필터드 ANN 네이티브) 재검토 트리거다 (docs/08 §4).
 
 ## 7. 코드 반영 (예정)
 
-- protocol: `LinkRole` 4→6 (`sequence`, `contrasts`)
-- core: remember()가 같은 session 직전 에피소드로 sequence 자동 배선
-  (사건 시각 순), 히트 캐시 노드 + m(T) 평가기, 랭킹 곱셈 적용
+- protocol: `LinkRole` 7종 (§4 표 — graphiti 어휘 확정)
+- core: remember()가 같은 session 직전 에피소드로 NEXT_EPISODE 자동
+  배선(사건 시각 순), 히트 원장 + 캐시 프로퍼티, m(T) 읽기 시점 평가,
+  랭킹 곱셈 적용 (실행 배치는 docs/11)
 - docs/01·03에서 이 문서 참조

@@ -50,8 +50,9 @@ SIGKILL 후 첫 쓰기에서 SEGV, 검색당 +0.6MB 누수 → 워크어라운�
 프로브, 셧다운 센티널, 자기 재시작)를 쌓다가 결국 전부 걷어내고 Neo4j 서버 +
 **단일 데몬 강제**로 전환. 진짜 원인은 "여러 프로세스가 임베디드 DB를 직접
 여는 것"이고 해법이 single-writer 데몬이다. **anamnesis는 처음부터
-anamnesisd가 유일한 접근 경로라 이 사고가 구조적으로 차단된다.** 또한 SQLite는
-Kuzu와 달리 crash-recovery가 수십 년 검증됐다.
+anamnesisd가 유일한 접근 경로라 이 사고가 구조적으로 차단된다.**
+(당시 SQLite 선택의 보조 근거였던 crash-recovery 논거는 §4 Neo4j 전환 후
+서버 프로세스 + 단일 데몬 구조가 대체한다.)
 
 **교훈 B — 무효화 오폭 대참사 (2026-07-08 조사).**
 무효화 판정(resolve_extracted_edge)을 mini 모델에 맡긴 결과 **전체 사실의
