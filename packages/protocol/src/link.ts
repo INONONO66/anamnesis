@@ -10,6 +10,7 @@
  * 그래프 확산(PPR)이 대화 흐름을 연결성으로 밟게 하려면 엣지여야 한다.
  */
 import { z } from "zod";
+import type { Celestial } from "./element.ts";
 
 export const LinkRole = z.enum([
   /** 에피소드/사실 → 엔티티. 무엇을 언급/관여하는가. PPR 시딩 연료. (graphiti MENTIONS) */
@@ -28,6 +29,25 @@ export const LinkRole = z.enum([
   "CONTRASTS",
 ]);
 export type LinkRole = z.infer<typeof LinkRole>;
+
+/**
+ * 격자 — 허용되는 (출발 라벨, 엣지, 도착 라벨) 쌍 (docs/01).
+ * graphiti처럼 엣지마다 출발/도착 천체를 고정한다. 이 격자 밖은 계약
+ * 위반 — 저장 계층이 거부한다. INVALIDATES에 Episode가 들어가는 것은
+ * 수정·분기(divergence) 감지용이다.
+ */
+export const LINK_LATTICE: Record<
+  LinkRole,
+  { from: readonly Celestial[]; to: readonly Celestial[] }
+> = {
+  NEXT_EPISODE: { from: ["Episode"], to: ["Episode"] },
+  MENTIONS: { from: ["Episode", "Fact"], to: ["Entity"] },
+  RELATES_TO: { from: ["Fact", "Entity"], to: ["Fact", "Entity"] },
+  HAS_MEMBER: { from: ["Community"], to: ["Entity", "Fact"] },
+  DERIVED_FROM: { from: ["Fact"], to: ["Episode", "Fact"] },
+  INVALIDATES: { from: ["Fact", "Episode"], to: ["Fact", "Episode"] },
+  CONTRASTS: { from: ["Fact"], to: ["Fact"] },
+};
 
 export const MemoryLink = z
   .object({

@@ -20,10 +20,13 @@
     "role": {
       "type": "string",
       "enum": [
-        "provenance",
-        "about",
-        "invalidates",
-        "semantic"
+        "MENTIONS",
+        "RELATES_TO",
+        "NEXT_EPISODE",
+        "HAS_MEMBER",
+        "DERIVED_FROM",
+        "INVALIDATES",
+        "CONTRASTS"
       ]
     },
     "content": {

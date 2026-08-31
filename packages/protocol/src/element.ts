@@ -9,8 +9,9 @@
  * - 객체당 시간은 정확히 하나이며, 그것은 사건 시간이다.
  *   (원본 = 실제 발생 시각, 주장 = 내용이 가리키는 시각,
  *    파생물 = 성립 시각. createdAt/ingestedAt 같은 운영 시간은 계약 밖.)
- * - 한 번 생성된 원소는 수정되지 않는다. 틀렸으면 invalidation 사건 +
- *   `invalidates` 링크로 무효화한다.
+ * - 한 번 생성된 원소는 수정되지 않는다. 틀렸으면 무효화 사건(그것도
+ *   그냥 claim이다) + `INVALIDATES` 링크로 무효화한다 — 노드 종류가
+ *   아니라 엣지가 역할을 말한다 (docs/01).
  * - `origin.actor`는 플랫폼 원본 ID 그대로다. 인물 해석은 별도의
  *   mapping 원소로 존재하며 원본을 덮어쓰지 않는다.
  */
@@ -67,20 +68,58 @@ export const ElementSchemaId = z
 export type ElementSchemaId = z.infer<typeof ElementSchemaId>;
 
 export const KNOWN_SCHEMAS = [
-  /** 원본 대화 메시지 — 금고 레코드의 투영 */
+  /** 원본 대화 메시지 — 원본층 레코드의 투영 */
   "anamnesis.original-message/1",
-  /** 원본 문서·파일 */
+  /** 원본 문서·파일 (리비전당 한 에피소드) */
   "anamnesis.original-document/1",
-  /** 추출된 주장 (자연어 사실). 불변 — 틀렸으면 invalidate */
+  /** 사람·사물·개념 앵커 — 무시간 돌덩이 */
+  "anamnesis.entity/1",
+  /** 추출된 주장 (자연어 사실). 불변. 무효화 사건도 그냥 claim —
+      특별함은 INVALIDATES 엣지가 나간다는 것뿐 */
   "anamnesis.claim/1",
-  /** actor ↔ 인물 매핑 기억 */
+  /** actor ↔ 인물 매핑 주장 */
   "anamnesis.mapping/1",
-  /** dreaming이 만든 통합 사실·요약. 재계산 가능 */
+  /** 여러 근거를 합친 상위 사실 (DERIVED_FROM 다수). 재계산 가능 */
   "anamnesis.synthesis/1",
-  /** 무효화 사건 — 자기 시간을 가진 1급 사건 */
-  "anamnesis.invalidation/1",
+  /** 주제 덩어리 요약 — HAS_MEMBER로 구성원 소유 (dreaming, v0.3) */
+  "anamnesis.community/1",
 ] as const;
 export type KnownSchema = (typeof KNOWN_SCHEMAS)[number];
+
+/**
+ * 천체 라벨 (docs/09) — 저장 시 공통 라벨 :Element에 더해 이중으로
+ * 물질화된다. 전역 질의는 :Element 한 방, 천체별 질의·GDS projection은
+ * 세부 라벨로 탄다 (docs/01 §schema 레지스트리).
+ */
+export const Celestial = z.enum(["Episode", "Entity", "Fact", "Community"]);
+export type Celestial = z.infer<typeof Celestial>;
+
+/** schema → 천체 라벨. 레지스트리 밖 schema는 라벨 없이 :Element만. */
+export const SCHEMA_LABELS: Record<KnownSchema, Celestial> = {
+  "anamnesis.original-message/1": "Episode",
+  "anamnesis.original-document/1": "Episode",
+  "anamnesis.entity/1": "Entity",
+  "anamnesis.claim/1": "Fact",
+  "anamnesis.mapping/1": "Fact",
+  "anamnesis.synthesis/1": "Fact",
+  "anamnesis.community/1": "Community",
+};
+
+/**
+ * claim의 sub_kind 태그 7종 (omni MemoryKind 차용, docs/01).
+ * 타입이 아니라 `properties.sub_kind` 태그 — 역학 입력(S_base 보정,
+ * docs/10 카드 2)으로만 쓰이고 계약 구조는 늘리지 않는다.
+ */
+export const ClaimSubKind = z.enum([
+  "fact",
+  "state",
+  "event",
+  "preference",
+  "procedure",
+  "decision",
+  "summary",
+]);
+export type ClaimSubKind = z.infer<typeof ClaimSubKind>;
 
 /** 기억의 최소 단위. */
 export const MemoryElement = z
@@ -93,11 +132,12 @@ export const MemoryElement = z
     content: z.string().min(1),
     origin: Origin,
     /**
-     * 고유 질량 (base mass), [0, 1]. 생성 시 한 번 부여되고 불변 —
+     * 고유 질량 m₀ (base mass), [0, 1]. 생성 시 한 번 부여되고 불변 —
      * 이 기억이 태어날 때부터 갖는 중요도다 (추출 시 LLM이 평가).
-     * 회상 시점의 유효 질량은 이 값을 입력으로 계산된다:
-     *   mass(T) = mass × decay(T − 마지막 강화) + Σ 강화(≤ T)
-     * 감쇠·강화는 저장하지 않고 읽기 시점에 평가한다 (03-recall).
+     * 회상 시점의 유효 질량은 멱법칙으로 읽기 시점에 평가된다:
+     *   m(T) = m₀ × (1 + FACTOR·t/S)^DECAY,  t = T − 마지막 히트
+     * (정본: docs/10 카드 1·2). 감쇠·강화는 저장하지 않고 히트 원장에서
+     * 유도한다 — tick 데몬 없음 (03-recall).
      */
     mass: z.number().min(0).max(1).default(0.5),
     /** schema별 부가 정보. 최소로 유지 — 여기에 구조를 쌓지 않는다. */
