@@ -1,13 +1,19 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import neo4j from "neo4j-driver";
+import neo4j, {
+  type Driver,
+  type Session,
+  type SessionConfig,
+} from "neo4j-driver";
 import { v7 as uuidv7 } from "uuid";
-import { Engine } from "./engine.ts";
+import { Engine, envConfig, RememberInput } from "./engine.ts";
+import { luceneQuery, Store } from "./store.ts";
 
 const TEST_DB = {
   uri: "bolt://127.0.0.1:7688",
   user: "neo4j",
   password: "anamnesis-test",
 };
+const AFTER_FIXTURES = "2027-01-01T00:00:00Z";
 
 let engine: Engine;
 
@@ -16,20 +22,114 @@ function msg(record: string, content: string, value: string) {
     time: { value, precision: "second" },
     content,
     origin: {
-      source: "kakao-export",
-      session: "친구방/2026-08",
-      actor: "이노",
+      source: "chat-export",
+      session: "friends/2026-08",
+      actor: "ino",
       record,
     },
   } as const;
 }
 
-beforeAll(async () => {
-  // 테스트 전 전체 초기화 — 데몬 코드에는 삭제 경로가 없으므로 테스트가 직접 지운다
-  const admin = neo4j.driver(
+function adminDriver(): Driver {
+  return neo4j.driver(
     TEST_DB.uri,
     neo4j.auth.basic(TEST_DB.user, TEST_DB.password),
   );
+}
+
+async function runAdmin(
+  cypher: string,
+  parameters: Record<string, string> = {},
+): Promise<void> {
+  const driver = adminDriver();
+  try {
+    await driver.executeQuery(cypher, parameters);
+  } finally {
+    await driver.close();
+  }
+}
+
+async function schemaObjectNames(
+  command: "CONSTRAINTS" | "INDEXES",
+): Promise<string[]> {
+  const driver = adminDriver();
+  const session = driver.session();
+  try {
+    const result = await session.run<{ name: string }>(
+      `SHOW ${command} YIELD name RETURN name`,
+    );
+    return result.records.map((record) => record.get("name"));
+  } finally {
+    await session.close();
+    await driver.close();
+  }
+}
+
+async function labelsOf(id: string): Promise<string[]> {
+  const driver = adminDriver();
+  const session = driver.session();
+  try {
+    const result = await session.run<{ labels: string[] }>(
+      "MATCH (e:Element { id: $id }) RETURN labels(e) AS labels",
+      { id },
+    );
+    return result.records[0]?.get("labels") ?? [];
+  } finally {
+    await session.close();
+    await driver.close();
+  }
+}
+
+describe("Engine configuration", () => {
+  test("uses defaults and honors every environment override", () => {
+    const keys = [
+      "ANAMNESIS_NEO4J_URI",
+      "ANAMNESIS_NEO4J_USER",
+      "ANAMNESIS_NEO4J_PASSWORD",
+      "ANAMNESIS_NEO4J_DATABASE",
+    ] as const;
+    const saved = keys.map((key) => process.env[key]);
+    try {
+      for (const key of keys) delete process.env[key];
+      expect(envConfig()).toEqual({
+        uri: "bolt://127.0.0.1:7687",
+        user: "neo4j",
+        password: "anamnesis",
+        database: "neo4j",
+      });
+
+      process.env["ANAMNESIS_NEO4J_URI"] = "bolt://db.example:9999";
+      process.env["ANAMNESIS_NEO4J_USER"] = "configured-user";
+      process.env["ANAMNESIS_NEO4J_PASSWORD"] = "configured-password";
+      process.env["ANAMNESIS_NEO4J_DATABASE"] = "configured-database";
+      expect(envConfig()).toEqual({
+        uri: "bolt://db.example:9999",
+        user: "configured-user",
+        password: "configured-password",
+        database: "configured-database",
+      });
+    } finally {
+      keys.forEach((key, index) => {
+        const value = saved[index];
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      });
+    }
+  });
+
+  test("accepts a short explicit previous record", () => {
+    expect(
+      RememberInput.parse({
+        ...msg("config-previous", "Previous fixture", "2026-08-20T00:00:00Z"),
+        previous: "xy",
+      }).previous,
+    ).toBe("xy");
+  });
+});
+
+beforeAll(async () => {
+  // Production intentionally has no delete path, so test isolation owns cleanup.
+  const admin = adminDriver();
   await admin.executeQuery("MATCH (n) DETACH DELETE n");
   await admin.close();
 
@@ -41,279 +141,803 @@ afterAll(async () => {
   await engine.close();
 });
 
-describe("Engine on Neo4j — 기본 축적", () => {
-  test("remember → digest(추출 핸들러) → recall 왕복", async () => {
+describe("Engine storage lifecycle", () => {
+  test("init creates the complete schema and is idempotent", async () => {
+    const constraints = [
+      "element_id",
+      "link_idem_mentions",
+      "link_idem_relates_to",
+      "link_idem_next_episode",
+      "link_idem_has_member",
+      "link_idem_derived_from",
+      "link_idem_invalidates",
+      "link_idem_contrasts",
+      "element_origin",
+      "payload_hash",
+    ];
+    const indexes = [
+      "element_time",
+      "element_schema",
+      "outbox_pending",
+      "element_content",
+    ];
+    for (const name of await schemaObjectNames("CONSTRAINTS")) {
+      await runAdmin(`DROP CONSTRAINT \`${name}\` IF EXISTS`);
+    }
+    for (const name of indexes) {
+      await runAdmin(`DROP INDEX \`${name}\` IF EXISTS`);
+    }
+
+    await engine.init();
+    await engine.init();
+
+    expect(await schemaObjectNames("CONSTRAINTS")).toEqual(
+      expect.arrayContaining(constraints),
+    );
+    expect(await schemaObjectNames("INDEXES")).toEqual(
+      expect.arrayContaining(indexes),
+    );
+  });
+
+  test("store exposes its effective default and explicit database", async () => {
+    const defaultStore = new Store(TEST_DB);
+    const explicitStore = new Store({ ...TEST_DB, database: "analytics" });
+    expect(defaultStore.databaseName).toBe("neo4j");
+    expect(explicitStore.databaseName).toBe("analytics");
+    await expect(
+      explicitStore.putElement({
+        id: uuidv7(),
+        schema: "anamnesis.claim/1",
+        time: { value: "2026-08-21T00:00:00Z", precision: "second" },
+        content: "Explicit database routing fixture",
+        origin: {
+          source: "database-test",
+          session: "routing",
+          actor: "fixture",
+          record: "explicit",
+        },
+      }),
+    ).rejects.toThrow();
+    await expect(explicitStore.counts()).rejects.toThrow();
+    await defaultStore.close();
+    await explicitStore.close();
+  });
+
+  test("sanitizes Lucene punctuation and repeated whitespace", () => {
+    expect(luceneQuery('kim*chi AND "x"')).toBe("kim chi AND x");
+    expect(luceneQuery("a  \t b")).toBe("a b");
+  });
+
+  test("closes write sessions on success", async () => {
+    const driver = adminDriver();
+    const openSession = driver.session.bind(driver);
+    let closes = 0;
+    driver.session = (config?: SessionConfig): Session => {
+      const session = openSession(config);
+      const close = session.close.bind(session);
+      session.close = async () => {
+        closes += 1;
+        await close();
+      };
+      return session;
+    };
+    const store = new Store(TEST_DB, driver);
+    await store.putElement({
+      id: uuidv7(),
+      schema: "anamnesis.claim/1",
+      time: { value: "2026-08-21T00:00:00Z", precision: "second" },
+      content: "Session closure fixture",
+      origin: {
+        source: "session-test",
+        session: "closure",
+        actor: "fixture",
+        record: "success",
+      },
+    });
+    expect(closes).toBe(1);
+    await runAdmin(
+      "MATCH (e:Element { origin_source: 'session-test' }) DETACH DELETE e",
+    );
+    await store.close();
+  });
+
+  test("remember, digest, and recall round trip", async () => {
     await engine.remember(
-      msg("m1", "이노는 다크 모드를 선호한다", "2026-08-21T14:00:00+09:00"),
+      msg("m1", "Ino prefers dark mode", "2026-08-21T14:00:00+09:00"),
     );
     await engine.remember(
-      msg("m2", "점심으로 김치찌개를 먹었다", "2026-08-21T12:00:00+09:00"),
+      msg("m2", "Lunch was kimchi stew", "2026-08-21T12:00:00+09:00"),
     );
     expect((await engine.status()).pendingOutbox).toBe(2);
 
-    // 추출 핸들러 자리 검증: 에피소드마다 claim + provenance 링크 파생
     const processed = await engine.digest(async (episode, store) => {
       const claim = await store.putElement({
         id: uuidv7(),
         schema: "anamnesis.claim/1",
         time: episode.time,
-        content: `[주장] ${episode.content}`,
-        origin: { ...episode.origin, actor: "extractor", record: `claim:${episode.origin.record}` },
+        content: `[claim] ${episode.content}`,
+        origin: {
+          ...episode.origin,
+          actor: "extractor",
+          record: `claim:${episode.origin.record}`,
+        },
       });
       await store.putLink({
         id: uuidv7(),
         from: claim.id,
         to: episode.id,
         role: "DERIVED_FROM",
-        content: "이 주장은 해당 원본 메시지에서 추출되었다",
+        content: "This claim was extracted from the source message",
       });
-    });
+    }, 1);
     expect(processed).toBe(2);
     expect(await engine.status()).toMatchObject({
-      elements: 4, // 에피소드 2 + 주장 2
+      elements: 4,
       links: 2,
       pendingOutbox: 0,
     });
 
-    const hits = await engine.recall("다크 모드");
+    const hits = await engine.recall("dark mode", { at: AFTER_FIXTURES });
     expect(hits.length).toBeGreaterThanOrEqual(1);
-    expect(hits[0]!.element.content).toContain("다크 모드");
+    expect(hits[0]!.element.content).toContain("dark mode");
   });
 
-  test("NEXT_EPISODE — 같은 세션의 에피소드가 사건 시각 순으로 사슬 연결", async () => {
-    const chain = (record: string, content: string, value: string) => ({
-      time: { value, precision: "second" },
-      content,
-      origin: {
-        source: "kakao-export",
-        session: "체인방/2026-08",
-        actor: "이노",
-        record,
-      },
-    }) as const;
-    const c1 = await engine.remember(chain("c1", "체인 첫째 메시지", "2026-08-23T10:00:00+09:00"));
-    const c2 = await engine.remember(chain("c2", "체인 둘째 메시지", "2026-08-23T10:05:00+09:00"));
-    const c3 = await engine.remember(chain("c3", "체인 셋째 메시지", "2026-08-23T10:10:00+09:00"));
+  test("digest skips an outbox entry whose element was removed", async () => {
+    const removed = await engine.remember(
+      msg("removed-1", "Removed episode", "2026-08-22T12:45:00+09:00"),
+    );
+    await runAdmin("MATCH (e:Element { id: $id }) DETACH DELETE e", {
+      id: removed.id,
+    });
+    let handled = 0;
+
+    expect(
+      await engine.digest(() => {
+        handled += 1;
+      }),
+    ).toBe(1);
+    expect(handled).toBe(0);
+  });
+
+  test("requeueEpisodes uses the original-message schema by default", async () => {
+    await engine.remember(
+      msg("requeue-default", "Default requeue", "2026-08-22T12:50:00+09:00"),
+    );
+    await engine.digest(() => {});
+    const requeued = await engine.requeueEpisodes();
+    expect(requeued).toBeGreaterThan(0);
+    expect(await engine.digest(() => {})).toBe(requeued);
+  });
+
+  test("requeueEpisodes makes processed episodes available to digest again", async () => {
+    const schema = "anamnesis.requeue-test/1";
+    await engine.remember({
+      ...msg(
+        "requeue-1",
+        "Episode to process twice",
+        "2026-08-22T13:00:00+09:00",
+      ),
+      schema,
+    });
+    const processedIds: string[] = [];
+    const handler = (episode: { id: string }) => {
+      processedIds.push(episode.id);
+    };
+
+    expect(await engine.digest(handler)).toBe(1);
+    expect(await engine.requeueEpisodes(schema)).toBe(1);
+    expect(await engine.digest(handler)).toBe(1);
+    expect(processedIds).toHaveLength(2);
+    expect(processedIds[1]).toBe(processedIds[0]);
+  });
+
+  test("NEXT_EPISODE links episodes in event-time order", async () => {
+    const chain = (record: string, content: string, value: string) =>
+      ({
+        time: { value, precision: "second" },
+        content,
+        origin: {
+          source: "chat-export",
+          session: "chain/2026-08",
+          actor: "ino",
+          record,
+        },
+      }) as const;
+    const c1 = await engine.remember(
+      chain("c1", "First chain message", "2026-08-23T10:00:00+09:00"),
+    );
+    const c2 = await engine.remember(
+      chain("c2", "Second chain message", "2026-08-23T10:05:00+09:00"),
+    );
+    const c3 = await engine.remember(
+      chain("c3", "Third chain message", "2026-08-23T10:10:00+09:00"),
+    );
 
     const around2 = await engine.store.linksOf(c2.id, "NEXT_EPISODE");
     expect(around2).toHaveLength(2);
-    expect(around2.some((l) => l.from === c1.id && l.to === c2.id)).toBe(true);
-    expect(around2.some((l) => l.from === c2.id && l.to === c3.id)).toBe(true);
-    // 체인 끝단은 한 쪽만
+    expect(
+      around2.some((link) => link.from === c1.id && link.to === c2.id),
+    ).toBe(true);
+    expect(
+      around2.some((link) => link.from === c2.id && link.to === c3.id),
+    ).toBe(true);
     expect(await engine.store.linksOf(c1.id, "NEXT_EPISODE")).toHaveLength(1);
   });
 
-  test("remember는 origin 멱등 — 같은 내용 재유입은 no-op", async () => {
+  test("origin identity preserves tuple boundaries", async () => {
+    const base = {
+      id: uuidv7(),
+      schema: "anamnesis.claim/1",
+      time: { value: "2026-08-23T11:00:00+09:00", precision: "second" },
+      content: "Boundary-sensitive origin",
+      mass: 0.5,
+      properties: {},
+    } as const;
+    const first = await engine.put({
+      ...base,
+      origin: { source: "ab", session: "c", actor: "fixture", record: "d" },
+    });
+    const second = await engine.put({
+      ...base,
+      id: uuidv7(),
+      origin: { source: "a", session: "bc", actor: "fixture", record: "d" },
+    });
+    expect(first.created).toBe(true);
+    expect(second.created).toBe(true);
+    expect(second.id).not.toBe(first.id);
+  });
+
+  test("remember is idempotent for identical origins and content", async () => {
     const first = await engine.remember(
-      msg("dup-1", "원본 내용", "2026-08-22T10:00:00+09:00"),
+      msg("dup-1", "Original content", "2026-08-22T10:00:00+09:00"),
     );
     const again = await engine.remember(
-      msg("dup-1", "원본 내용", "2026-08-22T10:00:00+09:00"),
+      msg("dup-1", "Original content", "2026-08-22T10:00:00+09:00"),
     );
     expect(first.created).toBe(true);
     expect(again.created).toBe(false);
     expect(again.id).toBe(first.id);
   });
 
-  test("2단 멱등 — 같은 origin, 다른 내용은 분기: 새 Episode + 자동 INVALIDATES", async () => {
+  test("changed content at the same origin creates an invalidating branch", async () => {
     const first = await engine.remember(
-      msg("div-1", "원래 보낸 내용", "2026-08-22T10:00:00+09:00"),
+      msg("div-1", "Original sent content", "2026-08-22T10:00:00+09:00"),
     );
     const edited = await engine.remember(
-      msg("div-1", "수정된 내용", "2026-08-22T10:00:00+09:00"),
+      msg("div-1", "Edited content", "2026-08-22T10:00:00+09:00"),
     );
     expect(edited.created).toBe(true);
     expect(edited.diverged).toBe(true);
     expect(edited.invalidated).toBe(first.id);
 
-    // 새 에피소드: record 접미 + 사건 시각은 원래 보낸 시각 유지
     const fresh = await engine.store.getElement(edited.id);
-    expect(fresh!.content).toBe("수정된 내용");
+    expect(fresh!.content).toBe("Edited content");
     expect(fresh!.origin.record).toMatch(/^div-1#h[0-9a-f]{8}$/);
     expect(fresh!.time.value).toBe("2026-08-22T10:00:00+09:00");
     expect(fresh!.properties["diverged_at"]).toBeString();
 
-    // (새것)-[:INVALIDATES]->(원본) 자동 배선 — 원본은 무효화됐지만 보존
-    const invLinks = await engine.store.linksOf(first.id, "INVALIDATES");
-    expect(invLinks.some((l) => l.from === edited.id && l.to === first.id)).toBe(true);
-    const old = await engine.store.getElement(first.id);
-    expect(old!.content).toBe("원래 보낸 내용"); // 덮어쓰기 없음
-    expect(await engine.store.isValidAt(first.id, new Date().toISOString())).toBe(false);
+    const invalidations = await engine.store.linksOf(first.id, "INVALIDATES");
+    expect(
+      invalidations.some(
+        (link) => link.from === edited.id && link.to === first.id,
+      ),
+    ).toBe(true);
+    expect((await engine.store.getElement(first.id))!.content).toBe(
+      "Original sent content",
+    );
+    expect(await engine.store.isValidAt(first.id, AFTER_FIXTURES)).toBe(false);
 
-    // 분기된 내용의 재유입도 멱등 — 세 번째 원소가 생기지 않는다
     const again = await engine.remember(
-      msg("div-1", "수정된 내용", "2026-08-22T10:00:00+09:00"),
+      msg("div-1", "Edited content", "2026-08-22T10:00:00+09:00"),
     );
     expect(again.created).toBe(false);
     expect(again.id).toBe(edited.id);
+    expect(again.diverged).toBe(true);
   });
 
-  test("payload 보존 및 verify() 무결성 감사 통과", async () => {
-    const bytes = new TextEncoder().encode('{"raw":"카톡 원본 라인"}');
-    const r = await engine.remember({
-      ...msg("p1", "페이로드 있는 메시지", "2026-08-22T12:00:00+09:00"),
+  test("does not invalidate divergences outside the lattice", async () => {
+    const cases = [
+      {
+        record: "entity-to-fact",
+        before: "anamnesis.entity/1",
+        after: "anamnesis.claim/1",
+      },
+      {
+        record: "fact-to-entity",
+        before: "anamnesis.claim/1",
+        after: "anamnesis.entity/1",
+      },
+    ] as const;
+    for (const fixture of cases) {
+      const origin = {
+        source: "divergence-test",
+        session: "non-invalidating",
+        actor: "fixture",
+        record: fixture.record,
+      } as const;
+      const original = await engine.put({
+        id: uuidv7(),
+        schema: fixture.before,
+        time: { value: "2026-08-22T11:00:00Z", precision: "second" },
+        content: `Original ${fixture.record}`,
+        origin,
+      });
+      const changed = await engine.put({
+        id: uuidv7(),
+        schema: fixture.after,
+        time: { value: "2026-08-22T11:00:00Z", precision: "second" },
+        content: `Changed ${fixture.record}`,
+        origin,
+      });
+      expect(changed).toMatchObject({ created: true, diverged: true });
+      expect(changed.invalidated).toBeUndefined();
+      expect(await engine.store.linksOf(original.id, "INVALIDATES")).toEqual(
+        [],
+      );
+    }
+  });
+
+  test("verify detects persisted element content tampering", async () => {
+    const result = await engine.remember(
+      msg("tamper-1", "Untampered content", "2026-08-22T11:30:00+09:00"),
+    );
+    await runAdmin("MATCH (e:Element { id: $id }) SET e.content = $content", {
+      id: result.id,
+      content: "Tampered content",
+    });
+    expect(await engine.verify()).toContainEqual({
+      elementId: result.id,
+      kind: "digest-mismatch",
+    });
+    await runAdmin("MATCH (e:Element { id: $id }) SET e.content = $content", {
+      id: result.id,
+      content: "Untampered content",
+    });
+    expect(await engine.verify()).not.toContainEqual({
+      elementId: result.id,
+      kind: "digest-mismatch",
+    });
+  });
+
+  test("payload bytes survive ingestion and integrity verification", async () => {
+    const bytes = new TextEncoder().encode('{"raw":"source line"}');
+    const result = await engine.remember({
+      ...msg("p1", "Message with payload", "2026-08-22T12:00:00+09:00"),
       payload: bytes,
     });
-    const el = await engine.store.getElement(r.id);
-    expect(el).not.toBeNull();
-    const issues = await engine.verify();
-    expect(issues).toEqual([]);
+    const element = await engine.store.getElement(result.id);
+    const payloadHash = element!.properties["payload_hash"];
+    expect(payloadHash).toBeString();
+    expect(await engine.store.getPayload(payloadHash as string)).toEqual(bytes);
+    expect(await engine.verify()).toEqual([]);
+
+    await runAdmin("MATCH (p:Payload { hash: $hash }) DELETE p", {
+      hash: payloadHash as string,
+    });
+    expect(await engine.verify()).toContainEqual({
+      elementId: result.id,
+      kind: "missing-payload",
+    });
+
+    const mismatch = await engine.remember({
+      ...msg("p2", "Mismatched payload", "2026-08-22T12:01:00+09:00"),
+      payload: bytes,
+    });
+    await runAdmin(
+      "MATCH (e:Element { id: $id }), (p:Payload { hash: e.payload_hash }) SET p.bytes = 'd3Jvbmc='",
+      { id: mismatch.id },
+    );
+    expect(await engine.verify()).toContainEqual({
+      elementId: mismatch.id,
+      kind: "payload-hash-mismatch",
+    });
+  });
+
+  test("recall matches CJK content", async () => {
+    await engine.remember(
+      msg("cjk-1", "점심으로 김치찌개를 먹었다", "2026-08-22T12:30:00+09:00"),
+    );
+    const hits = await engine.recall("김치찌개", { at: AFTER_FIXTURES });
+    expect(hits.some((hit) => hit.element.content.includes("김치찌개"))).toBe(
+      true,
+    );
   });
 });
 
-describe("Engine on Neo4j — 정본 구조 (라벨·격자·멱등)", () => {
-  test("천체 라벨 이중 물질화 — :Element + :Episode/:Fact", async () => {
-    const ep = await engine.remember(
-      msg("lbl-1", "라벨 확인용 메시지", "2026-08-24T10:00:00+09:00"),
+describe("Engine graph contracts", () => {
+  test("materializes common and celestial labels", async () => {
+    const episode = await engine.remember(
+      msg("lbl-1", "Episode label fixture", "2026-08-24T10:00:00+09:00"),
     );
     const claim = await engine.put({
       id: uuidv7(),
       schema: "anamnesis.claim/1",
       time: { value: "2026-08-24T10:00:00+09:00", precision: "second" },
-      content: "라벨 확인용 주장",
-      origin: { source: "agent", session: "s", actor: "extractor", record: "lbl-c1" },
+      content: "Fact label fixture",
+      origin: {
+        source: "agent",
+        session: "labels",
+        actor: "extractor",
+        record: "lbl-c1",
+      },
     });
-    expect(await engine.store.labelsOf(ep.id)).toEqual(
+    expect(await labelsOf(episode.id)).toEqual(
       expect.arrayContaining(["Element", "Episode"]),
     );
-    expect(await engine.store.labelsOf(claim.id)).toEqual(
+    expect(await labelsOf(claim.id)).toEqual(
       expect.arrayContaining(["Element", "Fact"]),
     );
   });
 
-  test("격자 — 허용 쌍은 생성, 위반 쌍은 거부", async () => {
-    const ep = await engine.remember(
-      msg("lat-1", "격자 확인용 메시지", "2026-08-24T11:00:00+09:00"),
+  test("round-trips explicit mass and tolerates absent stored properties", async () => {
+    const result = await engine.put({
+      id: uuidv7(),
+      schema: "anamnesis.claim/1",
+      time: { value: "2026-08-24T10:15:00+09:00", precision: "second" },
+      content: "Property decoding fixture",
+      origin: {
+        source: "agent",
+        session: "decoding",
+        actor: "fixture",
+        record: "decode-1",
+      },
+      mass: 0.73,
+      properties: { pinned: true },
+    });
+    expect(await engine.store.getElement(result.id)).toMatchObject({
+      mass: 0.73,
+      properties: { pinned: true },
+    });
+    await runAdmin("MATCH (e:Element { id: $id }) REMOVE e.properties", {
+      id: result.id,
+    });
+    expect((await engine.store.getElement(result.id))!.properties).toEqual({});
+  });
+
+  test("does not create episode links for a non-episode", async () => {
+    const parent = await engine.remember(
+      msg("claim-parent", "Episode parent", "2026-08-24T10:20:00+09:00"),
+    );
+    const claim = await engine.store.putElement(
+      {
+        id: uuidv7(),
+        schema: "anamnesis.claim/1",
+        time: { value: "2026-08-24T10:21:00+09:00", precision: "second" },
+        content: "Non-episode with previous option",
+        origin: {
+          source: "chat-export",
+          session: "friends/2026-08",
+          actor: "fixture",
+          record: "claim-child",
+        },
+      },
+      { previous: "claim-parent" },
+    );
+    expect(await engine.store.linksOf(claim.id, "NEXT_EPISODE")).toEqual([]);
+    expect(await engine.store.linksOf(parent.id, "NEXT_EPISODE")).not.toContainEqual(
+      expect.objectContaining({ to: claim.id }),
+    );
+  });
+
+  test("unknown schemas receive only the Element label", async () => {
+    const result = await engine.put({
+      id: uuidv7(),
+      schema: "anamnesis.unmapped/1",
+      time: { value: "2026-08-24T10:30:00+09:00", precision: "second" },
+      content: "Fallback label fixture",
+      origin: {
+        source: "agent",
+        session: "labels",
+        actor: "extractor",
+        record: "lbl-fallback",
+      },
+    });
+    expect(await labelsOf(result.id)).toEqual(["Element"]);
+  });
+
+  test("accepts lattice pairs and reports lattice violations", async () => {
+    const episode = await engine.remember(
+      msg("lat-1", "Lattice episode", "2026-08-24T11:00:00+09:00"),
     );
     const claim = await engine.put({
       id: uuidv7(),
       schema: "anamnesis.claim/1",
       time: { value: "2026-08-24T11:00:00+09:00", precision: "second" },
-      content: "격자 확인용 주장",
-      origin: { source: "agent", session: "s", actor: "extractor", record: "lat-c1" },
+      content: "Lattice claim",
+      origin: {
+        source: "agent",
+        session: "lattice",
+        actor: "extractor",
+        record: "lat-c1",
+      },
     });
-    // 허용: Fact --DERIVED_FROM--> Episode
-    await engine.link({
+    const accepted = await engine.link({
       id: uuidv7(),
       from: claim.id,
-      to: ep.id,
+      to: episode.id,
       role: "DERIVED_FROM",
-      content: "이 주장은 해당 메시지에서 추출되었다",
+      content: "The claim came from the episode",
     });
-    // 위반: Episode --RELATES_TO--> Episode (격자: Fact|Entity만)
+    expect(accepted).toMatchObject({
+      from: claim.id,
+      to: episode.id,
+      role: "DERIVED_FROM",
+      content: "The claim came from the episode",
+      weight: 1,
+    });
     await expect(
       engine.link({
         id: uuidv7(),
-        from: ep.id,
-        to: ep.id,
+        from: episode.id,
+        to: episode.id,
         role: "RELATES_TO",
-        content: "격자 위반 시도",
+        content: "Invalid lattice pair",
       }),
-    ).rejects.toThrow();
+    ).rejects.toThrow("self-link is not allowed");
+
+    const otherEpisode = await engine.remember(
+      msg("lat-2", "Other lattice episode", "2026-08-24T11:01:00+09:00"),
+    );
+    const rejectedId = uuidv7();
+    await expect(
+      engine.link({
+        id: rejectedId,
+        from: episode.id,
+        to: otherEpisode.id,
+        role: "RELATES_TO",
+        content: "Invalid lattice pair",
+      }),
+    ).rejects.toThrow(
+      `link rejected (endpoints missing or lattice violation): ${episode.id} -[RELATES_TO]-> ${otherEpisode.id}`,
+    );
   });
 
-  test("링크 멱등 — 같은 (from, to, role, content) 재실행은 중복 생성 없음", async () => {
-    const ep = await engine.remember(
-      msg("idem-1", "멱등 확인용 메시지", "2026-08-24T12:00:00+09:00"),
+  test("link identity is stable across extraction retries", async () => {
+    const episode = await engine.remember(
+      msg("idem-1", "Link idempotency episode", "2026-08-24T12:00:00+09:00"),
     );
     const claim = await engine.put({
       id: uuidv7(),
       schema: "anamnesis.claim/1",
       time: { value: "2026-08-24T12:00:00+09:00", precision: "second" },
-      content: "멱등 확인용 주장",
-      origin: { source: "agent", session: "s", actor: "extractor", record: "idem-c1" },
+      content: "Link idempotency claim",
+      origin: {
+        source: "agent",
+        session: "idempotency",
+        actor: "extractor",
+        record: "idem-c1",
+      },
     });
-    const mk = () => ({
-      id: uuidv7(), // 호출마다 새 id를 줘도
+    const makeLink = () => ({
+      id: uuidv7(),
       from: claim.id,
-      to: ep.id,
+      to: episode.id,
       role: "DERIVED_FROM" as const,
-      content: "이 주장은 해당 메시지에서 추출되었다",
+      content: "The claim came from the episode",
+      weight: 0.42,
     });
-    const l1 = await engine.link(mk());
-    const l2 = await engine.link(mk());
-    expect(l2.id).toBe(l1.id); // 멱등 키로 같은 링크 반환
+    const first = await engine.link(makeLink());
+    const second = await engine.link(makeLink());
+    expect(second.id).toBe(first.id);
     const links = await engine.store.linksOf(claim.id, "DERIVED_FROM");
-    expect(links.filter((l) => l.to === ep.id)).toHaveLength(1);
+    expect(links.filter((link) => link.to === episode.id)).toHaveLength(1);
+    expect(links[0]!.weight).toBe(0.42);
+    expect((await engine.store.linksOf(claim.id))[0]!.role).toBe(
+      "DERIVED_FROM",
+    );
   });
 
-  test("NEXT_EPISODE — previous 명시가 폴백보다 우선 (나무 배선)", async () => {
-    const chain = (record: string, value: string, previous?: string) => ({
-      time: { value, precision: "second" },
-      content: `나무 배선 ${record}`,
-      origin: { source: "agent-log", session: "sess/1", actor: "agent", record },
-      ...(previous ? { previous } : {}),
-    }) as const;
+  test("an explicit previous record takes precedence over chronology", async () => {
+    const chain = (record: string, value: string, previous?: string) =>
+      ({
+        time: { value, precision: "second" },
+        content: `Tree link ${record}`,
+        origin: {
+          source: "agent-log",
+          session: "tree/1",
+          actor: "agent",
+          record,
+        },
+        ...(previous ? { previous } : {}),
+      }) as const;
     const a = await engine.remember(chain("a", "2026-08-25T10:00:00+09:00"));
-    // b는 시각상 a 다음이지만, 부모를 명시하지 않으면 폴백으로 a에 붙는다
     const b = await engine.remember(chain("b", "2026-08-25T10:05:00+09:00"));
-    // c는 시각상 b 다음이지만 previous=a를 명시 → a에서 가지가 뻗는다
-    const c = await engine.remember(chain("c", "2026-08-25T10:10:00+09:00", "a"));
+    const c = await engine.remember(
+      chain("c", "2026-08-25T10:10:00+09:00", "a"),
+    );
+    const d = await engine.remember(
+      chain("d", "2026-08-25T10:15:00+09:00", "a"),
+    );
 
     const fromA = (await engine.store.linksOf(a.id, "NEXT_EPISODE")).filter(
-      (l) => l.from === a.id,
+      (link) => link.from === a.id,
     );
-    expect(fromA.map((l) => l.to).sort()).toEqual([b.id, c.id].sort()); // 가지 2개
+    expect(fromA.map((link) => link.to).sort()).toEqual(
+      [b.id, c.id, d.id].sort(),
+    );
     expect(
       (await engine.store.linksOf(b.id, "NEXT_EPISODE")).some(
-        (l) => l.from === b.id && l.to === c.id,
+        (link) => link.from === b.id && link.to === c.id,
       ),
-    ).toBe(false); // b→c 사슬은 없다
+    ).toBe(false);
   });
 });
 
-describe("Engine on Neo4j — 시간축 필터링", () => {
-  test("snapshot(T) — 절단 시점 이후 기억은 존재하지 않았던 것", async () => {
-    await engine.remember(msg("t1", "아주 옛날 기억이다", "2026-01-01T10:00:00+09:00"));
-    await engine.remember(msg("t2", "아주 최근 기억이다", "2026-08-01T10:00:00+09:00"));
-
-    const then = await engine.recall("아주 기억이다", { at: "2026-03-01T00:00:00Z" });
-    expect(then.some((h) => h.element.content === "아주 옛날 기억이다")).toBe(true);
-    expect(then.some((h) => h.element.content === "아주 최근 기억이다")).toBe(false);
-
-    const now = await engine.recall("아주 기억이다");
-    expect(now.some((h) => h.element.content === "아주 최근 기억이다")).toBe(true);
-  });
-
-  test("invalidates — 무효화 이후엔 회상에서 빠지고, 이전 시점에선 살아있다", async () => {
-    const fact = await engine.remember(
-      msg("f1", "이노는 커피를 끊었다", "2026-03-01T09:00:00+09:00"),
-    );
-
-    // 무효화 사건 (2026-08-15) + INVALIDATES 링크 — 사건도 그냥 claim이다
-    const inv = await engine.put({
+describe("Engine time-axis filtering", () => {
+  test("empty search is exact and unfiltered search includes invalidated data", async () => {
+    expect(await engine.store.searchText(" \\ / * ")).toEqual([]);
+    const original = await engine.put({
       id: uuidv7(),
       schema: "anamnesis.claim/1",
-      time: { value: "2026-08-15T10:00:00+09:00", precision: "second" },
-      content: "이노가 커피를 다시 마시기 시작했다",
-      origin: { source: "agent", session: "s", actor: "extractor", record: "inv-1" },
+      time: { value: "2026-02-01T00:00:00Z", precision: "second" },
+      content: "Unfiltered invalidated sentinel",
+      origin: {
+        source: "search-test",
+        session: "defaults",
+        actor: "fixture",
+        record: "original",
+      },
+    });
+    const replacement = await engine.put({
+      id: uuidv7(),
+      schema: "anamnesis.claim/1",
+      time: { value: "2026-02-02T00:00:00Z", precision: "second" },
+      content: "Replacement sentinel",
+      origin: {
+        source: "search-test",
+        session: "defaults",
+        actor: "fixture",
+        record: "replacement",
+      },
     });
     await engine.link({
       id: uuidv7(),
-      from: inv.id,
-      to: fact.id,
+      from: replacement.id,
+      to: original.id,
       role: "INVALIDATES",
-      content: "커피를 다시 마시므로 끊었다는 사실은 더 이상 유효하지 않다",
+      content: "Replacement invalidates original",
     });
-
-    // 지금 시점: 무효화된 사실은 회상에 안 나옴 (무효화 사건 자체는 나올 수 있음)
-    const now = await engine.recall("커피를 끊었다");
-    expect(now.some((h) => h.element.id === fact.id)).toBe(false);
-
-    // 무효화 이전 시점: 아직 참
-    const before = await engine.recall("커피를 끊었다", { at: "2026-05-01T00:00:00Z" });
-    expect(before.some((h) => h.element.id === fact.id)).toBe(true);
-
-    // isValidAt 직접 판정도 동일
-    expect(await engine.store.isValidAt(fact.id, "2026-05-01T00:00:00Z")).toBe(true);
-    expect(await engine.store.isValidAt(fact.id, new Date().toISOString())).toBe(false);
+    expect(
+      (await engine.store.searchText("Unfiltered invalidated sentinel")).some(
+        (hit) => hit.element.id === original.id,
+      ),
+    ).toBe(true);
   });
 
-  test("미래 시점 원소는 그 이전 시점에서 무효", async () => {
-    const r = await engine.remember(
-      msg("fut1", "미래에 기록된 무언가", "2026-12-25T00:00:00+09:00"),
+  test("snapshot recall excludes memories after the cutoff", async () => {
+    await engine.remember(
+      msg("t1", "A distant archival memory", "2026-01-01T10:00:00+09:00"),
     );
-    expect(await engine.store.isValidAt(r.id, "2026-11-01T00:00:00Z")).toBe(false);
-    expect(await engine.store.isValidAt(r.id, "2026-12-31T00:00:00Z")).toBe(true);
+    await engine.remember(
+      msg("t2", "A recent archival memory", "2026-08-01T10:00:00+09:00"),
+    );
+
+    const then = await engine.recall("archival memory", {
+      at: "2026-03-01T00:00:00Z",
+    });
+    expect(
+      then.some((hit) => hit.element.content === "A distant archival memory"),
+    ).toBe(true);
+    expect(
+      then.some((hit) => hit.element.content === "A recent archival memory"),
+    ).toBe(false);
+
+    const later = await engine.recall("archival memory", {
+      at: AFTER_FIXTURES,
+    });
+    expect(
+      later.some((hit) => hit.element.content === "A recent archival memory"),
+    ).toBe(true);
+  });
+
+  test("invalidation applies only at and after its event time", async () => {
+    const fact = await engine.remember(
+      msg("f1", "Ino stopped drinking coffee", "2026-03-01T09:00:00+09:00"),
+    );
+    const invalidation = await engine.put({
+      id: uuidv7(),
+      schema: "anamnesis.claim/1",
+      time: { value: "2026-08-15T10:00:00+09:00", precision: "second" },
+      content: "Ino started drinking coffee again",
+      origin: {
+        source: "agent",
+        session: "invalidation",
+        actor: "extractor",
+        record: "inv-1",
+      },
+    });
+    await engine.link({
+      id: uuidv7(),
+      from: invalidation.id,
+      to: fact.id,
+      role: "INVALIDATES",
+      content: "Resuming coffee invalidates the earlier statement",
+    });
+
+    const after = await engine.recall("stopped drinking coffee", {
+      at: AFTER_FIXTURES,
+    });
+    expect(after.some((hit) => hit.element.id === fact.id)).toBe(false);
+
+    const before = await engine.recall("stopped drinking coffee", {
+      at: "2026-05-01T00:00:00Z",
+    });
+    expect(before.some((hit) => hit.element.id === fact.id)).toBe(true);
+    expect(await engine.store.isValidAt(fact.id, "2026-05-01T00:00:00Z")).toBe(
+      true,
+    );
+    expect(await engine.store.isValidAt(fact.id, AFTER_FIXTURES)).toBe(false);
+  });
+
+  test("recall applies validity filtering before its exact limit", async () => {
+    const candidates: string[] = [];
+    for (let index = 0; index < 8; index += 1) {
+      const result = await engine.put({
+        id: uuidv7(),
+        schema: "anamnesis.claim/1",
+        time: { value: "2026-06-01T00:00:00Z", precision: "second" },
+        content: `Exact pagination target ${index}`,
+        origin: {
+          source: "pagination-test",
+          session: "exact-limit",
+          actor: "fixture",
+          record: `target-${index}`,
+        },
+      });
+      candidates.push(result.id);
+    }
+    for (let index = 0; index < 4; index += 1) {
+      const invalidation = await engine.put({
+        id: uuidv7(),
+        schema: "anamnesis.claim/1",
+        time: { value: "2026-07-01T00:00:00Z", precision: "second" },
+        content: `Retraction ${index}`,
+        origin: {
+          source: "pagination-test",
+          session: "exact-limit",
+          actor: "fixture",
+          record: `retraction-${index}`,
+        },
+      });
+      await engine.link({
+        id: uuidv7(),
+        from: invalidation.id,
+        to: candidates[index]!,
+        role: "INVALIDATES",
+        content: `Retracts target ${index}`,
+      });
+    }
+
+    const hits = await engine.recall("Exact pagination target", {
+      limit: 2,
+      at: AFTER_FIXTURES,
+    });
+    expect(hits).toHaveLength(2);
+    expect(
+      hits.every((hit) => candidates.slice(4).includes(hit.element.id)),
+    ).toBe(true);
+  });
+
+  test("a missing element is not valid", async () => {
+    expect(await engine.store.isValidAt(uuidv7(), AFTER_FIXTURES)).toBe(false);
+  });
+
+  test("future elements are invalid before their event time", async () => {
+    const result = await engine.remember(
+      msg("fut1", "A future event", "2026-12-25T00:00:00+09:00"),
+    );
+    expect(
+      await engine.store.isValidAt(result.id, "2026-11-01T00:00:00Z"),
+    ).toBe(false);
+    expect(
+      await engine.store.isValidAt(result.id, "2026-12-31T00:00:00Z"),
+    ).toBe(true);
+  });
+
+  test("close shuts down the underlying driver", async () => {
+    const closed = new Engine(TEST_DB);
+    await closed.init();
+    await closed.close();
+    await expect(closed.status()).rejects.toThrow();
   });
 });

@@ -1,8 +1,4 @@
-/**
- * 테스트용 Neo4j 컨테이너 보장 스크립트.
- * bolt://127.0.0.1:7688 (auth neo4j/anamnesis-test), 이름 anamnesis-neo4j-test.
- * 없으면 띄우고, bolt가 응답할 때까지 대기한 뒤 종료한다.
- */
+/** Ensures the isolated Neo4j test container is running and reachable. */
 import { execSync } from "node:child_process";
 import neo4j from "neo4j-driver";
 
@@ -38,7 +34,7 @@ if (state === "absent") {
   );
 }
 
-// bolt 응답 대기 (신규 기동은 이미지 pull + JVM 부팅으로 수 분까지 걸릴 수 있음)
+// A cold image pull and JVM startup can take several minutes.
 const driver = neo4j.driver(URI, neo4j.auth.basic("neo4j", PASSWORD));
 const deadline = Date.now() + 180_000;
 for (;;) {
