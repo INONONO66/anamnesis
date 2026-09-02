@@ -21,17 +21,18 @@ does not is forgotten. No derived layer, no PPR.
 
 | Area | Contents | Docs |
 |---|---|---|
-| storage | Neo4j compose, schema, constraints (`revision_key` unique, `origin_key` indexed, Meta singleton), `:Element:Episode`, Payload metadata + `objects/`, originals-layer links (NEXT_EPISODE, HAS_PAYLOAD, revision INVALIDATES) | 01 §1–2, §6–7 |
-| daemon | `anamnesisd` UDS JSON-RPC, write queue, `structure_revision`, `hello/remember/recall/commit/status/verify`, `daemon.lock` | 02 §1–3 |
-| security | 0700/0600 modes, peer-UID check on the UDS, request and payload caps, bolt on 127.0.0.1 only, per-install random password in `neo4j.auth` | 02 §10 |
+| storage | Neo4j compose, schema, canonical Episode digest, global `ingest_seq`, OriginHead CAS, `:Element:Episode`, Payload metadata + `objects/`, originals links, rebuildable event-time NEXT_EPISODE topology | 01 §1–2, §6–8; 02 §3 |
+| daemon | `anamnesisd` UDS JSON-RPC, bounded object upload, write queue, serving revision, pure-Node nonce/heartbeat singleton lease, core RPCs | 02 §1–3 |
+| security | 0700/0600 modes, UDS capability token, length-prefixed frame and global resource caps, bolt on 127.0.0.1 only, per-install random password | 02 §10 |
 | spool | fsync-before-ack, `.done` after commit, drain, retention, cold-start wait | 02 §4, §9 |
+| embedding | `embed_episode` Outbox worker, bounded batches, active model property/index and retry behavior | 01 §4, 02 §3 |
 | durability | write ordering, `gc --objects` safety, `anamnesis backup` / `restore`, `verify` | 01 §9 |
 | time | Episode `time_*`, `ingested_at`, snapshot(T) filter (Episodes only) | 03 §1, §3 |
 | forgetting | m₀, hit-cache initialization, R(t,S), Hit node + HIT_OF, S update, replay, `rebuild --hit-cache` | 04 §1–5, §7 |
 | commit path | `commitHits` with producers 1 (receipt) and 2 (exposure); `hello.commit_mode`; idem_key | 04 §6, 05 §10 |
 | recall | vector (nodes) + BM25 + session channels with caps, RRF, score = rel·m^γ, deterministic ordering, degradation ladder, diagnostics | 05 (without PPR, identity, relationship vectors) |
 | clients | CLI (`up/down/remember/recall/status/verify/backup/restore`), MCP server (receipt), claude-code hook (auto) | 08 |
-| protocol | zod: Episode-only time requirement, `revision_key`, `correction` schema, Hit, RPC methods | 08 |
+| protocol | zod: Episode-only time requirement, `source_revision`, `previous_revision_key`, `revision_key`, `correction` schema, Hit, RPC methods | 08 |
 | CI | forgetting fixtures, RRF invariance, ordering conventions, contract schema tests | 04 §10, 07 §6 |
 
 **Exit criteria**: ingest one month of the author's own conversation logs →
@@ -47,17 +48,17 @@ retrieves along relationships.
 
 | Area | Contents | Docs |
 |---|---|---|
-| derived layer | `:Fact`, `:Entity`, the 7-role lattice, `idem_key` with `gen_from` for Facts and links, `gen_from/gen_to`, extraction generation + selector, `gen` RPC, per-Episode supersession, rollback, Fact provenance contract | 01 §1, §4–5 |
-| extraction | Outbox worker as read tx → LLM → write tx with re-validation; time resolution, entity resolution, judge (new/duplicate/elaboration/contradiction), mode change\|correction, DLQ, embed stage | 02 §5 |
+| derived layer | `:Fact`, `:Entity`, physical generation labels/indexes, global `ingest_seq`, BUILDING/ACTIVE/CATCHING_UP/INACTIVE/RETIRED lifecycle, strict sequencer, dual-tail Outbox, atomic cutover and caught-up rollback | 01 §1, §4–5 |
+| extraction | target sequencer: claim LLM → bounded generation-index reads → judge LLM → revalidated write; blocked-head retry, entity/fact identity, correction context, embed stage | 02 §5 |
 | commit path | producer 3 (re_mention) | 04 §6 |
 | maintenance | hourly job: `m_cache`, hub shortlist. **Precedes PPR** — the envelope depends on both | 02 §6 |
 | time | Fact time, derived visibility for Entity and Link, non-recursive valid(T), replacement protocol, provenance exception | 03 §3–5 |
 | forgetting | Fact mass = source max · σ_fact, κ conservation and merging, sources resolution | 04 §3, §5 |
-| envelope | budgets, fanout, hub test (COUNT{}), per-node link cap, 3-query tx, 100 ms deadline, true weighted degree and leak, role-selected generation filter | 06 §1–4 |
+| envelope | budgets, fanout, hub test (COUNT{}), non-hub scan cap, indexed HubArc cache, per-row directed arc cap, row-total initialization, 3-query tx, deadline, retained-row normalization | 06 §1–4 |
 | PPR | CSR, iteration, convergence cap, determinism conventions | 06 §5–7 |
 | recall | relationship vector channel (`queryRelationships`), seeds (hub damping), PPR list in fusion, valid filter, provenance/supersedes/contrasts, torn retry | 05 §2–7 |
-| GDS | solver validation (σ-node construction, L1, top-k, NDCG), CI on every PR | 07 §2 |
-| gc | `gc --derived` (previous generation + 30 days), `gc --embedding` | 01 §4 |
+| GDS | disposable validation container, σ-node solver validation, L1/top-k/NDCG CI | 07 §1–2 |
+| gc | RETIRED-generation-only `gc --derived`, protected rollback targets, `gc --embedding` | 01 §4 |
 
 **Exit criteria**: extraction runs on v0.1 data with no downtime → 20 solver
 validations pass → correction scenario fixtures (change / correction /
@@ -71,9 +72,9 @@ measured.
 
 | Area | Contents | Docs |
 |---|---|---|
-| dreaming | Leiden (GDS profile) → community generation, synthesis, profile cache | 02 §7 |
+| dreaming | bounded ID/arc export → disposable networkless GDS Leiden → pinned community generation, exact-support synthesis, profile cache | 02 §7 |
 | commit path | producer 4 (promotion) | 04 §6 |
-| derived layer | `:Community`, HAS_MEMBER, majority visibility, Community mass | 01, 03 §3, 04 §3 |
+| derived layer | `:Community`, cross-stream-compatible HAS_MEMBER, extraction-cutover disable/rebuild rule, majority visibility, Community mass | 01 §4, 03 §3, 04 §3 |
 | recall | identity channel, `entities` block | 05 §2 |
 | embedding | model swap procedure (new property and index, backfill, switch, gc) | 01 §4 |
 | GDS | envelope validation overlap@20, 100k/1M scale benches, health report | 07 §3–5 |

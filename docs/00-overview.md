@@ -51,10 +51,11 @@ truncation costs is measured, not estimated
 
 ## Invariants — rules that span every document
 
-1. **The originals layer is CREATE-only.** Episode, Payload, Hit and the
-   links remember() and commit write (NEXT_EPISODE, HAS_PAYLOAD, HIT_OF,
-   revision INVALIDATES) are never modified or deleted once written. Mistakes
-   are fixed by events (INVALIDATES). The data authority is the Neo4j
+1. **The originals layer is CREATE-only.** Episode, Payload, Hit,
+   HAS_PAYLOAD, HIT_OF and revision INVALIDATES are never modified or deleted
+   once written. NEXT_EPISODE is a rebuildable cache because event-time
+   backfill must rewire session order. Mistakes are fixed by events
+   (INVALIDATES). The data authority is the Neo4j
    database plus `~/.anamnesis/objects/`, nothing else
    ([01-storage](01-storage.md) §9).
 2. **The derived layer is regenerable.** Fact, Entity, Community, Link and
@@ -89,7 +90,7 @@ truncation costs is measured, not estimated
 | [03-time](03-time.md) | Which world — snapshot(T), derived visibility, change vs correction, INVALIDATES |
 | [04-forgetting](04-forgetting.md) | How alive — m₀, S, Hit ledger, Episode attribution, commit protocol |
 | [05-recall](05-recall.md) | How to retrieve — candidates → seeds → envelope → PPR → RRF → assembly, degradation ladder |
-| [06-envelope-ppr](06-envelope-ppr.md) | How far to look — budgets, fanout, hubs, boundary normalization, convergence, determinism |
+| [06-envelope-ppr](06-envelope-ppr.md) | How far to look — budgets, fanout, hubs, retained-row normalization, convergence, determinism |
 | [07-gds-validation](07-gds-validation.md) | How accurate — solver validation, envelope validation, CI gates |
 | [08-repo-and-release](08-repo-and-release.md) | How it is built and shipped |
 | [09-roadmap](09-roadmap.md) | In what order |
@@ -104,8 +105,8 @@ truncation costs is measured, not estimated
 | Link | A relationship between Elements. Seven roles, real Neo4j relationship types |
 | Hit | A ledger record that a memory was actually used. Attached to an Episode |
 | generation | A version of the derived layer. An integer per stream for extraction and community; a model id for embedding |
-| revision_key | `sha256(origin_key, digest)` — the unique identity of one Episode revision; `origin_key` alone is the logical source and is shared by revisions |
+| revision_key | `sha256(origin_key, source_revision)` — one immutable revision occurrence; a later A→B→A revert has a new source revision and a new Episode |
 | envelope | The bounded subgraph a single recall actually sees |
-| structure_revision | Integer incremented on every Element/Link create and generation switch. Used for recall consistency checks |
+| structure_revision | Serving-view revision: changes only when recall-visible structure or selectors change |
 | snapshot(T) | The world up to event time T |
 | now | Server clock. The reference for forgetting |

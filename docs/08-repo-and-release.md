@@ -80,13 +80,16 @@ artifacts; CI is the drift gate).
   external prerequisite (the Neo4j container) — `up` creates `~/.anamnesis/`
   (0700), generates the per-install Neo4j password, writes `compose.yaml`
   binding bolt to 127.0.0.1 only, and manages the container's lifetime
-  (docs/02 §10). GDS only under `--profile gds` (docs/07 §1).
+  (docs/02 §10). GDS exists only in disposable networkless jobs: dreaming
+  loads bounded ID/arc exports, while `anamnesis bench` loads fixtures or
+  snapshots (docs/02 §7, docs/07 §1).
 - The daemon is a JS entry in the same package (`anamnesisd.js`) — clients
   spawn it on demand and it holds `daemon.lock`. Development override:
   `ANAMNESIS_DAEMON_PATH`.
-- All user data lives under `~/.anamnesis/` (docs/01 §6). Backup =
-  `neo4j-admin dump`, then `objects/` (docs/01 §9). `anamnesis backup` and
-  `anamnesis restore` wrap the procedure.
+- All user data lives under `~/.anamnesis/` (docs/01 §6).
+  `anamnesis backup` orchestrates the required Community offline dump, a
+  fixed Payload manifest and restart; `anamnesis restore` restores that
+  complete unit and verifies it (docs/01 §9).
 
 ## CI (GitHub Actions)
 

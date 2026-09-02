@@ -11,7 +11,7 @@ same `(query, T, now)` produce the same result.
     ├─ ② candidates  vector(64) ── BM25(64) ── session(32) ── identity(anchors + profile 16)
     │                all with visible(T) and visible_gen in the WHERE clause
     │
-    ├─ ③ seeds       channel RRF → hub damping → normalize → top 128
+    ├─ ③ seeds       channel RRF → hub damping → top 128 → normalize
     │
     ├─ ④ envelope    one Neo4j tx, ≤ 2,000 nodes / 20,000 links       ┐
     ├─ ⑤ PPR         TypeScript, CSR, α = 0.85                        ┘ docs/06
@@ -43,18 +43,26 @@ The following are fixed at the start of the request and never change.
 
 | Channel | Source | Size | Ranking |
 |---|---|---|---|
-| `vector` | `vec_<active>` HNSW over Fact ∪ Episode (content) — `queryNodes`; plus RELATES_TO (content, v0.2) — `queryRelationships`, each hit contributing **both endpoints** with the relationship's score | 64 nodes + 16 relationships (≤ 32 endpoints) | cosine DESC, id ASC |
-| `bm25` | fulltext `element_content` (cjk) | 64 | Lucene score DESC, id ASC |
-| `session` | the last 32 Episodes of `origin_session` plus the most recent 64 Facts DERIVED_FROM them | ≤ 32 + 64 | recency (time_utc DESC, id ASC) |
-| `identity` | user and agent Entity anchors + profile cache (dreaming, top-16 Facts) | ≤ 18 | cache order |
+| `vector` | global `vec_episode_<model>` plus active-generation `vec_fact_g<g>_<model>` — `queryNodes`; active-generation `vec_rel_g<g>_<model>` — `queryRelationships` | 64 nodes + 16 relationships (≤ 32 endpoints) | cosine DESC, id ASC |
+| `bm25` | global Episode fulltext plus `fts_fact_g<active>` (cjk) | 64 | Lucene score DESC, id ASC |
+| `session` | last 32 Episodes plus top 2 non-synthesis Facts per Episode through composite index seeks | ≤ 32 + 64 | Episodes: time_utc DESC, ingest_seq DESC; Facts: time_utc DESC, id ASC; merged by time, kind, id |
+| `identity` | user and agent Entity anchors + profile cache (dreaming, top-16 Facts) | ≤ 18 | score DESC, Fact.id ASC |
 
 Candidate total ≤ 96 + 64 + 96 + 18 = **274**. Every later stage is bounded
 by this number plus the envelope (§6).
 
-- Channel queries put **`visible(T) ∧ visible_gen` in the WHERE clause**.
-  Filtering after LIMIT leaves the candidate set empty for past T. HNSW
-  over-fetches to satisfy the filter: `k_fetch = 4 × k`, and if fewer than k
-  survive, we proceed with what we have.
+- Active selectors choose generation-scoped indexes before top-k, so hidden
+  generations cannot crowd the result. Channel queries also put
+  **`visible(T)` in the WHERE clause**. HNSW over-fetches `k_fetch = 4 × k`
+  only for the time predicate; if fewer than k survive, we proceed with what
+  we have.
+- Relationship-vector hits map to both endpoints. Within the vector channel,
+  each endpoint keeps the maximum score across its direct node hit and all
+  incident relationship hits; endpoint IDs then rank by `score DESC, id ASC`.
+- Candidate index procedures have `k_fetch ≤ 256` and a 50 ms transaction
+  timeout per channel. Timeout drops that whole channel. The session channel
+  performs 32 bounded index seeks and reads at most two Fact rows per Episode;
+  synthesis Facts have no `primary_episode_id` and cannot inflate the scan.
 - `valid(T)` is not applied here (docs/03 §7). Invalid Facts still conduct.
 - The session channel is what catches "the thing I mentioned a moment ago".
   The identity channel is a weak bias that lets spreading start around the
@@ -69,12 +77,14 @@ Seed mass of candidate x:
             w_vector = 0.35, w_bm25 = 0.35, w_session = 0.2, w_identity = 0.1
             weights of absent channels are redistributed proportionally to the rest
   hub(x)  = 1 / log₂(2 + deg(x))                   deg = conducting-role degree (Neo4j COUNT{})
-  seed(x) = raw(x) · hub(x) / Σ raw · hub          Σ seed = 1
+  affinity(x) = raw(x) · hub(x)
+  S           = top 128 candidates by affinity DESC, id ASC
+  s(x)        = affinity(x) / Σ_{y∈S} affinity(y)   for x ∈ S; Σ s = 1
 ```
 
-Only the top **128** by `seed DESC, id ASC` become the PPR personalization
-vector s. The remaining candidates do not seed but stay in the channel lists
-used in ⑥.
+Selection happens **before** normalization. The top 128 become the PPR
+personalization vector `s`; the remaining candidates do not seed but stay in
+the channel lists used in ⑥. If `S` is empty, PPR is absent.
 
 Note that these seed weights are a different set from the fusion weights in §6
 — seeding decides where spreading starts; fusion decides what is returned.
@@ -87,7 +97,8 @@ of neighbors and query specificity is lost.
 
 [06-envelope-ppr](06-envelope-ppr.md). Only the contract needed here:
 
-- Input: 128 seeds, T, active[*]. Output: p over the envelope nodes (Σ p ≤ 1),
+- Input: at most 128 normalized seeds, T, active[*]. Output: p over the
+  envelope nodes (`Σ p = 1`),
   or absent.
 - If the envelope transaction does not finish within **100 ms** (config), the
   PPR channel is **dropped entirely.** Running PPR on a partial envelope
@@ -112,9 +123,12 @@ Lucene and PPR mass have no common unit. All `w` are calibration targets.
 ### Mass and score
 
 For the candidate union (all lists ∪ envelope top 256; ≤ 274 + 256 = **530**
-elements), the source Episodes' cache `(s, t_last_hit)` is read **in one
-Cypher batch** (≤ 530 × 3 sources, bounded by the DERIVED_FROM depth) and
-exact `m(now)` is computed (docs/04 §3). Then
+elements), first retain returnable Facts/Episodes and at most eight Entity
+anchors. Communities and other non-result nodes are discarded **before**
+source resolution. The source Episodes' cache `(s, t_last_hit)` is then read
+in one Cypher batch for the remaining Facts/Episodes (≤ 530 × 16 materialized
+source Episode IDs); Entity anchors use immutable `m0`. Exact `m(now)` follows
+(docs/04 §3).
 
 ```text
   score(x) = relevance(x) · max(m(x), ε)^γ            γ = 0.5, ε = 0.02
@@ -125,9 +139,9 @@ exact `m(now)` is computed (docs/04 §3). Then
 1. **Kind**: results are Facts and Episodes. Entities and Communities are not
    results; they are returned separately in the `entities` block (anchors,
    top 8).
-2. **valid(T)**: invalid Facts leave the results. If the Fact that invalidated
-   one is in the results, the invalidated Fact is attached under
-   `provenance.supersedes`.
+2. **valid(T)**: invalid Facts **and superseded Episode revisions** leave the
+   results. If the Fact that invalidated one is in the results, the invalidated
+   Fact is attached under `provenance.supersedes`.
 3. **Ordering**: `score DESC, relevance DESC, mass DESC, id ASC`. Top k.
 
 ### Result item
@@ -163,8 +177,10 @@ exact `m(now)` is computed (docs/04 §3). Then
 - torn means the candidates and the envelope may have seen different
   revisions. It does not mean the result is wrong; it means reproducibility is
   not guaranteed.
-- Hits, cache writes and embedding backfill do not bump the revision
-  (docs/02 §1), so a burst of recalls does not make itself torn.
+- Hits, cache writes and hidden-generation/non-selected-model embedding
+  backfill do not bump the revision (docs/02 §1). Global Episode or ACTIVE
+  derived coverage for the selected model does, because it changes vector
+  candidates.
 - Mass is read **once**, in ⑦. If a commit lands mid-assembly and changes s,
   this response finishes with the value it read.
 
@@ -177,6 +193,7 @@ Top to bottom; nothing degrades into a silent partial result — whole
 |---|---|---|
 | Embedding service failure | vector channel absent. Seeds from bm25, session, identity | `channels_used` lacks vector |
 | Fulltext error | bm25 absent | 〃 |
+| Candidate channel tx > 50 ms | that channel is absent | `channel_reason: timeout` |
 | Both vector and bm25 absent | seeds from session and identity only → PPR still runs | 〃 |
 | Zero candidates | no envelope, empty result | `reason: no_candidates` |
 | Envelope tx > 100 ms | PPR list absent. Channel RRF only | `ppr_used: false, ppr_reason: envelope_timeout` |
@@ -203,8 +220,9 @@ thing that throws is a contract violation (schema error).
 ```
 
 Target: **p50 < 100 ms, p95 < 250 ms** (including embedding, 1M-element
-graph, local M-series). Per-stage budgets are set from measurements; the only
-hard deadline is the 100 ms envelope tx.
+graph, local M-series). Neo4j work has deterministic wall-clock guards candidate
+channel timeouts of 50 ms and an envelope timeout of 100 ms; either drops the
+whole affected channel. The bounded TypeScript PPR loop has no deadline.
 
 ## 10. Exposure in auto mode
 

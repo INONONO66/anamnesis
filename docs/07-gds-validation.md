@@ -13,29 +13,30 @@ for both measurements and is never on the online path.
 
 ## 1. Environment
 
-- The GDS plugin is loaded only under a **separate compose profile**
-  (`anamnesis up --profile gds`). The default profile's Neo4j has no plugin —
-  the online path cannot use GDS even by accident.
-- Validation is the `anamnesis bench …` CLI and bypasses the daemon (its own
-  bolt connection, read-only).
-- Fixture graphs: synthetic (§4) and real-usage snapshots (dumps), both.
+- The live authority never loads GDS and never grants a second Bolt client.
+  `anamnesis bench …` starts a disposable, loopback-only Neo4j+GDS container
+  and loads a synthetic fixture or verified point-in-time dump.
+- The disposable container has a distinct random credential and temporary
+  volume; it is destroyed after results and logs are captured.
+- Fixture graphs: synthetic (§4) and redacted/locally retained real-usage
+  snapshots (dumps), both.
 
 ## 2. Solver validation (v0.2)
 
 **Question**: is our PPR implementation mathematically correct?
 
 GDS personalized PageRank takes a *set* of source nodes with equal teleport
-probability, not a weighted seed vector, and handles dangling mass its own
-way. Both differences are removed on the graph side rather than by loosening
-the tolerance.
+probability, not a weighted seed vector. The virtual source below supplies the
+weighted seed. Explicit uniform edges are added only for dangling envelope
+rows so GDS and TypeScript use the same dangling policy.
 
 ```text
-  1. Run recall with diagnostics.dump_envelope = true → save V, E, s, leak, deg
+  1. Run recall with diagnostics.dump_envelope = true → save V, retained directed A, s, dangling
   2. Build a GDS in-memory graph on V ∪ {σ}
-       · i → j  for every ordered pair in V×V, weight  W_ij + leak_i / |V|
-         (W_ij = w_role / D_i with D_i the true weighted degree, as in docs/06 §4; the uniform leak is
-          folded into a dense row. Each row sums to exactly 1, so GDS's own out-weight normalization
-          is a no-op. |V|² ≤ 4M relationships — fine offline)
+       · for each non-dangling i: i → j with weight w_role for every retained arc;
+         GDS normalizes by Σ retained role weights, exactly docs/06 §4
+       · for each dangling i: i → every j ∈ V with weight 1/|V|
+         (worst case |V|² ≤ 4M relationships — fine offline)
        · σ → i  weight s_i   (Σ s = 1)
   3. gds.pageRank.stream(sourceNodes = [σ], dampingFactor = 0.85,
                          relationshipWeightProperty, tolerance = 1e-9, maxIterations = 1000)
@@ -55,7 +56,7 @@ Fallback if the σ construction is ever unavailable: PPR is linear in s, so
 
 | Criterion | Value | Basis |
 |---|---|---|
-| `‖p_ts − p_gds‖₁` | ≤ 7e-4 | error bound 6.7e-4 at τ = 1e-4 (docs/06 §5) + GDS residual |
+| `‖p_ts − p_gds‖₁` | ≤ 7e-4 | error bound 5.7e-4 at τ = 1e-4 (docs/06 §5) plus GDS residual and binary64 margin |
 | top-k set, k ∈ {10, 20, 50} | identical when the **boundary is clear** | the k-th and (k+1)-th p differ by > 2·7e-4 |
 | top-k set, boundary close | overlap@k ≥ 0.95 | difference ≤ 2·7e-4 — either order is legitimate |
 | NDCG@k (gain = p_gds) | ≥ 0.999 | rank flips, if any, lose a negligible amount of reference score |
@@ -75,21 +76,25 @@ mismatch, and both are fixed in code — the thresholds are not loosened.
 **Question**: how well does the 2-hop / 2,000-node truncation reproduce
 full-graph PPR?
 
+Let `U` be the complete visible vertex set for the pinned snapshot and active
+generation pair. `V ⊆ U` remains the local envelope.
+
 ```text
-  1. Full-graph projection (visible(T) and visible_gen applied, conducting roles, both directions,
+  1. Full-graph projection on U (visible(T) and visible_gen applied, conducting roles, both directions,
      relationship weight = w_role)
-       · GDS normalizes each node's out-weights by their sum, i.e. by Σ_role w_role · deg_role(i) = D_i.
-         That is exactly our W_ij = w_role / D_i (docs/06 §4), and on the full graph every row sums to 1,
-         so there is no leak term to reproduce. Any positive role weights are fine
-       · add σ → seeds with weight s_i as in §2; sourceNodes = [σ]; divide the result on V by α
+       · GDS normalizes each row over exactly the visible projected links, the
+         same retained-row rule used by local PPR. Any positive role weights are fine
+       · add σ → seeds with weight s_i as in §2; sourceNodes = [σ]; divide the result on U by α
   2. gds.pageRank.stream(personalized) → p_full
   3. recall's envelope + TS PPR → p_local (0 outside the envelope)
   4. Compare
 ```
 
-Seeds with conducting degree 0 (isolated) are excluded from the validation
-set — GDS's dangling treatment and ours need not agree for them, and they
-cannot spread anyway.
+Seeds with conducting degree 0 are excluded from the envelope-quality
+validation set. Conducting links are bidirectional, so a zero-degree node is
+isolated and cannot be reached from another seed; omitting isolated seeds
+therefore removes all reachable dangling rows from the full-view projection.
+The solver validation in §2 still tests dangling rows explicitly.
 
 ### Metrics
 
@@ -99,7 +104,7 @@ cannot spread anyway.
 | overlap@50 | report only | |
 | envelope recall | report only | share of full top 50 inside the envelope — what truncation missed |
 | Σ_{V} p_full | report only | share of full-PPR mass the envelope contains |
-| total leak Σ leak_i p_i | report only | how much boundary normalization did |
+| boundary mass | report only | `Σ_{i∈U\V} p_full(i)` |
 
 If overlap@20 < 0.8, **do not raise the limits first** — look at the cause:
 hub shortlist quality, fanout ordering bias, seed distribution. Raising limits

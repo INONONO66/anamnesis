@@ -19,16 +19,16 @@ bounding costs.
   and facts only.
 - **One time axis** — `snapshot(T)` reconstructs what was true at any moment.
   Contradictions are dated invalidation events, never destructive updates;
-  corrections are backdated; entity and community visibility is derived, not
-  stored.
+  corrections are backdated; Entity/Community have no event time, while
+  rebuildable visibility thresholds make recall bounded.
 - **Forgetting without a clock** — `m(now) = m₀ × R(t, S)` (power-law
   retention, testing-effect reinforcement) is computed at read time from a
   hit ledger attached to episodes, so re-extraction never resets what the
   system has learned about its own usage. No tick daemon.
 - **Bounded recall** — vector + BM25 + session candidates seed a 2-hop
   envelope (≤ 2,000 nodes / 20,000 links) pulled in one Neo4j transaction;
-  personalized PageRank runs on it in TypeScript with true-degree
-  normalization and uniform leak; RRF fuses channels; mass weights the
+  personalized PageRank runs on it in TypeScript with retained-row
+  normalization and a fixed uniform dangling rule; RRF fuses channels; mass weights the
   result. Deterministic. Partial results are never used silently.
 - **Local sovereignty** — one npm install, one resident daemon
   (`anamnesisd`, TypeScript/Node), one local Neo4j container the CLI manages,
@@ -49,7 +49,7 @@ normative; code follows them.
 | [03-time](docs/03-time.md) | Which world — `snapshot(T)`, derived visibility, change vs correction, non-recursive `INVALIDATES` |
 | [04-forgetting](docs/04-forgetting.md) | How alive — m₀, stability, hit ledger on episodes, commit protocol, replay |
 | [05-recall](docs/05-recall.md) | How to retrieve — candidates → seeds → envelope → PPR → RRF → assembly, degradation ladder |
-| [06-envelope-ppr](docs/06-envelope-ppr.md) | How far to look — budgets, fanout, hubs, boundary normalization, convergence, determinism |
+| [06-envelope-ppr](docs/06-envelope-ppr.md) | How far to look — budgets, fanout, hubs, retained-row normalization, convergence, determinism |
 | [07-gds-validation](docs/07-gds-validation.md) | How accurate — solver validation, envelope validation, CI gates |
 | [08-repo-and-release](docs/08-repo-and-release.md) | How it is built and shipped |
 | [09-roadmap](docs/09-roadmap.md) | In what order — v0.1 → v0.3 |

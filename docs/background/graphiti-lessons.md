@@ -7,8 +7,10 @@
 > Analyzed (2026-08-30, full read of code and ADRs):
 > - [getzep/graphiti](https://github.com/getzep/graphiti) — the original. Zep's core engine.
 > - [Soju06/graphiti](https://github.com/Soju06/graphiti) — a fork with production patches.
-> - [Soju06/hermes-graphiti](https://github.com/Soju06/hermes-graphiti) — memory plugin for
->   the Hermes agent plus a single-writer daemon. 100+ ADRs, including incident records.
+> - `Soju06/hermes-graphiti` — memory plugin for the Hermes agent plus a
+>   single-writer daemon. The analyzed repository is no longer publicly
+>   available as of 2026-09; observations below are retained as historical
+>   analysis rather than a live citation.
 
 ## 1. Upstream graphiti — logical structure
 

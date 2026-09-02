@@ -3,13 +3,16 @@
 Forgetting is computed, not stored. An element's current mass is
 
 ```text
-  m(now) = m₀ · R(now − t_last_hit, S)
+  Δdays(t₁,t₀) = max(0, t₁ − t₀) / 86,400,000
+  m(now) = m₀ · R(Δdays(now, t_last_hit), S)
   R(t, S) = (1 + FACTOR · t / S)^DECAY          DECAY = −0.5,  FACTOR = 19/81  ⇒  R(S, S) = 0.9
 ```
 
 with inputs the immutable `m₀`, the cached `(S, t_last_hit)`, and the server
 clock `now`. `(S, t_last_hit)` is a cache that is deterministically
 regenerable from the Hit ledger. There is no tick daemon.
+Clock regression yields elapsed zero; `R` never exceeds 1 and its base cannot
+become negative.
 
 ## 1. m₀ — intrinsic mass
 
@@ -45,11 +48,11 @@ handled by sub_kind and m₀.
 ## 3. Mass of derived elements
 
 ```text
-  sources(f)   = the set of Episodes reached by following DERIVED_FROM to depth ≤ 3
+  sources(f)   = f.source_episode_ids
+                 1–16 original Episodes, materialized at Fact creation
                  (ignoring generation and snapshot — the provenance exception, docs/03 §3)
-                 non-empty by contract: every Fact has ≥ 1 DERIVED_FROM (docs/01 §1)
 
-  R_fact(f)      = max_{e ∈ sources(f)} R(now − t_last_hit(e), s(e) · σ_fact)          σ_fact = 30
+  R_fact(f)      = max_{e ∈ sources(f)} R(Δdays(now,t_last_hit(e)), s(e) · σ_fact)     σ_fact = 30
 
   m(Fact f)      = m₀(f) · R_fact(f)
   m(Entity n)    = m₀(n)                                                                  (no decay)
@@ -66,6 +69,9 @@ handled by sub_kind and m₀.
   target.
 - Entities do not decay. An anchor fades sufficiently through its facts being
   forgotten.
+- `sources(f)` is a stored bounded authority set, not a recursive graph
+  traversal. `source_count_total` and `sources_truncated` expose synthesis
+  truncation (docs/01 §1).
 - Because reinforcement history lives on Episodes, **generation switches, the
   replacement protocol (docs/03 §5) and re-extraction never touch forgetting
   state.** When A′ replaces A, A's source Episodes are A′'s sources, so the
@@ -110,8 +116,8 @@ function (§6). Nothing else in the daemon creates a Hit.
 
 ### Derived → Episode attribution, with conservation
 
-If the adopted element is a Fact, a Hit is created on each Episode in
-`sources(f)`. Total reinforcement is conserved:
+If the adopted element is a Fact, a Hit is created on each of its 1–16
+materialized source Episodes. Total reinforcement is conserved:
 
 ```text
   κ_eff(e) = κ(kind) / |sources(f)|
@@ -127,9 +133,9 @@ adopted item the shares add up but never exceed the kind's κ.
 At hit time `t_h`:
 
 ```text
-  R_hit = R(t_h − t_last_hit, s)
+  R_hit = R(Δdays(t_h, t_last_hit), s)
   s′    = min( S_max,  s · (1 + a · κ_eff · (e^{b(1−R_hit)} − 1) · s^{−c}) )
-  t_last_hit′ = t_h,   hit_count′ = hit_count + 1
+  t_last_hit′ = max(t_last_hit, t_h),   hit_count′ = hit_count + 1
 
   a = 5.0,  b = 1.0,  c = 0.1,  S_max = 3650 days        (s in days)
 ```
@@ -146,15 +152,15 @@ by κ_eff. Properties:
 ```text
   s = 1 d, κ_eff = 1
     R_hit 0.9 (1 day later)    → s′ = 1 + 5·0.105 = 1.53
-    R_hit 0.5 (10 days later)  → s′ = 1 + 5·0.649 = 4.24
+    R_hit 0.5 (~12.8 days later) → s′ = 1 + 5·0.649 = 4.24
     R_hit 0.2 (100 days later) → s′ = 1 + 5·1.226 = 7.13
 ```
 
 ### The Hit node
 
 ```text
-  (:Hit {id, t: t_h (server ms), kind, kappa_eff, recall_id, idem_key}) -[:HIT_OF]-> (:Episode)
-  idem_key = sha256(recall_id, episode_id, kind)
+  (:Hit {id, t: t_h (server ms), kind, kappa_eff, namespace, idem_key}) -[:HIT_OF]-> (:Episode)
+  idem_key = sha256(namespace, episode_id, kind)
 ```
 
 The same cause produces at most one Hit per Episode and kind.
@@ -164,7 +170,7 @@ The same cause produces at most one Hit per Episode and kind.
 ### Internal function
 
 ```text
-  commitHits(namespace, kind, adopted: [element_id…], t_h = server_time)
+  commitHits(tx?, namespace, kind, adopted: [element_id…], t_h = server_time)
     1. each adopted → sources(x)  (an Episode is its own source)
     2. per-Episode κ_eff = κ(kind)/|sources(x)|, summed across adopted, capped at κ(kind)  (§5)
     3. per Episode
@@ -172,13 +178,16 @@ The same cause produces at most one Hit per Episode and kind.
          b. cache check: hit_count == COUNT { (:Hit)-[:HIT_OF]->(e) }
             mismatch → regenerate (s, t_last_hit, hit_count) by full ledger replay (§7), then continue
          c. compute R_hit, s′  (the server computes; no caller supplies numbers)
-    4. one transaction: Hit CREATE × n + Episode cache SET × n
+    4. Hit CREATE × n + Episode cache SET × n in the supplied write tx;
+       if tx is absent, open one standalone transaction
     5. return {hits_created, episodes: [{id, s, s′}]}
 ```
 
-Called from exactly four places, each with its own namespace (§5). This
-function is the whole of the write surface for forgetting; the
-`structure_revision` is not touched.
+Called from exactly four places, each with its own namespace (§5). Receipt and
+exposure calls open a standalone transaction; extraction and dreaming pass
+their ambient write transaction so their Fact and Hit effects are atomic.
+This function is the whole write surface for forgetting;
+`structure_revision` is not touched by the Hit/cache portion.
 
 ### Producer 1 — `commit` RPC (receipt clients)
 
@@ -238,8 +247,10 @@ is the price of "it was shown, but we do not know whether it was used".
   and commit replays on the spot when it sees a `hit_count` mismatch.
 - **Out-of-order Hits** (`h.t < t_last_hit` — migration imports, clock
   regression): the incremental update is order-dependent, so the cache is
-  discarded and the Episode's ledger is **replayed in full**. There are no
-  checkpoints — one Episode has at most a few hundred Hits.
+  discarded and the Episode's ledger is **replayed in full**. Every replay
+  step uses `Δdays=max(0,…)` and retains `max(t_last_hit,h.t)`, including a Hit
+  earlier than `ingested_at`. There are no checkpoints — one Episode has at
+  most a few hundred Hits.
 - Dropping the whole cache and regenerating it is always possible
   (`anamnesis rebuild --hit-cache`).
 
@@ -254,7 +265,8 @@ is the price of "it was shown, but we do not know whether it was used".
 - γ < 1 compresses mass differences so relevance leads. Calibration target.
 - ε keeps the score from collapsing to 0 as m → 0, which would destroy the
   ordering.
-- Envelope fanout ordering uses `m_cache` (SET hourly by the maintenance job, docs/02 §6)
+- Envelope fanout ordering uses `coalesce(m_cache,m0)` (`m_cache` is SET
+  hourly by maintenance; new nodes fall back to total immutable `m0`, docs/02 §6)
   so that exact m is not computed for every neighbor. The final score uses
   exact m(now).
 

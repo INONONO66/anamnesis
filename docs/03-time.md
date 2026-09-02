@@ -45,20 +45,22 @@ Entity, Community and Link it is **derived**.
   visible(Episode e, T)   = e.time_utc <= T
   visible(Fact f, T)      = f.time_utc <= T && visible_gen(f)
   visible(Entity n, T)    = visible_gen(n)
-                          && ∃ (x)-[:MENTIONS]->(n) : visible(x, T) && visible_gen(link)
-  visible(Community c, T) = visible_gen(c)
-                          && |{ m : (c)-[:HAS_MEMBER]->(m), visible(m, T) }| >= max(1, ⌈0.5 · |members(c)|⌉)
+                          && n.visible_from_utc <= T
+  visible(Community c, T) = visible_community(c, active[community], active[extraction])
+                          && c.visible_from_utc <= T
   visible(Link l, T)      = visible_gen(l) && visible(l.from, T) && visible(l.to, T)
 ```
 
 `visible_gen` is defined in [01-storage](01-storage.md) §4. Reasons:
 
-- Storing a time on an Entity makes it "first mention time", which is always
-  derivable from Episodes and can change on re-extraction. Storing it creates
-  two truths.
-- A Community is a product of dreaming and has no event time. The majority
-  rule approximates "if most of its members existed then, the topic existed".
-  The constant 0.5 is a calibration target.
+- `Entity.visible_from_utc` is a rebuildable cache: the minimum visible time
+  of its MENTIONS sources in that extraction generation. Active backfill may
+  lower it in the same transaction that adds the mention.
+- A Community generation captures each member's visibility threshold on
+  HAS_MEMBER. For `k=max(1,ceil(0.5·member_count))`,
+  `Community.visible_from_utc` is the k-th smallest captured threshold. The
+  majority rule is therefore one property comparison at recall, not an
+  unbounded member count.
 - A Link exists iff both ends exist. Links have no time of their own.
 
 ### The DERIVED_FROM exception — provenance only
@@ -75,18 +77,42 @@ Episode (2026) is not. Two rules diverge here.
 ## 4. valid(x, T) — non-recursive INVALIDATES
 
 ```text
-  valid(x, T) = visible(x, T)
-             && ¬∃ (y)-[:INVALIDATES]->(x) : y.time_utc <= T && visible_gen(y) && visible_gen(link)
+  source_live(e, T) = ¬∃ (y)-[:INVALIDATES]->(e) : y.time_utc <= T
+
+  valid(Episode e, T) = visible(e, T) && source_live(e, T)
+
+  support_valid(f, T) = true                                      if f is not synthesis
+                      = ∀ u ∈ f.support_fact_ids : valid(u, T)     if f is synthesis
+
+  valid(Fact f, T) = visible(f, T)
+                   && ∃ e ∈ f.source_episode_ids : source_live(e, T)
+                   && support_valid(f, T)
+                   && ¬∃ (y)-[:INVALIDATES]->(f) :
+                          y.time_utc <= T && visible_gen(y) && visible_gen(link)
 ```
 
-y's own validity is **not consulted.** "Does the original come back when its
+An invalidator Fact's own validity is **not consulted.** "Does the original come back when its
 invalidator is invalidated" is the doorway to recursion, cycles and rule
 explosion, and we keep that door shut. Anything that should come back is
 *created anew* by the replacement protocol in §5.
 
+`source_live` deliberately does not require the source Episode itself to be
+visible at T. A Fact backdated to 2019 from an Episode uttered in 2026 remains
+visible in a 2020 world snapshot under the provenance exception, while a 2027
+revision of that Episode can stop the Fact from 2027 onward.
+
+Both existential INVALIDATES checks compile to a composite relationship-index
+seek on `(target_id, generation?, effective_time_utc, id)` with
+`effective_time_utc <= T`, ordered by time/id and `LIMIT 1`; validity never
+expands an unbounded incoming adjacency list.
+
+Synthesis support is one bounded level: `support_fact_ids` may reference only
+non-synthesis Facts. If any support becomes invalid, the synthesis becomes
+invalid and the next dreaming run creates a replacement; it is never
+resurrected recursively.
+
 - INVALIDATES is meaningful only as `Fact → Fact` and `Episode → Episode`
-  (revisions). The lattice also permits `Fact → Episode`, but extraction never
-  produces it.
+  (revisions).
 - CONTRASTS has no effect on validity. Both Facts stay valid and appear
   together in recall results as a contradiction — resolution is left to the
   user or to a later utterance.
@@ -122,13 +148,15 @@ If B invalidated A, B turned out to be wrong, and A is still true:
                        A is still invalid (non-recursive — the A ← B edge stands even though B is invalid)
   create replacement   A′ {content = A.content, time = A.time, sub_kind = A.sub_kind}
                        A′ ─DERIVED_FROM─▶ A,  A′ ─DERIVED_FROM─▶ C     (provenance)
+                       A′.source_episode_ids = [C's correction Episode]
+                           + deterministic top 15 of authority(A)
                        A′ ─INVALIDATES──▶ A                             (A leaves for the whole range)
 ```
 
 Result: for every T ≥ A.time, A′ is valid and A and B are invalid. No
 duplicate exposure, and the validity definition stays one hop. The cost is one
-Fact. A′'s mass is computed from its source Episodes (A's Episode ∪ C's
-Episode), so the hit history A accumulated carries over to A′
+Fact. A′'s mass is computed from its bounded materialized source Episodes, so
+the hit history A accumulated carries over to A′
 ([04-forgetting](04-forgetting.md) §3 — one of the reasons Hits attach to
 Episodes).
 
@@ -155,29 +183,24 @@ necessary, a revision log on Meta is enough and the schema does not change.
 ## 7. Cypher sketch
 
 Candidate search and envelope expansion put visible(T) **in the WHERE
-clause** (not as a post-filter). Entities, whose visibility is derived, are
-tested with an EXISTS subquery.
+clause**. Generation-scoped indexes exclude hidden generations before top-k;
+materialized visibility thresholds avoid nested graph scans.
 
 ```cypher
-// Fact candidates (vector channel). $T = snapshot ms, $g = active[extraction]
-CALL db.index.vector.queryNodes('vec_bge_m3_1024', 64, $q) YIELD node AS f, score
+// The application selects this validated index from pinned active generation 43.
+CALL db.index.vector.queryNodes('vec_fact_g43_bge_m3_1024', 256, $q)
+YIELD node AS f, score
 WHERE f:Fact
   AND f.time_utc <= $T
-  AND f.gen_from <= $g AND (f.gen_to IS NULL OR f.gen_to > $g)
 RETURN f.id, score
 ORDER BY score DESC, f.id ASC
+LIMIT 64
 ```
 
 ```cypher
 // Entity visibility (neighbor filter during envelope expansion)
 WITH n
-WHERE n.gen_from <= $g AND (n.gen_to IS NULL OR n.gen_to > $g)
-  AND EXISTS {
-    MATCH (x)-[l:MENTIONS]->(n)
-    WHERE x.time_utc <= $T
-      AND (x.gen_from IS NULL OR (x.gen_from <= $g AND (x.gen_to IS NULL OR x.gen_to > $g)))
-      AND l.gen_from <= $g AND (l.gen_to IS NULL OR l.gen_to > $g)
-  }
+WHERE n.generation = $g_e AND n.visible_from_utc <= $T
 ```
 
 valid(T) is not applied at the candidate or envelope stage — an invalid Fact
