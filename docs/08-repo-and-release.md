@@ -19,6 +19,9 @@ only**.
 
 ## Monorepo (bun workspace)
 
+Target layout. Today only `protocol` and `core` exist; the rest is created as
+the roadmap reaches it (docs/09).
+
 ```text
 anamnesis/
 ├── package.json                # bun workspace root
@@ -74,13 +77,16 @@ artifacts; CI is the drift gate).
 
 - Install experience: `npm i -g @anamnesis/cli` → `anamnesis up`, done. No
   system daemon registration, no postinstall scripts. Docker is the only
-  external prerequisite (the Neo4j container) — `up` writes
-  `~/.anamnesis/compose.yaml` and manages the container's lifetime
-  (docs/02). GDS only under `--profile gds` (docs/07 §1).
+  external prerequisite (the Neo4j container) — `up` creates `~/.anamnesis/`
+  (0700), generates the per-install Neo4j password, writes `compose.yaml`
+  binding bolt to 127.0.0.1 only, and manages the container's lifetime
+  (docs/02 §10). GDS only under `--profile gds` (docs/07 §1).
 - The daemon is a JS entry in the same package (`anamnesisd.js`) — clients
-  spawn it on demand. Development override: `ANAMNESIS_DAEMON_PATH`.
+  spawn it on demand and it holds `daemon.lock`. Development override:
+  `ANAMNESIS_DAEMON_PATH`.
 - All user data lives under `~/.anamnesis/` (docs/01 §6). Backup =
-  `neo4j-admin dump` + `objects/` + `spool/`.
+  `neo4j-admin dump`, then `objects/` (docs/01 §9). `anamnesis backup` and
+  `anamnesis restore` wrap the procedure.
 
 ## CI (GitHub Actions)
 

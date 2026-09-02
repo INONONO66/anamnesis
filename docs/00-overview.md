@@ -16,8 +16,8 @@ for offline analysis and as an accuracy baseline only.
 
 ```text
   Neo4j                                          ~/.anamnesis/
-    ├─ originals: Episode · Hit ledger              ├─ objects/   payload bytes (content-addressed)
-    ├─ derived:   Fact · Entity · Community         ├─ spool/     remember() queue while Neo4j is down
+    ├─ originals: Episode · Hit ledger              ├─ objects/   payload bytes (content-addressed, part of the authority)
+    ├─ derived:   Fact · Entity · Community         ├─ spool/     transient remember() queue while Neo4j is down
     │             Link · embedding (generations)    └─ neo4j/     container volume
     ├─ caches:    hit cache · hub shortlist
     ├─ vector (HNSW) · fulltext (Lucene) candidates
@@ -51,9 +51,12 @@ truncation costs is measured, not estimated
 
 ## Invariants — rules that span every document
 
-1. **The originals layer is CREATE-only.** Episode, Payload and Hit are
-   never modified or deleted once written. Mistakes are fixed by events
-   (INVALIDATES).
+1. **The originals layer is CREATE-only.** Episode, Payload, Hit and the
+   links remember() and commit write (NEXT_EPISODE, HAS_PAYLOAD, HIT_OF,
+   revision INVALIDATES) are never modified or deleted once written. Mistakes
+   are fixed by events (INVALIDATES). The data authority is the Neo4j
+   database plus `~/.anamnesis/objects/`, nothing else
+   ([01-storage](01-storage.md) §9).
 2. **The derived layer is regenerable.** Fact, Entity, Community, Link and
    embeddings must be rebuildable at any time from the originals layer and
    the Hit ledger alone. That is why **Hits point at Episodes, never at
@@ -66,8 +69,11 @@ truncation costs is measured, not estimated
    ([03-time](03-time.md)).
 5. **Forgetting is computed, not stored.** The same state and the same clock
    give the same answer whenever it is evaluated. No tick daemon.
-6. **recall is read-only.** The only path that changes state is Hit commit,
-   and commit is recomputed by the server.
+6. **The recall handler is read-only, and Hits have one producer path.**
+   Every Hit — receipt commit, post-response exposure, extraction re_mention,
+   dreaming promotion — goes through the same server-side commit function
+   that recomputes the reinforcement ([04-forgetting](04-forgetting.md) §6).
+   No caller supplies numbers.
 7. **Partial results are never used silently.** When a channel fails, the
    whole channel is dropped and the fact is recorded in diagnostics.
 8. **Every constant is a calibration target.** Defaults are literature
@@ -79,7 +85,7 @@ truncation costs is measured, not estimated
 | Document | Question it answers |
 |---|---|
 | [01-storage](01-storage.md) | What is stored where — layers, elements, link lattice, generations, filesystem |
-| [02-daemon-and-pipelines](02-daemon-and-pipelines.md) | Who writes — single writer, RPC, revision, spool, extraction and dreaming cold paths |
+| [02-daemon-and-pipelines](02-daemon-and-pipelines.md) | Who writes — single writer, RPC, revision, spool, extraction, maintenance, dreaming, security boundary |
 | [03-time](03-time.md) | Which world — snapshot(T), derived visibility, change vs correction, INVALIDATES |
 | [04-forgetting](04-forgetting.md) | How alive — m₀, S, Hit ledger, Episode attribution, commit protocol |
 | [05-recall](05-recall.md) | How to retrieve — candidates → seeds → envelope → PPR → RRF → assembly, degradation ladder |
@@ -97,7 +103,8 @@ truncation costs is measured, not estimated
 | Episode / Fact / Entity / Community | Element kinds: original, derived statement, anchor, topic set |
 | Link | A relationship between Elements. Seven roles, real Neo4j relationship types |
 | Hit | A ledger record that a memory was actually used. Attached to an Episode |
-| generation | A version of the derived layer. One integer per stream (extraction / community / embedding) |
+| generation | A version of the derived layer. An integer per stream for extraction and community; a model id for embedding |
+| revision_key | `sha256(origin_key, digest)` — the unique identity of one Episode revision; `origin_key` alone is the logical source and is shared by revisions |
 | envelope | The bounded subgraph a single recall actually sees |
 | structure_revision | Integer incremented on every Element/Link create and generation switch. Used for recall consistency checks |
 | snapshot(T) | The world up to event time T |

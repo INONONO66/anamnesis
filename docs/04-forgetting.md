@@ -47,12 +47,14 @@ handled by sub_kind and m₀.
 ```text
   sources(f)   = the set of Episodes reached by following DERIVED_FROM to depth ≤ 3
                  (ignoring generation and snapshot — the provenance exception, docs/03 §3)
+                 non-empty by contract: every Fact has ≥ 1 DERIVED_FROM (docs/01 §1)
 
   R_fact(f)      = max_{e ∈ sources(f)} R(now − t_last_hit(e), s(e) · σ_fact)          σ_fact = 30
 
   m(Fact f)      = m₀(f) · R_fact(f)
   m(Entity n)    = m₀(n)                                                                  (no decay)
   m(Community c) = m₀(c) · max_{f ∈ members(c) ∩ Fact} R_fact(f)                          (v0.3)
+                   = m₀(c) if the Community has no Fact members (Entities do not decay)
 ```
 
 - **max**, not sum or mean. A fact with several sources is as alive as its
@@ -96,12 +98,15 @@ past, forgetting is not rewound to T.
 
 ### Kinds and κ
 
-| kind | κ | Origin |
-|---|---|---|
-| `recall_hit` | 1.0 | A receipt client reports that a result was adopted |
-| `re_mention` | 0.5 | The extraction judge classifies a new utterance as a duplicate of an existing Fact |
-| `promotion` | 0.3 | Dreaming synthesis uses this Fact as a source of a higher-level fact |
-| `exposure` | 0.15 | A result was shown to an auto client (top-3). Adoption unknown |
+| kind | κ | Producer | `recall_id` namespace |
+|---|---|---|---|
+| `recall_hit` | 1.0 | `commit` RPC from a receipt client: a result was adopted | the recall's UUID |
+| `exposure` | 0.15 | the daemon, after an auto-mode recall response: top-3 results were shown, adoption unknown | the recall's UUID |
+| `re_mention` | 0.5 | the extraction write tx: a new utterance is a duplicate of an existing Fact | `extract:<episode_id>` |
+| `promotion` | 0.3 | dreaming synthesis: this Fact became a source of a higher-level fact | `dream:<synthesis_fact_id>` |
+
+Four producers, **one path**: all of them call the same internal commit
+function (§6). Nothing else in the daemon creates a Hit.
 
 ### Derived → Episode attribution, with conservation
 
@@ -152,12 +157,59 @@ by κ_eff. Properties:
   idem_key = sha256(recall_id, episode_id, kind)
 ```
 
-`recall_id` namespaces: recall_hit and exposure use the recall's UUID,
-re_mention uses `extract:<episode_id>`, promotion uses
-`dream:<synthesis_fact_id>`. The same cause produces at most one Hit per
-Episode and kind.
+The same cause produces at most one Hit per Episode and kind.
 
-## 6. Commit protocol
+## 6. The commit path — the only Hit producer
+
+### Internal function
+
+```text
+  commitHits(namespace, kind, adopted: [element_id…], t_h = server_time)
+    1. each adopted → sources(x)  (an Episode is its own source)
+    2. per-Episode κ_eff = κ(kind)/|sources(x)|, summed across adopted, capped at κ(kind)  (§5)
+    3. per Episode
+         a. idem_key = sha256(namespace, episode_id, kind) exists → skip
+         b. cache check: hit_count == COUNT { (:Hit)-[:HIT_OF]->(e) }
+            mismatch → regenerate (s, t_last_hit, hit_count) by full ledger replay (§7), then continue
+         c. compute R_hit, s′  (the server computes; no caller supplies numbers)
+    4. one transaction: Hit CREATE × n + Episode cache SET × n
+    5. return {hits_created, episodes: [{id, s, s′}]}
+```
+
+Called from exactly four places, each with its own namespace (§5). This
+function is the whole of the write surface for forgetting; the
+`structure_revision` is not touched.
+
+### Producer 1 — `commit` RPC (receipt clients)
+
+```text
+  commit {recall_id, adopted: [element_id…]}
+    · caller's hello.commit_mode must be receipt, otherwise reject `commit_mode_mismatch`
+    · recall_id must be in the recall log (in-memory ring, TTL 1 h) and adopted ⊆ that recall's results,
+      otherwise reject `unknown_recall` (after a daemon restart the client simply recalls again)
+    · commitHits(recall_id, recall_hit, adopted)
+```
+
+recall attaches `sources` to every result and the log keeps them, so
+attribution uses the sources as of recall time even if a generation switched
+in between.
+
+### Producer 2 — exposure (auto clients)
+
+After the response of a recall whose client declared `commit_mode = auto`,
+the daemon calls `commitHits(recall_id, exposure, top-3 result ids)`. This
+runs after the bytes are on the socket, is not part of recall latency, and its
+failure does not affect the response (docs/05 §10).
+
+### Producer 3 — re_mention (extraction)
+
+In the extraction write transaction, for every claim judged a duplicate of
+Fact F: `commitHits("extract:" + episode_id, re_mention, [F])` (docs/02 §5).
+
+### Producer 4 — promotion (dreaming)
+
+When a synthesis Fact S is created from member Facts:
+`commitHits("dream:" + S.id, promotion, member fact ids)` (docs/02 §7).
 
 ### Modes
 
@@ -166,32 +218,11 @@ A client declares its mode in `hello {commit_mode}`.
 | Mode | Who | Hits |
 |---|---|---|
 | `receipt` | Clients that can observe adoption (an agent reports which results it used) | client `commit` → `recall_hit` |
-| `auto` | Clients that cannot observe adoption (context-injection hooks) | server records `exposure` on the top-3 sources right after recall |
+| `auto` | Clients that cannot observe adoption (context-injection hooks) | daemon records `exposure` on the top-3 sources after the response |
 
-An explicit `commit` from an auto client is rejected with
-`commit_mode_mismatch`. A client that cannot see adoption reporting adoption
-would pollute the ledger. The small κ of exposure is the price of "it was
-shown, but we do not know whether it was used".
-
-### Server procedure (receipt)
-
-```text
-  commit {recall_id, adopted: [element_id…], kind = recall_hit}
-    1. recall_id is in the recall log (in-memory ring, TTL 1 h) and adopted ⊆ that recall's results
-       otherwise reject (`unknown_recall` — after a daemon restart the client simply recalls again)
-    2. each adopted → sources(x)  (an Episode is its own source)
-    3. per-Episode κ_eff summation and merging (§5)
-    4. per Episode
-         a. idem_key exists → skip
-         b. cache check: hit_count == COUNT { (:Hit)-[:HIT_OF]->(e) }
-            mismatch → regenerate (s, t_last_hit, hit_count) by full ledger replay, then continue
-         c. compute R_hit, s′ (the server does this; the client sends no numbers)
-    5. one transaction: Hit CREATE × n + Episode cache SET × n
-    6. return {hits_created, episodes: [{id, s, s′}]}
-```
-
-recall attaches `sources` to every result, so step 2 comes from the log — if a
-generation switched in between, the attribution from recall time is used.
+An explicit `commit` from an auto client is rejected. A client that cannot see
+adoption reporting adoption would pollute the ledger. The small κ of exposure
+is the price of "it was shown, but we do not know whether it was used".
 
 ## 7. Replay — the cache is a function of the ledger
 
@@ -223,7 +254,7 @@ generation switched in between, the attribution from recall time is used.
 - γ < 1 compresses mass differences so relevance leads. Calibration target.
 - ε keeps the score from collapsing to 0 as m → 0, which would destroy the
   ordering.
-- Envelope fanout ordering uses `m_cache` (SET daily by dreaming, docs/02 §6)
+- Envelope fanout ordering uses `m_cache` (SET hourly by the maintenance job, docs/02 §6)
   so that exact m is not computed for every neighbor. The final score uses
   exact m(now).
 

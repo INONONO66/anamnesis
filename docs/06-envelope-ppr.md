@@ -15,12 +15,13 @@ reduce boundary distortion.
 | hop-1 node budget | 640 | |
 | hop-2 node budget | 1,232 | 2,000 − 128 − 640 |
 | total nodes | ≤ 2,000 | |
-| total links | ≤ 20,000 | truncated on the induced subgraph |
+| links per node | ≤ 10 (`L`) | fetched per node, ordered, LIMIT L |
+| total links | ≤ 20,000 | 2,000 × L |
 | fanout₁ | `clamp(⌊640 / |S|⌋, 4, 32)` | inversely proportional to seed count |
 | fanout₂ | `clamp(⌊1232 / |H₁|⌋, 2, 16)` | inversely proportional to hop-1 count |
 | hub threshold | deg ≥ 256 | conducting-role degree |
-| hub shortlist | ≤ 32 | produced by dreaming (docs/02 §6) |
-| inspection bound | 128·256 + 640·256 = 196,608 | non-hub nodes have < 256 neighbors |
+| hub shortlist | ≤ 32 | produced by maintenance (docs/02 §6) |
+| inspection bound | 128·256 + 640·256 + 2,000·256 = 708,608 | non-hub nodes have < 256 neighbors; link fetch inspects ≤ 256 per node |
 | envelope tx deadline | 100 ms (config) | exceeded → whole PPR channel dropped |
 
 Budgets are hard limits. Fanout is derived from them: with 3 seeds and with
@@ -30,6 +31,10 @@ its budget by a small margin (e.g. |H₁| = 630 → fanout₂ = 2 → up to 1,26
 1,232); when that happens, the hop is truncated to its budget by
 `m_cache DESC, id DESC`.
 
+Every query in the envelope transaction has a per-row LIMIT, so the **work**
+is bounded, not only the result: no query sorts an unbounded set before
+limiting.
+
 ## 2. Expansion
 
 ```text
@@ -37,7 +42,7 @@ its budget by a small margin (e.g. |H₁| = 630 → fanout₂ = 2 → up to 1,26
   H₁ = ∪_{v∈S}  expand(v, fanout₁)  \ S                    (hop 1, ≤ 640)
   H₂ = ∪_{v∈H₁} expand(v, fanout₂)  \ (S ∪ H₁)             (hop 2, ≤ 1,232)
   V  = S ∪ H₁ ∪ H₂                                         (≤ 2,000)
-  E  = conducting links of the induced subgraph on V×V, visible_gen(link),  ≤ 20,000
+  E  = for each v ∈ V: its conducting links to other nodes of V, visible_gen(link), top L per node
 ```
 
 ### expand(v, f)
@@ -47,33 +52,42 @@ its budget by a small margin (e.g. |H₁| = 630 → fanout₂ = 2 → up to 1,26
       return v.shortlist[0:f]  ∩ visible(T)    # no shortlist → ∅ — not expanded
   else:
       neighbors m over conducting roles, visible(m, T) ∧ visible_gen(m) ∧ visible_gen(link)
-      ORDER BY link.weight DESC, m.m_cache DESC, m.id DESC
+      ORDER BY w_role(link) DESC, m.m_cache DESC, m.id DESC
       LIMIT f
 ```
 
 The third sort key is **`id DESC`** for a reason: UUIDv7 is time-ordered, so
 an `id ASC` tie-break would systematically drop recent memories at every
 truncation. If a bias is unavoidable, we choose the one that keeps the recent.
-The first two keys (weight, m_cache) decide most cases; id only breaks ties.
+The first two keys (role weight, m_cache) decide most cases; id only breaks
+ties.
 
-`m_cache` is the mass snapshot SET daily by dreaming (docs/02 §6). It exists so
-that exact m(now) is not computed for thousands of neighbors during expansion,
-and it is used only for truncation order — the final score uses exact m(now)
-(docs/05 §6).
+`m_cache` is the mass snapshot SET hourly by the maintenance job
+(docs/02 §6). It exists so that exact m(now) is not computed for thousands of
+neighbors during expansion, and it is used only for truncation order — the
+final score uses exact m(now) (docs/05 §6). It is available from the first
+version that runs PPR (docs/09).
 
 ### Cypher shape
 
+Role weights are constants, so they are passed as a map and applied with a
+CASE; the generation filter picks the selector by role (HAS_MEMBER → community,
+others → extraction) and lets originals-layer links (no `gen_from`) through.
+
 ```cypher
-// hop-1. $frontier = seed ids, $f = fanout₁, $T, $g_e, $g_c = active[extraction|community]
+// hop-1. $frontier = seed ids, $f = fanout₁, $T, $g_e, $g_c, $w = {NEXT_EPISODE: 1.0, MENTIONS: 1.0, …}
 UNWIND $frontier AS fid
 MATCH (v:Element {id: fid})
 CALL (v) {
   WITH v
   WHERE COUNT { (v)-[:NEXT_EPISODE|MENTIONS|RELATES_TO|HAS_MEMBER|DERIVED_FROM]-() } < 256
   MATCH (v)-[l:NEXT_EPISODE|MENTIONS|RELATES_TO|HAS_MEMBER|DERIVED_FROM]-(m:Element)
-  WHERE /* visible(m, T) ∧ visible_gen(m) ∧ visible_gen(l) — docs/03 §7 */
+  WHERE /* visible(m, T) ∧ visible_gen(m) — docs/03 §7 */
+    AND ( l.gen_from IS NULL
+          OR ( l.gen_from <= CASE type(l) WHEN 'HAS_MEMBER' THEN $g_c ELSE $g_e END
+               AND (l.gen_to IS NULL OR l.gen_to > CASE type(l) WHEN 'HAS_MEMBER' THEN $g_c ELSE $g_e END) ) )
   RETURN m.id AS mid
-  ORDER BY l.weight DESC, m.m_cache DESC, m.id DESC
+  ORDER BY $w[type(l)] DESC, m.m_cache DESC, m.id DESC
   LIMIT $f
   UNION
   WITH v
@@ -85,39 +99,50 @@ CALL (v) {
 RETURN DISTINCT mid
 ```
 
-hop-2 has the same shape. Then one query fetches the induced-subgraph links and
-each node's **true degree**:
+hop-2 has the same shape. Then one query fetches, per node, its **true
+weighted degree** and its top-L links into V:
 
 ```cypher
-UNWIND $ids AS id  MATCH (a:Element {id: id})
-RETURN a.id,
-       COUNT { (a)-[:NEXT_EPISODE|MENTIONS|RELATES_TO|HAS_MEMBER|DERIVED_FROM]-() } AS deg
+UNWIND $ids AS id
+MATCH (a:Element {id: id})
+WITH a,
+     COUNT { (a)-[:NEXT_EPISODE]-() } * $w.NEXT_EPISODE
+   + COUNT { (a)-[:MENTIONS]-() }     * $w.MENTIONS
+   + COUNT { (a)-[:RELATES_TO]-() }   * $w.RELATES_TO
+   + COUNT { (a)-[:HAS_MEMBER]-() }   * $w.HAS_MEMBER
+   + COUNT { (a)-[:DERIVED_FROM]-() } * $w.DERIVED_FROM  AS D
+CALL (a) {
+  WITH a
+  MATCH (a)-[l:NEXT_EPISODE|MENTIONS|RELATES_TO|HAS_MEMBER|DERIVED_FROM]-(b:Element)
+  WHERE b.id IN $ids
+    AND ( l.gen_from IS NULL OR /* same role-selected generation filter as above */ )
+  RETURN b.id AS bid, type(l) AS role, l.id AS lid
+  ORDER BY $w[type(l)] DESC, l.id DESC
+  LIMIT $L
+}
+RETURN a.id, D, collect({b: bid, role: role, lid: lid}) AS links
 ```
 
-```cypher
-MATCH (a:Element)-[l:NEXT_EPISODE|MENTIONS|RELATES_TO|HAS_MEMBER|DERIVED_FROM]->(b:Element)
-WHERE a.id IN $ids AND b.id IN $ids
-  AND l.gen_from <= $g AND (l.gen_to IS NULL OR l.gen_to > $g)
-RETURN a.id, b.id, type(l) AS role, l.id, l.weight
-ORDER BY l.weight DESC, l.id DESC
-LIMIT 20000
-```
+The link query inspects at most 256 relationships per non-hub node and, for a
+hub, at most its relationships into V (≤ |V| per role) — it never sorts the
+whole induced subgraph. A link (a, b) fetched from a's side may also be
+fetched from b's side; the CSR build deduplicates by `lid`.
 
-The four queries form one read transaction. If it exceeds 100 ms, the
+The three queries form one read transaction. If it exceeds 100 ms, the
 transaction is abandoned and we proceed with `ppr_used = false`.
 
-The true degree is the conducting degree **ignoring visibility**. A
+The true degree is the weighted conducting degree **ignoring visibility**. A
 visibility-aware degree would be a subquery per node, not O(1). Ignoring it
 overstates the degree → overstates the leak → errs in the conservative
 direction (trusting in-envelope mass less), which we accept.
 
 ## 3. Hubs
 
-Nodes with degree ≥ 256 are not scanned. The shortlist built by dreaming (top
-32 neighbors by `m_cache × weight`, deterministic order) is used instead. If
-there is no shortlist (before the first dreaming, or a newly formed hub) the
-hub is not expanded — it enters the envelope **as a node** but pulls in no
-neighbors.
+Nodes with degree ≥ 256 are not scanned. The shortlist built by the
+maintenance job (top 32 neighbors by `m_cache`, deterministic order) is used
+instead. If there is no shortlist (a hub formed since the last maintenance
+run) the hub is not expanded — it enters the envelope **as a node** but pulls
+in no neighbors.
 
 What a hub does inside the envelope: its true degree D is large, so
 `leak = 1 − Σ_j W_ij` is large, and most mass entering the hub leaks
@@ -127,18 +152,28 @@ connects through "me", this is what preserves query specificity.
 ## 4. Boundary normalization
 
 ```text
-  W_ij  = w_ij / D_i           D_i = i's true conducting degree (including edges outside the envelope)
-  leak_i = 1 − Σ_{j∈V} W_ij    the share of mass that would have left the envelope.  0 ≤ leak_i ≤ 1
+  D_i    = Σ_role  w_role · deg_role(i)        true weighted degree, five O(1) counts (docs/01 §7)
+  W_ij   = w_role(ij) / D_i                    for each in-envelope link (i, j)
+  leak_i = 1 − Σ_{j∈V} W_ij                    the share of mass that would have left the envelope
 ```
 
-Since `w_ij ≤ 1` and the number of in-envelope links ≤ D_i, row sums are
-guaranteed ≤ 1. A node with no in-envelope neighbors (dangling) has leak = 1.
+Properties:
+
+- On the **full graph** every row sums to exactly 1 for any positive role
+  weights, so `leak_i = 0` — leak is purely a boundary effect. This is what
+  makes the GDS baseline agree with local PPR without restricting the weights
+  ([07-gds-validation](07-gds-validation.md)).
+- Inside an envelope, the in-envelope links are a subset of the counted ones,
+  so `0 ≤ leak_i ≤ 1` regardless of how large a role weight is. A node with no
+  in-envelope neighbors (dangling) has leak = 1.
+- The per-node link cap L can drop in-envelope links; their weight then counts
+  as leak. That is the conservative direction.
 
 Normalizing by in-envelope degree would make boundary nodes stronger
 conductors than they really are, piling mass up at the envelope's edge.
 Normalizing by true degree and redistributing the leak uniformly is what makes
 "a larger envelope converges toward full-graph PPR" hold — and that
-convergence is what GDS measures ([07-gds-validation](07-gds-validation.md) §3).
+convergence is what GDS measures (docs/07 §3).
 
 ## 5. PPR
 
@@ -167,9 +202,9 @@ convergence is what GDS measures ([07-gds-validation](07-gds-validation.md) §3)
 | NEXT_EPISODE, MENTIONS, RELATES_TO, HAS_MEMBER, DERIVED_FROM | yes | **both ways** — the stored direction is semantic |
 | INVALIDATES, CONTRASTS | no | negation and contradiction are not relevance conductors |
 
-Per-role weights start at **1.0 for all**. `config.jsonc` has a role → weight
-table and it is a calibration target. A link's `weight` property multiplies the
-role weight.
+Role weights `w_role` start at **1.0 for all**. `config.jsonc` has the
+role → weight table and it is a calibration target. There is no per-link
+weight (docs/01 §5).
 
 ### Data structures
 
@@ -177,13 +212,14 @@ role weight.
   nodes     V sorted by UUID bytes ASC → index 0..|V|−1
   CSR       rowPtr Int32Array(|V|+1), colIdx Int32Array(2|E|), val Float64Array(2|E|)
   vectors   p, pNext, s, leak: Float64Array(|V|)
-  deg       Int32Array(|V|)  — true degree
+  D         Float64Array(|V|)  — true weighted degree
 ```
 
-Link accumulation order: `(role bytes ASC, link UUID ASC)`. When several links
-connect the same (i, j), their val is summed in that order — floating-point
-sums depend on order, so the order is fixed. Both (i→j) and (j→i) are inserted
-since conduction is bidirectional.
+Link accumulation order: `(role bytes ASC, link UUID ASC)`, after
+deduplicating by link id. When several links connect the same (i, j), their
+val is summed in that order — floating-point sums depend on order, so the
+order is fixed. Both (i→j) and (j→i) are inserted since conduction is
+bidirectional.
 
 ## 6. Cost
 
@@ -191,8 +227,8 @@ since conduction is bidirectional.
 |---|---|---|
 | hop-1 query | 128 nodes, ≤ 32,768 inspected | 5–15 ms |
 | hop-2 query | ≤ 640 nodes, ≤ 163,840 inspected | 10–40 ms |
-| degree + link query | 2,000 nodes, 20,000 links | 5–20 ms |
-| CSR build | 40,000 entries | < 1 ms |
+| degree + link query | 2,000 nodes × (5 counts + ≤ 256 inspected, LIMIT 10) | 5–25 ms |
+| CSR build | ≤ 40,000 entries | < 1 ms |
 | PPR, 64 iterations | 2.6M multiply-adds | 1–3 ms |
 
 The envelope tx total is what the 100 ms deadline applies to. Re-measured at
@@ -205,9 +241,9 @@ The envelope tx total is what the 100 ms deadline applies to. Re-measured at
 | vector / BM25 candidates | score DESC, id ASC |
 | session candidates | time_utc DESC, id ASC |
 | seed selection | seed DESC, id ASC |
-| expansion fanout | link.weight DESC, m.m_cache DESC, **m.id DESC** |
+| expansion fanout | w_role DESC, m.m_cache DESC, **m.id DESC** |
 | hop budget truncation | m_cache DESC, id DESC |
-| link truncation (20,000) | weight DESC, link.id DESC |
+| per-node link fetch (L) | w_role DESC, link.id DESC |
 | CSR node order | UUID bytes ASC |
 | CSR link accumulation | role bytes ASC, link.id ASC |
 | PPR list | p DESC, id ASC |

@@ -31,9 +31,10 @@ bounding costs.
   normalization and uniform leak; RRF fuses channels; mass weights the
   result. Deterministic. Partial results are never used silently.
 - **Local sovereignty** — one npm install, one resident daemon
-  (`anamnesisd`, TypeScript/Node), one local Neo4j container the CLI manages.
-  Everything lives under `~/.anamnesis/`; `neo4j-admin database dump` plus
-  the `objects/` and `spool/` directories is a full backup.
+  (`anamnesisd`, TypeScript/Node), one local Neo4j container the CLI manages,
+  bound to 127.0.0.1 with a per-install password. Everything lives under
+  `~/.anamnesis/`; the data authority is the Neo4j database plus the
+  `objects/` directory, and `anamnesis backup` captures both.
 
 ## Documents
 
@@ -58,9 +59,11 @@ normative; code follows them.
 ## Status
 
 The design (docs 00–10) was rewritten in September 2026 and supersedes the
-earlier drafts. `packages/protocol` (zod contract) and the first cut of
-`packages/core` (Neo4j store, single-transaction ingest, two-stage
-idempotency with divergence, lattice enforcement, idempotent links,
-`NEXT_EPISODE` wiring) exist and are being brought in line with the new
-docs — notably payload bytes moving out of Neo4j and the hit ledger
-attaching to episodes. v0.1 scope is in [09-roadmap](docs/09-roadmap.md).
+earlier drafts. Only `packages/protocol` (zod contract) and a first cut of
+`packages/core` (Neo4j store, single-transaction ingest, idempotency with
+divergence, lattice enforcement, idempotent links, `NEXT_EPISODE` wiring)
+exist today; the package layout in [08-repo-and-release](docs/08-repo-and-release.md)
+is the target. Known gaps between that code and the docs — payload bytes
+stored as base64 on a node, no `revision_key`, a default Neo4j password, a
+time required on every element kind — are closed in v0.1
+([09-roadmap](docs/09-roadmap.md)).

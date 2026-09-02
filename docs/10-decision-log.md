@@ -70,17 +70,24 @@ know then" is a debugging question, and generation integers, Hit.t and
 ingested_at are partial substitutes. Bitemporal attaches a second interval
 axis to every derived element, correction and switch.
 
-## D5 — payload bytes live outside Neo4j
+## D5 — payload bytes live outside Neo4j; the authority is Neo4j + objects/
 
 **Decision**: content-addressed files in `~/.anamnesis/objects/` plus a
-`(:Payload)` metadata node (docs/01 §2).
+`(:Payload)` metadata node (docs/01 §2). The data authority is exactly the
+Neo4j database and `objects/`. The spool is a transient queue, deleted after a
+verified drain, never part of the authority (docs/01 §9). This supersedes the
+earlier "single Neo4j store" wording: Neo4j is the single **graph and index**
+store.
 
-**Alternative**: the previous drafts — `(:Payload {bytes})` as base64.
+**Alternative**: the previous drafts — `(:Payload {bytes})` as base64, one
+durable location.
 
 **Reason**: as document revisions accumulate, raw text takes over the
 property store and the page cache. Neo4j is a graph and index store, not a
-blob store. Backup becomes dump + directories, but both are append-only so
-ordering is not a concern.
+blob store. The cost is a two-part backup; because bytes are written and
+fsynced before any transaction references them and are never modified,
+"dump first, copy objects/ after" is consistent without pausing writes
+(docs/01 §9). Confirmed by the owner in the 2026-09 review.
 
 ## D6 — `structure_revision` does not bump on Hit or cache writes
 
@@ -109,7 +116,7 @@ budget is the invariant; fanout is derived.
 
 ## D8 — fanout tie-break is `id DESC`
 
-**Decision**: `link.weight DESC, m.m_cache DESC, m.id DESC` (docs/06 §2).
+**Decision**: `w_role DESC, m.m_cache DESC, m.id DESC` (docs/06 §2).
 
 **Alternative**: `id ASC` (uniform with every other ordering).
 
@@ -133,9 +140,9 @@ envelope stands — partial results are silent bias.
 
 ## D10 — true-degree normalization with uniform leak
 
-**Decision**: `W_ij = w_ij / D_i` (D_i = conducting degree including edges
-outside the envelope), `leak_i = 1 − Σ_j W_ij` redistributed uniformly
-(docs/06 §4).
+**Decision**: `W_ij = w_role / D_i` (D_i = true weighted conducting degree,
+including edges outside the envelope — see D24), `leak_i = 1 − Σ_j W_ij`
+redistributed uniformly (docs/06 §4).
 
 **Alternative**: normalize by in-envelope degree, uniform redistribution for
 dangling nodes only.
@@ -269,7 +276,7 @@ the lattice and the validation all at once.
 
 ## D22 — while Neo4j is down, remember spools and recall returns an empty success
 
-**Decision**: docs/02 §4, §8.
+**Decision**: docs/02 §4, §9.
 
 **Alternative**: recall reads the spool for a partial answer; remember returns
 failure.
@@ -287,3 +294,125 @@ applied at result assembly (docs/03 §7, 05 §6).
 still relevant. Removing it at the candidate stage cuts off the whole
 neighborhood of a corrected topic. Removing it from the results while exposing
 it under `supersedes` explains "why that fact is not showing".
+
+## D24 — role weights only; degree is the true weighted degree
+
+**Decision**: links carry no per-link `weight`. PPR transition strength is a
+per-role constant `w_role`. `D_i = Σ_role w_role · deg_role(i)` from five O(1)
+counts; `W_ij = w_role(ij) / D_i` (docs/01 §5, 06 §4).
+
+**Alternative**: keep a per-link weight in (0, 1] and normalize by the
+unweighted count, as the first draft of this document set did.
+
+**Reason**: with count normalization and sub-unit weights, a "weak link"
+leaked mass to uniform even on the full graph — an odd semantics — and the
+local operator disagreed with GDS's weight-sum normalization, so the
+full-graph GDS baseline was only valid at weight 1.0. With the weighted true
+degree, full-graph rows sum to exactly 1 for any positive role weights, leak is
+purely a boundary effect, `leak ≥ 0` even for weights above 1, and GDS agrees
+without restrictions. A per-link weight would need a per-node weighted-degree
+cache to stay O(1); nothing in the pipelines produced one anyway. Found by
+the PR review of 2026-09.
+
+## D25 — derived idempotency keys include the generation; originals-layer links have none
+
+**Decision**: derived link `idem_key = sha256(from, to, role, content,
+gen_from)`, Fact `idem_key = sha256(gen_from, sorted direct sources,
+content)`. `NEXT_EPISODE`, `HAS_PAYLOAD`, `HIT_OF` and revision `INVALIDATES`
+are originals-layer links with no generation and `idem_key = sha256(from, to,
+role)`. Every generation filter is `gen_from IS NULL OR (…)` (docs/01 §4–5).
+
+**Alternative**: the first draft — `sha256(from, to, role, content)` for every
+link, with all links implicitly in the extraction stream.
+
+**Reason**: re-creating the same relationship in generation 43 collided with
+its retired generation-42 copy, which made per-Episode supersession impossible
+to implement as written. And `NEXT_EPISODE` is written by remember, not by a
+pipeline, so it had no generation to carry. Found by the PR review of 2026-09.
+
+## D26 — `origin_key` is logical identity; `revision_key` is the unique key
+
+**Decision**: `origin_key = sha256(source, session, actor, record)` is indexed
+and shared by every revision of a source; `revision_key = sha256(origin_key,
+digest)` is unique and is what remember's idempotency and the spool drain use
+(docs/01 §1, 02 §3).
+
+**Alternative**: the first draft — `origin_key` unique, with a revision
+creating a second Episode under the same key (a constraint violation); the
+current code's workaround of suffixing the record with a hash.
+
+**Reason**: a revision must be a new Episode (CREATE-only) and must be
+findable through the logical identity of the source. Two keys, two jobs. Found
+by the PR review of 2026-09.
+
+## D27 — one commit path for every Hit
+
+**Decision**: a single internal `commitHits(namespace, kind, adopted)` with
+four producers — receipt `commit` RPC, post-response exposure, extraction
+re_mention, dreaming promotion — each with its own namespace (docs/04 §5–6).
+The recall request handler writes nothing; exposure runs after the response.
+
+**Alternative**: the first draft described the producers separately and
+contradicted itself ("dreaming never creates Hits" vs "promotion Hits";
+"recall is read-only" vs "auto recall records exposure").
+
+**Reason**: the ledger's invariants (idempotency, cache validation, server-side
+S′) must be enforced in one place, and the invariants in docs/00 must be
+literally true. Found by the PR review of 2026-09.
+
+## D28 — extraction is read tx → LLM → write tx with re-validation
+
+**Decision**: candidates are read in one transaction, the LLM runs outside
+any transaction, and the write transaction first re-checks that the active
+generation is unchanged and that every candidate the judge relied on is still
+un-retired and (where it matters) still valid; otherwise it aborts and
+re-queues, three times, then DLQ (docs/02 §5).
+
+**Alternative**: the first draft's "all in one transaction (LLM outside)",
+which was not implementable as stated and had no stale-read handling.
+
+**Reason**: a judge verdict is a function of its premises. If a candidate Fact
+was invalidated or retired while the LLM ran, writing INVALIDATES or a
+re_mention against it is wrong; re-running is cheap. Found by the PR review of
+2026-09.
+
+## D29 — `m_cache` and hub shortlists are a v0.2 maintenance job, not dreaming
+
+**Decision**: an hourly job with no LLM and no GDS computes `m_cache` and the
+hub shortlists; it ships in the same version as PPR (docs/02 §6, 09).
+
+**Alternative**: the first draft placed both in v0.3 dreaming while v0.2 PPR
+already depended on them — hubs would not have expanded at all and fanout
+ordering would have degenerated to role weight then id.
+
+**Reason**: the envelope's two bias controls must exist from the first
+version that has an envelope. Neither needs the expensive parts of dreaming.
+Found by the PR review of 2026-09.
+
+## D30 — hard bounds on every recall stage, including query work
+
+**Decision**: channel sizes are fixed (vector 64 nodes + 16 relationships,
+BM25 64, session 32 Episodes + 64 Facts, identity 18 → ≤ 274 candidates);
+assembly handles ≤ 530 elements; envelope links are fetched per node with
+`LIMIT L = 10` so no query sorts an unbounded set (docs/05 §2, §6; 06 §1–2).
+
+**Alternative**: the first draft bounded the PPR arrays but left the session
+channel's Fact fan-out and the induced-link query unbounded.
+
+**Reason**: "bounded" has to mean bounded work, not only bounded output. Found
+by the PR review of 2026-09.
+
+## D31 — security and durability rules are normative
+
+**Decision**: `~/.anamnesis` 0700, UDS 0600 with peer-UID check, request and
+payload caps, bolt on 127.0.0.1 only, per-install random Neo4j password,
+daemon singleton lock, spool fsync-before-ack, `.done` after commit,
+`gc --objects` protected against undrained spool references, documented
+backup and restore (docs/01 §9, 02 §10).
+
+**Alternative**: leave these to implementation.
+
+**Reason**: a normative document that leaves the trust boundary and the
+crash-consistency rules implicit will be implemented inconsistently; the
+current code's default password is the example. Found by the PR review of
+2026-09.

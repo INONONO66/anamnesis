@@ -33,9 +33,9 @@ the tolerance.
   1. Run recall with diagnostics.dump_envelope = true → save V, E, s, leak, deg
   2. Build a GDS in-memory graph on V ∪ {σ}
        · i → j  for every ordered pair in V×V, weight  W_ij + leak_i / |V|
-         (W_ij = w_ij / D_i as in docs/06 §4; the uniform leak is folded into a dense row.
-          Each row sums to exactly 1, so GDS's own out-weight normalization is a no-op.
-          |V|² ≤ 4M relationships — fine offline)
+         (W_ij = w_role / D_i with D_i the true weighted degree, as in docs/06 §4; the uniform leak is
+          folded into a dense row. Each row sums to exactly 1, so GDS's own out-weight normalization
+          is a no-op. |V|² ≤ 4M relationships — fine offline)
        · σ → i  weight s_i   (Σ s = 1)
   3. gds.pageRank.stream(sourceNodes = [σ], dampingFactor = 0.85,
                          relationshipWeightProperty, tolerance = 1e-9, maxIterations = 1000)
@@ -76,9 +76,11 @@ mismatch, and both are fixed in code — the thresholds are not loosened.
 full-graph PPR?
 
 ```text
-  1. Full-graph projection (visible(T) and visible_gen applied, conducting roles, both directions, w = weight)
-       · run with all role weights = 1.0 (the default). Then W_ij = 1/D_i everywhere, there is no leak
-         on the full graph, and GDS's degree normalization coincides with ours
+  1. Full-graph projection (visible(T) and visible_gen applied, conducting roles, both directions,
+     relationship weight = w_role)
+       · GDS normalizes each node's out-weights by their sum, i.e. by Σ_role w_role · deg_role(i) = D_i.
+         That is exactly our W_ij = w_role / D_i (docs/06 §4), and on the full graph every row sums to 1,
+         so there is no leak term to reproduce. Any positive role weights are fine
        · add σ → seeds with weight s_i as in §2; sourceNodes = [σ]; divide the result on V by α
   2. gds.pageRank.stream(personalized) → p_full
   3. recall's envelope + TS PPR → p_local (0 outside the envelope)
@@ -130,7 +132,7 @@ over the 100 ms deadline in < 1 % of recalls.
 
 | Use | Algorithm | Where the result goes |
 |---|---|---|
-| dreaming communities | Leiden | community generation (docs/02 §6) |
+| dreaming communities | Leiden | community generation (docs/02 §7) |
 | global centrality | PageRank, betweenness | reports only. Not in online scores — degree is enough for the hub test |
 | graph health | WCC, degree distribution | `anamnesis bench health` report |
 

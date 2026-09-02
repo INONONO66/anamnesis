@@ -10,6 +10,10 @@ layer and the Hit ledger are fixed in v0.1 and never change afterwards.
   v0.3  dreaming + validation + scale        "memory that organizes itself"
 ```
 
+Where the current code disagrees with the docs (payload bytes stored as base64
+on a node, no `revision_key`, default Neo4j password, Element schema requiring
+a time on every kind), v0.1 brings it in line — the docs lead.
+
 ## v0.1 — originals, forgetting, search
 
 **Goal**: Episodes go in and come out; what comes out is reinforced and what
@@ -17,20 +21,24 @@ does not is forgotten. No derived layer, no PPR.
 
 | Area | Contents | Docs |
 |---|---|---|
-| storage | Neo4j compose, schema, constraints, `:Element:Episode`, Payload metadata + `objects/`, NEXT_EPISODE | 01 §1–2, §6–7 |
-| daemon | `anamnesisd` UDS JSON-RPC, write queue, `structure_revision`, `hello/remember/recall/commit/status/verify` | 02 §1–3 |
-| spool | append-only while Neo4j is down, drain, cold-start wait | 02 §4, §8 |
-| time | Episode `time_*`, `ingested_at`, snapshot(T) filter (Episodes only), revision INVALIDATES | 03 §1, §3 |
-| forgetting | m₀, hit-cache initialization, R(t,S), Hit node + HIT_OF, κ recall_hit/exposure, S update, replay, verify | 04 all |
-| commit | `hello.commit_mode`, receipt commit procedure, auto exposure, idem_key | 04 §6, 05 §10 |
-| recall | vector + BM25 + session channels, RRF, score = rel·m^γ, deterministic ordering, degradation ladder, diagnostics | 05 (without PPR and identity) |
-| clients | CLI (`up/down/remember/recall/status/verify`), MCP server (receipt), claude-code hook (auto) | 08 |
+| storage | Neo4j compose, schema, constraints (`revision_key` unique, `origin_key` indexed, Meta singleton), `:Element:Episode`, Payload metadata + `objects/`, originals-layer links (NEXT_EPISODE, HAS_PAYLOAD, revision INVALIDATES) | 01 §1–2, §6–7 |
+| daemon | `anamnesisd` UDS JSON-RPC, write queue, `structure_revision`, `hello/remember/recall/commit/status/verify`, `daemon.lock` | 02 §1–3 |
+| security | 0700/0600 modes, peer-UID check on the UDS, request and payload caps, bolt on 127.0.0.1 only, per-install random password in `neo4j.auth` | 02 §10 |
+| spool | fsync-before-ack, `.done` after commit, drain, retention, cold-start wait | 02 §4, §9 |
+| durability | write ordering, `gc --objects` safety, `anamnesis backup` / `restore`, `verify` | 01 §9 |
+| time | Episode `time_*`, `ingested_at`, snapshot(T) filter (Episodes only) | 03 §1, §3 |
+| forgetting | m₀, hit-cache initialization, R(t,S), Hit node + HIT_OF, S update, replay, `rebuild --hit-cache` | 04 §1–5, §7 |
+| commit path | `commitHits` with producers 1 (receipt) and 2 (exposure); `hello.commit_mode`; idem_key | 04 §6, 05 §10 |
+| recall | vector (nodes) + BM25 + session channels with caps, RRF, score = rel·m^γ, deterministic ordering, degradation ladder, diagnostics | 05 (without PPR, identity, relationship vectors) |
+| clients | CLI (`up/down/remember/recall/status/verify/backup/restore`), MCP server (receipt), claude-code hook (auto) | 08 |
+| protocol | zod: Episode-only time requirement, `revision_key`, `correction` schema, Hit, RPC methods | 08 |
 | CI | forgetting fixtures, RRF invariance, ordering conventions, contract schema tests | 04 §10, 07 §6 |
 
 **Exit criteria**: ingest one month of the author's own conversation logs →
 recall p50 < 50 ms (no PPR) → after 100 receipt adoptions, `verify` shows
 ledger ↔ cache agreement → 50 remembers with Neo4j killed → drain verified
-after recovery.
+after recovery → `backup` then `restore` into an empty directory passes
+`verify --scope all`.
 
 ## v0.2 — derived layer, time, local PPR
 
@@ -39,33 +47,37 @@ retrieves along relationships.
 
 | Area | Contents | Docs |
 |---|---|---|
-| derived layer | `:Fact`, `:Entity`, the 7-role link lattice, `idem_key`, `gen_from/gen_to`, extraction generation + selector, `gen` RPC, per-Episode supersession, rollback | 01 §4–5 |
-| extraction | Outbox worker: claims, time resolution, entity resolution, judge (new/duplicate/elaboration/contradiction), mode change\|correction, re_mention Hit, embed stage | 02 §5 |
+| derived layer | `:Fact`, `:Entity`, the 7-role lattice, `idem_key` with `gen_from` for Facts and links, `gen_from/gen_to`, extraction generation + selector, `gen` RPC, per-Episode supersession, rollback, Fact provenance contract | 01 §1, §4–5 |
+| extraction | Outbox worker as read tx → LLM → write tx with re-validation; time resolution, entity resolution, judge (new/duplicate/elaboration/contradiction), mode change\|correction, DLQ, embed stage | 02 §5 |
+| commit path | producer 3 (re_mention) | 04 §6 |
+| maintenance | hourly job: `m_cache`, hub shortlist. **Precedes PPR** — the envelope depends on both | 02 §6 |
 | time | Fact time, derived visibility for Entity and Link, non-recursive valid(T), replacement protocol, provenance exception | 03 §3–5 |
 | forgetting | Fact mass = source max · σ_fact, κ conservation and merging, sources resolution | 04 §3, §5 |
-| envelope | budgets, fanout, hub test (COUNT{}), 4-query tx, 100 ms deadline, true degree and leak | 06 §1–4 |
+| envelope | budgets, fanout, hub test (COUNT{}), per-node link cap, 3-query tx, 100 ms deadline, true weighted degree and leak, role-selected generation filter | 06 §1–4 |
 | PPR | CSR, iteration, convergence cap, determinism conventions | 06 §5–7 |
-| recall | seeds (hub damping), PPR list in fusion, valid filter, provenance/supersedes/contrasts, torn retry | 05 §3–7 |
+| recall | relationship vector channel (`queryRelationships`), seeds (hub damping), PPR list in fusion, valid filter, provenance/supersedes/contrasts, torn retry | 05 §2–7 |
 | GDS | solver validation (σ-node construction, L1, top-k, NDCG), CI on every PR | 07 §2 |
-| gc | `gc --derived` (previous generation + 30 days) | 01 §4 |
+| gc | `gc --derived` (previous generation + 30 days), `gc --embedding` | 01 §4 |
 
 **Exit criteria**: extraction runs on v0.1 data with no downtime → 20 solver
 validations pass → correction scenario fixtures (change / correction /
-replacement) pass snapshot queries → recall p50 < 100 ms.
+replacement) pass snapshot queries → a hub Entity with degree > 256 is
+expanded through its shortlist in a recall → recall p50 < 100 ms.
 
 ## v0.3 — dreaming, validation, scale
 
-**Goal**: the graph builds its own topics, handles hubs, and the truncation
-quality is measured.
+**Goal**: the graph builds its own topics, and the truncation quality is
+measured.
 
 | Area | Contents | Docs |
 |---|---|---|
-| dreaming | Leiden (GDS profile) → community generation, synthesis + promotion Hits, hub shortlist, `m_cache`, profile cache | 02 §6 |
+| dreaming | Leiden (GDS profile) → community generation, synthesis, profile cache | 02 §7 |
+| commit path | producer 4 (promotion) | 04 §6 |
 | derived layer | `:Community`, HAS_MEMBER, majority visibility, Community mass | 01, 03 §3, 04 §3 |
-| recall | identity channel, `entities` block, hub shortlist expansion | 05 §2, 06 §3 |
+| recall | identity channel, `entities` block | 05 §2 |
 | embedding | model swap procedure (new property and index, backfill, switch, gc) | 01 §4 |
 | GDS | envelope validation overlap@20, 100k/1M scale benches, health report | 07 §3–5 |
-| calibration | receipt logs → refit DECAY, FACTOR, a, b, c, γ, σ_fact, RRF weights; config version tags | 04 §9 |
+| calibration | receipt logs → refit DECAY, FACTOR, a, b, c, γ, σ_fact, role weights, RRF weights; config version tags | 04 §9 |
 
 **Exit criteria**: on a 1M synthetic graph p50 < 100 ms / p95 < 250 ms,
 envelope deadline exceeded < 1 %, overlap@20 ≥ 0.8, dreaming on 1M in
@@ -73,7 +85,7 @@ envelope deadline exceeded < 1 %, overlap@20 ≥ 0.8, dreaming on 1M in
 
 ## Not doing
 
-- Multi-user, auth, remote bolt. Personal, localhost.
+- Multi-user, auth beyond the OS user, remote bolt. Personal, localhost.
 - A second graph store outside Neo4j (SQLite, custom format). The previous
   roadmap is retired ([10-decision-log](10-decision-log.md) D0).
 - LLM calls on the recall path. Summarization and re-ranking belong to the
@@ -81,3 +93,4 @@ envelope deadline exceeded < 1 %, overlap@20 ≥ 0.8, dreaming on 1M in
 - Transaction time / bitemporal (03 §6).
 - Recursive INVALIDATES (03 §4).
 - Tick- or schedule-based forgetting updates (04).
+- Per-link weights (D24).

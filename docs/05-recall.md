@@ -43,14 +43,17 @@ The following are fixed at the start of the request and never change.
 
 | Channel | Source | Size | Ranking |
 |---|---|---|---|
-| `vector` | `vec_<active>` HNSW over Fact ∪ Episode (content) ∪ RELATES_TO (content, v0.2) | 64 | cosine DESC, id ASC |
+| `vector` | `vec_<active>` HNSW over Fact ∪ Episode (content) — `queryNodes`; plus RELATES_TO (content, v0.2) — `queryRelationships`, each hit contributing **both endpoints** with the relationship's score | 64 nodes + 16 relationships (≤ 32 endpoints) | cosine DESC, id ASC |
 | `bm25` | fulltext `element_content` (cjk) | 64 | Lucene score DESC, id ASC |
-| `session` | the last 32 Episodes of `origin_session` plus the Facts DERIVED_FROM them | ≤ 32 + Facts | recency (time_utc DESC, id ASC) |
+| `session` | the last 32 Episodes of `origin_session` plus the most recent 64 Facts DERIVED_FROM them | ≤ 32 + 64 | recency (time_utc DESC, id ASC) |
 | `identity` | user and agent Entity anchors + profile cache (dreaming, top-16 Facts) | ≤ 18 | cache order |
+
+Candidate total ≤ 96 + 64 + 96 + 18 = **274**. Every later stage is bounded
+by this number plus the envelope (§6).
 
 - Channel queries put **`visible(T) ∧ visible_gen` in the WHERE clause**.
   Filtering after LIMIT leaves the candidate set empty for past T. HNSW
-  over-fetches to satisfy the filter: `k_fetch = 4 × 64`, and if fewer than 64
+  over-fetches to satisfy the filter: `k_fetch = 4 × k`, and if fewer than k
   survive, we proceed with what we have.
 - `valid(T)` is not applied here (docs/03 §7). Invalid Facts still conduct.
 - The session channel is what catches "the thing I mentioned a moment ago".
@@ -108,9 +111,10 @@ Lucene and PPR mass have no common unit. All `w` are calibration targets.
 
 ### Mass and score
 
-For the candidate union (all lists ∪ envelope top 256), the source Episodes'
-cache `(s, t_last_hit)` is read **in one Cypher batch** and exact `m(now)` is
-computed (docs/04 §3). Then
+For the candidate union (all lists ∪ envelope top 256; ≤ 274 + 256 = **530**
+elements), the source Episodes' cache `(s, t_last_hit)` is read **in one
+Cypher batch** (≤ 530 × 3 sources, bounded by the DERIVED_FROM depth) and
+exact `m(now)` is computed (docs/04 §3). Then
 
 ```text
   score(x) = relevance(x) · max(m(x), ε)^γ            γ = 0.5, ε = 0.02
@@ -204,11 +208,12 @@ hard deadline is the 100 ms envelope tx.
 
 ## 10. Exposure in auto mode
 
-A recall from a `commit_mode = auto` client records `exposure` Hits (κ 0.15)
-on the `sources` of the top 3 results after the response is sent
-(docs/04 §5–6). This is not part of the response latency, and a failure does
-not affect the recall result. It is not done for receipt clients — an adoption
-report will follow.
+The recall request handler itself writes nothing. For a `commit_mode = auto`
+client, **after the response is on the socket**, the daemon calls the commit
+path with `exposure` (κ 0.15) for the top 3 results
+(`commitHits(recall_id, exposure, …)`, docs/04 §6). This is not part of the
+response latency, and a failure does not affect the recall result. It is not
+done for receipt clients — an adoption report will follow.
 
 ## 11. Determinism
 
