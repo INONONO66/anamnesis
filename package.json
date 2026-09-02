@@ -8,7 +8,10 @@
     "test": "bun scripts/ensure-test-db.ts && bun test packages",
     "typecheck": "tsc --build",
     "schemas": "bun run packages/protocol/scripts/export-schemas.ts",
-    "test:db": "bun scripts/ensure-test-db.ts"
+    "test:db": "bun scripts/ensure-test-db.ts",
+    "migrate": "bun scripts/migrate.ts",
+    "backup": "bun scripts/backup.ts",
+    "db:up": "docker compose up -d neo4j"
   },
   "devDependencies": {
     "@types/bun": "^1.2.21",
