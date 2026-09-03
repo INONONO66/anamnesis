@@ -1,6 +1,6 @@
 # Deployment runbook
 
-Anamnesis follows Zep's origin/derived separation: episode journals are the durable source of truth outside Neo4j, while the graph is derived state that can be rebuilt. Store journals on durable storage and back them up independently of the Neo4j volumes.
+The data authority is the Neo4j database plus `~/.anamnesis/objects/`, nothing else ([00-overview](00-overview.md) invariant 1). Durability comes from `backup`/`restore` over that authority. The episode journal is a write-ahead spool precursor and a disaster-recovery convenience — it lets the originals layer be re-ingested if the graph is lost before a backup exists — not a second store of record ([10-decision-log](10-decision-log.md) D0).
 
 ## First deploy
 
@@ -15,7 +15,7 @@ Anamnesis follows Zep's origin/derived separation: episode journals are the dura
    set -a; . ./.env; set +a
    bun run migrate
    ```
-4. Configure ingestion to use `journaledRemember`. Put its journal directory on durable storage outside the Neo4j volumes. A future stateless ingestion service should depend on `neo4j` with `condition: service_healthy`.
+4. Optionally configure ingestion to use `journaledRemember` so writes are spooled before graph ingest. Put its journal directory on durable storage outside the Neo4j volumes. A future stateless ingestion service should depend on `neo4j` with `condition: service_healthy`.
 
 ## Redeploy
 
@@ -59,11 +59,11 @@ fi
 
 If loading fails, leave the graph stopped, preserve the failed volume state for diagnosis, and retry from a verified dump.
 
-## Rebuild after graph loss
+## Rebuild after graph loss (no usable backup)
 
 1. Start Neo4j with empty named volumes and run `bun run migrate`.
 2. Point an `EpisodeJournal` at the durable journal directory.
 3. Create and initialize an `Engine`, then call `await journal.replay(engine)`.
 4. Run normal digest processing to regenerate downstream facts, entities, links, and communities.
 
-Replay uses the normal `Engine.remember` path. Existing origin, element ID, and payload hash constraints make repeated replay safe and idempotent.
+Replay uses the normal `Engine.remember` path. Existing origin, element ID, and payload hash constraints make repeated replay safe and idempotent. Prefer `restore` from a verified dump when one exists — replay is the fallback for the window before the first backup, and it cannot recover Hit-ledger state, only originals.
