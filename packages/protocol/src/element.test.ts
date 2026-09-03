@@ -73,6 +73,22 @@ describe("MemoryElement", () => {
     expect(el.mass).toBe(0.5);
   });
 
+  test("requires event time only for Episodes", () => {
+    const { time, ...withoutTime } = validElement;
+    expect(() =>
+      MemoryElement.parse({
+        ...withoutTime,
+        schema: "anamnesis.original-message/1",
+      }),
+    ).toThrow();
+    expect(
+      MemoryElement.parse({
+        ...withoutTime,
+        schema: "anamnesis.entity/1",
+      }).time,
+    ).toBeUndefined();
+  });
+
   test("rejects mass outside [0, 1]", () => {
     expect(() =>
       MemoryElement.parse({ ...validElement, mass: 1.2 }),

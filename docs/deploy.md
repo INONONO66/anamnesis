@@ -4,7 +4,10 @@ The data authority is the Neo4j database plus `~/.anamnesis/objects/`, nothing e
 
 ## First deploy
 
-1. Copy `.env.example` to `.env`, set a strong `NEO4J_PASSWORD`, and review the bind address and memory limits.
+1. Generate the git-ignored `.env` with a per-install random Neo4j password, then review the bind address and memory limits. The generator never overwrites an existing `.env` and creates it with mode 0600.
+   ```sh
+   bun scripts/gen-password.ts
+   ```
 2. Start Neo4j and wait for it to become healthy:
    ```sh
    bun run db:up

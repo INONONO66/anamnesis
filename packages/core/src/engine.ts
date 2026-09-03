@@ -1,3 +1,5 @@
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { v7 as uuidv7 } from "uuid";
 import { z } from "zod";
 import {
@@ -22,6 +24,8 @@ export const RememberInput = z
       "anamnesis.original-message/1",
     ),
     payload: z.instanceof(Uint8Array).optional(),
+    payload_media_type: z.string().min(1).optional(),
+    source_revision: z.string().min(1).optional(),
     /** The parent record takes precedence over inferred chronological order. */
     previous: z.string().min(1).optional(),
   })
@@ -36,6 +40,9 @@ export function envConfig(): StoreOptions {
     user: process.env["ANAMNESIS_NEO4J_USER"] ?? "neo4j",
     password: process.env["ANAMNESIS_NEO4J_PASSWORD"] ?? "anamnesis",
     database: process.env["ANAMNESIS_NEO4J_DATABASE"] ?? "neo4j",
+    objectsRoot:
+      process.env["ANAMNESIS_OBJECTS_ROOT"] ??
+      join(homedir(), ".anamnesis", "objects"),
   };
 }
 
@@ -52,10 +59,18 @@ export class Engine {
 
   async remember(input: RememberInput): Promise<PutResult> {
     const rec = RememberInput.parse(input);
-    const { payload, previous, ...fields } = rec;
+    const {
+      payload,
+      payload_media_type: payloadMediaType,
+      source_revision: sourceRevision,
+      previous,
+      ...fields
+    } = rec;
     const element: MemoryElement = { ...fields, id: uuidv7() };
     return this.store.putParsedElement(element, {
       ...(payload ? { payload } : {}),
+      ...(payloadMediaType ? { payloadMediaType } : {}),
+      sourceRevision: sourceRevision ?? element.origin.record,
       ...(previous ? { previous } : {}),
       enqueue: true,
     });

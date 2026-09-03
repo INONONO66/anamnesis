@@ -1,8 +1,10 @@
 import { afterAll, describe, expect, test } from "bun:test";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import type { RememberInput } from "./engine.ts";
+import neo4j from "neo4j-driver";
+import { Engine, type RememberInput } from "./engine.ts";
 import { EpisodeJournal, journaledRemember } from "./journal.ts";
 import type { PutResult } from "./store.ts";
 
@@ -12,6 +14,28 @@ async function temporaryDirectory(): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), "anamnesis-journal-"));
   directories.push(directory);
   return directory;
+}
+
+const TEST_DB = {
+  uri: "bolt://127.0.0.1:7688",
+  user: "neo4j",
+  password: "anamnesis-test",
+};
+
+function sha256(value: string | Uint8Array): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function revisionKey(input: RememberInput): string {
+  const originKey = sha256(
+    JSON.stringify([
+      input.origin.source,
+      input.origin.session,
+      input.origin.actor,
+      input.origin.record,
+    ]),
+  );
+  return sha256(JSON.stringify([originKey, input.source_revision ?? input.origin.record]));
 }
 
 function episode(record: string, content = `Journal fixture ${record}`): RememberInput {
@@ -68,6 +92,57 @@ describe("EpisodeJournal", () => {
     const engine = new RecordingEngine();
     expect(await journal.replay(engine)).toBe(1);
     expect(engine.inputs[0]?.payload).toEqual(Uint8Array.from([0, 127, 255]));
+  });
+
+  test("replays journaled remembers idempotently through revision_key and restores payload bytes", async () => {
+    const journal = new EpisodeJournal(await temporaryDirectory());
+    const objectsRoot = await temporaryDirectory();
+    const engine = new Engine({ ...TEST_DB, objectsRoot });
+    const payload = Uint8Array.from([0, 127, 255]);
+    const input: RememberInput = {
+      ...episode(`revision-replay-${randomUUID()}`),
+      source_revision: "source-revision-1",
+      payload,
+      payload_media_type: "application/octet-stream",
+    };
+
+    await engine.init();
+    try {
+      const first = await journaledRemember(journal, engine, input);
+      expect(first.created).toBe(true);
+      expect(await journal.replay(engine)).toBe(1);
+      expect(await journal.replay(engine)).toBe(1);
+
+      const payloadHash = sha256(payload);
+      expect(await engine.store.getPayload(payloadHash)).toEqual(payload);
+
+      const driver = neo4j.driver(
+        TEST_DB.uri,
+        neo4j.auth.basic(TEST_DB.user, TEST_DB.password),
+        { disableLosslessIntegers: true },
+      );
+      const session = driver.session();
+      try {
+        const result = await session.run<{
+          ids: string[];
+          payloadHashes: string[];
+        }>(
+          `MATCH (e:Element:Episode { revision_key: $revisionKey })
+           OPTIONAL MATCH (e)-[:HAS_PAYLOAD]->(p:Payload)
+           RETURN collect(e.id) AS ids, collect(p.hash) AS payloadHashes`,
+          { revisionKey: revisionKey(input) },
+        );
+        expect(result.records).toHaveLength(1);
+        const record = result.records[0]!;
+        expect(record.get("ids")).toEqual([first.id]);
+        expect(record.get("payloadHashes")).toEqual([payloadHash]);
+      } finally {
+        await session.close();
+        await driver.close();
+      }
+    } finally {
+      await engine.close();
+    }
   });
 
   test("journal-first ingestion leaves a replayable entry on engine failure", async () => {
