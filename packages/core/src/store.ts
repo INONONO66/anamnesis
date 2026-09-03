@@ -15,6 +15,7 @@ import {
   MemoryElement,
   MemoryLink,
   SCHEMA_LABELS,
+  TIME_BEARING,
   type MemoryElementInput,
   type MemoryLinkInput,
   type Celestial,
@@ -113,12 +114,6 @@ function sha256(data: Uint8Array | string): string {
   return createHash("sha256").update(data).digest("hex");
 }
 
-/**
- * A timeless invalidator is a retroactive correction (docs/03 §5): the target
- * was never valid at any T. Storing the lower bound instead of null keeps
- * `effective_time_utc` non-null so valid(T) stays a composite index seek.
- */
-const BEGINNING_OF_TIME = "0000-01-01T00:00:00.000Z";
 /** Used when no snapshot cutoff is given, so every invalidator applies. */
 const END_OF_TIME = "9999-12-31T23:59:59.999Z";
 
@@ -186,7 +181,7 @@ function celestialOf(schema: string): Celestial | null {
 /** Only Episode and Fact carry an event time (docs/03 §1). */
 function carriesTime(schema: string): boolean {
   const c = celestialOf(schema);
-  return c === "Episode" || c === "Fact";
+  return c !== null && TIME_BEARING[c];
 }
 
 function labelClause(schema: string): string {
@@ -483,44 +478,49 @@ export class Store {
       );
     }
 
-    if (celestialOf(el.schema) === "Episode") {
-      if (opts.previous) {
+    if (isEpisode) {
+      const predecessors = opts.previous
+        ? await tx.run<{ id: string }>(
+            `MATCH (p:Element:Episode)
+             WHERE p.origin_source = $source AND p.origin_session = $session
+               AND p.origin_record = $previous
+             RETURN p.id AS id`,
+            {
+              source: el.origin.source,
+              session: el.origin.session,
+              previous: opts.previous,
+            },
+          )
+        : await tx.run<{ id: string }>(
+            `MATCH (e:Element { id: $id })
+             MATCH (p:Element:Episode)
+             WHERE p.schema = e.schema
+               AND p.origin_source = e.origin_source
+               AND p.origin_session = e.origin_session
+               AND p.id <> e.id
+               AND (p.time_utc < e.time_utc
+                    OR (p.time_utc = e.time_utc AND p.id < e.id))
+             RETURN p.id AS id
+             ORDER BY p.time_utc DESC, p.id DESC LIMIT 1`,
+            { id: el.id },
+          );
+      const content = opts.previous
+        ? "This episode follows the explicitly selected parent record"
+        : "This is the next episode in the same session";
+      for (const row of recordsToObjects(predecessors.records)) {
         await tx.run(
-          `MATCH (e:Element { id: $id })
-           MATCH (p:Element:Episode)
-           WHERE p.origin_source = $source AND p.origin_session = $session
-             AND p.origin_record = $previous
+          `MATCH (p:Element:Episode { id: $predecessor })
+           MATCH (e:Element { id: $id })
            MERGE (p)-[l:NEXT_EPISODE]->(e)
            ON CREATE SET l += { id: $linkId, idem_key: $idemKey,
-             content: 'This episode follows the explicitly selected parent record', weight: 1.0 }`,
+             content: $content, weight: 1.0 }`,
           {
             id: el.id,
-            source: el.origin.source,
-            session: el.origin.session,
-            previous: opts.previous,
+            predecessor: row.id,
             linkId: uuidv7(),
-            idemKey: sha256(`next_episode:${el.id}`),
-          },
-        );
-      } else {
-        await tx.run(
-          `MATCH (e:Element { id: $id })
-           MATCH (p:Element:Episode)
-           WHERE p.schema = e.schema
-             AND p.origin_source = e.origin_source
-             AND p.origin_session = e.origin_session
-             AND p.id <> e.id
-             AND (p.time_utc < e.time_utc
-                  OR (p.time_utc = e.time_utc AND p.id < e.id))
-           WITH e, p ORDER BY p.time_utc DESC, p.id DESC LIMIT 1
-           MERGE (p)-[l:NEXT_EPISODE]->(e)
-           ON CREATE SET l += { id: $linkId, idem_key: $idemKey,
-             content: 'This is the next episode in the same session',
-             weight: 1.0 }`,
-          {
-            id: el.id,
-            linkId: uuidv7(),
-            idemKey: sha256(`next_episode:${el.id}`),
+            // docs/01 §5: session topology keys by session, not by content.
+            idemKey: tupleHash([sessionKey(el.origin), row.id, el.id]),
+            content,
           },
         );
       }
@@ -562,8 +562,7 @@ export class Store {
     // revision edge belongs to the originals layer and keys without content.
     const seek =
       link.role === "INVALIDATES"
-        ? ", target_id: b.id," +
-          " effective_time_utc: coalesce(a.time_utc, $beginningOfTime)"
+        ? ", target_id: b.id, effective_time_utc: a.time_utc"
         : "";
     const res = await tx.run<{ id: string }>(
       `MATCH (a:Element { id: $from }), (b:Element { id: $to })
@@ -582,7 +581,6 @@ export class Store {
         originalsLayer: link.role === "INVALIDATES",
         originalsIdemKey: linkIdemKey(link, true),
         derivedIdemKey: linkIdemKey(link, false),
-        beginningOfTime: BEGINNING_OF_TIME,
         id: link.id,
         content: link.content,
         weight: link.weight,

@@ -40,6 +40,18 @@ export type ElementSchemaId = z.infer<typeof ElementSchemaId>;
 export const Celestial = z.enum(["Episode", "Entity", "Fact", "Community"]);
 export type Celestial = z.infer<typeof Celestial>;
 
+/**
+ * Only Episode and Fact carry an event time (docs/03 §1). A Fact without one
+ * would be visible at every snapshot T, while extraction always resolves a
+ * time — explicit, relative or inherited from the Episode (docs/03 §2).
+ */
+export const TIME_BEARING: Readonly<Record<Celestial, boolean>> = {
+  Episode: true,
+  Fact: true,
+  Entity: false,
+  Community: false,
+};
+
 const SCHEMA_REGISTRY = {
   "anamnesis.original-message/1": "Episode",
   "anamnesis.original-document/1": "Episode",
@@ -83,11 +95,12 @@ export const MemoryElement = z
   })
   .strict()
   .superRefine((element, context) => {
-    if (SCHEMA_REGISTRY[element.schema as KnownSchema] === "Episode" && !element.time) {
+    const celestial = SCHEMA_REGISTRY[element.schema as KnownSchema];
+    if (celestial && TIME_BEARING[celestial] && !element.time) {
       context.addIssue({
         code: "custom",
         path: ["time"],
-        message: "event time is required for an Episode",
+        message: `event time is required for a ${celestial}`,
       });
     }
     if (
