@@ -71,10 +71,13 @@ truncation costs is measured, not estimated
 5. **Forgetting is computed, not stored.** The same state and the same clock
    give the same answer whenever it is evaluated. No tick daemon.
 6. **The recall handler is read-only, and Hits have one producer path.**
-   Every Hit — receipt commit, post-response exposure, extraction re_mention,
-   dreaming promotion — goes through the same server-side commit function
-   that recomputes the reinforcement ([04-forgetting](04-forgetting.md) §6).
-   No caller supplies numbers.
+   Every Hit — receipt commit (adoption and signed outcome verdict),
+   post-response exposure, extraction re_mention, dreaming promotion — goes
+   through the same server-side commit function that recomputes the
+   reinforcement ([04-forgetting](04-forgetting.md) §6). A caller supplies at
+   most a bounded reward `∈ [−1,1]`; the server computes every stability number.
+   The outcome verdict is the only reinforcement that can lower stability, and
+   only to birth stability, never below.
 7. **Partial results are never used silently.** When a channel fails, the
    whole channel is dropped and the fact is recorded in diagnostics.
 8. **Every constant is a calibration target.** Defaults are literature

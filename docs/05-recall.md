@@ -151,6 +151,7 @@ source Episode IDs); Entity anchors use immutable `m0`. Exact `m(now)` follows
   "id": "…", "kind": "Fact", "schema": "anamnesis.claim/1", "sub_kind": "preference",
   "content": "…", "time": {"utc": 1700000000000, "precision": "day"},
   "score": 0.041, "relevance": 0.052, "mass": 0.62,
+  "rank": 0,                                        // 0-based position in results; commit's outcome verdict decays credit by 1/(rank+1)
   "sources": ["<episode-id>", "…"],                // for Hit attribution. commit uses this as is
   "provenance": {
     "derived_from": [{"id": "…", "kind": "Episode", "visible_at_T": true}],
@@ -231,7 +232,15 @@ client, **after the response is on the socket**, the daemon calls the commit
 path with `exposure` (κ 0.15) for the top 3 results
 (`commitHits(recall_id, exposure, …)`, docs/04 §6). This is not part of the
 response latency, and a failure does not affect the recall result. It is not
-done for receipt clients — an adoption report will follow.
+done for receipt clients — an adoption report, an outcome verdict, or both will
+follow.
+
+A receipt client instead calls `commit {recall_id, adopted?, reward?}` when it
+knows what happened: `adopted` marks which results it used (`recall_hit`), and
+`reward ∈ [−1,1]` is a signed verdict on whether the recalled context led to a
+good result (`outcome`). The verdict is the only signal that can lower an
+Episode's stability — the recall's `rank` on each result decays how much credit
+or blame it carries (docs/04 §5.1, §6).
 
 ## 11. Determinism
 

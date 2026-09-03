@@ -29,7 +29,7 @@ does not is forgotten. No derived layer, no PPR.
 | durability | write ordering, `gc --objects` safety, `anamnesis backup` / `restore`, `verify` | 01 §9 |
 | time | Episode `time_*`, `ingested_at`, snapshot(T) filter (Episodes only) | 03 §1, §3 |
 | forgetting | m₀, hit-cache initialization, R(t,S), Hit node + HIT_OF, S update, replay, `rebuild --hit-cache` | 04 §1–5, §7 |
-| commit path | `commitHits` with producers 1 (receipt) and 2 (exposure); `hello.commit_mode`; idem_key | 04 §6, 05 §10 |
+| commit path | `commitHits` with producers 1 (receipt `recall_hit` + signed `outcome`) and 2 (exposure); negative-branch S update; `hello.commit_mode`; idem_key | 04 §5.1, §6, 05 §10 |
 | recall | vector (nodes) + BM25 + session channels with caps, RRF, score = rel·m^γ, deterministic ordering, degradation ladder, diagnostics | 05 (without PPR, identity, relationship vectors) |
 | clients | ops CLI (`up/down/status/verify/backup/restore`), RPC contract export (`schemas/`); remember/recall harnesses are external (D39) | 08 |
 | protocol | zod: Episode-only time requirement, `source_revision`, `previous_revision_key`, `revision_key`, `correction` schema, Hit, RPC methods | 08 |

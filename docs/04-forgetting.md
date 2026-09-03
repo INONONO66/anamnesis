@@ -107,12 +107,40 @@ past, forgetting is not rewound to T.
 | kind | κ | Producer | `recall_id` namespace |
 |---|---|---|---|
 | `recall_hit` | 1.0 | `commit` RPC from a receipt client: a result was adopted | the recall's UUID |
+| `outcome` | signed, `reward · rank_decay` (§5.1) | `commit` RPC from a receipt client: a verdict on a whole recall — the context it produced led to a good or bad result | the recall's UUID |
 | `exposure` | 0.15 | the daemon, after an auto-mode recall response: top-3 results were shown, adoption unknown | the recall's UUID |
 | `re_mention` | 0.5 | the extraction write tx: a new utterance is a duplicate of an existing Fact | `extract:<episode_id>` |
 | `promotion` | 0.3 | dreaming synthesis: this Fact became a source of a higher-level fact | `dream:<synthesis_fact_id>` |
 
-Four producers, **one path**: all of them call the same internal commit
-function (§6). Nothing else in the daemon creates a Hit.
+Five producers, **one path**: all of them call the same internal commit
+function (§6). Nothing else in the daemon creates a Hit. `outcome` is the only
+kind whose κ can be **negative**; every other kind is strictly positive and can
+only grow stability.
+
+### 5.1 The outcome signal — a signed verdict on a recall
+
+Adoption (`recall_hit`) says *which* results a caller used; it cannot say the
+used context led anywhere good. A receipt client that observes the downstream
+result reports it once, against the whole recall, as a bounded reward:
+
+```text
+  reward ∈ [−1, 1]                         clamped by the server
+  rank_decay(x) = 1 / (rank_x + 1)         rank_x = 0-based position of x in the recall's results
+  κ_signal(x)   = reward · rank_decay(x)   the per-result signed strength before source attribution
+```
+
+`rank_decay` gives the top result the most credit and blame and fades down the
+list, so a verdict on a recall does not move every surfaced item equally — the
+result the caller most likely acted on carries the signal. One recall yields at
+most one `outcome` per source Episode; the namespace (the recall UUID) makes it
+idempotent under retry (§ The Hit node).
+
+Why a signed verdict at all: every other producer can only raise stability, so
+without this a memory that keeps surfacing and keeps producing bad answers is
+reinforced by its own exposure. `outcome` is the FSRS **"again" grade** the
+rest of the ledger lacks — the only way `S` is ever held back or lowered
+(§ Reinforcement). It is also the negative label §9 refitting needs and cannot
+otherwise obtain.
 
 ### Derived → Episode attribution, with conservation
 
@@ -130,30 +158,50 @@ adopted item the shares add up but never exceed the kind's κ.
 
 ### Reinforcement — updating S
 
-At hit time `t_h`:
+At hit time `t_h`, with `κ_eff` the per-Episode effective strength from
+attribution (§ Derived → Episode). For every positive kind `κ_eff ≥ 0`; only
+`outcome` can deliver `κ_eff < 0`.
 
 ```text
   R_hit = R(Δdays(t_h, t_last_hit), s)
-  s′    = min( S_max,  s · (1 + a · κ_eff · (e^{b(1−R_hit)} − 1) · s^{−c}) )
+
+  κ_eff ≥ 0   (reinforcement — every kind including a positive outcome)
+    s′ = min( S_max,  s · (1 + a · κ_eff · (e^{b(1−R_hit)} − 1) · s^{−c}) )
+
+  κ_eff < 0   (the "again" grade — outcome only)
+    s′ = max( S0(m₀),  s · (1 + d · κ_eff · (1 − R_hit)) )
+
   t_last_hit′ = max(t_last_hit, t_h),   hit_count′ = hit_count + 1
 
-  a = 5.0,  b = 1.0,  c = 0.1,  S_max = 3650 days        (s in days)
+  a = 5.0,  b = 1.0,  c = 0.1,  d = 1.0,  S_max = 3650 days,  s ≥ S0(m₀)  (s in days)
 ```
 
-This is the FSRS stability-increase formula with the difficulty term replaced
-by κ_eff. Properties:
+The positive branch is the FSRS stability-increase formula with the difficulty
+term replaced by κ_eff. The negative branch is a bounded penalty. Properties:
 
-- s′ ≥ s. Reinforcement never lowers stability.
-- **Spaced beats massed.** The gain of a second hit is `(e^{b(1−R_hit)} − 1)`,
-  which grows as R_hit falls (as the gap grows). Recalling something again a
-  month later makes it last longer than recalling it twice in a row.
+- **Positive hits never lower stability** and **negative outcomes never raise
+  it.** `s′ ≥ s` when `κ_eff ≥ 0`; `s′ ≤ s` when `κ_eff < 0`.
+- **A penalty cannot erase a memory.** The negative branch floors at `S0(m₀)`,
+  the birth stability — a bad outcome demotes a memory toward "just learned",
+  never below it, and never tombstones it. Forgetting still needs elapsed time;
+  the ledger only moves `S`.
+- The penalty grows with the gap: `(1 − R_hit)` is small for a memory hit
+  moments ago and approaches 1 for a stale one, so a bad outcome on something
+  the system was confident about (recently reinforced, high `R_hit`) barely
+  moves it, while a bad outcome on a shaky recall demotes it hard.
+- **Spaced beats massed** (positive branch). The gain of a second hit is
+  `(e^{b(1−R_hit)} − 1)`, which grows as R_hit falls. Recalling something again
+  a month later makes it last longer than recalling it twice in a row.
 - `s^{−c}`: already-stable memories gain a little less.
 
 ```text
-  s = 1 d, κ_eff = 1
+  s = 1 d, κ_eff = +1
     R_hit 0.9 (1 day later)    → s′ = 1 + 5·0.105 = 1.53
     R_hit 0.5 (~12.8 days later) → s′ = 1 + 5·0.649 = 4.24
     R_hit 0.2 (100 days later) → s′ = 1 + 5·1.226 = 7.13
+
+  s = 4.24 d, κ_eff = −0.5   (a bad outcome, this result ranked second → reward −1 · 1/2)
+    R_hit 0.5                → s′ = max(S0, 4.24·(1 − 1·0.5·0.5)) = 4.24·0.75 = 3.18
 ```
 
 ### The Hit node
@@ -170,9 +218,11 @@ The same cause produces at most one Hit per Episode and kind.
 ### Internal function
 
 ```text
-  commitHits(tx?, namespace, kind, adopted: [element_id…], t_h = server_time)
-    1. each adopted → sources(x)  (an Episode is its own source)
-    2. per-Episode κ_eff = κ(kind)/|sources(x)|, summed across adopted, capped at κ(kind)  (§5)
+  commitHits(tx?, namespace, kind, elements: [element_id…], κ_of?: element_id → signed κ, t_h = server_time)
+    κ_of defaults to the fixed κ(kind) for every element; outcome passes κ_signal per result (§5.1)
+    1. each element → sources(x)  (an Episode is its own source)
+    2. per-Episode κ_eff = κ_of(x)/|sources(x)|, summed across elements, magnitude-capped at max|κ_of| for the kind  (§5)
+       the sum keeps its sign; conservation and the cap are on |κ_eff|
     3. per Episode
          a. idem_key = sha256(namespace, episode_id, kind) exists → skip
          b. cache check: hit_count == COUNT { (:Hit)-[:HIT_OF]->(e) }
@@ -183,25 +233,41 @@ The same cause produces at most one Hit per Episode and kind.
     5. return {hits_created, episodes: [{id, s, s′}]}
 ```
 
-Called from exactly four places, each with its own namespace (§5). Receipt and
-exposure calls open a standalone transaction; extraction and dreaming pass
-their ambient write transaction so their Fact and Hit effects are atomic.
-This function is the whole write surface for forgetting;
-`structure_revision` is not touched by the Hit/cache portion.
+Called from exactly four commit sites (five producers — the `commit` RPC drives
+two kinds), each with its own namespace (§5). Receipt and exposure calls open a
+standalone transaction; extraction and dreaming pass their ambient write
+transaction so their Fact and Hit effects are atomic. The negative outcome
+branch of the S update lives in `commitHits` too — it is the same function, only
+`κ_eff` may now arrive signed. This function is the whole write surface for
+forgetting; `structure_revision` is not touched by the Hit/cache portion.
+
+Because `idem_key = sha256(namespace, episode_id, kind)` includes the kind, an
+adoption and a verdict on the same recall are distinct Hits on the same
+Episode — a `recall_hit` and an `outcome` coexist and both replay.
 
 ### Producer 1 — `commit` RPC (receipt clients)
 
+The `commit` RPC carries an adoption list, a verdict, or both. A verdict on a
+recall the caller never adopted from is still valid — the context was compiled
+and acted on regardless of which items the client flagged.
+
 ```text
-  commit {recall_id, adopted: [element_id…]}
+  commit {recall_id, adopted?: [element_id…], reward?: number in [−1,1]}
     · caller's hello.commit_mode must be receipt, otherwise reject `commit_mode_mismatch`
-    · recall_id must be in the recall log (in-memory ring, TTL 1 h) and adopted ⊆ that recall's results,
+    · recall_id must be in the recall log (in-memory ring, TTL 1 h),
       otherwise reject `unknown_recall` (after a daemon restart the client simply recalls again)
-    · commitHits(recall_id, recall_hit, adopted)
+    · at least one of adopted / reward must be present, otherwise reject `empty_commit`
+    · adopted present → adopted ⊆ that recall's results, else reject `unknown_recall`;
+      commitHits(recall_id, recall_hit, adopted)
+    · reward present → clamp to [−1,1]; for each result x at rank_x, κ_signal(x) = reward·/(rank_x+1);
+      commitHits(recall_id, outcome, all result ids, κ_signal per result)
 ```
 
-recall attaches `sources` to every result and the log keeps them, so
-attribution uses the sources as of recall time even if a generation switched
-in between.
+The verdict spans **all** results of the recall (not just the adopted subset),
+since rank decay already concentrates the signal on the top of the list. recall
+attaches `sources` and the 0-based `rank` to every result and the log keeps
+them, so both attribution and rank decay use the recall as of its own time even
+if a generation switched in between.
 
 ### Producer 2 — exposure (auto clients)
 
@@ -226,8 +292,12 @@ A client declares its mode in `hello {commit_mode}`.
 
 | Mode | Who | Hits |
 |---|---|---|
-| `receipt` | Clients that can observe adoption (an agent reports which results it used) | client `commit` → `recall_hit` |
+| `receipt` | Clients that can observe adoption (an agent reports which results it used) | client `commit` → `recall_hit` and/or `outcome` |
 | `auto` | Clients that cannot observe adoption (context-injection harnesses) | daemon records `exposure` on the top-3 sources after the response |
+
+Only a receipt client can report an `outcome`: a verdict presumes the client
+saw what the context produced, the same premise as adoption. An auto client
+gets `exposure` and nothing else.
 
 An explicit `commit` from an auto client is rejected. A client that cannot see
 adoption reporting adoption would pollute the ledger. The small κ of exposure
@@ -281,16 +351,21 @@ is the price of "it was shown, but we do not know whether it was used".
 | σ_fact | 30 | assumption |
 | a, b, c | 5.0, 1.0, 0.1 | near FSRS w8, w10, w9 |
 | S_max | 3650 days | cap |
-| κ | 1.0 / 0.5 / 0.3 / 0.15 | assumption |
+| d | 1.0 | penalty scale for the negative outcome branch; assumption |
+| κ | 1.0 / 0.5 / 0.3 / 0.15 | positive kinds; assumption |
+| reward | [−1, 1] | `outcome` κ before rank decay; caller-supplied, server-clamped |
 | γ, ε | 0.5, 0.02 | assumption |
 
-Refitting: receipt-mode recall logs yield the label "which of the shown
-results were adopted". Using the predicted R at exposure time as the feature
-and adoption as the target, minimize log loss to fit DECAY, FACTOR, a, b, c.
-Adoption is a proxy for recall probability (an irrelevant result is not
-adopted even if remembered), so the sample is restricted to the top relevance
-band. Constants are recorded in `config.jsonc` and every change gets a version
-tag — when constants change, the cache is regenerated by full replay.
+Refitting: receipt-mode recall logs yield two labels — "which of the shown
+results were adopted" (from `recall_hit`) and "did the context lead to a good
+result" (from `outcome`, the negative half of the sample that adoption alone
+cannot supply). Using the predicted R at exposure time as the feature and
+adoption as the target, minimize log loss to fit DECAY, FACTOR, a, b, c; the
+outcome label fits the penalty scale d against downstream success. Adoption is
+a proxy for recall probability (an irrelevant result is not adopted even if
+remembered), so the sample is restricted to the top relevance band. Constants
+are recorded in `config.jsonc` and every change gets a version tag — when
+constants change, the cache is regenerated by full replay.
 
 ## 10. CI fixtures
 
@@ -299,6 +374,13 @@ tag — when constants change, the cache is regenerated by full replay.
 - spaced > massed: the same two hits at 1 d vs 30 d apart → s′(30 d) > s′(1 d)
 - κ conservation: adopting a Fact with n sources → Σ κ_eff = κ
 - merge cap: an Episode overlapping within one recall has kappa_eff ≤ κ
+- signed monotonicity: `κ_eff ≥ 0 ⇒ s′ ≥ s` and `κ_eff < 0 ⇒ s′ ≤ s`
+- penalty floor: a chain of `outcome` reward −1 hits drives `s → S0(m₀)` and
+  never below; `m` still decays only through elapsed time
+- rank decay: reward −1 on a recall moves the rank-0 source twice as much as
+  the rank-1 source (`κ_signal ∝ 1/(rank+1)`)
+- outcome idempotency: two `commit` verdicts on the same `recall_id` create one
+  `outcome` Hit per source Episode, not two
 - replay(e) == cache, property test over 1,000 random Hit sequences
 - inserting Hits out of order then replaying == inserting them in order
 - an element with `m = 0` stays in the results when relevance dominates (ε behavior)

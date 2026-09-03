@@ -372,10 +372,13 @@ reviews of 2026-09.
 
 ## D27 — one commit path for every Hit
 
-**Decision**: a single internal `commitHits(namespace, kind, adopted)` with
-four producers — receipt `commit` RPC, post-response exposure, extraction
-re_mention, dreaming promotion — each with its own namespace (docs/04 §5–6).
-The recall request handler writes nothing; exposure runs after the response.
+**Decision**: a single internal `commitHits(namespace, kind, elements, κ_of?)`
+with five producers — receipt `commit` RPC (adoption `recall_hit` and signed
+`outcome`), post-response exposure, extraction re_mention, dreaming promotion —
+each with its own namespace (docs/04 §5–6). The recall request handler writes
+nothing; exposure runs after the response. The signed `outcome` reuses this same
+function — `κ_of` supplies a per-result rank-decayed κ that may be negative, and
+the negative branch of the S update lives beside the positive one (D40).
 
 **Alternative**: the first draft described the producers separately and
 contradicted itself ("dreaming never creates Hits" vs "promotion Hits";
@@ -554,3 +557,30 @@ surface — versioned, schema-exported, harness-agnostic — and new agent
 frameworks require zero changes here. The daemon protocol already assumed
 untrusted external callers (capability token, caps, commit modes), so nothing
 about the security or Hit-commit model changes.
+
+## D40 — a signed outcome verdict is the only reinforcement that can lower stability
+
+**Decision**: the receipt `commit` RPC accepts `reward ∈ [−1,1]`, a verdict on
+whether the recalled context led to a good result. It becomes an `outcome` Hit
+per source Episode with `κ_signal = reward·/(rank+1)` — rank-decayed so the top
+result carries the most credit or blame — and drives a negative branch of the S
+update, `s′ = max(S0(m₀), s·(1 + d·κ_eff·(1−R_hit)))`, floored at birth
+stability. Every other Hit kind stays strictly positive. The verdict spans all
+results of the recall and is idempotent on the recall UUID (docs/04 §5.1, §6,
+§9–§10; docs/05 §6, §10).
+
+**Alternative**: adoption (`recall_hit`) as the sole receipt signal. That only
+ever raises stability, so a memory that keeps surfacing and keeps producing bad
+answers is reinforced by its own exposure, and §9 refitting has no negative
+label — adoption cannot distinguish "not shown" from "shown and wrong".
+
+**Reason**: the loop from a recall to its downstream result is the one signal a
+pure engine can accept from an external caller without taking on harness
+concerns — a bounded scalar against a recall UUID, no per-item labeling, no
+prompt framing. It is FSRS's "again" grade, which the ledger otherwise lacks,
+and it supplies the negative half of the refitting sample. The floor at
+`S0(m₀)` keeps a penalty from erasing a memory: a bad outcome demotes toward
+"just learned", and forgetting still happens only through elapsed time.
+Adapted from memkraft's accountable outcome loop (usage_id → report_outcome →
+rank-decayed credit); anamnesis attributes it to the immutable Hit ledger and
+replays it like every other kind rather than storing a mutable utility score.

@@ -125,7 +125,7 @@ zod in `packages/protocol`; server and clients share the same schema.
 | `object.commit {upload_id}` | objects/ | Verify size/hash, fsync and atomically publish the object |
 | `remember {episode, payload_hash?}` | yes | Ingest one Episode referencing an already committed object. Idempotent |
 | `recall {query, session?, T?, k?}` | — | Read-only (docs/05) |
-| `commit {recall_id, adopted[]}` | Hit | Adoption report from a receipt-mode client (docs/04 §6) |
+| `commit {recall_id, adopted?, reward?}` | Hit | Receipt-mode client's adoption report (`recall_hit`) and/or signed outcome verdict (`outcome`, `reward ∈ [−1,1]`) (docs/04 §6) |
 | `status` | — | Neo4j connection, revision, active selectors, spool length, Outbox backlog |
 | `verify {scope}` | — | Digests, Payloads, orphan Facts, ledger ↔ cache agreement |
 | `gen {stream, action: build\|status\|activate\|rollback\|retire}` | selector | Lifecycle operations; activate/rollback enforce the catch-up barrier (docs/01 §4) |
