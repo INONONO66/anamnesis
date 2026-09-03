@@ -5,7 +5,11 @@ import neo4j, {
   type SessionConfig,
 } from "neo4j-driver";
 import { v7 as uuidv7 } from "uuid";
+import { mkdtemp, rm } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { Engine, envConfig, RememberInput } from "./engine.ts";
+import { EpisodeJournal } from "./journal.ts";
 import { luceneQuery, Store } from "./store.ts";
 
 const TEST_DB = {
@@ -397,6 +401,28 @@ describe("Engine storage lifecycle", () => {
     expect(first.created).toBe(true);
     expect(again.created).toBe(false);
     expect(again.id).toBe(first.id);
+  });
+
+  test("journal replay relies on origin idempotency", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "anamnesis-replay-"));
+    const journal = new EpisodeJournal(directory);
+    const input = msg(
+      `journal-replay-${uuidv7()}`,
+      "Journal replay idempotency",
+      "2026-08-22T10:01:00+09:00",
+    );
+    try {
+      await journal.append(input);
+      expect(await journal.replay(engine)).toBe(1);
+      const first = await engine.remember(input);
+      expect(first.created).toBe(false);
+
+      expect(await journal.replay(engine)).toBe(1);
+      const second = await engine.remember(input);
+      expect(second).toEqual(first);
+    } finally {
+      await rm(directory, { recursive: true });
+    }
   });
 
   test("changed content at the same origin creates an invalidating branch", async () => {
