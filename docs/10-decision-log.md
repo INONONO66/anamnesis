@@ -584,3 +584,25 @@ and it supplies the negative half of the refitting sample. The floor at
 Adapted from memkraft's accountable outcome loop (usage_id → report_outcome →
 rank-decayed credit); anamnesis attributes it to the immutable Hit ledger and
 replays it like every other kind rather than storing a mutable utility score.
+
+## D41 — every recall result carries a closed `epistemic` grade derived from its producer
+
+**Decision**: recall results include `epistemic ∈ {observed, extracted,
+synthesized}`, computed at assembly time from `schema` — ingest originals are
+`observed`, extraction claims and mappings are `extracted`, dreaming syntheses
+are `synthesized`. Nothing is stored; a new schema is mapped to one of the three
+when registered (docs/05 §6).
+
+**Alternative**: leave it implicit in `schema`. The registry is open-ended and
+grows with every extractor, so a caller wanting to grade trust would have to
+track the whole registry; and provenance already answers the question fully but
+only by walking `derived_from` per result.
+
+**Reason**: who wrote a memory is the cheapest honest signal of how far to trust
+it — the engine knows exactly which process produced each element, and the
+distance from the source (said → model read → model combined) is a fact about
+the data, not a framing choice. Exposing it as a fixed enum lets a caller weight,
+filter, or phrase by grade without parsing the schema registry, while
+`provenance` remains the full chain for anyone who needs it. Adapted from omo's
+author-as-trust-tier; anamnesis derives it from provenance instead of recording
+an author field.

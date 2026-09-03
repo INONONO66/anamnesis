@@ -149,6 +149,7 @@ source Episode IDs); Entity anchors use immutable `m0`. Exact `m(now)` follows
 ```jsonc
 {
   "id": "…", "kind": "Fact", "schema": "anamnesis.claim/1", "sub_kind": "preference",
+  "epistemic": "extracted",                        // observed | extracted | synthesized — who produced this, hence how far to trust it
   "content": "…", "time": {"utc": 1700000000000, "precision": "day"},
   "score": 0.041, "relevance": 0.052, "mass": 0.62,
   "rank": 0,                                        // 0-based position in results; commit's outcome verdict decays credit by 1/(rank+1)
@@ -165,6 +166,26 @@ source Episode IDs); Entity anchors use immutable `m0`. Exact `m(now)` follows
 `provenance.derived_from` is always filled, under the snapshot exception
 (docs/03 §3). `contrasts` lists only valid Facts that are also in the results
 — contradictions are not hidden, they are shown side by side.
+
+### `epistemic` — the producer is the trust grade
+
+Every result names the process that wrote it. The value is a closed enum,
+derived at assembly time from `schema` (docs/01 §2); nothing is stored.
+
+| `epistemic` | Producer | Schemas |
+|---|---|---|
+| `observed` | ingest — verbatim original, nothing inferred | `anamnesis.original-message/1`, `anamnesis.original-document/1`, `anamnesis.correction/1` |
+| `extracted` | extraction — a model's reading of one or more Episodes | `anamnesis.claim/1`, `anamnesis.mapping/1` |
+| `synthesized` | dreaming — a model's combination of extracted Facts | `anamnesis.synthesis/1` |
+
+The schema registry is open-ended and grows with the extractors; `epistemic`
+is fixed at three values, so a caller can grade trust without tracking every
+schema. The three are ordered by distance from the source: `observed` is what
+was said, `extracted` is what a model claims was meant, `synthesized` is what a
+model claims across several such claims. Each step down still bottoms out in
+Episodes through `provenance.derived_from` and `sources` — the field is a
+summary of that chain, not a substitute for it. What a caller does with the
+grade (weighting, phrasing, filtering) is the caller's business.
 
 ## 7. Consistency — structure_revision
 
