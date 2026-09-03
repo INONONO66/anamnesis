@@ -68,16 +68,12 @@ export const ClaimSubKind = z.enum([
 ]);
 export type ClaimSubKind = z.infer<typeof ClaimSubKind>;
 
-/**
- * Every element has one event or observation time. An entity's TimePoint records
- * when the anchor was observed; entities are not modeled as timeless.
- */
 export const MemoryElement = z
   .object({
     /** UUIDv7 preserves creation order in the identifier. */
     id: z.uuidv7(),
     schema: ElementSchemaId,
-    time: TimePoint,
+    time: TimePoint.optional(),
     content: z.string().min(1),
     origin: Origin,
     /** Effective mass is derived at recall so decay needs no mutable state. */
@@ -87,6 +83,13 @@ export const MemoryElement = z
   })
   .strict()
   .superRefine((element, context) => {
+    if (SCHEMA_REGISTRY[element.schema as KnownSchema] === "Episode" && !element.time) {
+      context.addIssue({
+        code: "custom",
+        path: ["time"],
+        message: "event time is required for an Episode",
+      });
+    }
     if (
       element.schema === "anamnesis.claim/1" &&
       "sub_kind" in element.properties &&

@@ -7,6 +7,8 @@ import neo4j, {
   type Relationship,
 } from "neo4j-driver";
 import { createHash } from "node:crypto";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { v7 as uuidv7 } from "uuid";
 import {
   LINK_LATTICE,
@@ -21,12 +23,14 @@ import {
   type Origin,
   type TimePoint,
 } from "@anamnesis/protocol";
+import { ObjectStore } from "./objects.ts";
 
 export interface StoreOptions {
   uri: string;
   user: string;
   password: string;
   database?: string;
+  objectsRoot?: string;
 }
 
 export interface PutResult {
@@ -64,6 +68,14 @@ type QueryParameter =
   | ReturnType<typeof neo4j.int>;
 type QueryParameters = Record<string, QueryParameter>;
 
+interface ElementWriteOptions {
+  payload?: Uint8Array;
+  payloadMediaType?: string;
+  sourceRevision?: string;
+  enqueue?: boolean;
+  previous?: string;
+}
+
 const LINK_ROLES = Object.keys(LINK_LATTICE) as LinkRole[];
 
 const SCHEMA_STATEMENTS = [
@@ -74,10 +86,14 @@ const SCHEMA_STATEMENTS = [
     (role) => `CREATE CONSTRAINT link_idem_${role.toLowerCase()} IF NOT EXISTS
    FOR ()-[l:${role}]-() REQUIRE l.idem_key IS UNIQUE`,
   ),
-  `CREATE CONSTRAINT element_origin IF NOT EXISTS
-   FOR (e:Element) REQUIRE e.origin_key IS UNIQUE`,
+  `CREATE CONSTRAINT episode_revision IF NOT EXISTS
+   FOR (e:Episode) REQUIRE e.revision_key IS UNIQUE`,
+  `CREATE CONSTRAINT episode_ingest_seq IF NOT EXISTS
+   FOR (e:Episode) REQUIRE e.ingest_seq IS UNIQUE`,
   `CREATE CONSTRAINT payload_hash IF NOT EXISTS
    FOR (p:Payload) REQUIRE p.hash IS UNIQUE`,
+  `CREATE INDEX episode_origin IF NOT EXISTS
+   FOR (e:Episode) ON (e.origin_key)`,
   `CREATE INDEX element_time IF NOT EXISTS
    FOR (e:Element) ON (e.time_utc)`,
   `CREATE INDEX element_schema IF NOT EXISTS
@@ -94,28 +110,42 @@ function sha256(data: Uint8Array | string): string {
   return createHash("sha256").update(data).digest("hex");
 }
 
-function elementDigest(e: {
-  schema: string;
-  time: TimePoint;
-  content: string;
-  origin: Origin;
-}): string {
+function elementDigest(
+  e: {
+    schema: string;
+    time?: TimePoint | undefined;
+    content: string;
+    properties?: MemoryElement["properties"] | undefined;
+  },
+  payloadHash: string | null = null,
+  previousRevisionKey: string | null = null,
+): string {
   return sha256(
-    JSON.stringify([
-      e.schema,
-      e.time.value,
-      e.time.precision,
-      e.content,
-      e.origin.source,
-      e.origin.session,
-      e.origin.actor,
-      e.origin.record,
-    ]),
+    JSON.stringify({
+      schema: e.schema,
+      content: e.content,
+      properties: Object.fromEntries(
+        Object.entries(e.properties ?? {}).filter(
+          ([key]) => key !== "payload_hash",
+        ),
+      ),
+      time: celestialOf(e.schema) === "Episode" ? e.time ?? null : null,
+      payload_hash: payloadHash,
+      previous_revision_key: previousRevisionKey,
+    }),
   );
 }
 
+function tupleHash(parts: readonly string[]): string {
+  return sha256(JSON.stringify(parts));
+}
+
 function originKey(o: Origin): string {
-  return [o.source, o.session, o.record].join("\u0000");
+  return tupleHash([o.source, o.session, o.actor, o.record]);
+}
+
+function sessionKey(o: Origin): string {
+  return tupleHash([o.source, o.session]);
 }
 
 function linkIdemKey(l: {
@@ -151,6 +181,7 @@ export function luceneQuery(raw: string): string {
 export class Store {
   private readonly driver: Driver;
   private readonly database: string;
+  private readonly objects: ObjectStore;
 
   constructor(opts: StoreOptions, driver?: Driver) {
     this.driver =
@@ -159,6 +190,9 @@ export class Store {
         disableLosslessIntegers: true,
       });
     this.database = opts.database ?? "neo4j";
+    this.objects = new ObjectStore(
+      opts.objectsRoot ?? join(homedir(), ".anamnesis", "objects"),
+    );
   }
 
   get databaseName(): string {
@@ -173,7 +207,7 @@ export class Store {
 
   async putElement(
     input: MemoryElementInput,
-    opts: { payload?: Uint8Array; enqueue?: boolean; previous?: string } = {},
+    opts: ElementWriteOptions = {},
   ): Promise<PutResult> {
     return this.putParsedElement(MemoryElement.parse(input), opts);
   }
@@ -181,11 +215,95 @@ export class Store {
   /** Engine ingestion uses this after its derived input schema has parsed once. */
   async putParsedElement(
     el: MemoryElement,
-    opts: { payload?: Uint8Array; enqueue?: boolean; previous?: string } = {},
+    opts: ElementWriteOptions = {},
   ): Promise<PutResult> {
-    const payloadHash = opts.payload ? sha256(opts.payload) : null;
+    const payload = opts.payload
+      ? await this.objects.put(
+          opts.payload,
+          opts.payloadMediaType ?? "application/octet-stream",
+        )
+      : null;
+    const payloadHash = payload?.hash ?? null;
     const now = new Date().toISOString();
     const celestial = celestialOf(el.schema);
+    const sourceRevision = opts.sourceRevision ?? el.origin.record;
+    if (celestial === "Episode") {
+      return this.withWriteTx(async (tx) => {
+        const key = originKey(el.origin);
+        const revisionKey = tupleHash([key, sourceRevision]);
+        const existing = await tx.run<{
+          id: string;
+          digest: string;
+          previousRevisionKey: string | null;
+        }>(
+          `MATCH (e:Element:Episode { revision_key: $revisionKey })
+           RETURN e.id AS id, e.digest AS digest,
+                  e.previous_revision_key AS previousRevisionKey`,
+          { revisionKey },
+        );
+        if (existing.records.length > 0) {
+          const record = existing.records[0]!;
+          const candidateDigest = elementDigest(
+            el,
+            payloadHash,
+            record.get("previousRevisionKey"),
+          );
+          if (record.get("digest") !== candidateDigest) {
+            throw new Error(`revision_conflict: ${revisionKey}`);
+          }
+          return { id: record.get("id"), created: false };
+        }
+        const head = await tx.run<{ revisionKey: string | null }>(
+          `MERGE (h:OriginHead { origin_key: $originKey })
+           SET h.revision_key = h.revision_key
+           RETURN h.revision_key AS revisionKey`,
+          { originKey: key },
+        );
+        const previousRevisionKey = head.records[0]!.get("revisionKey") ?? null;
+        const prior = previousRevisionKey
+          ? await tx.run<{ id: string }>(
+              `MATCH (e:Element:Episode { revision_key: $revisionKey })
+               RETURN e.id AS id`,
+              { revisionKey: previousRevisionKey },
+            )
+          : null;
+        const previousId = prior?.records[0]?.get("id") ?? null;
+        const sequence = await tx.run<{ value: number }>(
+          `MERGE (m:Meta { key: 'meta' })
+           ON CREATE SET m.ingest_seq = 0
+           SET m.ingest_seq = m.ingest_seq + 1
+           RETURN m.ingest_seq AS value`,
+        );
+        await this.createElementTx(tx, el, payload, opts, {
+          sourceRevision,
+          revisionKey,
+          previousRevisionKey,
+          ingestSeq: sequence.records[0]!.get("value"),
+          ingestedAt: Date.now(),
+          digest: elementDigest(el, payloadHash, previousRevisionKey),
+        });
+        if (previousId) {
+          await this.mergeLinkTx(tx, {
+            id: uuidv7(),
+            from: el.id,
+            to: previousId,
+            role: "INVALIDATES",
+            content: "This source revision supersedes the previous revision",
+            weight: 1,
+          });
+        }
+        await tx.run(
+          `MATCH (h:OriginHead { origin_key: $originKey })
+           SET h.revision_key = $revisionKey`,
+          { originKey: key, revisionKey },
+        );
+        return {
+          id: el.id,
+          created: true,
+          ...(previousId ? { invalidated: previousId } : {}),
+        };
+      });
+    }
 
     return this.withWriteTx(async (tx) => {
       const existing = await tx.run<{
@@ -227,7 +345,7 @@ export class Store {
           origin: { ...el.origin, record: derivedRecord },
           properties: { ...el.properties, diverged_at: now },
         };
-        await this.createElementTx(tx, divergedEl, payloadHash, opts);
+        await this.createElementTx(tx, divergedEl, payload, opts);
         const oldCelestial = celestialOf(rec.get("schema"));
         const invalidated =
           LINK_LATTICE.INVALIDATES.from.some((label) => label === celestial) &&
@@ -254,7 +372,7 @@ export class Store {
         };
       }
 
-      await this.createElementTx(tx, el, payloadHash, opts);
+      await this.createElementTx(tx, el, payload, opts);
       return { id: el.id, created: true };
     });
   }
@@ -262,38 +380,48 @@ export class Store {
   private async createElementTx(
     tx: ManagedTransaction,
     el: MemoryElement,
-    payloadHash: string | null,
-    opts: { payload?: Uint8Array; enqueue?: boolean; previous?: string },
+    payload: { hash: string; size: number; mediaType: string } | null,
+    opts: { enqueue?: boolean; previous?: string },
+    revision?: {
+      sourceRevision: string;
+      revisionKey: string;
+      previousRevisionKey: string | null;
+      ingestSeq: number;
+      ingestedAt: number;
+      digest: string;
+    },
   ): Promise<void> {
-    if (opts.payload) {
+    if (payload) {
       await tx.run(
         `MERGE (p:Payload { hash: $hash })
-         ON CREATE SET p.bytes = $bytes`,
-        {
-          hash: payloadHash,
-          bytes: Buffer.from(opts.payload).toString("base64"),
-        },
+         ON CREATE SET p.size = $size, p.media_type = $mediaType`,
+        { hash: payload.hash, size: payload.size, mediaType: payload.mediaType },
       );
     }
+    const isEpisode = celestialOf(el.schema) === "Episode";
     await tx.run(
       `CREATE (e:${labelClause(el.schema)} {
          id: $id, schema: $schema,
          time_value: $timeValue, time_utc: $timeUtc,
          time_precision: $timePrecision,
          content: $content,
-         origin_key: $originKey,
+         origin_key: $originKey, session_key: $sessionKey,
          origin_source: $source, origin_session: $session,
          origin_actor: $actor, origin_record: $record,
          mass: $mass, properties: $properties,
-         payload_hash: $payloadHash, digest: $digest
+         payload_hash: $payloadHash, digest: $digest,
+         source_revision: $sourceRevision, revision_key: $revisionKey,
+         previous_revision_key: $previousRevisionKey,
+         ingest_seq: $ingestSeq, ingested_at: $ingestedAt
        })`,
       {
         originKey: originKey(el.origin),
+        sessionKey: isEpisode ? sessionKey(el.origin) : null,
         id: el.id,
         schema: el.schema,
-        timeValue: el.time.value,
-        timeUtc: toUtc(el.time.value),
-        timePrecision: el.time.precision,
+        timeValue: isEpisode ? el.time!.value : null,
+        timeUtc: isEpisode ? toUtc(el.time!.value) : null,
+        timePrecision: isEpisode ? el.time!.precision : null,
         content: el.content,
         source: el.origin.source,
         session: el.origin.session,
@@ -301,10 +429,22 @@ export class Store {
         record: el.origin.record,
         mass: el.mass,
         properties: JSON.stringify(el.properties),
-        payloadHash,
-        digest: elementDigest(el),
+        payloadHash: payload?.hash ?? null,
+        digest: revision?.digest ?? elementDigest(el),
+        sourceRevision: revision?.sourceRevision ?? null,
+        revisionKey: revision?.revisionKey ?? null,
+        previousRevisionKey: revision?.previousRevisionKey ?? null,
+        ingestSeq: revision?.ingestSeq ?? null,
+        ingestedAt: Date.now(),
       },
     );
+    if (payload) {
+      await tx.run(
+        `MATCH (e:Element:Episode { id: $id }), (p:Payload { hash: $hash })
+         MERGE (e)-[:HAS_PAYLOAD]->(p)`,
+        { id: el.id, hash: payload.hash },
+      );
+    }
     if (opts.enqueue) {
       await tx.run(
         `MATCH (e:Element { id: $id })
@@ -418,13 +558,11 @@ export class Store {
   }
 
   async getPayload(hash: string): Promise<Uint8Array | null> {
-    const rows = await this.run<{ bytes: string }>(
-      `MATCH (p:Payload { hash: $hash }) RETURN p.bytes AS bytes`,
+    const rows = await this.run<{ hash: string }>(
+      `MATCH (p:Payload { hash: $hash }) RETURN p.hash AS hash`,
       { hash },
     );
-    return rows.length
-      ? new Uint8Array(Buffer.from(rows[0]!.bytes, "base64"))
-      : null;
+    return rows.length && await this.objects.has(hash) ? this.objects.get(hash) : null;
   }
 
   async searchText(
@@ -436,10 +574,10 @@ export class Store {
     const rows = await this.run<{ e: ElementNode; score: number }>(
       `CALL db.index.fulltext.queryNodes('element_content', $q)
        YIELD node, score
-       WHERE ($until IS NULL OR node.time_utc <= $until)
+       WHERE ($until IS NULL OR NOT node:Episode OR node.time_utc <= $until)
          AND (NOT $validOnly OR NOT EXISTS {
            MATCH (inv:Element)-[:INVALIDATES]->(node)
-           WHERE $until IS NULL OR inv.time_utc <= $until
+           WHERE $until IS NULL OR NOT inv:Episode OR inv.time_utc <= $until
          })
        RETURN node AS e, score
        ORDER BY score DESC
@@ -488,10 +626,10 @@ export class Store {
     const atUtc = toUtc(at);
     const rows = await this.run<{ valid: boolean }>(
       `MATCH (e:Element { id: $id })
-       RETURN e.time_utc <= $at
+       RETURN (NOT e:Episode OR e.time_utc <= $at)
               AND NOT EXISTS {
                 MATCH (inv:Element)-[:INVALIDATES]->(e)
-                WHERE inv.time_utc <= $at
+                WHERE NOT inv:Episode OR inv.time_utc <= $at
               } AS valid`,
       { id, at: atUtc },
     );
@@ -534,10 +672,11 @@ export class Store {
     for (const row of rows) {
       const p = nodeProps(row["e"]);
       const el = toElement(p);
-      if (elementDigest(el) !== p["digest"]) {
+      const payloadHash = p["payload_hash"] as string | null;
+      const previousRevisionKey = (p["previous_revision_key"] as string | null) ?? null;
+      if (elementDigest(el, payloadHash, previousRevisionKey) !== p["digest"]) {
         issues.push({ elementId: el.id, kind: "digest-mismatch" });
       }
-      const payloadHash = p["payload_hash"] as string | null;
       if (payloadHash) {
         const payload = await this.getPayload(payloadHash);
         if (!payload) {
@@ -607,7 +746,7 @@ function toElement(p: ElementProperties): MemoryElement {
   return MemoryElement.parse({
     id: p["id"],
     schema: p["schema"],
-    time: { value: p["time_value"], precision: p["time_precision"] },
+    ...(p["time_value"] ? { time: { value: p["time_value"], precision: p["time_precision"] } } : {}),
     content: p["content"],
     origin: {
       source: p["origin_source"],

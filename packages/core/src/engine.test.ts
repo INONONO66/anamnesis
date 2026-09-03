@@ -5,9 +5,10 @@ import neo4j, {
   type SessionConfig,
 } from "neo4j-driver";
 import { v7 as uuidv7 } from "uuid";
-import { mkdtemp, rm } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { Engine, envConfig, RememberInput } from "./engine.ts";
 import { EpisodeJournal } from "./journal.ts";
 import { luceneQuery, Store } from "./store.ts";
@@ -20,6 +21,7 @@ const TEST_DB = {
 const AFTER_FIXTURES = "2027-01-01T00:00:00Z";
 
 let engine: Engine;
+let objectsRoot: string;
 
 function msg(record: string, content: string, value: string) {
   return {
@@ -91,6 +93,7 @@ describe("Engine configuration", () => {
       "ANAMNESIS_NEO4J_USER",
       "ANAMNESIS_NEO4J_PASSWORD",
       "ANAMNESIS_NEO4J_DATABASE",
+      "ANAMNESIS_OBJECTS_ROOT",
     ] as const;
     const saved = keys.map((key) => process.env[key]);
     try {
@@ -100,17 +103,20 @@ describe("Engine configuration", () => {
         user: "neo4j",
         password: "anamnesis",
         database: "neo4j",
+        objectsRoot: join(homedir(), ".anamnesis", "objects"),
       });
 
       process.env["ANAMNESIS_NEO4J_URI"] = "bolt://db.example:9999";
       process.env["ANAMNESIS_NEO4J_USER"] = "configured-user";
       process.env["ANAMNESIS_NEO4J_PASSWORD"] = "configured-password";
       process.env["ANAMNESIS_NEO4J_DATABASE"] = "configured-database";
+      process.env["ANAMNESIS_OBJECTS_ROOT"] = "/srv/anamnesis/objects";
       expect(envConfig()).toEqual({
         uri: "bolt://db.example:9999",
         user: "configured-user",
         password: "configured-password",
         database: "configured-database",
+        objectsRoot: "/srv/anamnesis/objects",
       });
     } finally {
       keys.forEach((key, index) => {
@@ -137,12 +143,14 @@ beforeAll(async () => {
   await admin.executeQuery("MATCH (n) DETACH DELETE n");
   await admin.close();
 
-  engine = new Engine(TEST_DB);
+  objectsRoot = await mkdtemp(join(tmpdir(), "anamnesis-objects-"));
+  engine = new Engine({ ...TEST_DB, objectsRoot });
   await engine.init();
 });
 
 afterAll(async () => {
   await engine.close();
+  await rm(objectsRoot, { recursive: true });
 });
 
 describe("Engine storage lifecycle", () => {
@@ -156,7 +164,8 @@ describe("Engine storage lifecycle", () => {
       "link_idem_derived_from",
       "link_idem_invalidates",
       "link_idem_contrasts",
-      "element_origin",
+      "episode_revision",
+      "episode_ingest_seq",
       "payload_hash",
     ];
     const indexes = [
@@ -391,13 +400,13 @@ describe("Engine storage lifecycle", () => {
     expect(second.id).not.toBe(first.id);
   });
 
-  test("remember is idempotent for identical origins and content", async () => {
-    const first = await engine.remember(
-      msg("dup-1", "Original content", "2026-08-22T10:00:00+09:00"),
-    );
-    const again = await engine.remember(
-      msg("dup-1", "Original content", "2026-08-22T10:00:00+09:00"),
-    );
+  test("remember is idempotent for an identical source revision", async () => {
+    const input = {
+      ...msg("dup-1", "Original content", "2026-08-22T10:00:00+09:00"),
+      source_revision: "revision-1",
+    };
+    const first = await engine.remember(input);
+    const again = await engine.remember(input);
     expect(first.created).toBe(true);
     expect(again.created).toBe(false);
     expect(again.id).toBe(first.id);
@@ -425,40 +434,64 @@ describe("Engine storage lifecycle", () => {
     }
   });
 
-  test("changed content at the same origin creates an invalidating branch", async () => {
-    const first = await engine.remember(
-      msg("div-1", "Original sent content", "2026-08-22T10:00:00+09:00"),
-    );
-    const edited = await engine.remember(
-      msg("div-1", "Edited content", "2026-08-22T10:00:00+09:00"),
-    );
-    expect(edited.created).toBe(true);
-    expect(edited.diverged).toBe(true);
-    expect(edited.invalidated).toBe(first.id);
-
-    const fresh = await engine.store.getElement(edited.id);
-    expect(fresh!.content).toBe("Edited content");
-    expect(fresh!.origin.record).toMatch(/^div-1#h[0-9a-f]{8}$/);
-    expect(fresh!.time.value).toBe("2026-08-22T10:00:00+09:00");
-    expect(fresh!.properties["diverged_at"]).toBeString();
-
-    const invalidations = await engine.store.linksOf(first.id, "INVALIDATES");
-    expect(
-      invalidations.some(
-        (link) => link.from === edited.id && link.to === first.id,
-      ),
-    ).toBe(true);
-    expect((await engine.store.getElement(first.id))!.content).toBe(
+  test("revisions are immutable, linked, and permit A to B to A", async () => {
+    const base = msg(
+      "revision-chain",
       "Original sent content",
+      "2026-08-22T10:00:00+09:00",
     );
-    expect(await engine.store.isValidAt(first.id, AFTER_FIXTURES)).toBe(false);
+    const first = await engine.remember({ ...base, source_revision: "rev-a" });
+    const edited = await engine.remember({
+      ...base,
+      content: "Edited content",
+      source_revision: "rev-b",
+    });
+    const reverted = await engine.remember({
+      ...base,
+      source_revision: "rev-c",
+    });
 
-    const again = await engine.remember(
-      msg("div-1", "Edited content", "2026-08-22T10:00:00+09:00"),
+    expect(first.created).toBe(true);
+    expect(edited).toMatchObject({ created: true, invalidated: first.id });
+    expect(reverted).toMatchObject({ created: true, invalidated: edited.id });
+    expect(new Set([first.id, edited.id, reverted.id]).size).toBe(3);
+
+    const driver = adminDriver();
+    const session = driver.session();
+    try {
+      const result = await session.run<{
+        sourceRevision: string;
+        revisionKey: string;
+        previousRevisionKey: string | null;
+      }>(
+        `MATCH (e:Element:Episode { origin_record: $record })
+         RETURN e.source_revision AS sourceRevision,
+                e.revision_key AS revisionKey,
+                e.previous_revision_key AS previousRevisionKey
+         ORDER BY e.ingest_seq`,
+        { record: "revision-chain" },
+      );
+      const revisions = result.records.map((record) => record.toObject());
+      expect(revisions).toHaveLength(3);
+      expect(revisions.map((revision) => revision.sourceRevision)).toEqual([
+        "rev-a",
+        "rev-b",
+        "rev-c",
+      ]);
+      expect(revisions[0]!.previousRevisionKey).toBeNull();
+      expect(revisions[1]!.previousRevisionKey).toBe(revisions[0]!.revisionKey);
+      expect(revisions[2]!.previousRevisionKey).toBe(revisions[1]!.revisionKey);
+    } finally {
+      await session.close();
+      await driver.close();
+    }
+
+    expect(await engine.store.linksOf(first.id, "INVALIDATES")).toContainEqual(
+      expect.objectContaining({ from: edited.id, to: first.id }),
     );
-    expect(again.created).toBe(false);
-    expect(again.id).toBe(edited.id);
-    expect(again.diverged).toBe(true);
+    expect(await engine.store.linksOf(edited.id, "INVALIDATES")).toContainEqual(
+      expect.objectContaining({ from: reverted.id, to: edited.id }),
+    );
   });
 
   test("does not invalidate divergences outside the lattice", async () => {
@@ -525,38 +558,49 @@ describe("Engine storage lifecycle", () => {
     });
   });
 
-  test("payload bytes survive ingestion and integrity verification", async () => {
+  test("payload bytes are externalized before metadata is committed", async () => {
     const bytes = new TextEncoder().encode('{"raw":"source line"}');
     const result = await engine.remember({
       ...msg("p1", "Message with payload", "2026-08-22T12:00:00+09:00"),
       payload: bytes,
+      payload_media_type: "application/json",
     });
     const element = await engine.store.getElement(result.id);
     const payloadHash = element!.properties["payload_hash"];
     expect(payloadHash).toBeString();
-    expect(await engine.store.getPayload(payloadHash as string)).toEqual(bytes);
-    expect(await engine.verify()).toEqual([]);
-
-    await runAdmin("MATCH (p:Payload { hash: $hash }) DELETE p", {
-      hash: payloadHash as string,
-    });
-    expect(await engine.verify()).toContainEqual({
-      elementId: result.id,
-      kind: "missing-payload",
-    });
-
-    const mismatch = await engine.remember({
-      ...msg("p2", "Mismatched payload", "2026-08-22T12:01:00+09:00"),
-      payload: bytes,
-    });
-    await runAdmin(
-      "MATCH (e:Element { id: $id }), (p:Payload { hash: e.payload_hash }) SET p.bytes = 'd3Jvbmc='",
-      { id: mismatch.id },
+    const objectBytes = await readFile(
+      join(objectsRoot, (payloadHash as string).slice(0, 2), payloadHash as string),
     );
-    expect(await engine.verify()).toContainEqual({
-      elementId: mismatch.id,
-      kind: "payload-hash-mismatch",
-    });
+    expect(createHash("sha256").update(objectBytes).digest("hex")).toBe(
+      payloadHash as string,
+    );
+    expect(await engine.store.getPayload(payloadHash as string)).toEqual(bytes);
+
+    const driver = adminDriver();
+    const session = driver.session();
+    try {
+      const graph = await session.run<{
+        hash: string;
+        size: number;
+        mediaType: string;
+        hasBytes: boolean;
+      }>(
+        `MATCH (:Element:Episode { id: $id })-[:HAS_PAYLOAD]->(p:Payload)
+         RETURN p.hash AS hash, p.size AS size, p.media_type AS mediaType,
+                p.bytes IS NOT NULL AS hasBytes`,
+        { id: result.id },
+      );
+      expect(graph.records[0]!.toObject()).toEqual({
+        hash: payloadHash as string,
+        size: bytes.byteLength,
+        mediaType: "application/json",
+        hasBytes: false,
+      });
+    } finally {
+      await session.close();
+      await driver.close();
+    }
+    expect(await engine.verify()).toEqual([]);
   });
 
   test("recall matches CJK content", async () => {
@@ -790,6 +834,35 @@ describe("Engine graph contracts", () => {
 });
 
 describe("Engine time-axis filtering", () => {
+  test("snapshot time filters Episodes only and retains timeless elements", async () => {
+    const timeless = await engine.put({
+      id: uuidv7(),
+      schema: "anamnesis.entity/1",
+      content: "Snapshot contract sentinel",
+      origin: {
+        source: "time-test",
+        session: "episode-only",
+        actor: "fixture",
+        record: "timeless",
+      },
+    });
+    const future = await engine.remember({
+      ...msg(
+        "future-snapshot",
+        "Snapshot contract sentinel",
+        "2028-01-01T00:00:00Z",
+      ),
+      source_revision: "future-1",
+    });
+
+    const hits = await engine.recall("Snapshot contract sentinel", {
+      at: "2027-01-01T00:00:00Z",
+    });
+    expect(hits.some((hit) => hit.element.id === timeless.id)).toBe(true);
+    expect(hits.some((hit) => hit.element.id === future.id)).toBe(false);
+    expect((await engine.store.getElement(timeless.id))!.time).toBeUndefined();
+  });
+
   test("empty search is exact and unfiltered search includes invalidated data", async () => {
     expect(await engine.store.searchText(" \\ / * ")).toEqual([]);
     const original = await engine.put({
@@ -856,7 +929,7 @@ describe("Engine time-axis filtering", () => {
     ).toBe(true);
   });
 
-  test("invalidation applies only at and after its event time", async () => {
+  test("a timeless invalidator applies regardless of snapshot cutoff", async () => {
     const fact = await engine.remember(
       msg("f1", "Ino stopped drinking coffee", "2026-03-01T09:00:00+09:00"),
     );
@@ -888,9 +961,9 @@ describe("Engine time-axis filtering", () => {
     const before = await engine.recall("stopped drinking coffee", {
       at: "2026-05-01T00:00:00Z",
     });
-    expect(before.some((hit) => hit.element.id === fact.id)).toBe(true);
+    expect(before.some((hit) => hit.element.id === fact.id)).toBe(false);
     expect(await engine.store.isValidAt(fact.id, "2026-05-01T00:00:00Z")).toBe(
-      true,
+      false,
     );
     expect(await engine.store.isValidAt(fact.id, AFTER_FIXTURES)).toBe(false);
   });
