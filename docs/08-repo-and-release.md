@@ -9,8 +9,9 @@ only**.
   write ourselves (local PPR, forgetting, RRF) is size-bounded (≤ 2,000 nodes,
   docs/06) and runs in a few ms on Float64Array. Everything else
   (adapters, extraction, daemon) is orchestration and I/O-bound.
-- Where the code keeps growing (adapters, LLM orchestration, MCP) the TS
-  ecosystem is far ahead.
+- Where the code keeps growing (extraction orchestration, daemon I/O, the
+  external harness ecosystem this daemon serves) the TS ecosystem is far
+  ahead.
 - Two toolchains, contract codegen, a 5-platform sidecar build matrix and IPC
   drift management all disappear.
 - If a real bottleneck ever shows up, only the `dynamics` package is swapped
@@ -36,12 +37,14 @@ anamnesis/
 │   ├── recall/                 # candidates, seeds, envelope queries, assembly, degradation ladder (docs/05)
 │   ├── daemon/                 # anamnesisd: UDS JSON-RPC, write queue, Outbox worker, dreaming schedule
 │   ├── client/                 # socket client + daemon spawn/discovery
-│   ├── cli/                    # bin "anamnesis" (up/down/remember/recall/status/verify/gen/gc/dream/bench)
-│   ├── mcp/                    # MCP stdio bridge (receipt mode)
-│   ├── hooks/                  # host hooks such as claude-code (auto mode, exit-0 guaranteed)
-│   └── adapters/               # kakao-export etc.: source → Episode conversion
+│   └── cli/                    # bin "anamnesis" — daemon ops only (up/down/status/verify/gen/gc/dream/bench/backup/restore)
 └── .github/workflows/{ci,nightly,release}.yml
 ```
+
+Harnesses — MCP bridges, editor hooks (claude-code etc.), source adapters
+(kakao-export etc.) — live in separate repos owned by the operator and attach
+over the UDS RPC contract. `remember`/`recall` are API-only; the CLI never
+wraps them (D39).
 
 `dynamics` having no Neo4j dependency is what makes the CI gates (docs/07 §6)
 work — forgetting, PPR and ordering fixtures run without a container.
@@ -57,8 +60,8 @@ artifacts; CI is the drift gate).
 ## Toolchain and runtime
 
 - **Development**: bun (workspace, tests, scripts). Version pinned with mise.
-- **Deployment target**: Node LTS — the baseline for MCP hosts and general
-  compatibility. The CLI is a single `bun build --target=node` bundle.
+- **Deployment target**: Node LTS — the baseline for external harness hosts
+  and general compatibility. The CLI is a single `bun build --target=node` bundle.
 - **No native dependencies**: the store is a Neo4j server and neo4j-driver is
   pure JS. PPR is Float64Array. No prebuilt build matrix.
 - **Floating point**: PPR in `dynamics` uses only `+ × ÷` and is
@@ -114,7 +117,7 @@ solver validation (real dumps) · envelope validation overlap@20 · health repor
 ```text
 1. bun build (per-package dist)
 2. 100k scale bench (release gate, docs/07 §4)
-3. publish order: protocol → dynamics → core → recall → client → daemon → cli, mcp, hooks, adapters
+3. publish order: protocol → dynamics → core → recall → client → daemon → cli
    (npm provenance, OIDC)
 4. GitHub Release notes
 ```

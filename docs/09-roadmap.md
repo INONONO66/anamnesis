@@ -31,7 +31,7 @@ does not is forgotten. No derived layer, no PPR.
 | forgetting | m₀, hit-cache initialization, R(t,S), Hit node + HIT_OF, S update, replay, `rebuild --hit-cache` | 04 §1–5, §7 |
 | commit path | `commitHits` with producers 1 (receipt) and 2 (exposure); `hello.commit_mode`; idem_key | 04 §6, 05 §10 |
 | recall | vector (nodes) + BM25 + session channels with caps, RRF, score = rel·m^γ, deterministic ordering, degradation ladder, diagnostics | 05 (without PPR, identity, relationship vectors) |
-| clients | CLI (`up/down/remember/recall/status/verify/backup/restore`), MCP server (receipt), claude-code hook (auto) | 08 |
+| clients | ops CLI (`up/down/status/verify/backup/restore`), RPC contract export (`schemas/`); remember/recall harnesses are external (D39) | 08 |
 | protocol | zod: Episode-only time requirement, `source_revision`, `previous_revision_key`, `revision_key`, `correction` schema, Hit, RPC methods | 08 |
 | CI | forgetting fixtures, RRF invariance, ordering conventions, contract schema tests | 04 §10, 07 §6 |
 

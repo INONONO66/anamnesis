@@ -538,3 +538,19 @@ quarantine the whole journal on checksum corruption (docs/01 §9).
 **Reason**: arbitrary destinations, cross-device renames and two unjournaled
 root renames are not crash-total. A failed restore must leave or recover the
 previous live root automatically.
+
+## D39 — harnesses are external; the repo surface is the daemon and its contract
+
+**Decision**: this repo ships `anamnesisd`, the RPC contract
+(`@anamnesis/protocol`, schema-exported) and a daemon-ops CLI
+(`up/down/status/verify/gen/gc/dream/bench/backup/restore`). MCP bridges,
+editor hooks (claude-code and others) and source adapters are separate
+projects owned by the operator, attaching over the UDS JSON-RPC surface.
+`remember`/`recall` are API-only — the CLI does not wrap them.
+
+**Reason**: harness frameworks churn far faster than a memory engine should.
+Keeping them out of the repo makes the RPC contract the single product
+surface — versioned, schema-exported, harness-agnostic — and new agent
+frameworks require zero changes here. The daemon protocol already assumed
+untrusted external callers (capability token, caps, commit modes), so nothing
+about the security or Hit-commit model changes.
