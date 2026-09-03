@@ -1,12 +1,14 @@
 # 02 — Daemon and Pipelines
 
 Exactly one process writes. `anamnesisd` is Neo4j's only bolt client, and
-every caller (CLI, MCP server, editor hooks) talks to the daemon over a UDS.
+every caller talks to the daemon over a UDS. Harnesses — MCP bridges, editor
+hooks, agent adapters — are external projects maintained by the operator;
+this repo ships only the daemon, its ops CLI and the RPC contract (D39).
 
 ```text
-  claude-code hook ─┐
-  MCP server ───────┼─ UDS ~/.anamnesis/sock ─▶ anamnesisd ─ bolt(127.0.0.1) ─▶ Neo4j (Docker)
-  anamnesis CLI ────┘                             │
+  external harnesses ─┐  (MCP bridge, editor hook, custom agent — separate repos)
+  anamnesis ops CLI ──┼─ UDS ~/.anamnesis/sock ─▶ anamnesisd ─ bolt(127.0.0.1) ─▶ Neo4j (Docker)
+                      ┘                             │
                                                   ├─ objects/  spool/
                                                   ├─ write queue (serialized)
                                                   ├─ read pool  (recall, concurrent)
