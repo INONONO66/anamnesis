@@ -6,6 +6,7 @@ import {
   MemoryElement,
   MemoryLink,
   SCHEMA_LABELS,
+  TIME_BEARING,
   TimePrecision,
 } from "./index.ts";
 import { LINK_LATTICE, LinkRole } from "./link.ts";
@@ -73,19 +74,34 @@ describe("MemoryElement", () => {
     expect(el.mass).toBe(0.5);
   });
 
-  test("requires event time only for Episodes", () => {
+  test("requires event time for every kind that carries one", () => {
     const { time, ...withoutTime } = validElement;
-    expect(() =>
-      MemoryElement.parse({
-        ...withoutTime,
-        schema: "anamnesis.original-message/1",
-      }),
-    ).toThrow();
+    expect(TIME_BEARING).toEqual({
+      Episode: true,
+      Fact: true,
+      Entity: false,
+      Community: false,
+    });
+    for (const schema of KNOWN_SCHEMAS) {
+      const result = MemoryElement.safeParse({ ...withoutTime, schema });
+      expect(result.success).toBe(!TIME_BEARING[SCHEMA_LABELS[schema]]);
+      if (!result.success) {
+        expect(result.error.issues).toContainEqual({
+          code: "custom",
+          path: ["time"],
+          message: `event time is required for a ${SCHEMA_LABELS[schema]}`,
+        });
+      }
+    }
     expect(
       MemoryElement.parse({
         ...withoutTime,
         schema: "anamnesis.entity/1",
       }).time,
+    ).toBeUndefined();
+    expect(
+      MemoryElement.parse({ ...withoutTime, schema: "anamnesis.community/1" })
+        .time,
     ).toBeUndefined();
   });
 

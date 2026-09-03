@@ -92,6 +92,27 @@ async function invalidatesProps(
   }
 }
 
+async function nextEpisodeProps(
+  from: string,
+  to: string,
+): Promise<Record<string, string | number | null>> {
+  const driver = adminDriver();
+  const session = driver.session();
+  try {
+    const result = await session.run<{
+      props: Record<string, string | number | null>;
+    }>(
+      `MATCH (a:Element { id: $from })-[l:NEXT_EPISODE]->(b:Element { id: $to })
+       RETURN properties(l) AS props`,
+      { from, to },
+    );
+    return result.records[0]?.get("props") ?? {};
+  } finally {
+    await session.close();
+    await driver.close();
+  }
+}
+
 async function labelsOf(id: string): Promise<string[]> {
   const driver = adminDriver();
   const session = driver.session();
@@ -397,6 +418,38 @@ describe("Engine storage lifecycle", () => {
       around2.some((link) => link.from === c2.id && link.to === c3.id),
     ).toBe(true);
     expect(await engine.store.linksOf(c1.id, "NEXT_EPISODE")).toHaveLength(1);
+  });
+
+  test("session topology keys by session, predecessor and successor", async () => {
+    const chain = (record: string, value: string, previous?: string) =>
+      ({
+        time: { value, precision: "second" },
+        content: `Session topology key ${record}`,
+        origin: {
+          source: "chat-export",
+          session: "topology-key/2026-08",
+          actor: "ino",
+          record,
+        },
+        ...(previous ? { previous } : {}),
+      }) as const;
+    const sha256 = (parts: readonly string[]) =>
+      createHash("sha256").update(JSON.stringify(parts)).digest("hex");
+    const sessionKey = sha256(["chat-export", "topology-key/2026-08"]);
+
+    const k1 = await engine.remember(chain("k1", "2026-08-27T10:00:00+09:00"));
+    const k2 = await engine.remember(chain("k2", "2026-08-27T10:05:00+09:00"));
+    const k3 = await engine.remember(
+      chain("k3", "2026-08-27T10:10:00+09:00", "k1"),
+    );
+
+    expect((await nextEpisodeProps(k1.id, k2.id))["idem_key"]).toBe(
+      sha256([sessionKey, k1.id, k2.id]),
+    );
+    expect((await nextEpisodeProps(k1.id, k3.id))["idem_key"]).toBe(
+      sha256([sessionKey, k1.id, k3.id]),
+    );
+    expect((await nextEpisodeProps(k2.id, k3.id))).toEqual({});
   });
 
   test("origin identity preserves tuple boundaries", async () => {
@@ -1114,7 +1167,7 @@ describe("Engine time-axis filtering", () => {
     );
   });
 
-  test("a timeless invalidator is a retroactive correction", async () => {
+  test("a correction is retroactive through its backdated time, not a missing one", async () => {
     const fact = await engine.put({
       id: uuidv7(),
       schema: "anamnesis.claim/1",
@@ -1127,9 +1180,24 @@ describe("Engine time-axis filtering", () => {
         record: "corr-target",
       },
     });
-    const timeless = await engine.put({
+    await expect(
+      engine.put({
+        id: uuidv7(),
+        schema: "anamnesis.claim/1",
+        content: "Retroactive correction sentinel corrector",
+        origin: {
+          source: "agent",
+          session: "correction",
+          actor: "extractor",
+          record: "corr-source",
+        },
+      }),
+    ).rejects.toThrow(/event time is required for a Fact/);
+
+    const corrector = await engine.put({
       id: uuidv7(),
       schema: "anamnesis.claim/1",
+      time: { value: "2026-03-01T00:00:00Z", precision: "second" },
       content: "Retroactive correction sentinel corrector",
       origin: {
         source: "agent",
@@ -1140,14 +1208,14 @@ describe("Engine time-axis filtering", () => {
     });
     await engine.link({
       id: uuidv7(),
-      from: timeless.id,
+      from: corrector.id,
       to: fact.id,
       role: "INVALIDATES",
       content: "The record was wrong from the moment it took effect",
     });
-    expect(await invalidatesProps(timeless.id, fact.id)).toMatchObject({
+    expect(await invalidatesProps(corrector.id, fact.id)).toMatchObject({
       target_id: fact.id,
-      effective_time_utc: "0000-01-01T00:00:00.000Z",
+      effective_time_utc: "2026-03-01T00:00:00.000Z",
     });
 
     expect(

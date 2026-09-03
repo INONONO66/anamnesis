@@ -7,6 +7,7 @@ export {
   MemoryElement,
   Celestial,
   SCHEMA_LABELS,
+  TIME_BEARING,
   ClaimSubKind,
 } from "./element.ts";
 export type { KnownSchema, MemoryElementInput } from "./element.ts";
