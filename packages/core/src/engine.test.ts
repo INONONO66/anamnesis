@@ -71,6 +71,27 @@ async function schemaObjectNames(
   }
 }
 
+async function invalidatesProps(
+  from: string,
+  to: string,
+): Promise<Record<string, string | number | null>> {
+  const driver = adminDriver();
+  const session = driver.session();
+  try {
+    const result = await session.run<{
+      props: Record<string, string | number | null>;
+    }>(
+      `MATCH (a:Element { id: $from })-[l:INVALIDATES]->(b:Element { id: $to })
+       RETURN properties(l) AS props`,
+      { from, to },
+    );
+    return result.records[0]?.get("props") ?? {};
+  } finally {
+    await session.close();
+    await driver.close();
+  }
+}
+
 async function labelsOf(id: string): Promise<string[]> {
   const driver = adminDriver();
   const session = driver.session();
@@ -172,6 +193,7 @@ describe("Engine storage lifecycle", () => {
       "element_time",
       "element_schema",
       "outbox_pending",
+      "invalidates_seek",
       "element_content",
     ];
     for (const name of await schemaObjectNames("CONSTRAINTS")) {
@@ -492,6 +514,92 @@ describe("Engine storage lifecycle", () => {
     expect(await engine.store.linksOf(edited.id, "INVALIDATES")).toContainEqual(
       expect.objectContaining({ from: reverted.id, to: edited.id }),
     );
+  });
+
+  test("an originals INVALIDATES link keys on from, to, and role only", async () => {
+    const base = msg(
+      "originals-idem",
+      "Originals idem content",
+      "2026-08-26T10:00:00+09:00",
+    );
+    const first = await engine.remember({ ...base, source_revision: "o-rev-a" });
+    const second = await engine.remember({
+      ...base,
+      content: "Originals idem content edited",
+      source_revision: "o-rev-b",
+    });
+
+    const props = await invalidatesProps(second.id, first.id);
+    expect(props["idem_key"]).toBe(
+      createHash("sha256")
+        .update(JSON.stringify([second.id, first.id, "INVALIDATES"]))
+        .digest("hex"),
+    );
+    expect(props).toMatchObject({
+      target_id: first.id,
+      effective_time_utc: "2026-08-26T01:00:00.000Z",
+    });
+  });
+
+  test("a derived INVALIDATES link carries its seek fields", async () => {
+    const target = await engine.put({
+      id: uuidv7(),
+      schema: "anamnesis.claim/1",
+      time: { value: "2026-04-01T00:00:00Z", precision: "second" },
+      content: "Seek field target claim",
+      origin: {
+        source: "agent",
+        session: "seek-fields",
+        actor: "extractor",
+        record: "seek-target",
+      },
+    });
+    const source = await engine.put({
+      id: uuidv7(),
+      schema: "anamnesis.claim/1",
+      time: { value: "2026-09-01T00:00:00Z", precision: "second" },
+      content: "Seek field source claim",
+      origin: {
+        source: "agent",
+        session: "seek-fields",
+        actor: "extractor",
+        record: "seek-source",
+      },
+    });
+    await engine.link({
+      id: uuidv7(),
+      from: source.id,
+      to: target.id,
+      role: "INVALIDATES",
+      content: "The later claim invalidates the earlier one",
+    });
+
+    expect(await invalidatesProps(source.id, target.id)).toMatchObject({
+      target_id: target.id,
+      effective_time_utc: "2026-09-01T00:00:00.000Z",
+    });
+
+    const timeless = await engine.put({
+      id: uuidv7(),
+      schema: "anamnesis.entity/1",
+      content: "Seek field timeless source",
+      origin: {
+        source: "agent",
+        session: "seek-fields",
+        actor: "extractor",
+        record: "seek-timeless",
+      },
+    });
+    await engine.link({
+      id: uuidv7(),
+      from: timeless.id,
+      to: source.id,
+      role: "RELATES_TO",
+      content: "An unrelated derived link keeps no seek fields",
+    });
+    expect(
+      await invalidatesProps(timeless.id, source.id),
+    ).toEqual({});
   });
 
   test("does not invalidate divergences outside the lattice", async () => {
@@ -834,7 +942,7 @@ describe("Engine graph contracts", () => {
 });
 
 describe("Engine time-axis filtering", () => {
-  test("snapshot time filters Episodes only and retains timeless elements", async () => {
+  test("snapshot time filters event time and retains timeless elements", async () => {
     const timeless = await engine.put({
       id: uuidv7(),
       schema: "anamnesis.entity/1",
@@ -929,7 +1037,7 @@ describe("Engine time-axis filtering", () => {
     ).toBe(true);
   });
 
-  test("a timeless invalidator applies regardless of snapshot cutoff", async () => {
+  test("invalidation applies only at and after its event time", async () => {
     const fact = await engine.remember(
       msg("f1", "Ino stopped drinking coffee", "2026-03-01T09:00:00+09:00"),
     );
@@ -961,11 +1069,140 @@ describe("Engine time-axis filtering", () => {
     const before = await engine.recall("stopped drinking coffee", {
       at: "2026-05-01T00:00:00Z",
     });
-    expect(before.some((hit) => hit.element.id === fact.id)).toBe(false);
+    expect(before.some((hit) => hit.element.id === fact.id)).toBe(true);
     expect(await engine.store.isValidAt(fact.id, "2026-05-01T00:00:00Z")).toBe(
-      false,
+      true,
     );
     expect(await engine.store.isValidAt(fact.id, AFTER_FIXTURES)).toBe(false);
+  });
+
+  test("a Fact carries event time exactly like an Episode", async () => {
+    const backdated = await engine.put({
+      id: uuidv7(),
+      schema: "anamnesis.claim/1",
+      time: { value: "2019-03-01T00:00:00Z", precision: "month" },
+      content: "Fact event time sentinel moved to Seoul",
+      origin: {
+        source: "agent",
+        session: "fact-time",
+        actor: "extractor",
+        record: "fact-time-1",
+      },
+    });
+
+    expect((await engine.store.getElement(backdated.id))!.time).toEqual({
+      value: "2019-03-01T00:00:00Z",
+      precision: "month",
+    });
+    expect(
+      await engine.store.isValidAt(backdated.id, "2018-01-01T00:00:00Z"),
+    ).toBe(false);
+    expect(
+      await engine.store.isValidAt(backdated.id, "2020-01-01T00:00:00Z"),
+    ).toBe(true);
+
+    const before = await engine.recall("Fact event time sentinel", {
+      at: "2018-01-01T00:00:00Z",
+    });
+    expect(before.some((hit) => hit.element.id === backdated.id)).toBe(false);
+    const at = await engine.recall("Fact event time sentinel", {
+      at: AFTER_FIXTURES,
+    });
+    expect(at.some((hit) => hit.element.id === backdated.id)).toBe(true);
+    expect(await engine.verify()).not.toContainEqual(
+      expect.objectContaining({ elementId: backdated.id }),
+    );
+  });
+
+  test("a timeless invalidator is a retroactive correction", async () => {
+    const fact = await engine.put({
+      id: uuidv7(),
+      schema: "anamnesis.claim/1",
+      time: { value: "2026-03-01T00:00:00Z", precision: "second" },
+      content: "Retroactive correction sentinel claim",
+      origin: {
+        source: "agent",
+        session: "correction",
+        actor: "extractor",
+        record: "corr-target",
+      },
+    });
+    const timeless = await engine.put({
+      id: uuidv7(),
+      schema: "anamnesis.claim/1",
+      content: "Retroactive correction sentinel corrector",
+      origin: {
+        source: "agent",
+        session: "correction",
+        actor: "extractor",
+        record: "corr-source",
+      },
+    });
+    await engine.link({
+      id: uuidv7(),
+      from: timeless.id,
+      to: fact.id,
+      role: "INVALIDATES",
+      content: "The record was wrong from the moment it took effect",
+    });
+    expect(await invalidatesProps(timeless.id, fact.id)).toMatchObject({
+      target_id: fact.id,
+      effective_time_utc: "0000-01-01T00:00:00.000Z",
+    });
+
+    expect(
+      await engine.store.isValidAt(fact.id, "2026-04-01T00:00:00Z"),
+    ).toBe(false);
+    expect(await engine.store.isValidAt(fact.id, AFTER_FIXTURES)).toBe(false);
+    const hits = await engine.recall("Retroactive correction sentinel claim", {
+      at: AFTER_FIXTURES,
+    });
+    expect(hits.some((hit) => hit.element.id === fact.id)).toBe(false);
+  });
+
+  test("a backdated correction hides its target from the target's own time", async () => {
+    const wrong = await engine.put({
+      id: uuidv7(),
+      schema: "anamnesis.claim/1",
+      time: { value: "2026-03-01T00:00:00Z", precision: "second" },
+      content: "Backdated correction sentinel wrong claim",
+      origin: {
+        source: "agent",
+        session: "backdated",
+        actor: "extractor",
+        record: "backdated-wrong",
+      },
+    });
+    const corrected = await engine.put({
+      id: uuidv7(),
+      schema: "anamnesis.claim/1",
+      time: { value: "2026-03-01T00:00:00Z", precision: "second" },
+      content: "Backdated correction sentinel right claim",
+      origin: {
+        source: "agent",
+        session: "backdated",
+        actor: "extractor",
+        record: "backdated-right",
+      },
+    });
+    await engine.link({
+      id: uuidv7(),
+      from: corrected.id,
+      to: wrong.id,
+      role: "INVALIDATES",
+      content: "The record was wrong, so the correction carries its time",
+    });
+
+    expect(
+      await engine.store.isValidAt(wrong.id, "2026-02-28T00:00:00Z"),
+    ).toBe(false);
+    expect(
+      await engine.store.isValidAt(wrong.id, "2026-03-01T00:00:00Z"),
+    ).toBe(false);
+    expect(await engine.store.isValidAt(wrong.id, AFTER_FIXTURES)).toBe(false);
+    expect(
+      await engine.store.isValidAt(corrected.id, AFTER_FIXTURES),
+    ).toBe(true);
   });
 
   test("recall applies validity filtering before its exact limit", async () => {

@@ -100,6 +100,9 @@ const SCHEMA_STATEMENTS = [
    FOR (e:Element) ON (e.schema)`,
   `CREATE INDEX outbox_pending IF NOT EXISTS
    FOR (o:Outbox) ON (o.processed_at)`,
+  // valid(T) seeks invalidators by target instead of expanding adjacency.
+  `CREATE INDEX invalidates_seek IF NOT EXISTS
+   FOR ()-[l:INVALIDATES]-() ON (l.target_id, l.effective_time_utc, l.id)`,
 
   `CREATE FULLTEXT INDEX element_content IF NOT EXISTS
    FOR (e:Element) ON EACH [e.content]
@@ -109,6 +112,15 @@ const SCHEMA_STATEMENTS = [
 function sha256(data: Uint8Array | string): string {
   return createHash("sha256").update(data).digest("hex");
 }
+
+/**
+ * A timeless invalidator is a retroactive correction (docs/03 §5): the target
+ * was never valid at any T. Storing the lower bound instead of null keeps
+ * `effective_time_utc` non-null so valid(T) stays a composite index seek.
+ */
+const BEGINNING_OF_TIME = "0000-01-01T00:00:00.000Z";
+/** Used when no snapshot cutoff is given, so every invalidator applies. */
+const END_OF_TIME = "9999-12-31T23:59:59.999Z";
 
 function elementDigest(
   e: {
@@ -129,7 +141,7 @@ function elementDigest(
           ([key]) => key !== "payload_hash",
         ),
       ),
-      time: celestialOf(e.schema) === "Episode" ? e.time ?? null : null,
+      time: carriesTime(e.schema) ? e.time ?? null : null,
       payload_hash: payloadHash,
       previous_revision_key: previousRevisionKey,
     }),
@@ -148,17 +160,33 @@ function sessionKey(o: Origin): string {
   return tupleHash([o.source, o.session]);
 }
 
-function linkIdemKey(l: {
-  from: string;
-  to: string;
-  role: string;
-  content: string;
-}): string {
-  return sha256(JSON.stringify([l.from, l.to, l.role, l.content]));
+/** Originals-layer links are content-free keys; derived links bind content. */
+function linkIdemKey(
+  l: {
+    from: string;
+    to: string;
+    role: string;
+    content: string;
+  },
+  originals: boolean,
+): string {
+  return sha256(
+    JSON.stringify(
+      originals
+        ? [l.from, l.to, l.role]
+        : [l.from, l.to, l.role, l.content],
+    ),
+  );
 }
 
 function celestialOf(schema: string): Celestial | null {
   return SCHEMA_LABELS[schema as KnownSchema] ?? null;
+}
+
+/** Only Episode and Fact carry an event time (docs/03 §1). */
+function carriesTime(schema: string): boolean {
+  const c = celestialOf(schema);
+  return c === "Episode" || c === "Fact";
 }
 
 function labelClause(schema: string): string {
@@ -399,6 +427,7 @@ export class Store {
       );
     }
     const isEpisode = celestialOf(el.schema) === "Episode";
+    const time = carriesTime(el.schema) ? el.time ?? null : null;
     await tx.run(
       `CREATE (e:${labelClause(el.schema)} {
          id: $id, schema: $schema,
@@ -419,9 +448,9 @@ export class Store {
         sessionKey: isEpisode ? sessionKey(el.origin) : null,
         id: el.id,
         schema: el.schema,
-        timeValue: isEpisode ? el.time!.value : null,
-        timeUtc: isEpisode ? toUtc(el.time!.value) : null,
-        timePrecision: isEpisode ? el.time!.precision : null,
+        timeValue: time?.value ?? null,
+        timeUtc: time ? toUtc(time.value) : null,
+        timePrecision: time?.precision ?? null,
         content: el.content,
         source: el.origin.source,
         session: el.origin.session,
@@ -528,19 +557,32 @@ export class Store {
     link: MemoryLink,
   ): Promise<{ id: string }[]> {
     const lattice = LINK_LATTICE[link.role];
+    // INVALIDATES copies the seek fields of docs/01 §5 so valid(T) resolves
+    // without expanding an incoming adjacency list. An Episode→Episode
+    // revision edge belongs to the originals layer and keys without content.
+    const seek =
+      link.role === "INVALIDATES"
+        ? ", target_id: b.id," +
+          " effective_time_utc: coalesce(a.time_utc, $beginningOfTime)"
+        : "";
     const res = await tx.run<{ id: string }>(
       `MATCH (a:Element { id: $from }), (b:Element { id: $to })
        WHERE any(x IN labels(a) WHERE x IN $fromLabels)
          AND any(x IN labels(b) WHERE x IN $toLabels)
-       MERGE (a)-[l:${link.role} { idem_key: $idemKey }]->(b)
-       ON CREATE SET l += { id: $id, content: $content, weight: $weight }
+       WITH a, b, CASE WHEN $originalsLayer AND a:Episode AND b:Episode
+                    THEN $originalsIdemKey ELSE $derivedIdemKey END AS key
+       MERGE (a)-[l:${link.role} { idem_key: key }]->(b)
+       ON CREATE SET l += { id: $id, content: $content, weight: $weight${seek} }
        RETURN l.id AS id`,
       {
         from: link.from,
         to: link.to,
         fromLabels: [...lattice.from],
         toLabels: [...lattice.to],
-        idemKey: linkIdemKey(link),
+        originalsLayer: link.role === "INVALIDATES",
+        originalsIdemKey: linkIdemKey(link, true),
+        derivedIdemKey: linkIdemKey(link, false),
+        beginningOfTime: BEGINNING_OF_TIME,
         id: link.id,
         content: link.content,
         weight: link.weight,
@@ -574,10 +616,13 @@ export class Store {
     const rows = await this.run<{ e: ElementNode; score: number }>(
       `CALL db.index.fulltext.queryNodes('element_content', $q)
        YIELD node, score
-       WHERE ($until IS NULL OR NOT node:Episode OR node.time_utc <= $until)
+       WHERE ($until IS NULL OR node.time_utc IS NULL
+              OR node.time_utc <= $until)
          AND (NOT $validOnly OR NOT EXISTS {
-           MATCH (inv:Element)-[:INVALIDATES]->(node)
-           WHERE $until IS NULL OR NOT inv:Episode OR inv.time_utc <= $until
+           MATCH ()-[inv:INVALIDATES]->()
+           WHERE inv.target_id = node.id
+             AND inv.effective_time_utc <= coalesce($until, $endOfTime)
+             AND inv.id IS NOT NULL
          })
        RETURN node AS e, score
        ORDER BY score DESC
@@ -585,6 +630,7 @@ export class Store {
       {
         q,
         until: opts.until ? toUtc(opts.until) : null,
+        endOfTime: END_OF_TIME,
         validOnly: opts.validOnly ?? false,
         limit: neo4j.int(opts.limit ?? 20),
       },
@@ -626,10 +672,12 @@ export class Store {
     const atUtc = toUtc(at);
     const rows = await this.run<{ valid: boolean }>(
       `MATCH (e:Element { id: $id })
-       RETURN (NOT e:Episode OR e.time_utc <= $at)
+       RETURN (e.time_utc IS NULL OR e.time_utc <= $at)
               AND NOT EXISTS {
-                MATCH (inv:Element)-[:INVALIDATES]->(e)
-                WHERE NOT inv:Episode OR inv.time_utc <= $at
+                MATCH ()-[inv:INVALIDATES]->()
+                WHERE inv.target_id = e.id
+                  AND inv.effective_time_utc <= $at
+                  AND inv.id IS NOT NULL
               } AS valid`,
       { id, at: atUtc },
     );
