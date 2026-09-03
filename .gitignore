@@ -2,3 +2,7 @@ node_modules/
 dist/
 .env
 backups/
+
+# TypeScript incremental build state
+tsconfig.tsbuildinfo
+*.tsbuildinfo
