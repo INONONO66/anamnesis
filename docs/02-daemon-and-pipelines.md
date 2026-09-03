@@ -1,12 +1,12 @@
 # 02 — Daemon and Pipelines
 
 Exactly one process writes. `anamnesisd` is Neo4j's only bolt client, and
-every caller talks to the daemon over a UDS. Harnesses — MCP bridges, editor
-hooks, agent adapters — are external projects maintained by the operator;
-this repo ships only the daemon, its ops CLI and the RPC contract (D39).
+every caller talks to the daemon over a UDS. Harnesses are external projects
+maintained by the operator; this repo ships only the daemon, its ops CLI and
+the RPC contract (D39).
 
 ```text
-  external harnesses ─┐  (MCP bridge, editor hook, custom agent — separate repos)
+  external harnesses ─┐  (separate repos, attach over the RPC contract)
   anamnesis ops CLI ──┼─ UDS ~/.anamnesis/sock ─▶ anamnesisd ─ bolt(127.0.0.1) ─▶ Neo4j (Docker)
                       ┘                             │
                                                   ├─ objects/  spool/
@@ -491,7 +491,7 @@ tries again next cycle.
 | LLM down | normal | normal | backs up (retry) | maintenance normal; dreaming phase 1 summary fallback, phase 2 skipped |
 
 An "empty success" is `{results: [], diagnostics: {reason}}`, not an
-exception — host hooks must keep exiting 0.
+exception — a degraded daemon never turns into a caller-visible crash.
 
 ## 10. Security boundary
 

@@ -227,7 +227,7 @@ A client declares its mode in `hello {commit_mode}`.
 | Mode | Who | Hits |
 |---|---|---|
 | `receipt` | Clients that can observe adoption (an agent reports which results it used) | client `commit` → `recall_hit` |
-| `auto` | Clients that cannot observe adoption (context-injection hooks) | daemon records `exposure` on the top-3 sources after the response |
+| `auto` | Clients that cannot observe adoption (context-injection harnesses) | daemon records `exposure` on the top-3 sources after the response |
 
 An explicit `commit` from an auto client is rejected. A client that cannot see
 adoption reporting adoption would pollute the ledger. The small κ of exposure

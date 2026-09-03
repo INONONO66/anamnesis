@@ -8,7 +8,7 @@ only**.
 - Storage, indexes and pattern matching are Neo4j's job. The numeric work we
   write ourselves (local PPR, forgetting, RRF) is size-bounded (≤ 2,000 nodes,
   docs/06) and runs in a few ms on Float64Array. Everything else
-  (adapters, extraction, daemon) is orchestration and I/O-bound.
+  (extraction, daemon) is orchestration and I/O-bound.
 - Where the code keeps growing (extraction orchestration, daemon I/O, the
   external harness ecosystem this daemon serves) the TS ecosystem is far
   ahead.
@@ -41,9 +41,8 @@ anamnesis/
 └── .github/workflows/{ci,nightly,release}.yml
 ```
 
-Harnesses — MCP bridges, editor hooks (claude-code etc.), source adapters
-(kakao-export etc.) — live in separate repos owned by the operator and attach
-over the UDS RPC contract. `remember`/`recall` are API-only; the CLI never
+Harnesses — whatever injects or retrieves text — live in separate repos owned
+by the operator and attach over the UDS RPC contract. `remember`/`recall` are API-only; the CLI never
 wraps them (D39).
 
 `dynamics` having no Neo4j dependency is what makes the CI gates (docs/07 §6)

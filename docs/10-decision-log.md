@@ -191,7 +191,7 @@ explicit commits from auto clients are rejected (docs/04 §6).
 client may commit.
 
 **Reason**: ledger integrity has to be guarded by one server. A client that
-cannot observe adoption (a context-injection hook) reporting adoption pollutes
+cannot observe adoption (a context-injection harness) reporting adoption pollutes
 the ledger. Exposure's low κ is the price of that uncertainty.
 
 ## D14 — Fact mass = max over bounded source Episodes · σ_fact
@@ -543,9 +543,9 @@ previous live root automatically.
 
 **Decision**: this repo ships `anamnesisd`, the RPC contract
 (`@anamnesis/protocol`, schema-exported) and a daemon-ops CLI
-(`up/down/status/verify/gen/gc/dream/bench/backup/restore`). MCP bridges,
-editor hooks (claude-code and others) and source adapters are separate
-projects owned by the operator, attaching over the UDS JSON-RPC surface.
+(`up/down/status/verify/gen/gc/dream/bench/backup/restore`). Every harness —
+anything that injects or retrieves text — is a separate project owned by the
+operator, attaching over the UDS JSON-RPC surface.
 `remember`/`recall` are API-only — the CLI does not wrap them.
 
 **Reason**: harness frameworks churn far faster than a memory engine should.
