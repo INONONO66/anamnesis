@@ -111,7 +111,13 @@ describe("collectNotion", () => {
   test("keys the revision on masked content and carries the payload", async () => {
     const root = await fixtureRoot();
     await mkdir(join(root, "10x-docs-hub", "nested"), { recursive: true });
-    await writeFile(join(root, "10x-docs-hub", "Aside.md"), "# Aside\n");
+    const aside = join(root, "10x-docs-hub", "Aside.md");
+    await writeFile(aside, "# Aside\n");
+    await utimes(
+      aside,
+      new Date("2026-06-01T00:00:00Z"),
+      new Date("2026-06-01T00:00:00Z"),
+    );
     const path = join(root, "10x-docs-hub", "nested", "Onboarding.md");
     await writeFile(path, "# Onboarding\n\nsecret: abcdefghijklmnopqrstuvwxyz\n");
     await utimes(path, new Date("2026-03-01T00:00:00Z"), new Date("2026-03-01T00:00:00Z"));
@@ -137,6 +143,10 @@ describe("collectNotion", () => {
       precision: "day",
     });
     expect(episode?.input.payload).toEqual(new TextEncoder().encode(body));
+    expect(episodes.map((e) => e.input.time?.value)).toEqual([
+      "2026-03-01T00:00:00.000Z",
+      "2026-06-01T00:00:00.000Z",
+    ]);
     expect(episode?.input.payload_media_type).toBe("text/markdown");
     expect(episode?.input.content).toBe(`Onboarding\n\n# Onboarding ${REDACTION}`);
   });

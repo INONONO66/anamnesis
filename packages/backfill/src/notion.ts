@@ -34,6 +34,10 @@ function excerpt(title: string, body: string): string {
 /**
  * A document revision is its masked content hash: re-running the backfill over
  * an unchanged export is a no-op, while an edited page opens a new revision.
+ *
+ * Episodes are returned in event-time order, not export-path order, so the
+ * session chain the store builds on arrival is one ordered spine rather than a
+ * fragment per backdated document.
  */
 export async function collectNotion(root: string): Promise<NotionEpisode[]> {
   const episodes: NotionEpisode[] = [];
@@ -64,5 +68,11 @@ export async function collectNotion(root: string): Promise<NotionEpisode[]> {
       },
     });
   }
-  return episodes;
+  return episodes.sort((a, b) => {
+    const at = a.input.time?.value ?? "";
+    const bt = b.input.time?.value ?? "";
+    return at === bt
+      ? a.input.origin.record.localeCompare(b.input.origin.record)
+      : at.localeCompare(bt);
+  });
 }
