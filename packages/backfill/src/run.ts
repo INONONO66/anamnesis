@@ -1,5 +1,6 @@
 import { Engine, EpisodeJournal, journaledRemember } from "@anamnesis/core";
 import type { RememberInput } from "@anamnesis/core";
+import { collectAgentLog } from "./agentlog.ts";
 import { collectNotion } from "./notion.ts";
 import { collectSlack } from "./slack.ts";
 
@@ -11,6 +12,7 @@ interface Collected {
 const COLLECTORS: Record<string, (root: string) => Promise<Collected[]>> = {
   slack: collectSlack,
   notion: collectNotion,
+  agentlog: collectAgentLog,
 };
 
 interface Receipt {
