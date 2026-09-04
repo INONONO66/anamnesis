@@ -34,11 +34,22 @@ export type RememberInput = z.input<typeof RememberInput>;
 
 export interface EngineOptions extends Partial<StoreOptions> {}
 
+/** A default password would silently ship an unauthenticated install. */
+function requiredPassword(): string {
+  const password = process.env["ANAMNESIS_NEO4J_PASSWORD"];
+  if (password === undefined || password === "") {
+    throw new Error(
+      "ANAMNESIS_NEO4J_PASSWORD is required; generate one with `bun scripts/gen-password.ts`",
+    );
+  }
+  return password;
+}
+
 export function envConfig(): StoreOptions {
   return {
     uri: process.env["ANAMNESIS_NEO4J_URI"] ?? "bolt://127.0.0.1:7687",
     user: process.env["ANAMNESIS_NEO4J_USER"] ?? "neo4j",
-    password: process.env["ANAMNESIS_NEO4J_PASSWORD"] ?? "anamnesis",
+    password: requiredPassword(),
     database: process.env["ANAMNESIS_NEO4J_DATABASE"] ?? "neo4j",
     objectsRoot:
       process.env["ANAMNESIS_OBJECTS_ROOT"] ??
