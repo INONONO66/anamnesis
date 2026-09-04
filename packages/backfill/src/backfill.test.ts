@@ -300,7 +300,11 @@ describe("collectAgentLog", () => {
       actor: "user",
       record: "fixed-cx-1",
     });
-    expect(episodes[0]?.input.source_revision).toBe("fixed-cx-1");
+    expect(episodes[0]?.input.source_revision).toBe(
+      createHash("sha256")
+        .update(`${new Date(1000).toISOString()}\nstart the backfill`, "utf8")
+        .digest("hex"),
+    );
     expect(episodes[0]?.input.time).toEqual({
       value: new Date(1000).toISOString(),
       precision: "second",
@@ -384,6 +388,68 @@ describe("collectAgentLog", () => {
     expect(episodes.map((e) => e.input.origin.record)).toEqual(["a", "b", "c"]);
   });
 
+  test("opens a revision per re-emission of one evolving event id", async () => {
+    const root = await fixtureRoot();
+    await writeFile(
+      join(root, "codex.jsonl"),
+      agentLines([
+        {
+          provider: "codex",
+          partition_id: "session-stream",
+          upstream_event_id: "cx-stream",
+          occurred_at: 1000,
+          role: "assistant",
+          text: "partial answ",
+        },
+        {
+          provider: "codex",
+          partition_id: "session-stream",
+          upstream_event_id: "cx-stream",
+          occurred_at: 2000,
+          role: "assistant",
+          text: "partial answer, completed",
+        },
+      ]),
+    );
+
+    const episodes = await collectAgentLog(root);
+
+    expect(episodes.map((e) => e.input.origin.record)).toEqual([
+      "cx-stream",
+      "cx-stream",
+    ]);
+    expect(episodes[0]?.input.source_revision).not.toBe(
+      episodes[1]?.input.source_revision,
+    );
+  });
+
+  test("keys the revision on raw text so masking changes open none", async () => {
+    const root = await fixtureRoot();
+    const secret = "ghp_0123456789012345678901234567890123456789";
+    await writeFile(
+      join(root, "codex.jsonl"),
+      agentLines([
+        {
+          provider: "codex",
+          partition_id: "session-secret",
+          upstream_event_id: "cx-secret",
+          occurred_at: 1000,
+          role: "user",
+          text: `use ${secret}`,
+        },
+      ]),
+    );
+
+    const [episode] = await collectAgentLog(root);
+
+    expect(episode?.input.content).toBe(`use ${REDACTION}`);
+    expect(episode?.input.source_revision).toBe(
+      createHash("sha256")
+        .update(`${new Date(1000).toISOString()}\nuse ${secret}`, "utf8")
+        .digest("hex"),
+    );
+  });
+
   test("rejects an event missing an identity field the contract requires", async () => {
     const root = await fixtureRoot();
     await writeFile(
@@ -394,6 +460,48 @@ describe("collectAgentLog", () => {
     expect(collectAgentLog(root)).rejects.toThrow(
       "agent event without upstream_event_id",
     );
+  });
+
+  test("ingests a re-emitted event id as a superseding revision", async () => {
+    const root = await fixtureRoot();
+    const scope = `stream-${Date.now()}`;
+    await writeFile(
+      join(root, "codex.jsonl"),
+      agentLines([
+        {
+          provider: "codex",
+          partition_id: `${scope}-session`,
+          upstream_event_id: `${scope}-event`,
+          occurred_at: 1000,
+          role: "assistant",
+          text: "partial answ",
+        },
+        {
+          provider: "codex",
+          partition_id: `${scope}-session`,
+          upstream_event_id: `${scope}-event`,
+          occurred_at: 2000,
+          role: "assistant",
+          text: "partial answer, completed",
+        },
+      ]),
+    );
+    const objectsRoot = await mkdtemp(join(tmpdir(), "anamnesis-objects-"));
+    const engine = new Engine({ ...TEST_DB, objectsRoot });
+    await engine.init();
+    try {
+      const [first, second] = await collectAgentLog(root);
+
+      const early = await engine.remember(first!.input);
+      const late = await engine.remember(second!.input);
+
+      expect(early).toMatchObject({ created: true });
+      expect(early.invalidated).toBeUndefined();
+      expect(late).toMatchObject({ created: true, invalidated: early.id });
+    } finally {
+      await engine.close();
+      await rm(objectsRoot, { recursive: true });
+    }
   });
 
   test("ingests one unbroken session chain per exported session", async () => {

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { RememberInput } from "@anamnesis/core";
@@ -79,6 +80,15 @@ function isRecallable(event: AgentEvent): event is RecallableEvent {
 }
 
 function toEpisode(event: RecallableEvent): AgentLogEpisode {
+  const occurredAt = new Date(event.occurred_at).toISOString();
+  /**
+   * Keyed on the raw event, not the masked one: a change to the masking rules
+   * would otherwise rewrite every revision key and open a false revision of
+   * every event whose text a new rule touches.
+   */
+  const revision = createHash("sha256")
+    .update(`${occurredAt}\n${event.text}`, "utf8")
+    .digest("hex");
   const { text, redactions } = maskSecrets(event.text);
   const properties: Record<string, string> = {};
   if (event.canonical_kind !== undefined) {
@@ -97,12 +107,14 @@ function toEpisode(event: RecallableEvent): AgentLogEpisode {
         actor: event.role ?? "unknown",
         record: event.upstream_event_id,
       },
-      // Events are immutable appends: the event id is the only revision.
-      source_revision: event.upstream_event_id,
-      time: {
-        value: new Date(event.occurred_at).toISOString(),
-        precision: "second",
-      },
+      /**
+       * Providers re-emit one event id as the message it names evolves, so the
+       * id alone is not a revision: keying the revision on the content instead
+       * lets a re-emission supersede its predecessor through INVALIDATES,
+       * where keying it on the id collides two contents on one revision.
+       */
+      source_revision: revision,
+      time: { value: occurredAt, precision: "second" },
       ...(oversized
         ? {
             payload: new TextEncoder().encode(text),
