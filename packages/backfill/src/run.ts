@@ -19,6 +19,8 @@ interface Receipt {
   created: number;
   duplicates: number;
   invalidated: number;
+  /** A stored revision whose content changed: an adapter reused one token. */
+  diverged: number;
   redactions: number;
 }
 
@@ -45,6 +47,7 @@ async function main(): Promise<void> {
     created: 0,
     duplicates: 0,
     invalidated: 0,
+    diverged: 0,
     redactions: 0,
   };
   try {
@@ -56,6 +59,7 @@ async function main(): Promise<void> {
       if (result.created) receipt.created += 1;
       else receipt.duplicates += 1;
       if (result.invalidated !== undefined) receipt.invalidated += 1;
+      if (result.diverged === true) receipt.diverged += 1;
       receipt.redactions += item.redactions;
     }
   } finally {
