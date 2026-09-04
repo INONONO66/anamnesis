@@ -140,10 +140,15 @@ describe("Engine configuration", () => {
     const saved = keys.map((key) => process.env[key]);
     try {
       for (const key of keys) delete process.env[key];
+      expect(() => envConfig()).toThrow(
+        "ANAMNESIS_NEO4J_PASSWORD is required",
+      );
+
+      process.env["ANAMNESIS_NEO4J_PASSWORD"] = "only-password";
       expect(envConfig()).toEqual({
         uri: "bolt://127.0.0.1:7687",
         user: "neo4j",
-        password: "anamnesis",
+        password: "only-password",
         database: "neo4j",
         objectsRoot: join(homedir(), ".anamnesis", "objects"),
       });

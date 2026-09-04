@@ -1,0 +1,11 @@
+{
+  "name": "@anamnesis/backfill",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@anamnesis/core": "workspace:*",
+    "@anamnesis/protocol": "workspace:*",
+    "zod": "^4.1.5"
+  }
+}
