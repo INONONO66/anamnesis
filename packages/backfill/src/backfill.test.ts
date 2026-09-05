@@ -21,6 +21,7 @@ import { collectGjcRaw } from "./gjcraw.ts";
 import { collectCodexRaw } from "./codexraw.ts";
 import { collectMiscRaw } from "./miscraw.ts";
 import { collectNotion } from "./notion.ts";
+import { collectOmoRaw } from "./omoraw.ts";
 import { collectSlack } from "./slack.ts";
 import { maskSecrets, REDACTION } from "./secrets.ts";
 
@@ -2578,6 +2579,569 @@ describe("collectMiscRaw", () => {
             })
           ).id,
         );
+      }
+
+      const heads: string[] = [];
+      for (const [index, id] of ids.entries()) {
+        const inbound = await engine.store.linksOf(id, "NEXT_EPISODE");
+        if (inbound.every((link) => link.to !== id)) {
+          heads.push(episodes[index]?.input.origin.session ?? "");
+        }
+      }
+      const sessions = episodes.map((e) => e.input.origin.session);
+
+      expect(heads.sort()).toEqual([...new Set(sessions)].sort());
+    } finally {
+      await engine.close();
+      await rm(objectsRoot, { recursive: true });
+    }
+  });
+});
+
+const OMO_LONG = "w".repeat(4200);
+
+function omoLine(record: Record<string, unknown>): string {
+  return JSON.stringify(record);
+}
+
+function omoMessage(
+  id: string,
+  timestamp: string,
+  role: string,
+  content: readonly unknown[],
+): string {
+  return omoLine({
+    type: "message",
+    id,
+    parentId: null,
+    timestamp,
+    message: { role, content, timestamp: 1 },
+  });
+}
+
+/**
+ * The snapshot's two homes under one parent: the agent's own `~/.omo` store
+ * and a project checkout that keeps its delegated subagent transcripts under
+ * `.omo/senpi-task/children`. Every transcript is written out of event-time
+ * order, and the homes are named so that walk order contradicts time order.
+ */
+async function omoRawRoot(scope = "fixed"): Promise<string> {
+  const root = await fixtureRoot();
+  const workspace = join(
+    root,
+    "omo-senpi",
+    "home",
+    ".omo",
+    "agent",
+    "sessions",
+    "--Users-ino-Develop--",
+  );
+  const memory = join(
+    root,
+    "omo-senpi",
+    "home",
+    ".omo",
+    "memory",
+    "agents",
+    "develop-db021987",
+    "runtime",
+    "reflection",
+    "runs",
+    "reflection-run-1",
+  );
+  const child = join(
+    root,
+    "omo-project",
+    "home",
+    "Develop",
+    ".omo",
+    "senpi-task",
+    "children",
+    "st_01a041b3",
+    "sessions",
+    "st_01a041b3",
+  );
+  await mkdir(workspace, { recursive: true });
+  await mkdir(memory, { recursive: true });
+  await mkdir(child, { recursive: true });
+
+  await writeFile(
+    join(workspace, "2026-09-02T04-47-11-454Z_01a06071.jsonl"),
+    [
+      omoLine({
+        type: "session",
+        version: 3,
+        id: `${scope}-session-main`,
+        timestamp: "2026-09-02T04:47:12.718Z",
+        cwd: "/Users/ino/Develop",
+      }),
+      omoMessage("ev-late", "2026-09-02T04:50:00.000Z", "assistant", [
+        { type: "thinking", thinking: "provider scratch space", thinkingSignature: "{}" },
+        { type: "text", text: OMO_LONG },
+      ]),
+      omoMessage("ev-early", "2026-09-02T04:48:00.000Z", "user", [
+        { type: "text", text: "use ghp_0123456789012345678901234567890123456789" },
+      ]),
+      omoLine({
+        type: "compaction",
+        id: "ev-compaction",
+        parentId: "ev-early",
+        timestamp: "2026-09-02T04:49:00.000Z",
+        summary: "## 1. User Requests (Verbatim)\nships the raw adapter",
+      }),
+      omoMessage("ev-two-parts", "2026-09-02T04:51:00.000Z", "assistant", [
+        { type: "text", text: "first part" },
+        { type: "text", text: "second part" },
+      ]),
+    ].join("\n"),
+  );
+
+  await writeFile(
+    join(memory, "2026-08-26T06-54-38-959Z_01a03cd9.jsonl"),
+    [
+      omoLine({
+        type: "session",
+        version: 3,
+        id: `${scope}-session-memory`,
+        timestamp: "2026-08-26T06:54:38.959Z",
+        cwd: "/Users/ino/.omo/memory/agents/develop-db021987/runtime/worktrees/1787727277154-reflection-run-1",
+      }),
+      omoMessage("ev-memory", "2026-09-02T04:47:30.000Z", "user", [
+        { type: "text", text: "the memory runtime's own agent turn" },
+      ]),
+    ].join("\n"),
+  );
+
+  await writeFile(
+    join(child, "2026-08-27T05-23-13-372Z_01a041ac.jsonl"),
+    [
+      omoLine({
+        type: "session",
+        version: 3,
+        id: `${scope}-session-child`,
+        timestamp: "2026-08-27T05:23:13.372Z",
+      }),
+      omoMessage("ev-child", "2026-09-02T04:47:20.000Z", "user", [
+        { type: "text", text: "the delegated subagent turn" },
+      ]),
+    ].join("\n"),
+  );
+  return root;
+}
+
+/**
+ * Runtime bookkeeping the agent interleaves with the conversation. The
+ * snapshot carries 748 `custom` records (rule scans, todo and hook state,
+ * memory bindings), 155 `custom_message` harness injections and 3,167
+ * `toolResult` messages — every one of them addressed to the model rather
+ * than spoken by either party. An event without an id has no record to key
+ * on, and one without an event time has no place in the session order.
+ */
+async function omoNoiseRoot(): Promise<string> {
+  const root = await fixtureRoot();
+  const workspace = join(root, "omo-senpi", "home", ".omo", "agent", "sessions", "--Users-ino--");
+  await mkdir(workspace, { recursive: true });
+  await writeFile(
+    join(workspace, "noise.jsonl"),
+    [
+      omoLine({ type: "session", version: 3, id: "session-noise", timestamp: "2026-09-02T04:00:00.000Z" }),
+      omoLine({ type: "model_change", id: "n-model", parentId: null, timestamp: "2026-09-02T04:00:01.000Z", provider: "token-hub-codex", modelId: "gpt-5.6-sol" }),
+      omoLine({ type: "thinking_level_change", id: "n-think", timestamp: "2026-09-02T04:00:02.000Z", thinkingLevel: "medium" }),
+      omoLine({ type: "session_info", id: "n-name", timestamp: "2026-09-02T04:00:03.000Z", name: "클로드 비즈니스 계정 쿼터 전환" }),
+      omoLine({ type: "custom", id: "n-rules", timestamp: "2026-09-02T04:00:04.000Z", customType: "pi-rules.scan", data: { cwd: "/Users/ino", reason: "startup" } }),
+      omoLine({ type: "custom", id: "n-todo", timestamp: "2026-09-02T04:00:05.000Z", customType: "senpi.todo-state", data: { items: [] } }),
+      omoLine({ type: "custom", id: "n-turns", timestamp: "2026-09-02T04:00:06.000Z", customType: "omo-memory:accepted-turns", data: {} }),
+      omoLine({ type: "custom_message", id: "n-injection", timestamp: "2026-09-02T04:00:07.000Z", customType: "ttsr-injection", content: "<system-interrupt reason=\"rule_violation\">stop restating</system-interrupt>" }),
+      omoMessage("n-toolcall", "2026-09-02T04:00:08.000Z", "assistant", [
+        { type: "toolCall", id: "call_1", name: "read", arguments: { path: "README.md" } },
+      ]),
+      omoLine({
+        type: "message",
+        id: "n-toolresult",
+        timestamp: "2026-09-02T04:00:09.000Z",
+        message: {
+          role: "toolResult",
+          toolCallId: "call_1|fc_08f8",
+          toolName: "read",
+          content: [{ type: "text", text: "file body" }],
+          timestamp: 2,
+        },
+      }),
+      omoMessage("n-blank", "2026-09-02T04:00:10.000Z", "user", [{ type: "text", text: "   " }]),
+      omoMessage("n-thinking-only", "2026-09-02T04:00:11.000Z", "assistant", [
+        { type: "thinking", thinking: "scratch" },
+      ]),
+      omoLine({
+        type: "message",
+        timestamp: "2026-09-02T04:00:12.000Z",
+        message: { role: "user", content: [{ type: "text", text: "no id, no record to key on" }], timestamp: 3 },
+      }),
+      omoLine({
+        type: "message",
+        id: "n-untimed",
+        message: { role: "user", content: [{ type: "text", text: "no event time, no place in the order" }], timestamp: 4 },
+      }),
+      omoLine({
+        type: "message",
+        id: "n-textless",
+        timestamp: "2026-09-02T04:00:13.000Z",
+        message: { role: "user", content: "not a part list", timestamp: 5 },
+      }),
+      omoLine({
+        type: "message",
+        id: "n-messageless",
+        timestamp: "2026-09-02T04:00:14.000Z",
+        message: "not an object",
+      }),
+      omoLine({ type: "compaction", id: "n-empty-compaction", timestamp: "2026-09-02T04:00:15.000Z", summary: "   " }),
+      omoMessage("n-kept", "2026-09-02T04:00:16.000Z", "user", [{ type: "text", text: "the only turn here" }]),
+    ].join("\n"),
+  );
+  return root;
+}
+
+describe("collectOmoRaw", () => {
+  test("orders both homes by event time and maps the origin", async () => {
+    const root = await omoRawRoot();
+
+    const episodes = await collectOmoRaw(root);
+
+    expect(episodes.map((e) => e.input.origin.record)).toEqual([
+      "ev-child",
+      "ev-memory",
+      "ev-early",
+      "ev-compaction",
+      "ev-late",
+      "ev-two-parts",
+    ]);
+    expect(episodes[0]?.input.origin).toEqual({
+      source: "omo",
+      session: "fixed-session-child",
+      actor: "user",
+      record: "ev-child",
+    });
+    expect(episodes[0]?.input.time).toEqual({
+      value: "2026-09-02T04:47:20.000Z",
+      precision: "second",
+    });
+    expect(episodes[0]?.input.properties).toEqual({
+      kind: "message",
+      role: "user",
+    });
+    expect(episodes[0]?.input.schema).toBe("anamnesis.original-message/1");
+    expect(episodes[0]?.input.payload).toBeUndefined();
+  });
+
+  test("masks secrets and keys the revision on the raw text", async () => {
+    const root = await omoRawRoot();
+
+    const episodes = await collectOmoRaw(root);
+    const masked = episodes[2];
+    const secret = "use ghp_0123456789012345678901234567890123456789";
+
+    expect(masked?.redactions).toBe(1);
+    expect(masked?.input.content).toBe(`use ${REDACTION}`);
+    expect(masked?.input.source_revision).toBe(
+      createHash("sha256")
+        .update(`2026-09-02T04:48:00.000Z\n${secret}`, "utf8")
+        .digest("hex"),
+    );
+  });
+
+  test("stores an oversized turn as a payload with an excerpt on the node", async () => {
+    const root = await omoRawRoot();
+
+    const episodes = await collectOmoRaw(root);
+    const long = episodes[4];
+
+    expect(long?.input.content).toBe("w".repeat(4000));
+    expect(long?.input.payload).toEqual(new TextEncoder().encode(OMO_LONG));
+    expect(long?.input.payload_media_type).toBe("text/plain");
+  });
+
+  test("keeps a limit-length turn inline", async () => {
+    const root = await fixtureRoot();
+    const workspace = join(root, "omo-senpi", "home", ".omo", "agent", "sessions", "--Users-ino--");
+    await mkdir(workspace, { recursive: true });
+    await writeFile(
+      join(workspace, "limit.jsonl"),
+      [
+        omoLine({ type: "session", id: "session-limit", timestamp: "2026-09-02T04:00:00.000Z" }),
+        omoMessage("ev-limit", "2026-09-02T04:00:01.000Z", "assistant", [
+          { type: "text", text: "v".repeat(4000) },
+        ]),
+      ].join("\n"),
+    );
+
+    const [episode] = await collectOmoRaw(root);
+
+    expect(episode?.input.content).toBe("v".repeat(4000));
+    expect(episode?.input.payload).toBeUndefined();
+    expect(episode?.input.payload_media_type).toBeUndefined();
+  });
+
+  /**
+   * A compaction replaces the turns it summarizes, so its summary is the only
+   * surviving record of them and it has no author of its own.
+   */
+  test("carries a compaction summary under the kind that names it", async () => {
+    const root = await omoRawRoot();
+
+    const episodes = await collectOmoRaw(root);
+    const compaction = episodes[3];
+
+    expect(compaction?.input.content).toBe(
+      "## 1. User Requests (Verbatim)\nships the raw adapter",
+    );
+    expect(compaction?.input.origin.actor).toBe("unknown");
+    expect(compaction?.input.properties).toEqual({ kind: "compaction" });
+  });
+
+  test("joins the text parts of one turn and drops provider scratch space", async () => {
+    const root = await omoRawRoot();
+
+    const episodes = await collectOmoRaw(root);
+
+    expect(episodes[5]?.input.content).toBe("first part\nsecond part");
+    expect(episodes[4]?.input.content).not.toContain("provider scratch space");
+  });
+
+  test("skips runtime bookkeeping, tool plumbing and incomplete events", async () => {
+    const root = await omoNoiseRoot();
+
+    const episodes = await collectOmoRaw(root);
+
+    expect(episodes.map((e) => e.input.origin.record)).toEqual(["n-kept"]);
+    expect(episodes[0]?.input.content).toBe("the only turn here");
+  });
+
+  /**
+   * The snapshot was written on macOS, so an AppleDouble sidecar mirrors every
+   * one of its files. Reading one would parse its binary header as a
+   * transcript. Alongside them sit the `.log` captures of child process
+   * output, the `.txt` notes and the `posthog-activity.json` telemetry cache,
+   * none of which carries conversation.
+   */
+  test("ignores AppleDouble sidecars and non-transcript files", async () => {
+    const root = await omoNoiseRoot();
+    const workspace = join(root, "omo-senpi", "home", ".omo", "agent", "sessions", "--Users-ino--");
+    await writeFile(join(workspace, "._noise.jsonl"), "\u0000\u0005\u0016\u0007not json");
+    await writeFile(join(workspace, "child-stdout.log"), "bun install\n");
+    await writeFile(
+      join(workspace, "session.log"),
+      `${JSON.stringify({ ts: "2026-08-26T06:26:09.768Z", level: "debug", event: "queue_enqueue" })}\n`,
+    );
+    await writeFile(
+      join(workspace, "posthog-activity.json"),
+      JSON.stringify({ lastActivity: 1787727277154 }),
+    );
+    await writeFile(join(workspace, "notes.txt"), "scratch");
+
+    const episodes = await collectOmoRaw(root);
+
+    expect(episodes.map((e) => e.input.origin.record)).toEqual(["n-kept"]);
+  });
+
+  /**
+   * The memory extension re-encodes sessions it has observed into a flat
+   * `kind`/`text`/`captured_at` stream keyed by `source_message_id`. The
+   * native transcript is authoritative — it alone carries the session header,
+   * the parent chain and the part structure — so the derived copy is skipped
+   * and one turn cannot enter the graph under two records.
+   */
+  test("prefers the native transcript over the memory runtime's re-encoding", async () => {
+    const root = await omoRawRoot();
+    const derived = join(
+      root,
+      "omo-senpi",
+      "home",
+      ".omo",
+      "memory",
+      "agents",
+      "develop-db021987",
+      "runtime",
+      "transcripts",
+      "fixed-session-main",
+    );
+    await mkdir(derived, { recursive: true });
+    await writeFile(
+      join(derived, "transcript.jsonl"),
+      [
+        JSON.stringify({
+          kind: "user",
+          text: "use ghp_0123456789012345678901234567890123456789",
+          captured_at: "2026-09-02T04:48:00.000Z",
+          source_line_id: "ev-early:user",
+          source_message_id: "ev-early",
+        }),
+        JSON.stringify({
+          kind: "tool_call",
+          name: "read",
+          argsText: "{}",
+          resultOk: true,
+          resultText: "file body",
+          captured_at: "2026-09-02T04:48:30.000Z",
+          source_line_id: "ev-tool:tool",
+          source_message_id: "ev-tool",
+        }),
+      ].join("\n"),
+    );
+
+    const episodes = await collectOmoRaw(root);
+    const records = episodes.map((e) => e.input.origin.record);
+
+    expect(records.filter((record) => record === "ev-early")).toEqual([
+      "ev-early",
+    ]);
+    expect(records).not.toContain("ev-tool");
+  });
+
+  /**
+   * The snapshot's 27 databases are `codegraph.db` code indexes totalling
+   * 20GB, whose tables are `nodes`, `edges`, `files` and their FTS shadows.
+   * The probe reads the table list and returns without touching a symbol row.
+   */
+  test("skips a database that holds no conversation table", async () => {
+    const root = await fixtureRoot();
+    const projects = join(root, "omo-senpi", "home", ".omo", "codegraph", "projects", "repo-dff5884f");
+    await mkdir(projects, { recursive: true });
+    const codegraph = new Database(join(projects, "codegraph.db"), { create: true });
+    codegraph.run(
+      "CREATE TABLE nodes (id TEXT PRIMARY KEY, kind TEXT, name TEXT, file_path TEXT)",
+    );
+    codegraph.run("CREATE TABLE edges (id INTEGER PRIMARY KEY, source TEXT, target TEXT)");
+    codegraph.run("CREATE TABLE files (path TEXT PRIMARY KEY)");
+    codegraph.run(
+      "INSERT INTO nodes VALUES ('n1', 'constant', 'KO_TITLE', 'apps/admin/e2e/i18n.spec.ts')",
+    );
+    codegraph.close();
+
+    expect(await collectOmoRaw(root)).toEqual([]);
+  });
+
+  /**
+   * A store that does keep sessions in sqlite is read through the same
+   * originals contract as a transcript, with the part list decoded out of the
+   * content column and the runtime roles left behind.
+   */
+  test("reads a session store that keeps its messages in sqlite", async () => {
+    const root = await fixtureRoot();
+    const store = join(root, "omo-senpi", "home", ".omo", "agent");
+    await mkdir(store, { recursive: true });
+    const db = new Database(join(store, "sessions.db"), { create: true });
+    db.run("PRAGMA journal_mode = WAL");
+    db.run(
+      "CREATE TABLE messages (id TEXT PRIMARY KEY, session_id TEXT, role TEXT, content TEXT, created_at TEXT)",
+    );
+    const insert = db.prepare(
+      "INSERT INTO messages VALUES (?, ?, ?, ?, ?)",
+    );
+    insert.run("db-late", "db-session", "assistant", "a plain text column", "2026-09-02T05:01:00.000Z");
+    insert.run(
+      "db-early",
+      "db-session",
+      "user",
+      JSON.stringify([
+        { type: "thinking", thinking: "scratch" },
+        { type: "text", text: "encoded as a part list" },
+      ]),
+      "2026-09-02T05:00:00.000Z",
+    );
+    insert.run("db-object", "db-session", "user", JSON.stringify({ text: "encoded as one part" }), "2026-09-02T05:02:00.000Z");
+    /**
+     * A row killed mid-write opens like a part list and never closes. It is
+     * still the only record of that turn, so it is kept as the text it is
+     * rather than discarded for failing to parse.
+     */
+    insert.run("db-truncated", "db-session", "assistant", '[{"type":"text","text":"cut off mid', "2026-09-02T05:02:30.000Z");
+    insert.run("db-tool", "db-session", "toolResult", "command output", "2026-09-02T05:03:00.000Z");
+    insert.run("db-blank", "db-session", "user", "   ", "2026-09-02T05:04:00.000Z");
+    insert.run("db-untimed", "db-session", "user", "no event time", "not a date");
+    insert.run("db-partial", "db-session", "user", null, "2026-09-02T05:05:00.000Z");
+    db.close();
+
+    const episodes = await collectOmoRaw(root);
+
+    expect(episodes.map((e) => e.input.origin.record)).toEqual([
+      "db-early",
+      "db-late",
+      "db-object",
+      "db-truncated",
+    ]);
+    expect(episodes[3]?.input.content).toBe('[{"type":"text","text":"cut off mid');
+    expect(episodes[0]?.input.content).toBe("encoded as a part list");
+    expect(episodes[0]?.input.origin).toEqual({
+      source: "omo",
+      session: "db-session",
+      actor: "user",
+      record: "db-early",
+    });
+    expect(episodes[0]?.input.source_revision).toBe(
+      createHash("sha256")
+        .update("2026-09-02T05:00:00.000Z\nencoded as a part list", "utf8")
+        .digest("hex"),
+    );
+    expect(episodes[2]?.input.content).toBe("encoded as one part");
+  });
+
+  /** A transcript whose header never arrives cannot be attributed to a session. */
+  test("leaves out events that arrive before their session header", async () => {
+    const root = await fixtureRoot();
+    const workspace = join(root, "omo-senpi", "home", ".omo", "agent", "sessions", "--Users-ino--");
+    await mkdir(workspace, { recursive: true });
+    await writeFile(
+      join(workspace, "headerless.jsonl"),
+      [
+        omoMessage("ev-orphan", "2026-09-02T04:00:00.000Z", "user", [
+          { type: "text", text: "orphan" },
+        ]),
+        "",
+        JSON.stringify(["not an object"]),
+        '{"type":"message","id":"torn",',
+      ].join("\n"),
+    );
+
+    expect(await collectOmoRaw(root)).toEqual([]);
+  });
+
+  test("tie-breaks equal event times on the record so the order is total", async () => {
+    const root = await fixtureRoot();
+    const workspace = join(root, "omo-senpi", "home", ".omo", "agent", "sessions", "--Users-ino--");
+    await mkdir(workspace, { recursive: true });
+    const same = (id: string): string =>
+      omoMessage(id, "2026-09-02T04:00:00.000Z", "user", [
+        { type: "text", text: `tie ${id}` },
+      ]);
+    await writeFile(
+      join(workspace, "tie.jsonl"),
+      [
+        omoLine({ type: "session", id: "session-tie", timestamp: "2026-09-02T03:00:00.000Z" }),
+        same("b"),
+        same("c"),
+        same("a"),
+      ].join("\n"),
+    );
+
+    const episodes = await collectOmoRaw(root);
+
+    expect(episodes.map((e) => e.input.origin.record)).toEqual(["a", "b", "c"]);
+  });
+
+  /** A raw store that was never populated is an empty backfill, not an error. */
+  test("returns nothing when the snapshot root is absent", async () => {
+    expect(await collectOmoRaw(join(await fixtureRoot(), "absent"))).toEqual([]);
+  });
+
+  test("ingests one unbroken session chain per raw transcript", async () => {
+    const root = await omoRawRoot(`chain${Date.now()}`);
+    const objectsRoot = await mkdtemp(join(tmpdir(), "anamnesis-objects-"));
+    const engine = new Engine({ ...TEST_DB, objectsRoot });
+    await engine.init();
+    try {
+      const episodes = await collectOmoRaw(root);
+      const ids: string[] = [];
+      for (const episode of episodes) {
+        ids.push((await engine.remember(episode.input)).id);
       }
 
       const heads: string[] = [];

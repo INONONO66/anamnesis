@@ -6,6 +6,7 @@ import { collectCodexRaw } from "./codexraw.ts";
 import { collectGjcRaw } from "./gjcraw.ts";
 import { collectMiscRaw } from "./miscraw.ts";
 import { collectNotion } from "./notion.ts";
+import { collectOmoRaw } from "./omoraw.ts";
 import { collectSlack } from "./slack.ts";
 
 interface Collected {
@@ -21,6 +22,7 @@ const COLLECTORS: Record<string, (root: string) => Promise<Collected[]>> = {
   clauderaw: collectClaudeRaw,
   codexraw: collectCodexRaw,
   miscraw: collectMiscRaw,
+  omoraw: collectOmoRaw,
 };
 
 interface Receipt {
