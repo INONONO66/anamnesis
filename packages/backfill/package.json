@@ -6,6 +6,7 @@
   "dependencies": {
     "@anamnesis/core": "workspace:*",
     "@anamnesis/protocol": "workspace:*",
+    "@noble/hashes": "2.4.0",
     "zod": "^4.1.5"
   }
 }

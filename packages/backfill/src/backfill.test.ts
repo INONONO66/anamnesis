@@ -3,8 +3,11 @@ import { createHash } from "node:crypto";
 import { mkdtemp, mkdir, rm, writeFile, utimes } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { blake3 } from "@noble/hashes/blake3.js";
+import { bytesToHex } from "@noble/hashes/utils.js";
 import { Engine } from "@anamnesis/core";
 import { collectAgentLog } from "./agentlog.ts";
+import { collectClaudeRaw } from "./clauderaw.ts";
 import { collectGjcRaw } from "./gjcraw.ts";
 import { collectNotion } from "./notion.ts";
 import { collectSlack } from "./slack.ts";
@@ -956,5 +959,434 @@ describe("collectGjcRaw", () => {
   /** A raw store that was never populated is an empty backfill, not an error. */
   test("returns nothing when the sessions root is absent", async () => {
     expect(await collectGjcRaw(await fixtureRoot())).toEqual([]);
+  });
+});
+
+/**
+ * Two records copied byte for byte out of the normalized export this adapter
+ * backfills alongside, each with the raw transcript line it was derived from.
+ * They are the alignment contract in its original form: if the adapter ever
+ * derives a different origin tuple for these bytes, the overlap with the ten
+ * thousand already-ingested sessions stops being a no-op and the assertion
+ * below fails. Both are short, prose-only turns with nothing to redact.
+ */
+const CANONICAL_SAMPLES = [
+  {
+    raw: '{"type":"user","timestamp":"2026-05-30T05:03:48.912Z","content":"\\"Reply exactly: OK\\""}',
+    session: "ses_188bba578ffeZcbjTC7AHsYCX9",
+    record:
+      "fallback:66407b928098d9c71c1605d287c4dec25c0b28c309938eaad1d65a210171ea83:0",
+    role: "user",
+    occurredAt: 1780117428912,
+    text: '"Reply exactly: OK"',
+  },
+  {
+    raw: '{"type":"user","timestamp":"2026-06-17T09:17:00.521Z","content":"\\"Reply with exactly one word: pong\\""}',
+    session: "ses_12b216332ffe8RU9AomQyKnaRV",
+    record:
+      "fallback:3f418bfb1dc411fd4ae955d15477cd3e97ee522a511586468749c99795c170e9:0",
+    role: "user",
+    occurredAt: 1781687820521,
+    text: '"Reply with exactly one word: pong"',
+  },
+] as const;
+
+const LONG_TURN = "z".repeat(4200);
+
+function claudeLine(record: Record<string, unknown>): string {
+  return JSON.stringify(record);
+}
+
+function assistantText(
+  uuid: string,
+  timestamp: string,
+  blocks: readonly unknown[],
+  extra: Record<string, unknown> = {},
+): string {
+  return claudeLine({
+    type: "assistant",
+    uuid,
+    timestamp,
+    message: { role: "assistant", content: blocks },
+    ...extra,
+  });
+}
+
+/**
+ * Two projects with two sessions each, every file written out of event-time
+ * order and the projects named so that file order contradicts time order.
+ * Alongside the transcripts sit the record kinds the export rejected — a
+ * sidechain turn, a delegate's own transcript, tool plumbing, an API error and
+ * an empty message — plus an AppleDouble sidecar that parses as neither.
+ */
+async function claudeRawRoot(): Promise<string> {
+  const root = await fixtureRoot();
+  const alpha = join(root, "projects", "-Users-ino-alpha");
+  const beta = join(root, "projects", "-Users-ino-beta");
+  await mkdir(join(alpha, "session-a1", "subagents"), { recursive: true });
+  await mkdir(beta, { recursive: true });
+  await mkdir(join(root, "transcripts"), { recursive: true });
+
+  await writeFile(
+    join(alpha, "session-a1.jsonl"),
+    [
+      assistantText("a1-late", "2026-05-01T00:00:09.000Z", [
+        { type: "text", text: "the later answer" },
+      ]),
+      claudeLine({
+        type: "user",
+        uuid: "a1-early",
+        timestamp: "2026-05-01T00:00:03.000Z",
+        sessionId: "session-a1",
+        cwd: "/Users/ino/alpha",
+        gitBranch: "main",
+        message: { role: "user", content: "the earlier question" },
+      }),
+      claudeLine({
+        type: "user",
+        uuid: "a1-side",
+        timestamp: "2026-05-01T00:00:04.000Z",
+        isSidechain: true,
+        message: { role: "user", content: "delegated away" },
+      }),
+      claudeLine({
+        type: "assistant",
+        uuid: "a1-error",
+        timestamp: "2026-05-01T00:00:05.000Z",
+        isApiErrorMessage: true,
+        message: { role: "assistant", content: [{ type: "text", text: "overloaded" }] },
+      }),
+      claudeLine({
+        type: "assistant",
+        uuid: "a1-tool",
+        timestamp: "2026-05-01T00:00:06.000Z",
+        message: {
+          role: "assistant",
+          content: [{ type: "tool_use", id: "t1", name: "Bash", input: {} }],
+        },
+      }),
+      claudeLine({
+        type: "user",
+        uuid: "a1-result",
+        timestamp: "2026-05-01T00:00:07.000Z",
+        message: {
+          role: "user",
+          content: [{ type: "tool_result", tool_use_id: "t1", content: "ok" }],
+        },
+      }),
+      claudeLine({
+        type: "user",
+        uuid: "a1-empty",
+        timestamp: "2026-05-01T00:00:08.000Z",
+        message: { role: "user", content: "" },
+      }),
+      claudeLine({ type: "queue-operation", operation: "enqueue", timestamp: "2026-05-01T00:00:02.000Z" }),
+    ].join("\n"),
+  );
+  await writeFile(
+    join(alpha, "session-a1", "subagents", "agent-deadbeef.jsonl"),
+    claudeLine({
+      type: "user",
+      uuid: "sub-1",
+      timestamp: "2026-05-01T00:00:01.000Z",
+      agentId: "deadbeef",
+      message: { role: "user", content: "the delegate's own transcript" },
+    }),
+  );
+  await writeFile(
+    join(alpha, "._session-a1.jsonl"),
+    claudeLine({
+      type: "user",
+      uuid: "sidecar",
+      timestamp: "2026-05-01T00:00:00.000Z",
+      message: { role: "user", content: "AppleDouble" },
+    }),
+  );
+
+  /**
+   * A message mixing prose with plumbing, so the export sliced it and suffixed
+   * each surviving block with its position, beside one that is prose only and
+   * kept the message's own id.
+   */
+  await writeFile(
+    join(alpha, "session-a2.jsonl"),
+    [
+      assistantText("a2-mixed", "2026-05-02T00:00:02.000Z", [
+        { type: "thinking", thinking: "reasoning that never shipped" },
+        { type: "text", text: "first shipped block" },
+        { type: "tool_use", id: "t2", name: "Read", input: {} },
+        { type: "text", text: "second shipped block" },
+      ]),
+      assistantText("a2-whole", "2026-05-02T00:00:01.000Z", [
+        { type: "text", text: "one half" },
+        { type: "text", text: "other half" },
+      ]),
+      assistantText("a2-blockless", "2026-05-02T00:00:03.000Z", [
+        "a bare string where a block belongs",
+        null,
+      ]),
+    ].join("\n"),
+  );
+
+  await writeFile(
+    join(beta, "session-b1.jsonl"),
+    [
+      claudeLine({
+        type: "summary",
+        uuid: "b1-summary",
+        timestamp: "2026-05-03T00:00:02.000Z",
+        summary: "the session so far, compacted",
+      }),
+      claudeLine({
+        type: "user",
+        uuid: "b1-secret",
+        timestamp: "2026-05-03T00:00:01.000Z",
+        message: {
+          role: "user",
+          content: "deploy with ghp_0123456789012345678901234567890123456789",
+        },
+      }),
+      claudeLine({
+        type: "assistant",
+        uuid: "b1-long",
+        timestamp: "2026-05-03T00:00:03.000Z",
+        message: { role: "assistant", content: [{ type: "text", text: LONG_TURN }] },
+      }),
+      claudeLine({ type: "system", subtype: "boot", timestamp: "2026-05-03T00:00:00.000Z", content: "session started" }),
+    ].join("\n"),
+  );
+  await writeFile(
+    join(beta, "session-b2.jsonl"),
+    [
+      claudeLine({
+        type: "user",
+        uuid: "b2-tie",
+        timestamp: "2026-05-04T00:00:00.000Z",
+        message: { role: "user", content: "tie two" },
+      }),
+      claudeLine({
+        type: "user",
+        uuid: "b2-aaa",
+        timestamp: "2026-05-04T00:00:00.000Z",
+        message: { role: "user", content: "tie one" },
+      }),
+    ].join("\n"),
+  );
+
+  await writeFile(
+    join(root, "transcripts", `${CANONICAL_SAMPLES[0].session}.jsonl`),
+    `${CANONICAL_SAMPLES[0].raw}\n`,
+  );
+  await writeFile(
+    join(root, "transcripts", `${CANONICAL_SAMPLES[1].session}.jsonl`),
+    `${CANONICAL_SAMPLES[1].raw}\n`,
+  );
+  return root;
+}
+
+describe("collectClaudeRaw", () => {
+  test("derives the origin the normalized export already ingested", async () => {
+    const root = await claudeRawRoot();
+
+    const episodes = await collectClaudeRaw(root);
+
+    for (const sample of CANONICAL_SAMPLES) {
+      const episode = episodes.find(
+        (candidate) => candidate.input.origin.session === sample.session,
+      );
+      expect(episode?.input.origin).toEqual({
+        source: "claude-code",
+        session: sample.session,
+        actor: sample.role,
+        record: sample.record,
+      });
+      const occurredAt = new Date(sample.occurredAt).toISOString();
+      expect(episode?.input.time).toEqual({
+        value: occurredAt,
+        precision: "second",
+      });
+      expect(episode?.input.content).toBe(sample.text);
+      expect(episode?.input.source_revision).toBe(
+        createHash("sha256")
+          .update(`${occurredAt}\n${sample.text}`, "utf8")
+          .digest("hex"),
+      );
+    }
+  });
+
+  test("orders every transcript by event time and tie-breaks on the record", async () => {
+    const root = await claudeRawRoot();
+
+    const episodes = await collectClaudeRaw(root);
+
+    expect(episodes.map((e) => e.input.origin.record)).toEqual([
+      "a1-early",
+      "a1-late",
+      "a2-whole",
+      "a2-mixed:content:1",
+      "a2-mixed:content:3",
+      "b1-secret",
+      "b1-summary",
+      "b1-long",
+      "b2-aaa",
+      "b2-tie",
+      CANONICAL_SAMPLES[0].record,
+      CANONICAL_SAMPLES[1].record,
+    ]);
+  });
+
+  test("carries the session context onto every turn that inherits it", async () => {
+    const root = await claudeRawRoot();
+
+    const episodes = await collectClaudeRaw(root);
+    const early = episodes.find((e) => e.input.origin.record === "a1-early");
+    const late = episodes.find((e) => e.input.origin.record === "a1-late");
+
+    expect(early?.input.origin.session).toBe("session-a1");
+    expect(early?.input.properties).toEqual({
+      kind: "agent_message",
+      cwd: "/Users/ino/alpha",
+      git_branch: "main",
+    });
+    expect(late?.input.properties).toEqual({ kind: "agent_message" });
+    expect(late?.input.origin.actor).toBe("assistant");
+  });
+
+  test("keeps prose and drops the plumbing the export rejected", async () => {
+    const root = await claudeRawRoot();
+
+    const episodes = await collectClaudeRaw(root);
+    const records = episodes.map((e) => e.input.origin.record);
+
+    expect(records).not.toContain("a1-side");
+    expect(records).not.toContain("a1-error");
+    expect(records).not.toContain("a1-tool");
+    expect(records).not.toContain("a1-result");
+    expect(records).not.toContain("a1-empty");
+    expect(records).not.toContain("sub-1");
+    expect(records).not.toContain("sidecar");
+    expect(records).not.toContain("a2-blockless");
+    expect(
+      episodes.find((e) => e.input.origin.record === "a2-whole")?.input.content,
+    ).toBe("one half\nother half");
+    expect(
+      episodes.find((e) => e.input.origin.record === "a2-mixed:content:1")
+        ?.input.content,
+    ).toBe("first shipped block");
+  });
+
+  test("keeps a compaction summary as the record it stands in for", async () => {
+    const root = await claudeRawRoot();
+
+    const episodes = await collectClaudeRaw(root);
+    const summary = episodes.find(
+      (e) => e.input.origin.record === "b1-summary",
+    );
+
+    expect(summary?.input.content).toBe("the session so far, compacted");
+    expect(summary?.input.properties).toEqual({ kind: "compaction" });
+    expect(summary?.input.origin.actor).toBe("unknown");
+  });
+
+  test("masks secrets and stores an oversized turn as a payload", async () => {
+    const root = await claudeRawRoot();
+
+    const episodes = await collectClaudeRaw(root);
+    const secret = episodes.find((e) => e.input.origin.record === "b1-secret");
+    const long = episodes.find((e) => e.input.origin.record === "b1-long");
+
+    expect(secret?.redactions).toBe(1);
+    expect(secret?.input.content).toBe(`deploy with ${REDACTION}`);
+    expect(secret?.input.payload).toBeUndefined();
+    expect(long?.input.content).toBe("z".repeat(4000));
+    expect(long?.input.payload).toEqual(new TextEncoder().encode(LONG_TURN));
+    expect(long?.input.payload_media_type).toBe("text/plain");
+    expect(long?.redactions).toBe(0);
+  });
+
+  test("skips a record no reader can parse or place in the order", async () => {
+    const root = await fixtureRoot();
+    await writeFile(
+      join(root, "session-torn.jsonl"),
+      [
+        '{"type":"user","uuid":"torn","timestamp":"2026-05-05T00:00:00.000Z",',
+        claudeLine({ type: "user", uuid: "no-time", message: { role: "user", content: "no event time" } }),
+        claudeLine({ type: "user", uuid: "role-clash", timestamp: "2026-05-05T00:00:01.000Z", message: { role: "assistant", content: "role disagrees with type" } }),
+        claudeLine({ type: "summary", uuid: "blank", timestamp: "2026-05-05T00:00:02.000Z", summary: "" }),
+        "[1,2,3]",
+        claudeLine({ type: "user", uuid: "kept", timestamp: "2026-05-05T00:00:03.000Z", message: { role: "user", content: "the only survivor" } }),
+      ].join("\n"),
+    );
+
+    const episodes = await collectClaudeRaw(root);
+
+    expect(episodes.map((e) => e.input.origin.record)).toEqual(["kept"]);
+    expect(episodes[0]?.input.origin.session).toBe("session-torn");
+  });
+
+  test("hashes the exact bytes so an id survives a re-encoded transcript", async () => {
+    const root = await fixtureRoot();
+    await mkdir(join(root, "transcripts"), { recursive: true });
+    const line = claudeLine({
+      type: "user",
+      timestamp: "2026-05-06T00:00:00.000Z",
+      content: "no native id anywhere",
+    });
+    await writeFile(
+      join(root, "transcripts", "ses_fallback.jsonl"),
+      `${claudeLine({ type: "tool_use", timestamp: "2026-05-06T00:00:00.000Z", tool_name: "Bash" })}\n${line}\n`,
+    );
+
+    const [episode] = await collectClaudeRaw(root);
+
+    expect(episode?.input.origin.record).toBe(
+      `fallback:${bytesToHex(blake3(new TextEncoder().encode(line)))}:1`,
+    );
+  });
+
+  test("follows a resumed session onto the id it renames itself to", async () => {
+    const root = await fixtureRoot();
+    await writeFile(
+      join(root, "old-name.jsonl"),
+      claudeLine({
+        type: "user",
+        uuid: "resumed",
+        timestamp: "2026-05-07T00:00:00.000Z",
+        sessionId: "new-name",
+        message: { role: "user", content: "resumed under a new id" },
+      }),
+    );
+
+    const [episode] = await collectClaudeRaw(root);
+
+    expect(episode?.input.origin.session).toBe("new-name");
+  });
+
+  test("ingests one unbroken session chain per raw transcript", async () => {
+    const root = await claudeRawRoot();
+    const objectsRoot = await mkdtemp(join(tmpdir(), "anamnesis-objects-"));
+    const engine = new Engine({ ...TEST_DB, objectsRoot });
+    await engine.init();
+    try {
+      const episodes = await collectClaudeRaw(root);
+      const ids: string[] = [];
+      for (const episode of episodes) {
+        ids.push((await engine.remember(episode.input)).id);
+      }
+
+      const heads: string[] = [];
+      for (const [index, id] of ids.entries()) {
+        const inbound = await engine.store.linksOf(id, "NEXT_EPISODE");
+        if (inbound.every((link) => link.to !== id)) {
+          heads.push(episodes[index]?.input.origin.session ?? "");
+        }
+      }
+      const sessions = episodes.map((e) => e.input.origin.session);
+
+      expect(heads.sort()).toEqual([...new Set(sessions)].sort());
+    } finally {
+      await engine.close();
+      await rm(objectsRoot, { recursive: true });
+    }
   });
 });
