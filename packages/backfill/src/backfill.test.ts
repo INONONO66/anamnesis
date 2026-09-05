@@ -9,6 +9,7 @@ import { Engine } from "@anamnesis/core";
 import { collectAgentLog } from "./agentlog.ts";
 import { collectClaudeRaw } from "./clauderaw.ts";
 import { collectGjcRaw } from "./gjcraw.ts";
+import { collectCodexRaw } from "./codexraw.ts";
 import { collectNotion } from "./notion.ts";
 import { collectSlack } from "./slack.ts";
 import { maskSecrets, REDACTION } from "./secrets.ts";
@@ -1369,6 +1370,371 @@ describe("collectClaudeRaw", () => {
     await engine.init();
     try {
       const episodes = await collectClaudeRaw(root);
+      const ids: string[] = [];
+      for (const episode of episodes) {
+        ids.push((await engine.remember(episode.input)).id);
+      }
+
+      const heads: string[] = [];
+      for (const [index, id] of ids.entries()) {
+        const inbound = await engine.store.linksOf(id, "NEXT_EPISODE");
+        if (inbound.every((link) => link.to !== id)) {
+          heads.push(episodes[index]?.input.origin.session ?? "");
+        }
+      }
+      const sessions = episodes.map((e) => e.input.origin.session);
+
+      expect(heads.sort()).toEqual([...new Set(sessions)].sort());
+    } finally {
+      await engine.close();
+      await rm(objectsRoot, { recursive: true });
+    }
+  });
+});
+
+interface CodexRaw {
+  timestamp: string;
+  type: string;
+  payload: Record<string, unknown>;
+}
+
+function codexLines(records: CodexRaw[]): string {
+  return `${records.map((record) => JSON.stringify(record)).join("\n")}\n`;
+}
+
+function userMessage(text: string): Record<string, unknown> {
+  return {
+    type: "message",
+    role: "user",
+    content: [{ type: "input_text", text }],
+  };
+}
+
+function assistantMessage(text: string): Record<string, unknown> {
+  return {
+    type: "message",
+    role: "assistant",
+    content: [{ type: "output_text", text }],
+  };
+}
+
+/**
+ * One real turn copied out of the snapshot's rollout tree together with the
+ * canonical line the normalized export produced for it, so the alignment
+ * assertion is anchored on observed bytes rather than on a restatement of the
+ * adapter's own rules. Session `019cd33d-…` line 9, secret-free.
+ */
+const REAL_TEXT =
+  "I\u2019m pulling the issue text and the current docs/code so I can verify each requested correction against the repository before touching the markdown.";
+const REAL_SESSION = "019cd33d-e40f-7da3-a19f-15360a9c3c36";
+const REAL_TIMESTAMP = "2026-03-09T15:36:22.283Z";
+const REAL_OCCURRED_AT = 1773070582283;
+
+const CODEX_LONG = "z".repeat(4200);
+
+/**
+ * Two sessions written out of event-time order, spanning every record kind the
+ * export retained and a representative sample of the kinds it rejected, plus
+ * an AppleDouble sidecar and a truncated tail line.
+ */
+async function codexRawRoot(scope = "fixed"): Promise<string> {
+  const root = await fixtureRoot();
+  const day = join(root, "2026", "03", "10");
+  await mkdir(day, { recursive: true });
+  const sessionB = `019cd33d-0000-7000-8000-${scope.slice(0, 12).padEnd(12, "0")}`;
+
+  await writeFile(
+    join(day, `._rollout-2026-03-10T00-36-14-${REAL_SESSION}.jsonl`),
+    "Mac OS X            \u0000\u0000\u0000\u0000",
+  );
+  await writeFile(
+    join(day, `rollout-2026-03-10T00-36-14-${REAL_SESSION}.jsonl`),
+    codexLines([
+      {
+        timestamp: "2026-03-09T15:36:16.548Z",
+        type: "session_meta",
+        payload: {
+          id: REAL_SESSION,
+          cwd: "/Users/ino/Company/timetree-planner-agent",
+        },
+      },
+      {
+        timestamp: "2026-03-09T15:36:16.754Z",
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "developer",
+          content: [{ type: "input_text", text: "harness prompt" }],
+        },
+      },
+      {
+        timestamp: "2026-03-09T15:36:16.754Z",
+        type: "turn_context",
+        payload: { model: "gpt-5.4", cwd: "/ignored" },
+      },
+      {
+        timestamp: "2026-03-09T15:36:30.000Z",
+        type: "response_item",
+        payload: assistantMessage(CODEX_LONG),
+      },
+      {
+        timestamp: "2026-03-09T15:36:16.900Z",
+        type: "event_msg",
+        payload: { type: "user_message", message: "start the backfill" },
+      },
+      {
+        timestamp: REAL_TIMESTAMP,
+        type: "event_msg",
+        payload: { type: "agent_message", message: REAL_TEXT },
+      },
+      {
+        timestamp: "2026-03-09T15:36:24.000Z",
+        type: "response_item",
+        payload: { type: "reasoning", summary: [{ text: "thinking" }] },
+      },
+      {
+        timestamp: "2026-03-09T15:36:25.000Z",
+        type: "response_item",
+        payload: { type: "function_call", name: "shell", arguments: "{}" },
+      },
+      {
+        timestamp: "2026-03-09T15:36:26.000Z",
+        type: "event_msg",
+        payload: { type: "token_count", total: 12 },
+      },
+      {
+        timestamp: "2026-03-09T15:36:27.000Z",
+        type: "response_item",
+        payload: assistantMessage("   "),
+      },
+      {
+        timestamp: "2026-03-09T15:36:40.000Z",
+        type: "event_msg",
+        payload: { type: "context_compacted" },
+      },
+    ]),
+  );
+
+  await writeFile(
+    join(day, `rollout-2026-03-10T00-40-00-${sessionB}.jsonl`),
+    `${codexLines([
+      {
+        timestamp: "2026-03-09T15:40:00.000Z",
+        type: "session_meta",
+        payload: { id: sessionB },
+      },
+      {
+        timestamp: "2026-03-09T15:40:01.000Z",
+        type: "response_item",
+        payload: {
+          ...userMessage("use ghp_0123456789012345678901234567890123456789"),
+          id: "msg_native",
+        },
+      },
+      {
+        timestamp: "not-a-date",
+        type: "response_item",
+        payload: assistantMessage("undateable"),
+      },
+    ])}{"timestamp":"2026-03-09T15:40:02.000Z","type":"resp\n`,
+  );
+  return root;
+}
+
+describe("collectCodexRaw", () => {
+  test("mirrors the normalized export's origin and revision for a real turn", async () => {
+    const root = await codexRawRoot();
+
+    const episodes = await collectCodexRaw(root);
+    const real = episodes.find((e) => e.input.content === REAL_TEXT);
+
+    expect(real?.input.origin).toEqual({
+      source: "codex",
+      session: REAL_SESSION,
+      actor: "assistant",
+      record: `${REAL_SESSION}:5`,
+    });
+    expect(real?.input.time).toEqual({
+      value: new Date(REAL_OCCURRED_AT).toISOString(),
+      precision: "second",
+    });
+    /** The agent-log adapter's key, recomputed from the canonical fields. */
+    expect(real?.input.source_revision).toBe(
+      createHash("sha256")
+        .update(
+          `${new Date(REAL_OCCURRED_AT).toISOString()}\n${REAL_TEXT}`,
+          "utf8",
+        )
+        .digest("hex"),
+    );
+    expect(real?.input.properties).toEqual({
+      kind: "message",
+      canonical_kind: "agent_message",
+      cwd: "/Users/ino/Company/timetree-planner-agent",
+      model: "gpt-5.4",
+    });
+    expect(real?.input.schema).toBe("anamnesis.original-message/1");
+  });
+
+  test("orders every session by event time and keeps the compaction marker", async () => {
+    const root = await codexRawRoot();
+
+    const episodes = await collectCodexRaw(root);
+
+    expect(episodes.map((e) => e.input.content)).toEqual([
+      "start the backfill",
+      REAL_TEXT,
+      "z".repeat(4000),
+      "context_compacted",
+      `use ${REDACTION}`,
+    ]);
+    expect(episodes[3]?.input.properties).toEqual({
+      kind: "compaction",
+      canonical_kind: "compaction",
+      cwd: "/Users/ino/Company/timetree-planner-agent",
+      model: "gpt-5.4",
+    });
+    expect(episodes[3]?.input.origin.actor).toBe("unknown");
+  });
+
+  test("reproduces the export's native event id when the record carries one", async () => {
+    const root = await codexRawRoot();
+
+    const episodes = await collectCodexRaw(root);
+    const native = episodes.find((e) => e.input.content === `use ${REDACTION}`);
+
+    expect(native?.input.origin.record).toBe("msg_native:content:0");
+    expect(native?.redactions).toBe(1);
+    expect(native?.input.origin.actor).toBe("user");
+  });
+
+  test("stores an oversized turn as a payload with an excerpt on the node", async () => {
+    const root = await codexRawRoot();
+
+    const episodes = await collectCodexRaw(root);
+    const long = episodes[2];
+
+    expect(long?.input.content).toBe("z".repeat(4000));
+    expect(long?.input.payload).toEqual(new TextEncoder().encode(CODEX_LONG));
+    expect(long?.input.payload_media_type).toBe("text/plain");
+    expect(episodes[0]?.input.payload).toBeUndefined();
+  });
+
+  test("keys the revision on raw text so masking changes open none", async () => {
+    const root = await codexRawRoot();
+    const secret = "ghp_0123456789012345678901234567890123456789";
+
+    const episodes = await collectCodexRaw(root);
+    const masked = episodes[4];
+
+    expect(masked?.input.content).toBe(`use ${REDACTION}`);
+    expect(masked?.input.source_revision).toBe(
+      createHash("sha256")
+        .update(`2026-03-09T15:40:01.000Z\nuse ${secret}`, "utf8")
+        .digest("hex"),
+    );
+  });
+
+  test("tie-breaks equal event times on the record so the order is total", async () => {
+    const root = await fixtureRoot();
+    const session = "019cd33d-1111-7000-8000-000000000000";
+    await writeFile(
+      join(root, `rollout-2026-03-10T00-36-14-${session}.jsonl`),
+      codexLines([
+        {
+          timestamp: "2026-03-09T15:36:16.000Z",
+          type: "response_item",
+          payload: { ...userMessage("tie b"), id: "msg_b" },
+        },
+        {
+          timestamp: "2026-03-09T15:36:16.000Z",
+          type: "response_item",
+          payload: { ...userMessage("tie a"), id: "msg_a" },
+        },
+      ]),
+    );
+
+    const episodes = await collectCodexRaw(root);
+
+    expect(episodes.map((e) => e.input.origin.record)).toEqual([
+      "msg_a:content:0",
+      "msg_b:content:0",
+    ]);
+  });
+
+  test("falls back to the file name when a session carries no meta record", async () => {
+    const root = await fixtureRoot();
+    const session = "019cd33d-2222-7000-8000-000000000000";
+    await writeFile(
+      join(root, `rollout-2026-03-10T00-36-14-${session}.jsonl`),
+      codexLines([
+        {
+          timestamp: "2026-03-09T15:36:16.000Z",
+          type: "session_meta",
+          payload: { note: "no id" },
+        },
+        {
+          timestamp: "2026-03-09T15:36:17.000Z",
+          type: "event_msg",
+          payload: { type: "agent_message", message: "orphan turn" },
+        },
+      ]),
+    );
+
+    const [episode] = await collectCodexRaw(root);
+
+    expect(episode?.input.origin.session).toBe(session);
+    expect(episode?.input.origin.record).toBe(`${session}:1`);
+    expect(episode?.input.properties).toEqual({
+      kind: "message",
+      canonical_kind: "agent_message",
+    });
+  });
+
+  test("skips rollout lines that are not a well-formed record", async () => {
+    const root = await fixtureRoot();
+    const session = "019cd33d-3333-7000-8000-000000000000";
+    await writeFile(
+      join(root, `rollout-2026-03-10T00-36-14-${session}.jsonl`),
+      [
+        "[1,2,3]",
+        '"a bare string"',
+        "null",
+        JSON.stringify({ timestamp: "2026-03-09T15:36:16.000Z", type: "event_msg" }),
+        JSON.stringify({
+          timestamp: "2026-03-09T15:36:16.000Z",
+          type: "event_msg",
+          payload: ["not an object"],
+        }),
+        JSON.stringify({
+          type: "event_msg",
+          payload: { type: "agent_message", message: "no timestamp" },
+        }),
+        JSON.stringify({
+          timestamp: "2026-03-09T15:36:17.000Z",
+          type: "response_item",
+          payload: {
+            type: "message",
+            role: "assistant",
+            content: ["not a part", { type: "output_text", text: "survivor" }],
+          },
+        }),
+        "",
+      ].join("\n"),
+    );
+
+    const episodes = await collectCodexRaw(root);
+
+    expect(episodes.map((e) => e.input.content)).toEqual(["survivor"]);
+  });
+
+  test("ingests one unbroken session chain per rollout file", async () => {
+    const root = await codexRawRoot(`chain${Date.now()}`);
+    const objectsRoot = await mkdtemp(join(tmpdir(), "anamnesis-objects-"));
+    const engine = new Engine({ ...TEST_DB, objectsRoot });
+    await engine.init();
+    try {
+      const episodes = await collectCodexRaw(root);
       const ids: string[] = [];
       for (const episode of episodes) {
         ids.push((await engine.remember(episode.input)).id);

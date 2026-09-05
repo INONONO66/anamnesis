@@ -2,6 +2,7 @@ import { Engine, EpisodeJournal, journaledRemember } from "@anamnesis/core";
 import type { RememberInput } from "@anamnesis/core";
 import { collectAgentLog } from "./agentlog.ts";
 import { collectClaudeRaw } from "./clauderaw.ts";
+import { collectCodexRaw } from "./codexraw.ts";
 import { collectGjcRaw } from "./gjcraw.ts";
 import { collectNotion } from "./notion.ts";
 import { collectSlack } from "./slack.ts";
@@ -17,6 +18,7 @@ const COLLECTORS: Record<string, (root: string) => Promise<Collected[]>> = {
   agentlog: collectAgentLog,
   gjcraw: collectGjcRaw,
   clauderaw: collectClaudeRaw,
+  codexraw: collectCodexRaw,
 };
 
 interface Receipt {
