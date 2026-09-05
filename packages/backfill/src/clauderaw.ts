@@ -360,12 +360,26 @@ function toEpisode(
     .update(`${occurredAt}\n${accepted.text}`, "utf8")
     .digest("hex");
   const { text, redactions } = maskSecrets(accepted.text);
-  const properties: Record<string, string> = { kind: accepted.kind };
-  if (context.cwd !== undefined) properties["cwd"] = context.cwd;
-  if (context.gitBranch !== undefined) {
-    properties["git_branch"] = context.gitBranch;
-  }
+  /**
+   * A main transcript shares its revision token with the normalized export,
+   * and the digest guarding that revision covers `properties` (docs/01 §1), so
+   * the body has to be the export's `{canonical_kind, kind}` and nothing more:
+   * the export never carried `cwd` or `git_branch`, and adding them here would
+   * make the raw pass a `revision_conflict` instead of a duplicate. Sidechain
+   * transcripts were never exported, so they keep their richer context.
+   */
+  const properties: Record<string, string> =
+    context.sidechain === undefined
+      ? {
+          canonical_kind: accepted.kind,
+          kind: accepted.kind === "compaction" ? "compaction" : "message",
+        }
+      : { kind: accepted.kind };
   if (context.sidechain !== undefined) {
+    if (context.cwd !== undefined) properties["cwd"] = context.cwd;
+    if (context.gitBranch !== undefined) {
+      properties["git_branch"] = context.gitBranch;
+    }
     properties["is_sidechain"] = "true";
     properties["agent_id"] = context.sidechain.agentId;
     properties["transcript_kind"] = context.sidechain.transcriptKind;

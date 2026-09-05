@@ -1564,12 +1564,12 @@ describe("collectClaudeRaw", () => {
     const late = episodes.find((e) => e.input.origin.record === "a1-late");
 
     expect(early?.input.origin.session).toBe("session-a1");
-    expect(early?.input.properties).toEqual({
-      kind: "agent_message",
-      cwd: "/Users/ino/alpha",
-      git_branch: "main",
-    });
-    expect(late?.input.properties).toEqual({ kind: "agent_message" });
+    /**
+     * The export never carried the session context, so a main turn cannot
+     * either: the two passes must build one digest for one revision.
+     */
+    expect(early?.input.properties).toEqual({ canonical_kind: "agent_message", kind: "message" });
+    expect(late?.input.properties).toEqual({ canonical_kind: "agent_message", kind: "message" });
     expect(late?.input.origin.actor).toBe("assistant");
   });
 
@@ -1606,7 +1606,7 @@ describe("collectClaudeRaw", () => {
     );
 
     expect(summary?.input.content).toBe("the session so far, compacted");
-    expect(summary?.input.properties).toEqual({ kind: "compaction" });
+    expect(summary?.input.properties).toEqual({ canonical_kind: "compaction", kind: "compaction" });
     expect(summary?.input.origin.actor).toBe("unknown");
   });
 
@@ -1773,8 +1773,8 @@ describe("collectClaudeRaw", () => {
      * The sidechain records the raw tree holds live only under `subagents/`,
      * so a flagged record inside a main transcript stays rejected: admitting
      * it would rewrite output the normalized export already ingested. This is
-     * every main-transcript episode as the adapter produced them before the
-     * delegated transcripts were admitted.
+     * every main-transcript episode in the shape the normalized export wrote,
+     * so the raw pass resolves to the exported revision instead of conflicting.
      */
     expect(
       main.map((episode) => ({
@@ -1784,18 +1784,18 @@ describe("collectClaudeRaw", () => {
         properties: episode.input.properties,
       })),
     ).toEqual([
-      { source: "claude-code", session: "session-a1", actor: "user", record: "a1-early", time: "2026-05-01T00:00:03.000Z", content: "the earlier question", properties: { kind: "agent_message", cwd: "/Users/ino/alpha", git_branch: "main" } },
-      { source: "claude-code", session: "session-a1", actor: "assistant", record: "a1-late", time: "2026-05-01T00:00:09.000Z", content: "the later answer", properties: { kind: "agent_message" } },
-      { source: "claude-code", session: "session-a2", actor: "assistant", record: "a2-whole", time: "2026-05-02T00:00:01.000Z", content: "one half\nother half", properties: { kind: "agent_message" } },
-      { source: "claude-code", session: "session-a2", actor: "assistant", record: "a2-mixed:content:1", time: "2026-05-02T00:00:02.000Z", content: "first shipped block", properties: { kind: "agent_message" } },
-      { source: "claude-code", session: "session-a2", actor: "assistant", record: "a2-mixed:content:3", time: "2026-05-02T00:00:02.000Z", content: "second shipped block", properties: { kind: "agent_message" } },
-      { source: "claude-code", session: "session-b1", actor: "user", record: "b1-secret", time: "2026-05-03T00:00:01.000Z", content: `deploy with ${REDACTION}`, properties: { kind: "agent_message" } },
-      { source: "claude-code", session: "session-b1", actor: "unknown", record: "b1-summary", time: "2026-05-03T00:00:02.000Z", content: "the session so far, compacted", properties: { kind: "compaction" } },
-      { source: "claude-code", session: "session-b1", actor: "assistant", record: "b1-long", time: "2026-05-03T00:00:03.000Z", content: "z".repeat(4000), properties: { kind: "agent_message" } },
-      { source: "claude-code", session: "session-b2", actor: "user", record: "b2-aaa", time: "2026-05-04T00:00:00.000Z", content: "tie one", properties: { kind: "agent_message" } },
-      { source: "claude-code", session: "session-b2", actor: "user", record: "b2-tie", time: "2026-05-04T00:00:00.000Z", content: "tie two", properties: { kind: "agent_message" } },
-      { source: "claude-code", session: CANONICAL_SAMPLES[0].session, actor: "user", record: CANONICAL_SAMPLES[0].record, time: "2026-05-30T05:03:48.912Z", content: CANONICAL_SAMPLES[0].text, properties: { kind: "agent_message" } },
-      { source: "claude-code", session: CANONICAL_SAMPLES[1].session, actor: "user", record: CANONICAL_SAMPLES[1].record, time: "2026-06-17T09:17:00.521Z", content: CANONICAL_SAMPLES[1].text, properties: { kind: "agent_message" } },
+      { source: "claude-code", session: "session-a1", actor: "user", record: "a1-early", time: "2026-05-01T00:00:03.000Z", content: "the earlier question", properties: { canonical_kind: "agent_message", kind: "message" } },
+      { source: "claude-code", session: "session-a1", actor: "assistant", record: "a1-late", time: "2026-05-01T00:00:09.000Z", content: "the later answer", properties: { canonical_kind: "agent_message", kind: "message" } },
+      { source: "claude-code", session: "session-a2", actor: "assistant", record: "a2-whole", time: "2026-05-02T00:00:01.000Z", content: "one half\nother half", properties: { canonical_kind: "agent_message", kind: "message" } },
+      { source: "claude-code", session: "session-a2", actor: "assistant", record: "a2-mixed:content:1", time: "2026-05-02T00:00:02.000Z", content: "first shipped block", properties: { canonical_kind: "agent_message", kind: "message" } },
+      { source: "claude-code", session: "session-a2", actor: "assistant", record: "a2-mixed:content:3", time: "2026-05-02T00:00:02.000Z", content: "second shipped block", properties: { canonical_kind: "agent_message", kind: "message" } },
+      { source: "claude-code", session: "session-b1", actor: "user", record: "b1-secret", time: "2026-05-03T00:00:01.000Z", content: `deploy with ${REDACTION}`, properties: { canonical_kind: "agent_message", kind: "message" } },
+      { source: "claude-code", session: "session-b1", actor: "unknown", record: "b1-summary", time: "2026-05-03T00:00:02.000Z", content: "the session so far, compacted", properties: { canonical_kind: "compaction", kind: "compaction" } },
+      { source: "claude-code", session: "session-b1", actor: "assistant", record: "b1-long", time: "2026-05-03T00:00:03.000Z", content: "z".repeat(4000), properties: { canonical_kind: "agent_message", kind: "message" } },
+      { source: "claude-code", session: "session-b2", actor: "user", record: "b2-aaa", time: "2026-05-04T00:00:00.000Z", content: "tie one", properties: { canonical_kind: "agent_message", kind: "message" } },
+      { source: "claude-code", session: "session-b2", actor: "user", record: "b2-tie", time: "2026-05-04T00:00:00.000Z", content: "tie two", properties: { canonical_kind: "agent_message", kind: "message" } },
+      { source: "claude-code", session: CANONICAL_SAMPLES[0].session, actor: "user", record: CANONICAL_SAMPLES[0].record, time: "2026-05-30T05:03:48.912Z", content: CANONICAL_SAMPLES[0].text, properties: { canonical_kind: "agent_message", kind: "message" } },
+      { source: "claude-code", session: CANONICAL_SAMPLES[1].session, actor: "user", record: CANONICAL_SAMPLES[1].record, time: "2026-06-17T09:17:00.521Z", content: CANONICAL_SAMPLES[1].text, properties: { canonical_kind: "agent_message", kind: "message" } },
     ]);
   });
 
