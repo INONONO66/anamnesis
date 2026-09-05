@@ -222,6 +222,23 @@ function sessionIdOf(fileName: string): string {
 }
 
 /**
+ * A snapshot of the live session tree, taken while its rollout files were
+ * still being appended to and kept beside it under a suffixed name. Every
+ * file in one is a stale copy of a live session: the same session id, the
+ * same turns, and the same `${session}:${index}` fallback record ids, so the
+ * same `revision_key` — but a rewritten `turn_context`, and therefore a
+ * different `model` on turns the live file also emits. A `revision_key`
+ * carries exactly one element body and the digest guarding it covers
+ * `properties` (docs/01 §1), so walking both copies offers two bodies for one
+ * revision and the store rejects the second as a `revision_conflict`
+ * (docs/02 §3). The live `sessions` tree is the session; a snapshot beside it
+ * is not a second one.
+ */
+function isSessionSnapshot(name: string): boolean {
+  return name.startsWith("sessions-");
+}
+
+/**
  * 12,848 rollout files sit under a `<year>/<month>/<day>` tree next to their
  * AppleDouble sidecars, which are byte-for-byte not JSON and would otherwise
  * be parsed as sessions. An unreadable root is left to throw: silently
@@ -234,8 +251,12 @@ async function rolloutFiles(root: string): Promise<string[]> {
     for (const entry of entries) {
       if (entry.name.startsWith("._")) continue;
       const path = join(directory, entry.name);
-      if (entry.isDirectory()) await walk(path);
-      else if (entry.isFile() && entry.name.endsWith(".jsonl")) found.push(path);
+      if (entry.isDirectory()) {
+        if (isSessionSnapshot(entry.name)) continue;
+        await walk(path);
+      } else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
+        found.push(path);
+      }
     }
   };
   await walk(root);
