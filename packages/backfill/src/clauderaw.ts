@@ -26,6 +26,12 @@ const CONTENT_LIMIT = 4000;
  * `source_revision` stays keyed on `${occurred_at}\n${text}` exactly as the
  * agent-log adapter keys it, so a record ingested from either side of the
  * overlap lands on one revision.
+ *
+ * Delegated transcripts under `subagents/` are the one place this adapter
+ * goes beyond the export, which skipped them by path. They are admitted whole
+ * under identities the export never minted, so nothing about the overlap
+ * changes: a sidechain record keys on its own agent id, and no record the
+ * export ever produced is derived differently because of it.
  */
 
 /** Only the fields the originals contract consumes are modelled. */
@@ -232,15 +238,24 @@ function compaction(
  * while `thinking`, `tool_use` and `tool_result` blocks do not. Reproducing
  * that inclusion set is what keeps the overlap a no-op — widening it here
  * would write records the export never had and call them duplicates.
+ *
+ * The sidechain flags are read as a path question rather than a record one.
+ * Every one of the 121,047 delegated records in the raw tree sits under a
+ * `subagents/` directory, and no main transcript carries either flag, so a
+ * flagged record inside a main transcript is a record the export dropped and
+ * this adapter keeps dropping — admitting it there would rewrite output the
+ * export already ingested, which is the one thing widening the set must not
+ * do.
  */
 function acceptedRecords(
   value: ClaudeRecord,
   bytes: Uint8Array,
   lineIndex: number,
+  sidechain: SidechainOrigin | undefined,
 ): readonly AcceptedRecord[] {
   if (
-    value.isSidechain === true ||
-    value.agentId !== undefined ||
+    (sidechain === undefined &&
+      (value.isSidechain === true || value.agentId !== undefined)) ||
     value.isApiErrorMessage === true ||
     value.message?.isError === true
   ) {
@@ -306,10 +321,29 @@ function acceptedRecords(
   });
 }
 
+/**
+ * A delegate's transcript names the session that spawned it in `sessionId`,
+ * not itself, so keying the episode on `sessionId` would thread 838 separate
+ * delegations onto their parent's single spine and interleave them into one
+ * unreadable chain. The agent id is the transcript's own identity, so the
+ * session splits on that and the parent it belongs to is kept as a property.
+ */
+interface SidechainOrigin {
+  agentId: string;
+  transcriptKind: "subagent" | "workflow";
+}
+
 interface SessionContext {
   session: string;
   cwd?: string;
   gitBranch?: string;
+  /** Absent for a main transcript, which keeps its pre-sidechain shape. */
+  sidechain?: SidechainSession;
+}
+
+interface SidechainSession extends SidechainOrigin {
+  /** The main session this delegation hangs off, when a record names one. */
+  parentSession?: string;
 }
 
 function toEpisode(
@@ -330,6 +364,14 @@ function toEpisode(
   if (context.cwd !== undefined) properties["cwd"] = context.cwd;
   if (context.gitBranch !== undefined) {
     properties["git_branch"] = context.gitBranch;
+  }
+  if (context.sidechain !== undefined) {
+    properties["is_sidechain"] = "true";
+    properties["agent_id"] = context.sidechain.agentId;
+    properties["transcript_kind"] = context.sidechain.transcriptKind;
+    if (context.sidechain.parentSession !== undefined) {
+      properties["parent_session_id"] = context.sidechain.parentSession;
+    }
   }
   const oversized = text.length > CONTENT_LIMIT;
   return {
@@ -357,26 +399,45 @@ function toEpisode(
 }
 
 /**
- * Subagent and workflow transcripts sit beside the session that spawned them
- * and repeat its turns from the delegate's side; the export skipped both, and
- * so does this. AppleDouble sidecars mirror every file on a copied volume and
- * parse as neither.
+ * Subagent and workflow transcripts sit beside the session that spawned them:
+ * `<session>/subagents/agent-<id>.jsonl` for a delegated task, and one level
+ * deeper under `subagents/workflows/wf_<id>/` for a workflow step. Both are
+ * transcripts of real delegated work, so both are read — but as their own
+ * sessions rather than as more turns of the parent.
+ *
+ * A workflow's `journal.jsonl` is the orchestrator's own bookkeeping, not a
+ * conversation, and holds no user or assistant turn to recall.
+ *
+ * AppleDouble sidecars mirror every file on a copied volume and parse as
+ * neither.
  */
-function isTranscript(pathFromRoot: string): boolean {
+function classify(pathFromRoot: string): SidechainOrigin | "main" | undefined {
   const parts = pathFromRoot.split(sep);
-  if (parts.includes("subagents") || parts.includes("workflows")) return false;
-  if (parts.some((part) => part.startsWith("._"))) return false;
-  if (parts.length === 1) return true;
+  if (parts.some((part) => part.startsWith("._"))) return undefined;
+  if (parts.includes("subagents")) {
+    const name = basename(pathFromRoot, ".jsonl");
+    if (name === "journal") return undefined;
+    return {
+      agentId: name.replace(/^agent-/, ""),
+      transcriptKind: parts.includes("workflows") ? "workflow" : "subagent",
+    };
+  }
+  if (parts.length === 1) return "main";
   const root = parts[0];
-  return (
-    root === "projects" ||
+  return root === "projects" ||
     root === "transcripts" ||
     root === "pre-compact-session-histories"
-  );
+    ? "main"
+    : undefined;
 }
 
-async function transcriptFiles(root: string): Promise<string[]> {
-  const found: string[] = [];
+interface Transcript {
+  path: string;
+  sidechain?: SidechainOrigin;
+}
+
+async function transcriptFiles(root: string): Promise<Transcript[]> {
+  const found: Transcript[] = [];
   const walk = async (directory: string): Promise<void> => {
     const entries = await readdir(directory, { withFileTypes: true });
     for (const entry of [...entries].sort((a, b) =>
@@ -385,7 +446,9 @@ async function transcriptFiles(root: string): Promise<string[]> {
       const path = join(directory, entry.name);
       if (entry.isDirectory()) await walk(path);
       else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
-        if (isTranscript(relative(root, path))) found.push(path);
+        const kind = classify(relative(root, path));
+        if (kind === undefined) continue;
+        found.push(kind === "main" ? { path } : { path, sidechain: kind });
       }
     }
   };
@@ -411,22 +474,33 @@ function recordLines(file: Uint8Array): Uint8Array[] {
   return lines;
 }
 
-async function collectFile(path: string): Promise<ClaudeRawEpisode[]> {
+async function collectFile(
+  transcript: Transcript,
+): Promise<ClaudeRawEpisode[]> {
+  const { path, sidechain } = transcript;
   const file = new Uint8Array(await readFile(path));
   const decoder = new TextDecoder();
   const episodes: ClaudeRawEpisode[] = [];
   /**
    * The session a record belongs to is the one it names; the file name is
    * only the opening guess, and a resumed session renames itself mid-file.
+   * A delegate names its parent there instead, so its own session is pinned
+   * to the agent id and `sessionId` is recorded as the parent it hangs off.
    */
-  let context: SessionContext = { session: basename(path, ".jsonl") };
+  let context: SessionContext =
+    sidechain === undefined
+      ? { session: basename(path, ".jsonl") }
+      : { session: sidechain.agentId, sidechain };
   let lineIndex = 0;
   for (const bytes of recordLines(file)) {
     const value = parseRecord(decoder.decode(bytes));
     lineIndex += 1;
     if (value === undefined) continue;
     context = {
-      session: value.sessionId ?? context.session,
+      session:
+        sidechain === undefined
+          ? (value.sessionId ?? context.session)
+          : context.session,
       ...(value.cwd === undefined
         ? context.cwd === undefined
           ? {}
@@ -437,8 +511,25 @@ async function collectFile(path: string): Promise<ClaudeRawEpisode[]> {
           ? {}
           : { gitBranch: context.gitBranch }
         : { gitBranch: value.gitBranch }),
+      ...(sidechain === undefined
+        ? {}
+        : {
+            sidechain: {
+              ...sidechain,
+              ...(value.sessionId === undefined
+                ? context.sidechain?.parentSession === undefined
+                  ? {}
+                  : { parentSession: context.sidechain.parentSession }
+                : { parentSession: value.sessionId }),
+            },
+          }),
     };
-    for (const accepted of acceptedRecords(value, bytes, lineIndex - 1)) {
+    for (const accepted of acceptedRecords(
+      value,
+      bytes,
+      lineIndex - 1,
+      sidechain,
+    )) {
       episodes.push(toEpisode(accepted, context));
     }
   }
@@ -457,8 +548,8 @@ export async function collectClaudeRaw(
   root: string,
 ): Promise<ClaudeRawEpisode[]> {
   const episodes: ClaudeRawEpisode[] = [];
-  for (const path of await transcriptFiles(root)) {
-    episodes.push(...(await collectFile(path)));
+  for (const transcript of await transcriptFiles(root)) {
+    episodes.push(...(await collectFile(transcript)));
   }
   return episodes.sort((a, b) => {
     const at = a.input.time?.value ?? "";
