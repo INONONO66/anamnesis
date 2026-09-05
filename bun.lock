@@ -16,6 +16,7 @@
       "dependencies": {
         "@anamnesis/core": "workspace:*",
         "@anamnesis/protocol": "workspace:*",
+        "@noble/hashes": "2.4.0",
         "zod": "^4.1.5",
       },
     },
@@ -43,6 +44,8 @@
     "@anamnesis/core": ["@anamnesis/core@workspace:packages/core"],
 
     "@anamnesis/protocol": ["@anamnesis/protocol@workspace:packages/protocol"],
+
+    "@noble/hashes": ["@noble/hashes@2.4.0", "", {}, "sha512-X5XaVWZIBCT7HHZGm5I7ZQXDwLG+bGXuSrMQAW+7Zvl87h1kmc1ZB1VSRJcpUfoUrGQp4Fkoxm5kZ+Ms+aW+eA=="],
 
     "@types/bun": ["@types/bun@1.4.0", "", { "dependencies": { "bun-types": "1.4.0" } }, "sha512-K+lZULY23vRgK/CfTjFIV+tyifaNdSMlPh9j+6mQ/cLfpOznLyAuzgV/JQysyECpkBQLVMSyvjlr2fBUSA9wFQ=="],
 
