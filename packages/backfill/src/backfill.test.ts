@@ -1027,14 +1027,21 @@ function assistantText(
  * Two projects with two sessions each, every file written out of event-time
  * order and the projects named so that file order contradicts time order.
  * Alongside the transcripts sit the record kinds the export rejected — a
- * sidechain turn, a delegate's own transcript, tool plumbing, an API error and
- * an empty message — plus an AppleDouble sidecar that parses as neither.
+ * sidechain turn written into a main transcript, tool plumbing, an API error
+ * and an empty message — plus an AppleDouble sidecar that parses as neither.
+ *
+ * `session-a1` also owns the two delegated transcripts it spawned: one
+ * subagent and one workflow step, both naming `session-a1` as their
+ * `sessionId` exactly as the runtime writes them, beside the workflow journal
+ * that is orchestration bookkeeping rather than a conversation.
  */
 async function claudeRawRoot(): Promise<string> {
   const root = await fixtureRoot();
   const alpha = join(root, "projects", "-Users-ino-alpha");
   const beta = join(root, "projects", "-Users-ino-beta");
-  await mkdir(join(alpha, "session-a1", "subagents"), { recursive: true });
+  const subagents = join(alpha, "session-a1", "subagents");
+  const workflow = join(subagents, "workflows", "wf_11111111-222");
+  await mkdir(workflow, { recursive: true });
   await mkdir(beta, { recursive: true });
   await mkdir(join(root, "transcripts"), { recursive: true });
 
@@ -1094,14 +1101,91 @@ async function claudeRawRoot(): Promise<string> {
       claudeLine({ type: "queue-operation", operation: "enqueue", timestamp: "2026-05-01T00:00:02.000Z" }),
     ].join("\n"),
   );
+  /**
+   * A delegate names the session that spawned it in `sessionId`, carries its
+   * own `agentId`, and flags every record `isSidechain`. Its last turn is a
+   * compaction, which a long delegation reaches the same way a session does.
+   */
   await writeFile(
-    join(alpha, "session-a1", "subagents", "agent-deadbeef.jsonl"),
+    join(subagents, "agent-deadbeef.jsonl"),
+    [
+      claudeLine({
+        type: "user",
+        uuid: "sub-1",
+        timestamp: "2026-05-01T00:00:01.000Z",
+        isSidechain: true,
+        agentId: "deadbeef",
+        sessionId: "session-a1",
+        cwd: "/Users/ino/alpha",
+        gitBranch: "main",
+        message: { role: "user", content: "the delegate's own transcript" },
+      }),
+      claudeLine({
+        type: "assistant",
+        uuid: "sub-2",
+        timestamp: "2026-05-01T00:00:10.000Z",
+        isSidechain: true,
+        agentId: "deadbeef",
+        sessionId: "session-a1",
+        message: {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "delegate scratch space" },
+            { type: "text", text: "what the delegate reported back" },
+          ],
+        },
+      }),
+      claudeLine({
+        type: "system",
+        subtype: "compact_boundary",
+        uuid: "sub-compact",
+        timestamp: "2026-05-01T00:00:11.000Z",
+        isSidechain: true,
+        agentId: "deadbeef",
+        content: "the delegation so far, compacted",
+      }),
+    ].join("\n"),
+  );
+  await writeFile(
+    join(workflow, "agent-cafebabe.jsonl"),
     claudeLine({
       type: "user",
-      uuid: "sub-1",
+      uuid: "wf-1",
+      timestamp: "2026-05-01T00:00:12.000Z",
+      isSidechain: true,
+      agentId: "cafebabe",
+      sessionId: "session-a1",
+      cwd: "/Users/ino/alpha",
+      message: { role: "user", content: "the workflow step's own prompt" },
+    }),
+  );
+  await writeFile(
+    join(workflow, "journal.jsonl"),
+    claudeLine({ type: "started", key: "v2:abc", agentId: "cafebabe" }),
+  );
+  /**
+   * A background job's timeline sits beside the transcript roots under a
+   * directory of its own and holds runtime bookkeeping, not conversation.
+   */
+  await mkdir(join(root, "jobs", "6710737a"), { recursive: true });
+  await writeFile(
+    join(root, "jobs", "6710737a", "timeline.jsonl"),
+    claudeLine({
+      type: "user",
+      uuid: "job-1",
       timestamp: "2026-05-01T00:00:01.000Z",
+      message: { role: "user", content: "a job timeline entry" },
+    }),
+  );
+  await writeFile(
+    join(subagents, "._agent-deadbeef.jsonl"),
+    claudeLine({
+      type: "user",
+      uuid: "sub-sidecar",
+      timestamp: "2026-05-01T00:00:01.000Z",
+      isSidechain: true,
       agentId: "deadbeef",
-      message: { role: "user", content: "the delegate's own transcript" },
+      message: { role: "user", content: "AppleDouble beside a delegate" },
     }),
   );
   await writeFile(
@@ -1231,8 +1315,12 @@ describe("collectClaudeRaw", () => {
     const episodes = await collectClaudeRaw(root);
 
     expect(episodes.map((e) => e.input.origin.record)).toEqual([
+      "sub-1",
       "a1-early",
       "a1-late",
+      "sub-2:content:1",
+      "sub-compact",
+      "wf-1",
       "a2-whole",
       "a2-mixed:content:1",
       "a2-mixed:content:3",
@@ -1274,8 +1362,9 @@ describe("collectClaudeRaw", () => {
     expect(records).not.toContain("a1-tool");
     expect(records).not.toContain("a1-result");
     expect(records).not.toContain("a1-empty");
-    expect(records).not.toContain("sub-1");
     expect(records).not.toContain("sidecar");
+    expect(records).not.toContain("sub-sidecar");
+    expect(records).not.toContain("job-1");
     expect(records).not.toContain("a2-blockless");
     expect(
       episodes.find((e) => e.input.origin.record === "a2-whole")?.input.content,
@@ -1371,6 +1460,121 @@ describe("collectClaudeRaw", () => {
     const [episode] = await collectClaudeRaw(root);
 
     expect(episode?.input.origin.session).toBe("new-name");
+  });
+
+  test("gives every delegated transcript a session of its own", async () => {
+    const root = await claudeRawRoot();
+
+    const episodes = await collectClaudeRaw(root);
+    const sub = episodes.find((e) => e.input.origin.record === "sub-1");
+    const reply = episodes.find(
+      (e) => e.input.origin.record === "sub-2:content:1",
+    );
+    const step = episodes.find((e) => e.input.origin.record === "wf-1");
+
+    /**
+     * A delegate names its parent in `sessionId`, so keying on that would
+     * thread every delegation onto the parent's single spine; the agent id is
+     * the transcript's own identity and the parent is kept as a property.
+     */
+    expect(sub?.input.origin).toEqual({
+      source: "claude-code",
+      session: "deadbeef",
+      actor: "user",
+      record: "sub-1",
+    });
+    expect(step?.input.origin.session).toBe("cafebabe");
+    /** A delegate's turns run through the same slicing rule as a main one. */
+    expect(reply?.input.origin.actor).toBe("assistant");
+    expect(reply?.input.origin.session).toBe("deadbeef");
+    expect(sub?.input.content).toBe("the delegate's own transcript");
+    expect(reply?.input.content).toBe("what the delegate reported back");
+    expect(step?.input.content).toBe("the workflow step's own prompt");
+    /** The workflow journal is orchestration bookkeeping, not a transcript. */
+    expect(
+      episodes.filter((e) => e.input.origin.session === "journal"),
+    ).toEqual([]);
+  });
+
+  test("marks a delegated turn with the delegation it belongs to", async () => {
+    const root = await claudeRawRoot();
+
+    const episodes = await collectClaudeRaw(root);
+    const sub = episodes.find((e) => e.input.origin.record === "sub-1");
+    const compact = episodes.find(
+      (e) => e.input.origin.record === "sub-compact",
+    );
+    const step = episodes.find((e) => e.input.origin.record === "wf-1");
+
+    expect(sub?.input.properties).toEqual({
+      kind: "agent_message",
+      cwd: "/Users/ino/alpha",
+      git_branch: "main",
+      is_sidechain: "true",
+      agent_id: "deadbeef",
+      parent_session_id: "session-a1",
+      transcript_kind: "subagent",
+    });
+    expect(step?.input.properties).toEqual({
+      kind: "agent_message",
+      cwd: "/Users/ino/alpha",
+      is_sidechain: "true",
+      agent_id: "cafebabe",
+      parent_session_id: "session-a1",
+      transcript_kind: "workflow",
+    });
+    /**
+     * A compaction boundary names no session of its own, so the parent it
+     * hangs off is the one the transcript has already established.
+     */
+    expect(compact?.input.properties).toEqual({
+      kind: "compaction",
+      cwd: "/Users/ino/alpha",
+      git_branch: "main",
+      is_sidechain: "true",
+      agent_id: "deadbeef",
+      parent_session_id: "session-a1",
+      transcript_kind: "subagent",
+    });
+    expect(compact?.input.content).toBe("the delegation so far, compacted");
+  });
+
+  test("leaves every main-transcript episode exactly as it was", async () => {
+    const root = await claudeRawRoot();
+
+    const episodes = await collectClaudeRaw(root);
+    const main = episodes.filter(
+      (episode) => episode.input.properties?.["is_sidechain"] === undefined,
+    );
+
+    /**
+     * The sidechain records the raw tree holds live only under `subagents/`,
+     * so a flagged record inside a main transcript stays rejected: admitting
+     * it would rewrite output the normalized export already ingested. This is
+     * every main-transcript episode as the adapter produced them before the
+     * delegated transcripts were admitted.
+     */
+    expect(
+      main.map((episode) => ({
+        ...episode.input.origin,
+        time: episode.input.time?.value,
+        content: episode.input.content,
+        properties: episode.input.properties,
+      })),
+    ).toEqual([
+      { source: "claude-code", session: "session-a1", actor: "user", record: "a1-early", time: "2026-05-01T00:00:03.000Z", content: "the earlier question", properties: { kind: "agent_message", cwd: "/Users/ino/alpha", git_branch: "main" } },
+      { source: "claude-code", session: "session-a1", actor: "assistant", record: "a1-late", time: "2026-05-01T00:00:09.000Z", content: "the later answer", properties: { kind: "agent_message" } },
+      { source: "claude-code", session: "session-a2", actor: "assistant", record: "a2-whole", time: "2026-05-02T00:00:01.000Z", content: "one half\nother half", properties: { kind: "agent_message" } },
+      { source: "claude-code", session: "session-a2", actor: "assistant", record: "a2-mixed:content:1", time: "2026-05-02T00:00:02.000Z", content: "first shipped block", properties: { kind: "agent_message" } },
+      { source: "claude-code", session: "session-a2", actor: "assistant", record: "a2-mixed:content:3", time: "2026-05-02T00:00:02.000Z", content: "second shipped block", properties: { kind: "agent_message" } },
+      { source: "claude-code", session: "session-b1", actor: "user", record: "b1-secret", time: "2026-05-03T00:00:01.000Z", content: `deploy with ${REDACTION}`, properties: { kind: "agent_message" } },
+      { source: "claude-code", session: "session-b1", actor: "unknown", record: "b1-summary", time: "2026-05-03T00:00:02.000Z", content: "the session so far, compacted", properties: { kind: "compaction" } },
+      { source: "claude-code", session: "session-b1", actor: "assistant", record: "b1-long", time: "2026-05-03T00:00:03.000Z", content: "z".repeat(4000), properties: { kind: "agent_message" } },
+      { source: "claude-code", session: "session-b2", actor: "user", record: "b2-aaa", time: "2026-05-04T00:00:00.000Z", content: "tie one", properties: { kind: "agent_message" } },
+      { source: "claude-code", session: "session-b2", actor: "user", record: "b2-tie", time: "2026-05-04T00:00:00.000Z", content: "tie two", properties: { kind: "agent_message" } },
+      { source: "claude-code", session: CANONICAL_SAMPLES[0].session, actor: "user", record: CANONICAL_SAMPLES[0].record, time: "2026-05-30T05:03:48.912Z", content: CANONICAL_SAMPLES[0].text, properties: { kind: "agent_message" } },
+      { source: "claude-code", session: CANONICAL_SAMPLES[1].session, actor: "user", record: CANONICAL_SAMPLES[1].record, time: "2026-06-17T09:17:00.521Z", content: CANONICAL_SAMPLES[1].text, properties: { kind: "agent_message" } },
+    ]);
   });
 
   test("ingests one unbroken session chain per raw transcript", async () => {
