@@ -1,5 +1,5 @@
 import { Engine, EpisodeJournal, journaledRemember } from "@anamnesis/core";
-import type { RememberInput } from "@anamnesis/core";
+import type { PutResult, RememberInput } from "@anamnesis/core";
 import { collectAgentLog } from "./agentlog.ts";
 import { collectClaudeRaw } from "./clauderaw.ts";
 import { collectCodexRaw } from "./codexraw.ts";
@@ -9,7 +9,7 @@ import { collectNotion } from "./notion.ts";
 import { collectOmoRaw } from "./omoraw.ts";
 import { collectSlack } from "./slack.ts";
 
-interface Collected {
+export interface Collected {
   input: RememberInput;
   redactions: number;
 }
@@ -25,7 +25,7 @@ const COLLECTORS: Record<string, (root: string) => Promise<Collected[]>> = {
   omoraw: collectOmoRaw,
 };
 
-interface Receipt {
+export interface Receipt {
   source: string;
   episodes: number;
   created: number;
@@ -36,7 +36,74 @@ interface Receipt {
   redactions: number;
 }
 
-async function main(): Promise<void> {
+interface Rememberer {
+  remember(input: RememberInput): Promise<PutResult>;
+}
+
+const DEFAULT_CONCURRENCY = 8;
+
+/**
+ * Sessions are independent NEXT_EPISODE chains, so they may be ingested in
+ * parallel; the order inside one group builds its chain and stays sequential.
+ */
+export function groupBySession(
+  collected: readonly Collected[],
+): Collected[][] {
+  const groups = new Map<string, Collected[]>();
+  for (const item of collected) {
+    const key = `${item.input.origin.source}\u0000${item.input.origin.session}`;
+    const group = groups.get(key);
+    if (group === undefined) groups.set(key, [item]);
+    else group.push(item);
+  }
+  return [...groups.values()];
+}
+
+/** A malformed limit would silently fall back and hide a broken deployment. */
+export function concurrency(
+  raw: string | undefined = process.env["ANAMNESIS_BACKFILL_CONCURRENCY"],
+): number {
+  if (raw === undefined || raw === "") return DEFAULT_CONCURRENCY;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 1) {
+    throw new Error(
+      `ANAMNESIS_BACKFILL_CONCURRENCY must be a positive integer, got ${raw}`,
+    );
+  }
+  return value;
+}
+
+/** Counters are plain increments: single-threaded JS never interleaves them. */
+export async function ingestGroups(
+  groups: readonly Collected[][],
+  engine: Rememberer,
+  journal: EpisodeJournal | undefined,
+  receipt: Receipt,
+  workers: number,
+): Promise<void> {
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    for (let index = next++; index < groups.length; index = next++) {
+      for (const item of groups[index]!) {
+        const result =
+          journal === undefined
+            ? await engine.remember(item.input)
+            : await journaledRemember(journal, engine, item.input);
+        if (result.created) receipt.created += 1;
+        else receipt.duplicates += 1;
+        if (result.invalidated !== undefined) receipt.invalidated += 1;
+        if (result.diverged === true) receipt.diverged += 1;
+        receipt.redactions += item.redactions;
+      }
+    }
+  };
+  const pool = Array.from({ length: Math.min(workers, groups.length) }, () =>
+    worker(),
+  );
+  await Promise.all(pool);
+}
+
+export async function main(): Promise<void> {
   const [source, root, journalDirectory] = process.argv.slice(2);
   const collect = source === undefined ? undefined : COLLECTORS[source];
   if (source === undefined || collect === undefined || root === undefined) {
@@ -63,21 +130,17 @@ async function main(): Promise<void> {
     redactions: 0,
   };
   try {
-    for (const item of collected) {
-      const result =
-        journal === undefined
-          ? await engine.remember(item.input)
-          : await journaledRemember(journal, engine, item.input);
-      if (result.created) receipt.created += 1;
-      else receipt.duplicates += 1;
-      if (result.invalidated !== undefined) receipt.invalidated += 1;
-      if (result.diverged === true) receipt.diverged += 1;
-      receipt.redactions += item.redactions;
-    }
+    await ingestGroups(
+      groupBySession(collected),
+      engine,
+      journal,
+      receipt,
+      concurrency(),
+    );
   } finally {
     await engine.close();
   }
   process.stdout.write(`${JSON.stringify(receipt)}\n`);
 }
 
-await main();
+if (import.meta.main) await main();
