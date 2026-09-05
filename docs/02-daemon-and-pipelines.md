@@ -95,7 +95,15 @@ change that caused it.
 
 `Meta.ingest_seq` is a separate monotonic write cursor allocated in every
 Episode CREATE transaction. It orders generation catch-up but is never used
-as a recall consistency revision.
+as a recall consistency revision. It is allocated as late as that transaction
+allows: the single `(:Meta {key:'meta'})` node is the one object every
+concurrent remember must lock, and Neo4j holds a write lock until commit, so
+an early increment serializes unrelated remembers for their whole duration.
+Allocating inside the transaction is what keeps the sequence gapless — an
+aborted remember (`revision_conflict`, `stale_revision`) consumes no number,
+which the cutover barrier's `covered_ingest_seq = Meta.ingest_seq` proof
+(docs/01 §4) depends on. `Meta.key` is unique, so remembers racing on a cold
+database cannot each MERGE their own Meta node and hand out the same number.
 
 ### Logical server time
 
@@ -198,11 +206,14 @@ previous verified length and return `resource_exhausted` before ack.
                                                  new -[:INVALIDATES]-> previous,
                                                  SET head=new revision_key
               otherwise                       → reject stale_revision
-         c. increment Meta.ingest_seq and assign it to the new Episode
-         d. MERGE Payload metadata, HAS_PAYLOAD
-         e. update the rebuildable session topology around this Episode
+         c. MERGE Payload metadata, HAS_PAYLOAD
+         d. update the rebuildable session topology around this Episode
             in total order (time_utc ASC, ingest_seq ASC)
-         f. Initialize hit cache: s = S0(m0), t_last_hit = server_time, hit_count = 0   (docs/04 §2)
+         e. Initialize hit cache: s = S0(m0), t_last_hit = server_time, hit_count = 0   (docs/04 §2)
+         f. increment Meta.ingest_seq and assign it to the new Episode.
+            Every concurrent remember contends for this one node's write lock,
+            which Neo4j holds until commit, so the increment rides on the last
+            statement that nothing else in the transaction depends on
          g. For each distinct M in {active_embedding_model,
               target_embedding_model if set}, CREATE Outbox
               {episode_id, stage: embed_episode, target_generation: 0,

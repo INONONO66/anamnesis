@@ -49,7 +49,7 @@ kind-specific queries go through the kind label.
 | `source_revision` | Episode | Opaque adapter-issued token, stable across retries and unique for each revision of one `origin_key` |
 | `revision_key` | Episode | `sha256(origin_key, source_revision)`. **Unique.** Identity of one revision occurrence, including A→B→A reverts |
 | `previous_revision_key` | Episode | Explicit predecessor for a revision; null only for the first occurrence |
-| `ingest_seq` | Episode | Globally monotonic integer allocated in the remember transaction; unique build/catch-up cursor |
+| `ingest_seq` | Episode | Globally monotonic integer allocated in the remember transaction, last of the statements that do not depend on it; unique build/catch-up cursor. Gapless: an aborted remember consumes no number |
 | `ingested_at` | Episode | Server ms, written once at CREATE. **Not used in snapshot computation** — audit and spool-drain ordering only (docs/03 §1) |
 | `payload_hash` | Episode | Payload reference (optional) |
 | `digest` | Episode | SHA-256 of canonical `{schema, content, properties, time, payload_hash, previous_revision_key}` for integrity and retry conflict detection |

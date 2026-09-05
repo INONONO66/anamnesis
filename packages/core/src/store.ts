@@ -93,6 +93,10 @@ const SCHEMA_STATEMENTS = [
    FOR (e:Episode) REQUIRE e.ingest_seq IS UNIQUE`,
   `CREATE CONSTRAINT payload_hash IF NOT EXISTS
    FOR (p:Payload) REQUIRE p.hash IS UNIQUE`,
+  // Without it, remembers racing on a cold database each MERGE their own Meta
+  // node and hand out the same ingest_seq.
+  `CREATE CONSTRAINT meta_key IF NOT EXISTS
+   FOR (m:Meta) REQUIRE m.key IS UNIQUE`,
   `CREATE INDEX episode_origin IF NOT EXISTS
    FOR (e:Episode) ON (e.origin_key)`,
   `CREATE INDEX element_time IF NOT EXISTS
@@ -291,17 +295,10 @@ export class Store {
             )
           : null;
         const previousId = prior?.records[0]?.get("id") ?? null;
-        const sequence = await tx.run<{ value: number }>(
-          `MERGE (m:Meta { key: 'meta' })
-           ON CREATE SET m.ingest_seq = 0
-           SET m.ingest_seq = m.ingest_seq + 1
-           RETURN m.ingest_seq AS value`,
-        );
         await this.createElementTx(tx, el, payload, opts, {
           sourceRevision,
           revisionKey,
           previousRevisionKey,
-          ingestSeq: sequence.records[0]!.get("value"),
           ingestedAt: Date.now(),
           digest: elementDigest(el, payloadHash, previousRevisionKey),
         });
@@ -315,10 +312,20 @@ export class Store {
             weight: 1,
           });
         }
+        // Every remember contends for the single Meta node's write lock and
+        // Neo4j holds it until commit, so the increment rides on the last
+        // statement of the transaction instead of running before the CREATE
+        // and the link merges (docs/01 §2, docs/02 §1). It stays inside this
+        // transaction, so an aborted remember consumes no number.
         await tx.run(
           `MATCH (h:OriginHead { origin_key: $originKey })
-           SET h.revision_key = $revisionKey`,
-          { originKey: key, revisionKey },
+           MATCH (e:Element:Episode { id: $id })
+           SET h.revision_key = $revisionKey
+           MERGE (m:Meta { key: 'meta' })
+           ON CREATE SET m.ingest_seq = 0
+           SET m.ingest_seq = m.ingest_seq + 1
+           SET e.ingest_seq = m.ingest_seq`,
+          { originKey: key, revisionKey, id: el.id },
         );
         return {
           id: el.id,
@@ -409,7 +416,6 @@ export class Store {
       sourceRevision: string;
       revisionKey: string;
       previousRevisionKey: string | null;
-      ingestSeq: number;
       ingestedAt: number;
       digest: string;
     },
@@ -436,7 +442,7 @@ export class Store {
          payload_hash: $payloadHash, digest: $digest,
          source_revision: $sourceRevision, revision_key: $revisionKey,
          previous_revision_key: $previousRevisionKey,
-         ingest_seq: $ingestSeq, ingested_at: $ingestedAt
+         ingest_seq: null, ingested_at: $ingestedAt
        })`,
       {
         originKey: originKey(el.origin),
@@ -458,7 +464,6 @@ export class Store {
         sourceRevision: revision?.sourceRevision ?? null,
         revisionKey: revision?.revisionKey ?? null,
         previousRevisionKey: revision?.previousRevisionKey ?? null,
-        ingestSeq: revision?.ingestSeq ?? null,
         ingestedAt: Date.now(),
       },
     );
