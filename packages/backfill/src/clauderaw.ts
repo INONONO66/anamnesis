@@ -411,6 +411,21 @@ function toEpisode(
  * AppleDouble sidecars mirror every file on a copied volume and parse as
  * neither.
  */
+const TRANSCRIPT_ROOTS = [
+  "projects",
+  "transcripts",
+  "pre-compact-session-histories",
+] as const;
+
+/**
+ * A transcript root is recognized wherever it sits rather than only at the
+ * top of the dataset root: a snapshot of the raw tree keeps the home it was
+ * copied from, so the production root holds `home/.claude/transcripts/...`
+ * while a live `~/.claude` root holds `transcripts/...` directly. Anchoring
+ * on the first path segment read neither dialect out of the snapshot and left
+ * the delegated transcripts — matched at any depth already — as the only
+ * thing the adapter collected there.
+ */
 function classify(pathFromRoot: string): SidechainOrigin | "main" | undefined {
   const parts = pathFromRoot.split(sep);
   if (parts.some((part) => part.startsWith("._"))) return undefined;
@@ -423,10 +438,10 @@ function classify(pathFromRoot: string): SidechainOrigin | "main" | undefined {
     };
   }
   if (parts.length === 1) return "main";
-  const root = parts[0];
-  return root === "projects" ||
-    root === "transcripts" ||
-    root === "pre-compact-session-histories"
+  const directories = parts.slice(0, -1);
+  return directories.some((part) =>
+    TRANSCRIPT_ROOTS.some((known) => known === part),
+  )
     ? "main"
     : undefined;
 }
