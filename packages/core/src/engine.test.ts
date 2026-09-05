@@ -113,6 +113,37 @@ async function nextEpisodeProps(
   }
 }
 
+/** The store driver disables lossless integers, so sequences read back numeric. */
+async function readSequence(cypher: string, id?: string): Promise<number> {
+  const driver = neo4j.driver(
+    TEST_DB.uri,
+    neo4j.auth.basic(TEST_DB.user, TEST_DB.password),
+    { disableLosslessIntegers: true },
+  );
+  const session = driver.session();
+  try {
+    const result = await session.run<{ seq: number }>(
+      cypher,
+      id === undefined ? {} : { id },
+    );
+    return result.records[0]!.get("seq");
+  } finally {
+    await session.close();
+    await driver.close();
+  }
+}
+
+async function ingestSeqOf(id: string): Promise<number> {
+  return readSequence(
+    "MATCH (e:Element { id: $id }) RETURN e.ingest_seq AS seq",
+    id,
+  );
+}
+
+async function metaIngestSeq(): Promise<number> {
+  return readSequence("MATCH (m:Meta { key: 'meta' }) RETURN m.ingest_seq AS seq");
+}
+
 async function labelsOf(id: string): Promise<string[]> {
   const driver = adminDriver();
   const session = driver.session();
@@ -214,6 +245,7 @@ describe("Engine storage lifecycle", () => {
       "episode_revision",
       "episode_ingest_seq",
       "payload_hash",
+      "meta_key",
     ];
     const indexes = [
       "element_time",
@@ -490,6 +522,94 @@ describe("Engine storage lifecycle", () => {
     expect(first.created).toBe(true);
     expect(again.created).toBe(false);
     expect(again.id).toBe(first.id);
+  });
+
+  test("ingest_seq increases with ingest order and duplicates consume none", async () => {
+    const session = `ingest-seq-${uuidv7()}`;
+    const remember = (record: string) =>
+      engine.remember({
+        time: { value: "2026-08-30T10:00:00+09:00", precision: "second" },
+        content: `Sequence fixture ${record}`,
+        origin: {
+          source: "chat-export",
+          session,
+          actor: "ino",
+          record,
+        },
+      });
+
+    const first = await remember("seq-a");
+    const second = await remember("seq-b");
+    const duplicate = await remember("seq-b");
+    const third = await remember("seq-c");
+
+    expect(duplicate).toEqual({ id: second.id, created: false });
+    const seqs = await Promise.all(
+      [first, second, third].map((result) => ingestSeqOf(result.id)),
+    );
+    expect(seqs[1]).toBe(seqs[0]! + 1);
+    // The duplicate resolved between second and third without allocating.
+    expect(seqs[2]).toBe(seqs[1]! + 1);
+  });
+
+  test("concurrent remembers all commit with distinct ingest_seq", async () => {
+    const run = uuidv7();
+    const records = Array.from({ length: 12 }, (_, index) => index);
+    const results = await Promise.all(
+      records.map((index) =>
+        engine.remember({
+          time: { value: "2026-08-30T11:00:00+09:00", precision: "second" },
+          content: `Concurrent fixture ${index}`,
+          origin: {
+            source: "chat-export",
+            session: `concurrent-${run}-${index}`,
+            actor: "ino",
+            record: `concurrent-${index}`,
+          },
+        }),
+      ),
+    );
+
+    expect(results.every((result) => result.created)).toBe(true);
+    const seqs = await Promise.all(
+      results.map((result) => ingestSeqOf(result.id)),
+    );
+    expect(new Set(seqs).size).toBe(records.length);
+    expect(await metaIngestSeq()).toBeGreaterThanOrEqual(Math.max(...seqs));
+  });
+
+  test("a revision conflict throws and leaves Meta.ingest_seq intact", async () => {
+    const base = msg(
+      `conflict-${uuidv7()}`,
+      "Conflicting original content",
+      "2026-08-30T12:00:00+09:00",
+    );
+    const stored = await engine.remember({
+      ...base,
+      source_revision: "conflict-rev",
+    });
+    const before = await metaIngestSeq();
+
+    await expect(
+      engine.remember({
+        ...base,
+        content: "Rewritten under the same source revision",
+        source_revision: "conflict-rev",
+      }),
+    ).rejects.toThrow(/revision_conflict/);
+
+    // The increment lives in the aborted transaction, so it consumes no number.
+    expect(await metaIngestSeq()).toBe(before);
+    expect(await ingestSeqOf(stored.id)).toBe(before);
+
+    const next = await engine.remember(
+      msg(
+        `conflict-next-${uuidv7()}`,
+        "The sequence continues without a gap",
+        "2026-08-30T12:01:00+09:00",
+      ),
+    );
+    expect(await ingestSeqOf(next.id)).toBe(before + 1);
   });
 
   test("journal replay relies on origin idempotency", async () => {
