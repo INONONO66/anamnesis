@@ -14,6 +14,7 @@ import { join } from "node:path";
 import { Database } from "bun:sqlite";
 import { blake3 } from "@noble/hashes/blake3.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
+import neo4j from "neo4j-driver";
 import { Engine } from "@anamnesis/core";
 import { collectAgentLog } from "./agentlog.ts";
 import { collectClaudeRaw } from "./clauderaw.ts";
@@ -23,6 +24,14 @@ import { collectMiscRaw } from "./miscraw.ts";
 import { collectNotion } from "./notion.ts";
 import { collectOmoRaw } from "./omoraw.ts";
 import { collectSlack } from "./slack.ts";
+import {
+  concurrency,
+  groupBySession,
+  ingestGroups,
+  main,
+  type Collected,
+  type Receipt,
+} from "./run.ts";
 import { maskSecrets, REDACTION } from "./secrets.ts";
 
 async function fixtureRoot(): Promise<string> {
@@ -3157,6 +3166,280 @@ describe("collectOmoRaw", () => {
     } finally {
       await engine.close();
       await rm(objectsRoot, { recursive: true });
+    }
+  });
+});
+
+function ingested(session: string, record: string, value: string): Collected {
+  return {
+    input: {
+      content: `${session} ${record}`,
+      time: { value, precision: "second" },
+      origin: { source: "runner-test", session, actor: "ino", record },
+    },
+    redactions: 0,
+  };
+}
+
+function emptyReceipt(): Receipt {
+  return {
+    source: "runner-test",
+    episodes: 0,
+    created: 0,
+    duplicates: 0,
+    invalidated: 0,
+    diverged: 0,
+    redactions: 0,
+  };
+}
+
+describe("groupBySession", () => {
+  test("keeps within-session order and first-seen group order", () => {
+    const collected = [
+      ingested("a", "a1", "2026-01-01T00:00:01Z"),
+      ingested("b", "b1", "2026-01-01T00:00:02Z"),
+      ingested("a", "a2", "2026-01-01T00:00:03Z"),
+      ingested("c", "c1", "2026-01-01T00:00:04Z"),
+      ingested("b", "b2", "2026-01-01T00:00:05Z"),
+      ingested("a", "a3", "2026-01-01T00:00:06Z"),
+    ];
+
+    const groups = groupBySession(collected);
+
+    expect(
+      groups.map((group) => group.map((item) => item.input.origin.record)),
+    ).toEqual([["a1", "a2", "a3"], ["b1", "b2"], ["c1"]]);
+  });
+
+  test("separates equal session names from different sources", () => {
+    const shared = ingested("dup", "x1", "2026-01-01T00:00:01Z");
+    const other: Collected = {
+      ...shared,
+      input: {
+        ...shared.input,
+        origin: { ...shared.input.origin, source: "other-source" },
+      },
+    };
+
+    expect(groupBySession([shared, other])).toEqual([[shared], [other]]);
+  });
+});
+
+describe("concurrency", () => {
+  test("defaults to 8 when the variable is unset or empty", () => {
+    expect(concurrency(undefined)).toBe(8);
+    expect(concurrency("")).toBe(8);
+  });
+
+  test("reads a positive integer from the environment", () => {
+    expect(concurrency("3")).toBe(3);
+    expect(concurrency("1")).toBe(1);
+  });
+
+  test("rejects values that are not positive integers", () => {
+    expect(() => concurrency("0")).toThrow(
+      "ANAMNESIS_BACKFILL_CONCURRENCY must be a positive integer, got 0",
+    );
+    expect(() => concurrency("-2")).toThrow("positive integer");
+    expect(() => concurrency("2.5")).toThrow("positive integer");
+    expect(() => concurrency("eight")).toThrow("positive integer");
+  });
+});
+
+describe("ingestGroups", () => {
+  test("ingests independent sessions in parallel, in order within each", async () => {
+    const stamp = `${Date.now()}-${process.pid}`;
+    const objectsRoot = await mkdtemp(join(tmpdir(), "anamnesis-objects-"));
+    const engine = new Engine({ ...TEST_DB, objectsRoot });
+    await engine.init();
+    try {
+      const sessions = [`par-a-${stamp}`, `par-b-${stamp}`, `par-c-${stamp}`];
+      const collected = [0, 1, 2, 3, 4].flatMap((step) =>
+        sessions.map((session) =>
+          ingested(
+            session,
+            `r${step}`,
+            new Date(Date.UTC(2026, 0, 1, 0, 0, step)).toISOString(),
+          ),
+        ),
+      );
+      const receipt = emptyReceipt();
+      receipt.episodes = collected.length;
+
+      const groups = groupBySession(collected);
+      await ingestGroups(groups, engine, undefined, receipt, 3);
+
+      expect(groups.length).toBe(3);
+      expect(receipt.created).toBe(collected.length);
+      expect(receipt.duplicates).toBe(0);
+      for (const session of sessions) {
+        const order = await sessionChain(engine, session);
+        expect(order).toEqual(["r0", "r1", "r2", "r3", "r4"]);
+      }
+      expect(await chainHeads(engine, sessions)).toEqual(sessions.length);
+    } finally {
+      await engine.close();
+      await rm(objectsRoot, { recursive: true });
+    }
+  });
+
+  test("aggregates duplicate and redaction counters across workers", async () => {
+    const stamp = `${Date.now()}-${process.pid}`;
+    const objectsRoot = await mkdtemp(join(tmpdir(), "anamnesis-objects-"));
+    const engine = new Engine({ ...TEST_DB, objectsRoot });
+    await engine.init();
+    try {
+      const collected = [
+        { ...ingested(`dup-a-${stamp}`, "r0", "2026-01-01T00:00:00Z"), redactions: 2 },
+        ingested(`dup-b-${stamp}`, "r0", "2026-01-01T00:00:00Z"),
+      ];
+      const receipt = emptyReceipt();
+
+      const groups = groupBySession([...collected, ...collected]);
+      await ingestGroups(groups, engine, undefined, receipt, 8);
+
+      expect(receipt.created).toBe(2);
+      expect(receipt.duplicates).toBe(2);
+      expect(receipt.redactions).toBe(4);
+    } finally {
+      await engine.close();
+      await rm(objectsRoot, { recursive: true });
+    }
+  });
+});
+
+interface Ingested {
+  id: string;
+  record: string;
+}
+
+async function episodesOf(session: string): Promise<Ingested[]> {
+  const driver = neo4j.driver(
+    TEST_DB.uri,
+    neo4j.auth.basic(TEST_DB.user, TEST_DB.password),
+  );
+  try {
+    const { records } = await driver.executeQuery(
+      `MATCH (e:Element:Episode { origin_session: $session })
+       RETURN e.id AS id, e.origin_record AS record
+       ORDER BY e.time_utc, e.id`,
+      { session },
+    );
+    return records.map((row) => ({
+      id: String(row.get("id")),
+      record: String(row.get("record")),
+    }));
+  } finally {
+    await driver.close();
+  }
+}
+
+/** Walks NEXT_EPISODE from the session head so link order, not time, is read. */
+async function sessionChain(
+  engine: Engine,
+  session: string,
+): Promise<string[]> {
+  const episodes = await episodesOf(session);
+  const byId = new Map(episodes.map((e) => [e.id, e.record]));
+  const successors = new Map<string, string>();
+  const inbound = new Set<string>();
+  for (const episode of episodes) {
+    for (const link of await engine.store.linksOf(episode.id, "NEXT_EPISODE")) {
+      if (link.from === episode.id) successors.set(link.from, link.to);
+      if (link.to === episode.id) inbound.add(link.to);
+    }
+  }
+  const heads = episodes.filter((e) => !inbound.has(e.id));
+  expect(heads.length).toBe(1);
+  const chain: string[] = [];
+  for (let id: string | undefined = heads[0]?.id; id !== undefined; ) {
+    chain.push(byId.get(id) ?? id);
+    id = successors.get(id);
+  }
+  return chain;
+}
+
+async function chainHeads(
+  engine: Engine,
+  sessions: readonly string[],
+): Promise<number> {
+  let heads = 0;
+  for (const session of sessions) {
+    for (const episode of await episodesOf(session)) {
+      const links = await engine.store.linksOf(episode.id, "NEXT_EPISODE");
+      if (links.every((link) => link.to !== episode.id)) heads += 1;
+    }
+  }
+  return heads;
+}
+
+describe("main", () => {
+  test("rejects an unknown source or a missing dataset root", async () => {
+    const argv = process.argv;
+    try {
+      process.argv = ["bun", "run.ts", "nosuch", "/tmp"];
+      await expect(main()).rejects.toThrow("usage: bun backfill/run.ts");
+      process.argv = ["bun", "run.ts", "slack"];
+      await expect(main()).rejects.toThrow("usage: bun backfill/run.ts");
+      process.argv = ["bun", "run.ts"];
+      await expect(main()).rejects.toThrow("usage: bun backfill/run.ts");
+    } finally {
+      process.argv = argv;
+    }
+  });
+
+  test("writes one receipt for a journaled parallel run", async () => {
+    const stamp = `${Date.now()}-${process.pid}`;
+    const root = await fixtureRoot();
+    const journalDirectory = await fixtureRoot();
+    const objectsRoot = await mkdtemp(join(tmpdir(), "anamnesis-objects-"));
+    await mkdir(join(root, "channels"), { recursive: true });
+    await writeFile(join(root, "index.jsonl"), "");
+    for (const channel of [`M1-${stamp}`, `M2-${stamp}`]) {
+      await writeFile(
+        join(root, "channels", `${channel}.jsonl`),
+        [
+          JSON.stringify({ ts: "1.0", text: "first ghp_0123456789012345678901234567890123456789", user: "U1" }),
+          JSON.stringify({ ts: "2.0", text: "second", user: "U1" }),
+        ].join("\n"),
+      );
+    }
+    const argv = process.argv;
+    const env = { ...process.env };
+    const written: string[] = [];
+    const write = process.stdout.write.bind(process.stdout);
+    process.stdout.write = ((chunk: string) => {
+      written.push(String(chunk));
+      return true;
+    }) as typeof process.stdout.write;
+    try {
+      process.argv = ["bun", "run.ts", "slack", root, journalDirectory];
+      process.env["ANAMNESIS_NEO4J_URI"] = TEST_DB.uri;
+      process.env["ANAMNESIS_NEO4J_USER"] = TEST_DB.user;
+      process.env["ANAMNESIS_NEO4J_PASSWORD"] = TEST_DB.password;
+      process.env["ANAMNESIS_OBJECTS_ROOT"] = objectsRoot;
+      process.env["ANAMNESIS_BACKFILL_CONCURRENCY"] = "2";
+
+      await main();
+
+      expect(written.length).toBe(1);
+      expect(JSON.parse(written[0] ?? "{}")).toEqual({
+        source: "slack",
+        episodes: 4,
+        created: 4,
+        duplicates: 0,
+        invalidated: 0,
+        diverged: 0,
+        redactions: 2,
+      });
+      expect((await readdir(journalDirectory)).length).toBe(1);
+    } finally {
+      process.stdout.write = write;
+      process.argv = argv;
+      process.env = env;
+      await rm(objectsRoot, { recursive: true });
+      await rm(root, { recursive: true });
+      await rm(journalDirectory, { recursive: true });
     }
   });
 });
