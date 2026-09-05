@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Engine } from "@anamnesis/core";
 import { collectAgentLog } from "./agentlog.ts";
+import { collectGjcRaw } from "./gjcraw.ts";
 import { collectNotion } from "./notion.ts";
 import { collectSlack } from "./slack.ts";
 import { maskSecrets, REDACTION } from "./secrets.ts";
@@ -533,5 +534,427 @@ describe("collectAgentLog", () => {
       await engine.close();
       await rm(objectsRoot, { recursive: true });
     }
+  });
+});
+
+/**
+ * The raw store nests one session file per transcript under a per-workspace
+ * directory, and subagent transcripts sit one level deeper beside the
+ * `<n>.bash.log` captures of the commands their tool calls ran.
+ */
+async function gjcRawRoot(): Promise<string> {
+  const root = await fixtureRoot();
+  const sessions = join(root, "home", ".gjc", "agent", "sessions");
+  const workspace = join(sessions, "-Develop-token_hub");
+  const nested = join(workspace, "2026-07-17T15-03-18-381Z_019f709a");
+  await mkdir(nested, { recursive: true });
+
+  await writeFile(
+    join(workspace, "main.jsonl"),
+    [
+      JSON.stringify({
+        type: "session",
+        version: 4,
+        id: "session-main",
+        timestamp: "2026-07-20T11:31:06.117Z",
+        cwd: "/Users/ino/Develop/token_hub",
+      }),
+      JSON.stringify({
+        type: "message",
+        id: "ev-late",
+        timestamp: "2026-07-20T11:35:00.000Z",
+        message: {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "provider scratch space" },
+            { type: "text", text: LONG_TEXT },
+          ],
+          timestamp: 1,
+        },
+      }),
+      JSON.stringify({
+        type: "message",
+        id: "ev-early",
+        timestamp: "2026-07-20T11:32:00.000Z",
+        message: {
+          role: "user",
+          content: [{ type: "text", text: "use ghp_0123456789012345678901234567890123456789" }],
+          attribution: "user",
+          timestamp: 2,
+        },
+      }),
+      JSON.stringify({
+        type: "compaction",
+        id: "ev-compaction",
+        timestamp: "2026-07-20T11:34:00.000Z",
+        summary: "## Goal\nships the raw adapter",
+      }),
+      JSON.stringify({
+        type: "message",
+        id: "ev-two-parts",
+        timestamp: "2026-07-20T11:36:00.000Z",
+        message: {
+          role: "assistant",
+          content: [
+            { type: "text", text: "first part" },
+            { type: "text", text: "second part" },
+          ],
+          timestamp: 3,
+        },
+      }),
+    ].join("\n"),
+  );
+
+  await writeFile(
+    join(nested, "92-CFM4FinalReview.jsonl"),
+    [
+      JSON.stringify({
+        type: "session",
+        version: 4,
+        id: "session-subagent",
+        timestamp: "2026-07-20T11:31:06.117Z",
+      }),
+      JSON.stringify({
+        type: "message",
+        id: "ev-subagent",
+        timestamp: "2026-07-20T11:33:00.000Z",
+        message: {
+          role: "user",
+          content: [{ type: "text", text: "subagent turn" }],
+          timestamp: 4,
+        },
+      }),
+    ].join("\n"),
+  );
+  return root;
+}
+
+/**
+ * Runtime bookkeeping the agent interleaves with the conversation: model and
+ * mode switches, workspace reminders, tool plumbing and cancelled turns all
+ * reach the transcript, and none of them is a turn the export published.
+ * An event without an id has no record to key on, and one without an event
+ * time has no place in the session order, so neither can be ingested.
+ */
+async function gjcNoiseRoot(): Promise<string> {
+  const root = await fixtureRoot();
+  const workspace = join(root, "home", ".gjc", "agent", "sessions", "-Develop");
+  await mkdir(workspace, { recursive: true });
+  await writeFile(
+    join(workspace, "noise.jsonl"),
+    [
+      JSON.stringify({ type: "session", id: "session-noise", timestamp: "2026-07-20T11:00:00.000Z" }),
+      JSON.stringify({ type: "model_change", id: "n-model", timestamp: "2026-07-20T11:00:01.000Z", model: "inonono/claude-opus-4-8" }),
+      JSON.stringify({ type: "thinking_level_change", id: "n-think", timestamp: "2026-07-20T11:00:02.000Z", thinkingLevel: "medium" }),
+      JSON.stringify({ type: "mode_change", id: "n-mode", timestamp: "2026-07-20T11:00:03.000Z" }),
+      JSON.stringify({ type: "configured_model_chain", id: "n-chain", timestamp: "2026-07-20T11:00:04.000Z", entries: [] }),
+      JSON.stringify({ type: "session_init", id: "n-init", timestamp: "2026-07-20T11:00:05.000Z" }),
+      JSON.stringify({ type: "custom", id: "n-custom", timestamp: "2026-07-20T11:00:06.000Z", customType: "workflow-intent-diff", data: { route: "direct" } }),
+      JSON.stringify({ type: "custom_message", id: "n-reminder", timestamp: "2026-07-20T11:00:07.000Z", customType: "volatile-project-context", content: "<system-reminder>workspace tree</system-reminder>" }),
+      JSON.stringify({
+        type: "message",
+        id: "n-toolcall",
+        timestamp: "2026-07-20T11:00:08.000Z",
+        message: { role: "assistant", content: [{ type: "toolCall", id: "toolu_1", name: "read", arguments: { path: "README.md" } }], timestamp: 1 },
+      }),
+      JSON.stringify({
+        type: "message",
+        id: "n-toolresult",
+        timestamp: "2026-07-20T11:00:09.000Z",
+        message: { role: "toolResult", toolCallId: "toolu_1", toolName: "read", content: [{ type: "text", text: "file body" }], timestamp: 2 },
+      }),
+      JSON.stringify({
+        type: "message",
+        id: "n-filemention",
+        timestamp: "2026-07-20T11:00:10.000Z",
+        message: { role: "fileMention", content: null, timestamp: 3 },
+      }),
+      JSON.stringify({
+        type: "message",
+        id: "n-blank",
+        timestamp: "2026-07-20T11:00:11.000Z",
+        message: { role: "user", content: [{ type: "text", text: "   " }], timestamp: 4 },
+      }),
+      JSON.stringify({
+        type: "message",
+        id: "n-thinking-only",
+        timestamp: "2026-07-20T11:00:12.000Z",
+        message: { role: "assistant", content: [{ type: "thinking", thinking: "scratch" }], timestamp: 5 },
+      }),
+      JSON.stringify({
+        type: "message",
+        timestamp: "2026-07-20T11:00:13.000Z",
+        message: { role: "user", content: [{ type: "text", text: "no id, no record to key on" }], timestamp: 6 },
+      }),
+      JSON.stringify({
+        type: "message",
+        id: "n-untimed",
+        message: { role: "user", content: [{ type: "text", text: "no event time, no place in the order" }], timestamp: 7 },
+      }),
+      JSON.stringify({
+        type: "message",
+        id: "n-textless",
+        timestamp: "2026-07-20T11:00:14.000Z",
+        message: { role: "user", content: "not a part list", timestamp: 8 },
+      }),
+      JSON.stringify({
+        type: "compaction",
+        id: "n-empty-compaction",
+        timestamp: "2026-07-20T11:00:15.000Z",
+        summary: "   ",
+      }),
+      JSON.stringify({
+        type: "message",
+        id: "n-kept",
+        timestamp: "2026-07-20T11:00:16.000Z",
+        message: { role: "user", content: [{ type: "text", text: "the only turn here" }], timestamp: 9 },
+      }),
+    ].join("\n"),
+  );
+  return root;
+}
+
+describe("collectGjcRaw", () => {
+  test("orders every session file by event time and maps the origin", async () => {
+    const root = await gjcRawRoot();
+
+    const episodes = await collectGjcRaw(root);
+
+    expect(episodes.map((e) => e.input.origin.record)).toEqual([
+      "ev-early",
+      "ev-subagent",
+      "ev-compaction",
+      "ev-late",
+      "ev-two-parts",
+    ]);
+    expect(episodes[1]?.input.origin).toEqual({
+      source: "gjc",
+      session: "session-subagent",
+      actor: "user",
+      record: "ev-subagent",
+    });
+    expect(episodes[1]?.input.time).toEqual({
+      value: "2026-07-20T11:33:00.000Z",
+      precision: "second",
+    });
+    expect(episodes[1]?.input.properties).toEqual({
+      kind: "message",
+      role: "user",
+    });
+    expect(episodes[1]?.input.schema).toBe("anamnesis.original-message/1");
+    expect(episodes[1]?.input.payload).toBeUndefined();
+  });
+
+  /**
+   * The contract this adapter exists to honour. The expected values are copied
+   * by hand from one line of the normalized export the 1,128 already-ingested
+   * sessions came from, beside the raw event that produced it: reaching the
+   * same turn from the raw store has to rebuild that export's origin tuple and
+   * revision exactly, or re-reading the raw store would duplicate every
+   * session already in the graph rather than resolving to a no-op.
+   *
+   * The raw event carries two timestamps 39_944ms apart. The export keyed on
+   * the outer one, so this fixture keeps both and pins the outer.
+   */
+  test("rebuilds the origin tuple and revision the normalized export wrote", async () => {
+    const root = await fixtureRoot();
+    const workspace = join(root, "home", ".gjc", "agent", "sessions", "-Develop-token_hub");
+    await mkdir(workspace, { recursive: true });
+    const text = "Return the M4 verdict now with only blocker/high findings and status.";
+    await writeFile(
+      join(workspace, "92-CFM4FinalReview.jsonl"),
+      [
+        JSON.stringify({
+          type: "session",
+          version: 4,
+          id: "019f7f4b-4105-7000-8518-eb0fbb71a583",
+          timestamp: "2026-07-20T11:31:06.117Z",
+          cwd: "/Users/ino/Develop/token_hub",
+        }),
+        JSON.stringify({
+          type: "message",
+          id: "bdf10532",
+          parentId: "ada9ed6c",
+          timestamp: "2026-07-20T11:33:34.269Z",
+          message: {
+            role: "user",
+            content: [{ type: "text", text }],
+            attribution: "user",
+            timestamp: 1784547174325,
+          },
+        }),
+      ].join("\n"),
+    );
+
+    const [episode] = await collectGjcRaw(root);
+
+    // Copied from the export: partition_id, upstream_event_id, role, occurred_at.
+    const occurredAt = 1784547214269;
+    expect(episode?.input.origin).toEqual({
+      source: "gjc",
+      session: "019f7f4b-4105-7000-8518-eb0fbb71a583",
+      actor: "user",
+      record: "bdf10532",
+    });
+    expect(episode?.input.time?.value).toBe(new Date(occurredAt).toISOString());
+    expect(episode?.input.source_revision).toBe(
+      createHash("sha256")
+        .update(`${new Date(occurredAt).toISOString()}\n${text}`, "utf8")
+        .digest("hex"),
+    );
+    expect(episode?.input.content).toBe(text);
+  });
+
+  test("masks secrets and keys the revision on the raw text", async () => {
+    const root = await gjcRawRoot();
+
+    const episodes = await collectGjcRaw(root);
+    const masked = episodes[0];
+    const secret = "use ghp_0123456789012345678901234567890123456789";
+
+    expect(masked?.redactions).toBe(1);
+    expect(masked?.input.content).toBe(`use ${REDACTION}`);
+    expect(masked?.input.source_revision).toBe(
+      createHash("sha256")
+        .update(`2026-07-20T11:32:00.000Z\n${secret}`, "utf8")
+        .digest("hex"),
+    );
+  });
+
+  test("stores an oversized turn as a payload with an excerpt on the node", async () => {
+    const root = await gjcRawRoot();
+
+    const episodes = await collectGjcRaw(root);
+    const long = episodes[3];
+
+    expect(long?.input.content).toBe("x".repeat(4000));
+    expect(long?.input.payload).toEqual(new TextEncoder().encode(LONG_TEXT));
+    expect(long?.input.payload_media_type).toBe("text/plain");
+  });
+
+  test("keeps a limit-length turn inline", async () => {
+    const root = await fixtureRoot();
+    const workspace = join(root, "home", ".gjc", "agent", "sessions", "-Develop");
+    await mkdir(workspace, { recursive: true });
+    await writeFile(
+      join(workspace, "limit.jsonl"),
+      [
+        JSON.stringify({ type: "session", id: "session-limit", timestamp: "2026-07-20T11:00:00.000Z" }),
+        JSON.stringify({
+          type: "message",
+          id: "ev-limit",
+          timestamp: "2026-07-20T11:00:01.000Z",
+          message: { role: "assistant", content: [{ type: "text", text: "y".repeat(4000) }], timestamp: 1 },
+        }),
+      ].join("\n"),
+    );
+
+    const [episode] = await collectGjcRaw(root);
+
+    expect(episode?.input.content).toBe("y".repeat(4000));
+    expect(episode?.input.payload).toBeUndefined();
+    expect(episode?.input.payload_media_type).toBeUndefined();
+  });
+
+  /**
+   * A compaction replaces the turns it summarizes, so its summary is the only
+   * surviving record of them and it has no author of its own.
+   */
+  test("carries a compaction summary under the kind that names it", async () => {
+    const root = await gjcRawRoot();
+
+    const episodes = await collectGjcRaw(root);
+    const compaction = episodes[2];
+
+    expect(compaction?.input.content).toBe("## Goal\nships the raw adapter");
+    expect(compaction?.input.origin.actor).toBe("unknown");
+    expect(compaction?.input.properties).toEqual({ kind: "compaction" });
+  });
+
+  test("joins the text parts of one turn and drops provider scratch space", async () => {
+    const root = await gjcRawRoot();
+
+    const episodes = await collectGjcRaw(root);
+
+    expect(episodes[4]?.input.content).toBe("first part\nsecond part");
+    expect(episodes[3]?.input.content).not.toContain("provider scratch space");
+  });
+
+  test("skips runtime bookkeeping, tool plumbing and incomplete events", async () => {
+    const root = await gjcNoiseRoot();
+
+    const episodes = await collectGjcRaw(root);
+
+    expect(episodes.map((e) => e.input.origin.record)).toEqual(["n-kept"]);
+    expect(episodes[0]?.input.content).toBe("the only turn here");
+  });
+
+  /**
+   * The export was written on macOS, so an AppleDouble sidecar mirrors every
+   * transcript. Reading one would parse its binary header as a transcript.
+   */
+  test("ignores AppleDouble sidecars and non-transcript files", async () => {
+    const root = await gjcNoiseRoot();
+    const workspace = join(root, "home", ".gjc", "agent", "sessions", "-Develop");
+    await writeFile(join(workspace, "._noise.jsonl"), "\u0000\u0005\u0016\u0007not json");
+    await writeFile(join(workspace, "12.bash.log"), "## Stack\n\n- Base: `codex/calendar-sync`\n");
+    await writeFile(join(workspace, "state.json"), JSON.stringify({ skill: "ralplan" }));
+
+    const episodes = await collectGjcRaw(root);
+
+    expect(episodes.map((e) => e.input.origin.record)).toEqual(["n-kept"]);
+  });
+
+  /** A transcript whose header never arrives cannot be attributed to a session. */
+  test("leaves out events that arrive before their session header", async () => {
+    const root = await fixtureRoot();
+    const workspace = join(root, "home", ".gjc", "agent", "sessions", "-Develop");
+    await mkdir(workspace, { recursive: true });
+    await writeFile(
+      join(workspace, "headerless.jsonl"),
+      [
+        JSON.stringify({
+          type: "message",
+          id: "ev-orphan",
+          timestamp: "2026-07-20T11:00:00.000Z",
+          message: { role: "user", content: [{ type: "text", text: "orphan" }], timestamp: 1 },
+        }),
+        "",
+        JSON.stringify(["not an object"]),
+      ].join("\n"),
+    );
+
+    expect(await collectGjcRaw(root)).toEqual([]);
+  });
+
+  test("tie-breaks equal event times on the record so the order is total", async () => {
+    const root = await fixtureRoot();
+    const workspace = join(root, "home", ".gjc", "agent", "sessions", "-Develop");
+    await mkdir(workspace, { recursive: true });
+    const same = (id: string): string =>
+      JSON.stringify({
+        type: "message",
+        id,
+        timestamp: "2026-07-20T11:00:00.000Z",
+        message: { role: "user", content: [{ type: "text", text: `tie ${id}` }], timestamp: 1 },
+      });
+    await writeFile(
+      join(workspace, "tie.jsonl"),
+      [
+        JSON.stringify({ type: "session", id: "session-tie", timestamp: "2026-07-20T10:00:00.000Z" }),
+        same("b"),
+        same("c"),
+        same("a"),
+      ].join("\n"),
+    );
+
+    const episodes = await collectGjcRaw(root);
+
+    expect(episodes.map((e) => e.input.origin.record)).toEqual(["a", "b", "c"]);
+  });
+
+  /** A raw store that was never populated is an empty backfill, not an error. */
+  test("returns nothing when the sessions root is absent", async () => {
+    expect(await collectGjcRaw(await fixtureRoot())).toEqual([]);
   });
 });
