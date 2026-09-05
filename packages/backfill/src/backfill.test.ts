@@ -16,8 +16,10 @@ import { blake3 } from "@noble/hashes/blake3.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
 import neo4j from "neo4j-driver";
 import { Engine } from "@anamnesis/core";
+import type { RememberInput } from "@anamnesis/core";
 import { collectAgentLog } from "./agentlog.ts";
 import { collectClaudeRaw } from "./clauderaw.ts";
+import type { ClaudeRawEpisode } from "./clauderaw.ts";
 import { collectGjcRaw } from "./gjcraw.ts";
 import { collectCodexRaw } from "./codexraw.ts";
 import { collectMiscRaw } from "./miscraw.ts";
@@ -1044,16 +1046,22 @@ function assistantText(
  * subagent and one workflow step, both naming `session-a1` as their
  * `sessionId` exactly as the runtime writes them, beside the workflow journal
  * that is orchestration bookkeeping rather than a conversation.
+ *
+ * The tree is laid out the way the production snapshot lays it out — the
+ * transcript roots under the `home/.claude` the raw tree was copied from,
+ * not at the top of the dataset root — because a fixture that hoists them to
+ * the top exercises a path the real snapshot never takes.
  */
 async function claudeRawRoot(): Promise<string> {
   const root = await fixtureRoot();
-  const alpha = join(root, "projects", "-Users-ino-alpha");
-  const beta = join(root, "projects", "-Users-ino-beta");
+  const home = join(root, "home", ".claude");
+  const alpha = join(home, "projects", "-Users-ino-alpha");
+  const beta = join(home, "projects", "-Users-ino-beta");
   const subagents = join(alpha, "session-a1", "subagents");
   const workflow = join(subagents, "workflows", "wf_11111111-222");
   await mkdir(workflow, { recursive: true });
   await mkdir(beta, { recursive: true });
-  await mkdir(join(root, "transcripts"), { recursive: true });
+  await mkdir(join(home, "transcripts"), { recursive: true });
 
   await writeFile(
     join(alpha, "session-a1.jsonl"),
@@ -1177,9 +1185,9 @@ async function claudeRawRoot(): Promise<string> {
    * A background job's timeline sits beside the transcript roots under a
    * directory of its own and holds runtime bookkeeping, not conversation.
    */
-  await mkdir(join(root, "jobs", "6710737a"), { recursive: true });
+  await mkdir(join(home, "jobs", "6710737a"), { recursive: true });
   await writeFile(
-    join(root, "jobs", "6710737a", "timeline.jsonl"),
+    join(home, "jobs", "6710737a", "timeline.jsonl"),
     claudeLine({
       type: "user",
       uuid: "job-1",
@@ -1278,14 +1286,17 @@ async function claudeRawRoot(): Promise<string> {
     ].join("\n"),
   );
 
-  await writeFile(
-    join(root, "transcripts", `${CANONICAL_SAMPLES[0].session}.jsonl`),
-    `${CANONICAL_SAMPLES[0].raw}\n`,
-  );
-  await writeFile(
-    join(root, "transcripts", `${CANONICAL_SAMPLES[1].session}.jsonl`),
-    `${CANONICAL_SAMPLES[1].raw}\n`,
-  );
+  for (const sample of CANONICAL_SAMPLES) {
+    await writeFile(
+      join(home, "transcripts", `${sample.session}.jsonl`),
+      `${sample.raw}\n`,
+    );
+    /** Every file on the copied volume carries an AppleDouble sidecar. */
+    await writeFile(
+      join(home, "transcripts", `._${sample.session}.jsonl`),
+      `${sample.raw}\n`,
+    );
+  }
   return root;
 }
 
@@ -1317,6 +1328,93 @@ describe("collectClaudeRaw", () => {
           .digest("hex"),
       );
     }
+  });
+
+  /**
+   * The production snapshot keeps the home directory it was copied from, so
+   * the transcript roots sit under `home/.claude/` rather than at the top of
+   * the dataset root. Reading the `~/.claude` layout as well is what lets one
+   * root serve both, and the ids have to come out identical either way: they
+   * hash the line's on-disk bytes, so a snapshot re-run has to be recognized
+   * as duplicates of the records the normalized export already ingested
+   * rather than as a second copy of them.
+   */
+  test("reads the transcript roots at whatever depth the snapshot nests them", async () => {
+    const nested = await fixtureRoot();
+    const flat = await fixtureRoot();
+    for (const [root, prefix] of [
+      [nested, join("home", ".claude")],
+      [flat, "."],
+    ] as const) {
+      await mkdir(join(root, prefix, "transcripts"), { recursive: true });
+      await mkdir(join(root, prefix, "projects", "-Users-ino-alpha"), {
+        recursive: true,
+      });
+      for (const sample of CANONICAL_SAMPLES) {
+        await writeFile(
+          join(root, prefix, "transcripts", `${sample.session}.jsonl`),
+          `${sample.raw}\n`,
+        );
+      }
+      await writeFile(
+        join(root, prefix, "projects", "-Users-ino-alpha", "session-a1.jsonl"),
+        claudeLine({
+          type: "user",
+          uuid: "a1-early",
+          timestamp: "2026-05-01T00:00:03.000Z",
+          sessionId: "session-a1",
+          message: { role: "user", content: "the earlier question" },
+        }),
+      );
+    }
+
+    const fromNested = await collectClaudeRaw(nested);
+    const fromFlat = await collectClaudeRaw(flat);
+
+    const origins = (
+      episodes: readonly ClaudeRawEpisode[],
+    ): RememberInput["origin"][] =>
+      episodes.map((episode) => episode.input.origin);
+    expect(origins(fromNested)).toEqual([
+      {
+        source: "claude-code",
+        session: "session-a1",
+        actor: "user",
+        record: "a1-early",
+      },
+      {
+        source: "claude-code",
+        session: CANONICAL_SAMPLES[0].session,
+        actor: CANONICAL_SAMPLES[0].role,
+        record: CANONICAL_SAMPLES[0].record,
+      },
+      {
+        source: "claude-code",
+        session: CANONICAL_SAMPLES[1].session,
+        actor: CANONICAL_SAMPLES[1].role,
+        record: CANONICAL_SAMPLES[1].record,
+      },
+    ]);
+    expect(origins(fromNested)).toEqual(origins(fromFlat));
+  });
+
+  /** A directory the raw tree keeps beside the transcripts is not one. */
+  test("reads no conversation out of a directory that holds none", async () => {
+    const root = await fixtureRoot();
+    await mkdir(join(root, "home", ".claude", "jobs", "6710737a"), {
+      recursive: true,
+    });
+    await writeFile(
+      join(root, "home", ".claude", "jobs", "6710737a", "timeline.jsonl"),
+      claudeLine({
+        type: "user",
+        uuid: "job-1",
+        timestamp: "2026-05-01T00:00:01.000Z",
+        message: { role: "user", content: "a job timeline entry" },
+      }),
+    );
+
+    expect(await collectClaudeRaw(root)).toEqual([]);
   });
 
   test("orders every transcript by event time and tie-breaks on the record", async () => {
