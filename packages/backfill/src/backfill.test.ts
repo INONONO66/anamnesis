@@ -1,8 +1,17 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, rm, writeFile, utimes } from "node:fs/promises";
+import {
+  mkdtemp,
+  mkdir,
+  readdir,
+  rm,
+  stat,
+  writeFile,
+  utimes,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Database } from "bun:sqlite";
 import { blake3 } from "@noble/hashes/blake3.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
 import { Engine } from "@anamnesis/core";
@@ -10,6 +19,7 @@ import { collectAgentLog } from "./agentlog.ts";
 import { collectClaudeRaw } from "./clauderaw.ts";
 import { collectGjcRaw } from "./gjcraw.ts";
 import { collectCodexRaw } from "./codexraw.ts";
+import { collectMiscRaw } from "./miscraw.ts";
 import { collectNotion } from "./notion.ts";
 import { collectSlack } from "./slack.ts";
 import { maskSecrets, REDACTION } from "./secrets.ts";
@@ -1738,6 +1748,632 @@ describe("collectCodexRaw", () => {
       const ids: string[] = [];
       for (const episode of episodes) {
         ids.push((await engine.remember(episode.input)).id);
+      }
+
+      const heads: string[] = [];
+      for (const [index, id] of ids.entries()) {
+        const inbound = await engine.store.linksOf(id, "NEXT_EPISODE");
+        if (inbound.every((link) => link.to !== id)) {
+          heads.push(episodes[index]?.input.origin.session ?? "");
+        }
+      }
+      const sessions = episodes.map((e) => e.input.origin.session);
+
+      expect(heads.sort()).toEqual([...new Set(sessions)].sort());
+    } finally {
+      await engine.close();
+      await rm(objectsRoot, { recursive: true });
+    }
+  });
+});
+
+interface AsideMessage {
+  role: string;
+  content?: unknown;
+  timestamp?: number;
+  attachments?: unknown[];
+  toolCallId?: string;
+  kind?: string;
+}
+
+function jsonLines(records: unknown[]): string {
+  return `${records.map((record) => JSON.stringify(record)).join("\n")}\n`;
+}
+
+const MISC_LONG = "y".repeat(4300);
+
+/**
+ * The snapshot's own store names, one directory per agent product, carrying
+ * one small fixture per store the adapter ingests beside the diagnostics-only
+ * stores it has to leave alone. The samples in the skipped stores are copied
+ * from the snapshot rather than invented, so the skip assertions fail if the
+ * adapter ever starts reading a log file that only holds telemetry.
+ */
+async function miscRawRoot(): Promise<string> {
+  const root = await fixtureRoot();
+
+  const asideUser = join(root, "aside", "home", ".aside", "u", "0");
+  const asideSession = join(
+    asideUser,
+    "sessions",
+    "2026-06-30_6K1bOZC03YTVbDpP",
+  );
+  await mkdir(asideSession, { recursive: true });
+  await writeFile(
+    join(asideSession, "messages.jsonl"),
+    jsonLines([
+      {
+        role: "user-message-metadata",
+        attachments: [{ id: "tab:41C4", type: "tab" }],
+        timestamp: 1_782_794_590_500,
+      },
+      {
+        role: "user",
+        content: "help me build the recipe deck",
+        timestamp: 1_782_794_590_501,
+      },
+      {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "provider scratch space" },
+          { type: "text", text: "sure, let me look at the page first" },
+          { type: "toolCall", id: "toolu_01", name: "repl", arguments: {} },
+        ],
+        timestamp: 1_782_794_591_000,
+      },
+      {
+        role: "toolResult",
+        content: [{ type: "text", text: "tab listing output" }],
+        timestamp: 1_782_794_591_500,
+        toolCallId: "toolu_01",
+      },
+      {
+        role: "system-message",
+        content: "Relevant skill docs are available.",
+        kind: "site_skill",
+        timestamp: 1_782_794_592_000,
+      },
+      { role: "assistant", content: [], timestamp: 1_782_794_592_500 },
+      { role: "user", content: "   ", timestamp: 1_782_794_593_000 },
+      { role: "user", content: "no timestamp here" },
+      ["a bare array, not a record"],
+      {
+        role: "user",
+        content: `use ghp_0123456789012345678901234567890123456789`,
+        timestamp: 1_782_794_594_000,
+      },
+      { role: "assistant", content: MISC_LONG, timestamp: 1_782_794_595_000 },
+    ] satisfies (AsideMessage | string[])[]),
+  );
+  await writeFile(join(asideSession, "._messages.jsonl"), "Mac OS X\u0000");
+  const state = new Database(join(asideUser, "state.db"));
+  state.run(
+    "create table sessions (id text primary key, title text not null, cwd text not null)",
+  );
+  state.run("insert into sessions values (?, ?, ?)", [
+    "6K1bOZC03YTVbDpP",
+    "recipe deck",
+    "/Users/ino/.aside/u/0/sessions/2026-06-30_6K1bOZC03YTVbDpP",
+  ]);
+  state.close();
+  await writeFile(join(asideUser, "._state.db"), "Mac OS X\u0000");
+
+  const brain = join(
+    root,
+    "gemini-antigravity",
+    "home",
+    ".gemini",
+    "antigravity-cli",
+    "brain",
+    "3c119fe5-8550-4230-ba74-63f52e82568e",
+    ".system_generated",
+    "logs",
+  );
+  await mkdir(brain, { recursive: true });
+  await writeFile(
+    join(brain, "transcript.jsonl"),
+    [
+      jsonLines([
+        {
+          step_index: 0,
+          source: "USER_EXPLICIT",
+          type: "USER_INPUT",
+          status: "DONE",
+          created_at: "2026-06-14T07:35:41Z",
+          content:
+            "<USER_REQUEST>\nCREATE-FLOW.md is this the doc?\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nThe current local time is: 2026-06-14T16:35:41+09:00.\n</ADDITIONAL_METADATA>",
+        },
+        {
+          step_index: 1,
+          source: "SYSTEM",
+          type: "CONVERSATION_HISTORY",
+          status: "DONE",
+          created_at: "2026-06-14T07:35:41Z",
+        },
+        {
+          step_index: 2,
+          source: "MODEL",
+          type: "PLANNER_RESPONSE",
+          status: "DONE",
+          created_at: "2026-06-14T07:35:42Z",
+          content: "I will start by exploring the workspace.",
+          tool_calls: [{ name: "list_dir", args: {} }],
+        },
+        {
+          step_index: 3,
+          source: "MODEL",
+          type: "RUN_COMMAND",
+          status: "DONE",
+          created_at: "2026-06-14T07:35:43Z",
+          content: "Created At: 2026-06-14T07:35:43Z\nTask Description: find …",
+        },
+        {
+          step_index: 4,
+          source: "SYSTEM",
+          type: "EPHEMERAL_MESSAGE",
+          status: "DONE",
+          created_at: "2026-06-14T07:35:44Z",
+          content:
+            "The following is an <EPHEMERAL_MESSAGE> not actually sent by the user.",
+        },
+        {
+          step_index: 5,
+          source: "USER_EXPLICIT",
+          type: "USER_INPUT",
+          status: "DONE",
+          created_at: "2026-06-14T07:35:45Z",
+          content: "<USER_REQUEST>\n\n</USER_REQUEST>",
+        },
+        {
+          step_index: 6,
+          source: "MODEL",
+          type: "PLANNER_RESPONSE",
+          status: "DONE",
+          created_at: "not a timestamp",
+          content: "unplaceable in the session order",
+        },
+      ]),
+      "{ truncated mid-write\n",
+    ].join(""),
+  );
+  await writeFile(
+    join(brain, "transcript_full.jsonl"),
+    jsonLines([
+      {
+        step_index: 0,
+        source: "USER_EXPLICIT",
+        type: "USER_INPUT",
+        status: "DONE",
+        created_at: "2026-06-14T07:35:41Z",
+        content: "<USER_REQUEST>\nCREATE-FLOW.md is this the doc?\n</USER_REQUEST>",
+      },
+    ]),
+  );
+
+  const opencode = join(
+    root,
+    "opencode",
+    "home",
+    ".local",
+    "state",
+    "opencode",
+  );
+  await mkdir(opencode, { recursive: true });
+  await writeFile(
+    join(opencode, "prompt-history.jsonl"),
+    jsonLines([
+      { input: "compare the two videos by sha256", parts: [], mode: "normal" },
+      {
+        input: "[Pasted ~64 lines] is this right?",
+        parts: [
+          { type: "text", text: "the pasted review comment" },
+          { type: "file", filename: "note.md" },
+        ],
+        mode: "normal",
+      },
+      { input: "   ", parts: [], mode: "normal" },
+      { parts: [], mode: "normal" },
+    ]),
+  );
+  await writeFile(
+    join(opencode, "frecency.jsonl"),
+    jsonLines([{ path: "/Users/ino/Develop/pss-mgba", frequency: 1 }]),
+  );
+  await utimes(
+    join(opencode, "prompt-history.jsonl"),
+    new Date(1_784_000_000_000),
+    new Date(1_784_000_000_000),
+  );
+
+  const cursorLogs = join(
+    root,
+    "cursor",
+    "home",
+    "Library",
+    "Application Support",
+    "Cursor",
+    "logs",
+    "20260521T152729",
+  );
+  await mkdir(cursorLogs, { recursive: true });
+  await writeFile(
+    join(cursorLogs, "Claude VSCode.log"),
+    "2026-05-21 15:27:33.909 [info] MCP Server running on port 12920 (localhost only)\n",
+  );
+
+  const codexLogs = join(
+    root,
+    "codex-desktop",
+    "home",
+    "Library",
+    "Logs",
+    "com.openai.codex",
+  );
+  await mkdir(codexLogs, { recursive: true });
+  await writeFile(
+    join(codexLogs, "codex-desktop-1-t0.log"),
+    "2026-07-16T03:30:48.438Z error [electron-message-handler] Conversation state not found conversationId=019f68ec\n",
+  );
+
+  const openomni = join(root, "openomni", "home", ".openomni");
+  await mkdir(openomni, { recursive: true });
+  const storage = new Database(join(openomni, "storage.db"));
+  storage.run(
+    "create table message (id text primary key, session_id text, data text, role text, time_created integer)",
+  );
+  storage.close();
+
+  const claudeProject = join(root, "claude-project", "home", "data");
+  await mkdir(claudeProject, { recursive: true });
+  const calendars = new Database(join(claudeProject, "raw.db"));
+  calendars.run(
+    "create table calendars (calendar_id integer primary key, name text, purpose text)",
+  );
+  calendars.run("insert into calendars values (?, ?, ?)", [
+    1_915_182,
+    "private",
+    "other",
+  ]);
+  calendars.close();
+
+  const zedLogs = join(root, "zed", "home", "Library", "Logs", "Zed");
+  await mkdir(zedLogs, { recursive: true });
+  await writeFile(
+    join(zedLogs, "Zed.log"),
+    "2026-09-03T18:20:27+09:00 INFO  [zed::reliability] memory usage: resident 396 MiB (+5 MiB)\n",
+  );
+
+  const ouroLogs = join(root, "ouro", "home", ".ouroboros", "logs");
+  await mkdir(ouroLogs, { recursive: true });
+  await writeFile(
+    join(ouroLogs, "ouroboros.log"),
+    "2026-06-09T06:33:54.035022Z [info] mcp.tool.qa iteration=1 pass_threshold=0.8\n",
+  );
+
+  const anamnesisLogs = join(root, "anamnesis", "home", "Library", "Logs");
+  await mkdir(anamnesisLogs, { recursive: true });
+  await writeFile(
+    join(anamnesisLogs, "omni-anamnesis-sync.log"),
+    "tar: Ignoring unknown extended header keyword 'LIBARCHIVE.xattr.com.apple.provenance'\n",
+  );
+
+  await writeFile(join(root, "._aside"), "Mac OS X\u0000");
+  await mkdir(join(root, "kodu"), { recursive: true });
+  await writeFile(join(root, "kodu", "tasks.json"), "{}");
+
+  return root;
+}
+
+describe("collectMiscRaw", () => {
+  test("ingests only the stores that carry conversation, in event-time order", async () => {
+    const root = await miscRawRoot();
+
+    const episodes = await collectMiscRaw(root);
+
+    expect(episodes.map((e) => e.input.origin.source)).toEqual([
+      "gemini-antigravity",
+      "gemini-antigravity",
+      "aside",
+      "aside",
+      "aside",
+      "aside",
+      "opencode",
+      "opencode",
+    ]);
+    expect(episodes.map((e) => e.input.time?.value)).toEqual([
+      "2026-06-14T07:35:41.000Z",
+      "2026-06-14T07:35:42.000Z",
+      "2026-06-30T04:43:10.501Z",
+      "2026-06-30T04:43:11.000Z",
+      "2026-06-30T04:43:14.000Z",
+      "2026-06-30T04:43:15.000Z",
+      "2026-07-14T03:33:20.000Z",
+      "2026-07-14T03:33:20.000Z",
+    ]);
+  });
+
+  test("maps the aside origin onto the session id the product's own index joins on", async () => {
+    const root = await miscRawRoot();
+
+    const episodes = await collectMiscRaw(root);
+    const aside = episodes.filter((e) => e.input.origin.source === "aside");
+
+    expect(aside[0]?.input.origin).toEqual({
+      source: "aside",
+      session: "6K1bOZC03YTVbDpP",
+      actor: "user",
+      record: "6K1bOZC03YTVbDpP:1",
+    });
+    expect(aside[0]?.input.content).toBe("help me build the recipe deck");
+    expect(aside[0]?.input.properties).toEqual({
+      kind: "message",
+      session_title: "recipe deck",
+      cwd: "/Users/ino/.aside/u/0/sessions/2026-06-30_6K1bOZC03YTVbDpP",
+    });
+    expect(aside[0]?.input.schema).toBe("anamnesis.original-message/1");
+  });
+
+  test("keeps aside prose and drops thinking, tool calls and harness messages", async () => {
+    const root = await miscRawRoot();
+
+    const episodes = await collectMiscRaw(root);
+    const aside = episodes.filter((e) => e.input.origin.source === "aside");
+
+    expect(aside.map((e) => e.input.content)).toEqual([
+      "help me build the recipe deck",
+      "sure, let me look at the page first",
+      `use ${REDACTION}`,
+      "y".repeat(4000),
+    ]);
+  });
+
+  test("unwraps the antigravity user request from the metadata wrapped around it", async () => {
+    const root = await miscRawRoot();
+
+    const episodes = await collectMiscRaw(root);
+    const antigravity = episodes.filter(
+      (e) => e.input.origin.source === "gemini-antigravity",
+    );
+
+    expect(antigravity.map((e) => e.input.content)).toEqual([
+      "CREATE-FLOW.md is this the doc?",
+      "I will start by exploring the workspace.",
+    ]);
+    expect(antigravity[0]?.input.origin).toEqual({
+      source: "gemini-antigravity",
+      session: "3c119fe5-8550-4230-ba74-63f52e82568e",
+      actor: "user",
+      record: "3c119fe5-8550-4230-ba74-63f52e82568e:0",
+    });
+    expect(antigravity[0]?.input.properties).toEqual({ kind: "USER_INPUT" });
+    expect(antigravity[1]?.input.origin.actor).toBe("assistant");
+    expect(antigravity[1]?.input.properties).toEqual({
+      kind: "PLANNER_RESPONSE",
+    });
+  });
+
+  test("appends the elided paste to the opencode prompt that carried it", async () => {
+    const root = await miscRawRoot();
+
+    const episodes = await collectMiscRaw(root);
+    const opencode = episodes.filter(
+      (e) => e.input.origin.source === "opencode",
+    );
+
+    expect(opencode.map((e) => e.input.content)).toEqual([
+      "compare the two videos by sha256",
+      "[Pasted ~64 lines] is this right?\nthe pasted review comment",
+    ]);
+    expect(opencode[1]?.input.origin).toEqual({
+      source: "opencode",
+      session: "prompt-history",
+      actor: "user",
+      record: "prompt-history:1",
+    });
+    expect(opencode[1]?.input.properties).toEqual({
+      kind: "prompt",
+      mode: "normal",
+    });
+    /** The history carries no per-entry time; the file's own is all there is. */
+    expect(opencode[0]?.input.time).toEqual({
+      value: new Date(1_784_000_000_000).toISOString(),
+      precision: "second",
+    });
+  });
+
+  test("keys the revision on raw text so masking changes open none", async () => {
+    const root = await miscRawRoot();
+    const secret = "ghp_0123456789012345678901234567890123456789";
+
+    const episodes = await collectMiscRaw(root);
+    const masked = episodes.find((e) => e.input.content === `use ${REDACTION}`);
+
+    expect(masked?.redactions).toBe(1);
+    expect(masked?.input.source_revision).toBe(
+      createHash("sha256")
+        .update(
+          `${new Date(1_782_794_594_000).toISOString()}\nuse ${secret}`,
+          "utf8",
+        )
+        .digest("hex"),
+    );
+  });
+
+  test("stores an oversized turn as a payload with an excerpt on the node", async () => {
+    const root = await miscRawRoot();
+
+    const episodes = await collectMiscRaw(root);
+    const long = episodes.find((e) => e.input.payload !== undefined);
+
+    expect(long?.input.content).toBe("y".repeat(4000));
+    expect(long?.input.payload).toEqual(new TextEncoder().encode(MISC_LONG));
+    expect(long?.input.payload_media_type).toBe("text/plain");
+    expect(episodes[0]?.input.payload).toBeUndefined();
+  });
+
+  test("reads none of the stores whose files hold only diagnostics or caches", async () => {
+    const root = await miscRawRoot();
+
+    const episodes = await collectMiscRaw(root);
+
+    expect(
+      episodes.filter((e) =>
+        [
+          "cursor",
+          "codex-desktop",
+          "zed",
+          "ouro",
+          "anamnesis",
+          "openomni",
+          "claude-project",
+          "kodu",
+        ].includes(e.input.origin.source),
+      ),
+    ).toEqual([]);
+  });
+
+  test("leaves the dataset directory byte-identical after a backfill", async () => {
+    const root = await miscRawRoot();
+    const asideUser = join(root, "aside", "home", ".aside", "u", "0");
+    const before = await stat(join(asideUser, "state.db"));
+
+    await collectMiscRaw(root);
+
+    const after = await stat(join(asideUser, "state.db"));
+    expect(after.mtimeMs).toBe(before.mtimeMs);
+    expect(after.size).toBe(before.size);
+    expect(
+      (await readdir(asideUser))
+        .filter((name) => name.includes("state.db"))
+        .sort(),
+    ).toEqual(["._state.db", "state.db"]);
+  });
+
+  test("tie-breaks equal event times on the record so the order is total", async () => {
+    const root = await fixtureRoot();
+    const session = join(
+      root,
+      "aside",
+      "home",
+      ".aside",
+      "u",
+      "0",
+      "sessions",
+      "2026-06-30_tie",
+    );
+    await mkdir(session, { recursive: true });
+    await writeFile(
+      join(session, "messages.jsonl"),
+      jsonLines([
+        { role: "user", content: "tie b", timestamp: 1_782_794_590_000 },
+        { role: "user", content: "tie a", timestamp: 1_782_794_590_000 },
+      ] satisfies AsideMessage[]),
+    );
+
+    const episodes = await collectMiscRaw(root);
+
+    expect(episodes.map((e) => e.input.origin.record)).toEqual([
+      "tie:0",
+      "tie:1",
+    ]);
+    expect(episodes.map((e) => e.input.content)).toEqual(["tie b", "tie a"]);
+    expect(episodes[0]?.input.properties).toEqual({ kind: "message" });
+  });
+
+  /**
+   * The snapshot's own `state.db` carries an unflushed write-ahead log, so the
+   * rows this adapter reads only exist once the log is copied beside the main
+   * file — reading the main file alone would silently lose the session title
+   * and cwd of every session written since the last checkpoint.
+   */
+  test("reads rows still held in a sqlite write-ahead log", async () => {
+    const root = await fixtureRoot();
+    const user = join(root, "aside", "home", ".aside", "u", "0");
+    const session = join(user, "sessions", "2026-06-30_walSession");
+    await mkdir(session, { recursive: true });
+    await writeFile(
+      join(session, "messages.jsonl"),
+      jsonLines([
+        { role: "user", content: "in the log", timestamp: 1_782_794_590_000 },
+      ] satisfies AsideMessage[]),
+    );
+    const state = new Database(join(user, "state.db"));
+    state.run("pragma journal_mode = wal");
+    state.run(
+      "create table sessions (id text primary key, title text not null, cwd text not null)",
+    );
+    state.run("insert into sessions values (?, ?, ?)", [
+      "walSession",
+      "unflushed title",
+      "/Users/ino/Develop",
+    ]);
+    state.close(false);
+
+    const [episode] = await collectMiscRaw(root);
+
+    expect(episode?.input.properties).toEqual({
+      kind: "message",
+      session_title: "unflushed title",
+      cwd: "/Users/ino/Develop",
+    });
+  });
+
+  test("skips a store whose transcript or index is missing or unreadable", async () => {
+    const root = await fixtureRoot();
+    const user = join(root, "aside", "home", ".aside", "u", "0");
+    await mkdir(join(user, "sessions", "2026-06-30_empty"), {
+      recursive: true,
+    });
+    await writeFile(join(user, "sessions", "loose.txt"), "not a session");
+    /**
+     * A file where the walk expects a user directory: it is listed beside the
+     * real users, and a stray lock file must not be opened as one.
+     */
+    await writeFile(join(root, "aside", "home", ".aside", "u", "lock"), "");
+    /** A second user the product created but never opened a session in. */
+    await mkdir(join(root, "aside", "home", ".aside", "u", "1"), {
+      recursive: true,
+    });
+    /** A conversation whose brain directory holds tasks but no transcript. */
+    await mkdir(
+      join(
+        root,
+        "gemini-antigravity",
+        "home",
+        ".gemini",
+        "antigravity-cli",
+        "brain",
+        "e5d007bf-9b98-4094-8db3-ca70db2bed29",
+        ".system_generated",
+        "tasks",
+      ),
+      { recursive: true },
+    );
+    await mkdir(join(root, "opencode", "home"), { recursive: true });
+
+    expect(await collectMiscRaw(root)).toEqual([]);
+  });
+
+  test("ingests one unbroken session chain per raw store", async () => {
+    const root = await miscRawRoot();
+    const objectsRoot = await mkdtemp(join(tmpdir(), "anamnesis-objects-"));
+    const engine = new Engine({ ...TEST_DB, objectsRoot });
+    await engine.init();
+    try {
+      const episodes = await collectMiscRaw(root);
+      const ids: string[] = [];
+      for (const episode of episodes) {
+        ids.push(
+          (
+            await engine.remember({
+              ...episode.input,
+              origin: {
+                ...episode.input.origin,
+                session: `${episode.input.origin.session}:${objectsRoot}`,
+              },
+            })
+          ).id,
+        );
       }
 
       const heads: string[] = [];
