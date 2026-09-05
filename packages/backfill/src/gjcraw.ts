@@ -116,8 +116,22 @@ function toEpisode(event: SessionEvent): GjcRawEpisode {
     .update(`${occurredAt}\n${event.text}`, "utf8")
     .digest("hex");
   const { text, redactions } = maskSecrets(event.text);
-  const properties: Record<string, string> = { kind: event.type };
-  if (event.role !== undefined) properties["role"] = event.role;
+  /**
+   * The same shape the normalized export wrote for this turn. A `revision_key`
+   * carries exactly one element body, and the digest that guards it covers
+   * `properties` (docs/01 §1), so agreeing on the revision token is not enough
+   * on its own: a turn reached from the export and again from raw has to build
+   * the same properties or the second pass is rejected as a
+   * `revision_conflict` instead of resolving to the stored revision.
+   *
+   * The author is already carried by `origin.actor`, which is the field the
+   * export keyed it on too, so publishing it a second time under `role` only
+   * adds the disagreement.
+   */
+  const properties: Record<string, string> = {
+    canonical_kind: event.role === undefined ? "compaction" : "agent_message",
+    kind: event.type,
+  };
   const oversized = text.length > CONTENT_LIMIT;
   return {
     redactions,

@@ -763,9 +763,11 @@ describe("collectGjcRaw", () => {
       value: "2026-07-20T11:33:00.000Z",
       precision: "second",
     });
+    // The shape the normalized export published for the same turn; the author
+    // is carried by `origin.actor`, which is where the export keyed it too.
     expect(episodes[1]?.input.properties).toEqual({
+      canonical_kind: "agent_message",
       kind: "message",
-      role: "user",
     });
     expect(episodes[1]?.input.schema).toBe("anamnesis.original-message/1");
     expect(episodes[1]?.input.payload).toBeUndefined();
@@ -894,7 +896,11 @@ describe("collectGjcRaw", () => {
 
     expect(compaction?.input.content).toBe("## Goal\nships the raw adapter");
     expect(compaction?.input.origin.actor).toBe("unknown");
-    expect(compaction?.input.properties).toEqual({ kind: "compaction" });
+    // A compaction has no author, and the export named it under its own kind.
+    expect(compaction?.input.properties).toEqual({
+      canonical_kind: "compaction",
+      kind: "compaction",
+    });
   });
 
   test("joins the text parts of one turn and drops provider scratch space", async () => {
@@ -982,6 +988,114 @@ describe("collectGjcRaw", () => {
   /** A raw store that was never populated is an empty backfill, not an error. */
   test("returns nothing when the sessions root is absent", async () => {
     expect(await collectGjcRaw(await fixtureRoot())).toEqual([]);
+  });
+
+  /**
+   * The adapter keys its revision exactly as the agent-log adapter keys the
+   * same turn, so the export and the raw transcript resolve to one
+   * `revision_key`. A `revision_key` carries one element body, so the digest
+   * inputs have to agree too: a turn ingested from the export and again from
+   * raw must be a no-op, not a `revision_conflict` (docs/01 §1, docs/02 §3).
+   */
+  test("builds the same element the agent-log export builds for one turn", async () => {
+    const occurredAt = 1783584820363;
+    const iso = new Date(occurredAt).toISOString();
+    const text = "the turn both backfills carry";
+    const raw = await fixtureRoot();
+    const workspace = join(raw, "home", ".gjc", "agent", "sessions", "-w");
+    await mkdir(workspace, { recursive: true });
+    await writeFile(
+      join(workspace, "s.jsonl"),
+      [
+        JSON.stringify({ type: "session", id: "session-overlap", timestamp: iso }),
+        JSON.stringify({
+          type: "message",
+          id: "rec-overlap",
+          timestamp: iso,
+          message: { role: "user", content: [{ type: "text", text }] },
+        }),
+      ].join("\n"),
+    );
+    const exported = await fixtureRoot();
+    await writeFile(
+      join(exported, "gjc.jsonl"),
+      `${JSON.stringify({
+        provider: "gjc",
+        partition_id: "session-overlap",
+        upstream_event_id: "rec-overlap",
+        occurred_at: occurredAt,
+        role: "user",
+        canonical_kind: "agent_message",
+        kind: "message",
+        text,
+      })}\n`,
+    );
+
+    const [fromRaw] = await collectGjcRaw(raw);
+    const [fromExport] = await collectAgentLog(exported);
+
+    expect(fromRaw?.input.source_revision).toBe(fromExport?.input.source_revision);
+    expect(fromRaw?.input.origin).toEqual(fromExport?.input.origin);
+    expect(fromRaw?.input.properties).toEqual(fromExport?.input.properties);
+  });
+
+  /**
+   * The digest equality above is what the store enforces, so it is asserted
+   * against the store rather than only against the two inputs: the export is
+   * ingested first, exactly as the deployed graph was built, and the raw pass
+   * over the same turn has to resolve to the stored revision.
+   */
+  test("re-ingests an exported turn from raw as a record-level no-op", async () => {
+    const occurredAt = 1783584821363;
+    const iso = new Date(occurredAt).toISOString();
+    const text = `the turn both backfills carry ${Date.now()}`;
+    const session = `session-overlap-${Date.now()}`;
+    const raw = await fixtureRoot();
+    const workspace = join(raw, "home", ".gjc", "agent", "sessions", "-w");
+    await mkdir(workspace, { recursive: true });
+    await writeFile(
+      join(workspace, "s.jsonl"),
+      [
+        JSON.stringify({ type: "session", id: session, timestamp: iso }),
+        JSON.stringify({
+          type: "message",
+          id: "rec-overlap",
+          timestamp: iso,
+          message: { role: "user", content: [{ type: "text", text }] },
+        }),
+      ].join("\n"),
+    );
+    const exported = await fixtureRoot();
+    await writeFile(
+      join(exported, "gjc.jsonl"),
+      `${JSON.stringify({
+        provider: "gjc",
+        partition_id: session,
+        upstream_event_id: "rec-overlap",
+        occurred_at: occurredAt,
+        role: "user",
+        canonical_kind: "agent_message",
+        kind: "message",
+        text,
+      })}\n`,
+    );
+
+    const objectsRoot = await mkdtemp(join(tmpdir(), "anamnesis-objects-"));
+    const engine = new Engine({ ...TEST_DB, objectsRoot });
+    await engine.init();
+    try {
+      const [fromExport] = await collectAgentLog(exported);
+      const [fromRaw] = await collectGjcRaw(raw);
+      const first = await engine.remember(fromExport!.input);
+
+      const second = await engine.remember(fromRaw!.input);
+
+      expect(second.created).toBe(false);
+      expect(second.id).toBe(first.id);
+    } finally {
+      await engine.close();
+      await rm(objectsRoot, { recursive: true });
+    }
   });
 });
 
@@ -2076,6 +2190,60 @@ describe("collectCodexRaw", () => {
       await engine.close();
       await rm(objectsRoot, { recursive: true });
     }
+  });
+
+  /**
+   * The corpus keeps a `sessions-backup-*` snapshot of the live tree beside
+   * it, holding stale copies of rollout files that are still being appended
+   * to. A copy carries the same turns under the same session id, so walking
+   * it emits a second element for every record the live file already emits —
+   * same `revision_key`, different `turn_context` — which the store rejects
+   * as a `revision_conflict` (docs/01 §1). Only the live tree is a session.
+   */
+  test("skips the stale session snapshots kept beside the live tree", async () => {
+    const root = await fixtureRoot();
+    const session = "019cd33d-0000-7000-8000-000000000000";
+    const file = `rollout-2026-03-10T00-36-14-${session}.jsonl`;
+    const lines = (model: string): string =>
+      codexLines([
+        {
+          timestamp: "2026-03-09T15:36:16.548Z",
+          type: "session_meta",
+          payload: { id: session, cwd: "/Users/ino/Develop/openomni" },
+        },
+        {
+          timestamp: "2026-03-09T15:36:17.000Z",
+          type: "turn_context",
+          payload: { model },
+        },
+        {
+          timestamp: "2026-03-09T15:36:18.000Z",
+          type: "event_msg",
+          payload: { type: "user_message", message: "the turn both copies carry" },
+        },
+      ]);
+    const live = join(root, "home", ".codex", "sessions", "2026", "03", "10");
+    await mkdir(live, { recursive: true });
+    await writeFile(join(live, file), lines("gpt-5.4-mini"));
+    const snapshot = join(
+      root,
+      "home",
+      ".codex",
+      "sessions-backup-codex-auto-review",
+    );
+    await mkdir(snapshot, { recursive: true });
+    await writeFile(join(snapshot, file), lines("codex-auto-review"));
+
+    const episodes = await collectCodexRaw(root);
+
+    expect(episodes.map((e) => e.input.properties)).toEqual([
+      {
+        kind: "message",
+        canonical_kind: "agent_message",
+        cwd: "/Users/ino/Develop/openomni",
+        model: "gpt-5.4-mini",
+      },
+    ]);
   });
 });
 
