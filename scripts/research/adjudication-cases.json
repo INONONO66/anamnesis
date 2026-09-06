@@ -1,0 +1,2020 @@
+{
+  "schema": "anamnesis.research.adjudication-cases/1",
+  "provenance": "SYNTHETIC",
+  "notice": "These 36 cases are hand-written specification-conformance probes for docs/02 §5 (L4 judge outcomes), docs/02 §5.1 (modality), docs/03 §5 (change vs correction) and D46 (one Fact per occurrence, no automatic winner). They are NOT human-labeled production data, NOT a sample of any real distribution, and results over them certify nothing statistically and certify nothing about deployment. They test whether a model applies stated rules, not how often it is right in the field.",
+  "invalidation_note": "A false invalidation is not repaired by re-extraction or by a new generation. docs/03 §5: INVALIDATES is non-recursive, so a corrected invalidator leaves its own target invalid; restoring a wrongly invalidated fact requires an explicit replacement A' built from the corrected fact's bounded source authority. A judge that misses the replacement leaves the fact invisible, which the spec prefers to automatic resurrection. Cases therefore never score a verdict as if the store self-heals.",
+  "gold_fields": [
+    "gold_verdict",
+    "gold_target_ids",
+    "gold_evidence_ids",
+    "gold_effective_time_basis",
+    "gold_time_basis_normative",
+    "gold_rationale"
+  ],
+  "gold_fields_note": "Gold fields are held here only. The runner must never include them in a model payload.",
+  "cases": [
+    {
+      "id": "new-en-001",
+      "lang": "en",
+      "traits": [
+        "empty-candidates",
+        "null-candidates"
+      ],
+      "episode": {
+        "id": "ep-new-en-001",
+        "time_value": "2026-03-04T09:12:00Z",
+        "time_utc": 1772615520000,
+        "snippets": [
+          {
+            "id": "s1",
+            "speaker": "user",
+            "text": "I started using a standing desk at the Mapo office."
+          },
+          {
+            "id": "s2",
+            "speaker": "user",
+            "text": "The coffee machine on that floor is broken again."
+          }
+        ]
+      },
+      "proposed_claim": {
+        "id": "pc-new-en-001",
+        "content": "The user started using a standing desk at the Mapo office.",
+        "modality": "asserted",
+        "time_value": "2026-03-04T09:12:00Z",
+        "time_utc": 1772615520000,
+        "time_precision": "inherited",
+        "time_basis_source": "inherited",
+        "entities": [
+          "user",
+          "Mapo office"
+        ]
+      },
+      "candidates": [],
+      "gold_verdict": "NEW",
+      "gold_target_ids": [],
+      "gold_evidence_ids": [
+        "s1"
+      ],
+      "gold_effective_time_basis": "proposed",
+      "gold_time_basis_normative": false,
+      "gold_rationale": "No candidates were retrieved at all; nothing can be duplicated, elaborated or contradicted."
+    },
+    {
+      "id": "new-ko-002",
+      "lang": "ko",
+      "traits": [
+        "same-entity-different-event",
+        "explicit-time"
+      ],
+      "episode": {
+        "id": "ep-new-ko-002",
+        "time_value": "2026-03-05T02:40:00Z",
+        "time_utc": 1772678400000,
+        "snippets": [
+          {
+            "id": "s1",
+            "speaker": "user",
+            "text": "2월 23일에 부산에서 열린 학회에 다녀왔어요."
+          }
+        ]
+      },
+      "proposed_claim": {
+        "id": "pc-new-ko-002",
+        "content": "사용자는 2026년 2월 23일 부산에서 열린 학회에 참석했다.",
+        "modality": "asserted",
+        "time_value": "2월 23일",
+        "time_utc": 1771804800000,
+        "time_precision": "day",
+        "time_basis_source": "explicit",
+        "entities": [
+          "사용자",
+          "부산"
+        ]
+      },
+      "candidates": [
+        {
+          "id": "c_d87e44dd7434",
+          "content": "사용자는 2019년에 부산으로 이사했다.",
+          "modality": "asserted",
+          "time_value": "2019",
+          "time_utc": 1546300800000,
+          "time_precision": "year",
+          "valid": true
+        }
+      ],
+      "gold_verdict": "NEW",
+      "gold_target_ids": [],
+      "gold_evidence_ids": [
+        "s1"
+      ],
+      "gold_effective_time_basis": "proposed",
+      "gold_time_basis_normative": false,
+      "gold_rationale": "Attending a conference in Busan and having moved to Busan in 2019 are different events about the same entity; both can be true."
+    },
+    {
+      "id": "new-ja-003",
+      "lang": "ja",
+      "traits": [
+        "unrelated-candidate",
+        "same-entity-different-event"
+      ],
+      "episode": {
+        "id": "ep-new-ja-003",
+        "time_value": "2026-03-06T11:05:00Z",
+        "time_utc": 1772795100000,
+        "snippets": [
+          {
+            "id": "s1",
+            "speaker": "user",
+            "text": "田中さんが新しいチームのリードになりました。"
+          },
+          {
+            "id": "s2",
+            "speaker": "user",
+            "text": "会議室の予約は私がやっておきます。"
+          }
+        ]
+      },
+      "proposed_claim": {
+        "id": "pc-new-ja-003",
+        "content": "田中は新しいチームのリードになった。",
+        "modality": "asserted",
+        "time_value": "2026-03-06T11:05:00Z",
+        "time_utc": 1772795100000,
+        "time_precision": "inherited",
+        "time_basis_source": "inherited",
+        "entities": [
+          "田中"
+        ]
+      },
+      "candidates": [
+        {
+          "id": "c_a9f3bdf58eac",
+          "content": "田中は名古屋のオフィスに勤務している。",
+          "modality": "asserted",
+          "time_value": "2025-11",
+          "time_utc": 1761955200000,
+          "time_precision": "month",
+          "valid": true
+        }
+      ],
+      "gold_verdict": "NEW",
+      "gold_target_ids": [],
+      "gold_evidence_ids": [
+        "s1"
+      ],
+      "gold_effective_time_basis": "proposed",
+      "gold_time_basis_normative": false,
+      "gold_rationale": "Working in the Nagoya office and becoming a team lead are independent facts about the same person."
+    },
+    {
+      "id": "new-en-004",
+      "lang": "en",
+      "traits": [
+        "modality-intended",
+        "no-candidate-conflict"
+      ],
+      "episode": {
+        "id": "ep-new-en-004",
+        "time_value": "2026-03-07T15:20:00Z",
+        "time_utc": 1772896800000,
+        "snippets": [
+          {
+            "id": "s1",
+            "speaker": "user",
+            "text": "I'm thinking of moving the archive to object storage next quarter."
+          }
+        ]
+      },
+      "proposed_claim": {
+        "id": "pc-new-en-004",
+        "content": "The user intends to move the archive to object storage next quarter.",
+        "modality": "intended",
+        "time_value": "2026-03-07T15:20:00Z",
+        "time_utc": 1772896800000,
+        "time_precision": "inherited",
+        "time_basis_source": "inherited",
+        "entities": [
+          "user",
+          "archive"
+        ]
+      },
+      "candidates": [
+        {
+          "id": "c_57d12e8220fe",
+          "content": "The archive is stored on the office NAS.",
+          "modality": "asserted",
+          "time_value": "2024-08",
+          "time_utc": 1722470400000,
+          "time_precision": "month",
+          "valid": true
+        }
+      ],
+      "gold_verdict": "NEW",
+      "gold_target_ids": [],
+      "gold_evidence_ids": [
+        "s1"
+      ],
+      "gold_effective_time_basis": "proposed",
+      "gold_time_basis_normative": false,
+      "gold_rationale": "An intent does not contradict the current storage fact; the plan is stored as a plan (docs/02 §5.1)."
+    },
+    {
+      "id": "new-ko-005",
+      "lang": "ko",
+      "traits": [
+        "null-candidates",
+        "reported-modality"
+      ],
+      "episode": {
+        "id": "ep-new-ko-005",
+        "time_value": "2026-03-08T06:00:00Z",
+        "time_utc": 1772949600000,
+        "snippets": [
+          {
+            "id": "s1",
+            "speaker": "user",
+            "text": "민수가 그러는데 창고 열쇠가 바뀌었대요."
+          }
+        ]
+      },
+      "proposed_claim": {
+        "id": "pc-new-ko-005",
+        "content": "민수는 창고 열쇠가 바뀌었다고 말했다.",
+        "modality": "reported",
+        "time_value": "2026-03-08T06:00:00Z",
+        "time_utc": 1772949600000,
+        "time_precision": "inherited",
+        "time_basis_source": "inherited",
+        "entities": [
+          "민수",
+          "창고"
+        ]
+      },
+      "candidates": null,
+      "gold_verdict": "NEW",
+      "gold_target_ids": [],
+      "gold_evidence_ids": [
+        "s1"
+      ],
+      "gold_effective_time_basis": "proposed",
+      "gold_time_basis_normative": false,
+      "gold_rationale": "The candidate set is null (the bounded read returned nothing); a reported claim with no candidates is new."
+    },
+    {
+      "id": "new-ja-006",
+      "lang": "ja",
+      "traits": [
+        "hypothetical-modality"
+      ],
+      "episode": {
+        "id": "ep-new-ja-006",
+        "time_value": "2026-03-09T08:45:00Z",
+        "time_utc": 1773045900000,
+        "snippets": [
+          {
+            "id": "s1",
+            "speaker": "user",
+            "text": "もし利用者が一万人を超えたらシャーディングすることになるでしょう。"
+          }
+        ]
+      },
+      "proposed_claim": {
+        "id": "pc-new-ja-006",
+        "content": "利用者が一万人を超えた場合、システムはシャーディングされる。",
+        "modality": "hypothetical",
+        "time_value": "2026-03-09T08:45:00Z",
+        "time_utc": 1773045900000,
+        "time_precision": "inherited",
+        "time_basis_source": "inherited",
+        "entities": [
+          "システム"
+        ]
+      },
+      "candidates": [
+        {
+          "id": "c_d6186929612f",
+          "content": "システムは単一の Postgres インスタンスで運用されている。",
+          "modality": "asserted",
+          "time_value": "2025-06",
+          "time_utc": 1748736000000,
+          "time_precision": "month",
+          "valid": true
+        }
+      ],
+      "gold_verdict": "NEW",
+      "gold_target_ids": [],
+      "gold_evidence_ids": [
+        "s1"
+      ],
+      "gold_effective_time_basis": "proposed",
+      "gold_time_basis_normative": false,
+      "gold_rationale": "A conditional possibility does not contradict the present deployment fact."
+    },
+    {
+      "id": "dup-en-101",
+      "lang": "en",
+      "traits": [
+        "exact-restatement"
+      ],
+      "episode": {
+        "id": "ep-dup-en-101",
+        "time_value": "2026-03-10T13:00:00Z",
+        "time_utc": 1773147600000,
+        "snippets": [
+          {
+            "id": "s1",
+            "speaker": "user",
+            "text": "Just to confirm, I moved to Seoul in 2019."
+          },
+          {
+            "id": "s2",
+            "speaker": "user",
+            "text": "Anyway, that is ancient history now."
+          }
+        ]
+      },
+      "proposed_claim": {
+        "id": "pc-dup-en-101",
+        "content": "The user moved to Seoul in 2019.",
+        "modality": "asserted",
+        "time_value": "2019",
+        "time_utc": 1546300800000,
+        "time_precision": "year",
+        "time_basis_source": "explicit",
+        "entities": [
+          "user",
+          "Seoul"
+        ]
+      },
+      "candidates": [
+        {
+          "id": "c_24f426a9f51d",
+          "content": "The user moved to Seoul in 2019.",
+          "modality": "asserted",
+          "time_value": "2019",
+          "time_utc": 1546300800000,
+          "time_precision": "year",
+          "valid": true
+        }
+      ],
+      "gold_verdict": "DUPLICATE_OCCURRENCE",
+      "gold_target_ids": [
+        "c_24f426a9f51d"
+      ],
+      "gold_evidence_ids": [
+        "s1"
+      ],
+      "gold_effective_time_basis": "proposed",
+      "gold_time_basis_normative": false,
+      "gold_rationale": "Same subject, predicate, effective time and modality. D46: the occurrence is preserved as its own Fact; the original is not suppressed."
+    },
+    {
+      "id": "dup-ko-102",
+      "lang": "ko",
+      "traits": [
+        "paraphrase",
+        "two-candidates"
+      ],
+      "episode": {
+        "id": "ep-dup-ko-102",
+        "time_value": "2026-03-11T04:30:00Z",
+        "time_utc": 1773203400000,
+        "snippets": [
+          {
+            "id": "s1",
+            "speaker": "user",
+            "text": "아까 말했듯이 제 노트북은 16GB 램이에요."
+          }
+        ]
+      },
+      "proposed_claim": {
+        "id": "pc-dup-ko-102",
+        "content": "사용자의 노트북은 램이 16GB이다.",
+        "modality": "asserted",
+        "time_value": "2026-03-11T04:30:00Z",
+        "time_utc": 1773203400000,
+        "time_precision": "inherited",
+        "time_basis_source": "inherited",
+        "entities": [
+          "사용자",
+          "노트북"
+        ]
+      },
+      "candidates": [
+        {
+          "id": "c_68c732fc3863",
+          "content": "사용자의 노트북 램은 16GB이다.",
+          "modality": "asserted",
+          "time_value": "2026-03-11",
+          "time_utc": 1773187200000,
+          "time_precision": "day",
+          "valid": true
+        },
+        {
+          "id": "c_1c4e8d33118c",
+          "content": "사용자의 노트북은 맥북 프로이다.",
+          "modality": "asserted",
+          "time_value": "2025-12",
+          "time_utc": 1764547200000,
+          "time_precision": "month",
+          "valid": true
+        }
+      ],
+      "gold_verdict": "DUPLICATE_OCCURRENCE",
+      "gold_target_ids": [
+        "c_68c732fc3863"
+      ],
+      "gold_evidence_ids": [
+        "s1"
+      ],
+      "gold_effective_time_basis": "proposed",
+      "gold_time_basis_normative": false,
+      "gold_rationale": "Only c_68c732fc3863 restates the claim; c_1c4e8d33118c merely shares the entity and must not be listed as a target."
+    },
+    {
+      "id": "dup-ja-103",
+      "lang": "ja",
+      "traits": [
+        "restatement-different-episode"
+      ],
+      "episode": {
+        "id": "ep-dup-ja-103",
+        "time_value": "2026-03-12T02:10:00Z",
+        "time_utc": 1773281400000,
+        "snippets": [
+          {
+            "id": "s1",
+            "speaker": "user",
+            "text": "前にも言いましたが、デプロイは毎週金曜日です。"
+          }
+        ]
+      },
+      "proposed_claim": {
+        "id": "pc-dup-ja-103",
+        "content": "デプロイは毎週金曜日に行われる。",
+        "modality": "asserted",
+        "time_value": "2026-03-12T02:10:00Z",
+        "time_utc": 1773281400000,
+        "time_precision": "inherited",
+        "time_basis_source": "inherited",
+        "entities": [
+          "デプロイ"
+        ]
+      },
+      "candidates": [
+        {
+          "id": "c_63cef1c13253",
+          "content": "デプロイは毎週金曜日に行われる。",
+          "modality": "asserted",
+          "time_value": "2026-03-12",
+          "time_utc": 1773273600000,
+          "time_precision": "day",
+          "valid": true
+        }
+      ],
+      "gold_verdict": "DUPLICATE_OCCURRENCE",
+      "gold_target_ids": [
+        "c_63cef1c13253"
+      ],
+      "gold_evidence_ids": [
+        "s1"
+      ],
+      "gold_effective_time_basis": "proposed",
+      "gold_time_basis_normative": false,
+      "gold_rationale": "A second occurrence of the same standing claim from a different episode."
+    },
+    {
+      "id": "dup-en-104",
+      "lang": "en",
+      "traits": [
+        "repetition-not-evidence",
+        "three-candidates"
+      ],
+      "episode": {
+        "id": "ep-dup-en-104",
+        "time_value": "2026-03-13T17:25:00Z",
+        "time_utc": 1773422700000,
+        "snippets": [
+          {
+            "id": "s1",
+            "speaker": "user",
+            "text": "Again: the staging cluster runs in eu-west-1."
+          }
+        ]
+      },
+      "proposed_claim": {
+        "id": "pc-dup-en-104",
+        "content": "The staging cluster runs in eu-west-1.",
+        "modality": "asserted",
+        "time_value": "2026-03-13T17:25:00Z",
+        "time_utc": 1773422700000,
+        "time_precision": "inherited",
+        "time_basis_source": "inherited",
+        "entities": [
+          "staging cluster"
+        ]
+      },
+      "candidates": [
+        {
+          "id": "c_e71ffb34ba2d",
+          "content": "The staging cluster runs in eu-west-1.",
+          "modality": "asserted",
+          "time_value": "2026-03-13",
+          "time_utc": 1773360000000,
+          "time_precision": "day",
+          "valid": true
+        },
+        {
+          "id": "c_cec381ec6c31",
+          "content": "The production cluster runs in ap-northeast-2.",
+          "modality": "asserted",
+          "time_value": "2026-01",
+          "time_utc": 1767225600000,
+          "time_precision": "month",
+          "valid": true
+        },
+        {
+          "id": "c_74e60863101a",
+          "content": "The staging cluster has three nodes.",
+          "modality": "asserted",
+          "time_value": "2026-02",
+          "time_utc": 1769904000000,
+          "time_precision": "month",
+          "valid": true
+        }
+      ],
+      "gold_verdict": "DUPLICATE_OCCURRENCE",
+      "gold_target_ids": [
+        "c_e71ffb34ba2d"
+      ],
+      "gold_evidence_ids": [
+        "s1"
+      ],
+      "gold_effective_time_basis": "proposed",
+      "gold_time_basis_normative": false,
+      "gold_rationale": "Repetition adds an occurrence, never a truth or confidence boost; only the matching candidate is the target."
+    },
+    {
+      "id": "dup-ko-105",
+      "lang": "ko",
+      "traits": [
+        "numeric-identical"
+      ],
+      "episode": {
+        "id": "ep-dup-ko-105",
+        "time_value": "2026-03-14T09:00:00Z",
+        "time_utc": 1773478800000,
+        "snippets": [
+          {
+            "id": "s1",
+            "speaker": "user",
+            "text": "월 구독료는 여전히 29,000원입니다."
+          }
+        ]
+      },
+      "proposed_claim": {
+        "id": "pc-dup-ko-105",
+        "content": "월 구독료는 29,000원이다.",
+        "modality": "asserted",
+        "time_value": "2026-03-14T09:00:00Z",
+        "time_utc": 1773478800000,
+        "time_precision": "inherited",
+        "time_basis_source": "inherited",
+        "entities": [
+          "구독료"
+        ]
+      },
+      "candidates": [
+        {
+          "id": "c_1ef2f1b16efb",
+          "content": "월 구독료는 29,000원이다.",
+          "modality": "asserted",
+          "time_value": "2026-03-14",
+          "time_utc": 1773446400000,
+          "time_precision": "day",
+          "valid": true
+        }
+      ],
+      "gold_verdict": "DUPLICATE_OCCURRENCE",
+      "gold_target_ids": [
+        "c_1ef2f1b16efb"
+      ],
+      "gold_evidence_ids": [
+        "s1"
+      ],
+      "gold_effective_time_basis": "proposed",
+      "gold_time_basis_normative": false,
+      "gold_rationale": "The number is unchanged; a restated identical value is an occurrence, not a change."
+    },
+    {
+      "id": "dup-ja-106",
+      "lang": "ja",
+      "traits": [
+        "reported-both-sides"
+      ],
+      "episode": {
+        "id": "ep-dup-ja-106",
+        "time_value": "2026-03-15T05:55:00Z",
+        "time_utc": 1773554100000,
+        "snippets": [
+          {
+            "id": "s1",
+            "speaker": "user",
+            "text": "佐藤さんも、リリースは延期されたと言っていました。"
+          }
+        ]
+      },
+      "proposed_claim": {
+        "id": "pc-dup-ja-106",
+        "content": "佐藤はリリースが延期されたと述べた。",
+        "modality": "reported",
+        "time_value": "2026-03-15T05:55:00Z",
+        "time_utc": 1773554100000,
+        "time_precision": "inherited",
+        "time_basis_source": "inherited",
+        "entities": [
+          "佐藤",
+          "リリース"
+        ]
+      },
+      "candidates": [
+        {
+          "id": "c_763a7694ed51",
+          "content": "佐藤はリリースが延期されたと述べた。",
+          "modality": "reported",
+          "time_value": "2026-03-15",
+          "time_utc": 1773532800000,
+          "time_precision": "day",
+          "valid": true
+        }
+      ],
+      "gold_verdict": "DUPLICATE_OCCURRENCE",
+      "gold_target_ids": [
+        "c_763a7694ed51"
+      ],
+      "gold_evidence_ids": [
+        "s1"
+      ],
+      "gold_effective_time_basis": "proposed",
+      "gold_time_basis_normative": false,
+      "gold_rationale": "Same speaker attribution, same modality, same time: another occurrence of the reported claim."
+    },
+    {
+      "id": "elab-en-201",
+      "lang": "en",
+      "traits": [
+        "adds-detail"
+      ],
+      "episode": {
+        "id": "ep-elab-en-201",
+        "time_value": "2026-03-16T10:15:00Z",
+        "time_utc": 1773656100000,
+        "snippets": [
+          {
+            "id": "s1",
+            "speaker": "user",
+            "text": "The Seoul place is in Mapo-gu, by the way."
+          }
+        ]
+      },
+      "proposed_claim": {
+        "id": "pc-elab-en-201",
+        "content": "The user's Seoul residence is in Mapo-gu.",
+        "modality": "asserted",
+        "time_value": "2026-03-16T10:15:00Z",
+        "time_utc": 1773656100000,
+        "time_precision": "inherited",
+        "time_basis_source": "inherited",
+        "entities": [
+          "user",
+          "Seoul",
+          "Mapo-gu"
+        ]
+      },
+      "candidates": [
+        {
+          "id": "c_b916215f6e19",
+          "content": "The user moved to Seoul in 2019.",
+          "modality": "asserted",
+          "time_value": "2019",
+          "time_utc": 1546300800000,
+          "time_precision": "year",
+          "valid": true
+        }
+      ],
+      "gold_verdict": "ELABORATION",
+      "gold_target_ids": [
+        "c_b916215f6e19"
+      ],
+      "gold_evidence_ids": [
+        "s1"
+      ],
+      "gold_effective_time_basis": "proposed",
+      "gold_time_basis_normative": false,
+      "gold_rationale": "The district refines the existing residence fact without contradicting it."
+    },
+    {
+      "id": "elab-ko-202",
+      "lang": "ko",
+      "traits": [
+        "intent-fulfilled"
+      ],
+      "episode": {
+        "id": "ep-elab-ko-202",
+        "time_value": "2026-03-17T01:20:00Z",
+        "time_utc": 1773710400000,
+        "snippets": [
+          {
+            "id": "s1",
+            "speaker": "user",
+            "text": "결국 저장소를 Neo4j로 전환했습니다."
+          }
+        ]
+      },
+      "proposed_claim": {
+        "id": "pc-elab-ko-202",
+        "content": "사용자는 저장소를 Neo4j로 전환했다.",
+        "modality": "asserted",
+        "time_value": "2026-03-17T01:20:00Z",
+        "time_utc": 1773710400000,
+        "time_precision": "inherited",
+        "time_basis_source": "inherited",
+        "entities": [
+          "사용자",
+          "Neo4j"
+        ]
+      },
+      "candidates": [
+        {
+          "id": "c_d6f2dd7555dc",
+          "content": "사용자는 저장소를 Neo4j로 전환할 계획이다.",
+          "modality": "intended",
+          "time_value": "2026-01-20",
+          "time_utc": 1768867200000,
+          "time_precision": "day",
+          "valid": true
+        }
+      ],
+      "gold_verdict": "ELABORATION",
+      "gold_target_ids": [
+        "c_d6f2dd7555dc"
+      ],
+      "gold_evidence_ids": [
+        "s1"
+      ],
+      "gold_effective_time_basis": "proposed",
+      "gold_time_basis_normative": false,
+      "gold_rationale": "docs/02 §5.1: a fulfilled intent is an elaboration of the plan, not a contradiction of it. The plan was true as a plan."
+    },
+    {
+      "id": "elab-ja-203",
+      "lang": "ja",
+      "traits": [
+        "narrower-scope"
+      ],
+      "episode": {
+        "id": "ep-elab-ja-203",
+        "time_value": "2026-03-18T07:40:00Z",
+        "time_utc": 1773819600000,
+        "snippets": [
+          {
+            "id": "s1",
+            "speaker": "user",
+            "text": "バックアップは毎晩3時、東京リージョンに保存されます。"
+          }
+        ]
+      },
+      "proposed_claim": {
+        "id": "pc-elab-ja-203",
+        "content": "バックアップは毎晩午前3時に東京リージョンへ保存される。",
+        "modality": "asserted",
+        "time_value": "2026-03-18T07:40:00Z",
+        "time_utc": 1773819600000,
+        "time_precision": "inherited",
+        "time_basis_source": "inherited",
+        "entities": [
+          "バックアップ"
+        ]
+      },
+      "candidates": [
+        {
+          "id": "c_43ea00e38eb5",
+          "content": "バックアップは毎晩実行される。",
+          "modality": "asserted",
+          "time_value": "2025-09",
+          "time_utc": 1756684800000,
+          "time_precision": "month",
+          "valid": true
+        }
+      ],
+      "gold_verdict": "ELABORATION",
+      "gold_target_ids": [
+        "c_43ea00e38eb5"
+      ],
+      "gold_evidence_ids": [
+        "s1"
+      ],
+      "gold_effective_time_basis": "proposed",
+      "gold_time_basis_normative": false,
+      "gold_rationale": "Adds the hour and the region to an existing nightly-backup fact; both hold together."
+    },
+    {
+      "id": "elab-en-204",
+      "lang": "en",
+      "traits": [
+        "hedge-to-detail",
+        "two-candidates"
+      ],
+      "episode": {
+        "id": "ep-elab-en-204",
+        "time_value": "2026-03-19T12:00:00Z",
+        "time_utc": 1773921600000,
+        "snippets": [
+          {
+            "id": "s1",
+            "speaker": "user",
+            "text": "The March 18 outage lasted 42 minutes and it was the DNS resolver."
+          },
+          {
+            "id": "s2",
+            "speaker": "user",
+            "text": "I will write the postmortem tomorrow."
+          }
+        ]
+      },
+      "proposed_claim": {
+        "id": "pc-elab-en-204",
+        "content": "The 2026-03-18 outage lasted 42 minutes and was caused by the DNS resolver.",
+        "modality": "asserted",
+        "time_value": "March 18",
+        "time_utc": 1773792000000,
+        "time_precision": "day",
+        "time_basis_source": "explicit",
+        "entities": [
+          "outage",
+          "DNS resolver"
+        ]
+      },
+      "candidates": [
+        {
+          "id": "c_94cd1d814a1d",
+          "content": "There was an outage on 2026-03-18.",
+          "modality": "asserted",
+          "time_value": "2026-03-18",
+          "time_utc": 1773792000000,
+          "time_precision": "day",
+          "valid": true
+        },
+        {
+          "id": "c_a67bfed74285",
+          "content": "The DNS resolver was upgraded in January 2026.",
+          "modality": "asserted",
+          "time_value": "2026-01",
+          "time_utc": 1767225600000,
+          "time_precision": "month",
+          "valid": true
+        }
+      ],
+      "gold_verdict": "ELABORATION",
+      "gold_target_ids": [
+        "c_94cd1d814a1d"
+      ],
+      "gold_evidence_ids": [
+        "s1"
+      ],
+      "gold_effective_time_basis": "proposed",
+      "gold_time_basis_normative": false,
+      "gold_rationale": "Duration and cause elaborate the outage fact; the resolver upgrade merely shares an entity and is not a target."
+    },
+    {
+      "id": "elab-ko-205",
+      "lang": "ko",
+      "traits": [
+        "role-detail"
+      ],
+      "episode": {
+        "id": "ep-elab-ko-205",
+        "time_value": "2026-03-20T03:05:00Z",
+        "time_utc": 1773975900000,
+        "snippets": [
+          {
+            "id": "s1",
+            "speaker": "user",
+            "text": "지현 씨는 플랫폼 팀에서 데이터 파이프라인을 담당해요."
+          }
+        ]
+      },
+      "proposed_claim": {
+        "id": "pc-elab-ko-205",
+        "content": "지현은 플랫폼 팀에서 데이터 파이프라인을 담당한다.",
+        "modality": "asserted",
+        "time_value": "2026-03-20T03:05:00Z",
+        "time_utc": 1773975900000,
+        "time_precision": "inherited",
+        "time_basis_source": "inherited",
+        "entities": [
+          "지현"
+        ]
+      },
+      "candidates": [
+        {
+          "id": "c_e91a0e34fb95",
+          "content": "지현은 플랫폼 팀 소속이다.",
+          "modality": "asserted",
+          "time_value": "2025-10",
+          "time_utc": 1759276800000,
+          "time_precision": "month",
+          "valid": true
+        }
+      ],
+      "gold_verdict": "ELABORATION",
+      "gold_target_ids": [
+        "c_e91a0e34fb95"
+      ],
+      "gold_evidence_ids": [
+        "s1"
+      ],
+      "gold_effective_time_basis": "proposed",
+      "gold_time_basis_normative": false,
+      "gold_rationale": "The responsibility refines the team-membership fact."
+    },
+    {
+      "id": "elab-ja-206",
+      "lang": "ja",
+      "traits": [
+        "numeric-refinement-not-change"
+      ],
+      "episode": {
+        "id": "ep-elab-ja-206",
+        "time_value": "2026-03-21T06:30:00Z",
+        "time_utc": 1774074600000,
+        "snippets": [
+          {
+            "id": "s1",
+            "speaker": "user",
+            "text": "ステージングのノードは3台で、そのうち1台は予備です。"
+          }
+        ]
+      },
+      "proposed_claim": {
+        "id": "pc-elab-ja-206",
+        "content": "ステージングの3台のノードのうち1台は予備である。",
+        "modality": "asserted",
+        "time_value": "2026-03-21T06:30:00Z",
+        "time_utc": 1774074600000,
+        "time_precision": "inherited",
+        "time_basis_source": "inherited",
+        "entities": [
+          "ステージング"
+        ]
+      },
+      "candidates": [
+        {
+          "id": "c_4198fb1e31f9",
+          "content": "ステージングのノードは3台である。",
+          "modality": "asserted",
+          "time_value": "2026-02",
+          "time_utc": 1769904000000,
+          "time_precision": "month",
+          "valid": true
+        }
+      ],
+      "gold_verdict": "ELABORATION",
+      "gold_target_ids": [
+        "c_4198fb1e31f9"
+      ],
+      "gold_evidence_ids": [
+        "s1"
+      ],
+      "gold_effective_time_basis": "proposed",
+      "gold_time_basis_normative": false,
+      "gold_rationale": "The count is unchanged; the spare-node detail refines it rather than replacing a number."
+    },
+    {
+      "id": "chg-en-301",
+      "lang": "en",
+      "traits": [
+        "world-changed",
+        "relocation"
+      ],
+      "episode": {
+        "id": "ep-chg-en-301",
+        "time_value": "2026-03-22T14:00:00Z",
+        "time_utc": 1774188000000,
+        "snippets": [
+          {
+            "id": "s1",
+            "speaker": "user",
+            "text": "I moved to Busan last month."
+          },
+          {
+            "id": "s2",
+            "speaker": "user",
+            "text": "The new place has better light."
+          }
+        ]
+      },
+      "proposed_claim": {
+        "id": "pc-chg-en-301",
+        "content": "The user moved to Busan in February 2026.",
+        "modality": "asserted",
+        "time_value": "last month",
+        "time_utc": 1769904000000,
+        "time_precision": "month",
+        "time_basis_source": "relative",
+        "entities": [
+          "user",
+          "Busan"
+        ]
+      },
+      "candidates": [
+        {
+          "id": "c_6dde286d57c3",
+          "content": "The user lives in Seoul.",
+          "modality": "asserted",
+          "time_value": "2019",
+          "time_utc": 1546300800000,
+          "time_precision": "year",
+          "valid": true
+        }
+      ],
+      "gold_verdict": "CHANGE",
+      "gold_target_ids": [
+        "c_6dde286d57c3"
+      ],
+      "gold_evidence_ids": [
+        "s1"
+      ],
+      "gold_effective_time_basis": "proposed",
+      "gold_time_basis_normative": true,
+      "gold_rationale": "The world changed: the Seoul fact was true until February 2026. C.time is the event's own time (docs/03 §5)."
+    },
+    {
+      "id": "chg-ko-302",
+      "lang": "ko",
+      "traits": [
+        "numeric-change"
+      ],
+      "episode": {
+        "id": "ep-chg-ko-302",
+        "time_value": "2026-03-23T00:40:00Z",
+        "time_utc": 1774226400000,
+        "snippets": [
+          {
+            "id": "s1",
+            "speaker": "user",
+            "text": "4월부터 월 구독료가 39,000원으로 인상됩니다."
+          }
+        ]
+      },
+      "proposed_claim": {
+        "id": "pc-chg-ko-302",
+        "content": "2026년 4월부터 월 구독료는 39,000원이다.",
+        "modality": "asserted",
+        "time_value": "4월",
+        "time_utc": 1775001600000,
+        "time_precision": "month",
+        "time_basis_source": "explicit",
+        "entities": [
+          "구독료"
+        ]
+      },
+      "candidates": [
+        {
+          "id": "c_aaadb84c54fb",
+          "content": "월 구독료는 29,000원이다.",
+          "modality": "asserted",
+          "time_value": "2025-01",
+          "time_utc": 1735689600000,
+          "time_precision": "month",
+          "valid": true
+        }
+      ],
+      "gold_verdict": "CHANGE",
+      "gold_target_ids": [
+        "c_aaadb84c54fb"
+      ],
+      "gold_evidence_ids": [
+        "s1"
+      ],
+      "gold_effective_time_basis": "proposed",
+      "gold_time_basis_normative": true,
+      "gold_rationale": "A numeric change with a stated effective date; the old price was correct for its period."
+    },
+    {
+      "id": "chg-ja-303",
+      "lang": "ja",
+      "traits": [
+        "role-change"
+      ],
+      "episode": {
+        "id": "ep-chg-ja-303",
+        "time_value": "2026-03-24T08:00:00Z",
+        "time_utc": 1774339200000,
+        "snippets": [
+          {
+            "id": "s1",
+            "speaker": "user",
+            "text": "デプロイは3月23日から火曜日に変更されました。"
+          }
+        ]
+      },
+      "proposed_claim": {
+        "id": "pc-chg-ja-303",
+        "content": "2026年3月23日以降、デプロイは毎週火曜日に行われる。",
+        "modality": "asserted",
+        "time_value": "3月23日",
+        "time_utc": 1774224000000,
+        "time_precision": "day",
+        "time_basis_source": "explicit",
+        "entities": [
+          "デプロイ"
+        ]
+      },
+      "candidates": [
+        {
+          "id": "c_19e4493b3778",
+          "content": "デプロイは毎週金曜日に行われる。",
+          "modality": "asserted",
+          "time_value": "2025-05",
+          "time_utc": 1746057600000,
+          "time_precision": "month",
+          "valid": true
+        }
+      ],
+      "gold_verdict": "CHANGE",
+      "gold_target_ids": [
+        "c_19e4493b3778"
+      ],
+      "gold_evidence_ids": [
+        "s1"
+      ],
+      "gold_effective_time_basis": "proposed",
+      "gold_time_basis_normative": true,
+      "gold_rationale": "The schedule changed from a stated date; the Friday fact stays valid for the earlier range."
+    },
+    {
+      "id": "chg-en-304",
+      "lang": "en",
+      "traits": [
+        "employment-change",
+        "distractor-candidate"
+      ],
+      "episode": {
+        "id": "ep-chg-en-304",
+        "time_value": "2026-03-25T16:10:00Z",
+        "time_utc": 1774455000000,
+        "snippets": [
+          {
+            "id": "s1",
+            "speaker": "user",
+            "text": "Ana left the platform team in March and joined the search team."
+          }
+        ]
+      },
+      "proposed_claim": {
+        "id": "pc-chg-en-304",
+        "content": "Ana joined the search team in March 2026.",
+        "modality": "asserted",
+        "time_value": "March",
+        "time_utc": 1772323200000,
+        "time_precision": "month",
+        "time_basis_source": "explicit",
+        "entities": [
+          "Ana",
+          "search team"
+        ]
+      },
+      "candidates": [
+        {
+          "id": "c_d0e49849212d",
+          "content": "Ana is on the platform team.",
+          "modality": "asserted",
+          "time_value": "2024-05",
+          "time_utc": 1714521600000,
+          "time_precision": "month",
+          "valid": true
+        },
+        {
+          "id": "c_08f0f7a9661c",
+          "content": "Ana speaks Portuguese.",
+          "modality": "asserted",
+          "time_value": "2024-05",
+          "time_utc": 1714521600000,
+          "time_precision": "month",
+          "valid": true
+        }
+      ],
+      "gold_verdict": "CHANGE",
+      "gold_target_ids": [
+        "c_d0e49849212d"
+      ],
+      "gold_evidence_ids": [
+        "s1"
+      ],
+      "gold_effective_time_basis": "proposed",
+      "gold_time_basis_normative": true,
+      "gold_rationale": "Team membership changed in March 2026; the language fact is an unrelated distractor."
+    },
+    {
+      "id": "chg-ko-305",
+      "lang": "ko",
+      "traits": [
+        "device-replacement"
+      ],
+      "episode": {
+        "id": "ep-chg-ko-305",
+        "time_value": "2026-03-26T02:25:00Z",
+        "time_utc": 1774491900000,
+        "snippets": [
+          {
+            "id": "s1",
+            "speaker": "user",
+            "text": "노트북을 새로 샀어요. 이제 램이 64GB입니다."
+          }
+        ]
+      },
+      "proposed_claim": {
+        "id": "pc-chg-ko-305",
+        "content": "사용자의 노트북은 램이 64GB이다.",
+        "modality": "asserted",
+        "time_value": "2026-03-26T02:25:00Z",
+        "time_utc": 1774491900000,
+        "time_precision": "inherited",
+        "time_basis_source": "inherited",
+        "entities": [
+          "사용자",
+          "노트북"
+        ]
+      },
+      "candidates": [
+        {
+          "id": "c_ceeb9304302c",
+          "content": "사용자의 노트북 램은 16GB이다.",
+          "modality": "asserted",
+          "time_value": "2024-11",
+          "time_utc": 1730419200000,
+          "time_precision": "month",
+          "valid": true
+        }
+      ],
+      "gold_verdict": "CHANGE",
+      "gold_target_ids": [
+        "c_ceeb9304302c"
+      ],
+      "gold_evidence_ids": [
+        "s1"
+      ],
+      "gold_effective_time_basis": "proposed",
+      "gold_time_basis_normative": true,
+      "gold_rationale": "A new machine changed the world; the 16GB fact was true for the old one."
+    },
+    {
+      "id": "chg-ja-306",
+      "lang": "ja",
+      "traits": [
+        "region-move"
+      ],
+      "episode": {
+        "id": "ep-chg-ja-306",
+        "time_value": "2026-03-27T09:50:00Z",
+        "time_utc": 1774605000000,
+        "snippets": [
+          {
+            "id": "s1",
+            "speaker": "user",
+            "text": "本番クラスタは2月に大阪リージョンへ移設しました。"
+          }
+        ]
+      },
+      "proposed_claim": {
+        "id": "pc-chg-ja-306",
+        "content": "本番クラスタは2026年2月に大阪リージョンへ移設された。",
+        "modality": "asserted",
+        "time_value": "2月",
+        "time_utc": 1769904000000,
+        "time_precision": "month",
+        "time_basis_source": "explicit",
+        "entities": [
+          "本番クラスタ"
+        ]
+      },
+      "candidates": [
+        {
+          "id": "c_285d2d514754",
+          "content": "本番クラスタは東京リージョンで稼働している。",
+          "modality": "asserted",
+          "time_value": "2023-04",
+          "time_utc": 1680307200000,
+          "time_precision": "month",
+          "valid": true
+        }
+      ],
+      "gold_verdict": "CHANGE",
+      "gold_target_ids": [
+        "c_285d2d514754"
+      ],
+      "gold_evidence_ids": [
+        "s1"
+      ],
+      "gold_effective_time_basis": "proposed",
+      "gold_time_basis_normative": true,
+      "gold_rationale": "The cluster genuinely moved in February 2026; the Tokyo fact held before that."
+    },
+    {
+      "id": "cor-en-401",
+      "lang": "en",
+      "traits": [
+        "explicit-correction",
+        "backdated-time"
+      ],
+      "episode": {
+        "id": "ep-cor-en-401",
+        "time_value": "2026-03-28T11:30:00Z",
+        "time_utc": 1774697400000,
+        "snippets": [
+          {
+            "id": "s1",
+            "speaker": "user",
+            "text": "No, that's wrong — I never moved to Seoul in 2019, it was 2020."
+          },
+          {
+            "id": "s2",
+            "speaker": "user",
+            "text": "Also, remind me to renew the passport."
+          }
+        ]
+      },
+      "proposed_claim": {
+        "id": "pc-cor-en-401",
+        "content": "The user moved to Seoul in 2020, not 2019.",
+        "modality": "asserted",
+        "time_value": "2020",
+        "time_utc": 1577836800000,
+        "time_precision": "year",
+        "time_basis_source": "explicit",
+        "entities": [
+          "user",
+          "Seoul"
+        ]
+      },
+      "candidates": [
+        {
+          "id": "c_8bda5e3a0498",
+          "content": "The user moved to Seoul in 2019.",
+          "modality": "asserted",
+          "time_value": "2019",
+          "time_utc": 1546300800000,
+          "time_precision": "year",
+          "valid": true
+        }
+      ],
+      "gold_verdict": "CORRECTION",
+      "gold_target_ids": [
+        "c_8bda5e3a0498"
+      ],
+      "gold_evidence_ids": [
+        "s1"
+      ],
+      "gold_effective_time_basis": "target",
+      "gold_time_basis_normative": true,
+      "gold_rationale": "Explicit repair by the same speaker: the record was wrong. C.time := B.time, so the corrected fact was never valid (docs/03 §5)."
+    },
+    {
+      "id": "cor-ko-402",
+      "lang": "ko",
+      "traits": [
+        "explicit-correction",
+        "numeric"
+      ],
+      "episode": {
+        "id": "ep-cor-ko-402",
+        "time_value": "2026-03-29T05:15:00Z",
+        "time_utc": 1774761300000,
+        "snippets": [
+          {
+            "id": "s1",
+            "speaker": "user",
+            "text": "정정합니다. 구독료는 29,000원이 아니라 처음부터 32,000원이었어요."
+          }
+        ]
+      },
+      "proposed_claim": {
+        "id": "pc-cor-ko-402",
+        "content": "월 구독료는 처음부터 32,000원이었다.",
+        "modality": "asserted",
+        "time_value": "처음부터",
+        "time_utc": 1735689600000,
+        "time_precision": "month",
+        "time_basis_source": "candidate",
+        "entities": [
+          "구독료"
+        ],
+        "content_context_ids": [
+          "c_b31214f75e9a"
+        ]
+      },
+      "candidates": [
+        {
+          "id": "c_b31214f75e9a",
+          "content": "월 구독료는 29,000원이다.",
+          "modality": "asserted",
+          "time_value": "2025-01",
+          "time_utc": 1735689600000,
+          "time_precision": "month",
+          "valid": true
+        }
+      ],
+      "gold_verdict": "CORRECTION",
+      "gold_target_ids": [
+        "c_b31214f75e9a"
+      ],
+      "gold_evidence_ids": [
+        "s1"
+      ],
+      "gold_effective_time_basis": "target",
+      "gold_time_basis_normative": true,
+      "gold_rationale": "An explicit repair of a number that was never right; the new fact is backdated to the corrected fact's time."
+    },
+    {
+      "id": "cor-ja-403",
+      "lang": "ja",
+      "traits": [
+        "explicit-correction",
+        "misheard-name"
+      ],
+      "episode": {
+        "id": "ep-cor-ja-403",
+        "time_value": "2026-03-30T03:45:00Z",
+        "time_utc": 1774842300000,
+        "snippets": [
+          {
+            "id": "s1",
+            "speaker": "user",
+            "text": "訂正します。リードは田中さんではなく佐藤さんでした。"
+          }
+        ]
+      },
+      "proposed_claim": {
+        "id": "pc-cor-ja-403",
+        "content": "チームのリードは佐藤である（田中ではない）。",
+        "modality": "asserted",
+        "time_value": "2026-03-06",
+        "time_utc": 1772755200000,
+        "time_precision": "day",
+        "time_basis_source": "candidate",
+        "entities": [
+          "佐藤",
+          "田中"
+        ],
+        "content_context_ids": [
+          "c_6a910396872e"
+        ]
+      },
+      "candidates": [
+        {
+          "id": "c_6a910396872e",
+          "content": "チームのリードは田中である。",
+          "modality": "asserted",
+          "time_value": "2026-03-06",
+          "time_utc": 1772755200000,
+          "time_precision": "day",
+          "valid": true
+        }
+      ],
+      "gold_verdict": "CORRECTION",
+      "gold_target_ids": [
+        "c_6a910396872e"
+      ],
+      "gold_evidence_ids": [
+        "s1"
+      ],
+      "gold_effective_time_basis": "target",
+      "gold_time_basis_normative": true,
+      "gold_rationale": "The record named the wrong person from the start; the repair is backdated to that fact's time."
+    },
+    {
+      "id": "cor-en-404",
+      "lang": "en",
+      "traits": [
+        "explicit-correction",
+        "distractor-candidate"
+      ],
+      "episode": {
+        "id": "ep-cor-en-404",
+        "time_value": "2026-03-31T13:20:00Z",
+        "time_utc": 1774963200000,
+        "snippets": [
+          {
+            "id": "s1",
+            "speaker": "user",
+            "text": "Correction: the March 18 outage was 24 minutes, not 42. I misread the dashboard."
+          }
+        ]
+      },
+      "proposed_claim": {
+        "id": "pc-cor-en-404",
+        "content": "The 2026-03-18 outage lasted 24 minutes.",
+        "modality": "asserted",
+        "time_value": "March 18",
+        "time_utc": 1773792000000,
+        "time_precision": "day",
+        "time_basis_source": "explicit",
+        "entities": [
+          "outage"
+        ]
+      },
+      "candidates": [
+        {
+          "id": "c_b2689ca22208",
+          "content": "The 2026-03-18 outage lasted 42 minutes.",
+          "modality": "asserted",
+          "time_value": "2026-03-18",
+          "time_utc": 1773792000000,
+          "time_precision": "day",
+          "valid": true
+        },
+        {
+          "id": "c_4135b65611f9",
+          "content": "The 2026-03-18 outage was caused by the DNS resolver.",
+          "modality": "asserted",
+          "time_value": "2026-03-18",
+          "time_utc": 1773792000000,
+          "time_precision": "day",
+          "valid": true
+        }
+      ],
+      "gold_verdict": "CORRECTION",
+      "gold_target_ids": [
+        "c_b2689ca22208"
+      ],
+      "gold_evidence_ids": [
+        "s1"
+      ],
+      "gold_effective_time_basis": "target",
+      "gold_time_basis_normative": true,
+      "gold_rationale": "Only the duration was wrong; the cause fact is untouched and must not be a target."
+    },
+    {
+      "id": "cor-ko-405",
+      "lang": "ko",
+      "traits": [
+        "explicit-correction",
+        "modality-repair"
+      ],
+      "episode": {
+        "id": "ep-cor-ko-405",
+        "time_value": "2026-04-01T07:10:00Z",
+        "time_utc": 1775027400000,
+        "snippets": [
+          {
+            "id": "s1",
+            "speaker": "user",
+            "text": "아까 제가 잘못 말했어요. 이사한 게 아니라 이사할 계획이라고 했어야 했어요."
+          }
+        ]
+      },
+      "proposed_claim": {
+        "id": "pc-cor-ko-405",
+        "content": "사용자는 이사할 계획이다(이미 이사한 것이 아니다).",
+        "modality": "intended",
+        "time_value": "2026-03-26",
+        "time_utc": 1774483200000,
+        "time_precision": "day",
+        "time_basis_source": "candidate",
+        "entities": [
+          "사용자"
+        ],
+        "content_context_ids": [
+          "c_75c4f90de309"
+        ]
+      },
+      "candidates": [
+        {
+          "id": "c_75c4f90de309",
+          "content": "사용자는 이사했다.",
+          "modality": "asserted",
+          "time_value": "2026-03-26",
+          "time_utc": 1774483200000,
+          "time_precision": "day",
+          "valid": true
+        }
+      ],
+      "gold_verdict": "CORRECTION",
+      "gold_target_ids": [
+        "c_75c4f90de309"
+      ],
+      "gold_evidence_ids": [
+        "s1"
+      ],
+      "gold_effective_time_basis": "target",
+      "gold_time_basis_normative": true,
+      "gold_rationale": "The speaker repairs their own speech act: the asserted move was never true; the plan is backdated to the corrected fact's time."
+    },
+    {
+      "id": "cor-ja-406",
+      "lang": "ja",
+      "traits": [
+        "explicit-correction",
+        "reverses-prior-invalidation"
+      ],
+      "episode": {
+        "id": "ep-cor-ja-406",
+        "time_value": "2026-04-02T02:00:00Z",
+        "time_utc": 1775095200000,
+        "snippets": [
+          {
+            "id": "s1",
+            "speaker": "user",
+            "text": "先ほどの訂正は誤りでした。デプロイはやはり毎週金曜日のままです。"
+          }
+        ]
+      },
+      "proposed_claim": {
+        "id": "pc-cor-ja-406",
+        "content": "デプロイは毎週金曜日のままである（火曜日への変更は誤りだった）。",
+        "modality": "asserted",
+        "time_value": "2026-03-23",
+        "time_utc": 1774224000000,
+        "time_precision": "day",
+        "time_basis_source": "candidate",
+        "entities": [
+          "デプロイ"
+        ],
+        "content_context_ids": [
+          "c_ab7d4a13aaec"
+        ]
+      },
+      "candidates": [
+        {
+          "id": "c_ab7d4a13aaec",
+          "content": "2026年3月23日以降、デプロイは毎週火曜日に行われる。",
+          "modality": "asserted",
+          "time_value": "2026-03-23",
+          "time_utc": 1774224000000,
+          "time_precision": "day",
+          "valid": true,
+          "invalidates": [
+            "c_03c2b79eb8fc"
+          ]
+        },
+        {
+          "id": "c_03c2b79eb8fc",
+          "content": "デプロイは毎週金曜日に行われる。",
+          "modality": "asserted",
+          "time_value": "2025-05",
+          "time_utc": 1746057600000,
+          "time_precision": "month",
+          "valid": false
+        }
+      ],
+      "gold_verdict": "CORRECTION",
+      "gold_target_ids": [
+        "c_ab7d4a13aaec"
+      ],
+      "gold_evidence_ids": [
+        "s1"
+      ],
+      "gold_effective_time_basis": "target",
+      "gold_time_basis_normative": true,
+      "gold_rationale": "The Tuesday record was wrong and is corrected at its own time; only it is a target. The Friday fact stays invalid: INVALIDATES is non-recursive and no re-extraction or new generation restores it. Reinstating it requires an explicit replacement fact derived from this correction's source authority (docs/03 §5), which is a separate write, not an extra target here."
+    },
+    {
+      "id": "unr-en-501",
+      "lang": "en",
+      "traits": [
+        "authority-ambiguity",
+        "no-latest-wins"
+      ],
+      "episode": {
+        "id": "ep-unr-en-501",
+        "time_value": "2026-04-03T15:00:00Z",
+        "time_utc": 1775228400000,
+        "snippets": [
+          {
+            "id": "s1",
+            "speaker": "user",
+            "text": "Ops says the migration ran on Tuesday."
+          },
+          {
+            "id": "s2",
+            "speaker": "user",
+            "text": "I have not checked the audit log myself."
+          }
+        ]
+      },
+      "proposed_claim": {
+        "id": "pc-unr-en-501",
+        "content": "Ops reported that the migration ran on Tuesday.",
+        "modality": "reported",
+        "time_value": "Tuesday",
+        "time_utc": 1774915200000,
+        "time_precision": "day",
+        "time_basis_source": "relative",
+        "entities": [
+          "migration",
+          "Ops"
+        ]
+      },
+      "candidates": [
+        {
+          "id": "c_cddbb0e526ab",
+          "content": "The release engineer reported that the migration ran on Wednesday.",
+          "modality": "reported",
+          "time_value": "2026-04-01",
+          "time_utc": 1775001600000,
+          "time_precision": "day",
+          "valid": true
+        }
+      ],
+      "gold_verdict": "UNRESOLVED_CONTRADICTION",
+      "gold_target_ids": [
+        "c_cddbb0e526ab"
+      ],
+      "gold_evidence_ids": [
+        "s1"
+      ],
+      "gold_effective_time_basis": "proposed",
+      "gold_time_basis_normative": false,
+      "gold_rationale": "Two reports from different authorities disagree on the date and nothing in the text ranks one authority over the other; no latest-wins (D46). Resolving this would be a false invalidation, and nothing downstream would undo it automatically."
+    },
+    {
+      "id": "unr-ko-502",
+      "lang": "ko",
+      "traits": [
+        "scope-ambiguity"
+      ],
+      "episode": {
+        "id": "ep-unr-ko-502",
+        "time_value": "2026-04-04T04:20:00Z",
+        "time_utc": 1775276400000,
+        "snippets": [
+          {
+            "id": "s1",
+            "speaker": "user",
+            "text": "사무실은 주 4일 근무예요."
+          }
+        ]
+      },
+      "proposed_claim": {
+        "id": "pc-unr-ko-502",
+        "content": "사무실은 주 4일 근무제이다.",
+        "modality": "asserted",
+        "time_value": "2026-04-04T04:20:00Z",
+        "time_utc": 1775276400000,
+        "time_precision": "inherited",
+        "time_basis_source": "inherited",
+        "entities": [
+          "사무실"
+        ]
+      },
+      "candidates": [
+        {
+          "id": "c_a7cdc02445bd",
+          "content": "회사는 주 5일 근무제이다.",
+          "modality": "asserted",
+          "time_value": "2026-04-04",
+          "time_utc": 1775260800000,
+          "time_precision": "day",
+          "valid": true
+        }
+      ],
+      "gold_verdict": "UNRESOLVED_CONTRADICTION",
+      "gold_target_ids": [
+        "c_a7cdc02445bd"
+      ],
+      "gold_evidence_ids": [
+        "s1"
+      ],
+      "gold_effective_time_basis": "proposed",
+      "gold_time_basis_normative": false,
+      "gold_rationale": "Office scope versus company scope at the same time; the text does not say whether one overrides the other."
+    },
+    {
+      "id": "unr-ja-503",
+      "lang": "ja",
+      "traits": [
+        "modality-ambiguity"
+      ],
+      "episode": {
+        "id": "ep-unr-ja-503",
+        "time_value": "2026-04-05T06:35:00Z",
+        "time_utc": 1775370900000,
+        "snippets": [
+          {
+            "id": "s1",
+            "speaker": "user",
+            "text": "たぶん本番はまだ東京のままだと思います。"
+          }
+        ]
+      },
+      "proposed_claim": {
+        "id": "pc-unr-ja-503",
+        "content": "本番クラスタはまだ東京リージョンにある（と話者は考えている）。",
+        "modality": "hedged",
+        "time_value": "2026-04-05T06:35:00Z",
+        "time_utc": 1775370900000,
+        "time_precision": "inherited",
+        "time_basis_source": "inherited",
+        "entities": [
+          "本番クラスタ"
+        ]
+      },
+      "candidates": [
+        {
+          "id": "c_a8404e9c2aae",
+          "content": "本番クラスタは2026年2月に大阪リージョンへ移設された。",
+          "modality": "asserted",
+          "time_value": "2026-02",
+          "time_utc": 1769904000000,
+          "time_precision": "month",
+          "valid": true
+        }
+      ],
+      "gold_verdict": "UNRESOLVED_CONTRADICTION",
+      "gold_target_ids": [
+        "c_a8404e9c2aae"
+      ],
+      "gold_evidence_ids": [
+        "s1"
+      ],
+      "gold_effective_time_basis": "proposed",
+      "gold_time_basis_normative": false,
+      "gold_rationale": "A hedge conflicts with an assertion about the same current state; a hedge is neither promoted to a fact nor dropped, and it cannot invalidate the assertion."
+    },
+    {
+      "id": "unr-en-504",
+      "lang": "en",
+      "traits": [
+        "numeric-conflict-no-basis",
+        "two-candidates"
+      ],
+      "episode": {
+        "id": "ep-unr-en-504",
+        "time_value": "2026-04-06T09:45:00Z",
+        "time_utc": 1775468700000,
+        "snippets": [
+          {
+            "id": "s1",
+            "speaker": "user",
+            "text": "The dashboard shows 12 active nodes."
+          }
+        ]
+      },
+      "proposed_claim": {
+        "id": "pc-unr-en-504",
+        "content": "The cluster has 12 active nodes.",
+        "modality": "asserted",
+        "time_value": "2026-04-06T09:45:00Z",
+        "time_utc": 1775468700000,
+        "time_precision": "inherited",
+        "time_basis_source": "inherited",
+        "entities": [
+          "cluster"
+        ]
+      },
+      "candidates": [
+        {
+          "id": "c_db3ba7bc99bb",
+          "content": "The cluster has 9 active nodes.",
+          "modality": "asserted",
+          "time_value": "2026-04-06",
+          "time_utc": 1775433600000,
+          "time_precision": "day",
+          "valid": true
+        },
+        {
+          "id": "c_a7c6e03ed7ac",
+          "content": "The cluster runs in ap-northeast-2.",
+          "modality": "asserted",
+          "time_value": "2026-01",
+          "time_utc": 1767225600000,
+          "time_precision": "month",
+          "valid": true
+        }
+      ],
+      "gold_verdict": "UNRESOLVED_CONTRADICTION",
+      "gold_target_ids": [
+        "c_db3ba7bc99bb"
+      ],
+      "gold_evidence_ids": [
+        "s1"
+      ],
+      "gold_effective_time_basis": "proposed",
+      "gold_time_basis_normative": false,
+      "gold_rationale": "Same day, same scope, two different counts, and no statement that the count changed or that the earlier one was wrong."
+    },
+    {
+      "id": "unr-ko-505",
+      "lang": "ko",
+      "traits": [
+        "speaker-conflict",
+        "authority-ambiguity"
+      ],
+      "episode": {
+        "id": "ep-unr-ko-505",
+        "time_value": "2026-04-07T01:55:00Z",
+        "time_utc": 1775526900000,
+        "snippets": [
+          {
+            "id": "s1",
+            "speaker": "user",
+            "text": "지현 씨는 계약이 이미 끝났다고 하네요."
+          }
+        ]
+      },
+      "proposed_claim": {
+        "id": "pc-unr-ko-505",
+        "content": "지현은 계약이 이미 종료되었다고 말했다.",
+        "modality": "reported",
+        "time_value": "2026-04-07T01:55:00Z",
+        "time_utc": 1775526900000,
+        "time_precision": "inherited",
+        "time_basis_source": "inherited",
+        "entities": [
+          "지현",
+          "계약"
+        ]
+      },
+      "candidates": [
+        {
+          "id": "c_ef7792a41d73",
+          "content": "민수는 계약이 6월까지 유효하다고 말했다.",
+          "modality": "reported",
+          "time_value": "2026-04-07",
+          "time_utc": 1775520000000,
+          "time_precision": "day",
+          "valid": true
+        }
+      ],
+      "gold_verdict": "UNRESOLVED_CONTRADICTION",
+      "gold_target_ids": [
+        "c_ef7792a41d73"
+      ],
+      "gold_evidence_ids": [
+        "s1"
+      ],
+      "gold_effective_time_basis": "proposed",
+      "gold_time_basis_normative": false,
+      "gold_rationale": "Two attributed reports disagree on the same day and neither speaker is marked authoritative, so the echo of one report cannot settle the other. Picking a winner is a false invalidation that only an explicit later correction could repair."
+    },
+    {
+      "id": "unr-ja-506",
+      "lang": "ja",
+      "traits": [
+        "time-basis-ambiguity"
+      ],
+      "episode": {
+        "id": "ep-unr-ja-506",
+        "time_value": "2026-04-08T08:05:00Z",
+        "time_utc": 1775635500000,
+        "snippets": [
+          {
+            "id": "s1",
+            "speaker": "user",
+            "text": "契約金額は500万円だったはずです。いつの時点かは覚えていません。"
+          }
+        ]
+      },
+      "proposed_claim": {
+        "id": "pc-unr-ja-506",
+        "content": "契約金額は500万円である（時点は不明）。",
+        "modality": "hedged",
+        "time_value": "2026-04-08T08:05:00Z",
+        "time_utc": 1775635500000,
+        "time_precision": "inherited",
+        "time_basis_source": "inherited",
+        "entities": [
+          "契約"
+        ]
+      },
+      "candidates": [
+        {
+          "id": "c_503f876c4736",
+          "content": "契約金額は800万円である。",
+          "modality": "asserted",
+          "time_value": "2025-07",
+          "time_utc": 1751328000000,
+          "time_precision": "month",
+          "valid": true
+        }
+      ],
+      "gold_verdict": "UNRESOLVED_CONTRADICTION",
+      "gold_target_ids": [
+        "c_503f876c4736"
+      ],
+      "gold_evidence_ids": [
+        "s1"
+      ],
+      "gold_effective_time_basis": "proposed",
+      "gold_time_basis_normative": false,
+      "gold_rationale": "The speaker cannot place the amount in time, so neither a change nor a correction can be established; the conflict stands as CONTRASTS."
+    }
+  ],
+  "claim_time_note": "Adjudication consumes pre-extracted claims. proposed_claim.time_value / time_utc / time_precision are SUPPLIED upstream normalization (docs/03 §2 already applied by the extraction step), not gold for the adjudicator to re-derive, and the adjudicator is never scored on them. time_value keeps the original expression when the snippet is relative; time_precision follows docs/03 §2 (explicit as given, relative lowered, none = inherited). proposed_claim.time_basis_source names where the supplied time came from: explicit (stated in the snippet), relative (computed against the episode time), inherited (no time reference in the snippet), candidate (anchored on a supplied candidate fact's time).",
+  "content_context_note": "proposed_claim.content is self-contained per docs/02 §5 L1. Where a claim's wording relies on a supplied candidate rather than on its own snippet, content_context_ids names those candidate ids so the label source is explicit and no unsupported precision is smuggled into the gold.",
+  "time_basis_note": "effective_time_basis is a SELECTION field in the model's output schema: which supplied time the written fact would take, not a normative stored time and not a re-derivation of docs/03 §2. It is scored strictly only where docs/03 §5 pins it: CORRECTION => target (C.time := B.time) and CHANGE => proposed (C.time is the event's own time). For NEW, DUPLICATE_OCCURRENCE, ELABORATION and UNRESOLVED_CONTRADICTION the docs pin no basis beyond ordinary time resolution, so gold_time_basis_normative is false and a mismatch is reported as advisory only, never as a scored mode/time error. The schema permits null (no fact would be written); no case invents a temporal semantic that the docs do not state.",
+  "candidate_id_note": "Candidate ids are opaque and deterministic (c_ + 12 hex of sha256 over a domain-separated label). They carry no label, language or ordering signal, so nothing in the model payload hints at the gold verdict. Snippet ids stay s1..sN. Referential identity is preserved: gold_target_ids, candidates[].invalidates and proposed_claim.content_context_ids point at the same candidates as before."
+}
