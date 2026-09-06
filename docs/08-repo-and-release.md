@@ -20,8 +20,8 @@ only**.
 
 ## Monorepo (bun workspace)
 
-Target layout. Today only `protocol` and `core` exist; the rest is created as
-the roadmap reaches it (docs/09).
+Target layout. Today only `protocol`, `core` and `backfill` (source
+adapters) exist; the rest is created as the roadmap reaches it (docs/09).
 
 ```text
 anamnesis/
@@ -33,8 +33,8 @@ anamnesis/
 │   │   ├── schemas/*.schema.json   # exported artifacts (committed)
 │   │   └── scripts/export-schemas.ts
 │   ├── core/                   # Neo4j schema, write path, idempotency, generations, objects/, spool (docs/01–02)
-│   ├── dynamics/               # pure functions: R(t,S), S update, replay, CSR PPR, RRF, ordering conventions (docs/04–06). No Neo4j dependency
-│   ├── recall/                 # candidates, seeds, envelope queries, assembly, degradation ladder (docs/05)
+│   ├── dynamics/               # pure functions: R(t,S), S update, replay, utility U, CSR PPR, RRF, budget packing, ordering conventions (docs/04–06). No Neo4j dependency
+│   ├── recall/                 # candidates, seeds, envelope queries, policy filter, conflict bundles, assembly, receipts, degradation ladder (docs/05)
 │   ├── daemon/                 # anamnesisd: UDS JSON-RPC, write queue, Outbox worker, dreaming schedule
 │   ├── client/                 # socket client + daemon spawn/discovery
 │   └── cli/                    # bin "anamnesis" — daemon ops only (up/down/status/verify/gen/gc/dream/bench/backup/restore)
@@ -42,8 +42,11 @@ anamnesis/
 ```
 
 Harnesses — whatever injects or retrieves text — live in separate repos owned
-by the operator and attach over the UDS RPC contract. `remember`/`recall` are API-only; the CLI never
-wraps them (D39).
+by the operator and attach over the UDS RPC contract. `remember`/`recall`,
+`commit`, `policy.set` and `policy.revoke` are API-only; the CLI never wraps
+them (D39, D43). `gc` has `--objects`, `--derived` and `--embedding` modes and
+nothing else: there is no `gc --erase`, because policy suppresses and never
+erases (D43).
 
 `dynamics` having no Neo4j dependency is what makes the CI gates (docs/07 §6)
 work — forgetting, PPR and ordering fixtures run without a container.
@@ -66,6 +69,13 @@ artifacts; CI is the drift gate).
 - **Floating point**: PPR in `dynamics` uses only `+ × ÷` and is
   bit-reproducible. Tests of mass and RRF, which use `Math.exp/pow`, carry a
   1e-12 tolerance (docs/06 §7).
+- **Tokenizers are optional, pinned dependencies.** A `tokens` budget is
+  accepted only when the named `tokenizer_id` is installed and pinned by
+  version or digest; an unknown id is rejected. There is no bytes/4 fallback
+  and no estimate of any kind (D44). `utf8_bytes` and `unicode_scalars`
+  need nothing installed.
+- **GDS is pinned.** Validation and bench containers use GDS 2.13.12. No
+  claim in docs/07 is made about GDS master or "latest".
 
 ## Distribution
 
@@ -100,8 +110,8 @@ artifacts; CI is the drift gate).
 ```text
 bun install → typecheck (tsc) → bun test              (linux + macos, no container)
 contract: bun run schemas → git diff --exit-code
-dynamics gates: forgetting fixtures · PPR convergence/conservation/determinism · RRF invariance · ordering conventions
-integration: Neo4j container (service) → core/recall tests
+dynamics gates: forgetting fixtures · utility attribution (Σ w_e = 1) · budget packing exactness · PPR convergence/conservation/determinism · RRF invariance · ordering conventions
+integration: Neo4j container (service) → core/recall tests · policy suppression fixtures · receipt exact-once fixtures
 gds-solver: Neo4j+GDS container → 20 synthetic solver validations               (docs/07 §2)
 ```
 
@@ -127,7 +137,11 @@ solver validation (real dumps) · envelope validation overlap@20 · health repor
 script). The daemon–client protocol is locked, so independent versioning is
 over-engineering — they always ship together. Calibration constants
 (`config.jsonc`) carry their own version tag (docs/04 §9) — they may change
-independently of the code version.
+independently of the code version. Three more versions are recorded on data,
+not on packages: the `m₀` prior/calibration version on each derived
+generation (a prior change is a new generation, never a rewrite), the
+`tokenizer_id` version or digest on each receipt that used a token budget,
+and the policy revision on each receipt (D44, D45, D47).
 
 ## Naming
 
@@ -144,3 +158,5 @@ npm `anamnesis` is taken (an unrelated v1.2.3). Plan:
 - License: MIT.
 - Minimum before commit: `git diff --check`, tsc, bun test.
 - Any write outside the SET/DELETE list in docs/01 §8 is rejected in review.
+- No test pins prose. Tests assert machine-consumed values: parsed fields,
+  JSON examples, numeric fixtures, link targets.

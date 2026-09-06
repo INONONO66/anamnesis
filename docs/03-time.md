@@ -1,13 +1,15 @@
 # 03 — Time
 
-The only stored time is **event time**. "When the system learned it"
-(transaction time) is not stored. `snapshot(T)` therefore means "what the
-world was like at T", not "what the system knew at T"
+The semantic time axis is **event time**. Operational server times are stored
+for ingestion, Hits, policy events and receipts, but there is no bitemporal
+transaction-time validity interval. `snapshot(T)` therefore means "what the
+record currently says the world was like at T", not "what the system knew at T"
 ([10-decision-log](10-decision-log.md) D4).
 
 ## 1. Stored time
 
-Only Episode and Fact carry a time.
+Only Episode and Fact carry a semantic event time. Control Episode event times
+record command acceptance and are not selectable historical memory content.
 
 | Property | Meaning |
 |---|---|
@@ -51,6 +53,12 @@ Entity, Community and Link it is **derived**.
   visible(Link l, T)      = visible_gen(l) && visible(l.from, T) && visible(l.to, T)
 ```
 
+These are temporal/generation predicates only. Ordinary serving additionally
+requires `allowed_now(x)` under the current pinned `policy_revision` (D43).
+Policy/control Episodes and RecallReceipt records are never memory candidates
+or conductors. `T` cannot restore a currently denied original or derived item;
+confidence and low mass cannot substitute for policy/validity checks.
+
 `visible_gen` is defined in [01-storage](01-storage.md) §4. Reasons:
 
 - `Entity.visible_from_utc` is a rebuildable cache: the minimum visible time
@@ -59,25 +67,62 @@ Entity, Community and Link it is **derived**.
 - A Community generation captures each member's visibility threshold on
   HAS_MEMBER. For `k=max(1,ceil(0.5·member_count))`,
   `Community.visible_from_utc` is the k-th smallest captured threshold. The
-  majority rule is therefore one property comparison at recall, not an
-  unbounded member count.
+  half-members threshold is therefore one property comparison at recall, not an
+  unbounded member count. Empty communities are not created (there is no
+  first member threshold for zero members).
 - A Link exists iff both ends exist. Links have no time of their own.
+
+Cached thresholds do not prove policy permission. An Entity needs a current
+allowed supporting mention that is itself visible at `T`; an affected
+Community/profile/synthesis must be suppressed until rebuilt from allowed
+supports. Current policy gates endpoints and link content before conduction,
+even when structural caches are stale.
+
+The Entity witness is one more property comparison, not a per-request scan:
+
+```text
+  earliest_allowed_from(n, g_e, policy_revision)
+    = min { e.time_utc : (e)-[:MENTIONS]->(n), e.generation ∈ {none, g_e},
+            allowed(e, policy_revision) }        null if the set is empty
+
+  witnessed(n, T) = earliest_allowed_from(n, g_e, policy_revision) <= T
+```
+
+`EntityWitness {generation, policy_revision, entity_id, earliest_allowed_from}`
+rows are rebuilt for the active generation whenever `policy_revision`
+advances, as part of the policy barrier's reconciliation, and are keyed by
+`(generation, policy_revision)` only. There is no cache keyed by an arbitrary
+request `T`; the request supplies `T` and compares. A null or missing row,
+or an unavailable cache, excludes the Entity from candidates, seeds and
+conduction; it never falls back to `visible_from_utc` alone (docs/01 §3.2,
+§7).
 
 ### The DERIVED_FROM exception — provenance only
 
 A backdated Fact (the move in §1) is visible at T = 2020 while its source
 Episode (2026) is not. Two rules diverge here.
 
-- **Provenance assembly**: the source Episode **is attached.** When the user
-  asks "where did this fact come from" there must always be an answer. It is
-  marked `provenance[].visible_at_T = false`.
+- **Provenance assembly**: an allowed source Episode **is attached.** Its
+  later event time alone is not a reason to hide the citation. It is
+  marked `provenance.derived_from[].visible_at_T = false`.
 - **PPR conduction**: `visible(Link)` is false, so it **does not conduct.**
   Spreading inside snapshot(T) never leaks into future Episodes.
+
+The exception is temporal, never a policy bypass. A denied source cannot
+support a visible derived result; reject the whole affected Fact, rather than
+dropping its denied source from attribution. Suppress denied companion and
+superseded text too; a hidden conflict may produce only a redacted warning,
+without its text, ID or hidden-peer count. The serving publication barrier
+revalidates policy after assembly (docs/02 §1).
 
 ## 4. valid(x, T) — non-recursive INVALIDATES
 
 ```text
-  source_live(e, T) = ¬∃ (y)-[:INVALIDATES]->(e) : y.time_utc <= T
+  invalidated(target, generation, T)
+    = ∃ retained INVALIDATES edge OR replayed InvalidationMarker for target:
+        owning/mapped generation matches && effective_time_utc <= T
+
+  source_live(e, T) = !invalidated(e.id, 0, T)
 
   valid(Episode e, T) = visible(e, T) && source_live(e, T)
 
@@ -87,8 +132,7 @@ Episode (2026) is not. Two rules diverge here.
   valid(Fact f, T) = visible(f, T)
                    && ∃ e ∈ f.source_episode_ids : source_live(e, T)
                    && support_valid(f, T)
-                   && ¬∃ (y)-[:INVALIDATES]->(f) :
-                          y.time_utc <= T && visible_gen(y) && visible_gen(link)
+                   && !invalidated(f.id, f.generation, T)
 ```
 
 An invalidator Fact's own validity is **not consulted.** "Does the original come back when its
@@ -101,21 +145,64 @@ visible at T. A Fact backdated to 2019 from an Episode uttered in 2026 remains
 visible in a 2020 world snapshot under the provenance exception, while a 2027
 revision of that Episode can stop the Fact from 2027 onward.
 
-Both existential INVALIDATES checks compile to a composite relationship-index
-seek on `(target_id, generation?, effective_time_utc, id)` with
-`effective_time_utc <= T`, ordered by time/id and `LIMIT 1`; validity never
-expands an unbounded incoming adjacency list.
+Both existential INVALIDATES checks use bounded index seeks: the existing
+relationship index `(target_id, generation?, effective_time_utc, id)` and the
+marker index `(target_id, generation, effective_time_utc, evidence_id)`, with
+`effective_time_utc <= T`, ordered by time/ID and `LIMIT 1` each. Either match
+invalidates; duplicate edge/marker evidence does not change the predicate.
+Validity never expands an unbounded incoming adjacency list. Complete marker
+coverage is required before serving a reconciled generation.
 
 Synthesis support is one bounded level: `support_fact_ids` may reference only
 non-synthesis Facts. If any support becomes invalid, the synthesis becomes
 invalid and the next dreaming run creates a replacement; it is never
 resurrected recursively.
 
+Temporal invalidation is not suppression, within or across generations. An
+established INVALIDATES decision continues to determine validity when its
+source is denied: preserve content-free target/effective-time/generation
+markers in the non-serving view, rebuilt from retained authority (docs/01 §4).
+No marker or denied-source text/IDs are returned or conducted. Policy
+reconciliation is not semantic re-extraction and cannot remove these outcomes.
+Activation requires preservation at every supported T or fails closed. This
+keeps invalidation non-recursive and prevents suppression-induced resurrection.
+Independently, `allowed_now(f)` fails if any materialized Episode authority or
+required support Fact is denied. A policy revoke cannot manufacture outputs
+that were never extracted while denied (D43).
+
+Boundary fixture (A and B have live original authority; no other invalidation):
+
+```text
+  A.time = 10; B.time = 20; B -[:INVALIDATES]-> A
+  deny B; reconcile generation 42 -> 43
+  marker(target = A_in_43, generation = 43, effective_time_utc = 20)
+
+  T                 9       10       19       20       21
+  valid(A), before  false   true     true     false    false
+  valid(A), after   false   true     true     false    false
+```
+
+B's content is suppressed after the deny; its invalidating effect is not.
+Revoking the deny does not remove the marker. Omitting the marker or failing
+to reconstruct its target mapping rejects activation rather than making A
+valid at T=20. Every interval and equality boundary must agree, not just the
+five illustrative T values.
+
 - INVALIDATES is meaningful only as `Fact → Fact` and `Episode → Episode`
   (revisions).
-- CONTRASTS has no effect on validity. Both Facts stay valid and appear
-  together in recall results as a contradiction — resolution is left to the
-  user or to a later utterance.
+- CONTRASTS has no effect on validity and elects no winner by confidence or
+  recency. After primary ranking, assembly completes up to four valid,
+  non-denied peers per primary through indexed adjacency with limit+1,
+  deterministic peer-ID order, even if peers were not retrieval candidates.
+  The scan reads at most 65 raw `CONTRASTS` rows: it inspects the first 64
+  with bounded visibility, validity and policy checks and treats the 65th
+  only as a has-more sentinel. `conflict_total` is the exact eligible count
+  only when the scan exhausted the rows within 64 and found at most 4
+  eligible peers; otherwise it is `null`, and `conflict_truncated=true`
+  says the bundle is explicitly incomplete. A hidden peer yields only a
+  redacted indicator, with no ID, text or hidden count. Budget admission includes the full permitted companion
+  text and mandatory warnings, otherwise skips the primary bundle (D44, D46;
+  docs/05). There is no unconditional both-sides guarantee beyond this bound.
 
 ## 5. Change vs correction
 
@@ -146,17 +233,23 @@ If B invalidated A, B turned out to be wrong, and A is still true:
   before               A  ◀──INVALIDATES── B
   correction C arrives A  ◀──INVALIDATES── B  ◀──INVALIDATES── C(time := B.time)
                        A is still invalid (non-recursive — the A ← B edge stands even though B is invalid)
-  create replacement   A′ {content = A.content, time = A.time, sub_kind = A.sub_kind}
+  create replacement   A′ {content = A.content, time = A.time,
+                           sub_kind = A.sub_kind, modality = A.modality}
                        A′ ─DERIVED_FROM─▶ A,  A′ ─DERIVED_FROM─▶ C     (provenance)
                        A′.source_episode_ids = [C's correction Episode]
                            + deterministic top 15 of authority(A)
                        A′ ─INVALIDATES──▶ A                             (A leaves for the whole range)
 ```
 
-Result: for every T ≥ A.time, A′ is valid and A and B are invalid. No
-duplicate exposure, and the validity definition stays one hop. The cost is one
-Fact. A′'s mass is computed from its bounded materialized source Episodes, so
-the hit history A accumulated carries over to A′
+Absent later invalidation or denial, A′ is valid for T ≥ A.time, and A is
+invalid over that range; B is invalid for T ≥ B.time and not yet visible before
+it. The replacement protocol itself adds no duplicate current exposure, and
+the validity definition stays one hop. A′ retains the same meaning-bearing
+entity/property bindings; its confidence is judged for source-faithfulness and
+its immutable `m0` uses the pinned generation priors. Its accessibility is
+computed from its bounded Episode authority, so retained source histories
+carry over, while a truncated source does not. This is Episode-shared
+accessibility, not a per-Fact reinforcement guarantee
 ([04-forgetting](04-forgetting.md) §3 — one of the reasons Hits attach to
 Episodes).
 
@@ -176,18 +269,27 @@ switch, re-extraction and correction. What the user of a personal memory
 engine actually asks is "what was the world like then"; "what did the system
 know then" is a debugging question.
 
-Debugging has partial substitutes: `Episode.ingested_at`, generation integers,
-Hit.t (server time). If "the recall result as of revision N" ever becomes
-necessary, a revision log on Meta is enough and the schema does not change.
+Debugging uses `Episode.ingested_at`, generation integers, Hit server time and
+durable RecallReceipt impressions (D45, D47). A structural revision log alone
+cannot reconstruct a result: policy/config versions, selected channels,
+candidate/index/cache state, degradation decisions, mass/utility reads, `now`
+and exact output budgeting also matter. Receipts capture bounded source/result
+snapshots and ranking evidence, not a complete historical database. Their
+explicit retention window bounds feedback acceptance, not semantic validity;
+missing or expired feedback is never a negative utility label. Current policy
+still governs ordinary historical recall and feedback after a restart.
 
 ## 7. Cypher sketch
 
-Candidate search and envelope expansion put visible(T) **in the WHERE
-clause**. Generation-scoped indexes exclude hidden generations before top-k;
+Candidate search and envelope expansion apply visible(T) plus current policy
+before admitting seeds or conductors. Generation-scoped indexes exclude hidden
+generations before top-k;
 materialized visibility thresholds avoid nested graph scans.
 
 ```cypher
+// Temporal candidate subquery, not a complete serving query.
 // The application selects this validated index from pinned active generation 43.
+// Apply current policy to every returned row before seed admission.
 CALL db.index.vector.queryNodes('vec_fact_g43_bge_m3_1024', 256, $q)
 YIELD node AS f, score
 WHERE f:Fact
@@ -198,13 +300,19 @@ LIMIT 64
 ```
 
 ```cypher
-// Entity visibility (neighbor filter during envelope expansion)
-WITH n
+// Entity temporal visibility plus the current-policy witness (docs/03 §3).
+MATCH (n:Entity {id: $entity_id})
 WHERE n.generation = $g_e AND n.visible_from_utc <= $T
+MATCH (w:EntityWitness {generation: $g_e, policy_revision: $policy_revision,
+                        entity_id: n.id})
+WHERE w.earliest_allowed_from IS NOT NULL AND w.earliest_allowed_from <= $T
+RETURN n.id
 ```
 
-valid(T) is not applied at the candidate or envelope stage — an invalid Fact
-is still a conductor (the Entities connected through it are still relevant).
+valid(T) is not applied at the candidate or envelope stage — an invalid but
+non-denied Fact may still conduct (the Entities connected through it can
+remain relevant). A denied Fact never conducts, regardless of validity.
 valid is applied **only at result assembly**; invalid Facts drop out of the
-results but are exposed through the INVALIDATES chain in `provenance`
+results but allowed invalidated Facts may appear in bounded supersedes
+provenance, never through unbounded recursive traversal
 ([05-recall](05-recall.md) §6).

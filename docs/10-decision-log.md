@@ -4,6 +4,13 @@ Decisions from the September 2026 design review. Each entry is **decision /
 alternative / reason**. "The proposal" is the twelve-section design text
 under review; "the previous drafts" are the retired docs/00–11 (2026-08).
 
+D43 through D47 come from the design finalization of 2026-09 (baseline
+bc372ca). Where they supersede an earlier entry, the earlier entry stays in
+place with a **Status** line naming what changed and what still holds. The
+original rationale is kept so the reasoning can be audited, not to be read as
+current policy. Affected: D14 (clarified), D27 and D40 (outcome no longer
+touches `S`), D41 (clarified), D42 (span and intra-Episode rules narrowed).
+
 ## D0 — main retired, anamnesis2 is the mainline, previous drafts retired
 
 **Decision**: `main` (Rust, SQLite, trace-native roadmap) is retired. The
@@ -164,11 +171,15 @@ envelope-quality cost in docs/07 rather than a hidden model mismatch.
 
 **Alternative**: the proposal — 20 fixed iterations.
 
-**Reason**: at α = 0.85, 20 iterations give `0.85^20 ≈ 0.039` — the residual
-cannot reach 1e-4, and the error bound is set by the final residual, not by
-the iteration count. 64 is a cap that guarantees τ is reached
-(`2·0.85^61 < 1e-4`) while runs stop at 20–30 in practice. The L1 tolerance of
-7e-4 in 07 comes from this bound.
+**Reason**: at α = 0.85, 20 iterations give a worst-case contraction of
+`0.85^20 ≈ 0.039`, so a fixed 20 cannot *guarantee* a residual of 1e-4; a
+particular graph may converge faster, but the bound doesn't promise it, and
+the error bound is set by the final residual, not by the iteration count. 64
+is a cap that guarantees τ is reached (`2·0.85^61 < 1e-4`). How many
+iterations typical envelopes actually need is unmeasured; "20–30" was an
+expectation, and the iteration count is a reported diagnostic to be
+confirmed by the docs/07 gates. The L1 tolerance of 7e-4 in 07 comes from
+this bound.
 
 ## D12 — κ conservation and merge cap
 
@@ -194,6 +205,14 @@ client may commit.
 cannot observe adoption (a context-injection harness) reporting adoption pollutes
 the ledger. Exposure's low κ is the price of that uncertainty.
 
+**Status (2026-09 finalization, D45)**: server-side recompute and the two
+modes hold. Two details above are historical. The client now sends
+`adopted[]` and, optionally, one `reward` per recall against a receipt, and
+both are checked exact-once against the RecallReceipt. Exposure no longer
+carries a "low κ"; it is audit-only and moves neither `S` nor `t_last_hit`.
+The price of auto-mode uncertainty is that auto clients never reinforce at
+all, not that they reinforce weakly.
+
 ## D14 — Fact mass = max over bounded source Episodes · σ_fact
 
 **Decision**: docs/04 §3.
@@ -204,6 +223,14 @@ the ledger. Exposure's low κ is the price of that uncertainty.
 of sources; a mean dilutes recent reinforcement. Max is monotone and
 conservative and matches the intuition "as alive as its most recently handled
 source". σ_fact models the gist outliving the detail.
+
+**Status (2026-09 finalization, D45)**: holds, with one correction to the
+intuition above. Max selects the source with the highest current retention,
+which is not always the most recently handled one (an older source with a
+larger `S` can win). `σ_fact = 30` is a dimensionless multiplier on the
+source's stability (`s · σ_fact`), not a duration in days, and it's an
+assumption to ablate, not a measured value. Utility `U` of a Fact is the mean of its sources' `U`, an
+explicit coupled heuristic with no independence claim.
 
 ## D15 — Entity and Community materialize visibility thresholds, not event time
 
@@ -261,8 +288,13 @@ branch in every snapshot query.
 
 **Decision**: GDS receives the retained role-weighted links and normalizes
 them exactly as TypeScript does. Only a dangling row is expanded to explicit
-uniform edges. A virtual source node σ carries weights `s_i`; the GDS vector
-on V equals `α·p*` (docs/07 §2).
+uniform edges. A virtual source node σ carries weights `s_i`. For the
+probability-normalized stationary vector of the augmented graph, the
+restriction to V equals `α·p*`; that identity holds for normalized
+stationary probabilities only, not for raw GDS scores, which may carry an
+arbitrary positive scale. The actual comparison therefore restricts the raw
+GDS output to V and renormalizes by its observed sum on V, then checks the
+residual; it never divides raw scores by α (docs/07 §2).
 
 **Alternative**: leave dangling handling and weighted source teleport to GDS
 and widen the tolerance.
@@ -286,8 +318,16 @@ and creates pressure to loosen thresholds.
 **Alternative**: one relationship type with role as a property; roles open for
 extension.
 
-**Reason**: real types are what make `COUNT{}` and type-filtered expansion
-O(1) and index-backed. Variety is absorbed by `RELATES_TO.content`, so there
+**Reason**: real types are what let type-filtered expansion use the
+relationship-type store and bounded index-backed patterns instead of a
+property predicate on every relationship. That is a bounded, typed pattern,
+not an O(1) promise: a degree `COUNT{}` over an arbitrary node can cost work
+proportional to the degree, so the hub test doesn't use one. It's a bounded
+indexed probe over the physical conducting relationships with `LIMIT 256`:
+fewer than 256 rows is the exact degree, saturation marks a hub, and hubs
+expand only through the `HubArc` cache under the non-hub scan cap (D30,
+D33). Seed damping uses the same capped degree. Variety is absorbed
+by `RELATES_TO.content`, so there
 is little pressure to add roles, and adding one changes PPR conduction rules,
 the lattice and the validation all at once.
 
@@ -304,6 +344,19 @@ failure.
 success under ENOSPC. Recalling from the spool would create a second search
 path, which is a second store.
 
+**Status (2026-09 finalization, D43–D45)**: recall's diagnosed empty
+success holds, with a narrower meaning: it is a diagnostic-only reply with no
+items, no context, no budget use and `recall_id: null`, so nothing about it
+can be committed (docs/05 degradation ladder). That "no memory available"
+exception is distinct from serving under unknown policy, which is never
+allowed. Everything that needs receipt or policy authority fails closed with
+a named retryable error: `commit`, `policy.set` and `policy.revoke` return
+`storage_unavailable` while Neo4j is down, a recall or commit without
+loadable policy state returns `policy_unavailable`, and a recall whose
+receipt can't be persisted returns `receipt_unavailable` rather than
+unreceipted results. A policy command never reports an unenforced deny as
+active (docs/02).
+
 ## D23 — valid(T) only at assembly
 
 **Decision**: candidates and the envelope use `visible(T)` only; `valid(T)` is
@@ -313,6 +366,13 @@ applied at result assembly (docs/03 §7, 05 §6).
 still relevant. Removing it at the candidate stage cuts off the whole
 neighborhood of a corrected topic. Removing it from the results while exposing
 it under `supersedes` explains "why that fact is not showing".
+
+**Status (2026-09 finalization, D43)**: validity stays an assembly-time
+filter. Policy does not: the current policy is a hard filter at every stage,
+candidates, seeds, envelope conduction, companions, assembly and provenance
+text, under the policy-revision barrier. "Candidates and the envelope use
+`visible(T)` only" now reads "`visible(T)` and not denied by current
+policy"; a denied element neither surfaces nor conducts.
 
 ## D24 — role weights only; each retained row normalizes itself
 
@@ -388,6 +448,12 @@ contradicted itself ("dreaming never creates Hits" vs "promotion Hits";
 S′) must be enforced in one place, and the invariants in docs/00 must be
 literally true. Found by the PR review of 2026-09.
 
+**Status (2026-09 finalization, D45)**: the single commit path holds. The
+sentence about a negative `κ_of` and a negative branch of the S update is
+historical: `outcome` still flows through `commitHits` for idempotency and
+audit, but it never modifies `S` or `t_last_hit`. It feeds the separate
+utility `U`.
+
 ## D28 — extraction is sequenced claim-LLM → bounded read → judge-LLM → write
 
 **Decision**: a target-generation sequencer reserves one ingest sequence; the
@@ -428,7 +494,9 @@ assembly handles ≤ 530 elements and at most 16 materialized source Episodes
 per element. The session channel performs 32 composite index seeks and returns
 at most two non-synthesis Facts each. Candidate indexes use generation-specific
 partitions, `k_fetch≤256` and per-channel deadlines. Entity/Community
-visibility is an O(1) threshold comparison. Envelope expansion scans fewer than 256
+visibility is one threshold comparison plus one Entity witness row read. The
+hub test is a probe that stops at 256 relationships. Envelope expansion scans
+fewer than 256
 relationships for a non-hub; a hub uses at most 32 cached link tuples. The
 final link query returns at most `L=10` directed arcs per row and never expands
 hub adjacency. Generation-scoped indexes isolate hidden data before top-k
@@ -452,9 +520,9 @@ staging-root restore (docs/01 §9, 02 §2/§10).
 **Alternative**: leave these to implementation.
 
 **Reason**: a normative document that leaves the trust boundary and the
-crash-consistency rules implicit will be implemented inconsistently; the
-current code's default password is the example. Found by the PR review of
-2026-09.
+crash-consistency rules implicit will be implemented inconsistently; a
+default database password is the kind of gap an unwritten rule leaves open.
+Found by the PR review of 2026-09.
 
 ## D32 — Community generations pin an extraction snapshot
 
@@ -560,7 +628,17 @@ about the security or Hit-commit model changes.
 
 ## D40 — a signed outcome verdict is the only reinforcement that can lower stability
 
-**Decision**: the receipt `commit` RPC accepts `reward ∈ [−1,1]`, a verdict on
+> **Status: superseded in part by D45 (2026-09 finalization).** What
+> survives: the `commit` RPC accepts `reward ∈ [−1,1]` per recall, the
+> verdict is idempotent on the recall UUID, and it's the negative label the
+> refitting sample needs. What's withdrawn: the negative branch of the S
+> update, the floor at `S0(m₀)`, and `κ_signal = reward/(rank+1)` as a
+> reinforcement quantity. Outcome no longer touches `S` or `t_last_hit` at
+> all; it feeds a separate per-Episode utility `U` with rank-weighted
+> attribution recorded in the RecallReceipt. The text below is kept as the
+> original reasoning.
+
+**Decision (historical)**: the receipt `commit` RPC accepts `reward ∈ [−1,1]`, a verdict on
 whether the recalled context led to a good result. It becomes an `outcome` Hit
 per source Episode with `κ_signal = reward·/(rank+1)` — rank-decayed so the top
 result carries the most credit or blame — and drives a negative branch of the S
@@ -585,6 +663,14 @@ Adapted from memkraft's accountable outcome loop (usage_id → report_outcome �
 rank-decayed credit); anamnesis attributes it to the immutable Hit ledger and
 replays it like every other kind rather than storing a mutable utility score.
 
+**Why it was changed**: coupling a downstream verdict to `S` made one number
+answer two questions, "how accessible" and "how useful", and the penalty path
+rewound the accessibility of every sibling Fact of a source because Hits are
+Episode-scoped (D1). Keeping the ledger and the attribution but routing the
+reward into `U` keeps the negative label without a second forgetting law.
+The utility cache is still rebuildable from Hit outcome events, so the
+"replay, don't store" intent survives.
+
 ## D41 — every recall result carries a closed `epistemic` grade derived from its producer
 
 **Decision**: recall results include `epistemic ∈ {observed, extracted,
@@ -607,9 +693,29 @@ filter, or phrase by grade without parsing the schema registry, while
 author-as-trust-tier; anamnesis derives it from provenance instead of recording
 an author field.
 
+**Status (2026-09 finalization, D47)**: holds, with the wording tightened.
+`epistemic` is provenance distance, the number of model steps between the
+source utterance and the result. It is not a trust probability and it is not
+calibrated against outcomes; a caller who wants a trust estimate combines it
+with `confidence`, `modality`, `U` and its own judgment.
+
 ## D42 — extraction keeps the speech act and the evidence span; it never records-then-invalidates within one Episode
 
-**Decision**: a claim carries `modality ∈ {asserted, reported, hedged,
+> **Status: superseded in part by D46 and D47 (2026-09 finalization).**
+> What survives: the closed `modality` enum, `modality` in Fact identity and
+> as a factor of `m₀`, `confidence` stored but outside identity, a
+> fail-closed `span` check. What changed: (1) `span` validates only that the
+> slice is nonempty and lies on UTF-8 boundaries inside the Episode; it is
+> not proof of entailment or a hallucination detector. (2) `confidence`
+> means source-faithfulness, how faithfully the claim restates what the
+> source said, not world truth. (3) Intra-Episode suppression applies only to
+> an explicit same-speaker, same-time, same-scope self-correction. Differing
+> reports, times or modalities stay as separate Facts; an unresolved pair
+> gets CONTRASTS. (4) Generation identity includes `modality`, omits
+> `confidence`, and records the prior/calibration version. The text below is
+> the original reasoning.
+
+**Decision (historical)**: a claim carries `modality ∈ {asserted, reported, hedged,
 intended, hypothetical}`, `confidence ∈ [0,1]`, and an optional `span` of byte
 offsets into the Episode. `modality` is part of Fact identity and a factor of
 `m₀`; `confidence` is stored but not identity. A present `span` is validated at
@@ -637,3 +743,205 @@ fork otherwise-identical Facts. Adapted from senpi's self-contained-record and
 same-transcript-contradiction rules and memkraft's uncertainty markers; both
 are done here at write time as stored fields rather than at read time as
 prompts or regexes.
+
+## D43 — policy is suppression, never erasure
+
+**Decision**: two authenticated RPCs, `policy.set` and `policy.revoke`, each
+append an `anamnesis.memory-policy/1` Episode; the active policy is a
+rebuildable cache over those Episodes. A policy has `policy_id`, `action ∈
+{deny, revoke}`, a selector `{subject_entity_id?, schema?, sub_kind?,
+modality?, literal?}` with at least one field, fields ANDed, `literal` an
+NFC-normalized case-sensitive substring (no regex), and a `scope`. `derived`
+scope matches the canonical claim and its resolved entities before any
+derived write or Hit. `content` scope also matches the raw Episode text and
+suppresses ordinary original recall. A policy takes effect for ordinary
+serving after a policy-revision barrier; background reconciliation then
+removes denied derived items from indexes and caches by rebuilding, not by
+touching originals. Suppression applies to extraction, re_mention, dreaming,
+candidates, conduction, assembly, companion and provenance text: a denied
+source can't support a visible derived result. A policy change during a
+recall or commit forces retry or reject before the response or feedback, never
+torn serving. Policy Episodes keep their audit metadata but are excluded from
+memory search. `revoke` doesn't fabricate Facts that were suppressed before
+extraction; re-extraction is an explicit operation. Historical `T` never
+bypasses current policy. Existing backups and privileged raw operator access
+stay outside suppression. There is no `gc --erase` and no GDPR-style erasure
+guarantee. Instructions found in ingested text are never executed as policy
+(docs/02, docs/05).
+
+**Alternative**: (a) physical deletion of matched Episodes and everything
+derived from them; (b) read-time regex filters on results; (c) letting a
+"forget this" utterance in an ingested transcript act as a command.
+
+**Reason**: (a) breaks invariant 1 (CREATE-only originals), makes replay of
+the Hit ledger and generations non-deterministic, and still can't reach
+backups, so it would promise an erasure it can't keep. (b) leaks through
+conduction and provenance: a denied Fact still pulls its neighborhood into
+the envelope and its text into `derived_from`. (c) is prompt injection with
+write access. Structured selectors can't reach text that was never extracted;
+the contract says so rather than pretending `content` scope is optional.
+Naming the limits is the honest version of the feature.
+
+## D44 — recall budget in exact units with a pinned tokenizer
+
+**Decision**: `recall` accepts an optional `budget {unit ∈ {utf8_bytes,
+unicode_scalars, tokens}, limit: nonnegative integer, tokenizer_id?}`. `tokens`
+requires an installed `tokenizer_id` pinned by version or digest; an unknown
+id is rejected, with no estimate fallback. Byte and scalar counts are exact.
+`context_text` is a deterministic LF-separated rendering of the complete
+included items plus their mandatory source, contrast and supersedes content;
+the same structured results always render to the same text. `used_budget`
+counts the exact final `context_text` including separators; transport JSON
+and diagnostics are excluded. Packing is greedy over primaries in final
+score order: for each candidate bundle, construct the actual deduplicated
+prospective `context_text` and include the bundle only if the whole text
+fits. An oversized bundle is skipped and later ones are still considered.
+Claims and required contradiction warnings are never truncated. `limit: 0`
+yields empty context and results. `limit` counts primary bundles (it's the
+canonical RPC field, not `k`); companions are bounded separately (D46). Ranks
+and the receipt describe included primaries only. Without a budget the
+configured server output cap applies. The hard RPC response byte cap stays
+in force under any budget (docs/05).
+
+**Alternative**: (a) approximate tokens as `bytes / 4`; (b) truncate the last
+item to fill the budget exactly; (c) count the whole JSON response.
+
+**Reason**: (a) is wrong by a factor that depends on script and tokenizer
+version, and a caller who sets a token budget is doing so because their
+context window is measured in that tokenizer's tokens. Being off means either
+an overflowed prompt or wasted room; a rejected request is diagnosable. (b)
+produces half a claim or a claim without its contradiction, and the receipt
+would then attest to something the caller never saw whole. (c) makes the
+budget depend on field names and formatting rather than on delivered
+memory. A caller who needs to bound the transport has the byte cap.
+
+## D45 — accessibility and utility are separate; only adoption moves S
+
+**Decision**: the Episode-only Hit ledger and derived max-source
+accessibility stand (D1, D14). Only `recall_hit`, a confirmed adoption,
+updates `S` and `t_last_hit`. `exposure`, `re_mention`, `promotion` and
+`outcome` are audit-only for accessibility. Adoption uses the existing
+positive formula with the dimensionless `(S / 1 day)^-c` factor, capped at
+`S_max`; the cap makes reinforcement weakly, not strictly, monotone. Episode
+`S₀` is initialized from the original `m₀` at ingestion. `m₀ =
+confidence · prior(sub_kind) · prior(modality)` is immutable; a synthesis
+carries a required explicit `modality` judged from its content and a
+`confidence` that measures faithfulness to its support, never a default and
+never a product of uncalibrated marginals. Raw model outputs and the
+prior/config version are retained; priors change through a new derived
+generation, never by replaying Hits over a stored `m₀`.
+
+Outcome is a separate per-Episode utility, `U = (ν·μ₀ + Σ w·r) / (ν + Σ w)`,
+with `ν = 4`, `μ₀ = 0` as illustrative defaults for calibration, `r ∈ [−1,1]`,
+`w ≥ 0`. For the result set in the receipt (adopted IDs if present, else the
+returned primaries; empty means no item attribution but the receipt-level
+outcome is kept), rank weight `a_j = (1/(rank_j+1)) / Σ_l (1/(rank_l+1))`,
+source share `b_je = 1/n` over the result's sources, `w_e = Σ_j a_j·b_je`, so
+`Σ_e w_e = 1` with no extra cap that loses credit. Original ranks and exact
+attribution are stored. Ranks are 0-based in receipts and 1-based in channel
+RRF. Outcome never rewinds or resets time and never modifies `S`; zero and
+missing are different values. Impressions live in append-only
+`RecallReceipt` control records, not semantic Episodes: delivered primary and
+companion IDs, source snapshots, policy/config/generation versions, selected
+channels, ranking state, budget and result digests. Source IDs are immutable
+and derived snapshots are bounded for replay; full raw text isn't duplicated.
+Receipts enforce exact-once adoption per recall and source and exact-once
+outcome per recall; a conflicting duplicate reward is rejected. TTL is
+explicit config; an expired receipt rejects commit and absence is never a
+negative label. The utility cache is rebuildable from retained Hit outcome
+events after receipts expire.
+
+Score: `score = relevance · max(m, 0.02)^γ · (1 + β·U)` with `m = m₀·A`,
+`γ = 0.5`, `β = 0.25`, `β ∈ [0,1)`; RRF weights as before. `U_Fact` is the
+mean of source `U`. Outcome-only events change `U`, not mass. All defaults
+are assumptions to ablate. Policy and validity are hard filters, never
+confidence adjustments (docs/04, docs/05).
+
+**Alternative**: D40's negative branch of the S update; or a mutable utility
+score stored on the Fact.
+
+**Reason**: `S` models how readily a memory returns; a bad downstream result
+says the memory was unhelpful, not that it's fading. Folding one into the
+other made every sibling Fact of a source pay for one bad answer (Episode
+attribution is collateral by design, and this decision says so instead of
+claiming per-Fact selectivity). A stored per-Fact score violates D1. Keeping
+outcome in the ledger, attributing it exactly once with weights that sum to
+one, and reporting `U` as a proxy rather than a truth or causal claim gives
+the refitting sample its negative label without a second forgetting law.
+Comparisons in calibration are adoption-plus-negative against adoption-only,
+never against no event, and a whole-recall reward is one label, not many.
+
+## D46 — one Fact per occurrence, contradictions as bounded companion bundles
+
+**Decision**: a semantic duplicate preserves every original and each
+occurrence's extracted assertion and provenance. There is no "duplicate →
+no Fact". Each source occurrence yields its own immutable Fact, linked to
+the existing one by `DERIVED_FROM` / `RELATES_TO`, with an optional
+`re_mention` audit Hit and no automatic truth or confidence boost. Duplicates
+are grouped only at assembly, with a representative plus explicit occurrence
+IDs and truncation metadata; the grouping key preserves subject, predicate,
+time and modality, and no global semantic merge is promised.
+
+Conflicts are completed after primary ranking and before budget packing.
+For each primary, recall scans its raw `CONTRASTS` adjacency in
+deterministic ID order, at most 64 rows plus one sentinel row, and runs the
+bounded per-row policy and validity checks on those rows. The first 4
+eligible rows become the companions. There is no cache of eligible peers
+keyed by an arbitrary `T`; eligibility is evaluated on the scanned rows
+under the request's snapshot and current policy. Reporting follows from what
+the scan can actually know: `conflict_total` is the exact eligible count only
+when the raw scan was exhausted within 64 rows and that count is at most 4;
+in every other case it is `null`, never an estimate and never a value
+inferred from a `limit + 1` read. `conflict_truncated` is set when more than
+4 eligible peers were found or the sentinel row shows raw rows beyond 64.
+An incomplete bundle carries a mandatory incomplete warning; a policy-hidden
+peer yields a mandatory redacted conflict indicator with no text and no ID.
+No unbounded `COUNT` runs on the recall path. Field names
+(`conflict_total`, `conflict_truncated`, `conflict_redacted`) are owned by
+docs/05 and coordinated through the lead. The bundle is returned even when
+the peer wasn't a retrieval candidate. There's no automatic winner by
+confidence or recency. The budget counts companion text and both warnings;
+a bundle that doesn't fit whole is skipped (D44). There's no both-sides guarantee beyond this stated bound
+(docs/02, docs/05).
+
+**Alternative**: dedupe at extraction (drop the second occurrence, raise the
+first's confidence); or surface only the contradiction peers that happened
+to be retrieved.
+
+**Reason**: the second occurrence is evidence with its own time, speaker and
+modality; collapsing it destroys the provenance that D42's span and
+`epistemic` exist to expose, and a confidence bump from repetition is the
+"repeated therefore true" error. Peer completion after ranking keeps the
+ranking stage bounded while ensuring a caller never sees one side of a known
+contradiction merely because the other side scored low. The bound of 4 and
+the truncation flag keep the work bounded and the omission visible.
+
+## D47 — calibration, oracle and replay are defined, not implied
+
+**Decision**: every quantity that enters a score has a stated status.
+Assumptions to ablate: `DECAY`, `FACTOR`, `a`, `b`, `c`, `γ`, `β`, `ν`,
+`μ₀`, `σ_fact`, the `sub_kind` and `modality` priors, role weights and RRF
+weights. Observed but proxy: `U`, a reported utility, not truth or causal
+attribution. Provenance distance, not trust probability: `epistemic`.
+Source-faithfulness, not world truth: `confidence`. The PPR baseline uses
+`α = 0.85` as the damping factor (not its complement), the uniform dangling
+policy, rank origin 1, and RRF example values within `1/61`; the virtual
+source is normalized over `V`. Mass gates the envelope as well as the final
+score, and docs/06–07 describe that gating rather than presenting the
+envelope as mass-neutral. Local residual, truncation and retrieval utility
+are three separate measurements; close ties don't imply `overlap ≥ 0.95`,
+so validation uses the residual bound plus a tie-aware, report-only overlap.
+The GDS baseline is pinned to release 2.13.12 with no claims about master or
+latest. Determinism is conditional on the captured candidate, index, cache
+and degradation state; `structure_revision` is a serving-view revision, not
+a full replay token. The policy barrier is stricter than the torn structural
+result check (docs/04 §9, docs/06, docs/07).
+
+**Alternative**: present the defaults as tuned values and the GDS comparison
+as ground truth.
+
+**Reason**: the earlier text mixed literature values, guesses and measured
+numbers in one table and let a reader assume that agreement with GDS on a
+truncated envelope certified retrieval quality. Naming what each number is,
+what the oracle actually measures, and what replay can and can't reproduce
+is what makes the CI gates in docs/07 falsifiable rather than decorative.

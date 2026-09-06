@@ -5,6 +5,12 @@ every caller talks to the daemon over a UDS. Harnesses are external projects
 maintained by the operator; this repo ships only the daemon, its ops CLI and
 the RPC contract (D39).
 
+This is the normative target architecture, not a claim that every stage ships
+today. The current implementation supports original Episode storage/fulltext
+recall; the roadmap distinguishes later extraction, policy, receipts, PPR and
+dreaming work. D43–D47 finalize the contracts below without authorizing code
+changes.
+
 ```text
   external harnesses ─┐  (separate repos, attach over the RPC contract)
   anamnesis ops CLI ──┼─ UDS ~/.anamnesis/sock ─▶ anamnesisd ─ bolt(127.0.0.1) ─▶ Neo4j (Docker)
@@ -79,13 +85,14 @@ a global queue order". `ingest_seq` orders Episode creation;
 A single integer on `(:Meta {key: 'meta', structure_revision})`.
 **Incremented on:**
 
-- original Element/Link or session-topology CREATE/DELETE
+- semantic original Element/Link or session-topology CREATE/DELETE
 - Element or Link CREATE in the currently ACTIVE generation
 - an ACTIVE Entity's `visible_from_utc` moves earlier
 - selected model's global Episode or ACTIVE-generation embedding coverage advances
 - generation selector switch (`active_*` SET)
 
-**Not incremented on:** Hit CREATE, hit-cache / `m_cache` / shortlist SET,
+**Not incremented on:** Hit or RecallReceipt CREATE, policy control Episode
+CREATE (uses `policy_revision`), hit/utility-cache / `m_cache` / shortlist SET,
 hidden-generation embedding backfill, Outbox cursor,
 BUILDING/CATCHING_UP generation writes, or
 GC of hidden RETIRED generations. These do not change the *serving structure*
@@ -116,7 +123,42 @@ regression cannot produce `R>1` or lower stability.
 
 recall reads the revision twice to detect structural change
 ([05-recall](05-recall.md) §7). On a mismatch it retries once; if it changes
-again it proceeds with `diagnostics.torn = true` — recall never blocks writes.
+again it proceeds with `diagnostics.torn = true` — numeric recall work does not
+hold the write queue; only bounded control publication uses its barrier.
+
+### policy_revision — a stricter publication barrier (D43)
+
+`Meta.policy_revision` is separate from structural consistency. A policy command
+atomically appends its control Episode, publishes the rebuilt active-policy
+cache, and increments this revision under the write queue. A recall pins the
+revision before reads, checks every stage against that policy, and rechecks
+under a short publication barrier before durable receipt creation and socket
+publication. Policy commands and response publication serialize at this
+barrier: once a policy command acknowledges, no later response is published
+under its predecessor policy. Already-delivered bytes cannot be withdrawn.
+
+On mismatch, retry the recall under current policy; if that retry also races,
+reject `policy_changed`. `diagnostics.torn` never permits torn-policy serving.
+Feedback, extraction, embedding and dreaming likewise revalidate policy before
+their transaction commits. A commit based on an old receipt must revalidate
+the recorded results and sources under current policy; reject it atomically
+if any credited item/source is now denied. No denied Hit is written, even
+when the receipt's original policy allowed it. Policy cache unavailable means
+retryable `policy_unavailable`, not an empty-policy fallback. Background reconciliation is not
+the immediate enforcement mechanism.
+
+Policy reconciliation is not semantic re-extraction. It rebuilds the serving
+view without denied content while preserving content-free invalidation
+evidence and target/effective-time/generation markers (docs/01 §4). Markers
+are private control/cache state, never conductors or returned text/IDs.
+Generation activation requires exact source-validity/invalidation equivalence
+at every supported T; missing evidence, mapping or marker coverage fails
+closed. In particular, `A <-INVALIDATES- B; deny B; rebuild` leaves A invalid
+from B's effective time onward, even though B cannot be returned.
+
+`structure_revision` alone is not a replay token. Captured index/candidate,
+cache, policy, config, generation, and channel-degradation state determine
+the numeric result; receipts retain bounded replay evidence (D47, docs/05).
 
 ## 2. RPC
 
@@ -132,8 +174,10 @@ zod in `packages/protocol`; server and clients share the same schema.
 | `object.chunk {upload_id, seq, bytes_b64}` | temp file | Append one raw chunk ≤ 512 KiB in sequence |
 | `object.commit {upload_id}` | objects/ | Verify size/hash, fsync and atomically publish the object |
 | `remember {episode, payload_hash?}` | yes | Ingest one Episode referencing an already committed object. Idempotent |
-| `recall {query, session?, T?, k?}` | — | Read-only (docs/05) |
+| `recall {query, session?, T?, limit?, budget?}` | dispatcher receipt | Read-only semantic handler; dispatcher durably appends control impression before publication (docs/05) |
 | `commit {recall_id, adopted?, reward?}` | Hit | Receipt-mode client's adoption report (`recall_hit`) and/or signed outcome verdict (`outcome`, `reward ∈ [−1,1]`) (docs/04 §6) |
+| `policy.set {policy_id, selector, scope}` | policy Episode/cache | Explicit authenticated deny command; idempotent by policy ID and canonical body |
+| `policy.revoke {policy_id}` | policy Episode/cache | Explicit authenticated revocation of that immutable deny |
 | `status` | — | Neo4j connection, revision, active selectors, spool length, Outbox backlog |
 | `verify {scope}` | — | Digests, Payloads, orphan Facts, ledger ↔ cache agreement |
 | `gen {stream, action: build\|status\|activate\|rollback\|retire}` | selector | Lifecycle operations; activate/rollback enforce the catch-up barrier (docs/01 §4) |
@@ -141,10 +185,106 @@ zod in `packages/protocol`; server and clients share the same schema.
 | `dream {phase?}` | derived, Hits | Run dreaming now (§7) |
 | `gc {derived\|embedding\|objects, …}` | DELETE | Explicit cleanup (docs/01 §4, §9) |
 
-Every response carries `structure_revision` and `server_time`. JSON-RPC
+Every response carries `structure_revision`, `policy_revision` and `server_time`. JSON-RPC
 frames are capped at 1 MiB. Base64 upload chunks carry at most 512 KiB raw
 bytes, leaving bounded framing overhead; a committed object is capped at
 64 MiB (§10).
+
+### Output budget (D44)
+
+`limit` is the canonical primary-result bound, not `k`. `budget` is optional:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 7,
+  "method": "recall",
+  "params": {
+    "query": "What did I decide?",
+    "limit": 10,
+    "budget": {"unit": "utf8_bytes", "limit": 4096}
+  }
+}
+```
+
+`budget.unit` is `utf8_bytes | unicode_scalars | tokens`; `budget.limit` is a
+nonnegative integer. Reject negative, fractional, nonfinite or unsafe-integer
+limits, unknown units, malformed Unicode, and unrecognized fields. Tokens
+require an installed version/digest-pinned `tokenizer_id`; unknown/missing
+tokenizers reject the request, never fall back to estimates. `tokenizer_id`
+is not accepted for byte/scalar budgets. Count UTF-8 bytes or Unicode scalar
+values exactly, not UTF-16 code units or graphemes.
+
+The response's `context_text` deterministically renders the same structured
+results as LF-separated complete items, including mandatory source,
+supersedes and contrast content/warnings. `used_budget` counts that exact
+final text including separators, excluding transport JSON and diagnostics.
+After primary ranking and bounded companion completion (docs/05), greedily
+try each primary's whole bundle: deduplicate the prospective text, measure
+it, include only if it fits. Skip oversized bundles and consider later ones;
+never truncate a claim or remove a required contradiction warning to fit.
+`limit` counts primaries, companions have separate bounds. Budget zero returns
+empty `results` and `context_text`; ranks and receipts include only actually
+included primaries. No budget uses the configured server output cap. The
+1 MiB encoded RPC response cap remains hard, including with token budgets;
+bundle admission also checks that cap rather than publishing an oversized frame.
+
+### Explicit policy commands (D43)
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 8,
+  "method": "policy.set",
+  "params": {
+    "policy_id": "0192f3b2-0000-7000-8000-000000000001",
+    "selector": {"literal": "private access code"},
+    "scope": "content"
+  }
+}
+```
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 9,
+  "method": "policy.revoke",
+  "params": {"policy_id": "0192f3b2-0000-7000-8000-000000000001"}
+}
+```
+
+The selector contract and immutable event fields are docs/01 §3.2. Require
+successful `hello` authentication; direct `remember` of a policy schema is
+rejected, and a natural-language request inside any ingested source never
+executes a control command. Reject an empty selector, empty literal, invalid
+enum/ID, unknown fields, a conflicting reused policy ID, or an unknown revoke
+target. A repeated identical set/revoke is a no-op. NFC normalization applies
+to both literal and tested text; matching is case-sensitive AND across all
+supplied fields, with no regex or implicit OR.
+
+Hard policy bounds: at most **256 active denies**, each literal at most **512
+Unicode scalars after NFC**, and at most **256 resolved entity aliases per
+policy per generation**. Validate before appending a policy Episode or
+changing any cache/revision. Alias expansion reads at most 257 ordered entries
+(limit+1); overflow or ambiguity rejects a new set atomically, or blocks
+generation cutover for an existing deny while retaining the current serving
+policy. Do not truncate a selector/alias set. Identical command retries remain
+no-ops; revoke is still allowed when a bound is reached or cutover is blocked.
+
+`derived` tests canonical claims and resolved entities; `content` additionally
+tests stored capped Episode text (at most 64 KiB), never automatic payload
+scanning. A supplied structured selector field absent on a tested raw Episode is false:
+the AND selector is a no-match, not guessed semantic metadata. The Episode's
+own schema is tested, not a possible future Fact schema. A structured selector
+therefore cannot guarantee matching facts hidden in unextracted text: policy
+responses report that limitation.
+Commands return the effective policy revision only after the serving barrier;
+they do not acknowledge deferred spool entries. Neo4j unavailable means
+`policy.set`, `policy.revoke` and `commit` fail with retryable
+`storage_unavailable`, never report unapplied effects as accepted. Revocation
+does not implicitly re-extract skipped assertions. Background rebuild removes
+denied derived material from serving indexes/caches, not immutable originals,
+operator raw access or old backups. There is no erase operation.
 
 ### Payload upload state machine
 
@@ -186,7 +326,8 @@ previous verified length and return `resource_exhausted` before ack.
 
 ```text
   remember(episode, payload_hash?)
-    1. Contract validation (schema registry, origin, time, size caps)
+    1. Contract validation (semantic schema registry, origin, time, size caps;
+       policy/control schemas require their explicit command path)
        origin_key   = sha256(source, session, actor, record)
        session_key  = sha256(source, session)
        source_revision = adapter-issued stable revision token
@@ -326,6 +467,8 @@ decisions. LLM calls cannot sit inside a transaction.
         · rebuild/rollback: target state is BUILDING or CATCHING_UP
         · require ingest_seq = Generation.next_ingest_seq
         capture input_head = OriginHead[episode.origin_key]
+        capture policy_revision; control Episodes complete as no-ops
+        content-denied input creates no derived output or re_mention Hit
     ── extraction LLM (outside a tx) ────────────────────────────────────────
     L1. Episode → at most 32 claims[], in Episode order:
           {content, sub_kind, modality, confidence, span?, time_hint, entities[≤16], mode?}
@@ -338,10 +481,10 @@ decisions. LLM calls cannot sit inside a transaction.
           Episode says, given its modality
         · span = [start, end) UTF-8 byte offsets into Episode.content that the
           claim rests on; omitted only when the claim has no single locus
-    L1b. Intra-Episode resolution: a later claim that contradicts an earlier
-        claim of the same Episode wins — the earlier one is not emitted.
-        Nothing was recorded, so nothing is invalidated; a self-correction
-        inside one message never reaches the graph as Fact + INVALIDATES
+    L1b. Suppress an earlier claim only for an explicit self-correction by
+        the same speaker at the same time and scope. Different reports,
+        times or modalities remain separate assertions; unresolved
+        contradictions produce CONTRASTS, never a last-sentence-wins rule
     L2. Time resolution: explicit > relative against Episode.time > inherit.
         Never against wall clock
     ── bounded read tx, all indexes scoped to target_generation ─────────────
@@ -354,7 +497,9 @@ decisions. LLM calls cannot sit inside a transaction.
         outgoing INVALIDATES targets supplies replacement context, including
         invalid A, its authority and content
     R4. candidate_digest = sha256(canonical ordered candidate IDs, scores,
-        validity bits and replacement-context edge IDs)
+        validity bits, replacement-context edge IDs and policy_revision)
+        All R1–R4 candidates and text obey current policy, including context
+        obtained through otherwise snapshot-exempt provenance
     ── judge LLM (outside a tx) ─────────────────────────────────────────────
     L3. Entity judge: match an existing candidate / create new with
         entity_key = sha256(target_generation, normalized_name, entity_kind).
@@ -362,13 +507,15 @@ decisions. LLM calls cannot sit inside a transaction.
         creates no Entity; the literal stays in the claim's content
     L4. Claim judge against Fact candidates:
           new                        → Fact + DERIVED_FROM Episode + MENTIONS
-          duplicate of F             → no Fact. re_mention Hit on sources(F)
+          duplicate of F             → new occurrence Fact + DERIVED_FROM Episode,
+                                        RELATES_TO F; optional audit re_mention
           elaboration of F           → Fact + RELATES_TO F
           contradiction, resolved    → Fact + at most 8 INVALIDATES targets
                                         (mode: change | correction, docs/03 §5)
           contradiction, unresolved  → Fact + CONTRASTS F
     ── write tx ─────────────────────────────────────────────────────────────
     W1. Re-validate:
+        · policy_revision unchanged
         · normal path: active[extraction] == target_generation
         · rebuild path: target state is still BUILDING or CATCHING_UP
         · ingest_seq still equals Generation.next_ingest_seq
@@ -376,23 +523,34 @@ decisions. LLM calls cannot sit inside a transaction.
         · rerun the bounded reads and require the exact candidate_digest
         · every referenced candidate and replacement-context edge is unchanged
         any check fails → abort tx and retry the same sequence head
+        Under the pinned policy, match canonical claims, resolved entities,
+        links and supporting sources. Suppress denied claims and their writes/
+        Hits as deterministic no-output, not as a retryable failure. Do not
+        create Entities or relations supported only by suppressed claims
     W2. Span check, before anything is created: a present `span` must slice
         Episode.content to a non-empty string on UTF-8 boundaries, else the
         claim is rejected (`diagnostics.extract.span_mismatch += 1`, the
-        Episode still completes). A quote that is not in the source is the
-        strongest hallucination signal the engine can verify without a model.
+        Episode still completes). Require integer offsets with
+        0 <= start < end <= utf8_byte_length(content). This verifies only
+        nonempty byte boundaries, not quotation, entailment or hallucination;
+        a valid span can still point at text that does not support the claim.
         For each surviving new Fact, materialize 1–16 source Episode IDs and
         matching direct DERIVED_FROM links (docs/01 §1), the primary link
         carrying `span`; then CREATE Facts and links in target_generation. Every derived endpoint is in that same generation;
         cross-generation extraction links are rejected. Fact identity hashes
-        schema, content, properties, time, sub_kind, primary Episode, entity
+        generation, schema, content, meaning-bearing properties, time,
+        sub_kind, modality, primary Episode, entity
         bindings, source Episodes and synthesis supports; Entity identity uses entity_key.
         Exact retry collisions are no-ops. `confidence` is stored but not part
         of identity: two runs that agree on meaning and differ only in belief
         collide, and the first write's confidence stands — model
-        nondeterminism on a scalar must not fork Facts. SET each mentioned
+        nondeterminism on a scalar must not fork Facts. Retain bounded raw
+        output and prior/calibration/judge versions separately from identity;
+        reject oversized output rather than discarding required audit fields.
+        SET each mentioned
         Entity's visible_from_utc to min(current, mention source time)
-    W3. re_mention Hits through the commit path (docs/04 §6), namespace extract:<episode_id>
+    W3. Optional re_mention audit Hits through the commit path (docs/04 §6),
+        namespace extract:<episode_id>; no change to S or t_last_hit
     W4. For each distinct M in {active_embedding_model,
         target_embedding_model if set}, CREATE Outbox
         {stage: embed_derived, target_generation, ingest_seq, fact_ids,
@@ -401,8 +559,8 @@ decisions. LLM calls cannot sit inside a transaction.
         vectors, advance M's coverage cursor as a no-op
     W5. advance next_ingest_seq/covered_ingest_seq to this committed sequence;
         if structural output was created in the ACTIVE generation,
-        structure_revision += 1. BUILDING/CATCHING_UP writes and Hit-only
-        duplicate outcomes do not bump it
+        structure_revision += 1. BUILDING/CATCHING_UP writes do not bump it;
+        an ACTIVE duplicate occurrence creates structural output and does
 ```
 
 `structure_revision` may legitimately change between R1 and W1 (other
@@ -412,6 +570,18 @@ than committing a stale relation. A historical input Episode may still be
 extracted after its head changed on an earlier run: its derived Facts inherit
 the bounded source authority's temporal validity (docs/03 §3–4), so they serve
 historical snapshots without becoming current again.
+
+A source/span example, using normalized stored content (not a complete RPC):
+
+```json
+{"content":"Aé🙂Z","span":[1,7]}
+```
+
+The content is 8 UTF-8 bytes and 4 Unicode scalars; `[1,7)` selects `é🙂`.
+`[2,7)` splits `é`, `[1,6)` splits the emoji, `[1,1)` is empty, and `[0,9)`
+exceeds the source: all are rejected. A valid `[0,1)` merely selects `A`;
+it cannot prove an arbitrary extracted claim is supported. Omitted span is
+allowed only for no single locus; malformed-present is not treated as omitted.
 
 The `embed_derived` stage SETs the named model property and advances
 `EmbeddingCoverage(target_generation,model_id)` only through contiguous
@@ -440,6 +610,11 @@ speech act it came in:
 
 `modality` is meaning-bearing: it is part of Fact identity (docs/01 §1), an
 input to `m₀` (docs/04 §1), and exposed on every recall result (docs/05 §6).
+It is required on synthesis too: judge the synthesis content's modality and
+confidence in its support-faithfulness; neither an arbitrary asserted default
+nor multiplication of uncalibrated marginal confidences is allowed. Policies
+and temporal validity are hard filters, not confidence discounts. Changing
+priors produces a new generation; Hit replay never changes immutable `m0`.
 An `intended` claim later fulfilled is a new `asserted` Fact whose judge
 outcome is `elaboration` (RELATES_TO the intent), not a contradiction — the
 plan was true as a plan. What a caller does with `hedged` or `intended` results
@@ -466,7 +641,8 @@ envelope has what it needs from the first version that runs PPR.
 
 ```text
   m_cache        compute m(now) for every Element → SET Element.m_cache
-                 · used to order envelope fanout (docs/06 §2). An hour of staleness is fine
+                 · used to order bounded envelope fanout (docs/06 §2), hence gates
+                   inclusion as well as final ranking; capture staleness for replay
   hub shortlist  for each Element with deg ≥ HUB_DEGREE (256): atomically rebuild
                  at most 32 cache nodes
                  (:HubArc {hub_id, rank: 0..31, link_id, neighbor_id, role,
@@ -479,6 +655,9 @@ Both are cache-layer SETs and do not bump `structure_revision`. `maintain`
 runs it on demand. Any topology rewire, relationship GC or other Link DELETE
 removes `HubArc {link_id}` in the same transaction; consumers never trust an
 arc whose physical/cache link no longer exists.
+Policy is checked on every consumption; stale mass/shortlists cannot bypass
+suppression. Policy reconciliation rebuilds affected shortlists/profile caches
+and generation indexes without denied material.
 
 ## 7. Dreaming (v0.3)
 
@@ -489,6 +668,8 @@ looks at global structure, and the place where GDS is used if at all.
   phase 1  community      pin source_extraction_generation = active[extraction]
                           source_covered_ingest_seq = Generation.covered_ingest_seq
                           and source_structure_revision = structure_revision
+                          · pin policy_revision; export only allowed nodes/arcs
+                            with allowed provenance/support witnesses
                           · export only IDs and MENTIONS/RELATES_TO arcs for Facts with
                             max_source_ingest_seq ≤ the pin to
                             ~/.anamnesis/tmp/dream/<operation_id>/, capped at 8 GiB
@@ -496,15 +677,15 @@ looks at global structure, and the place where GDS is used if at all.
                             remains reserved; delete+directory-fsync the temp tree in finally
                           · load that file into a disposable GDS container; Leiden returns
                             only {element_id, community_assignment}
-                          · container image is digest-pinned, network=none, temporary volume;
+                          · baseline GDS 2.13.12 image is digest-pinned, network=none, temporary volume;
                             no live credential, content or write path enters it
                           · source_export_digest = SHA-256 of ordered exported
                             node IDs, arcs and captured visibility thresholds
                           · one Community node + HAS_MEMBER per community (generation = new g_c)
                           · HAS_MEMBER captures each member's visible_from_utc;
-                            Community.visible_from_utc is the majority threshold (docs/03 §3)
+                            Community.visible_from_utc is the half-members threshold (docs/03 §3)
                           · summary content by LLM; on failure content = member names joined
-                          · write tx requires unchanged source_structure_revision,
+                          · write tx requires unchanged policy_revision, source_structure_revision,
                             active extraction selector, covered prefix, export digest
                             and every assignment ID; otherwise discard
                           · switch active[community] only while its source extraction
@@ -515,16 +696,21 @@ looks at global structure, and the place where GDS is used if at all.
                             ORDER BY m0 DESC, time_utc DESC, id ASC
                           · the LLM receives exactly that support set; no omitted member is
                             a semantic contributor
+                          · all supports and source Episodes must be allowed; judge
+                            synthesis modality and support-faithfulness confidence,
+                            retaining raw output and prior/calibration versions
                           · support_fact_ids and semantic DERIVED_FROM links equal the bundle
                           · materialized authority = top 16 union of those supports' Episodes
-                          · write tx requires unchanged structure revision, selectors,
+                          · write tx requires unchanged policy revision, structure revision, selectors,
                             generation/prefix and support ID/validity digest;
                             otherwise discard/retry
                           · append to active extraction generation g
-                          · promotion Hits on exactly the support Facts, through the commit path,
+                          · audit-only promotion on support Facts resolves to Episode Hits
+                            through the commit path; no S/t_last_hit reinforcement,
                             namespace dream:<synthesis_fact_id>   (docs/04 §5–6)
   phase 3  profile        (:ProfileCache) top Facts around identity anchors
                           ORDER BY score DESC, Fact.id ASC; pin extraction/community selectors
+                          and policy revision; reject denied content/supports before publishing
 ```
 
 Dreaming never touches the originals layer except through the commit path
@@ -535,9 +721,12 @@ tries again next cycle.
 
 - No LLM calls. Candidates, seeds, PPR, RRF and assembly are deterministic
   numeric work.
-- No writes inside the request handler. The auto-mode exposure Hit is a
-  separate step after the response has been sent, through the commit path
-  (docs/05 §10).
+- No semantic memory writes. The numeric recall handler is read-only; the RPC
+  dispatcher's explicit control-publication exception appends a bounded durable
+  RecallReceipt before publishing the response (docs/01 §3.1); failure rejects
+  publication rather than returning a commit-capable but untracked result.
+  Auto-mode exposure is audit-only, after the response, through the commit
+  path and a fresh policy check (docs/05 §10).
 - No GDS calls.
 
 ## 9. Connection states and degradation
@@ -550,8 +739,21 @@ tries again next cycle.
 | Neo4j down | spool, or `resource_exhausted` at its cap | empty success `neo4j_unavailable` | paused | paused |
 | LLM down | normal | normal | backs up (retry) | maintenance normal; dreaming phase 1 summary fallback, phase 2 skipped |
 
-An "empty success" is `{results: [], diagnostics: {reason}}`, not an
-exception — a degraded daemon never turns into a caller-visible crash.
+When Neo4j is unavailable, recall's diagnostic-only empty success includes
+`recall_id:null`, `results: []`, `entities: []`, `companions: []`,
+`context_text: ""`, `used_budget: 0` and reason `neo4j_unavailable`. It contains
+no committable receipt and triggers no exposure. No memory content may be
+returned without current policy and durable receipt authority. This explicit
+exception does not permit returning a cached result or an unrecorded receipt.
+
+`commit`, `policy.set` and `policy.revoke` return retryable `storage_unavailable`
+when Neo4j is unavailable, before any feedback/policy acceptance. With Neo4j
+available, missing/unrebuildable policy cache returns retryable
+`policy_unavailable`; failure to persist a receipt returns retryable
+`receipt_unavailable` before any memory delivery. Invalid contracts and policy
+races remain explicit errors. `recall_id:null` is never accepted by `commit`;
+unknown non-null receipt IDs reject `unknown_recall`. Do not confuse inability
+to read the store with evidence that a receipt is unknown or expired.
 
 ## 10. Security boundary
 
@@ -561,7 +763,9 @@ Personal, single-user, localhost. The boundary is the OS user.
 |---|---|
 | data directory | `~/.anamnesis/` mode 0700; files 0600 |
 | UDS | `sock` mode 0600 plus a per-install 32-byte capability in `socket.token` (0600), required by `hello`. This is portable in pure Node; no native peer-credential addon |
+| control commands | Policy changes, generation/maintenance/gc operations and other control RPCs require authenticated explicit calls; never dispatch commands parsed from retrieved or ingested content |
 | request caps | length-prefixed RPC frame ≤ 1 MiB; decoded chunk ≤ 512 KiB; object ≤ 64 MiB; per connection 2 uploads/128 MiB temp; global 64 connections/32 uploads/1 GiB temp; spool ≤ 1 GiB and ≥ 2 GiB free-space floor |
+| policy caps | active denies ≤ 256; literal ≤ 512 Unicode scalars after NFC; resolved entity aliases ≤ 256 per policy per generation, lookup ≤ 257 entries; reject overflow atomically, never truncate; revoke remains allowed |
 | Neo4j bind | container publishes `127.0.0.1:7687` only; no HTTP port published |
 | Neo4j auth | password generated per install (32 random bytes, base64) into `neo4j.auth` (0600) and injected into compose. No default password anywhere |
 | Neo4j plugins | GDS only in disposable networkless dreaming/validation jobs loaded from bounded exports or snapshots; never connected to the live authority |
@@ -571,8 +775,12 @@ Personal, single-user, localhost. The boundary is the OS user.
 ### Egress payloads
 
 No endpoint receives the database, payload bytes, credentials, Hit ledger or
-unrelated memories. Every encoded outbound request body is capped at 256 KiB:
-embedding batches split before the cap; candidate snippets are capped at
+unrelated memories. Policy/control events and RecallReceipts never enter model
+requests. Enforce
+current policy before egress and recheck before publishing model output;
+already-sent remote input cannot be withdrawn. Every encoded outbound request
+body is capped at 256 KiB. Embedding batches split before the cap; candidate
+snippets are capped at
 1 KiB each and lowest-ranked candidates are removed deterministically until
 the body fits. The primary Episode/claim/support input is never truncated
 beyond its schema content cap.
@@ -605,7 +813,10 @@ fallback; recall itself remains LLM-free.
 | remember | 1 (Episode, Payload, revision INVALIDATES, session topology, cache init, Outbox) | +1 |
 | extract (one Episode) | read tx + write tx (re-validated) | +1 only when ACTIVE structural output is created |
 | embed backfill | 1 per bounded batch, contiguous coverage cursor | +1 only for ACTIVE coverage |
-| standalone commit / exposure | 1 (Hit CREATE + cache SET, once per source Episode) | — |
+| recall impression | 1 bounded control transaction before response publication, under policy barrier | — |
+| policy.set / policy.revoke | 1 (immutable control Episode, active-policy publication, contiguous cursor no-ops) | policy_revision +1 for effective change; structure unchanged |
+| policy reconciliation | bounded serving-view rebuild; preserve invalidation evidence/markers, no new extraction judgment | hidden work —; activation +1 only after validity-preservation gate |
+| standalone commit / exposure | 1 (feedback acceptance + Episode Hits + appropriate adoption/utility caches); revalidate policy | — |
 | re_mention / promotion | joins the owning extraction/dreaming write tx | Hit portion — |
 | generation build/catch-up | bounded write tx per Episode | — while hidden |
 | generation switch / caught-up rollback | one cutover tx under write queue | +1 |

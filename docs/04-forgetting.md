@@ -1,387 +1,623 @@
 # 04 — Forgetting
 
-Forgetting is computed, not stored. An element's current mass is
+This is the normative anamnesis2 design, not a claim that the current
+originals/fulltext implementation already implements these dynamics.
+[D45 and D47](10-decision-log.md) separate **accessibility** (retention after
+confirmed use) from **utility** (reported downstream usefulness). Neither is
+truth, validity, policy permission, or calibrated human recall probability.
+
+Forgetting is computed, not stored. For an Episode:
 
 ```text
   Δdays(t₁,t₀) = max(0, t₁ − t₀) / 86,400,000
-  m(now) = m₀ · R(Δdays(now, t_last_hit), S)
-  R(t, S) = (1 + FACTOR · t / S)^DECAY          DECAY = −0.5,  FACTOR = 19/81  ⇒  R(S, S) = 0.9
+  A_e(now) = R(Δdays(now, t_last_hit(e)), s(e))
+  m(e, now) = m₀(e) · A_e(now)
+  R(t, S) = (1 + FACTOR · t / S)^DECAY
+  DECAY = −0.5, FACTOR = 19/81, t ≥ 0 days, S > 0 days
+  R(S, S) = 0.9
 ```
 
-with inputs the immutable `m₀`, the cached `(S, t_last_hit)`, and the server
-clock `now`. `(S, t_last_hit)` is a cache that is deterministically
-regenerable from the Hit ledger. There is no tick daemon.
-Clock regression yields elapsed zero; `R` never exceeds 1 and its base cannot
-become negative.
+`S` in equations and cache field `s` denote the same stability, measured in
+days. Inputs are immutable `m0`, cached `(s, t_last_hit)`, and the server clock
+`now`. The cache is deterministically regenerable from the Episode and Hit
+ledger under a pinned dynamics configuration (§7). There is no tick daemon.
+Clock regression yields elapsed zero; `0 < R ≤ 1` at finite elapsed time.
 
 ## 1. m₀ — intrinsic mass
 
-Assigned once at creation, immutable. Calibration target.
+Assigned once at creation, immutable, in `[0,1]`. These are assumptions for
+calibration, not measured estimates of importance or correctness.
 
 | Kind | m₀ default |
 |---|---|
 | Episode `original-message` | 0.5 |
 | Episode `original-document` | 0.6 |
 | Episode `correction` | 0.8 |
-| Fact | `confidence × prior(sub_kind) × prior(modality)` — sub_kind prior: preference, decision 1.0; fact, procedure 0.9; state 0.8; event 0.7; summary 0.6. modality prior: asserted 1.0; reported 0.8; hedged 0.6; intended 0.5; hypothetical 0.3 (docs/02 §5.1) |
+| Fact, including synthesis | `confidence × prior(sub_kind) × prior(modality)` |
 | Entity | 0.5 |
 | Community | 0.5 |
 
+| `sub_kind` | Prior |
+|---|---|
+| preference, decision | 1.0 |
+| fact, procedure | 0.9 |
+| state | 0.8 |
+| event | 0.7 |
+| summary | 0.6 |
+
+| `modality` | Prior |
+|---|---|
+| asserted | 1.0 |
+| reported | 0.8 |
+| hedged | 0.6 |
+| intended | 0.5 |
+| hypothetical | 0.3 |
+
+Every Fact, **including synthesis**, requires explicit `modality` judged from
+its own content. `confidence` is source-faithfulness given that modality; for
+synthesis it is faithfulness to the complete bounded support bundle, not the
+probability that the world agrees with it. Never substitute a default modality
+or multiply uncalibrated support confidences as if sources were independent.
+A `summary`, `reported`, `confidence=0.9` synthesis has `m0=0.432`.
+
+Retain raw extraction/judge/synthesis outputs and their model, prompt,
+prior/calibration and configuration versions with the generation audit.
+Changing priors requires a new derived generation; Hit replay must never SET
+immutable `m0` or recompute an original Episode's birth mass from new priors.
+Fact identity includes modality and generation, excludes confidence; the
+first immutable confidence on an exact retry stands (docs/01 §1, D42).
+A nonempty UTF-8-boundary-valid `span` validates offsets only, not entailment
+or absence of hallucination (docs/02 §5).
+
 ## 2. State lives on Episodes only
 
-The forgetting state `(s, t_last_hit, hit_count)` exists **only in the
-Episode's hit cache**. The mass of Facts and Communities is **derived** from
-their source Episodes.
+The accessibility state `(s, t_last_hit, hit_count)` exists **only in the
+Episode's hit cache**. Facts have no independent reinforcement state. Utility
+has separate rebuildable per-Episode sufficient statistics (§5.1).
 
 ```text
   initialization (inside the remember transaction)
-    s          = S0(m₀) = S_base · (1 + λ · m₀)       S_base = 1 day,  λ = 1   ⇒  s ∈ [1, 2] days
-    t_last_hit = ingested_at                           (server time)
+    s          = S0(m₀(e)) = S_base · (1 + λ · m₀(e))
+    t_last_hit = ingested_at
     hit_count  = 0
+    S_base = 1 day, λ = 1  ⇒  s ∈ [1, 2] days
 ```
 
-Note that t_last_hit starts at **ingestion time**, not event time. A document
-from 2019 ingested today starts being forgotten today — forgetting is a
-function of how much the mind has handled the memory; how old the event is is
-handled by sub_kind and m₀.
+An original message starts at `1.5` days, a document at `1.6`, a correction at
+`1.8`. Initialization uses **that original Episode's m0 at ingestion**, not a
+later Fact's confidence or modality. A document from 2019 ingested today starts
+being forgotten today; event-time interpretation is handled by snapshot and
+temporal validity, not by rewinding this initialization.
+
+`hit_count` counts all retained Episode Hits for cache integrity, including
+audit-only kinds. **Only `recall_hit` changes `s` or `t_last_hit`.** Recording
+another kind may advance `hit_count` but is not an accessibility refresh.
+Control/policy Episodes are not memory candidates or feedback targets.
 
 ## 3. Mass of derived elements
 
 ```text
-  sources(f)   = f.source_episode_ids
-                 1–16 original Episodes, materialized at Fact creation
-                 (ignoring generation and snapshot — the provenance exception, docs/03 §3)
+  sources(f) = f.source_episode_ids
+               1–16 original Episodes, materialized at Fact creation
+               (generation/snapshot-exempt provenance, docs/03 §3;
+                never exempt from current policy)
 
-  R_fact(f)      = max_{e ∈ sources(f)} R(Δdays(now,t_last_hit(e)), s(e) · σ_fact)     σ_fact = 30
+  A_f(now) = R_fact(f)
+           = max_{e ∈ sources(f)} R(Δdays(now,t_last_hit(e)), s(e) · σ_fact)
+  σ_fact   = 30
 
-  m(Fact f)      = m₀(f) · R_fact(f)
-  m(Entity n)    = m₀(n)                                                                  (no decay)
-  m(Community c) = m₀(c) · max_{f ∈ members(c) ∩ Fact} R_fact(f)                          (v0.3)
-                   = m₀(c) if the Community has no Fact members (Entities do not decay)
+  m(Fact f)      = m₀(f) · A_f(now)
+  m(Entity n)    = m₀(n)                                     (A_n = 1)
+  m(Community c) = m₀(c) · max_{f ∈ members(c) ∩ Fact} A_f(now) (v0.3)
+                  = m₀(c) if there are no Fact members
 ```
 
-- **max**, not sum or mean. A fact with several sources is as alive as its
-  most recently reinforced source. A sum inflates with the number of sources;
-  a mean lets old sources dilute recent reinforcement.
-- **σ_fact** stretches the time axis. With the same hit history a Fact is
-  forgotten 30× more slowly than the raw text — the detail of the original
-  fades while the gist remains. 30 is an initial assumption and a calibration
-  target.
-- Entities do not decay. An anchor fades sufficiently through its facts being
-  forgotten.
-- `sources(f)` is a stored bounded authority set, not a recursive graph
-  traversal. `source_count_total` and `sources_truncated` expose synthesis
-  truncation (docs/01 §1).
-- Because reinforcement history lives on Episodes, **generation switches, the
-  replacement protocol (docs/03 §5) and re-extraction never touch forgetting
-  state.** When A′ replaces A, A's source Episodes are A′'s sources, so the
-  reinforcement A accumulated carries over.
+These equations do not authorize serving an element. Denied sources cannot
+support visible derived results; exclude such results under D43 rather than
+silently deleting sources, changing denominators, or treating an all-denied
+Community as an empty, fully accessible one (§8).
 
-```text
-  A feel for R (S_base = 1 d, no reinforcement)
+- **max**, not sum or mean, selects the **highest retention**, not necessarily
+  the most recently reinforced source. With `σ_fact=30`, a source last hit
+  30 days ago with `s=100 days` gives `R=0.998829`; a source last hit yesterday
+  with `s=1 day` gives `R=0.996113`. The older but more stable source wins.
+- `σ_fact` stretches the time axis: at equal history the modeled gist decays
+  30 times more slowly than original text. **30 is an assumption**, not an
+  empirical result or per-Fact measured stability.
+- Episode-only attribution deliberately accepts **collateral sibling
+  refresh**. Adopting one Fact can refresh unrelated Facts sharing that
+  Episode, including a Fact that was not delivered. This is not per-Fact
+  selectivity. Utility is similarly coupled through source Episodes (§5.1).
+- Entities do not decay. Their surrounding Facts can fade, but that does not
+  prove the anchor itself will leave bounded candidate lists.
+- Authority is a stored bounded set, not a recursive graph traversal.
+  `source_count_total` and `sources_truncated` expose truncation (docs/01 §1).
+- Generation switches, replacement and re-extraction do not reset Episode
+  state. A replacement reserves its correction Episode plus at most 15 old
+  sources; retained sources carry their history, omitted sources do not.
+  Therefore neither an identical authority set nor identical replacement
+  accessibility is guaranteed. Non-recursive INVALIDATES remains unchanged.
 
-    Episode  (S = 1 d)               Fact  (S_eff = 30 d)
-    ┌───────┬───────┐               ┌───────┬───────┐
-    │ 1 d   │ 0.900 │               │ 1 d   │ 0.996 │
-    │ 10 d  │ 0.546 │               │ 30 d  │ 0.900 │
-    │ 100 d │ 0.202 │               │ 1 y   │ 0.510 │
-    │ 1 y   │ 0.107 │               │ 3 y   │ 0.323 │
-    └───────┴───────┘               └───────┴───────┘
-```
+Illustrative retention (`S=1 day`, `S_eff=30 days`; `1 year=365 days`):
+
+| Elapsed | Episode R | Elapsed | Fact R |
+|---|---|---|---|
+| 1 day | 0.900 | 1 day | 0.996 |
+| 10 days | 0.547 | 30 days | 0.900 |
+| 100 days | 0.202 | 1 year | 0.509 |
+| 1 year | 0.107 | 3 years | 0.323 |
+
+`S=1` is the boundary illustration (`m0=0`), not the default message's `S0`.
 
 ## 4. The now axis — independent of snapshot(T)
 
-Mass is **always evaluated at now.** Even when snapshot(T) asks about the
-past, forgetting is not rewound to T.
+Mass and utility are evaluated from state read at **now**, even for a
+historical `snapshot(T)`. Snapshot asks what was valid at T; accessibility
+asks how retained it is now. Historical T never bypasses **current policy**.
 
-- snapshot is "what the world was like at T"; forgetting is "how alive this
-  memory is now". Mixing them makes memories that were "just born at T" look
-  unduly fresh in answers to questions about the past.
-- Mass at T is well defined (replay the ledger up to T), but no question needs
-  that value. If one ever does, it is a single `until` argument on replay.
+An audit replay through a past ledger cutoff is a separate calculation under
+pinned configuration, not ordinary historical recall. `structure_revision`
+alone cannot recreate the candidate/index/cache/degradation state of a past
+response; bounded receipt snapshots supply feedback attribution and limited
+replay evidence, not a full time machine (D47).
 
-## 5. Hit — ledger and reinforcement
+## 5. Hit — ledger, accessibility and utility
 
-### Kinds and κ
+### Kinds and effects
 
-| kind | κ | Producer | `recall_id` namespace |
+| kind | Accessibility effect | Producer | Namespace |
 |---|---|---|---|
-| `recall_hit` | 1.0 | `commit` RPC from a receipt client: a result was adopted | the recall's UUID |
-| `outcome` | signed, `reward · rank_decay` (§5.1) | `commit` RPC from a receipt client: a verdict on a whole recall — the context it produced led to a good or bad result | the recall's UUID |
-| `exposure` | 0.15 | the daemon, after an auto-mode recall response: top-3 results were shown, adoption unknown | the recall's UUID |
-| `re_mention` | 0.5 | the extraction write tx: a new utterance is a duplicate of an existing Fact | `extract:<episode_id>` |
-| `promotion` | 0.3 | dreaming synthesis: this Fact became a source of a higher-level fact | `dream:<synthesis_fact_id>` |
+| `recall_hit` | positive adoption coefficient κ = 1 before source sharing | authenticated receipt-mode `commit` | recall UUID |
+| `outcome` | none; separate utility `(reward, weight)` | authenticated receipt-mode `commit` | recall UUID |
+| `exposure` | none; audit of top-3 delivered primaries | daemon after auto-mode response | recall UUID |
+| `re_mention` | none; occurrence audit | extraction transaction | `extract:<episode_id>` |
+| `promotion` | none; synthesis support audit | dreaming transaction | `dream:<synthesis_fact_id>` |
 
-Five producers, **one path**: all of them call the same internal commit
-function (§6). Nothing else in the daemon creates a Hit. `outcome` is the only
-kind whose κ can be **negative**; every other kind is strictly positive and can
-only grow stability.
+Five producers, one internal Hit write path (§6). Exposure, remention,
+promotion and positive, zero or negative outcome never move stability or
+reset/rewind `t_last_hit`. They are not FSRS grades. The earlier D40 signed
+stability-penalty design is superseded by D45; there is no negative-S branch.
 
-### 5.1 The outcome signal — a signed verdict on a recall
-
-Adoption (`recall_hit`) says *which* results a caller used; it cannot say the
-used context led anywhere good. A receipt client that observes the downstream
-result reports it once, against the whole recall, as a bounded reward:
+### 5.1 Outcome utility — one bounded verdict on a recall
 
 ```text
-  reward ∈ [−1, 1]                         clamped by the server
-  rank_decay(x) = 1 / (rank_x + 1)         rank_x = 0-based position of x in the recall's results
-  κ_signal(x)   = reward · rank_decay(x)   the per-result signed strength before source attribution
+  U_e = (ν · μ0 + Σ_h w_h · r_h) / (ν + Σ_h w_h)
+  h ranges over retained outcome Hits for Episode e
+  ν = 4, μ0 = 0, r_h ∈ [−1,1], w_h ≥ 0
 ```
 
-`rank_decay` gives the top result the most credit and blame and fades down the
-list, so a verdict on a recall does not move every surfaced item equally — the
-result the caller most likely acted on carries the signal. One recall yields at
-most one `outcome` per source Episode; the namespace (the recall UUID) makes it
-idempotent under retry (§ The Hit node).
+`ν` and `μ0` are fixed illustrative prior defaults, subject to calibration.
+`U_e=0` without attributed outcomes; `−1 ≤ U_e ≤ 1`. Keep the sufficient
+statistics `Σ w*r` and `Σ w` rebuildable from retained Hits even after receipts
+expire. An explicitly reported zero adds evidence weight with zero numerator;
+missing reward adds nothing. Utility measures a reported usefulness proxy,
+not truth, independent labels or causal attribution.
 
-Why a signed verdict at all: every other producer can only raise stability, so
-without this a memory that keeps surfacing and keeps producing bad answers is
-reinforced by its own exposure. `outcome` is the FSRS **"again" grade** the
-rest of the ledger lacks — the only way `S` is ever held back or lowered
-(§ Reinforcement). It is also the negative label §9 refitting needs and cannot
-otherwise obtain.
-
-### Derived → Episode attribution, with conservation
-
-If the adopted element is a Fact, a Hit is created on each of its 1–16
-materialized source Episodes. Total reinforcement is conserved:
+For the outcome-bearing commit, choose its distinct `adopted` IDs when that
+field is present; otherwise choose all delivered primary IDs from the
+receipt. An explicit empty list, or an empty recall, gives **no item
+attribution**: retain the verdict at receipt/control level. Companions are not
+independent primary items and do not receive extra outcome credit.
 
 ```text
-  κ_eff(e) = κ(kind) / |sources(f)|
+  J = selected nonempty primary result set
+  rank_j = original delivered rank, 0-based; do not rerank a selected subset
+  a_j = (1 / (rank_j + 1)) / Σ_{l ∈ J} (1 / (rank_l + 1))
+  b_je = 1 / |sources(j)|  if e ∈ sources(j), otherwise 0
+  w_e = Σ_{j ∈ J} a_j · b_je
+  Σ_e w_e = 1
 ```
 
-If, within one recall, the same Episode is a source of several adopted items,
-the Hits **merge into one** with `kappa_eff = min(Σ κ_eff, κ(kind))`. Adopting
-a fact with four sources gives each source 0.25; if a source also backs another
-adopted item the shares add up but never exceed the kind's κ.
+An Episode is its own one-element source set. A Fact uses its receipt's
+immutable 1–16-source snapshot. Merge overlapping Episode shares by addition
+with **no extra cap**: all nonempty recall outcome credit is conserved. Store
+the original ranks, selected IDs, source shares and resulting weights; do not
+resolve current-generation IDs during later feedback.
 
-### Reinforcement — updating S
+Example: delivered rank 0 has `[E1]`, rank 1 has `[E1,E2]`, and both are
+selected. `a=(2/3,1/3)`, hence `w_E1=5/6`, `w_E2=1/6`, sum 1. With `reward=-1`
+and no previous outcomes, `U_E1=-5/29≈-0.172414`, `U_E2=-1/25=-0.04`.
+A selected rank-1 item alone instead has `a=1`, not `1/2`.
 
-At hit time `t_h`, with `κ_eff` the per-Episode effective strength from
-attribution (§ Derived → Episode). For every positive kind `κ_eff ≥ 0`; only
-`outcome` can deliver `κ_eff < 0`.
+For a returnable Fact, `U_f = mean_{e ∈ sources(f)} U_e`. This is explicitly a
+**coupled heuristic**; correlated sources are not independent evidence. Entity
+anchors and Communities have no attributed outcomes and use neutral `U=0` if
+a score is needed for them.
+
+For current total weight W, an additional outcome changes utility by
+`U′−U = w·(r−U)/(ν+W+w)`. A non-positive reward need not lower U: if U is
+already more negative than r, U increases toward r. No outcome changes mass.
+
+### Adoption → Episode attribution
+
+For one confirmed adopted Fact, distribute `κ=1` equally over its sources.
+For a single commit's distinct adopted primary items J:
+
+```text
+  kappa_eff(e) = min(1, Σ_{j ∈ J, e ∈ sources(j)} 1 / |sources(j)|)
+```
+
+Adopting a four-source Fact gives each source `0.25`; a single Fact conserves
+one unit. Overlapping multi-item adoption is **capped per Episode**, so do not
+claim multi-item conservation for this adoption rule. The cap is not applied
+to outcome weights. One `recall_hit` per recall/source is allowed: subsequent
+commits cannot top up or repeat a recorded source's reinforcement; previously
+unhit sources can get their first Hit. Persist the actual applied shares.
+
+### Reinforcement — only recall_hit updates S
+
+At server hit time `t_h`, with the positive attributed `κ_eff`:
 
 ```text
   R_hit = R(Δdays(t_h, t_last_hit), s)
-
-  κ_eff ≥ 0   (reinforcement — every kind including a positive outcome)
-    s′ = min( S_max,  s · (1 + a · κ_eff · (e^{b(1−R_hit)} − 1) · s^{−c}) )
-
-  κ_eff < 0   (the "again" grade — outcome only)
-    s′ = max( S0(m₀),  s · (1 + d · κ_eff · (1 − R_hit)) )
-
-  t_last_hit′ = max(t_last_hit, t_h),   hit_count′ = hit_count + 1
-
-  a = 5.0,  b = 1.0,  c = 0.1,  d = 1.0,  S_max = 3650 days,  s ≥ S0(m₀)  (s in days)
+  s′ = min(S_max,
+           s · (1 + a · κ_eff · (exp(b·(1−R_hit)) − 1) · (s / 1 day)^(−c)))
+  t_last_hit′ = max(t_last_hit, t_h)
+  a = 5.0, b = 1.0, c = 0.1, S_max = 3650 days
+  S0(m₀) ≤ s ≤ S_max, 0 < κ_eff ≤ 1
 ```
 
-The positive branch is the FSRS stability-increase formula with the difficulty
-term replaced by κ_eff. The negative branch is a bounded penalty. Properties:
-
-- **Positive hits never lower stability** and **negative outcomes never raise
-  it.** `s′ ≥ s` when `κ_eff ≥ 0`; `s′ ≤ s` when `κ_eff < 0`.
-- **A penalty cannot erase a memory.** The negative branch floors at `S0(m₀)`,
-  the birth stability — a bad outcome demotes a memory toward "just learned",
-  never below it, and never tombstones it. Forgetting still needs elapsed time;
-  the ledger only moves `S`.
-- The penalty grows with the gap: `(1 − R_hit)` is small for a memory hit
-  moments ago and approaches 1 for a stale one, so a bad outcome on something
-  the system was confident about (recently reinforced, high `R_hit`) barely
-  moves it, while a bad outcome on a shaky recall demotes it hard.
-- **Spaced beats massed** (positive branch). The gain of a second hit is
-  `(e^{b(1−R_hit)} − 1)`, which grows as R_hit falls. Recalling something again
-  a month later makes it last longer than recalling it twice in a row.
-- `s^{−c}`: already-stable memories gain a little less.
+The power `(s / 1 day)^(−c)` is dimensionless. With valid state, `s′ ≥ s`;
+the cap, zero elapsed time and machine precision make monotonicity **weak**,
+not strict. For fixed pre-hit state and coefficient, a larger elapsed gap
+increases the uncapped gain; strict spaced-greater-than-massed claims require
+positive gaps, no saturation and a difference above numeric tolerance.
+The stability factor reduces **relative** gain for already-stable memories,
+not necessarily absolute gain. This is FSRS-inspired, not a fitted FSRS model
+of users of this system.
 
 ```text
-  s = 1 d, κ_eff = +1
-    R_hit 0.9 (1 day later)    → s′ = 1 + 5·0.105 = 1.53
-    R_hit 0.5 (~12.8 days later) → s′ = 1 + 5·0.649 = 4.24
-    R_hit 0.2 (100 days later) → s′ = 1 + 5·1.226 = 7.13
-
-  s = 4.24 d, κ_eff = −0.5   (a bad outcome, this result ranked second → reward −1 · 1/2)
-    R_hit 0.5                → s′ = max(S0, 4.24·(1 − 1·0.5·0.5)) = 4.24·0.75 = 3.18
+  s = 1 day, κ_eff = 1
+    R_hit = 0.9, elapsed = 1 day           → s′ = 1.525855 days
+    R_hit = 0.5, elapsed ≈ 12.789474 days  → s′ = 4.243606 days
+    R_hit = 0.2, elapsed ≈ 102.315789 days → s′ = 7.127705 days
 ```
+
+A negative outcome alone leaves `(s,t_last_hit,m)` unchanged at the same now.
+Adoption plus a negative outcome has the **same accessibility as adoption
+alone**, with a utility adjustment; it need not rank below the no-event case
+because adoption can increase accessibility.
 
 ### The Hit node
 
 ```text
-  (:Hit {id, t: t_h (server ms), kind, kappa_eff, namespace, idem_key}) -[:HIT_OF]-> (:Episode)
+  (:Hit {id, t, kind, kappa_eff, namespace, idem_key}) -[:HIT_OF]-> (:Episode)
   idem_key = sha256(namespace, episode_id, kind)
 ```
 
-The same cause produces at most one Hit per Episode and kind.
+`id` is server UUIDv7, `t` server ms. `kappa_eff` is positive only for
+`recall_hit`, zero for the four other kinds. An `outcome` additionally retains
+`reward`, `weight` and bounded `attribution` (contributing result IDs, original
+ranks and source shares), plus audit versions sufficient to rebuild utility
+without the receipt. The utility cache fields are `utility_reward_sum=Σw*r`
+and `utility_weight=Σw`. Never encode reward as negative
+`kappa_eff`. Hit targets are Episodes only; audit references to delivered Fact
+IDs do not create Fact Hit targets. The same cause makes at most one Hit per
+Episode and kind.
 
 ## 6. The commit path — the only Hit producer
 
-### Internal function
+### Durable RecallReceipt control records
 
-```text
-  commitHits(tx?, namespace, kind, elements: [element_id…], κ_of?: element_id → signed κ, t_h = server_time)
-    κ_of defaults to the fixed κ(kind) for every element; outcome passes κ_signal per result (§5.1)
-    1. each element → sources(x)  (an Episode is its own source)
-    2. per-Episode κ_eff = κ_of(x)/|sources(x)|, summed across elements, magnitude-capped at max|κ_of| for the kind  (§5)
-       the sum keeps its sign; conservation and the cap are on |κ_eff|
-    3. per Episode
-         a. idem_key = sha256(namespace, episode_id, kind) exists → skip
-         b. cache check: hit_count == COUNT { (:Hit)-[:HIT_OF]->(e) }
-            mismatch → regenerate (s, t_last_hit, hit_count) by full ledger replay (§7), then continue
-         c. compute R_hit, s′  (the server computes; no caller supplies numbers)
-    4. Hit CREATE × n + Episode cache SET × n in the supplied write tx;
-       if tx is absent, open one standalone transaction
-    5. return {hits_created, episodes: [{id, s, s′}]}
+Every issued memory context, including auto mode, has a durable append-only
+`RecallReceipt`, separate from semantic Episodes and memory search. Retain
+actual delivered primary/companion IDs, 0-based delivered primary ranks,
+source snapshots, bounded derived snapshots needed after generation GC,
+policy/config/generation versions, selected channels, ranking/cache state,
+budget, result digest and context digest. Original source IDs are immutable;
+no duplicate full raw Episode text is needed. Receipt persistence must
+succeed before publishing a nonempty or feedback-capable response, not in an
+in-memory ring that disappears on restart. A degraded empty response without
+a durable receipt cannot accept feedback. A persisted impression records an
+attempted publication, not proof of client consumption; a failed socket send
+is delivery-unknown, never adoption or a negative label. Events append associated
+control records (`RecallFeedback`; unique `RecallOutcome` acceptance for the
+verdict); mutable lookup/idempotency caches are rebuildable.
+
+Only included primaries receive delivered ranks. With D44, `limit` counts
+primary bundles; complete source/contrast/supersedes companions and LF
+separators count in the exact budgeted `context_text`, not as extra primary
+outcome observations. An oversized bundle is skipped, later bundles are
+considered, and `budget.limit=0` yields empty results/context and no item
+attribution. Budget is `{unit, limit, tokenizer_id?}` with a nonnegative
+integer limit. `utf8_bytes` and `unicode_scalars` counts are exact; `tokens`
+requires an installed version/digest-pinned `tokenizer_id`, rejecting unknown
+IDs, never estimating. Bundle selection checks the actual deduplicated
+prospective `context_text`; `used_budget` counts the final included text,
+including separators and mandatory warnings but excluding JSON
+transport/diagnostics. The same structured items render that deterministic
+LF-separated text; never truncate a claim or required warning to fit.
+Absent budget uses the configured output cap; the hard RPC byte cap remains.
+
+The explicit `receipt_ttl_ms` defaults to **3,600,000 ms (1 hour)**;
+persist `expires_at = created_at + receipt_ttl_ms` on the receipt at issuance.
+Restart does not shorten this window.
+`now >= expires_at` rejects feedback, including retries, rather than silently
+accepting it. Expiry bounds the feedback window, not utility history: retained
+Episode outcome Hits remain authoritative; receipt-only outcomes with no
+sources remain control audit, never invented Episode Hits. No receipt,
+missing feedback or expired feedback is a negative label.
+
+### Producer 1 — authenticated commit RPC (receipt clients)
+
+A JSON-RPC example (IDs must identify an actual issued receipt and primary):
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 17,
+  "method": "commit",
+  "params": {
+    "recall_id": "0192f3b2-0000-7000-8000-000000000001",
+    "adopted": ["0192f3b2-0000-7000-8000-000000000002"],
+    "reward": -1
+  }
+}
 ```
 
-Called from exactly four commit sites (five producers — the `commit` RPC drives
-two kinds), each with its own namespace (§5). Receipt and exposure calls open a
-standalone transaction; extraction and dreaming pass their ambient write
-transaction so their Fact and Hit effects are atomic. The negative outcome
-branch of the S update lives in `commitHits` too — it is the same function, only
-`κ_eff` may now arrive signed. This function is the whole write surface for
-forgetting; `structure_revision` is not touched by the Hit/cache portion.
+Validate before any write:
 
-Because `idem_key = sha256(namespace, episode_id, kind)` includes the kind, an
-adoption and a verdict on the same recall are distinct Hits on the same
-Episode — a `recall_hit` and an `outcome` coexist and both replay.
+- The authenticated caller's `hello.commit_mode` must be `receipt`, else
+  `commit_mode_mismatch`. Auto-mode clients cannot fabricate adoption.
+- Require an issued, authorized, unexpired receipt; unknown IDs reject
+  `unknown_recall`, expired receipts reject `receipt_expired`.
+- At least one of `adopted` or `reward` must be present (`empty_commit`).
+  `adopted` must be an array of distinct delivered primary IDs; reject
+  duplicates, unknown IDs and companion-only IDs. An empty array is valid.
+- `reward` must be a finite number in `[-1,1]`; reject null, strings,
+  booleans, non-finite or out-of-range values. **Do not clamp.** Presence is
+  checked independently of truthiness, so `reward:0` is a real observation.
+- If present, `adopted` drives adoption Hits. If reward is present, compute
+  outcome attribution by §5.1. The outcome-bearing call's adopted field is
+  authoritative; an earlier adoption-only call is not an implicit substitute
+  for an absent adopted field. Later adoption cannot redistribute an outcome.
+- One outcome per recall: an identical normalized reward/selected-set retry
+  is a no-op; a different reward or attribution set rejects as a conflicting
+  duplicate. Validate this before applying any new adoption in that request.
+  Exact-once adoption is enforced per recall/source, independent of outcome.
 
-### Producer 1 — `commit` RPC (receipt clients)
-
-The `commit` RPC carries an adoption list, a verdict, or both. A verdict on a
-recall the caller never adopted from is still valid — the context was compiled
-and acted on regardless of which items the client flagged.
+### Internal transaction
 
 ```text
-  commit {recall_id, adopted?: [element_id…], reward?: number in [−1,1]}
-    · caller's hello.commit_mode must be receipt, otherwise reject `commit_mode_mismatch`
-    · recall_id must be in the recall log (in-memory ring, TTL 1 h),
-      otherwise reject `unknown_recall` (after a daemon restart the client simply recalls again)
-    · at least one of adopted / reward must be present, otherwise reject `empty_commit`
-    · adopted present → adopted ⊆ that recall's results, else reject `unknown_recall`;
-      commitHits(recall_id, recall_hit, adopted)
-    · reward present → clamp to [−1,1]; for each result x at rank_x, κ_signal(x) = reward·/(rank_x+1);
-      commitHits(recall_id, outcome, all result ids, κ_signal per result)
+  commitHits(tx?, namespace, kind, captured_items, t_h = server_time)
+    1. resolve immutable bounded source snapshots; compute adoption coefficients,
+       outcome weights or audit-only targets according to kind
+    2. validate current policy on all items, supports and sources; pin revision
+    3. under the serialized write queue, recheck policy revision and idempotency;
+       for receipt feedback also recheck receipt expiry/acceptance before effects
+    4. for each new Episode/kind idem_key:
+         verify hit_count against total Hit count; mismatch → replay first
+         recall_hit → update s and t_last_hit
+         outcome    → update only utility sufficient statistics
+         all kinds  → append Hit and increment hit_count
+    5. append receipt feedback events where applicable and SET caches atomically;
+       recheck policy before commit; return applied counts (no denied text/IDs)
 ```
 
-The verdict spans **all** results of the recall (not just the adopted subset),
-since rank decay already concentrates the signal on the top of the list. recall
-attaches `sources` and the 0-based `rank` to every result and the log keeps
-them, so both attribution and rank decay use the recall as of its own time even
-if a generation switched in between.
+`captured_items` and attributed numbers are internal, never caller-supplied
+source IDs, weights or stability. A policy change during recall/commit causes
+retry or rejection **before response/feedback**; a torn-policy response or
+partial renormalization over remaining sources is forbidden. An unchanged
+policy revision still requires checking the receipt's captured items against
+current policy. Structural generation changes alone do not alter captured
+attribution. All state changes join one transaction; no partial adoption when
+an outcome validation fails. The Hit/cache/control portion does not increment
+`structure_revision`; policy uses its own stricter revision barrier.
 
-### Producer 2 — exposure (auto clients)
+### Producers 2–4 — audit only
 
-After the response of a recall whose client declared `commit_mode = auto`,
-the daemon calls `commitHits(recall_id, exposure, top-3 result ids)`. This
-runs after the bytes are on the socket, is not part of recall latency, and its
-failure does not affect the response (docs/05 §10).
+- **Exposure:** after an auto-mode response is on the socket, call the path
+  for the top three **delivered** primary IDs, not pre-budget candidates.
+  The durable receipt already records the impression. An exposure failure
+  cannot unsend bytes; report it operationally rather than swallowing it.
+- **Re_mention:** in the extraction transaction, optionally record the
+  duplicate relationship under `extract:<episode_id>`. Preserve **every
+  original and every occurrence's separate extracted assertion/provenance**.
+  A duplicate still creates its own immutable Fact and direct Episode
+  provenance, links the previous occurrence through existing DERIVED_FROM /
+  RELATES_TO roles as appropriate, and never automatically raises confidence,
+  truth or accessibility. Same-transaction retries remain idempotent (D46).
+- **Promotion:** in the dreaming transaction, record exactly the synthesis's
+  bounded support Facts under `dream:<synthesis_fact_id>`, resolved to original
+  Episodes. This does not reinforce them or change their `m0`.
 
-### Producer 3 — re_mention (extraction)
+These are the other three commit sites. Extraction/dreaming use their ambient
+transaction so Fact and audit effects are atomic; receipt/exposure use a
+standalone transaction. Policy checks also cover these internal producers.
 
-In the extraction write transaction, for every claim judged a duplicate of
-Fact F: `commitHits("extract:" + episode_id, re_mention, [F])` (docs/02 §5).
+Intra-Episode suppression is allowed only for an explicit same-speaker,
+same-time, same-scope self-correction. Different speakers/reports, times or
+modalities remain separate; unresolved contradictions use CONTRASTS (D42,
+D46), not a later-text-wins or high-confidence-wins rule.
 
-### Producer 4 — promotion (dreaming)
-
-When a synthesis Fact S is created from member Facts:
-`commitHits("dream:" + S.id, promotion, member fact ids)` (docs/02 §7).
-
-### Modes
-
-A client declares its mode in `hello {commit_mode}`.
-
-| Mode | Who | Hits |
-|---|---|---|
-| `receipt` | Clients that can observe adoption (an agent reports which results it used) | client `commit` → `recall_hit` and/or `outcome` |
-| `auto` | Clients that cannot observe adoption (context-injection harnesses) | daemon records `exposure` on the top-3 sources after the response |
-
-Only a receipt client can report an `outcome`: a verdict presumes the client
-saw what the context produced, the same premise as adoption. An auto client
-gets `exposure` and nothing else.
-
-An explicit `commit` from an auto client is rejected. A client that cannot see
-adoption reporting adoption would pollute the ledger. The small κ of exposure
-is the price of "it was shown, but we do not know whether it was used".
-
-## 7. Replay — the cache is a function of the ledger
+## 7. Replay — caches are functions of retained authority
 
 ```text
-  replay(e):
-    (s, t, n) = (S0(m₀(e)), ingested_at(e), 0)
+  replay(e, dynamics_config, utility_config):
+    (s, t, n) = (S0(e.m0), e.ingested_at, 0)
+    (sum_wr, sum_w) = (0, 0)
     for h in Hits(e) ORDER BY h.t ASC, h.id ASC:
-      (s, t, n) = update(s, t, n, h.t, h.kappa_eff)
-    return (s, t, n)
+      if h.kind == recall_hit: (s, t) = adoption_update(s, t, h.t, h.kappa_eff)
+      if h.kind == outcome:    (sum_wr, sum_w) += (h.weight*h.reward, h.weight)
+      n += 1
+    U = (ν*μ0 + sum_wr) / (ν + sum_w)
+    return (s, t, n, sum_wr, sum_w, U)
 ```
 
-- The cache must always equal this function's result. `verify` samples it,
-  and commit replays on the spot when it sees a `hit_count` mismatch.
-- **Out-of-order Hits** (`h.t < t_last_hit` — migration imports, clock
-  regression): the incremental update is order-dependent, so the cache is
-  discarded and the Episode's ledger is **replayed in full**. Every replay
-  step uses `Δdays=max(0,…)` and retains `max(t_last_hit,h.t)`, including a Hit
-  earlier than `ingested_at`. There are no checkpoints — one Episode has at
-  most a few hundred Hits.
-- Dropping the whole cache and regenerating it is always possible
-  (`anamnesis rebuild --hit-cache`).
+- The caches must equal this function under their recorded config version.
+  `verify` compares ledger replay, and commit repairs a count mismatch. Count
+  equality alone cannot prove cached values are correct; verification compares
+  values as well. Replay does not mutate Hits, raw outputs, Episode ingestion
+  metadata or `m0`.
+- An inserted Hit ordered before an existing Hit by `(t,id)` triggers full
+  Episode replay, not an incremental update in arrival order. Every adoption
+  step clamps elapsed time and retains `max(t_last_hit,h.t)`, even before
+  `ingested_at`. Normal logical server time is monotonic (docs/02 §1), but
+  imports and equal timestamps still obey this ordering rule.
+- No fixed sleep or live wall clock belongs in replay fixtures. Inject time,
+  use fixed event sequences, and seed any generated sequence.
+- `anamnesis rebuild --hit-cache` can discard/rebuild both accessibility and
+  utility caches from retained originals/Hits. There are no checkpoints in
+  this design; replay cost grows with that Episode's ledger, not an assumed
+  guaranteed few-hundred-Hit bound. Rebuild is an operational job, not recall.
+- A dynamics/utility configuration change is versioned, builds replacement
+  caches by full replay, and publishes a consistent version. Receipts retain
+  the version and values actually used. Neither replay nor refitting derives
+  missing outcome labels from expired receipts. Earlier historical signed-S
+  events, if imported, require an explicit audited format migration; never
+  silently reinterpret them as confirmed adoption.
 
-## 8. Where mass enters recall
+## 8. Where accessibility, utility and policy enter recall
 
 ```text
-  score(x) = relevance(x) · max(m(x), ε)^γ          γ = 0.5,  ε = 0.02
+  score(x) = relevance(x) · max(m(x), ε)^γ · (1 + β · U_x)
+  m(x) = m₀(x) · A_x
+  γ = 0.5, ε = 0.02, β = 0.25, 0 ≤ β < 1
 ```
 
-- Mass is **a weight, not a gate**. A forgotten memory still surfaces when
-  relevance dominates.
-- γ < 1 compresses mass differences so relevance leads. Calibration target.
-- ε keeps the score from collapsing to 0 as m → 0, which would destroy the
-  ordering.
-- Envelope fanout ordering uses `coalesce(m_cache,m0)` (`m_cache` is SET
-  hourly by maintenance; new nodes fall back to total immutable `m0`, docs/02 §6)
-  so that exact m is not computed for every neighbor. The final score uses
-  exact m(now).
+- Relevance retains the RRF channels/weights in docs/05. Channel RRF ranks
+  start at **1**, while delivered receipt ranks start at **0**. With normalized
+  RRF weights and denominator `60+rank`, relevance cannot exceed `1/61`.
+- `γ<1` compresses mass differences; `ε` preserves a positive mass factor for
+  otherwise eligible candidates even at `m=0`. With `β<1` and `|U|≤1`, the
+  utility multiplier stays positive; at defaults its range is `[0.75,1.25]`.
+  Example: `relevance=0.01`, `m=0.62`, `U=-5/29` gives `score≈0.007534611`.
+- Mass is a weight at final ranking **and a bounded-envelope selection gate**:
+  fanout uses `coalesce(m_cache,m0)` (hourly maintenance, docs/02 §6), so a low
+  mass neighbor can be omitted before exact scoring. The score floor does not
+  guarantee admission or retrieval. Final mass/utility use the batch-captured
+  exact source state; captured shortlist/cache state matters for replay.
+- Policy and `valid(T)` are hard filters, never lower confidence scores. A
+  denied source cannot support a visible Fact, synthesis, Community, cached
+  profile or provenance snippet. D43 checks extraction, remention, dreaming,
+  candidates, conduction, assembly and mandatory companion text. No outcome,
+  adoption, mass floor or historical snapshot can override suppression.
+- Duplicate grouping is assembly-only with representative and explicit
+  occurrence IDs/truncation, preserving subject/predicate/time/modality.
+  Grouping never rewrites authority or rewards undelivered occurrences.
+- After primary ranking, bounded conflict completion (D46) reads at most 65
+  raw CONTRASTS adjacency rows in deterministic peer-ID order: inspect 64,
+  reserve one sentinel, and select up to four eligible peers, even outside
+  retrieval candidates. `conflict_included_count` is exact. If more than four
+  inspected peers are eligible or the sentinel exists, report
+  `conflict_truncated=true` and `conflict_total=null`; only an exhausted,
+  untruncated scan reports an exact eligible total. An inspected policy-hidden
+  peer yields `conflict_redacted=true` without text, ID or hidden count.
+  No automatic winner by confidence or recency. The complete bundle, including required
+  warnings, must fit D44's budget or that primary is skipped. There is no
+  unconditional both-sides guarantee beyond the stated bound.
+
+**Suppression is not erasure (D43).** `policy.set` and `policy.revoke` are
+explicit authenticated commands, never instructions automatically executed
+from ingested text. They append `anamnesis.memory-policy/1` control Episodes;
+active policy is a rebuildable cache. Events carry `policy_id`, `action`
+(`deny`/`revoke`), `selector` and `scope` (`derived`/`content`); at least one
+selector field is required from `subject_entity_id`, `schema`, `sub_kind`,
+`modality`, `literal`. Fields combine with AND. Literal matching is
+NFC-normalized Unicode case-sensitive substring matching, not regex.
+
+Derived scope checks canonical claims and resolved entities before derived
+writes/Hits; content scope also checks raw Episode text and suppresses ordinary
+original recall. Structured selectors cannot guarantee suppression of
+unextracted original text; expose that limit. Policy becomes effective at the
+revision barrier, with background derived index/cache rebuilding to remove
+denied items, **not deletion of originals**. Control Episodes are excluded
+from memory search while audit metadata remains. Revoke does not fabricate
+previously suppressed Facts; re-extraction is explicit. Existing backups and
+privileged raw operator access are outside this boundary. There is no
+`gc --erase` or GDPR erasure guarantee.
 
 ## 9. Constants and calibration
 
 | Constant | Default | Basis |
 |---|---|---|
-| DECAY | −0.5 | FSRS-4.5 power law |
-| FACTOR | 19/81 | so that R(S, S) = 0.9 |
-| S_base | 1 day | assumption |
-| λ | 1 | S0 ∈ [S_base, 2·S_base] |
-| σ_fact | 30 | assumption |
-| prior(sub_kind), prior(modality) | docs/04 §1 tables | assumption; modality prior refits against outcome verdicts (§6) grouped by modality |
-| a, b, c | 5.0, 1.0, 0.1 | near FSRS w8, w10, w9 |
-| S_max | 3650 days | cap |
-| d | 1.0 | penalty scale for the negative outcome branch; assumption |
-| κ | 1.0 / 0.5 / 0.3 / 0.15 | positive kinds; assumption |
-| reward | [−1, 1] | `outcome` κ before rank decay; caller-supplied, server-clamped |
-| γ, ε | 0.5, 0.02 | assumption |
+| DECAY, FACTOR | −0.5, 19/81 | FSRS-inspired power law; `R(S,S)=0.9` |
+| S_base, λ | 1 day, 1 | assumption; initialize from immutable original m0 |
+| σ_fact | 30 | assumption; ablate against 1 and fitted alternatives |
+| prior(sub_kind), prior(modality) | §1 | assumptions, new generation for changed priors |
+| a, b, c | 5.0, 1.0, 0.1 | FSRS-inspired adoption gain, not fitted coefficients |
+| S_max | 3650 days | assumed cap; weak monotonicity only |
+| κ adoption | 1.0 before source sharing | assumption; other kinds have no accessibility gain |
+| ν, μ0 | 4, 0 | illustrative utility shrinkage prior |
+| reward | [−1,1] | explicit finite client report; reject outside bounds |
+| γ, ε, β | 0.5, 0.02, 0.25 | assumptions; `0≤β<1` |
+| receipt_ttl_ms | 3,600,000 ms | explicit configurable feedback window |
 
-Refitting: receipt-mode recall logs yield two labels — "which of the shown
-results were adopted" (from `recall_hit`) and "did the context lead to a good
-result" (from `outcome`, the negative half of the sample that adoption alone
-cannot supply). Using the predicted R at exposure time as the feature and
-adoption as the target, minimize log loss to fit DECAY, FACTOR, a, b, c; the
-outcome label fits the penalty scale d against downstream success. Adoption is
-a proxy for recall probability (an irrelevant result is not adopted even if
-remembered), so the sample is restricted to the top relevance band. Constants
-are recorded in `config.jsonc` and every change gets a version tag — when
-constants change, the cache is regenerated by full replay.
+Reject malformed/non-finite configuration at the boundary: require
+`DECAY<0`, `FACTOR>0`, `S_base>0`, `λ≥0`, `S_max≥S_base·(1+λ)`, `σ_fact>0`,
+`a,b>0`, `c≥0`, `ν>0`, `μ0∈[-1,1]`, `0<γ<1`, `0<ε≤1`, `0≤β<1`, valid
+`[0,1]` priors and positive finite receipt TTL. If refitting DECAY while
+preserving the stability definition `R(S,S)=0.9`, derive
+`FACTOR=0.9^(1/DECAY)−1`; fitting both independently would redefine S.
 
-## 10. CI fixtures
+Calibration uses retained delivered impressions and explicit adoption/outcome
+reports, not self-generated exposure/remention/promotion as positive labels.
+Separate the tasks:
 
-- `R(S, S) = 0.9` exactly (floating-point tolerance 1e-12)
-- R monotonically decreasing, S monotonically increasing
-- spaced > massed: the same two hits at 1 d vs 30 d apart → s′(30 d) > s′(1 d)
-- κ conservation: adopting a Fact with n sources → Σ κ_eff = κ
-- merge cap: an Episode overlapping within one recall has kappa_eff ≤ κ
-- signed monotonicity: `κ_eff ≥ 0 ⇒ s′ ≥ s` and `κ_eff < 0 ⇒ s′ ≤ s`
-- penalty floor: a chain of `outcome` reward −1 hits drives `s → S0(m₀)` and
-  never below; `m` still decays only through elapsed time
-- rank decay: reward −1 on a recall moves the rank-0 source twice as much as
-  the rank-1 source (`κ_signal ∝ 1/(rank+1)`)
-- outcome idempotency: two `commit` verdicts on the same `recall_id` create one
-  `outcome` Hit per source Episode, not two
-- replay(e) == cache, property test over 1,000 random Hit sequences
-- inserting Hits out of order then replaying == inserting them in order
-- an element with `m = 0` stays in the results when relevance dominates (ε behavior)
+1. Fit source-faithfulness confidence against annotated source/support pairs,
+   including modality, corrections, unsupported syntheses and correlated
+   sources. Do not fit truth from bounded span validation.
+2. Evaluate accessibility as an adoption proxy conditional on exposure and
+   relevance, with held-out time/session splits. Restricting to a top relevance
+   band can reduce relevance confounding, not establish unbiased memory
+   probability. No response/expired receipt is missing data, not failure.
+3. Evaluate utility against explicit recall-level outcomes. Use one observation
+   per recall with the conserved attribution weights, not many independent
+   labels for its Facts or source Episodes. Zero is observed neutral reward.
+4. Ablate utility (`β=0`), retention (`σ_fact`, adoption gain), priors, source
+   aggregation and the mass gate against held-out retrieval/usefulness metrics.
+   Include collateral sibling refresh and synthesis support correlation.
+
+All constants and their versions live in `config.jsonc`/generation audit.
+Changing dynamics or utility priors rebuilds caches under a new pinned version;
+changing intrinsic priors rebuilds derived generations instead (§1). No
+refit result or measured efficacy is asserted here.
+
+D47 separates numerical PPR residual from bounded-envelope truncation and
+retrieval usefulness: a small residual proves neither global recall coverage
+nor a fixed top-k overlap in close ties. Retrieval validation keeps local
+`α=0.85`, uniform dangling handling and normalized virtual-source V, with
+`alpha=dampingFactor`, not its complement. The GDS oracle baseline is pinned
+**2.13.12**, not master/latest (docs/06–07). Determinism is conditional on
+captured candidate/index/cache/degradation state, not merely structure revision.
+
+## 10. Required mathematical and protocol fixtures
+
+These specify implementation checks; this prose-only finalization adds no
+prose-pinning tests and does not claim the implementation already passes them.
+
+- `R(S,S)=0.9` within `1e-12`; `R(0,S)=1`; elapsed time is nonnegative under
+  clock regression. R is strictly decreasing for increasing finite elapsed
+  time, and increasing in S for positive elapsed time (within tolerance).
+- Adoption never lowers S or `t_last_hit`; cap and same-time hits permit
+  equality. Fixed uncapped state gives larger gain for a larger gap. With
+  `S0=1.5`, first hit at day 1, second after 0/1/30 days gives approximately
+  `2.022748 / 2.539589 / 8.570575` days. At `S_max`, gaps cannot give strict gain.
+- For all four non-adoption kinds, accessibility/cache time are unchanged;
+  negative outcome alone leaves mass unchanged at the same now. Compare
+  adoption-plus-negative with adoption-only, not no event.
+- Single-Fact adoption shares sum to 1; multi-item adoption uses the Episode
+  cap and is not globally conservative. Outcome attribution always sums to 1
+  for a nonempty selected set, including overlap; no second cap is applied.
+- Outcome utility is bounded, zero differs from missing, an all-one-source
+  bundle gives weight 1, and selecting only a low-ranked item renormalizes it
+  to 1. The `5/6,1/6` overlapping example yields `−5/29,−1/25` at reward −1.
+- Reject malformed rewards, duplicate/unknown/companion adopted IDs and
+  malformed configurations before effects. Explicit `adopted:[]` retains
+  only receipt-level outcome; empty/budget-zero recall does the same.
+- Identical feedback retry gives no extra Hits or utility; conflicting
+  reward/attribution rejects atomically. Expiry boundary rejects at equality,
+  restart preserves receipts, and receipt expiry does not lose utility replay.
+- Replaying a fixed-seed set of 1,000 mixed event sequences matches cache
+  updates, including out-of-order insertions and identical times ordered by
+  ID. Replay never modifies m0 and generation switches never reset Episode S.
+- Max-source accessibility chooses retention, not recency; unchanged sources
+  do not grant replacement equality after source truncation. Sibling refresh
+  is expected, not a failing per-Fact-selectivity test.
+- Eligible mass-zero candidates retain a positive score factor, but admission
+  through the bounded mass-ordered envelope is not guaranteed. Outcome only
+  changes utility, and `1+βU` stays positive for accepted configurations.
+- Current-policy barriers reject/retry races before serving or committing;
+  denied support cannot leak via receipt feedback, provenance, conflict peers,
+  cached profiles or historical T. Only explicit authenticated policy RPCs
+  create policy controls; ingested instructions are data.

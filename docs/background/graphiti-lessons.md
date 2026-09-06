@@ -1,6 +1,7 @@
 # The graphiti Family — Analysis and What We Borrowed
 
-> Non-normative background (written 2026-08). The normative design is
+> Non-normative background (written 2026-08, anamnesis-side statements
+> corrected 2026-09 to match the finalized design). The normative design is
 > [docs/00–10](../00-overview.md); where a "borrowing decision" here differs
 > from it, the normative docs win.
 
@@ -21,7 +22,7 @@ The correspondence with our design is nearly isomorphic:
 | EpisodicNode (raw) | Episode element (original-message etc.) | both keep originals lossless |
 | EntityNode (name + summary + name_embedding) | mapping / Entity elements | entities are natural-language summaries too |
 | **EntityEdge.fact (natural-language sentence) + fact_embedding** | `RELATES_TO.content` | "facts live on edges as natural language" — same principle as ours |
-| valid_at / invalid_at / expired_at (updated in place) | invalidation-as-event (immutable) | ours is stronger — see the incident in §3 |
+| valid_at / invalid_at / expired_at (updated in place) | invalidation-as-event (immutable) | different failure mode, see the incident in §3 |
 | CommunityNode (cluster summary) | dreaming's consolidation tier | |
 | per-tier hybrid search (BM25 + cosine + BFS) → RRF/MMR/cross-encoder | recall pipeline | recipe structure borrowed |
 
@@ -49,9 +50,10 @@ caused hundreds of classifier calls per search; the patch caps at RRF seeds →
 
 **Borrowing 5 — write-path hook seam.** An explicit, fail-open hook contract
 for intervening in the write path (edge judgment etc.) without monkey-patching.
-Our digest handlers are formalized in the same spirit: the engine has a default
-behavior when no hook is present; when one is, the hook receives the default
-implementation as an argument and wraps it.
+*Not adopted in the normative design.* The extraction pipeline is a fixed
+sequence (claim LLM → bounded read → judge LLM → revalidated write, D28)
+with no caller hooks; harnesses sit outside the daemon (D39) and the only
+write-path intervention a caller has is the authenticated policy RPC (D43).
 
 ## 3. hermes-graphiti — lessons from operational incidents
 
@@ -73,9 +75,15 @@ rate to 2.5 %. Two things are fixed by this:
 1. **Judgment (duplicate / contradiction / invalidation decisions) uses a model
    at least as strong as extraction.** It is not a job for a mini model.
 2. graphiti edits `invalid_at` in place, so a repair script over 100k edges was
-   needed. With invalidation-as-event, the invalidation itself is an immutable
-   element, so repairing a misfire is "add an event that invalidates the
-   invalidation". **Empirical justification of the immutable design.**
+   needed. With invalidation-as-event the wrong INVALIDATES is itself an
+   immutable record, so nothing is lost. The repair is not "invalidate the
+   invalidator": INVALIDATES is non-recursive (D3), so a wrongly invalidated
+   Fact A is restored by an explicit replacement A′ that copies A's content
+   and time, DERIVED_FROM A and the correcting source, and INVALIDATES the
+   wrong invalidator's Fact. Mass repair is a batch of replacement Facts,
+   which the ledger records as such. The incident shows why the original
+   must survive the misfire; it doesn't by itself show which repair protocol
+   is better.
 
 **Lesson C — banish maintenance from the hot path (ADR-107).** Community
 summary and membership updates were removed from the write path and moved to
@@ -83,16 +91,20 @@ threshold-triggered deferred batches. Same conclusion as our hot/cold split and
 dreaming. Consolidation never sits in the latency of remember or digest.
 
 **Lesson D — time weighting is multiplicative, not a hard filter (ADR-102).**
-`final = (1-w)·vector + w·(decay × recency × validity × kind)`. Same
-philosophy as our read-time mass evaluation — invalidation and weathering do
-not delete candidates, they weigh them down (except for the explicit snapshot
-cut).
+`final = (1-w)·vector + w·(decay × recency × validity × kind)`. Partly the
+same philosophy: our accessibility `m` and utility `U` multiply into the
+score at read time and never delete a candidate. Validity is different: an
+invalid Fact still conducts in the envelope but is a hard filter at assembly
+(D23), and policy is a hard filter everywhere (D43). We weigh by mass and
+filter by validity and policy; we don't fold validity into a soft weight.
 
 **Lesson E — failures are not silently dropped (ADR-098/101).** Failed
 extraction episodes are preserved in a DLQ file with an idempotent replay
-script, and a bounded ingest queue (bulkhead) blocks stampedes. To add to our
-Outbox: a retry counter on digest-handler failure and DLQ marking after N
-attempts (elements are immutable, so only cursor state changes).
+script, and a bounded ingest queue (bulkhead) blocks stampedes. The
+normative equivalent: the extraction sequencer pauses the blocked sequence
+head after three automatic failures and nothing overtakes it (D28); the
+Episode is already durable, so only cursor state is involved, and the spool
+is the bounded ingest queue (D22).
 
 **Lesson F — re-ranking and recall UX (ADR-041/042/106).** Center-node
 proximity search (re-ranking by graph distance), two-stage recall (find the
@@ -103,12 +115,16 @@ entity → unfold surrounding facts), communities used to structure broad recall
 
 > **[Updated 2026-08-30]** The "npm install without Docker" constraint was
 > lifted, reversing the initial decision below. **We move to Neo4j as the
-> single store** (graph + vector HNSW + fulltext Lucene + GDS in one system).
+> single graph and index store** (graph + vector HNSW + fulltext Lucene).
 > No separate vector DB such as Qdrant — both upstream graphiti and
 > hermes-graphiti keep embeddings inside the graph DB; separating them only
 > adds synchronization plumbing. Revisit behind the recall seam if vectors in
 > the hundreds of millions are ever measured.
 > Details in [docs/01-storage](../01-storage.md).
+>
+> **[Corrected 2026-09]** "Single store" was later narrowed (D5): payload
+> bytes live in `~/.anamnesis/objects/`, and GDS runs only in disposable
+> offline jobs for dreaming and validation, never on the recall path.
 
 Initial decision (while the constraint held): borrow the logical architecture
 wholesale from graphiti (three tiers, facts = natural language + embedding,
@@ -128,8 +144,12 @@ not move the physical store to Neo4j —
 
 ## 5. Roadmap impact
 
-- v0.2 (extraction): noise-entity filter rule, judge model ≥ extraction model,
-  DLQ cursor, link embeddings.
-- v0.2 (recall): RRF fusion + candidate caps, multiplicative time weighting.
-- v0.3: deferred community (consolidation) batches, center-node proximity
-  re-ranking, two-stage recall, MMR / cross-encoder recipes.
+As of the 2026-09 finalization, checked against [docs/09](../09-roadmap.md):
+
+- v0.2 (extraction): noise-entity filter rule, judge model ≥ extraction
+  model, blocked-head pause instead of a DLQ (D28), link embeddings.
+- v0.2 (recall): RRF fusion + candidate caps, multiplicative mass weighting.
+- v0.3: deferred community (consolidation) batches. Center-node proximity
+  re-ranking and two-stage recall are still candidates, not scheduled. MMR
+  and cross-encoder re-ranking are not planned inside the daemon: docs/09
+  puts re-ranking with the caller, and recall makes no LLM calls.
