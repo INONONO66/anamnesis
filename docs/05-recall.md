@@ -150,6 +150,8 @@ source Episode IDs); Entity anchors use immutable `m0`. Exact `m(now)` follows
 {
   "id": "…", "kind": "Fact", "schema": "anamnesis.claim/1", "sub_kind": "preference",
   "epistemic": "extracted",                        // observed | extracted | synthesized — who produced this, hence how far to trust it
+  "modality": "asserted",                          // asserted | reported | hedged | intended | hypothetical — the speech act the claim came in (docs/02 §5.1); absent on originals and syntheses
+  "confidence": 0.9,                               // extraction judge's belief the claim is what the source says
   "content": "…", "time": {"utc": 1700000000000, "precision": "day"},
   "score": 0.041, "relevance": 0.052, "mass": 0.62,
   "rank": 0,                                        // 0-based position in results; commit's outcome verdict decays credit by 1/(rank+1)

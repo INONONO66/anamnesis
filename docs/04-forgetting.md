@@ -23,7 +23,7 @@ Assigned once at creation, immutable. Calibration target.
 | Episode `original-message` | 0.5 |
 | Episode `original-document` | 0.6 |
 | Episode `correction` | 0.8 |
-| Fact | `confidence × prior(sub_kind)` — prior: preference, decision 1.0; fact, procedure 0.9; state 0.8; event 0.7; summary 0.6 |
+| Fact | `confidence × prior(sub_kind) × prior(modality)` — sub_kind prior: preference, decision 1.0; fact, procedure 0.9; state 0.8; event 0.7; summary 0.6. modality prior: asserted 1.0; reported 0.8; hedged 0.6; intended 0.5; hypothetical 0.3 (docs/02 §5.1) |
 | Entity | 0.5 |
 | Community | 0.5 |
 
@@ -349,6 +349,7 @@ is the price of "it was shown, but we do not know whether it was used".
 | S_base | 1 day | assumption |
 | λ | 1 | S0 ∈ [S_base, 2·S_base] |
 | σ_fact | 30 | assumption |
+| prior(sub_kind), prior(modality) | docs/04 §1 tables | assumption; modality prior refits against outcome verdicts (§6) grouped by modality |
 | a, b, c | 5.0, 1.0, 0.1 | near FSRS w8, w10, w9 |
 | S_max | 3650 days | cap |
 | d | 1.0 | penalty scale for the negative outcome branch; assumption |

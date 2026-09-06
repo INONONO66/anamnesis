@@ -606,3 +606,34 @@ filter, or phrase by grade without parsing the schema registry, while
 `provenance` remains the full chain for anyone who needs it. Adapted from omo's
 author-as-trust-tier; anamnesis derives it from provenance instead of recording
 an author field.
+
+## D42 — extraction keeps the speech act and the evidence span; it never records-then-invalidates within one Episode
+
+**Decision**: a claim carries `modality ∈ {asserted, reported, hedged,
+intended, hypothetical}`, `confidence ∈ [0,1]`, and an optional `span` of byte
+offsets into the Episode. `modality` is part of Fact identity and a factor of
+`m₀`; `confidence` is stored but not identity. A present `span` is validated at
+write — a slice that is not in the Episode rejects the claim. Claims are emitted
+in Episode order and a later claim contradicting an earlier one in the same
+Episode suppresses it before anything is written (docs/02 §5, §5.1; docs/01 §1;
+docs/04 §1; docs/05 §6).
+
+**Alternative**: (a) drop hedges and intents as "not durable" (senpi's facts
+extractor: "omit guesses, plans not adopted"), or (b) store them as low-score
+facts flagged by regex at read time (memkraft `confidence.py`). (c) No span —
+trust `DERIVED_FROM` alone. (d) Let intra-Episode self-corrections become Fact +
+INVALIDATES like any other contradiction.
+
+**Reason**: (a) forgets that an intent existed and (b) lets an intent be counted
+as a done thing until a regex catches it; storing the speech act as a closed
+enum keeps both the recall and the distinction, and lets the modality prior be
+refit against outcome verdicts instead of guessed. A span makes `extracted`
+auditable against `observed` — a caller can show the quote — and a fabricated
+span is the one hallucination signal the engine can verify with no model, so it
+is fail-closed. Suppressing intra-Episode contradictions keeps the graph free of
+Facts that were wrong before they were written. `confidence` stays out of
+identity because a scalar the model does not emit deterministically must not
+fork otherwise-identical Facts. Adapted from senpi's self-contained-record and
+same-transcript-contradiction rules and memkraft's uncertainty markers; both
+are done here at write time as stored fields rather than at read time as
+prompts or regexes.

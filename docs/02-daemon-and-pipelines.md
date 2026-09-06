@@ -327,8 +327,23 @@ decisions. LLM calls cannot sit inside a transaction.
         · require ingest_seq = Generation.next_ingest_seq
         capture input_head = OriginHead[episode.origin_key]
     ── extraction LLM (outside a tx) ────────────────────────────────────────
-    L1. Episode → at most 32 claims[] {content, sub_kind, time_hint, entities[≤16], mode?}
-    L2. Time resolution: explicit > relative against Episode.time > inherit
+    L1. Episode → at most 32 claims[], in Episode order:
+          {content, sub_kind, modality, confidence, span?, time_hint, entities[≤16], mode?}
+        · content is self-contained: pronouns and deixis resolved to the named
+          referent, so the claim reads correctly with no Episode in view
+        · modality ∈ {asserted, reported, hedged, intended, hypothetical} — the
+          speech act, not the confidence (§5.1). A hedge or an intent is kept
+          and labelled, never silently promoted to a fact or silently dropped
+        · confidence ∈ [0,1] — the judge's belief that the claim is what the
+          Episode says, given its modality
+        · span = [start, end) UTF-8 byte offsets into Episode.content that the
+          claim rests on; omitted only when the claim has no single locus
+    L1b. Intra-Episode resolution: a later claim that contradicts an earlier
+        claim of the same Episode wins — the earlier one is not emitted.
+        Nothing was recorded, so nothing is invalidated; a self-correction
+        inside one message never reaches the graph as Fact + INVALIDATES
+    L2. Time resolution: explicit > relative against Episode.time > inherit.
+        Never against wall clock
     ── bounded read tx, all indexes scoped to target_generation ─────────────
     R1. For each extracted entity mention: synchronous fulltext top 16.
         Deduplicate by Entity id; score DESC, id ASC; keep global top 64
@@ -342,7 +357,9 @@ decisions. LLM calls cannot sit inside a transaction.
         validity bits and replacement-context edge IDs)
     ── judge LLM (outside a tx) ─────────────────────────────────────────────
     L3. Entity judge: match an existing candidate / create new with
-        entity_key = sha256(target_generation, normalized_name, entity_kind)
+        entity_key = sha256(target_generation, normalized_name, entity_kind).
+        A mention with no resolvable referent (bare pronoun, "the client")
+        creates no Entity; the literal stays in the claim's content
     L4. Claim judge against Fact candidates:
           new                        → Fact + DERIVED_FROM Episode + MENTIONS
           duplicate of F             → no Fact. re_mention Hit on sources(F)
@@ -359,14 +376,22 @@ decisions. LLM calls cannot sit inside a transaction.
         · rerun the bounded reads and require the exact candidate_digest
         · every referenced candidate and replacement-context edge is unchanged
         any check fails → abort tx and retry the same sequence head
-    W2. For each new Fact, materialize 1–16 source Episode IDs and matching
-        direct DERIVED_FROM links (docs/01 §1); then CREATE Facts and links in
-        target_generation. Every derived endpoint is in that same generation;
+    W2. Span check, before anything is created: a present `span` must slice
+        Episode.content to a non-empty string on UTF-8 boundaries, else the
+        claim is rejected (`diagnostics.extract.span_mismatch += 1`, the
+        Episode still completes). A quote that is not in the source is the
+        strongest hallucination signal the engine can verify without a model.
+        For each surviving new Fact, materialize 1–16 source Episode IDs and
+        matching direct DERIVED_FROM links (docs/01 §1), the primary link
+        carrying `span`; then CREATE Facts and links in target_generation. Every derived endpoint is in that same generation;
         cross-generation extraction links are rejected. Fact identity hashes
         schema, content, properties, time, sub_kind, primary Episode, entity
         bindings, source Episodes and synthesis supports; Entity identity uses entity_key.
-        Exact retry collisions are no-ops. SET each mentioned Entity's
-        visible_from_utc to min(current, mention source time)
+        Exact retry collisions are no-ops. `confidence` is stored but not part
+        of identity: two runs that agree on meaning and differ only in belief
+        collide, and the first write's confidence stands — model
+        nondeterminism on a scalar must not fork Facts. SET each mentioned
+        Entity's visible_from_utc to min(current, mention source time)
     W3. re_mention Hits through the commit path (docs/04 §6), namespace extract:<episode_id>
     W4. For each distinct M in {active_embedding_model,
         target_embedding_model if set}, CREATE Outbox
@@ -396,6 +421,30 @@ model's serving vector set, the same transaction increments
 `structure_revision`. If the embedding service is unavailable the entry stays
 and is retried — meanwhile the Fact is unreachable through the vector channel
 and is reached through BM25 and PPR only.
+
+### 5.1 Modality — the speech act is a stored field
+
+Extractors face a choice on "I'm thinking of getting an orchid" or "I think we
+deployed on Friday": drop it as not durable, or store it as a weak fact. Both
+lose information — the first forgets that an intent existed, the second lets
+an intent be counted as an acquisition. The engine stores the claim with the
+speech act it came in:
+
+| `modality` | The Episode… | Example |
+|---|---|---|
+| `asserted` | states it as so | "I moved to Busan" |
+| `reported` | attributes it to someone else | "Bob said the deploy failed" |
+| `hedged` | states it with an uncertainty marker | "I think we deployed Friday" |
+| `intended` | states a plan or wish, not a done thing | "I'm going to switch to Neo4j" |
+| `hypothetical` | states it under a condition or as a possibility | "if we hit 10k users we'd shard" |
+
+`modality` is meaning-bearing: it is part of Fact identity (docs/01 §1), an
+input to `m₀` (docs/04 §1), and exposed on every recall result (docs/05 §6).
+An `intended` claim later fulfilled is a new `asserted` Fact whose judge
+outcome is `elaboration` (RELATES_TO the intent), not a contradiction — the
+plan was true as a plan. What a caller does with `hedged` or `intended` results
+(filter, phrase, discount) is the caller's business; the engine's job is to
+not lose the distinction.
 
 ### Idempotency and a blocked sequence head
 

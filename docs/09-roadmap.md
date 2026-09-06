@@ -49,7 +49,7 @@ retrieves along relationships.
 | Area | Contents | Docs |
 |---|---|---|
 | derived layer | `:Fact`, `:Entity`, physical generation labels/indexes, global `ingest_seq`, BUILDING/ACTIVE/CATCHING_UP/INACTIVE/RETIRED lifecycle, strict sequencer, dual-tail Outbox, atomic cutover and caught-up rollback | 01 §1, §4–5 |
-| extraction | target sequencer: claim LLM → bounded generation-index reads → judge LLM → revalidated write; blocked-head retry, entity/fact identity, correction context, embed stage | 02 §5 |
+| extraction | target sequencer: claim LLM (self-contained content, modality, confidence, span; intra-Episode resolution) → bounded generation-index reads → judge LLM → revalidated write with span check; blocked-head retry, entity/fact identity, correction context, embed stage | 02 §5, §5.1 |
 | commit path | producer 3 (re_mention) | 04 §6 |
 | maintenance | hourly job: `m_cache`, hub shortlist. **Precedes PPR** — the envelope depends on both | 02 §6 |
 | time | Fact time, derived visibility for Entity and Link, non-recursive valid(T), replacement protocol, provenance exception | 03 §3–5 |

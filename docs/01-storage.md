@@ -65,6 +65,9 @@ kind-specific queries go through the kind label.
 | `max_source_ingest_seq` | Fact | Maximum ingest sequence in `source_episode_ids`; Community snapshot filter |
 | `support_fact_ids` | synthesis Fact | 1–16 non-synthesis Facts whose validity the synthesis depends on |
 | `sub_kind` | Fact | `fact / state / event / preference / procedure / decision / summary`. Input to the forgetting prior (docs/04 §1) |
+| `modality` | non-synthesis Fact | `asserted / reported / hedged / intended / hypothetical` — the speech act the claim came in (docs/02 §5.1). Meaning-bearing: part of identity, input to the forgetting prior, returned on recall |
+| `confidence` | Fact | Judge's belief in [0,1] that the claim is what the source says. Stored, input to `m₀`, **not** part of identity — model nondeterminism on a scalar must not fork Facts |
+| `span` | primary `DERIVED_FROM` link (Fact → Episode) | `[start, end)` UTF-8 byte offsets into the Episode's content the claim rests on; validated at write, optional when the claim has no single locus (docs/02 §5 W2) |
 
 ### Schema registry
 
@@ -121,7 +124,7 @@ Fact identity covers every immutable field that can change meaning:
 
 ```text
   idem_key = sha256(RFC-8785 canonical JSON of {
-    generation, schema, content, properties, time, sub_kind, primary_episode_id,
+    generation, schema, content, properties, time, sub_kind, modality, primary_episode_id,
     max_source_ingest_seq,
     sorted(entity_ids), sorted(source_episode_ids), sorted(support_fact_ids)
   })
@@ -385,6 +388,7 @@ language in `RELATES_TO.content`.
   "from": "<element-id>", "to": "<element-id>",
   "role": "DERIVED_FROM",
   "content": "This claim was extracted from that message.",
+  "span": [128, 191],                      // primary Fact→Episode link only; byte offsets the claim rests on
   "generation": 42,                        // absent on originals-layer links
   "idem_key": "…"
 }
