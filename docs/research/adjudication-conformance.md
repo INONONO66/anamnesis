@@ -265,12 +265,17 @@ executed the 36-case screen after the `anyOf` change. Both were verified by
 the parent, and the second is the one transferred to the server alongside the
 unchanged fixtures and prompt.
 
-The copy in this checkout hashes to
-`678728eb47a18cfbcec799b59a4751f47422b5bf5d81d1d8d3d8b4e2b63a45f7`, which
+The metric-naming revision, before subsequent comment-only clarification,
+hashed to `678728eb47a18cfbcec799b59a4751f47422b5bf5d81d1d8d3d8b4e2b63a45f7`, which
 differs from `06db2928...178b05` because of the post-run metric-naming
 correction described above. Fixture and prompt hashes are unchanged from the
 frozen run, so the predictions in the rows remain exactly what the executing
 runner produced.
+
+Parent verification also passed the repository type build, JavaScript syntax
+check and gitleaks scan of the research scripts. Fresh LSP diagnostics after
+the comment-only clarification timed out; this is a tooling limitation, not
+a clean-diagnostics claim.
 
 ## Limitations
 
