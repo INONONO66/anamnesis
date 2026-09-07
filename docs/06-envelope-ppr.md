@@ -112,6 +112,13 @@ aborts PPR; a verified stale-row exclusion never authorizes a native scan.
   return policy-eligible pool only; no refill through unbounded adjacency
 ```
 
+Policy eligibility of a candidate node includes its materialized
+corroboration roots: at most 16 bounded root IDs per node are checked as part
+of the same eligibility test, exactly like its other bounded sources. Roots
+never add a node or an arc, never change `w_role`, `m_cache` ordering or any
+row weight, and are never traversed; a node whose roots cannot be checked is
+excluded rather than admitted unverified (docs/01 §3.3, D49).
+
 The third sort key is **`id DESC`** for a reason: UUIDv7 is time-ordered, so
 an `id ASC` tie-break would systematically drop recent memories at every
 truncation. If a bias is unavoidable, we choose the one that keeps the recent.

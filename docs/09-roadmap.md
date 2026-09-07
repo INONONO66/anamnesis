@@ -26,6 +26,15 @@ Wherever the code at the baseline disagrees with these documents, v0.1
 brings it in line: the docs lead. The gap is established by reading the
 baseline against docs/01 and docs/02, not by the list in this paragraph.
 
+One boundary is deliberately narrower than "bring it in line". The Episode
+digest that ships today is D49's version 1, and v0.1 keeps it that way for
+every already-stored row. Adding the version-2 digest means adding the
+server-selected `episode_digest_version` discriminator and a dispatching
+verifier beside the frozen version-1 serializer, so verify, retry, journal
+replay, backup/restore and rebuild all run write-free over legacy rows. No
+Episode is reserialized, relabeled or given lineage in place, and there is no
+data migration in any stage (docs/01 §1, docs/08).
+
 ## v0.1 — originals, forgetting, search
 
 **Goal**: Episodes go in and come out; what a caller confirms it adopted is
@@ -35,11 +44,12 @@ derived layer, no PPR.
 
 | Area | Contents | Docs |
 |---|---|---|
-| storage | Neo4j compose, schema, canonical Episode digest, global `ingest_seq`, OriginHead CAS, `:Element:Episode`, Payload metadata + `objects/`, originals links, rebuildable event-time NEXT_EPISODE topology | 01 §1–2, §6–8; 02 §3 |
+| storage | Neo4j compose, schema, version-dispatched Episode digest (frozen version-1 body for stored rows, version 2 for new admissions, zero SETs either way), global `ingest_seq`, OriginHead CAS, `:Element:Episode`, Payload metadata + `objects/`, originals links, rebuildable event-time NEXT_EPISODE topology | 01 §1–2, §6–8; 02 §3 |
 | daemon | `anamnesisd` UDS JSON-RPC, bounded object upload, write queue, serving revision, pure-Node nonce/heartbeat singleton lease, core RPCs | 02 §1–3 |
 | security | 0700/0600 modes, UDS capability token, length-prefixed frame and global resource caps, bolt on 127.0.0.1 only, per-install random password | 02 §10 |
 | spool | fsync-before-ack, `.done` after commit, drain, retention, cold-start wait | 02 §4, §9 |
-| embedding | `embed_episode` Outbox worker, bounded batches, active model property/index and retry behavior | 01 §4, 02 §3 |
+| provenance | authenticated `origin_role` / `lineage_mode`, `EchoLineage` control row written in the Episode transaction, bounded parent receipts, roots and depth, `unknown` lineage never presumed independent | 01 §3.3, D49 |
+| embedding | `embed_episode` Outbox worker, bounded batches, three-part embedding identity (`embedding_model_id`, `vector_index_id`, `embedding_profile_id`), per-entry state machine with bounded retry, terminal-prefix coverage, authenticated retry/skip/cancel and append-only resolution records | 01 §4, 02 §3, D51 |
 | durability | write ordering, `gc --objects` safety, `anamnesis backup` / `restore`, `verify` | 01 §9 |
 | time | Episode `time_*`, `ingested_at`, snapshot(T) filter (Episodes only) | 03 §1, §3 |
 | forgetting | m₀, hit-cache initialization, R(t,S), Hit node + HIT_OF, S update, replay, `rebuild --hit-cache` | 04 §1–5, §7 |
@@ -77,6 +87,17 @@ reading):
   recall is a no-op, a conflicting second outcome is rejected, an expired
   receipt rejects commit, and `S`/`t_last_hit` are bit-identical before and
   after an outcome-only commit.
+- lineage: an assistant Episode declaring receipts writes a lineage row whose
+  roots and depth match its parents, overflow past 16 roots or depth 8 sets
+  `complete=false` and `unknown`, and an echoed claim leaves `S`, `m`, utility
+  and ranking bit-identical to the no-echo case.
+- embedding failure: a deterministic failure (`context_overflow`,
+  `wrong_dimension`, `malformed_response`, `client_error`) blocks the head
+  immediately, a lost worker lease closes its attempt `worker_lost`, three transient failures block
+  it after the fixed `[1000, 10000]` ms delays, the coverage cursor does not
+  move past the hole, and no later entry publishes a vector across it; an
+  authenticated retry or skip is the only way forward and each writes its
+  resolution record.
 
 ## v0.2 — derived layer, time, local PPR
 
@@ -86,7 +107,9 @@ retrieves along relationships.
 | Area | Contents | Docs |
 |---|---|---|
 | derived layer | `:Fact`, `:Entity`, physical generation labels/indexes, global `ingest_seq`, BUILDING/ACTIVE/CATCHING_UP/INACTIVE/RETIRED lifecycle, strict sequencer, dual-tail Outbox, atomic cutover and caught-up rollback | 01 §1, §4–5 |
-| extraction | target sequencer: claim LLM (self-contained content, modality, confidence as source-faithfulness, span) → bounded generation-index reads → judge LLM → revalidated write with UTF-8 boundary span check; explicit same-speaker/same-time/same-scope self-correction only, otherwise CONTRASTS; one immutable Fact per source occurrence, no "duplicate → no Fact"; policy applied before any derived write; blocked-head retry, entity/fact identity, correction context, embed stage | 02 §5, §5.1, D46, D47 |
+| extraction | target sequencer: claim LLM (self-contained content, required `content_language`, modality, confidence as source-faithfulness, literal `evidence_quote` and derived span) → bounded generation-index reads → judge LLM → revalidated write with quote and UTF-8 boundary checks; explicit same-speaker/same-time/same-scope self-correction only, otherwise CONTRASTS; one immutable Fact per source occurrence, no "duplicate → no Fact"; policy applied before any derived write; blocked-head retry, entity/fact identity, correction context, embed stage | 02 §5, §5.1, D46, D47, D48 |
+| grouping | bounded `speaker_key` / `subject_keys` / `predicate_text` / closed `scope` / `time_key` fields, `anamnesis.duplicate-group/1` key, irreflexive symmetric non-transitive `known_conflict`; local comparison only, never a global identity claim | 02 §5.3, 05 §6, D49 |
+| adjudication | shadow-mode proposals with immutable attempt/proposal/review/consumption records, single-use acceptance revalidated at W1, authenticated `adjudication.correct` with a CREATE-only operator Episode and append-only replacement under the docs/03 §5 protocol, `operator_corrected` provenance | 02 §5.2, 03 §5, D50 |
 | commit path | producer 3 (re_mention), audit-only for accessibility | 04 §6 |
 | maintenance | hourly job: `m_cache`, hub shortlist; ConductingArc retained-graph rebuild/verify and complete generation publication. **Precedes PPR** — no missing-cache native fallback | 01 §5, 02 §6 |
 | time | Fact time, derived visibility for Entity and Link, non-recursive valid(T), replacement protocol, provenance exception | 03 §3–5 |
@@ -118,7 +141,8 @@ measured.
 | commit path | producer 4 (promotion) | 04 §6 |
 | derived layer | `:Community`, cross-stream-compatible HAS_MEMBER, extraction-cutover disable/rebuild rule, majority visibility, Community mass | 01 §4, 03 §3, 04 §3 |
 | recall | identity channel, `entities` block | 05 §2 |
-| embedding | model swap procedure (new property and index, backfill, switch, gc) | 01 §4 |
+| embedding | profile swap procedure (new property and indexes, backfill, current-watermark barrier, switch, gc), `EmbeddingQualification` records and the production-activation block | 01 §4, D51 |
+| qualification (trigger-gated) | production multilingual, extractor, judge and index qualification packages: each ships only when its own machine-validated manifests and predeclared thresholds exist. Until then the v0.2 defaults stay development-scoped and reversible | 07, D48, D50, D51 |
 | GDS | envelope validation overlap@20, 100k/1M scale benches, health report | 07 §3–5 |
 | calibration | receipts and outcome events → refit DECAY, FACTOR, a, b, c, γ, β, ν, μ₀, σ_fact, modality and sub_kind priors, role weights, RRF weights; ablate each default; prior changes ship as a new derived generation with a recorded prior version; config version tags | 04 §9, D47 |
 
@@ -149,3 +173,18 @@ envelope deadline exceeded < 1 %, overlap@20 ≥ 0.8, dreaming on 1M in
 - A stability penalty. `S` only rises; outcome feeds `U` (D45, supersedes
   the D40 negative branch).
 - Automatic contradiction winners by confidence or recency (D46).
+- Automatic query translation or two-query fusion on the recall path. The
+  caller's query is used verbatim; the offline comparison behind that default
+  is in [research/retrieval-fusion](research/retrieval-fusion.md) (D48).
+- English-normalized canonical Facts. `fact_language_policy` is a per-
+  generation configuration, and generated English projections are neither
+  persisted nor indexed under this contract (D48).
+- Corroboration by repetition. Occurrence count, root count and echo depth
+  never move confidence, mass, utility, ranking or a conflict winner (D49).
+- Unattended automatic invalidation. Adjudication ships in shadow mode, and
+  acceptance is an operator decision, not human gold (D50).
+- Production embedding activation on ONLINE status or operator attestation
+  alone. It stays disabled until a qualification carries machine-validated
+  manifests and predeclared thresholds (D51).
+- Truncating, chunking or zero-filling an embedding input to move a coverage
+  cursor (D51).

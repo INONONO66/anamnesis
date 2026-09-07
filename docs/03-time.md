@@ -91,7 +91,9 @@ The Entity witness is one more property comparison, not a per-request scan:
 `EntityWitness {generation, policy_revision, entity_id, earliest_allowed_from}`
 rows are rebuilt for the active generation whenever `policy_revision`
 advances, as part of the policy barrier's reconciliation, and are keyed by
-`(generation, policy_revision)` only. There is no cache keyed by an arbitrary
+`(generation, policy_revision)` only. Echo lineage adds nothing to this axis:
+`echo_depth`, roots and receipt times are operational provenance and never
+supply or shift a Fact's event time or its visibility at `T` (D49). There is no cache keyed by an arbitrary
 request `T`; the request supplies `T` and compares. A null or missing row,
 or an unavailable cache, excludes the Entity from candidates, seeds and
 conduction; it never falls back to `visible_from_utc` alone (docs/01 §3.2,
@@ -134,6 +136,11 @@ revalidates policy after assembly (docs/02 §1).
                    && support_valid(f, T)
                    && !invalidated(f.id, f.generation, T)
 ```
+
+An operator acceptance time is operational too. Reviewing or correcting an
+adjudication never changes an `effective_time_utc`, never backdates an
+existing edge and never removes one; a repair adds new records and, where
+needed, a replacement Fact under §5 (D50).
 
 An invalidator Fact's own validity is **not consulted.** "Does the original come back when its
 invalidator is invalidated" is the doorway to recursion, cycles and rule
@@ -259,6 +266,38 @@ C reverses it, create A′). If the LLM misses it, A stays invalid — a better
 failure mode than automatic restoration by a recursive rule: an invisible fact
 can be re-stated by the user, but a wrongly resurrected fact produces silent
 wrong answers.
+
+### Operator correction uses the same protocol (D50)
+
+When the adjudicator itself was wrong and no user correction exists, the
+repair is an authenticated `adjudication.correct` call
+([02-daemon-and-pipelines](02-daemon-and-pipelines.md) §5.2), never a delete
+and never an edit of history. The daemon first appends a CREATE-only
+`anamnesis.operator-adjudication/1` Episode. That Episode is excluded from
+ordinary search, extraction and PPR, and its deterministic renderer states
+what the operator decided; it never impersonates user prose, because
+fabricating a user correction would be the same class of error the repair is
+fixing.
+
+Restoring a wrongly invalidated A then follows the protocol above, with A′
+appended in A's ACTIVE generation. A′ copies A's meaning and effective time,
+its exact 1..16 source authorities, bounded support IDs, confidence,
+`m0`/version fields and corroboration roots without a boost, derives from A,
+and invalidates A so exactly one copy of that meaning serves. Every bad edge
+is retained. The evidence seek is ordered by
+`(effective_time_utc ASC, evidence_id ASC)` with `LIMIT 65`: the request names
+1..8 bad evidence IDs and the correction record carries at most 64 other
+retained incoming evidence IDs onto A′ as content-free markers. A 65th row,
+or a named ID outside the inspected set, rejects
+`repair_evidence_overflow` rather than bypassing another valid invalidation.
+The mistaken invalidator B stays valid unless it is independently corrected,
+and non-recursive validity is unchanged.
+A′ keeps `A.time`, so it serves every `T >= A.time` once the correction
+commits, and operator acceptance time is audit-only: it never becomes an
+effective time and never shifts a snapshot boundary. Ordinary recall labels
+the repaired provenance `operator_corrected`
+([05-recall](05-recall.md) §6). Operator acceptance is a decision record, not
+a human-gold label, and it authorizes no unattended invalidation elsewhere.
 
 ## 6. Why no transaction time
 

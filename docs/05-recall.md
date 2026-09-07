@@ -5,7 +5,7 @@ reinforces accessibility merely by returning context. It does persist a durable
 RecallReceipt control record before delivery (§10). Determinism is conditional
 on the captured serving inputs and degradation state, not graph state alone
 (§11). This is the normative future pipeline; current code supports originals
-and fulltext only (docs/09). D43-D47 in [10-decision-log](10-decision-log.md)
+and fulltext only (docs/09). D43-D51 in [10-decision-log](10-decision-log.md)
 supersede the affected D40/D42 contracts.
 
 ```text
@@ -45,14 +45,24 @@ recaptures serving revisions/selectors but preserves the request's T and now.
 | `active[*]` | The three stream selectors. A switch mid-request is caught by §7 |
 | `policy_revision` | Current suppression policy, regardless of historical T; checked at delivery and commit |
 | `config_version` | Ranking, prior/calibration, rendering, budget/tokenizer and receipt-retention versions |
+| pinned data versions | The active generation's `fact_language_policy` with its prompt digest and `extractor_profile_id`, the `grouping_version`, the adjudication `judge_profile_id`, and the `embedding_profile_id` behind the vector channel. All are recorded on the receipt (D48–D51) |
 | request options | Session, `limit`, validated `budget`, client mode and authenticated principal |
-| query embedding | One call to the embedding service. On failure the vector channel is absent |
+| query embedding | One call to the embedding service, on the caller's verbatim query inside the active profile's pinned template. On failure the vector channel is absent |
+
+The query text is used **as the caller wrote it** (D48). BM25 runs on that
+exact string and the vector channel embeds the same string wrapped only by the
+active embedding profile's frozen query template. The daemon never translates
+the query, never issues a second generated query and never fuses a translated
+variant; the offline comparison behind that default is in
+[research/retrieval-fusion](research/retrieval-fusion.md), which measured 20/20
+versus 19/20 Hit@1 on a small development set and therefore settles nothing
+beyond "no mandatory translation".
 
 ## 2. Candidate channels
 
 | Channel | Source | Size | Ranking |
 |---|---|---|---|
-| `vector` | global `vec_episode_<model>` plus active-generation `vec_fact_g<g>_<model>` — `queryNodes`; active-generation `vec_rel_g<g>_<model>` — `queryRelationships` | 64 nodes + 16 relationships (≤ 32 endpoints) | cosine DESC, id ASC |
+| `vector` | global `vec_episode_<indexhex>` plus active-generation `vec_fact_g<g>_<indexhex>` — `queryNodes`; active-generation `vec_rel_g<g>_<indexhex>` — `queryRelationships` | 64 nodes + 16 relationships (≤ 32 endpoints) | cosine DESC, id ASC |
 | `bm25` | global Episode fulltext plus `fts_fact_g<active>` (cjk) | 64 | Lucene score DESC, id ASC |
 | `session` | last 32 Episodes plus top 2 non-synthesis Facts per Episode through composite index seeks | ≤ 32 + 64 | Episodes: time_utc DESC, ingest_seq DESC; Facts: time_utc DESC, id ASC; merged by time, kind, id |
 | `identity` | user and agent Entity anchors + profile cache (dreaming, top-16 Facts) | ≤ 18 | score DESC, Fact.id ASC |
@@ -92,6 +102,17 @@ are never semantic candidates.
 - The session channel is what catches "the thing I mentioned a moment ago".
   The identity channel is a weak bias that lets spreading start around the
   self regardless of the query.
+- Global original Episodes and active-generation Facts share these same
+  channels and caps whatever language they are stored in. There is no language
+  quota, no per-language channel and no translated candidate set. A Fact whose
+  source is missing a vector because its embedding entry is BLOCKED or
+  resolved as skipped is simply absent from the vector channel; BM25, session
+  and PPR still reach it (docs/01 §4).
+- The lineage gate covers the source Episode itself, not only its Facts. An
+  assistant Episode with unknown or incomplete lineage, and every output
+  derived from it, is stored but ineligible for semantic candidates, for
+  synthesis and for invalidation. A synthesis whose bounded support union is
+  incomplete or truncated is ineligible on the same rule (docs/01 §3.3).
 
 ## 3. Seeds
 
@@ -239,6 +260,7 @@ a memory excluded there has no PPR opportunity (docs/06).
   "kind": "Fact", "schema": "anamnesis.claim/1", "sub_kind": "preference",
   "epistemic": "extracted", "modality": "asserted", "confidence": 0.9,
   "content": "Mira prefers tea.",
+  "content_language": "en",
   "time": {"utc": 1700000000000, "precision": "day"},
   "score": 0.01008, "relevance": 0.016, "mass": 0.36,
   "utility": 0.2, "rank": 0,
@@ -247,7 +269,10 @@ a memory excluded there has no PPR opportunity (docs/06).
     "derived_from": [{"id": "01920000-0000-7000-8000-000000000002", "kind": "Episode", "visible_at_T": true}],
     "supersedes": [], "contrasts": [],
     "conflict_included_count": 0, "conflict_total": 0,
-    "conflict_truncated": false, "conflict_redacted": false, "warnings": []
+    "conflict_truncated": false, "conflict_redacted": false, "warnings": [],
+    "echo_state": "direct", "echo_depth": 0,
+    "corroboration_root_count": 1, "echo_lineage_truncated": false,
+    "operator_corrected": false
   },
   "channels": ["vector", "bm25", "session", "identity", "ppr"]
 }
@@ -255,9 +280,20 @@ a memory excluded there has no PPR opportunity (docs/06).
 
 Here `score = .016 × sqrt(.36) × (1 + .25 × utility)` (rounded).
 `modality` is required on all Facts, including syntheses, and absent on original
-Episodes. `provenance.derived_from` contains the exact bounded Episode source
-snapshot, under the time-only exception (docs/03 §3). Client-supplied sources or
-ranks are never trusted at commit; the durable receipt is authority.
+Episodes. `content_language` is required on every Fact and carries the stored
+source language (`mul` for materially multilingual prose, `und` when the
+evidence is nonlinguistic); the daemon never returns a translated rendering in
+its place (D48). `provenance.derived_from` contains the exact bounded Episode
+source snapshot, under the time-only exception (docs/03 §3).
+
+The lineage fields are provenance labels only. `echo_state`, `echo_depth`,
+`corroboration_root_count` and `echo_lineage_truncated` never enter
+`relevance`, `mass`, `utility`, `score` or ordering, and a high root count
+never elects a conflict winner (D49). `operator_corrected` is true when this
+result came from an authenticated repair of an adjudicator mistake
+(docs/03 §5); it marks provenance, not extra authority. Client-supplied
+sources or ranks are never trusted at commit; the durable receipt is
+authority.
 
 ### Occurrences and bounded conflict bundles (D46)
 
@@ -325,9 +361,28 @@ For each prospective primary, complete its conflict bundle **before budget**:
   primary. This is a bounded both-sides contract, not an unconditional guarantee.
 
 D42's intra-Episode exception is only explicit same-speaker, same-time,
-same-scope self-correction. Unresolved competing assertions remain CONTRASTS;
-a later report does not automatically defeat an earlier one. Span validation
-proves only nonempty UTF-8 boundaries, not entailment or absence of hallucination.
+same-scope self-correction. Those predicates are now decided from the bounded
+stored fields in docs/02 §5.3, and the two scope predicates there are
+different. The intra-Episode rule uses `same_scope_l1b`: equal non-null
+`correction_scope_text` with equal resolved subjects, predicate and
+attribution, while the corrected value and time fields are expected to differ.
+Grouping uses `same_scope_group`, which requires `scope_complete=true` and a
+byte-identical RFC-8785 `scope`. Both also require equal non-null
+`speaker_key` inside one `(origin_source, origin_actor)` namespace, plus the
+same immutable Episode ID for L1b or the exact `time_key` across Episodes.
+Assembly never substitutes one predicate for the other. The grouping key that
+assembly may use is
+`grouping_version = "anamnesis.duplicate-group/1"` over subject keys,
+predicate key, time key, scope key and modality, and it remains a local
+comparison inside this bounded candidate set, never a global identity claim
+(D49). Unresolved competing assertions remain CONTRASTS; a later report does
+not automatically defeat an earlier one. Evidence validation proves a literal
+quote and nonempty UTF-8 span boundaries, not entailment or absence of
+hallucination.
+
+A repeated occurrence is still never corroboration: occurrence count, root
+count and echo depth do not change confidence, ranking or conflict resolution,
+and an assistant echo of delivered text adds no independent root.
 
 ### Exact output budget (D44)
 
@@ -441,8 +496,11 @@ from this enum. Callers may use it for phrasing or provenance filtering.
   not guaranteed.
 - Hits, cache writes and hidden-generation/non-selected-model embedding
   backfill do not bump the revision (docs/02 §1). Global Episode or ACTIVE
-  derived coverage for the selected model does, because it changes vector
-  candidates.
+  derived coverage for the active profile does, because it changes vector
+  candidates, and so does an embedding skip that releases ACTIVE coverage.
+- An operator correction that creates ACTIVE structural output bumps the
+  revision like any other structural write; an accepted adjudication proposal
+  that has not been consumed yet changes nothing that is served.
 - Mass and utility inputs are read **once**, in ⑦. If a commit lands
   mid-assembly, this response finishes with the captured values. Cache writes
   do not bump structure_revision, so the revision alone is not a replay token.
@@ -486,8 +544,11 @@ receipt failures reject rather than expose unverified context.
 
 | Situation | Behavior | diagnostics |
 |---|---|---|
-| Embedding service failure | vector channel absent. Seeds from bm25, session, identity | `channels_used` lacks vector |
+| Embedding service failure (query embedding) | vector channel absent. Seeds from bm25, session, identity | `channels_used` lacks vector |
+| Active profile has a BLOCKED embedding head | vector channel serves the prior contiguous prefix; entries past the hole have no vector and are reached through bm25, session and PPR only | the mandatory `embedding_profile_id` plus the complete `embedding_coverages` array below, whose blocked row or rows name their own `stream`, `generation`, cursors and omission digest |
+| Source resolved as `RESOLVED_NO_VECTOR` | that source is permanently absent from this model's vector channel; other channels unaffected | 〃 |
 | Fulltext error | bm25 absent | 〃 |
+| Query exceeds the profile context, or the returned vector fails the profile's dimension or norm check | whole vector channel absent; never a truncated or renormalized query | `channel_reason: query_rejected` / `profile_mismatch` |
 | Candidate channel tx > 50 ms | that channel is absent | `channel_reason: timeout` |
 | Both vector and bm25 absent | seeds from session and identity only → PPR still runs | 〃 |
 | Zero candidates | no envelope, empty result | `reason: no_candidates` |
@@ -523,6 +584,15 @@ is no separate public `receipt_id` field.
   "structure_revision": 4021, "policy_revision": 7,
   "config_version": "recall-v1", "torn": false,
   "channels_used": ["vector", "bm25", "session", "identity", "ppr"],
+  "embedding_profile_id": "16d404a70ca92beccbe06fae1c1bc400d924223a09c498c7f01278b0f795405b",
+  "embedding_coverages": [
+    {"stream": "episode", "generation": 0, "health": "BLOCKED",
+     "covered_ingest_seq": 84120, "required_ingest_seq": 84137, "lag": 17,
+     "omission_digest": "3f2a9c61d0b74e58a1c9f0e2b6d4837c5ae10f92bb73c8d4e6015a7f92c3b8d0"},
+    {"stream": "extraction", "generation": 42, "health": "BLOCKED",
+     "covered_ingest_seq": 83904, "required_ingest_seq": 84102, "lag": 198,
+     "omission_digest": "c7d1084b6e2f5a390bd47c1e8f6205a3d9b0e74126cf83a5d0e91b7c4632af18"}
+  ],
   "ppr_used": true, "seeds": 97,
   "degree_probe": {"cap": 256, "seed_damping": "capped_physical", "state_captured": true},
   "envelope": {"nodes": 1412, "links": 9930, "hops": 2, "truncated_links": 0, "hubs_expanded": 2},
@@ -530,6 +600,44 @@ is no separate public `receipt_id` field.
   "timings_ms": {"embed": 11, "candidates": 9, "envelope": 31, "ppr": 3, "assemble": 6, "receipt": 2, "total": 64}
 }}
 ```
+
+`embedding_profile_id` and `embedding_coverages` are bounded machine values,
+never source text. Whenever recall selects the vector channel, both are
+recorded in diagnostics and on the durable receipt exactly as served. The
+array carries one row per applicable source partition of the active profile:
+always `(episode, 0)`, plus `(extraction, active[extraction])` when an active
+extraction generation exists, so it holds one or two rows, distinct and keyed
+by `(stream, generation)`, sorted `episode` before `extraction` and then by
+generation.
+
+```text
+embedding_coverages[1..2] = [{
+  stream: episode | extraction,
+  generation,
+  health: HEALTHY | BLOCKED,
+  covered_ingest_seq,
+  required_ingest_seq,
+  lag,
+  omission_digest
+}]
+```
+
+`health`, `covered_ingest_seq` and `omission_digest` come from that
+partition's stored `EmbeddingCoverage` row (docs/01 §4).
+`required_ingest_seq` is the same-attempt current `Meta.ingest_seq` for the
+Episode row and the active extraction generation's current
+`Generation.covered_ingest_seq` for the extraction row; `lag` is the exact
+nonnegative difference `required_ingest_seq - covered_ingest_seq`. Generation,
+both cursors and lag are nonnegative safe integers, and `omission_digest` is
+64 lowercase SHA-256 hex over that row's resolved-no-vector set, so a replay
+can prove which prefix each stream served without exposing what was omitted.
+Every applicable row is persisted, including healthy rows and two
+simultaneously blocked rows with different cursors and omission digests; an
+anonymous scalar, or a choice between the Episode and extraction row, is
+invalid. A missing applicable coverage row prevents vector-channel selection
+instead of producing a partial array. The receipt also retains the
+`EmbeddingResolution` and `EmbeddingQualification` identities applicable to
+any source resolved as `RESOLVED_NO_VECTOR` in the delivered set.
 
 Internal receipt/bench diagnostics record ConductingArc coverage state,
 seed/envelope ordered probe rows/counts, stale-row exclusions,
@@ -558,8 +666,14 @@ recall. Record the actual included primary IDs and 0-based ranks, companion
 IDs, immutable source snapshots, bounded derived snapshots needed after
 generation GC, selected/absent channels and reasons, candidate/ranking state,
 policy/config/generation versions, effective budget, used_budget, renderer and
-tokenizer versions, and SHA-256 result/context digests. Original text need not
-be duplicated: its immutable Episode IDs suffice. A write failure prevents
+tokenizer versions, and SHA-256 result/context digests. It also stores an
+immutable
+`selection_digest = sha256(RFC-8785(ordered array of at most 64 delivered
+{element_id, root_episode_ids, echo_depth, complete} records))`. That stored
+value is what a later assistant Episode's `EchoLineage` copies into
+`context_digests`, so lineage never depends on recomputing a selection after
+the feedback window closes (docs/01 §3.3). Original text need not be
+duplicated: its immutable Episode IDs suffice. A write failure prevents
 delivery with a committable recall_id. A failed socket send is delivery-unknown, never adoption;
 record transport status separately and never manufacture a negative label.
 
@@ -619,9 +733,16 @@ docs/04, so monotonicity is weak at S_max.
 
 The same **captured serving inputs** produce the same ordered context within
 the pinned numeric/runtime contract (D47, docs/06 §7). Capture query and exact
-embedding/model; T/now/session/options; ordered candidate IDs, scores and
-channel availability; selected index/coverage state; selectors and structural
-reads; ConductingArc completeness and stage/source ordered degree-probe
+embedding/model; the `embedding_profile_id` and the complete
+`embedding_coverages` array actually served, each row carrying its
+`stream`, `generation`, `health`, `covered_ingest_seq`,
+`required_ingest_seq`, `lag` and `omission_digest`, plus the
+`EmbeddingResolution` and `EmbeddingQualification` identities applicable to
+the delivered set; the `fact_language_policy`, `grouping_version` and
+`judge_profile_id` of the active generation, plus any correction record
+applied to a delivered item; T/now/session/options; ordered candidate IDs,
+scores and channel availability; selected index/coverage state; selectors and
+structural reads; ConductingArc completeness and stage/source ordered degree-probe
 rows/counts, stale-row exclusions and saturation decisions;
 earliest_allowed_from thresholds with generation/policy versions; mass/utility
 snapshots; m_cache and HubArc/profile snapshots actually used; envelope

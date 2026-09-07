@@ -66,8 +66,17 @@ Changing priors requires a new derived generation; Hit replay must never SET
 immutable `m0` or recompute an original Episode's birth mass from new priors.
 Fact identity includes modality and generation, excludes confidence; the
 first immutable confidence on an exact retry stands (docs/01 §1, D42).
-A nonempty UTF-8-boundary-valid `span` validates offsets only, not entailment
-or absence of hallucination (docs/02 §5).
+A literal `evidence_quote` and its derived nonempty UTF-8-boundary-valid
+`span` validate the locus only, not entailment or absence of hallucination
+(docs/02 §5).
+
+Nothing else raises `m0`. Occurrence count, echo depth, corroboration-root
+count, an operator's acceptance of an adjudication proposal and a Fact's
+`content_language` are not inputs to the prior; a repeated or reviewed claim
+has exactly the birth mass its schema, sub-kind, modality and confidence give
+it (D48–D50). A replacement `A′` copies A's bounded Episode authority,
+confidence, `m0` and prior/calibration versions and its roots, and gets no
+fresh accessibility (docs/03 §5).
 
 ## 2. State lives on Episodes only
 
@@ -137,6 +146,14 @@ Community as an empty, fully accessible one (§8).
   sources; retained sources carry their history, omitted sources do not.
   Therefore neither an identical authority set nor identical replacement
   accessibility is guaranteed. Non-recursive INVALIDATES remains unchanged.
+  An operator repair takes the same path (docs/03 §5): A′ inherits the
+  bounded retained authority, not a fresh accessibility grant.
+- Echo lineage is inert here. `echo_state`, `echo_depth`, occurrence count and
+  `corroboration_root_episode_ids` never enter `m0`, `S`, `κ_eff`, mass or
+  utility, so an assistant restating retrieved text cannot make it more
+  accessible (D49). A Hit still attaches to the Episode that actually
+  produced the delivered result, and an assistant Episode with unknown or
+  truncated lineage contributes no semantic output to be adopted at all.
 
 Illustrative retention (`S=1 day`, `S_eff=30 days`; `1 year=365 days`):
 
@@ -494,7 +511,14 @@ D46), not a later-text-wins or high-confidence-wins rule.
   adoption, mass floor or historical snapshot can override suppression.
 - Duplicate grouping is assembly-only with representative and explicit
   occurrence IDs/truncation, preserving subject/predicate/time/modality.
-  Grouping never rewrites authority or rewards undelivered occurrences.
+  Grouping never rewrites authority or rewards undelivered occurrences. Its
+  predicates are the bounded stored fields in docs/02 §5.3, and the resulting
+  key is local to one candidate set, never a global identity claim (D49).
+- Lineage is not a score term. `echo_state`, `echo_depth`,
+  `corroboration_root_count` and `operator_corrected` appear on results as
+  provenance and never enter `relevance`, `m`, `U`, `score` or ordering;
+  Facts from an Episode with unknown or truncated lineage are excluded from
+  serving entirely rather than ranked lower (D49, D50).
 - After primary ranking, bounded conflict completion (D46) reads at most 65
   raw CONTRASTS adjacency rows in deterministic peer-ID order: inspect 64,
   reserve one sentinel, and select up to four eligible peers, even outside
