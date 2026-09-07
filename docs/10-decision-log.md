@@ -4,12 +4,19 @@ Decisions from the September 2026 design review. Each entry is **decision /
 alternative / reason**. "The proposal" is the twelve-section design text
 under review; "the previous drafts" are the retired docs/00–11 (2026-08).
 
-D43 through D47 come from the design finalization of 2026-09 (baseline
+D43 through D51 come from the design finalization of 2026-09 (baseline
 bc372ca). Where they supersede an earlier entry, the earlier entry stays in
 place with a **Status** line naming what changed and what still holds. The
 original rationale is kept so the reasoning can be audited, not to be read as
-current policy. Affected: D14 (clarified), D27 and D40 (outcome no longer
-touches `S`), D41 (clarified), D42 (span and intra-Episode rules narrowed).
+current policy. Affected: D14 (clarified), D26 (Episode digest body narrowed
+to version 1), D27 and D40 (outcome no longer touches `S`), D41 (clarified),
+D42 (span and intra-Episode rules narrowed).
+
+D48 through D51 close the remaining implementable gaps in the unshipped
+extraction and embedding pipelines. They narrow D42 and D46 without
+weakening them, and none of them is a deployment result: every constant
+below is a normative operational bound or a frozen development baseline, not
+a measured production metric.
 
 ## D0 — main retired, anamnesis2 is the mainline, previous drafts retired
 
@@ -430,6 +437,13 @@ and properties. Occurrence identity permits a true revert; the canonical
 digest detects conflicting retries of that occurrence. Found by the PR
 reviews of 2026-09.
 
+**Status (2026-09 finalization, D49)**: narrowed, not replaced. The digest
+body described above is exactly version 1, and it stays frozen for every
+Episode already stored under it. D49 adds `origin_role` and `lineage_digest`
+only to the version-2 body used by new admissions, and the stored row's
+version decides which body a retry recomputes. Revision identity, the
+`OriginHead` CAS and idempotency are unchanged in both versions.
+
 ## D27 — one commit path for every Hit
 
 **Decision**: a single internal `commitHits(namespace, kind, elements, κ_of?)`
@@ -701,7 +715,11 @@ with `confidence`, `modality`, `U` and its own judgment.
 
 ## D42 — extraction keeps the speech act and the evidence span; it never records-then-invalidates within one Episode
 
-> **Status: superseded in part by D46 and D47 (2026-09 finalization).**
+> **Status: superseded in part by D46, D47, D48 and D49 (2026-09
+> finalization).** D48 adds a literal `evidence_quote` from which the stored
+> span is derived, plus a required immutable `content_language`; D49 makes
+> same-speaker, same-time and same-scope decidable from bounded stored fields
+> rather than judgment. Neither weakens the rules below.
 > What survives: the closed `modality` enum, `modality` in Fact identity and
 > as a factor of `m₀`, `confidence` stored but outside identity, a
 > fail-closed `span` check. What changed: (1) `span` validates only that the
@@ -873,6 +891,13 @@ never against no event, and a whole-recall reward is one label, not many.
 
 ## D46 — one Fact per occurrence, contradictions as bounded companion bundles
 
+> **Status: narrowed by D49 (2026-09 finalization).** The grouping key and
+> the `known_conflict` predicate are now defined over bounded stored fields
+> (`speaker_key`, `subject_keys`, `predicate_text`, closed `scope`,
+> `time_key`, `modality`) under `grouping_version`, and echo lineage is added
+> to the list of things that never boost a duplicate. Nothing below is
+> relaxed.
+
 **Decision**: a semantic duplicate preserves every original and each
 occurrence's extracted assertion and provenance. There is no "duplicate →
 no Fact". Each source occurrence yields its own immutable Fact, linked to
@@ -945,3 +970,278 @@ numbers in one table and let a reader assume that agreement with GDS on a
 truncated envelope certified retrieval quality. Naming what each number is,
 what the oracle actually measures, and what replay can and can't reproduce
 is what makes the CI gates in docs/07 falsifiable rather than decorative.
+
+## D48 — source-language Facts and original-query recall are the reversible default
+
+**Decision**: a Fact carries a required, immutable, meaning-bearing
+`content_language` matching `^[a-z]{2,8}(-[a-z0-9]{1,8})*$` in at most 35
+ASCII characters, `mul` for materially multilingual prose or `und` when the
+evidence is nonlinguistic or insufficient. Extraction preserves the source
+Episode's language by default; mixed and code material stays mixed.
+`evidence_quote`, spans, names, paths, URLs, identifiers and code are always
+source-exact. English Fact content is an **optional extraction-generation
+configuration**, never a mutation of a source-language Fact and never an
+in-place rewrite: a generation records `fact_language_policy ∈ {source, en}`,
+the prompt artifact digest, `extractor_profile_id` and the validator version.
+An `en` generation accepts only `content_language=en`; a claim it cannot
+render source-faithfully in English is rejected as
+`language_policy_mismatch`, with no per-claim fallback. Changing policy opens
+a replacement extraction generation and uses the normal cutover/rollback
+path. Model-generated translations and transliterations never replace a
+source name, never enter Entity `normalized_name` or aliases, and never carry
+source authority; separate English projections are nonauthoritative
+development artifacts that are neither persisted nor indexed until a later
+decision pins their schema, prompt and digest. Recall keeps the caller's
+original query verbatim: BM25 uses that query and the vector channel applies
+only the active embedding profile's pinned wrapper around the same text.
+Global original Episodes and active-generation Facts share the existing
+vector and BM25 channels and their existing caps, with no language quota and
+no added channel. Automatic translation and two-query RRF stay absent from
+runtime (docs/01 §1, docs/02 §5, docs/05 §1–2).
+
+**Alternative**: (a) normalize every Fact to English at extraction; (b) issue
+a translated second query and fuse it with the original at runtime; (c) admit
+English projections as searchable rows alongside their source Facts.
+
+**Reason**: (a) rewrites the evidence the rest of the contract depends on.
+The extraction spotcheck showed generated projections inventing name
+renderings (`Jihyun`, `(Sato)`) and one model collapsing distinct
+Latin/Cyrillic identifiers, so a translated record cannot be the canonical
+one. (b) was exercised offline in
+[research/retrieval-fusion](research/retrieval-fusion.md) at commit
+`4bbbd7e07a41592bc3d1fccba512138643a89648`: on the same source-informed
+20-query development set the original-query union scored 20/20 Hit@1 and
+equal-weight two-query RRF scored 19/20. That set has seven substantive
+targets, human translations, no realistic distractor population and saturated
+Hit@3, so it supports a reversible default, not a superiority claim in either
+direction. A runtime fusion decision would still have to pin its translator,
+candidate quota, fusion and failure rules and receipt fields. (c) doubles the
+candidate population with unversioned model output; keeping the policy a
+generation configuration makes the whole choice reversible by cutover.
+
+## D49 — provenance roots bound echo accounting; pairwise predicates assert no global identity
+
+**Decision**: Episode digest identity gains a server-selected
+`episode_digest_version` **prospectively**. An Episode stored without that
+property is immutable version 1 and keeps the frozen pre-D49 insertion-ordered
+`JSON.stringify` body; every revision admitted after D49 implementation stores
+version 2, whose RFC-8785 body adds `episode_digest_version`, `origin_role`
+and `lineage_digest`; any other stored value is `unsupported_digest_version`.
+The stored row's version wins over a caller's or a journal record's creation
+version, so verify, exact retry, journal replay, backup/restore and rebuild
+dispatch on it and never SET `episode_digest_version`, `digest`, `origin_role`
+or `lineage_digest` on a legacy Episode, which also never gains an
+`EchoLineage` row in place. There is no data migration, and this PR ships no
+compatibility code (docs/01 §1, docs/02 §3 and §4, docs/08, docs/09).
+
+On top of that boundary, the authenticated adapter labels each Episode
+`origin_role ∈ {user, assistant, tool, document, operator}` and
+`lineage_mode ∈ {direct, receipts}`. Direct input has no parents, depth 0 and
+its own Episode ID as its single root; an assistant turn that received
+anamnesis context must use `receipts` and supply 1..4 distinct
+`parent_recall_ids`. The daemon verifies the caller binding and appends
+`EchoLineage {episode_id, lineage_mode, parent_recall_ids[0..4],
+context_digests[0..4], root_episode_ids[0..16], echo_depth: 0..8, complete}`
+in the Episode transaction; that retained control row, not an expiring
+receipt, is replay authority. `context_digests` copies each parent receipt's
+stored `selection_digest`, the SHA-256 over the RFC-8785 canonical ordered
+array of at most 64 delivered `{element_id, root_episode_ids, echo_depth,
+complete}` records, so the receipt schema retains exactly the value lineage
+names. Each Fact copies immutable bounded metadata:
+`echo_state ∈ {direct, known_echo, context_derived, unknown}`,
+`echo_of_element_id`, sorted `parent_recall_ids`, sorted
+`corroboration_root_episode_ids[0..16]`, `echo_depth` and
+`echo_lineage_truncated`. Overflow past 16 roots or depth 8 sets
+`complete=false`, `echo_state=unknown` and `echo_lineage_truncated=true`; no
+omitted ancestor becomes a new root. Assistant input without authenticated
+receipt metadata is `unknown`, never presumed independent. The gate covers
+the source Episode itself: an assistant Episode with unknown or incomplete
+lineage, and every output derived from it, is stored but ineligible for
+semantic candidates, synthesis and invalidation
+(`echo_lineage_unavailable`). A synthesis has no Episode lineage row to copy,
+so it materializes one from its exact 1..16 non-synthesis supports before Fact
+identity: no `echo_of_element_id`, the first 4 of the sorted distinct
+`parent_recall_ids` union, the first 16 of the sorted distinct root union, and
+`max(support.echo_depth)` with no added receipt hop. It is `context_derived`
+only when every support is lineage-complete and neither union truncates;
+otherwise it is `unknown`, truncated and ineligible. Occurrence count,
+root count, echo state and echo depth never change confidence, `m0`, mass,
+utility, rank or adjudication, and never elect a conflict winner.
+
+The same decision fixes the bounded fields that make same-speaker, same-time
+and same-scope decidable: `speaker_key`, `subject_keys` (1..16 sorted resolved
+Entity IDs or null, with no literal or normalized-string fallback),
+`predicate_text`, a closed `scope` object with `scope_complete`, `time_key`
+and the existing `modality` enum. `same_speaker` requires two non-null equal
+`speaker_key` values inside one `(origin_source, origin_actor)` namespace; no
+display name, alias, pronoun, fuzzy match or shared account implies speaker
+equality. For the L1b intra-Episode rule `same_time` means the same immutable
+Episode ID, while cross-Episode grouping requires exact `time_utc` and
+`time_precision`. Scope equality has two distinct predicates that are never
+interchanged: `same_scope_l1b` needs equal non-null `correction_scope_text`
+plus equal resolved subjects, predicate and attribution while the corrected
+value and time fields may differ, and `same_scope_group` needs
+`scope_complete=true` with a byte-identical RFC-8785 `scope`. Requiring the
+complete grouping scope for a correction would make every real self-correction
+fail.
+When every component resolves, assembly pins
+`grouping_version = "anamnesis.duplicate-group/1"` and computes
+`duplicate_group_key` over subject keys, predicate key, time key, scope key
+and modality; an unresolved subject, empty predicate or incomplete scope
+disables grouping. `known_conflict(f,g)` is exactly one active-generation
+CONTRASTS relationship with canonical endpoints; it is irreflexive, symmetric
+and not transitive (docs/01 §1, docs/02 §3 and §5, docs/05 §6).
+
+**Alternative**: (a) count repeated assistant restatements as corroboration;
+(b) infer lineage from prose; (c) treat the grouping key or `speaker_key` as
+a global identity claim across generations and adapters; (d) recompute every
+stored Episode under the new digest body, whether by rewriting the rows or by
+reinterpreting the old body with the new serializer.
+
+**Reason**: (a) is the "repeated therefore true" error D46 already rejects,
+one step removed: the model repeating retrieved text is the system's own
+output coming back, so counting it as new evidence inflates whatever it
+echoes. (b) is prompt injection with provenance authority. (c) would make a
+bounded local comparison masquerade as an entity-resolution result; the key
+is local to one pinned generation and one bounded candidate set, and it never
+erases an occurrence. Bounding the lineage to four parents, sixteen roots and
+depth eight keeps every online check a materialized-row read, with no
+ancestor traversal on the recall path. (d) has two failure modes and no
+upside: rewriting breaks invariant 1's CREATE-only originals, and
+reinterpreting makes every existing row fail verification, since the frozen
+body has neither the discriminator nor the two lineage fields. A version
+discriminator that the server owns and the stored row decides keeps retry,
+journal replay and rebuild deterministic while costing one property on new
+Episodes.
+
+## D50 — adjudication is shadow-first and operator repair is append-only
+
+**Decision**: for the frozen conformance prompt
+`scripts/research/adjudication-prompt.md` (SHA-256
+`94a74ca2825e17d09188ae0af97c915c7a79a64a45ac998e2f584d8878c3275b`),
+`claude-opus-5` on Messages with thinking disabled is the **development**
+adjudication default and `gpt-5.5` on Responses with reasoning effort `none`
+remains the comparator. This is a role-specific choice: it approves no
+extractor, transfers to no other role, and names no global winner. The
+default runs in **shadow/no-write mode**, emitting proposed verdicts and
+audit records that create no Fact and no semantic link. Every call appends an
+immutable `AdjudicationAttempt` carrying the `source_head_revision_key` and
+`policy_revision` captured before the bounded candidate read and the model
+call, so a transport, parse or validation failure creates no proposal and
+never leaves a denominator. A valid strict output creates an immutable
+`AdjudicationProposal` that copies those two premises byte-for-byte and adds
+`proposed_claim_digest = sha256(RFC-8785(validated complete L1 claim object))`
+over content and language, sub-kind, modality, confidence, evidence
+quote/kind/span, resolved time, Entity mentions, predicate and scope fields
+and the local-correction fields. Its materialized state is
+`SHADOW | ACCEPTED | REJECTED` rebuilt from append-only reviews; only an
+authenticated `adjudication.review` moves it, and an ACCEPTED proposal may be
+consumed once, by its named target generation, after W1 compares those
+**stored** values directly, never inferring proposal-time source or policy
+state from the current graph.
+Acceptance is an operator decision, not human gold, and enables no unattended
+writes globally. Unattended invalidation requires a new decision backed by
+independent, production-shaped labels and declared false-invalidation,
+missed-update, candidate-completeness, transport and parse bounds; neither the
+119 historical pseudo-label cases nor the 36 synthetic conformance cases
+qualifies.
+
+Operator correction of an adjudicator mistake is authenticated, append-only
+audit authority through `adjudication.correct`. It never rewrites or deletes a
+historical Fact, edge or `InvalidationEvidence`. A repair that creates a
+replacement Fact first appends a CREATE-only
+`anamnesis.operator-adjudication/1` Episode, excluded from ordinary search,
+extraction and PPR, whose deterministic renderer never impersonates user
+prose. Restoring a wrongly invalidated A appends A-prime in A's ACTIVE
+generation under the docs/03 §5 replacement protocol, retains every bad edge,
+inspects at most 65 incoming evidence rows and carries at most 64 retained
+evidence IDs forward as content-free markers. A-prime keeps `A.time`, so it
+serves every `T >= A.time` after the correction commits; operator acceptance
+time is audit-only. Ordinary recall labels the repaired provenance
+`operator_corrected` (docs/01 §4, docs/02 §2 and §5, docs/03 §5).
+
+**Alternative**: (a) let the measured conformance leader write `INVALIDATES`
+unattended; (b) repair a mistake by deleting the bad edge or rewriting the
+Fact; (c) express the repair as a synthetic user correction Episode.
+
+**Reason**: (a) reads 36/36 on a synthetic specification screen as a
+production error bound. The screen has two disclosed arguable gold choices and
+no production-shaped negatives; the historical predecessor evidence that
+motivates conservatism (a predecessor report's 54% invalidated-state
+observation, a repair job that restored 97,163 of 101,914 edges by the same
+model's own judgment) is an evidence chain, not independent accuracy. Those
+are secondary reported operations from a private predecessor report, neither
+replayed truth labels nor current anamnesis deployment metrics. (b) breaks invariant 1 and makes
+validity replay non-deterministic. (c) would fabricate something the user
+never said, exactly the failure the correction is supposed to fix; an operator
+Episode with a deterministic renderer keeps the audit trail honest about who
+acted.
+
+## D51 — separate model and index fingerprints pin one embedding profile; a permanent hole blocks coverage
+
+**Decision**: embedding identity is three SHA-256 IDs over canonical RFC-8785
+objects. `embedding_model_id` covers the artifact repository/revision/file
+digest/size/quantization, tokenizer, request serialization, pooling,
+dimension, normalization, document prefix, exact query template and context;
+`vector_index_id` covers that model ID plus layout version, Neo4j version
+family/provider, dimension, similarity, index quantization and HNSW settings;
+`embedding_profile_id` covers the exact pair and is the value of
+`active[embedding]`. A model-field change builds new vector properties and
+indexes; an index-only change may reuse vectors but never mutates an active
+index in place. `ONLINE` means only that an index can answer queries: it is
+not quality approval, and activation additionally requires an authenticated
+append-only `EmbeddingQualification`. Production activation stays disabled
+until a qualification references machine-validated manifests from the
+applicable M4/M5 gate with predeclared quality and resource thresholds.
+
+Per-entry embedding work is a state machine
+(`PENDING → RUNNING → SUCCEEDED | NO_VECTOR_REQUIRED | RETRY_WAIT | BLOCKED`,
+with `BLOCKED → PENDING` on authenticated retry and
+`BLOCKED → RESOLVED_NO_VECTOR` on authenticated skip). Only transient
+`unavailable`, `timeout`, `rate_limited` and `server_error` classes retry:
+three attempts per cycle with fixed `[1000, 10000]` ms delays, then BLOCKED.
+Invalid input, context overflow, zero/nonfinite/wrong-dimension vectors,
+profile mismatch, cardinality mismatch, `malformed_response` and deterministic
+`client_error` (4xx) block immediately, while a lost worker lease closes its
+attempt `worker_lost` under the same retry and third-failure rule. Never truncate, chunk, silently skip, synthesize a zero vector or
+advance coverage past a nonterminal entry. Coverage advances only over a
+contiguous terminal prefix, so a BLOCKED head freezes that model's cursor
+while BM25 and session recall continue and the active profile keeps serving
+its prior prefix. Recovery is authenticated and append-only
+(`embedding.retry`, `embedding.skip`, `embedding.cancel`), each writing an
+`EmbeddingResolution`; a skip permanently excludes that source from the
+model's vector channel and the default activation policy permits zero skips.
+Input transformation requires a new model ID and a complete build, never an
+operator mutation of one job. Cutover still compares against **current**
+`Meta.ingest_seq` and current active-generation cursors under the write
+barrier. Whenever recall selects the vector channel, diagnostics and the
+durable receipt record `embedding_profile_id` once plus an
+`embedding_coverages` array holding every applicable partition of that
+profile: the `(episode, 0)` row always, and the
+`(extraction, active[extraction])` row when an active extraction generation
+exists. Each row names its own `stream`, `generation`, `health`,
+`covered_ingest_seq`, `required_ingest_seq`, `lag` and `omission_digest`, so
+two partitions blocked at once with different cursors stay separately
+replayable and no served prefix is anonymous (docs/01 §4, docs/02 §5,
+docs/05 §8–§9).
+
+The experimental baseline is the resolved Qwen3-Embedding-0.6B Q8_0 artifact
+(`embedding_profile_id`
+`16d404a70ca92beccbe06fae1c1bc400d924223a09c498c7f01278b0f795405b`) on the
+pinned llama.cpp configuration and Neo4j 5.26 cosine index settings in
+docs/01 §4.
+
+**Alternative**: (a) one opaque `model_id` string as today; (b) chunk or
+truncate an oversized input so the cursor can advance; (c) let ONLINE indexes
+plus operator attestation qualify a production cutover.
+
+**Reason**: (a) cannot express that Q8_0 and FP16 of the same revision are
+different retrieval systems, or that an HNSW parameter change invalidates an
+index but not its vectors; parity between quantizations is unmeasured, so the
+IDs must differ. (b) silently changes what a vector means and hides the
+omission from every later comparison. One observed 5,002-token request was
+rejected with HTTP 400 by the pinned 4,096-token server, and exact boundary,
+batch and throughput behavior remains unmeasured, so failing closed with an
+auditable BLOCKED head is the only honest option. (c) confuses an index that
+answers queries with an index that answers them well; the qualification record
+is what makes the distinction reviewable.

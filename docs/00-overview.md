@@ -5,6 +5,13 @@
 > retired; the reasons and the decisions that replaced them are recorded in
 > [10-decision-log](10-decision-log.md). Non-normative material (competitor
 > comparison, field lessons) lives in `docs/background/`.
+>
+> **Target, not runtime status.** Everything here describes the design the
+> code must reach. What actually runs today is the short list in
+> [09-roadmap](09-roadmap.md) ("Where the code is today"); no number in this
+> set is a production measurement, and the two frozen development screens
+> behind the D48 and D50 defaults are reported with their limits in
+> [07-gds-validation](07-gds-validation.md) §7.
 
 ## One line
 
@@ -19,7 +26,8 @@ for offline analysis and as an accuracy baseline only.
     ├─ originals: Episode · Hit ledger              ├─ objects/   payload bytes (content-addressed, part of the authority)
     │             policy Episodes                   ├─ spool/     transient remember() queue while Neo4j is down
     ├─ control:   RecallReceipt (append-only)       └─ neo4j/     container volume
-    │             InvalidationEvidence (append-only)
+    │             InvalidationEvidence · EchoLineage
+    │             adjudication + embedding records (append-only)
     ├─ derived:   Fact · Entity · Community
     │             Link · embedding (generations)
     ├─ caches:    hit cache · utility cache · active policy · ConductingArc · hub shortlist
@@ -61,17 +69,25 @@ exists yet, and the gates that will produce one are in
    HAS_PAYLOAD, HIT_OF and revision INVALIDATES are never modified or deleted
    once written. NEXT_EPISODE is a rebuildable cache because event-time
    backfill must rewire session order. Mistakes are fixed by events
-   (INVALIDATES). The data authority is the Neo4j
-   database plus `~/.anamnesis/objects/`, nothing else
-   ([01-storage](01-storage.md) §9).
+   (INVALIDATES). D49's digest change is prospective for the same reason: an
+   Episode stored without `episode_digest_version` stays byte-verified as
+   version 1 and is never rewritten, reserialized or given lineage in place,
+   while only newly admitted revisions store version 2. There is no migration
+   ([01-storage](01-storage.md) §1, §9). The data authority is the Neo4j
+   database plus `~/.anamnesis/objects/`, nothing else.
 2. **The derived layer is regenerable.** Fact, Entity, Community, Link and
    embeddings must be rebuildable at any time from the originals layer, the
-   Hit ledger, the retained content-free `InvalidationEvidence` ledger and
-   the explicit old/new target mappings of each rebuild. Originals and Hits
-   alone are not enough: a denied invalidator's text may leave the serving
-   view, and its established invalidation outcome must still be replayed
-   ([01-storage](01-storage.md) §4). That is why **Hits point at Episodes,
-   never at derived elements** ([04-forgetting](04-forgetting.md) §2).
+   Hit ledger, the retained content-free `InvalidationEvidence` ledger, the
+   retained `EchoLineage`, `AdjudicationReview` / operator-adjudication
+   Episode, `AdjudicationCorrection` and `EmbeddingResolution` control
+   records, and the explicit old/new target mappings of each rebuild.
+   Originals and Hits alone are not enough: a denied invalidator's text may
+   leave the serving view, and its established invalidation outcome must
+   still be replayed; an accepted operator repair or embedding skip is a
+   decision no re-extraction can rediscover
+   ([01-storage](01-storage.md) §4, D49–D51). That is why **Hits point at
+   Episodes, never at derived elements**
+   ([04-forgetting](04-forgetting.md) §2).
 3. **Only the cache layer is ever SET.** Hit cache, utility cache, active
    policy, Entity witness rows, ConductingArc, hub shortlist, `m_cache`,
    Outbox, selectors. All of it must be deletable and regenerable.
@@ -123,7 +139,18 @@ exists yet, and the gates that will produce one are in
    that scan can't see everything, the bundle carries a mandatory incomplete
    warning and no count is reported, rather than a guessed total
    ([05-recall](05-recall.md), D46).
-10. **Every constant is a calibration target.** Defaults are literature
+10. **No echo is counted twice and no vector is skipped in silence.** An
+   assistant turn that received anamnesis context declares its parent
+   receipts; the resulting Facts carry bounded lineage and corroboration
+   roots that never raise confidence, mass, utility, rank or a conflict
+   winner. Unknown or incomplete assistant lineage is stored but never served
+   as a semantic candidate, and that applies to the assistant Episode itself
+   as much as to anything derived from it. An embedding entry that cannot produce a
+   vector blocks its model's contiguous coverage until an authenticated
+   retry or skip resolves it; nothing is truncated, chunked or zero-filled
+   to let the cursor move ([01-storage](01-storage.md) §4,
+   [05-recall](05-recall.md), D49, D51).
+11. **Every constant is a calibration target.** Defaults are literature
    values or explicit assumptions, refitted once the hit ledger has data
    ([04-forgetting](04-forgetting.md) §9). Priors that enter `m₀` change only
    through a new derived generation, never by rewriting a stored `m₀`.
@@ -156,10 +183,14 @@ exists yet, and the gates that will produce one are in
 | policy | A `deny` or `revoke` command with at least one selector (`subject_entity_id`, `schema`, `sub_kind`, `modality`, `literal`) and a scope (`derived` or `content`). Suppresses ordinary extraction and serving; never erases originals |
 | budget | Optional recall bound `{unit: utf8_bytes \| unicode_scalars \| tokens, limit, tokenizer_id?}`. Exact counts of the final `context_text`; `tokens` needs an installed, version-pinned tokenizer, no estimates |
 | epistemic | `observed \| extracted \| synthesized`: provenance distance from the source utterance. Not a trust probability |
-| generation | A version of the derived layer. An integer per stream for extraction and community; a model id for embedding |
+| generation | A version of the derived layer. An integer per stream for extraction and community; an `embedding_profile_id` for embedding |
 | revision_key | `sha256(origin_key, source_revision)` — one immutable revision occurrence; a later A→B→A revert has a new source revision and a new Episode |
 | envelope | The bounded subgraph a single recall actually sees |
 | ConductingArc | Rebuildable per-endpoint physical-link access cache, keyed by (source_id, link_id); not an Element, authority, candidate, conductor or output |
 | structure_revision | Serving-view revision: changes only when recall-visible structure or selectors change |
 | snapshot(T) | The world up to event time T |
 | now | Server clock. The reference for forgetting |
+| `fact_language_policy` | Extraction-generation configuration, `source` or `en`. Chooses the language of Fact content for that whole generation; never an in-place rewrite of an existing Fact, and never applied to quotes, spans, names or identifiers (D48) |
+| corroboration root | An original Episode ID in a Fact's bounded `corroboration_root_episode_ids` (at most 16). Provenance accounting only: roots gate policy checks and never add candidates, Hits, mass or score terms (D49) |
+| adjudication proposal | An immutable proposed verdict from the shadow-mode adjudicator, with its own attempt row and candidate digest. Creates no Fact or edge until an authenticated review accepts it and its named generation consumes it once (D50) |
+| embedding profile | `sha256` over one exact `(embedding_model_id, vector_index_id)` pair; the value of `active[embedding]`. ONLINE indexes are not an approved profile: activation needs a recorded `EmbeddingQualification` (D51) |

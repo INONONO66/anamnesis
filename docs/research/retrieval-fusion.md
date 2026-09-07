@@ -26,8 +26,8 @@ results. GPT had 20 admitted claims; Opus had 15 after one quote rejection.
 
 Only q20, asking for the four continuously collected agent sources, missed
 top-1. Its target ranked third with the English query, second with fusion,
-and first with the original query. Thus adding a translation and equal-
-weight fusion did not improve the original-query baseline on this set.
+and first with the original query. Thus adding a translation and
+equal-weight fusion did not improve the original-query baseline on this set.
 
 The union arm preserves original evidence when Fact extraction omits a
 detail. An Episode hit still does not prove the delivered claim answers the
@@ -44,6 +44,12 @@ only seven substantive target Episodes, human translations, no realistic
 distractor population, and saturated Hit@3. No statistical superiority or
 production-quality conclusion follows. Language translation, extraction
 variability and grouping effects are not isolated causal factors.
+
+Under [D48](../10-decision-log.md), this fusion was exercised offline at commit
+`4bbbd7e07a41592bc3d1fccba512138643a89648`. Automatic translation and runtime
+two-query fusion remain unadmitted; the caller's verbatim query and the
+original-Episode path remain the runtime contract
+([05-recall §2](../05-recall.md)).
 
 ## Reproduction
 

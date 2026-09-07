@@ -138,7 +138,7 @@ is 0 for GPT, both zero for Opus.
 
 The aggregates captured at run time reported this under a single
 `unresolved_resolved` counter, which conflated the two outcomes. That name
-was corrected on the parent side afterwards; the runner now exports
+was corrected afterwards; the runner now exports
 `unresolved_missed` and `unresolved_invalidated` separately, and splits
 `wrong_target` into `wrong_target_given_verdict` and
 `target_mismatch_total`. This changed output labels only. No prediction, no
@@ -261,8 +261,8 @@ captures and outputs are created with mode 0600 in 0700 directories.
 
 The preregistration recorded two runner hashes: `56b21b2d...c28615` before the
 API preflight amendment, and `06db2928...178b05` for the runner that actually
-executed the 36-case screen after the `anyOf` change. Both were verified by
-the parent, and the second is the one transferred to the server alongside the
+executed the 36-case screen after the `anyOf` change. Both were verified,
+and the second is the one transferred to the server alongside the
 unchanged fixtures and prompt.
 
 The metric-naming revision, before subsequent comment-only clarification,
@@ -272,10 +272,8 @@ correction described above. Fixture and prompt hashes are unchanged from the
 frozen run, so the predictions in the rows remain exactly what the executing
 runner produced.
 
-Parent verification also passed the repository type build, JavaScript syntax
-check and gitleaks scan of the research scripts. Fresh LSP diagnostics after
-the comment-only clarification timed out; this is a tooling limitation, not
-a clean-diagnostics claim.
+The research scripts also pass the repository typecheck, a JavaScript syntax
+check and a gitleaks scan.
 
 ## Limitations
 
@@ -296,3 +294,14 @@ a clean-diagnostics claim.
 - Two gold labels are known to be arguable (`new-en-004` verdict,
   `unr-en-501` evidence span). Discount the affected counts accordingly
   rather than treating 36 as a clean ceiling.
+
+## Finalization disposition (D50)
+
+[D50](../10-decision-log.md) adopts `claude-opus-5` on Messages with thinking
+disabled only as the development adjudication default for this frozen prompt;
+`gpt-5.5` on Responses with reasoning effort `none` remains the comparator.
+Runtime admission remains shadow/no-write and requires an authenticated review
+of the exact proposal
+([02-daemon-and-pipelines §5.2](../02-daemon-and-pipelines.md)). These
+synthetic cases are not human gold, select no extractor or global model
+winner, and do not authorize unattended writes.
