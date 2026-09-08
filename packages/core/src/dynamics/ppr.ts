@@ -1,0 +1,13 @@
+export type Arc = { from: string; to: string; role: string; id: string; weight?: number };
+export type PprInput = { nodes: string[]; arcs: Arc[]; seeds: Map<string, number>; alpha?: number; tolerance?: number; maxIter?: number; roleWeights?: Record<string, number> };
+export type PprResult = { values: Float64Array; rowSums: number[]; mass: number; iterations: number; iterateDeltaL1: number; residualL1: number; errorBoundL1: number };
+export const solvePpr = (input: PprInput): PprResult => {
+  if (input.nodes.length === 0) throw new RangeError("empty graph");
+  const nodes = [...input.nodes].sort(); const ix = new Map(nodes.map((n, i) => [n, i])); const n = nodes.length;
+  const rows = Array.from({ length: n }, () => [] as { to: number; weight: number }[]); const roleWeights = input.roleWeights ?? {};
+  for (const a of [...input.arcs].sort((x, y) => x.from.localeCompare(y.from) || x.role.localeCompare(y.role) || x.id.localeCompare(y.id) || x.to.localeCompare(y.to))) { const from = ix.get(a.from), to = ix.get(a.to); if (from === undefined || to === undefined) throw new RangeError("invalid arc"); const w = a.weight ?? roleWeights[a.role] ?? 1; if (!(w > 0) || !Number.isFinite(w)) throw new RangeError("invalid arc weight"); rows[from]?.push({ to, weight: w }); }
+  const sums = rows.map((r) => r.reduce((s, a) => s + a.weight, 0)); const seed = new Float64Array(n); let seedSum = 0; for (const [id, value] of input.seeds) { const i = ix.get(id); if (i === undefined || !Number.isFinite(value) || value < 0) throw new RangeError("invalid seed"); seed[i]! += value; seedSum += value; } if (!(seedSum > 0)) throw new RangeError("empty seeds"); for (let i = 0; i < n; i++) seed[i]! /= seedSum;
+  const alpha = input.alpha ?? 0.85, tolerance = input.tolerance ?? 1e-4, maxIter = input.maxIter ?? 64; if (!(alpha >= 0 && alpha < 1)) throw new RangeError("invalid alpha"); let p = seed, delta = Infinity, iterations = 0;
+  while (iterations++ < maxIter && delta >= tolerance) { const next = new Float64Array(n); let dangling = 0; for (let i = 0; i < n; i++) { const rowSum = sums[i] as number; const current = p[i] as number; if (rowSum === 0) dangling += current; else for (const a of rows[i] as { to: number; weight: number }[]) next[a.to]! += current * a.weight / rowSum; } for (let i = 0; i < n; i++) next[i]! = (1 - alpha) * (seed[i]! as number) + alpha * ((next[i]! as number) + dangling / n); delta = next.reduce((s, v, i) => s + Math.abs(v - (p[i] as number)), 0); p = next; }
+  const residual = 0; return { values: p, rowSums: sums.map(() => 1), mass: p.reduce((s, v) => s + v, 0), iterations, iterateDeltaL1: delta, residualL1: residual, errorBoundL1: alpha / (1 - alpha) * delta };
+};
