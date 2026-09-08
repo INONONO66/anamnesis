@@ -22,6 +22,14 @@ const TEST_DB = {
   password: "anamnesis-test",
 };
 
+// Provide isolated test credentials at module load time to avoid Engine requiring env vars
+const savedPassword = process.env["ANAMNESIS_NEO4J_PASSWORD"];
+const savedUri = process.env["ANAMNESIS_NEO4J_URI"];
+const savedUser = process.env["ANAMNESIS_NEO4J_USER"];
+process.env["ANAMNESIS_NEO4J_PASSWORD"] = TEST_DB.password;
+process.env["ANAMNESIS_NEO4J_URI"] = TEST_DB.uri;
+process.env["ANAMNESIS_NEO4J_USER"] = TEST_DB.user;
+
 function sha256(value: string | Uint8Array): string {
   return createHash("sha256").update(value).digest("hex");
 }
@@ -63,6 +71,23 @@ class RecordingEngine {
 }
 
 afterAll(async () => {
+  // Restore original environment
+  if (savedPassword === undefined) {
+    delete process.env["ANAMNESIS_NEO4J_PASSWORD"];
+  } else {
+    process.env["ANAMNESIS_NEO4J_PASSWORD"] = savedPassword;
+  }
+  if (savedUri === undefined) {
+    delete process.env["ANAMNESIS_NEO4J_URI"];
+  } else {
+    process.env["ANAMNESIS_NEO4J_URI"] = savedUri;
+  }
+  if (savedUser === undefined) {
+    delete process.env["ANAMNESIS_NEO4J_USER"];
+  } else {
+    process.env["ANAMNESIS_NEO4J_USER"] = savedUser;
+  }
+
   await Promise.all(directories.map((directory) => rm(directory, { recursive: true })));
 });
 

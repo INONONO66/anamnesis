@@ -80,6 +80,35 @@ export const ClaimSubKind = z.enum([
 ]);
 export type ClaimSubKind = z.infer<typeof ClaimSubKind>;
 
+export function validateElementSemantics(
+  element: {
+    schema: string;
+    time?: TimePoint | undefined;
+    properties: Record<string, unknown>;
+  },
+  context: z.RefinementCtx,
+): void {
+  const celestial = SCHEMA_REGISTRY[element.schema as KnownSchema];
+  if (celestial && TIME_BEARING[celestial] && !element.time) {
+    context.addIssue({
+      code: "custom",
+      path: ["time"],
+      message: `event time is required for a ${celestial}`,
+    });
+  }
+  if (
+    element.schema === "anamnesis.claim/1" &&
+    "sub_kind" in element.properties &&
+    !ClaimSubKind.safeParse(element.properties.sub_kind).success
+  ) {
+    context.addIssue({
+      code: "custom",
+      path: ["properties", "sub_kind"],
+      message: "expected a recognized claim sub_kind",
+    });
+  }
+}
+
 export const MemoryElement = z
   .object({
     /** UUIDv7 preserves creation order in the identifier. */
@@ -94,26 +123,6 @@ export const MemoryElement = z
     properties: z.record(z.string(), z.json()).default({}),
   })
   .strict()
-  .superRefine((element, context) => {
-    const celestial = SCHEMA_REGISTRY[element.schema as KnownSchema];
-    if (celestial && TIME_BEARING[celestial] && !element.time) {
-      context.addIssue({
-        code: "custom",
-        path: ["time"],
-        message: `event time is required for a ${celestial}`,
-      });
-    }
-    if (
-      element.schema === "anamnesis.claim/1" &&
-      "sub_kind" in element.properties &&
-      !ClaimSubKind.safeParse(element.properties.sub_kind).success
-    ) {
-      context.addIssue({
-        code: "custom",
-        path: ["properties", "sub_kind"],
-        message: "expected a recognized claim sub_kind",
-      });
-    }
-  });
+  .superRefine(validateElementSemantics);
 export type MemoryElement = z.infer<typeof MemoryElement>;
 export type MemoryElementInput = z.input<typeof MemoryElement>;

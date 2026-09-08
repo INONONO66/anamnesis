@@ -4,6 +4,7 @@ import { v7 as uuidv7 } from "uuid";
 import { z } from "zod";
 import {
   MemoryElement,
+  validateElementSemantics,
   type MemoryElementInput,
   type MemoryLink,
   type MemoryLinkInput,
@@ -29,7 +30,8 @@ export const RememberInput = z
     /** The parent record takes precedence over inferred chronological order. */
     previous: z.string().min(1).optional(),
   })
-  .strict();
+  .strict()
+  .superRefine(validateElementSemantics);
 export type RememberInput = z.input<typeof RememberInput>;
 
 export interface EngineOptions extends Partial<StoreOptions> {}

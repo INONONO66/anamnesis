@@ -4,11 +4,24 @@ import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { z } from "zod";
 import { RememberInput } from "./engine.ts";
+import { validateElementSemantics } from "@anamnesis/protocol";
 import type { PutResult } from "./store.ts";
 
-const PersistedElement = RememberInput.extend({
-  payload: z.array(z.number().int().min(0).max(255)).optional(),
-});
+const PersistedElement = z
+  .object({
+    time: RememberInput.shape.time,
+    content: RememberInput.shape.content,
+    origin: RememberInput.shape.origin,
+    schema: RememberInput.shape.schema,
+    mass: RememberInput.shape.mass,
+    properties: RememberInput.shape.properties,
+    source_revision: RememberInput.shape.source_revision,
+    previous: RememberInput.shape.previous,
+    payload_media_type: RememberInput.shape.payload_media_type,
+    payload: z.array(z.number().int().min(0).max(255)).optional(),
+  })
+  .strict()
+  .superRefine(validateElementSemantics);
 
 const JournalEntry = z
   .object({

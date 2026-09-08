@@ -9,6 +9,7 @@ export {
   SCHEMA_LABELS,
   TIME_BEARING,
   ClaimSubKind,
+  validateElementSemantics,
 } from "./element.ts";
 export type { KnownSchema, MemoryElementInput } from "./element.ts";
 
