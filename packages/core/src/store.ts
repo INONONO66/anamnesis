@@ -52,7 +52,8 @@ export interface SearchHit {
 
 export interface IntegrityIssue {
   elementId: string;
-  kind: "digest-mismatch" | "missing-payload" | "payload-hash-mismatch";
+  kind: "digest-mismatch" | "missing-payload" | "payload-hash-mismatch"
+    | "unsupported-digest-format" | "topology-mismatch" | "unsupported-topology-format";
 }
 
 type ElementProperties = Record<string, string | number | null>;
@@ -73,6 +74,7 @@ interface ElementWriteOptions {
   payload?: Uint8Array;
   payloadMediaType?: string;
   sourceRevision?: string;
+  expectedPreviousRevisionKey?: string | null;
   enqueue?: boolean;
   previous?: string;
 }
@@ -91,6 +93,8 @@ const SCHEMA_STATEMENTS = [
    FOR (e:Episode) REQUIRE e.revision_key IS UNIQUE`,
   `CREATE CONSTRAINT episode_ingest_seq IF NOT EXISTS
    FOR (e:Episode) REQUIRE e.ingest_seq IS UNIQUE`,
+  `CREATE CONSTRAINT origin_head_key IF NOT EXISTS
+   FOR (h:OriginHead) REQUIRE h.origin_key IS UNIQUE`,
   `CREATE CONSTRAINT payload_hash IF NOT EXISTS
    FOR (p:Payload) REQUIRE p.hash IS UNIQUE`,
   // Without it, remembers racing on a cold database each MERGE their own Meta
@@ -99,6 +103,8 @@ const SCHEMA_STATEMENTS = [
    FOR (m:Meta) REQUIRE m.key IS UNIQUE`,
   `CREATE INDEX episode_origin IF NOT EXISTS
    FOR (e:Episode) ON (e.origin_key)`,
+  `CREATE INDEX episode_session_order IF NOT EXISTS
+   FOR (e:Episode) ON (e.session_key, e.time_utc, e.ingest_seq)`,
   `CREATE INDEX element_time IF NOT EXISTS
    FOR (e:Element) ON (e.time_utc)`,
   `CREATE INDEX element_schema IF NOT EXISTS
@@ -121,6 +127,78 @@ function sha256(data: Uint8Array | string): string {
 /** Used when no snapshot cutoff is given, so every invalidator applies. */
 const END_OF_TIME = "9999-12-31T23:59:59.999Z";
 
+const CANONICAL_DIGEST = "rfc8785-v1";
+
+interface TopologyRow {
+  id: string;
+  sessionKey: string;
+  record: string;
+  previousRecord: string | null;
+  timeUtc: string;
+  ingestSeq: number;
+  version: number | null;
+  actual: ({ from: string; key: string | null } | null)[];
+}
+
+const TOPOLOGY_QUERY = `MATCH (e:Element:Episode)
+  OPTIONAL MATCH (p)-[l:NEXT_EPISODE]->(e)
+  RETURN e.id AS id, e.session_key AS sessionKey, e.origin_record AS record,
+    e.topology_previous_record AS previousRecord, e.ingest_seq AS ingestSeq,
+    e.topology_version AS version, e.time_utc AS timeUtc,
+    collect(CASE WHEN l IS NULL THEN null ELSE {from: p.id, key: l.idem_key} END) AS actual
+  ORDER BY sessionKey, timeUtc, ingestSeq`;
+
+/** Derive expectations independently of the cache, retaining explicit-parent
+ * semantics as observed at admission (later source revisions are not parents).
+ */
+function topologyExpectations(rows: TopologyRow[]): (TopologyRow & { parents: string[] })[] {
+  const records = new Map<string, TopologyRow[]>();
+  for (const row of rows) {
+    const key = JSON.stringify([row.sessionKey, row.record]);
+    const bucket = records.get(key) ?? [];
+    bucket.push(row);
+    records.set(key, bucket);
+  }
+  const previousBySession = new Map<string, string>();
+  return rows.map((row) => {
+    const previous = previousBySession.get(row.sessionKey);
+    const parents = row.previousRecord === null
+      ? previous === undefined ? [] : [previous]
+      : (records.get(JSON.stringify([row.sessionKey, row.previousRecord])) ?? [])
+        .filter((parent) => parent.ingestSeq < row.ingestSeq).map((parent) => parent.id);
+    previousBySession.set(row.sessionKey, row.id);
+    return { ...row, parents };
+  });
+}
+
+class StorageContractError extends Error {
+  constructor(readonly code: "revision_conflict" | "stale_revision"
+    | "unsupported_digest_format" | "invalid_canonical_json" | "unsupported_topology_format",
+    readonly detail: string) {
+    super(`${code}: ${detail}`);
+  }
+}
+
+/** RFC 8785: UTF-16 key order, ECMAScript primitives, no lone surrogates.
+ * Serialize members directly: JSON.stringify(object) reorders integer keys.
+ * Values have already crossed the protocol's JSON-only boundary.
+ */
+function canonicalJson(value: MemoryElement["properties"][string]): string {
+  if (typeof value === "string" && /[\uD800-\uDFFF]/u.test(value)) {
+    throw new StorageContractError("invalid_canonical_json", "lone surrogate");
+  }
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  return `{${Object.entries(value).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
+    .map(([key, member]) => `${canonicalJson(key)}:${canonicalJson(member)}`).join(",")}}`;
+}
+
+interface DigestContext {
+  payloadHash?: string | null;
+  previousRevisionKey?: string | null;
+  format?: string | number | null;
+}
+
 function elementDigest(
   e: {
     schema: string;
@@ -128,11 +206,9 @@ function elementDigest(
     content: string;
     properties?: MemoryElement["properties"] | undefined;
   },
-  payloadHash: string | null = null,
-  previousRevisionKey: string | null = null,
+  context: DigestContext = {},
 ): string {
-  return sha256(
-    JSON.stringify({
+  const body = {
       schema: e.schema,
       content: e.content,
       properties: Object.fromEntries(
@@ -141,10 +217,17 @@ function elementDigest(
         ),
       ),
       time: carriesTime(e.schema) ? e.time ?? null : null,
-      payload_hash: payloadHash,
-      previous_revision_key: previousRevisionKey,
-    }),
-  );
+      payload_hash: context.payloadHash ?? null,
+      previous_revision_key: context.previousRevisionKey ?? null,
+    };
+  // Absent stored markers mean frozen insertion-ordered legacy bytes, never
+  // an invitation to migrate or sort a previously admitted original.
+  switch (context.format) {
+    case null: return sha256(JSON.stringify(body));
+    case undefined:
+    case CANONICAL_DIGEST: return sha256(canonicalJson(body));
+    default: throw new StorageContractError("unsupported_digest_format", String(context.format));
+  }
 }
 
 function tupleHash(parts: readonly string[]): string {
@@ -258,28 +341,33 @@ export class Store {
       return this.withWriteTx(async (tx) => {
         const key = originKey(el.origin);
         const revisionKey = tupleHash([key, sourceRevision]);
-        const existing = await tx.run<{
-          id: string;
-          digest: string;
-          previousRevisionKey: string | null;
-        }>(
-          `MATCH (e:Element:Episode { revision_key: $revisionKey })
-           RETURN e.id AS id, e.digest AS digest,
-                  e.previous_revision_key AS previousRevisionKey`,
-          { revisionKey },
-        );
-        if (existing.records.length > 0) {
-          const record = existing.records[0]!;
-          const candidateDigest = elementDigest(
-            el,
-            payloadHash,
-            record.get("previousRevisionKey"),
+        const retry = async (): Promise<PutResult | null> => {
+          const existing = await tx.run<{
+            id: string;
+            digest: string;
+            format: string | number | null;
+            previousRevisionKey: string | null;
+          }>(
+            `MATCH (e:Element:Episode { revision_key: $revisionKey })
+             RETURN e.id AS id, e.digest AS digest, e.digest_format AS format,
+                    e.previous_revision_key AS previousRevisionKey`,
+            { revisionKey },
           );
+          const record = existing.records[0];
+          if (!record) return null;
+          const candidateDigest = elementDigest(el, {
+            payloadHash,
+            previousRevisionKey: opts.expectedPreviousRevisionKey === undefined
+              ? record.get("previousRevisionKey") : opts.expectedPreviousRevisionKey,
+            format: record.get("format"),
+          });
           if (record.get("digest") !== candidateDigest) {
-            throw new Error(`revision_conflict: ${revisionKey}`);
+            throw new StorageContractError("revision_conflict", revisionKey);
           }
           return { id: record.get("id"), created: false };
-        }
+        };
+        const existing = await retry();
+        if (existing) return existing;
         const head = await tx.run<{ revisionKey: string | null }>(
           `MERGE (h:OriginHead { origin_key: $originKey })
            SET h.revision_key = h.revision_key
@@ -287,6 +375,14 @@ export class Store {
           { originKey: key },
         );
         const previousRevisionKey = head.records[0]!.get("revisionKey") ?? null;
+        // A contender may have committed this exact revision while we waited
+        // for the unique head's write lock. Recheck before attempting CREATE.
+        const raced = await retry();
+        if (raced) return raced;
+        if (opts.expectedPreviousRevisionKey !== undefined &&
+            opts.expectedPreviousRevisionKey !== previousRevisionKey) {
+          throw new StorageContractError("stale_revision", revisionKey);
+        }
         const prior = previousRevisionKey
           ? await tx.run<{ id: string }>(
               `MATCH (e:Element:Episode { revision_key: $revisionKey })
@@ -295,12 +391,15 @@ export class Store {
             )
           : null;
         const previousId = prior?.records[0]?.get("id") ?? null;
+        if (previousRevisionKey !== null && previousId === null) {
+          throw new StorageContractError("stale_revision", previousRevisionKey);
+        }
         await this.createElementTx(tx, el, payload, opts, {
           sourceRevision,
           revisionKey,
           previousRevisionKey,
           ingestedAt: Date.now(),
-          digest: elementDigest(el, payloadHash, previousRevisionKey),
+          digest: elementDigest(el, { payloadHash, previousRevisionKey }),
         });
         if (previousId) {
           await this.mergeLinkTx(tx, {
@@ -314,8 +413,9 @@ export class Store {
         }
         // Every remember contends for the single Meta node's write lock and
         // Neo4j holds it until commit, so the increment rides on the last
-        // statement of the transaction instead of running before the CREATE
-        // and the link merges (docs/01 §2, docs/02 §1). It stays inside this
+        // sequence-independent statement, after CREATE and originals links.
+        // Topology depends on this sequence and runs under the same lock.
+        // It stays inside this
         // transaction, so an aborted remember consumes no number.
         await tx.run(
           `MATCH (h:OriginHead { origin_key: $originKey })
@@ -327,6 +427,7 @@ export class Store {
            SET e.ingest_seq = m.ingest_seq`,
           { originKey: key, revisionKey, id: el.id },
         );
+        await this.spliceTopologyTx(tx, { id: el.id, sessionKey: sessionKey(el.origin) });
         return {
           id: el.id,
           created: true,
@@ -439,7 +540,8 @@ export class Store {
          origin_source: $source, origin_session: $session,
          origin_actor: $actor, origin_record: $record,
          mass: $mass, properties: $properties,
-         payload_hash: $payloadHash, digest: $digest,
+         payload_hash: $payloadHash, digest: $digest, digest_format: $digestFormat,
+         topology_version: $topologyVersion, topology_previous_record: $previous,
          source_revision: $sourceRevision, revision_key: $revisionKey,
          previous_revision_key: $previousRevisionKey,
          ingest_seq: null, ingested_at: $ingestedAt
@@ -460,7 +562,10 @@ export class Store {
         mass: el.mass,
         properties: JSON.stringify(el.properties),
         payloadHash: payload?.hash ?? null,
-        digest: revision?.digest ?? elementDigest(el),
+        digest: revision?.digest ?? elementDigest(el, { payloadHash: payload?.hash ?? null }),
+        digestFormat: CANONICAL_DIGEST,
+        topologyVersion: isEpisode ? 1 : null,
+        previous: isEpisode ? opts.previous ?? null : null,
         sourceRevision: revision?.sourceRevision ?? null,
         revisionKey: revision?.revisionKey ?? null,
         previousRevisionKey: revision?.previousRevisionKey ?? null,
@@ -482,54 +587,72 @@ export class Store {
         { id: el.id, now: new Date().toISOString() },
       );
     }
+  }
 
-    if (isEpisode) {
-      const predecessors = opts.previous
-        ? await tx.run<{ id: string }>(
-            `MATCH (p:Element:Episode)
-             WHERE p.origin_source = $source AND p.origin_session = $session
-               AND p.origin_record = $previous
-             RETURN p.id AS id`,
-            {
-              source: el.origin.source,
-              session: el.origin.session,
-              previous: opts.previous,
-            },
-          )
-        : await tx.run<{ id: string }>(
-            `MATCH (e:Element { id: $id })
-             MATCH (p:Element:Episode)
-             WHERE p.schema = e.schema
-               AND p.origin_source = e.origin_source
-               AND p.origin_session = e.origin_session
-               AND p.id <> e.id
-               AND (p.time_utc < e.time_utc
-                    OR (p.time_utc = e.time_utc AND p.id < e.id))
-             RETURN p.id AS id
-             ORDER BY p.time_utc DESC, p.id DESC LIMIT 1`,
-            { id: el.id },
-          );
-      const content = opts.previous
-        ? "This episode follows the explicitly selected parent record"
-        : "This is the next episode in the same session";
-      for (const row of recordsToObjects(predecessors.records)) {
-        await tx.run(
-          `MATCH (p:Element:Episode { id: $predecessor })
-           MATCH (e:Element { id: $id })
-           MERGE (p)-[l:NEXT_EPISODE]->(e)
-           ON CREATE SET l += { id: $linkId, idem_key: $idemKey,
-             content: $content, weight: 1.0 }`,
-          {
-            id: el.id,
-            predecessor: row.id,
-            linkId: uuidv7(),
-            // docs/01 §5: session topology keys by session, not by content.
-            idemKey: tupleHash([sessionKey(el.origin), row.id, el.id]),
-            content,
-          },
-        );
-      }
+  /** Meta's sequence lock is held until commit, serializing cache splices. */
+  private async spliceTopologyTx(tx: ManagedTransaction, episode: { id: string; sessionKey: string }): Promise<void> {
+    const { id, sessionKey } = episode;
+    const predecessors = await tx.run<{ id: string }>(
+      `MATCH (e:Element:Episode {id: $id}), (p:Element:Episode)
+       WHERE p.session_key = e.session_key
+         AND (p.time_utc < e.time_utc OR (p.time_utc = e.time_utc AND p.ingest_seq < e.ingest_seq))
+       RETURN p.id AS id ORDER BY p.time_utc DESC, p.ingest_seq DESC LIMIT 1`, { id });
+    const successors = await tx.run<{ id: string; previousRecord: string | null }>(
+      `MATCH (e:Element:Episode {id: $id}), (s:Element:Episode)
+       WHERE s.session_key = e.session_key
+         AND (s.time_utc > e.time_utc OR (s.time_utc = e.time_utc AND s.ingest_seq > e.ingest_seq))
+       RETURN s.id AS id, s.topology_previous_record AS previousRecord
+       ORDER BY s.time_utc, s.ingest_seq LIMIT 1`, { id });
+    const predecessor = predecessors.records[0]?.get("id") ?? null;
+    const successor = successors.records[0];
+    if (successor && successor.get("previousRecord") === null) {
+      await tx.run(
+        `MATCH (p:Element:Episode {id: $predecessor})-[l:NEXT_EPISODE]->(s:Element:Episode {id: $successor})
+         DELETE l`, { predecessor, successor: successor.get("id") });
+      await this.mergeTopologyTx(tx, { from: id, to: successor.get("id"), sessionKey });
     }
+    const parents = await tx.run<{ id: string }>(
+      `MATCH (e:Element:Episode {id: $id}), (p:Element:Episode)
+       WHERE (e.topology_previous_record IS NULL AND p.id = $predecessor)
+         OR (e.topology_previous_record IS NOT NULL AND p.session_key = e.session_key
+             AND p.origin_record = e.topology_previous_record AND p.ingest_seq < e.ingest_seq)
+       RETURN p.id AS id`, { id, predecessor });
+    for (const parent of parents.records) {
+      await this.mergeTopologyTx(tx, { from: parent.get("id"), to: id, sessionKey });
+    }
+  }
+
+  private async mergeTopologyTx(tx: ManagedTransaction, edge: { from: string; to: string; sessionKey: string }): Promise<void> {
+    await tx.run(
+      `MATCH (p:Element:Episode {id: $from}), (e:Element:Episode {id: $to})
+       MERGE (p)-[l:NEXT_EPISODE]->(e)
+       ON CREATE SET l.id = $linkId, l.idem_key = $idemKey,
+         l.content = CASE WHEN e.topology_previous_record IS NULL
+           THEN 'This is the next episode in the same session'
+           ELSE 'This episode follows the explicitly selected parent record' END,
+         l.weight = 1.0`,
+      { ...edge, linkId: uuidv7(), idemKey: tupleHash([edge.sessionKey, edge.from, edge.to]) });
+  }
+
+  /** Only cache links are replaced. Legacy explicit parents were not persisted,
+   * so rebuilding unmarked rows would invent provenance; require journal recovery.
+   */
+  async rebuildTopology(): Promise<void> {
+    await this.withWriteTx(async (tx) => {
+      await tx.run(`MERGE (m:Meta {key: 'meta'}) ON CREATE SET m.ingest_seq = 0
+        SET m.ingest_seq = m.ingest_seq`);
+      const result = await tx.run<TopologyRow>(TOPOLOGY_QUERY);
+      const rows = topologyExpectations(recordsToObjects(result.records));
+      for (const row of rows) {
+        if (row.version !== 1) throw new StorageContractError("unsupported_topology_format", row.id);
+      }
+      await tx.run(`MATCH ()-[l:NEXT_EPISODE]->() DELETE l`);
+      for (const row of rows) {
+        for (const parent of row.parents) {
+          await this.mergeTopologyTx(tx, { from: parent, to: row.id, sessionKey: row.sessionKey });
+        }
+      }
+    });
   }
 
   async putLink(input: MemoryLinkInput): Promise<MemoryLink> {
@@ -725,8 +848,15 @@ export class Store {
       const el = toElement(p);
       const payloadHash = p["payload_hash"] as string | null;
       const previousRevisionKey = (p["previous_revision_key"] as string | null) ?? null;
-      if (elementDigest(el, payloadHash, previousRevisionKey) !== p["digest"]) {
-        issues.push({ elementId: el.id, kind: "digest-mismatch" });
+      try {
+        if (elementDigest(el, { payloadHash, previousRevisionKey, format: p["digest_format"] ?? null }) !== p["digest"]) {
+          issues.push({ elementId: el.id, kind: "digest-mismatch" });
+        }
+      } catch (error) {
+        if (!(error instanceof StorageContractError)) throw error;
+        if (error.code !== "unsupported_digest_format" && error.code !== "invalid_canonical_json") throw error;
+        issues.push({ elementId: el.id, kind: error.code === "unsupported_digest_format"
+          ? "unsupported-digest-format" : "digest-mismatch" });
       }
       if (payloadHash) {
         const payload = await this.getPayload(payloadHash);
@@ -735,6 +865,14 @@ export class Store {
         } else if (sha256(payload) !== payloadHash) {
           issues.push({ elementId: el.id, kind: "payload-hash-mismatch" });
         }
+      }
+    }
+    for (const row of topologyExpectations(await this.run<TopologyRow>(TOPOLOGY_QUERY))) {
+      if (row.version !== 1) {
+        issues.push({ elementId: row.id, kind: "unsupported-topology-format" });
+      } else if (row.actual.filter((edge) => edge !== null).length !== row.parents.length || row.parents.some((parent) =>
+        !row.actual.some((edge) => edge !== null && edge.from === parent && edge.key === tupleHash([row.sessionKey, parent, row.id])))) {
+        issues.push({ elementId: row.id, kind: "topology-mismatch" });
       }
     }
     return issues;

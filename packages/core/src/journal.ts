@@ -16,6 +16,7 @@ const PersistedElement = z
     mass: RememberInput.shape.mass,
     properties: RememberInput.shape.properties,
     source_revision: RememberInput.shape.source_revision,
+    expected_previous_revision_key: RememberInput.shape.expected_previous_revision_key,
     previous: RememberInput.shape.previous,
     payload_media_type: RememberInput.shape.payload_media_type,
     payload: z.array(z.number().int().min(0).max(255)).optional(),

@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import {
   mkdtemp,
@@ -41,10 +41,23 @@ async function fixtureRoot(): Promise<string> {
 }
 
 const TEST_DB = {
-  uri: "bolt://127.0.0.1:7688",
-  user: "neo4j",
-  password: "anamnesis-test",
+  uri: process.env["ANAMNESIS_TEST_NEO4J_URI"] ?? "",
+  user: process.env["ANAMNESIS_TEST_NEO4J_USER"] ?? "neo4j",
+  password: process.env["ANAMNESIS_TEST_NEO4J_PASSWORD"] ?? "",
 };
+if (!TEST_DB.uri || !TEST_DB.password) throw new Error("ANAMNESIS_TEST_NEO4J_URI and ANAMNESIS_TEST_NEO4J_PASSWORD are required");
+
+async function clearTestDatabase(): Promise<void> {
+  const driver = neo4j.driver(TEST_DB.uri, neo4j.auth.basic(TEST_DB.user, TEST_DB.password));
+  try {
+    await driver.executeQuery("MATCH (n) DETACH DELETE n");
+  } finally {
+    await driver.close();
+  }
+}
+
+beforeAll(clearTestDatabase);
+afterAll(clearTestDatabase);
 
 describe("maskSecrets", () => {
   test("masks credential shapes before the write boundary", () => {

@@ -1,0 +1,4 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "include": ["./*.ts", "../ensure-test-db.ts"]
+}

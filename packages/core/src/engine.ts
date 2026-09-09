@@ -27,6 +27,8 @@ export const RememberInput = z
     payload: z.instanceof(Uint8Array).optional(),
     payload_media_type: z.string().min(1).optional(),
     source_revision: z.string().min(1).optional(),
+    /** Omit for the legacy append API; null pins a first revision. */
+    expected_previous_revision_key: z.string().regex(/^[0-9a-f]{64}$/).nullable().optional(),
     /** The parent record takes precedence over inferred chronological order. */
     previous: z.string().min(1).optional(),
   })
@@ -76,6 +78,7 @@ export class Engine {
       payload,
       payload_media_type: payloadMediaType,
       source_revision: sourceRevision,
+      expected_previous_revision_key: expectedPreviousRevisionKey,
       previous,
       ...fields
     } = rec;
@@ -84,6 +87,7 @@ export class Engine {
       ...(payload ? { payload } : {}),
       ...(payloadMediaType ? { payloadMediaType } : {}),
       sourceRevision: sourceRevision ?? element.origin.record,
+      ...(expectedPreviousRevisionKey !== undefined ? { expectedPreviousRevisionKey } : {}),
       ...(previous ? { previous } : {}),
       enqueue: true,
     });
