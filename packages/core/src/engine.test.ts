@@ -14,10 +14,11 @@ import { EpisodeJournal } from "./journal.ts";
 import { luceneQuery, Store } from "./store.ts";
 
 const TEST_DB = {
-  uri: "bolt://127.0.0.1:7688",
-  user: "neo4j",
-  password: "anamnesis-test",
+  uri: process.env["ANAMNESIS_TEST_NEO4J_URI"] ?? "",
+  user: process.env["ANAMNESIS_TEST_NEO4J_USER"] ?? "neo4j",
+  password: process.env["ANAMNESIS_TEST_NEO4J_PASSWORD"] ?? "",
 };
+if (!TEST_DB.uri || !TEST_DB.password) throw new Error("ANAMNESIS_TEST_NEO4J_URI and ANAMNESIS_TEST_NEO4J_PASSWORD are required");
 const AFTER_FIXTURES = "2027-01-01T00:00:00Z";
 
 let engine: Engine;
@@ -216,11 +217,7 @@ describe("Engine configuration", () => {
 });
 
 beforeAll(async () => {
-  // Production intentionally has no delete path, so test isolation owns cleanup.
-  const admin = adminDriver();
-  await admin.executeQuery("MATCH (n) DETACH DELETE n");
-  await admin.close();
-
+  // The endpoint is injected by the per-run QA container.
   objectsRoot = await mkdtemp(join(tmpdir(), "anamnesis-objects-"));
   engine = new Engine({ ...TEST_DB, objectsRoot });
   await engine.init();
@@ -228,6 +225,12 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await engine.close();
+  const admin = adminDriver();
+  try {
+    await admin.executeQuery("MATCH (n) DETACH DELETE n");
+  } finally {
+    await admin.close();
+  }
   await rm(objectsRoot, { recursive: true });
 });
 
@@ -335,12 +338,14 @@ describe("Engine storage lifecycle", () => {
   });
 
   test("remember, digest, and recall round trip", async () => {
-    await engine.remember(
+    const later = await engine.remember(
       msg("m1", "Ino prefers dark mode", "2026-08-21T14:00:00+09:00"),
     );
-    await engine.remember(
+    const earlier = await engine.remember(
       msg("m2", "Lunch was kimchi stew", "2026-08-21T12:00:00+09:00"),
     );
+    expect(await nextEpisodeProps(earlier.id, later.id)).toHaveProperty("id");
+    expect(await nextEpisodeProps(later.id, earlier.id)).toEqual({});
     expect((await engine.status()).pendingOutbox).toBe(2);
 
     const processed = await engine.digest(async (episode, store) => {
@@ -366,7 +371,7 @@ describe("Engine storage lifecycle", () => {
     expect(processed).toBe(2);
     expect(await engine.status()).toMatchObject({
       elements: 4,
-      links: 2,
+      links: 3,
       pendingOutbox: 0,
     });
 

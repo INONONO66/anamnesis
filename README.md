@@ -58,12 +58,17 @@ normative; code follows them.
 
 ## Status
 
-The design (docs 00–10) was rewritten in September 2026 and supersedes the
-earlier drafts. Only `packages/protocol` (zod contract) and a first cut of
-`packages/core` (Neo4j store, single-transaction ingest, idempotency with
-divergence, lattice enforcement, idempotent links, `NEXT_EPISODE` wiring)
-exist today; the package layout in [08-repo-and-release](docs/08-repo-and-release.md)
-is the target. Known gaps between that code and the docs — payload bytes
-stored as base64 on a node, no `revision_key`, a default Neo4j password, a
-time required on every element kind — are closed in v0.1
-([09-roadmap](docs/09-roadmap.md)).
+The September 2026 design (docs 00–10) supersedes earlier drafts. Current
+code includes `packages/protocol`, `packages/core`, and eight backfill
+adapters. Originals use external content-addressed payloads, revision keys,
+transactional ingestion sequences, and fulltext recall. The storage contract
+adds explicit predecessor checks, versioned canonical digests, and
+event-time session insertion; unmarked legacy records are not silently
+rewritten.
+
+Pure dynamics helpers are present but not yet wired into recall. The runtime
+application, receipts, policies, extraction, generations, and graph recall are
+still implementation work, not existing capabilities. The execution boundary
+is one `app/anamnesis`; internal modules do not require separate workspace
+packages. See [runtime storage development](docs/runtime-storage-development.md)
+and the [main roadmap issue](https://github.com/INONONO66/anamnesis/issues/186).

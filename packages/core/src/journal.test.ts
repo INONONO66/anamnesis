@@ -17,18 +17,12 @@ async function temporaryDirectory(): Promise<string> {
 }
 
 const TEST_DB = {
-  uri: "bolt://127.0.0.1:7688",
-  user: "neo4j",
-  password: "anamnesis-test",
+  uri: process.env["ANAMNESIS_TEST_NEO4J_URI"] ?? "",
+  user: process.env["ANAMNESIS_TEST_NEO4J_USER"] ?? "neo4j",
+  password: process.env["ANAMNESIS_TEST_NEO4J_PASSWORD"] ?? "",
 };
+if (!TEST_DB.uri || !TEST_DB.password) throw new Error("ANAMNESIS_TEST_NEO4J_URI and ANAMNESIS_TEST_NEO4J_PASSWORD are required");
 
-// Provide isolated test credentials at module load time to avoid Engine requiring env vars
-const savedPassword = process.env["ANAMNESIS_NEO4J_PASSWORD"];
-const savedUri = process.env["ANAMNESIS_NEO4J_URI"];
-const savedUser = process.env["ANAMNESIS_NEO4J_USER"];
-process.env["ANAMNESIS_NEO4J_PASSWORD"] = TEST_DB.password;
-process.env["ANAMNESIS_NEO4J_URI"] = TEST_DB.uri;
-process.env["ANAMNESIS_NEO4J_USER"] = TEST_DB.user;
 
 function sha256(value: string | Uint8Array): string {
   return createHash("sha256").update(value).digest("hex");
@@ -71,23 +65,12 @@ class RecordingEngine {
 }
 
 afterAll(async () => {
-  // Restore original environment
-  if (savedPassword === undefined) {
-    delete process.env["ANAMNESIS_NEO4J_PASSWORD"];
-  } else {
-    process.env["ANAMNESIS_NEO4J_PASSWORD"] = savedPassword;
+  const driver = neo4j.driver(TEST_DB.uri, neo4j.auth.basic(TEST_DB.user, TEST_DB.password));
+  try {
+    await driver.executeQuery("MATCH (n) DETACH DELETE n");
+  } finally {
+    await driver.close();
   }
-  if (savedUri === undefined) {
-    delete process.env["ANAMNESIS_NEO4J_URI"];
-  } else {
-    process.env["ANAMNESIS_NEO4J_URI"] = savedUri;
-  }
-  if (savedUser === undefined) {
-    delete process.env["ANAMNESIS_NEO4J_USER"];
-  } else {
-    process.env["ANAMNESIS_NEO4J_USER"] = savedUser;
-  }
-
   await Promise.all(directories.map((directory) => rm(directory, { recursive: true })));
 });
 

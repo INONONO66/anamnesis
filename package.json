@@ -5,7 +5,7 @@
     "packages/*"
   ],
   "scripts": {
-    "test": "bun scripts/ensure-test-db.ts && bun test packages",
+    "test": "bun scripts/qa/runtime-scenarios.ts --case foundation --evidence-root .omo/evidence/foundation/root-test",
     "typecheck": "tsc --build",
     "schemas": "bun run packages/protocol/scripts/export-schemas.ts",
     "test:db": "bun scripts/ensure-test-db.ts",
