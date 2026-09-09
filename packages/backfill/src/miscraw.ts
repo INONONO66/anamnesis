@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
-import { copyFile, mkdtemp, readdir, readFile, stat } from "node:fs/promises";
+import { copyFile, mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
-import { Database } from "bun:sqlite";
+import type { Database } from "bun:sqlite";
 import type { RememberInput } from "@anamnesis/core";
 import { maskSecrets } from "./secrets.ts";
 
@@ -164,7 +164,9 @@ async function readOnlyCopy(
  * `bun:sqlite` opened read-only still needs the write-ahead log beside the
  * main file, which `readOnlyCopy` has already placed there.
  */
-function openReadOnly(path: string): Database {
+async function openReadOnly(path: string): Promise<Database> {
+  // The Node parser import graph never opens SQLite. Legacy Bun collection only.
+  const { Database } = await import("bun:sqlite");
   return new Database(path, { readonly: true });
 }
 
@@ -205,7 +207,7 @@ function asideText(content: unknown): string | undefined {
  * product's own `state.db` joins its rows on, so the session partition is the
  * id rather than the directory name.
  */
-function asideSessionId(directory: string): string {
+export function asideSessionId(directory: string): string {
   const index = directory.indexOf("_");
   return index === -1 ? directory : directory.slice(index + 1);
 }
@@ -224,7 +226,7 @@ async function asideSessions(
   const titles = new Map<string, Record<string, string>>();
   const copied = await readOnlyCopy(join(userRoot, "state.db"), scratch);
   if (copied === undefined) return titles;
-  const database = openReadOnly(copied);
+  const database = await openReadOnly(copied);
   try {
     const rows = database
       .query("select id, title, cwd from sessions")
@@ -251,8 +253,8 @@ async function asideSessions(
  * ever appended to, which is the same property `state.db` relies on when it
  * stores byte offsets into it.
  */
-async function collectAsideStore(storeRoot: string): Promise<MiscTurn[]> {
-  const turns: MiscTurn[] = [];
+async function collectAsideStore(storeRoot: string): Promise<MiscRawEpisode[]> {
+  const turns: MiscRawEpisode[] = [];
   const usersRoot = join(storeRoot, ASIDE_USERS);
   /**
    * The SQLite copies this store's index is read through land here rather than
@@ -261,42 +263,27 @@ async function collectAsideStore(storeRoot: string): Promise<MiscTurn[]> {
    * snapshot without an aside store leaves no scratch behind at all.
    */
   let scratch: string | undefined;
-  for (const user of await entries(usersRoot)) {
-    const userRoot = join(usersRoot, user);
-    if (!(await isDirectory(userRoot))) continue;
-    scratch ??= await mkdtemp(join(tmpdir(), "anamnesis-miscraw-"));
-    const titles = await asideSessions(userRoot, scratch);
-    const sessionsRoot = join(userRoot, "sessions");
-    for (const directory of await entries(sessionsRoot)) {
-      const path = join(sessionsRoot, directory, "messages.jsonl");
-      const raw = await readFile(path, "utf8").catch(() => undefined);
-      if (raw === undefined) continue;
-      const session = asideSessionId(directory);
-      const context = titles.get(session) ?? {};
-      let index = -1;
-      for (const line of raw.split("\n")) {
-        if (line.trim() === "") continue;
-        index += 1;
-        const record = parseLine(line);
-        if (record === undefined) continue;
-        const role = optionalText(record["role"]);
-        if (role === undefined || !ASIDE_ROLES.has(role)) continue;
-        const text = asideText(record["content"]);
-        const timestamp = record["timestamp"];
-        if (text === undefined || typeof timestamp !== "number") continue;
-        turns.push({
-          source: "aside",
-          session,
-          actor: role,
-          record: `${session}:${index}`,
-          occurredAt: timestamp,
-          text,
-          properties: { kind: "message", ...context },
-        });
+  try {
+    for (const user of await entries(usersRoot)) {
+      const userRoot = join(usersRoot, user);
+      if (!(await isDirectory(userRoot))) continue;
+      scratch ??= await mkdtemp(join(tmpdir(), "anamnesis-miscraw-"));
+      const titles = await asideSessions(userRoot, scratch);
+      const sessionsRoot = join(userRoot, "sessions");
+      for (const directory of await entries(sessionsRoot)) {
+        const path = join(sessionsRoot, directory, "messages.jsonl");
+        const raw = await readFile(path, "utf8").catch(() => undefined);
+        if (raw === undefined) continue;
+        const session = asideSessionId(directory);
+        const context = titles.get(session) ?? {};
+        const parse = createMiscRawParser({ source: "aside", session, properties: context });
+        for (const line of raw.split("\n")) turns.push(...parse(line));
       }
     }
+    return turns;
+  } finally {
+    if (scratch !== undefined) await rm(scratch, { recursive: true, force: true });
   }
-  return turns;
 }
 
 /** Antigravity: `<root>/gemini-antigravity/home/.gemini/antigravity-cli`. */
@@ -339,8 +326,8 @@ function antigravityText(type: string, content: string): string | undefined {
  * counts and identical fields on every conversation in the snapshot — so
  * reading both would double every turn.
  */
-async function collectAntigravityStore(storeRoot: string): Promise<MiscTurn[]> {
-  const turns: MiscTurn[] = [];
+async function collectAntigravityStore(storeRoot: string): Promise<MiscRawEpisode[]> {
+  const turns: MiscRawEpisode[] = [];
   const brainRoot = join(storeRoot, ANTIGRAVITY_CLI, "brain");
   for (const conversation of await entries(brainRoot)) {
     const path = join(
@@ -352,37 +339,8 @@ async function collectAntigravityStore(storeRoot: string): Promise<MiscTurn[]> {
     );
     const raw = await readFile(path, "utf8").catch(() => undefined);
     if (raw === undefined) continue;
-    for (const line of raw.split("\n")) {
-      if (line.trim() === "") continue;
-      const record = parseLine(line);
-      if (record === undefined) continue;
-      const type = optionalText(record["type"]);
-      const actor = type === undefined ? undefined : ANTIGRAVITY_STEPS[type];
-      const content = optionalText(record["content"]);
-      const stepIndex = record["step_index"];
-      const createdAt = optionalText(record["created_at"]);
-      if (
-        type === undefined ||
-        actor === undefined ||
-        content === undefined ||
-        typeof stepIndex !== "number" ||
-        createdAt === undefined
-      ) {
-        continue;
-      }
-      const occurredAt = Date.parse(createdAt);
-      const text = antigravityText(type, content);
-      if (text === undefined || !Number.isFinite(occurredAt)) continue;
-      turns.push({
-        source: "gemini-antigravity",
-        session: conversation,
-        actor,
-        record: `${conversation}:${stepIndex}`,
-        occurredAt,
-        text,
-        properties: { kind: type },
-      });
-    }
+    const parse = createMiscRawParser({ source: "gemini-antigravity", session: conversation });
+    for (const line of raw.split("\n")) turns.push(...parse(line));
   }
   return turns;
 }
@@ -405,52 +363,74 @@ const OPENCODE_STATE = join("home", ".local", "state", "opencode");
  * shares one time, and the line index both breaks that tie into a total order
  * and identifies the record.
  */
-async function collectOpencodeStore(storeRoot: string): Promise<MiscTurn[]> {
+async function collectOpencodeStore(storeRoot: string): Promise<MiscRawEpisode[]> {
   const path = join(storeRoot, OPENCODE_STATE, "prompt-history.jsonl");
   const raw = await readFile(path, "utf8").catch(() => undefined);
   if (raw === undefined) return [];
   const info = await stat(path);
   const occurredAt = info.mtime.getTime();
-  const turns: MiscTurn[] = [];
+  const parse = createMiscRawParser({ source: "opencode", occurredAt });
+  return raw.split("\n").flatMap(parse);
+}
+
+export type MiscRawContext =
+  | { source: "aside"; session: string; properties?: Record<string, string> }
+  | { source: "gemini-antigravity"; session: string }
+  | { source: "opencode"; occurredAt: number };
+
+/** Shared record parser. Nonblank physical ordinals include excluded records.
+ * Strict mode belongs to sealed runtime snapshots, not tolerant legacy imports. */
+export function createMiscRawParser(context: MiscRawContext, strict = false): (line: string) => MiscRawEpisode[] {
   let index = -1;
-  for (const line of raw.split("\n")) {
-    if (line.trim() === "") continue;
-    index += 1;
+  const invalid = (): [] => { if (strict) throw new Error("miscraw_invalid_record"); return []; };
+  return line => {
+    if (line.trim() === "") return [];
+    index++;
     const record = parseLine(line);
-    if (record === undefined) continue;
-    const input = optionalText(record["input"]);
-    if (input === undefined || input.trim() === "") continue;
-    /**
-     * A pasted attachment is stored beside the prompt that carried it and is
-     * elided from `input` as `[Pasted ~64 lines]`, so the prompt only reads
-     * back in full with its parts appended to it.
-     */
-    const parts: string[] = [input];
-    const attached = record["parts"];
-    if (Array.isArray(attached)) {
-      for (const item of attached) {
-        const part = asRecord(item);
-        if (part === undefined || part["type"] !== "text") continue;
-        const text = optionalText(part["text"]);
-        if (text !== undefined && text.trim() !== "") parts.push(text);
-      }
+    if (!record) return invalid();
+    if (context.source === "aside") {
+      const role = optionalText(record["role"]);
+      if (!role) return invalid();
+      if (!ASIDE_ROLES.has(role)) return [];
+      const content = record["content"], timestamp = record["timestamp"];
+      if (strict && typeof content !== "string" && !Array.isArray(content)) return invalid();
+      const text = asideText(content);
+      if (typeof timestamp !== "number" || !Number.isFinite(new Date(timestamp).getTime())) return invalid();
+      if (text === undefined) return [];
+      return [toEpisode({ source: context.source, session: context.session, actor: role, record: `${context.session}:${index}`, occurredAt: timestamp, text, properties: { kind: "message", ...context.properties } })];
+    }
+    if (context.source === "gemini-antigravity") {
+      const type = optionalText(record["type"]);
+      if (!type) return invalid();
+      const actor = Object.hasOwn(ANTIGRAVITY_STEPS, type) ? ANTIGRAVITY_STEPS[type] : undefined;
+      if (!actor) return [];
+      const content = record["content"], step = record["step_index"], createdAt = optionalText(record["created_at"]);
+      if (typeof content !== "string" || typeof step !== "number" || !createdAt || (strict && (!Number.isSafeInteger(step) || step < 0))) return invalid();
+      const occurredAt = Date.parse(createdAt);
+      if (!Number.isFinite(occurredAt)) return invalid();
+      const text = antigravityText(type, content);
+      if (text === undefined) return [];
+      return [toEpisode({ source: context.source, session: context.session, actor, record: `${context.session}:${step}`, occurredAt, text, properties: { kind: type } })];
+    }
+    const input = record["input"];
+    if (typeof input !== "string") return invalid();
+    if (input.trim() === "") return [];
+    // Pasted text is elided from input; only text attachments restore it.
+    const parts = [input], attached = record["parts"];
+    if (strict && attached !== undefined && !Array.isArray(attached)) return invalid();
+    if (Array.isArray(attached)) for (const item of attached) {
+      const part = asRecord(item);
+      if (part?.["type"] !== "text") continue;
+      const text = optionalText(part["text"]);
+      if (text !== undefined && text.trim() !== "") parts.push(text);
     }
     const mode = optionalText(record["mode"]);
-    turns.push({
-      source: "opencode",
-      session: "prompt-history",
-      actor: "user",
-      record: `prompt-history:${index}`,
-      occurredAt,
-      text: parts.join("\n"),
-      properties: { kind: "prompt", ...(mode === undefined ? {} : { mode }) },
-    });
-  }
-  return turns;
+    return [toEpisode({ source: context.source, session: "prompt-history", actor: "user", record: `prompt-history:${index}`, occurredAt: context.occurredAt, text: parts.join("\n"), properties: { kind: "prompt", ...(mode === undefined ? {} : { mode }) } })];
+  };
 }
 
 const COLLECTORS: Readonly<
-  Record<string, (storeRoot: string) => Promise<MiscTurn[]>>
+  Record<string, (storeRoot: string) => Promise<MiscRawEpisode[]>>
 > = {
   aside: collectAsideStore,
   "gemini-antigravity": collectAntigravityStore,
@@ -467,7 +447,7 @@ const COLLECTORS: Readonly<
  * its diagnostics or claim to have read a transcript it never opened.
  */
 export async function collectMiscRaw(root: string): Promise<MiscRawEpisode[]> {
-  const turns: MiscTurn[] = [];
+  const turns: MiscRawEpisode[] = [];
   for (const name of await entries(root)) {
     if (SKIPPED_STORES.includes(name)) continue;
     const collect = COLLECTORS[name];
@@ -477,7 +457,6 @@ export async function collectMiscRaw(root: string): Promise<MiscRawEpisode[]> {
     turns.push(...(await collect(storeRoot)));
   }
   return turns
-    .map(toEpisode)
     .sort((a, b) => {
       const at = a.input.time?.value ?? "";
       const bt = b.input.time?.value ?? "";
