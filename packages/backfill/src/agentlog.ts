@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readdir, readFile } from "node:fs/promises";
+import { open, readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { RememberInput } from "@anamnesis/core";
 import { maskSecrets } from "./secrets.ts";
@@ -130,7 +130,7 @@ function toEpisode(event: RecallableEvent): AgentLogEpisode {
  * Manifests describe the export, AppleDouble sidecars mirror it, and a
  * provider with no captured session leaves an empty file behind.
  */
-async function logFiles(root: string): Promise<string[]> {
+export async function agentLogFiles(root: string): Promise<string[]> {
   const entries = await readdir(root, { withFileTypes: true });
   return entries
     .filter(
@@ -144,15 +144,51 @@ async function logFiles(root: string): Promise<string[]> {
     .map((name) => join(root, name));
 }
 
-/**
- * Episodes are returned in event-time order across every provider file, not in
- * file order: the store links each arriving Episode to the latest earlier one
- * in its session, so a backdated arrival would start a second chain head and
- * fragment the session spine it belongs to.
- */
+/** A bounded JSONL reader for sealed normalized exports. The collector below
+ * retains its historical final-line and ordering behavior; runtime snapshots
+ * require a newline seal and keep physical order (Engine handles chronology).
+ * Non-recallable records still expose their absolute line for replay context. */
+export async function* streamAgentLogFile(path: string, maxRecordBytes = 1024 * 1024): AsyncGenerator<{ line: number; episode: AgentLogEpisode | null }> {
+  if (!Number.isSafeInteger(maxRecordBytes) || maxRecordBytes < 1) throw new Error("source_record_limit_invalid");
+  const file = await open(path, "r");
+  try {
+    if (!(await file.stat()).isFile()) throw new Error("source_not_regular_file");
+    const chunk = Buffer.allocUnsafe(64 * 1024);
+    const record = Buffer.allocUnsafe(maxRecordBytes);
+    let length = 0, line = 0;
+    while (true) {
+      const { bytesRead } = await file.read(chunk, 0, chunk.length, null);
+      if (!bytesRead) break;
+      let start = 0;
+      for (let end = 0; end < bytesRead; end++) {
+        if (chunk[end] !== 10) continue;
+        const size = end - start;
+        if (length + size > maxRecordBytes) throw new Error(`source_record_too_large: ${path}:${line + 1}`);
+        chunk.copy(record, length, start, end); length += size;
+        line++;
+        let episode: AgentLogEpisode | null = null;
+        try {
+          const text = new TextDecoder("utf-8", { fatal: true }).decode(record.subarray(0, length));
+          if (text.trim() !== "") {
+            const event = parseEvent(text);
+            if (isRecallable(event)) episode = toEpisode(event);
+          }
+        } catch { throw new Error(`source_parse_error: ${path}:${line}`); }
+        yield { line, episode };
+        length = 0; start = end + 1;
+      }
+      const size = bytesRead - start;
+      if (length + size > maxRecordBytes) throw new Error(`source_record_too_large: ${path}:${line + 1}`);
+      chunk.copy(record, length, start, bytesRead); length += size;
+    }
+    if (length) throw new Error(`source_partial_final_line: ${path}:${line + 1}; snapshot incomplete, tail/rotation unsupported`);
+  } finally { await file.close(); }
+}
+
+/** Historical collector: preserves event-time ordering and signature. */
 export async function collectAgentLog(root: string): Promise<AgentLogEpisode[]> {
   const episodes: AgentLogEpisode[] = [];
-  for (const path of await logFiles(root)) {
+  for (const path of await agentLogFiles(root)) {
     const raw = await readFile(path, "utf8");
     for (const line of raw.split("\n").filter((l) => l.trim() !== "")) {
       const event = parseEvent(line);
