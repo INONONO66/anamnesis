@@ -31,6 +31,28 @@ function excerpt(title: string, body: string): string {
   return head === "" ? title : `${title}\n\n${head}`;
 }
 
+/** Shared page conversion; callers own traversal, snapshot validation and order. */
+export function notionEpisode(root: string, path: string, raw: string, mtime: Date): NotionEpisode {
+  const { text, redactions } = maskSecrets(raw);
+  const relpath = relative(root, path);
+  const [workspace = "notion"] = relpath.split(sep);
+  const hash = createHash("sha256").update(text, "utf8").digest("hex");
+  const title = basename(path, ".md");
+  return {
+    redactions,
+    input: {
+      schema: "anamnesis.original-document/1",
+      content: excerpt(title, text),
+      origin: { source: "notion", session: workspace, actor: "export", record: relpath },
+      source_revision: hash,
+      time: { value: mtime.toISOString(), precision: "day" },
+      payload: new TextEncoder().encode(text),
+      payload_media_type: "text/markdown",
+      properties: { title, path: relpath },
+    },
+  };
+}
+
 /**
  * A document revision is its masked content hash: re-running the backfill over
  * an unchanged export is a no-op, while an edited page opens a new revision.
@@ -43,30 +65,8 @@ export async function collectNotion(root: string): Promise<NotionEpisode[]> {
   const episodes: NotionEpisode[] = [];
   for (const path of await markdownFiles(root)) {
     const raw = await readFile(path, "utf8");
-    const { text, redactions } = maskSecrets(raw);
-    const relpath = relative(root, path);
-    const [workspace = "notion"] = relpath.split(sep);
-    const hash = createHash("sha256").update(text, "utf8").digest("hex");
     const info = await stat(path);
-    const title = basename(path, ".md");
-    episodes.push({
-      redactions,
-      input: {
-        schema: "anamnesis.original-document/1",
-        content: excerpt(title, text),
-        origin: {
-          source: "notion",
-          session: workspace,
-          actor: "export",
-          record: relpath,
-        },
-        source_revision: hash,
-        time: { value: info.mtime.toISOString(), precision: "day" },
-        payload: new TextEncoder().encode(text),
-        payload_media_type: "text/markdown",
-        properties: { title, path: relpath },
-      },
-    });
+    episodes.push(notionEpisode(root, path, raw, info.mtime));
   }
   return episodes.sort((a, b) => {
     const at = a.input.time?.value ?? "";
