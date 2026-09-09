@@ -147,6 +147,20 @@ describe("collectSlack", () => {
     });
   });
 
+  test("drops every housekeeping subtype and localized join notice", async () => {
+    const root = await fixtureRoot();
+    await mkdir(join(root, "channels"), { recursive: true });
+    await writeFile(join(root, "index.jsonl"), JSON.stringify({ id: "C-SLOP", name: "general" }) + "\n");
+    const subtypes = ["channel_join", "channel_leave", "group_join", "group_leave", "channel_topic", "channel_purpose", "channel_name", "mpdm_move", "huddle_thread", "bot_message"];
+    const lines = subtypes.map((subtype, i) => JSON.stringify({ ts: `${i + 1}.0`, user: "U1", subtype, text: "housekeeping" }));
+    lines.push(JSON.stringify({ ts: "20.0", user: "U1", text: "<@U1> has joined the channel" }));
+    lines.push(JSON.stringify({ ts: "21.0", user: "U1", text: "real message" }));
+    await writeFile(join(root, "channels", "C-SLOP.jsonl"), lines.join("\n") + "\n");
+    const episodes = await collectSlack(root);
+    expect(episodes).toHaveLength(1);
+    expect(episodes[0]?.input.content).toBe("real message");
+  });
+
   test("masks secrets found in message text", async () => {
     const root = await fixtureRoot();
     await mkdir(join(root, "channels"), { recursive: true });

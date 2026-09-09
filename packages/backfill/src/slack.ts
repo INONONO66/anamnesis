@@ -4,7 +4,7 @@ import type { RememberInput } from "@anamnesis/core";
 import { maskSecrets } from "./secrets.ts";
 
 /** Only the fields the originals contract consumes are modelled. */
-interface SlackMessage {
+export interface SlackMessage {
   ts: string;
   text: string;
   user: string;
@@ -21,7 +21,7 @@ function optionalText(value: unknown): string | undefined {
   return typeof value === "string" && value !== "" ? value : undefined;
 }
 
-function parseMessage(line: string): SlackMessage {
+export function parseSlackMessage(line: string): SlackMessage {
   const raw: Record<string, unknown> = JSON.parse(line);
   const ts = optionalText(raw["ts"]);
   if (ts === undefined) throw new Error(`slack message without ts: ${line}`);
@@ -65,7 +65,7 @@ export interface SlackEpisode {
   redactions: number;
 }
 
-function isSlop(message: SlackMessage): boolean {
+export function isSlackSlop(message: SlackMessage): boolean {
   if (message.subtype !== undefined && SLOP_SUBTYPES.has(message.subtype)) {
     return true;
   }
@@ -73,7 +73,7 @@ function isSlop(message: SlackMessage): boolean {
   return text === "" || JOIN_NOTICE.test(text);
 }
 
-function toEpisode(
+export function slackEpisode(
   message: SlackMessage,
   channelId: string,
   channelName: string,
@@ -113,7 +113,7 @@ async function readMessages(path: string): Promise<SlackMessage[]> {
   return raw
     .split("\n")
     .filter((line) => line.trim() !== "")
-    .map(parseMessage);
+    .map(parseSlackMessage);
 }
 
 /** Channel id prefixes every thread export: `<channel>-<parent ts>.jsonl`. */
@@ -160,10 +160,10 @@ export async function collectSlack(root: string): Promise<SlackEpisode[]> {
   for (const [channelId, messages] of [...byChannel].sort(([a], [b]) =>
     a.localeCompare(b),
   )) {
-    const kept = messages.filter((message) => !isSlop(message));
+    const kept = messages.filter((message) => !isSlackSlop(message));
     kept.sort((a, b) => Number.parseFloat(a.ts) - Number.parseFloat(b.ts));
     for (const message of kept) {
-      episodes.push(toEpisode(message, channelId, names.get(channelId) ?? channelId));
+      episodes.push(slackEpisode(message, channelId, names.get(channelId) ?? channelId));
     }
   }
   return episodes;
