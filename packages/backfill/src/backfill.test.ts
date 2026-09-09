@@ -36,8 +36,11 @@ import {
 } from "./run.ts";
 import { maskSecrets, REDACTION } from "./secrets.ts";
 
+const fixtureRoots = new Set<string>();
 async function fixtureRoot(): Promise<string> {
-  return await mkdtemp(join(tmpdir(), "backfill-"));
+  const root = await mkdtemp(join(tmpdir(), "backfill-"));
+  fixtureRoots.add(root);
+  return root;
 }
 
 const TEST_DB = {
@@ -57,7 +60,16 @@ async function clearTestDatabase(): Promise<void> {
 }
 
 beforeAll(clearTestDatabase);
-afterAll(clearTestDatabase);
+afterAll(async () => {
+  try { await clearTestDatabase(); }
+  finally {
+    const owned = [...fixtureRoots];
+    console.log(JSON.stringify({ event: "backfill_fixture_cleanup_before", owned }));
+    await Promise.all(owned.map((root) => rm(root, { recursive: true, force: true })));
+    for (const root of owned) await expect(stat(root)).rejects.toMatchObject({ code: "ENOENT" });
+    console.log(JSON.stringify({ event: "backfill_fixture_cleanup_after", owned, remaining: [] }));
+  }
+});
 
 describe("maskSecrets", () => {
   test("masks credential shapes before the write boundary", () => {
