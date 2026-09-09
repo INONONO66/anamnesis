@@ -56,13 +56,17 @@ export class EpisodeJournal {
       ...fields,
       ...(payload ? { payload: Array.from(payload) } : {}),
     };
-    const line = `${JSON.stringify({ recordedAt, element })}\n`;
+    const line = Buffer.from(`${JSON.stringify({ recordedAt, element })}\n`);
     const month = recordedAt.slice(0, 7);
 
     await mkdir(this.directory, { recursive: true });
     const file = await open(join(this.directory, `journal-${month}.jsonl`), "a");
     try {
-      await file.write(line);
+      for (let offset = 0; offset < line.length;) {
+        const { bytesWritten } = await file.write(line, offset, line.length - offset);
+        if (bytesWritten === 0) throw new Error("Journal write made no progress");
+        offset += bytesWritten;
+      }
       await file.sync();
     } finally {
       await file.close();
