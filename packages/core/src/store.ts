@@ -292,6 +292,7 @@ export class Store {
   private readonly driver: Driver;
   private readonly database: string;
   private readonly objects: ObjectStore;
+  private writerEpoch: number | undefined;
 
   constructor(opts: StoreOptions, driver?: Driver) {
     this.driver =
@@ -307,6 +308,27 @@ export class Store {
 
   get databaseName(): string {
     return this.database;
+  }
+
+  async claimWriterEpoch(): Promise<number> {
+    const session = this.driver.session({ database: this.database });
+    try {
+      const epoch = await session.executeWrite(async (tx) => {
+        const result = await tx.run<{ epoch: number }>(
+          `MERGE (m:Meta {key: 'meta'})
+           ON CREATE SET m.ingest_seq = 0, m.writer_epoch = 0
+           SET m.writer_epoch = coalesce(m.writer_epoch, 0) + 1
+           RETURN m.writer_epoch AS epoch`,
+        );
+        const record = result.records[0];
+        if (!record) throw new Error("writer epoch claim returned no epoch");
+        return record.get("epoch");
+      });
+      this.writerEpoch = epoch;
+      return epoch;
+    } finally {
+      await session.close();
+    }
   }
 
   async init(): Promise<void> {
@@ -674,7 +696,22 @@ export class Store {
   ): Promise<Result> {
     const session = this.driver.session({ database: this.database });
     try {
-      return await session.executeWrite(work);
+      return await session.executeWrite(async (tx) => {
+        const epoch = this.writerEpoch;
+        if (epoch !== undefined) {
+          // Acquire Meta's write lock before reading the epoch, and hold it
+          // through commit against concurrent claims.
+          const fence = await tx.run<{ epoch: number }>(
+            `MATCH (m:Meta {key: 'meta'})
+             SET m.writer_epoch = m.writer_epoch
+             RETURN m.writer_epoch AS epoch`,
+          );
+          if (fence.records[0]?.get("epoch") !== epoch) {
+            throw new Error("stale_writer_epoch");
+          }
+        }
+        return work(tx);
+      });
     } finally {
       await session.close();
     }
@@ -820,22 +857,26 @@ export class Store {
   }
 
   async markProcessed(elementIds: string[]): Promise<void> {
-    await this.run(
+    await this.withWriteTx((tx) => tx.run(
       `MATCH (o:Outbox) WHERE o.element_id IN $ids
        SET o.processed_at = $now`,
       { ids: elementIds, now: new Date().toISOString() },
-    );
+    ).then(() => undefined));
   }
 
   async requeue(schema: string): Promise<number> {
-    const rows = await this.run<{ n: number }>(
+    return this.withWriteTx(async (tx) => {
+      const rows = await tx.run<{ n: number }>(
       `MATCH (e:Element { schema: $schema })
        CREATE (o:Outbox { element_id: e.id, enqueued_at: $now,
                           processed_at: null })-[:OF]->(e)
        RETURN count(o) AS n`,
       { schema, now: new Date().toISOString() },
-    );
-    return rows[0]!.n;
+      );
+      const record = rows.records[0];
+      if (!record) throw new Error("requeue count returned no result");
+      return record.get("n");
+    });
   }
 
   async verify(): Promise<IntegrityIssue[]> {

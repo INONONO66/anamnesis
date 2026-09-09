@@ -72,6 +72,10 @@ export class Engine {
     await this.store.init();
   }
 
+  async claimWriterEpoch(): Promise<number> {
+    return this.store.claimWriterEpoch();
+  }
+
   async remember(input: RememberInput): Promise<PutResult> {
     const rec = RememberInput.parse(input);
     const {
