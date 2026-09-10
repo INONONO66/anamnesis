@@ -440,7 +440,7 @@ const TRANSCRIPT_ROOTS = [
  * the delegated transcripts — matched at any depth already — as the only
  * thing the adapter collected there.
  */
-function classify(pathFromRoot: string): SidechainOrigin | "main" | undefined {
+export function classifyClaudeTranscript(pathFromRoot: string): SidechainOrigin | "main" | undefined {
   const parts = pathFromRoot.split(sep);
   if (parts.some((part) => part.startsWith("._"))) return undefined;
   if (parts.includes("subagents")) {
@@ -475,7 +475,7 @@ async function transcriptFiles(root: string): Promise<Transcript[]> {
       const path = join(directory, entry.name);
       if (entry.isDirectory()) await walk(path);
       else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
-        const kind = classify(relative(root, path));
+        const kind = classifyClaudeTranscript(relative(root, path));
         if (kind === undefined) continue;
         found.push(kind === "main" ? { path } : { path, sidechain: kind });
       }
@@ -503,13 +503,13 @@ function recordLines(file: Uint8Array): Uint8Array[] {
   return lines;
 }
 
-async function collectFile(
-  transcript: Transcript,
-): Promise<ClaudeRawEpisode[]> {
+/** Shared stateful parser. Runtime readers bound raw bytes before calling this;
+ * strict admission rejects malformed records, while legacy collection keeps its
+ * permissive skip behavior. Empty physical lines do not consume fallback indexes
+ * (the historical recordLines convention), but all other lines do. */
+export function createClaudeRawParser(transcript: Transcript, strict = false): (bytes: Uint8Array) => ClaudeRawEpisode[] {
   const { path, sidechain } = transcript;
-  const file = new Uint8Array(await readFile(path));
-  const decoder = new TextDecoder();
-  const episodes: ClaudeRawEpisode[] = [];
+  const decoder = new TextDecoder("utf-8", { fatal: strict });
   /**
    * The session a record belongs to is the one it names; the file name is
    * only the opening guess, and a resumed session renames itself mid-file.
@@ -521,10 +521,14 @@ async function collectFile(
       ? { session: basename(path, ".jsonl") }
       : { session: sidechain.agentId, sidechain };
   let lineIndex = 0;
-  for (const bytes of recordLines(file)) {
+  return (bytes) => {
+    if (!bytes.length) return [];
     const value = parseRecord(decoder.decode(bytes));
     lineIndex += 1;
-    if (value === undefined) continue;
+    if (value === undefined) {
+      if (strict) throw new Error("source_invalid_record");
+      return [];
+    }
     context = {
       session:
         sidechain === undefined
@@ -553,14 +557,16 @@ async function collectFile(
             },
           }),
     };
-    for (const accepted of acceptedRecords(
-      value,
-      bytes,
-      lineIndex - 1,
-      sidechain,
-    )) {
-      episodes.push(toEpisode(accepted, context));
-    }
+    return acceptedRecords(value, bytes, lineIndex - 1, sidechain)
+      .map((accepted) => toEpisode(accepted, context));
+  };
+}
+
+async function collectFile(transcript: Transcript): Promise<ClaudeRawEpisode[]> {
+  const parse = createClaudeRawParser(transcript);
+  const episodes: ClaudeRawEpisode[] = [];
+  for (const bytes of recordLines(new Uint8Array(await readFile(transcript.path)))) {
+    episodes.push(...parse(bytes));
   }
   return episodes;
 }
