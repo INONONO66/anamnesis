@@ -18,6 +18,9 @@ import { loadTokenizers } from "./tokenizer.ts";
 import { daemonTiming, runtimeTimed, timingHash } from "./timing.ts";
 import { fault, RpcFault, storageUnavailable } from "./wire.ts";
 import type { TrustedAuthorityAdapter } from "./backup-restore-orchestrator.ts";
+import { backupOwned, restoreOwned } from "./backup-restore-orchestrator.ts";
+import { createRuntimeAuthority, manifestTemplate, objectInventory } from "./runtime-authority.ts";
+import { NEO4J_IMAGE, NEO4J_VERSION } from "./owned-neo4j-adapter.ts";
 import { createDreamLeidenAdapter } from './dream-leiden-runtime.ts';
 import { trustedDreamLeiden, DREAM_GDS_IMAGE, DREAM_GDS_VERSION, DREAM_ALGORITHM, DREAM_NETWORK } from '../../packages/core/src/dream-leiden-adapter.ts';
 
@@ -65,9 +68,6 @@ export interface RuntimeAuthorityOptions {
 }
 
 export class Runtime {
-  readonly uploads: Uploads;
-  private readonly engine: Engine;
-  private readonly reader: Driver;
   readonly capabilities: RpcCapabilities;
   /** Load asynchronous provider assets once, before accepting RPC traffic. */
   static async create(installation: Installation, scheduleDrain: () => void = () => {}, uploadLifecycle: UploadLifecycle = {}, authorityOptions: RuntimeAuthorityOptions = {}): Promise<Runtime> {
@@ -90,11 +90,16 @@ export class Runtime {
     }
     return new Runtime(installation, scheduleDrain, uploadLifecycle, authorityOptions, providers);
   }
+  readonly uploads: Uploads;
+  private readonly engine: Engine;
+  private readonly reader: Driver;
   private readonly database: string;
   private readonly spool: DurableSpool;
   private readonly spoolRoot: string;
   private readonly bindings: string;
   private readonly authorityAdapter: TrustedAuthorityAdapter | undefined;
+  private readonly backupOperations = new Map<string, { state: "running" | "complete" | "failed"; error?: string }>();
+  private readonly restoreOperations = new Map<string, { state: "running" | "complete" | "failed"; error?: string }>();
   private epoch: number | undefined;
   private initialized = false;
   private available = false;
@@ -475,27 +480,54 @@ export class Runtime {
       spool: { pending: spool.pending, blocked: this.blocked.size, quarantined: spool.quarantined ? 1 : this.quarantined.size, bytes },
       outbox_pending: outbox, capabilities: this.capabilities };
   }
-  /** The adapter is deliberately dependency-injected by the owner lifecycle.
-   * The current RPC contract has no authenticated archive manifest/path
-   * authority inputs, so even an injected adapter cannot be driven safely from
-   * these legacy no-parameter methods. Refuse rather than inventing a dump. */
-  async backup(context: InstallationContext): Promise<never> {
+  async backup(context: InstallationContext, destination: string, operationId: string) {
     await this.installation.assertOwned();
     if (!context.client_binding) throw new RpcFault("unauthenticated", "authenticated connection custody is required");
+    if (!destination || !operationId) throw new RpcFault("invalid_params", "backup destination and operation identity are required");
     if (!this.authorityAdapter) throw new RpcFault("backup_adapter_unavailable", "offline backup adapter is not installed");
-    throw new RpcFault("backup_adapter_unavailable", "authenticated backup manifest/path authority API is not installed");
+    const fenced = await this.authorityAdapter.revokeWriters();
+    const authority = await this.authorityAdapter.authoritySnapshot(fenced.epoch);
+    const objectRoot = join(this.installation.root, "objects");
+    const objects = await objectInventory(objectRoot);
+    const config = Buffer.from(JSON.stringify({ uri: process.env["ANAMNESIS_NEO4J_URI"] ?? "", user: process.env["ANAMNESIS_NEO4J_USER"] ?? "neo4j", database: process.env["ANAMNESIS_NEO4J_DATABASE"] ?? "neo4j" }));
+    const manifest = manifestTemplate(operationId, fenced.cutoff, authority, objects, createHash("sha256").update(config).digest("hex"));
+    const cached: TrustedAuthorityAdapter = {
+      revokeWriters: async () => fenced,
+      authoritySnapshot: async () => authority,
+      dumpOffline: this.authorityAdapter.dumpOffline.bind(this.authorityAdapter),
+      materializeMembers: this.authorityAdapter.materializeMembers.bind(this.authorityAdapter),
+      startAndReady: this.authorityAdapter.startAndReady.bind(this.authorityAdapter),
+      stop: this.authorityAdapter.stop.bind(this.authorityAdapter),
+      restoreOffline: this.authorityAdapter.restoreOffline.bind(this.authorityAdapter),
+      rebindSource: this.authorityAdapter.rebindSource.bind(this.authorityAdapter),
+      verifyPhysicalLinks: this.authorityAdapter.verifyPhysicalLinks.bind(this.authorityAdapter),
+      quarantine: this.authorityAdapter.quarantine.bind(this.authorityAdapter),
+    };
+    this.backupOperations.set(operationId, { state: "running" });
+    try { await backupOwned({ root: this.installation.root, destination, operationId, compatibility: { schema_versions: ["anamnesis.storage/1"], neo4j_versions: [manifest.compatibility.neo4j_version], neo4j_image_digests: [manifest.compatibility.neo4j_image_digest], episode_digest_version_ceiling: 2 }, manifest, objectRoot }, cached); this.backupOperations.set(operationId, { state: "complete" }); return { state: "complete", operation_id: operationId }; }
+    catch (error) { this.backupOperations.set(operationId, { state: "failed", error: String(error) }); throw error; }
   }
-  async restore(context: InstallationContext): Promise<never> {
+  async restore(context: InstallationContext, archive: string, operationId: string) {
     await this.installation.assertOwned();
     if (!context.client_binding) throw new RpcFault("unauthenticated", "authenticated connection custody is required");
     if (!this.authorityAdapter) throw new RpcFault("restore_adapter_unavailable", "offline restore adapter is not installed");
-    throw new RpcFault("restore_adapter_unavailable", "authenticated restore manifest/path authority API is not installed");
+    const liveRoot = this.installation.root;
+    const stagingRoot = `${liveRoot}.restore-staging.${operationId}`;
+    const rollbackRoot = `${liveRoot}.restore-rollback.${operationId}`;
+    const compatibility = { schema_versions: ["anamnesis.storage/1"], neo4j_versions: ["5.26.30"], neo4j_image_digests: ["sha256:037cf5756f0135cbfd66b739b6df7c7c4bb100f9ce11602f6f9538e17e02c74d"], episode_digest_version_ceiling: 2 as const };
+    this.restoreOperations.set(operationId, { state: "running" });
+    try { const result = await restoreOwned({ archive, liveRoot, stagingRoot, rollbackRoot, operationId, compatibility, expectedSourceId: this.installation.incarnation }, this.authorityAdapter); this.restoreOperations.set(operationId, { state: "complete" }); return { state: "complete", operation_id: operationId, manifest: result.manifest }; }
+    catch (error) { this.restoreOperations.set(operationId, { state: "failed", error: String(error) }); throw error; }
   }
   async backupStatus(operation_id: string) {
-    return { state: "unknown" as const, operation_id, reason: "adapter_unavailable" as const };
+    const state = this.backupOperations.get(operation_id);
+    if (!state && !this.authorityAdapter) return { state: "unknown" as const, operation_id, reason: "adapter_unavailable" as const };
+    return state ? { state: state.state, operation_id, ...(state.error ? { error: state.error } : {}) } : { state: "unknown" as const, operation_id, reason: "not_found" as const };
   }
   async restoreStatus(operation_id: string) {
-    return { state: "unknown" as const, operation_id, reason: "adapter_unavailable" as const };
+    const state = this.restoreOperations.get(operation_id);
+    if (!state && !this.authorityAdapter) return { state: "unknown" as const, operation_id, reason: "adapter_unavailable" as const };
+    return state ? { state: state.state, operation_id, ...(state.error ? { error: state.error } : {}) } : { state: "unknown" as const, operation_id, reason: "not_found" as const };
   }
   private async requireStorage(): Promise<void> {
     await this.refresh();

@@ -281,7 +281,7 @@ export const RpcErrorCode = z.enum([
   "lineage_unavailable", "lineage_binding_mismatch", "lineage_mismatch",
   "spool_corrupt", "unsupported_digest_version", "unknown_recall", "receipt_expired", "empty_commit", "invalid_selection", "unsupported_policy", "internal_error",
   "commit_mode_mismatch", "policy_denied", "policy_unavailable", "unknown_policy", "invalid_hit_evidence",
-  "extraction_not_configured", "extraction_audit_conflict", "extraction_audit_incomplete", "extraction_audit_stale", "backup_adapter_unavailable", "restore_adapter_unavailable",
+  "extraction_not_configured", "extraction_audit_conflict", "extraction_audit_incomplete", "extraction_audit_stale", "backup_adapter_unavailable", "restore_adapter_unavailable", "daemon_live", "member_mismatch", "archive_layout", "invalid_completion", "completion_mismatch", "incompatible_archive", "object_digest_mismatch", "invalid_dump",
   "dream_input_invalid", "dream_fence_stale", "dream_source_missing", "dream_source_denied", "dream_source_stale", "dream_job_missing", "dream_version_conflict", "dream_lease_invalid", "dream_lease_expired", "dream_not_queued", "dream_lease_fenced", "dream_adapter_unavailable",
   "embedding_not_configured", "invalid_budget", "receipt_unavailable", "degree_probe_unavailable", "ordered_probe_unavailable",
 ]);
@@ -412,8 +412,10 @@ export const RpcSuccessResponse = z.discriminatedUnion("method", [
   success("dream.execute", RpcDreamJob),
   success("embedding.recover", RpcEmbeddingAttempt),
   success("embedding.status", z.union([RpcEmbeddingAttempt, z.strictObject({ state: z.literal("unknown"), operation_id: z.uuidv7() })])),
-  success("backup.status", z.strictObject({ state: z.literal("unknown"), operation_id: z.uuidv7(), reason: z.literal("adapter_unavailable") })),
-  success("restore.status", z.strictObject({ state: z.literal("unknown"), operation_id: z.uuidv7(), reason: z.literal("adapter_unavailable") })),
+  success("backup", z.strictObject({ state: z.literal("complete"), operation_id: z.uuidv7() })),
+  success("restore", z.strictObject({ state: z.literal("complete"), operation_id: z.uuidv7(), manifest: z.unknown() })),
+  success("backup.status", z.union([z.strictObject({ state: z.enum(["running", "complete", "failed"]), operation_id: z.uuidv7(), error: boundedString(1024).optional() }), z.strictObject({ state: z.literal("unknown"), operation_id: z.uuidv7(), reason: z.enum(["not_found", "adapter_unavailable"]) })])),
+  success("restore.status", z.union([z.strictObject({ state: z.enum(["running", "complete", "failed"]), operation_id: z.uuidv7(), error: boundedString(1024).optional() }), z.strictObject({ state: z.literal("unknown"), operation_id: z.uuidv7(), reason: z.enum(["not_found", "adapter_unavailable"]) })])),
   success("policy.set", RpcPolicyResult),
   success("policy.revoke", RpcPolicyResult),
 ]);
