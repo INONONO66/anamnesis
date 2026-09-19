@@ -58,7 +58,7 @@ export async function snapshotObjectStore(sourceRoot: string, destinationRoot: s
         const raw = JSON.parse(await readFile(sidecar, "utf8")) as Record<string, unknown>;
         if (raw.hash !== name || raw.size !== Number(before.size) || typeof raw.mediaType !== "string") throw new AuthorityOrchestrationError("object_corrupt", "object sidecar disagrees with data");
         total += Number(before.size); if (total > TOTAL_OBJECT_BYTES) throw new AuthorityOrchestrationError("object_limit", "total object bytes limit");
-        const targetDir = join(destination, "objects", prefix); await mkdir(targetDir, { recursive: true, mode: 0o700 });
+        const targetDir = join(destination, prefix); await mkdir(targetDir, { recursive: true, mode: 0o700 });
         const target = join(targetDir, name), temp = `${target}.${inputTemp()}.tmp`; await fresh(target); await fresh(`${target}.json`);
         const digest = createHash("sha256");
         await pipeline(createReadStream(data, { flags: "r" }), new Transform({ transform(chunk, _encoding, callback) { digest.update(chunk); callback(null, chunk); } }), createWriteStream(temp, { flags: "wx", mode: 0o600 }));

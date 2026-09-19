@@ -1,0 +1,72 @@
+#!/usr/bin/env node
+import assert from "node:assert/strict";
+import { execFile, spawn } from "node:child_process";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { join, resolve } from "node:path";
+import { createInterface, type Interface } from "node:readline";
+import type { ChildProcess } from "node:child_process";
+import { promisify } from "node:util";
+import neo4j from "neo4j-driver";
+import { v7 as uuidv7 } from "../../packages/core/node_modules/uuid/dist/esm/index.js";
+import { RpcClient } from "../../app/anamnesis/client.ts";
+
+const execute = promisify(execFile);
+const image = "neo4j@sha256:037cf5756f0135cbfd66b739b6df7c7c4bb100f9ce11602f6f9538e17e02c74d";
+const owner = `g5-crash-${process.pid}-${Date.now()}`;
+const evidence = resolve(".omo/evidence/runtime-complete/g5");
+const parent = await mkdtemp("/tmp/ana-g5-crash-");
+const root = join(parent, "runtime"), key = join(parent, "provider.json");
+const password = `g5-${uuidv7()}`;
+const name = `anamnesis-${owner}`;
+const env: NodeJS.ProcessEnv = { ...process.env, ANAMNESIS_RUNTIME_ROOT: root, ANAMNESIS_NEO4J_PASSWORD: password,
+  ANAMNESIS_NEO4J_USER: "neo4j", ANAMNESIS_NEO4J_DATABASE: "neo4j", ANAMNESIS_NEO4J_CONTAINER: "", ANAMNESIS_QA_OWNER: owner,
+  ANAMNESIS_LLM_BASE_URL: "http://127.0.0.1:1", ANAMNESIS_LLM_MODEL: "g5-inert", ANAMNESIS_LLM_API_KEY_FILE: key };
+interface CrashSummary { status: string; accepted_before: number; spooled_during_outage: number; final_episodes: number; distinct_ids: number; spool_pending: number; error?: string }
+const summary: CrashSummary = { status: "running", accepted_before: 0, spooled_during_outage: 0, final_episodes: 0, distinct_ids: 0, spool_pending: -1 };
+let container = "", daemon: ChildProcess | undefined, lines: Interface | undefined, client: RpcClient | undefined;
+async function waitFor<T>(attempt: () => Promise<T>, timeoutMs: number, code: string): Promise<T> {
+  const signal = AbortSignal.timeout(timeoutMs);
+  while (!signal.aborted) {
+    try { return await attempt(); } catch { await new Promise(resolve => setImmediate(resolve)); }
+  }
+  throw new Error(code);
+}
+async function docker(...args: string[]): Promise<string> { return (await execute("docker", args, { env, maxBuffer: 4 * 1024 * 1024 })).stdout.trim(); }
+function episode(n: number) { return { episode: { schema: "anamnesis.original-message/1" as const, time: { value: "2026-09-19T00:00:00Z", precision: "second" as const }, content: `G5 outage episode ${n}`, origin: { source: "g5-crash", session: "owned", actor: "qa", record: String(n) }, mass: 1, properties: {} }, source_revision: `g5-${n}`, expected_previous_revision_key: null }; }
+try {
+  await mkdir(evidence, { recursive: true }); await mkdir(root, { recursive: true, mode: 0o700 }); await writeFile(key, "inert-g5-fixture", { mode: 0o600 });
+  container = await docker("run", "-d", "--name", name, "--label", `anamnesis.qa.owner=${owner}`, "-p", "127.0.0.1::7687", "-e", `NEO4J_AUTH=neo4j/${password}`, image);
+  const port = Number((await docker("port", container, "7687/tcp")).split(":").at(-1));
+  const uri = `bolt://127.0.0.1:${port}`;
+  const driver = neo4j.driver(uri, neo4j.auth.basic("neo4j", password), { connectionTimeout: 1000, connectionAcquisitionTimeout: 1500, maxTransactionRetryTime: 0 });
+  await waitFor(() => driver.verifyConnectivity(), 90000, "bolt_readiness_timeout"); await driver.close();
+  env.ANAMNESIS_NEO4J_URI = uri;
+  daemon = spawn(process.execPath, [resolve("dist/anamnesis-ops.mjs"), "foreground"], { env, stdio: ["ignore", "pipe", "pipe"] });
+  lines = createInterface({ input: daemon.stdout! });
+  await new Promise<void>((resolveReady, reject) => { const timer = setTimeout(() => reject(new Error("daemon_readiness_timeout")), 90000); const onLine = (line: string) => { if (line.includes('"event":"listening"')) { clearTimeout(timer); lines?.off("line", onLine); resolveReady(); } }; lines?.on("line", onLine); daemon?.once("error", reject); });
+  client = await RpcClient.connect(join(root, "anamnesis.sock"), (await readFile(join(root, "token"), "utf8")).trim());
+  assert.ok(client);
+  const before = Array.from({ length: 100 }, (_, i) => episode(i));
+  for (const params of before) { const result: any = await client.request("remember", params); assert.equal(result.state, "committed"); summary.accepted_before++; }
+  await docker("kill", "--signal", "SIGKILL", container);
+  const during = Array.from({ length: 50 }, (_, i) => episode(100 + i));
+  for (const params of during) { const result: any = await client.request("remember", params); assert.equal(result.state, "spooled"); summary.spooled_during_outage++; }
+  const settled = new Promise<void>((resolveSettled, reject) => { const timer = setTimeout(() => reject(new Error("drain_settled_timeout")), 90000); const onLine = (line: string) => { if (line === JSON.stringify({ event: "drain_settled" })) { clearTimeout(timer); lines?.off("line", onLine); resolveSettled(); } }; lines?.on("line", onLine); });
+  await docker("start", container); await settled;
+  const after = await client.request("status", {}); summary.spool_pending = after.spool.pending; assert.equal(after.storage, "available"); assert.equal(after.spool.pending, 0);
+  const verifyDriver = neo4j.driver(uri, neo4j.auth.basic("neo4j", password), { connectionTimeout: 1000, connectionAcquisitionTimeout: 1500, maxTransactionRetryTime: 0 });
+  try {
+    await waitFor(() => verifyDriver.verifyConnectivity(), 90000, "bolt_recovery_timeout");
+    const result = await verifyDriver.executeQuery("MATCH (e:Element:Episode) RETURN count(e) AS episodes, count(DISTINCT e.id) AS distinct_ids");
+    const row = result.records[0]; assert.ok(row);
+    summary.final_episodes = Number(row.get("episodes")); summary.distinct_ids = Number(row.get("distinct_ids"));
+  } finally { await verifyDriver.close(); }
+  assert.equal(summary.final_episodes, 150); assert.equal(summary.distinct_ids, 150); summary.status = "passed";
+} catch (error) {
+  summary.status = "failed"; summary.error = error instanceof Error && /^Command failed: docker/.test(error.message) ? "docker_unavailable" : error instanceof Error ? error.message.replace(/[^a-zA-Z0-9_.:-]/g, "_") : "unknown"; process.exitCode = 1;
+} finally {
+  await writeFile(join(evidence, "crash-ingest-summary.json"), JSON.stringify(summary, null, 2) + "\n");
+  if (client) await client.close().catch(() => {}); if (daemon && daemon.exitCode === null) daemon.kill("SIGTERM");
+  if (container) await execute("docker", ["rm", "-f", "-v", container]).catch(() => {});
+  await rm(parent, { recursive: true, force: true });
+}

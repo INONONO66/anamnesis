@@ -36,6 +36,11 @@ export function createLlmPacer(minIntervalMs: number, clock = () => performance.
     markCall() { lastCall = clock(); },
   };
 }
+async function waitForReady(attempt: () => Promise<unknown>, timeoutMs: number, code: string): Promise<void> {
+  const signal = AbortSignal.timeout(timeoutMs);
+  while (!signal.aborted) { try { await attempt(); return; } catch { await new Promise(resolve => setImmediate(resolve)); } }
+  throw new Error(code);
+}
 async function freePort() {
   const server = createServer();
   await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
@@ -115,10 +120,7 @@ export async function runE2eReal(evidence = resolve(".omo/evidence/runtime-compl
   };
   const stopDaemon = async () => { if (daemon) { await ops("down"); await daemonDone; daemon = undefined; } };
   const connect = async () => RpcClient.connect(join(root, "anamnesis.sock"), (await readFile(join(root, "token"), "utf8")).trim());
-  const ready = async () => {
-    const deadline = Date.now() + 120000;
-    while (true) { try { await driver!.verifyConnectivity(); return; } catch { if (Date.now() >= deadline) throw new Error("bolt_readiness_timeout"); await pause(250); } }
-  };
+  const ready = async () => waitForReady(() => driver!.verifyConnectivity(), 120000, "bolt_readiness_timeout");
   const snapshot = async () => {
     const result = await driver!.executeQuery(`MATCH (s:Meta {key:'extraction_selector'})
       OPTIONAL MATCH (g:ExtractionGeneration {id:s.generation_id})
@@ -134,11 +136,7 @@ export async function runE2eReal(evidence = resolve(".omo/evidence/runtime-compl
     const tunnelPort = await freePort();
     const control = join(secretRoot, "ssh.sock");
     tunnel = spawn("ssh", ["-N", "-M", "-S", control, "-o", "ForkAfterAuthentication=no", "-o", "ControlPersist=no", "-o", "BatchMode=yes", "-o", "ExitOnForwardFailure=yes", "-L", `${tunnelPort}:127.0.0.1:19080`, "inonono"], { stdio: "ignore" });
-    const tunnelDeadline = Date.now() + 30000;
-    while (true) {
-      try { await execute("ssh", ["-S", control, "-O", "check", "inonono"], { timeout: 3000 }); break; }
-      catch { if (Date.now() >= tunnelDeadline || tunnel.exitCode !== null) throw new Error("tunnel_readiness_failed"); await pause(100); }
-    }
+    await waitForReady(() => execute("ssh", ["-S", control, "-O", "check", "inonono"], { timeout: 3000 }).then(() => undefined), 30000, "tunnel_readiness_failed");
     env.ANAMNESIS_LLM_BASE_URL = `http://127.0.0.1:${tunnelPort}`;
     await log("resources", { owner, tunnel_pid: tunnel.pid, local_port: tunnelPort, credential_mode: "0600" });
     const port = await freePort(); env.ANAMNESIS_NEO4J_URI = `bolt://127.0.0.1:${port}`;

@@ -5,7 +5,7 @@ import { promisify } from 'node:util';
 import { mkdtemp, mkdir, writeFile, readFile, rm, stat } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
-import { fixture, canonical, hash } from './archive-manifest.fixture.mjs';
+import { fixture, canonical } from './archive-manifest.fixture.mjs';
 
 const entry = resolve('dist/anamnesis-ops.mjs');
 const OWNER_LABEL = 'anamnesis.qa.owner';
@@ -49,6 +49,15 @@ test('backup refuses a live unfenced owner', { timeout: 15000 }, async t => {
   assert.equal(result.code, 1);
   assert.equal(JSON.parse(result.stdout).error, 'daemon_live');
   await assert.rejects(stat(root + '-archive'), { code: 'ENOENT' });
+});
+
+test('restore refuses a live unfenced owner', { timeout: 15000 }, async t => {
+  const root = await rootFor(t);
+  await mkdir(join(root, 'owner'), { mode: 0o700 });
+  await writeFile(join(root, 'owner/owner.json'), JSON.stringify({ pid: process.pid, nonce: 'live-test-owner' }), { mode: 0o600 });
+  const result = await cli(['restore', root + '-archive'], environment(root));
+  assert.equal(result.code, 1);
+  assert.equal(JSON.parse(result.stdout).error, 'daemon_live');
 });
 
 test('restore rejects a tampered object with existing member_mismatch', { timeout: 15000 }, async t => {
@@ -131,6 +140,15 @@ test('CLI backup and restore into an empty root then verify', { timeout: 240000 
   const lines = [0, 1, 2].map(n => ({ episode: { schema: 'anamnesis.original-message/1', time: { value: '2026-09-19T00:00:00Z', precision: 'second' }, content: `G3 archived episode ${n}`, origin: { source: 'g3', session: 'isolated', actor: 'qa', record: `${n}` }, mass: 1, properties: {} }, source_revision: 'r1', expected_previous_revision_key: null }));
   const input = join(parent, 'episodes.jsonl'); await writeFile(input, lines.map(JSON.stringify).join('\n') + '\n', { mode: 0o600 });
   await run(['ingest', input, join(parent, 'checkpoint.json')], env);
+  const objectBytes = Buffer.from('G3 real object payload\n'), objectHash = createHash('sha256').update(objectBytes).digest('hex');
+  const objectDir = join(root, 'objects', objectHash.slice(0, 2)); await mkdir(objectDir, { recursive: true, mode: 0o700 });
+  await writeFile(join(objectDir, objectHash), objectBytes, { mode: 0o600 });
+  await writeFile(join(objectDir, `${objectHash}.json`), JSON.stringify({ hash: objectHash, size: objectBytes.length, mediaType: 'application/octet-stream' }), { mode: 0o600 });
+  const sourceDriver = neo4j.driver(env.ANAMNESIS_NEO4J_URI, neo4j.auth.basic('neo4j', 'g3-isolated-password'), { connectionTimeout: 1000, connectionAcquisitionTimeout: 1500, maxTransactionRetryTime: 0 });
+  try {
+    const sourceCount = await sourceDriver.executeQuery("MATCH (e:Element:Episode) RETURN count(e) AS episodes");
+    assert.equal(Number(sourceCount.records[0].get('episodes')), 3);
+  } finally { await sourceDriver.close(); }
   await run(['backup', archive], env, 1); // A live daemon must never be dumped.
   await run(['down'], env);
   await run(['backup', archive], env);
@@ -140,7 +158,20 @@ test('CLI backup and restore into an empty root then verify', { timeout: 240000 
   await run(['restore', archive], target);
   const state = JSON.parse(await readFile(join(restored, 'authority.json'), 'utf8'));
   ports.push(Number(new URL(state.uri).port));
+  assert.deepEqual((await readFile(join(restored, 'objects', objectHash.slice(0, 2), objectHash))).toString(), objectBytes.toString());
   await run(['up'], target);
+  const status = await run(['status'], target);
+  assert.equal(JSON.parse(status.stdout).storage, 'available');
+  const recall = await run(['recall', 'G3 archived episode'], target);
+  assert.equal(JSON.parse(recall.stdout).results.length, 3);
+  const restoredDriver = neo4j.driver(state.uri, neo4j.auth.basic('neo4j', 'g3-isolated-password'), { connectionTimeout: 1000, connectionAcquisitionTimeout: 1500, maxTransactionRetryTime: 0 });
+  try {
+    await restoredDriver.verifyConnectivity();
+    const counts = await restoredDriver.executeQuery("MATCH (e:Episode) RETURN count(e) AS episodes");
+    assert.equal(Number(counts.records[0].get('episodes')), 3);
+    const selector = await restoredDriver.executeQuery("MATCH (s:Meta {key:'extraction_selector'}) RETURN s.selector_version AS selector_version");
+    assert.equal(Number(selector.records[0].get('selector_version')), 0);
+  } finally { await restoredDriver.close(); }
   await run(['verify'], target);
   await run(['down'], target);
   const manifest = JSON.parse(await readFile(join(archive, 'manifest.json'), 'utf8'));

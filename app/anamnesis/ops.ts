@@ -22,7 +22,7 @@ import { applyAuthorityEnvironment, offlineBackup, offlineRestore } from "./offl
 const ingestCommands = ["ingest", "ingest-agentlog", "ingest-slack", "ingest-notion", "ingest-claude-raw", "ingest-codex-raw", "ingest-gjc-raw", "ingest-omo-raw", "ingest-misc-raw"];
 const usage = "usage: anamnesis-ops up|down|backup <destination-dir>|restore <archive-dir>|extract|embed|recall <query>|foreground|managed|status|verify|ingest <snapshot.jsonl> <checkpoint.json>";
 const uuidv7 = () => { const value = randomUUID(); return `${value.slice(0, 14)}7${value.slice(15, 19)}8${value.slice(20)}`; };
-const fail = (code: string, exit = 1): never => { console.log(JSON.stringify({ error: code })); process.exit(exit); throw new Error(code); };
+const fail = (code: string, exit = 1): never => { console.log(JSON.stringify({ error: code })); process.exit(exit); };
 
 async function connectClient(root: string): Promise<RpcClient> {
   const token = (await readFile(join(root, "token"), "utf8")).trim();
@@ -52,6 +52,9 @@ async function main(): Promise<void> {
     return;
   }
   if (command === "backup") {
+    try { const owner = JSON.parse(await readFile(join(root, "owner", "owner.json"), "utf8")); if (owner.pid === process.pid || (Number.isSafeInteger(owner.pid) && (() => { try { process.kill(owner.pid, 0); return true; } catch { return false; } })())) fail("daemon_live"); } catch (error) { const code = error && typeof error === "object" && "code" in error ? String(error.code) : "unknown"; if (code !== "ENOENT") throw error; }
+  }
+  if (command === "restore") {
     try { const owner = JSON.parse(await readFile(join(root, "owner", "owner.json"), "utf8")); if (owner.pid === process.pid || (Number.isSafeInteger(owner.pid) && (() => { try { process.kill(owner.pid, 0); return true; } catch { return false; } })())) fail("daemon_live"); } catch (error) { const code = error && typeof error === "object" && "code" in error ? String(error.code) : "unknown"; if (code !== "ENOENT") throw error; }
   }
   if (command === "restore") {
