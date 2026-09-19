@@ -31,19 +31,22 @@ async function waitFor<T>(attempt: () => Promise<T>, timeoutMs: number, code: st
   }
   throw new Error(code);
 }
+async function freePort(): Promise<number> { const { createServer } = await import("node:net"); return new Promise((resolve, reject) => { const server = createServer(); server.once("error", reject); server.listen(0, "127.0.0.1", () => { const address = server.address(); server.close(() => typeof address === "object" && address ? resolve(address.port) : reject(new Error("no_port"))); }); }); }
 async function docker(...args: string[]): Promise<string> { return (await execute("docker", args, { env, maxBuffer: 4 * 1024 * 1024 })).stdout.trim(); }
 function episode(n: number) { return { episode: { schema: "anamnesis.original-message/1" as const, time: { value: "2026-09-19T00:00:00Z", precision: "second" as const }, content: `G5 outage episode ${n}`, origin: { source: "g5-crash", session: "owned", actor: "qa", record: String(n) }, mass: 1, properties: {} }, source_revision: `g5-${n}`, expected_previous_revision_key: null }; }
 try {
-  await mkdir(evidence, { recursive: true }); await mkdir(root, { recursive: true, mode: 0o700 }); await writeFile(key, "inert-g5-fixture", { mode: 0o600 });
-  container = await docker("run", "-d", "--name", name, "--label", `anamnesis.qa.owner=${owner}`, "-p", "127.0.0.1::7687", "-e", `NEO4J_AUTH=neo4j/${password}`, image);
-  const port = Number((await docker("port", container, "7687/tcp")).split(":").at(-1));
+  await mkdir(evidence, { recursive: true }); await mkdir(root, { recursive: true, mode: 0o700 }); await writeFile(key, JSON.stringify({ bearer: "inert-g5-fixture-bearer" }), { mode: 0o600 });
+  // Reserve an explicit host port: an ephemeral "::7687" mapping is re-assigned by docker start, so the daemon's Bolt URI would never recover.
+  const port = await freePort();
+  container = await docker("run", "-d", "--name", name, "--label", `anamnesis.qa.owner=${owner}`, "-p", `127.0.0.1:${port}:7687`, "-e", `NEO4J_AUTH=neo4j/${password}`, image);
   const uri = `bolt://127.0.0.1:${port}`;
   const driver = neo4j.driver(uri, neo4j.auth.basic("neo4j", password), { connectionTimeout: 1000, connectionAcquisitionTimeout: 1500, maxTransactionRetryTime: 0 });
   await waitFor(() => driver.verifyConnectivity(), 90000, "bolt_readiness_timeout"); await driver.close();
   env.ANAMNESIS_NEO4J_URI = uri;
   daemon = spawn(process.execPath, [resolve("dist/anamnesis-ops.mjs"), "foreground"], { env, stdio: ["ignore", "pipe", "pipe"] });
   lines = createInterface({ input: daemon.stdout! });
-  await new Promise<void>((resolveReady, reject) => { const timer = setTimeout(() => reject(new Error("daemon_readiness_timeout")), 90000); const onLine = (line: string) => { if (line.includes('"event":"listening"')) { clearTimeout(timer); lines?.off("line", onLine); resolveReady(); } }; lines?.on("line", onLine); daemon?.once("error", reject); });
+  const daemonStderr: string[] = []; daemon.stderr!.on("data", (chunk: Buffer) => { daemonStderr.push(chunk.toString()); });
+  await new Promise<void>((resolveReady, reject) => { const timer = setTimeout(() => reject(new Error("daemon_readiness_timeout")), 90000); const onLine = (line: string) => { if (line.includes('"event":"listening"')) { clearTimeout(timer); lines?.off("line", onLine); resolveReady(); } }; lines?.on("line", onLine); daemon?.once("error", reject); daemon?.once("exit", (code) => { clearTimeout(timer); reject(new Error(`daemon_exited_${code}:${daemonStderr.join("").trim().slice(0, 200)}`)); }); });
   client = await RpcClient.connect(join(root, "anamnesis.sock"), (await readFile(join(root, "token"), "utf8")).trim());
   assert.ok(client);
   const before = Array.from({ length: 100 }, (_, i) => episode(i));
@@ -52,7 +55,14 @@ try {
   const during = Array.from({ length: 50 }, (_, i) => episode(100 + i));
   for (const params of during) { const result: any = await client.request("remember", params); assert.equal(result.state, "spooled"); summary.spooled_during_outage++; }
   const settled = new Promise<void>((resolveSettled, reject) => { const timer = setTimeout(() => reject(new Error("drain_settled_timeout")), 90000); const onLine = (line: string) => { if (line === JSON.stringify({ event: "drain_settled" })) { clearTimeout(timer); lines?.off("line", onLine); resolveSettled(); } }; lines?.on("line", onLine); });
-  await docker("start", container); await settled;
+  await docker("start", container);
+  assert.equal(Number((await docker("port", container, "7687/tcp")).split(":").at(-1)), port, "bolt host port must survive restart");
+  // refresh() is demand-driven: each status request lets the daemon observe storage recovery and take a drain turn.
+  const daemonEvents: string[] = []; const onEvent = (line: string) => { daemonEvents.push(line); }; lines.on("line", onEvent);
+  let settledFlag = false; const settledTracked = settled.then(() => { settledFlag = true; });
+  const nudge = (async () => { while (!settledFlag) { await client!.request("status", {}).catch(() => {}); await new Promise<void>(resolve => { const t = setTimeout(resolve, 500); settledTracked.then(() => { clearTimeout(t); resolve(); }); }); } })();
+  try { await settledTracked; } finally { lines.off("line", onEvent); await writeFile(join(evidence, "crash-ingest-daemon-events.log"), daemonEvents.join("\n") + "\n"); }
+  await nudge;
   const after = await client.request("status", {}); summary.spool_pending = after.spool.pending; assert.equal(after.storage, "available"); assert.equal(after.spool.pending, 0);
   const verifyDriver = neo4j.driver(uri, neo4j.auth.basic("neo4j", password), { connectionTimeout: 1000, connectionAcquisitionTimeout: 1500, maxTransactionRetryTime: 0 });
   try {
