@@ -30,14 +30,15 @@ export type ExtractionDisposition = z.infer<typeof ExtractionDisposition>;
 export const ExtractionPipeline = z.discriminatedUnion('state', [
   z.strictObject({ state: z.literal('unknown'), pipeline_id: id }),
   z.strictObject({ state: z.literal('known'), pipeline_id: id, mode: z.literal('claim-judge-audit-v1'),
-    semantic_writes: z.literal(false), claim: ModelTask, claim_attempt: ExtractionAttempt.nullable(),
+    semantic_writes: z.boolean(), claim: ModelTask, claim_attempt: ExtractionAttempt.nullable(),
     judge: ModelTask.nullable(), judge_attempt: ExtractionAttempt.nullable(),
     decisions: z.array(ExtractionDisposition).max(64),
   }),
 ]);
 export type ExtractionPipeline = z.infer<typeof ExtractionPipeline>;
 export class ExtractionAuditError extends Error {
-  constructor(readonly code: 'extraction_not_configured' | 'extraction_audit_conflict' | 'extraction_audit_incomplete' | 'extraction_audit_stale') {
-    super(code); this.name = 'ExtractionAuditError';
+  readonly code: 'extraction_not_configured' | 'extraction_audit_conflict' | 'extraction_audit_incomplete' | 'extraction_audit_stale';
+  constructor(code: ExtractionAuditError['code']) {
+    super(code); this.name = 'ExtractionAuditError'; this.code = code;
   }
 }

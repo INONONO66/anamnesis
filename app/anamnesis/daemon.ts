@@ -5,7 +5,7 @@ import { once } from "node:events";
 import { RPC_LIMITS, type RpcRequest } from "../../packages/protocol/src/rpc.ts";
 import { acquireInstallation, runtimeRoot, socketPath } from "./config.ts";
 import { daemonTiming, timingContext, timingHash } from "./timing.ts";
-import { Runtime, capabilities } from "./runtime.ts";
+import { Runtime } from "./runtime.ts";
 import type { InstallationContext, RecallTransportInput } from "../../packages/core/src/store.ts";
 import { Frames, RpcByteBudget, RpcFault, decodeRequest, encode, envelope, errorResponse, fault, type ByteAccount, type ByteReservation } from "./wire.ts";
 
@@ -224,7 +224,7 @@ export async function foreground(): Promise<void> {
       connection.authenticated = true;
       connection.context = Object.freeze({ principal: "installation", commit_mode: request.params.commit_mode, client_binding: randomUUID() });
       return { version: 1, principal: "installation", commit_mode: request.params.commit_mode,
-        data_incarnation: installation.incarnation, fs_epoch: installation.epoch, capabilities,
+        data_incarnation: installation.incarnation, fs_epoch: installation.epoch, capabilities: runtime.capabilities,
         limits: { frame_bytes: RPC_LIMITS.frame_bytes, chunk_bytes: RPC_LIMITS.chunk_bytes, object_bytes: RPC_LIMITS.object_bytes, content_bytes: RPC_LIMITS.content_bytes } };
     }
     if (!connection.authenticated) throw new RpcFault("unauthenticated", "hello authentication is required");
@@ -247,8 +247,8 @@ export async function foreground(): Promise<void> {
       case "graph.envelope": return runtime.graphEnvelope(request.params as { seed_ids: string[]; T?: number }, connection.context!);
       case "embedding.recover": return runtime.recoverEmbedding(request.params, connection.context!);
       case "embedding.status": return runtime.embeddingStatus(request.params.operation_id, connection.context!);
-      case "backup": return runtime.backup(connection.context!);
-      case "restore": return runtime.restore(connection.context!);
+      case "backup": return runtime.backup(connection.context!, request.params.destination, request.params.operation_id);
+      case "restore": return runtime.restore(connection.context!, request.params.archive, request.params.operation_id);
       case "backup.status": return runtime.backupStatus(request.params.operation_id);
       case "restore.status": return runtime.restoreStatus(request.params.operation_id);
       case "commit":
@@ -298,7 +298,7 @@ export async function foreground(): Promise<void> {
   })();
   const signalStop = () => { void stop().catch(error => { logError(error); process.exitCode = 1; }); };
   try {
-    runtime = new Runtime(installation, () => { drainReady = true; kick(); }, {
+    runtime = await Runtime.create(installation, () => { drainReady = true; kick(); }, {
       enqueue: job => { if (!stopping) enqueue(async () => { if (!stopping) { await installation.assertOwned(); await job(); } }); },
     });
     await runtime.init();

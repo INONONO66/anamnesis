@@ -24,6 +24,11 @@ test("foundation defaults to packages plus QA tests without launching another ha
   expect(parseOptions(base).testPaths).toEqual(["packages", "scripts/qa"]);
 });
 
+test("live e2e requires explicit case selection and cannot become a test override", () => {
+  expect(parseOptions(["--case", "e2e-real", "--evidence-root", "proof"]).testPaths).toEqual([]);
+  expect(() => parseOptions(["--case", "e2e-real", "--evidence-root", "proof", "--test-path", "packages/core/src/remember-input.test.ts"])).toThrow();
+});
+
 const scenarioFiles = {
   "contract-and-cas": [
     "./packages/core/src/remember-input.test.ts",

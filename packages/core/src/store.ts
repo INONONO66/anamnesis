@@ -38,6 +38,8 @@ import { ExtractionModelOutput } from '../../protocol/src/extraction.ts';
 import { HistoricalElement, historicalEligibility, type EligibilityReason } from "./legacy-format.ts";
 import { z } from "zod";
 import { replayDynamics, type DynamicsEvent } from "./dynamics/state.ts";
+import { solvePpr } from "./dynamics/ppr.ts";
+import { materializeFacts, type RetainedExtractionAttempt, type RetainedEpisode } from "./fact-materialization.ts";
 import { ADOPTION_NUMERIC_VERSION } from "./dynamics/adoption-numeric.ts";
 import { attributeOutcome, normalizedRrf } from "./dynamics/ranking.ts";
 import { initialStability, retention } from "./dynamics/retention.ts";
@@ -1792,11 +1794,11 @@ export class Store {
         CALL () { MATCH (e:Element) WITH e ORDER BY e.id LIMIT $limit RETURN collect(e.id) AS members }
         CALL () { MATCH (g:Generation) WHERE g.stream IN ['extraction','community'] WITH g ORDER BY g.stream,g.generation LIMIT $limit RETURN collect(g.generation) AS generations }
         CALL () { MATCH (m:Meta {key:'meta'}) RETURN m.ingest_seq AS ingest_seq,coalesce(m.structure_revision,0) AS structure_revision }
-        CALL () { MATCH (p:PolicyAuthority {key:'authority'}) RETURN p.revision AS policy_revision }
+        CALL () { MATCH (p:PolicyAuthority {key:'installation'}) RETURN p.revision AS policy_revision }
         CALL () { MATCH (a)-[l]->(b) WHERE type(l) IN $roles WITH a,l,b ORDER BY l.id LIMIT $limit RETURN collect({id:l.id,from:a.id,to:b.id,role:CASE WHEN type(l)='DERIVED_FROM' THEN 'DERIVED_FROM' ELSE 'ConductingArc' END}) AS links }
         CALL () { MATCH (a:Element)-[l:INVALIDATES]->(b:Element) WITH a,l,b ORDER BY l.id LIMIT $limit RETURN collect({id:l.id,source_hash:l.source_hash,outcome_hash:l.outcome_hash}) AS invalidation }
         CALL () { MATCH (e:Element:Episode) WITH e ORDER BY e.id LIMIT $limit RETURN collect(e.source_hash) AS sources }
-        RETURN members,member_count,generations,generation_count,ingest_seq,structure_revision,policy_revision,links,link_count,invalidation,invalidation_count,sources,source_count`, { roles: [...CONDUCTING_ROLES], limit: neo4j.int(maxItems + 1) });
+        RETURN members,generations,ingest_seq,structure_revision,policy_revision,links,invalidation,sources`, { roles: [...CONDUCTING_ROLES], limit: neo4j.int(maxItems + 1) });
       const row = result.records[0]; if (!row) throw new AuthoritySnapshotError("authority_snapshot_unavailable", "snapshot query returned no record");
       const count = (name: string) => (row.get(name) as unknown[]).length;
       for (const name of ["members","generations","links","invalidation","sources"]) if (count(name) > maxItems) throw new AuthoritySnapshotError("authority_snapshot_limit_exceeded", name);
@@ -2255,7 +2257,8 @@ export class Store {
       const allowed = `e.schema IN $schemas AND e.time_utc <= $T
         AND NONE(d IN $denies WHERE (d.episode_id IS NULL OR d.episode_id=e.id) AND (d.source IS NULL OR d.source=e.origin_source))
         AND NOT EXISTS { MATCH ()-[inv:INVALIDATES]->() WHERE inv.target_id=e.id AND inv.effective_time_utc <= $T AND inv.id IS NOT NULL }`;
-      const lists: Record<string, { id: string }[]> = {}, nodes = new Map<string, ElementNode>();
+      const lists: Record<string, { id: string }[]> = {}, nodes = new Map<string, ElementNode>(), derivedNodes = new Map<string, ElementNode>();
+      let pprUsed = false, pprScores = new Map<string, number>();
       const channel = async (name: string, query: string, params: Record<string, unknown>) => {
         const rows = await tx.run<{ e: ElementNode }>(query, { ...parameters, ...params });
         lists[name] = rows.records.map(row => { const e = row.get("e"); const id = String(e.properties["id"]); nodes.set(id, e); return { id }; });
@@ -2286,22 +2289,64 @@ export class Store {
           channels: Object.keys(lists).filter(name => lists[name]!.some(candidate => candidate.id === id)) };
         ranked.push(RpcRecallResult.shape.results.element.parse(item));
       }
-      // Derived serving is strictly generation-selected and policy-authorized.
-      // The bounded query uses the generation index and validates every source
-      // through the same policy function as original recall.
-      if (selection.generation_id && request.limit > ranked.length && budget.limit > 0) {
-        const derived = await tx.run(`MATCH (f:Element:Fact {generation:$generation})-[l:DERIVED_FROM]->(e:Element:Episode)
-          WHERE f.content CONTAINS $query AND f.time_utc <= $T AND l.generation=$generation
-          RETURN f,e.id AS source ORDER BY f.id LIMIT 64`, { generation: selection.generation_id, query: request.query, T: new Date(T).toISOString() });
-        for (const row of derived.records) {
-          const fact = toElement(nodeProps(row.get("f"))), sourceId = z.uuidv7().parse(row.get("source"));
-          try { await this.authorizeEpisodesTx(tx, [sourceId], policy); } catch (error) { if (error instanceof ReceiptError && error.code === "policy_denied") continue; throw error; }
-          const item = { id: fact.id, kind: "Fact" as const, schema: "anamnesis.claim/1" as const, epistemic: "derived" as const,
-            content: fact.content, time: fact.time!, mass: fact.mass, utility: 0, relevance: 1, score: fact.mass,
-            sources: [sourceId], provenance: { derived_from: [{ id: sourceId, kind: "Episode" as const, visible_at_T: true }], supersedes: [], supersedes_redacted: false, contrasts: [], warnings: [] }, channels: ["bm25" as const] };
-          ranked.push(RpcRecallResult.shape.results.element.parse(item));
+      if (selection.generation_id && budget.limit > 0) {
+        const q = luceneQuery(request.query);
+        if (q) {
+          const derivedRows = await tx.run(`CALL db.index.fulltext.queryNodes('element_content',$q,{limit:256}) YIELD node,score
+            WITH node AS f,score WHERE f:Fact AND f.generation=$generation AND f.time_utc <= $T
+            RETURN f,score ORDER BY score DESC,f.id ASC LIMIT 64`, { q, generation: selection.generation_id, T: new Date(T).toISOString() });
+          const bm25 = lists["bm25"] ?? (lists["bm25"] = []);
+          for (const row of derivedRows.records) {
+            const fact = row.get("f") as ElementNode, id = String(fact.properties["id"]);
+            derivedNodes.set(id, fact); bm25.push({ id });
+          }
         }
       }
+      if (selection.generation_id && (Object.values(lists).some(list => list.length > 0) || derivedNodes.size > 0)) {
+        const seeds = [...new Set(Object.values(lists).flat().map(hit => hit.id).concat([...derivedNodes.keys()]))];
+        const graph = await tx.run(`MATCH (a:ConductingArc)
+          WHERE a.generation=$generation AND (a.source_id IN $seeds OR a.peer_id IN $seeds)
+          RETURN a.source_id AS source,a.peer_id AS peer,a.role AS role,a.link_id AS id LIMIT 1024`, { generation: selection.generation_id, seeds });
+        const arcs = graph.records.map(record => ({ from: record.get("source"), to: record.get("peer"), role: record.get("role"), id: record.get("id") }));
+        const graphNodes = [...new Set(seeds.concat(arcs.flatMap(arc => [arc.from, arc.to])))];
+        if (graphNodes.length) {
+          const solved = solvePpr({ nodes: graphNodes, arcs, seeds: new Map(seeds.map(id => [id, 1])) });
+          const sorted = [...graphNodes].sort(); pprScores = new Map(sorted.map((id, index) => [id, solved.values[index]!]));
+          pprUsed = true;
+        }
+      }
+      // Derived serving is strictly generation-selected and policy-authorized.
+      // Every source Episode is rechecked for primaries AND their mandatory peers.
+      const factItems = new Map<string, RpcRecallItem>();
+      if (selection.generation_id && budget.limit > 0) {
+        const factItem = async (node: ElementNode): Promise<RpcRecallItem | null> => {
+          const id = String(node.properties["id"]), cached = factItems.get(id);
+          if (cached) return cached;
+          const sourceRows = await tx.run(`MATCH (f:Fact {id:$id})-[:DERIVED_FROM]->(e:Element:Episode) RETURN e.id AS source LIMIT 2`, { id });
+          const sourceId = sourceRows.records[0]?.get("source");
+          if (typeof sourceId !== "string") return null;
+          try { await this.authorizeEpisodesTx(tx, [z.uuidv7().parse(sourceId)], policy); }
+          catch (error) { if (error instanceof ReceiptError && error.code === "policy_denied") return null; throw error; }
+          const fact = toElement(nodeProps(node)), ppr = pprScores.get(id) ?? 0;
+          const item = RpcRecallResult.shape.results.element.parse({ id, kind: "Fact", schema: "anamnesis.claim/1", epistemic: "derived",
+            content: fact.content, time: fact.time!, mass: Math.max(0, Math.min(1, ppr || fact.mass)), utility: 0,
+            relevance: Math.max(0, ppr), score: Math.max(0, ppr || fact.mass), sources: [z.uuidv7().parse(sourceId)],
+            provenance: { derived_from: [{ id: z.uuidv7().parse(sourceId), kind: "Episode", visible_at_T: true }], supersedes: [], supersedes_redacted: false,
+              contrasts: [], warnings: [] }, channels: derivedNodes.has(id) ? ["bm25"] : [] });
+          factItems.set(id, item); return item;
+        };
+        for (const [id, node] of derivedNodes) {
+          const item = await factItem(node); if (!item) continue;
+          const peers = await tx.run<{ other: ElementNode }>(`MATCH (f:Fact {id:$id})-[:CONTRASTS]-(other:Fact {generation:$generation})
+            WHERE other.time_utc <= $T RETURN DISTINCT other ORDER BY other.id LIMIT 4`, { id, generation: selection.generation_id, T: parameters.T });
+          for (const row of peers.records) {
+            const peer = await factItem(row.get("other"));
+            if (peer) item.provenance.contrasts.push(peer.id);
+          }
+          ranked.push(item);
+        }
+      }
+      // Originals are retained in `nodes`; Facts are served from `derivedNodes`.
       ranked.sort((a, b) => b.score - a.score || b.relevance - a.relevance || b.mass - a.mass || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
       const bundles: RecallBundle[] = [];
       for (const primary of ranked) {
@@ -2316,14 +2361,14 @@ export class Store {
         }
         if (primary.provenance.supersedes_redacted) primary.provenance.warnings.push({ code: "supersedes_withheld", content: "Prior revision content is withheld by current policy." });
         if (supersedes.records.length > 8) primary.provenance.warnings.push({ code: "supersedes_incomplete", content: "Prior revision provenance exceeds the bounded eight-entry view." });
-        bundles.push({ primary, companions: [] }); // CONTRASTS lattice is Fact-only.
+        bundles.push({ primary, companions: primary.provenance.contrasts.map(id => factItems.get(id)!) });
       }
       const result = RpcRecallResult.parse(packRecall(bundles, {
         recall_id: recallId, expires_at: now + 3600000, results: [], companions: [], entities: [], context_text: "", used_budget: 0,
         budget, renderer: "canonical-jsonl-v1", diagnostics: { pipeline: ranked.some(item => item.kind === "Fact") ? "derived-hybrid-v1" : "originals-hybrid-v1", now, T,
           policy_revision: policy.policy_revision, channels_used: Object.keys(lists).filter(name => lists[name]!.length > 0) as RpcRecallResult["diagnostics"]["channels_used"],
           vector_reason: vectorReason, embedding_profile_id: profileId, candidate_count: ranked.length, skipped_bundles: 0,
-          ppr_used: false, identity_mode: "exact_episode_id" },
+          ppr_used: pprUsed, identity_mode: "exact_episode_id" },
       }, request.limit, this.tokenizers));
       await this.authorizeEpisodesTx(tx, [...new Set(result.results.flatMap(item => item.sources))], policy);
       await this.issueReceiptTx(tx, IssueReceiptInput.parse({ recall_id: recallId, primary_ids: result.results.map(item => item.id) }), context, policy,
@@ -2416,6 +2461,20 @@ export class Store {
       { limit: neo4j.int(limit) },
     );
     return rows.map((r) => r.id);
+  }
+
+  async drainEmbeddingOutbox(limit = 100, context: InstallationContext = { principal: "installation", commit_mode: "auto" }): Promise<{ drained: number; reason?: "embeddings_disabled" }> {
+    const bounded = z.number().int().min(1).max(1000).parse(limit);
+    if (!this.embeddingProvider) return { drained: 0, reason: "embeddings_disabled" };
+    let drained = 0;
+    for (const episodeId of await this.pending(bounded)) {
+      const attempt = await this.recoverEmbedding({ operation_id: uuidv7(), episode_id: z.uuidv7().parse(episodeId) }, context);
+      if (attempt.state === "succeeded" || attempt.state === "quarantined") {
+        await this.markProcessed([episodeId]);
+        drained++;
+      }
+    }
+    return { drained };
   }
 
   async markProcessed(elementIds: string[]): Promise<void> {
@@ -2724,6 +2783,81 @@ export class Store {
     });
   }
 
+  private async materializeExtractionPipelineTx(tx: ManagedTransaction, pipeline: {
+    claim: ModelTask; claim_attempt: ExtractionAttempt | null; judge_attempt: ExtractionAttempt | null; decisions: ExtractionDisposition[];
+  }, policy: PolicyState): Promise<boolean> {
+    const judge = pipeline.judge_attempt, claim = pipeline.claim_attempt;
+    if (!judge || judge.state !== "succeeded" || !judge.output || !claim || claim.state !== "succeeded" || !claim.output) return false;
+    await this.authorizeEpisodesTx(tx, [judge.source_id], policy);
+    const sourceRows = await tx.run<{ e: ElementNode }>(`MATCH (e:Element:Episode {id:$id}) RETURN e`, { id: judge.source_id });
+    if (!sourceRows.records[0]) throw new Error("unknown_source");
+    const source = toElement(nodeProps(sourceRows.records[0].get("e")));
+    const claimOutput = ExtractionModelOutput.parse(JSON.parse(claim.output.canonical_body));
+    if (claimOutput.task !== "claim") throw new ExtractionAuditError("extraction_audit_conflict");
+    const judgeOutput = ExtractionModelOutput.parse(JSON.parse(judge.output.canonical_body));
+    if (judgeOutput.task !== "judge_claims") throw new ExtractionAuditError("extraction_audit_conflict");
+    const accepted = pipeline.decisions.filter(decision => decision.disposition === "retain" || decision.disposition === "correct");
+    const occurrence = extractionBodyDigest([judge.generation_id, judge.source_id]);
+    const prior = await tx.run(`MATCH (o:MaterializationOperation {occurrence_key:$key}) RETURN o.id`, { key: occurrence });
+    if (prior.records.length) return true;
+
+    const claims = accepted.map(decision => {
+      const extracted = claimOutput.claims[decision.claim_index];
+      if (!extracted) throw new ExtractionAuditError("extraction_audit_conflict");
+      return { text: extracted.text, start: extracted.evidence.start, end: extracted.evidence.end,
+        time: source.time?.value ?? new Date(this.clock()).toISOString() };
+    });
+    const retainedAttempt: RetainedExtractionAttempt = { id: judge.id, episodeId: source.id, generation: judge.generation_id,
+      policyRevision: policy.policy_revision, state: "succeeded", gate: "independent_shadow_review_required", claims };
+    const retainedEpisode: RetainedEpisode = { id: source.id, content: source.content, generation: judge.generation_id, policyRevision: policy.policy_revision };
+    const syntheticArcs = claims.map((_, index) => {
+      const factId = createHash("sha256").update(`${judge.id}:${index}:${claims[index]!.text}:${claims[index]!.time}`).digest("hex").slice(0, 32);
+      return { source_id: factId, link_id: uuidv7(), peer_id: source.id, role: "DERIVED_FROM" as const, generation: judge.generation_id };
+    });
+    const pure = materializeFacts(retainedAttempt, retainedEpisode, {
+      semanticWrites: true, independentShadowReview: true, conductingArcs: syntheticArcs,
+      conductingArcLookup: (sourceId, linkId) => syntheticArcs.find(arc => arc.source_id === sourceId && arc.link_id === linkId),
+    });
+    if (pure.state !== "materialized" && claims.length) throw new ExtractionAuditError("extraction_audit_conflict");
+
+    const facts: { id: string; linkId: string; content: string; time: string; confidence: number; entityId: string }[] = [];
+    for (const [index, retained] of (pure.state === "materialized" ? pure.facts : []).entries()) {
+      const factId = uuidv7(), entityId = uuidv7(), entityKey = extractionBodyDigest({ generation: judge.generation_id, content: retained.content });
+      const fact = MemoryElement.parse({ id: factId, schema: "anamnesis.claim/1", content: retained.content,
+        time: source.time, origin: { source: "extraction-audit", session: judge.generation_id, actor: "fixture", record: `${occurrence}:${index}` },
+        mass: 1, properties: { confidence: 1, content_language: "und", entity_ids: [entityId], source_episode_ids: [source.id], primary_episode_id: source.id } });
+      await this.createElementTx(tx, fact, null, {});
+      await tx.run(`MATCH (f:Fact {id:$id}) SET f.generation=$generation,f.policy_revision=$policy,f.confidence=$confidence,
+        f.primary_episode_id=$source,f.source_episode_ids=$sources,f.entity_ids=$entities,f.max_source_ingest_seq=$seq,
+        f.semantic_profile_id='extraction-audit-v1'`, { id: factId, generation: judge.generation_id, policy: policy.policy_revision,
+          confidence: 1, source: source.id, sources: [source.id], entities: [entityId], seq: judge.source_ingest_seq });
+      const entity = MemoryElement.parse({ id: entityId, schema: "anamnesis.entity/1", content: retained.content,
+        origin: { source: "extraction-audit", session: judge.generation_id, actor: "fixture", record: entityKey },
+        properties: { normalized_name: retained.content, entity_kind: "claim", entity_key: entityKey } });
+      await this.createElementTx(tx, entity, null, {});
+      await tx.run(`MATCH (e:Entity {id:$id}) SET e.generation=$generation,e.entity_key=$key`, { id: entityId, generation: judge.generation_id, key: entityKey });
+      const derivedLinkId = uuidv7();
+      await this.mergeLinkTx(tx, MemoryLink.parse({ id: derivedLinkId, from: factId, to: source.id, role: "DERIVED_FROM", content: "extraction evidence", weight: 1 }));
+      await this.mergeLinkTx(tx, MemoryLink.parse({ id: uuidv7(), from: factId, to: entityId, role: "MENTIONS", content: "extracted entity", weight: 1 }));
+      await tx.run(`MERGE (w:EntityWitness {entity_id:$entity,generation:$generation,policy_revision:$policy}) SET w.state='COMPLETE'`, { entity: entityId, generation: judge.generation_id, policy: policy.policy_revision });
+      facts.push({ id: factId, linkId: derivedLinkId, content: retained.content, time: source.time?.value ?? new Date(this.clock()).toISOString(), confidence: 1, entityId });
+    }
+    for (let left = 0; left < facts.length; left++) for (let right = left + 1; right < facts.length; right++) {
+      const words = (value: string) => new Set(value.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(word => word.length > 2));
+      const a = words(facts[left]!.content), b = words(facts[right]!.content), common = [...a].filter(word => b.has(word)).length;
+      if (common >= Math.min(a.size, b.size) / 2) {
+        await this.mergeLinkTx(tx, MemoryLink.parse({ id: uuidv7(), from: facts[left]!.id, to: facts[right]!.id, role: "CONTRASTS", content: "conflicting extracted claims", weight: 1 }));
+      }
+    }
+    const operationId = uuidv7(), result = canonicalExtractionBody({ created: true, fact_ids: facts.map(fact => fact.id) });
+    await tx.run(`CREATE (:MaterializationOperation {id:$id,digest:$digest,result:$result,occurrence_key:$key,
+      source_episode_id:$source,generation:$generation,semantic_profile_id:'extraction-audit-v1',fact_id:$fact,link_id:$link})`, {
+      id: operationId, digest: extractionBodyDigest({ generation: judge.generation_id, source: source.id, claims }), result, key: occurrence,
+      source: source.id, generation: judge.generation_id, fact: facts[0]?.id ?? `suppressed:${source.id}`, link: facts[0]?.linkId ?? `suppressed:${source.id}` });
+    await tx.run(`MATCH (m:Meta {key:'meta'}) SET m.structure_revision=coalesce(m.structure_revision,0)+1`);
+    return true;
+  }
+
   private async readExtractionPipelineTx(tx: ManagedTransaction,id: string): Promise<ExtractionPipeline> {
     const rows = await tx.run(`MATCH (p:ExtractionPipeline {id:$id}) RETURN p.judge_task_id AS judge`,{id});
     if (!rows.records[0]) return {state:'unknown',pipeline_id:id};
@@ -2733,7 +2867,10 @@ export class Store {
     const terminal = async(task:ModelTask|null) => task?.attempt_id && task.state !== 'leased' ? this.extractionRecordTx(tx,'ExtractionAttempt',task.attempt_id,ExtractionAttempt) : null;
     const claimAttempt = await terminal(claim), judgeAttempt = await terminal(judge);
     const decisions = judgeAttempt ? await this.extractionDecisionsTx(tx,judgeAttempt) : [];
-    return ExtractionPipeline.parse({state:'known',pipeline_id:id,mode:'claim-judge-audit-v1',semantic_writes:false,claim,claim_attempt:claimAttempt,judge,judge_attempt:judgeAttempt,decisions});
+    const materialized = judgeAttempt && judgeAttempt.state === "succeeded"
+      ? await this.materializeExtractionPipelineTx(tx, { claim, claim_attempt: claimAttempt, judge_attempt: judgeAttempt, decisions }, await this.receiptLockTx(tx))
+      : false;
+    return ExtractionPipeline.parse({state:'known',pipeline_id:id,mode:'claim-judge-audit-v1',semantic_writes:materialized,claim,claim_attempt:claimAttempt,judge,judge_attempt:judgeAttempt,decisions});
   }
 
   async readExtractionPipeline(id: string, context: InstallationContext): Promise<ExtractionPipeline> {
@@ -2920,6 +3057,23 @@ export class Store {
     });
   }
 
+  /** Only immutable failed/cancelled attempts can justify a content-free omission.
+   * A lost or expired lease is unresolved work, not an extraction outcome. */
+  private extractionPipelineOmission(pipeline: ExtractionPipeline) {
+    if (pipeline.state !== "known") return null;
+    for (const [stage, task, attempt] of [
+      ["claim", pipeline.claim, pipeline.claim_attempt],
+      ["judge", pipeline.judge, pipeline.judge_attempt],
+    ] as const) {
+      if (stage === "judge" && pipeline.claim.state !== "succeeded") continue;
+      if (task && attempt && (task.state === "failed" || task.state === "cancelled")
+        && attempt.state === task.state && attempt.id === task.attempt_id && attempt.task_id === task.id) {
+        return { pipeline_id: pipeline.pipeline_id, stage, attempt_id: attempt.id, state: attempt.state, reason: attempt.reason };
+      }
+    }
+    return null;
+  }
+
   /** Each explicit advance seals at most 256 terminal outcomes, including
    * content-free omissions. Retry is then forbidden for that sealed work.
    * The shared generation cursor is the minimum of the two partition cursors;
@@ -2948,18 +3102,23 @@ export class Store {
       if (prefix.records.length !== request.covered_ingest_seq - covered) throw new Error("coverage_hole");
       let omissionDigest = prior?.omission_digest ?? extractionBodyDigest([]);
       for (const [index, row] of prefix.records.entries()) {
-        if (row.get("seq") !== covered + index + 1 || !row.get("task") || !row.get("attempt")) throw new Error("coverage_hole");
+        if (row.get("seq") !== covered + index + 1 || !row.get("task")) throw new Error("coverage_hole");
         const task = ModelTask.parse(JSON.parse(row.get("task")!));
+        if (task.pipeline && (task.state === "queued" || task.state === "leased" || !row.get("attempt"))) throw new ExtractionAuditError("extraction_audit_incomplete");
+        if (!row.get("attempt")) throw new Error("coverage_hole");
         const attempt = ExtractionAttempt.parse(JSON.parse(row.get("attempt")!));
         if (task.state === "queued" || task.state === "leased" || attempt.state !== task.state || attempt.id !== task.attempt_id
           || attempt.task_id !== task.id || attempt.source_id !== row.get("source") || attempt.source_ingest_seq !== row.get("seq") || attempt.generation_id !== generation.id) throw new Error("coverage_hole");
         if (task.pipeline) {
           const pipeline = await this.readExtractionPipelineTx(tx,task.id);
-          if (pipeline.state !== 'known' || pipeline.claim.state !== 'succeeded' || pipeline.judge?.state !== 'succeeded') throw new ExtractionAuditError('extraction_audit_incomplete');
-          // These rows seal audit work only, never materialization/embedding readiness.
-          omissionDigest = extractionBodyDigest({prior:omissionDigest,pipeline_id:task.id,judge_attempt_id:pipeline.judge_attempt!.id,decisions:pipeline.decisions.map(d=>d.disposition)});
-        }
-        if (attempt.state !== "succeeded" || !["retain", "correct"].includes(attempt.disposition ?? "")) omissionDigest = extractionBodyDigest({ prior: omissionDigest, id: attempt.id, seq: attempt.source_ingest_seq, state: attempt.state, reason: attempt.reason, disposition: attempt.disposition });
+          const omission = this.extractionPipelineOmission(pipeline);
+          if (omission) omissionDigest = extractionBodyDigest({ prior: omissionDigest, ...omission });
+          else {
+            if (pipeline.state !== 'known' || pipeline.claim.state !== 'succeeded' || pipeline.judge?.state !== 'succeeded') throw new ExtractionAuditError('extraction_audit_incomplete');
+            // These rows seal audit work only, never materialization/embedding readiness.
+            omissionDigest = extractionBodyDigest({prior:omissionDigest,pipeline_id:task.id,judge_attempt_id:pipeline.judge_attempt!.id,decisions:pipeline.decisions.map(d=>d.disposition)});
+          }
+        } else if (attempt.state !== "succeeded" || !["retain", "correct"].includes(attempt.disposition ?? "")) omissionDigest = extractionBodyDigest({ prior: omissionDigest, id: attempt.id, seq: attempt.source_ingest_seq, state: attempt.state, reason: attempt.reason, disposition: attempt.disposition });
       }
       const now = Math.max(generation.updated_at, prior?.updated_at ?? 0, receiptTime.parse(this.clock()));
       const value = Coverage.parse({ generation_id: generation.id, partition: request.partition, required_ingest_seq: required, covered_ingest_seq: request.covered_ingest_seq, omission_digest: omissionDigest, updated_at: now });
@@ -3044,27 +3203,45 @@ export class Store {
       // Serving readiness is derived only from persisted, generation-scoped
       // materialization custody. Audit success without an accepted proposal and
       // consumption remains insufficient. Every source in the covered prefix
-      // must have one bounded, policy-authorized materialization operation.
+      // must have materialization custody or an explicitly sealed omission.
       const sources = await tx.run(`MATCH (e:Element:Episode) WHERE e.ingest_seq > 0 AND e.ingest_seq <= $seq
         OPTIONAL MATCH (o:MaterializationOperation {generation:$generation,source_episode_id:e.id})
-        RETURN e.id AS id,count(o) AS operations LIMIT 257`, { seq: live, generation: target.id });
+        OPTIONAL MATCH (t:ModelTask {work_key:$generation+':'+e.id})
+        RETURN e.id AS id,count(o) AS operations,t.id AS task LIMIT 257`, { seq: live, generation: target.id });
+      // The source partition is bounded at 256, but each source can retain up to
+      // 64 claims. Derived custody rows use their own bounded overflow sentinel.
+      const maxDerived = 256 * 64;
       const operationRows = await tx.run(`MATCH (o:MaterializationOperation {generation:$generation})
-        RETURN o.source_episode_id AS source,o.semantic_profile_id AS profile,o.fact_id AS fact,o.link_id AS link LIMIT 257`, { generation: target.id });
-      const missing = sources.records.some(row => row.get("operations") === 0);
-      const overflow = sources.records.length > 256 || operationRows.records.length > 256;
-      const profiles = new Set(operationRows.records.map(row => row.get("profile")));
+        RETURN o.source_episode_id AS source,o.semantic_profile_id AS profile,o.fact_id AS fact,o.link_id AS link LIMIT $limit`, { generation: target.id, limit: neo4j.int(maxDerived + 1) });
+      let missing = false;
+      for (const source of sources.records) if (source.get("operations") === 0) {
+        // Both coverage partitions above pin this terminal attempt. Retrying it
+        // is forbidden after sealing, so no fabricated materialization is needed.
+        const task = source.get("task");
+        if (!task || !this.extractionPipelineOmission(await this.readExtractionPipelineTx(tx, task))) missing = true;
+      }
+      const overflow = sources.records.length > 256 || operationRows.records.length > maxDerived;
       const malformed = operationRows.records.some(row => typeof row.get("source") !== "string" || typeof row.get("fact") !== "string" || typeof row.get("link") !== "string");
       const links = await tx.run(`MATCH (f:Element:Fact)-[l:DERIVED_FROM]->(e:Element:Episode)
-        WHERE l.generation=$generation RETURN f.id AS fact,e.id AS source,l.id AS link,l.generation AS generation LIMIT 257`, { generation: target.id });
-      const linkBad = links.records.length > 256 || links.records.some(row => row.get("generation") !== target.id || !row.get("fact") || !row.get("source") || !row.get("link"));
+        WHERE l.generation=$generation RETURN f.id AS fact,e.id AS source,l.id AS link,l.generation AS generation LIMIT $limit`, { generation: target.id, limit: neo4j.int(maxDerived + 1) });
+      const linkBad = links.records.length > maxDerived || links.records.some(row => row.get("generation") !== target.id || !row.get("fact") || !row.get("source") || !row.get("link"));
       const entities = await tx.run(`MATCH (f:Element:Fact {generation:$generation}) UNWIND coalesce(f.entity_ids,[]) AS entity
         OPTIONAL MATCH (w:EntityWitness {entity_id:entity,generation:$generation,policy_revision:$policy})
-        RETURN entity,count(w) AS witnesses LIMIT 257`, { generation: target.id, policy: policy.policy_revision });
-      const witnessBad = entities.records.length > 256 || entities.records.some(row => row.get("witnesses") !== 1);
+        RETURN entity,count(w) AS witnesses LIMIT $limit`, { generation: target.id, policy: policy.policy_revision, limit: neo4j.int(maxDerived + 1) });
+      const witnessBad = entities.records.length > maxDerived || entities.records.some(row => row.get("witnesses") !== 1);
       const indexesReady = indexes.records.length === 7 && indexes.records.every(index => index.get("state") === "ONLINE");
-      if (missing || overflow || malformed || linkBad || witnessBad || profiles.size !== 1 || !indexesReady) {
+      let embeddingCoverageBad = false;
+      if (this.embeddingProvider) {
+        const profileId = embeddingProfileId(this.embeddingProvider.profile);
+        const configured = await tx.run(`MATCH (p:EmbeddingProfile) RETURN p.id AS id`);
+        const vectors = await tx.run(`MATCH (v:EmbeddingVector {profile_id:$profile}) RETURN v.episode_id AS episode`, { profile: profileId });
+        const vectorEpisodes = new Set(vectors.records.map(record => record.get("episode")));
+        embeddingCoverageBad = configured.records.length !== 1 || configured.records[0]?.get("id") !== profileId
+          || sources.records.some(source => !vectorEpisodes.has(source.get("id")));
+      }
+      if (missing || overflow || malformed || linkBad || witnessBad || !indexesReady || embeddingCoverageBad) {
         throw new GenerationReadinessError("activation_prerequisite_unavailable", [
-          ...(profiles.size !== 1 ? ["selected_model_embedding_coverage"] : []),
+          ...(embeddingCoverageBad ? ["selected_model_embedding_coverage"] : []),
           ...(!indexesReady ? ["generation_scoped_indexes"] : []),
           ...(missing || overflow || malformed ? ["derived_authority_and_links"] : []),
           ...(witnessBad ? ["entity_witness_policy_coverage"] : []),
@@ -3075,7 +3252,8 @@ export class Store {
       await tx.run(`MATCH (g:ExtractionGeneration {id:$id}), (s:Meta {key:'extraction_selector'})
         SET g.state='active',g.body=$body,s.generation_id=$id,s.selector_version=s.selector_version+1`, { id: target.id, body: canonicalExtractionBody(activated) });
       await tx.run(`MERGE (r:DerivedServingReadiness {generation:$generation})
-        SET r.state='COMPLETE',r.profile_id=$profile,r.policy_revision=$policy,r.covered_ingest_seq=$seq,r.link_revision=$revision`, { generation: target.id, profile: [...profiles][0], policy: policy.policy_revision, seq: live, revision: row.get("covered") });
+        SET r.state='COMPLETE',r.profile_id=$profile,r.policy_revision=$policy,r.covered_ingest_seq=$seq,r.link_revision=$revision`, { generation: target.id,
+          profile: this.embeddingProvider ? embeddingProfileId(this.embeddingProvider.profile) : "embeddings-disabled-v1", policy: policy.policy_revision, seq: live, revision: row.get("covered") });
       return activated;
     });
   }

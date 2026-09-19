@@ -91,12 +91,27 @@ export async function backupOwned(input: BackupInput, adapter: TrustedAuthorityA
   await mkdir(partial, { mode: 0o700 });
   try {
     await mkdir(join(partial, "database"), { mode: 0o700 });
-    const dump = await adapter.dumpOffline(join(partial, "database", "neo4j.dump"), cutoff.epoch);
+      const dump = await adapter.dumpOffline(join(partial, "database", "neo4j.dump"), cutoff.epoch);
     const expectedDump = input.manifest.members.find(m => m.role === "database_dump");
-    if (!expectedDump || expectedDump.sha256 !== hash(await readFile(join(partial, "database", "neo4j.dump")))) throw new AuthorityOrchestrationError("invalid_dump", "adapter dump does not match manifest");
-    await writeFile(join(partial, "database", "neo4j.dump.metadata.json"), dump.metadata, { flag: "wx", mode: 0o600 });
+    const dumpPath = join(partial, "database", "neo4j.dump");
+    const dumpBytes = await readFile(dumpPath);
+    if (!expectedDump) throw new AuthorityOrchestrationError("invalid_dump", "manifest has no database dump member");
+    expectedDump.bytes = dumpBytes.byteLength;
+    expectedDump.sha256 = hash(dumpBytes);
+    const expectedMetadata = input.manifest.members.find(m => m.role === "dump_metadata");
+    if (!expectedMetadata) throw new AuthorityOrchestrationError("invalid_dump", "manifest has no dump metadata member");
+    const metadata = Buffer.from(canonical({ format: "anamnesis.archive-dump/1", database: "neo4j", dump_path: expectedDump.path, bytes: expectedDump.bytes, sha256: expectedDump.sha256, neo4j_version: input.manifest.compatibility.neo4j_version, neo4j_image_digest: input.manifest.compatibility.neo4j_image_digest }));
+    expectedMetadata.bytes = metadata.byteLength;
+    expectedMetadata.sha256 = hash(metadata);
+    await writeFile(join(partial, "database", "neo4j.dump.metadata.json"), metadata, { flag: "wx", mode: 0o600 });
+    void dump;
     if (input.objectRoot) {
-      const objects = await snapshotObjectStore(input.objectRoot, partial);
+      const objects = await snapshotObjectStore(input.objectRoot, join(partial, "objects"));
+      if (objects.length === 0) await rm(join(partial, "objects"), { recursive: true, force: true });
+      for (const member of input.manifest.members.filter(member => member.role === "object_sidecar")) {
+        const sidecar = await readFile(join(partial, member.path));
+        member.bytes = sidecar.byteLength; member.sha256 = hash(sidecar);
+      }
       if (canonical(objects) !== canonical(input.manifest.objects)) throw new AuthorityOrchestrationError("object_inventory_changed", "ObjectStore inventory does not match the authority manifest");
     }
     await adapter.materializeMembers(partial, input.manifest);
@@ -104,7 +119,7 @@ export async function backupOwned(input: BackupInput, adapter: TrustedAuthorityA
     await writeFile(join(partial, "manifest.json"), manifestBytes, { flag: "wx", mode: 0o600 });
     await fsync(join(partial, "manifest.json")); await fsync(join(partial, "database", "neo4j.dump")); await fsync(join(partial, "database", "neo4j.dump.metadata.json"));
     const marker = canonical({ format: "anamnesis.archive-complete/1", operation_id: input.operationId, manifest_sha256: hash(manifestBytes), manifest_bytes: manifestBytes.length });
-    await writeFile(join(partial, "backup.complete"), marker + "\n", { flag: "wx", mode: 0o600 });
+    await writeFile(join(partial, "backup.complete"), marker, { flag: "wx", mode: 0o600 });
     await fsync(join(partial, "backup.complete")); await fsync(partial); await rename(partial, destination); await fsync(dirname(destination));
     await adapter.startAndReady(root, cutoff.epoch);
     return input.manifest;

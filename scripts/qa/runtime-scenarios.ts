@@ -12,7 +12,7 @@ import { timingHash, timingLog } from "../../app/anamnesis/timing.ts";
 
 const ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const OWNER_LABEL = "anamnesis.qa.owner";
-const RUNTIME_CASES = new Set(["uds-ingest", "object-spool-crashes", "outage-drain-50", "source-resume", "managed-ingest-restart", "normalized-agentlog"]);
+const RUNTIME_CASES = new Set(["e2e-real", "uds-ingest", "object-spool-crashes", "outage-drain-50", "source-resume", "managed-ingest-restart", "normalized-agentlog"]);
 const AGGREGATE_CASES = new Set(["release-acceptance", "soak-24h"]);
 const BLOCKED_CASES = new Map<string, string>();
 // Storage contracts contain real CAS, ordered-edge and legacy-format assertions.
@@ -50,6 +50,7 @@ const CASE_TEST_PATHS = new Map<string, string[]>([
     "scripts/qa/g003-publication.test.ts",
     "scripts/qa/g003-byte-budget.test.ts",
   ]],
+  ["derived", ["scripts/qa/g2-derived-e2e.test.ts", "scripts/qa/g4-recall-companions.test.ts"]],
   ["dynamics-replay", [
     "scripts/qa/g003-dynamics-replay.test.ts",
   ]],
@@ -247,6 +248,12 @@ export async function cleanupOwnedContainer(name: string, owner: string, docker:
 
 export async function main(args = process.argv.slice(2)): Promise<string> {
   const options = parseOptions(args); // Reject invalid input before filesystem/Docker acquisition.
+  if (options.caseName === "e2e-real") {
+    const { runE2eReal } = await import("./e2e-real.ts");
+    await runE2eReal(resolve(options.evidenceRoot));
+    if (process.exitCode) throw new Error("e2e-real failed; see e2e-summary.json");
+    return resolve(options.evidenceRoot);
+  }
   await mkdir(options.evidenceRoot, { recursive: true });
   const evidence = await mkdtemp(resolve(options.evidenceRoot, `${options.caseName}-`));
   console.log(`Evidence: ${evidence}`);

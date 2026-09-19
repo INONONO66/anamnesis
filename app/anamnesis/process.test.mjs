@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { watch } from 'node:fs';
+import { createInterface } from 'node:readline';
 import { mkdtemp, rm, stat, readFile, writeFile, readdir } from 'node:fs/promises';
 import { connect } from 'node:net';
 import { once } from 'node:events';
@@ -30,19 +30,26 @@ function peer(path) {
     request(method,params={}) { return this.send({jsonrpc:'2.0',id:++id,method,params}); }
   };
 }
-async function fixture(run) {
+async function fixture(run, configure = async () => ({})) {
   const root=await mkdtemp('/tmp/ana-process-'); const path=root+'/anamnesis.sock';
-  const watcher=watch(root); let child; const sockets=[];
-  const appeared=new Promise(resolve=>{watcher.on('change',(_event,name)=>{if(String(name)==='anamnesis.sock')resolve();});});
+  let child, lines; const sockets=[];
   try {
-    child=spawn(process.execPath,[entry],{env:{...process.env,ANAMNESIS_RUNTIME_ROOT:root,ANAMNESIS_RUNTIME_TOKEN:'correct-token',ANAMNESIS_NEO4J_PASSWORD:'unused-offline',ANAMNESIS_NEO4J_URI:'bolt://127.0.0.1:1'},stdio:['ignore','pipe','pipe']});
+    const env = { ...process.env };
+    for (const name of Object.keys(env)) if (/^ANAMNESIS_(LLM_|EMBEDDING_|EXTRACTION_)/.test(name)) delete env[name];
+    Object.assign(env, await configure(root));
+    child=spawn(process.execPath,[entry],{env:{...env,ANAMNESIS_RUNTIME_ROOT:root,ANAMNESIS_RUNTIME_TOKEN:'correct-token',ANAMNESIS_NEO4J_PASSWORD:'unused-offline',ANAMNESIS_NEO4J_URI:'bolt://127.0.0.1:1'},stdio:['ignore','pipe','pipe']});
+    lines=createInterface({input:child.stdout});
+    const appeared=(async()=>{
+      for await (const line of lines) if (JSON.parse(line).event==='listening') return;
+      throw Error('daemon stdout ended before listening');
+    })();
     let output='';child.stderr.on('data',b=>{output+=b});
     const failed=new Promise((_,reject)=>{child.once('error',reject);child.once('exit',(c)=>reject(Error(`daemon exited ${c}: ${output}`)));});
     await Promise.race([appeared,failed,new Promise((_,reject)=>{const s=deadline();s.addEventListener('abort',()=>reject(Error('socket deadline')),{once:true})})]);
-    watcher.close();
+    lines.close();
     await run({root,path,child,client:()=>{const p=peer(path);sockets.push(p.socket);return p;}});
   } finally {
-    watcher.close();for(const s of sockets)s.destroy();
+    lines?.close();for(const s of sockets)s.destroy();
     if(child && child.exitCode===null && child.signalCode===null){const exited=once(child,'exit',{signal:deadline()});child.kill('SIGKILL');await exited;}
     await rm(root,{recursive:true,force:true});
     await assert.rejects(stat(root),{code:'ENOENT'});
@@ -59,6 +66,38 @@ function bodyDigest(params) {
   collect(envelope);
   return createHash('sha256').update(JSON.stringify(envelope,[...keys].sort())).digest('hex');
 }
+test('actual Node/socket reports unconfigured providers as disabled', {timeout:15000}, ()=>fixture(async ({client})=>{
+  const p=client();
+  const h=(await p.request('hello',hello)).result;
+  const s=(await p.request('status')).result;
+  for (const result of [h,s]) {
+    assert.equal(result.capabilities.extraction,false);
+    assert.equal(result.capabilities.embeddings,false);
+  }
+}));
+for (const model of ['claude-haiku-4-5', 'gpt-5-5']) {
+  test(`actual Node/socket advertises configured ${model} extraction without embeddings`, {timeout:15000}, ()=>fixture(async ({client})=>{
+    const p=client();
+    const h=(await p.request('hello',hello)).result;
+    const s=(await p.request('status')).result;
+    for (const result of [h,s]) {
+      assert.equal(result.capabilities.extraction,true);
+      assert.equal(result.capabilities.embeddings,false);
+    }
+  }, async root=>{
+    await writeFile(root+'/provider.json',JSON.stringify({bearer:'provider-test-fixture'}),{mode:0o600});
+    return {ANAMNESIS_LLM_BASE_URL:'http://127.0.0.1:1',ANAMNESIS_LLM_API_KEY_FILE:root+'/provider.json',ANAMNESIS_LLM_MODEL:model};
+  }));
+}
+test('actual Node/socket advertises optional embedding configuration', {timeout:15000}, ()=>fixture(async ({client})=>{
+  const p=client();
+  const h=(await p.request('hello',hello)).result;
+  const s=(await p.request('status')).result;
+  for (const result of [h,s]) {
+    assert.equal(result.capabilities.extraction,false);
+    assert.equal(result.capabilities.embeddings,true);
+  }
+}, async ()=>({ANAMNESIS_EMBEDDING_BASE_URL:'http://127.0.0.1:1'})));
 test('actual Node/socket rejects malformed JSON and unknown methods', {timeout:15000}, ()=>fixture(async ({client})=>{
   const p=client();assert.equal((await p.send('{')).error.data.code,'parse_error');
   assert.equal((await p.request('hello',hello)).result.principal,'installation');

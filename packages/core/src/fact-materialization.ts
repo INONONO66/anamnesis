@@ -2,16 +2,16 @@ import { createHash } from "node:crypto";
 
 export type RetainedClaim = { text: string; start?: number; end?: number; time: string };
 export type RetainedExtractionAttempt = {
-  id: string; episodeId: string; generation: number; policyRevision: number;
+  id: string; episodeId: string; generation: number | string; policyRevision: number;
   state: "succeeded" | "failed"; gate: "independent_shadow_review_required"; claims: RetainedClaim[];
 };
-export type RetainedEpisode = { id: string; content: string; generation: number; policyRevision: number };
+export type RetainedEpisode = { id: string; content: string; generation: number | string; policyRevision: number };
 export type MaterializedFact = {
   id: string; schema: "anamnesis.claim/1"; content: string; time: { value: string; precision: "second" };
-  generation: number; policyRevision: number; source_episode_ids: string[]; primary_episode_id: string;
+  generation: number | string; policyRevision: number; source_episode_ids: string[]; primary_episode_id: string;
   lineage: { episode_id: string; attempt_id: string; span?: [number, number] };
 };
-export type ConductingArc = { source_id: string; link_id: string; peer_id: string; role: "DERIVED_FROM"; generation: number; policyRevision?: number };
+export type ConductingArc = { source_id: string; link_id: string; peer_id: string; role: "DERIVED_FROM"; generation: number | string; policyRevision?: number };
 export type PhysicalConductingArcLookup = (sourceId: string, linkId: string) => ConductingArc | undefined;
 
 const id = (value: string) => createHash("sha256").update(value).digest("hex").slice(0, 32);
@@ -23,7 +23,7 @@ export function materializeFacts(
     conductingArc?: ConductingArc; conductingArcs?: readonly ConductingArc[];
     conductingArcLookup?: PhysicalConductingArcLookup;
   },
-): { state: "blocked"; reason: string; facts: never[] } | { state: "materialized"; facts: MaterializedFact[] } {
+): { state: "blocked"; reason: string; facts: MaterializedFact[] } | { state: "materialized"; facts: MaterializedFact[] } {
   if (!options.semanticWrites || !options.independentShadowReview) {
     return { state: "blocked", reason: "independent_shadow_review_required", facts: [] };
   }

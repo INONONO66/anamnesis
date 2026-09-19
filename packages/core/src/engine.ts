@@ -236,6 +236,10 @@ export class Engine {
     return this.store.recoverEmbedding(input, context);
   }
 
+  async drainEmbeddingOutbox(limit = 100) {
+    return this.store.drainEmbeddingOutbox(limit);
+  }
+
   async embeddingStatus(operationId: string, context: InstallationContext) {
     return this.store.embeddingStatus(operationId, context);
   }

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { DREAM_ALGORITHM, DREAM_GDS_VERSION, DREAM_NETWORK, DREAM_GDS_IMAGE, DreamAdapterError, trustedDreamLeiden, type DreamLeidenInput } from "./dream-leiden-adapter.ts";
 
-const input: DreamLeidenInput = { operation_id:"dream-1", export_bytes:"{}", export_digest:createHash("sha256").update("{}").digest("hex"), source_receipts:[], graph:{node_count:0,arc_count:0,byte_count:2} };
+const input: DreamLeidenInput = { operation_id:"dream-1", export_bytes:"{}", export_digest:createHash("sha256").update("{}").digest("hex"), source_receipts:[], graph:{node_count:0,arc_count:0,byte_count:2,nodes:[],arcs:[]} };
 test("refuses missing and unpinned adapters", () => {
   expect(() => trustedDreamLeiden(undefined)).toThrow(DreamAdapterError);
   expect(() => trustedDreamLeiden({ image_digest:DREAM_GDS_IMAGE, plugin_digest:"sha256:"+"0".repeat(64), algorithm:DREAM_ALGORITHM, gds_version:DREAM_GDS_VERSION, network:"bridge", adapter:{} })).toThrow("dream_adapter_untrusted");

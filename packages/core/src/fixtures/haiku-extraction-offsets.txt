@@ -1,0 +1,25 @@
+```json
+{
+  "task": "claim",
+  "claims": [
+    {
+      "text": "Alice works on the Anamnesis project.",
+      "evidence": {
+        "start": 0,
+        "end": 41,
+        "text": "Alice works on the Anamnesis project."
+      }
+    },
+    {
+      "text": "Alice decided to store project backups every Friday.",
+      "evidence": {
+        "start": 42,
+        "end": 96,
+        "text": "Alice decided to store project backups every Friday."
+      }
+    }
+  ],
+  "language": "en",
+  "modality": "text"
+}
+```

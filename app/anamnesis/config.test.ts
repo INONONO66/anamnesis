@@ -4,7 +4,83 @@ import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { atomicJson } from "./config.ts";
+import { atomicJson, DEFAULT_EXTRACTION_PROMPT_FILE, loadProviderConfig } from "./config.ts";
+
+test("provider defaults leave endpoints opt-in and load the bundled prompt", async () => {
+  const config = await loadProviderConfig({});
+  assert.equal(config.embedding, undefined);
+  assert.deepEqual(config.llm, { baseUrl: undefined, model: "claude-haiku-4-5", dialect: "anthropic_messages" });
+  assert.equal(config.promptFile, DEFAULT_EXTRACTION_PROMPT_FILE);
+  assert.equal(config.systemPrompt, await fs.readFile(DEFAULT_EXTRACTION_PROMPT_FILE, "utf8"));
+});
+
+test("provider configuration reads overrides and bearer at startup", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "ana-provider-config-"));
+  try {
+    const keyFile = join(root, "key.json"), promptFile = join(root, "prompt.md");
+    await fs.writeFile(keyFile, JSON.stringify({ bearer: "fixture-bearer", metadata: "allowed" }));
+    await fs.writeFile(promptFile, "fixture prompt");
+    const env = {
+      ANAMNESIS_EMBEDDING_BASE_URL: "http://localhost:18089",
+      ANAMNESIS_EMBEDDING_MODEL: "embedding-fixture",
+      ANAMNESIS_EMBEDDING_DIMENSIONS: "3",
+      ANAMNESIS_EMBEDDING_API_KEY: "embedding-fixture-key",
+      ANAMNESIS_LLM_BASE_URL: "https://localhost:19080",
+      ANAMNESIS_LLM_MODEL: "chat-fixture",
+      ANAMNESIS_LLM_API_KEY_FILE: keyFile,
+      ANAMNESIS_EXTRACTION_PROMPT_FILE: promptFile,
+    };
+    const config = await loadProviderConfig(env);
+    assert.deepEqual(config.embedding, { baseUrl: env.ANAMNESIS_EMBEDDING_BASE_URL, model: "embedding-fixture", dimensions: 3, apiKey: "embedding-fixture-key" });
+    assert.deepEqual(config.llm, { baseUrl: env.ANAMNESIS_LLM_BASE_URL, model: "chat-fixture", dialect: "openai_chat", apiKey: "fixture-bearer" });
+    assert.equal(config.systemPrompt, "fixture prompt");
+    assert.equal(config.promptFile, promptFile);
+    await fs.writeFile(keyFile, JSON.stringify({ bearer: "rotated-fixture" }));
+    assert.equal(config.llm.apiKey, "fixture-bearer");
+    assert.equal((await loadProviderConfig(env)).llm.apiKey, "rotated-fixture");
+    for (const invalid of ['{"bearer":', '{}', '{"bearer":42}', '{"bearer":""}', '{"bearer":"fixture\\ninvalid"}']) {
+      await fs.writeFile(keyFile, invalid);
+      await assert.rejects(loadProviderConfig(env), error => error instanceof Error && !error.message.includes("fixture"));
+    }
+    await fs.rm(keyFile);
+    await assert.rejects(loadProviderConfig(env), /ANAMNESIS_LLM_API_KEY_FILE/);
+    await fs.writeFile(promptFile, " ");
+    await assert.rejects(loadProviderConfig({ ANAMNESIS_EXTRACTION_PROMPT_FILE: promptFile }), /ANAMNESIS_EXTRACTION_PROMPT_FILE/);
+    await fs.rm(promptFile);
+    await assert.rejects(loadProviderConfig({ ANAMNESIS_EXTRACTION_PROMPT_FILE: promptFile }), { code: "ENOENT" });
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+});
+
+test("provider dialect overrides model inference and disabled embeddings require no fields", async () => {
+  const config = await loadProviderConfig({ ANAMNESIS_LLM_DIALECT: "openai_chat", ANAMNESIS_EMBEDDING_MODEL: "", ANAMNESIS_EMBEDDING_DIMENSIONS: "invalid", ANAMNESIS_EMBEDDING_API_KEY: "" });
+  assert.equal(config.embedding, undefined);
+  assert.equal(config.llm.dialect, "openai_chat");
+  assert.equal((await loadProviderConfig({ ANAMNESIS_LLM_MODEL: "gpt-5-5" })).llm.dialect, "openai_chat");
+  assert.equal((await loadProviderConfig({ ANAMNESIS_LLM_MODEL: "claude-opus-5" })).llm.dialect, "anthropic_messages");
+  assert.equal((await loadProviderConfig({ ANAMNESIS_LLM_MODEL: "custom", ANAMNESIS_LLM_DIALECT: "anthropic_messages" })).llm.dialect, "anthropic_messages");
+});
+
+test("provider environment rejects invalid boundaries without disclosing values", async () => {
+  const cases: Record<string, string[]> = {
+    ANAMNESIS_EMBEDDING_BASE_URL: ["invalid", "file:///tmp/model"],
+    ANAMNESIS_LLM_BASE_URL: ["invalid", "ftp://localhost/model"],
+    ANAMNESIS_EMBEDDING_DIMENSIONS: ["", "0", "-1", "1.5", "4097", "NaN"],
+    ANAMNESIS_EMBEDDING_MODEL: ["", " ", "x".repeat(257)],
+    ANAMNESIS_LLM_DIALECT: ["", "unsupported"],
+    ANAMNESIS_LLM_MODEL: ["", " ", "x".repeat(257)],
+    ANAMNESIS_EMBEDDING_API_KEY: ["", "fixture\nsecret"],
+    ANAMNESIS_LLM_API_KEY_FILE: [""],
+    ANAMNESIS_EXTRACTION_PROMPT_FILE: [""],
+  };
+  for (const [name, values] of Object.entries(cases)) {
+    for (const value of values) await assert.rejects(loadProviderConfig({ ANAMNESIS_EMBEDDING_BASE_URL: "http://localhost:18089", [name]: value }), error => {
+      assert.ok(error instanceof Error);
+      assert.ok(error.message.includes(name));
+      assert.ok(!error.message.includes("fixture"));
+      return true;
+    });
+  }
+});
 
 class FilesystemFault extends Error {
   readonly name = "FilesystemFault";

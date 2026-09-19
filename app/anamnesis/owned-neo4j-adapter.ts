@@ -1,9 +1,9 @@
-import { createWriteStream } from "node:fs";
-import { mkdir, open, stat } from "node:fs/promises";
+import { createReadStream } from "node:fs";
 import { spawn } from "node:child_process";
+import { mkdir, open, stat } from "node:fs/promises";
 import { pipeline } from "node:stream/promises";
 import { join } from "node:path";
-import { verifyAuthoritySnapshot, type ArchiveManifest, type AuthoritySnapshot } from "./archive-manifest.ts";
+import type { ArchiveManifest } from "./archive-manifest.ts";
 import type { TrustedAuthorityAdapter } from "./backup-restore-orchestrator.ts";
 
 /** Community image used by the authority adapter. A tag is intentionally not accepted. */
@@ -60,7 +60,7 @@ export class OwnedNeo4jAdapter implements TrustedAuthorityAdapter {
     if (!child.stdout) throw new Error("dump_stdout_unavailable");
     let stderr = ""; child.stderr?.on("data", b => { stderr += b.toString(); });
     const completion = new Promise<number>((resolve, reject) => { child.once("error", reject); child.once("close", c => resolve(c ?? 1)); });
-    await pipeline(child.stdout, createWriteStream(destination, { flags: "wx", mode: 0o600 }));
+    await pipeline(child.stdout, (await import("node:fs")).createWriteStream(destination, { flags: "wx", mode: 0o600 }));
     if (await completion !== 0) throw new Error(`neo4j_dump_failed: ${stderr.slice(-1000)}`);
     await fsync(destination);
     const bytes = (await stat(destination)).size;
@@ -71,6 +71,10 @@ export class OwnedNeo4jAdapter implements TrustedAuthorityAdapter {
   async restoreOffline(archive: string, staging: string, _manifest: ArchiveManifest): Promise<void> {
     await mkdir(join(staging, "database"), { recursive: true, mode: 0o700 });
     const dump = join(archive, "database", "neo4j.dump");
-    await this.run(["docker", "run", "--rm", "-v", `${staging}/database:/data`, "-v", `${dump}:/archive/neo4j.dump:ro`, NEO4J_IMAGE, "neo4j-admin", "database", "load", "neo4j", "--from-path=/archive", "--overwrite-destination=true"]);
+    const child = spawn("docker", ["run", "--rm", "--user", "0:0", "--entrypoint", "neo4j-admin", "-i", "-v", `${staging}/database:/data`, NEO4J_IMAGE, "database", "load", "neo4j", "--from-stdin", "--overwrite-destination=true"], { stdio: ["pipe", "ignore", "pipe"] });
+    let stderr = ""; child.stderr?.on("data", b => { stderr += b.toString(); });
+    const completion = new Promise<number>((resolve, reject) => { child.once("error", reject); child.once("close", c => resolve(c ?? 1)); });
+    await pipeline(createReadStream(dump, { flags: "r" }), child.stdin!);
+    if (await completion !== 0) throw new Error(`neo4j_load_failed: ${stderr.slice(-1000)}`);
   }
 }

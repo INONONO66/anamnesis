@@ -1,8 +1,30 @@
 # Experimental Node ingest runtime
 
-This is an ingest/recovery application, not a production memory service. No
-service manager, recall, policy, extraction, embeddings, or commit pipeline is
-installed or advertised.
+This is an experimental ingest/recovery application, not a production memory
+service. Recall, policy and commit RPCs are advertised; extraction and embedding
+capabilities reflect configured providers. No OS service manager is installed.
+
+## Optional providers
+
+Set `ANAMNESIS_LLM_BASE_URL` and `ANAMNESIS_LLM_API_KEY_FILE` (private JSON
+containing a `bearer` string) to enable extraction. The default model is
+`claude-haiku-4-5`. `ANAMNESIS_LLM_DIALECT` is `anthropic_messages` for models
+starting with `claude`, otherwise `openai_chat`; either can be explicitly selected.
+`ANAMNESIS_EXTRACTION_PROMPT_FILE` overrides the bundled extraction prompt.
+See [extraction audit](extraction-audit.md) for the audit-only semantics.
+Task identity is a stable SHA-256 of dialect/endpoint/model/prompt configuration,
+not an attestation of upstream weights. The reported model identity is tracked
+separately; a change within a provider instance fails with `provider_mismatch`.
+
+Embeddings are optional and disabled without configuration. Set
+`ANAMNESIS_EMBEDDING_BASE_URL` to enable the OpenAI embedding adapter, optionally
+with `ANAMNESIS_EMBEDDING_MODEL`, `ANAMNESIS_EMBEDDING_DIMENSIONS`, and
+`ANAMNESIS_EMBEDDING_API_KEY`. Defaults are `Qwen3-Embedding-0.6B` and 1024
+dimensions. Its profile identity hashes endpoint/model/dimensions, not server
+weights; change configuration when changing weights. Token-hub has no embedding
+route, so leave this endpoint unset there. Legacy `ANAMNESIS_EMBEDDING_CONFIG`
+and `ANAMNESIS_EXTRACTION_CONFIG` remain supported; explicit base URLs take
+precedence. Both `hello` and `status` report the selected provider capabilities.
 
 ## Run
 
@@ -63,18 +85,23 @@ The client has no Bolt connection or Bun runtime dependency.
 - SIGTERM/SIGINT and authenticated `shutdown` stop admission, finish accepted
   work, close clients/drivers, remove uploads/socket, and release ownership.
 
-## G005 authority boundary
+## Backup and restore
 
-Backup/restore remain fail-closed at the authenticated RPC boundary. `Runtime`
-accepts a lifecycle-owned `TrustedAuthorityAdapter` injection, but the current
-RPC methods do not carry the required owner/epoch/path/manifest authority
-inputs, and the core has no authority snapshot API for member, generation,
-coverage, physical-link, invalidation, or source evidence. Therefore the daemon
-retains typed `backup_adapter_unavailable`/`restore_adapter_unavailable`
-refusals and never fabricates an archive or marker. The adapter implementation
-still pins the exact Neo4j image digest and validates container ownership before
-offline commands; activation must wait for the missing authority API.
+Offline backup and restore are exposed through the authenticated `backup` and
+`restore` RPCs and the ops commands `backup <destination-dir>` and
+`restore <archive-dir>`. The lifecycle must inject an `OwnedNeo4jAdapter` for
+these operations; without one the runtime refuses rather than fabricating an
+archive. The adapter accepts only the pinned Neo4j image and an explicitly
+labelled owner container. Archive completion markers and member SHA-256 values
+are verified before restore admission. A live daemon refuses offline backup
+with `daemon_live`; stop it with `down` before invoking an offline lifecycle.
+`backup.status` and `restore.status` retain the operation state.
 
+`up` requires an extraction provider (`ANAMNESIS_LLM_BASE_URL` plus its private
+key file) and exits 2 with `{"error":"extraction_provider_required"}` when
+absent. Embeddings remain optional; `embed` reports a disabled no-op when no
+embedding endpoint is configured. `extract`, `embed`, and `recall <query>` are
+explicit foreground operations and print one JSON result.
 ## Source snapshots and managed foreground mode
 
 `node dist/anamnesis-ops.mjs ingest snapshot.jsonl checkpoint.json` consumes an
@@ -113,6 +140,43 @@ bun scripts/qa/runtime-scenarios.ts --case uds-ingest --evidence-root /tmp/g002-
 # Other cases: object-spool-crashes, outage-drain-50, source-resume,
 # managed-ingest-restart. Run database cases serially on small Docker VMs.
 ```
+
+## Live extraction acceptance (explicit opt-in)
+
+```sh
+bun run build:runtime
+bun scripts/qa/e2e-real.ts
+# Equivalent registry entry; never included in the default test suite:
+bun scripts/qa/runtime-scenarios.ts --case e2e-real --evidence-root .omo/evidence/runtime-complete/g4
+```
+
+This local QA script requires Docker and SSH access to `inonono`. It fetches the
+Haiku token-hub credential into a private temporary file, opens its own tunnel,
+and uses only a newly owner-labelled Neo4j container and temporary runtime root.
+Embeddings are deliberately disabled. It copies source transcripts read-only,
+tries Codex raw admission, and deterministically converts real Claude text turns
+when fewer than 200 Episodes are admitted. `ANAMNESIS_E2E_FALLBACK_PROJECT` can
+select the Claude project directory. Source rules/counts, provider errors, recall,
+crash recovery, and cleanup receipts are saved under the evidence directory.
+No credential or evidence file belongs in a commit.
+`ANAMNESIS_QA_LLM_MIN_INTERVAL_MS` controls the minimum provider-call interval
+(default 3000 ms, range 0-60000). Pacing occurs before task leases and applies to
+claims, judges and retries; attempts remain bounded at four. Run live QA serially.
+`ANAMNESIS_QA_KEEP_ON_FAILURE=1` retains the owned database and temporary runtime
+on failure for post-mortem inspection, recording custody in `kept-resources.json`.
+It still deletes the token-hub credential and stops the tunnel. Manually remove
+only that recorded owner-labelled container (`docker rm -f -v`) and its temporary
+root afterward, and append the cleanup receipt. Success always cleans up.
+
+Extraction uses the Engine pipeline after daemon shutdown (`ops extract` only
+reports capability readiness). `Engine.digest` acknowledges the original-message
+Outbox only after generation coverage/cutover has accepted each extraction outcome.
+Recall records full-text/top-20 query results, one-based minimum Fact ranks and
+Fact-hit coverage; contrast companions are included under the same policy and
+output budget as their primary Facts. Since `verify` reports admission health rather
+than graph counts, read-only database snapshots supplement its RPC output.
+`scripts/qa/dream-leiden-real.test.ts` requires a Docker VM with at least 3 GiB;
+its isolated GDS fixture uses an explicit hostname mapping and JVM heap caps.
 
 ## Verification and limits
 
