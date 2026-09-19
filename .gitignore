@@ -7,3 +7,6 @@ backups/
 # TypeScript incremental build state
 tsconfig.tsbuildinfo
 *.tsbuildinfo
+
+# Local QA evidence can contain real transcript excerpts and downloaded plugins.
+.omo/evidence/
