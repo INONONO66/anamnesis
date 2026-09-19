@@ -76,5 +76,6 @@ export class OwnedNeo4jAdapter implements TrustedAuthorityAdapter {
     const completion = new Promise<number>((resolve, reject) => { child.once("error", reject); child.once("close", c => resolve(c ?? 1)); });
     await pipeline(createReadStream(dump, { flags: "r" }), child.stdin!);
     if (await completion !== 0) throw new Error(`neo4j_load_failed: ${stderr.slice(-1000)}`);
+    await this.run(["docker", "run", "--rm", "--user", "0:0", "--entrypoint", "chown", "-v", `${staging}/database:/data`, NEO4J_IMAGE, "-R", "7474:7474", "/data"]);
   }
 }
