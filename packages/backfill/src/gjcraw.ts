@@ -167,6 +167,20 @@ function toEpisode(event: SessionEvent): GjcRawEpisode {
  * partitioned on. A file whose header never arrives cannot be attributed to a
  * session, so its events are left out rather than given a synthetic partition.
  */
+export function createGjcRawParser(): (line: string) => GjcRawEpisode[] {
+  let session: string | undefined;
+  return (line: string): GjcRawEpisode[] => {
+    const raw: unknown = JSON.parse(line);
+    if (isRecord(raw) && raw["type"] === "session") {
+      session = optionalText(raw["id"]);
+      return [];
+    }
+    if (session === undefined) return [];
+    const event = parseEvent(line);
+    return event === undefined ? [] : [toEpisode({ ...event, session })];
+  };
+}
+
 async function readSession(path: string): Promise<SessionEvent[]> {
   const events: SessionEvent[] = [];
   let session: string | undefined;

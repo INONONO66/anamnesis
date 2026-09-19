@@ -1,0 +1,551 @@
+import { createHash } from "node:crypto";
+import { mkdir, readFile, rm, stat } from "node:fs/promises";
+import { join } from "node:path";
+import neo4j, { type Driver, type RecordShape } from "neo4j-driver";
+import { Engine, envConfig } from "../../packages/core/src/engine.ts";
+import { elementDigest, verifyLineageRetry } from "../../packages/core/src/store.ts";
+import { EchoLineage, parseEpisodeLineage } from "../../packages/protocol/src/episode-lineage.ts";
+import type { CreateExtractionPipeline, RunExtractionPipeline } from '../../packages/protocol/src/extraction-audit.ts';
+import type { InstallationContext, CommitReceiptInput, RecallTransportInput } from "../../packages/core/src/store.ts";
+import type { RpcPolicySetParams, RpcPolicyRevokeParams, RpcRecallParams, RpcEmbeddingRecoverParams, RpcDreamAdmitParams, RpcDreamLeaseParams, RpcDreamExpireParams, RpcDreamExecuteParams } from "../../packages/protocol/src/rpc.ts";
+import { DurableSpool, type SpoolEntry } from "../../packages/core/src/spool.ts";
+import { RPC_LIMITS, RPC_METHODS, RpcRememberParams, type RpcCapabilities, type RpcCommittedResult, type RpcIngestStatusParams, type RpcIngestStatusResult, type RpcStatusResult } from "../../packages/protocol/src/rpc.ts";
+import { atomicJson, hasCode, syncDirectory, type Installation } from "./config.ts";
+import { Uploads, type UploadLifecycle } from "./objects.ts";
+import { loadTokenizers } from "./tokenizer.ts";
+import { daemonTiming, runtimeTimed, timingHash } from "./timing.ts";
+import { fault, RpcFault, storageUnavailable } from "./wire.ts";
+import type { TrustedAuthorityAdapter } from "./backup-restore-orchestrator.ts";
+import { createDreamLeidenAdapter } from './dream-leiden-runtime.ts';
+import { trustedDreamLeiden, DREAM_GDS_IMAGE, DREAM_GDS_VERSION, DREAM_ALGORITHM, DREAM_NETWORK } from '../../packages/core/src/dream-leiden-adapter.ts';
+
+export const capabilities: RpcCapabilities = { methods: [...RPC_METHODS], recall: true, commit: true, policy: true, extraction: false, embeddings: !!process.env["ANAMNESIS_EMBEDDING_CONFIG"], writer_fence: "database" };
+function canonical(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  return `{${Object.entries(value).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([key, member]) => `${JSON.stringify(key)}:${canonical(member)}`).join(",")}}`;
+}
+const sha = (value: string) => createHash("sha256").update(value).digest("hex");
+const originKey = (params: RpcRememberParams) => { const o = params.episode.origin; return sha(JSON.stringify([o.source, o.session, o.actor, o.record])); };
+// Origin field order is explicit, not object-insertion dependent.
+function revisionKey(params: RpcRememberParams): string {
+  const o = params.episode.origin;
+  return sha(JSON.stringify([sha(JSON.stringify([o.source, o.session, o.actor, o.record])), params.source_revision]));
+}
+interface Binding { digest_version: 1; params: RpcRememberParams; body_digest: string; incarnation: string; fs_epoch: string; }
+const Binding = { parse(value: unknown): Binding {
+  if (!value || typeof value !== "object") throw new RpcFault("spool_corrupt", "invalid delivery binding");
+  const data = value as Record<string, unknown>;
+  if (data["digest_version"] !== 1 || typeof data["body_digest"] !== "string" || !/^[a-f0-9]{64}$/.test(data["body_digest"]) || typeof data["incarnation"] !== "string" || typeof data["fs_epoch"] !== "string") throw new RpcFault("spool_corrupt", "invalid delivery binding");
+  return { digest_version: 1, params: RpcRememberParams.parse(data["params"]), body_digest: data["body_digest"], incarnation: data["incarnation"], fs_epoch: data["fs_epoch"] };
+} };
+function digest(params: RpcRememberParams): string { return sha(canonical({ digest_version: 1, params })); }
+interface StoredEpisode {
+  id: string; schema: string; time_value: string; time_precision: string;
+  content: string; mass: number; properties: string;
+  origin_source: string; origin_session: string; origin_actor: string; origin_record: string;
+  source_revision: string; previous_revision_key?: string; payload_hash?: string;
+  ingest_seq: number; digest: string; digest_format?: string;
+  episode_digest_version?: number; origin_role?: string; lineage_digest?: string;
+}
+function lineageMetadata(params: RpcRememberParams) {
+  return params.origin_role !== undefined || params.lineage_mode !== undefined || params.parent_recall_ids !== undefined
+    ? { origin_role: params.origin_role, lineage_mode: params.lineage_mode, parent_recall_ids: params.parent_recall_ids } : undefined;
+}
+function compatibilityParams(params: RpcRememberParams): RpcRememberParams {
+  const { origin_role, lineage_mode, parent_recall_ids, ...legacy } = params;
+  return legacy;
+}
+
+export interface RuntimeAuthorityOptions {
+  /** Injected only by the owning lifecycle. No ambient/global adapter is used. */
+  authorityAdapter?: TrustedAuthorityAdapter;
+}
+
+export class Runtime {
+  readonly uploads: Uploads;
+  private readonly engine: Engine;
+  private readonly reader: Driver;
+  private readonly database: string;
+  private readonly spool: DurableSpool;
+  private readonly spoolRoot: string;
+  private readonly bindings: string;
+  private readonly authorityAdapter: TrustedAuthorityAdapter | undefined;
+  private epoch: number | undefined;
+  private initialized = false;
+  private available = false;
+  private readonly blocked = new Map<number, "missing_predecessor" | "dependency_cycle" | "stale_revision" | "revision_conflict">();
+  private readonly quarantined = new Map<number, "spool_corrupt" | "incarnation_mismatch">();
+  private drainJob: AsyncGenerator<void, void, void> | undefined;
+  private drainRequested = false;
+  private drainStopped = false;
+  constructor(readonly installation: Installation, private readonly scheduleDrain: () => void = () => {}, uploadLifecycle: UploadLifecycle = {}, authorityOptions: RuntimeAuthorityOptions = {}) {
+    this.authorityAdapter = authorityOptions.authorityAdapter;
+    const config = { ...envConfig(), tokenizers: loadTokenizers(), objectsRoot: join(installation.root, "objects") };
+    const rawDream = createDreamLeidenAdapter();
+    const dreamLeidenAdapter = rawDream ? trustedDreamLeiden({ image_digest: DREAM_GDS_IMAGE, plugin_digest: 'sha256:246e3fbbbf733b4def1e7b0a9740a2309f6605ee8a7b46b29fe1de56d0a4b47c', algorithm: DREAM_ALGORITHM, gds_version: DREAM_GDS_VERSION, network: DREAM_NETWORK, adapter: rawDream }) : undefined;
+    this.engine = new Engine({ ...config, ...(dreamLeidenAdapter ? { dreamLeidenAdapter } : {}) });
+    this.database = config.database ?? "neo4j";
+    this.reader = neo4j.driver(config.uri, neo4j.auth.basic(config.user, config.password), {
+      disableLosslessIntegers: true, connectionTimeout: 1000, connectionAcquisitionTimeout: 1500, maxTransactionRetryTime: 0,
+    });
+    this.uploads = new Uploads(config.objectsRoot, join(installation.root, "uploads"), uploadLifecycle);
+    this.spoolRoot = join(installation.root, "spool");
+    this.bindings = join(installation.root, "deliveries");
+    this.spool = new DurableSpool(this.spoolRoot, { maxBytes: RPC_LIMITS.spool_bytes, maxFrameBytes: RPC_LIMITS.frame_bytes });
+  }
+  async init(): Promise<void> {
+    await mkdir(this.bindings, { recursive: true, mode: 0o700 });
+    await mkdir(this.spoolRoot, { recursive: true, mode: 0o700 });
+    await this.uploads.init();
+    await syncDirectory(this.installation.root);
+    await this.refresh();
+  }
+  private async read<Row extends RecordShape>(query: string, params: Record<string, unknown> = {}): Promise<Row[]> {
+    const session = this.reader.session({ database: this.database, defaultAccessMode: neo4j.session.READ });
+    try { return (await runtimeTimed("neo4j.read", () => session.run<Row>(query, params, { timeout: 5000 }), daemonTiming ? timingHash(query) : undefined)).records.map(record => record.toObject()); }
+    finally { await runtimeTimed("neo4j.session.close", () => session.close()); }
+  }
+  /** Reconnect is demand-driven by status/remember/startup, without polling timers. */
+  async refresh(): Promise<void> {
+    await this.installation.assertOwned();
+    try {
+      await this.read("RETURN 1 AS connected");
+      if (!this.initialized) { await runtimeTimed("engine.init", () => this.engine.init()); this.initialized = true; }
+      if (this.epoch === undefined) this.epoch = await runtimeTimed("engine.claimWriterEpoch", () => this.engine.claimWriterEpoch());
+      const rows = await this.read<{ epoch: number }>("MATCH (m:Meta {key:'meta'}) RETURN m.writer_epoch AS epoch");
+      if (rows[0]?.epoch !== this.epoch) throw new RpcFault("ownership_lost", "database writer epoch changed");
+      const recovered = !this.available;
+      this.available = true;
+      if (recovered) this.wakeDrain();
+    } catch (error) {
+      if (!storageUnavailable(error)) throw error;
+      this.available = false;
+    }
+  }
+  private identity(binding: Binding) {
+    return { revision_key: revisionKey(binding.params), body_digest: binding.body_digest, data_incarnation: binding.incarnation };
+  }
+  private spooled(binding: Binding, sequence: number) {
+    return { state: "spooled" as const, ...this.identity(binding), fs_epoch: binding.fs_epoch, spool_seq: sequence };
+  }
+  private async binding(key: string): Promise<Binding | null> {
+    try { return Binding.parse(JSON.parse(await readFile(join(this.bindings, key + ".json"), "utf8"))); }
+    catch (error) { if (hasCode(error, "ENOENT")) return null; throw error; }
+  }
+  private async pendingEntry(revision: string): Promise<SpoolEntry | null> {
+    // Snapshot the admitted cohort rather than using an unbounded sentinel. The
+    // page cursor then gives deterministic continuation without materializing the journal.
+    const cohort = (await this.spool.status()).nextSequence - 1;
+    const lookup = this.findPending(revision, cohort);
+    let step = await lookup.next();
+    while (!step.done) step = await lookup.next();
+    return step.value;
+  }
+  private async *findPending(revision: string, cohort: number): AsyncGenerator<void, SpoolEntry | null, void> {
+    let cursor: string | undefined;
+    while (true) {
+      const page = await this.spool.page({ ...(cursor ? { cursor } : {}), limit: 100, maxBytes: 4 * 1024 * 1024 });
+      yield;
+      const found = page.entries.find(entry => entry.sequence <= cohort && entry.revision === revision);
+      if (found) return found;
+      if (!page.nextCursor || page.entries.some(entry => entry.sequence >= cohort)) return null;
+      cursor = page.nextCursor;
+    }
+  }
+  private async *eachPendingPage(cohort: number, visit: (entry: SpoolEntry) => AsyncGenerator<void, void, void>): AsyncGenerator<void, void, void> {
+    let cursor: string | undefined;
+    while (true) {
+      const page = await this.spool.page({ ...(cursor ? { cursor } : {}), limit: 100, maxBytes: 4 * 1024 * 1024 });
+      yield;
+      for (const entry of page.entries) {
+        if (entry.sequence > cohort) return;
+        yield* visit(entry);
+        yield; // Invalid/blocked entries also consume a bounded turn.
+      }
+      if (!page.nextCursor || page.entries.some(entry => entry.sequence >= cohort)) return;
+      cursor = page.nextCursor;
+    }
+  }
+  private validated(entry: SpoolEntry): Binding {
+    const binding = Binding.parse(entry.body);
+    if (entry.incarnation !== this.installation.incarnation || binding.incarnation !== entry.incarnation) throw new RpcFault("incarnation_mismatch", "spool belongs to another installation incarnation");
+    if (entry.revision !== revisionKey(binding.params) || entry.predecessor !== binding.params.expected_previous_revision_key || entry.origin !== originKey(binding.params) || binding.body_digest !== digest(binding.params)) {
+      throw new RpcFault("spool_corrupt", "spool envelope identity mismatch");
+    }
+    return binding;
+  }
+  private async committed(binding: Binding, created = false): Promise<RpcCommittedResult | null> {
+    const row = (await this.read<{ e: StoredEpisode }>("MATCH (e:Element:Episode {revision_key:$key}) RETURN properties(e) AS e", { key: revisionKey(binding.params) }))[0]?.e;
+    if (!row) return null;
+    if (row.episode_digest_version !== undefined && row.episode_digest_version !== 2)
+      throw new RpcFault("unsupported_digest_version", "stored Episode version is unsupported");
+    let metadata;
+    if (row.episode_digest_version === 2) {
+      const retained = (await this.read<{ body: string; props: Record<string, unknown> }>(
+        "MATCH (l:EchoLineage {episode_id:$id}) RETURN l.body AS body,properties(l) AS props", { id: row.id }))[0];
+      if (!retained) throw new RpcFault("lineage_unavailable", "retained lineage missing");
+      const lineage = EchoLineage.parse(JSON.parse(retained.body));
+      const { body, digest: retainedDigest, ...props } = retained.props;
+      if (lineage.episode_id !== row.id || sha(canonical(lineage)) !== row.lineage_digest
+        || retainedDigest !== row.lineage_digest || canonical(props) !== body || canonical(lineage) !== body)
+        throw new RpcFault("lineage_mismatch", "retained lineage digest mismatch");
+      verifyLineageRetry(lineageMetadata(binding.params), row.origin_role ?? null, lineage);
+      metadata = { origin_role: row.origin_role, lineage_mode: lineage.lineage_mode, parent_recall_ids: lineage.parent_recall_ids };
+    } else if (row.digest_format !== undefined && row.digest_format !== "rfc8785-v1") {
+      throw new RpcFault("unsupported_digest_version", "stored digest format is unsupported");
+    }
+    const params = RpcRememberParams.parse({ episode: {
+      schema: row.schema, time: { value: row.time_value, precision: row.time_precision },
+      content: row.content, mass: row.mass, properties: JSON.parse(row.properties),
+      origin: { source: row.origin_source, session: row.origin_session, actor: row.origin_actor, record: row.origin_record },
+    }, source_revision: row.source_revision, expected_previous_revision_key: row.previous_revision_key ?? null,
+    ...(row.payload_hash ? { payload_hash: row.payload_hash } : {}), ...metadata });
+    const candidate = row.episode_digest_version === 2
+      ? { ...binding.params, ...parseEpisodeLineage(lineageMetadata(binding.params)) } : compatibilityParams(binding.params);
+    if (digest(params) !== digest(candidate)) throw new RpcFault("revision_conflict", "stored revision has a different delivery body");
+    // Verify the core digest as well as the complete RPC envelope (which also
+    // binds mass and origin). A revision-only match can never yield success.
+    const coreDigest = elementDigest(candidate.episode, { payloadHash: candidate.payload_hash ?? null,
+      previousRevisionKey: candidate.expected_previous_revision_key, format: row.digest_format ?? null,
+      episodeDigestVersion: row.episode_digest_version ?? null, originRole: row.origin_role ?? null, lineageDigest: row.lineage_digest ?? null });
+    if (row.digest !== coreDigest) throw new RpcFault("revision_conflict", "stored digest does not verify");
+    return { state: "committed", ...this.identity(binding), id: row.id, created, ingest_seq: row.ingest_seq };
+  }
+  private async write(binding: Binding, context?: InstallationContext): Promise<RpcCommittedResult> {
+    const params = binding.params;
+    const existing = await this.committed(binding);
+    if (existing) return existing;
+    let payload: { payload: Uint8Array<ArrayBuffer>; payload_media_type: string } | undefined;
+    if (params.payload_hash) {
+      const metadata = await this.uploads.metadata(params.payload_hash);
+      if (!metadata) throw new RpcFault("object_not_found", "remember references an uncommitted object");
+      payload = { payload: new Uint8Array(await this.uploads.store.get(params.payload_hash)), payload_media_type: metadata.media_type };
+    }
+    await this.installation.assertOwned();
+    const metadata = lineageMetadata(params);
+    if (metadata && !context) throw new RpcFault("lineage_binding_mismatch", "new lineage requires authenticated connection custody");
+    const result = await runtimeTimed("engine.remember", () => this.engine.remember({ ...params.episode, source_revision: params.source_revision,
+      expected_previous_revision_key: params.expected_previous_revision_key, ...payload }, metadata ? { metadata, context: context! } : undefined));
+    const committed = await this.committed(binding, result.created);
+    if (!committed || committed.id !== result.id) throw new RpcFault("internal_error", "database did not expose the committed delivery");
+    return committed;
+  }
+  async remember(params: RpcRememberParams, context?: InstallationContext) {
+    await this.installation.assertOwned();
+    if ((await this.spool.status()).quarantined) throw new RpcFault("spool_corrupt", "spool is quarantined; admission is stopped");
+    const key = revisionKey(params);
+    const previous = await this.binding(key);
+    const candidate: Binding = { digest_version: 1, params, body_digest: digest(params), incarnation: this.installation.incarnation, fs_epoch: this.installation.epoch };
+    // The immutable database version wins before filesystem delivery equality or
+    // any new role/parent validation. Never rewrite an old delivery binding.
+    await this.refresh();
+    if (this.available) {
+      const existing = await this.committed(candidate);
+      if (existing) {
+        if (previous?.incarnation !== undefined && previous.incarnation !== this.installation.incarnation)
+          throw new RpcFault("incarnation_mismatch", "delivery belongs to another incarnation");
+        if (!previous) await atomicJson(join(this.bindings, key + ".json"), candidate);
+        return previous ? { ...existing, ...this.identity(previous) } : existing;
+      }
+    }
+    if (previous && previous.body_digest !== candidate.body_digest) throw new RpcFault("revision_conflict", "revision already binds a different delivery body");
+    const binding = previous ?? candidate;
+    if (binding.incarnation !== this.installation.incarnation) throw new RpcFault("incarnation_mismatch", "delivery belongs to another incarnation");
+    if (params.payload_hash && !await this.uploads.metadata(params.payload_hash)) throw new RpcFault("object_not_found", "remember references an uncommitted object");
+    if ((await this.spool.status()).quarantined) throw new RpcFault("spool_corrupt", "spool is quarantined; admission is stopped");
+    const metadata = lineageMetadata(params);
+    if (metadata) {
+      if (!context?.client_binding) throw new RpcFault("lineage_binding_mismatch", "authenticated connection required");
+      if (!this.available) throw new RpcFault("storage_unavailable", "lineage admission requires retained authority", true);
+      parseEpisodeLineage(metadata);
+    }
+    if (!previous) await atomicJson(join(this.bindings, key + ".json"), binding);
+    if (this.available) {
+      try {
+        const result = await this.write(binding, context);
+        if (result.created) this.wakeDrain();
+        return result;
+      }
+      catch (error) {
+        if (!storageUnavailable(error)) {
+          if (!previous) await rm(join(this.bindings, key + ".json"));
+          throw error;
+        }
+        this.available = false;
+      }
+    }
+    if (metadata) throw new RpcFault("storage_unavailable", "lineage admission is never spooled without parent authority", true);
+    await this.installation.assertOwned();
+    const existing = await this.pendingEntry(key);
+    if (existing) { this.validated(existing); return this.spooled(binding, existing.sequence); }
+    const sequence = await this.spool.append({ origin: originKey(params), revision: key,
+      predecessor: params.expected_previous_revision_key, body: binding, incarnation: binding.incarnation });
+    // The current producer API fsyncs journal/markers; the runtime owns and
+    // syncs their already-created directory before any durable acceptance.
+    await syncDirectory(this.spoolRoot);
+    await this.installation.assertOwned();
+    if (sequence < 1 || (await this.spool.status()).quarantined) throw new RpcFault("spool_corrupt", "spool did not publish a verifiable durable entry");
+    this.wakeDrain();
+    return this.spooled(binding, sequence);
+  }
+  private wakeDrain(): void {
+    this.drainRequested = true;
+    if (this.available && !this.drainStopped) this.scheduleDrain();
+  }
+  /** Called only by the daemon's serial owner, never from a second writer. */
+  async drainTurn(): Promise<boolean> {
+    if (this.drainStopped || !this.available) {
+      await this.drainJob?.return(); this.drainJob = undefined;
+      return false;
+    }
+    try {
+      await this.installation.assertOwned();
+      const rows = await this.read<{ epoch: number }>("MATCH (m:Meta {key:'meta'}) RETURN m.writer_epoch AS epoch");
+      if (rows[0]?.epoch !== this.epoch) throw new RpcFault("ownership_lost", "database writer epoch changed");
+      if (!this.drainJob) {
+        if (!this.drainRequested) return false;
+        this.drainRequested = false;
+        this.drainJob = this.drain();
+      }
+      if ((await this.drainJob.next()).done) this.drainJob = undefined;
+      return !!this.drainJob || this.drainRequested;
+    } catch (error) {
+      await this.drainJob?.return(); this.drainJob = undefined;
+      if (!storageUnavailable(error)) throw error;
+      this.available = false;
+      this.drainRequested = true; // Explicit recovery will wake a fresh cohort.
+      return false;
+    }
+  }
+  /** The active bounded turn finishes; no continuation may write after stop. */
+  cancelDrain(): void { this.drainStopped = true; this.drainRequested = false; }
+  /** Follow only uncommitted, executable dependencies; retain no chain-sized set. */
+  private async *unresolvedPredecessor(entry: SpoolEntry, cohort: number): AsyncGenerator<void, SpoolEntry | null, void> {
+    if (!entry.predecessor) return null;
+    const rows = await this.read<{ found: number }>("MATCH (e:Episode {revision_key:$key}) RETURN count(e) AS found", { key: entry.predecessor });
+    yield;
+    if (rows[0]?.found) return null;
+    const predecessor = yield* this.findPending(entry.predecessor, cohort);
+    if (!predecessor || this.quarantined.has(predecessor.sequence)) return null;
+    const reason = this.blocked.get(predecessor.sequence);
+    if (reason && reason !== "dependency_cycle") return null;
+    this.validated(predecessor);
+    return predecessor;
+  }
+  private async *dependencyReason(entry: SpoolEntry, cohort: number): AsyncGenerator<void, "missing_predecessor" | "dependency_cycle", void> {
+    // Floyd traversal distinguishes a cycle member from a tail entering it.
+    // DB/missing/invalid/stale termini stop the chain. Each lookup is paged;
+    // this trades repeated journal scans for constant chain memory.
+    let slow: SpoolEntry | null = entry, fast: SpoolEntry | null = entry;
+    do {
+      slow = yield* this.unresolvedPredecessor(slow, cohort);
+      fast = yield* this.unresolvedPredecessor(fast, cohort);
+      if (fast) fast = yield* this.unresolvedPredecessor(fast, cohort);
+      if (!slow || !fast) return "missing_predecessor";
+    } while (slow.revision !== fast.revision);
+    let start: SpoolEntry | null = entry;
+    while (start.revision !== slow.revision) {
+      start = yield* this.unresolvedPredecessor(start, cohort);
+      slow = yield* this.unresolvedPredecessor(slow, cohort);
+      if (!start || !slow) return "missing_predecessor";
+    }
+    return start.revision === entry.revision ? "dependency_cycle" : "missing_predecessor";
+  }
+  private async *drain(): AsyncGenerator<void, void, void> {
+    this.blocked.clear(); this.quarantined.clear();
+    const spool = await this.spool.status();
+    if (spool.quarantined) return;
+    const cohort = spool.nextSequence - 1;
+    yield;
+    // Page/status/complete still scan O(N) inside core. Yields bound runtime
+    // entries and DB operations per turn, not the latency of those core calls.
+    const runtime = this;
+    let progress = true;
+    while (progress) {
+      progress = false;
+      yield* this.eachPendingPage(cohort, async function* (entry) {
+        const self = runtime;
+        let binding: Binding;
+        try { binding = self.validated(entry); }
+        catch (error) {
+          const reason = fault(error).code;
+          if (reason !== "spool_corrupt" && reason !== "incarnation_mismatch") throw error;
+          self.quarantined.set(entry.sequence, reason); return;
+        }
+        try {
+          const existing = await self.committed(binding);
+          yield;
+          if (!existing && entry.predecessor) {
+            const predecessor = await self.read<{ found: number }>("MATCH (e:Episode {revision_key:$key}) RETURN count(e) AS found", { key: entry.predecessor });
+            yield;
+            // Retained suffix visibility is not evidence that a predecessor
+            // still needs execution. Check the DB before deferring to it.
+            if (!predecessor[0]?.found) {
+              if (!(yield* self.findPending(entry.predecessor, cohort))) self.blocked.set(entry.sequence, "missing_predecessor");
+              return;
+            }
+          }
+          const before = await self.spool.status();
+          yield;
+          const result = existing ?? await self.write(binding);
+          yield;
+          await self.installation.assertOwned();
+          await self.spool.complete(entry.sequence);
+          await syncDirectory(self.spoolRoot);
+          yield;
+          const after = await self.spool.status();
+          // Completing an already-committed suffix behind a blocked head is
+          // idempotent, not progress. Preserve advancement earlier in the pass.
+          progress = progress || result.created || after.pending < before.pending;
+          self.blocked.delete(entry.sequence);
+        } catch (error) {
+          const reason = fault(error).code;
+          if (reason === "revision_conflict" || reason === "stale_revision") self.blocked.set(entry.sequence, reason);
+          else throw error;
+        }
+      });
+    }
+    yield* this.eachPendingPage(cohort, async function* (entry) {
+      if (runtime.quarantined.has(entry.sequence) || runtime.blocked.has(entry.sequence)) return;
+      const committed = await runtime.committed(runtime.validated(entry));
+      yield;
+      if (!committed) runtime.blocked.set(entry.sequence, yield* runtime.dependencyReason(entry, cohort));
+    });
+  }
+  async ingestStatus(identity: RpcIngestStatusParams): Promise<RpcIngestStatusResult> {
+    if (identity.data_incarnation !== this.installation.incarnation) throw new RpcFault("incarnation_mismatch", "delivery belongs to another incarnation");
+    await this.refresh();
+    const binding = await this.binding(identity.revision_key);
+    if (!binding || binding.body_digest !== identity.body_digest) return { state: "unknown", ...identity };
+    if (this.available) {
+      const committed = await this.committed(binding);
+      if (committed) return committed;
+    }
+    const spoolStatus = await this.spool.status();
+    if (spoolStatus.quarantined) return { state: "quarantined", ...identity, reason: "spool_corrupt" };
+    const entry = await this.pendingEntry(identity.revision_key);
+    if (!entry) return { state: "unknown", ...identity };
+    const quarantined = this.quarantined.get(entry.sequence);
+    if (quarantined) return { state: "quarantined", ...identity, reason: quarantined };
+    const reason = this.blocked.get(entry.sequence);
+    if (reason) return { ...this.spooled(binding, entry.sequence), state: "blocked", expected_previous_revision_key: entry.predecessor, reason };
+    this.validated(entry);
+    return this.spooled(binding, entry.sequence);
+  }
+  async status(pending: number, stopping: boolean): Promise<RpcStatusResult> {
+    await this.refresh();
+    const spool = await this.spool.status();
+    let bytes = 0;
+    try { bytes = (await stat(join(this.spoolRoot, "spool.journal"))).size; }
+    catch (error) { if (!hasCode(error, "ENOENT")) throw error; }
+    let outbox: number | null = null;
+    if (this.available) {
+      try { outbox = (await runtimeTimed("engine.status", () => this.engine.status())).pendingOutbox; }
+      catch (error) { if (!storageUnavailable(error)) throw error; this.available = false; }
+    }
+    return { version: 1, state: stopping ? "stopping" : this.available && !spool.quarantined && this.quarantined.size === 0 ? "ready" : "degraded",
+      storage: this.available ? "available" : "unavailable", data_incarnation: this.installation.incarnation,
+      fs_epoch: this.installation.epoch, queue: { pending, capacity: RPC_LIMITS.queued_requests },
+      spool: { pending: spool.pending, blocked: this.blocked.size, quarantined: spool.quarantined ? 1 : this.quarantined.size, bytes },
+      outbox_pending: outbox, capabilities };
+  }
+  /** The adapter is deliberately dependency-injected by the owner lifecycle.
+   * The current RPC contract has no authenticated archive manifest/path
+   * authority inputs, so even an injected adapter cannot be driven safely from
+   * these legacy no-parameter methods. Refuse rather than inventing a dump. */
+  async backup(context: InstallationContext): Promise<never> {
+    await this.installation.assertOwned();
+    if (!context.client_binding) throw new RpcFault("unauthenticated", "authenticated connection custody is required");
+    if (!this.authorityAdapter) throw new RpcFault("backup_adapter_unavailable", "offline backup adapter is not installed");
+    throw new RpcFault("backup_adapter_unavailable", "authenticated backup manifest/path authority API is not installed");
+  }
+  async restore(context: InstallationContext): Promise<never> {
+    await this.installation.assertOwned();
+    if (!context.client_binding) throw new RpcFault("unauthenticated", "authenticated connection custody is required");
+    if (!this.authorityAdapter) throw new RpcFault("restore_adapter_unavailable", "offline restore adapter is not installed");
+    throw new RpcFault("restore_adapter_unavailable", "authenticated restore manifest/path authority API is not installed");
+  }
+  async backupStatus(operation_id: string) {
+    return { state: "unknown" as const, operation_id, reason: "adapter_unavailable" as const };
+  }
+  async restoreStatus(operation_id: string) {
+    return { state: "unknown" as const, operation_id, reason: "adapter_unavailable" as const };
+  }
+  private async requireStorage(): Promise<void> {
+    await this.refresh();
+    if (!this.available) throw new RpcFault("storage_unavailable", "database unavailable", true);
+  }
+  async graphEnvelope(params: { seed_ids: string[]; T?: number }, context: InstallationContext) {
+    await this.installation.assertOwned();
+    await this.requireStorage();
+    return this.engine.graphEnvelope(params.seed_ids, params.T === undefined ? {} : { T: params.T }, context);
+  }
+
+  async admitDream(params: RpcDreamAdmitParams, context: InstallationContext) { await this.requireStorage(); return this.engine.store.admitDream(params, context); }
+  async dreamStatus(id: string, context: InstallationContext) { await this.requireStorage(); return this.engine.store.dreamStatus(id, context); }
+  async leaseDream(params: RpcDreamLeaseParams, context: InstallationContext) { await this.requireStorage(); return this.engine.store.leaseDream(params, context); }
+  async expireDream(params: RpcDreamExpireParams, context: InstallationContext) { await this.requireStorage(); return this.engine.store.expireDream(params, context); }
+  async executeDream(params: RpcDreamExecuteParams, context: InstallationContext) { await this.requireStorage(); return this.engine.store.executeDream(params, context); }
+
+  async createExtractionPipeline(params: CreateExtractionPipeline, context: InstallationContext) {
+    await this.requireStorage();
+    return this.engine.createExtractionPipeline(params,context);
+  }
+  async runExtractionPipeline(params: RunExtractionPipeline, context: InstallationContext) {
+    await this.requireStorage();
+    return this.engine.runExtractionPipeline(params,context);
+  }
+  async extractionPipelineStatus(id: string, context: InstallationContext) {
+    await this.requireStorage();
+    return this.engine.store.readExtractionPipeline(id,context);
+  }
+
+  async recall(params: RpcRecallParams, context: InstallationContext) {
+    await this.requireStorage();
+    return this.engine.recallHybrid(params, context);
+  }
+  async recordRecallTransport(input: RecallTransportInput, context: InstallationContext) {
+    await this.requireStorage();
+    return this.engine.recordRecallTransport(input, context);
+  }
+  async exposeRecall(recallId: string, context: InstallationContext) {
+    await this.requireStorage();
+    return this.engine.exposeRecall(recallId, context);
+  }
+  async recoverEmbedding(params: RpcEmbeddingRecoverParams, context: InstallationContext) {
+    await this.requireStorage();
+    return this.engine.recoverEmbedding(params, context);
+  }
+  async embeddingStatus(operationId: string, context: InstallationContext) {
+    await this.requireStorage();
+    return this.engine.embeddingStatus(operationId, context);
+  }
+  async commit(params: CommitReceiptInput, context: InstallationContext) {
+    await this.requireStorage();
+    return this.engine.commitReceipt(params, context);
+  }
+  async setPolicy(params: RpcPolicySetParams, context: InstallationContext) {
+    await this.requireStorage();
+    return this.engine.setPolicy(params, context);
+  }
+  async revokePolicy(params: RpcPolicyRevokeParams, context: InstallationContext) {
+    await this.requireStorage();
+    return this.engine.revokePolicy(params, context);
+  }
+  async verifyHitCache() {
+    await this.requireStorage();
+    const result = await this.engine.verifyHitCache();
+    if (result.issues.length > 1024) throw new RpcFault("resource_exhausted", "hit-cache verification exceeds the response limit");
+    return result;
+  }
+  async rebuildHitCache() {
+    await this.requireStorage();
+    return this.engine.rebuildHitCache();
+  }
+  async close(): Promise<void> {
+    this.cancelDrain();
+    await this.drainJob?.return(); this.drainJob = undefined;
+    await this.uploads.close(); await this.engine.close(); await this.reader.close();
+  }
+}

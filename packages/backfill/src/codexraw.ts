@@ -19,7 +19,7 @@ const CONTENT_LIMIT = 4000;
  */
 const COMPACTION_TEXT = "context_compacted";
 
-interface CodexRecord {
+export interface CodexRecord {
   timestamp: string;
   type: string;
   payload: Record<string, unknown>;
@@ -55,22 +55,47 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
  * Rollout files are appended live, so a session killed mid-write leaves a
  * truncated final line. Dropping it keeps the other 12,847 files ingestible.
  */
-function parseRecord(line: string): CodexRecord | undefined {
+export function parseCodexRecord(line: string, strict = false): CodexRecord | undefined {
   let raw: unknown;
   try {
     raw = JSON.parse(line);
-  } catch {
+  } catch (cause) {
+    if (strict) throw new Error("invalid JSON record", { cause });
     return undefined;
   }
   const record = asRecord(raw);
-  if (record === undefined) return undefined;
+  if (record === undefined) { if (strict) throw new Error("invalid Codex record shape"); return undefined; }
   const timestamp = optionalText(record["timestamp"]);
   const type = optionalText(record["type"]);
   const payload = asRecord(record["payload"]);
   if (timestamp === undefined || type === undefined || payload === undefined) {
+    if (strict) throw new Error("invalid Codex record shape");
     return undefined;
   }
   return { timestamp, type, payload };
+}
+
+/** Stateful parser used by the bounded runtime snapshot reader. */
+export function createCodexRawParser(session = "unknown", strict = false): (line: string) => CodexRawEpisode[] {
+  const context: SessionContext = { id: session };
+  let index = -1;
+  return (line: string) => {
+    if (line.trim() === "") return [];
+    index += 1;
+    const record = parseCodexRecord(line, strict);
+    if (record === undefined) return [];
+    if (record.type === "session_meta") {
+      const id = optionalText(record.payload["id"]); if (id !== undefined) context.id = id;
+      const cwd = optionalText(record.payload["cwd"]); if (cwd !== undefined) context.cwd = cwd;
+      return [];
+    }
+    if (record.type === "turn_context") {
+      const model = optionalText(record.payload["model"]); if (model !== undefined) context.model = model;
+      return [];
+    }
+    const turn = toTurn(record, context.id, index);
+    return turn === undefined ? [] : [toEpisode(turn, context)];
+  };
 }
 
 /**
@@ -277,7 +302,7 @@ async function collectFile(path: string): Promise<CodexRawEpisode[]> {
     for await (const line of lines) {
       if (line.trim() === "") continue;
       index += 1;
-      const record = parseRecord(line);
+      const record = parseCodexRecord(line);
       if (record === undefined) continue;
       if (record.type === "session_meta") {
         const id = optionalText(record.payload["id"]);

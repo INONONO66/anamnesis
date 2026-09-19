@@ -1,0 +1,139 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "entity_resolutions": {
+      "maxItems": 16,
+      "type": "array",
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "string",
+                "const": "unresolved"
+              },
+              "mention": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024
+              }
+            },
+            "required": [
+              "status",
+              "mention"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "string",
+                "const": "existing"
+              },
+              "mention": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024
+              },
+              "entity_id": {
+                "type": "string",
+                "format": "uuid",
+                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$"
+              }
+            },
+            "required": [
+              "status",
+              "mention",
+              "entity_id"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "string",
+                "const": "new"
+              },
+              "mention": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024
+              },
+              "entity_id": {
+                "type": "string",
+                "format": "uuid",
+                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$"
+              },
+              "normalized_name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              },
+              "entity_kind": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "entity_key": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            },
+            "required": [
+              "status",
+              "mention",
+              "entity_id",
+              "normalized_name",
+              "entity_kind",
+              "entity_key"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      }
+    },
+    "attribution_speakers": {
+      "maxItems": 8,
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "origin_source": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "origin_actor": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          }
+        },
+        "required": [
+          "origin_source",
+          "origin_actor"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "allow_no_single_locus": {
+      "type": "boolean"
+    },
+    "content_language": {
+      "type": "string",
+      "maxLength": 35,
+      "pattern": "^[a-z]{2,8}(?:-[a-z0-9]{1,8})*$"
+    }
+  },
+  "required": [
+    "entity_resolutions",
+    "attribution_speakers",
+    "allow_no_single_locus",
+    "content_language"
+  ],
+  "additionalProperties": false
+}

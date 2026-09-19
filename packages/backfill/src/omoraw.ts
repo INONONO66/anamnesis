@@ -160,6 +160,22 @@ function toEpisode(event: SessionEvent): OmoRawEpisode {
  * writes transcripts past a megabyte, and a session killed mid-write leaves a
  * truncated final line that must not lose the session it precedes.
  */
+/** Stateful line parser used by the runtime admission path. It deliberately
+ * requires the producer's session header before accepting events. */
+export function createOmoRawParser(): (line: string) => OmoRawEpisode[] {
+  let session: string | undefined;
+  return (line: string): OmoRawEpisode[] => {
+    const raw: unknown = JSON.parse(line);
+    if (isRecord(raw) && raw["type"] === SESSION_HEADER) {
+      session = optionalText(raw["id"]);
+      return [];
+    }
+    if (session === undefined) return [];
+    const event = parseEvent(line);
+    return event === undefined ? [] : [toEpisode({ ...event, session })];
+  };
+}
+
 async function readSession(path: string): Promise<SessionEvent[]> {
   const events: SessionEvent[] = [];
   let session: string | undefined;

@@ -34,6 +34,13 @@ async function writeCursor(root: string, value: unknown) {
   await writeFile(join(root, "spool.done"), JSON.stringify({ payload, checksum: createHash("sha256").update(payload).digest("hex") }));
 }
 
+test("completing sequence 2 cannot advance the contiguous watermark past sequence 1", async () => {
+  const { root, spool } = await fixture();
+  await spool.complete(2);
+  expect(await cursor(root)).toEqual({ version: 2, frontier: 0, completed: [2] });
+  expect(await spool.status()).toEqual({ pending: 2, nextSequence: 3, quarantined: false });
+});
+
 test("reopened replay retains completed suffix until the contiguous gap closes", async () => {
   const { root, spool } = await fixture();
   const journal = await readFile(join(root, "spool.journal"));

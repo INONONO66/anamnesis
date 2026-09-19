@@ -1,6 +1,33 @@
 export type Arc = { from: string; to: string; role: string; id: string; weight?: number };
 export type PprInput = { nodes: string[]; arcs: Arc[]; seeds: Map<string, number>; alpha?: number; tolerance?: number; maxIter?: number; roleWeights?: Record<string, number> };
 export type PprResult = { values: Float64Array<ArrayBufferLike>; rowSums: number[]; mass: number; iterations: number; iterateDeltaL1: number; residualL1: number; errorBoundL1: number };
+export type FixedCsr = { nodes: string[]; offsets: number[]; targets: number[]; roles: string[] };
+
+/** Deterministic graph snapshot used by both production solving and external
+ * qualification. No native adjacency or caller-order dependence is allowed. */
+export function exportFixedCsr(input: Pick<PprInput, "nodes" | "arcs">): FixedCsr {
+  const nodes = [...input.nodes].sort();
+  if (new Set(nodes).size !== nodes.length || nodes.some(node => typeof node !== "string")) throw new RangeError("invalid CSR nodes");
+  const ix = new Map(nodes.map((node, i) => [node, i]));
+  const arcs = [...input.arcs].sort((x, y) => x.from < y.from ? -1 : x.from > y.from ? 1 : x.role < y.role ? -1 : x.role > y.role ? 1 : x.id < y.id ? -1 : x.id > y.id ? 1 : x.to < y.to ? -1 : x.to > y.to ? 1 : 0);
+  const offsets: number[] = Array(nodes.length + 1).fill(0), targets: number[] = [], roles: string[] = [];
+  for (const arc of arcs) {
+    const from = ix.get(arc.from), to = ix.get(arc.to);
+    if (from === undefined || to === undefined || typeof arc.role !== "string" || !arc.role || typeof arc.id !== "string" || !arc.id || arc.weight !== undefined) throw new RangeError("invalid CSR arc");
+    targets.push(to); roles.push(arc.role); offsets[from + 1]!++;
+  }
+  for (let i = 1; i < offsets.length; i++) offsets[i]! += offsets[i - 1]!;
+  return { nodes, offsets, targets, roles };
+}
+
+export function solveFixedCsr(csr: FixedCsr, seeds: Map<string, number>, options: Omit<PprInput, "nodes" | "arcs" | "seeds"> = {}): PprResult {
+  if (csr.offsets.length !== csr.nodes.length + 1 || csr.targets.length !== csr.roles.length || csr.offsets[0] !== 0 || csr.offsets.at(-1) !== csr.targets.length) throw new RangeError("invalid CSR");
+  if (csr.offsets.some((offset, i) => !Number.isSafeInteger(offset) || offset < 0 || offset > csr.targets.length || (i > 0 && offset < csr.offsets[i - 1]!)) ||
+      csr.targets.some(target => !Number.isSafeInteger(target) || target < 0 || target >= csr.nodes.length) ||
+      csr.roles.some(role => typeof role !== "string" || !role)) throw new RangeError("invalid CSR");
+  const arcs = csr.nodes.flatMap((from, i) => csr.targets.slice(csr.offsets[i]!, csr.offsets[i + 1]!).map((to, j) => ({ from, to: csr.nodes[to]!, role: csr.roles[csr.offsets[i]! + j]!, id: String(j).padStart(16, "0") })));
+  return solvePpr({ ...options, nodes: csr.nodes, arcs, seeds });
+}
 type Link = { to: number; weight: number };
 export const solvePpr = (input: PprInput): PprResult => {
   if (!input || !Array.isArray(input.nodes) || !Array.isArray(input.arcs) || !(input.seeds instanceof Map)) throw new RangeError("malformed input");

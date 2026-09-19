@@ -1,3 +1,5 @@
+import { adoptionGain } from "./adoption-numeric.ts";
+
 export const retention = (elapsedDays: number, stability: number): number => {
   if (!Number.isFinite(elapsedDays) || elapsedDays < 0 || !Number.isFinite(stability) || stability <= 0) throw new RangeError("invalid retention input");
   return Math.pow(1 + (19 / 81) * elapsedDays / stability, -0.5);
@@ -12,8 +14,7 @@ const DAY = 86_400_000;
 export const adopt = (state: State, at: number, kappa: number): State => {
   if (!Number.isFinite(at) || !Number.isFinite(kappa) || kappa < 0 || kappa > 1) throw new RangeError("invalid adoption");
   const gap = Math.max(0, at - state.lastHit) / DAY;
-  const r = retention(gap, state.stability);
-  const gain = state.stability * 5 * kappa * (Math.exp(1 - r) - 1) * Math.pow(state.stability, -0.1);
+  const gain = adoptionGain(state.stability, gap, kappa);
   return { stability: Math.min(3650, state.stability + gain), lastHit: Math.max(state.lastHit, at), hitCount: state.hitCount };
 };
 export const replay = (m0: number, ingestedAt: number, hits: Hit[]): State => {

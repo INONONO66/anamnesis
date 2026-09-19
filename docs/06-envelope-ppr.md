@@ -601,10 +601,13 @@ mathematically deterministic decisions.
 The numeric PPR kernel uses fixed-order binary64 arithmetic. With identical
 CSR, seeds, runtime/implementation and options it is bit-reproducible; this is
 not a guarantee that rerunning ANN queries, concurrent cache reads or timeout
-races produces the same envelope. `Math.exp`/`Math.pow` in accessibility and
-mass scoring and `Math.log2` in hub damping may differ in the last ulp across
-runtimes; cross-runtime comparisons give these values tolerance 1e-12. RRF
-itself is rank-based addition/division, not an exp/pow formula.
+races produces the same envelope. Native transcendental calls in recall-time
+accessibility/mass scoring and `Math.log2` in hub damping may differ in the last
+ulp across runtimes; cross-runtime comparisons give these values tolerance
+1e-12. This is not permission to use fuzzy equality for persisted Hit caches:
+the G003 `binary64-adoption-v1` kernel in docs/04 section 7 uses fixed-order
+arithmetic for producer and replay, with exact versioned cache comparison.
+RRF itself is rank-based addition/division, not an exp/pow formula.
 
 Capture the candidate/index/coverage state, ConductingArc completeness and
 stage/source ordered probe rows/counts, stale-row exclusions and saturation

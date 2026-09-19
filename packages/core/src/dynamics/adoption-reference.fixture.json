@@ -1,0 +1,542 @@
+[
+  {
+    "stability": 1.0,
+    "at": 0,
+    "kappa": 0.0,
+    "expected": 1.0
+  },
+  {
+    "stability": 1.0,
+    "at": 0,
+    "kappa": 0.0625,
+    "expected": 1.0
+  },
+  {
+    "stability": 1.0,
+    "at": 0,
+    "kappa": 1.0,
+    "expected": 1.0
+  },
+  {
+    "stability": 1.0,
+    "at": 5,
+    "kappa": 0.0,
+    "expected": 1.0
+  },
+  {
+    "stability": 1.0,
+    "at": 5,
+    "kappa": 0.0625,
+    "expected": 1.0000000021210205
+  },
+  {
+    "stability": 1.0,
+    "at": 5,
+    "kappa": 1.0,
+    "expected": 1.000000033936328
+  },
+  {
+    "stability": 1.0,
+    "at": 86400000,
+    "kappa": 0.0,
+    "expected": 1.0
+  },
+  {
+    "stability": 1.0,
+    "at": 86400000,
+    "kappa": 0.0625,
+    "expected": 1.0328659118986399
+  },
+  {
+    "stability": 1.0,
+    "at": 86400000,
+    "kappa": 1.0,
+    "expected": 1.5258545903782381
+  },
+  {
+    "stability": 1.0,
+    "at": 2592000000,
+    "kappa": 0.0,
+    "expected": 1.0
+  },
+  {
+    "stability": 1.0,
+    "at": 2592000000,
+    "kappa": 0.0625,
+    "expected": 1.2844698791442972
+  },
+  {
+    "stability": 1.0,
+    "at": 2592000000,
+    "kappa": 1.0,
+    "expected": 5.551518066308754
+  },
+  {
+    "stability": 1.0,
+    "at": 9007199254740991,
+    "kappa": 0.0,
+    "expected": 1.0
+  },
+  {
+    "stability": 1.0,
+    "at": 9007199254740991,
+    "kappa": 0.0625,
+    "expected": 1.5367913089226983
+  },
+  {
+    "stability": 1.0,
+    "at": 9007199254740991,
+    "kappa": 1.0,
+    "expected": 9.588660942763173
+  },
+  {
+    "stability": 1.5,
+    "at": 0,
+    "kappa": 0.0,
+    "expected": 1.5
+  },
+  {
+    "stability": 1.5,
+    "at": 0,
+    "kappa": 0.0625,
+    "expected": 1.5
+  },
+  {
+    "stability": 1.5,
+    "at": 0,
+    "kappa": 1.0,
+    "expected": 1.5
+  },
+  {
+    "stability": 1.5,
+    "at": 5,
+    "kappa": 0.0,
+    "expected": 1.5
+  },
+  {
+    "stability": 1.5,
+    "at": 5,
+    "kappa": 0.0625,
+    "expected": 1.5000000020367408
+  },
+  {
+    "stability": 1.5,
+    "at": 5,
+    "kappa": 1.0,
+    "expected": 1.5000000325878513
+  },
+  {
+    "stability": 1.5,
+    "at": 86400000,
+    "kappa": 0.0,
+    "expected": 1.5
+  },
+  {
+    "stability": 1.5,
+    "at": 86400000,
+    "kappa": 0.0625,
+    "expected": 1.5326717571312765
+  },
+  {
+    "stability": 1.5,
+    "at": 86400000,
+    "kappa": 1.0,
+    "expected": 2.0227481141004233
+  },
+  {
+    "stability": 1.5,
+    "at": 2592000000,
+    "kappa": 0.0,
+    "expected": 1.5
+  },
+  {
+    "stability": 1.5,
+    "at": 2592000000,
+    "kappa": 0.0625,
+    "expected": 1.8544808568753
+  },
+  {
+    "stability": 1.5,
+    "at": 2592000000,
+    "kappa": 1.0,
+    "expected": 7.1716937100048
+  },
+  {
+    "stability": 1.5,
+    "at": 9007199254740991,
+    "kappa": 0.0,
+    "expected": 1.5
+  },
+  {
+    "stability": 1.5,
+    "at": 9007199254740991,
+    "kappa": 0.0625,
+    "expected": 2.273136861073557
+  },
+  {
+    "stability": 1.5,
+    "at": 9007199254740991,
+    "kappa": 1.0,
+    "expected": 13.870189777176911
+  },
+  {
+    "stability": 2.0,
+    "at": 0,
+    "kappa": 0.0,
+    "expected": 2.0
+  },
+  {
+    "stability": 2.0,
+    "at": 0,
+    "kappa": 0.0625,
+    "expected": 2.0
+  },
+  {
+    "stability": 2.0,
+    "at": 0,
+    "kappa": 1.0,
+    "expected": 2.0
+  },
+  {
+    "stability": 2.0,
+    "at": 5,
+    "kappa": 0.0,
+    "expected": 2.0
+  },
+  {
+    "stability": 2.0,
+    "at": 5,
+    "kappa": 0.0625,
+    "expected": 2.0000000019789823
+  },
+  {
+    "stability": 2.0,
+    "at": 5,
+    "kappa": 1.0,
+    "expected": 2.000000031663714
+  },
+  {
+    "stability": 2.0,
+    "at": 86400000,
+    "kappa": 0.0,
+    "expected": 2.0
+  },
+  {
+    "stability": 2.0,
+    "at": 86400000,
+    "kappa": 0.0625,
+    "expected": 2.0323192915400194
+  },
+  {
+    "stability": 2.0,
+    "at": 86400000,
+    "kappa": 1.0,
+    "expected": 2.5171086646403102
+  },
+  {
+    "stability": 2.0,
+    "at": 2592000000,
+    "kappa": 0.0,
+    "expected": 2.0
+  },
+  {
+    "stability": 2.0,
+    "at": 2592000000,
+    "kappa": 0.0625,
+    "expected": 2.4071459310985808
+  },
+  {
+    "stability": 2.0,
+    "at": 2592000000,
+    "kappa": 1.0,
+    "expected": 8.51433489757729
+  },
+  {
+    "stability": 2.0,
+    "at": 9007199254740991,
+    "kappa": 0.0,
+    "expected": 2.0
+  },
+  {
+    "stability": 2.0,
+    "at": 9007199254740991,
+    "kappa": 0.0625,
+    "expected": 3.0015552568084787
+  },
+  {
+    "stability": 2.0,
+    "at": 9007199254740991,
+    "kappa": 1.0,
+    "expected": 18.024884108935662
+  },
+  {
+    "stability": 100.0,
+    "at": 0,
+    "kappa": 0.0,
+    "expected": 100.0
+  },
+  {
+    "stability": 100.0,
+    "at": 0,
+    "kappa": 0.0625,
+    "expected": 100.0
+  },
+  {
+    "stability": 100.0,
+    "at": 0,
+    "kappa": 1.0,
+    "expected": 100.0
+  },
+  {
+    "stability": 100.0,
+    "at": 5,
+    "kappa": 0.0,
+    "expected": 100.0
+  },
+  {
+    "stability": 100.0,
+    "at": 5,
+    "kappa": 0.0625,
+    "expected": 100.00000000133828
+  },
+  {
+    "stability": 100.0,
+    "at": 5,
+    "kappa": 1.0,
+    "expected": 100.00000002141238
+  },
+  {
+    "stability": 100.0,
+    "at": 86400000,
+    "kappa": 0.0,
+    "expected": 100.0
+  },
+  {
+    "stability": 100.0,
+    "at": 86400000,
+    "kappa": 0.0625,
+    "expected": 100.02309828035
+  },
+  {
+    "stability": 100.0,
+    "at": 86400000,
+    "kappa": 1.0,
+    "expected": 100.3695724855999
+  },
+  {
+    "stability": 100.0,
+    "at": 2592000000,
+    "kappa": 0.0,
+    "expected": 100.0
+  },
+  {
+    "stability": 100.0,
+    "at": 2592000000,
+    "kappa": 0.0625,
+    "expected": 100.67031072503256
+  },
+  {
+    "stability": 100.0,
+    "at": 2592000000,
+    "kappa": 1.0,
+    "expected": 110.72497160052102
+  },
+  {
+    "stability": 100.0,
+    "at": 9007199254740991,
+    "kappa": 0.0,
+    "expected": 100.0
+  },
+  {
+    "stability": 100.0,
+    "at": 9007199254740991,
+    "kappa": 0.0625,
+    "expected": 133.7718033452273
+  },
+  {
+    "stability": 100.0,
+    "at": 9007199254740991,
+    "kappa": 1.0,
+    "expected": 640.3488535236369
+  },
+  {
+    "stability": 3649.0,
+    "at": 0,
+    "kappa": 0.0,
+    "expected": 3649.0
+  },
+  {
+    "stability": 3649.0,
+    "at": 0,
+    "kappa": 0.0625,
+    "expected": 3649.0
+  },
+  {
+    "stability": 3649.0,
+    "at": 0,
+    "kappa": 1.0,
+    "expected": 3649.0
+  },
+  {
+    "stability": 3649.0,
+    "at": 5,
+    "kappa": 0.0,
+    "expected": 3649.0
+  },
+  {
+    "stability": 3649.0,
+    "at": 5,
+    "kappa": 0.0625,
+    "expected": 3649.000000000934
+  },
+  {
+    "stability": 3649.0,
+    "at": 5,
+    "kappa": 1.0,
+    "expected": 3649.0000000149435
+  },
+  {
+    "stability": 3649.0,
+    "at": 86400000,
+    "kappa": 0.0,
+    "expected": 3649.0
+  },
+  {
+    "stability": 3649.0,
+    "at": 86400000,
+    "kappa": 0.0625,
+    "expected": 3649.0161382806314
+  },
+  {
+    "stability": 3649.0,
+    "at": 86400000,
+    "kappa": 1.0,
+    "expected": 3649.258212490104
+  },
+  {
+    "stability": 3649.0,
+    "at": 2592000000,
+    "kappa": 0.0,
+    "expected": 3649.0
+  },
+  {
+    "stability": 3649.0,
+    "at": 2592000000,
+    "kappa": 0.0625,
+    "expected": 3649.483697653446
+  },
+  {
+    "stability": 3649.0,
+    "at": 2592000000,
+    "kappa": 1.0,
+    "expected": 3650.0
+  },
+  {
+    "stability": 3649.0,
+    "at": 9007199254740991,
+    "kappa": 0.0,
+    "expected": 3649.0
+  },
+  {
+    "stability": 3649.0,
+    "at": 9007199254740991,
+    "kappa": 0.0625,
+    "expected": 3650.0
+  },
+  {
+    "stability": 3649.0,
+    "at": 9007199254740991,
+    "kappa": 1.0,
+    "expected": 3650.0
+  },
+  {
+    "stability": 3650.0,
+    "at": 0,
+    "kappa": 0.0,
+    "expected": 3650.0
+  },
+  {
+    "stability": 3650.0,
+    "at": 0,
+    "kappa": 0.0625,
+    "expected": 3650.0
+  },
+  {
+    "stability": 3650.0,
+    "at": 0,
+    "kappa": 1.0,
+    "expected": 3650.0
+  },
+  {
+    "stability": 3650.0,
+    "at": 5,
+    "kappa": 0.0,
+    "expected": 3650.0
+  },
+  {
+    "stability": 3650.0,
+    "at": 5,
+    "kappa": 0.0625,
+    "expected": 3650.0
+  },
+  {
+    "stability": 3650.0,
+    "at": 5,
+    "kappa": 1.0,
+    "expected": 3650.0
+  },
+  {
+    "stability": 3650.0,
+    "at": 86400000,
+    "kappa": 0.0,
+    "expected": 3650.0
+  },
+  {
+    "stability": 3650.0,
+    "at": 86400000,
+    "kappa": 0.0625,
+    "expected": 3650.0
+  },
+  {
+    "stability": 3650.0,
+    "at": 86400000,
+    "kappa": 1.0,
+    "expected": 3650.0
+  },
+  {
+    "stability": 3650.0,
+    "at": 2592000000,
+    "kappa": 0.0,
+    "expected": 3650.0
+  },
+  {
+    "stability": 3650.0,
+    "at": 2592000000,
+    "kappa": 0.0625,
+    "expected": 3650.0
+  },
+  {
+    "stability": 3650.0,
+    "at": 2592000000,
+    "kappa": 1.0,
+    "expected": 3650.0
+  },
+  {
+    "stability": 3650.0,
+    "at": 9007199254740991,
+    "kappa": 0.0,
+    "expected": 3650.0
+  },
+  {
+    "stability": 3650.0,
+    "at": 9007199254740991,
+    "kappa": 0.0625,
+    "expected": 3650.0
+  },
+  {
+    "stability": 3650.0,
+    "at": 9007199254740991,
+    "kappa": 1.0,
+    "expected": 3650.0
+  }
+]

@@ -1,10 +1,12 @@
 import { createReadStream } from "node:fs";
-import { mkdir, open, readdir } from "node:fs/promises";
+import { mkdir, open, readFile, readdir } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { z } from "zod";
 import { RememberInput } from "./engine.ts";
 import { validateElementSemantics } from "@anamnesis/protocol";
+import { HistoricalElement, historicalEligibility, type EligibilityReason } from "./legacy-format.ts";
 import type { PutResult } from "./store.ts";
 
 const PersistedElement = z
@@ -41,12 +43,52 @@ interface Rememberer {
   remember(input: RememberInput): Promise<PutResult>;
 }
 
+const HistoricalEntry = z.object({
+  recordedAt: z.iso.datetime(),
+  element: HistoricalElement.extend({
+    source_revision: z.string().min(1).optional(),
+    previous: z.string().min(1).optional(),
+    payload_media_type: z.string().min(1).optional(),
+    payload: z.array(z.number().int().min(0).max(255)).optional(),
+  }),
+}).strict();
+export interface HistoricalInspection {
+  file: string;
+  offset: number;
+  raw: Buffer;
+  sha256: string;
+  entry: z.infer<typeof HistoricalEntry>;
+  eligibility: EligibilityReason[];
+}
+
 /** Append-only origin journal; graph state is rebuilt from these records. */
 export class EpisodeJournal {
   constructor(
     private readonly directory: string,
     private readonly clock: () => Date = () => new Date(),
   ) {}
+
+  /** Inventory only. Provenance is explicit, never inferred from a parse failure
+   * or recordedAt. Keep the original bytes, including terminators, untouched. */
+  async inspect(format: string): Promise<HistoricalInspection[]> {
+    if (format !== "post167-pre194") throw new Error(`unsupported-legacy-format: ${format}`);
+    const results: HistoricalInspection[] = [];
+    const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+    const names = (await readdir(this.directory)).filter(name => /^journal-\d{4}-\d{2}\.jsonl$/.test(name)).sort();
+    for (const file of names) {
+      const bytes = await readFile(join(this.directory, file));
+      for (let offset = 0; offset < bytes.length;) {
+        const end = bytes.indexOf(0x0a, offset);
+        if (end < 0) throw new Error(`incomplete-legacy-line: ${file}:${offset}`);
+        const raw = bytes.subarray(offset, end + 1);
+        const entry = HistoricalEntry.parse(JSON.parse(decoder.decode(raw)));
+        results.push({ file, offset, raw, sha256: createHash("sha256").update(raw).digest("hex"),
+          entry, eligibility: historicalEligibility(entry.element) });
+        offset = end + 1;
+      }
+    }
+    return results;
+  }
 
   async append(input: object): Promise<void> {
     const parsed = RememberInput.parse(input);
@@ -80,19 +122,39 @@ export class EpisodeJournal {
     let replayed = 0;
 
     for (const name of names) {
-      const lines = createInterface({
-        input: createReadStream(join(this.directory, name), { encoding: "utf8" }),
-        crlfDelay: Infinity,
-      });
-      for await (const line of lines) {
-        opts.signal?.throwIfAborted();
-        const entry = JournalEntry.parse(JSON.parse(line));
-        const { payload, ...fields } = entry.element;
-        await engine.remember({
-          ...fields,
-          ...(payload ? { payload: Uint8Array.from(payload) } : {}),
-        });
-        replayed += 1;
+      const input = createReadStream(join(this.directory, name), { encoding: "utf8" });
+      const lines = createInterface({ input, crlfDelay: Infinity });
+      try {
+        for await (const line of lines) {
+          opts.signal?.throwIfAborted();
+          const entry = JournalEntry.parse(JSON.parse(line));
+          const { payload, ...fields } = entry.element;
+          const remember = engine.remember({
+            ...fields,
+            ...(payload ? { payload: Uint8Array.from(payload) } : {}),
+          });
+          if (!opts.signal) {
+            await remember;
+          } else {
+            let abort!: () => void;
+            const cancelled = new Promise<never>((_, reject) => {
+              abort = () => reject(opts.signal!.reason ?? new Error("Replay aborted"));
+              opts.signal!.addEventListener("abort", abort, { once: true });
+              if (opts.signal!.aborted) abort();
+            });
+            try {
+              await Promise.race([remember, cancelled]);
+            } finally {
+              opts.signal!.removeEventListener("abort", abort);
+            }
+          }
+          replayed += 1;
+        }
+      } finally {
+        // The async iterator normally closes readline, but an engine failure or
+        // abort must also release the underlying file before replay settles.
+        lines.close();
+        input.destroy();
       }
     }
 

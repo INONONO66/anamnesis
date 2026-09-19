@@ -126,5 +126,30 @@
         }
       ]
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "schema": {
+            "enum": [
+              "anamnesis.original-message/1",
+              "anamnesis.original-document/1",
+              "anamnesis.claim/1",
+              "anamnesis.mapping/1",
+              "anamnesis.synthesis/1"
+            ]
+          }
+        },
+        "required": [
+          "schema"
+        ]
+      },
+      "then": {
+        "required": [
+          "time"
+        ]
+      }
+    }
+  ]
 }

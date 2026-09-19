@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { open, readFile, rm } from "node:fs/promises";
+import { lstat, open, readFile, rm } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { RPC_LIMITS, RpcHash, RpcIngestStatusParams, RpcRememberParams } from "../../packages/protocol/src/rpc.ts";
 import { acquireInstallation, atomicJson, hasCode, syncDirectory } from "./config.ts";
@@ -55,17 +55,28 @@ function sameIdentity(a: RpcIngestStatusParams, b: RpcIngestStatusParams): boole
   return a.revision_key === b.revision_key && a.body_digest === b.body_digest && a.data_incarnation === b.data_incarnation;
 }
 const pendingFailure = (state: string) => Object.assign(new Error(`source_pending_${state}`), { code: `source_pending_${state}` });
-async function snapshot(path: string): Promise<Buffer> {
+interface SourceFile { bytes: Buffer; fingerprint: string; }
+async function sourceFingerprint(path: string): Promise<string> {
+  const info = await lstat(path, { bigint: true });
+  if (!info.isFile()) throw new Error("source_not_regular_file");
+  return [info.dev, info.ino, info.size, info.mtimeNs, info.ctimeNs, info.mode].join(":");
+}
+async function snapshot(path: string): Promise<SourceFile> {
+  const before = await sourceFingerprint(path);
   const file = await open(path, "r");
   try {
-    if (!(await file.stat()).isFile()) throw new Error("source_not_regular_file");
     const bytes = Buffer.allocUnsafe(SOURCE_MAX_BYTES + 1);
     let length = 0;
     while (length < bytes.length) {
       const { bytesRead } = await file.read(bytes, length, bytes.length - length, null);
-      if (!bytesRead) return bytes.subarray(0, length);
+      if (!bytesRead) {
+        const after = await sourceFingerprint(path);
+        if (after !== before) throw new Error("source_changed");
+        return { bytes: bytes.subarray(0, length), fingerprint: before };
+      }
       length += bytesRead;
     }
+    if (await sourceFingerprint(path) !== before) throw new Error("source_changed");
     throw new Error("source_too_large");
   } finally { await file.close(); }
 }
@@ -73,16 +84,19 @@ async function snapshot(path: string): Promise<Buffer> {
 export async function ingestSource(source: string, checkpointPath: string, client: RpcClient): Promise<void> {
   if ([checkpointPath, checkpointPath + ".pending.json"].some(path => resolve(source) === resolve(path))) throw new Error("source_checkpoint_path_conflict");
   await ingestSnapshot(checkpointPath, client, async () => {
-    const bytes = await snapshot(source);
-    const sourceHash = createHash("sha256").update(bytes).digest("hex");
-    const lines = new TextDecoder("utf-8", { fatal: true }).decode(bytes).split("\n");
+    const initial = await snapshot(source);
+    const sourceHash = createHash("sha256").update(initial.bytes).digest("hex");
+    const lines = new TextDecoder("utf-8", { fatal: true }).decode(initial.bytes).split("\n");
     if (lines.at(-1) === "") lines.pop();
     return { sourceHash, records: (async function* () {
       for (const line of lines) {
         if (Buffer.byteLength(line) > RPC_LIMITS.frame_bytes) throw new Error("source_record_too_large");
         yield { params: RpcRememberParams.parse(JSON.parse(line)) };
       }
-    })(), async assertUnchanged() {} };
+    })(), async assertUnchanged() {
+      const current = await snapshot(source);
+      if (current.fingerprint !== initial.fingerprint || createHash("sha256").update(current.bytes).digest("hex") !== sourceHash) throw new Error("source_changed");
+    } };
   });
 }
 

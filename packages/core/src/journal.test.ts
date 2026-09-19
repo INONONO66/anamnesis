@@ -211,4 +211,23 @@ describe("EpisodeJournal", () => {
       journal.replay(new RecordingEngine(), { signal: controller.signal }),
     ).rejects.toThrow();
   });
+
+  test("cancels a remember that is still pending", async () => {
+    const directory = await temporaryDirectory();
+    const journal = new EpisodeJournal(directory);
+    await journal.append(episode("pending-abort"));
+    const controller = new AbortController();
+    let started!: () => void;
+    const rememberStarted = new Promise<void>((resolve) => { started = resolve; });
+    const pendingEngine = {
+      async remember(_input: RememberInput): Promise<PutResult> {
+        started();
+        return new Promise<PutResult>(() => {});
+      },
+    };
+    const replay = journal.replay(pendingEngine, { signal: controller.signal });
+    await rememberStarted;
+    controller.abort();
+    await expect(replay).rejects.toThrow();
+  });
 });

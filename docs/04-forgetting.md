@@ -466,6 +466,23 @@ D46), not a later-text-wins or high-confidence-wins rule.
   equality alone cannot prove cached values are correct; verification compares
   values as well. Replay does not mutate Hits, raw outputs, Episode ingestion
   metadata or `m0`.
+- The G003 default-configuration implementation pins persisted accessibility
+  arithmetic as `HitCache.numeric_version = "binary64-adoption-v1"`. Adoption
+  uses fixed-order binary64 operations: power-of-four reduction plus eight
+  Newton square-root steps for R, 64 Newton tenth-root steps for `s^0.1`, and
+  24 Taylor terms for `exp(1-R)-1`. No native transcendental, decimal
+  quantization or fuzzy cache comparison is used in this kernel. At its
+  documented domain (`1 <= s <= 3650`, nonnegative finite elapsed days),
+  truncation errors are below binary64 rounding; exact operation order and
+  iteration counts are part of the numeric version. The mathematical priors
+  and reinforcement constants are unchanged.
+  Utility rewards, weights, ordered sums, attribution and U arithmetic are
+  unchanged and still compared exactly. A missing/unknown numeric marker or
+  any unequal value (including a one-ULP change) fails cache verification.
+  Existing native-transcendental caches require the explicit atomic hit-cache
+  rebuild, or are rebuilt when a new Hit touches that Episode. This upgrades
+  derived caches only: immutable Hits, receipts, originals and utility
+  evidence are not rewritten. Verification itself never migrates data.
 - An inserted Hit ordered before an existing Hit by `(t,id)` triggers full
   Episode replay, not an incremental update in arrival order. Every adoption
   step clamps elapsed time and retains `max(t_last_hit,h.t)`, even before

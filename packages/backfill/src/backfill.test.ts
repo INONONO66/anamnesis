@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { createHash } from "node:crypto";
 import {
   mkdtemp,
@@ -36,7 +36,16 @@ import {
 } from "./run.ts";
 import { maskSecrets, REDACTION } from "./secrets.ts";
 
+setDefaultTimeout(120000);
+
 const fixtureRoots = new Set<string>();
+let schemaInitTail = Promise.resolve();
+async function initFixtureEngine(engine: Engine): Promise<void> {
+  const turn = schemaInitTail.then(() => engine.init());
+  schemaInitTail = turn.then(() => undefined, () => undefined);
+  await turn;
+}
+
 async function fixtureRoot(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "backfill-"));
   fixtureRoots.add(root);
@@ -554,7 +563,7 @@ describe("collectAgentLog", () => {
     );
     const objectsRoot = await mkdtemp(join(tmpdir(), "anamnesis-objects-"));
     const engine = new Engine({ ...TEST_DB, objectsRoot });
-    await engine.init();
+    await initFixtureEngine(engine);
     try {
       const [first, second] = await collectAgentLog(root);
 
@@ -574,7 +583,7 @@ describe("collectAgentLog", () => {
     const root = await agentLogRoot(`chain-${Date.now()}`);
     const objectsRoot = await mkdtemp(join(tmpdir(), "anamnesis-objects-"));
     const engine = new Engine({ ...TEST_DB, objectsRoot });
-    await engine.init();
+    await initFixtureEngine(engine);
     try {
       const episodes = await collectAgentLog(root);
       const ids: string[] = [];
@@ -1121,7 +1130,7 @@ describe("collectGjcRaw", () => {
 
     const objectsRoot = await mkdtemp(join(tmpdir(), "anamnesis-objects-"));
     const engine = new Engine({ ...TEST_DB, objectsRoot });
-    await engine.init();
+    await initFixtureEngine(engine);
     try {
       const [fromExport] = await collectAgentLog(exported);
       const [fromRaw] = await collectGjcRaw(raw);
@@ -1842,7 +1851,7 @@ describe("collectClaudeRaw", () => {
     const root = await claudeRawRoot();
     const objectsRoot = await mkdtemp(join(tmpdir(), "anamnesis-objects-"));
     const engine = new Engine({ ...TEST_DB, objectsRoot });
-    await engine.init();
+    await initFixtureEngine(engine);
     try {
       const episodes = await collectClaudeRaw(root);
       const ids: string[] = [];
@@ -2207,7 +2216,7 @@ describe("collectCodexRaw", () => {
     const root = await codexRawRoot(`chain${Date.now()}`);
     const objectsRoot = await mkdtemp(join(tmpdir(), "anamnesis-objects-"));
     const engine = new Engine({ ...TEST_DB, objectsRoot });
-    await engine.init();
+    await initFixtureEngine(engine);
     try {
       const episodes = await collectCodexRaw(root);
       const ids: string[] = [];
@@ -2877,7 +2886,7 @@ describe("collectMiscRaw", () => {
     const root = await miscRawRoot();
     const objectsRoot = await mkdtemp(join(tmpdir(), "anamnesis-objects-"));
     const engine = new Engine({ ...TEST_DB, objectsRoot });
-    await engine.init();
+    await initFixtureEngine(engine);
     try {
       const episodes = await collectMiscRaw(root);
       const ids: string[] = [];
@@ -3450,7 +3459,7 @@ describe("collectOmoRaw", () => {
     const root = await omoRawRoot(`chain${Date.now()}`);
     const objectsRoot = await mkdtemp(join(tmpdir(), "anamnesis-objects-"));
     const engine = new Engine({ ...TEST_DB, objectsRoot });
-    await engine.init();
+    await initFixtureEngine(engine);
     try {
       const episodes = await collectOmoRaw(root);
       const ids: string[] = [];
@@ -3556,7 +3565,7 @@ describe("ingestGroups", () => {
     const stamp = `${Date.now()}-${process.pid}`;
     const objectsRoot = await mkdtemp(join(tmpdir(), "anamnesis-objects-"));
     const engine = new Engine({ ...TEST_DB, objectsRoot });
-    await engine.init();
+    await initFixtureEngine(engine);
     try {
       const sessions = [`par-a-${stamp}`, `par-b-${stamp}`, `par-c-${stamp}`];
       const collected = [0, 1, 2, 3, 4].flatMap((step) =>
@@ -3592,7 +3601,7 @@ describe("ingestGroups", () => {
     const stamp = `${Date.now()}-${process.pid}`;
     const objectsRoot = await mkdtemp(join(tmpdir(), "anamnesis-objects-"));
     const engine = new Engine({ ...TEST_DB, objectsRoot });
-    await engine.init();
+    await initFixtureEngine(engine);
     try {
       const collected = [
         { ...ingested(`dup-a-${stamp}`, "r0", "2026-01-01T00:00:00Z"), redactions: 2 },

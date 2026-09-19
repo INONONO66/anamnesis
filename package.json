@@ -1,6 +1,7 @@
 {
   "name": "anamnesis-monorepo",
   "private": true,
+  "type": "module",
   "workspaces": [
     "packages/*"
   ],
@@ -11,7 +12,10 @@
     "test:db": "bun scripts/ensure-test-db.ts",
     "migrate": "bun scripts/migrate.ts",
     "backup": "bun scripts/backup.ts",
-    "db:up": "docker compose up -d neo4j"
+    "db:up": "docker compose up -d neo4j",
+    "build:runtime": "bun build app/anamnesis/main.ts --target=node --outfile=dist/anamnesis-daemon.mjs && bun build app/anamnesis/ops.ts --target=node --outfile=dist/anamnesis-ops.mjs && bun build app/anamnesis/client.ts --target=node --outfile=dist/anamnesis-client.mjs",
+    "test:runtime": "bun run build:runtime && node --test app/anamnesis/process.test.mjs",
+    "test:runtime:surface": "node app/anamnesis/surface.mjs"
   },
   "devDependencies": {
     "@types/bun": "^1.2.21",

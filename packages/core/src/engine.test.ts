@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import neo4j, {
   type Driver,
   type Session,
@@ -20,6 +20,7 @@ const TEST_DB = {
 };
 if (!TEST_DB.uri || !TEST_DB.password) throw new Error("ANAMNESIS_TEST_NEO4J_URI and ANAMNESIS_TEST_NEO4J_PASSWORD are required");
 const AFTER_FIXTURES = "2027-01-01T00:00:00Z";
+setDefaultTimeout(120000);
 
 let engine: Engine;
 let objectsRoot: string;
@@ -160,8 +161,8 @@ async function labelsOf(id: string): Promise<string[]> {
   }
 }
 
-describe("Engine configuration", () => {
-  test("uses defaults and honors every environment override", () => {
+describe.serial("Engine configuration", () => {
+  test.serial("uses defaults and honors every environment override", () => {
     const keys = [
       "ANAMNESIS_NEO4J_URI",
       "ANAMNESIS_NEO4J_USER",
@@ -206,7 +207,7 @@ describe("Engine configuration", () => {
     }
   });
 
-  test("accepts a short explicit previous record", () => {
+  test.serial("accepts a short explicit previous record", () => {
     expect(
       RememberInput.parse({
         ...msg("config-previous", "Previous fixture", "2026-08-20T00:00:00Z"),
@@ -221,7 +222,7 @@ beforeAll(async () => {
   objectsRoot = await mkdtemp(join(tmpdir(), "anamnesis-objects-"));
   engine = new Engine({ ...TEST_DB, objectsRoot });
   await engine.init();
-});
+}, 120000); // Cold schema creation includes the bounded db.awaitIndexes(60) barrier.
 
 afterAll(async () => {
   await engine.close();
@@ -234,8 +235,8 @@ afterAll(async () => {
   await rm(objectsRoot, { recursive: true });
 });
 
-describe("Engine storage lifecycle", () => {
-  test("init creates the complete schema and is idempotent", async () => {
+describe.serial("Engine storage lifecycle", () => {
+  test.serial("init creates the complete schema and is idempotent", async () => {
     const constraints = [
       "element_id",
       "link_idem_mentions",
@@ -273,9 +274,9 @@ describe("Engine storage lifecycle", () => {
     expect(await schemaObjectNames("INDEXES")).toEqual(
       expect.arrayContaining(indexes),
     );
-  });
+  }, 180000); // Two real schema/index publication barriers, not a latency assertion.
 
-  test("store exposes its effective default and explicit database", async () => {
+  test.serial("store exposes its effective default and explicit database", async () => {
     const defaultStore = new Store(TEST_DB);
     const explicitStore = new Store({ ...TEST_DB, database: "analytics" });
     expect(defaultStore.databaseName).toBe("neo4j");
@@ -299,12 +300,12 @@ describe("Engine storage lifecycle", () => {
     await explicitStore.close();
   });
 
-  test("sanitizes Lucene punctuation and repeated whitespace", () => {
+  test.serial("sanitizes Lucene punctuation and repeated whitespace", () => {
     expect(luceneQuery('kim*chi AND "x"')).toBe("kim chi AND x");
     expect(luceneQuery("a  \t b")).toBe("a b");
   });
 
-  test("closes write sessions on success", async () => {
+  test.serial("closes write sessions on success", async () => {
     const driver = adminDriver();
     const openSession = driver.session.bind(driver);
     let closes = 0;
@@ -337,7 +338,7 @@ describe("Engine storage lifecycle", () => {
     await store.close();
   });
 
-  test("remember, digest, and recall round trip", async () => {
+  test.serial("remember, digest, and recall round trip", async () => {
     const later = await engine.remember(
       msg("m1", "Ino prefers dark mode", "2026-08-21T14:00:00+09:00"),
     );
@@ -380,7 +381,7 @@ describe("Engine storage lifecycle", () => {
     expect(hits[0]!.element.content).toContain("dark mode");
   });
 
-  test("digest skips an outbox entry whose element was removed", async () => {
+  test.serial("digest skips an outbox entry whose element was removed", async () => {
     const removed = await engine.remember(
       msg("removed-1", "Removed episode", "2026-08-22T12:45:00+09:00"),
     );
@@ -397,7 +398,7 @@ describe("Engine storage lifecycle", () => {
     expect(handled).toBe(0);
   });
 
-  test("requeueEpisodes uses the original-message schema by default", async () => {
+  test.serial("requeueEpisodes uses the original-message schema by default", async () => {
     await engine.remember(
       msg("requeue-default", "Default requeue", "2026-08-22T12:50:00+09:00"),
     );
@@ -407,7 +408,7 @@ describe("Engine storage lifecycle", () => {
     expect(await engine.digest(() => {})).toBe(requeued);
   });
 
-  test("requeueEpisodes makes processed episodes available to digest again", async () => {
+  test.serial("requeueEpisodes makes processed episodes available to digest again", async () => {
     const schema = "anamnesis.requeue-test/1";
     await engine.remember({
       ...msg(
@@ -429,7 +430,7 @@ describe("Engine storage lifecycle", () => {
     expect(processedIds[1]).toBe(processedIds[0]);
   });
 
-  test("NEXT_EPISODE links episodes in event-time order", async () => {
+  test.serial("NEXT_EPISODE links episodes in event-time order", async () => {
     const chain = (record: string, content: string, value: string) =>
       ({
         time: { value, precision: "second" },
@@ -462,7 +463,7 @@ describe("Engine storage lifecycle", () => {
     expect(await engine.store.linksOf(c1.id, "NEXT_EPISODE")).toHaveLength(1);
   });
 
-  test("session topology keys by session, predecessor and successor", async () => {
+  test.serial("session topology keys by session, predecessor and successor", async () => {
     const chain = (record: string, value: string, previous?: string) =>
       ({
         time: { value, precision: "second" },
@@ -494,7 +495,7 @@ describe("Engine storage lifecycle", () => {
     expect((await nextEpisodeProps(k2.id, k3.id))).toEqual({});
   });
 
-  test("origin identity preserves tuple boundaries", async () => {
+  test.serial("origin identity preserves tuple boundaries", async () => {
     const base = {
       id: uuidv7(),
       schema: "anamnesis.claim/1",
@@ -517,7 +518,7 @@ describe("Engine storage lifecycle", () => {
     expect(second.id).not.toBe(first.id);
   });
 
-  test("remember is idempotent for an identical source revision", async () => {
+  test.serial("remember is idempotent for an identical source revision", async () => {
     const input = {
       ...msg("dup-1", "Original content", "2026-08-22T10:00:00+09:00"),
       source_revision: "revision-1",
@@ -529,7 +530,7 @@ describe("Engine storage lifecycle", () => {
     expect(again.id).toBe(first.id);
   });
 
-  test("ingest_seq increases with ingest order and duplicates consume none", async () => {
+  test.serial("ingest_seq increases with ingest order and duplicates consume none", async () => {
     const session = `ingest-seq-${uuidv7()}`;
     const remember = (record: string) =>
       engine.remember({
@@ -557,7 +558,7 @@ describe("Engine storage lifecycle", () => {
     expect(seqs[2]).toBe(seqs[1]! + 1);
   });
 
-  test("concurrent remembers all commit with distinct ingest_seq", async () => {
+  test.serial("concurrent remembers all commit with distinct ingest_seq", async () => {
     const run = uuidv7();
     const records = Array.from({ length: 12 }, (_, index) => index);
     const results = await Promise.all(
@@ -583,7 +584,7 @@ describe("Engine storage lifecycle", () => {
     expect(await metaIngestSeq()).toBeGreaterThanOrEqual(Math.max(...seqs));
   });
 
-  test("a revision conflict throws and leaves Meta.ingest_seq intact", async () => {
+  test.serial("a revision conflict throws and leaves Meta.ingest_seq intact", async () => {
     const base = msg(
       `conflict-${uuidv7()}`,
       "Conflicting original content",
@@ -617,7 +618,7 @@ describe("Engine storage lifecycle", () => {
     expect(await ingestSeqOf(next.id)).toBe(before + 1);
   });
 
-  test("journal replay relies on origin idempotency", async () => {
+  test.serial("journal replay relies on origin idempotency", async () => {
     const directory = await mkdtemp(join(tmpdir(), "anamnesis-replay-"));
     const journal = new EpisodeJournal(directory);
     const input = msg(
@@ -639,7 +640,7 @@ describe("Engine storage lifecycle", () => {
     }
   });
 
-  test("revisions are immutable, linked, and permit A to B to A", async () => {
+  test.serial("revisions are immutable, linked, and permit A to B to A", async () => {
     const base = msg(
       "revision-chain",
       "Original sent content",
@@ -699,7 +700,7 @@ describe("Engine storage lifecycle", () => {
     );
   });
 
-  test("an originals INVALIDATES link keys on from, to, and role only", async () => {
+  test.serial("an originals INVALIDATES link keys on from, to, and role only", async () => {
     const base = msg(
       "originals-idem",
       "Originals idem content",
@@ -724,7 +725,7 @@ describe("Engine storage lifecycle", () => {
     });
   });
 
-  test("a derived INVALIDATES link carries its seek fields", async () => {
+  test.serial("a derived INVALIDATES link carries its seek fields", async () => {
     const target = await engine.put({
       id: uuidv7(),
       schema: "anamnesis.claim/1",
@@ -785,7 +786,7 @@ describe("Engine storage lifecycle", () => {
     ).toEqual({});
   });
 
-  test("does not invalidate divergences outside the lattice", async () => {
+  test.serial("does not invalidate divergences outside the lattice", async () => {
     const cases = [
       {
         record: "entity-to-fact",
@@ -827,7 +828,7 @@ describe("Engine storage lifecycle", () => {
     }
   });
 
-  test("verify detects persisted element content tampering", async () => {
+  test.serial("verify detects persisted element content tampering", async () => {
     const result = await engine.remember(
       msg("tamper-1", "Untampered content", "2026-08-22T11:30:00+09:00"),
     );
@@ -849,7 +850,7 @@ describe("Engine storage lifecycle", () => {
     });
   });
 
-  test("payload bytes are externalized before metadata is committed", async () => {
+  test.serial("payload bytes are externalized before metadata is committed", async () => {
     const bytes = new TextEncoder().encode('{"raw":"source line"}');
     const result = await engine.remember({
       ...msg("p1", "Message with payload", "2026-08-22T12:00:00+09:00"),
@@ -894,7 +895,7 @@ describe("Engine storage lifecycle", () => {
     expect(await engine.verify()).toEqual([]);
   });
 
-  test("recall matches CJK content", async () => {
+  test.serial("recall matches CJK content", async () => {
     await engine.remember(
       msg("cjk-1", "점심으로 김치찌개를 먹었다", "2026-08-22T12:30:00+09:00"),
     );
@@ -905,8 +906,8 @@ describe("Engine storage lifecycle", () => {
   });
 });
 
-describe("Engine graph contracts", () => {
-  test("materializes common and celestial labels", async () => {
+describe.serial("Engine graph contracts", () => {
+  test.serial("materializes common and celestial labels", async () => {
     const episode = await engine.remember(
       msg("lbl-1", "Episode label fixture", "2026-08-24T10:00:00+09:00"),
     );
@@ -930,7 +931,7 @@ describe("Engine graph contracts", () => {
     );
   });
 
-  test("round-trips explicit mass and tolerates absent stored properties", async () => {
+  test.serial("round-trips explicit mass and tolerates absent stored properties", async () => {
     const result = await engine.put({
       id: uuidv7(),
       schema: "anamnesis.claim/1",
@@ -955,7 +956,7 @@ describe("Engine graph contracts", () => {
     expect((await engine.store.getElement(result.id))!.properties).toEqual({});
   });
 
-  test("does not create episode links for a non-episode", async () => {
+  test.serial("does not create episode links for a non-episode", async () => {
     const parent = await engine.remember(
       msg("claim-parent", "Episode parent", "2026-08-24T10:20:00+09:00"),
     );
@@ -980,7 +981,7 @@ describe("Engine graph contracts", () => {
     );
   });
 
-  test("unknown schemas receive only the Element label", async () => {
+  test.serial("unknown schemas receive only the Element label", async () => {
     const result = await engine.put({
       id: uuidv7(),
       schema: "anamnesis.unmapped/1",
@@ -996,7 +997,7 @@ describe("Engine graph contracts", () => {
     expect(await labelsOf(result.id)).toEqual(["Element"]);
   });
 
-  test("accepts lattice pairs and reports lattice violations", async () => {
+  test.serial("accepts lattice pairs and reports lattice violations", async () => {
     const episode = await engine.remember(
       msg("lat-1", "Lattice episode", "2026-08-24T11:00:00+09:00"),
     );
@@ -1053,7 +1054,7 @@ describe("Engine graph contracts", () => {
     );
   });
 
-  test("link identity is stable across extraction retries", async () => {
+  test.serial("link identity is stable across extraction retries", async () => {
     const episode = await engine.remember(
       msg("idem-1", "Link idempotency episode", "2026-08-24T12:00:00+09:00"),
     );
@@ -1088,7 +1089,7 @@ describe("Engine graph contracts", () => {
     );
   });
 
-  test("an explicit previous record takes precedence over chronology", async () => {
+  test.serial("an explicit previous record takes precedence over chronology", async () => {
     const chain = (record: string, value: string, previous?: string) =>
       ({
         time: { value, precision: "second" },
@@ -1124,8 +1125,8 @@ describe("Engine graph contracts", () => {
   });
 });
 
-describe("Engine time-axis filtering", () => {
-  test("snapshot time filters event time and retains timeless elements", async () => {
+describe.serial("Engine time-axis filtering", () => {
+  test.serial("snapshot time filters event time and retains timeless elements", async () => {
     const timeless = await engine.put({
       id: uuidv7(),
       schema: "anamnesis.entity/1",
@@ -1154,7 +1155,7 @@ describe("Engine time-axis filtering", () => {
     expect((await engine.store.getElement(timeless.id))!.time).toBeUndefined();
   });
 
-  test("empty search is exact and unfiltered search includes invalidated data", async () => {
+  test.serial("empty search is exact and unfiltered search includes invalidated data", async () => {
     expect(await engine.store.searchText(" \\ / * ")).toEqual([]);
     const original = await engine.put({
       id: uuidv7(),
@@ -1194,7 +1195,7 @@ describe("Engine time-axis filtering", () => {
     ).toBe(true);
   });
 
-  test("snapshot recall excludes memories after the cutoff", async () => {
+  test.serial("snapshot recall excludes memories after the cutoff", async () => {
     await engine.remember(
       msg("t1", "A distant archival memory", "2026-01-01T10:00:00+09:00"),
     );
@@ -1220,7 +1221,7 @@ describe("Engine time-axis filtering", () => {
     ).toBe(true);
   });
 
-  test("invalidation applies only at and after its event time", async () => {
+  test.serial("invalidation applies only at and after its event time", async () => {
     const fact = await engine.remember(
       msg("f1", "Ino stopped drinking coffee", "2026-03-01T09:00:00+09:00"),
     );
@@ -1259,7 +1260,7 @@ describe("Engine time-axis filtering", () => {
     expect(await engine.store.isValidAt(fact.id, AFTER_FIXTURES)).toBe(false);
   });
 
-  test("a Fact carries event time exactly like an Episode", async () => {
+  test.serial("a Fact carries event time exactly like an Episode", async () => {
     const backdated = await engine.put({
       id: uuidv7(),
       schema: "anamnesis.claim/1",
@@ -1297,7 +1298,7 @@ describe("Engine time-axis filtering", () => {
     );
   });
 
-  test("a correction is retroactive through its backdated time, not a missing one", async () => {
+  test.serial("a correction is retroactive through its backdated time, not a missing one", async () => {
     const fact = await engine.put({
       id: uuidv7(),
       schema: "anamnesis.claim/1",
@@ -1358,7 +1359,7 @@ describe("Engine time-axis filtering", () => {
     expect(hits.some((hit) => hit.element.id === fact.id)).toBe(false);
   });
 
-  test("a backdated correction hides its target from the target's own time", async () => {
+  test.serial("a backdated correction hides its target from the target's own time", async () => {
     const wrong = await engine.put({
       id: uuidv7(),
       schema: "anamnesis.claim/1",
@@ -1403,7 +1404,7 @@ describe("Engine time-axis filtering", () => {
     ).toBe(true);
   });
 
-  test("recall applies validity filtering before its exact limit", async () => {
+  test.serial("recall applies validity filtering before its exact limit", async () => {
     const candidates: string[] = [];
     for (let index = 0; index < 8; index += 1) {
       const result = await engine.put({
@@ -1452,11 +1453,11 @@ describe("Engine time-axis filtering", () => {
     ).toBe(true);
   });
 
-  test("a missing element is not valid", async () => {
+  test.serial("a missing element is not valid", async () => {
     expect(await engine.store.isValidAt(uuidv7(), AFTER_FIXTURES)).toBe(false);
   });
 
-  test("future elements are invalid before their event time", async () => {
+  test.serial("future elements are invalid before their event time", async () => {
     const result = await engine.remember(
       msg("fut1", "A future event", "2026-12-25T00:00:00+09:00"),
     );
@@ -1468,7 +1469,7 @@ describe("Engine time-axis filtering", () => {
     ).toBe(true);
   });
 
-  test("close shuts down the underlying driver", async () => {
+  test.serial("close shuts down the underlying driver", async () => {
     const closed = new Engine(TEST_DB);
     await closed.init();
     await closed.close();

@@ -89,6 +89,15 @@ kind-specific queries go through the kind label.
 
 ### Episode digest versions (D49)
 
+**Implemented compatibility exception (G004 recovery):** the existing Engine,
+journal/import and metadata-free RPC APIs remain pre-lineage/unknown, not v2.
+Stored `digest_format=null` retains insertion-order bytes; stored
+`rfc8785-v1` retains its canonical pre-lineage bytes. Only explicit authenticated
+role/lineage admission creates `episode_digest_version=2` with the distinct
+`episode-rfc8785-v2` format. This implementation supersedes the all-new-v2 and
+insertion-only assumptions below; no stored original is rewritten. See the
+[implemented custody, retry and compatibility contract](../app/anamnesis/episode-lineage.md).
+
 D49 changes Episode digest identity **prospectively**. It never rewrites,
 reserializes or relabels an original, and this document set ships no
 compatibility code and no data migration (docs/08, docs/09).

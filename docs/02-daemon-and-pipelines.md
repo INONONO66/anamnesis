@@ -394,6 +394,16 @@ previous verified length and return `resource_exhausted` before ack.
 
 ## 3. Hot path — remember
 
+**Implemented G004 compatibility:** metadata-free remember/import remains its
+existing unknown/pre-lineage contract. Supplying any role/lineage field selects
+the explicit authenticated path and requires all three admission fields for a
+new revision. Existing stored versions win before metadata/parent validation;
+both insertion-order and canonical pre-lineage digests remain frozen. Parent
+custody is a server-issued hello-connection binding, not the client label.
+New lineage admission requires an available store, never an unauthorised legacy
+spool fallback. These compatibility choices qualify the all-new-v2 target below;
+see [the implemented contract](../app/anamnesis/episode-lineage.md).
+
 ```text
   remember(episode, payload_hash?)
     1. Contract validation (semantic schema registry, origin, time, size caps;

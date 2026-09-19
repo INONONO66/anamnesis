@@ -4,7 +4,8 @@ import { join } from "node:path";
 import { spawn } from "node:child_process";
 import { pipeline } from "node:stream/promises";
 
-const PINNED_IMAGE = "neo4j:5.26-community";
+// Exact Community image digest; mutable tags are forbidden for authority dumps.
+const PINNED_IMAGE = "neo4j@sha256:037cf5756f0135cbfd66b739b6df7c7c4bb100f9ce11602f6f9538e17e02c74d";
 
 function containerArgument(args: string[]): string {
   if (args.length === 0) {
