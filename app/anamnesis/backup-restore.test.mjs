@@ -23,7 +23,9 @@ async function cli(args, env) {
   return { code, stdout, stderr };
 }
 async function rootFor(t) {
-  const root = await mkdtemp('/tmp/ana-g3-');
+  // Docker bind mounts must live under $HOME: colima/virtiofs only shares the home directory, so a /tmp root would land in the VM's own /tmp and the restored database would come up empty.
+  const qaParent = join(process.env.HOME ?? '/tmp', '.cache', 'anamnesis-qa'); await mkdir(qaParent, { recursive: true, mode: 0o700 });
+  const root = await mkdtemp(join(qaParent, 'ana-g3-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   return root;
 }
