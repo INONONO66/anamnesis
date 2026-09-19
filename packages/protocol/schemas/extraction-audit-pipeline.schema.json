@@ -37,8 +37,7 @@
           "const": "claim-judge-audit-v1"
         },
         "semantic_writes": {
-          "type": "boolean",
-          "const": false
+          "type": "boolean"
         },
         "claim": {
           "type": "object",
