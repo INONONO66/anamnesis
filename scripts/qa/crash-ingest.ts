@@ -26,12 +26,18 @@ const env: NodeJS.ProcessEnv = { ...process.env, ANAMNESIS_RUNTIME_ROOT: root, A
 interface CrashSummary { status: string; accepted_before: number; spooled_during_outage: number; final_episodes: number; distinct_ids: number; spool_pending: number; error?: string }
 const summary: CrashSummary = { status: "running", accepted_before: 0, spooled_during_outage: 0, final_episodes: 0, distinct_ids: 0, spool_pending: -1 };
 let container = "", daemon: ChildProcess | undefined, lines: Interface | undefined, client: RpcClient | undefined;
-async function waitFor<T>(attempt: () => Promise<T>, timeoutMs: number, code: string): Promise<T> {
-  const signal = AbortSignal.timeout(timeoutMs);
-  while (!signal.aborted) {
-    try { return await attempt(); } catch { await new Promise(resolve => setImmediate(resolve)); }
-  }
-  throw new Error(code);
+/** Event subscription, not polling: resolve on the Neo4j "Started." log line emitted after the given moment, bounded by a deadline. */
+async function awaitNeo4jStarted(containerId: string, since: string, timeoutMs: number, code: string): Promise<void> {
+  const logs = spawn("docker", ["logs", "-f", "--since", since, containerId], { stdio: ["ignore", "pipe", "pipe"] });
+  const streams = [createInterface({ input: logs.stdout! }), createInterface({ input: logs.stderr! })];
+  try {
+    await new Promise<void>((resolveStarted, reject) => {
+      const timer = setTimeout(() => reject(new Error(code)), timeoutMs);
+      const onLine = (line: string) => { if (line.includes("Started.")) { clearTimeout(timer); resolveStarted(); } };
+      for (const stream of streams) stream.on("line", onLine);
+      logs.once("exit", exitCode => { clearTimeout(timer); reject(new Error(`${code}:docker_logs_exit_${exitCode}`)); });
+    });
+  } finally { for (const stream of streams) stream.close(); logs.kill(); }
 }
 async function freePort(): Promise<number> { const { createServer } = await import("node:net"); return new Promise((resolve, reject) => { const server = createServer(); server.once("error", reject); server.listen(0, "127.0.0.1", () => { const address = server.address(); server.close(() => typeof address === "object" && address ? resolve(address.port) : reject(new Error("no_port"))); }); }); }
 async function docker(...args: string[]): Promise<string> { return (await execute("docker", args, { env, maxBuffer: 4 * 1024 * 1024 })).stdout.trim(); }
@@ -40,10 +46,11 @@ try {
   await mkdir(evidence, { recursive: true }); await mkdir(root, { recursive: true, mode: 0o700 }); await writeFile(key, JSON.stringify({ bearer: "inert-g5-fixture-bearer" }), { mode: 0o600 });
   // Reserve an explicit host port: an ephemeral "::7687" mapping is re-assigned by docker start, so the daemon's Bolt URI would never recover.
   const port = await freePort();
+  const startedAt = new Date().toISOString();
   container = await docker("run", "-d", "--name", name, "--label", `anamnesis.qa.owner=${owner}`, "-p", `127.0.0.1:${port}:7687`, "-e", `NEO4J_AUTH=neo4j/${password}`, image);
   const uri = `bolt://127.0.0.1:${port}`;
   const driver = neo4j.driver(uri, neo4j.auth.basic("neo4j", password), { connectionTimeout: 1000, connectionAcquisitionTimeout: 1500, maxTransactionRetryTime: 0 });
-  await waitFor(() => driver.verifyConnectivity(), 90000, "bolt_readiness_timeout"); await driver.close();
+  await awaitNeo4jStarted(container, startedAt, 90000, "bolt_readiness_timeout"); await driver.verifyConnectivity(); await driver.close();
   env.ANAMNESIS_NEO4J_URI = uri;
   daemon = spawn(process.execPath, [resolve("dist/anamnesis-ops.mjs"), "foreground"], { env, stdio: ["ignore", "pipe", "pipe"] });
   lines = createInterface({ input: daemon.stdout! });
@@ -57,19 +64,19 @@ try {
   const during = Array.from({ length: 50 }, (_, i) => episode(100 + i));
   for (const params of during) { const result: any = await client.request("remember", params); assert.equal(result.state, "spooled"); summary.spooled_during_outage++; }
   const settled = new Promise<void>((resolveSettled, reject) => { const timer = setTimeout(() => reject(new Error("drain_settled_timeout")), 90000); const onLine = (line: string) => { if (line === JSON.stringify({ event: "drain_settled" })) { clearTimeout(timer); lines?.off("line", onLine); resolveSettled(); } }; lines?.on("line", onLine); });
+  const restartedAt = new Date().toISOString();
   await docker("start", container);
   assert.equal(Number((await docker("port", container, "7687/tcp")).split(":").at(-1)), port, "bolt host port must survive restart");
   // refresh() is demand-driven: wait for Bolt to accept connections (event: successful verifyConnectivity),
   // then a single status request lets the daemon observe recovery and wake its drain loop. No timers.
   const daemonEvents: string[] = []; const onEvent = (line: string) => { daemonEvents.push(line); }; lines.on("line", onEvent);
-  const recoveredDriver = neo4j.driver(uri, neo4j.auth.basic("neo4j", password), { connectionTimeout: 1000, connectionAcquisitionTimeout: 1500, maxTransactionRetryTime: 0 });
-  try { await waitFor(() => recoveredDriver.verifyConnectivity(), 90000, "bolt_restart_timeout"); } finally { await recoveredDriver.close(); }
+  await awaitNeo4jStarted(container, restartedAt, 90000, "bolt_restart_timeout");
   const wake: any = await client.request("status", {}); daemonEvents.push(JSON.stringify({ event: "qa_wake_status", storage: wake.storage, pending: wake.spool.pending }));
   try { await settled; } finally { lines.off("line", onEvent); await writeFile(join(evidence, "crash-ingest-daemon-events.log"), daemonEvents.join("\n") + "\n"); }
   const after = await client.request("status", {}); summary.spool_pending = after.spool.pending; assert.equal(after.storage, "available"); assert.equal(after.spool.pending, 0);
   const verifyDriver = neo4j.driver(uri, neo4j.auth.basic("neo4j", password), { connectionTimeout: 1000, connectionAcquisitionTimeout: 1500, maxTransactionRetryTime: 0 });
   try {
-    await waitFor(() => verifyDriver.verifyConnectivity(), 90000, "bolt_recovery_timeout");
+    await verifyDriver.verifyConnectivity();
     const result = await verifyDriver.executeQuery("MATCH (e:Element:Episode) RETURN count(e) AS episodes, count(DISTINCT e.id) AS distinct_ids");
     const row = result.records[0]; assert.ok(row);
     summary.final_episodes = Number(row.get("episodes")); summary.distinct_ids = Number(row.get("distinct_ids"));
