@@ -17,8 +17,10 @@ test('admission accepts IDs only; models, claims, sources and policy are not cal
  for(const field of ['model','policy_revision','claim_context','body_digest','origin_role','lineage_mode'])expect(CreateExtractionPipeline.safeParse({...params,[field]:'forged'}).success).toBe(false);
  expect(CreateModelTask.safeParse({...params,kind:'judge',model:'fixture',model_incarnation:'a'.repeat(64),pipeline:'claim-judge-audit-v1'}).success).toBe(false);
 });
-test('authenticated dispatcher has distinct audit methods; semantic capability remains impossible',()=>{
+test('authenticated dispatcher has distinct audit methods; extraction capability is a strict provider-backed boolean',()=>{
  for(const [method,params]of [['extraction.audit.create',{id,generation_id:id,source_id:id}],['extraction.audit.run',{task_id:id,expected_version:0,worker_id:'qa',lease_ms:30000}],['extraction.audit.status',{pipeline_id:id}]]as const)expect(RpcRequest.safeParse({jsonrpc:'2.0',id:1,method,params}).success).toBe(true);
- expect(RpcCapabilities.shape.extraction.safeParse(true).success).toBe(false);
+ expect(RpcCapabilities.shape.extraction.safeParse(true).success).toBe(true);
+ expect(RpcCapabilities.shape.extraction.safeParse(false).success).toBe(true);
+ expect(RpcCapabilities.shape.extraction.safeParse('enabled').success).toBe(false);
  for(const method of ['extraction.materialize','derived.recall'])expect(RpcRequest.safeParse({jsonrpc:'2.0',id:1,method,params:{}}).success).toBe(false);
 });

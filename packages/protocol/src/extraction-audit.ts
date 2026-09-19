@@ -37,7 +37,8 @@ export const ExtractionPipeline = z.discriminatedUnion('state', [
 ]);
 export type ExtractionPipeline = z.infer<typeof ExtractionPipeline>;
 export class ExtractionAuditError extends Error {
-  constructor(readonly code: 'extraction_not_configured' | 'extraction_audit_conflict' | 'extraction_audit_incomplete' | 'extraction_audit_stale') {
-    super(code); this.name = 'ExtractionAuditError';
+  readonly code: 'extraction_not_configured' | 'extraction_audit_conflict' | 'extraction_audit_incomplete' | 'extraction_audit_stale';
+  constructor(code: ExtractionAuditError['code']) {
+    super(code); this.name = 'ExtractionAuditError'; this.code = code;
   }
 }

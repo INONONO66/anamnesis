@@ -2,7 +2,64 @@ import { randomBytes, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { RpcIngestStatusParams } from "../../packages/protocol/src/rpc.ts";
+import { fileURLToPath } from "node:url";
+import type { ExtractionDialect } from "../../packages/core/src/openai-extraction-provider.ts";
+import { RpcEmbeddingAttempt, RpcIngestStatusParams } from "../../packages/protocol/src/rpc.ts";
+
+// Reuse the protocol's Zod schemas; the app has no independent Zod dependency.
+const providerUrl = RpcEmbeddingAttempt.shape.model.refine(value => URL.canParse(value) && ["http:", "https:"].includes(new URL(value).protocol));
+const providerName = RpcEmbeddingAttempt.shape.model.trim().min(1).max(256);
+const providerSecret = RpcEmbeddingAttempt.shape.model.refine(value => !/[\r\n]/.test(value));
+const providerPath = RpcEmbeddingAttempt.shape.model;
+export const DEFAULT_EXTRACTION_PROMPT_FILE = fileURLToPath(new URL("./prompts/extract-claims.v2.md", import.meta.url));
+const ProviderEnvironment = RpcEmbeddingAttempt.pick({}).strip().extend({
+  ANAMNESIS_EMBEDDING_BASE_URL: providerUrl.optional(),
+  ANAMNESIS_EMBEDDING_MODEL: providerName.default("Qwen3-Embedding-0.6B"),
+  ANAMNESIS_EMBEDDING_DIMENSIONS: RpcEmbeddingAttempt.shape.dimensions.default(1024),
+  ANAMNESIS_EMBEDDING_API_KEY: providerSecret.optional(),
+  ANAMNESIS_LLM_BASE_URL: providerUrl.optional(),
+  ANAMNESIS_LLM_API_KEY_FILE: providerPath.optional(),
+  ANAMNESIS_LLM_MODEL: providerName.default("claude-haiku-4-5"),
+  ANAMNESIS_LLM_DIALECT: providerName.refine(value => value === "openai_chat" || value === "anthropic_messages").transform(value => value as ExtractionDialect).optional(),
+  ANAMNESIS_EXTRACTION_PROMPT_FILE: providerPath.default(DEFAULT_EXTRACTION_PROMPT_FILE),
+});
+
+/** Load once at provider startup. Absent base URLs leave legacy provider selection unchanged.
+ * Secrets are never included in validation errors; callers must not log this result. */
+export async function loadProviderConfig(env: NodeJS.ProcessEnv = process.env) {
+  const embeddingEnabled = env["ANAMNESIS_EMBEDDING_BASE_URL"] !== undefined;
+  const parsed = ProviderEnvironment.safeParse({ ...env,
+    ANAMNESIS_EMBEDDING_MODEL: embeddingEnabled ? env["ANAMNESIS_EMBEDDING_MODEL"] : undefined,
+    ANAMNESIS_EMBEDDING_API_KEY: embeddingEnabled ? env["ANAMNESIS_EMBEDDING_API_KEY"] : undefined,
+    ANAMNESIS_EMBEDDING_DIMENSIONS: !embeddingEnabled || env["ANAMNESIS_EMBEDDING_DIMENSIONS"] === undefined ? undefined : Number(env["ANAMNESIS_EMBEDDING_DIMENSIONS"]),
+  });
+  if (!parsed.success) throw new Error(`invalid provider configuration: ${parsed.error.issues.map(issue => issue.path.join(".")).join(", ")}`);
+  const config = parsed.data;
+  let apiKey: string | undefined;
+  if (config.ANAMNESIS_LLM_API_KEY_FILE !== undefined) {
+    let value: unknown;
+    try { value = JSON.parse(await fs.readFile(config.ANAMNESIS_LLM_API_KEY_FILE, "utf8")); }
+    catch { throw new Error("unable to read ANAMNESIS_LLM_API_KEY_FILE as JSON"); }
+    const key = RpcEmbeddingAttempt.pick({}).strip().extend({ bearer: providerSecret }).safeParse(value);
+    if (!key.success) throw new Error("invalid bearer in ANAMNESIS_LLM_API_KEY_FILE");
+    apiKey = key.data.bearer;
+  }
+  const promptFile = resolve(config.ANAMNESIS_EXTRACTION_PROMPT_FILE);
+  const systemPrompt = await fs.readFile(promptFile, "utf8");
+  if (!systemPrompt.trim()) throw new Error("empty ANAMNESIS_EXTRACTION_PROMPT_FILE");
+  return {
+    embedding: config.ANAMNESIS_EMBEDDING_BASE_URL === undefined ? undefined : {
+      baseUrl: config.ANAMNESIS_EMBEDDING_BASE_URL,
+      model: config.ANAMNESIS_EMBEDDING_MODEL,
+      dimensions: config.ANAMNESIS_EMBEDDING_DIMENSIONS,
+      ...(config.ANAMNESIS_EMBEDDING_API_KEY === undefined ? {} : { apiKey: config.ANAMNESIS_EMBEDDING_API_KEY }),
+    },
+    llm: { baseUrl: config.ANAMNESIS_LLM_BASE_URL, model: config.ANAMNESIS_LLM_MODEL,
+      dialect: config.ANAMNESIS_LLM_DIALECT ?? (config.ANAMNESIS_LLM_MODEL.startsWith("claude") ? "anthropic_messages" : "openai_chat"),
+      ...(apiKey === undefined ? {} : { apiKey }) },
+    promptFile, systemPrompt,
+  };
+}
 
 export function hasCode(error: unknown, code: string): boolean {
   return error instanceof Error && "code" in error && error.code === code;

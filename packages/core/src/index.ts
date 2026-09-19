@@ -1,6 +1,8 @@
 export { Store, GenerationReadinessError } from "./store.ts";
 export { EmbeddingConfig, EmbeddingProfile, HttpEmbeddingProvider, embeddingProfileId, validateVector } from "./embedding.ts";
 export type { EmbeddingProvider } from "./embedding.ts";
+export { OpenAiEmbeddingProvider } from "./openai-embedding-provider.ts";
+export type { OpenAiEmbeddingProviderOptions, OpenAiEmbeddingResult } from "./openai-embedding-provider.ts";
 export { admittedBudget, packRecall, renderContext } from "./recall.ts";
 export type {
   StoreOptions,
@@ -11,6 +13,8 @@ export type {
 
 export { Engine, RememberInput, envConfig } from "./engine.ts";
 export { HttpExtractionProvider, DeterministicExtractionProvider, validateProviderOutput, validateModelOutput, validateSourceSpans, ExtractionProviderConfig, ExtractionProviderError } from "./extraction.ts";
+export { OpenAiChatExtractionProvider } from "./openai-extraction-provider.ts";
+export type { OpenAiChatExtractionProviderOptions, ExtractionDialect } from "./openai-extraction-provider.ts";
 export type { ExtractionProvider } from "./extraction.ts";
 export type { EngineOptions } from "./engine.ts";
 

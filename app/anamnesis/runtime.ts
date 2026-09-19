@@ -2,7 +2,9 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import neo4j, { type Driver, type RecordShape } from "neo4j-driver";
-import { Engine, envConfig } from "../../packages/core/src/engine.ts";
+import { Engine, envConfig, type EngineOptions } from "../../packages/core/src/engine.ts";
+import { OpenAiChatExtractionProvider } from "../../packages/core/src/openai-extraction-provider.ts";
+import { OpenAiEmbeddingProvider } from "../../packages/core/src/openai-embedding-provider.ts";
 import { elementDigest, verifyLineageRetry } from "../../packages/core/src/store.ts";
 import { EchoLineage, parseEpisodeLineage } from "../../packages/protocol/src/episode-lineage.ts";
 import type { CreateExtractionPipeline, RunExtractionPipeline } from '../../packages/protocol/src/extraction-audit.ts';
@@ -10,7 +12,7 @@ import type { InstallationContext, CommitReceiptInput, RecallTransportInput } fr
 import type { RpcPolicySetParams, RpcPolicyRevokeParams, RpcRecallParams, RpcEmbeddingRecoverParams, RpcDreamAdmitParams, RpcDreamLeaseParams, RpcDreamExpireParams, RpcDreamExecuteParams } from "../../packages/protocol/src/rpc.ts";
 import { DurableSpool, type SpoolEntry } from "../../packages/core/src/spool.ts";
 import { RPC_LIMITS, RPC_METHODS, RpcRememberParams, type RpcCapabilities, type RpcCommittedResult, type RpcIngestStatusParams, type RpcIngestStatusResult, type RpcStatusResult } from "../../packages/protocol/src/rpc.ts";
-import { atomicJson, hasCode, syncDirectory, type Installation } from "./config.ts";
+import { atomicJson, hasCode, loadProviderConfig, syncDirectory, type Installation } from "./config.ts";
 import { Uploads, type UploadLifecycle } from "./objects.ts";
 import { loadTokenizers } from "./tokenizer.ts";
 import { daemonTiming, runtimeTimed, timingHash } from "./timing.ts";
@@ -19,7 +21,7 @@ import type { TrustedAuthorityAdapter } from "./backup-restore-orchestrator.ts";
 import { createDreamLeidenAdapter } from './dream-leiden-runtime.ts';
 import { trustedDreamLeiden, DREAM_GDS_IMAGE, DREAM_GDS_VERSION, DREAM_ALGORITHM, DREAM_NETWORK } from '../../packages/core/src/dream-leiden-adapter.ts';
 
-export const capabilities: RpcCapabilities = { methods: [...RPC_METHODS], recall: true, commit: true, policy: true, extraction: false, embeddings: !!process.env["ANAMNESIS_EMBEDDING_CONFIG"], writer_fence: "database" };
+export const capabilities: RpcCapabilities = { methods: [...RPC_METHODS], recall: true, commit: true, policy: true, extraction: false, embeddings: false, writer_fence: "database" };
 function canonical(value: unknown): string {
   if (value === null || typeof value !== "object") return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
@@ -66,6 +68,28 @@ export class Runtime {
   readonly uploads: Uploads;
   private readonly engine: Engine;
   private readonly reader: Driver;
+  readonly capabilities: RpcCapabilities;
+  /** Load asynchronous provider assets once, before accepting RPC traffic. */
+  static async create(installation: Installation, scheduleDrain: () => void = () => {}, uploadLifecycle: UploadLifecycle = {}, authorityOptions: RuntimeAuthorityOptions = {}): Promise<Runtime> {
+    const providers: EngineOptions = {};
+    if (process.env["ANAMNESIS_LLM_BASE_URL"] !== undefined || process.env["ANAMNESIS_EMBEDDING_BASE_URL"] !== undefined) {
+      const config = await loadProviderConfig();
+      if (config.llm.baseUrl !== undefined) {
+        if (!config.llm.apiKey) throw new Error("ANAMNESIS_LLM_API_KEY_FILE required");
+        providers.extractionProvider = new OpenAiChatExtractionProvider({
+          ...config.llm, baseUrl: config.llm.baseUrl, apiKey: config.llm.apiKey, systemPrompt: config.systemPrompt, timeoutMs: 30000,
+        });
+      }
+      if (config.embedding) {
+        const { model, dimensions, baseUrl } = config.embedding;
+        // Configuration identity only; an alias does not attest immutable server weights.
+        const profile = { model, dimensions, model_incarnation: sha(JSON.stringify([baseUrl, model, dimensions])),
+          document_prefix: "", query_prefix: "", max_input_bytes: 65536, norm: "unit_l2" as const, norm_tolerance: 0.01 };
+        providers.embeddingProvider = new OpenAiEmbeddingProvider({ ...config.embedding, profile, timeoutMs: 30000 });
+      }
+    }
+    return new Runtime(installation, scheduleDrain, uploadLifecycle, authorityOptions, providers);
+  }
   private readonly database: string;
   private readonly spool: DurableSpool;
   private readonly spoolRoot: string;
@@ -79,9 +103,10 @@ export class Runtime {
   private drainJob: AsyncGenerator<void, void, void> | undefined;
   private drainRequested = false;
   private drainStopped = false;
-  constructor(readonly installation: Installation, private readonly scheduleDrain: () => void = () => {}, uploadLifecycle: UploadLifecycle = {}, authorityOptions: RuntimeAuthorityOptions = {}) {
+  constructor(readonly installation: Installation, private readonly scheduleDrain: () => void = () => {}, uploadLifecycle: UploadLifecycle = {}, authorityOptions: RuntimeAuthorityOptions = {}, providers: EngineOptions = {}) {
     this.authorityAdapter = authorityOptions.authorityAdapter;
-    const config = { ...envConfig(), tokenizers: loadTokenizers(), objectsRoot: join(installation.root, "objects") };
+    const config = { ...envConfig(), ...providers, tokenizers: loadTokenizers(), objectsRoot: join(installation.root, "objects") };
+    this.capabilities = { ...capabilities, extraction: !!config.extractionProvider, embeddings: !!config.embeddingProvider };
     const rawDream = createDreamLeidenAdapter();
     const dreamLeidenAdapter = rawDream ? trustedDreamLeiden({ image_digest: DREAM_GDS_IMAGE, plugin_digest: 'sha256:246e3fbbbf733b4def1e7b0a9740a2309f6605ee8a7b46b29fe1de56d0a4b47c', algorithm: DREAM_ALGORITHM, gds_version: DREAM_GDS_VERSION, network: DREAM_NETWORK, adapter: rawDream }) : undefined;
     this.engine = new Engine({ ...config, ...(dreamLeidenAdapter ? { dreamLeidenAdapter } : {}) });
@@ -448,7 +473,7 @@ export class Runtime {
       storage: this.available ? "available" : "unavailable", data_incarnation: this.installation.incarnation,
       fs_epoch: this.installation.epoch, queue: { pending, capacity: RPC_LIMITS.queued_requests },
       spool: { pending: spool.pending, blocked: this.blocked.size, quarantined: spool.quarantined ? 1 : this.quarantined.size, bytes },
-      outbox_pending: outbox, capabilities };
+      outbox_pending: outbox, capabilities: this.capabilities };
   }
   /** The adapter is deliberately dependency-injected by the owner lifecycle.
    * The current RPC contract has no authenticated archive manifest/path

@@ -198,6 +198,8 @@ describe("strict RPC responses", () => {
     const object = { hash, size: RPC_LIMITS.object_bytes, media_type: "text/plain" };
     const valid = [
       response("hello", hello),
+      response("hello", { ...hello, capabilities: { ...capabilities, extraction: true } }),
+      response("status", { ...status, capabilities: { ...capabilities, extraction: true } }),
       response("status", status),
       response("shutdown", { state: "stopping" }),
       response("object.begin", { state: "uploading", upload_id: uuid, next_seq: 0, chunk_bytes_max: RPC_LIMITS.chunk_bytes }),
@@ -210,7 +212,7 @@ describe("strict RPC responses", () => {
     }
     const invalid = [
       response("hello", { ...hello, principal: "trusted-client" }),
-      response("hello", { ...hello, capabilities: { ...capabilities, extraction: true } }),
+      response("hello", { ...hello, capabilities: { ...capabilities, extraction: "true" } }),
       response("hello", { ...hello, capabilities: { ...capabilities, methods: ["hello", "hello"] } }),
       response("status", { ...status, queue: { pending: RPC_LIMITS.queued_requests + 1, capacity: RPC_LIMITS.queued_requests } }),
       response("shutdown", { state: "stopped" }),

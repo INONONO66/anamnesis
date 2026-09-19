@@ -340,7 +340,7 @@ export const RpcCapabilities = z.strictObject({
   recall: z.boolean(),
   commit: z.boolean(),
   policy: z.boolean(),
-  extraction: z.literal(false),
+  extraction: z.boolean(),
   embeddings: z.boolean(),
   writer_fence: z.enum(["database", "local_only"]),
 });
