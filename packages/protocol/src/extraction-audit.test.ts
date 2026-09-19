@@ -12,6 +12,12 @@ test('audit ABI has bounded strict decisions, explicit unknown and no semantic a
  expect(ExtractionPipeline.safeParse({state:'unknown',pipeline_id:id,semantic_writes:true}).success).toBe(false);
  expect(ExtractionDisposition.safeParse({judge_attempt_id:id,claim_attempt_id:id,claim_body_digest:'a'.repeat(64),claim_index:0,disposition:'correct',evidence}).success).toBe(true);
 });
+test('known pipeline responses carry a strict materialization boolean',()=>{
+ const marker=ExtractionPipeline.options[1].shape.semantic_writes;
+ expect(marker.safeParse(true).success).toBe(true);
+ expect(marker.safeParse(false).success).toBe(true);
+ expect(marker.safeParse('true').success).toBe(false);
+});
 test('admission accepts IDs only; models, claims, sources and policy are not caller replacements',()=>{
  const params={id,generation_id:id,source_id:id};expect(CreateExtractionPipeline.parse(params)).toEqual(params);
  for(const field of ['model','policy_revision','claim_context','body_digest','origin_role','lineage_mode'])expect(CreateExtractionPipeline.safeParse({...params,[field]:'forged'}).success).toBe(false);

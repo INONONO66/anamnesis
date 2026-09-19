@@ -3126,8 +3126,7 @@
                       "maximum": 177
                     },
                     "ppr_used": {
-                      "type": "boolean",
-                      "const": false
+                      "type": "boolean"
                     },
                     "identity_mode": {
                       "type": "string",
@@ -3519,8 +3518,7 @@
                       "const": "claim-judge-audit-v1"
                     },
                     "semantic_writes": {
-                      "type": "boolean",
-                      "const": false
+                      "type": "boolean"
                     },
                     "claim": {
                       "type": "object",
@@ -4640,8 +4638,7 @@
                       "const": "claim-judge-audit-v1"
                     },
                     "semantic_writes": {
-                      "type": "boolean",
-                      "const": false
+                      "type": "boolean"
                     },
                     "claim": {
                       "type": "object",

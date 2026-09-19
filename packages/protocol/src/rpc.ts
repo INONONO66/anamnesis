@@ -136,7 +136,7 @@ export const RpcRecallResult = z.strictObject({
     channels_used: z.array(RpcRecallChannel).max(4),
     vector_reason: z.enum(["not_configured", "not_requested", "provider_unavailable", "provider_rejected", "profile_mismatch", "invalid_vector", "input_too_large", "available"]),
     embedding_profile_id: RpcHash.nullable(), candidate_count: counter.max(177), skipped_bundles: counter.max(177),
-    ppr_used: z.literal(false), identity_mode: z.literal("exact_episode_id"),
+    ppr_used: z.boolean(), identity_mode: z.literal("exact_episode_id"),
   }),
 });
 export type RpcRecallResult = z.infer<typeof RpcRecallResult>;
