@@ -14,7 +14,9 @@ const execute = promisify(execFile);
 const image = "neo4j@sha256:037cf5756f0135cbfd66b739b6df7c7c4bb100f9ce11602f6f9538e17e02c74d";
 const owner = `g5-crash-${process.pid}-${Date.now()}`;
 const evidence = resolve(".omo/evidence/runtime-complete/g5");
-const parent = await mkdtemp("/tmp/ana-g5-crash-");
+// Bind-mounted roots must live under $HOME (colima/virtiofs shares only the home directory).
+const qaParent = join(process.env["HOME"] ?? "/tmp", ".cache", "anamnesis-qa"); await mkdir(qaParent, { recursive: true, mode: 0o700 });
+const parent = await mkdtemp(join(qaParent, "ana-g5-crash-"));
 const root = join(parent, "runtime"), key = join(parent, "provider.json");
 const password = `g5-${uuidv7()}`;
 const name = `anamnesis-${owner}`;
@@ -57,12 +59,13 @@ try {
   const settled = new Promise<void>((resolveSettled, reject) => { const timer = setTimeout(() => reject(new Error("drain_settled_timeout")), 90000); const onLine = (line: string) => { if (line === JSON.stringify({ event: "drain_settled" })) { clearTimeout(timer); lines?.off("line", onLine); resolveSettled(); } }; lines?.on("line", onLine); });
   await docker("start", container);
   assert.equal(Number((await docker("port", container, "7687/tcp")).split(":").at(-1)), port, "bolt host port must survive restart");
-  // refresh() is demand-driven: each status request lets the daemon observe storage recovery and take a drain turn.
+  // refresh() is demand-driven: wait for Bolt to accept connections (event: successful verifyConnectivity),
+  // then a single status request lets the daemon observe recovery and wake its drain loop. No timers.
   const daemonEvents: string[] = []; const onEvent = (line: string) => { daemonEvents.push(line); }; lines.on("line", onEvent);
-  let settledFlag = false; const settledTracked = settled.then(() => { settledFlag = true; });
-  const nudge = (async () => { while (!settledFlag) { await client!.request("status", {}).catch(() => {}); await new Promise<void>(resolve => { const t = setTimeout(resolve, 500); settledTracked.then(() => { clearTimeout(t); resolve(); }); }); } })();
-  try { await settledTracked; } finally { lines.off("line", onEvent); await writeFile(join(evidence, "crash-ingest-daemon-events.log"), daemonEvents.join("\n") + "\n"); }
-  await nudge;
+  const recoveredDriver = neo4j.driver(uri, neo4j.auth.basic("neo4j", password), { connectionTimeout: 1000, connectionAcquisitionTimeout: 1500, maxTransactionRetryTime: 0 });
+  try { await waitFor(() => recoveredDriver.verifyConnectivity(), 90000, "bolt_restart_timeout"); } finally { await recoveredDriver.close(); }
+  const wake: any = await client.request("status", {}); daemonEvents.push(JSON.stringify({ event: "qa_wake_status", storage: wake.storage, pending: wake.spool.pending }));
+  try { await settled; } finally { lines.off("line", onEvent); await writeFile(join(evidence, "crash-ingest-daemon-events.log"), daemonEvents.join("\n") + "\n"); }
   const after = await client.request("status", {}); summary.spool_pending = after.spool.pending; assert.equal(after.storage, "available"); assert.equal(after.spool.pending, 0);
   const verifyDriver = neo4j.driver(uri, neo4j.auth.basic("neo4j", password), { connectionTimeout: 1000, connectionAcquisitionTimeout: 1500, maxTransactionRetryTime: 0 });
   try {

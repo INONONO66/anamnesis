@@ -73,7 +73,9 @@ export async function runE2eReal(evidence = resolve(".omo/evidence/runtime-compl
   const summary: Record<string, unknown> = { status: "running", stage: "setup", episodes: 0, facts_active: 0, vectors: 0,
     llm_min_interval_ms: llmMinIntervalMs,
     embedding_channel: "disabled_by_decision", recall: [], crash_drain: null, model: "claude-haiku-4-5", provider_errors: errors, durations, deviations };
-  const parent = await mkdtemp("/tmp/ana-g4-"), root = join(parent, "runtime"), secretRoot = await mkdtemp("/tmp/ana-g4-key-");
+  // Bind-mounted roots must live under $HOME (colima/virtiofs shares only the home directory).
+  const qaParent = join(process.env["HOME"] ?? "/tmp", ".cache", "anamnesis-qa"); await mkdir(qaParent, { recursive: true, mode: 0o700 });
+  const parent = await mkdtemp(join(qaParent, "ana-g4-")), root = join(parent, "runtime"), secretRoot = await mkdtemp(join(qaParent, "ana-g4-key-"));
   const key = join(secretRoot, "provider.json"), owner = `g4-${randomUUID()}`, name = `anamnesis-qa-${owner}`;
   const password = `qa-${randomUUID()}`;
   const env: NodeJS.ProcessEnv = { ...process.env, ANAMNESIS_RUNTIME_ROOT: root, ANAMNESIS_NEO4J_PASSWORD: password,
