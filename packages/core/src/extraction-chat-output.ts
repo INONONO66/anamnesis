@@ -29,7 +29,10 @@ function dropUnknownLabels(value: unknown): unknown {
     const relaxed = relaxedLabels.safeParse(entry);
     if (!relaxed.success) return entry;
     const { sub_kind, speech_act, ...rest } = relaxed.data;
-    const kept = claimLabels.partial().safeParse({ sub_kind, speech_act });
+    // Re-add only labels that are present and in vocabulary; an explicit undefined
+    // key would break canonical-body admission for label-free legacy claims.
+    const labels = Object.fromEntries(Object.entries({ sub_kind, speech_act }).filter(([, v]) => v !== undefined));
+    const kept = claimLabels.partial().safeParse(labels);
     return { ...rest, ...(kept.success ? kept.data : {}) };
   });
   return { ...(value as object), claims };
