@@ -77,6 +77,85 @@
                   "text"
                 ],
                 "additionalProperties": false
+              },
+              "confidence": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "entities": {
+                "maxItems": 16,
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "mention": {
+                      "type": "string",
+                      "maxLength": 256
+                    },
+                    "normalized_name": {
+                      "type": "string",
+                      "maxLength": 256
+                    },
+                    "entity_kind": {
+                      "type": "string",
+                      "maxLength": 256
+                    }
+                  },
+                  "required": [
+                    "mention",
+                    "normalized_name",
+                    "entity_kind"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "time": {
+                "type": "object",
+                "properties": {
+                  "value": {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                  },
+                  "precision": {
+                    "type": "string",
+                    "enum": [
+                      "second",
+                      "minute",
+                      "day",
+                      "month",
+                      "year"
+                    ]
+                  }
+                },
+                "required": [
+                  "value",
+                  "precision"
+                ],
+                "additionalProperties": false
+              },
+              "sub_kind": {
+                "type": "string",
+                "enum": [
+                  "fact",
+                  "state",
+                  "event",
+                  "preference",
+                  "procedure",
+                  "decision",
+                  "summary"
+                ]
+              },
+              "speech_act": {
+                "type": "string",
+                "enum": [
+                  "asserted",
+                  "reported",
+                  "hedged",
+                  "intended",
+                  "hypothetical"
+                ]
               }
             },
             "required": [

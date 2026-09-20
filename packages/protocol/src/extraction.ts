@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
+import { ClaimSubKind, TimePoint } from "./element.ts";
 
 const hash = z.string().regex(/^[0-9a-f]{64}$/);
 const id = z.uuidv7();
@@ -16,12 +17,23 @@ const modality = z.enum(["text", "code", "mixed", "unknown"]);
 const terminal = z.enum(["succeeded", "failed", "cancelled", "expired", "worker_lost"]);
 export const ExtractionFailure = z.enum(["provider_unavailable", "provider_rejected", "provider_mismatch", "output_too_large", "input_too_large", "policy_denied", "cancelled", "expired", "worker_lost", "premises_changed"]);
 
-/** Bounded model-task audit ABI, not a Fact/graph materialization ABI. */
+/** Legacy text/evidence claims remain auditable; confidence is required for
+ * semantic materialization. Names are source-exact, never generated aliases. */
+export const ExtractionClaim = z.strictObject({
+  text: bounded(8192).refine(v => v.length > 0), evidence: ExtractionSpan,
+  confidence: z.number().min(0).max(1).optional(),
+  entities: z.array(z.strictObject({ mention: name, normalized_name: name, entity_kind: name })).max(16).optional(),
+  time: TimePoint.optional(),
+  sub_kind: ClaimSubKind.optional(),
+  speech_act: z.enum(["asserted", "reported", "hedged", "intended", "hypothetical"]).optional(),
+});
+export type ExtractionClaim = z.infer<typeof ExtractionClaim>;
+/** Bounded model output. Optional claim metadata does not authorize relations. */
 export const ExtractionModelOutput = z.discriminatedUnion("task", [
-  z.strictObject({ task: z.literal("claim"), claims: z.array(z.strictObject({ text: bounded(8192).refine(v => v.length > 0), evidence: ExtractionSpan })).max(64), language: bounded(64), modality }),
+  z.strictObject({ task: z.literal("claim"), claims: z.array(ExtractionClaim).max(64), language: bounded(64), modality }),
   z.strictObject({ task: z.literal("judge"), disposition, spans, language: bounded(64), modality }),
   z.strictObject({ task: z.literal("judge_claims"), claim_body_digest: hash,
-    decisions: z.array(z.strictObject({ claim_index: timestamp.max(63), disposition, evidence: ExtractionSpan })).max(64),
+    decisions: z.array(z.strictObject({ claim_index: timestamp.max(63), disposition, evidence: ExtractionSpan, confidence: z.number().min(0).max(1).optional() })).max(64),
     language: bounded(64), modality }),
 ]);
 export type ExtractionModelOutput = z.infer<typeof ExtractionModelOutput>;

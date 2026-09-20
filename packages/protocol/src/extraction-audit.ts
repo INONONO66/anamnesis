@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { ExtractionSpan, ExtractionAttempt, ModelTask, LeaseModelTask } from './extraction.ts';
+import { ExtractionSpan, ExtractionClaim, ExtractionAttempt, ModelTask, LeaseModelTask } from './extraction.ts';
 
 const id = z.uuidv7();
 const hash = z.string().regex(/^[0-9a-f]{64}$/);
@@ -8,7 +8,7 @@ const counter = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
  * Dispositions are retained observations, never authority to suppress/correct. */
 export const ExtractionClaimContext = z.strictObject({
   task_id: id, attempt_id: id, body_digest: hash,
-  claims: z.array(z.strictObject({ text: z.string().max(8192), evidence: ExtractionSpan })).max(64),
+  claims: z.array(ExtractionClaim).max(64),
 });
 export type ExtractionClaimContext = z.infer<typeof ExtractionClaimContext>;
 export const ExtractionJudgeInput = z.strictObject({
@@ -24,7 +24,7 @@ export const ExtractionPipelineStatus = z.strictObject({ pipeline_id: id });
 export const ExtractionDisposition = z.strictObject({
   judge_attempt_id: id, claim_attempt_id: id, claim_body_digest: hash,
   claim_index: counter.max(63), disposition: z.enum(['retain','suppress','correct','unknown']),
-  evidence: ExtractionSpan,
+  evidence: ExtractionSpan, confidence: z.number().min(0).max(1).optional(),
 });
 export type ExtractionDisposition = z.infer<typeof ExtractionDisposition>;
 export const ExtractionPipeline = z.discriminatedUnion('state', [

@@ -29,7 +29,7 @@ import {
 import { RpcPolicySetParams, RpcPolicyRevokeParams, type RpcPolicyResult } from "../../protocol/src/rpc.ts";
 import { ObjectStore } from "./objects.ts";
 import { EchoLineage, EpisodeLineageError, RecallLineageSelection, parseEpisodeLineage, type EpisodeLineageInput } from "../../protocol/src/episode-lineage.ts";
-import { SemanticResolvedTime, validateSemanticClaim, type SemanticSourceContext } from "../../protocol/src/semantic-claim.ts";
+import { SemanticClaimValidationError, SemanticResolvedTime, validateSemanticClaim, type SemanticSourceContext, type ValidatedSemanticClaim } from "../../protocol/src/semantic-claim.ts";
 import { CreateModelTask, ModelTaskCAS, LeaseModelTask, SettleModelTask, CompleteExtractionAttempt, AdvanceExtractionCoverage, SelectExtractionGeneration, ExtractionSelection, ReadExtractionCoverage, ExtractionCoverageRead, canonicalExtractionBody, extractionBodyDigest } from "../../protocol/src/extraction.ts";
 import { validateModelOutput, validateSourceSpans } from "./extraction.ts";
 import { ExtractionClaimContext, ExtractionJudgeInput, ExtractionPipeline, ExtractionDisposition, ExtractionAuditError } from '../../protocol/src/extraction-audit.ts';
@@ -39,7 +39,7 @@ import { HistoricalElement, historicalEligibility, type EligibilityReason } from
 import { z } from "zod";
 import { replayDynamics, type DynamicsEvent } from "./dynamics/state.ts";
 import { solvePpr } from "./dynamics/ppr.ts";
-import { materializeFacts, type RetainedExtractionAttempt, type RetainedEpisode } from "./fact-materialization.ts";
+
 import { ADOPTION_NUMERIC_VERSION } from "./dynamics/adoption-numeric.ts";
 import { attributeOutcome, normalizedRrf } from "./dynamics/ranking.ts";
 import { initialStability, retention } from "./dynamics/retention.ts";
@@ -244,6 +244,19 @@ const SCHEMA_STATEMENTS = [
    FOR (e:Element) ON EACH [e.content]
    OPTIONS { indexConfig: { \`fulltext.analyzer\`: 'cjk' } }`,
 ];
+
+/** Model-stated claim time becomes an explicit resolved time. Coarse precisions
+ * are truncated to the UTC interval start; second/minute stay instants. */
+function semanticClaimTime(time: { value: string; precision: "second" | "minute" | "day" | "month" | "year" }) {
+  const d = new Date(time.value);
+  const precision = time.precision === "second" || time.precision === "minute" ? "instant" as const : time.precision;
+  if (precision !== "instant") {
+    d.setUTCHours(0, 0, 0, 0);
+    if (precision !== "day") d.setUTCDate(1);
+    if (precision === "year") d.setUTCMonth(0);
+  }
+  return { time_value: time.value, time_utc: d.getTime(), time_precision: precision, resolution: "explicit" as const, anchor_time_utc: null };
+}
 
 function sha256(data: Uint8Array | string): string {
   return createHash("sha256").update(data).digest("hex");
@@ -2193,43 +2206,63 @@ export class Store {
       const existing = await tx.run(`MATCH (o:MaterializationOperation {occurrence_key:$key}) RETURN o.id`, { key: occurrence });
       if (existing.records.length) throw new Error("claim_already_materialized");
       allocated ??= { fact_id: uuidv7(), link_id: uuidv7(), mention_ids: validated.identity.entity_ids.map(() => uuidv7()) };
-      const { fact_id, link_id } = allocated;
-      const claim = output.semantic_claim, source = premises.source;
-      const element = MemoryElement.parse({ id: fact_id, schema: "anamnesis.claim/1", content: claim.content,
-        time: { value: new Date(claim.time.time_utc).toISOString(), precision: ["instant", "inherited"].includes(claim.time.time_precision) ? "second" : claim.time.time_precision },
-        origin: { source: "semantic-extraction", session: request.generation_id, actor: premises.judge_profile_id, record: occurrence },
-        mass: claim.confidence, properties: { ...validated.identity.properties, sub_kind: claim.sub_kind, modality: claim.modality,
-          confidence: claim.confidence, content_language: claim.content_language, semantic_time: claim.time } });
-      await this.createElementTx(tx, element, null, {});
-      await tx.run(`MATCH (f:Fact {id:$id}) SET f.generation=$generation,f.content_language=$language,f.sub_kind=$subkind,f.modality=$modality,
-        f.confidence=$confidence,f.meaning_digest=$meaning,f.primary_episode_id=$source,f.source_episode_ids=$sources,f.max_source_ingest_seq=$seq,
-        f.echo_state=$echo,f.echo_depth=$depth,f.echo_lineage_truncated=false,f.parent_recall_ids=$parents,f.corroboration_root_episode_ids=$roots,
-        f.entity_ids=$entities,f.support_fact_ids=[],f.proposal_id=$proposal,f.policy_revision=$policy`,
-        { id: fact_id, generation: request.generation_id, language: claim.content_language, subkind: claim.sub_kind, modality: claim.modality,
-          confidence: claim.confidence, meaning: validated.meaning_digest, source: source.id, sources: [source.id], seq: source.ingest_seq,
-          echo: validated.identity.echo_state, depth: validated.identity.echo_depth, parents: validated.identity.parent_recall_ids,
-          roots: validated.identity.corroboration_root_episode_ids, entities: validated.identity.entity_ids, proposal: request.proposal_id, policy: policy.policy_revision });
-      await this.mergeLinkTx(tx, MemoryLink.parse({ id: link_id, from: fact_id, to: source.id, role: "DERIVED_FROM", content: "semantic evidence", weight: 1 }));
-      await tx.run(`MATCH ()-[l:DERIVED_FROM]->() WHERE l.id=$id SET l.span=$span,l.evidence_text=$text,l.proposal_id=$proposal`,
-        { id: link_id, span: validated.evidence ? [validated.evidence.start, validated.evidence.end] : null, text: validated.evidence?.text ?? null, proposal: request.proposal_id });
-      for (const entity of resolution.entity_resolutions) {
-        if (entity.status !== "new") continue;
-        await this.createElementTx(tx, MemoryElement.parse({ id: entity.entity_id, schema: "anamnesis.entity/1", content: entity.normalized_name,
-          origin: { source: "semantic-extraction", session: request.generation_id, actor: premises.judge_profile_id, record: entity.entity_key },
-          properties: { normalized_name: entity.normalized_name, entity_kind: entity.entity_kind, entity_key: entity.entity_key } }), null, {});
-        await tx.run(`MATCH (e:Entity {id:$id}) SET e.generation=$generation,e.entity_key=$key`, { id: entity.entity_id, generation: request.generation_id, key: entity.entity_key });
-      }
-      for (const [i, entity] of validated.identity.entity_ids.entries()) {
-        await this.mergeLinkTx(tx, MemoryLink.parse({ id: allocated.mention_ids[i], from: fact_id, to: entity, role: "MENTIONS", content: "semantic entity mention", weight: 1 }));
-        await tx.run(`MERGE (w:EntityWitness {entity_id:$entity,generation:$generation,policy_revision:$policy}) SET w.state='COMPLETE'`, { entity, generation: request.generation_id, policy: policy.policy_revision });
-      }
-      const result = MaterializationResult.parse({ created: true, fact_id, link_id });
-      await tx.run(`CREATE (:MaterializationOperation {id:$id,digest:$digest,result:$result,occurrence_key:$key,source_episode_id:$source,generation:$generation,semantic_profile_id:$profile,fact_id:$fact,link_id:$link})
-        CREATE (:AdjudicationConsumption {proposal_id:$proposal,operation_id:$id,fact_id:$fact,link_id:$link})
-        WITH 1 AS ignored MATCH (m:Meta {key:'meta'}) SET m.structure_revision=coalesce(m.structure_revision,0)+1`,
-        { id: request.operation_id, digest, result: canonicalExtractionBody(result), key: occurrence, source: source.id, generation: request.generation_id, profile: premises.judge_profile_id, proposal: request.proposal_id, fact: fact_id, link: link_id });
+      const result = await this.writeValidatedFactTx(tx, { validated, resolution, source: premises.source,
+        generation: request.generation_id, profile: premises.judge_profile_id, policy: policy.policy_revision,
+        operationId: request.operation_id, digest, occurrence, proposalId: request.proposal_id, allocated });
+      await tx.run(`CREATE (:AdjudicationConsumption {proposal_id:$proposal,operation_id:$id,fact_id:$fact,link_id:$link})`,
+        { proposal: request.proposal_id, id: request.operation_id, fact: result.fact_id, link: result.link_id });
       return result;
     });
+  }
+
+  /** Both admission paths write only a mechanically validated new occurrence.
+   * mergeLinkTx creates physical links and their real conducting rows atomically.
+   * Relation adjudication is separate; this body never invalidates another Fact. */
+  private async writeValidatedFactTx(tx: ManagedTransaction, input: {
+    validated: ValidatedSemanticClaim; resolution: SemanticResolution; source: SemanticReviewPremises["source"];
+    generation: string; profile: string; policy: number; operationId: string; digest: string; occurrence: string;
+    proposalId: string | null; allocated: { fact_id: string; link_id: string; mention_ids: string[] };
+  }): Promise<MaterializationResult> {
+    const { validated, resolution, source, generation, profile, policy, operationId, digest, occurrence, proposalId, allocated } = input;
+    const claim = validated.claim, { fact_id, link_id } = allocated;
+    const inherited = claim.time.resolution === "inherited";
+    const precision = inherited ? source.time.time_precision : claim.time.time_precision;
+    const element = MemoryElement.parse({ id: fact_id, schema: "anamnesis.claim/1", content: claim.content,
+      time: { value: new Date(claim.time.time_utc).toISOString(), precision: ["instant", "inherited"].includes(precision) ? "second" : precision },
+      origin: { source: "semantic-extraction", session: generation, actor: profile, record: occurrence },
+      mass: claim.confidence, properties: { ...validated.identity.properties, sub_kind: claim.sub_kind, modality: claim.modality,
+        confidence: claim.confidence, content_language: claim.content_language, semantic_time: claim.time,
+        time_basis: inherited ? "episode_fallback" : "claim" } });
+    await this.createElementTx(tx, element, null, {});
+    await tx.run(`MATCH (f:Fact {id:$id}) SET f.generation=$generation,f.content_language=$language,f.sub_kind=$subkind,f.modality=$modality,
+      f.confidence=$confidence,f.meaning_digest=$meaning,f.primary_episode_id=$source,f.source_episode_ids=$sources,f.max_source_ingest_seq=$seq,
+      f.echo_state=$echo,f.echo_depth=$depth,f.echo_lineage_truncated=false,f.parent_recall_ids=$parents,f.corroboration_root_episode_ids=$roots,
+      f.entity_ids=$entities,f.support_fact_ids=[],f.proposal_id=$proposal,f.policy_revision=$policy,f.semantic_profile_id=$profile`,
+      { id: fact_id, generation, language: claim.content_language, subkind: claim.sub_kind, modality: claim.modality,
+        confidence: claim.confidence, meaning: validated.meaning_digest, source: source.id, sources: [source.id], seq: source.ingest_seq,
+        echo: validated.identity.echo_state, depth: validated.identity.echo_depth, parents: validated.identity.parent_recall_ids,
+        roots: validated.identity.corroboration_root_episode_ids, entities: validated.identity.entity_ids, proposal: proposalId, policy, profile });
+    await this.mergeLinkTx(tx, MemoryLink.parse({ id: link_id, from: fact_id, to: source.id, role: "DERIVED_FROM", content: "semantic evidence", weight: 1 }));
+    await tx.run(`MATCH ()-[l:DERIVED_FROM]->() WHERE l.id=$id SET l.span=$span,l.evidence_text=$text,l.proposal_id=$proposal`,
+      { id: link_id, span: validated.evidence ? [validated.evidence.start, validated.evidence.end] : null, text: validated.evidence?.text ?? null, proposal: proposalId });
+    const createdEntities = new Set<string>();
+    for (const entity of resolution.entity_resolutions) {
+      if (entity.status !== "new" || !validated.identity.entity_ids.includes(entity.entity_id) || createdEntities.has(entity.entity_id)) continue;
+      await this.createElementTx(tx, MemoryElement.parse({ id: entity.entity_id, schema: "anamnesis.entity/1", content: entity.normalized_name,
+        origin: { source: "semantic-extraction", session: generation, actor: profile, record: entity.entity_key },
+        properties: { normalized_name: entity.normalized_name, entity_kind: entity.entity_kind, entity_key: entity.entity_key } }), null, {});
+      await tx.run(`MATCH (e:Entity {id:$id}) SET e.generation=$generation,e.entity_key=$key`, { id: entity.entity_id, generation, key: entity.entity_key });
+      createdEntities.add(entity.entity_id);
+    }
+    for (const [i, entity] of validated.identity.entity_ids.entries()) {
+      await this.mergeLinkTx(tx, MemoryLink.parse({ id: allocated.mention_ids[i], from: fact_id, to: entity, role: "MENTIONS", content: "semantic entity mention", weight: 1 }));
+      await tx.run(`MERGE (w:EntityWitness {entity_id:$entity,generation:$generation,policy_revision:$policy}) SET w.state='COMPLETE'`, { entity, generation, policy: neo4j.int(policy) });
+    }
+    const result = MaterializationResult.parse({ created: true, fact_id, link_id });
+    await tx.run(`CREATE (:MaterializationOperation {id:$id,digest:$digest,result:$result,occurrence_key:$key,source_episode_id:$source,generation:$generation,semantic_profile_id:$profile,fact_id:$fact,link_id:$link})
+      WITH 1 AS ignored MATCH (m:Meta {key:'meta'}) SET m.structure_revision=coalesce(m.structure_revision,0)+1`,
+      { id: operationId, digest, result: canonicalExtractionBody(result), key: occurrence, source: source.id, generation, profile, fact: fact_id, link: link_id });
+    return result;
   }
 
   /** Originals-only increment. All candidate reads, policy revalidation, source
@@ -2783,79 +2816,81 @@ export class Store {
     });
   }
 
+  /** Relation adjudication seam. The automatic pipeline never decides that two
+   * Facts restate or contradict each other; a calibrated judge supplied later
+   * emits those decisions and Fact->Fact INVALIDATES stays non-automatic (D50). */
   private async materializeExtractionPipelineTx(tx: ManagedTransaction, pipeline: {
-    claim: ModelTask; claim_attempt: ExtractionAttempt | null; judge_attempt: ExtractionAttempt | null; decisions: ExtractionDisposition[];
+    claim: ModelTask; claim_attempt: ExtractionAttempt | null; judge: ModelTask | null; judge_attempt: ExtractionAttempt | null; decisions: ExtractionDisposition[];
   }, policy: PolicyState): Promise<boolean> {
     const judge = pipeline.judge_attempt, claim = pipeline.claim_attempt;
-    if (!judge || judge.state !== "succeeded" || !judge.output || !claim || claim.state !== "succeeded" || !claim.output) return false;
-    await this.authorizeEpisodesTx(tx, [judge.source_id], policy);
-    const sourceRows = await tx.run<{ e: ElementNode }>(`MATCH (e:Element:Episode {id:$id}) RETURN e`, { id: judge.source_id });
-    if (!sourceRows.records[0]) throw new Error("unknown_source");
-    const source = toElement(nodeProps(sourceRows.records[0].get("e")));
+    if (!judge || judge.state !== "succeeded" || !judge.output || !claim || claim.state !== "succeeded" || !claim.output || !pipeline.judge) return false;
     const claimOutput = ExtractionModelOutput.parse(JSON.parse(claim.output.canonical_body));
     if (claimOutput.task !== "claim") throw new ExtractionAuditError("extraction_audit_conflict");
     const judgeOutput = ExtractionModelOutput.parse(JSON.parse(judge.output.canonical_body));
     if (judgeOutput.task !== "judge_claims") throw new ExtractionAuditError("extraction_audit_conflict");
-    const accepted = pipeline.decisions.filter(decision => decision.disposition === "retain" || decision.disposition === "correct");
-    const occurrence = extractionBodyDigest([judge.generation_id, judge.source_id]);
-    const prior = await tx.run(`MATCH (o:MaterializationOperation {occurrence_key:$key}) RETURN o.id`, { key: occurrence });
-    if (prior.records.length) return true;
-
-    const claims = accepted.map(decision => {
+    // Only model-reported confidence admits a claim to semantic writes. Audit-only
+    // output (no confidence) stays an auditable decision and never becomes a Fact.
+    const candidates = pipeline.decisions.flatMap(decision => {
+      if (decision.disposition !== "retain" && decision.disposition !== "correct") return [];
       const extracted = claimOutput.claims[decision.claim_index];
       if (!extracted) throw new ExtractionAuditError("extraction_audit_conflict");
-      return { text: extracted.text, start: extracted.evidence.start, end: extracted.evidence.end,
-        time: source.time?.value ?? new Date(this.clock()).toISOString() };
+      const confidence = decision.confidence ?? extracted.confidence;
+      return confidence === undefined ? [] : [{ decision, extracted, confidence }];
     });
-    const retainedAttempt: RetainedExtractionAttempt = { id: judge.id, episodeId: source.id, generation: judge.generation_id,
-      policyRevision: policy.policy_revision, state: "succeeded", gate: "independent_shadow_review_required", claims };
-    const retainedEpisode: RetainedEpisode = { id: source.id, content: source.content, generation: judge.generation_id, policyRevision: policy.policy_revision };
-    const syntheticArcs = claims.map((_, index) => {
-      const factId = createHash("sha256").update(`${judge.id}:${index}:${claims[index]!.text}:${claims[index]!.time}`).digest("hex").slice(0, 32);
-      return { source_id: factId, link_id: uuidv7(), peer_id: source.id, role: "DERIVED_FROM" as const, generation: judge.generation_id };
-    });
-    const pure = materializeFacts(retainedAttempt, retainedEpisode, {
-      semanticWrites: true, independentShadowReview: true, conductingArcs: syntheticArcs,
-      conductingArcLookup: (sourceId, linkId) => syntheticArcs.find(arc => arc.source_id === sourceId && arc.link_id === linkId),
-    });
-    if (pure.state !== "materialized" && claims.length) throw new ExtractionAuditError("extraction_audit_conflict");
-
-    const facts: { id: string; linkId: string; content: string; time: string; confidence: number; entityId: string }[] = [];
-    for (const [index, retained] of (pure.state === "materialized" ? pure.facts : []).entries()) {
-      const factId = uuidv7(), entityId = uuidv7(), entityKey = extractionBodyDigest({ generation: judge.generation_id, content: retained.content });
-      const fact = MemoryElement.parse({ id: factId, schema: "anamnesis.claim/1", content: retained.content,
-        time: source.time, origin: { source: "extraction-audit", session: judge.generation_id, actor: "fixture", record: `${occurrence}:${index}` },
-        mass: 1, properties: { confidence: 1, content_language: "und", entity_ids: [entityId], source_episode_ids: [source.id], primary_episode_id: source.id } });
-      await this.createElementTx(tx, fact, null, {});
-      await tx.run(`MATCH (f:Fact {id:$id}) SET f.generation=$generation,f.policy_revision=$policy,f.confidence=$confidence,
-        f.primary_episode_id=$source,f.source_episode_ids=$sources,f.entity_ids=$entities,f.max_source_ingest_seq=$seq,
-        f.semantic_profile_id='extraction-audit-v1'`, { id: factId, generation: judge.generation_id, policy: policy.policy_revision,
-          confidence: 1, source: source.id, sources: [source.id], entities: [entityId], seq: judge.source_ingest_seq });
-      const entity = MemoryElement.parse({ id: entityId, schema: "anamnesis.entity/1", content: retained.content,
-        origin: { source: "extraction-audit", session: judge.generation_id, actor: "fixture", record: entityKey },
-        properties: { normalized_name: retained.content, entity_kind: "claim", entity_key: entityKey } });
-      await this.createElementTx(tx, entity, null, {});
-      await tx.run(`MATCH (e:Entity {id:$id}) SET e.generation=$generation,e.entity_key=$key`, { id: entityId, generation: judge.generation_id, key: entityKey });
-      const derivedLinkId = uuidv7();
-      await this.mergeLinkTx(tx, MemoryLink.parse({ id: derivedLinkId, from: factId, to: source.id, role: "DERIVED_FROM", content: "extraction evidence", weight: 1 }));
-      await this.mergeLinkTx(tx, MemoryLink.parse({ id: uuidv7(), from: factId, to: entityId, role: "MENTIONS", content: "extracted entity", weight: 1 }));
-      await tx.run(`MERGE (w:EntityWitness {entity_id:$entity,generation:$generation,policy_revision:$policy}) SET w.state='COMPLETE'`, { entity: entityId, generation: judge.generation_id, policy: policy.policy_revision });
-      facts.push({ id: factId, linkId: derivedLinkId, content: retained.content, time: source.time?.value ?? new Date(this.clock()).toISOString(), confidence: 1, entityId });
-    }
-    for (let left = 0; left < facts.length; left++) for (let right = left + 1; right < facts.length; right++) {
-      const words = (value: string) => new Set(value.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(word => word.length > 2));
-      const a = words(facts[left]!.content), b = words(facts[right]!.content), common = [...a].filter(word => b.has(word)).length;
-      if (common >= Math.min(a.size, b.size) / 2) {
-        await this.mergeLinkTx(tx, MemoryLink.parse({ id: uuidv7(), from: facts[left]!.id, to: facts[right]!.id, role: "CONTRASTS", content: "conflicting extracted claims", weight: 1 }));
+    // Per-source custody is written exactly once; readiness requires every covered
+    // source to carry custody even when the judge admitted nothing or every claim was refused.
+    const custody = extractionBodyDigest([judge.generation_id, judge.source_id]);
+    const priorCustody = await tx.run(`MATCH (o:MaterializationOperation {occurrence_key:$key}) RETURN o.result AS result`, { key: custody });
+    if (priorCustody.records[0]) return JSON.parse(priorCustody.records[0].get("result")).created === true;
+    const source = await this.semanticEpisodeTx(tx, judge.source_id, policy);
+    if (judge.source_revision !== source.revision_key || judge.body_digest !== source.content_digest || judge.source_ingest_seq !== source.ingest_seq)
+      throw new ExtractionAuditError("extraction_audit_stale");
+    const reported = claimOutput.language.toLowerCase();
+    const language = /^[a-z]{2,8}(?:-[a-z0-9]{1,8})*$/.test(reported) ? reported : "und";
+    const profile = pipeline.judge.model;
+    const factIds: string[] = [], refused: string[] = [];
+    for (const { decision, extracted, confidence } of candidates) {
+      const occurrence = extractionBodyDigest([judge.generation_id, judge.source_id, judge.id, decision.claim_index]);
+      const resolutions: SemanticResolution["entity_resolutions"] = [], references: { mention: string; entity_id: string | null }[] = [];
+      for (const entity of extracted.entities ?? []) {
+        if (references.some(reference => reference.mention === entity.mention)) continue;
+        const key = extractionBodyDigest({ generation: judge.generation_id, normalized_name: entity.normalized_name, entity_kind: entity.entity_kind });
+        const existing = await tx.run(`MATCH (e:Entity {generation:$generation,entity_key:$key}) RETURN e.id AS id LIMIT 1`, { generation: judge.generation_id, key });
+        const known = existing.records[0]?.get("id");
+        if (typeof known === "string") { resolutions.push({ status: "existing", mention: entity.mention, entity_id: known }); references.push({ mention: entity.mention, entity_id: known }); }
+        else if (!source.content.includes(entity.normalized_name)) { resolutions.push({ status: "unresolved", mention: entity.mention }); references.push({ mention: entity.mention, entity_id: null }); }
+        else { const entity_id = uuidv7(); resolutions.push({ status: "new", mention: entity.mention, entity_id, normalized_name: entity.normalized_name, entity_kind: entity.entity_kind, entity_key: key }); references.push({ mention: entity.mention, entity_id }); }
       }
+      const time = extracted.time ? semanticClaimTime(extracted.time) : { time_value: source.time.time_value, time_utc: source.time.time_utc, time_precision: "inherited" as const, resolution: "inherited" as const, anchor_time_utc: source.time.time_utc };
+      const semantic = { content: extracted.text, content_language: language, sub_kind: extracted.sub_kind ?? "fact", modality: extracted.speech_act ?? "asserted",
+        confidence, time, entities: references, subject_keys: null, predicate_text: [...extracted.text.normalize("NFC")].slice(0, 256).join(""),
+        scope: { object_keys: [], location_keys: [], quantities: [], condition: null, attribution_speaker_keys: [] }, scope_complete: false,
+        evidence: { kind: "source_locus" as const, span: { start: decision.evidence.start, end: decision.evidence.end } } };
+      const resolution = SemanticResolution.parse({ entity_resolutions: resolutions, attribution_speakers: [], allow_no_single_locus: false, content_language: language });
+      let validated: ValidatedSemanticClaim;
+      try {
+        validated = validateSemanticClaim(semantic, { generation: judge.generation_id, fact_language_policy: "source", allow_no_single_locus: false,
+          episode: { ...source, content_language: language }, entity_resolutions: resolutions, attribution_speakers: [] });
+      } catch (error) {
+        if (!(error instanceof SemanticClaimValidationError)) throw error;
+        // A refused claim is retained as a content-free operation so the pipeline stays idempotent and auditable.
+        await tx.run(`CREATE (:MaterializationOperation {id:$id,digest:$digest,result:$result,occurrence_key:$key,source_episode_id:$source,generation:$generation,semantic_profile_id:$profile,fact_id:$fact,link_id:$link})`,
+          { id: uuidv7(), digest: extractionBodyDigest(semantic), result: canonicalExtractionBody({ created: false, refused: error.code }), key: occurrence,
+            source: source.id, generation: judge.generation_id, profile, fact: `refused:${occurrence}`, link: `refused:${occurrence}` });
+        refused.push(error.code);
+        continue;
+      }
+      const allocated = { fact_id: uuidv7(), link_id: uuidv7(), mention_ids: validated.identity.entity_ids.map(() => uuidv7()) };
+      await this.writeValidatedFactTx(tx, { validated, resolution, source, generation: judge.generation_id, profile, policy: policy.policy_revision,
+        operationId: uuidv7(), digest: extractionBodyDigest(semantic), occurrence, proposalId: null, allocated });
+      factIds.push(allocated.fact_id);
     }
-    const operationId = uuidv7(), result = canonicalExtractionBody({ created: true, fact_ids: facts.map(fact => fact.id) });
-    await tx.run(`CREATE (:MaterializationOperation {id:$id,digest:$digest,result:$result,occurrence_key:$key,
-      source_episode_id:$source,generation:$generation,semantic_profile_id:'extraction-audit-v1',fact_id:$fact,link_id:$link})`, {
-      id: operationId, digest: extractionBodyDigest({ generation: judge.generation_id, source: source.id, claims }), result, key: occurrence,
-      source: source.id, generation: judge.generation_id, fact: facts[0]?.id ?? `suppressed:${source.id}`, link: facts[0]?.linkId ?? `suppressed:${source.id}` });
-    await tx.run(`MATCH (m:Meta {key:'meta'}) SET m.structure_revision=coalesce(m.structure_revision,0)+1`);
-    return true;
+    const created = factIds.length > 0;
+    await tx.run(`CREATE (:MaterializationOperation {id:$id,digest:$digest,result:$result,occurrence_key:$key,source_episode_id:$source,generation:$generation,semantic_profile_id:$profile,fact_id:$fact,link_id:$link})`,
+      { id: uuidv7(), digest: extractionBodyDigest({ generation: judge.generation_id, source: source.id, judge: judge.id, facts: factIds, refused }),
+        result: canonicalExtractionBody({ created, facts: factIds.length, refused }), key: custody, source: source.id, generation: judge.generation_id, profile,
+        fact: created ? `custody:${source.id}` : `suppressed:${source.id}`, link: created ? `custody:${source.id}` : `suppressed:${source.id}` });
+    return created;
   }
 
   private async readExtractionPipelineTx(tx: ManagedTransaction,id: string): Promise<ExtractionPipeline> {
@@ -2868,7 +2903,7 @@ export class Store {
     const claimAttempt = await terminal(claim), judgeAttempt = await terminal(judge);
     const decisions = judgeAttempt ? await this.extractionDecisionsTx(tx,judgeAttempt) : [];
     const materialized = judgeAttempt && judgeAttempt.state === "succeeded"
-      ? await this.materializeExtractionPipelineTx(tx, { claim, claim_attempt: claimAttempt, judge_attempt: judgeAttempt, decisions }, await this.receiptLockTx(tx))
+      ? await this.materializeExtractionPipelineTx(tx, { claim, claim_attempt: claimAttempt, judge, judge_attempt: judgeAttempt, decisions }, await this.receiptLockTx(tx))
       : false;
     return ExtractionPipeline.parse({state:'known',pipeline_id:id,mode:'claim-judge-audit-v1',semantic_writes:materialized,claim,claim_attempt:claimAttempt,judge,judge_attempt:judgeAttempt,decisions});
   }
@@ -3225,9 +3260,10 @@ export class Store {
       const links = await tx.run(`MATCH (f:Element:Fact)-[l:DERIVED_FROM]->(e:Element:Episode)
         WHERE l.generation=$generation RETURN f.id AS fact,e.id AS source,l.id AS link,l.generation AS generation LIMIT $limit`, { generation: target.id, limit: neo4j.int(maxDerived + 1) });
       const linkBad = links.records.length > maxDerived || links.records.some(row => row.get("generation") !== target.id || !row.get("fact") || !row.get("source") || !row.get("link"));
+      // Several Facts may mention one Entity; the witness requirement is per distinct entity.
       const entities = await tx.run(`MATCH (f:Element:Fact {generation:$generation}) UNWIND coalesce(f.entity_ids,[]) AS entity
-        OPTIONAL MATCH (w:EntityWitness {entity_id:entity,generation:$generation,policy_revision:$policy})
-        RETURN entity,count(w) AS witnesses LIMIT $limit`, { generation: target.id, policy: policy.policy_revision, limit: neo4j.int(maxDerived + 1) });
+        WITH DISTINCT entity OPTIONAL MATCH (w:EntityWitness {entity_id:entity,generation:$generation,policy_revision:$policy})
+        RETURN entity,count(w) AS witnesses LIMIT $limit`, { generation: target.id, policy: neo4j.int(policy.policy_revision), limit: neo4j.int(maxDerived + 1) });
       const witnessBad = entities.records.length > maxDerived || entities.records.some(row => row.get("witnesses") !== 1);
       const indexesReady = indexes.records.length === 7 && indexes.records.every(index => index.get("state") === "ONLINE");
       let embeddingCoverageBad = false;
