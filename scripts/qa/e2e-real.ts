@@ -11,6 +11,7 @@ import neo4j, { type Driver } from "neo4j-driver";
 import { v7 as uuidv7 } from "../../packages/core/node_modules/uuid/dist/esm/index.js";
 import { Engine } from "../../packages/core/src/engine.ts";
 import { OpenAiChatExtractionProvider } from "../../packages/core/src/openai-extraction-provider.ts";
+import { OpenAiEmbeddingProvider } from "../../packages/core/src/openai-embedding-provider.ts";
 import { Generation } from "../../packages/protocol/src/extraction.ts";
 import { RpcRememberParams, type RpcStatusResult } from "../../packages/protocol/src/rpc.ts";
 import { maskSecrets } from "../../packages/backfill/src/secrets.ts";
@@ -61,8 +62,10 @@ export async function runE2eReal(evidence = resolve(".omo/evidence/runtime-compl
     await appendFile(transcript, line + "\n"); console.log(line);
   };
   const started = Date.now(), durations: Record<string, number> = {}, errors: Record<string, number> = {};
+  // Opt-in: ANAMNESIS_QA_EMBEDDINGS=1 tunnels to the inonono llama-server (Qwen3-Embedding-0.6B, port 18081).
+  const embeddingEnabled = process.env.ANAMNESIS_QA_EMBEDDINGS === "1";
   const deviations = [
-    "Embeddings disabled by decision: token-hub has no embeddings route.",
+    ...(embeddingEnabled ? [] : ["Embeddings disabled: ANAMNESIS_EMBEDDING_BASE_URL unset (token-hub has no embeddings route)."]),
     "ops extract is capability admission only; extraction uses Engine after ops down.",
     "verify/status RPC has no Episode/Fact/generation counters; committed ingest receipts and read-only owned-DB snapshots supplement verify health.",
     "Attempt 4 was cleaned before a recall probe could run; its second response was not recorded. Queries now use full Fact text and top-20 results; ranking code was not changed without evidence.",
@@ -72,7 +75,7 @@ export async function runE2eReal(evidence = resolve(".omo/evidence/runtime-compl
   const pacer = createLlmPacer(llmMinIntervalMs);
   const summary: Record<string, unknown> = { status: "running", stage: "setup", episodes: 0, facts_active: 0, vectors: 0,
     llm_min_interval_ms: llmMinIntervalMs,
-    embedding_channel: "disabled_by_decision", recall: [], crash_drain: null, model: "claude-haiku-4-5", provider_errors: errors, durations, deviations };
+    embedding_channel: embeddingEnabled ? "qwen3-embedding-0.6b via llama-server" : "disabled", recall: [], crash_drain: null, model: "claude-haiku-4-5", provider_errors: errors, durations, deviations };
   // Bind-mounted roots must live under $HOME (colima/virtiofs shares only the home directory).
   const qaParent = join(process.env["HOME"] ?? "/tmp", ".cache", "anamnesis-qa"); await mkdir(qaParent, { recursive: true, mode: 0o700 });
   const parent = await mkdtemp(join(qaParent, "ana-g4-")), root = join(parent, "runtime"), secretRoot = await mkdtemp(join(qaParent, "ana-g4-key-"));
@@ -135,11 +138,13 @@ export async function runE2eReal(evidence = resolve(".omo/evidence/runtime-compl
     await writeFile(key, "", { mode: 0o600 });
     await command("scp", ["-q", "-o", "BatchMode=yes", "inonono:~/.config/anamnesis/token-hub-haiku.json", key]);
     await chmod(key, 0o600); assert.equal((await stat(key)).mode & 0o777, 0o600);
-    const tunnelPort = await freePort();
+    const tunnelPort = await freePort(), embedPort = await freePort();
     const control = join(secretRoot, "ssh.sock");
-    tunnel = spawn("ssh", ["-N", "-M", "-S", control, "-o", "ForkAfterAuthentication=no", "-o", "ControlPersist=no", "-o", "BatchMode=yes", "-o", "ExitOnForwardFailure=yes", "-L", `${tunnelPort}:127.0.0.1:19080`, "inonono"], { stdio: "ignore" });
+    tunnel = spawn("ssh", ["-N", "-M", "-S", control, "-o", "ForkAfterAuthentication=no", "-o", "ControlPersist=no", "-o", "BatchMode=yes", "-o", "ExitOnForwardFailure=yes", "-L", `${tunnelPort}:127.0.0.1:19080`,
+      ...(embeddingEnabled ? ["-L", `${embedPort}:127.0.0.1:18081`] : []), "inonono"], { stdio: "ignore" });
     await waitForReady(() => execute("ssh", ["-S", control, "-O", "check", "inonono"], { timeout: 3000 }).then(() => undefined), 30000, "tunnel_readiness_failed");
     env.ANAMNESIS_LLM_BASE_URL = `http://127.0.0.1:${tunnelPort}`;
+    if (embeddingEnabled) { env.ANAMNESIS_EMBEDDING_BASE_URL = `http://127.0.0.1:${embedPort}`; env.ANAMNESIS_EMBEDDING_MODEL = "qwen3-embedding-0.6b"; env.ANAMNESIS_EMBEDDING_DIMENSIONS = "1024"; }
     await log("resources", { owner, tunnel_pid: tunnel.pid, local_port: tunnelPort, credential_mode: "0600" });
     const port = await freePort(); env.ANAMNESIS_NEO4J_URI = `bolt://127.0.0.1:${port}`;
     // Reserve an explicit port so docker start keeps the same Bolt endpoint.
@@ -166,6 +171,7 @@ export async function runE2eReal(evidence = resolve(".omo/evidence/runtime-compl
     const converted: RpcRememberParams[] = [];
     if (count < 200) {
       deviations.push("One copied Codex rollout yielded fewer than 200 Episodes; deterministic real Claude text-block conversion filled the remainder via ops ingest. One rollout keeps the run inside the current 256-source cutover bound.");
+      deviations.push("The first transcript Episode is admitted metadata-free so the crash-drain replay is an exact legacy retry (explicit lineage cannot spool offline). ingest-codex-raw Episodes are pre-lineage (digest version 1) and refuse semantic Facts (echo_lineage_unavailable) by D49 contract; only the lineage-admitted transcript Episodes can yield Facts.");
       const fallback = process.env.ANAMNESIS_E2E_FALLBACK_PROJECT ?? join(homedir(), ".claude/projects/-Users-ino-Develop-token-hub");
       const fallbackCopy = join(parent, "fallback-copy"); await cp(fallback, fallbackCopy, { recursive: true });
       for (const file of (await readdir(fallbackCopy)).filter(file => file.endsWith(".jsonl")).sort()) {
@@ -179,10 +185,14 @@ export async function runE2eReal(evidence = resolve(".omo/evidence/runtime-compl
           const content = typeof raw === "string" ? raw : raw?.find(block => block.type === "text")?.text;
           if (!content || content.length < 40 || Buffer.byteLength(content) > 1200 || !record.timestamp || !Number.isFinite(Date.parse(record.timestamp))) continue;
           if (maskSecrets(content).redactions > 0) continue;
+          // Explicit lineage admission (D49): only version-2 Episodes are semantic-eligible; metadata-free imports stay pre-lineage and refuse Facts.
+          // The first transcript Episode stays metadata-free on purpose: it is the crash-drain replay source, and only an exact
+          // legacy retry may spool offline (explicit lineage needs the database; a v2 retry with different lineage fields is a revision_conflict).
+          const lineage = converted.length === 0 ? {} : { origin_role: actor, lineage_mode: "direct", parent_recall_ids: [] };
           const params = RpcRememberParams.parse({ episode: { schema: "anamnesis.original-message/1", content,
             time: { value: new Date(record.timestamp).toISOString(), precision: "second" },
             origin: { source: "claude-transcript", session: record.sessionId ?? file, actor, record: `${file}:${lineNumber}` }, mass: 1, properties: {} },
-            source_revision: sha(content), expected_previous_revision_key: null });
+            source_revision: sha(content), expected_previous_revision_key: null, ...lineage });
           converted.push(params);
           if (converted.length + count >= 200) break;
         }
@@ -200,7 +210,11 @@ export async function runE2eReal(evidence = resolve(".omo/evidence/runtime-compl
     await stopDaemon();
     summary.stage = "extraction";
     await log("extraction_surface", { engine: true, ops_extract: "capability_admission_only", writer_handoff: "daemon stopped" });
-    const config = await loadProviderConfig(env); assert.ok(config.llm.baseUrl && config.llm.apiKey); assert.equal(config.embedding, undefined);
+    const config = await loadProviderConfig(env); assert.ok(config.llm.baseUrl && config.llm.apiKey); assert.equal(config.embedding !== undefined, embeddingEnabled);
+    // Same profile construction as app/anamnesis/runtime.ts: configuration identity, not attested weights.
+    const embeddingProvider = config.embedding ? new OpenAiEmbeddingProvider({ ...config.embedding, timeoutMs: 30000,
+      profile: { model: config.embedding.model, dimensions: config.embedding.dimensions, document_prefix: "", query_prefix: "", max_input_bytes: 65536, norm: "unit_l2" as const, norm_tolerance: 0.01,
+        model_incarnation: createHash("sha256").update(JSON.stringify([config.embedding.baseUrl, config.embedding.model, config.embedding.dimensions])).digest("hex") } }) : undefined;
     bearer = config.llm.apiKey;
     let quotaSince: number | undefined;
     const provider = new OpenAiChatExtractionProvider({ ...config.llm, baseUrl: config.llm.baseUrl, apiKey: config.llm.apiKey,
@@ -218,7 +232,7 @@ export async function runE2eReal(evidence = resolve(".omo/evidence/runtime-compl
     // Engine's environment loader requires a password even with explicit options.
     process.env.ANAMNESIS_NEO4J_PASSWORD = password;
     delete process.env.ANAMNESIS_EMBEDDING_CONFIG; delete process.env.ANAMNESIS_EXTRACTION_CONFIG;
-    engine = new Engine({ uri: env.ANAMNESIS_NEO4J_URI, user: "neo4j", password, objectsRoot: join(root, "objects"), extractionProvider: provider });
+    engine = new Engine({ uri: env.ANAMNESIS_NEO4J_URI, user: "neo4j", password, objectsRoot: join(root, "objects"), extractionProvider: provider, ...(embeddingProvider ? { embeddingProvider } : {}) });
     // Pacing must precede lease acquisition, not consume the task's 30s lease.
     // runExtractionPipeline dispatches both claim and judge through this method.
     const runTask = engine.runExtractionTask.bind(engine);
@@ -261,7 +275,19 @@ export async function runE2eReal(evidence = resolve(".omo/evidence/runtime-compl
     summary.facts_materialized = (await driver.executeQuery("MATCH (f:Fact) RETURN count(f) AS count")).records[0]!.get("count");
     summary.stage = "coverage";
     for (const partition of ["episodes", "active_extraction"] as const) await engine.store.recordExtractionCoverage({ generation_id: generation.id, partition, expected_covered_ingest_seq: 0, covered_ingest_seq: count }, context);
-    assert.deepEqual(await engine.drainEmbeddingOutbox(1000), { drained: 0, reason: "embeddings_disabled" });
+    summary.stage = "embedding_drain";
+    if (embeddingProvider) {
+      const embedStart = Date.now(), pendingBefore = (await engine.status()).pendingOutbox;
+      let drainedTotal = 0;
+      for (;;) { const step = await engine.drainEmbeddingOutbox(1000); drainedTotal += step.drained; if (step.drained === 0) break; }
+      const vectors = Number((await driver.executeQuery("MATCH (v:EmbeddingVector) RETURN count(v) AS count")).records[0]!.get("count"));
+      const quarantined = Number((await driver.executeQuery("MATCH (a:EmbeddingAttempt {state:'quarantined'}) RETURN count(a) AS count")).records[0]!.get("count"));
+      durations.embedding_ms = Date.now() - embedStart;
+      summary.vectors = vectors; summary.embedding_drain = { pending_before: pendingBefore, drained: drainedTotal, vectors, quarantined };
+      await log("embedding_drain", summary.embedding_drain);
+      // Activation requires vector coverage for every source Episode of the generation.
+      assert.equal(vectors, count); assert.equal(quarantined, 0);
+    } else assert.deepEqual(await engine.drainEmbeddingOutbox(1000), { drained: 0, reason: "embeddings_disabled" });
     const selection = await engine.readExtractionSelection(context);
     summary.stage = "cutover";
     await engine.cutoverExtractionGeneration({ generation_id: generation.id, expected_generation_id: selection.generation_id, expected_selector_version: selection.selector_version }, context);
@@ -282,7 +308,7 @@ export async function runE2eReal(evidence = resolve(".omo/evidence/runtime-compl
     const facts = await driver.executeQuery("MATCH (f:Fact {generation:$generation}) RETURN f.content AS content ORDER BY f.id LIMIT 64", { generation: generation.id });
     const queries = [...new Set(facts.records.map(row => String(row.get("content"))))].slice(0, 5);
     assert.equal(queries.length, 5);
-    const recall: { query: string; kinds: string[]; fact_count: number; fact_rank_min: number | null; ppr_used: boolean; channels: string[]; result_count: number; top: unknown[] }[] = [];
+    const recall: { query: string; kinds: string[]; fact_count: number; fact_rank_min: number | null; ppr_used: boolean; channels: string[]; vector_reason: string; result_count: number; top: unknown[] }[] = [];
     summary.recall = recall; summary.fact_rank_base = 1;
     summary.stage = "recall";
     for (const query of queries) {
@@ -291,7 +317,7 @@ export async function runE2eReal(evidence = resolve(".omo/evidence/runtime-compl
       const factResults = result.results.filter(item => item.kind === "Fact");
       const receipt = { query, kinds: result.results.map(item => item.kind), fact_count: factResults.length,
         fact_rank_min: factResults.length ? result.results.findIndex(item => item.kind === "Fact") + 1 : null,
-        ppr_used: result.diagnostics.ppr_used, channels: result.diagnostics.channels_used, result_count: result.results.length,
+        ppr_used: result.diagnostics.ppr_used, channels: result.diagnostics.channels_used, vector_reason: result.diagnostics.vector_reason, result_count: result.results.length,
         top: result.results.map(item => ({ ...item, content: item.content.slice(0, 200) })),
         companions: result.companions.map(item => ({ ...item, content: item.content.slice(0, 200) })) };
       recall.push(receipt); await log("recall", receipt);
@@ -301,6 +327,7 @@ export async function runE2eReal(evidence = resolve(".omo/evidence/runtime-compl
     if (factHits < 3) deviations.push(`derived Fact ranking: Facts outranked by Episodes in ${5 - factHits}/5 queries`);
     assert.equal(recall.length, 5);
     assert.ok(recall.some(result => result.kinds.includes("Fact") && result.ppr_used));
+    if (embeddingProvider) { assert.ok(recall.every(result => result.channels.includes("vector") && result.vector_reason === "available")); }
     summary.stage = "crash_drain";
     await engine.close(); engine = undefined; await startDaemon();
     const beforeVerify = await verify(), before = await snapshot();
@@ -313,6 +340,9 @@ export async function runE2eReal(evidence = resolve(".omo/evidence/runtime-compl
       // Replay an already admitted delivery while offline: a real durable spool
       // entry must drain idempotently, without changing Episode/generation counts.
       assert.ok(converted[0], "crash replay needs a converted source receipt");
+      // converted[0] was admitted metadata-free, so this is an exact legacy retry: the only
+      // delivery shape the spool accepts offline, and it drains idempotently.
+      assert.equal("origin_role" in converted[0], false, "crash replay source must be metadata-free");
       assert.equal((await client.request("remember", converted[0])).state, "spooled");
       assert.ok((await client.request("status", {})).spool.pending > 0);
       // Subscribe before restart/wake. Convert rejection to a handled outcome so
@@ -372,4 +402,4 @@ export async function runE2eReal(evidence = resolve(".omo/evidence/runtime-compl
     await log("complete", { status: summary.status, episodes: summary.episodes, facts_active: summary.facts_active, durations });
   }
 }
-if (import.meta.main) await runE2eReal();
+if (import.meta.main) await runE2eReal(process.env.ANAMNESIS_QA_EVIDENCE_DIR ? resolve(process.env.ANAMNESIS_QA_EVIDENCE_DIR) : undefined);

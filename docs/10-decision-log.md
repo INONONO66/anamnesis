@@ -1245,3 +1245,40 @@ batch and throughput behavior remains unmeasured, so failing closed with an
 auditable BLOCKED head is the only honest option. (c) confuses an index that
 answers queries with an index that answers them well; the qualification record
 is what makes the distinction reviewable.
+
+## D52 — the automatic extraction pipeline writes Facts only through the validated semantic path; relations are never guessed
+
+**Decision**: `materializeExtractionPipelineTx` no longer has a private
+write path. A judge-approved claim becomes a Fact only when it passes
+`validateSemanticClaim` and is written by the same `writeValidatedFactTx`
+that serves adjudication proposals (D50), so every Fact carries
+`meaning_digest`, a real `sub_kind`/`modality`, model-reported
+`confidence` as its mass, Entity nodes resolved against the generation's
+`entity_key` registry (existing → reuse, new → create with an
+`EntityWitness`, unresolved → mention dropped), and a resolved time
+(`time_basis: claim` when the model states an absolute date, otherwise the
+Episode's time as `inherited`). The claim schema gains optional
+`confidence`, `entities`, `time`, `sub_kind` and `speech_act`; the
+extraction prompt asks for them. A claim without any confidence is retained
+as an audit decision only and never becomes a Fact; a claim the validator
+refuses is recorded as a content-free `MaterializationOperation`
+(`created:false, refused:<code>`) so the occurrence stays idempotent.
+
+The former word-overlap heuristic that linked Facts of one Episode with
+`CONTRASTS "conflicting extracted claims"` is removed. Fact→Fact
+`CONTRASTS` and `INVALIDATES` are emitted only by an explicit relation
+judge (still to be shipped) or an operator; the automatic path emits neither.
+Activation's witness check counts witnesses per distinct Entity, since several
+Facts of one generation may legitimately mention one Entity.
+
+**Alternative**: (a) keep the private path and add fields to it; (b) keep the
+heuristic as a "cheap contradiction detector" until a judge exists; (c) fall
+back to `confidence: 1` or the judge's `retain` as implicit confidence.
+
+**Reason**: (a) duplicated identity, entity and time rules that D46/D49/D50
+already fixed in one place, and had drifted (fixture actor, mass 1.0, no
+`meaning_digest`, Entities that were Facts by label). (b) produced links
+between claims that merely shared vocabulary, which recall then surfaced as
+"conflicts"; a wrong relation is worse than none because D46 companion bundles
+present it as evidence. (c) fabricates the one number that docs/04 and
+docs/05 consume as Fact mass; an absent measurement must stay absent.

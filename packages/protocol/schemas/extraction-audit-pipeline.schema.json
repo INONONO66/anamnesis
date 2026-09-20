@@ -1022,6 +1022,11 @@
                   "text"
                 ],
                 "additionalProperties": false
+              },
+              "confidence": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
               }
             },
             "required": [

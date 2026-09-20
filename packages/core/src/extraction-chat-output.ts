@@ -18,9 +18,28 @@ export const chatExtractionSchema = z.toJSONSchema(withEvidence(quote), { target
 const receivedOutput = withEvidence(z.union([quote, z.strictObject({
   text: quote, start: z.number().optional(), end: z.number().optional(),
 })]));
+// Anthropic Messages has no response_format, so enum labels arrive unenforced.
+// A label outside the vocabulary is dropped (the claim keeps its evidence and
+// confidence); the field is a classification, never the claim's content.
+const claimLabels = claim.shape.claims.element.pick({ sub_kind: true, speech_act: true });
+const relaxedLabels = z.object({ sub_kind: z.string().optional(), speech_act: z.string().optional() }).loose();
+function dropUnknownLabels(value: unknown): unknown {
+  if (typeof value !== "object" || value === null || (value as { task?: unknown }).task !== "claim" || !Array.isArray((value as { claims?: unknown }).claims)) return value;
+  const claims = (value as { claims: unknown[] }).claims.map(entry => {
+    const relaxed = relaxedLabels.safeParse(entry);
+    if (!relaxed.success) return entry;
+    const { sub_kind, speech_act, ...rest } = relaxed.data;
+    // Re-add only labels that are present and in vocabulary; an explicit undefined
+    // key would break canonical-body admission for label-free legacy claims.
+    const labels = Object.fromEntries(Object.entries({ sub_kind, speech_act }).filter(([, v]) => v !== undefined));
+    const kept = claimLabels.partial().safeParse(labels);
+    return { ...rest, ...(kept.success ? kept.data : {}) };
+  });
+  return { ...(value as object), claims };
+}
 
 export function normalizeChatExtraction(value: unknown, input: ExtractionProviderInput): ExtractionModelOutput {
-  const output = receivedOutput.parse(value);
+  const output = receivedOutput.parse(dropUnknownLabels(value));
   countBudget(input.text, "utf8_bytes"); // Reject invalid Unicode before Buffer replacement encoding.
   const source = Buffer.from(input.text, "utf8");
   const span = (evidence: string | { text: string; start?: number | undefined }, claimIndex?: number) => {
