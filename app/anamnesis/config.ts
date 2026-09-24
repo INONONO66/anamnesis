@@ -61,6 +61,29 @@ export async function loadProviderConfig(env: NodeJS.ProcessEnv = process.env) {
   };
 }
 
+export interface ListenConfig { host: string; port: number; token: string; }
+/** Optional TCP listener next to the socket. Present only with ANAMNESIS_LISTEN="host:port";
+ * the bearer comes from ANAMNESIS_LISTEN_TOKEN_FILE (regular file, owner-only 0600).
+ * Errors name the variable, never the token. Callers must not log the result. */
+export async function loadListenConfig(env: NodeJS.ProcessEnv = process.env): Promise<ListenConfig | undefined> {
+  const listen = env["ANAMNESIS_LISTEN"];
+  if (listen === undefined) return undefined;
+  const address = /^(?:\[([^\]]+)\]|([^:\[\]]+)):(\d{1,5})$/.exec(listen);
+  const host = address?.[1] ?? address?.[2];
+  const port = address ? Number(address[3]) : NaN;
+  if (!host || port > 65535) throw new Error("ANAMNESIS_LISTEN must be host:port");
+  const file = env["ANAMNESIS_LISTEN_TOKEN_FILE"];
+  if (!file) throw new Error("ANAMNESIS_LISTEN_TOKEN_FILE is required with ANAMNESIS_LISTEN");
+  const unreadable = () => new Error("unable to read ANAMNESIS_LISTEN_TOKEN_FILE");
+  const info = await fs.lstat(file).catch(() => { throw unreadable(); });
+  if (!info.isFile() || info.uid !== process.getuid?.() || (info.mode & 0o777) !== 0o600) {
+    throw new Error("ANAMNESIS_LISTEN_TOKEN_FILE must be a regular file owned by the current user with mode 0600");
+  }
+  const token = (await fs.readFile(file, "utf8").catch(() => { throw unreadable(); })).trim();
+  if (!token || /[\r\n]/.test(token) || Buffer.byteLength(token) > 1024) throw new Error("ANAMNESIS_LISTEN_TOKEN_FILE must hold one bearer token of at most 1024 bytes");
+  return { host, port, token };
+}
+
 export function hasCode(error: unknown, code: string): boolean {
   return error instanceof Error && "code" in error && error.code === code;
 }

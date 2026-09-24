@@ -1,16 +1,19 @@
-import { timingSafeEqual, randomUUID } from "node:crypto";
+import { createHash, timingSafeEqual, randomUUID } from "node:crypto";
 import { chmod, rm } from "node:fs/promises";
-import { createServer, type Socket } from "node:net";
+import { createServer, type AddressInfo, type Socket } from "node:net";
 import { once } from "node:events";
-import { RPC_LIMITS, type RpcRequest } from "../../packages/protocol/src/rpc.ts";
-import { acquireInstallation, runtimeRoot, socketPath } from "./config.ts";
+import { RPC_LIMITS, RpcTcpAuth, type RpcRequest } from "../../packages/protocol/src/rpc.ts";
+import { acquireInstallation, loadListenConfig, runtimeRoot, socketPath } from "./config.ts";
 import { daemonTiming, timingContext, timingHash } from "./timing.ts";
 import { Runtime } from "./runtime.ts";
 import type { InstallationContext, RecallTransportInput } from "../../packages/core/src/store.ts";
 import { Frames, RpcByteBudget, RpcFault, decodeRequest, encode, envelope, errorResponse, fault, type ByteAccount, type ByteReservation } from "./wire.ts";
 
-interface Connection { socket: Socket; authenticated: boolean; context?: InstallationContext; pending: number; closed: boolean; bytes: ByteAccount; cancel: Set<() => void>; writes: Set<() => void>; }
+/** authorized: transport admission (always for the socket, bearer frame for TCP); authenticated: hello. */
+interface Connection { socket: Socket; authorized: boolean; authenticated: boolean; context?: InstallationContext; pending: number; closed: boolean; bytes: ByteAccount; cancel: Set<() => void>; writes: Set<() => void>; }
 export async function foreground(): Promise<void> {
+  const listen = await loadListenConfig(); // Refused before the root is claimed; never logged.
+  const bearer = listen && createHash("sha256").update(listen.token).digest();
   const installation = await acquireInstallation(runtimeRoot());
   const path = socketPath(installation.root);
   let runtime: Runtime | undefined;
@@ -119,12 +122,13 @@ export async function foreground(): Promise<void> {
       });
     } catch (error) { disconnected(); connection.socket.destroy(); logError(error); }
   };
-  const server = createServer(socket => {
+  const accept = (transport: "uds" | "tcp") => (socket: Socket) => {
     if (stopping || connections.size >= RPC_LIMITS.connections) { socket.destroy(); return; }
-    const connection: Connection = { socket, authenticated: false, pending: 0, closed: false,
+    const connection: Connection = { socket, authorized: transport === "uds", authenticated: false, pending: 0, closed: false,
       bytes: { used: { general: 0, control: 0, ingress: 0 } }, cancel: new Set(), writes: new Set() };
     connections.add(connection);
     const connectionId = ++connectionSequence;
+    if (transport === "tcp") socket.setNoDelay(true);
     daemonTiming?.({ layer: "daemon", event: "connection", connection: connectionId });
     // Operational idle deadline; tests synchronize on socket/process events.
     socket.setTimeout(30_000, () => { daemonTiming?.({ layer: "daemon", event: "socket_idle_deadline", connection: connectionId }); socket.destroy(); });
@@ -144,8 +148,23 @@ export async function foreground(): Promise<void> {
       });
     });
     let receiving: ByteReservation | undefined;
+    let failed = false;
     const frames = new Frames(bytes => {
       const reservation = receiving!; receiving = undefined;
+      if (!connection.authorized) {
+        // The first TCP frame must be the bearer. Anything else, malformed or
+        // mismatched, is one uniform unauthorized fault; the peer learns nothing.
+        let admitted = false;
+        try { admitted = timingSafeEqual(createHash("sha256").update(RpcTcpAuth.parse(JSON.parse(bytes.toString("utf8"))).auth.bearer).digest(), bearer!); }
+        catch { admitted = false; }
+        if (admitted) { connection.authorized = true; budget.release(reservation); return true; }
+        failed = true;
+        daemonTiming?.({ layer: "daemon", event: "unauthorized", connection: connectionId });
+        console.error(JSON.stringify({ event: "unauthorized", connection: connectionId }));
+        send(connection, errorResponse(null, new RpcFault("unauthorized", "bearer authorization is required on this listener")), reservation);
+        socket.end();
+        return false;
+      }
       if (stopping) { send(connection, errorResponse(null, new RpcFault("shutting_down", "runtime is stopping")), reservation); return false; }
       let request: RpcRequest;
       try { request = decodeRequest(bytes); }
@@ -200,7 +219,6 @@ export async function foreground(): Promise<void> {
       receiving = reservation;
       return () => { receiving = undefined; budget.release(reservation); };
     });
-    let failed = false;
     socket.on("data", (data: Buffer) => {
       if (failed) return;
       try { frames.push(data); }
@@ -213,7 +231,10 @@ export async function foreground(): Promise<void> {
         else socket.destroy();
       }
     });
-  });
+  };
+  const server = createServer(accept("uds"));
+  const tcpServer = listen ? createServer(accept("tcp")) : undefined;
+  const listeners = tcpServer ? [server, tcpServer] : [server];
   async function dispatch(connection: Connection, request: RpcRequest): Promise<unknown> {
     if (!runtime) throw new RpcFault("storage_unavailable", "runtime is starting", true);
     if (request.method === "hello") {
@@ -272,7 +293,7 @@ export async function foreground(): Promise<void> {
     stopping = true;
     drainReady = false;
     runtime?.cancelDrain();
-    const closed = new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    const closed = Promise.all(listeners.map(listener => new Promise<void>((resolve, reject) => listener.close(error => error ? reject(error) : resolve()))));
     const deadline = setTimeout(() => {
       logError(new Error("graceful shutdown deadline exceeded"));
       for (const connection of connections) connection.socket.destroy();
@@ -307,12 +328,21 @@ export async function foreground(): Promise<void> {
     server.listen(path);
     await listening;
     await chmod(path, 0o600);
+    let tcp: { host: string; port: number } | undefined;
+    if (tcpServer && listen) {
+      const tcpListening = once(tcpServer, "listening");
+      tcpServer.listen({ host: listen.host, port: listen.port });
+      await tcpListening;
+      const address = tcpServer.address() as AddressInfo; // Port 0 binds an ephemeral port; report the real one.
+      tcp = { host: address.address, port: address.port };
+    }
     process.on("SIGINT", signalStop);
     process.on("SIGTERM", signalStop);
     daemonTiming?.({ layer: "daemon", event: "listening" });
-    console.log(JSON.stringify({ event: "listening", socket: path, data_incarnation: installation.incarnation, fs_epoch: installation.epoch }));
+    console.log(JSON.stringify({ event: "listening", socket: path, ...(tcp ? { tcp } : {}), data_incarnation: installation.incarnation, fs_epoch: installation.epoch }));
     started = true; kick();
   } catch (error) {
+    for (const listener of listeners) if (listener.listening) listener.close(); // A failed second bind must not keep the process alive.
     await runtime?.close();
     await installation.release();
     throw error;

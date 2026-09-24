@@ -4,7 +4,7 @@ import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { atomicJson, DEFAULT_EXTRACTION_PROMPT_FILE, loadProviderConfig } from "./config.ts";
+import { atomicJson, DEFAULT_EXTRACTION_PROMPT_FILE, loadListenConfig, loadProviderConfig } from "./config.ts";
 
 test("provider defaults leave endpoints opt-in and load the bundled prompt", async () => {
   const config = await loadProviderConfig({});
@@ -80,6 +80,43 @@ test("provider environment rejects invalid boundaries without disclosing values"
       return true;
     });
   }
+});
+
+test("listen configuration is opt-in and reads a private bearer file", async () => {
+  assert.equal(await loadListenConfig({}), undefined);
+  assert.equal(await loadListenConfig({ ANAMNESIS_LISTEN_TOKEN_FILE: "/nonexistent/ignored" }), undefined);
+  const root = await fs.mkdtemp(join(tmpdir(), "ana-listen-config-"));
+  try {
+    const file = join(root, "bearer");
+    await fs.writeFile(file, " fixture-bearer \n", { mode: 0o600 });
+    await fs.chmod(file, 0o600);
+    assert.deepEqual(await loadListenConfig({ ANAMNESIS_LISTEN: "127.0.0.1:0", ANAMNESIS_LISTEN_TOKEN_FILE: file }), { host: "127.0.0.1", port: 0, token: "fixture-bearer" });
+    assert.deepEqual(await loadListenConfig({ ANAMNESIS_LISTEN: "[::1]:4400", ANAMNESIS_LISTEN_TOKEN_FILE: file }), { host: "::1", port: 4400, token: "fixture-bearer" });
+    assert.deepEqual(await loadListenConfig({ ANAMNESIS_LISTEN: "memory.internal:65535", ANAMNESIS_LISTEN_TOKEN_FILE: file }), { host: "memory.internal", port: 65535, token: "fixture-bearer" });
+    const refused = async (env: NodeJS.ProcessEnv, name: string) => assert.rejects(loadListenConfig(env), error => {
+      assert.ok(error instanceof Error);
+      assert.ok(error.message.includes(name), error.message);
+      assert.ok(!error.message.includes("fixture"), error.message);
+      return true;
+    });
+    for (const address of ["", "4400", ":4400", "127.0.0.1", "127.0.0.1:", "127.0.0.1:65536", "127.0.0.1:port", "[::1]", "[::1]:x"]) {
+      await refused({ ANAMNESIS_LISTEN: address, ANAMNESIS_LISTEN_TOKEN_FILE: file }, "ANAMNESIS_LISTEN ");
+    }
+    await refused({ ANAMNESIS_LISTEN: "127.0.0.1:0" }, "ANAMNESIS_LISTEN_TOKEN_FILE");
+    await refused({ ANAMNESIS_LISTEN: "127.0.0.1:0", ANAMNESIS_LISTEN_TOKEN_FILE: join(root, "absent") }, "ANAMNESIS_LISTEN_TOKEN_FILE");
+    for (const mode of [0o644, 0o640, 0o400, 0o700]) {
+      await fs.chmod(file, mode);
+      await refused({ ANAMNESIS_LISTEN: "127.0.0.1:0", ANAMNESIS_LISTEN_TOKEN_FILE: file }, "ANAMNESIS_LISTEN_TOKEN_FILE");
+    }
+    await fs.chmod(file, 0o600);
+    const link = join(root, "link");
+    await fs.symlink(file, link);
+    await refused({ ANAMNESIS_LISTEN: "127.0.0.1:0", ANAMNESIS_LISTEN_TOKEN_FILE: link }, "ANAMNESIS_LISTEN_TOKEN_FILE");
+    for (const content of ["", " \n", "fixture\nsecond-line", "x".repeat(1025)]) {
+      await fs.writeFile(file, content);
+      await refused({ ANAMNESIS_LISTEN: "127.0.0.1:0", ANAMNESIS_LISTEN_TOKEN_FILE: file }, "ANAMNESIS_LISTEN_TOKEN_FILE");
+    }
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
 });
 
 class FilesystemFault extends Error {
