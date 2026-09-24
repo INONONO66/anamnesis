@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { ExtractionAttempt, Generation, ModelTask, canonicalExtractionBody } from "./extraction.ts";
+import { ExtractionAttempt, Generation, LeaseModelTask, ModelTask, canonicalExtractionBody } from "./extraction.ts";
 
 describe("G004 extraction contract", () => {
   test("canonicalizes JSON domain with UTF-16 ordering and rejects invalid values", () => {
@@ -24,5 +24,15 @@ describe("G004 extraction contract", () => {
   test("rejects incomplete task and generation records", () => {
     expect(() => ModelTask.parse({ id: "bad" })).toThrow();
     expect(() => Generation.parse({ id: "bad" })).toThrow();
+  });
+
+  test("a task lease may outlast one 30 s provider call with margin, but stays bounded", () => {
+    // The lease is taken before the provider HTTP call and checked when the attempt is recorded; a lease equal to the
+    // provider timeout turns every slow-but-successful call into lease_expired and burns an attempt.
+    const base = { task_id: "01a0d34d-e781-70be-bf5f-c82ca4b53849", expected_version: 0, worker_id: "scheduler" };
+    expect(LeaseModelTask.parse({ ...base, lease_ms: 90000 }).lease_ms).toBe(90000);
+    expect(LeaseModelTask.parse({ ...base, lease_ms: 120000 }).lease_ms).toBe(120000);
+    expect(() => LeaseModelTask.parse({ ...base, lease_ms: 120001 })).toThrow();
+    expect(() => LeaseModelTask.parse({ ...base, lease_ms: 0 })).toThrow();
   });
 });

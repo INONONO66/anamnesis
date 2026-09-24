@@ -265,12 +265,19 @@ llama-server`; `llm_min_interval_ms` 3000; `workers_deadline_ms` 5,400,000.
 | workers snapshot (settled) | embedding: pending 0, drained_total 200, quarantined_total 0, last_error null. extraction: state `active`, covered_ingest_seq 200, live_ingest_seq 200, in_flight 0, completed_total 200, failed_total 0, last_error `Error: lease_expired` |
 | provider_errors | null |
 
-The `lease_expired` in `last_error` is a transient. The protocol caps a lease
-at 30 s and a slow haiku round trip crossed it; the scheduler settled the
-expired lease and retried the source, which is why `completed_total` is 200
-and `failed_total` is 0. A re-arm bug that kept the lane from retrying in run
-2 was fixed in commit 650eca8 before run 3. The field shows the last error
-string the lane saw, not an open failure.
+The `lease_expired` in `last_error` is a transient. In run 3 the scheduler
+leased a claim for 30 s and a slow haiku round trip crossed it; the scheduler
+settled the expired lease and retried the source, which is why
+`completed_total` is 200 and `failed_total` is 0. A re-arm bug that kept the
+lane from retrying in run 2 was fixed in commit 650eca8 before run 3. The
+field shows the last error string the lane saw, not an open failure. Two
+later changes close the remaining gap: the scheduler lease is now 90 s
+(`extraction-scheduler.ts`, `LEASE_MS`, three times the daemon's provider
+timeout), and a source whose lease expires on every attempt of the budget is
+cancelled into a durable omission that coverage can seal, instead of leaving
+the generation stuck behind it (`store.ts` `cancelModelTask` accepting
+`expired`/`worker_lost`; regression test `extraction-scheduler.test.ts`,
+which drives lease expiry through the injected store clock).
 
 Two run-shape notes from `deviations` matter for reading the sample. The
 corpus is one copied Codex rollout plus deterministic Claude text-block

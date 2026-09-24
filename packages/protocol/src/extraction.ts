@@ -97,7 +97,8 @@ export const CreateModelTask = z.strictObject({ id, generation_id: id, source_id
 export type CreateModelTask = z.infer<typeof CreateModelTask>;
 export const ModelTaskCAS = z.strictObject({ task_id: id, expected_version: timestamp });
 export type ModelTaskCAS = z.infer<typeof ModelTaskCAS>;
-export const LeaseModelTask = ModelTaskCAS.extend({ worker_id: name, lease_ms: timestamp.positive().max(30000) });
+/** Upper bound: a lease covers one provider call (30 s timeout) plus its two transactions with margin, never a whole pipeline. */
+export const LeaseModelTask = ModelTaskCAS.extend({ worker_id: name, lease_ms: timestamp.positive().max(120000) });
 export type LeaseModelTask = z.infer<typeof LeaseModelTask>;
 export const SettleModelTask = ModelTaskCAS.extend({ lease_epoch: id, reason: z.enum(["expired", "worker_lost"]) });
 export type SettleModelTask = z.infer<typeof SettleModelTask>;
