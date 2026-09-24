@@ -15,7 +15,8 @@
     "db:up": "docker compose up -d neo4j",
     "build:runtime": "bun build app/anamnesis/main.ts --target=node --outfile=dist/anamnesis-daemon.mjs && bun build app/anamnesis/ops.ts --target=node --outfile=dist/anamnesis-ops.mjs && bun build app/anamnesis/client.ts --target=node --outfile=dist/anamnesis-client.mjs && mkdir -p dist/prompts && cp app/anamnesis/prompts/extract-claims.v2.md dist/prompts/extract-claims.v2.md && cp app/anamnesis/prompts/judge-relations.v1.md dist/prompts/judge-relations.v1.md",
     "test:runtime": "bun run build:runtime && node --test app/anamnesis/process.test.mjs",
-    "test:runtime:surface": "node app/anamnesis/surface.mjs"
+    "test:runtime:surface": "node app/anamnesis/surface.mjs",
+    "qa:e2e-daemon": "bun scripts/qa/e2e-daemon.ts"
   },
   "devDependencies": {
     "@types/bun": "^1.2.21",
