@@ -5,8 +5,8 @@ import { FactRelationDecision, MaterializationResult } from "./materialization.t
 
 const id = "01900000-0000-7000-8000-000000000001", other = "01900000-0000-7000-8000-000000000002";
 const digest = "a".repeat(64);
-const judgement = { candidate_id: other, relation: "invalidates", confidence: 0.9, reason: "later statement replaces the earlier preference" };
-const output = { task: "judge_relations", relation_context_digest: digest, judgements: [judgement], language: "en", modality: "text" };
+const judgement = { candidate_id: other, relation: "invalidates" as const, confidence: 0.9, reason: "later statement replaces the earlier preference" };
+const output = { task: "judge_relations" as const, relation_context_digest: digest, judgements: [judgement], language: "en", modality: "text" as const };
 
 test("judge_relations output is a bounded strict per-candidate verdict list", () => {
   expect(ExtractionModelOutput.parse(output)).toEqual(output);
@@ -29,8 +29,8 @@ test("judge_relations attempts are span-free outputs", () => {
 });
 
 test("relation context carries the new fact, bounded candidates and its own digest", () => {
-  const context = { body_digest: digest, fact: { text: "Alice prefers light mode", time: { value: "2026-09-02T00:00:00.000Z", precision: "day" } },
-    candidates: [{ id: other, text: "Alice prefers dark mode", time: { value: "2026-09-01T00:00:00.000Z", precision: "day" } }] };
+  const context = { body_digest: digest, fact: { text: "Alice prefers light mode", time: { value: "2026-09-02T00:00:00.000Z", precision: "day" as const } },
+    candidates: [{ id: other, text: "Alice prefers dark mode", time: { value: "2026-09-01T00:00:00.000Z", precision: "day" as const } }] };
   expect(FactRelationContext.parse(context)).toEqual(context);
   expect(FactRelationContext.safeParse({ ...context, candidates: Array(17).fill(context.candidates[0]) }).success).toBe(false);
   expect(FactRelationContext.safeParse({ ...context, candidates: [{ ...context.candidates[0], source_episode_id: id }] }).success).toBe(false);
@@ -38,7 +38,7 @@ test("relation context carries the new fact, bounded candidates and its own dige
 });
 
 test("materialization results record relation decisions and duplicates without widening the base shape", () => {
-  const decision = { candidate_id: other, relation: "contrasts", confidence: 0.7, reason: "conflicting preferences", outcome: "linked", link_id: id };
+  const decision = { candidate_id: other, relation: "contrasts" as const, confidence: 0.7, reason: "conflicting preferences", outcome: "linked" as const, link_id: id };
   expect(FactRelationDecision.parse(decision)).toEqual(decision);
   expect(FactRelationDecision.safeParse({ ...decision, outcome: "merged" }).success).toBe(false);
   expect(MaterializationResult.parse({ created: true, fact_id: id, link_id: id })).toEqual({ created: true, fact_id: id, link_id: id });

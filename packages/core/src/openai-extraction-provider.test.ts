@@ -103,7 +103,7 @@ describe("OpenAiChatExtractionProvider", () => {
     const relation_context = { body_digest: "d".repeat(64), fact: { text: "Alice prefers light mode", time: { value: "2026-09-02T00:00:00.000Z", precision: "day" as const } },
       candidates: [{ id: "01900000-0000-7000-8000-000000000003", text: "Alice prefers dark mode", time: { value: "2026-09-01T00:00:00.000Z", precision: "day" as const } }] };
     const verdict = { task: "judge_relations", relation_context_digest: relation_context.body_digest, language: "en", modality: "text",
-      judgements: [{ candidate_id: relation_context.candidates[0].id, relation: "invalidates", confidence: 0.9, reason: "later preference replaces the earlier one" }] };
+      judgements: [{ candidate_id: relation_context.candidates[0]!.id, relation: "invalidates", confidence: 0.9, reason: "later preference replaces the earlier one" }] };
     const systems: string[] = [];
     const fetch = async (_url: string | URL | Request, init?: RequestInit) => {
       const body = JSON.parse(String(init!.body));
