@@ -46,6 +46,33 @@ async function embedder(): Promise<{ server: Server; endpoint: string; calls: ()
   return { server, endpoint: `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1/embeddings`, calls: () => calls };
 }
 
+/** Deterministic HttpExtractionProvider peer: one retained claim per Episode with entity metadata (so Facts
+ * materialize), retain-all judge verdicts, "unrelated" relation verdicts; Episodes mentioning "poison" are rejected. */
+async function extractor(): Promise<{ server: Server; endpoint: string; model: string; model_incarnation: string; rejected: () => number }> {
+  const model = "extraction-worker-fixture", model_incarnation = "f".repeat(64);
+  let rejected = 0;
+  const server = createServer(async (request, response) => {
+    const chunks: Buffer[] = []; for await (const chunk of request) chunks.push(chunk as Buffer);
+    const input = JSON.parse(Buffer.concat(chunks).toString("utf8")) as { text: string; task: string;
+      claim_context?: { body_digest: string; claims: Array<{ evidence: unknown }> }; relation_context?: { body_digest: string; candidates: Array<{ id: string }> } };
+    response.setHeader("content-type", "application/json");
+    if (input.task === "claim" && input.text.includes("poison")) { rejected++; response.statusCode = 400; response.end("{}"); return; }
+    const output = input.task === "claim"
+      ? { task: "claim", language: "en", modality: "text", claims: [{ text: input.text, evidence: { start: 0, end: Buffer.byteLength(input.text), text: input.text },
+          confidence: 0.9, entities: [{ mention: "fixture", normalized_name: "Fixture", entity_kind: "person" }] }] }
+      : input.task === "judge_claims"
+        ? { task: "judge_claims", language: "en", modality: "text", claim_body_digest: input.claim_context!.body_digest,
+            decisions: input.claim_context!.claims.map((claim, claim_index) => ({ claim_index, disposition: "retain", evidence: claim.evidence, confidence: 0.8 })) }
+        : { task: "judge_relations", language: "en", modality: "text", relation_context_digest: input.relation_context!.body_digest,
+            judgements: input.relation_context!.candidates.map(candidate => ({ candidate_id: candidate.id, relation: "unrelated", confidence: 0.9, reason: "fixture" })) };
+    response.end(JSON.stringify({ model, model_incarnation, output }));
+  });
+  const listening = once(server, "listening", { signal: deadline(5000) });
+  server.listen(0, "127.0.0.1");
+  await listening;
+  return { server, endpoint: `http://127.0.0.1:${(server.address() as AddressInfo).port}/extract`, model, model_incarnation, rejected: () => rejected };
+}
+
 /** Buffered stdout subscription: lines are kept from the moment of attachment, so an await never misses an earlier event. */
 function stdoutLines(child: ChildProcess) {
   const buffered: Array<Record<string, unknown>> = [];
@@ -92,6 +119,8 @@ async function fixture(extra: NodeJS.ProcessEnv, run: (daemon: Daemon) => Promis
 const episode = (root: string, record: string) => ({ episode: { schema: "anamnesis.original-message/1" as const, content: `worker fixture ${record}`,
   time: { value: "2026-09-01T00:00:00Z", precision: "second" as const }, mass: 0, properties: {},
   origin: { source: root, session: "workers", actor: "fixture", record } }, source_revision: "v1", expected_previous_revision_key: null });
+/** Lineage-admitted remember: the extraction pipeline only authorizes admitted Episodes. */
+const admitted = (root: string, record: string) => ({ ...episode(root, record), origin_role: "user" as const, lineage_mode: "direct" as const, parent_recall_ids: [] as string[] });
 
 test("status reports the worker counters even while storage is unavailable", async () => {
   await fixture({}, async daemon => {
@@ -146,3 +175,53 @@ test.skipIf(!URI || !PASSWORD)("committed remembers wake the embedding worker, w
     await closed;
   }
 }, 120_000);
+
+test.skipIf(!URI || !PASSWORD)("the extraction scheduler catches a fresh generation up, cuts it over, keeps feeding it, and seals provider failures", async () => {
+  const provider = await extractor();
+  const driver = neo4j.driver(URI!, neo4j.auth.basic("neo4j", PASSWORD!), { disableLosslessIntegers: true });
+  try {
+    // The generation must cover every Episode from ingest_seq 1; earlier tests' graphs do not belong to it.
+    await driver.executeQuery("MATCH (n) DETACH DELETE n");
+    await fixture({ ANAMNESIS_NEO4J_URI: URI!, ANAMNESIS_NEO4J_PASSWORD: PASSWORD!,
+      ANAMNESIS_EXTRACTION_CONFIG: JSON.stringify({ endpoint: provider.endpoint, model: provider.model, model_incarnation: provider.model_incarnation, timeout_ms: 5000 }) }, async daemon => {
+      const client = await RpcClient.connect(join(daemon.root, "anamnesis.sock"), TOKEN);
+      try {
+        expect((await client.request("status", {})).capabilities.extraction).toBe(true);
+        // Each idle line is a real both-lanes-quiet transition; loop until the scheduler has observed and covered the expected watermark.
+        const settled = async (live: number) => {
+          for (;;) {
+            const extraction = (await client.request("status", {})).workers.extraction;
+            if (extraction.state === "active" && extraction.live_ingest_seq >= live && extraction.covered_ingest_seq === extraction.live_ingest_seq && extraction.in_flight === 0) return extraction;
+            try { await daemon.lines.until("workers_idle"); }
+            catch (error) { throw new Error(`no workers_idle while ${JSON.stringify(extraction)}; daemon stderr: ${daemon.stderr()}`, { cause: error }); }
+          }
+        };
+        const facts = async (generation: string) =>
+          (await driver.executeQuery("MATCH (f:Element:Fact {generation:$generation}) RETURN count(f) AS n", { generation })).records[0]!.get("n") as number;
+        for (const record of ["one", "two", "three"]) expect((await client.request("remember", admitted(daemon.root, record))).state).toBe("committed");
+        const caught = await settled(3);
+        expect(caught).toMatchObject({ state: "active", covered_ingest_seq: 3, live_ingest_seq: 3, in_flight: 0, completed_total: 3, failed_total: 0, last_error: null });
+        const before = await facts(caught.generation_id);
+        expect(before).toBeGreaterThan(0);
+        // Steady state: an active generation keeps receiving new Episodes identically.
+        expect((await client.request("remember", admitted(daemon.root, "four"))).state).toBe("committed");
+        const steady = await settled(4);
+        expect(steady).toMatchObject({ generation_id: caught.generation_id, covered_ingest_seq: 4, live_ingest_seq: 4, completed_total: 4, failed_total: 0 });
+        expect(await facts(caught.generation_id)).toBeGreaterThan(before);
+        // A persistently rejected Episode is retried three times, then sealed as a terminal omission; coverage still reaches live.
+        expect((await client.request("remember", admitted(daemon.root, "poison"))).state).toBe("committed");
+        const sealed = await settled(5);
+        expect(sealed).toMatchObject({ generation_id: caught.generation_id, covered_ingest_seq: 5, live_ingest_seq: 5, completed_total: 4, failed_total: 1 });
+        expect(provider.rejected()).toBe(4);
+        const exited = once(daemon.child, "exit", { signal: deadline() });
+        expect((await client.request("shutdown", {})).state).toBe("stopping");
+        expect((await exited)[0]).toBe(0);
+      } finally { await client.close(); }
+    });
+  } finally {
+    await driver.close();
+    const closed = once(provider.server, "close", { signal: deadline(5000) });
+    provider.server.close(); provider.server.closeAllConnections();
+    await closed;
+  }
+}, 180_000);
