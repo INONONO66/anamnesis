@@ -20,6 +20,28 @@ The data authority is the Neo4j database plus `~/.anamnesis/objects/`, nothing e
    ```
 4. Optionally configure ingestion to use `journaledRemember` so writes are spooled before graph ingest. Put its journal directory on durable storage outside the Neo4j volumes. A future stateless ingestion service should depend on `neo4j` with `condition: service_healthy`.
 
+## Optional TCP listener
+
+By default the daemon accepts RPC only on the Unix socket `<runtime root>/anamnesis.sock` (mode 0600), where filesystem permissions are the access control. Setting `ANAMNESIS_LISTEN` adds a TCP listener with identical framing and request handling; the socket keeps working unchanged. TCP has no filesystem check, so every TCP connection must prove possession of a bearer token before its first request.
+
+| Variable | Meaning |
+|---|---|
+| `ANAMNESIS_LISTEN` | `host:port` to bind, e.g. `127.0.0.1:4400` or `[::1]:4400`. Port `0` binds an ephemeral port. The bound address is reported in the `listening` log event as `"tcp":{"host":...,"port":...}`. Unset = socket only. |
+| `ANAMNESIS_LISTEN_TOKEN_FILE` | Required with `ANAMNESIS_LISTEN`. Path to a regular file (not a symlink) owned by the daemon user with mode exactly `0600`, holding one bearer token of at most 1024 bytes; surrounding whitespace is ignored. This is distinct from the installation token in `<runtime root>/token`, which `hello` still requires on every transport. |
+
+A missing variable, unreadable or non-`0600` file, or empty token is a startup error. The daemon exits before claiming the runtime root, and the error names the variable, never the token. A TCP bind failure (for example `EADDRINUSE`) after the socket is up also exits instead of serving socket-only.
+
+```sh
+(umask 077; openssl rand -base64 32 > /etc/anamnesis/listen-token)
+export ANAMNESIS_LISTEN=127.0.0.1:4400
+export ANAMNESIS_LISTEN_TOKEN_FILE=/etc/anamnesis/listen-token
+node dist/anamnesis-daemon.mjs
+```
+
+Wire contract on TCP: the first frame is `{"auth":{"bearer":"<token>"}}` with the same four-byte big-endian length prefix as requests. The daemon compares it in constant time and sends nothing on success; the client then continues with `hello`. A wrong, missing, or malformed first frame is answered with one error response (`id: null`, `error.data.code: "unauthorized"`) and the connection is closed. The daemon logs `{"event":"unauthorized","connection":N}` without the supplied value. The bundled client does this for you: `RpcClient.connect({ host, port, token: bearer }, installationToken)`; passing a socket path instead keeps the existing behaviour.
+
+The listener is plain TCP without TLS. Bind to loopback or a private interface and put it behind a TLS terminator or SSH tunnel when peers are remote.
+
 ## Redeploy
 
 There is no application container yet. When a stateless ingestion service is added, rebuild and recreate only that service:
