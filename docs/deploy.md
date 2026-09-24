@@ -93,7 +93,17 @@ Reference layout used for the first production install (issue #213). Unit files 
 3. Enable one timer per source: `systemctl --user enable --now anamnesis-ingest@{codex,claude}.timer` for the live sources present on inonono (omo and agentlog originals live on the workstation, not on inonono), and `anamnesis-ingest@vault-{codex,claude-code,opencode,slack,discord,gjc,pi}.timer` for the hub-vault backlog. Each run of a `vault-*` unit converts the vault once (`dist/vault-to-snapshots.mjs`, built by `build:runtime`; newest session first) and then ingests one shard per run, so the backlog drains gradually under the pacing above. `{"event":"backlog_drained"}` marks completion.
 4. Checkpoints live under `~/.local/state/anamnesis-ingest/<source>/`; the adapters are idempotent by revision key, so re-running after a failed run is safe.
 
-### Backup
+### Running on inonono instead of a PVE guest
+
+When the PVE guest is unavailable the same artifacts run directly on inonono, where token-hub, llama-server and the backup disk already live. Differences from the guest layout, all expressed through configuration:
+
+- Compose project `anamnesis-prod` (`COMPOSE_PROJECT_NAME` in `/opt/anamnesis/.env`, Bolt on `127.0.0.1:7688`) so the legacy `anamnesis-neo4j-1` container is never touched; `ANAMNESIS_NEO4J_CONTAINER=anamnesis-prod-neo4j-1`.
+- No `anamnesis-tunnel.service`: `ANAMNESIS_LLM_BASE_URL` / `ANAMNESIS_EMBEDDING_BASE_URL` point at the loopback ports directly; drop the tunnel lines from `anamnesis.service`.
+- Objects on the data disk: `ANAMNESIS_OBJECTS_ROOT=/mnt/data/anamnesis/prod/objects` (add it to `ReadWritePaths`).
+- `backup.sh` rsyncs to the local user over ssh with a `restrict,command="rsync --server ..."` key so the archive lands under `/mnt/data/anamnesis/backups/pve-vm/` unchanged.
+- The ingest wrapper's `ANAMNESIS_RPC_TCP` is the host's own tailnet address.
+
+## Backup
 
 `anamnesis-backup.timer` runs `deploy/vm/backup.sh` daily as root: `systemctl stop anamnesis`, offline `ops backup <dir>` as the `anamnesis` user into a not-yet-existing `<stamp>/` directory with the JSON result beside it as `<stamp>.result.json` (`ops backup` refuses a live daemon with `daemon_live` and an existing destination with `destination_exists`; the daemon is restarted even if the dump fails), then `rsync` of `/var/lib/anamnesis/backups/` to inonono `/mnt/data/anamnesis/backups/pve-vm/`, keeping 14 local copies. `systemctl list-timers anamnesis-backup.timer` and `journalctl -u anamnesis-backup` show the last run; a non-zero exit marks the unit failed. Restore follows [Restore a dump](#restore-a-dump) with the daemon stopped (`systemctl stop anamnesis`).
 
