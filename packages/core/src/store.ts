@@ -30,10 +30,10 @@ import { RpcPolicySetParams, RpcPolicyRevokeParams, type RpcPolicyResult } from 
 import { ObjectStore } from "./objects.ts";
 import { EchoLineage, EpisodeLineageError, RecallLineageSelection, parseEpisodeLineage, type EpisodeLineageInput } from "../../protocol/src/episode-lineage.ts";
 import { SemanticClaimValidationError, SemanticResolvedTime, validateSemanticClaim, type SemanticSourceContext, type ValidatedSemanticClaim } from "../../protocol/src/semantic-claim.ts";
-import { CreateModelTask, ModelTaskCAS, LeaseModelTask, SettleModelTask, CompleteExtractionAttempt, AdvanceExtractionCoverage, SelectExtractionGeneration, ExtractionSelection, ReadExtractionCoverage, ExtractionCoverageRead, canonicalExtractionBody, extractionBodyDigest } from "../../protocol/src/extraction.ts";
+import { CreateModelTask, ModelTaskCAS, LeaseModelTask, SettleModelTask, CompleteExtractionAttempt, AdvanceExtractionCoverage, SelectExtractionGeneration, ExtractionSelection, ReadExtractionCoverage, ExtractionCoverageRead, canonicalExtractionBody, extractionBodyDigest, FactRelationJudgement } from "../../protocol/src/extraction.ts";
 import { validateModelOutput, validateSourceSpans } from "./extraction.ts";
-import { ExtractionClaimContext, ExtractionJudgeInput, ExtractionPipeline, ExtractionDisposition, ExtractionAuditError } from '../../protocol/src/extraction-audit.ts';
-import { ProposeRetainedClaim, MaterializeRetainedClaim, ReviewRetainedClaim, MaterializationResult, SemanticReviewPremises, SemanticResolution, SemanticReviewOutput, RetainedSemanticProposal, semanticReviewClaimBody } from "../../protocol/src/materialization.ts";
+import { ExtractionClaimContext, ExtractionJudgeInput, ExtractionPipeline, ExtractionDisposition, ExtractionAuditError, FactRelationContext } from '../../protocol/src/extraction-audit.ts';
+import { ProposeRetainedClaim, MaterializeRetainedClaim, ReviewRetainedClaim, MaterializationResult, FactRelationDecision, SemanticReviewPremises, SemanticResolution, SemanticReviewOutput, RetainedSemanticProposal, semanticReviewClaimBody } from "../../protocol/src/materialization.ts";
 import { ExtractionModelOutput } from '../../protocol/src/extraction.ts';
 import { HistoricalElement, historicalEligibility, type EligibilityReason } from "./legacy-format.ts";
 import { z } from "zod";
@@ -95,6 +95,9 @@ export interface StoreOptions {
   recallDefaultBytes?: number;
   /** Trusted runtime injection only; never loaded from an RPC or arbitrary command. */
   dreamLeidenAdapter?: DreamLeidenAdapter;
+  /** True when the extraction provider answers `judge_relations`: validated claims
+   * then wait for Fact->Fact verdicts before any Fact of their source is written (D53). */
+  relationJudge?: boolean;
 }
 
 export interface PutResult {
@@ -256,6 +259,14 @@ function semanticClaimTime(time: { value: string; precision: "second" | "minute"
     if (precision === "year") d.setUTCMonth(0);
   }
   return { time_value: time.value, time_utc: d.getTime(), time_precision: precision, resolution: "explicit" as const, anchor_time_utc: null };
+}
+
+/** The TimePoint a validated claim is stored under; an inherited time keeps the
+ * Episode's precision. The relation judge sees exactly this time. */
+function validatedFactTime(validated: ValidatedSemanticClaim, source: SemanticReviewPremises["source"]): TimePoint {
+  const claim = validated.claim;
+  const precision = claim.time.resolution === "inherited" ? source.time.time_precision : claim.time.time_precision;
+  return { value: new Date(claim.time.time_utc).toISOString(), precision: precision === "instant" || precision === "inherited" ? "second" : precision };
 }
 
 function sha256(data: Uint8Array | string): string {
@@ -617,9 +628,11 @@ export class Store {
   private readonly tokenizers: Tokenizers;
   private readonly recallDefaultBytes: number;
   private readonly dreamLeidenAdapter: DreamLeidenAdapter | undefined;
+  private readonly relationJudge: boolean;
 
   constructor(opts: StoreOptions, driver?: Driver) {
     this.clock = opts.clock ?? Date.now;
+    this.relationJudge = opts.relationJudge ?? false;
     this.embeddingProvider = opts.embeddingProvider;
     this.tokenizers = opts.tokenizers ?? new Map();
     this.recallDefaultBytes = z.number().int().min(0).max(1024 * 1024).parse(opts.recallDefaultBytes ?? 65536);
@@ -2222,13 +2235,13 @@ export class Store {
     validated: ValidatedSemanticClaim; resolution: SemanticResolution; source: SemanticReviewPremises["source"];
     generation: string; profile: string; policy: number; operationId: string; digest: string; occurrence: string;
     proposalId: string | null; allocated: { fact_id: string; link_id: string; mention_ids: string[] };
+    /** Relation verdicts already applied for this Fact (D53); absent when no relation judge ran. */
+    relations?: FactRelationDecision[];
   }): Promise<MaterializationResult> {
-    const { validated, resolution, source, generation, profile, policy, operationId, digest, occurrence, proposalId, allocated } = input;
+    const { validated, resolution, source, generation, profile, policy, operationId, digest, occurrence, proposalId, allocated, relations } = input;
     const claim = validated.claim, { fact_id, link_id } = allocated;
     const inherited = claim.time.resolution === "inherited";
-    const precision = inherited ? source.time.time_precision : claim.time.time_precision;
-    const element = MemoryElement.parse({ id: fact_id, schema: "anamnesis.claim/1", content: claim.content,
-      time: { value: new Date(claim.time.time_utc).toISOString(), precision: ["instant", "inherited"].includes(precision) ? "second" : precision },
+    const element = MemoryElement.parse({ id: fact_id, schema: "anamnesis.claim/1", content: claim.content, time: validatedFactTime(validated, source),
       origin: { source: "semantic-extraction", session: generation, actor: profile, record: occurrence },
       mass: claim.confidence, properties: { ...validated.identity.properties, sub_kind: claim.sub_kind, modality: claim.modality,
         confidence: claim.confidence, content_language: claim.content_language, semantic_time: claim.time,
@@ -2258,7 +2271,7 @@ export class Store {
       await this.mergeLinkTx(tx, MemoryLink.parse({ id: allocated.mention_ids[i], from: fact_id, to: entity, role: "MENTIONS", content: "semantic entity mention", weight: 1 }));
       await tx.run(`MERGE (w:EntityWitness {entity_id:$entity,generation:$generation,policy_revision:$policy}) SET w.state='COMPLETE'`, { entity, generation, policy: neo4j.int(policy) });
     }
-    const result = MaterializationResult.parse({ created: true, fact_id, link_id });
+    const result = MaterializationResult.parse({ created: true, fact_id, link_id, ...(relations ? { relations } : {}) });
     await tx.run(`CREATE (:MaterializationOperation {id:$id,digest:$digest,result:$result,occurrence_key:$key,source_episode_id:$source,generation:$generation,semantic_profile_id:$profile,fact_id:$fact,link_id:$link})
       WITH 1 AS ignored MATCH (m:Meta {key:'meta'}) SET m.structure_revision=coalesce(m.structure_revision,0)+1`,
       { id: operationId, digest, result: canonicalExtractionBody(result), key: occurrence, source: source.id, generation, profile, fact: fact_id, link: link_id });
@@ -2816,21 +2829,26 @@ export class Store {
     });
   }
 
-  /** Relation adjudication seam. The automatic pipeline never decides that two
-   * Facts restate or contradict each other; a calibrated judge supplied later
-   * emits those decisions and Fact->Fact INVALIDATES stays non-automatic (D50). */
+  /** Relation adjudication seam (D52, D53). A judge-approved claim becomes a Fact
+   * only through the validated path. When the extraction provider judges relations,
+   * every validated claim of the source first gets verdicts against its ACTIVE
+   * same-entity Facts: the premise is persisted once per occurrence so the verdict
+   * binds to a fixed digest, and no Fact of the source is written while a verdict
+   * is still owed. Verdicts are applied mechanically: CONTRASTS and INVALIDATES
+   * new->candidate (never onto an invalidator), a duplicate suppresses the write. */
   private async materializeExtractionPipelineTx(tx: ManagedTransaction, pipeline: {
     claim: ModelTask; claim_attempt: ExtractionAttempt | null; judge: ModelTask | null; judge_attempt: ExtractionAttempt | null; decisions: ExtractionDisposition[];
-  }, policy: PolicyState): Promise<boolean> {
+  }, policy: PolicyState): Promise<{ semantic_writes: boolean; relation_judge?: "disabled" | "pending" | "complete" }> {
     const judge = pipeline.judge_attempt, claim = pipeline.claim_attempt;
-    if (!judge || judge.state !== "succeeded" || !judge.output || !claim || claim.state !== "succeeded" || !claim.output || !pipeline.judge) return false;
+    if (!judge || judge.state !== "succeeded" || !judge.output || !claim || claim.state !== "succeeded" || !claim.output || !pipeline.judge) return { semantic_writes: false };
+    const relationJudge = this.relationJudge ? "complete" as const : "disabled" as const;
     const claimOutput = ExtractionModelOutput.parse(JSON.parse(claim.output.canonical_body));
     if (claimOutput.task !== "claim") throw new ExtractionAuditError("extraction_audit_conflict");
     const judgeOutput = ExtractionModelOutput.parse(JSON.parse(judge.output.canonical_body));
     if (judgeOutput.task !== "judge_claims") throw new ExtractionAuditError("extraction_audit_conflict");
     // Only model-reported confidence admits a claim to semantic writes. Audit-only
     // output (no confidence) stays an auditable decision and never becomes a Fact.
-    const candidates = pipeline.decisions.flatMap(decision => {
+    const admitted = pipeline.decisions.flatMap(decision => {
       if (decision.disposition !== "retain" && decision.disposition !== "correct") return [];
       const extracted = claimOutput.claims[decision.claim_index];
       if (!extracted) throw new ExtractionAuditError("extraction_audit_conflict");
@@ -2841,15 +2859,17 @@ export class Store {
     // source to carry custody even when the judge admitted nothing or every claim was refused.
     const custody = extractionBodyDigest([judge.generation_id, judge.source_id]);
     const priorCustody = await tx.run(`MATCH (o:MaterializationOperation {occurrence_key:$key}) RETURN o.result AS result`, { key: custody });
-    if (priorCustody.records[0]) return JSON.parse(priorCustody.records[0].get("result")).created === true;
+    if (priorCustody.records[0]) return { semantic_writes: JSON.parse(priorCustody.records[0].get("result")).created === true, relation_judge: relationJudge };
     const source = await this.semanticEpisodeTx(tx, judge.source_id, policy);
     if (judge.source_revision !== source.revision_key || judge.body_digest !== source.content_digest || judge.source_ingest_seq !== source.ingest_seq)
       throw new ExtractionAuditError("extraction_audit_stale");
     const reported = claimOutput.language.toLowerCase();
     const language = /^[a-z]{2,8}(?:-[a-z0-9]{1,8})*$/.test(reported) ? reported : "und";
     const profile = pipeline.judge.model;
-    const factIds: string[] = [], refused: string[] = [];
-    for (const { decision, extracted, confidence } of candidates) {
+    // Entities first seen in this pass keep one allocated id per entity_key, so two
+    // claims of one source share a single new Entity whichever of them is written first.
+    const allocatedEntities = new Map<string, string>();
+    const prepare = async ({ decision, extracted, confidence }: (typeof admitted)[number]) => {
       const occurrence = extractionBodyDigest([judge.generation_id, judge.source_id, judge.id, decision.claim_index]);
       const resolutions: SemanticResolution["entity_resolutions"] = [], references: { mention: string; entity_id: string | null }[] = [];
       for (const entity of extracted.entities ?? []) {
@@ -2859,38 +2879,133 @@ export class Store {
         const known = existing.records[0]?.get("id");
         if (typeof known === "string") { resolutions.push({ status: "existing", mention: entity.mention, entity_id: known }); references.push({ mention: entity.mention, entity_id: known }); }
         else if (!source.content.includes(entity.normalized_name)) { resolutions.push({ status: "unresolved", mention: entity.mention }); references.push({ mention: entity.mention, entity_id: null }); }
-        else { const entity_id = uuidv7(); resolutions.push({ status: "new", mention: entity.mention, entity_id, normalized_name: entity.normalized_name, entity_kind: entity.entity_kind, entity_key: key }); references.push({ mention: entity.mention, entity_id }); }
+        else {
+          const entity_id = allocatedEntities.get(key) ?? uuidv7();
+          allocatedEntities.set(key, entity_id);
+          resolutions.push({ status: "new", mention: entity.mention, entity_id, normalized_name: entity.normalized_name, entity_kind: entity.entity_kind, entity_key: key }); references.push({ mention: entity.mention, entity_id });
+        }
       }
       const time = extracted.time ? semanticClaimTime(extracted.time) : { time_value: source.time.time_value, time_utc: source.time.time_utc, time_precision: "inherited" as const, resolution: "inherited" as const, anchor_time_utc: source.time.time_utc };
       const semantic = { content: extracted.text, content_language: language, sub_kind: extracted.sub_kind ?? "fact", modality: extracted.speech_act ?? "asserted",
         confidence, time, entities: references, subject_keys: null, predicate_text: [...extracted.text.normalize("NFC")].slice(0, 256).join(""),
         scope: { object_keys: [], location_keys: [], quantities: [], condition: null, attribution_speaker_keys: [] }, scope_complete: false,
         evidence: { kind: "source_locus" as const, span: { start: decision.evidence.start, end: decision.evidence.end } } };
+      const digest = extractionBodyDigest(semantic);
       const resolution = SemanticResolution.parse({ entity_resolutions: resolutions, attribution_speakers: [], allow_no_single_locus: false, content_language: language });
-      let validated: ValidatedSemanticClaim;
       try {
-        validated = validateSemanticClaim(semantic, { generation: judge.generation_id, fact_language_policy: "source", allow_no_single_locus: false,
+        const validated = validateSemanticClaim(semantic, { generation: judge.generation_id, fact_language_policy: "source", allow_no_single_locus: false,
           episode: { ...source, content_language: language }, entity_resolutions: resolutions, attribution_speakers: [] });
+        return { occurrence, digest, resolution, validated, refused: null };
       } catch (error) {
         if (!(error instanceof SemanticClaimValidationError)) throw error;
+        return { occurrence, digest, resolution, validated: null, refused: error.code };
+      }
+    };
+    const premise = (claim: { occurrence: string; validated: ValidatedSemanticClaim }) =>
+      this.factRelationVerdictTx(tx, { occurrence: claim.occurrence, pipeline_id: pipeline.claim.id, source, generation: judge.generation_id, validated: claim.validated });
+    // Phase 1 (relation judge on): bind every validated claim's premise; write nothing while a verdict is owed.
+    if (this.relationJudge) {
+      let pending = false;
+      for (const candidate of admitted) {
+        const claim = await prepare(candidate);
+        if (claim.validated && await premise({ occurrence: claim.occurrence, validated: claim.validated }) === "pending") pending = true;
+      }
+      if (pending) return { semantic_writes: false, relation_judge: "pending" };
+    }
+    // Phase 2: one transaction writes every operation of the source, so a retry either
+    // sees custody or repeats all of it. Claims are re-resolved in order, so an Entity
+    // created by an earlier claim of this source is reused rather than duplicated.
+    const factIds: string[] = [], refused: string[] = [], duplicates: string[] = [];
+    const contentFree = (fact: string, digest: string, result: object) =>
+      tx.run(`CREATE (:MaterializationOperation {id:$id,digest:$digest,result:$result,occurrence_key:$key,source_episode_id:$source,generation:$generation,semantic_profile_id:$profile,fact_id:$fact,link_id:$link})`,
+        { id: uuidv7(), digest, result: canonicalExtractionBody(result), key: fact, source: source.id, generation: judge.generation_id, profile, fact, link: fact });
+    for (const candidate of admitted) {
+      const { occurrence, digest, resolution, validated, refused: refusal } = await prepare(candidate);
+      if (!validated) {
         // A refused claim is retained as a content-free operation so the pipeline stays idempotent and auditable.
-        await tx.run(`CREATE (:MaterializationOperation {id:$id,digest:$digest,result:$result,occurrence_key:$key,source_episode_id:$source,generation:$generation,semantic_profile_id:$profile,fact_id:$fact,link_id:$link})`,
-          { id: uuidv7(), digest: extractionBodyDigest(semantic), result: canonicalExtractionBody({ created: false, refused: error.code }), key: occurrence,
-            source: source.id, generation: judge.generation_id, profile, fact: `refused:${occurrence}`, link: `refused:${occurrence}` });
-        refused.push(error.code);
+        await contentFree(`refused:${occurrence}`, digest, { created: false, refused: refusal });
+        refused.push(refusal);
+        continue;
+      }
+      const judgements = this.relationJudge ? await premise({ occurrence, validated }) : null;
+      if (judgements === "pending") throw new ExtractionAuditError("extraction_audit_conflict");
+      const judged = judgements ? await this.decideFactRelationsTx(tx, judge.generation_id, judgements) : null;
+      if (judged?.duplicate_of) {
+        await contentFree(`duplicate:${occurrence}`, digest, { created: false, duplicate_of: judged.duplicate_of, relations: judged.decisions });
+        duplicates.push(judged.duplicate_of);
         continue;
       }
       const allocated = { fact_id: uuidv7(), link_id: uuidv7(), mention_ids: validated.identity.entity_ids.map(() => uuidv7()) };
       await this.writeValidatedFactTx(tx, { validated, resolution, source, generation: judge.generation_id, profile, policy: policy.policy_revision,
-        operationId: uuidv7(), digest: extractionBodyDigest(semantic), occurrence, proposalId: null, allocated });
+        operationId: uuidv7(), digest, occurrence, proposalId: null, allocated, ...(judged ? { relations: judged.decisions } : {}) });
+      for (const link of judged?.links ?? [])
+        await this.mergeLinkTx(tx, MemoryLink.parse({ id: link.id, from: allocated.fact_id, to: link.to, role: link.role, content: link.content, weight: link.weight }));
       factIds.push(allocated.fact_id);
     }
     const created = factIds.length > 0;
     await tx.run(`CREATE (:MaterializationOperation {id:$id,digest:$digest,result:$result,occurrence_key:$key,source_episode_id:$source,generation:$generation,semantic_profile_id:$profile,fact_id:$fact,link_id:$link})`,
-      { id: uuidv7(), digest: extractionBodyDigest({ generation: judge.generation_id, source: source.id, judge: judge.id, facts: factIds, refused }),
-        result: canonicalExtractionBody({ created, facts: factIds.length, refused }), key: custody, source: source.id, generation: judge.generation_id, profile,
+      { id: uuidv7(), digest: extractionBodyDigest({ generation: judge.generation_id, source: source.id, judge: judge.id, facts: factIds, refused, duplicates }),
+        result: canonicalExtractionBody({ created, facts: factIds.length, refused, ...(duplicates.length ? { duplicates } : {}) }), key: custody, source: source.id, generation: judge.generation_id, profile,
         fact: created ? `custody:${source.id}` : `suppressed:${source.id}`, link: created ? `custody:${source.id}` : `suppressed:${source.id}` });
-    return created;
+    return { semantic_writes: created, relation_judge: relationJudge };
+  }
+
+  /** One validated claim's relation premise: its ACTIVE same-entity Facts of the
+   * generation (cap 16), persisted once per occurrence as a `FactRelationInput` so
+   * the provider's verdict binds to a fixed digest. Returns the recorded judgements,
+   * `[]` when there is nobody to compare against, or "pending" while the verdict is owed. */
+  private async factRelationVerdictTx(tx: ManagedTransaction, input: {
+    occurrence: string; pipeline_id: string; source: SemanticReviewPremises["source"]; generation: string; validated: ValidatedSemanticClaim;
+  }): Promise<FactRelationJudgement[] | "pending"> {
+    const { occurrence, generation, validated } = input;
+    const known = await tx.run(`MATCH (i:FactRelationInput {occurrence_key:$key}) OPTIONAL MATCH (v:FactRelationVerdict {occurrence_key:$key})
+      RETURN i.candidates AS candidates, v.judgements AS judgements`, { key: occurrence });
+    const row = known.records[0];
+    if (row) {
+      if (row.get("candidates") === 0) return [];
+      const judgements = row.get("judgements");
+      return typeof judgements === "string" ? z.array(FactRelationJudgement).parse(JSON.parse(judgements)) : "pending";
+    }
+    // Vector neighbours are not consulted: no Fact vector index exists in this schema.
+    const rows = await tx.run(`MATCH (f:Fact {generation:$generation})-[:MENTIONS]->(e:Entity) WHERE e.id IN $entities
+      AND NOT EXISTS { MATCH ()-[inv:INVALIDATES]->(f) WHERE inv.id IS NOT NULL }
+      RETURN DISTINCT f.id AS id, f.content AS text, f.time_value AS value, f.time_precision AS precision ORDER BY id LIMIT 16`,
+      { generation, entities: validated.identity.entity_ids });
+    const candidates = rows.records.map(record => ({ id: record.get("id"), text: record.get("text"), time: { value: record.get("value"), precision: record.get("precision") } }));
+    const body = { fact: { text: validated.claim.content, time: validatedFactTime(validated, input.source) }, candidates };
+    const context = FactRelationContext.parse({ body_digest: extractionBodyDigest(body), ...body });
+    await tx.run(`CREATE (:FactRelationInput {occurrence_key:$key,pipeline_id:$pipeline,source_episode_id:$source,generation:$generation,body_digest:$digest,context:$context,candidates:$count,last_failure:null})`,
+      { key: occurrence, pipeline: input.pipeline_id, source: input.source.id, generation, digest: context.body_digest, context: canonicalExtractionBody(context), count: neo4j.int(candidates.length) });
+    return candidates.length ? "pending" : [];
+  }
+
+  /** Mechanical application of relation verdicts, read-only: the confidence floor,
+   * candidate staleness and the non-recursive INVALIDATES rule decide each outcome;
+   * link ids are allocated here and written only once the new Fact exists. */
+  private async decideFactRelationsTx(tx: ManagedTransaction, generation: string, judgements: FactRelationJudgement[]): Promise<{
+    decisions: FactRelationDecision[]; duplicate_of: string | null; links: { id: string; to: string; role: "CONTRASTS" | "INVALIDATES"; content: string; weight: number }[];
+  }> {
+    const decisions: FactRelationDecision[] = [], links: { id: string; to: string; role: "CONTRASTS" | "INVALIDATES"; content: string; weight: number }[] = [];
+    let duplicate_of: string | null = null;
+    for (const judgement of judgements) {
+      const base = { candidate_id: judgement.candidate_id, relation: judgement.relation, confidence: judgement.confidence, reason: judgement.reason };
+      if (judgement.relation === "unrelated") { decisions.push({ ...base, outcome: "unrelated" }); continue; }
+      if (judgement.confidence < 0.6) { decisions.push({ ...base, outcome: "low_confidence" }); continue; }
+      const state = await tx.run(`MATCH (c:Fact {id:$id,generation:$generation})
+        RETURN EXISTS { MATCH ()-[inv:INVALIDATES]->(c) WHERE inv.id IS NOT NULL } AS invalidated, EXISTS { MATCH (c)-[inv:INVALIDATES]->() WHERE inv.generation=$generation } AS invalidator`,
+        { id: judgement.candidate_id, generation });
+      const candidate = state.records[0];
+      if (!candidate || candidate.get("invalidated") === true) { decisions.push({ ...base, outcome: "stale_candidate" }); continue; }
+      if (judgement.relation === "duplicate") { duplicate_of ??= judgement.candidate_id; decisions.push({ ...base, outcome: "duplicate" }); continue; }
+      if (judgement.relation === "invalidates" && candidate.get("invalidator") === true) { decisions.push({ ...base, outcome: "chain_refused" }); continue; }
+      const id = uuidv7();
+      links.push({ id, to: judgement.candidate_id, role: judgement.relation === "invalidates" ? "INVALIDATES" : "CONTRASTS", content: judgement.reason, weight: judgement.confidence });
+      decisions.push({ ...base, outcome: "linked", link_id: id });
+    }
+    // A duplicate is never written, so no verdict of it can become a link.
+    if (duplicate_of) return { duplicate_of, links: [], decisions: decisions.map(decision => decision.outcome === "linked" || decision.outcome === "chain_refused"
+      ? { candidate_id: decision.candidate_id, relation: decision.relation, confidence: decision.confidence, reason: decision.reason, outcome: "duplicate" } : decision) };
+    return { duplicate_of, links, decisions };
   }
 
   private async readExtractionPipelineTx(tx: ManagedTransaction,id: string): Promise<ExtractionPipeline> {
@@ -2904,8 +3019,9 @@ export class Store {
     const decisions = judgeAttempt ? await this.extractionDecisionsTx(tx,judgeAttempt) : [];
     const materialized = judgeAttempt && judgeAttempt.state === "succeeded"
       ? await this.materializeExtractionPipelineTx(tx, { claim, claim_attempt: claimAttempt, judge, judge_attempt: judgeAttempt, decisions }, await this.receiptLockTx(tx))
-      : false;
-    return ExtractionPipeline.parse({state:'known',pipeline_id:id,mode:'claim-judge-audit-v1',semantic_writes:materialized,claim,claim_attempt:claimAttempt,judge,judge_attempt:judgeAttempt,decisions});
+      : { semantic_writes: false };
+    return ExtractionPipeline.parse({state:'known',pipeline_id:id,mode:'claim-judge-audit-v1',semantic_writes:materialized.semantic_writes,claim,claim_attempt:claimAttempt,judge,judge_attempt:judgeAttempt,decisions,
+      ...(materialized.relation_judge ? { relation_judge: materialized.relation_judge } : {})});
   }
 
   async readExtractionPipeline(id: string, context: InstallationContext): Promise<ExtractionPipeline> {
@@ -2913,6 +3029,32 @@ export class Store {
       const value = await this.readExtractionPipelineTx(tx,z.uuidv7().parse(id));
       if (value.state === 'known') await this.authorizeEpisodesTx(tx,[value.claim.source_id],policy);
       return value;
+    });
+  }
+
+  /** Relation premises of one pipeline that still owe a verdict (candidates present, none recorded). */
+  async pendingFactRelationInputs(pipelineId: string, context: InstallationContext): Promise<{ key: string; context: FactRelationContext }[]> {
+    return this.extractionTx(context, async (tx, policy) => {
+      const rows = await tx.run(`MATCH (i:FactRelationInput {pipeline_id:$pipeline}) WHERE i.candidates > 0 AND NOT EXISTS { MATCH (:FactRelationVerdict {occurrence_key:i.occurrence_key}) }
+        RETURN i.occurrence_key AS key, i.context AS context, i.source_episode_id AS source ORDER BY key`, { pipeline: z.uuidv7().parse(pipelineId) });
+      const sources = new Set<string>(rows.records.map(row => String(row.get("source"))));
+      if (sources.size) await this.authorizeEpisodesTx(tx, [...sources], policy);
+      return rows.records.map(row => ({ key: String(row.get("key")), context: FactRelationContext.parse(JSON.parse(String(row.get("context")))) }));
+    });
+  }
+
+  /** Records the provider's answer for one premise: a verdict bound to the premise
+   * digest (written once), or the failure reason that keeps the pipeline pending. */
+  async recordFactRelationVerdict(input: { key: string } & ({ judgements: FactRelationJudgement[]; model: string; model_incarnation: string } | { failure: string }), context: InstallationContext): Promise<void> {
+    await this.extractionTx(context, async (tx, policy) => {
+      const premise = await tx.run(`MATCH (i:FactRelationInput {occurrence_key:$key}) RETURN i.source_episode_id AS source, i.body_digest AS digest`, { key: input.key });
+      const row = premise.records[0];
+      if (!row) throw new ExtractionAuditError("extraction_audit_conflict");
+      await this.authorizeEpisodesTx(tx, [String(row.get("source"))], policy);
+      if ("failure" in input) { await tx.run(`MATCH (i:FactRelationInput {occurrence_key:$key}) SET i.last_failure=$failure`, { key: input.key, failure: input.failure }); return; }
+      await tx.run(`MATCH (i:FactRelationInput {occurrence_key:$key}) SET i.last_failure=null
+        MERGE (v:FactRelationVerdict {occurrence_key:$key}) ON CREATE SET v.body_digest=$digest, v.judgements=$judgements, v.model=$model, v.model_incarnation=$incarnation`,
+        { key: input.key, digest: String(row.get("digest")), judgements: canonicalExtractionBody(z.array(FactRelationJudgement).max(16).parse(input.judgements)), model: input.model, incarnation: input.model_incarnation });
     });
   }
 

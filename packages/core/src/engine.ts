@@ -29,7 +29,7 @@ import {
 
 import { EmbeddingConfig, HttpEmbeddingProvider } from "./embedding.ts";
 import { ExtractionProviderConfig, HttpExtractionProvider, ExtractionProviderError, validateModelOutput, validateSourceSpans, type ExtractionProvider } from "./extraction.ts";
-import type { CreateModelTask, LeaseModelTask, CompleteExtractionAttempt, SelectExtractionGeneration, ReadExtractionCoverage, Generation, ExtractionCoverageRead } from "../../protocol/src/extraction.ts";
+import { ExtractionModelOutput, type CreateModelTask, type LeaseModelTask, type CompleteExtractionAttempt, type SelectExtractionGeneration, type ReadExtractionCoverage, type Generation, type ExtractionCoverageRead } from "../../protocol/src/extraction.ts";
 import { bindGenerationProfile, type GenerationProfileInput, type GenerationIdentityReceipt } from "../../protocol/src/generation-identity.ts";
 import { CreateExtractionPipeline, RunExtractionPipeline, ExtractionAuditError } from '../../protocol/src/extraction-audit.ts';
 import { MaterializeRetainedClaim, ProposeRetainedClaim, ReviewRetainedClaim, SemanticResolution, SemanticReviewOutput, type SemanticReviewProvider } from "../../protocol/src/materialization.ts";
@@ -96,7 +96,8 @@ export class Engine {
     const { extractionProvider, semanticReviewProvider, dreamLeidenAdapter, ...storeOptions } = { ...envConfig(), ...opts };
     this.extractionProvider = extractionProvider;
     this.semanticReviewProvider = semanticReviewProvider;
-    this.store = new Store({ ...storeOptions, ...(dreamLeidenAdapter ? { dreamLeidenAdapter } : {}) });
+    // Every configured extraction provider answers `judge_relations` (D53), so validated claims wait for verdicts.
+    this.store = new Store({ ...storeOptions, relationJudge: extractionProvider !== undefined, ...(dreamLeidenAdapter ? { dreamLeidenAdapter } : {}) });
   }
 
   async materializeRetainedClaim(input: MaterializeRetainedClaim, context: InstallationContext) {
@@ -182,7 +183,34 @@ export class Engine {
     if (afterClaim.state !== 'known' || afterClaim.claim.state !== 'succeeded') return afterClaim;
     const judge = await this.store.createExtractionJudgeTask({claim_task_id:request.task_id},context);
     if (judge.state === 'queued') await this.runExtractionTask({...request,task_id:judge.id,expected_version:judge.version},context);
+    const afterJudge = await this.store.readExtractionPipeline(request.task_id,context);
+    if (afterJudge.state !== 'known' || afterJudge.relation_judge !== 'pending' || !afterJudge.judge) return afterJudge;
+    await this.judgeFactRelations(request.task_id,afterJudge.judge,context);
     return this.store.readExtractionPipeline(request.task_id,context);
+  }
+
+  /** Relation verdicts for the validated claims of one pipeline (D53). The HTTP
+   * call stays outside transactions; a verdict is accepted only when it echoes
+   * the persisted premise digest and covers exactly the supplied candidates.
+   * Provider failures are recorded on the premise and leave the pipeline pending. */
+  private async judgeFactRelations(pipelineId: string, task: { model: string; model_incarnation: string }, context: InstallationContext) {
+    const provider = this.extractionProvider;
+    if (!provider) throw new ExtractionAuditError('extraction_not_configured');
+    for (const input of await this.store.pendingFactRelationInputs(pipelineId, context)) {
+      try {
+        if (provider.model !== task.model || provider.modelIncarnation !== task.model_incarnation) throw new ExtractionProviderError("provider_mismatch");
+        const validated = validateModelOutput(await provider.extract({ text: input.context.fact.text, task: "judge_relations", relation_context: input.context }), "judge_relations");
+        const output = ExtractionModelOutput.parse(JSON.parse(validated.output.canonical_body));
+        const ids = new Set(input.context.candidates.map(candidate => candidate.id));
+        if (output.task !== "judge_relations" || output.relation_context_digest !== input.context.body_digest || output.judgements.length !== ids.size
+          || new Set(output.judgements.map(judgement => judgement.candidate_id)).size !== ids.size || output.judgements.some(judgement => !ids.has(judgement.candidate_id)))
+          throw new ExtractionProviderError("provider_mismatch");
+        await this.store.recordFactRelationVerdict({ key: input.key, judgements: output.judgements, model: provider.model, model_incarnation: provider.modelIncarnation }, context);
+      } catch (error) {
+        if (!(error instanceof ExtractionProviderError)) throw error;
+        await this.store.recordFactRelationVerdict({ key: input.key, failure: error.reason }, context);
+      }
+    }
   }
 
   /** One explicitly requested model task, never an automatic graph/recall worker.

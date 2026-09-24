@@ -104,14 +104,15 @@ test("relation judge gates validated Facts: invalidates, chain refusal, duplicat
     expect(completed.state === "known" && completed.relation_judge).toBe("complete");
     expect(completed.state === "known" && completed.semantic_writes).toBe(true);
     expect(f.relationInputs).toHaveLength(3);
-    expect(f.relationInputs[2]!.fact).toEqual({ text: "Alice prefers light mode", time: { value: "2026-09-02T00:00:00.000Z", precision: "day" } });
+    expect(f.relationInputs[2]!.fact).toEqual({ text: "Alice prefers light mode", time: { value: "2026-09-02T00:00:00.000Z", precision: "day" as const } });
     expect(f.relationInputs[2]!.candidates).toEqual([{ id: dark.id as string, text: "Alice prefers dark mode", time: { value: "2026-09-01T00:00:00.000Z", precision: "day" } }]);
     const light = await f.factByContent("Alice prefers light mode");
     const invalidations = await f.query("MATCH (a:Fact)-[l:INVALIDATES]->(b:Fact) RETURN a.id AS from, b.id AS to, l.target_id AS target, l.effective_time_utc AS effective, l.generation AS generation, l.id AS id");
     expect(invalidations).toEqual([{ from: light.id, to: dark.id, target: dark.id, effective: "2026-09-02T00:00:00.000Z", generation: f.generation.id, id: expect.any(String) }]);
     const secondOps = await f.operations(second.source.id);
-    expect(secondOps.map(op => op.fact)).toEqual([`custody:${second.source.id}`, light.id as string]);
-    expect(secondOps[1]!.result).toEqual({ created: true, fact_id: light.id, link_id: expect.any(String),
+    // Operations sort by fact_id: the uuidv7 of the Fact precedes the `custody:` marker.
+    expect(secondOps.map(op => op.fact)).toEqual([light.id as string, `custody:${second.source.id}`]);
+    expect(secondOps[0]!.result).toEqual({ created: true, fact_id: light.id, link_id: expect.any(String),
       relations: [{ candidate_id: dark.id, relation: "invalidates", confidence: 0.9, reason: "Alice prefers light mode vs Alice prefers dark mode", outcome: "linked", link_id: invalidations[0]!.id }] });
 
     // Retrying a finished pipeline changes nothing: no new verdicts, calls, links or operations.
@@ -125,7 +126,7 @@ test("relation judge gates validated Facts: invalidates, chain refusal, duplicat
     const third = await f.ingest("Alice prefers dark mode again [2026-09-03].");
     const thirdResult = await third.run();
     expect(thirdResult.state === "known" && thirdResult.semantic_writes).toBe(true);
-    expect(f.relationInputs.at(-1)!.candidates.map(candidate => candidate.id)).toEqual([light.id]);
+    expect(f.relationInputs.at(-1)!.candidates.map(candidate => candidate.id)).toEqual([light.id as string]);
     const again = await f.factByContent("Alice prefers dark mode again");
     expect(await f.query("MATCH ()-[l:INVALIDATES]->() RETURN count(l) AS count")).toEqual([{ count: 1 }]);
     expect((await f.operations(third.source.id)).find(op => op.fact === again.id)!.result.relations).toEqual([

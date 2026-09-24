@@ -4528,6 +4528,14 @@
                         ],
                         "additionalProperties": false
                       }
+                    },
+                    "relation_judge": {
+                      "type": "string",
+                      "enum": [
+                        "disabled",
+                        "pending",
+                        "complete"
+                      ]
                     }
                   },
                   "required": [
@@ -5653,6 +5661,14 @@
                         ],
                         "additionalProperties": false
                       }
+                    },
+                    "relation_judge": {
+                      "type": "string",
+                      "enum": [
+                        "disabled",
+                        "pending",
+                        "complete"
+                      ]
                     }
                   },
                   "required": [
