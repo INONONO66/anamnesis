@@ -74,6 +74,7 @@ Reference layout used for the first production install (issue #213). Unit files 
 
 1. Debian 12 guest with docker, node 22 (for the built bundles) and tailscale joined to the tailnet. Create user `anamnesis` (member of `docker`), `/opt/anamnesis` (checkout + `bun run build:runtime` output in `dist/`), `/var/lib/anamnesis/{runtime,objects,backups}` owned by that user, `/etc/anamnesis` mode `0700`.
 2. Neo4j: follow [First deploy](#first-deploy) inside `/opt/anamnesis` (`gen-password`, `db:up`, `migrate`). Keep the compose bind on `127.0.0.1`.
+   inonono only needs node 22 and the `dist/` bundles (no bun); copy `dist/` from a `bun run build:runtime` output.
 3. Secrets, all `0600`, owned by `anamnesis`, never committed or logged:
    - `/etc/anamnesis/anamnesis.env` from `deploy/vm/anamnesis.env.example` (Neo4j password from `.env`, tailnet IP in `ANAMNESIS_LISTEN`).
    - `/etc/anamnesis/listen-token` (`openssl rand -base64 32`).
@@ -87,7 +88,7 @@ Reference layout used for the first production install (issue #213). Unit files 
 
 1. Client files: `~/.config/anamnesis/ingest.env` from `deploy/inonono/ingest.env.example`, `~/.config/anamnesis/listen-token` and `~/.config/anamnesis/pve-runtime-token` copied from the guest (`0600`).
 2. `install -m 755 deploy/inonono/anamnesis-ingest-source ~/.local/bin/`; `install -m 644 deploy/inonono/anamnesis-ingest@.* ~/.config/systemd/user/`; `systemctl --user daemon-reload`; `loginctl enable-linger $USER`.
-3. Enable one timer per source: `systemctl --user enable --now anamnesis-ingest@{codex,claude,omo,agentlog}.timer` for live sources, and `anamnesis-ingest@vault-{codex,claude-code,opencode,slack,discord,gjc,pi}.timer` for the hub-vault backlog. Each run of a `vault-*` unit converts the vault once (`scripts/ops/vault-to-snapshots.ts`, newest session first) and then ingests one shard per run, so the backlog drains gradually under the pacing above. `{"event":"backlog_drained"}` marks completion.
+3. Enable one timer per source: `systemctl --user enable --now anamnesis-ingest@{codex,claude}.timer` for the live sources present on inonono (omo and agentlog originals live on the workstation, not on inonono), and `anamnesis-ingest@vault-{codex,claude-code,opencode,slack,discord,gjc,pi}.timer` for the hub-vault backlog. Each run of a `vault-*` unit converts the vault once (`dist/vault-to-snapshots.mjs`, built by `build:runtime`; newest session first) and then ingests one shard per run, so the backlog drains gradually under the pacing above. `{"event":"backlog_drained"}` marks completion.
 4. Checkpoints live under `~/.local/state/anamnesis-ingest/<source>/`; the adapters are idempotent by revision key, so re-running after a failed run is safe.
 
 ### Backup

@@ -25,6 +25,7 @@
 import { createHash } from "node:crypto";
 import { mkdir, open, opendir, readdir, readFile, writeFile, type FileHandle } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { RPC_LIMITS, RpcRememberParams } from "../../packages/protocol/src/rpc.ts";
 import { SOURCE_MAX_BYTES, sourceRevisionKey } from "../../app/anamnesis/source.ts";
@@ -238,7 +239,9 @@ export async function convertVault(options: ConvertOptions): Promise<Manifest> {
   return manifest;
 }
 
-if (import.meta.main) {
+// Not `import.meta.main`: bun's node-target bundle rewrites it into an undefined `__require`, so dist/ would crash.
+const invokedDirectly = process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (invokedDirectly) {
   const usage = "usage: bun scripts/ops/vault-to-snapshots.ts --root <vault source dir> --out <dir> [--limit-sessions N] [--since ISO]";
   const { values } = parseArgs({ options: { root: { type: "string" }, out: { type: "string" }, "limit-sessions": { type: "string" }, since: { type: "string" } }, strict: true });
   if (!values.root || !values.out) { console.error(usage); process.exit(2); }
