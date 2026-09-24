@@ -77,7 +77,7 @@ export class Runtime {
       if (config.llm.baseUrl !== undefined) {
         if (!config.llm.apiKey) throw new Error("ANAMNESIS_LLM_API_KEY_FILE required");
         providers.extractionProvider = new OpenAiChatExtractionProvider({
-          ...config.llm, baseUrl: config.llm.baseUrl, apiKey: config.llm.apiKey, systemPrompt: config.systemPrompt, timeoutMs: 30000,
+          ...config.llm, baseUrl: config.llm.baseUrl, apiKey: config.llm.apiKey, systemPrompt: config.systemPrompt, relationPrompt: config.relationPrompt, timeoutMs: 30000,
         });
       }
       if (config.embedding) {

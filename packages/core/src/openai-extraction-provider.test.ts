@@ -99,6 +99,29 @@ describe("OpenAiChatExtractionProvider", () => {
     await expectFailure(new OpenAiChatExtractionProvider({ ...options, fetch: async () => response(JSON.stringify({ task: "claim", claims: [], language: "en", modality: "invalid" })) }), "provider_mismatch", false);
   });
 
+  test("relation judge requests use the dedicated relation prompt and bind it into the task identity", async () => {
+    const relation_context = { body_digest: "d".repeat(64), fact: { text: "Alice prefers light mode", time: { value: "2026-09-02T00:00:00.000Z", precision: "day" as const } },
+      candidates: [{ id: "01900000-0000-7000-8000-000000000003", text: "Alice prefers dark mode", time: { value: "2026-09-01T00:00:00.000Z", precision: "day" as const } }] };
+    const verdict = { task: "judge_relations", relation_context_digest: relation_context.body_digest, language: "en", modality: "text",
+      judgements: [{ candidate_id: relation_context.candidates[0].id, relation: "invalidates", confidence: 0.9, reason: "later preference replaces the earlier one" }] };
+    const systems: string[] = [];
+    const fetch = async (_url: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(String(init!.body));
+      systems.push(body.messages[0].content);
+      return response(JSON.stringify(body.messages[1].content.includes('"judge_relations"') ? verdict : output));
+    };
+    const instance = new OpenAiChatExtractionProvider({ ...options, relationPrompt: "Judge relations.", fetch });
+    const plain = new OpenAiChatExtractionProvider({ ...options, fetch });
+    expect(instance.modelIncarnation).not.toBe(plain.modelIncarnation);
+    expect(instance.modelIncarnation).toBe(new OpenAiChatExtractionProvider({ ...options, relationPrompt: "Judge relations.", fetch }).modelIncarnation);
+    await expect(instance.extract({ text: relation_context.fact.text, task: "judge_relations", relation_context })).resolves.toEqual(verdict);
+    await expect(instance.extract({ text: "The sky is blue.", task: "claim" })).resolves.toEqual(output);
+    expect(systems).toEqual(["Judge relations.", "Extract claims."]);
+    // Without a relation prompt the shared extraction prompt still carries the request.
+    await expect(plain.extract({ text: relation_context.fact.text, task: "judge_relations", relation_context })).resolves.toEqual(verdict);
+    expect(systems.at(-1)).toBe("Extract claims.");
+  });
+
   test("validates constructor configuration", () => {
     expect(() => new OpenAiChatExtractionProvider({ ...options, baseUrl: "file:///tmp/provider" })).toThrow();
     expect(() => new OpenAiChatExtractionProvider({ ...options, model: "" })).toThrow();

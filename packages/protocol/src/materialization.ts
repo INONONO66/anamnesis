@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { SemanticClaim, SemanticSourceContext } from "./semantic-claim.ts";
-import { ExtractionSelection, ExtractionSpan } from "./extraction.ts";
+import { ExtractionSelection, ExtractionSpan, FactRelationKind } from "./extraction.ts";
 
 const id = z.uuidv7(), hash = z.string().regex(/^[0-9a-f]{64}$/);
 const counter = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
@@ -13,7 +13,14 @@ export const MaterializeRetainedClaim = z.strictObject({ operation_id: id, propo
 export type MaterializeRetainedClaim = z.infer<typeof MaterializeRetainedClaim>;
 export const ReviewRetainedClaim = z.strictObject({ review_id: id, proposal_id: id, action: z.enum(["accept", "reject"]), reason: z.string().min(1).max(2048) });
 export type ReviewRetainedClaim = z.infer<typeof ReviewRetainedClaim>;
-export const MaterializationResult = z.strictObject({ created: z.boolean(), fact_id: id, link_id: id });
+/** One applied relation verdict. `outcome` is the applier's decision: a link was
+ * written, or the verdict was held back for a stated mechanical reason. */
+export const FactRelationDecision = z.strictObject({
+  candidate_id: id, relation: FactRelationKind, confidence: z.number().min(0).max(1), reason: z.string().min(1).max(512),
+  outcome: z.enum(["linked", "unrelated", "low_confidence", "chain_refused", "stale_candidate", "duplicate"]), link_id: id.optional(),
+});
+export type FactRelationDecision = z.infer<typeof FactRelationDecision>;
+export const MaterializationResult = z.strictObject({ created: z.boolean(), fact_id: id, link_id: id, duplicate_of: id.optional(), relations: z.array(FactRelationDecision).max(16).optional() });
 export type MaterializationResult = z.infer<typeof MaterializationResult>;
 
 /** Supplied by the installed semantic adapter, never by materialize's caller. */
