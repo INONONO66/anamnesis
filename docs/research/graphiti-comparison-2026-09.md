@@ -472,7 +472,7 @@ duration and no concurrency figure; neither is stated here.
 |---|---|---|
 | LLM calls per Episode | 2 base calls (`claim`, `judge_claims`) plus 1 `judge_relations` call per validated claim whose same-Entity candidate list is non-empty: `judgeFactRelations` loops over every pending premise of the pipeline and calls the provider once each (`engine.ts` L199-215; `extract-claims.v2.md`; `judge-relations.v1.md`; D53). 2 when no claim has candidates; 2 + N for N candidate-bearing claims (an Episode with six such claims costs 8). Retries on provider failure are extra. Entity resolution and Fact write are deterministic (D52) | "~5" per episode: extract_nodes, dedupe_nodes, extract_edges, dedupe_edges, attributes (dossier §8, UNVERIFIED). Expanded: 1 extract_nodes + 1 resolve_node per entity + 1 extract_edges + 1 resolve_edge per edge + 1 extract_timestamps per edge missing times + attribute calls per typed node/edge (dossier §2) |
 | Calls for 200 Episodes | Not measured: the artifact records no provider call count. The lower bound is 400 (2 per Episode); there is no fixed upper bound from the call shape because relation calls scale with candidate-bearing validated claims (421 active Facts across 200 Episodes means about 2.1 validated claims per Episode on average, so a rough expectation is 400 plus a few hundred relation calls, plus retries) | At least 1000 by the dossier's rough figure; §9.3 predictions run 5 to 15 per Episode on this corpus. No seconds are given in the dossier and none are invented here |
-| Wall time per Episode | 987,029 ms / 200 = about 4.9 s per Episode of wall time across the worker lanes (arithmetic on `durations.workers_ms`), with up to 4 pipelines in flight, so roughly 20 s of lane time per Episode: 2 to 2+N sequential haiku round trips through the token-hub tunnel plus Neo4j writes. Run 6 (`e2e-run6/e2e-summary.json`, tree 88debb6) measured 689,456 ms for the same 200 Episodes, about 3.4 s per Episode: the spread between runs is provider latency, not configuration. The artifact doesn't expose the per-lane split | Dossier §7 cites "typical 1-5 s per episode with OpenAI API"; that section is UNVERIFIED and not a measurement |
+| Wall time per Episode | Measured: `durations.workers_ms` 987,029 (run 3) and 689,456 (run 6, `e2e-run6/e2e-summary.json`, tree 88debb6) for the same 200 Episodes, i.e. 4.9 s and 3.4 s of aggregate worker-window wall time per Episode; the window starts after ingest while the lanes are already running. Code-backed bound: at most 4 pipelines in flight, each a sequence of 2 to 2+N provider calls plus Neo4j writes. Not measured: per-call provider latency, call counts, tunnel and database time, or lane utilization over the window, so no per-Episode lane time can be derived. The source of the 298 s difference between runs was not isolated (candidates: provider latency variance, the lease cap change between the runs, differing retry behaviour, different claim counts) | Dossier §7 cites "typical 1-5 s per episode with OpenAI API"; that section is UNVERIFIED and not a measurement |
 | Embedding | 200 Episode vectors drained, `quarantined_total` 0, inside the same worker window (in run 6 the embedding lane was already idle at 200/200 when the extraction lane had covered 12 Episodes); no separate timing in the artifact | Per-node name embedding and per-edge fact embedding (dossier §1); no timing in the dossier |
 | Concurrency | Not recorded in the artifact; design is a strict sequencer per generation (`docs/02-daemon-and-pipelines.md` §5) | `SEMAPHORE_LIMIT=20` (dossier §2) |
 | Recall LLM cost | Zero by design (`docs/02-daemon-and-pipelines.md` §8) | Zero for RRF/MMR/node-distance; about 1 LLM call per candidate for cross-encoder (dossier §7, UNVERIFIED) |
@@ -481,13 +481,15 @@ duration and no concurrency figure; neither is stated here.
 Two caveats. The anamnesis 3-call figure buys no entity dedup, so it's still
 not like-for-like with Graphiti's per-entity fan-out; it does now buy
 contradiction and duplicate judgement over same-Entity candidates. And the
-wall time is provider-bound, not configuration-bound: the daemon applies no
-inter-call pacing (the driver's `llm_min_interval_ms` field is inert for the
-daemon path), so 987 s (run 3) versus 689 s (run 6) for the same corpus is the
-variance of haiku round trips through the token-hub tunnel at 4 pipelines in
-flight, and the 30 s lease cap in force during run 3 was tight enough for one
-slow round trip to expire a lease (§9.1; raised to 90 s in e57db17). A per-call
-latency histogram is needed before comparing model time with Graphiti.
+wall-time figures are aggregate measurements with no isolated cause: the daemon
+applies no inter-call pacing (the driver's `llm_min_interval_ms` field is
+inert for the daemon path), so configuration does not explain the 987 s (run 3)
+versus 689 s (run 6) spread, but nothing in the artifacts measures what does.
+Provider latency variance is one candidate; the lease cap moved from 30 s to
+90 s between those runs (e57db17) after run 3 recorded a `lease_expired`
+(§9.1), and the runs also differ in claim counts, so retry behaviour and model
+output are candidates too. Until per-call provider latency is recorded, no
+model-time comparison with Graphiti is possible from these runs.
 
 ## Open items for the maintainer
 
