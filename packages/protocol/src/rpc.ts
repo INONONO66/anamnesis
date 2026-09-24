@@ -271,9 +271,14 @@ export const RpcRequest = z.discriminatedUnion("method", [
 export type RpcRequest = z.infer<typeof RpcRequest>;
 export type RpcRequestInput = z.input<typeof RpcRequest>;
 
+/** First frame on a TCP connection, before any request; UDS peers never send it.
+ * Same u32-be framing as requests. A mismatch is answered with `unauthorized`. */
+export const RpcTcpAuth = z.strictObject({ auth: z.strictObject({ bearer: boundedString(RPC_LIMITS.identifier_bytes) }) });
+export type RpcTcpAuth = z.infer<typeof RpcTcpAuth>;
+
 export const RpcErrorCode = z.enum([
   "parse_error", "invalid_request", "invalid_params", "unsupported_method",
-  "unsupported_version", "unauthenticated", "authentication_failed", "already_authenticated",
+  "unsupported_version", "unauthorized", "unauthenticated", "authentication_failed", "already_authenticated",
   "storage_unavailable", "resource_exhausted", "shutting_down", "ownership_lost",
   "revision_conflict", "stale_revision", "idempotency_conflict", "incarnation_mismatch",
   "object_not_found", "object_metadata_conflict", "object_corrupt", "upload_not_found",

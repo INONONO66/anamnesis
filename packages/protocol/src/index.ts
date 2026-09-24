@@ -50,6 +50,7 @@ export {
   RpcCommitParams,
   RpcHitCacheParams,
   RpcRequest,
+  RpcTcpAuth,
   RpcErrorCode,
   RpcError,
   RpcObjectMetadata,
