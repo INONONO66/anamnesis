@@ -118,14 +118,15 @@ export async function runE2eDaemon(evidence = resolve(".omo/evidence/auto-pipeli
   };
   const started = Date.now(), durations: Record<string, number> = {};
   // Embeddings are forced on: activation needs one vector per Episode and recall must use the vector channel.
-  const llmMinIntervalMs = Number(process.env.ANAMNESIS_QA_LLM_MIN_INTERVAL_MS ?? "3000");
+  // The daemon has no inter-call pacing knob: its extraction lane is bounded by the scheduler's 4 pipelines in flight.
+  const schedulerMaxInFlight = 4;
   const deviations = [
     "Extraction, coverage, embedding drain and cutover are the daemon's own worker lanes; this script constructs no Engine and drives no pipeline.",
     "verify/status RPC has no Episode/Fact/generation counters; committed ingest receipts and read-only owned-DB snapshots supplement verify health.",
     "ingest-codex-raw Episodes are pre-lineage (digest version 1) and refuse semantic Facts (echo_lineage_unavailable) by D49 contract; only lineage-admitted transcript Episodes can yield Facts.",
   ];
   const summary: Record<string, unknown> = { status: "running", stage: "setup", episodes: 0, facts_active: 0, vectors: 0, relation_links: null,
-    llm_min_interval_ms: llmMinIntervalMs, workers_deadline_ms: WORKERS_DEADLINE_MS,
+    scheduler_max_in_flight: schedulerMaxInFlight, workers_deadline_ms: WORKERS_DEADLINE_MS,
     embedding_channel: "qwen3-embedding-0.6b via llama-server", recall: [], crash_drain: null, model: "claude-haiku-4-5", workers: null, durations, deviations };
   // Bind-mounted roots must live under $HOME (colima/virtiofs shares only the home directory).
   const qaParent = join(process.env["HOME"] ?? "/tmp", ".cache", "anamnesis-qa"); await mkdir(qaParent, { recursive: true, mode: 0o700 });
@@ -137,8 +138,7 @@ export async function runE2eDaemon(evidence = resolve(".omo/evidence/auto-pipeli
   // (repo defaults unless the operator overrides them, so they are deliberately NOT stripped below).
   const env: NodeJS.ProcessEnv = { ...process.env, ANAMNESIS_RUNTIME_ROOT: root, ANAMNESIS_NEO4J_PASSWORD: password,
     ANAMNESIS_NEO4J_USER: "neo4j", ANAMNESIS_NEO4J_DATABASE: "neo4j", ANAMNESIS_LLM_MODEL: "claude-haiku-4-5",
-    ANAMNESIS_LLM_DIALECT: "anthropic_messages", ANAMNESIS_LLM_API_KEY_FILE: key, ANAMNESIS_QA_EMBEDDINGS: "1",
-    ANAMNESIS_QA_LLM_MIN_INTERVAL_MS: String(llmMinIntervalMs) };
+    ANAMNESIS_LLM_DIALECT: "anthropic_messages", ANAMNESIS_LLM_API_KEY_FILE: key, ANAMNESIS_QA_EMBEDDINGS: "1" };
   // Fixture providers (ANAMNESIS_EXTRACTION_CONFIG / ANAMNESIS_EMBEDDING_CONFIG) and foreign runtime identity are dropped.
   for (const field of Object.keys(env)) if (/^ANAMNESIS_(EMBEDDING_|EXTRACTION_CONFIG|RUNTIME_SOCKET|RUNTIME_TOKEN|NEO4J_CONTAINER|QA_OWNER|OBJECTS_ROOT)/.test(field)) delete env[field];
   let tunnel: ChildProcess | undefined, daemon: ChildProcess | undefined, daemonDone: Promise<void> | undefined, lines: LineStream | undefined;
@@ -203,7 +203,7 @@ export async function runE2eDaemon(evidence = resolve(".omo/evidence/auto-pipeli
     const config = await loadProviderConfig(env); bearer = config.llm.apiKey;
     assert.ok(config.llm.baseUrl && config.llm.apiKey, "daemon_llm_config_incomplete"); assert.ok(config.embedding, "daemon_embedding_config_incomplete");
     await log("daemon_config", { model: env.ANAMNESIS_LLM_MODEL, dialect: env.ANAMNESIS_LLM_DIALECT, embedding_model: config.embedding.model, embedding_dimensions: config.embedding.dimensions,
-      extraction_prompt_file: env.ANAMNESIS_EXTRACTION_PROMPT_FILE ?? "default", relation_prompt_file: env.ANAMNESIS_RELATION_PROMPT_FILE ?? "default", llm_min_interval_ms: llmMinIntervalMs });
+      extraction_prompt_file: env.ANAMNESIS_EXTRACTION_PROMPT_FILE ?? "default", relation_prompt_file: env.ANAMNESIS_RELATION_PROMPT_FILE ?? "default", scheduler_max_in_flight: schedulerMaxInFlight });
     const port = await freePort(); env.ANAMNESIS_NEO4J_URI = `bolt://127.0.0.1:${port}`;
     // Reserve an explicit port so docker start keeps the same Bolt endpoint.
     await command("docker", ["create", "--name", name, "--label", `anamnesis.qa.owner=${owner}`, "-p", `127.0.0.1:${port}:7687`,

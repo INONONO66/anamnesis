@@ -232,7 +232,7 @@ forgetting is a score multiplier, not a GC policy. Whether the `S` update and
 | Indexes | Unique/range/fulltext/vector per generation; vector options pinned (`vector-2.0`, cosine, 1024, HNSW m 16 / ef 100) (`docs/01-storage.md` §4, §7) | `build_indices_and_constraints`: uuid/group_id, name/group_id, fulltext on name+summary, content, fact (dossier §7, UNVERIFIED) |
 | LLM | HTTP extraction provider; default `claude-haiku-4-5` via token-hub, `anthropic_messages` dialect (`app/anamnesis/README.md`; `scripts/qa/e2e-real.ts` L85-86, L139). Adjudication default `claude-opus-5`, shadow mode (D50) | OpenAI default, Anthropic, Gemini, Groq, OpenAI-compatible (dossier §7, UNVERIFIED) |
 | Embeddings | Self-hosted Qwen3-Embedding-0.6B on llama.cpp, 1024 dims, L2-normalized, pinned query template; profile ID hashes endpoint/model/dimensions (`docs/01-storage.md` §4; D51; `app/anamnesis/README.md`). G7 `embedding_channel`: `qwen3-embedding-0.6b via llama-server` | OpenAI `text-embedding-3-small` default, Voyage, Ollama (dossier §7, UNVERIFIED) |
-| Concurrency | One sequencer per generation, strict `ingest_seq` order, blocked head after three failures (`docs/02-daemon-and-pipelines.md` §5). QA pacing `ANAMNESIS_QA_LLM_MIN_INTERVAL_MS` default 3000 (`app/anamnesis/README.md`; G7 `llm_min_interval_ms: 3000`) | `SEMAPHORE_LIMIT=20` default, `semaphore_gather` around parallel LLM/DB work (dossier §2) |
+| Concurrency | Extraction lane: at most 4 pipelines in flight per writer (`ExtractionScheduler` `maxInFlight` default 4, `packages/core/src/extraction-scheduler.ts`), each pipeline's provider calls sequential; no inter-call pacing in the daemon (`ANAMNESIS_QA_LLM_MIN_INTERVAL_MS` is consumed only by the Engine-driven `scripts/qa/e2e-real.ts` pacer, not by `app/anamnesis`) | `SEMAPHORE_LIMIT=20` default, `semaphore_gather` around parallel LLM/DB work (dossier §2) |
 | QA database | Isolated ephemeral Neo4j per harness run, owner-labelled container, never the live `anamnesis-neo4j-1` (`.omo/g7-context.md`; `app/anamnesis/README.md`) | Not described in the dossier |
 | Backup / restore | Offline `neo4j-admin database dump` with the pinned image, manifest of `objects/`, staged restore with activation journal (`docs/01-storage.md` §9; `docs/deploy.md`; `app/anamnesis/README.md`) | Not described in the dossier |
 | Multi-tenancy | Not doing (`docs/09-roadmap.md`) | `group_id` partition key (dossier §1) |
@@ -249,7 +249,10 @@ are documented and exercised by the E2E harness.
 
 Source: `.omo/evidence/auto-pipeline/g7/e2e/e2e-summary.json`, run 3,
 2026-09-24. Model `claude-haiku-4-5`; embeddings `qwen3-embedding-0.6b via
-llama-server`; `llm_min_interval_ms` 3000; `workers_deadline_ms` 5,400,000.
+llama-server`; `workers_deadline_ms` 5,400,000. The artifact's `llm_min_interval_ms: 3000`
+field was recorded by the driver but the daemon never reads that variable (no
+`app/anamnesis` or `packages/core` code consumes it); the worker lanes ran at
+the scheduler's own bound of 4 pipelines in flight with no inter-call pacing.
 
 | Field | Value |
 |---|---|
@@ -290,6 +293,16 @@ live 200, completed_total 200, failed_total 0, `last_error` null. Durations
 (ms): ingest 45,024; workers 1,143,177; recall 2,386; total 1,207,162. The
 sample in 9.2 is still drawn from run 3; the Fact texts differ between runs
 only in wording since the extraction is a fresh haiku call per Episode.
+
+Run 6 (`.omo/evidence/auto-pipeline/g7/e2e-run6/e2e-summary.json`, tree
+88debb6, the merged PR's final code) repeats it: status `passed`, 200
+Episodes, 417 active Facts, 200 vectors, relation links contrasts 7 /
+invalidates 0 / duplicates 6 (total 13), `refused_claims` 0; recall 5/5 with
+`[bm25, vector]` and `ppr_used`; crash_drain equal; extraction completed
+200 / failed 0, `last_error` null. Durations (ms): ingest 53,222; workers
+689,456; recall 2,656; total 775,913. Three runs, three Fact counts (421, 422,
+417) and three link totals (21, 15, 13): the extraction is stable in shape and
+varies in the margin where haiku splits or merges a claim.
 
 Two run-shape notes from `deviations` matter for reading the sample. The
 corpus is one copied Codex rollout plus deterministic Claude text-block
@@ -459,8 +472,8 @@ duration and no concurrency figure; neither is stated here.
 |---|---|---|
 | LLM calls per Episode | 2 base calls (`claim`, `judge_claims`) plus 1 `judge_relations` call per validated claim whose same-Entity candidate list is non-empty: `judgeFactRelations` loops over every pending premise of the pipeline and calls the provider once each (`engine.ts` L199-215; `extract-claims.v2.md`; `judge-relations.v1.md`; D53). 2 when no claim has candidates; 2 + N for N candidate-bearing claims (an Episode with six such claims costs 8). Retries on provider failure are extra. Entity resolution and Fact write are deterministic (D52) | "~5" per episode: extract_nodes, dedupe_nodes, extract_edges, dedupe_edges, attributes (dossier §8, UNVERIFIED). Expanded: 1 extract_nodes + 1 resolve_node per entity + 1 extract_edges + 1 resolve_edge per edge + 1 extract_timestamps per edge missing times + attribute calls per typed node/edge (dossier §2) |
 | Calls for 200 Episodes | Not measured: the artifact records no provider call count. The lower bound is 400 (2 per Episode); there is no fixed upper bound from the call shape because relation calls scale with candidate-bearing validated claims (421 active Facts across 200 Episodes means about 2.1 validated claims per Episode on average, so a rough expectation is 400 plus a few hundred relation calls, plus retries) | At least 1000 by the dossier's rough figure; §9.3 predictions run 5 to 15 per Episode on this corpus. No seconds are given in the dossier and none are invented here |
-| Wall time per Episode | 987,029 ms / 200 = about 4.9 s per Episode across the worker lanes (arithmetic on `durations.workers_ms`). The 3000 ms pacing floor per provider call means 2 or more paced calls per Episode account for at least 6 s if serialized, so the lanes overlapped calls across sources; the artifact doesn't expose the per-lane split | Dossier §7 cites "typical 1-5 s per episode with OpenAI API"; that section is UNVERIFIED and not a measurement |
-| Embedding | 200 Episode vectors drained, `quarantined_total` 0, inside the same 987 s worker window; no separate timing in the artifact | Per-node name embedding and per-edge fact embedding (dossier §1); no timing in the dossier |
+| Wall time per Episode | 987,029 ms / 200 = about 4.9 s per Episode of wall time across the worker lanes (arithmetic on `durations.workers_ms`), with up to 4 pipelines in flight, so roughly 20 s of lane time per Episode: 2 to 2+N sequential haiku round trips through the token-hub tunnel plus Neo4j writes. Run 6 (`e2e-run6/e2e-summary.json`, tree 88debb6) measured 689,456 ms for the same 200 Episodes, about 3.4 s per Episode: the spread between runs is provider latency, not configuration. The artifact doesn't expose the per-lane split | Dossier §7 cites "typical 1-5 s per episode with OpenAI API"; that section is UNVERIFIED and not a measurement |
+| Embedding | 200 Episode vectors drained, `quarantined_total` 0, inside the same worker window (in run 6 the embedding lane was already idle at 200/200 when the extraction lane had covered 12 Episodes); no separate timing in the artifact | Per-node name embedding and per-edge fact embedding (dossier §1); no timing in the dossier |
 | Concurrency | Not recorded in the artifact; design is a strict sequencer per generation (`docs/02-daemon-and-pipelines.md` §5) | `SEMAPHORE_LIMIT=20` (dossier §2) |
 | Recall LLM cost | Zero by design (`docs/02-daemon-and-pipelines.md` §8) | Zero for RRF/MMR/node-distance; about 1 LLM call per candidate for cross-encoder (dossier §7, UNVERIFIED) |
 | Recall latency | 2,631 ms for 5 queries in G7, about 526 ms each, measured through the harness on an ephemeral Neo4j; target p50 < 100 ms, p95 < 250 ms (`docs/05-recall.md` §9). The G7 figure is above target and includes client round trips | UNVERIFIED (dossier closing note) |
@@ -468,10 +481,13 @@ duration and no concurrency figure; neither is stated here.
 Two caveats. The anamnesis 3-call figure buys no entity dedup, so it's still
 not like-for-like with Graphiti's per-entity fan-out; it does now buy
 contradiction and duplicate judgement over same-Entity candidates. And the
-pacing floor still dominates: 987 s for 200 Episodes says as much about
-`ANAMNESIS_QA_LLM_MIN_INTERVAL_MS` as about haiku latency, and the 30 s lease
-cap was tight enough for one slow round trip to expire a lease (§9.1). A run
-with the interval at 0 is needed before comparing model time.
+wall time is provider-bound, not configuration-bound: the daemon applies no
+inter-call pacing (the driver's `llm_min_interval_ms` field is inert for the
+daemon path), so 987 s (run 3) versus 689 s (run 6) for the same corpus is the
+variance of haiku round trips through the token-hub tunnel at 4 pipelines in
+flight, and the 30 s lease cap in force during run 3 was tight enough for one
+slow round trip to expire a lease (§9.1; raised to 90 s in e57db17). A per-call
+latency histogram is needed before comparing model time with Graphiti.
 
 ## Open items for the maintainer
 
@@ -487,8 +503,8 @@ with the interval at 0 is needed before comparing model time.
 - Fact ranking: Facts trailed Episodes in 4/5 recall queries (§6, §9.1).
 - Re-verify dossier §7 and §8 before quoting any provider, index or cost
   figure from them outside this document.
-- Run G7 with `ANAMNESIS_QA_LLM_MIN_INTERVAL_MS=0` to separate pacing from
-  model latency (§10).
+- Record per-call provider latency in the daemon's worker status so §10 can
+  separate model time from Neo4j and tunnel time (§10).
 
 ## Sources
 
