@@ -312,6 +312,79 @@
         "modality"
       ],
       "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "task": {
+          "type": "string",
+          "const": "judge_relations"
+        },
+        "relation_context_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "judgements": {
+          "maxItems": 16,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "candidate_id": {
+                "type": "string",
+                "format": "uuid",
+                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$"
+              },
+              "relation": {
+                "type": "string",
+                "enum": [
+                  "duplicate",
+                  "contrasts",
+                  "invalidates",
+                  "unrelated"
+                ]
+              },
+              "confidence": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "reason": {
+                "type": "string",
+                "maxLength": 512
+              }
+            },
+            "required": [
+              "candidate_id",
+              "relation",
+              "confidence",
+              "reason"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "language": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "modality": {
+          "type": "string",
+          "enum": [
+            "text",
+            "code",
+            "mixed",
+            "unknown"
+          ]
+        }
+      },
+      "required": [
+        "task",
+        "relation_context_digest",
+        "judgements",
+        "language",
+        "modality"
+      ],
+      "additionalProperties": false
     }
   ]
 }

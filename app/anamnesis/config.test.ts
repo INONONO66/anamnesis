@@ -4,14 +4,34 @@ import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { atomicJson, DEFAULT_EXTRACTION_PROMPT_FILE, loadListenConfig, loadProviderConfig } from "./config.ts";
+import { atomicJson, DEFAULT_EXTRACTION_PROMPT_FILE, DEFAULT_RELATION_PROMPT_FILE, loadListenConfig, loadProviderConfig } from "./config.ts";
 
-test("provider defaults leave endpoints opt-in and load the bundled prompt", async () => {
+test("provider defaults leave endpoints opt-in and load the bundled prompts", async () => {
   const config = await loadProviderConfig({});
   assert.equal(config.embedding, undefined);
   assert.deepEqual(config.llm, { baseUrl: undefined, model: "claude-haiku-4-5", dialect: "anthropic_messages" });
   assert.equal(config.promptFile, DEFAULT_EXTRACTION_PROMPT_FILE);
   assert.equal(config.systemPrompt, await fs.readFile(DEFAULT_EXTRACTION_PROMPT_FILE, "utf8"));
+  assert.equal(config.relationPromptFile, DEFAULT_RELATION_PROMPT_FILE);
+  assert.equal(config.relationPrompt, await fs.readFile(DEFAULT_RELATION_PROMPT_FILE, "utf8"));
+  assert.match(config.relationPrompt, /judge_relations/);
+});
+
+test("relation prompt override is validated like the extraction prompt", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "ana-relation-prompt-"));
+  try {
+    const promptFile = join(root, "relations.md");
+    await fs.writeFile(promptFile, "fixture relation prompt");
+    const config = await loadProviderConfig({ ANAMNESIS_RELATION_PROMPT_FILE: promptFile });
+    assert.equal(config.relationPrompt, "fixture relation prompt");
+    assert.equal(config.relationPromptFile, promptFile);
+    assert.equal(config.systemPrompt, await fs.readFile(DEFAULT_EXTRACTION_PROMPT_FILE, "utf8"));
+    await fs.writeFile(promptFile, " ");
+    await assert.rejects(loadProviderConfig({ ANAMNESIS_RELATION_PROMPT_FILE: promptFile }), /ANAMNESIS_RELATION_PROMPT_FILE/);
+    await fs.rm(promptFile);
+    await assert.rejects(loadProviderConfig({ ANAMNESIS_RELATION_PROMPT_FILE: promptFile }), { code: "ENOENT" });
+    await assert.rejects(loadProviderConfig({ ANAMNESIS_RELATION_PROMPT_FILE: "" }), /ANAMNESIS_RELATION_PROMPT_FILE/);
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
 });
 
 test("provider configuration reads overrides and bearer at startup", async () => {

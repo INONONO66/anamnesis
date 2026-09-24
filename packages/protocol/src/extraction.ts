@@ -28,6 +28,13 @@ export const ExtractionClaim = z.strictObject({
   speech_act: z.enum(["asserted", "reported", "hedged", "intended", "hypothetical"]).optional(),
 });
 export type ExtractionClaim = z.infer<typeof ExtractionClaim>;
+/** One relation verdict per supplied candidate Fact. `unrelated` is the only
+ * verdict that leaves the graph untouched; the applier, not the model, enforces
+ * the confidence floor and the non-recursive INVALIDATES rule. */
+export const FactRelationKind = z.enum(["duplicate", "contrasts", "invalidates", "unrelated"]);
+export type FactRelationKind = z.infer<typeof FactRelationKind>;
+export const FactRelationJudgement = z.strictObject({ candidate_id: id, relation: FactRelationKind, confidence: z.number().min(0).max(1), reason: bounded(512).refine(v => v.length > 0) });
+export type FactRelationJudgement = z.infer<typeof FactRelationJudgement>;
 /** Bounded model output. Optional claim metadata does not authorize relations. */
 export const ExtractionModelOutput = z.discriminatedUnion("task", [
   z.strictObject({ task: z.literal("claim"), claims: z.array(ExtractionClaim).max(64), language: bounded(64), modality }),
@@ -35,6 +42,7 @@ export const ExtractionModelOutput = z.discriminatedUnion("task", [
   z.strictObject({ task: z.literal("judge_claims"), claim_body_digest: hash,
     decisions: z.array(z.strictObject({ claim_index: timestamp.max(63), disposition, evidence: ExtractionSpan, confidence: z.number().min(0).max(1).optional() })).max(64),
     language: bounded(64), modality }),
+  z.strictObject({ task: z.literal("judge_relations"), relation_context_digest: hash, judgements: z.array(FactRelationJudgement).max(16), language: bounded(64), modality }),
 ]);
 export type ExtractionModelOutput = z.infer<typeof ExtractionModelOutput>;
 export const ExtractionOutput = z.strictObject({ canonical_body: bounded(65536), body_digest: hash, spans, language: bounded(64), modality }).superRefine((v, ctx) => {
@@ -42,7 +50,7 @@ export const ExtractionOutput = z.strictObject({ canonical_body: bounded(65536),
     const body: unknown = JSON.parse(v.canonical_body);
     if (canonicalExtractionBody(body) !== v.canonical_body || extractionBodyDigest(body) !== v.body_digest) throw new Error("digest");
     const parsed = ExtractionModelOutput.parse(body);
-    const evidence = parsed.task === "claim" ? parsed.claims.map(c => c.evidence) : parsed.task === "judge_claims" ? parsed.decisions.map(d => d.evidence) : parsed.spans;
+    const evidence = parsed.task === "claim" ? parsed.claims.map(c => c.evidence) : parsed.task === "judge_claims" ? parsed.decisions.map(d => d.evidence) : parsed.task === "judge_relations" ? [] : parsed.spans;
     if (canonicalExtractionBody(evidence) !== canonicalExtractionBody(v.spans) || parsed.language !== v.language || parsed.modality !== v.modality) throw new Error("metadata");
   } catch { ctx.addIssue({ code: "custom", message: "output ABI/canonical body/digest mismatch" }); }
 });

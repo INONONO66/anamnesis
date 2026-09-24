@@ -12,6 +12,7 @@ const providerName = RpcEmbeddingAttempt.shape.model.trim().min(1).max(256);
 const providerSecret = RpcEmbeddingAttempt.shape.model.refine(value => !/[\r\n]/.test(value));
 const providerPath = RpcEmbeddingAttempt.shape.model;
 export const DEFAULT_EXTRACTION_PROMPT_FILE = fileURLToPath(new URL("./prompts/extract-claims.v2.md", import.meta.url));
+export const DEFAULT_RELATION_PROMPT_FILE = fileURLToPath(new URL("./prompts/judge-relations.v1.md", import.meta.url));
 const ProviderEnvironment = RpcEmbeddingAttempt.pick({}).strip().extend({
   ANAMNESIS_EMBEDDING_BASE_URL: providerUrl.optional(),
   ANAMNESIS_EMBEDDING_MODEL: providerName.default("Qwen3-Embedding-0.6B"),
@@ -22,6 +23,7 @@ const ProviderEnvironment = RpcEmbeddingAttempt.pick({}).strip().extend({
   ANAMNESIS_LLM_MODEL: providerName.default("claude-haiku-4-5"),
   ANAMNESIS_LLM_DIALECT: providerName.refine(value => value === "openai_chat" || value === "anthropic_messages").transform(value => value as ExtractionDialect).optional(),
   ANAMNESIS_EXTRACTION_PROMPT_FILE: providerPath.default(DEFAULT_EXTRACTION_PROMPT_FILE),
+  ANAMNESIS_RELATION_PROMPT_FILE: providerPath.default(DEFAULT_RELATION_PROMPT_FILE),
 });
 
 /** Load once at provider startup. Absent base URLs leave legacy provider selection unchanged.
@@ -47,6 +49,9 @@ export async function loadProviderConfig(env: NodeJS.ProcessEnv = process.env) {
   const promptFile = resolve(config.ANAMNESIS_EXTRACTION_PROMPT_FILE);
   const systemPrompt = await fs.readFile(promptFile, "utf8");
   if (!systemPrompt.trim()) throw new Error("empty ANAMNESIS_EXTRACTION_PROMPT_FILE");
+  const relationPromptFile = resolve(config.ANAMNESIS_RELATION_PROMPT_FILE);
+  const relationPrompt = await fs.readFile(relationPromptFile, "utf8");
+  if (!relationPrompt.trim()) throw new Error("empty ANAMNESIS_RELATION_PROMPT_FILE");
   return {
     embedding: config.ANAMNESIS_EMBEDDING_BASE_URL === undefined ? undefined : {
       baseUrl: config.ANAMNESIS_EMBEDDING_BASE_URL,
@@ -57,7 +62,7 @@ export async function loadProviderConfig(env: NodeJS.ProcessEnv = process.env) {
     llm: { baseUrl: config.ANAMNESIS_LLM_BASE_URL, model: config.ANAMNESIS_LLM_MODEL,
       dialect: config.ANAMNESIS_LLM_DIALECT ?? (config.ANAMNESIS_LLM_MODEL.startsWith("claude") ? "anthropic_messages" : "openai_chat"),
       ...(apiKey === undefined ? {} : { apiKey }) },
-    promptFile, systemPrompt,
+    promptFile, systemPrompt, relationPromptFile, relationPrompt,
   };
 }
 
