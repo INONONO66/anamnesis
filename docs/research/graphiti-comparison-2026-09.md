@@ -279,6 +279,18 @@ the generation stuck behind it (`store.ts` `cancelModelTask` accepting
 `expired`/`worker_lost`; regression test `extraction-scheduler.test.ts`,
 which drives lease expiry through the injected store clock).
 
+Run 5 (`.omo/evidence/auto-pipeline/g7/e2e-run5/e2e-summary.json`, same
+date, same corpus rule, code including both changes) confirms the shape with
+a clean lane: status `passed`, 200 Episodes, 422 active Facts, 200 vectors,
+relation links contrasts 8 / invalidates 0 / duplicates 7 (total 15),
+`refused_claims` 0; recall 5/5 with `[bm25, vector]` and `ppr_used` on every
+query (Fact hits 3, 0, 0, 0, 2); crash_drain `equal: true`; settled workers
+embedding 200 drained / 0 quarantined, extraction `active`, covered 200 /
+live 200, completed_total 200, failed_total 0, `last_error` null. Durations
+(ms): ingest 45,024; workers 1,143,177; recall 2,386; total 1,207,162. The
+sample in 9.2 is still drawn from run 3; the Fact texts differ between runs
+only in wording since the extraction is a fresh haiku call per Episode.
+
 Two run-shape notes from `deviations` matter for reading the sample. The
 corpus is one copied Codex rollout plus deterministic Claude text-block
 conversions to reach 200 Episodes, so many Episodes appear twice with
