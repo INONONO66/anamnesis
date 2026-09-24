@@ -11,7 +11,7 @@ import type { CreateExtractionPipeline, RunExtractionPipeline } from '../../pack
 import type { InstallationContext, CommitReceiptInput, RecallTransportInput } from "../../packages/core/src/store.ts";
 import type { RpcPolicySetParams, RpcPolicyRevokeParams, RpcRecallParams, RpcEmbeddingRecoverParams, RpcDreamAdmitParams, RpcDreamLeaseParams, RpcDreamExpireParams, RpcDreamExecuteParams } from "../../packages/protocol/src/rpc.ts";
 import { DurableSpool, type SpoolEntry } from "../../packages/core/src/spool.ts";
-import { RPC_LIMITS, RPC_METHODS, RpcRememberParams, type RpcCapabilities, type RpcCommittedResult, type RpcIngestStatusParams, type RpcIngestStatusResult, type RpcStatusResult } from "../../packages/protocol/src/rpc.ts";
+import { RPC_LIMITS, RPC_METHODS, RpcRememberParams, type RpcCapabilities, type RpcCommittedResult, type RpcIngestStatusParams, type RpcIngestStatusResult, type RpcStatusResult, type RpcWorkersStatus } from "../../packages/protocol/src/rpc.ts";
 import { atomicJson, hasCode, loadProviderConfig, syncDirectory, type Installation } from "./config.ts";
 import { Uploads, type UploadLifecycle } from "./objects.ts";
 import { loadTokenizers } from "./tokenizer.ts";
@@ -66,11 +66,15 @@ export interface RuntimeAuthorityOptions {
   /** Injected only by the owning lifecycle. No ambient/global adapter is used. */
   authorityAdapter?: TrustedAuthorityAdapter;
 }
+/** Background lanes the daemon's single writer interleaves with requests. */
+export type BackgroundLane = "spool" | "embedding";
+/** Outcome of one bounded embedding batch. "stalled" keeps the wake pending for the next storage recovery. */
+export type EmbeddingTurn = "more" | "idle" | "stalled";
 
 export class Runtime {
   readonly capabilities: RpcCapabilities;
   /** Load asynchronous provider assets once, before accepting RPC traffic. */
-  static async create(installation: Installation, scheduleDrain: () => void = () => {}, uploadLifecycle: UploadLifecycle = {}, authorityOptions: RuntimeAuthorityOptions = {}): Promise<Runtime> {
+  static async create(installation: Installation, scheduleDrain: (lane: BackgroundLane) => void = () => {}, uploadLifecycle: UploadLifecycle = {}, authorityOptions: RuntimeAuthorityOptions = {}): Promise<Runtime> {
     const providers: EngineOptions = {};
     if (process.env["ANAMNESIS_LLM_BASE_URL"] !== undefined || process.env["ANAMNESIS_EMBEDDING_BASE_URL"] !== undefined) {
       const config = await loadProviderConfig();
@@ -108,7 +112,8 @@ export class Runtime {
   private drainJob: AsyncGenerator<void, void, void> | undefined;
   private drainRequested = false;
   private drainStopped = false;
-  constructor(readonly installation: Installation, private readonly scheduleDrain: () => void = () => {}, uploadLifecycle: UploadLifecycle = {}, authorityOptions: RuntimeAuthorityOptions = {}, providers: EngineOptions = {}) {
+  private readonly embedding = { requested: false, drained_total: 0, quarantined_total: 0, last_error: null as string | null };
+  constructor(readonly installation: Installation, private readonly scheduleDrain: (lane: BackgroundLane) => void = () => {}, uploadLifecycle: UploadLifecycle = {}, authorityOptions: RuntimeAuthorityOptions = {}, providers: EngineOptions = {}) {
     this.authorityAdapter = authorityOptions.authorityAdapter;
     const config = { ...envConfig(), ...providers, tokenizers: loadTokenizers(), objectsRoot: join(installation.root, "objects") };
     this.capabilities = { ...capabilities, extraction: !!config.extractionProvider, embeddings: !!config.embeddingProvider };
@@ -147,7 +152,7 @@ export class Runtime {
       if (rows[0]?.epoch !== this.epoch) throw new RpcFault("ownership_lost", "database writer epoch changed");
       const recovered = !this.available;
       this.available = true;
-      if (recovered) this.wakeDrain();
+      if (recovered) { this.wakeDrain(); this.wakeEmbedding(); }
     } catch (error) {
       if (!storageUnavailable(error)) throw error;
       this.available = false;
@@ -259,6 +264,7 @@ export class Runtime {
       expected_previous_revision_key: params.expected_previous_revision_key, ...payload }, metadata ? { metadata, context: context! } : undefined));
     const committed = await this.committed(binding, result.created);
     if (!committed || committed.id !== result.id) throw new RpcFault("internal_error", "database did not expose the committed delivery");
+    if (committed.created) this.wakeEmbedding(); // Direct and spool-drained commits alike enqueue outbox work.
     return committed;
   }
   async remember(params: RpcRememberParams, context?: InstallationContext) {
@@ -321,7 +327,41 @@ export class Runtime {
   }
   private wakeDrain(): void {
     this.drainRequested = true;
-    if (this.available && !this.drainStopped) this.scheduleDrain();
+    if (this.available && !this.drainStopped) this.scheduleDrain("spool");
+  }
+  private wakeEmbedding(): void {
+    if (!this.capabilities.embeddings) return; // Unconfigured: the worker is never scheduled and never reports.
+    this.embedding.requested = true;
+    if (this.available && !this.drainStopped) this.scheduleDrain("embedding");
+  }
+  /** One bounded outbox batch; called only by the daemon's serial owner, never from a second writer. */
+  async embeddingTurn(): Promise<EmbeddingTurn> {
+    if (this.drainStopped || !this.available) return "stalled";
+    if (!this.embedding.requested) return "idle";
+    try {
+      await this.installation.assertOwned();
+      const rows = await this.read<{ epoch: number }>("MATCH (m:Meta {key:'meta'}) RETURN m.writer_epoch AS epoch");
+      if (rows[0]?.epoch !== this.epoch) throw new RpcFault("ownership_lost", "database writer epoch changed");
+      const batch = await runtimeTimed("engine.drainEmbeddingOutbox", () => this.engine.drainEmbeddingOutbox(100));
+      this.embedding.drained_total += batch.drained;
+      if ("reason" in batch) { this.embedding.requested = false; return "idle"; }
+      this.embedding.quarantined_total += batch.quarantined;
+      // A deferred entry is a provider-side failure that stays in the outbox; it
+      // is retried on the next wake, never in a loop of its own.
+      this.embedding.last_error = batch.deferred ? `${batch.deferred} outbox entries deferred: ${batch.deferral_reason}` : null;
+      if (batch.drained > 0) return "more";
+      this.embedding.requested = false;
+      return "idle";
+    } catch (error) {
+      if (storageUnavailable(error)) { this.available = false; return "stalled"; } // Recovery re-schedules the pending wake.
+      this.embedding.last_error = String(error).slice(0, 512);
+      this.embedding.requested = false;
+      throw error;
+    }
+  }
+  private workers(pendingOutbox: number | null): RpcWorkersStatus {
+    const { drained_total, quarantined_total, last_error } = this.embedding;
+    return { embedding: { pending: pendingOutbox, drained_total, quarantined_total, last_error }, extraction: { state: "unconfigured" } };
   }
   /** Called only by the daemon's serial owner, never from a second writer. */
   async drainTurn(): Promise<boolean> {
@@ -478,7 +518,7 @@ export class Runtime {
       storage: this.available ? "available" : "unavailable", data_incarnation: this.installation.incarnation,
       fs_epoch: this.installation.epoch, queue: { pending, capacity: RPC_LIMITS.queued_requests },
       spool: { pending: spool.pending, blocked: this.blocked.size, quarantined: spool.quarantined ? 1 : this.quarantined.size, bytes },
-      outbox_pending: outbox, capabilities: this.capabilities };
+      outbox_pending: outbox, capabilities: this.capabilities, workers: this.workers(outbox) };
   }
   async backup(context: InstallationContext, destination: string, operationId: string) {
     await this.installation.assertOwned();

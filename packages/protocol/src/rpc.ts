@@ -350,6 +350,19 @@ export const RpcCapabilities = z.strictObject({
   writer_fence: z.enum(["database", "local_only"]),
 });
 export type RpcCapabilities = z.infer<typeof RpcCapabilities>;
+/** Background workers owned by the daemon's single writer. Counters are per process lifetime. */
+export const RpcWorkersStatus = z.strictObject({
+  embedding: z.strictObject({
+    /** Null while storage is unavailable; never a fabricated zero. */
+    pending: counter.nullable(),
+    drained_total: counter,
+    quarantined_total: counter,
+    last_error: z.string().max(512).nullable(),
+  }),
+  // A union so the extraction scheduler can add configured states without reshaping the field.
+  extraction: z.discriminatedUnion("state", [z.strictObject({ state: z.literal("unconfigured") })]),
+});
+export type RpcWorkersStatus = z.infer<typeof RpcWorkersStatus>;
 export const RpcStatusResult = z.strictObject({
   version: z.literal(RPC_VERSION),
   state: z.enum(["starting", "ready", "degraded", "stopping"]),
@@ -360,6 +373,7 @@ export const RpcStatusResult = z.strictObject({
   spool: z.strictObject({ pending: counter, blocked: counter, quarantined: counter, bytes: counter.max(RPC_LIMITS.spool_bytes) }),
   outbox_pending: counter.nullable(),
   capabilities: RpcCapabilities,
+  workers: RpcWorkersStatus,
 });
 export type RpcStatusResult = z.infer<typeof RpcStatusResult>;
 

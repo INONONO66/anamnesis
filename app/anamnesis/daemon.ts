@@ -24,32 +24,58 @@ export async function foreground(): Promise<void> {
   const budget = new RpcByteBudget();
   let serial: Promise<void> = Promise.resolve();
   const requests: Array<() => Promise<void>> = [];
-  let running = false, started = false, drainReady = false, preferDrain = false;
+  let running = false, started = false, drainReady = false, embeddingReady = false, preferDrain = false, embeddingNext = false;
+  const backgroundReady = () => (drainReady || embeddingReady) && !stopping;
+  const lostOwnership = () => {
+    ownershipLost = true; stopping = true;
+    runtime!.cancelDrain();
+    setImmediate(() => { void stop().catch(logError); });
+  };
+  /** One spool-drain turn. Woken by remember/recovery through the runtime's scheduler. */
+  const drainTurn = async () => {
+    drainReady = false;
+    try {
+      daemonTiming?.({ layer: "daemon", event: "drain_start" });
+      drainReady = await runtime!.drainTurn();
+      daemonTiming?.({ layer: "daemon", event: "drain_complete" });
+      if (!drainReady) console.log(JSON.stringify({ event: "drain_settled" }));
+    } catch (error) {
+      logError(error);
+      if (fault(error).code === "ownership_lost") lostOwnership();
+    }
+  };
+  /** One embedding outbox batch. Part B hooks the extraction scheduler as a third lane beside this one. */
+  const embeddingTurn = async () => {
+    embeddingReady = false;
+    try {
+      daemonTiming?.({ layer: "daemon", event: "embedding_start" });
+      const outcome = await runtime!.embeddingTurn();
+      daemonTiming?.({ layer: "daemon", event: "embedding_complete" });
+      embeddingReady = outcome === "more";
+      // Busy -> nothing left. A stalled worker (storage gone) is not idle; recovery wakes it.
+      if (outcome === "idle") console.log(JSON.stringify({ event: "workers_idle" }));
+    } catch (error) {
+      logError(error);
+      if (fault(error).code === "ownership_lost") lostOwnership();
+    }
+  };
   // Background has its own coalesced admission slot. Alternate dispatch lanes
   // so neither a saturated foreground nor a large drain cohort can starve one.
+  // Inside the slot the spool and embedding lanes alternate as well, so a long
+  // spool cohort cannot starve vectors, nor a deep outbox the spool.
   const kick = () => {
     if (running || !started) return;
     running = true;
     serial = (async () => {
       try {
-        while (requests.length || (drainReady && !stopping)) {
+        while (requests.length || backgroundReady()) {
           // Let real socket admissions arrive between turns, not just promises.
           await new Promise<void>(resolve => setImmediate(resolve));
-          if (drainReady && !stopping && (preferDrain || !requests.length)) {
-            drainReady = false; preferDrain = false;
-            try {
-              daemonTiming?.({ layer: "daemon", event: "drain_start" });
-              drainReady = await runtime!.drainTurn();
-              daemonTiming?.({ layer: "daemon", event: "drain_complete" });
-              if (!drainReady) console.log(JSON.stringify({ event: "drain_settled" }));
-            } catch (error) {
-              logError(error);
-              if (fault(error).code === "ownership_lost") {
-                ownershipLost = true; stopping = true;
-                runtime!.cancelDrain();
-                setImmediate(() => { void stop().catch(logError); });
-              }
-            }
+          if (backgroundReady() && (preferDrain || !requests.length)) {
+            preferDrain = false;
+            const embedding = embeddingReady && (!drainReady || embeddingNext);
+            embeddingNext = !embedding;
+            if (embedding) await embeddingTurn(); else await drainTurn();
           } else {
             const request = requests.shift();
             if (request) { preferDrain = true; await request(); }
@@ -291,7 +317,7 @@ export async function foreground(): Promise<void> {
   }
   const stop = (): Promise<void> => shutdown ??= (async () => {
     stopping = true;
-    drainReady = false;
+    drainReady = false; embeddingReady = false;
     runtime?.cancelDrain();
     const closed = Promise.all(listeners.map(listener => new Promise<void>((resolve, reject) => listener.close(error => error ? reject(error) : resolve()))));
     const deadline = setTimeout(() => {
@@ -319,7 +345,7 @@ export async function foreground(): Promise<void> {
   })();
   const signalStop = () => { void stop().catch(error => { logError(error); process.exitCode = 1; }); };
   try {
-    runtime = await Runtime.create(installation, () => { drainReady = true; kick(); }, {
+    runtime = await Runtime.create(installation, lane => { if (lane === "embedding") embeddingReady = true; else drainReady = true; kick(); }, {
       enqueue: job => { if (!stopping) enqueue(async () => { if (!stopping) { await installation.assertOwned(); await job(); } }); },
     });
     await runtime.init();
