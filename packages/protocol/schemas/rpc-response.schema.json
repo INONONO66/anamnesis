@@ -4024,6 +4024,19 @@
                                 }
                               ]
                             },
+                            "detail": {
+                              "type": "string",
+                              "enum": [
+                                "model",
+                                "incarnation",
+                                "envelope",
+                                "json",
+                                "normalize",
+                                "span",
+                                "judge_shape",
+                                "digest"
+                              ]
+                            },
                             "created_at": {
                               "type": "integer",
                               "minimum": 0,
@@ -4488,6 +4501,19 @@
                                 {
                                   "type": "null"
                                 }
+                              ]
+                            },
+                            "detail": {
+                              "type": "string",
+                              "enum": [
+                                "model",
+                                "incarnation",
+                                "envelope",
+                                "json",
+                                "normalize",
+                                "span",
+                                "judge_shape",
+                                "digest"
                               ]
                             },
                             "created_at": {
@@ -5158,6 +5184,19 @@
                                 }
                               ]
                             },
+                            "detail": {
+                              "type": "string",
+                              "enum": [
+                                "model",
+                                "incarnation",
+                                "envelope",
+                                "json",
+                                "normalize",
+                                "span",
+                                "judge_shape",
+                                "digest"
+                              ]
+                            },
                             "created_at": {
                               "type": "integer",
                               "minimum": 0,
@@ -5622,6 +5661,19 @@
                                 {
                                   "type": "null"
                                 }
+                              ]
+                            },
+                            "detail": {
+                              "type": "string",
+                              "enum": [
+                                "model",
+                                "incarnation",
+                                "envelope",
+                                "json",
+                                "normalize",
+                                "span",
+                                "judge_shape",
+                                "digest"
                               ]
                             },
                             "created_at": {

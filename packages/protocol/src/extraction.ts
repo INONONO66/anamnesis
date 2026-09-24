@@ -16,6 +16,10 @@ const disposition = z.enum(["retain", "suppress", "correct", "unknown"]);
 const modality = z.enum(["text", "code", "mixed", "unknown"]);
 const terminal = z.enum(["succeeded", "failed", "cancelled", "expired", "worker_lost"]);
 export const ExtractionFailure = z.enum(["provider_unavailable", "provider_rejected", "provider_mismatch", "output_too_large", "input_too_large", "policy_denied", "cancelled", "expired", "worker_lost", "premises_changed"]);
+/** Which check a `provider_mismatch` failed (#218): the response envelope, its JSON content, the model/incarnation the
+ * upstream reported, output normalization, evidence span verification, the judge's decision shape or a premise digest. */
+export const ExtractionFailureDetail = z.enum(["model", "incarnation", "envelope", "json", "normalize", "span", "judge_shape", "digest"]);
+export type ExtractionFailureDetail = z.infer<typeof ExtractionFailureDetail>;
 
 /** Legacy text/evidence claims remain auditable; confidence is required for
  * semantic materialization. Names are source-exact, never generated aliases. */
@@ -65,17 +69,21 @@ const source = { generation_id: id, source_id: id, source_revision: hash, body_d
 /** Only terminal attempts are immutable records. Mutable work lives in ModelTask. */
 export const ExtractionAttempt = z.strictObject({
   id, task_id: id, ...source, state: terminal, reason: ExtractionFailure.nullable(), disposition: disposition.nullable(),
+  /** Absent unless the failure names a check (currently only `provider_mismatch`); older records carry no key. */
+  detail: ExtractionFailureDetail.optional(),
   created_at: timestamp, updated_at: timestamp, lease: lease.nullable(), output: ExtractionOutput.nullable(),
   policy_context: policy, spans,
 }).superRefine((v, ctx) => {
   if (v.updated_at < v.created_at) ctx.addIssue({ code: "custom", message: "backwards timestamps" });
   if (v.state === "succeeded") {
-    if (!v.output || v.reason !== null || v.disposition === null || !v.lease || canonicalExtractionBody(v.spans) !== canonicalExtractionBody(v.output.spans)) ctx.addIssue({ code: "custom", message: "invalid success" });
+    if (!v.output || v.reason !== null || v.disposition === null || !v.lease || v.detail !== undefined || canonicalExtractionBody(v.spans) !== canonicalExtractionBody(v.output.spans)) ctx.addIssue({ code: "custom", message: "invalid success" });
   } else if (v.output !== null || v.spans.length || v.disposition !== null || v.reason === null) ctx.addIssue({ code: "custom", message: "non-success must be content-free" });
   if (["cancelled", "expired", "worker_lost"].includes(v.state) && v.reason !== v.state && !(v.state === "cancelled" && v.reason === "policy_denied")) ctx.addIssue({ code: "custom", message: "outcome/reason mismatch" });
 });
 export type ExtractionAttempt = z.infer<typeof ExtractionAttempt>;
 
+/** `model`/`model_incarnation` name the provider that created the task or, once leased, the one that most recently
+ * leased it: a daemon whose provider identity changed between boots (#218) runs inherited work with its own provider. */
 export const ModelTask = z.strictObject({
   id, ...source, attempt_id: id.nullable(), kind: z.enum(["claim", "judge", "judge_claims"]), model: name, model_incarnation: hash,
   pipeline: z.literal("claim-judge-audit-v1").optional(),
@@ -104,8 +112,9 @@ export const SettleModelTask = ModelTaskCAS.extend({ lease_epoch: id, reason: z.
 export type SettleModelTask = z.infer<typeof SettleModelTask>;
 export const CompleteExtractionAttempt = ModelTaskCAS.extend({
   id, lease_epoch: id, state: z.enum(["succeeded", "failed"]), reason: ExtractionFailure.nullable(), disposition: disposition.nullable(), output: ExtractionOutput.nullable(), spans,
+  detail: ExtractionFailureDetail.optional(),
 }).refine(v => {
-  if (v.state === "succeeded") return v.output !== null && v.disposition !== null && v.reason === null;
+  if (v.state === "succeeded") return v.output !== null && v.disposition !== null && v.reason === null && v.detail === undefined;
   return v.output === null && v.disposition === null && v.spans.length === 0 && v.reason !== null
     && (v.reason.startsWith("provider_") || ["input_too_large", "output_too_large"].includes(v.reason));
 }, "invalid completion");
