@@ -4685,7 +4685,8 @@
                       "enum": [
                         "disabled",
                         "pending",
-                        "complete"
+                        "complete",
+                        "omitted"
                       ]
                     }
                   },
@@ -5818,7 +5819,8 @@
                       "enum": [
                         "disabled",
                         "pending",
-                        "complete"
+                        "complete",
+                        "omitted"
                       ]
                     }
                   },

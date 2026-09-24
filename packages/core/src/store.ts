@@ -2842,7 +2842,7 @@ export class Store {
    * new->candidate (never onto an invalidator), a duplicate suppresses the write. */
   private async materializeExtractionPipelineTx(tx: ManagedTransaction, pipeline: {
     claim: ModelTask; claim_attempt: ExtractionAttempt | null; judge: ModelTask | null; judge_attempt: ExtractionAttempt | null; decisions: ExtractionDisposition[];
-  }, policy: PolicyState): Promise<{ semantic_writes: boolean; relation_judge?: "disabled" | "pending" | "complete" }> {
+  }, policy: PolicyState): Promise<{ semantic_writes: boolean; relation_judge?: "disabled" | "pending" | "complete" | "omitted" }> {
     const judge = pipeline.judge_attempt, claim = pipeline.claim_attempt;
     if (!judge || judge.state !== "succeeded" || !judge.output || !claim || claim.state !== "succeeded" || !claim.output || !pipeline.judge) return { semantic_writes: false };
     const relationJudge = this.relationJudge ? "complete" as const : "disabled" as const;
@@ -2863,7 +2863,10 @@ export class Store {
     // source to carry custody even when the judge admitted nothing or every claim was refused.
     const custody = extractionBodyDigest([judge.generation_id, judge.source_id]);
     const priorCustody = await tx.run(`MATCH (o:MaterializationOperation {occurrence_key:$key}) RETURN o.result AS result`, { key: custody });
-    if (priorCustody.records[0]) return { semantic_writes: JSON.parse(priorCustody.records[0].get("result")).created === true, relation_judge: relationJudge };
+    if (priorCustody.records[0]) {
+      const result = JSON.parse(priorCustody.records[0].get("result")) as { created?: boolean; omitted?: string };
+      return { semantic_writes: result.created === true, relation_judge: result.omitted === "relation_judge_exhausted" ? "omitted" : relationJudge };
+    }
     const source = await this.semanticEpisodeTx(tx, judge.source_id, policy);
     if (judge.source_revision !== source.revision_key || judge.body_digest !== source.content_digest || judge.source_ingest_seq !== source.ingest_seq)
       throw new ExtractionAuditError("extraction_audit_stale");
@@ -3033,6 +3036,34 @@ export class Store {
       const value = await this.readExtractionPipelineTx(tx,z.uuidv7().parse(id));
       if (value.state === 'known') await this.authorizeEpisodesTx(tx,[value.claim.source_id],policy);
       return value;
+    });
+  }
+
+  /** Seals a validated-but-unjudged source as a terminal omission (D53): the relation judge has failed on every
+   * premise at least `min_failures` times, so the source's custody operation is written content-free with the
+   * omission recorded, no Fact is written, and coverage/activation see custody like any refused source. Idempotent;
+   * refuses while a verdict is still owed within budget or when the pipeline is not at the relation stage. */
+  async sealFactRelationOmission(request: { pipeline_id: string; min_failures: number }, context: InstallationContext): Promise<{ sealed: boolean; failures: number }> {
+    const pipelineId = z.uuidv7().parse(request.pipeline_id), minFailures = z.number().int().positive().parse(request.min_failures);
+    return this.extractionTx(context, async (tx, policy) => {
+      const pipeline = await this.readExtractionPipelineTx(tx, pipelineId);
+      if (pipeline.state !== "known" || !pipeline.judge || pipeline.judge.state !== "succeeded") throw new Error("invalid_transition");
+      await this.authorizeEpisodesTx(tx, [pipeline.claim.source_id], policy);
+      await this.writableExtractionGenerationTx(tx, pipeline.claim.generation_id);
+      const custody = extractionBodyDigest([pipeline.claim.generation_id, pipeline.claim.source_id]);
+      const pending = await tx.run(`MATCH (i:FactRelationInput {pipeline_id:$pipeline}) WHERE i.candidates > 0 AND NOT EXISTS { MATCH (:FactRelationVerdict {occurrence_key:i.occurrence_key}) }
+        RETURN i.occurrence_key AS occurrence, i.failures AS failures ORDER BY occurrence`, { pipeline: pipelineId });
+      const failures = pending.records.reduce((max, row) => Math.max(max, Number(row.get("failures") ?? 0)), 0);
+      if (pipeline.relation_judge === "omitted") return { sealed: false, failures };
+      if (pipeline.relation_judge !== "pending") throw new Error("invalid_transition");
+      if (failures < minFailures) throw new Error("relation_omission_premature");
+      const occurrences = pending.records.map(row => String(row.get("occurrence")));
+      await tx.run(`CREATE (:MaterializationOperation {id:$id,digest:$digest,result:$result,occurrence_key:$key,source_episode_id:$source,generation:$generation,semantic_profile_id:$profile,fact_id:$fact,link_id:$link})`,
+        { id: uuidv7(), digest: extractionBodyDigest({ generation: pipeline.claim.generation_id, source: pipeline.claim.source_id, judge: pipeline.judge.id, omitted: "relation_judge_exhausted", occurrences }),
+          result: canonicalExtractionBody({ created: false, facts: 0, refused: [], omitted: "relation_judge_exhausted", failures, occurrences }), key: custody,
+          source: pipeline.claim.source_id, generation: pipeline.claim.generation_id, profile: pipeline.judge.model,
+          fact: `suppressed:${pipeline.claim.source_id}`, link: `suppressed:${pipeline.claim.source_id}` });
+      return { sealed: true, failures };
     });
   }
 

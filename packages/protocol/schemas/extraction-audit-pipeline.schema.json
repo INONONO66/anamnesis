@@ -1045,7 +1045,8 @@
           "enum": [
             "disabled",
             "pending",
-            "complete"
+            "complete",
+            "omitted"
           ]
         }
       },

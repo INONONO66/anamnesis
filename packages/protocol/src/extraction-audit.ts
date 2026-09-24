@@ -46,7 +46,9 @@ export const ExtractionPipeline = z.discriminatedUnion('state', [
     decisions: z.array(ExtractionDisposition).max(64),
     // Present once the claim judge succeeded: `pending` means validated claims
     // still await relation verdicts, so no Fact of this source is written yet.
-    relation_judge: z.enum(['disabled', 'pending', 'complete']).optional(),
+    /** "omitted": the relation judge failed on every attempt of the budget and the source was sealed as a
+     * content-free custody operation (no Fact written); terminal, never reopened. */
+    relation_judge: z.enum(['disabled', 'pending', 'complete', 'omitted']).optional(),
   }),
 ]);
 export type ExtractionPipeline = z.infer<typeof ExtractionPipeline>;

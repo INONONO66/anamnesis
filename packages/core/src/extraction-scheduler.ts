@@ -178,7 +178,10 @@ export class ExtractionScheduler {
     const claim = existing ?? await this.engine.createExtractionPipeline({ id: uuidv7(), generation_id: generation.id, source_id: episodeId }, this.context);
     let pipeline = await this.engine.store.readExtractionPipeline(claim.id, this.context);
     let fresh = existing === null;
-    for (let step = 0; step < this.maxAttempts * 4; step++) {
+    // Every stage is attempt-bounded: claim and judge each need at most one run plus one retry per attempt, the
+    // relation stage at most one run per failure plus the seal. A pipeline that is still open past this bound is a bug.
+    const steps = this.maxAttempts * 5 + 2;
+    for (let step = 0; step < steps; step++) {
       if (pipeline.state === "unknown" || this.closed) return null;
       const action = this.classify(pipeline);
       if (action === "completed" || action === "failed") return { outcome: action, fresh };
@@ -186,7 +189,12 @@ export class ExtractionScheduler {
       if (action === "unresolved") { this.deferWake(Math.min(...[pipeline.claim, pipeline.judge].map(task => task?.state === "leased" && task.lease ? task.lease.expires_at : Infinity))); return null; }
       // Validated claims still owe relation verdicts. Every run asks the provider once per pending premise; a premise
       // that has failed maxAttempts times seals the source as a terminal omission (D53) instead of parking the pipeline.
-      if (action === "pending" && await this.engine.store.factRelationFailures(claim.id, this.context) >= this.maxAttempts) return { outcome: "failed", fresh: true };
+      if (action === "pending" && await this.engine.store.factRelationFailures(claim.id, this.context) >= this.maxAttempts) {
+        await this.engine.store.sealFactRelationOmission({ pipeline_id: claim.id, min_failures: this.maxAttempts }, this.context);
+        pipeline = await this.engine.store.readExtractionPipeline(claim.id, this.context);
+        fresh = true;
+        continue;
+      }
       fresh = true;
       if (action === "run" || action === "pending") {
         pipeline = await this.engine.runExtractionPipeline({ task_id: pipeline.claim.id, expected_version: pipeline.claim.version, worker_id: this.workerId, lease_ms: LEASE_MS }, this.context);
@@ -198,9 +206,13 @@ export class ExtractionScheduler {
       else await this.engine.store.cancelModelTask({ task_id: action.task.id, expected_version: action.task.version }, this.context);
       pipeline = await this.engine.store.readExtractionPipeline(claim.id, this.context);
     }
-    // The step budget is the last bound: a pipeline that never reaches a terminal task state is still a terminal omission.
-    this.recordError(new Error(`pipeline ${claim.id} did not settle within ${this.maxAttempts * 4} steps`));
-    return { outcome: "failed", fresh: true };
+    // The last step may itself have settled the pipeline; classify it before judging the budget.
+    if (pipeline.state === "unknown") return null;
+    const final = this.classify(pipeline);
+    if (final === "completed" || final === "failed") return { outcome: final, fresh };
+    // Unreachable by construction; the pipeline stays retryable for the next wake rather than being reported as an outcome it never reached.
+    this.recordError(new Error(`pipeline ${claim.id} did not settle within ${steps} steps`));
+    return null;
   }
 
   private deferWake(at: number): void {
@@ -227,7 +239,8 @@ export class ExtractionScheduler {
     if (!pipeline.judge) return "run";
     const judge = stage(pipeline.judge);
     if (judge !== "ok") return judge;
-    return pipeline.relation_judge === "pending" ? "pending" : "completed";
+    if (pipeline.relation_judge === "pending") return "pending";
+    return pipeline.relation_judge === "omitted" ? "failed" : "completed";
   }
 
   /** A lease left by a lost writer is settled as worker_lost; our own expired lease as expired. */
