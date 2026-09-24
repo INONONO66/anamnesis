@@ -353,7 +353,10 @@ export class Runtime {
     this.embedding.requested = true;
     if (this.available && !this.drainStopped) this.scheduleDrain("embedding");
   }
-  /** One bounded outbox batch; called only by the daemon's serial owner, never from a second writer. */
+  /** One outbox entry per turn; called only by the daemon's serial owner, never from a second writer. The owner
+   * alternates a background turn with a queued request, so the turn's length is the bound on RPC latency during a
+   * backlog: one provider call, not a batch of up to 100 (a requeue on the production daemon held `status` past the
+   * client deadline). */
   async embeddingTurn(): Promise<EmbeddingTurn> {
     if (this.drainStopped || !this.available) return "stalled";
     if (!this.embedding.requested) return "idle";
@@ -361,14 +364,15 @@ export class Runtime {
       await this.installation.assertOwned();
       const rows = await this.read<{ epoch: number }>("MATCH (m:Meta {key:'meta'}) RETURN m.writer_epoch AS epoch");
       if (rows[0]?.epoch !== this.epoch) throw new RpcFault("ownership_lost", "database writer epoch changed");
-      const batch = await runtimeTimed("engine.drainEmbeddingOutbox", () => this.engine.drainEmbeddingOutbox(100));
+      const batch = await runtimeTimed("engine.drainEmbeddingOutbox", () => this.engine.drainEmbeddingOutbox(1));
       this.embedding.drained_total += batch.drained;
       if ("reason" in batch) { this.embedding.requested = false; return "idle"; }
       this.embedding.quarantined_total += batch.quarantined;
-      // A deferred entry is a provider-side failure that stays in the outbox; it
-      // is retried on the next wake, never in a loop of its own.
+      // A deferred entry is a provider-side failure that stays in the outbox with a retry_after in the future, so the
+      // next turn moves on to the other due entries and the deferred one is retried on a later wake, never in a loop
+      // of its own. The turn is "more" either way: the lane only rests once nothing is due.
       this.embedding.last_error = batch.deferred ? `${batch.deferred} outbox entries deferred: ${batch.deferral_reason}` : null;
-      if (batch.drained > 0) return "more";
+      if (batch.drained > 0 || batch.deferred > 0) return "more";
       this.embedding.requested = false;
       return "idle";
     } catch (error) {

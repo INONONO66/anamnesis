@@ -179,6 +179,71 @@ test.skipIf(!URI || !PASSWORD)("committed remembers wake the embedding worker, w
   }
 }, 120_000);
 
+/** Embedder whose every call waits for an explicit release, so the test controls where the worker is mid-turn. */
+async function gatedEmbedder(): Promise<{ server: Server; endpoint: string; calls: () => number; started: () => Promise<void>; release: () => void }> {
+  let calls = 0;
+  const releases: Array<() => void> = [];
+  const startedWaiters: Array<() => void> = [];
+  const server = createServer(async (request, response) => {
+    const chunks: Buffer[] = []; for await (const chunk of request) chunks.push(chunk as Buffer);
+    JSON.parse(Buffer.concat(chunks).toString("utf8")); calls++;
+    startedWaiters.splice(0).forEach(resolve => resolve());
+    await new Promise<void>(resolve => { releases.push(resolve); });
+    response.setHeader("content-type", "application/json");
+    response.end(JSON.stringify({ model: profile.model, model_incarnation: profile.model_incarnation, data: [{ index: 0, embedding: [0, 1, 0] }] }));
+  });
+  const listening = once(server, "listening", { signal: deadline(5000) });
+  server.listen(0, "127.0.0.1");
+  await listening;
+  return { server, endpoint: `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1/embeddings`, calls: () => calls,
+    started: () => new Promise<void>(resolve => { startedWaiters.push(resolve); }), release: () => { releases.shift()?.(); } };
+}
+
+test.skipIf(!URI || !PASSWORD)("an RPC issued during an embedding backlog is served after at most one provider call", async () => {
+  // The daemon's serial owner alternates one background turn with one request. A turn that embedded a whole batch
+  // (up to 100 sequential provider calls, each up to the provider timeout) held every RPC for minutes on the
+  // production daemon: status over TCP hit the client deadline and reported outcome_unknown while a requeue drained.
+  const provider = await gatedEmbedder();
+  try {
+    await fixture({ ANAMNESIS_NEO4J_URI: URI!, ANAMNESIS_NEO4J_PASSWORD: PASSWORD!,
+      ANAMNESIS_EMBEDDING_CONFIG: JSON.stringify({ endpoint: provider.endpoint, profile, timeout_ms: 20_000 }) }, async daemon => {
+      const client = await RpcClient.connect(join(daemon.root, "anamnesis.sock"), TOKEN);
+      try {
+        const firstCall = provider.started();
+        expect((await client.request("remember", episode(daemon.root, "one"))).state).toBe("committed");
+        await firstCall;
+        // The worker is inside call 1. A status request queued now must run as soon as that call returns, before the
+        // worker takes another outbox entry: the serial owner alternates one background turn with one request.
+        const status = client.request("status", {});
+        provider.release();
+        const observed = await status;
+        expect(provider.calls()).toBe(1);
+        expect(observed.workers.embedding.drained_total).toBe(1);
+        // Every further remember is followed by at most one provider call before the next request is served.
+        for (const record of ["two", "three"]) {
+          const call = provider.started();
+          const committed = client.request("remember", episode(daemon.root, record));
+          await Promise.race([call, committed]);
+          const before = provider.calls();
+          expect((await committed).state).toBe("committed");
+          expect(provider.calls() - before).toBeLessThanOrEqual(1);
+          await call; provider.release();
+        }
+        let settled = await client.request("status", {});
+        while (settled.workers.embedding.drained_total < 3) { await daemon.lines.until("workers_idle"); settled = await client.request("status", {}); }
+        expect(settled.workers.embedding).toEqual({ pending: 0, drained_total: 3, quarantined_total: 0, last_error: null });
+        const exited = once(daemon.child, "exit", { signal: deadline() });
+        expect((await client.request("shutdown", {})).state).toBe("stopping");
+        expect((await exited)[0]).toBe(0);
+      } finally { await client.close(); }
+    });
+  } finally {
+    const closed = once(provider.server, "close", { signal: deadline(5000) });
+    provider.server.close(); provider.server.closeAllConnections();
+    await closed;
+  }
+}, 120_000);
+
 test.skipIf(!URI || !PASSWORD)("the extraction scheduler catches a fresh generation up, cuts it over, keeps feeding it, and seals provider failures", async () => {
   const provider = await extractor();
   const driver = neo4j.driver(URI!, neo4j.auth.basic("neo4j", PASSWORD!), { disableLosslessIntegers: true });
