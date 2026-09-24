@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { lstat, open, readFile, rm } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
-import { RPC_LIMITS, RpcHash, RpcIngestStatusParams, RpcRememberParams } from "../../packages/protocol/src/rpc.ts";
+import { RPC_LIMITS, RpcHash, RpcIngestStatusParams, RpcRememberParams, type RpcIngestStatusResult, type RpcStatusResult } from "../../packages/protocol/src/rpc.ts";
 import { acquireInstallation, atomicJson, hasCode, syncDirectory } from "./config.ts";
 import { RpcClient } from "./client.ts";
 
@@ -55,6 +55,14 @@ function sameIdentity(a: RpcIngestStatusParams, b: RpcIngestStatusParams): boole
   return a.revision_key === b.revision_key && a.body_digest === b.body_digest && a.data_incarnation === b.data_incarnation;
 }
 const pendingFailure = (state: string) => Object.assign(new Error(`source_pending_${state}`), { code: `source_pending_${state}` });
+/** The daemon disowns a pending identity when it answers UNKNOWN for its own
+ * incarnation while storage is available: nothing was admitted, spooled or
+ * committed for it, so the lost reply never became a delivery. With storage
+ * unavailable UNKNOWN cannot rule out a drained commit, and a foreign
+ * incarnation is never resolved here (`incarnation_mismatch`). */
+function daemonDisowns(result: RpcIngestStatusResult, status: RpcStatusResult, identity: RpcIngestStatusParams): boolean {
+  return result.state === "unknown" && sameIdentity(result, identity) && status.data_incarnation === identity.data_incarnation && status.storage === "available";
+}
 interface SourceFile { bytes: Buffer; fingerprint: string; }
 async function sourceFingerprint(path: string): Promise<string> {
   const info = await lstat(path, { bigint: true });
@@ -120,7 +128,10 @@ async function uploadPayload(client: RpcClient, record: SourceRecord): Promise<v
 
 /** Durable pending (including normalized defaults/object body) -> confirmed
  * COMMIT -> durable checkpoint -> retire. Replay is bounded by the adapter and
- * validates the immutable anchor before reconciliation, never blind resends. */
+ * validates the immutable anchor before reconciliation, never blind resends:
+ * a pending identity is resent only after the daemon disowns it (see
+ * `daemonDisowns`), and remember is idempotent on revision_key, so a commit
+ * that lands late still reconciles as an identity match. */
 export async function ingestSnapshot(checkpointPath: string, client: RpcClient, prepare: () => Promise<SourceSnapshot>): Promise<void> {
   const pendingPath = checkpointPath + ".pending.json";
   const lease = await acquireInstallation(resolve(checkpointPath) + ".lease");
@@ -151,6 +162,15 @@ export async function ingestSnapshot(checkpointPath: string, client: RpcClient, 
       await syncDirectory(dirname(checkpointPath));
       pending = null;
     };
+    // Resolve a pending identity through ingest.status. A disowned identity is
+    // retired here and null is returned so the caller sends it as a first send.
+    const reconcile = async (work: Pending, index: number): Promise<RpcIngestStatusResult | null> => {
+      const result = await client.request("ingest.status", work.identity);
+      if (!daemonDisowns(result, status, work.identity)) return result;
+      await retire();
+      console.log(JSON.stringify({ event: "pending_retired", reason: "daemon_unknown", index, identity: work.identity }));
+      return null;
+    };
     const resumeNext = checkpoint.next;
     let count = 0;
     for await (const record of snapshot.records) {
@@ -166,19 +186,17 @@ export async function ingestSnapshot(checkpointPath: string, client: RpcClient, 
       }
       if (next < resumeNext) continue;
       await snapshot.assertUnchanged();
-      const recovering = pending !== null;
+      const resolved = pending ? await reconcile(pending, next) : null;
       if (!pending) {
         pending = { version: 1, source_hash: sourceHash, index: next, ...record, identity };
         await lease.assertOwned();
         await atomicJson(pendingPath, pending);
       }
-      if (!recovering && pending.payload) await uploadPayload(client, pending);
-      const result = recovering
-        ? await client.request("ingest.status", pending.identity)
-        : await client.request("remember", pending.params);
+      if (!resolved && pending.payload) await uploadPayload(client, pending);
+      const result = resolved ?? await client.request("remember", pending.params);
       if (!sameIdentity(result, pending.identity)) throw pendingFailure("identity_mismatch");
       if (result.state !== "committed") throw pendingFailure(result.state);
-      if (recovering) console.log(JSON.stringify({ event: "source_reconciled", index: next, state: result.state, identity: pending.identity }));
+      if (resolved) console.log(JSON.stringify({ event: "source_reconciled", index: next, state: result.state, identity: pending.identity }));
       await snapshot.assertUnchanged();
       checkpoint = { ...checkpoint, next: next + 1, last: pending.identity };
       await lease.assertOwned();

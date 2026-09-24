@@ -246,23 +246,39 @@ const scenarios={
     const lossCp=root+'/loss-cp', lossPending=lossCp+'.pending.json';
     const lostWork=JSON.parse(await readFile(lossPending,'utf8'));
     const lossResume=await runSource(lossCp);assert.equal(lossResume.code,0,lossResume.output);assert.match(lossResume.output,/"event":"source_reconciled"/);
-    // A valid never-delivered identity must stay UNKNOWN; pending is not an
-    // authorization to replay an unobserved request automatically.
+    // A valid never-delivered identity: pending is not an authorization to replay
+    // it blindly. Only the daemon disowning it (UNKNOWN for its own incarnation with
+    // storage available) retires the record and resends it from the checkpoint.
     const unknownSource=root+'/unknown.jsonl', unknownCp=root+'/unknown-cp';
     const absent=input('never-delivered'), absentText=JSON.stringify(absent)+'\n';await writeFile(unknownSource,absentText);
     const keys=new Set();const collect=value=>{if(value&&typeof value==='object')for(const [k,v]of Object.entries(value)){if(!Array.isArray(value))keys.add(k);collect(v);}};
     const envelope={digest_version:1,params:absent};collect(envelope);
     const unknownIdentity={revision_key:key(absent),body_digest:hash(JSON.stringify(envelope,[...keys].sort())),data_incarnation:saved.data_incarnation};
     const unknownCpValue={...saved,next:0,last:null,source_hash:hash(absentText)};
-    await writeFile(unknownCp,JSON.stringify(unknownCpValue));await writeFile(unknownCp+'.pending.json',JSON.stringify({...lostWork,source_hash:hash(absentText),params:absent,identity:unknownIdentity}));
-    const unknownBefore=await readFile(unknownCp), unknownPendingBefore=await readFile(unknownCp+'.pending.json');
-    const unresolved=await launch(['dist/anamnesis-ops.mjs','ingest',unknownSource,unknownCp]).done;assert.equal(unresolved.code,1);assert.equal(failureCode(unresolved),'source_pending_unknown');assert.deepEqual(await readFile(unknownCp),unknownBefore);assert.deepEqual(await readFile(unknownCp+'.pending.json'),unknownPendingBefore);assert.equal((await c.request('ingest.status',unknownIdentity)).state,'unknown');await rows(3);
+    const unknownWork={...lostWork,source_hash:hash(absentText),params:absent,identity:unknownIdentity};
+    // Bound to another installation incarnation: refused unchanged, never resent.
+    const foreignIncarnation=randomUUID();
+    await writeFile(unknownCp,JSON.stringify({...unknownCpValue,data_incarnation:foreignIncarnation}));await writeFile(unknownCp+'.pending.json',JSON.stringify({...unknownWork,identity:{...unknownIdentity,data_incarnation:foreignIncarnation}}));
+    const foreignCpBefore=await readFile(unknownCp), foreignPendingBefore=await readFile(unknownCp+'.pending.json');
+    const refused=await launch(['dist/anamnesis-ops.mjs','ingest',unknownSource,unknownCp]).done;assert.equal(refused.code,1);assert.match(refused.output,/incarnation_mismatch/);assert.doesNotMatch(refused.output,/pending_retired/);
+    assert.deepEqual(await readFile(unknownCp),foreignCpBefore);assert.deepEqual(await readFile(unknownCp+'.pending.json'),foreignPendingBefore);assert.equal((await c.request('ingest.status',unknownIdentity)).state,'unknown');await rows(3);
+    // Same incarnation, storage available, daemon answers UNKNOWN: retire and resend.
+    await writeFile(unknownCp,JSON.stringify(unknownCpValue));await writeFile(unknownCp+'.pending.json',JSON.stringify(unknownWork));
+    assert.equal((await c.request('status',{})).storage,'available');
+    const disowned=await launch(['dist/anamnesis-ops.mjs','ingest',unknownSource,unknownCp],{ready:/"event":"source_complete"/}).done;assert.equal(disowned.code,0,disowned.output);
+    const retired=disowned.output.split('\n').filter(line=>line.includes('"event":"pending_retired"')).map(line=>JSON.parse(line));
+    assert.deepEqual(retired,[{event:'pending_retired',reason:'daemon_unknown',index:0,identity:unknownIdentity}]);
+    assert.doesNotMatch(disowned.output,/"event":"source_reconciled"/);
+    assert.deepEqual(JSON.parse(await readFile(unknownCp,'utf8')),{...unknownCpValue,next:1,last:unknownIdentity});await assert.rejects(stat(unknownCp+'.pending.json'),{code:'ENOENT'});
+    const resent=await c.request('ingest.status',unknownIdentity);assert.equal(resent.state,'committed');await rows(4);
+    // A commit landing late for the same delivery reconciles as an identity match.
+    const late=await c.request('remember',absent);assert.equal(late.state,'committed');assert.equal(late.created,false);assert.equal(late.id,resent.id);await rows(4);
     const unchangedCheckpoint=await readFile(cp);
     await writeFile(source,text+'{}\n');const changed=await runSource();assert.equal(changed.code,1);assert.match(changed.output,/source_changed/);assert.deepEqual(await readFile(cp),unchangedCheckpoint);await writeFile(source,text);
     await writeFile(cp,JSON.stringify({...saved,data_incarnation:randomUUID()}));const foreignBytes=await readFile(cp);const foreign=await runSource();assert.equal(foreign.code,1);assert.match(foreign.output,/incarnation_mismatch/);assert.deepEqual(await readFile(cp),foreignBytes);await writeFile(cp,JSON.stringify(saved));
-    await writeFile(root+'/bad.jsonl','{\n');const bad=await launch(['dist/anamnesis-ops.mjs','ingest',root+'/bad.jsonl',root+'/bad-cp']).done;assert.equal(bad.code,1);await rows(3);
+    await writeFile(root+'/bad.jsonl','{\n');const bad=await launch(['dist/anamnesis-ops.mjs','ingest',root+'/bad.jsonl',root+'/bad-cp']).done;assert.equal(bad.code,1);await rows(4);
     await writeFile(root+'/oversize.jsonl',Buffer.alloc(16*1024*1024+1,32));const large=await launch(['dist/anamnesis-ops.mjs','ingest',root+'/oversize.jsonl',root+'/large-cp']).done;assert.equal(large.code,1);assert.match(large.output,/source_too_large/);await assert.rejects(stat(root+'/large-cp'),{code:'ENOENT'});
-    checkpoint('source-resume',{saved,crashBeforeAcknowledgement:true,changedSourceRejectedUnchanged:true,foreignIncarnationRejectedUnchanged:true,wrongValidLastRejectedUnchanged:true,forgedNextRejectedUnchanged:true,malformedRejected:true,unknownPendingUnchangedWithoutReplay:true,commitBeforeCheckpoint:true,boundedSnapshot:true});
+    checkpoint('source-resume',{saved,crashBeforeAcknowledgement:true,changedSourceRejectedUnchanged:true,foreignIncarnationRejectedUnchanged:true,wrongValidLastRejectedUnchanged:true,forgedNextRejectedUnchanged:true,malformedRejected:true,foreignPendingRefusedUnchanged:true,unknownPendingRetiredAndResent:true,lateDuplicateReconciled:true,commitBeforeCheckpoint:true,boundedSnapshot:true});
   },
   async 'normalized-agentlog'(){
     await start();let c=await client();

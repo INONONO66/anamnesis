@@ -27,7 +27,7 @@ function mock(cp: string, loseReply = false) {
   const calls: string[] = [], params: RpcRememberParams[] = [], committed = new Map<string, unknown>();
   const client = Object.assign(Object.create(RpcClient.prototype) as RpcClient, { request: async (method: string, input: unknown) => {
     calls.push(method);
-    if (method === "status") return { data_incarnation: incarnation };
+    if (method === "status") return { data_incarnation: incarnation, storage: "available" };
     if (method === "ingest.status") return committed.get(JSON.stringify(input)) ?? { ...input as object, state: "unknown" };
     if (method === "remember") {
       const pending = await saved(cp + ".pending.json");
@@ -154,15 +154,35 @@ for (const change of ["delete", "permission", "add", "rename"] as const) test(`$
   expect(m.params).toHaveLength(4);
 }));
 
-for (const state of ["unknown", "spooled", "blocked", "quarantined"] as const) test(`agentlog ${state} recovery does not retransmit or advance`, () => fixture(async (root, cp) => {
+for (const state of ["spooled", "blocked", "quarantined"] as const) test(`agentlog ${state} recovery does not retransmit or advance`, () => fixture(async (root, cp) => {
   const m = mock(cp, true);
   await expect(ingestAgentLog(root, cp, m.client)).rejects.toThrow("lost reply");
   const before = await readFile(cp), pending = await readFile(cp + ".pending.json");
   const client = Object.assign(Object.create(RpcClient.prototype) as RpcClient, { request: async (method: string, input: object) => {
-    if (method === "status") return { data_incarnation: incarnation };
+    if (method === "status") return { data_incarnation: incarnation, storage: "available" };
     expect(method).toBe("ingest.status"); return { ...input, state };
   }});
   await expect(ingestAgentLog(root, cp, client)).rejects.toHaveProperty("code", `source_pending_${state}`);
   expect(await readFile(cp)).toEqual(before);
   expect(await readFile(cp + ".pending.json")).toEqual(pending);
+}));
+
+test("agentlog unknown recovery resends only for the same ready incarnation", () => fixture(async (root, cp) => {
+  const lost = mock(cp, true);
+  await expect(ingestAgentLog(root, cp, lost.client)).rejects.toThrow("lost reply");
+  const before = await readFile(cp), pending = await readFile(cp + ".pending.json");
+  const foreign = Object.assign(Object.create(RpcClient.prototype) as RpcClient, { request: async (method: string) => {
+    expect(method).toBe("status"); return { data_incarnation: "33333333-3333-4333-8333-333333333333", storage: "available" };
+  }});
+  await expect(ingestAgentLog(root, cp, foreign)).rejects.toThrow("incarnation_mismatch");
+  expect(await readFile(cp)).toEqual(before);
+  expect(await readFile(cp + ".pending.json")).toEqual(pending);
+  // A fresh mock holds no binding for the lost delivery: UNKNOWN from the same
+  // ready incarnation retires the pending record and resends it from the checkpoint.
+  const m = mock(cp);
+  await ingestAgentLog(root, cp, m.client);
+  expect(m.calls.slice(0, 3)).toEqual(["status", "ingest.status", "remember"]);
+  expect(m.params[0]).toEqual(JSON.parse(pending.toString()).params);
+  expect((await saved(cp)).next).toBe(m.params.length);
+  await expect(stat(cp + ".pending.json")).rejects.toHaveProperty("code", "ENOENT");
 }));

@@ -112,7 +112,8 @@ Before sending, it durably saves the normalized line and delivery identity in
 checkpoint's snapshot hash, installation incarnation, next line and last receipt;
 pending is retired afterward. A spooled receipt is not source completion.
 Re-running reconciles an existing pending identity through `ingest.status`
-without resending it. It rejects changed snapshots, foreign incarnations,
+without resending it, unless the daemon disowns it (below). It rejects changed
+snapshots, foreign incarnations,
 unresolved pending work, and receipts that do not match the checkpointed source
 line. It does not tail changing logs or
 replace the existing backfill format adapters. Keep snapshot/checkpoint paths
@@ -120,10 +121,17 @@ private and distinct. `ANAMNESIS_RUNTIME_SOCKET` optionally overrides the socket
 used by ops (including a transport relay).
 
 A lost response is `outcome_unknown` with `retryable: false`; no checkpoint
-advancement or automatic request retry occurs. Resolve a known delivery identity
-with `ingest.status`. A still-unknown pending identity remains available for
-operator resolution; restarting the source command does not automatically
-retransmit it.
+advancement or in-process retry occurs. The next run resolves the pending
+identity with `ingest.status`: `committed` advances the checkpoint;
+`spooled`/`blocked`/`quarantined` exit `source_pending_<state>` and leave both
+files unchanged; `unknown` answered by the same `data_incarnation` while
+`status.storage` is `available` means the daemon never admitted that delivery,
+so the run prints `{"event":"pending_retired","reason":"daemon_unknown"}`,
+retires the pending file and resends the same checkpointed line as a first send
+(`remember` is idempotent on `revision_key`, so a commit that landed late
+reconciles as an identity match). `unknown` while storage is unavailable stays
+`source_pending_unknown`, and a foreign incarnation stays `incarnation_mismatch`;
+neither is resent.
 The source checkpoint has its own exclusive process lease; confirmed-dead source
 processes are reclaimed using the same conservative PID ownership policy.
 
