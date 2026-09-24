@@ -4,7 +4,11 @@ import { canonicalExtractionBody, extractionBodyDigest, ExtractionModelOutput, E
 
 export const ExtractionProviderConfig = z.strictObject({ endpoint: z.url().refine(v => ["http:", "https:"].includes(new URL(v).protocol)), model: z.string().min(1).max(256), model_incarnation: z.string().regex(/^[0-9a-f]{64}$/), timeout_ms: z.number().int().min(1).max(30000).default(5000) });
 export type ExtractionProviderConfig = z.infer<typeof ExtractionProviderConfig>;
-export type ExtractionProviderInput = { text: string; task: "claim" | "judge" | "judge_claims"; claim_context?: import('../../protocol/src/extraction-audit.ts').ExtractionClaimContext };
+/** `judge_relations` compares one validated new Fact (`text`) against the
+ * bounded candidates in `relation_context`; no Episode text is supplied. */
+export type ExtractionProviderInput = { text: string; task: "claim" | "judge" | "judge_claims" | "judge_relations";
+  claim_context?: import('../../protocol/src/extraction-audit.ts').ExtractionClaimContext;
+  relation_context?: import('../../protocol/src/extraction-audit.ts').FactRelationContext };
 export interface ExtractionProvider { readonly model: string; readonly modelIncarnation: string; extract(input: ExtractionProviderInput): Promise<unknown>; }
 export class ExtractionProviderError extends Error {
   constructor(readonly reason: "provider_unavailable" | "provider_rejected" | "provider_mismatch" | "output_too_large" | "input_too_large") { super(reason); }
@@ -81,9 +85,9 @@ export function validateModelOutput(value: unknown, task: ExtractionProviderInpu
   const parsed = ExtractionModelOutput.safeParse(value);
   if (!parsed.success || parsed.data.task !== task) throw new ExtractionProviderError("provider_mismatch");
   const body = parsed.data;
-  const spans = body.task === "claim" ? body.claims.map(claim => claim.evidence) : body.task === "judge_claims" ? body.decisions.map(decision => decision.evidence) : body.spans;
-  // A mixed per-claim audit never elects a semantic winner.
-  const disposition = body.task === "claim" ? body.claims.length ? "retain" : "suppress" : body.task === "judge_claims" ? "unknown" : body.disposition;
+  const spans = body.task === "claim" ? body.claims.map(claim => claim.evidence) : body.task === "judge_claims" ? body.decisions.map(decision => decision.evidence) : body.task === "judge_relations" ? [] : body.spans;
+  // A mixed per-claim audit never elects a semantic winner; relation verdicts are not dispositions either.
+  const disposition = body.task === "claim" ? body.claims.length ? "retain" : "suppress" : body.task === "judge_claims" || body.task === "judge_relations" ? "unknown" : body.disposition;
   if ((disposition === "retain" || disposition === "correct") && spans.length === 0) throw new ExtractionProviderError("provider_mismatch");
   return { output: ExtractionOutput.parse({ ...encoded, spans, language: body.language, modality: body.modality }), disposition, spans };
 }

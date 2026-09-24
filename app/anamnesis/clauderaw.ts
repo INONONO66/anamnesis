@@ -15,6 +15,16 @@ const MAX_FILE_BYTES = 256 * 1024 * 1024;
 const MAX_SNAPSHOT_BYTES = 4 * 1024 * 1024 * 1024;
 const MAX_REVISIONS = 100_000;
 const sha = (bytes: string | Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+
+/** Map a transcript actor to explicit lineage metadata (D49).
+ * Only conversational turns (user, assistant) are admitted as semantic-eligible; tool and system records stay
+ * metadata-free on purpose ("tool" is a legal origin_role, but tool output is not claim material and would only
+ * cost extraction calls). The mapping depends on the record alone, so a retry repeats the identical lineage body. */
+function getLineageMetadata(actor: string): { origin_role: "user" | "assistant"; lineage_mode: "direct"; parent_recall_ids: [] } | Record<never, never> {
+  if (actor === "user") return { origin_role: "user", lineage_mode: "direct", parent_recall_ids: [] };
+  if (actor === "assistant") return { origin_role: "assistant", lineage_mode: "direct", parent_recall_ids: [] };
+  return {};
+}
 const fingerprint = (info: Awaited<ReturnType<typeof fileInfo>>) => [info.dev, info.ino, info.size, info.mtimeNs, info.ctimeNs, info.mode].join(":");
 async function fileInfo(path: string) {
   const info = await lstat(path, { bigint: true });
@@ -127,7 +137,8 @@ export async function ingestClaudeRaw(root: string, checkpoint: string, client: 
             if (duplicate && head.signature !== signature) throw new Error(`source_revision_conflict: ${name}:${line}`);
             const seenKey = sha(JSON.stringify([origin, native]));
             const revision = duplicate ? head.revision : seen.has(seenKey) ? `${native}:occurrence:${ordinal}` : native;
-            const params = RpcRememberParams.parse({ ...base, source_revision: revision, expected_previous_revision_key: duplicate ? head.previous : head?.key ?? null });
+            const lineageMetadata = getLineageMetadata(base.episode.origin.actor);
+            const params = RpcRememberParams.parse({ ...base, source_revision: revision, expected_previous_revision_key: duplicate ? head.previous : head?.key ?? null, ...lineageMetadata });
             if (!duplicate) {
               if (seen.size >= MAX_REVISIONS || heads.size >= MAX_REVISIONS) throw new Error("source_revision_limit");
               seen.add(seenKey);

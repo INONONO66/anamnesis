@@ -4,6 +4,14 @@ import { RPC_LIMITS, RpcRequest, RpcResponse, type RpcMethod, type RpcRequestInp
 import { Frames } from "./wire.ts";
 import { timingHash, type TimingSink } from "./timing.ts";
 
+/** TCP endpoint of a daemon started with ANAMNESIS_LISTEN; token is that listener's bearer. */
+export interface RpcTcpTarget { host: string; port: number; token: string; }
+function frame(value: unknown): Buffer {
+  const body = Buffer.from(JSON.stringify(value));
+  const bytes = Buffer.allocUnsafe(4 + body.length);
+  bytes.writeUInt32BE(body.length); body.copy(bytes, 4);
+  return bytes;
+}
 type Params<M extends RpcMethod> = Extract<RpcRequestInput, { method: M }>["params"];
 type Result<M extends RpcMethod> = Extract<RpcSuccessResponse, { method: M }>["result"];
 interface Pending { resolve(value: unknown): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout>; method: RpcMethod; started: number; }
@@ -14,7 +22,14 @@ export class RpcClient {
     const frames = new Frames(body => {
       const response = RpcResponse.parse(JSON.parse(body.toString("utf8")));
       const pending = typeof response.id === "number" ? this.pending.get(response.id) : undefined;
-      if (!pending) throw new Error("response has no matching request");
+      if (!pending) {
+        // A refused TCP bearer precedes every request, so nothing was admitted.
+        if (response.id === null && "error" in response && response.error.data.code === "unauthorized") {
+          this.fail(Object.assign(new Error(response.error.message), { code: response.error.data.code, retryable: false }), true);
+          socket.destroy(); return false;
+        }
+        throw new Error("response has no matching request");
+      }
       this.timing?.({ layer: "client", event: "response", id: response.id!, method: pending.method, elapsedMs: performance.now() - pending.started });
       this.pending.delete(response.id as number);
       clearTimeout(pending.timer);
@@ -30,19 +45,20 @@ export class RpcClient {
     socket.on("error", error => this.fail(error));
     socket.on("close", () => this.fail(new Error("RPC connection closed")));
   }
-  static async connect(path: string, token: string, mode: "auto" | "receipt" = "receipt", timing?: TimingSink): Promise<RpcClient> {
-    const socket = connect(path);
+  static async connect(target: string | RpcTcpTarget, token: string, mode: "auto" | "receipt" = "receipt", timing?: TimingSink): Promise<RpcClient> {
+    const socket = typeof target === "string" ? connect(target) : connect({ host: target.host, port: target.port });
     const client = new RpcClient(socket, timing);
     try {
       await once(socket, "connect", { signal: AbortSignal.timeout(5000) });
+      if (typeof target !== "string") { socket.setNoDelay(true); socket.write(frame({ auth: { bearer: target.token } })); }
       await client.request("hello", { token, client: "node-client", commit_mode: mode, version: 1 });
       return client;
     } catch (error) { socket.destroy(); throw error; }
   }
-  private fail(error: Error): void {
+  private fail(error: Error, known = false): void {
     // A closed transport after an admitted request leaves its effect unknown;
     // callers must resolve it with ingest.status rather than retrying blindly.
-    const unknown = Object.assign(new Error("RPC connection closed; delivery outcome is unknown", { cause: error }), { code: "outcome_unknown", retryable: false });
+    const unknown = known ? error : Object.assign(new Error("RPC connection closed; delivery outcome is unknown", { cause: error }), { code: "outcome_unknown", retryable: false });
     this.timing?.({ layer: "client", event: "transport_terminal", hash: timingHash(String(error)) });
     for (const [id, pending] of this.pending) {
       this.timing?.({ layer: "client", event: "failed", id, method: pending.method, elapsedMs: performance.now() - pending.started });
@@ -54,10 +70,7 @@ export class RpcClient {
     if (this.socket.destroyed) return Promise.reject(new Error("RPC connection is closed"));
     if (this.pending.size >= RPC_LIMITS.queued_requests_per_connection) return Promise.reject(new Error("client request limit reached"));
     const id = ++this.id;
-    const request = RpcRequest.parse({ jsonrpc: "2.0", id, method, params });
-    const body = Buffer.from(JSON.stringify(request));
-    const bytes = Buffer.allocUnsafe(4 + body.length);
-    bytes.writeUInt32BE(body.length); body.copy(bytes, 4);
+    const bytes = frame(RpcRequest.parse({ jsonrpc: "2.0", id, method, params }));
     const started = performance.now();
     return new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => {

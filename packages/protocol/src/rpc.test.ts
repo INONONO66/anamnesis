@@ -194,6 +194,7 @@ describe("strict RPC responses", () => {
       spool: { pending: 1, blocked: 0, quarantined: 0, bytes: 128 },
       outbox_pending: null,
       capabilities,
+      workers: { embedding: { pending: null, drained_total: 0, quarantined_total: 0, last_error: null }, extraction: { state: "unconfigured" } },
     };
     const object = { hash, size: RPC_LIMITS.object_bytes, media_type: "text/plain" };
     const valid = [

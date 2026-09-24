@@ -3,13 +3,15 @@ import { ExtractionModelOutput, ExtractionSpan } from "../../protocol/src/extrac
 import { countBudget } from "./dynamics/budget.ts";
 import { validateModelOutput, validateSourceSpans, type ExtractionProviderInput } from "./extraction.ts";
 
-const [claim, judge, judgeClaims] = ExtractionModelOutput.options;
+const [claim, judge, judgeClaims, judgeRelations] = ExtractionModelOutput.options;
 const quote = ExtractionSpan.shape.text.min(1);
 function withEvidence<T extends z.ZodType>(evidence: T) {
   return z.discriminatedUnion("task", [
     claim.extend({ claims: claim.shape.claims.element.extend({ evidence }).array().max(64) }),
     judge.extend({ spans: evidence.array().max(64) }),
     judgeClaims.extend({ decisions: judgeClaims.shape.decisions.element.extend({ evidence }).array().max(64) }),
+    // Relation verdicts quote nothing: candidates are identified by ID only.
+    judgeRelations,
   ]);
 }
 // Models copy quotes; only trusted local code calculates byte offsets.
@@ -59,10 +61,20 @@ export function normalizeChatExtraction(value: unknown, input: ExtractionProvide
     return result;
   };
   const standaloneSpans = output.task === "judge" ? output.spans.flatMap(evidence => { const anchored = span(evidence); return anchored ? [anchored] : []; }) : [];
+  if (output.task === "judge_relations") {
+    // Every verdict must name a supplied candidate exactly once; nothing is coerced or dropped.
+    const supplied = new Set(input.relation_context?.candidates.map(candidate => candidate.id) ?? []);
+    const seen = new Set<string>();
+    for (const judgement of output.judgements) {
+      if (!supplied.has(judgement.candidate_id) || seen.has(judgement.candidate_id)) throw new Error("relation verdict names an unsupplied candidate");
+      seen.add(judgement.candidate_id);
+    }
+  }
   const normalized = ExtractionModelOutput.parse(output.task === "claim"
     ? { ...output, claims: output.claims.flatMap(claim => { const evidence = span(claim.evidence); return evidence ? [{ ...claim, evidence }] : []; }) }
     : output.task === "judge"
       ? { ...output, spans: standaloneSpans, disposition: standaloneSpans.length ? output.disposition : "suppress" }
+      : output.task === "judge_relations" ? output
       : { ...output, decisions: output.decisions.flatMap(decision => { const evidence = span(decision.evidence, decision.claim_index); return evidence ? [{ ...decision, evidence }] : []; }) });
   validateModelOutput(normalized, input.task);
   return normalized;

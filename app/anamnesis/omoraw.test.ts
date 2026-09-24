@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { RpcRememberParams } from "../../packages/protocol/src/rpc.ts";
 import { RpcClient } from "./client.ts";
 import { ingestOmoRaw } from "./omoraw.ts";
 
@@ -42,4 +43,21 @@ test("SQLite runtime admission is explicitly unsupported", async () => {
 
 test("oversize records are rejected before RPC", async () => fixture(session + message("huge", "x".repeat(8 * 1024 * 1024)), async (source, cp) => {
   const m = client(cp); await expect(ingestOmoRaw(source, cp, m.client as any)).rejects.toThrow(); expect(m.methods).toEqual([]);
+}));
+
+test("user records include lineage metadata (origin_role, lineage_mode, parent_recall_ids)", async () => fixture(session + message("M", "test message", "2026-01-01T00:00:00Z"), async (source, cp) => {
+  // The pending file holds the exact params the adapter is about to send; parsing it through the protocol schema keeps this test typed.
+  const remembered: RpcRememberParams[] = [];
+  const m = client(cp), request: RpcClient["request"] = m.client.request.bind(m.client);
+  const observing = Object.assign(Object.create(RpcClient.prototype) as RpcClient, { request: (async (...args: Parameters<RpcClient["request"]>) => {
+    const [method, input] = args;
+    if (method === "remember") remembered.push(RpcRememberParams.parse(JSON.parse(await readFile(cp + ".pending.json", "utf8")).params));
+    return request(method, input);
+  }) as RpcClient["request"] });
+  await ingestOmoRaw(source, cp, observing);
+  const userRecord = remembered.find(params => params.episode.origin.record === "M");
+  expect(userRecord).toBeDefined();
+  expect(userRecord!.origin_role).toBe("user");
+  expect(userRecord!.lineage_mode).toBe("direct");
+  expect(userRecord!.parent_recall_ids).toEqual([]);
 }));

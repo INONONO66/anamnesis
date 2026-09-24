@@ -35,3 +35,16 @@ test("normalization never invents fields or admits invalid Unicode", () => {
   }
   expect(() => normalizeChatExtraction({ task: "claim", claims: [{ text: "Fact.", evidence: "Fact." }], language: "en", modality: "text" }, { task: "claim", text: "\ud800Fact." })).toThrow();
 });
+test("relation judge output keeps the schema task list and needs no evidence quotes", () => {
+  const schema = z.fromJSONSchema(structuredClone(chatExtractionSchema));
+  const relation_context = { body_digest: "b".repeat(64), fact: { text: "Alice prefers light mode", time: { value: "2026-09-02T00:00:00.000Z", precision: "day" as const } },
+    candidates: [{ id: "01900000-0000-7000-8000-000000000003", text: "Alice prefers dark mode", time: { value: "2026-09-01T00:00:00.000Z", precision: "day" as const } }] };
+  const output = { task: "judge_relations" as const, relation_context_digest: relation_context.body_digest, language: "en", modality: "text" as const,
+    judgements: [{ candidate_id: relation_context.candidates[0]!.id, relation: "invalidates" as const, confidence: 0.92, reason: "the later preference replaces the earlier one" }] };
+  expect(schema.safeParse(output).success).toBe(true);
+  expect(normalizeChatExtraction(output, { task: "judge_relations", text: relation_context.fact.text, relation_context })).toEqual(output);
+  // Out-of-vocabulary relation labels and foreign candidate IDs are rejected, never coerced.
+  expect(() => normalizeChatExtraction({ ...output, judgements: [{ ...output.judgements[0], relation: "supersedes" }] }, { task: "judge_relations", text: relation_context.fact.text, relation_context })).toThrow();
+  expect(() => normalizeChatExtraction({ ...output, judgements: [{ ...output.judgements[0], candidate_id: "01900000-0000-7000-8000-000000000009" }] }, { task: "judge_relations", text: relation_context.fact.text, relation_context })).toThrow();
+  expect(() => normalizeChatExtraction(output, { task: "judge_claims", text, claim_context })).toThrow();
+});

@@ -1,9 +1,10 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import neo4j, { type Driver, type RecordShape } from "neo4j-driver";
 import { Engine, envConfig, type EngineOptions } from "../../packages/core/src/engine.ts";
 import { OpenAiChatExtractionProvider } from "../../packages/core/src/openai-extraction-provider.ts";
+import { ExtractionScheduler, type ExtractionTurn } from "../../packages/core/src/extraction-scheduler.ts";
 import { OpenAiEmbeddingProvider } from "../../packages/core/src/openai-embedding-provider.ts";
 import { elementDigest, verifyLineageRetry } from "../../packages/core/src/store.ts";
 import { EchoLineage, parseEpisodeLineage } from "../../packages/protocol/src/episode-lineage.ts";
@@ -11,7 +12,7 @@ import type { CreateExtractionPipeline, RunExtractionPipeline } from '../../pack
 import type { InstallationContext, CommitReceiptInput, RecallTransportInput } from "../../packages/core/src/store.ts";
 import type { RpcPolicySetParams, RpcPolicyRevokeParams, RpcRecallParams, RpcEmbeddingRecoverParams, RpcDreamAdmitParams, RpcDreamLeaseParams, RpcDreamExpireParams, RpcDreamExecuteParams } from "../../packages/protocol/src/rpc.ts";
 import { DurableSpool, type SpoolEntry } from "../../packages/core/src/spool.ts";
-import { RPC_LIMITS, RPC_METHODS, RpcRememberParams, type RpcCapabilities, type RpcCommittedResult, type RpcIngestStatusParams, type RpcIngestStatusResult, type RpcStatusResult } from "../../packages/protocol/src/rpc.ts";
+import { RPC_LIMITS, RPC_METHODS, RpcRememberParams, type RpcCapabilities, type RpcCommittedResult, type RpcIngestStatusParams, type RpcIngestStatusResult, type RpcStatusResult, type RpcWorkersStatus } from "../../packages/protocol/src/rpc.ts";
 import { atomicJson, hasCode, loadProviderConfig, syncDirectory, type Installation } from "./config.ts";
 import { Uploads, type UploadLifecycle } from "./objects.ts";
 import { loadTokenizers } from "./tokenizer.ts";
@@ -66,18 +67,22 @@ export interface RuntimeAuthorityOptions {
   /** Injected only by the owning lifecycle. No ambient/global adapter is used. */
   authorityAdapter?: TrustedAuthorityAdapter;
 }
+/** Background lanes the daemon's single writer interleaves with requests. */
+export type BackgroundLane = "spool" | "embedding" | "extraction";
+/** Outcome of one bounded embedding batch. "stalled" keeps the wake pending for the next storage recovery. */
+export type EmbeddingTurn = "more" | "idle" | "stalled";
 
 export class Runtime {
   readonly capabilities: RpcCapabilities;
   /** Load asynchronous provider assets once, before accepting RPC traffic. */
-  static async create(installation: Installation, scheduleDrain: () => void = () => {}, uploadLifecycle: UploadLifecycle = {}, authorityOptions: RuntimeAuthorityOptions = {}): Promise<Runtime> {
+  static async create(installation: Installation, scheduleDrain: (lane: BackgroundLane) => void = () => {}, uploadLifecycle: UploadLifecycle = {}, authorityOptions: RuntimeAuthorityOptions = {}): Promise<Runtime> {
     const providers: EngineOptions = {};
     if (process.env["ANAMNESIS_LLM_BASE_URL"] !== undefined || process.env["ANAMNESIS_EMBEDDING_BASE_URL"] !== undefined) {
       const config = await loadProviderConfig();
       if (config.llm.baseUrl !== undefined) {
         if (!config.llm.apiKey) throw new Error("ANAMNESIS_LLM_API_KEY_FILE required");
         providers.extractionProvider = new OpenAiChatExtractionProvider({
-          ...config.llm, baseUrl: config.llm.baseUrl, apiKey: config.llm.apiKey, systemPrompt: config.systemPrompt, timeoutMs: 30000,
+          ...config.llm, baseUrl: config.llm.baseUrl, apiKey: config.llm.apiKey, systemPrompt: config.systemPrompt, relationPrompt: config.relationPrompt, timeoutMs: 30000,
         });
       }
       if (config.embedding) {
@@ -108,13 +113,25 @@ export class Runtime {
   private drainJob: AsyncGenerator<void, void, void> | undefined;
   private drainRequested = false;
   private drainStopped = false;
-  constructor(readonly installation: Installation, private readonly scheduleDrain: () => void = () => {}, uploadLifecycle: UploadLifecycle = {}, authorityOptions: RuntimeAuthorityOptions = {}, providers: EngineOptions = {}) {
+  private readonly embedding = { requested: false, drained_total: 0, quarantined_total: 0, last_error: null as string | null };
+  /** Present only with an extraction provider; the lane is otherwise never scheduled and reports unconfigured. */
+  private readonly extraction: ExtractionScheduler | undefined;
+  private extractionRequested = false;
+  constructor(readonly installation: Installation, private readonly scheduleDrain: (lane: BackgroundLane) => void = () => {}, uploadLifecycle: UploadLifecycle = {}, authorityOptions: RuntimeAuthorityOptions = {}, providers: EngineOptions = {}) {
     this.authorityAdapter = authorityOptions.authorityAdapter;
     const config = { ...envConfig(), ...providers, tokenizers: loadTokenizers(), objectsRoot: join(installation.root, "objects") };
     this.capabilities = { ...capabilities, extraction: !!config.extractionProvider, embeddings: !!config.embeddingProvider };
     const rawDream = createDreamLeidenAdapter();
     const dreamLeidenAdapter = rawDream ? trustedDreamLeiden({ image_digest: DREAM_GDS_IMAGE, plugin_digest: 'sha256:246e3fbbbf733b4def1e7b0a9740a2309f6605ee8a7b46b29fe1de56d0a4b47c', algorithm: DREAM_ALGORITHM, gds_version: DREAM_GDS_VERSION, network: DREAM_NETWORK, adapter: rawDream }) : undefined;
-    this.engine = new Engine({ ...config, ...(dreamLeidenAdapter ? { dreamLeidenAdapter } : {}) });
+    // Same bounded deadlines as the reader: with defaults (30 s connect, 60 s acquisition) a background lane meeting a
+    // dead Bolt endpoint held the serial dispatch slot past the 30 s socket idle deadline and dropped queued RPCs.
+    const writer = neo4j.driver(config.uri, neo4j.auth.basic(config.user, config.password), {
+      disableLosslessIntegers: true, connectionTimeout: 1000, connectionAcquisitionTimeout: 1500, maxTransactionRetryTime: 0,
+    });
+    this.engine = new Engine({ ...config, driver: writer, ...(dreamLeidenAdapter ? { dreamLeidenAdapter } : {}) });
+    this.extraction = config.extractionProvider && new ExtractionScheduler(this.engine, { provider: config.extractionProvider,
+      context: Object.freeze({ principal: "installation", commit_mode: "auto", client_binding: randomUUID() }),
+      read: (query, params) => this.read(query, params), wake: () => this.wakeExtraction() });
     this.database = config.database ?? "neo4j";
     this.reader = neo4j.driver(config.uri, neo4j.auth.basic(config.user, config.password), {
       disableLosslessIntegers: true, connectionTimeout: 1000, connectionAcquisitionTimeout: 1500, maxTransactionRetryTime: 0,
@@ -147,7 +164,7 @@ export class Runtime {
       if (rows[0]?.epoch !== this.epoch) throw new RpcFault("ownership_lost", "database writer epoch changed");
       const recovered = !this.available;
       this.available = true;
-      if (recovered) this.wakeDrain();
+      if (recovered) { this.wakeDrain(); this.wakeEmbedding(); this.wakeExtraction(); }
     } catch (error) {
       if (!storageUnavailable(error)) throw error;
       this.available = false;
@@ -259,6 +276,7 @@ export class Runtime {
       expected_previous_revision_key: params.expected_previous_revision_key, ...payload }, metadata ? { metadata, context: context! } : undefined));
     const committed = await this.committed(binding, result.created);
     if (!committed || committed.id !== result.id) throw new RpcFault("internal_error", "database did not expose the committed delivery");
+    if (committed.created) { this.wakeEmbedding(); this.wakeExtraction(); } // Direct and spool-drained commits alike enqueue worker work.
     return committed;
   }
   async remember(params: RpcRememberParams, context?: InstallationContext) {
@@ -321,7 +339,65 @@ export class Runtime {
   }
   private wakeDrain(): void {
     this.drainRequested = true;
-    if (this.available && !this.drainStopped) this.scheduleDrain();
+    if (this.available && !this.drainStopped) this.scheduleDrain("spool");
+  }
+  private wakeEmbedding(): void {
+    if (!this.capabilities.embeddings) return; // Unconfigured: the worker is never scheduled and never reports.
+    this.embedding.requested = true;
+    if (this.available && !this.drainStopped) this.scheduleDrain("embedding");
+  }
+  /** One bounded outbox batch; called only by the daemon's serial owner, never from a second writer. */
+  async embeddingTurn(): Promise<EmbeddingTurn> {
+    if (this.drainStopped || !this.available) return "stalled";
+    if (!this.embedding.requested) return "idle";
+    try {
+      await this.installation.assertOwned();
+      const rows = await this.read<{ epoch: number }>("MATCH (m:Meta {key:'meta'}) RETURN m.writer_epoch AS epoch");
+      if (rows[0]?.epoch !== this.epoch) throw new RpcFault("ownership_lost", "database writer epoch changed");
+      const batch = await runtimeTimed("engine.drainEmbeddingOutbox", () => this.engine.drainEmbeddingOutbox(100));
+      this.embedding.drained_total += batch.drained;
+      if ("reason" in batch) { this.embedding.requested = false; return "idle"; }
+      this.embedding.quarantined_total += batch.quarantined;
+      // A deferred entry is a provider-side failure that stays in the outbox; it
+      // is retried on the next wake, never in a loop of its own.
+      this.embedding.last_error = batch.deferred ? `${batch.deferred} outbox entries deferred: ${batch.deferral_reason}` : null;
+      if (batch.drained > 0) return "more";
+      this.embedding.requested = false;
+      return "idle";
+    } catch (error) {
+      if (storageUnavailable(error)) { this.available = false; return "stalled"; } // Recovery re-schedules the pending wake.
+      this.embedding.last_error = String(error).slice(0, 512);
+      this.embedding.requested = false;
+      throw error;
+    }
+  }
+  private wakeExtraction(): void {
+    if (!this.extraction) return;
+    this.extractionRequested = true;
+    if (this.available && !this.drainStopped) this.scheduleDrain("extraction");
+  }
+  /** One bounded scheduler turn: database work only, provider calls stay in tracked in-flight pipelines. */
+  async extractionTurn(): Promise<ExtractionTurn | "stalled"> {
+    if (this.drainStopped || !this.available || !this.extraction) return "stalled";
+    if (!this.extractionRequested) return this.extraction.inFlightCount ? "waiting" : "idle";
+    // Consume the request before working: a pipeline settling mid-turn re-arms the lane and that wake must survive.
+    this.extractionRequested = false;
+    try {
+      await this.installation.assertOwned();
+      const rows = await this.read<{ epoch: number }>("MATCH (m:Meta {key:'meta'}) RETURN m.writer_epoch AS epoch");
+      if (rows[0]?.epoch !== this.epoch) throw new RpcFault("ownership_lost", "database writer epoch changed");
+      const outcome = await runtimeTimed("engine.extractionTurn", () => this.extraction!.turn());
+      if (outcome === "more") this.extractionRequested = true;
+      return outcome;
+    } catch (error) {
+      if (storageUnavailable(error)) { this.available = false; this.extractionRequested = true; return "stalled"; } // Recovery re-schedules the pending wake.
+      this.extraction.recordError(error);
+      throw error;
+    }
+  }
+  private workers(pendingOutbox: number | null): RpcWorkersStatus {
+    const { drained_total, quarantined_total, last_error } = this.embedding;
+    return { embedding: { pending: pendingOutbox, drained_total, quarantined_total, last_error }, extraction: this.extraction?.status() ?? { state: "unconfigured" } };
   }
   /** Called only by the daemon's serial owner, never from a second writer. */
   async drainTurn(): Promise<boolean> {
@@ -478,7 +554,7 @@ export class Runtime {
       storage: this.available ? "available" : "unavailable", data_incarnation: this.installation.incarnation,
       fs_epoch: this.installation.epoch, queue: { pending, capacity: RPC_LIMITS.queued_requests },
       spool: { pending: spool.pending, blocked: this.blocked.size, quarantined: spool.quarantined ? 1 : this.quarantined.size, bytes },
-      outbox_pending: outbox, capabilities: this.capabilities };
+      outbox_pending: outbox, capabilities: this.capabilities, workers: this.workers(outbox) };
   }
   async backup(context: InstallationContext, destination: string, operationId: string) {
     await this.installation.assertOwned();
@@ -603,6 +679,7 @@ export class Runtime {
   async close(): Promise<void> {
     this.cancelDrain();
     await this.drainJob?.return(); this.drainJob = undefined;
+    await this.extraction?.close(); // In-flight pipelines settle before the writer goes away.
     await this.uploads.close(); await this.engine.close(); await this.reader.close();
   }
 }

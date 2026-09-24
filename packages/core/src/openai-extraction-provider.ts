@@ -14,6 +14,8 @@ export type OpenAiChatExtractionProviderOptions = {
   apiKey: string;
   model: string;
   systemPrompt: string;
+  /** System prompt for `judge_relations` requests; other tasks keep `systemPrompt`. */
+  relationPrompt?: string;
   fetch?: (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
   timeoutMs?: number;
 };
@@ -48,6 +50,7 @@ export class OpenAiChatExtractionProvider implements ExtractionProvider {
   private readonly endpoint: string;
   private readonly apiKey: string;
   private readonly systemPrompt: string;
+  private readonly relationPrompt: string | undefined;
   private readonly timeoutMs: number;
   private readonly fetch: NonNullable<OpenAiChatExtractionProviderOptions["fetch"]>;
 
@@ -59,6 +62,7 @@ export class OpenAiChatExtractionProvider implements ExtractionProvider {
     if (typeof options.model !== "string" || options.model.length === 0 || options.model.length > 256) throw new TypeError("model must be non-empty");
     if (typeof options.apiKey !== "string") throw new TypeError("apiKey must be a string");
     if (typeof options.systemPrompt !== "string") throw new TypeError("systemPrompt must be a string");
+    if (options.relationPrompt !== undefined && (typeof options.relationPrompt !== "string" || !options.relationPrompt.trim())) throw new TypeError("relationPrompt must be a non-empty string");
     const timeoutMs = options.timeoutMs ?? 5000;
     if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 30000) throw new TypeError("timeoutMs out of range");
     this.model = options.model;
@@ -66,11 +70,12 @@ export class OpenAiChatExtractionProvider implements ExtractionProvider {
     // Stable task identity, not an attestation of immutable upstream weights.
     // A response must not change the identity between a claim and its judge.
     this.modelIncarnation = createHash("sha256").update(JSON.stringify([
-      this.dialect, baseUrl.href, this.model, options.systemPrompt,
+      this.dialect, baseUrl.href, this.model, options.systemPrompt, ...(options.relationPrompt === undefined ? [] : [options.relationPrompt]),
     ])).digest("hex");
     this.endpoint = `${options.baseUrl.replace(/\/+$/, "")}/v1/${this.dialect === "anthropic_messages" ? "messages" : "chat/completions"}`;
     this.apiKey = options.apiKey;
     this.systemPrompt = options.systemPrompt;
+    this.relationPrompt = options.relationPrompt;
     this.timeoutMs = timeoutMs;
     this.fetch = options.fetch ?? globalThis.fetch;
   }
@@ -85,15 +90,16 @@ export class OpenAiChatExtractionProvider implements ExtractionProvider {
       headers["x-api-key"] = this.apiKey;
       headers["anthropic-version"] = "2023-06-01";
     }
+    const systemPrompt = input.task === "judge_relations" && this.relationPrompt !== undefined ? this.relationPrompt : this.systemPrompt;
     const body = JSON.stringify(this.dialect === "anthropic_messages" ? {
       model: this.model,
       max_tokens: 8192,
-      system: `${this.systemPrompt}\n\nRespond with ONLY a JSON object matching this schema. The schema is authoritative for field names and the requested task. Evidence values are exact quote strings copied from the input text; do not generate offsets.\n${JSON.stringify(chatExtractionSchema)}`,
+      system: `${systemPrompt}\n\nRespond with ONLY a JSON object matching this schema. The schema is authoritative for field names and the requested task. Evidence values are exact quote strings copied from the input text; do not generate offsets.\n${JSON.stringify(chatExtractionSchema)}`,
       messages: [{ role: "user", content: JSON.stringify(input) }],
     } : {
       model: this.model,
       messages: [
-        { role: "system", content: this.systemPrompt },
+        { role: "system", content: systemPrompt },
         { role: "user", content: JSON.stringify(input) },
       ],
       response_format: {

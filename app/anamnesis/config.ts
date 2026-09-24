@@ -12,6 +12,7 @@ const providerName = RpcEmbeddingAttempt.shape.model.trim().min(1).max(256);
 const providerSecret = RpcEmbeddingAttempt.shape.model.refine(value => !/[\r\n]/.test(value));
 const providerPath = RpcEmbeddingAttempt.shape.model;
 export const DEFAULT_EXTRACTION_PROMPT_FILE = fileURLToPath(new URL("./prompts/extract-claims.v2.md", import.meta.url));
+export const DEFAULT_RELATION_PROMPT_FILE = fileURLToPath(new URL("./prompts/judge-relations.v1.md", import.meta.url));
 const ProviderEnvironment = RpcEmbeddingAttempt.pick({}).strip().extend({
   ANAMNESIS_EMBEDDING_BASE_URL: providerUrl.optional(),
   ANAMNESIS_EMBEDDING_MODEL: providerName.default("Qwen3-Embedding-0.6B"),
@@ -22,6 +23,7 @@ const ProviderEnvironment = RpcEmbeddingAttempt.pick({}).strip().extend({
   ANAMNESIS_LLM_MODEL: providerName.default("claude-haiku-4-5"),
   ANAMNESIS_LLM_DIALECT: providerName.refine(value => value === "openai_chat" || value === "anthropic_messages").transform(value => value as ExtractionDialect).optional(),
   ANAMNESIS_EXTRACTION_PROMPT_FILE: providerPath.default(DEFAULT_EXTRACTION_PROMPT_FILE),
+  ANAMNESIS_RELATION_PROMPT_FILE: providerPath.default(DEFAULT_RELATION_PROMPT_FILE),
 });
 
 /** Load once at provider startup. Absent base URLs leave legacy provider selection unchanged.
@@ -47,6 +49,9 @@ export async function loadProviderConfig(env: NodeJS.ProcessEnv = process.env) {
   const promptFile = resolve(config.ANAMNESIS_EXTRACTION_PROMPT_FILE);
   const systemPrompt = await fs.readFile(promptFile, "utf8");
   if (!systemPrompt.trim()) throw new Error("empty ANAMNESIS_EXTRACTION_PROMPT_FILE");
+  const relationPromptFile = resolve(config.ANAMNESIS_RELATION_PROMPT_FILE);
+  const relationPrompt = await fs.readFile(relationPromptFile, "utf8");
+  if (!relationPrompt.trim()) throw new Error("empty ANAMNESIS_RELATION_PROMPT_FILE");
   return {
     embedding: config.ANAMNESIS_EMBEDDING_BASE_URL === undefined ? undefined : {
       baseUrl: config.ANAMNESIS_EMBEDDING_BASE_URL,
@@ -57,8 +62,31 @@ export async function loadProviderConfig(env: NodeJS.ProcessEnv = process.env) {
     llm: { baseUrl: config.ANAMNESIS_LLM_BASE_URL, model: config.ANAMNESIS_LLM_MODEL,
       dialect: config.ANAMNESIS_LLM_DIALECT ?? (config.ANAMNESIS_LLM_MODEL.startsWith("claude") ? "anthropic_messages" : "openai_chat"),
       ...(apiKey === undefined ? {} : { apiKey }) },
-    promptFile, systemPrompt,
+    promptFile, systemPrompt, relationPromptFile, relationPrompt,
   };
+}
+
+export interface ListenConfig { host: string; port: number; token: string; }
+/** Optional TCP listener next to the socket. Present only with ANAMNESIS_LISTEN="host:port";
+ * the bearer comes from ANAMNESIS_LISTEN_TOKEN_FILE (regular file, owner-only 0600).
+ * Errors name the variable, never the token. Callers must not log the result. */
+export async function loadListenConfig(env: NodeJS.ProcessEnv = process.env): Promise<ListenConfig | undefined> {
+  const listen = env["ANAMNESIS_LISTEN"];
+  if (listen === undefined) return undefined;
+  const address = /^(?:\[([^\]]+)\]|([^:\[\]]+)):(\d{1,5})$/.exec(listen);
+  const host = address?.[1] ?? address?.[2];
+  const port = address ? Number(address[3]) : NaN;
+  if (!host || port > 65535) throw new Error("ANAMNESIS_LISTEN must be host:port");
+  const file = env["ANAMNESIS_LISTEN_TOKEN_FILE"];
+  if (!file) throw new Error("ANAMNESIS_LISTEN_TOKEN_FILE is required with ANAMNESIS_LISTEN");
+  const unreadable = () => new Error("unable to read ANAMNESIS_LISTEN_TOKEN_FILE");
+  const info = await fs.lstat(file).catch(() => { throw unreadable(); });
+  if (!info.isFile() || info.uid !== process.getuid?.() || (info.mode & 0o777) !== 0o600) {
+    throw new Error("ANAMNESIS_LISTEN_TOKEN_FILE must be a regular file owned by the current user with mode 0600");
+  }
+  const token = (await fs.readFile(file, "utf8").catch(() => { throw unreadable(); })).trim();
+  if (!token || /[\r\n]/.test(token) || Buffer.byteLength(token) > 1024) throw new Error("ANAMNESIS_LISTEN_TOKEN_FILE must hold one bearer token of at most 1024 bytes");
+  return { host, port, token };
 }
 
 export function hasCode(error: unknown, code: string): boolean {
