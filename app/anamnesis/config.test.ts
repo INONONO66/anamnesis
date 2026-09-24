@@ -80,6 +80,22 @@ test("provider dialect overrides model inference and disabled embeddings require
   assert.equal((await loadProviderConfig({ ANAMNESIS_LLM_MODEL: "custom", ANAMNESIS_LLM_DIALECT: "anthropic_messages" })).llm.dialect, "anthropic_messages");
 });
 
+test("extraction pacing knobs default, parse, and reject out-of-range values", async () => {
+  assert.deepEqual((await loadProviderConfig({})).extractionPacing, { maxInFlight: 4, minIntervalMs: 0, jitterFraction: 0.5 });
+  const parsed = await loadProviderConfig({ ANAMNESIS_EXTRACTION_MAX_IN_FLIGHT: "16", ANAMNESIS_LLM_MIN_INTERVAL_MS: "600000", ANAMNESIS_LLM_JITTER_FRACTION: "0" });
+  assert.deepEqual(parsed.extractionPacing, { maxInFlight: 16, minIntervalMs: 600000, jitterFraction: 0 });
+  assert.deepEqual((await loadProviderConfig({ ANAMNESIS_EXTRACTION_MAX_IN_FLIGHT: "1", ANAMNESIS_LLM_MIN_INTERVAL_MS: "2500", ANAMNESIS_LLM_JITTER_FRACTION: "1" })).extractionPacing,
+    { maxInFlight: 1, minIntervalMs: 2500, jitterFraction: 1 });
+  const rejected: Record<string, string[]> = {
+    ANAMNESIS_EXTRACTION_MAX_IN_FLIGHT: ["0", "17", "2.5", "-1", "", " ", "four"],
+    ANAMNESIS_LLM_MIN_INTERVAL_MS: ["-1", "600001", "0.5", "", "slow"],
+    ANAMNESIS_LLM_JITTER_FRACTION: ["-0.1", "1.5", "", "NaN", "half"],
+  };
+  for (const [name, values] of Object.entries(rejected)) {
+    for (const value of values) await assert.rejects(loadProviderConfig({ [name]: value }), error => error instanceof Error && error.message.includes(name) && (value.trim() === "" || !error.message.includes(value)));
+  }
+});
+
 test("provider environment rejects invalid boundaries without disclosing values", async () => {
   const cases: Record<string, string[]> = {
     ANAMNESIS_EMBEDDING_BASE_URL: ["invalid", "file:///tmp/model"],
@@ -91,6 +107,9 @@ test("provider environment rejects invalid boundaries without disclosing values"
     ANAMNESIS_EMBEDDING_API_KEY: ["", "fixture\nsecret"],
     ANAMNESIS_LLM_API_KEY_FILE: [""],
     ANAMNESIS_EXTRACTION_PROMPT_FILE: [""],
+    ANAMNESIS_EXTRACTION_MAX_IN_FLIGHT: ["0", "17"],
+    ANAMNESIS_LLM_MIN_INTERVAL_MS: ["-1", "600001"],
+    ANAMNESIS_LLM_JITTER_FRACTION: ["-0.1", "1.5"],
   };
   for (const [name, values] of Object.entries(cases)) {
     for (const value of values) await assert.rejects(loadProviderConfig({ ANAMNESIS_EMBEDDING_BASE_URL: "http://localhost:18089", [name]: value }), error => {

@@ -5,6 +5,7 @@ import neo4j, { type Driver, type RecordShape } from "neo4j-driver";
 import { Engine, envConfig, type EngineOptions } from "../../packages/core/src/engine.ts";
 import { OpenAiChatExtractionProvider } from "../../packages/core/src/openai-extraction-provider.ts";
 import { ExtractionScheduler, type ExtractionTurn } from "../../packages/core/src/extraction-scheduler.ts";
+import { PacedExtractionProvider } from "../../packages/core/src/paced-extraction-provider.ts";
 import { OpenAiEmbeddingProvider } from "../../packages/core/src/openai-embedding-provider.ts";
 import { elementDigest, verifyLineageRetry } from "../../packages/core/src/store.ts";
 import { EchoLineage, parseEpisodeLineage } from "../../packages/protocol/src/episode-lineage.ts";
@@ -12,8 +13,8 @@ import type { CreateExtractionPipeline, RunExtractionPipeline } from '../../pack
 import type { InstallationContext, CommitReceiptInput, RecallTransportInput } from "../../packages/core/src/store.ts";
 import type { RpcPolicySetParams, RpcPolicyRevokeParams, RpcRecallParams, RpcEmbeddingRecoverParams, RpcDreamAdmitParams, RpcDreamLeaseParams, RpcDreamExpireParams, RpcDreamExecuteParams } from "../../packages/protocol/src/rpc.ts";
 import { DurableSpool, type SpoolEntry } from "../../packages/core/src/spool.ts";
-import { RPC_LIMITS, RPC_METHODS, RpcRememberParams, type RpcCapabilities, type RpcCommittedResult, type RpcIngestStatusParams, type RpcIngestStatusResult, type RpcStatusResult, type RpcWorkersStatus } from "../../packages/protocol/src/rpc.ts";
-import { atomicJson, hasCode, loadProviderConfig, syncDirectory, type Installation } from "./config.ts";
+import { RPC_LIMITS, RPC_METHODS, RpcRememberParams, type RpcCapabilities, type RpcCommittedResult, type RpcExtractionPacing, type RpcIngestStatusParams, type RpcIngestStatusResult, type RpcStatusResult, type RpcWorkersStatus } from "../../packages/protocol/src/rpc.ts";
+import { atomicJson, EXTRACTION_PACING_DEFAULTS, hasCode, loadProviderConfig, syncDirectory, type ExtractionPacingConfig, type Installation } from "./config.ts";
 import { Uploads, type UploadLifecycle } from "./objects.ts";
 import { loadTokenizers } from "./tokenizer.ts";
 import { daemonTiming, runtimeTimed, timingHash } from "./timing.ts";
@@ -77,8 +78,10 @@ export class Runtime {
   /** Load asynchronous provider assets once, before accepting RPC traffic. */
   static async create(installation: Installation, scheduleDrain: (lane: BackgroundLane) => void = () => {}, uploadLifecycle: UploadLifecycle = {}, authorityOptions: RuntimeAuthorityOptions = {}): Promise<Runtime> {
     const providers: EngineOptions = {};
+    let pacing = EXTRACTION_PACING_DEFAULTS;
     if (process.env["ANAMNESIS_LLM_BASE_URL"] !== undefined || process.env["ANAMNESIS_EMBEDDING_BASE_URL"] !== undefined) {
       const config = await loadProviderConfig();
+      pacing = config.extractionPacing;
       if (config.llm.baseUrl !== undefined) {
         if (!config.llm.apiKey) throw new Error("ANAMNESIS_LLM_API_KEY_FILE required");
         providers.extractionProvider = new OpenAiChatExtractionProvider({
@@ -93,7 +96,7 @@ export class Runtime {
         providers.embeddingProvider = new OpenAiEmbeddingProvider({ ...config.embedding, profile, timeoutMs: 30000 });
       }
     }
-    return new Runtime(installation, scheduleDrain, uploadLifecycle, authorityOptions, providers);
+    return new Runtime(installation, scheduleDrain, uploadLifecycle, authorityOptions, providers, pacing);
   }
   readonly uploads: Uploads;
   private readonly engine: Engine;
@@ -116,10 +119,14 @@ export class Runtime {
   private readonly embedding = { requested: false, drained_total: 0, quarantined_total: 0, last_error: null as string | null };
   /** Present only with an extraction provider; the lane is otherwise never scheduled and reports unconfigured. */
   private readonly extraction: ExtractionScheduler | undefined;
+  /** Wraps the configured provider so every model call (scheduler and audit RPCs alike) is metered; present with `extraction`. */
+  private readonly pacer: PacedExtractionProvider | undefined;
   private extractionRequested = false;
-  constructor(readonly installation: Installation, private readonly scheduleDrain: (lane: BackgroundLane) => void = () => {}, uploadLifecycle: UploadLifecycle = {}, authorityOptions: RuntimeAuthorityOptions = {}, providers: EngineOptions = {}) {
+  constructor(readonly installation: Installation, private readonly scheduleDrain: (lane: BackgroundLane) => void = () => {}, uploadLifecycle: UploadLifecycle = {}, authorityOptions: RuntimeAuthorityOptions = {}, providers: EngineOptions = {}, private readonly pacing: ExtractionPacingConfig = EXTRACTION_PACING_DEFAULTS) {
     this.authorityAdapter = authorityOptions.authorityAdapter;
-    const config = { ...envConfig(), ...providers, tokenizers: loadTokenizers(), objectsRoot: join(installation.root, "objects") };
+    const unpaced = { ...envConfig(), ...providers, tokenizers: loadTokenizers(), objectsRoot: join(installation.root, "objects") };
+    this.pacer = unpaced.extractionProvider && new PacedExtractionProvider(unpaced.extractionProvider, { minIntervalMs: pacing.minIntervalMs, jitterFraction: pacing.jitterFraction });
+    const config = this.pacer ? { ...unpaced, extractionProvider: this.pacer } : unpaced;
     this.capabilities = { ...capabilities, extraction: !!config.extractionProvider, embeddings: !!config.embeddingProvider };
     const rawDream = createDreamLeidenAdapter();
     const dreamLeidenAdapter = rawDream ? trustedDreamLeiden({ image_digest: DREAM_GDS_IMAGE, plugin_digest: 'sha256:246e3fbbbf733b4def1e7b0a9740a2309f6605ee8a7b46b29fe1de56d0a4b47c', algorithm: DREAM_ALGORITHM, gds_version: DREAM_GDS_VERSION, network: DREAM_NETWORK, adapter: rawDream }) : undefined;
@@ -129,7 +136,7 @@ export class Runtime {
       disableLosslessIntegers: true, connectionTimeout: 1000, connectionAcquisitionTimeout: 1500, maxTransactionRetryTime: 0,
     });
     this.engine = new Engine({ ...config, driver: writer, ...(dreamLeidenAdapter ? { dreamLeidenAdapter } : {}) });
-    this.extraction = config.extractionProvider && new ExtractionScheduler(this.engine, { provider: config.extractionProvider,
+    this.extraction = config.extractionProvider && new ExtractionScheduler(this.engine, { provider: config.extractionProvider, maxInFlight: pacing.maxInFlight,
       context: Object.freeze({ principal: "installation", commit_mode: "auto", client_binding: randomUUID() }),
       read: (query, params) => this.read(query, params), wake: () => this.wakeExtraction() });
     this.database = config.database ?? "neo4j";
@@ -397,7 +404,13 @@ export class Runtime {
   }
   private workers(pendingOutbox: number | null): RpcWorkersStatus {
     const { drained_total, quarantined_total, last_error } = this.embedding;
-    return { embedding: { pending: pendingOutbox, drained_total, quarantined_total, last_error }, extraction: this.extraction?.status() ?? { state: "unconfigured" } };
+    const extraction = this.extraction && this.pacer ? { ...this.extraction.status(), pacing: this.pacingStatus(this.pacer) } : { state: "unconfigured" as const };
+    return { embedding: { pending: pendingOutbox, drained_total, quarantined_total, last_error }, extraction };
+  }
+  private pacingStatus(pacer: PacedExtractionProvider): RpcExtractionPacing {
+    const { calls_total, waited_total_ms } = pacer.stats();
+    const { maxInFlight: max_in_flight, minIntervalMs: min_interval_ms, jitterFraction: jitter_fraction } = this.pacing;
+    return { max_in_flight, min_interval_ms, jitter_fraction, calls_total, waited_total_ms };
   }
   /** Called only by the daemon's serial owner, never from a second writer. */
   async drainTurn(): Promise<boolean> {

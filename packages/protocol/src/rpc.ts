@@ -350,6 +350,17 @@ export const RpcCapabilities = z.strictObject({
   writer_fence: z.enum(["database", "local_only"]),
 });
 export type RpcCapabilities = z.infer<typeof RpcCapabilities>;
+/** Provider pacing on the extraction lane: at most `max_in_flight` pipelines, and consecutive provider calls
+ * (claims, judges, retries) spaced by `min_interval_ms * (1 + jitter_fraction * random())` through one FIFO gate.
+ * The knobs echo the daemon's environment; `calls_total` and `waited_total_ms` are per process lifetime. */
+export const RpcExtractionPacing = z.strictObject({
+  max_in_flight: z.number().int().min(1).max(16),
+  min_interval_ms: z.number().int().min(0).max(600000),
+  jitter_fraction: z.number().min(0).max(1),
+  calls_total: counter,
+  waited_total_ms: counter,
+});
+export type RpcExtractionPacing = z.infer<typeof RpcExtractionPacing>;
 /** Background workers owned by the daemon's single writer. Counters are per process lifetime. */
 export const RpcWorkersStatus = z.strictObject({
   embedding: z.strictObject({
@@ -362,11 +373,12 @@ export const RpcWorkersStatus = z.strictObject({
   extraction: z.discriminatedUnion("state", [
     z.strictObject({ state: z.literal("unconfigured") }),
     /** Configured, but no turn has attached a generation yet (startup, or storage unavailable since startup). */
-    z.strictObject({ state: z.literal("starting") }),
+    z.strictObject({ state: z.literal("starting"), pacing: RpcExtractionPacing }),
     /** The single writable generation the scheduler feeds. Watermarks are the last observed values; counters are per process lifetime. */
     z.strictObject({
       state: z.enum(["catching_up", "active"]), generation_id: z.uuidv7(), covered_ingest_seq: counter, live_ingest_seq: counter,
-      in_flight: counter.max(4), completed_total: counter, failed_total: counter, last_error: z.string().max(512).nullable(),
+      in_flight: counter.max(16), completed_total: counter, failed_total: counter, last_error: z.string().max(512).nullable(),
+      pacing: RpcExtractionPacing,
     }),
   ]),
 });
