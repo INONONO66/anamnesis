@@ -75,7 +75,7 @@ Reference layout used for the first production install (issue #213). Unit files 
 ### Guest
 
 1. Debian 12 guest with docker, node 22 (for the built bundles) and tailscale joined to the tailnet. Create user `anamnesis` (member of `docker`), `/opt/anamnesis` (checkout + `bun run build:runtime` output in `dist/`), `/var/lib/anamnesis/{runtime,objects,backups}` owned by that user, `/etc/anamnesis` mode `0700`.
-2. Neo4j: follow [First deploy](#first-deploy) inside `/opt/anamnesis` (`gen-password`, `db:up`, `migrate`). Keep the compose bind on `127.0.0.1`.
+2. Neo4j: follow [First deploy](#first-deploy) inside `/opt/anamnesis` (`gen-password`, `db:up`, `migrate`). Keep the compose bind on `127.0.0.1`. The compose file labels the container `anamnesis.qa.owner=${ANAMNESIS_QA_OWNER}` (default `production`, from `.env`); the daemon env must carry the same `ANAMNESIS_QA_OWNER` and `ANAMNESIS_NEO4J_CONTAINER=anamnesis-neo4j-1`, otherwise backup/restore fail with `backup_adapter_unavailable` or `owned_container_required`.
    inonono only needs node 22 and the `dist/` bundles (no bun); copy `dist/` from a `bun run build:runtime` output.
 3. Secrets, all `0600`, owned by `anamnesis`, never committed or logged:
    - `/etc/anamnesis/anamnesis.env` from `deploy/vm/anamnesis.env.example` (Neo4j password from `.env`, tailnet IP in `ANAMNESIS_LISTEN`).
@@ -95,7 +95,7 @@ Reference layout used for the first production install (issue #213). Unit files 
 
 ### Backup
 
-`anamnesis-backup.timer` runs `deploy/vm/backup.sh` daily as root: `systemctl stop anamnesis`, offline `ops backup <dir>` as the `anamnesis` user (`ops backup` refuses a live daemon with `daemon_live`; the daemon is restarted even if the dump fails), then `rsync` of `/var/lib/anamnesis/backups/` to inonono `/mnt/data/anamnesis/backups/pve-vm/`, keeping 14 local copies. `systemctl list-timers anamnesis-backup.timer` and `journalctl -u anamnesis-backup` show the last run; a non-zero exit marks the unit failed. Restore follows [Restore a dump](#restore-a-dump) with the daemon stopped (`systemctl stop anamnesis`).
+`anamnesis-backup.timer` runs `deploy/vm/backup.sh` daily as root: `systemctl stop anamnesis`, offline `ops backup <dir>` as the `anamnesis` user into a not-yet-existing `<stamp>/` directory with the JSON result beside it as `<stamp>.result.json` (`ops backup` refuses a live daemon with `daemon_live` and an existing destination with `destination_exists`; the daemon is restarted even if the dump fails), then `rsync` of `/var/lib/anamnesis/backups/` to inonono `/mnt/data/anamnesis/backups/pve-vm/`, keeping 14 local copies. `systemctl list-timers anamnesis-backup.timer` and `journalctl -u anamnesis-backup` show the last run; a non-zero exit marks the unit failed. Restore follows [Restore a dump](#restore-a-dump) with the daemon stopped (`systemctl stop anamnesis`).
 
 ## Redeploy
 
