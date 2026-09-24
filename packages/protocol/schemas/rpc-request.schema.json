@@ -760,7 +760,7 @@
             "lease_ms": {
               "type": "integer",
               "exclusiveMinimum": 0,
-              "maximum": 30000
+              "maximum": 120000
             }
           },
           "required": [
