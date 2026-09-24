@@ -31,11 +31,17 @@ export interface ExtractionSchedulerOptions {
   maxInFlight?: number;
   /** First attempt plus retries; a task failing this often is a terminal omission. */
   maxAttempts?: number;
+  /** Same clock as the engine's store, so lease expiry is judged once; tests inject it, the daemon uses Date.now. */
+  clock?: () => number;
 }
+
+/** Three times the daemon's 30 s provider timeout: the lease is taken before the HTTP call and checked when the attempt is
+ * recorded, so a lease equal to the timeout turned every slow-but-successful call into lease_expired (E2E run 4 sealed two sources). */
+const LEASE_MS = 90000;
 
 type Outcome = "completed" | "failed";
 type Known = Extract<ExtractionPipeline, { state: "known" }>;
-type Action = Outcome | "run" | "pending" | "unresolved" | { kind: "retry" | "settle"; task: ModelTask };
+type Action = Outcome | "run" | "pending" | "unresolved" | { kind: "retry" | "settle" | "cancel"; task: ModelTask };
 interface ScanRow extends Record<string, unknown> { live: number; id: string | null; seq: number | null; task: string | null }
 
 const PARTITIONS = ["episodes", "active_extraction"] as const;
@@ -50,6 +56,7 @@ export class ExtractionScheduler {
   private readonly workerId: string;
   private readonly maxInFlight: number;
   private readonly maxAttempts: number;
+  private readonly clock: () => number;
   /** work_key -> settlement; a drive removes itself before waking. */
   private readonly inFlight = new Map<string, Promise<void>>();
   /** work_key -> terminal outcome awaiting coverage. Dropped once sealed. */
@@ -68,6 +75,7 @@ export class ExtractionScheduler {
     this.workerId = options.workerId ?? "daemon-extraction";
     this.maxInFlight = options.maxInFlight ?? 4;
     this.maxAttempts = options.maxAttempts ?? 4;
+    this.clock = options.clock ?? Date.now;
   }
 
   get inFlightCount(): number { return this.inFlight.size; }
@@ -135,7 +143,7 @@ export class ExtractionScheduler {
     if (selection.generation_id) return this.generation = await this.engine.store.getExtractionGeneration(selection.generation_id, this.context);
     const rows = await this.read<{ body: string }>(`MATCH (g:ExtractionGeneration {state:'catching_up'}) RETURN g.body AS body ORDER BY g.id LIMIT 1`, {});
     if (rows[0]) return this.generation = Generation.parse(JSON.parse(rows[0].body));
-    const now = Date.now();
+    const now = this.clock();
     return this.generation = await this.engine.store.createExtractionGeneration({ id: uuidv7(), stream: "extraction", incarnation: this.provider.modelIncarnation,
       state: "catching_up", covered_ingest_seq: 0, created_at: now, updated_at: now }, this.context);
   }
@@ -181,11 +189,13 @@ export class ExtractionScheduler {
       if (action === "pending" && await this.engine.store.factRelationFailures(claim.id, this.context) >= this.maxAttempts) return { outcome: "failed", fresh: true };
       fresh = true;
       if (action === "run" || action === "pending") {
-        pipeline = await this.engine.runExtractionPipeline({ task_id: pipeline.claim.id, expected_version: pipeline.claim.version, worker_id: this.workerId, lease_ms: 30000 }, this.context);
+        pipeline = await this.engine.runExtractionPipeline({ task_id: pipeline.claim.id, expected_version: pipeline.claim.version, worker_id: this.workerId, lease_ms: LEASE_MS }, this.context);
         continue;
       }
       if (action.kind === "retry") await this.engine.store.retryModelTask({ task_id: action.task.id, expected_version: action.task.version }, this.context);
-      else await this.settle(action.task);
+      else if (action.kind === "settle") await this.settle(action.task);
+      // An expired or lost lease is not an outcome the store will cover; with the budget spent it is cancelled into one.
+      else await this.engine.store.cancelModelTask({ task_id: action.task.id, expected_version: action.task.version }, this.context);
       pipeline = await this.engine.store.readExtractionPipeline(claim.id, this.context);
     }
     // The step budget is the last bound: a pipeline that never reaches a terminal task state is still a terminal omission.
@@ -196,7 +206,7 @@ export class ExtractionScheduler {
   private deferWake(at: number): void {
     if (this.closed || !Number.isFinite(at) || (this.deferred && this.deferred.at <= at)) return;
     if (this.deferred) clearTimeout(this.deferred.timer);
-    const timer = setTimeout(() => { this.deferred = undefined; if (!this.closed) this.wake(); }, Math.max(0, at - Date.now()) + 1);
+    const timer = setTimeout(() => { this.deferred = undefined; if (!this.closed) this.wake(); }, Math.max(0, at - this.clock()) + 1);
     timer.unref?.();
     this.deferred = { at, timer };
   }
@@ -206,9 +216,10 @@ export class ExtractionScheduler {
       switch (task.state) {
         case "succeeded": return "ok";
         case "queued": return "run";
-        case "leased": return task.lease && task.lease.expires_at <= Date.now() ? { kind: "settle", task } : "unresolved";
-        case "cancelled": return "failed";
-        default: return task.attempts < this.maxAttempts ? { kind: "retry", task } : "failed";
+        case "leased": return task.lease && task.lease.expires_at <= this.clock() ? { kind: "settle", task } : "unresolved";
+        case "cancelled": case "failed": return task.attempts < this.maxAttempts && task.state === "failed" ? { kind: "retry", task } : "failed";
+        // expired / worker_lost: unresolved work in the store's eyes; retry while the budget lasts, else cancel into a durable omission.
+        default: return task.attempts < this.maxAttempts ? { kind: "retry", task } : { kind: "cancel", task };
       }
     };
     const claim = stage(pipeline.claim);

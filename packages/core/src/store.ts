@@ -3208,8 +3208,12 @@ export class Store {
     return this.extractionTx(context, async (tx, policy) => {
       const task = await this.extractionRecordTx(tx, "ModelTask", request.task_id, ModelTask);
       this.checkExtractionCAS(task, request.expected_version);
-      if (!["queued", "leased"].includes(task.state)) throw new Error("invalid_transition");
-      await this.finishExtractionTx(tx, task, policy, { state: "cancelled", reason: "cancelled", output: null, disposition: null, spans: [] }, extractionBodyDigest({ action: "cancel", ...request }));
+      // Open work is cancelled in place. An expired or lost lease is unresolved work, not an outcome (extractionPipelineOmission);
+      // cancelling it is how a caller whose retry budget is spent turns it into a durable, coverable omission. The cancel is a
+      // fresh content-free attempt record, so the settled lease attempt stays immutable and the attempt count is unchanged.
+      if (!["queued", "leased", "expired", "worker_lost"].includes(task.state)) throw new Error("invalid_transition");
+      const open = task.state === "queued" || task.state === "leased" ? task : { ...task, attempt_id: null, lease: null, attempts: task.attempts - 1 };
+      await this.finishExtractionTx(tx, open, policy, { state: "cancelled", reason: "cancelled", output: null, disposition: null, spans: [] }, extractionBodyDigest({ action: "cancel", ...request }));
       return this.extractionRecordTx(tx, "ModelTask", task.id, ModelTask);
     });
   }
