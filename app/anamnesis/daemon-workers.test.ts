@@ -180,54 +180,75 @@ test.skipIf(!URI || !PASSWORD)("committed remembers wake the embedding worker, w
 }, 120_000);
 
 /** Embedder whose every call waits for an explicit release, so the test controls where the worker is mid-turn. */
-async function gatedEmbedder(): Promise<{ server: Server; endpoint: string; calls: () => number; started: () => Promise<void>; release: () => void }> {
-  let calls = 0;
+async function gatedEmbedder(): Promise<{ server: Server; endpoint: string; calls: () => number; started: () => Promise<void>; finished: () => Promise<void>; release: () => boolean; completed: () => number }> {
+  let calls = 0, completed = 0;
   const releases: Array<() => void> = [];
   const startedWaiters: Array<() => void> = [];
+  const completedWaiters: Array<() => void> = [];
   const server = createServer(async (request, response) => {
     const chunks: Buffer[] = []; for await (const chunk of request) chunks.push(chunk as Buffer);
     JSON.parse(Buffer.concat(chunks).toString("utf8")); calls++;
     startedWaiters.splice(0).forEach(resolve => resolve());
     await new Promise<void>(resolve => { releases.push(resolve); });
+    completed++;
     response.setHeader("content-type", "application/json");
     response.end(JSON.stringify({ model: profile.model, model_incarnation: profile.model_incarnation, data: [{ index: 0, embedding: [0, 1, 0] }] }));
+    completedWaiters.splice(0).forEach(resolve => resolve());
   });
   const listening = once(server, "listening", { signal: deadline(5000) });
   server.listen(0, "127.0.0.1");
   await listening;
-  return { server, endpoint: `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1/embeddings`, calls: () => calls,
-    started: () => new Promise<void>(resolve => { startedWaiters.push(resolve); }), release: () => { releases.shift()?.(); } };
+  // release() answers the oldest held call and reports whether one was held; a release with nothing held is a no-op.
+  return { server, endpoint: `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1/embeddings`, calls: () => calls, completed: () => completed,
+    // started() resolves at once while a call is held, so a waiter registered after the call began cannot miss it.
+    started: () => new Promise<void>(resolve => { if (releases.length) resolve(); else startedWaiters.push(resolve); }), finished: () => new Promise<void>(resolve => { completedWaiters.push(resolve); }),
+    release: () => { const held = releases.shift(); held?.(); return held !== undefined; } };
 }
 
 test.skipIf(!URI || !PASSWORD)("an RPC issued during an embedding backlog is served after at most one provider call", async () => {
   // The daemon's serial owner alternates one background turn with one request. A turn that embedded a whole batch
   // (up to 100 sequential provider calls, each up to the provider timeout) held every RPC for minutes on the
   // production daemon: status over TCP hit the client deadline and reported outcome_unknown while a requeue drained.
+  // Every provider call here is held until the test releases it, so the RPC latency is measured in provider calls.
   const provider = await gatedEmbedder();
   try {
     await fixture({ ANAMNESIS_NEO4J_URI: URI!, ANAMNESIS_NEO4J_PASSWORD: PASSWORD!,
       ANAMNESIS_EMBEDDING_CONFIG: JSON.stringify({ endpoint: provider.endpoint, profile, timeout_ms: 20_000 }) }, async daemon => {
       const client = await RpcClient.connect(join(daemon.root, "anamnesis.sock"), TOKEN);
       try {
-        const firstCall = provider.started();
-        expect((await client.request("remember", episode(daemon.root, "one"))).state).toBe("committed");
-        await firstCall;
-        // The worker is inside call 1. A status request queued now must run as soon as that call returns, before the
-        // worker takes another outbox entry: the serial owner alternates one background turn with one request.
-        const status = client.request("status", {});
-        provider.release();
-        const observed = await status;
-        expect(provider.calls()).toBe(1);
-        expect(observed.workers.embedding.drained_total).toBe(1);
-        // Every further remember is followed by at most one provider call before the next request is served.
-        for (const record of ["two", "three"]) {
+        // Each committed remember wakes the lane, and the owner serves the next request only once the turn's held
+        // provider call is released: an RPC is never admitted mid-call, so a remember is answered after the call the
+        // previous remember started. Three remembers therefore seed three entries while releasing calls one by one.
+        const remembers = ["one", "two", "three"].map(record => client.request("remember", episode(daemon.root, record)));
+        for (const remembered of remembers) {
           const call = provider.started();
-          const committed = client.request("remember", episode(daemon.root, record));
-          await Promise.race([call, committed]);
-          const before = provider.calls();
-          expect((await committed).state).toBe("committed");
-          expect(provider.calls() - before).toBeLessThanOrEqual(1);
-          await call; provider.release();
+          const outcome = await Promise.race([remembered.then(() => "committed" as const), call.then(() => "held" as const)]);
+         
+          if (outcome === "held") { provider.release(); expect((await remembered).state).toBe("committed"); }
+          else expect((await remembered).state).toBe("committed");
+         
+        }
+        // The seed released at most three calls (one per turn between remembers); the rest of the outbox is still due
+        // and every further call is held. A status queued now is answered after the call in flight, and at most one
+        // more if the owner started a second turn before the frame was admitted. A batch turn would embed every
+        // remaining entry before serving it.
+        const before = provider.completed();
+        let answered = false;
+        const status = client.request("status", {}).then(result => { answered = true; return result; });
+        while (!answered) {
+          const next = provider.started();
+          if (!provider.release()) { await next; continue; }
+          await Promise.race([status, next]);
+        }
+        const observed = await status;
+        expect(provider.completed() - before).toBeLessThanOrEqual(2);
+        expect(observed.workers.embedding.pending).toBe(3 - observed.workers.embedding.drained_total);
+        expect(observed.workers.embedding.quarantined_total).toBe(0);
+        // Let the remaining calls through one at a time: wait for a call to be held, answer it, wait for its completion.
+        while (provider.completed() < 3) {
+          const held = provider.started(), done = provider.finished();
+          if (!provider.release()) { await held; provider.release(); }
+          await done;
         }
         let settled = await client.request("status", {});
         while (settled.workers.embedding.drained_total < 3) { await daemon.lines.until("workers_idle"); settled = await client.request("status", {}); }

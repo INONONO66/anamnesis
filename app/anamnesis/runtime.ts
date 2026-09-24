@@ -360,25 +360,27 @@ export class Runtime {
   async embeddingTurn(): Promise<EmbeddingTurn> {
     if (this.drainStopped || !this.available) return "stalled";
     if (!this.embedding.requested) return "idle";
+    // Consume the request before working: a remember committing mid-turn re-arms the lane, and that wake must survive
+    // this turn's outcome. Clearing the flag at the end instead dropped such a wake once turns embedded one entry
+    // each: the lane reported idle with the new entry still queued, and nothing retried it until the next commit.
+    this.embedding.requested = false;
     try {
       await this.installation.assertOwned();
       const rows = await this.read<{ epoch: number }>("MATCH (m:Meta {key:'meta'}) RETURN m.writer_epoch AS epoch");
       if (rows[0]?.epoch !== this.epoch) throw new RpcFault("ownership_lost", "database writer epoch changed");
       const batch = await runtimeTimed("engine.drainEmbeddingOutbox", () => this.engine.drainEmbeddingOutbox(1));
       this.embedding.drained_total += batch.drained;
-      if ("reason" in batch) { this.embedding.requested = false; return "idle"; }
+      if ("reason" in batch) return "idle";
       this.embedding.quarantined_total += batch.quarantined;
       // A deferred entry is a provider-side failure that stays in the outbox with a retry_after in the future, so the
       // next turn moves on to the other due entries and the deferred one is retried on a later wake, never in a loop
       // of its own. The turn is "more" either way: the lane only rests once nothing is due.
       this.embedding.last_error = batch.deferred ? `${batch.deferred} outbox entries deferred: ${batch.deferral_reason}` : null;
-      if (batch.drained > 0 || batch.deferred > 0) return "more";
-      this.embedding.requested = false;
-      return "idle";
+      if (batch.drained > 0 || batch.deferred > 0) { this.embedding.requested = true; return "more"; }
+      return this.embedding.requested ? "more" : "idle";
     } catch (error) {
-      if (storageUnavailable(error)) { this.available = false; return "stalled"; } // Recovery re-schedules the pending wake.
+      if (storageUnavailable(error)) { this.available = false; this.embedding.requested = true; return "stalled"; } // Recovery re-schedules the pending wake.
       this.embedding.last_error = String(error).slice(0, 512);
-      this.embedding.requested = false;
       throw error;
     }
   }
