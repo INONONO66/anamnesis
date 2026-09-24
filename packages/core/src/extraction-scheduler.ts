@@ -156,7 +156,7 @@ export class ExtractionScheduler {
         this.outcomes.set(key, result.outcome);
         if (result.fresh) { if (result.outcome === "completed") this.completed_total++; else this.failed_total++; }
         return true;
-      }, error => { this.recordError(error); return false; })
+      }, error => { this.recordError(error); return true; }) // A thrown drive (e.g. lease_expired) left a retryable task; re-arm so the lane settles it.
       .then(settled => { this.inFlight.delete(key); if (settled) this.wake(); });
     this.inFlight.set(key, drive);
   }
