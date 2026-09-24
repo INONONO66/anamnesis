@@ -33,3 +33,36 @@ test("runtime adapter streams a sealed export and commit-gates checkpoint", asyn
   const client = Object.assign(Object.create(RpcClient.prototype), { request: async (method: string, p: any) => { calls.push(method); if (method === "status") return { data_incarnation: "11111111-1111-4111-8111-111111111111" }; if (method === "ingest.status") return committed.get(p.revision_key) ?? { ...p, state: "unknown" }; if (method === "remember") { const pending = JSON.parse(await Bun.file(cp + ".pending.json").text()); const r = { ...pending.identity, state: "committed", created: true, id: "id", ingest_seq: 1 }; committed.set(p.revision_key, r); return r; } throw new Error(method); } });
   try { await ingestCodexRaw(source, cp, client as RpcClient); expect(calls).toContain("remember"); expect(JSON.parse(await Bun.file(cp).text()).next).toBe(1); } finally { await rm(root, { recursive: true, force: true }); }
 });
+
+test("user and assistant records include lineage metadata (origin_role, lineage_mode, parent_recall_ids)", async () => {
+  const root = await mkdtemp("/tmp/ana-codex-test-"); const source = join(root, "export"); const cp = join(root, "checkpoint.json");
+  await mkdir(source);
+  await writeFile(join(source, "rollout-2026-01-01-s.jsonl"), [meta, ctx, msg("user message", "u1", "user"), msg("assistant message", "a1", "assistant")].join("\n") + "\n");
+  const committed = new Map<string, any>(); const remembered: any[] = [];
+  const client = Object.assign(Object.create(RpcClient.prototype), { request: async (method: string, p: any) => {
+    if (method === "status") return { data_incarnation: "11111111-1111-4111-8111-111111111111" };
+    if (method === "ingest.status") return committed.get(p.revision_key) ?? { ...p, state: "unknown" };
+    if (method === "remember") {
+      const pending = JSON.parse(await Bun.file(cp + ".pending.json").text());
+      remembered.push(pending.params);
+      const r = { ...pending.identity, state: "committed", created: true, id: "id", ingest_seq: 1 };
+      committed.set(p.revision_key, r);
+      return r;
+    }
+    throw new Error(method);
+  } });
+  try {
+    await ingestCodexRaw(source, cp, client as RpcClient);
+    expect(remembered.length).toBe(2);
+    const userRecord = remembered.find((p: any) => p.episode.content === "user message");
+    expect(userRecord).toBeDefined();
+    expect(userRecord.origin_role).toBe("user");
+    expect(userRecord.lineage_mode).toBe("direct");
+    expect(userRecord.parent_recall_ids).toEqual([]);
+    const assistantRecord = remembered.find((p: any) => p.episode.content === "assistant message");
+    expect(assistantRecord).toBeDefined();
+    expect(assistantRecord.origin_role).toBe("assistant");
+    expect(assistantRecord.lineage_mode).toBe("direct");
+    expect(assistantRecord.parent_recall_ids).toEqual([]);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});

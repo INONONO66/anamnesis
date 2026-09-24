@@ -43,3 +43,23 @@ test("SQLite runtime admission is explicitly unsupported", async () => {
 test("oversize records are rejected before RPC", async () => fixture(session + message("huge", "x".repeat(8 * 1024 * 1024)), async (source, cp) => {
   const m = client(cp); await expect(ingestOmoRaw(source, cp, m.client as any)).rejects.toThrow(); expect(m.methods).toEqual([]);
 }));
+
+test("user records include lineage metadata (origin_role, lineage_mode, parent_recall_ids)", async () => fixture(session + message("M", "test message", "2026-01-01T00:00:00Z"), async (source, cp) => {
+  const rememberedParams: any[] = [];
+  const m = client(cp);
+  const originalRequest = m.client.request.bind(m.client);
+  m.client.request = async (method: string, input: any) => {
+    if (method === "remember") {
+      const p = JSON.parse(await readFile(cp + ".pending.json", "utf8"));
+      rememberedParams.push(p.params);
+    }
+    return originalRequest(method, input);
+  };
+  await ingestOmoRaw(source, cp, m.client as any);
+  expect(rememberedParams.length).toBeGreaterThan(0);
+  const userRecord = rememberedParams.find((p: any) => p.episode.origin.record === "M");
+  expect(userRecord).toBeDefined();
+  expect(userRecord.origin_role).toBe("user");
+  expect(userRecord.lineage_mode).toBe("direct");
+  expect(userRecord.parent_recall_ids).toEqual([]);
+}));

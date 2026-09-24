@@ -11,6 +11,13 @@ const hash = (value: string | Uint8Array) => createHash("sha256").update(value).
 const saved = async (path: string) => JSON.parse(await readFile(path, "utf8"));
 const line = (value: object) => JSON.stringify(value) + "\n";
 const turn = (text = "hello", uuid = "turn") => ({ type: "user", uuid, timestamp: "2026-03-01T00:00:00Z", content: text });
+
+/** Helper to build expected RpcRememberParams including lineage metadata for user/assistant roles. */
+function expectedParams(input: any): RpcRememberParams {
+  const actor = input.origin.actor;
+  const metadata = actor === "user" || actor === "assistant" ? { origin_role: actor, lineage_mode: "direct", parent_recall_ids: [] } : {};
+  return RpcRememberParams.parse({ episode: { schema: input.schema, content: input.content, time: input.time, origin: input.origin, properties: input.properties }, source_revision: input.source_revision, expected_previous_revision_key: null, ...metadata });
+}
 function identity(params: RpcRememberParams) {
   const value = { digest_version: 1, params }, keys = new Set<string>();
   const collect = (v: unknown) => { if (v && typeof v === "object") for (const [k, child] of Object.entries(v)) { if (!Array.isArray(v)) keys.add(k); collect(child); } };
@@ -62,7 +69,7 @@ test("preserves parser bodies, nested roots, headers, delegation, compaction and
   const expected = await collectClaudeRaw(source), m = mock(cp);
   await ingestClaudeRaw(source, cp, m.client);
   expect(m.params).toHaveLength(expected.length);
-  for (const { input } of expected) expect(m.params.find(p => p.episode.origin.record === input.origin.record)).toEqual(RpcRememberParams.parse({ episode: { schema: input.schema, content: input.content, time: input.time, origin: input.origin, properties: input.properties }, source_revision: input.source_revision, expected_previous_revision_key: null }));
+  for (const { input } of expected) expect(m.params.find(p => p.episode.origin.record === input.origin.record)).toEqual(expectedParams(input));
   expect(m.params.map(p => p.episode.origin.record)).toEqual(["child", "compact", "turn", "summary", "mixed:content:1"]);
   expect((await saved(cp)).next).toBe(5);
 }));
@@ -157,4 +164,21 @@ test("missing, empty, symlinked and checkpoint-inside-export inputs fail explici
   await mkdir(source + "/empty"); await expect(ingestClaudeRaw(source + "/empty", cp, m.client)).rejects.toThrow("source_no_export_files");
   await symlink(source + "/home", source + "/link"); await expect(ingestClaudeRaw(source, cp, m.client)).rejects.toThrow("source_symlink"); await rm(source + "/link");
   await expect(ingestClaudeRaw(source, source + "/checkpoint.json", m.client)).rejects.toThrow("source_checkpoint_path_conflict"); expect(m.methods).toEqual([]);
+}));
+
+test("user and assistant records include lineage metadata (origin_role, lineage_mode, parent_recall_ids)", () => fixture(async (source, cp, path) => {
+  await writeFile(path, line({ type: "session", sessionId: "test" }) + line(turn("user msg", "user-turn")) + line({ type: "assistant", uuid: "asst-turn", timestamp: "2026-03-01T00:00:01Z", message: { content: [{ type: "text", text: "assistant msg" }] } }));
+  const m = mock(cp);
+  await ingestClaudeRaw(source, cp, m.client);
+  expect(m.params).toHaveLength(2);
+  const userRecord = m.params.find(p => p.episode.origin.record === "user-turn");
+  expect(userRecord).toBeDefined();
+  expect(userRecord!.origin_role).toBe("user");
+  expect(userRecord!.lineage_mode).toBe("direct");
+  expect(userRecord!.parent_recall_ids).toEqual([]);
+  const assistantRecord = m.params.find(p => p.episode.origin.record === "asst-turn");
+  expect(assistantRecord).toBeDefined();
+  expect(assistantRecord!.origin_role).toBe("assistant");
+  expect(assistantRecord!.lineage_mode).toBe("direct");
+  expect(assistantRecord!.parent_recall_ids).toEqual([]);
 }));
