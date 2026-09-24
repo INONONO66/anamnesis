@@ -72,13 +72,32 @@ async function remember(record, content, session = 'small', previous = null, sou
 }
 const log = (name, value) => console.log(JSON.stringify({ checkpoint: name, value }));
 const contextRecords = result => result.context_text ? result.context_text.split('\n').map(line => JSON.parse(line)) : [];
+// Exact events, never timing: a named daemon stdout event, or the provider request for one exact input.
+const daemonEvent = name => new Promise((resolve, reject) => {
+  const timer = setTimeout(() => { daemon.lines.off('line', onLine); reject(Error(`${name} deadline`)); }, 20000);
+  const onLine = line => { if (JSON.parse(line).event === name) { clearTimeout(timer); daemon.lines.off('line', onLine); resolve(); } };
+  daemon.lines.on('line', onLine);
+});
+const providerRequest = input => new Promise((resolve, reject) => {
+  const timer = setTimeout(() => { signals.off('request', onRequest); reject(Error('provider request deadline')); }, 20000);
+  const onRequest = request => { if (request.input === input) { clearTimeout(timer); signals.off('request', onRequest); resolve(); } };
+  signals.on('request', onRequest);
+});
 try {
   await start();
   assert.deepEqual((await client.request('status', {})).capabilities.recall, true);
   assert.equal((await client.request('status', {})).capabilities.embeddings, true);
+  // The daemon embeds every committed original on its own lane. A rejecting provider lets it quarantine both
+  // originals first, so every later provider call is attributable and the explicit recovery starts from nothing.
+  mode = 'fail';
+  const originalsAsked = Promise.all([providerRequest('document: needle A\né🙂'), providerRequest('document: unrelated original')]);
   const a = await remember('a', 'needle A\né🙂'), b = await remember('b', 'unrelated original');
+  await originalsAsked; await daemonEvent('workers_idle');
+  assert.deepEqual(await query('MATCH (x:EmbeddingAttempt) RETURN x.state AS state, x.reason AS reason ORDER BY x.episode_id'),
+    [{ state: 'quarantined', reason: 'provider_rejected' }, { state: 'quarantined', reason: 'provider_rejected' }]);
+  assert.equal((await query('MATCH (o:Outbox) WHERE o.processed_at IS NULL RETURN o')).length, 0);
   const failedRequest = { episode_id: a.id, operation_id: uuid() };
-  mode = 'fail'; const failed = await client.request('embedding.recover', failedRequest);
+  const failed = await client.request('embedding.recover', failedRequest);
   assert.equal(failed.state, 'quarantined'); assert.equal(failed.reason, 'provider_rejected');
   const count = calls; assert.deepEqual(await client.request('embedding.recover', failedRequest), failed); assert.equal(calls, count);
   assert.equal((await query('MATCH (v:EmbeddingVector) RETURN v')).length, 0);
@@ -169,7 +188,7 @@ try {
   // Exact HTTP request event follows the durable pending write. Kill there,
   // restart, and resume the same operation ID rather than creating duplicate work.
   const pendingRequest = { episode_id: b.id, operation_id: uuid() }; mode = 'hold';
-  const requested = once(signals, 'request', { signal: AbortSignal.timeout(10000) });
+  const requested = providerRequest('document: unrelated original');
   const pendingReply = client.request('embedding.recover', pendingRequest).catch(error => error);
   await requested;
   assert.equal(JSON.parse((await query('MATCH (a:EmbeddingAttempt {operation_id:$id}) RETURN a.body AS body', { id: pendingRequest.operation_id }))[0].body).state, 'pending');
@@ -186,16 +205,6 @@ try {
   assert.equal((await client.request('commit', allowedFeedback)).applied, false);
   assert.deepEqual((await client.request('hit-cache.verify', {})).issues, []);
   // A quarantined Episode returns to the outbox through embedding.requeue; the call itself wakes the lane.
-  const daemonEvent = name => new Promise((resolve, reject) => {
-    const timer = setTimeout(() => { daemon.lines.off('line', onLine); reject(Error(`${name} deadline`)); }, 20000);
-    const onLine = line => { if (JSON.parse(line).event === name) { clearTimeout(timer); daemon.lines.off('line', onLine); resolve(); } };
-    daemon.lines.on('line', onLine);
-  });
-  const providerRequest = input => new Promise((resolve, reject) => {
-    const timer = setTimeout(() => { signals.off('request', onRequest); reject(Error('provider request deadline')); }, 20000);
-    const onRequest = request => { if (request.input === input) { clearTimeout(timer); signals.off('request', onRequest); resolve(); } };
-    signals.on('request', onRequest);
-  });
   mode = 'fail';
   const candidateAsked = providerRequest('document: requeue candidate');
   const c = await remember('c', 'requeue candidate', 'small');

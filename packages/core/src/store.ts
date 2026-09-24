@@ -1979,7 +1979,8 @@ export class Store {
   /** One explicit retry operation per Episode. Reusing a completed operation is
    * a no-op; retry a quarantined or deferred attempt with a new operation ID. Pending
    * rows can resume after process loss. Provider work never runs in a retried DB tx.
-   * An operator-driven recover never exhausts: transient failures always defer. */
+   * An operator-driven recover never exhausts: transient failures always defer. A terminal
+   * outcome retires the Episode's queued outbox entry, so the worker has nothing left to do. */
   async recoverEmbedding(input: RpcEmbeddingRecoverParams, context: InstallationContext): Promise<RpcEmbeddingAttempt> {
     return this.attemptEmbedding(input, context, true);
   }
@@ -2037,6 +2038,11 @@ export class Store {
       }
       await tx.run(`MATCH (a:EmbeddingAttempt {operation_id:$id}) SET a.body=$body,a.state=$state,a.reason=$reason`,
         { id: request.operation_id, body: canonicalJson(attempt), state: attempt.state, reason: attempt.reason });
+      // A terminal outcome retires the Episode's live outbox entry in the same transaction, whoever attempted it: an
+      // explicit quarantine leaves nothing for the worker. A deferral keeps the entry, and its retry budget, untouched.
+      if (attempt.state !== "deferred") await tx.run(
+        `MATCH (o:Outbox {element_id:$episode}) WHERE o.processed_at IS NULL SET o.processed_at=$now`,
+        { episode: request.episode_id, now: new Date().toISOString() });
       return attempt;
     });
   }
@@ -2571,7 +2577,8 @@ export class Store {
 
   /** A transient provider failure defers the entry: it stays in the outbox with exponential backoff and a per-entry
    * budget of EMBEDDING_MAX_DEFERRALS; the transient failure after that quarantines it as provider_unavailable_exhausted.
-   * Deterministic failures quarantine at once. Retries happen on later passes, never in a loop of their own. */
+   * Deterministic failures quarantine at once. Retries happen on later passes, never in a loop of their own.
+   * A terminal attempt retires its entry itself (see attemptEmbedding). */
   async drainEmbeddingOutbox(limit = 100, context: InstallationContext = { principal: "installation", commit_mode: "auto" }):
     Promise<{ drained: number; quarantined: number; deferred: number; deferral_reason: string | null } | { drained: 0; reason: "embeddings_disabled" }> {
     const bounded = z.number().int().min(1).max(1000).parse(limit);
@@ -2581,7 +2588,6 @@ export class Store {
     for (const entry of await this.dueOutbox(bounded, this.clock())) {
       const attempt = await this.attemptEmbedding({ operation_id: uuidv7(), episode_id: z.uuidv7().parse(entry.id) }, context, entry.deferrals < EMBEDDING_MAX_DEFERRALS);
       if (attempt.state === "succeeded" || attempt.state === "quarantined") {
-        await this.markProcessed([entry.id]);
         drained++;
         if (attempt.state === "quarantined") quarantined++;
       } else {

@@ -145,6 +145,25 @@ test("a transient provider failure defers the outbox entry with backoff; fresh e
     expect(await f.engine.recoverEmbedding({ episode_id: bad, operation_id: manual.operation_id }, f.context)).toEqual(manual);
     expect(f.state.calls).toBe(calls);
     expect(await f.vectors(bad)).toBe(0);
+    // An explicit quarantine retires the queued entry: nothing is left for the worker, and requeue can reach the Episode.
+    f.state.mode = "rejected";
+    const handled = await f.remember("handled");
+    expect(await f.engine.recoverEmbedding({ episode_id: handled, operation_id: Bun.randomUUIDv7() }, f.context)).toMatchObject({ state: "quarantined", reason: "provider_rejected" });
+    expect(await f.outbox(handled)).toMatchObject([{ processed_at: expect.any(String) }]);
+    const settled = f.state.calls;
+    expect(await f.engine.drainEmbeddingOutbox(100)).toEqual({ drained: 0, quarantined: 0, deferred: 0, deferral_reason: null });
+    expect(f.state.calls).toBe(settled);
+    // An explicit deferral leaves the entry queued with its budget untouched; the worker still owns the retry.
+    f.state.mode = "unavailable";
+    const wobbly = await f.remember("wobbly");
+    expect(await f.engine.recoverEmbedding({ episode_id: wobbly, operation_id: Bun.randomUUIDv7() }, f.context)).toMatchObject({ state: "deferred", reason: "provider_unavailable" });
+    expect(await f.outbox(wobbly)).toEqual([{ processed_at: null, deferrals: null, retry_after: null }]);
+    f.state.mode = "ok";
+    expect(await f.engine.drainEmbeddingOutbox(100)).toEqual({ drained: 1, quarantined: 0, deferred: 0, deferral_reason: null });
+    expect([await f.vectors(wobbly), await f.vectors(handled)]).toEqual([1, 0]);
+    expect(await f.engine.requeueQuarantinedEmbeddings({ limit: 10, reasons: ["provider_rejected"] }, f.context)).toEqual({ requeued: 2 }); // bad and handled
+    expect(await f.engine.drainEmbeddingOutbox(100)).toEqual({ drained: 2, quarantined: 0, deferred: 0, deferral_reason: null });
+    expect([await f.vectors(bad), await f.vectors(handled)]).toEqual([1, 1]);
   } finally { await f.close(); }
 }, 60000);
 

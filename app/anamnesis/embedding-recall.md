@@ -46,6 +46,11 @@ Neither its retrieval accuracy nor a private model's efficacy is claimed.
 - Reusing a completed operation is a durable no-op. Retry a quarantined or
   deferred attempt with a new operation ID; reuse a pending ID after process
   interruption.
+- A terminal outcome (`succeeded` or `quarantined`) retires the Episode's
+  queued outbox entry in the same transaction, whether the daemon's embedding
+  lane or an explicit `embedding.recover` produced it: an explicit quarantine
+  leaves nothing for the worker and the Episode is eligible for requeue. A
+  deferral leaves the entry, and its retry budget, untouched.
 - The outbox drain keeps a deferred Episode queued with exponential backoff
   (30 s doubling, capped at 1 h) for at most 8 deferrals; the next transient
   failure quarantines it as `provider_unavailable_exhausted`. Never-deferred
