@@ -1,0 +1,32 @@
+#!/bin/sh
+# Usage: anamnesis-ingest-source <codex|claude|vault-codex|vault-claude-code|vault-opencode|vault-slack|vault-discord|vault-gjc|vault-pi>
+# Native sources use their raw adapters (only codex and claude exist on inonono; omo/agentlog live elsewhere);
+# vault-* sources go through vault-to-snapshots (newest-first)
+# and the generic 'ingest' adapter, one shard per run so a 30-minute timer drains the backlog gradually.
+set -eu
+src=$1
+: "${ANAMNESIS_REPO:?}" "${ANAMNESIS_INGEST_STATE:?}" "${VAULT_ROOT:?}"
+mkdir -p "$ANAMNESIS_INGEST_STATE/$src"
+ops="$ANAMNESIS_REPO/dist/anamnesis-ops.mjs"
+export ANAMNESIS_RUNTIME_ROOT ANAMNESIS_RPC_TCP ANAMNESIS_RPC_TCP_TOKEN_FILE ANAMNESIS_RUNTIME_TOKEN_FILE
+case "$src" in
+  codex)    exec node "$ops" ingest-codex-raw  "$HOME/.codex/sessions"  "$ANAMNESIS_INGEST_STATE/$src/checkpoint.json" ;;
+  claude)   exec node "$ops" ingest-claude-raw "$HOME/.claude/projects" "$ANAMNESIS_INGEST_STATE/$src/checkpoint.json" ;;
+  vault-*)
+    name=${src#vault-}
+    shards="$ANAMNESIS_INGEST_STATE/$src/shards"
+    if [ ! -f "$shards/manifest.json" ]; then
+      node "$ANAMNESIS_REPO/dist/vault-to-snapshots.mjs" --root "$VAULT_ROOT/$name" --out "$shards"
+    fi
+    # Next shard = first snapshot without a completed marker. A failed ingest leaves no marker and
+    # exits non-zero (the timer unit shows failed); the checkpoint makes the retry resume mid-shard.
+    for shard in "$shards"/snapshot-*.jsonl; do
+      done_marker="$shard.done"
+      [ -f "$done_marker" ] && continue
+      node "$ops" ingest "$shard" "$shard.checkpoint.json"
+      touch "$done_marker"
+      exit 0
+    done
+    echo '{"event":"backlog_drained","source":"'"$src"'"}' ;;
+  *) echo "unknown source: $src" >&2; exit 2 ;;
+esac

@@ -1,0 +1,11 @@
+[Unit]
+Description=anamnesis ingest timer for source %i
+
+[Timer]
+OnBootSec=5m
+OnUnitActiveSec=30m
+RandomizedDelaySec=5m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

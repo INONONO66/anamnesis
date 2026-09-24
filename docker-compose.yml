@@ -1,6 +1,9 @@
 services:
   neo4j:
     image: neo4j:5.26-community
+    # backup/restore only operate on a container carrying this label equal to ANAMNESIS_QA_OWNER (OwnedNeo4jAdapter).
+    labels:
+      anamnesis.qa.owner: ${ANAMNESIS_QA_OWNER:-production}
     environment:
       NEO4J_AUTH: ${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:?Run bun scripts/gen-password.ts first}
       NEO4J_server_memory_heap_initial__size: ${NEO4J_HEAP:-1G}

@@ -126,6 +126,38 @@ test("TCP peer presenting the bearer completes hello and status while UDS is unc
   });
 }, 60_000);
 
+test("ops CLI in ANAMNESIS_RPC_TCP mode reaches a remote daemon and refuses a non-0600 token file", async () => {
+  await fixture(tokenFile(0o600), async daemon => {
+    const { host, port } = (await daemon.listening).tcp!;
+    const clientRoot = await mkdtemp("/tmp/ana-tcp-client-"); // no socket or token here: only TCP can succeed
+    try {
+      const bearerFile = join(clientRoot, "bearer"), installationFile = join(clientRoot, "installation");
+      await writeFile(bearerFile, BEARER + "\n", { mode: 0o600 }); await chmod(bearerFile, 0o600);
+      await writeFile(installationFile, TOKEN + "\n", { mode: 0o600 }); await chmod(installationFile, 0o600);
+      const env = { ...process.env, ANAMNESIS_RUNTIME_ROOT: clientRoot, ANAMNESIS_RPC_TCP: `${host}:${port}`, ANAMNESIS_RPC_TCP_TOKEN_FILE: bearerFile, ANAMNESIS_RUNTIME_TOKEN_FILE: installationFile };
+      const ops = (extra: NodeJS.ProcessEnv = {}) => promisify(execFile)(process.execPath, ["app/anamnesis/ops.ts", "status"], { cwd: ROOT, env: { ...env, ...extra } }).then(r => ({ code: 0, ...r }), (error: { code?: number; stdout?: string; stderr?: string }) => ({ code: error.code ?? 1, stdout: error.stdout ?? "", stderr: error.stderr ?? "" }));
+
+      const ok = await ops();
+      expect(ok.code).toBe(0);
+      const status = JSON.parse(ok.stdout.trim().split("\n").at(-1)!);
+      expect(status.version).toBe(1);
+      expect(status.storage).toBe("unavailable");
+
+      await chmod(installationFile, 0o644);
+      const refused = await ops();
+      expect(refused.code).not.toBe(0);
+      expect(refused.stderr).toContain("ANAMNESIS_RUNTIME_TOKEN_FILE");
+      expect(refused.stdout + refused.stderr).not.toContain(TOKEN);
+      expect(refused.stdout + refused.stderr).not.toContain(BEARER);
+
+      const malformed = await ops({ ANAMNESIS_RPC_TCP: host });
+      expect(malformed.code).not.toBe(0);
+      expect(malformed.stderr).toContain("ANAMNESIS_RPC_TCP must be host:port");
+    } finally { await rm(clientRoot, { recursive: true, force: true }); }
+    expect(daemon.output()).not.toContain(BEARER);
+  });
+}, 60_000);
+
 test("wrong or missing bearer is refused with unauthorized and the TCP connection is closed", async () => {
   await fixture(tokenFile(0o600), async daemon => {
     const port = (await daemon.listening).tcp!.port;
