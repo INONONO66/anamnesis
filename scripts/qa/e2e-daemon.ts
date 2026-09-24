@@ -191,7 +191,14 @@ export async function runE2eDaemon(evidence = resolve(".omo/evidence/auto-pipeli
     await ready(); await startDaemon();
     // Subscribed before the first remember: no idle transition emitted during or after ingest can be missed.
     const idle = lines!.subscribe("workers_idle");
-    client = await connect(); const rpc = client;
+    client = await connect();
+    // The daemon destroys sockets idle for 30s (daemon.ts socket.setTimeout); the workers stage waits far longer between
+    // idle transitions, so every request goes through a connection that is reopened when the previous one was closed.
+    const closedTransport = (error: unknown) => error instanceof Error && /RPC connection (is )?closed/.test(error.message);
+    const rpc = { request: (async (method, params) => {
+      try { return await client!.request(method, params); }
+      catch (error) { if (!closedTransport(error)) throw error; await client!.close().catch(() => undefined); client = await connect(); return await client.request(method, params); }
+    }) as RpcClient["request"] };
     const initial = await rpc.request("status", {});
     assert.equal(initial.capabilities.extraction, true, "daemon_extraction_capability_missing"); assert.equal(initial.capabilities.embeddings, true, "daemon_embeddings_capability_missing");
     assert.notEqual(initial.workers.extraction.state, "unconfigured", "extraction_lane_unconfigured");
