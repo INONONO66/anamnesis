@@ -114,28 +114,38 @@ test("built Node misc snapshots: exact UDS identities/payload/outbox, UNKNOWN, r
     const params = [pa, pb, pb, pc, pd, pe], unique = [pa, pb, pc, pd, pe];
     await record("fixture.json", { files: Object.fromEntries(Object.entries(bodies).map(([name, bytes]) => [name, hash(bytes)])), params, payload: { hash: hash(payload), bytes: payload.length } });
 
-    // Uploaded object exists, but remember never reached daemon. Recover only by
-    // status: UNKNOWN is retained, with no retransmission/object upload.
+    // Uploaded object exists, but remember never reached daemon. The daemon
+    // disowns that identity (UNKNOWN for its own incarnation, storage available),
+    // so the resume retires the pending record and resends it from the
+    // checkpoint; the already committed object is reused, never re-chunked.
     const unknown = await gate(root, "request"); gates.push(unknown);
     const unknownCp = join(root, "unknown.json"), unknownHeld = once(unknown.events, "held", { signal: AbortSignal.timeout(30_000) });
     const unknownCli = run(unknownCp, unknown.path);
     const unknownOutcome = await Promise.race([unknownHeld.then(([request]) => ({ request })), unknownCli.done.then(result => ({ result }))]);
     if (!("request" in unknownOutcome)) throw new Error(`ops ended before request: ${JSON.stringify(unknownOutcome)}`);
     expect(unknownOutcome.request.params).toEqual(pa); unknown.drop(); const unknownExit = await unknownCli.done; expect(unknownExit.code).toBe(1); expect(unknownExit.output).toContain("outcome_unknown");
-    const unknownCursor = await readFile(unknownCp), unknownPending = await readFile(unknownCp + ".pending.json");
-    const unknownObserve = await gate(root, false); gates.push(unknownObserve);
-    const unresolved = await run(unknownCp, unknownObserve.path).done;
-    expect(unresolved.code).toBe(1); expect(unresolved.output).toContain("source_pending_unknown");
-    expect(unknownObserve.requests.map(r => r.method)).toEqual(["status", "ingest.status"]);
-    expect(await readFile(unknownCp)).toEqual(unknownCursor); expect(await readFile(unknownCp + ".pending.json")).toEqual(unknownPending);
+    const unknownCursor = await json(unknownCp), unknownPending = await json(unknownCp + ".pending.json");
+    expect(unknownCursor.next).toBe(0); expect(unknownPending.identity).toEqual(identity(pa, status.data_incarnation));
+    expect(await client.request("ingest.status", unknownPending.identity)).toEqual({ state: "unknown", ...unknownPending.identity, storage: "available" });
     expect((await driver.executeQuery("MATCH (e:Episode) RETURN count(e) AS n")).records[0]!.get("n")).toBe(0);
-    await record("unknown.json", { exit: unknownExit, resumed: unresolved, cursor: JSON.parse(unknownCursor.toString()), pendingIdentity: (await json(unknownCp + ".pending.json")).identity, requests: unknownObserve.requests });
+    const unknownObserve = await gate(root, false); gates.push(unknownObserve);
+    const disowned = await run(unknownCp, unknownObserve.path).done;
+    expect(disowned.code).toBe(0); expect(disowned.output).toContain('"event":"pending_retired","reason":"daemon_unknown","index":0');
+    expect(unknownObserve.requests.map(r => r.method)).toEqual(["status", "ingest.status", "object.begin", ...params.map(() => "remember")]);
+    expect(unknownObserve.requests.filter(r => r.method === "remember").map(r => r.params)).toEqual(params);
+    expect(unknownObserve.responses.find(r => r.method === "object.begin")?.result).toMatchObject({ state: "committed", object: { hash: hash(payload), size: payload.length } });
+    const disownedCursor = await json(unknownCp); expect(disownedCursor.next).toBe(params.length); expect(disownedCursor.last).toEqual(identity(pe, status.data_incarnation));
+    await expect(stat(unknownCp + ".pending.json")).rejects.toMatchObject({ code: "ENOENT" });
+    expect((await driver.executeQuery("MATCH (e:Episode) RETURN count(e) AS n")).records[0]!.get("n")).toBe(unique.length);
+    await record("unknown.json", { exit: unknownExit, resumed: disowned, cursor: disownedCursor, pendingIdentity: unknownPending.identity, requests: unknownObserve.requests });
 
     const loss = await gate(root, "reply"); gates.push(loss);
     const held = once(loss.events, "held", { signal: AbortSignal.timeout(30_000) }), losing = run(cp, loss.path);
     const outcome = await Promise.race([held.then(([reply]) => ({ reply })), losing.done.then(result => ({ result }))]);
     if (!("reply" in outcome)) throw new Error(`ops ended before commit: ${JSON.stringify(outcome)}`);
-    expect(outcome.reply.result).toMatchObject({ ...identity(pa, status.data_incarnation), state: "committed" });
+    // pa was already committed by the disowned resend above: this genuine reply
+    // is the daemon's identity match for the same delivery, not a second episode.
+    expect(outcome.reply.result).toMatchObject({ ...identity(pa, status.data_incarnation), state: "committed", created: false });
     expect((await json(cp)).next).toBe(0); const pending = await json(cp + ".pending.json");
     expect(pending.params).toEqual(pa); expect(pending.identity).toEqual(identity(pa, status.data_incarnation));
     expect(pending.context).toEqual({ file: aside, line: 2, native_source_revision: pa.source_revision });

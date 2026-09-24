@@ -21,7 +21,7 @@ async function fixture(body: string, run: (source: string, cp: string, file: str
     console.log(JSON.stringify({ event: "unit_fixture_cleanup", family: "gjc", owned, remaining: [] }));
   }
 }
-function client(cp: string, state = "committed") { const methods: string[] = []; const seen = new Map<string, any>(); const c = Object.assign(Object.create(RpcClient.prototype), { request: async (method: string, input: any) => { methods.push(method); if (method === "status") return { data_incarnation: incarnation }; if (method === "ingest.status") return { ...input, state: seen.get(JSON.stringify(input))?.state ?? state }; if (method === "remember") { const p = JSON.parse(await readFile(cp + ".pending.json", "utf8")); const result = { ...p.identity, state: "committed" }; seen.set(JSON.stringify(p.identity), result); return result; } throw new Error(`unexpected ${method}`); } }); return { client: c, methods }; }
+function client(cp: string, state = "committed") { const methods: string[] = []; const seen = new Map<string, any>(); const c = Object.assign(Object.create(RpcClient.prototype), { request: async (method: string, input: any) => { methods.push(method); if (method === "status") return { data_incarnation: incarnation, storage: "available" }; if (method === "ingest.status") { const s = seen.get(JSON.stringify(input))?.state ?? state; return { ...input, state: s, ...(s === "unknown" ? { storage: "available" } : {}) }; } if (method === "remember") { const p = JSON.parse(await readFile(cp + ".pending.json", "utf8")); const result = { ...p.identity, state: "committed" }; seen.set(JSON.stringify(p.identity), result); return result; } throw new Error(`unexpected ${method}`); } }); return { client: c, methods }; }
 
 test("session inheritance, joined text, compaction, exclusions, masking, payload, IDs and revisions", async () => fixture(session + message("A", "hello\npassword=supersecret", "2026-01-01T00:00:00Z") + line({ type: "compaction", id: "C", timestamp: "2026-01-01T00:00:01Z", summary: "old context" }) + line({ type: "message", id: "T", timestamp: "2026-01-01T00:00:02Z", message: { role: "toolResult", content: [{ type: "text", text: "ignored" }] } }), async (source, cp) => { const m = client(cp); await ingestGjcRaw(source, cp, m.client as any); expect((await JSON.parse(await readFile(cp, "utf8"))).next).toBe(2); expect(m.methods.filter(x => x === "remember")).toHaveLength(2); const pending = await stat(cp).then(() => true); expect(pending).toBe(true); }));
 
@@ -31,4 +31,17 @@ for (const [name, body, error] of [["partial", session + JSON.stringify({ type: 
 
 test("symlink, permission and checkpoint boundary are explicit", async () => fixture(session + message("A", "x"), async (source, cp) => { await symlink(source + "/home", source + "/link"); const m = client(cp); await expect(ingestGjcRaw(source, cp, m.client as any)).rejects.toThrow("source_symlink"); await rm(source + "/link"); await expect(ingestGjcRaw(source, source + "/checkpoint.json", m.client as any)).rejects.toThrow("source_checkpoint_path_conflict"); }));
 
-test("unknown/spooled outcomes never retransmit or advance", async () => fixture(session + message("A", "x"), async (source, cp) => { const first = client(cp); first.client.request = async (method: string) => { if (method === "status") return { data_incarnation: incarnation }; throw new Error("lost reply"); }; await expect(ingestGjcRaw(source, cp, first.client as any)).rejects.toThrow("lost reply"); const m = client(cp, "unknown"); await expect(ingestGjcRaw(source, cp, m.client as any)).rejects.toThrow("source_pending_unknown"); expect(await stat(cp + ".pending.json")).toBeTruthy(); expect((JSON.parse(await readFile(cp, "utf8"))).next).toBe(0); }));
+test("spooled and foreign-incarnation outcomes never retransmit or advance; unknown from the same ready incarnation is retired and resent", async () => fixture(session + message("A", "x"), async (source, cp) => {
+  const first = client(cp); first.client.request = async (method: string) => { if (method === "status") return { data_incarnation: incarnation, storage: "available" }; throw new Error("lost reply"); };
+  await expect(ingestGjcRaw(source, cp, first.client as any)).rejects.toThrow("lost reply");
+  const before = await readFile(cp), pending = await readFile(cp + ".pending.json");
+  const spooled = client(cp, "spooled"); await expect(ingestGjcRaw(source, cp, spooled.client as any)).rejects.toThrow("source_pending_spooled"); expect(spooled.methods).toEqual(["status", "ingest.status"]);
+  const foreign = client(cp, "unknown"); foreign.client.request = async (method: string) => { expect(method).toBe("status"); return { data_incarnation: "33333333-3333-4333-8333-333333333333", storage: "available" }; };
+  await expect(ingestGjcRaw(source, cp, foreign.client as any)).rejects.toThrow("incarnation_mismatch");
+  expect(await readFile(cp)).toEqual(before); expect(await readFile(cp + ".pending.json")).toEqual(pending);
+  // The daemon holds nothing for the lost delivery: UNKNOWN from the same ready
+  // incarnation retires the pending record and resends it from the checkpoint.
+  const m = client(cp, "unknown"); await ingestGjcRaw(source, cp, m.client as any);
+  expect(m.methods).toEqual(["status", "ingest.status", "remember"]);
+  await expect(stat(cp + ".pending.json")).rejects.toMatchObject({ code: "ENOENT" }); expect((JSON.parse(await readFile(cp, "utf8"))).next).toBe(1);
+}));

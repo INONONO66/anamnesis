@@ -24,7 +24,7 @@ function transport() {
   const client = { async request(method: string, p: any) {
     methods.push(method);
     if (method === "status") return { data_incarnation: incarnation };
-    if (method === "ingest.status") return bindings.get(p.revision_key) ?? { ...p, state: "unknown" };
+    if (method === "ingest.status") return bindings.get(p.revision_key) ?? { ...p, state: "unknown", storage: "available" };
     if (method === "object.begin") { uploading = { ...p, chunks: [] }; return { state: "uploading", upload_id: randomUUID() }; }
     if (method === "object.chunk") { expect(p.seq).toBe(uploading.chunks.length); uploading.chunks.push(Buffer.from(p.bytes_b64, "base64")); return { next_seq: p.seq + 1 }; }
     if (method === "object.commit") { const body = Buffer.concat(uploading.chunks); expect(body.length).toBe(uploading.size); expect(hash(body)).toBe(uploading.sha256); objects.set(uploading.sha256, body); return { hash: uploading.sha256, size: body.length, media_type: uploading.media_type }; }

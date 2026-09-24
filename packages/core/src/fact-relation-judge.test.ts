@@ -98,8 +98,8 @@ test("relation judge gates validated Facts: invalidates, chain refusal, duplicat
       expect(await f.query("MATCH (v:FactRelationVerdict) RETURN count(v) AS count")).toEqual([{ count: 0 }]);
     }
     expect(f.relationInputs).toHaveLength(2);
-    expect(await f.query("MATCH (p:FactRelationInput {source_episode_id:$source}) RETURN p.candidates AS candidates, p.last_failure AS failure", { source: second.source.id }))
-      .toEqual([{ candidates: 1, failure: "provider_mismatch" }]);
+    expect(await f.query("MATCH (p:FactRelationInput {source_episode_id:$source}) RETURN p.candidates AS candidates, p.last_failure AS failure, p.last_failure_detail AS detail", { source: second.source.id }))
+      .toEqual([{ candidates: 1, failure: "provider_mismatch", detail: "digest" }]);
     const completed = await second.run();
     expect(completed.state === "known" && completed.relation_judge).toBe("complete");
     expect(completed.state === "known" && completed.semantic_writes).toBe(true);

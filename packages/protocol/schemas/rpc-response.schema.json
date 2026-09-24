@@ -91,7 +91,7 @@
                   "type": "object",
                   "properties": {
                     "methods": {
-                      "maxItems": 29,
+                      "maxItems": 30,
                       "type": "array",
                       "items": {
                         "type": "string",
@@ -124,7 +124,8 @@
                           "policy.revoke",
                           "recall",
                           "embedding.recover",
-                          "embedding.status"
+                          "embedding.status",
+                          "embedding.requeue"
                         ]
                       }
                     },
@@ -370,7 +371,7 @@
                   "type": "object",
                   "properties": {
                     "methods": {
-                      "maxItems": 29,
+                      "maxItems": 30,
                       "type": "array",
                       "items": {
                         "type": "string",
@@ -403,7 +404,8 @@
                           "policy.revoke",
                           "recall",
                           "embedding.recover",
-                          "embedding.status"
+                          "embedding.status",
+                          "embedding.requeue"
                         ]
                       }
                     },
@@ -1423,13 +1425,21 @@
                       "type": "string",
                       "format": "uuid",
                       "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
+                    "storage": {
+                      "type": "string",
+                      "enum": [
+                        "available",
+                        "unavailable"
+                      ]
                     }
                   },
                   "required": [
                     "state",
                     "revision_key",
                     "body_digest",
-                    "data_incarnation"
+                    "data_incarnation",
+                    "storage"
                   ],
                   "additionalProperties": false
                 },
@@ -3617,6 +3627,11 @@
                   "minimum": 0,
                   "maximum": 1000
                 },
+                "lost_leases": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 1000
+                },
                 "created_at": {
                   "type": "integer",
                   "minimum": 0,
@@ -3906,6 +3921,11 @@
                           "minimum": 0,
                           "maximum": 1000
                         },
+                        "lost_leases": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 1000
+                        },
                         "created_at": {
                           "type": "integer",
                           "minimum": 0,
@@ -4023,6 +4043,23 @@
                                   "type": "null"
                                 }
                               ]
+                            },
+                            "detail": {
+                              "type": "string",
+                              "enum": [
+                                "model",
+                                "incarnation",
+                                "envelope",
+                                "json",
+                                "normalize",
+                                "span",
+                                "judge_shape",
+                                "digest"
+                              ]
+                            },
+                            "reported_model": {
+                              "type": "string",
+                              "maxLength": 256
                             },
                             "created_at": {
                               "type": "integer",
@@ -4367,6 +4404,11 @@
                               "minimum": 0,
                               "maximum": 1000
                             },
+                            "lost_leases": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 1000
+                            },
                             "created_at": {
                               "type": "integer",
                               "minimum": 0,
@@ -4489,6 +4531,23 @@
                                   "type": "null"
                                 }
                               ]
+                            },
+                            "detail": {
+                              "type": "string",
+                              "enum": [
+                                "model",
+                                "incarnation",
+                                "envelope",
+                                "json",
+                                "normalize",
+                                "span",
+                                "judge_shape",
+                                "digest"
+                              ]
+                            },
+                            "reported_model": {
+                              "type": "string",
+                              "maxLength": 256
                             },
                             "created_at": {
                               "type": "integer",
@@ -5040,6 +5099,11 @@
                           "minimum": 0,
                           "maximum": 1000
                         },
+                        "lost_leases": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 1000
+                        },
                         "created_at": {
                           "type": "integer",
                           "minimum": 0,
@@ -5157,6 +5221,23 @@
                                   "type": "null"
                                 }
                               ]
+                            },
+                            "detail": {
+                              "type": "string",
+                              "enum": [
+                                "model",
+                                "incarnation",
+                                "envelope",
+                                "json",
+                                "normalize",
+                                "span",
+                                "judge_shape",
+                                "digest"
+                              ]
+                            },
+                            "reported_model": {
+                              "type": "string",
+                              "maxLength": 256
                             },
                             "created_at": {
                               "type": "integer",
@@ -5501,6 +5582,11 @@
                               "minimum": 0,
                               "maximum": 1000
                             },
+                            "lost_leases": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 1000
+                            },
                             "created_at": {
                               "type": "integer",
                               "minimum": 0,
@@ -5623,6 +5709,23 @@
                                   "type": "null"
                                 }
                               ]
+                            },
+                            "detail": {
+                              "type": "string",
+                              "enum": [
+                                "model",
+                                "incarnation",
+                                "envelope",
+                                "json",
+                                "normalize",
+                                "span",
+                                "judge_shape",
+                                "digest"
+                              ]
+                            },
+                            "reported_model": {
+                              "type": "string",
+                              "maxLength": 256
                             },
                             "created_at": {
                               "type": "integer",
@@ -7373,7 +7476,8 @@
                   "enum": [
                     "pending",
                     "succeeded",
-                    "quarantined"
+                    "quarantined",
+                    "deferred"
                   ]
                 },
                 "reason": {
@@ -7382,12 +7486,28 @@
                       "type": "string",
                       "enum": [
                         "provider_unavailable",
+                        "provider_unavailable_exhausted",
                         "provider_rejected",
                         "profile_mismatch",
                         "invalid_vector",
                         "input_too_large",
                         "stale_input"
                       ]
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "detail": {
+                  "default": null,
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 256,
+                      "pattern": "^(?:[^\\uD800-\\uDFFF]|[\\uD800-\\uDBFF][\\uDC00-\\uDFFF])*$",
+                      "x-maxUtf8Bytes": 256
                     },
                     {
                       "type": "null"
@@ -7407,7 +7527,8 @@
                 "created_at",
                 "completed_at",
                 "state",
-                "reason"
+                "reason",
+                "detail"
               ],
               "additionalProperties": false
             }
@@ -7544,7 +7665,8 @@
                       "enum": [
                         "pending",
                         "succeeded",
-                        "quarantined"
+                        "quarantined",
+                        "deferred"
                       ]
                     },
                     "reason": {
@@ -7553,12 +7675,28 @@
                           "type": "string",
                           "enum": [
                             "provider_unavailable",
+                            "provider_unavailable_exhausted",
                             "provider_rejected",
                             "profile_mismatch",
                             "invalid_vector",
                             "input_too_large",
                             "stale_input"
                           ]
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "detail": {
+                      "default": null,
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 256,
+                          "pattern": "^(?:[^\\uD800-\\uDFFF]|[\\uD800-\\uDBFF][\\uDC00-\\uDFFF])*$",
+                          "x-maxUtf8Bytes": 256
                         },
                         {
                           "type": "null"
@@ -7578,7 +7716,8 @@
                     "created_at",
                     "completed_at",
                     "state",
-                    "reason"
+                    "reason",
+                    "detail"
                   ],
                   "additionalProperties": false
                 },
@@ -7602,6 +7741,88 @@
                   "additionalProperties": false
                 }
               ]
+            }
+          },
+          "required": [
+            "jsonrpc",
+            "id",
+            "structure_revision",
+            "policy_revision",
+            "server_time",
+            "method",
+            "result"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "jsonrpc": {
+              "type": "string",
+              "const": "2.0"
+            },
+            "id": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128,
+                  "pattern": "^(?:[^\\uD800-\\uDFFF]|[\\uD800-\\uDBFF][\\uDC00-\\uDFFF])*$",
+                  "x-maxUtf8Bytes": 128
+                }
+              ]
+            },
+            "structure_revision": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "policy_revision": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "server_time": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "method": {
+              "type": "string",
+              "const": "embedding.requeue"
+            },
+            "result": {
+              "type": "object",
+              "properties": {
+                "requeued": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "requeued"
+              ],
+              "additionalProperties": false
             }
           },
           "required": [

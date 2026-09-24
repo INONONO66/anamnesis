@@ -30,7 +30,7 @@ import { RpcPolicySetParams, RpcPolicyRevokeParams, type RpcPolicyResult } from 
 import { ObjectStore } from "./objects.ts";
 import { EchoLineage, EpisodeLineageError, RecallLineageSelection, parseEpisodeLineage, type EpisodeLineageInput } from "../../protocol/src/episode-lineage.ts";
 import { SemanticClaimValidationError, SemanticResolvedTime, validateSemanticClaim, type SemanticSourceContext, type ValidatedSemanticClaim } from "../../protocol/src/semantic-claim.ts";
-import { CreateModelTask, ModelTaskCAS, LeaseModelTask, SettleModelTask, CompleteExtractionAttempt, AdvanceExtractionCoverage, SelectExtractionGeneration, ExtractionSelection, ReadExtractionCoverage, ExtractionCoverageRead, canonicalExtractionBody, extractionBodyDigest, FactRelationJudgement } from "../../protocol/src/extraction.ts";
+import { CreateModelTask, ModelTaskCAS, LeaseModelTask, SettleModelTask, CompleteExtractionAttempt, AdvanceExtractionCoverage, SelectExtractionGeneration, ExtractionSelection, ReadExtractionCoverage, ExtractionCoverageRead, canonicalExtractionBody, extractionBodyDigest, FactRelationJudgement, type ExtractionFailureDetail } from "../../protocol/src/extraction.ts";
 import { validateModelOutput, validateSourceSpans } from "./extraction.ts";
 import { ExtractionClaimContext, ExtractionJudgeInput, ExtractionPipeline, ExtractionDisposition, ExtractionAuditError, FactRelationContext } from '../../protocol/src/extraction-audit.ts';
 import { ProposeRetainedClaim, MaterializeRetainedClaim, ReviewRetainedClaim, MaterializationResult, FactRelationDecision, SemanticReviewPremises, SemanticResolution, SemanticReviewOutput, RetainedSemanticProposal, semanticReviewClaimBody } from "../../protocol/src/materialization.ts";
@@ -43,11 +43,14 @@ import { solvePpr } from "./dynamics/ppr.ts";
 import { ADOPTION_NUMERIC_VERSION } from "./dynamics/adoption-numeric.ts";
 import { attributeOutcome, normalizedRrf } from "./dynamics/ranking.ts";
 import { initialStability, retention } from "./dynamics/retention.ts";
-import { RpcEmbeddingRecoverParams, RpcEmbeddingAttempt, RpcRecallParams, RpcRecallResult, type RpcRecallItem, RpcDreamAdmitParams, RpcDreamJob, RpcDreamLeaseParams, RpcDreamExpireParams, RpcDreamExecuteParams } from "../../protocol/src/rpc.ts";
+import { RpcEmbeddingRecoverParams, RpcEmbeddingAttempt, RpcEmbeddingRequeueParams, type RpcEmbeddingRequeueResult, RpcRecallParams, RpcRecallResult, type RpcRecallItem, RpcDreamAdmitParams, RpcDreamJob, RpcDreamLeaseParams, RpcDreamExpireParams, RpcDreamExecuteParams } from "../../protocol/src/rpc.ts";
 import { EmbeddingError, embeddingProfileId, validateVector, type EmbeddingProvider } from "./embedding.ts";
 import { admittedBudget, packRecall, canonicalContext, RecallError, type Tokenizers, type RecallBundle } from "./recall.ts";
 import { receiptBodyDigestInput, canonicalReceiptJson } from "./receipt-digest.ts";
 import { DreamAdapterError, type DreamLeidenAdapter } from "./dream-leiden-adapter.ts";
+
+/** Internal lease request: the engine names the provider that will run the task (never an RPC caller). */
+const LeaseModelTaskWithProvider = LeaseModelTask.extend({ provider: z.strictObject({ model: ModelTask.shape.model, model_incarnation: ModelTask.shape.model_incarnation }).optional() });
 
 export type ConductingArcRow = {
   source_id: string; link_id: string; peer_id: string; role: string;
@@ -164,6 +167,11 @@ function arcIdentity(row: ConductingArcRow): string { return JSON.stringify([row
 function arcTuple(row: ConductingArcRow): string {
   return JSON.stringify([row.source_id, row.link_id, row.peer_id, row.role, row.generation, row.source_extraction_generation]);
 }
+
+/** Transient embedding failures keep an outbox entry queued this many times before it is quarantined as exhausted (#219). */
+const EMBEDDING_MAX_DEFERRALS = 8;
+/** Backoff before a deferred outbox entry is due again: 30 s doubling per deferral, capped at one hour. */
+const embeddingRetryDelay = (deferrals: number): number => Math.min(30_000 * 2 ** (deferrals - 1), 3_600_000);
 
 const SCHEMA_STATEMENTS = [
   `CREATE CONSTRAINT echo_lineage_episode IF NOT EXISTS FOR (l:EchoLineage) REQUIRE l.episode_id IS UNIQUE`,
@@ -1969,9 +1977,16 @@ export class Store {
   }
 
   /** One explicit retry operation per Episode. Reusing a completed operation is
-   * a no-op; retry a quarantined attempt with a new operation ID. Pending rows
-   * can resume after process loss. Provider work never runs in a retried DB tx. */
+   * a no-op; retry a quarantined or deferred attempt with a new operation ID. Pending
+   * rows can resume after process loss. Provider work never runs in a retried DB tx.
+   * An operator-driven recover never exhausts: transient failures always defer. A terminal
+   * outcome retires the Episode's queued outbox entry, so the worker has nothing left to do. */
   async recoverEmbedding(input: RpcEmbeddingRecoverParams, context: InstallationContext): Promise<RpcEmbeddingAttempt> {
+    return this.attemptEmbedding(input, context, true);
+  }
+
+  /** `deferrable` false turns a transient failure into the terminal provider_unavailable_exhausted quarantine (outbox budget spent). */
+  private async attemptEmbedding(input: RpcEmbeddingRecoverParams, context: InstallationContext, deferrable: boolean): Promise<RpcEmbeddingAttempt> {
     requireInstallation(context);
     const request = RpcEmbeddingRecoverParams.parse(input), provider = this.embeddingProvider;
     if (!provider) throw new RecallError("embedding_not_configured");
@@ -1988,15 +2003,17 @@ export class Store {
         throw new ReceiptError("idempotency_conflict");
       const attempt = old ?? RpcEmbeddingAttempt.parse({ ...request, profile_id: profileId, model: profile.model,
         model_incarnation: profile.model_incarnation, dimensions: profile.dimensions,
-        input_revision: row.get("revision"), input_digest: row.get("digest"), created_at: this.clock(), completed_at: null, state: "pending", reason: null });
+        input_revision: row.get("revision"), input_digest: row.get("digest"), created_at: this.clock(), completed_at: null, state: "pending", reason: null, detail: null });
       if (!old) await tx.run(`CREATE (:EmbeddingAttempt {operation_id:$id,episode_id:$episode,profile_id:$profile,state:'pending',body:$body})`,
         { id: request.operation_id, episode: request.episode_id, profile: profileId, body: canonicalJson(attempt) });
       return { attempt, content: row.get("content") };
     });
     if (prepared.attempt.state !== "pending") return prepared.attempt;
-    let vector: number[] | null = null, reason: RpcEmbeddingAttempt["reason"] = null;
+    let vector: number[] | null = null, reason: RpcEmbeddingAttempt["reason"] = null, detail: string | null = null;
     try { vector = validateVector(await provider.embed(prepared.content, "document"), profile); }
-    catch (error) { if (!(error instanceof EmbeddingError)) throw error; reason = error.reason; }
+    catch (error) { if (!(error instanceof EmbeddingError)) throw error; reason = error.reason; detail = error.detail?.slice(0, 256) ?? null; }
+    // provider_unavailable is the only transient reason: it defers (the Episode stays queued) until the caller's budget is spent.
+    if (reason === "provider_unavailable" && !deferrable) reason = "provider_unavailable_exhausted";
     return this.withWriteTx(async tx => {
       const policy = await this.receiptLockTx(tx);
       await this.authorizeEpisodesTx(tx, [request.episode_id], policy);
@@ -2006,7 +2023,8 @@ export class Store {
       const row = rows.records[0]!, prior = RpcEmbeddingAttempt.parse(JSON.parse(row.get("body")));
       if (prior.state !== "pending") return prior;
       if (row.get("revision") !== prior.input_revision || row.get("digest") !== prior.input_digest) reason = "stale_input";
-      const attempt = RpcEmbeddingAttempt.parse({ ...prior, state: reason ? "quarantined" : "succeeded", reason, completed_at: this.clock() });
+      const state = reason === null ? "succeeded" : reason === "provider_unavailable" ? "deferred" : "quarantined";
+      const attempt = RpcEmbeddingAttempt.parse({ ...prior, state, reason, detail, completed_at: this.clock() });
       if (!reason && vector) {
         const key = tupleHash([request.episode_id, profileId]);
         // First valid vector for this immutable input/model wins. Neither a
@@ -2018,9 +2036,41 @@ export class Store {
           SET m.structure_revision=coalesce(m.structure_revision,0)+CASE WHEN v.operation_id=$operation THEN 1 ELSE 0 END`,
           { key, episode: request.episode_id, profile: profileId, revision: prior.input_revision, digest: prior.input_digest, vector, operation: request.operation_id });
       }
-      await tx.run(`MATCH (a:EmbeddingAttempt {operation_id:$id}) SET a.body=$body,a.state=$state`,
-        { id: request.operation_id, body: canonicalJson(attempt), state: attempt.state });
+      await tx.run(`MATCH (a:EmbeddingAttempt {operation_id:$id}) SET a.body=$body,a.state=$state,a.reason=$reason`,
+        { id: request.operation_id, body: canonicalJson(attempt), state: attempt.state, reason: attempt.reason });
+      // A terminal outcome retires the Episode's live outbox entry in the same transaction, whoever attempted it: an
+      // explicit quarantine leaves nothing for the worker. A deferral keeps the entry, and its retry budget, untouched.
+      if (attempt.state !== "deferred") await tx.run(
+        `MATCH (o:Outbox {element_id:$episode}) WHERE o.processed_at IS NULL SET o.processed_at=$now`,
+        { episode: request.episode_id, now: new Date().toISOString() });
       return attempt;
+    });
+  }
+
+  /** Returns quarantined Episodes of the configured profile to the outbox as fresh entries (retry budget reset);
+   * their attempt rows stay for audit. Episodes that already hold a vector or an unprocessed entry are skipped. */
+  async requeueQuarantinedEmbeddings(input: RpcEmbeddingRequeueParams, context: InstallationContext): Promise<RpcEmbeddingRequeueResult> {
+    requireInstallation(context);
+    const request = RpcEmbeddingRequeueParams.parse(input), provider = this.embeddingProvider;
+    if (!provider) throw new RecallError("embedding_not_configured");
+    const profileId = embeddingProfileId(provider.profile);
+    return this.withWriteTx(async tx => {
+      // Rows written before a.reason existed carry the reason only in the body; lift it once so the filter sees it.
+      const legacy = await tx.run<{ id: string; body: string }>(
+        `MATCH (a:EmbeddingAttempt {state:'quarantined'}) WHERE a.reason IS NULL RETURN a.operation_id AS id,a.body AS body`);
+      if (legacy.records.length) await tx.run(`UNWIND $rows AS row MATCH (a:EmbeddingAttempt {operation_id:row.id}) SET a.reason=row.reason`,
+        { rows: legacy.records.map(row => ({ id: row.get("id"), reason: RpcEmbeddingAttempt.parse(JSON.parse(row.get("body"))).reason })) });
+      const rows = await tx.run<{ n: number }>(
+        `MATCH (a:EmbeddingAttempt {profile_id:$profile,state:'quarantined'}) WHERE $reasons IS NULL OR a.reason IN $reasons
+         WITH DISTINCT a.episode_id AS episode_id
+         MATCH (e:Element:Episode {id:episode_id})
+         WHERE NOT EXISTS { MATCH (v:EmbeddingVector {episode_id:episode_id,profile_id:$profile}) }
+           AND NOT EXISTS { MATCH (o:Outbox {element_id:episode_id}) WHERE o.processed_at IS NULL }
+         WITH e ORDER BY e.id LIMIT $limit
+         CREATE (o:Outbox {element_id:e.id,enqueued_at:$now,processed_at:null})-[:OF]->(e)
+         RETURN count(o) AS n`,
+        { profile: profileId, reasons: request.reasons ?? null, limit: neo4j.int(request.limit), now: new Date().toISOString() });
+      return { requeued: rows.records[0]!.get("n") };
     });
   }
 
@@ -2509,20 +2559,42 @@ export class Store {
     return rows.map((r) => r.id);
   }
 
-  /** Deferred entries stay in the outbox (non-terminal attempt, e.g. provider_unavailable) for a later pass. */
+  /** Unprocessed entries whose retry backoff has elapsed, never-deferred entries first so retries cannot starve fresh work. */
+  private async dueOutbox(limit: number, now: number): Promise<{ id: string; deferrals: number }[]> {
+    return this.run<{ id: string; deferrals: number }>(
+      `MATCH (o:Outbox) WHERE o.processed_at IS NULL AND (o.retry_after IS NULL OR o.retry_after <= $now)
+       RETURN o.element_id AS id, coalesce(o.deferrals, 0) AS deferrals ORDER BY deferrals, id LIMIT $limit`,
+      { now: neo4j.int(now), limit: neo4j.int(limit) },
+    );
+  }
+
+  private async deferOutbox(elementId: string, deferrals: number, retryAfter: number): Promise<void> {
+    await this.withWriteTx((tx) => tx.run(
+      `MATCH (o:Outbox {element_id:$id}) WHERE o.processed_at IS NULL SET o.deferrals=$deferrals, o.retry_after=$retry_after`,
+      { id: elementId, deferrals: neo4j.int(deferrals), retry_after: neo4j.int(retryAfter) },
+    ).then(() => undefined));
+  }
+
+  /** A transient provider failure defers the entry: it stays in the outbox with exponential backoff and a per-entry
+   * budget of EMBEDDING_MAX_DEFERRALS; the transient failure after that quarantines it as provider_unavailable_exhausted.
+   * Deterministic failures quarantine at once. Retries happen on later passes, never in a loop of their own.
+   * A terminal attempt retires its entry itself (see attemptEmbedding). */
   async drainEmbeddingOutbox(limit = 100, context: InstallationContext = { principal: "installation", commit_mode: "auto" }):
     Promise<{ drained: number; quarantined: number; deferred: number; deferral_reason: string | null } | { drained: 0; reason: "embeddings_disabled" }> {
     const bounded = z.number().int().min(1).max(1000).parse(limit);
     if (!this.embeddingProvider) return { drained: 0, reason: "embeddings_disabled" };
     let drained = 0, quarantined = 0, deferred = 0;
     let deferralReason: string | null = null;
-    for (const episodeId of await this.pending(bounded)) {
-      const attempt = await this.recoverEmbedding({ operation_id: uuidv7(), episode_id: z.uuidv7().parse(episodeId) }, context);
+    for (const entry of await this.dueOutbox(bounded, this.clock())) {
+      const attempt = await this.attemptEmbedding({ operation_id: uuidv7(), episode_id: z.uuidv7().parse(entry.id) }, context, entry.deferrals < EMBEDDING_MAX_DEFERRALS);
       if (attempt.state === "succeeded" || attempt.state === "quarantined") {
-        await this.markProcessed([episodeId]);
         drained++;
         if (attempt.state === "quarantined") quarantined++;
-      } else { deferred++; deferralReason = attempt.reason ?? attempt.state; }
+      } else {
+        const deferrals = entry.deferrals + 1;
+        await this.deferOutbox(entry.id, deferrals, this.clock() + embeddingRetryDelay(deferrals));
+        deferred++; deferralReason = attempt.reason ?? attempt.state;
+      }
     }
     return { drained, quarantined, deferred, deferral_reason: deferralReason };
   }
@@ -3090,16 +3162,20 @@ export class Store {
 
   /** Records the provider's answer for one premise: a verdict bound to the premise
    * digest (written once), or the failure reason that keeps the pipeline pending. */
-  async recordFactRelationVerdict(input: { key: string } & ({ judgements: FactRelationJudgement[]; model: string; model_incarnation: string } | { failure: string }), context: InstallationContext): Promise<void> {
+  async recordFactRelationVerdict(input: { key: string } & ({ judgements: FactRelationJudgement[]; model: string; model_incarnation: string; reported_model?: string } | { failure: string; detail?: ExtractionFailureDetail }), context: InstallationContext): Promise<void> {
     await this.extractionTx(context, async (tx, policy) => {
       const premise = await tx.run(`MATCH (i:FactRelationInput {occurrence_key:$key}) RETURN i.source_episode_id AS source, i.body_digest AS digest`, { key: input.key });
       const row = premise.records[0];
       if (!row) throw new ExtractionAuditError("extraction_audit_conflict");
       await this.authorizeEpisodesTx(tx, [String(row.get("source"))], policy);
-      if ("failure" in input) { await tx.run(`MATCH (i:FactRelationInput {occurrence_key:$key}) SET i.last_failure=$failure, i.failures=coalesce(i.failures,0)+1`, { key: input.key, failure: input.failure }); return; }
-      await tx.run(`MATCH (i:FactRelationInput {occurrence_key:$key}) SET i.last_failure=null
-        MERGE (v:FactRelationVerdict {occurrence_key:$key}) ON CREATE SET v.body_digest=$digest, v.judgements=$judgements, v.model=$model, v.model_incarnation=$incarnation`,
-        { key: input.key, digest: String(row.get("digest")), judgements: canonicalExtractionBody(z.array(FactRelationJudgement).max(16).parse(input.judgements)), model: input.model, incarnation: input.model_incarnation });
+      if ("failure" in input) {
+        await tx.run(`MATCH (i:FactRelationInput {occurrence_key:$key}) SET i.last_failure=$failure, i.last_failure_detail=$detail, i.failures=coalesce(i.failures,0)+1`,
+          { key: input.key, failure: input.failure, detail: input.detail ?? null });
+        return;
+      }
+      await tx.run(`MATCH (i:FactRelationInput {occurrence_key:$key}) SET i.last_failure=null, i.last_failure_detail=null
+        MERGE (v:FactRelationVerdict {occurrence_key:$key}) ON CREATE SET v.body_digest=$digest, v.judgements=$judgements, v.model=$model, v.model_incarnation=$incarnation, v.reported_model=$reported`,
+        { key: input.key, digest: String(row.get("digest")), judgements: canonicalExtractionBody(z.array(FactRelationJudgement).max(16).parse(input.judgements)), model: input.model, incarnation: input.model_incarnation, reported: input.reported_model ?? null });
     });
   }
 
@@ -3120,19 +3196,21 @@ export class Store {
     return parsed;
   }
 
-  async leaseModelTask(input: LeaseModelTask, context: InstallationContext): Promise<ModelTask> {
+  /** `provider` is the identity of the provider about to run the task; the leased task adopts it so a daemon whose
+   * provider changed between boots finishes inherited work instead of refusing it (#218). Absent, the task keeps its own. */
+  async leaseModelTask(input: LeaseModelTask & { provider?: Pick<ModelTask, "model" | "model_incarnation"> }, context: InstallationContext): Promise<ModelTask> {
     requireInstallation(context);
-    const request = LeaseModelTask.parse(input);
+    const request = LeaseModelTaskWithProvider.parse(input);
     return this.extractionTx(context, async (tx, policy) => {
       const task = await this.extractionRecordTx(tx, "ModelTask", request.task_id, ModelTask);
       this.checkExtractionCAS(task, request.expected_version);
-      if (task.state !== "queued" || task.attempts >= 1000) throw new Error("invalid_transition");
+      if (task.state !== "queued" || task.attempts >= 1000 || (task.lost_leases ?? 0) >= 1000) throw new Error("invalid_transition");
       await this.writableExtractionGenerationTx(tx, task.generation_id);
       await this.authorizeEpisodesTx(tx, [task.source_id], policy);
       await this.validateExtractionSourceTx(tx, task);
       await this.extractionNotCoveredTx(tx, task);
       const now = Math.max(task.updated_at, receiptTime.parse(this.clock()));
-      const leased = await this.saveExtractionTaskTx(tx, { ...task, state: "leased", version: task.version + 1, attempts: task.attempts + 1, attempt_id: uuidv7(), updated_at: now,
+      const leased = await this.saveExtractionTaskTx(tx, { ...task, ...request.provider, state: "leased", version: task.version + 1, attempts: task.attempts + 1, attempt_id: uuidv7(), updated_at: now,
         lease: { worker_id: request.worker_id, epoch: uuidv7(), writer_epoch: this.writerEpoch!, expires_at: now + request.lease_ms },
         policy_context: { revision: policy.policy_revision, authority: "installation" } });
       if (task.kind === 'judge_claims') {
@@ -3165,9 +3243,11 @@ export class Store {
   }
 
   private async finishExtractionTx(tx: ManagedTransaction, task: ModelTask, policy: PolicyState,
-    outcome: Pick<ExtractionAttempt, "state" | "reason" | "disposition" | "output" | "spans">, requestDigest: string): Promise<ExtractionAttempt> {
+    outcome: Pick<ExtractionAttempt, "state" | "reason" | "disposition" | "output" | "spans" | "detail" | "reported_model">, requestDigest: string): Promise<ExtractionAttempt> {
     const now = Math.max(task.updated_at, receiptTime.parse(this.clock()));
     const attempt = ExtractionAttempt.parse({ state: outcome.state, reason: outcome.reason, disposition: outcome.disposition, output: outcome.output, spans: outcome.spans,
+      ...(outcome.detail === undefined ? {} : { detail: outcome.detail }),
+      ...(outcome.reported_model === undefined ? {} : { reported_model: outcome.reported_model }),
       id: task.attempt_id ?? uuidv7(), task_id: task.id,
       generation_id: task.generation_id, source_id: task.source_id, source_revision: task.source_revision, source_ingest_seq: task.source_ingest_seq, body_digest: task.body_digest,
       created_at: task.updated_at, updated_at: now, lease: task.lease, policy_context: { revision: policy.policy_revision, authority: "installation" } });
@@ -3218,10 +3298,11 @@ export class Store {
         if (canonicalExtractionBody(parent) !== canonicalExtractionBody(premise.claim_context) || premise.task_id !== task.id || premise.attempt_id !== task.attempt_id) throw new ExtractionAuditError('extraction_audit_conflict');
         if (request.output) {
           const body = ExtractionModelOutput.parse(JSON.parse(request.output.canonical_body));
-          if (body.task !== 'judge_claims' || body.claim_body_digest !== parent.body_digest || body.decisions.length !== parent.claims.length
-            || body.decisions.some((d,i)=>d.claim_index !== i || canonicalExtractionBody(d.evidence) !== canonicalExtractionBody(parent.claims[i]!.evidence))) {
-            return this.finishExtractionTx(tx,task,policy,{state:'failed',reason:'provider_mismatch',disposition:null,output:null,spans:[]},digest);
-          }
+          // The attempt names the check the judge failed (#218): ABI task, parent digest, or the decision set's shape.
+          const refuse = (detail: ExtractionFailureDetail) => this.finishExtractionTx(tx,task,policy,{state:'failed',reason:'provider_mismatch',detail,disposition:null,output:null,spans:[]},digest);
+          if (body.task !== 'judge_claims') return refuse('normalize');
+          if (body.claim_body_digest !== parent.body_digest) return refuse('digest');
+          if (body.decisions.length !== parent.claims.length || body.decisions.some((d,i)=>d.claim_index !== i || canonicalExtractionBody(d.evidence) !== canonicalExtractionBody(parent.claims[i]!.evidence))) return refuse('judge_shape');
           for (const d of body.decisions) {
             const decision = ExtractionDisposition.parse({...d,judge_attempt_id:task.attempt_id,claim_attempt_id:parent.attempt_id,claim_body_digest:parent.body_digest});
             await tx.run(`CREATE (:ExtractionDisposition {judge_attempt_id:$id,claim_index:$index,body:$body})`,
@@ -3258,7 +3339,10 @@ export class Store {
       if (task.state !== "leased" || task.lease?.epoch !== request.lease_epoch) throw new Error("lease_conflict");
       if (request.reason === "expired" && this.clock() < task.lease.expires_at) throw new Error("lease_not_expired");
       if (request.reason === "worker_lost" && task.lease.writer_epoch === this.writerEpoch) throw new Error("worker_still_owned");
-      await this.finishExtractionTx(tx, task, policy, { state: request.reason, reason: request.reason, output: null, disposition: null, spans: [] }, extractionBodyDigest(request));
+      // No provider outcome was received: the lease returns its attempt to the provider-failure budget and counts as a
+      // lost lease instead, so a restart or an overrun on the last budgeted lease never becomes a terminal omission.
+      const lost = { ...task, attempts: task.attempts - 1, lost_leases: (task.lost_leases ?? 0) + 1 };
+      await this.finishExtractionTx(tx, lost, policy, { state: request.reason, reason: request.reason, output: null, disposition: null, spans: [] }, extractionBodyDigest(request));
       return this.extractionRecordTx(tx, "ModelTask", task.id, ModelTask);
     });
   }

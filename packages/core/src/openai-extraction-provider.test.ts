@@ -15,12 +15,12 @@ const response = (content: string, extra: Record<string, unknown> = {}) => Respo
 });
 const options = { baseUrl: "http://llm.test/", apiKey: "test-key", model: "gpt-test", systemPrompt: "Extract claims." };
 
-async function expectFailure(instance: OpenAiChatExtractionProvider, code: string, retryable: boolean) {
+async function expectFailure(instance: OpenAiChatExtractionProvider, code: string, retryable: boolean, detail?: string) {
   const error = await instance.extract({ text: "The sky is blue.", task: "claim" }).then(
     () => { throw new Error("expected provider rejection"); }, error => error,
   );
   expect(error).toBeInstanceOf(ExtractionProviderError);
-  expect(error).toMatchObject({ code, reason: code, retryable });
+  expect(error).toMatchObject({ code, reason: code, retryable, detail });
 }
 
 describe("OpenAiChatExtractionProvider", () => {
@@ -67,11 +67,33 @@ describe("OpenAiChatExtractionProvider", () => {
     expect(instance.reportedModelIncarnation).toBe("gpt-test:nofp");
   });
 
+  test("rejects an unrelated reported model on the first response instead of pinning it", async () => {
+    // The first valid answer used to establish the reported identity unchecked: a proxy answering with another model
+    // was accepted and its output attributed to the configured one.
+    const instance = new OpenAiChatExtractionProvider({ ...options, fetch: async () => response(JSON.stringify(output), { model: "wrong-model", system_fingerprint: "wrong-weights" }) });
+    await expectFailure(instance, "provider_mismatch", false, "model");
+    expect(instance.reportedModelIncarnation).toBeUndefined();
+    // A prefix without the alias boundary is another model, not a snapshot of this one.
+    await expectFailure(new OpenAiChatExtractionProvider({ ...options, fetch: async () => response(JSON.stringify(output), { model: "gpt-tester" }) }), "provider_mismatch", false, "model");
+    // A dashed variant is a different model too; only a dated snapshot of the configured alias is accepted.
+    await expectFailure(new OpenAiChatExtractionProvider({ ...options, fetch: async () => response(JSON.stringify(output), { model: "gpt-test-mini" }) }), "provider_mismatch", false, "model");
+    const snapshot = new OpenAiChatExtractionProvider({ ...options, fetch: async () => response(JSON.stringify(output), { model: "gpt-test-2024-08-06", system_fingerprint: "fp-snap" }) });
+    await expect(snapshot.extract({ text: "The sky is blue.", task: "claim" })).resolves.toBeDefined();
+    expect(snapshot.reportedModelIncarnation).toBe("gpt-test-2024-08-06:fp-snap");
+  });
+
+  test("accepts a dated snapshot of the configured alias and records the reported identity", async () => {
+    const instance = new OpenAiChatExtractionProvider({ ...options, fetch: async () => response(JSON.stringify(output), { model: "gpt-test-2026-01-01", system_fingerprint: "fp-snapshot" }) });
+    await expect(instance.extract({ text: "The sky is blue.", task: "claim" })).resolves.toEqual(output);
+    expect(instance.reportedModelIncarnation).toBe("gpt-test-2026-01-01:fp-snapshot");
+    expect(instance.model).toBe("gpt-test");
+  });
+
   test("rejects upstream identity drift instead of changing admitted task identity", async () => {
     let call = 0;
     const instance = new OpenAiChatExtractionProvider({ ...options, fetch: async () => response(JSON.stringify(output), { system_fingerprint: ++call === 1 ? "first" : "changed" }) });
     await instance.extract({ text: "The sky is blue.", task: "claim" });
-    await expectFailure(instance, "provider_mismatch", false);
+    await expectFailure(instance, "provider_mismatch", false, "incarnation");
   });
 
   test("maps quota errors and non-success responses to retryable provider_unavailable", async () => {
@@ -94,9 +116,10 @@ describe("OpenAiChatExtractionProvider", () => {
     expect(observedAbort).toBe(true);
   }, 1000);
 
-  test("maps malformed or schema-invalid content to non-retryable provider_mismatch", async () => {
-    await expectFailure(new OpenAiChatExtractionProvider({ ...options, fetch: async () => response("not json") }), "provider_mismatch", false);
-    await expectFailure(new OpenAiChatExtractionProvider({ ...options, fetch: async () => response(JSON.stringify({ task: "claim", claims: [], language: "en", modality: "invalid" })) }), "provider_mismatch", false);
+  test("maps malformed or schema-invalid content to non-retryable provider_mismatch naming the failed check", async () => {
+    await expectFailure(new OpenAiChatExtractionProvider({ ...options, fetch: async () => response("not json") }), "provider_mismatch", false, "json");
+    await expectFailure(new OpenAiChatExtractionProvider({ ...options, fetch: async () => response(JSON.stringify({ task: "claim", claims: [], language: "en", modality: "invalid" })) }), "provider_mismatch", false, "normalize");
+    await expectFailure(new OpenAiChatExtractionProvider({ ...options, fetch: async () => new Response("not json", { status: 200 }) }), "provider_mismatch", false, "envelope");
   });
 
   test("relation judge requests use the dedicated relation prompt and bind it into the task identity", async () => {

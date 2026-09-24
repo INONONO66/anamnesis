@@ -30,7 +30,7 @@ test("runtime adapter streams a sealed export and commit-gates checkpoint", asyn
   const root = await mkdtemp("/tmp/ana-codex-test-"); const source = join(root, "export"); const cp = join(root, "checkpoint.json");
   await mkdir(source); await writeFile(join(source, "rollout-2026-01-01-s.jsonl"), meta + "\n" + ctx + "\n" + msg("x", "id") + "\n");
   const committed = new Map<string, any>(); const calls: string[] = [];
-  const client = Object.assign(Object.create(RpcClient.prototype), { request: async (method: string, p: any) => { calls.push(method); if (method === "status") return { data_incarnation: "11111111-1111-4111-8111-111111111111" }; if (method === "ingest.status") return committed.get(p.revision_key) ?? { ...p, state: "unknown" }; if (method === "remember") { const pending = JSON.parse(await Bun.file(cp + ".pending.json").text()); const r = { ...pending.identity, state: "committed", created: true, id: "id", ingest_seq: 1 }; committed.set(p.revision_key, r); return r; } throw new Error(method); } });
+  const client = Object.assign(Object.create(RpcClient.prototype), { request: async (method: string, p: any) => { calls.push(method); if (method === "status") return { data_incarnation: "11111111-1111-4111-8111-111111111111" }; if (method === "ingest.status") return committed.get(p.revision_key) ?? { ...p, state: "unknown", storage: "available" }; if (method === "remember") { const pending = JSON.parse(await Bun.file(cp + ".pending.json").text()); const r = { ...pending.identity, state: "committed", created: true, id: "id", ingest_seq: 1 }; committed.set(p.revision_key, r); return r; } throw new Error(method); } });
   try { await ingestCodexRaw(source, cp, client as RpcClient); expect(calls).toContain("remember"); expect(JSON.parse(await Bun.file(cp).text()).next).toBe(1); } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -41,7 +41,7 @@ test("user and assistant records include lineage metadata (origin_role, lineage_
   const committed = new Map<string, any>(); const remembered: any[] = [];
   const client = Object.assign(Object.create(RpcClient.prototype), { request: async (method: string, p: any) => {
     if (method === "status") return { data_incarnation: "11111111-1111-4111-8111-111111111111" };
-    if (method === "ingest.status") return committed.get(p.revision_key) ?? { ...p, state: "unknown" };
+    if (method === "ingest.status") return committed.get(p.revision_key) ?? { ...p, state: "unknown", storage: "available" };
     if (method === "remember") {
       const pending = JSON.parse(await Bun.file(cp + ".pending.json").text());
       remembered.push(pending.params);

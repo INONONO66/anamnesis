@@ -83,6 +83,23 @@
         }
       ]
     },
+    "detail": {
+      "type": "string",
+      "enum": [
+        "model",
+        "incarnation",
+        "envelope",
+        "json",
+        "normalize",
+        "span",
+        "judge_shape",
+        "digest"
+      ]
+    },
+    "reported_model": {
+      "type": "string",
+      "maxLength": 256
+    },
     "created_at": {
       "type": "integer",
       "minimum": 0,

@@ -1520,6 +1520,71 @@
         },
         "method": {
           "type": "string",
+          "const": "embedding.requeue"
+        },
+        "params": {
+          "type": "object",
+          "properties": {
+            "limit": {
+              "default": 100,
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000
+            },
+            "reasons": {
+              "minItems": 1,
+              "maxItems": 7,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "provider_unavailable",
+                  "provider_unavailable_exhausted",
+                  "provider_rejected",
+                  "profile_mismatch",
+                  "invalid_vector",
+                  "input_too_large",
+                  "stale_input"
+                ]
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "jsonrpc",
+        "id",
+        "method",
+        "params"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "jsonrpc": {
+          "type": "string",
+          "const": "2.0"
+        },
+        "id": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^(?:[^\\uD800-\\uDFFF]|[\\uD800-\\uDBFF][\\uDC00-\\uDFFF])*$",
+              "x-maxUtf8Bytes": 128
+            }
+          ]
+        },
+        "method": {
+          "type": "string",
           "const": "backup"
         },
         "params": {

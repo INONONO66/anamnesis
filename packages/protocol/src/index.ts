@@ -24,7 +24,7 @@ export { OriginRole, EpisodeLineageInput, EchoLineage, RecallLineageSelection, E
 
 export { LinkRole, MemoryLink, LINK_LATTICE } from "./link.ts";
 export type { MemoryLinkInput } from "./link.ts";
-export { ExtractionAttempt, Generation, ModelTask, Coverage, ExtractionSpan, ExtractionOutput, ExtractionModelOutput, ExtractionFailure,
+export { ExtractionAttempt, Generation, ModelTask, Coverage, ExtractionSpan, ExtractionOutput, ExtractionModelOutput, ExtractionFailure, ExtractionFailureDetail,
   CreateModelTask, ModelTaskCAS, LeaseModelTask, SettleModelTask, CompleteExtractionAttempt, AdvanceExtractionCoverage,
   canonicalExtractionBody, extractionBodyDigest, SelectExtractionGeneration, ExtractionCoverageRead, FactRelationKind, FactRelationJudgement } from "./extraction.ts";
 export { ExtractionClaimContext, ExtractionJudgeInput, CreateExtractionPipeline, RunExtractionPipeline, ExtractionPipelineStatus, ExtractionDisposition, ExtractionPipeline, ExtractionAuditError, FactRelationCandidate, FactRelationContext } from "./extraction-audit.ts";
@@ -57,6 +57,7 @@ export {
   RpcCommittedResult,
   RpcSpooledResult,
   RpcRememberResult,
+  RpcStorageState,
   RpcIngestStatusResult,
   RpcCapabilities,
   RpcStatusResult,

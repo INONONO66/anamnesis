@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import { canonicalExtractionBody, extractionBodyDigest, ExtractionModelOutput, ExtractionOutput, ExtractionSpan } from "../../protocol/src/extraction.ts";
+import { canonicalExtractionBody, extractionBodyDigest, ExtractionModelOutput, ExtractionOutput, ExtractionSpan, type ExtractionFailureDetail } from "../../protocol/src/extraction.ts";
 
 export const ExtractionProviderConfig = z.strictObject({ endpoint: z.url().refine(v => ["http:", "https:"].includes(new URL(v).protocol)), model: z.string().min(1).max(256), model_incarnation: z.string().regex(/^[0-9a-f]{64}$/), timeout_ms: z.number().int().min(1).max(30000).default(5000) });
 export type ExtractionProviderConfig = z.infer<typeof ExtractionProviderConfig>;
@@ -9,9 +9,21 @@ export type ExtractionProviderConfig = z.infer<typeof ExtractionProviderConfig>;
 export type ExtractionProviderInput = { text: string; task: "claim" | "judge" | "judge_claims" | "judge_relations";
   claim_context?: import('../../protocol/src/extraction-audit.ts').ExtractionClaimContext;
   relation_context?: import('../../protocol/src/extraction-audit.ts').FactRelationContext };
-export interface ExtractionProvider { readonly model: string; readonly modelIncarnation: string; extract(input: ExtractionProviderInput): Promise<unknown>; }
+/** `reportedModelIncarnation` is the identity the upstream reported on its accepted responses (a dated snapshot and
+ * fingerprint); a provider that checks and pins it exposes it so accepted results can be attributed to the model that
+ * actually answered, not only to the configured alias. Undefined until a response was accepted or when the transport
+ * reports none. */
+export interface ExtractionProvider { readonly model: string; readonly modelIncarnation: string; readonly reportedModelIncarnation?: string | undefined; extract(input: ExtractionProviderInput): Promise<unknown>; }
+/** The configured model names the reported one when they are equal or the configured name is an alias the upstream
+ * resolved to a dated snapshot of the same model (`claude-haiku-4-5` -> `claude-haiku-4-5-20251001`, `gpt-4o` ->
+ * `gpt-4o-2024-08-06`). Only a date suffix is a snapshot: `gpt-4o-mini` is a different model, not an alias of `gpt-4o`. */
+export function reportedModelMatches(configured: string, reported: string): boolean {
+  return reported === configured || (reported.startsWith(configured + "-") && SNAPSHOT_SUFFIX.test(reported.slice(configured.length)));
+}
+const SNAPSHOT_SUFFIX = /^-(\d{8}|\d{4}-\d{2}-\d{2})$/;
+/** `detail` names the check a `provider_mismatch` failed; it is recorded on the attempt (#218). */
 export class ExtractionProviderError extends Error {
-  constructor(readonly reason: "provider_unavailable" | "provider_rejected" | "provider_mismatch" | "output_too_large" | "input_too_large") { super(reason); }
+  constructor(readonly reason: "provider_unavailable" | "provider_rejected" | "provider_mismatch" | "output_too_large" | "input_too_large", readonly detail?: ExtractionFailureDetail) { super(reason); }
 }
 const envelope = z.strictObject({ model: z.string(), model_incarnation: z.string(), output: z.unknown() });
 export class HttpExtractionProvider implements ExtractionProvider {
@@ -56,7 +68,9 @@ export class HttpExtractionProvider implements ExtractionProvider {
       throw new ExtractionProviderError("provider_rejected");
     }
     const parsed = envelope.safeParse(body);
-    if (!parsed.success || parsed.data.model !== this.model || parsed.data.model_incarnation !== this.modelIncarnation) throw new ExtractionProviderError("provider_mismatch");
+    if (!parsed.success) throw new ExtractionProviderError("provider_mismatch", "envelope");
+    if (parsed.data.model !== this.model) throw new ExtractionProviderError("provider_mismatch", "model");
+    if (parsed.data.model_incarnation !== this.modelIncarnation) throw new ExtractionProviderError("provider_mismatch", "incarnation");
     validateModelOutput(parsed.data.output, input.task);
     return parsed.data.output;
   }
@@ -81,14 +95,14 @@ export function validateModelOutput(value: unknown, task: ExtractionProviderInpu
   // Canonical domain/depth admission precedes recursive ABI validation.
   let encoded: ReturnType<typeof validateProviderOutput>;
   try { encoded = validateProviderOutput(value); }
-  catch (error) { if (error instanceof ExtractionProviderError) throw error; throw new ExtractionProviderError("provider_mismatch"); }
+  catch (error) { if (error instanceof ExtractionProviderError) throw error; throw new ExtractionProviderError("provider_mismatch", "json"); }
   const parsed = ExtractionModelOutput.safeParse(value);
-  if (!parsed.success || parsed.data.task !== task) throw new ExtractionProviderError("provider_mismatch");
+  if (!parsed.success || parsed.data.task !== task) throw new ExtractionProviderError("provider_mismatch", "normalize");
   const body = parsed.data;
   const spans = body.task === "claim" ? body.claims.map(claim => claim.evidence) : body.task === "judge_claims" ? body.decisions.map(decision => decision.evidence) : body.task === "judge_relations" ? [] : body.spans;
   // A mixed per-claim audit never elects a semantic winner; relation verdicts are not dispositions either.
   const disposition = body.task === "claim" ? body.claims.length ? "retain" : "suppress" : body.task === "judge_claims" || body.task === "judge_relations" ? "unknown" : body.disposition;
-  if ((disposition === "retain" || disposition === "correct") && spans.length === 0) throw new ExtractionProviderError("provider_mismatch");
+  if ((disposition === "retain" || disposition === "correct") && spans.length === 0) throw new ExtractionProviderError("provider_mismatch", "normalize");
   return { output: ExtractionOutput.parse({ ...encoded, spans, language: body.language, modality: body.modality }), disposition, spans };
 }
 export function validateSourceSpans(content: string, spans: z.infer<typeof ExtractionSpan>[]): void {

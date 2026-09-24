@@ -230,10 +230,14 @@ describe("strict RPC responses", () => {
     const identity = { revision_key: hash, body_digest: hash, data_incarnation: uuid };
     const committed = { state: "committed", ...identity, id: uuid, created: true, ingest_seq: 1 };
     const spooled = { state: "spooled", ...identity, fs_epoch: uuid, spool_seq: 1 };
-    const unknown = { state: "unknown", ...identity };
+    const unknown = { state: "unknown", ...identity, storage: "available" };
     expect(RpcResponse.safeParse({ ...response("remember", committed), structure_revision: 1 }).success).toBe(true);
     expect(RpcResponse.safeParse(response("remember", spooled)).success).toBe(true);
     expect(RpcResponse.safeParse(response("ingest.status", unknown)).success).toBe(true);
+    // UNKNOWN always names the storage state observed while answering; a client must not infer it from an older status.
+    expect(RpcResponse.safeParse(response("ingest.status", { ...unknown, storage: "unavailable" })).success).toBe(true);
+    expect(RpcResponse.safeParse(response("ingest.status", { state: "unknown", ...identity })).success).toBe(false);
+    expect(RpcResponse.safeParse(response("ingest.status", { ...unknown, storage: "degraded" })).success).toBe(false);
     expect(RpcResponse.safeParse(response("remember", unknown)).success).toBe(false);
     expect(RpcResponse.safeParse(response("remember", { ...spooled, created: true })).success).toBe(false);
     expect(RpcResponse.safeParse(response("remember", { ...spooled, id: uuid })).success).toBe(false);

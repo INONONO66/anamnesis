@@ -38,8 +38,8 @@ function mock(cp: string, loseReply = false) {
   let object: { hash: string; size: number; media_type: string }, chunks: Buffer[] = [];
   const client = Object.assign(Object.create(RpcClient.prototype) as RpcClient, { request: async (method: string, input: any) => {
     methods.push(method);
-    if (method === "status") return { data_incarnation: incarnation };
-    if (method === "ingest.status") return committed.get(JSON.stringify(input)) ?? { ...input, state: "unknown" };
+    if (method === "status") return { data_incarnation: incarnation, storage: "available" };
+    if (method === "ingest.status") return committed.get(JSON.stringify(input)) ?? { ...input, state: "unknown", storage: "available" };
     const pending = await saved(cp + ".pending.json");
     expect(pending.identity).toEqual(identity(pending.params));
     if (pending.payload) expect(hash(Buffer.from(pending.payload.bytes_b64, "base64"))).toBe(pending.params.payload_hash);
@@ -103,15 +103,31 @@ test("physical order binds duplicate A and observed A-B-A occurrence with exact 
   expect(m.methods.slice(before)).toEqual(["status", "ingest.status"]); expect((await saved(cp)).next).toBe(4);
 }));
 
-for (const state of ["unknown", "spooled", "blocked", "quarantined"] as const) test(`${state} never retransmits or advances`, () => fixture(async (source, cp) => {
+for (const state of ["spooled", "blocked", "quarantined"] as const) test(`${state} never retransmits or advances`, () => fixture(async (source, cp) => {
   const m = mock(cp, true); await expect(ingestClaudeRaw(source, cp, m.client)).rejects.toThrow("lost reply");
   const before = await readFile(cp), pending = await readFile(cp + ".pending.json");
   const client = Object.assign(Object.create(RpcClient.prototype) as RpcClient, { request: async (method: string, input: object) => {
-    if (method === "status") return { data_incarnation: incarnation };
+    if (method === "status") return { data_incarnation: incarnation, storage: "available" };
     expect(method).toBe("ingest.status"); return { ...input, state };
   }});
   await expect(ingestClaudeRaw(source, cp, client)).rejects.toHaveProperty("code", `source_pending_${state}`);
   expect(await readFile(cp)).toEqual(before); expect(await readFile(cp + ".pending.json")).toEqual(pending);
+}));
+
+test("unknown recovery resends only for the same ready incarnation", () => fixture(async (source, cp) => {
+  const lost = mock(cp, true); await expect(ingestClaudeRaw(source, cp, lost.client)).rejects.toThrow("lost reply");
+  const before = await readFile(cp), pending = await readFile(cp + ".pending.json");
+  const foreign = Object.assign(Object.create(RpcClient.prototype) as RpcClient, { request: async (method: string) => {
+    expect(method).toBe("status"); return { data_incarnation: "33333333-3333-4333-8333-333333333333", storage: "available" };
+  }});
+  await expect(ingestClaudeRaw(source, cp, foreign)).rejects.toThrow("incarnation_mismatch");
+  expect(await readFile(cp)).toEqual(before); expect(await readFile(cp + ".pending.json")).toEqual(pending);
+  // A fresh mock holds no binding for the lost delivery: UNKNOWN from the same
+  // ready incarnation retires the pending record and resends it from the checkpoint.
+  const m = mock(cp); await ingestClaudeRaw(source, cp, m.client);
+  expect(m.methods.slice(0, 2)).toEqual(["status", "ingest.status"]); expect(m.methods.filter(x => x === "ingest.status")).toHaveLength(1);
+  expect(m.params[0]).toEqual(JSON.parse(pending.toString()).params);
+  expect((await saved(cp)).next).toBe(m.params.length); await expect(stat(cp + ".pending.json")).rejects.toHaveProperty("code", "ENOENT");
 }));
 
 for (const change of ["bytes", "permission", "delete", "add", "rotation"] as const) test(`${change} rejects immutable resume`, () => fixture(async (source, cp, path) => {

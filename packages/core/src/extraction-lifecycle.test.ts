@@ -14,11 +14,23 @@ async function response(body: unknown, run: (provider: HttpExtractionProvider) =
 }
 test("HTTP envelope is strict before retention", async () => {
   await response({ model: "test", model_incarnation: incarnation, output: null, ignored: "data" }, async p => {
-    await expect(p.extract({ text: "hello", task: "claim" })).rejects.toThrow("provider_mismatch");
+    await expect(p.extract({ text: "hello", task: "claim" })).rejects.toMatchObject({ message: "provider_mismatch", detail: "envelope" });
+  });
+});
+test("HTTP envelope identity drift names the failed check (#218)", async () => {
+  await response({ model: "other", model_incarnation: incarnation, output: null }, async p => {
+    await expect(p.extract({ text: "hello", task: "claim" })).rejects.toMatchObject({ message: "provider_mismatch", detail: "model" });
+  });
+  await response({ model: "test", model_incarnation: "b".repeat(64), output: null }, async p => {
+    await expect(p.extract({ text: "hello", task: "claim" })).rejects.toMatchObject({ message: "provider_mismatch", detail: "incarnation" });
   });
 });
 test("HTTP task output is ABI checked, not just arbitrary canonical JSON", async () => {
   await response({ model: "test", model_incarnation: incarnation, output: null }, async p => {
-    await expect(p.extract({ text: "hello", task: "claim" })).rejects.toThrow("provider_mismatch");
+    await expect(p.extract({ text: "hello", task: "claim" })).rejects.toMatchObject({ message: "provider_mismatch", detail: "normalize" });
+  });
+  // A lone surrogate survives JSON transport but is outside the canonical body domain.
+  await response({ model: "test", model_incarnation: incarnation, output: "\ud800" }, async p => {
+    await expect(p.extract({ text: "hello", task: "claim" })).rejects.toMatchObject({ message: "provider_mismatch", detail: "json" });
   });
 });

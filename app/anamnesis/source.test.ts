@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { RpcClient } from "./client.ts";
@@ -7,6 +7,14 @@ import { RpcRememberParams, type RpcIngestStatusParams } from "../../packages/pr
 
 const incarnation = "11111111-1111-4111-8111-111111111111";
 const epoch = "22222222-2222-4222-8222-222222222222";
+const foreign = "33333333-3333-4333-8333-333333333333";
+const ready = { data_incarnation: incarnation, storage: "available" };
+// Machine-consumed stdout events of one run, captured without touching the adapter.
+async function events(run: () => Promise<unknown>): Promise<{ event: string; [key: string]: unknown }[]> {
+  const log = spyOn(console, "log").mockImplementation(() => {});
+  try { await run(); return log.mock.calls.map(([line]) => JSON.parse(String(line))); }
+  finally { log.mockRestore(); }
+}
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 const input = (index: number) => RpcRememberParams.parse({
   episode: { schema: "anamnesis.original-message/1", time: { value: "2026-09-09T00:00:00Z", precision: "second" },
@@ -77,7 +85,7 @@ test("spooled is not source completion: pending exists before send and checkpoin
   expect(await saved(pending)).toEqual(pendingAtSend);
 }));
 
-for (const state of ["spooled", "unknown", "quarantined", "blocked"] as const) {
+for (const state of ["spooled", "quarantined", "blocked"] as const) {
   test(`pending restart with ${state} never resends or advances`, () => fixture(async ({ source, cp, pending, records, sourceHash }) => {
     const work = { version: 1, source_hash: sourceHash, index: 0, params: records[0], identity: identity(records[0]!) };
     await writeFile(cp, JSON.stringify(initial(sourceHash)));
@@ -85,7 +93,7 @@ for (const state of ["spooled", "unknown", "quarantined", "blocked"] as const) {
     const before = await readFile(cp), beforePending = await readFile(pending);
     let sends = 0;
     const client = mock(async (method, params) => {
-      if (method === "status") return { data_incarnation: incarnation };
+      if (method === "status") return ready;
       if (method === "remember") { sends++; return committed(records[0]!); }
       expect(params).toEqual(work.identity);
       return { state, ...work.identity, ...(state === "spooled" ? { fs_epoch: epoch, spool_seq: 1 } : {}) };
@@ -93,6 +101,37 @@ for (const state of ["spooled", "unknown", "quarantined", "blocked"] as const) {
     const error = await ingestSource(source, cp, client).then(() => null, error => error);
     expect(sends).toBe(0);
     expect(error?.code).toBe(`source_pending_${state}`);
+    expect(await readFile(cp)).toEqual(before);
+    expect(await readFile(pending)).toEqual(beforePending);
+  }));
+}
+
+// UNKNOWN alone is not a licence to resend: the daemon must be the same
+// installation and able to rule out a committed delivery (storage available)
+// in the very answer that says unknown. The storage state ships inside the
+// `ingest.status` reply: a `status` taken before storage went away (available,
+// then the database is lost, then unknown) must not license the resend.
+for (const [name, status, storage, failure, calls] of [
+  ["storage unavailable", { data_incarnation: incarnation, storage: "unavailable" }, "unavailable", "source_pending_unknown", ["status", "ingest.status"]],
+  ["storage lost after status", ready, "unavailable", "source_pending_unknown", ["status", "ingest.status"]],
+  ["foreign incarnation", { data_incarnation: foreign, storage: "available" }, "available", "incarnation_mismatch", ["status"]],
+] as const) {
+  test(`unknown pending with ${name} is neither retired nor resent`, () => fixture(async ({ source, cp, pending, records, sourceHash }) => {
+    const work = { version: 1, source_hash: sourceHash, index: 0, params: records[0], identity: identity(records[0]!) };
+    await writeFile(cp, JSON.stringify(initial(sourceHash)));
+    await writeFile(pending, JSON.stringify(work));
+    const before = await readFile(cp), beforePending = await readFile(pending);
+    const seen: string[] = [];
+    const client = mock(async (method, params) => {
+      seen.push(method);
+      if (method === "status") return status;
+      if (method === "remember") throw new Error("unexpected retransmission");
+      expect(params).toEqual(work.identity);
+      return { state: "unknown", ...work.identity, storage };
+    });
+    const error = await ingestSource(source, cp, client).then(() => null, error => error);
+    expect(error?.message).toBe(failure);
+    expect(seen).toEqual([...calls]);
     expect(await readFile(cp)).toEqual(before);
     expect(await readFile(pending)).toEqual(beforePending);
   }));
@@ -116,18 +155,33 @@ test("committed pending resolves through status, checkpoints exactly once, then 
   expect(calls).toEqual(["status", "ingest.status", "status", "ingest.status"]);
 }));
 
-test("UNKNOWN reply retains pre-send identity/body, and resume cannot blindly retransmit", () => fixture(async ({ source, cp, pending, records, sourceHash }) => {
-  let sends = 0;
-  const client = mock(async method => {
-    if (method === "status") return { data_incarnation: incarnation };
-    if (method === "remember") { sends++; throw Object.assign(new Error("lost reply"), { code: "outcome_unknown" }); }
-    return { state: "unknown", ...identity(records[0]!) };
+test("UNKNOWN reply retains pre-send identity/body; resume resends only once the daemon disowns it", () => fixture(async ({ source, cp, pending, records, sourceHash }) => {
+  const work = { version: 1, source_hash: sourceHash, index: 0, params: records[0], identity: identity(records[0]!) };
+  const calls: string[] = [], pendingAtSend: unknown[] = [];
+  let lost = true;
+  const client = mock(async (method, params) => {
+    calls.push(method);
+    if (method === "status") return ready;
+    if (method === "remember") {
+      pendingAtSend.push(await saved(pending));
+      if (lost) throw Object.assign(new Error("lost reply"), { code: "outcome_unknown" });
+      expect(params).toEqual(records[0]);
+      return committed(records[0]!);
+    }
+    expect(params).toEqual(work.identity);
+    return { state: "unknown", ...work.identity, storage: "available" };
   });
   await expect(ingestSource(source, cp, client)).rejects.toHaveProperty("code", "outcome_unknown");
   expect(await saved(cp)).toEqual(initial(sourceHash));
-  expect((await saved(pending)).params).toEqual(records[0]);
-  await expect(ingestSource(source, cp, client)).rejects.toHaveProperty("code", "source_pending_unknown");
-  expect(sends).toBe(1);
+  expect(await saved(pending)).toEqual(work);
+  lost = false;
+  const emitted = await events(() => ingestSource(source, cp, client));
+  expect(calls).toEqual(["status", "remember", "status", "ingest.status", "remember"]);
+  expect(pendingAtSend).toEqual([work, work]);
+  expect(emitted.filter(e => e.event === "pending_retired")).toEqual([{ event: "pending_retired", reason: "daemon_unknown", index: 0, identity: work.identity }]);
+  expect(emitted.map(e => e.event)).toEqual(["pending_retired", "source_checkpoint", "source_complete"]);
+  expect(await saved(cp)).toEqual({ ...initial(sourceHash), next: 1, last: work.identity });
+  await expect(stat(pending)).rejects.toHaveProperty("code", "ENOENT");
 }));
 
 for (const attack of ["forged-next", "swapped-last"] as const) {

@@ -78,7 +78,7 @@ test('claim-only pipeline cannot advance audit coverage; decisions are atomic wi
 test('unsupported judge ABI fails closed, explicit retry retains the failed attempt',async()=>{
  let supported=false;const f=await setup(async input=>input.task==='claim'?claims(input.text):supported?judgment(input):{task:'judge',disposition:'unknown',spans:[],language:'und',modality:'text'});
  try{
-  const task=await f.create(),failed=await f.run(task);assert.equal(failed.judge.state,'failed');assert.equal(failed.judge_attempt.reason,'provider_mismatch');assert.deepEqual(failed.decisions,[]);
+  const task=await f.create(),failed=await f.run(task);assert.equal(failed.judge.state,'failed');assert.equal(failed.judge_attempt.reason,'provider_mismatch');assert.equal(failed.judge_attempt.detail,'normalize');assert.deepEqual(failed.decisions,[]);
   supported=true;await f.store.retryModelTask({task_id:failed.judge.id,expected_version:failed.judge.version},context);
   const result=await f.run(task);assert.equal(result.judge.state,'succeeded');assert.notEqual(result.judge_attempt.id,failed.judge_attempt.id);
   assert.deepEqual(await f.store.getExtractionAttempt(failed.judge_attempt.id,context),failed.judge_attempt);assert.deepEqual(await semantic(f),[{count:0}]);audit('retry',{failed,result});
@@ -98,9 +98,9 @@ test('missing disposition authority rejects reads and cannot seal coverage',asyn
  }finally{await f.close();}
 });
 
-for(const corruption of ['digest','order','span'])test(`judge ${corruption} mismatch retains failure without decisions`,async()=>{
+for(const [corruption,detail] of [['digest','digest'],['order','judge_shape'],['span','judge_shape']])test(`judge ${corruption} mismatch retains failure without decisions, naming the failed check`,async()=>{
  const f=await setup(async input=>{const body=output(input);if(input.task==='judge_claims'){if(corruption==='digest')body.claim_body_digest='f'.repeat(64);if(corruption==='order')body.decisions.reverse();if(corruption==='span')body.decisions[0].evidence={start:0,end:1,text:'A'};}return body;});
- try{const result=await f.run(await f.create());assert.equal(result.judge_attempt.reason,'provider_mismatch');assert.equal(result.judge_attempt.output,null);assert.deepEqual(result.decisions,[]);audit('rejected-judge-binding',{corruption,result});}finally{await f.close();}
+ try{const result=await f.run(await f.create());assert.equal(result.judge_attempt.reason,'provider_mismatch');assert.equal(result.judge_attempt.detail,detail);assert.equal(result.judge_attempt.output,null);assert.deepEqual(result.decisions,[]);audit('rejected-judge-binding',{corruption,result});}finally{await f.close();}
 });
 
 for(const race of ['deny','head','policy','cancel','parent'])test(`in-flight judge ${race} is fenced without semantic writes`,async()=>{
@@ -199,7 +199,7 @@ test('real daemon UDS authenticates audit boundaries and recovers UNKNOWN withou
    const remembered=ok(await p.request('remember',{episode,source_revision:mode,expected_previous_revision_key:null}));
    const next=ok(await p.request('extraction.audit.create',{id:uuid(),generation_id:f.g.id,source_id:remembered.id}));
    const refused=ok(await p.request('extraction.audit.run',lease(next)));
-   assert.equal(refused.judge_attempt.state,'failed');assert.equal(refused.judge_attempt.reason,'provider_mismatch');assert.equal(refused.judge_attempt.output,null);assert.deepEqual(refused.decisions,[]);
+   assert.equal(refused.judge_attempt.state,'failed');assert.equal(refused.judge_attempt.reason,'provider_mismatch');assert.equal(refused.judge_attempt.detail,mode==='out_of_range'?'normalize':'judge_shape');assert.equal(refused.judge_attempt.output,null);assert.deepEqual(refused.decisions,[]);
    assert.deepEqual(ok(await p.request('extraction.audit.status',{pipeline_id:next.id})),refused);
    audit('uds-decision-refusal',{mode,refused});
   }

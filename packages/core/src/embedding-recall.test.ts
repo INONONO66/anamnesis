@@ -1,11 +1,11 @@
 import { expect, test } from "bun:test";
 import { Store } from "./store.ts";
-import { EmbeddingProfile, embeddingProfileId, validateVector } from "./embedding.ts";
+import { EmbeddingError, EmbeddingProfile, HttpEmbeddingProvider, embeddingProfileId, httpStatusReason, validateVector } from "./embedding.ts";
 import { admittedBudget, packRecall, renderContext, recallResponseBytes, canonicalContext } from "./recall.ts";
 import { createHash } from "node:crypto";
 import { receiptBodyDigestInput, canonicalReceiptJson } from "./receipt-digest.ts";
 import { countBudget } from "./dynamics/budget.ts";
-import { RpcRecallResult, RpcRecallItem, RpcRequest, RpcOutputBudget } from "../../protocol/src/rpc.ts";
+import { RpcEmbeddingAttempt, RpcRecallResult, RpcRecallItem, RpcRequest, RpcOutputBudget } from "../../protocol/src/rpc.ts";
 
 test("receipt digest projection preserves receipt-only and embedding serving fields", () => {
   const base = { recall_id: id(998), primary_ids: [id(1)], receipt_ttl_ms: 3600000 };
@@ -49,6 +49,43 @@ test("embedding recovery and hybrid recall have real core and wire entry points"
   expect(typeof Reflect.get(Store.prototype, "recoverEmbedding")).toBe("function");
   expect(typeof Reflect.get(Store.prototype, "recall")).toBe("function");
   expect(RpcRequest.safeParse({ jsonrpc: "2.0", id: 1, method: "recall", params: { query: "A\né🙂", budget: { unit: "unicode_scalars", limit: 8 } } }).success).toBe(true);
+  expect(typeof Reflect.get(Store.prototype, "requeueQuarantinedEmbeddings")).toBe("function");
+  expect(RpcRequest.safeParse({ jsonrpc: "2.0", id: 2, method: "embedding.requeue", params: { limit: 5, reasons: ["provider_unavailable_exhausted"] } }).success).toBe(true);
+  expect(RpcRequest.safeParse({ jsonrpc: "2.0", id: 3, method: "embedding.requeue", params: { limit: 0 } }).success).toBe(false);
+});
+
+test("attempt rows carry the deferred state, the exhausted reason and transport detail; older rows parse without detail", () => {
+  const base = { operation_id: id(1), episode_id: id(2), profile_id: "a".repeat(64), model: "wiring-fixture", model_incarnation: "b".repeat(64),
+    dimensions: 2, input_revision: "c".repeat(64), input_digest: "d".repeat(64), created_at: 1, completed_at: 2 };
+  expect(RpcEmbeddingAttempt.parse({ ...base, state: "deferred", reason: "provider_unavailable", detail: "http 503" })).toMatchObject({ state: "deferred", detail: "http 503" });
+  expect(RpcEmbeddingAttempt.parse({ ...base, state: "quarantined", reason: "provider_unavailable_exhausted", detail: "timeout 30000ms" }).reason).toBe("provider_unavailable_exhausted");
+  expect(RpcEmbeddingAttempt.parse({ ...base, state: "quarantined", reason: "provider_unavailable" }).detail).toBeNull();
+  expect(RpcEmbeddingAttempt.safeParse({ ...base, state: "quarantined", reason: "provider_unavailable", detail: "x".repeat(257) }).success).toBe(false);
+});
+
+test("the HTTP provider classifies by the failing condition: a 503 is deferred, a 400 is terminal, a dead socket is unavailable", async () => {
+  // A temporary outage (503) must defer within the transient budget, never quarantine; a deterministic 400 is terminal.
+  for (const [status, reason] of [[503, "provider_unavailable"], [429, "provider_unavailable"], [400, "provider_rejected"], [404, "provider_rejected"]] as const) {
+    const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("nope", { status }) });
+    try {
+      const error = await new HttpEmbeddingProvider({ endpoint: `http://127.0.0.1:${server.port}/v1/embeddings`, profile, timeout_ms: 5000 }).embed("hello", "document").then(() => null, error => error);
+      expect(error).toBeInstanceOf(EmbeddingError);
+      expect(error).toMatchObject({ reason, detail: `http ${status}` });
+    } finally { await server.stop(true); }
+  }
+  expect([408, 425, 429, 500, 502, 503, 504].map(httpStatusReason)).toEqual(Array<"provider_unavailable">(7).fill("provider_unavailable"));
+  expect([400, 401, 403, 404, 413, 422].map(httpStatusReason)).toEqual(Array<"provider_rejected">(6).fill("provider_rejected"));
+  const closed = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("unused") }), port = closed.port;
+  await closed.stop(true);
+  const unavailable = await new HttpEmbeddingProvider({ endpoint: `http://127.0.0.1:${port}/v1/embeddings`, profile, timeout_ms: 5000 }).embed("hello", "document").then(() => null, error => error);
+  expect(unavailable).toBeInstanceOf(EmbeddingError);
+  expect(unavailable).toMatchObject({ reason: "provider_unavailable" });
+  expect(typeof unavailable.detail).toBe("string");
+  expect(unavailable.detail.length).toBeGreaterThan(0);
+  const oversized = await new HttpEmbeddingProvider({ endpoint: `http://127.0.0.1:${port}/v1/embeddings`, profile, timeout_ms: 5000 }).embed("x".repeat(8193), "document").then(() => null, error => error);
+  expect(oversized).toMatchObject({ reason: "input_too_large", detail: "8193 bytes > 8192" });
+  expect(() => validateVector([1, 0, 0], profile)).toThrow(expect.objectContaining({ reason: "invalid_vector", detail: "dimensions" }));
+  expect(() => validateVector([2, 0], profile)).toThrow(expect.objectContaining({ reason: "invalid_vector", detail: "norm" }));
 });
 const id = (n: number) => `0192f3a1-5e7b-7c3d-9f21-${String(n).padStart(12, "0")}`;
 const profile = EmbeddingProfile.parse({ model: "wiring-fixture", model_incarnation: "a".repeat(64), dimensions: 2,

@@ -31,6 +31,9 @@ export interface ExtractionSchedulerOptions {
   maxInFlight?: number;
   /** First attempt plus retries; a task failing this often is a terminal omission. */
   maxAttempts?: number;
+  /** Leases lost without a provider outcome (a restart, an overrun) that a task may recover from; they never spend
+   * `maxAttempts`. Losing this many is cancelled into a durable omission (default 3). */
+  maxLostLeases?: number;
   /** Same clock as the engine's store, so lease expiry is judged once; tests inject it, the daemon uses Date.now. */
   clock?: () => number;
 }
@@ -56,6 +59,7 @@ export class ExtractionScheduler {
   private readonly workerId: string;
   private readonly maxInFlight: number;
   private readonly maxAttempts: number;
+  private readonly maxLostLeases: number;
   private readonly clock: () => number;
   /** work_key -> settlement; a drive removes itself before waking. */
   private readonly inFlight = new Map<string, Promise<void>>();
@@ -75,6 +79,7 @@ export class ExtractionScheduler {
     this.workerId = options.workerId ?? "daemon-extraction";
     this.maxInFlight = options.maxInFlight ?? 4;
     this.maxAttempts = options.maxAttempts ?? 4;
+    this.maxLostLeases = options.maxLostLeases ?? 3;
     this.clock = options.clock ?? Date.now;
   }
 
@@ -178,9 +183,10 @@ export class ExtractionScheduler {
     const claim = existing ?? await this.engine.createExtractionPipeline({ id: uuidv7(), generation_id: generation.id, source_id: episodeId }, this.context);
     let pipeline = await this.engine.store.readExtractionPipeline(claim.id, this.context);
     let fresh = existing === null;
-    // Every stage is attempt-bounded: claim and judge each need at most one run plus one retry per attempt, the
-    // relation stage at most one run per failure plus the seal. A pipeline that is still open past this bound is a bug.
-    const steps = this.maxAttempts * 5 + 2;
+    // Every stage is attempt-bounded: claim and judge each need at most one run plus one retry per attempt and a settle,
+    // retry and run per lost lease; the relation stage at most one run per failure plus the seal. A pipeline that is
+    // still open past this bound is a bug.
+    const steps = this.maxAttempts * 5 + this.maxLostLeases * 6 + 2;
     for (let step = 0; step < steps; step++) {
       if (pipeline.state === "unknown" || this.closed) return null;
       const action = this.classify(pipeline);
@@ -230,8 +236,9 @@ export class ExtractionScheduler {
         case "queued": return "run";
         case "leased": return task.lease && task.lease.expires_at <= this.clock() ? { kind: "settle", task } : "unresolved";
         case "cancelled": case "failed": return task.attempts < this.maxAttempts && task.state === "failed" ? { kind: "retry", task } : "failed";
-        // expired / worker_lost: unresolved work in the store's eyes; retry while the budget lasts, else cancel into a durable omission.
-        default: return task.attempts < this.maxAttempts ? { kind: "retry", task } : { kind: "cancel", task };
+        // expired / worker_lost: no provider outcome was received, so the attempt budget is untouched; retry while the
+        // lost-lease budget lasts, else cancel into a durable omission.
+        default: return (task.lost_leases ?? 0) < this.maxLostLeases ? { kind: "retry", task } : { kind: "cancel", task };
       }
     };
     const claim = stage(pipeline.claim);

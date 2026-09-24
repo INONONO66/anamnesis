@@ -62,7 +62,12 @@ Each judge lease appends its own immutable input premise: current source
 head, policy revision, and parent attempt binding. Completion revalidates
 these premises and current source permission under the writer fence.
 Changed premises retain a content-free failure; denied output retains a
-content-free cancelled attempt. Valid per-claim disposition rows and the
+content-free cancelled attempt. A `provider_mismatch` attempt names the
+check it failed in `detail` (`model`, `incarnation`, `envelope`, `json`,
+`normalize`, `span`, `judge_shape` or `digest`). A lease stamps the task
+with the identity of the provider that runs it, so work queued or lost
+under a previous daemon configuration is finished by the current one
+rather than refused until its attempt budget is spent (#218). Valid per-claim disposition rows and the
 terminal judge attempt commit atomically. Decisions are read through 65
 composite point seeks, including an overflow sentinel, with no adjacency or
 candidate fallback. Required missing decision rows reject status/coverage.

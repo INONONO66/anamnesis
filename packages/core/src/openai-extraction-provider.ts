@@ -2,10 +2,12 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import {
   ExtractionProviderError,
+  reportedModelMatches,
   type ExtractionProvider,
   type ExtractionProviderInput,
 } from "./extraction.ts";
 import { chatExtractionSchema, normalizeChatExtraction } from "./extraction-chat-output.ts";
+import type { ExtractionFailureDetail } from "../../protocol/src/extraction.ts";
 
 export type ExtractionDialect = "openai_chat" | "anthropic_messages";
 export type OpenAiChatExtractionProviderOptions = {
@@ -23,8 +25,8 @@ export type OpenAiChatExtractionProviderOptions = {
 class OpenAiChatExtractionError extends ExtractionProviderError {
   readonly code: ExtractionProviderError["reason"];
   readonly retryable: boolean;
-  constructor(readonly reason: ExtractionProviderError["reason"]) {
-    super(reason);
+  constructor(readonly reason: ExtractionProviderError["reason"], detail?: ExtractionFailureDetail) {
+    super(reason, detail);
     this.code = reason;
     this.retryable = reason === "provider_unavailable";
   }
@@ -45,6 +47,8 @@ const errorEnvelope = z.looseObject({ error: z.looseObject({ code: z.string() })
 export class OpenAiChatExtractionProvider implements ExtractionProvider {
   readonly model: string;
   readonly modelIncarnation: string;
+  /** Pinned by the first accepted response (`model:system_fingerprint` for Chat, the dated model for Messages); every
+   * later response must report the same identity, and the model must be the configured one or a snapshot of it. */
   reportedModelIncarnation: string | undefined;
   private readonly dialect: ExtractionDialect;
   private readonly endpoint: string;
@@ -125,7 +129,7 @@ export class OpenAiChatExtractionProvider implements ExtractionProvider {
     catch { throw new OpenAiChatExtractionError("provider_unavailable"); }
     let parsedBody: unknown;
     try { parsedBody = JSON.parse(raw); }
-    catch { throw new OpenAiChatExtractionError("provider_mismatch"); }
+    catch { throw new OpenAiChatExtractionError("provider_mismatch", "envelope"); }
     if (errorEnvelope.safeParse(parsedBody).success) {
       const error = errorEnvelope.parse(parsedBody);
       if (error.error.code === "upstream_quota_exhausted") throw new OpenAiChatExtractionError("provider_unavailable");
@@ -134,7 +138,8 @@ export class OpenAiChatExtractionProvider implements ExtractionProvider {
     let incarnation: string;
     if (this.dialect === "anthropic_messages") {
       const parsed = anthropicEnvelope.safeParse(parsedBody);
-      if (!parsed.success) throw new OpenAiChatExtractionError("provider_mismatch");
+      if (!parsed.success) throw new OpenAiChatExtractionError("provider_mismatch", "envelope");
+      if (!reportedModelMatches(this.model, parsed.data.model)) throw new OpenAiChatExtractionError("provider_mismatch", "model");
       content = parsed.data.content[0]!.text.trim();
       // Some Messages models append an explanation after their fenced JSON.
       // Only unwrap a leading, complete fence; the JSON object stays strict.
@@ -143,17 +148,18 @@ export class OpenAiChatExtractionProvider implements ExtractionProvider {
       incarnation = parsed.data.model;
     } else {
       const parsed = responseEnvelope.safeParse(parsedBody);
-      if (!parsed.success) throw new OpenAiChatExtractionError("provider_mismatch");
+      if (!parsed.success) throw new OpenAiChatExtractionError("provider_mismatch", "envelope");
+      if (!reportedModelMatches(this.model, parsed.data.model)) throw new OpenAiChatExtractionError("provider_mismatch", "model");
       content = parsed.data.choices[0]!.message.content;
       incarnation = `${parsed.data.model}:${parsed.data.system_fingerprint ?? "nofp"}`;
     }
     let output: unknown;
     try { output = JSON.parse(content); }
-    catch { throw new OpenAiChatExtractionError("provider_mismatch"); }
+    catch { throw new OpenAiChatExtractionError("provider_mismatch", "json"); }
     try { output = normalizeChatExtraction(output, input); }
-    catch { throw new OpenAiChatExtractionError("provider_mismatch"); }
+    catch { throw new OpenAiChatExtractionError("provider_mismatch", "normalize"); }
     if (this.reportedModelIncarnation !== undefined && this.reportedModelIncarnation !== incarnation) {
-      throw new OpenAiChatExtractionError("provider_mismatch");
+      throw new OpenAiChatExtractionError("provider_mismatch", "incarnation");
     }
     this.reportedModelIncarnation = incarnation;
     return output;

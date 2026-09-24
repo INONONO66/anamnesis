@@ -58,6 +58,9 @@ export class PacedExtractionProvider implements ExtractionProvider {
     this.model = inner.model; this.modelIncarnation = inner.modelIncarnation;
   }
 
+  /** The inner provider's pinned upstream identity; the gate adds none of its own. */
+  get reportedModelIncarnation(): string | undefined { return this.inner.reportedModelIncarnation; }
+
   async extract(input: ExtractionProviderInput): Promise<unknown> {
     await this.turn();
     return this.inner.extract(input);
