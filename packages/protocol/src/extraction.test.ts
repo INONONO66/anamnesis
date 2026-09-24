@@ -19,6 +19,11 @@ describe("G004 extraction contract", () => {
     });
     expect(attempt.id).toMatch(/^018/);
     expect(canonicalExtractionBody({ claim: "x" })).toBe('{"claim":"x"}');
+    // A mismatch names the check it failed (#218); records written before the field exists still parse.
+    const mismatch = { ...attempt, state: "failed", reason: "provider_mismatch" };
+    expect(ExtractionAttempt.parse(mismatch).detail).toBeUndefined();
+    expect(ExtractionAttempt.parse({ ...mismatch, detail: "incarnation" }).detail).toBe("incarnation");
+    expect(() => ExtractionAttempt.parse({ ...mismatch, detail: "other" })).toThrow();
   });
 
   test("rejects incomplete task and generation records", () => {

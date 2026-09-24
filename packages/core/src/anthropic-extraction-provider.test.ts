@@ -8,11 +8,11 @@ const input = { task: "claim", text: "Alice works here." } as const;
 const output = { task: "claim", claims: [{ text: input.text, evidence: { start: 0, end: 17, text: input.text } }], language: "en", modality: "text" };
 const options = { baseUrl: "http://llm.test/", apiKey: "fixture-key", model: "claude-haiku-4-5", systemPrompt: "Extract claims.", dialect: "anthropic_messages" as const };
 const response = (text: string) => Response.json({ id: "msg_fixture", model: "claude-haiku-4-5-20251001", content: [{ type: "text", text }] });
-async function failure(fetch: NonNullable<ConstructorParameters<typeof OpenAiChatExtractionProvider>[0]["fetch"]>, reason: string, timeoutMs = 5000) {
+async function failure(fetch: NonNullable<ConstructorParameters<typeof OpenAiChatExtractionProvider>[0]["fetch"]>, reason: string, timeoutMs = 5000, detail?: string) {
   const provider = new OpenAiChatExtractionProvider({ ...options, fetch, timeoutMs });
   const error = await provider.extract(input).then(() => { throw new Error("expected rejection"); }, error => error);
   expect(error).toBeInstanceOf(ExtractionProviderError);
-  expect(error).toMatchObject({ reason, code: reason, retryable: reason === "provider_unavailable" });
+  expect(error).toMatchObject({ reason, code: reason, retryable: reason === "provider_unavailable", detail });
 }
 describe("Anthropic Messages extraction dialect", () => {
   test("posts Messages headers, schema and user input; uses the dated model identity", async () => {
@@ -88,11 +88,11 @@ describe("Anthropic Messages extraction dialect", () => {
     expect(validateModelOutput(result, "claim").disposition).toBe("suppress");
   });
   test("rejects empty evidence", async () => {
-    await failure(async () => response(JSON.stringify({ ...output, claims: [{ text: input.text, evidence: "" }] })), "provider_mismatch");
+    await failure(async () => response(JSON.stringify({ ...output, claims: [{ text: input.text, evidence: "" }] })), "provider_mismatch", 5000, "normalize");
   });
   test("fence normalization still rejects extra fields and invalid claim shapes", async () => {
     for (const invalid of [{ ...output, extra: true }, { ...output, claims: null }, { claims: output.claims }]) {
-      await failure(async () => response('```json\n' + JSON.stringify(invalid) + '\n```\nExplanation.'), "provider_mismatch");
+      await failure(async () => response('```json\n' + JSON.stringify(invalid) + '\n```\nExplanation.'), "provider_mismatch", 5000, "normalize");
     }
   });
   for (const status of [429, 500, 503]) test(`HTTP ${status} is retryable`, async () => {
@@ -109,11 +109,13 @@ describe("Anthropic Messages extraction dialect", () => {
       if (signal.aborted) reject(signal.reason);
     }), "provider_unavailable", 1);
   }, 1000);
-  test("malformed envelopes, JSON, schema and mismatched tasks fail closed", async () => {
-    for (const body of ["not json", "{}", JSON.stringify({ ...output, task: "judge" }), JSON.stringify({ ...output, modality: "invalid" })]) {
-      await failure(async () => response(body), "provider_mismatch");
+  test("malformed envelopes, JSON, schema and mismatched tasks fail closed, naming the failed check", async () => {
+    // The attempt row records which check refused the response (#218): the content JSON, its shape, or the envelope.
+    await failure(async () => response("not json"), "provider_mismatch", 5000, "json");
+    for (const body of ["{}", JSON.stringify({ ...output, task: "judge" }), JSON.stringify({ ...output, modality: "invalid" })]) {
+      await failure(async () => response(body), "provider_mismatch", 5000, "normalize");
     }
-    await failure(async () => Response.json({ model: "claude", content: [] }), "provider_mismatch");
-    await failure(async () => new Response("not json"), "provider_mismatch");
+    await failure(async () => Response.json({ model: "claude", content: [] }), "provider_mismatch", 5000, "envelope");
+    await failure(async () => new Response("not json"), "provider_mismatch", 5000, "envelope");
   });
 });

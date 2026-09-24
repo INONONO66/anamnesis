@@ -30,7 +30,7 @@ import { RpcPolicySetParams, RpcPolicyRevokeParams, type RpcPolicyResult } from 
 import { ObjectStore } from "./objects.ts";
 import { EchoLineage, EpisodeLineageError, RecallLineageSelection, parseEpisodeLineage, type EpisodeLineageInput } from "../../protocol/src/episode-lineage.ts";
 import { SemanticClaimValidationError, SemanticResolvedTime, validateSemanticClaim, type SemanticSourceContext, type ValidatedSemanticClaim } from "../../protocol/src/semantic-claim.ts";
-import { CreateModelTask, ModelTaskCAS, LeaseModelTask, SettleModelTask, CompleteExtractionAttempt, AdvanceExtractionCoverage, SelectExtractionGeneration, ExtractionSelection, ReadExtractionCoverage, ExtractionCoverageRead, canonicalExtractionBody, extractionBodyDigest, FactRelationJudgement } from "../../protocol/src/extraction.ts";
+import { CreateModelTask, ModelTaskCAS, LeaseModelTask, SettleModelTask, CompleteExtractionAttempt, AdvanceExtractionCoverage, SelectExtractionGeneration, ExtractionSelection, ReadExtractionCoverage, ExtractionCoverageRead, canonicalExtractionBody, extractionBodyDigest, FactRelationJudgement, type ExtractionFailureDetail } from "../../protocol/src/extraction.ts";
 import { validateModelOutput, validateSourceSpans } from "./extraction.ts";
 import { ExtractionClaimContext, ExtractionJudgeInput, ExtractionPipeline, ExtractionDisposition, ExtractionAuditError, FactRelationContext } from '../../protocol/src/extraction-audit.ts';
 import { ProposeRetainedClaim, MaterializeRetainedClaim, ReviewRetainedClaim, MaterializationResult, FactRelationDecision, SemanticReviewPremises, SemanticResolution, SemanticReviewOutput, RetainedSemanticProposal, semanticReviewClaimBody } from "../../protocol/src/materialization.ts";
@@ -48,6 +48,9 @@ import { EmbeddingError, embeddingProfileId, validateVector, type EmbeddingProvi
 import { admittedBudget, packRecall, canonicalContext, RecallError, type Tokenizers, type RecallBundle } from "./recall.ts";
 import { receiptBodyDigestInput, canonicalReceiptJson } from "./receipt-digest.ts";
 import { DreamAdapterError, type DreamLeidenAdapter } from "./dream-leiden-adapter.ts";
+
+/** Internal lease request: the engine names the provider that will run the task (never an RPC caller). */
+const LeaseModelTaskWithProvider = LeaseModelTask.extend({ provider: z.strictObject({ model: ModelTask.shape.model, model_incarnation: ModelTask.shape.model_incarnation }).optional() });
 
 export type ConductingArcRow = {
   source_id: string; link_id: string; peer_id: string; role: string;
@@ -3153,14 +3156,18 @@ export class Store {
 
   /** Records the provider's answer for one premise: a verdict bound to the premise
    * digest (written once), or the failure reason that keeps the pipeline pending. */
-  async recordFactRelationVerdict(input: { key: string } & ({ judgements: FactRelationJudgement[]; model: string; model_incarnation: string } | { failure: string }), context: InstallationContext): Promise<void> {
+  async recordFactRelationVerdict(input: { key: string } & ({ judgements: FactRelationJudgement[]; model: string; model_incarnation: string } | { failure: string; detail?: ExtractionFailureDetail }), context: InstallationContext): Promise<void> {
     await this.extractionTx(context, async (tx, policy) => {
       const premise = await tx.run(`MATCH (i:FactRelationInput {occurrence_key:$key}) RETURN i.source_episode_id AS source, i.body_digest AS digest`, { key: input.key });
       const row = premise.records[0];
       if (!row) throw new ExtractionAuditError("extraction_audit_conflict");
       await this.authorizeEpisodesTx(tx, [String(row.get("source"))], policy);
-      if ("failure" in input) { await tx.run(`MATCH (i:FactRelationInput {occurrence_key:$key}) SET i.last_failure=$failure, i.failures=coalesce(i.failures,0)+1`, { key: input.key, failure: input.failure }); return; }
-      await tx.run(`MATCH (i:FactRelationInput {occurrence_key:$key}) SET i.last_failure=null
+      if ("failure" in input) {
+        await tx.run(`MATCH (i:FactRelationInput {occurrence_key:$key}) SET i.last_failure=$failure, i.last_failure_detail=$detail, i.failures=coalesce(i.failures,0)+1`,
+          { key: input.key, failure: input.failure, detail: input.detail ?? null });
+        return;
+      }
+      await tx.run(`MATCH (i:FactRelationInput {occurrence_key:$key}) SET i.last_failure=null, i.last_failure_detail=null
         MERGE (v:FactRelationVerdict {occurrence_key:$key}) ON CREATE SET v.body_digest=$digest, v.judgements=$judgements, v.model=$model, v.model_incarnation=$incarnation`,
         { key: input.key, digest: String(row.get("digest")), judgements: canonicalExtractionBody(z.array(FactRelationJudgement).max(16).parse(input.judgements)), model: input.model, incarnation: input.model_incarnation });
     });
@@ -3183,9 +3190,11 @@ export class Store {
     return parsed;
   }
 
-  async leaseModelTask(input: LeaseModelTask, context: InstallationContext): Promise<ModelTask> {
+  /** `provider` is the identity of the provider about to run the task; the leased task adopts it so a daemon whose
+   * provider changed between boots finishes inherited work instead of refusing it (#218). Absent, the task keeps its own. */
+  async leaseModelTask(input: LeaseModelTask & { provider?: Pick<ModelTask, "model" | "model_incarnation"> }, context: InstallationContext): Promise<ModelTask> {
     requireInstallation(context);
-    const request = LeaseModelTask.parse(input);
+    const request = LeaseModelTaskWithProvider.parse(input);
     return this.extractionTx(context, async (tx, policy) => {
       const task = await this.extractionRecordTx(tx, "ModelTask", request.task_id, ModelTask);
       this.checkExtractionCAS(task, request.expected_version);
@@ -3195,7 +3204,7 @@ export class Store {
       await this.validateExtractionSourceTx(tx, task);
       await this.extractionNotCoveredTx(tx, task);
       const now = Math.max(task.updated_at, receiptTime.parse(this.clock()));
-      const leased = await this.saveExtractionTaskTx(tx, { ...task, state: "leased", version: task.version + 1, attempts: task.attempts + 1, attempt_id: uuidv7(), updated_at: now,
+      const leased = await this.saveExtractionTaskTx(tx, { ...task, ...request.provider, state: "leased", version: task.version + 1, attempts: task.attempts + 1, attempt_id: uuidv7(), updated_at: now,
         lease: { worker_id: request.worker_id, epoch: uuidv7(), writer_epoch: this.writerEpoch!, expires_at: now + request.lease_ms },
         policy_context: { revision: policy.policy_revision, authority: "installation" } });
       if (task.kind === 'judge_claims') {
@@ -3228,9 +3237,10 @@ export class Store {
   }
 
   private async finishExtractionTx(tx: ManagedTransaction, task: ModelTask, policy: PolicyState,
-    outcome: Pick<ExtractionAttempt, "state" | "reason" | "disposition" | "output" | "spans">, requestDigest: string): Promise<ExtractionAttempt> {
+    outcome: Pick<ExtractionAttempt, "state" | "reason" | "disposition" | "output" | "spans" | "detail">, requestDigest: string): Promise<ExtractionAttempt> {
     const now = Math.max(task.updated_at, receiptTime.parse(this.clock()));
     const attempt = ExtractionAttempt.parse({ state: outcome.state, reason: outcome.reason, disposition: outcome.disposition, output: outcome.output, spans: outcome.spans,
+      ...(outcome.detail === undefined ? {} : { detail: outcome.detail }),
       id: task.attempt_id ?? uuidv7(), task_id: task.id,
       generation_id: task.generation_id, source_id: task.source_id, source_revision: task.source_revision, source_ingest_seq: task.source_ingest_seq, body_digest: task.body_digest,
       created_at: task.updated_at, updated_at: now, lease: task.lease, policy_context: { revision: policy.policy_revision, authority: "installation" } });
@@ -3281,10 +3291,11 @@ export class Store {
         if (canonicalExtractionBody(parent) !== canonicalExtractionBody(premise.claim_context) || premise.task_id !== task.id || premise.attempt_id !== task.attempt_id) throw new ExtractionAuditError('extraction_audit_conflict');
         if (request.output) {
           const body = ExtractionModelOutput.parse(JSON.parse(request.output.canonical_body));
-          if (body.task !== 'judge_claims' || body.claim_body_digest !== parent.body_digest || body.decisions.length !== parent.claims.length
-            || body.decisions.some((d,i)=>d.claim_index !== i || canonicalExtractionBody(d.evidence) !== canonicalExtractionBody(parent.claims[i]!.evidence))) {
-            return this.finishExtractionTx(tx,task,policy,{state:'failed',reason:'provider_mismatch',disposition:null,output:null,spans:[]},digest);
-          }
+          // The attempt names the check the judge failed (#218): ABI task, parent digest, or the decision set's shape.
+          const refuse = (detail: ExtractionFailureDetail) => this.finishExtractionTx(tx,task,policy,{state:'failed',reason:'provider_mismatch',detail,disposition:null,output:null,spans:[]},digest);
+          if (body.task !== 'judge_claims') return refuse('normalize');
+          if (body.claim_body_digest !== parent.body_digest) return refuse('digest');
+          if (body.decisions.length !== parent.claims.length || body.decisions.some((d,i)=>d.claim_index !== i || canonicalExtractionBody(d.evidence) !== canonicalExtractionBody(parent.claims[i]!.evidence))) return refuse('judge_shape');
           for (const d of body.decisions) {
             const decision = ExtractionDisposition.parse({...d,judge_attempt_id:task.attempt_id,claim_attempt_id:parent.attempt_id,claim_body_digest:parent.body_digest});
             await tx.run(`CREATE (:ExtractionDisposition {judge_attempt_id:$id,claim_index:$index,body:$body})`,

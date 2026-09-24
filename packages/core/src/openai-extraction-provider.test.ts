@@ -15,12 +15,12 @@ const response = (content: string, extra: Record<string, unknown> = {}) => Respo
 });
 const options = { baseUrl: "http://llm.test/", apiKey: "test-key", model: "gpt-test", systemPrompt: "Extract claims." };
 
-async function expectFailure(instance: OpenAiChatExtractionProvider, code: string, retryable: boolean) {
+async function expectFailure(instance: OpenAiChatExtractionProvider, code: string, retryable: boolean, detail?: string) {
   const error = await instance.extract({ text: "The sky is blue.", task: "claim" }).then(
     () => { throw new Error("expected provider rejection"); }, error => error,
   );
   expect(error).toBeInstanceOf(ExtractionProviderError);
-  expect(error).toMatchObject({ code, reason: code, retryable });
+  expect(error).toMatchObject({ code, reason: code, retryable, detail });
 }
 
 describe("OpenAiChatExtractionProvider", () => {
@@ -71,7 +71,7 @@ describe("OpenAiChatExtractionProvider", () => {
     let call = 0;
     const instance = new OpenAiChatExtractionProvider({ ...options, fetch: async () => response(JSON.stringify(output), { system_fingerprint: ++call === 1 ? "first" : "changed" }) });
     await instance.extract({ text: "The sky is blue.", task: "claim" });
-    await expectFailure(instance, "provider_mismatch", false);
+    await expectFailure(instance, "provider_mismatch", false, "incarnation");
   });
 
   test("maps quota errors and non-success responses to retryable provider_unavailable", async () => {
@@ -94,9 +94,10 @@ describe("OpenAiChatExtractionProvider", () => {
     expect(observedAbort).toBe(true);
   }, 1000);
 
-  test("maps malformed or schema-invalid content to non-retryable provider_mismatch", async () => {
-    await expectFailure(new OpenAiChatExtractionProvider({ ...options, fetch: async () => response("not json") }), "provider_mismatch", false);
-    await expectFailure(new OpenAiChatExtractionProvider({ ...options, fetch: async () => response(JSON.stringify({ task: "claim", claims: [], language: "en", modality: "invalid" })) }), "provider_mismatch", false);
+  test("maps malformed or schema-invalid content to non-retryable provider_mismatch naming the failed check", async () => {
+    await expectFailure(new OpenAiChatExtractionProvider({ ...options, fetch: async () => response("not json") }), "provider_mismatch", false, "json");
+    await expectFailure(new OpenAiChatExtractionProvider({ ...options, fetch: async () => response(JSON.stringify({ task: "claim", claims: [], language: "en", modality: "invalid" })) }), "provider_mismatch", false, "normalize");
+    await expectFailure(new OpenAiChatExtractionProvider({ ...options, fetch: async () => new Response("not json", { status: 200 }) }), "provider_mismatch", false, "envelope");
   });
 
   test("relation judge requests use the dedicated relation prompt and bind it into the task identity", async () => {

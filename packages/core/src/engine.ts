@@ -188,53 +188,57 @@ export class Engine {
     if (judge.state === 'queued') await this.runExtractionTask({...request,task_id:judge.id,expected_version:judge.version},context);
     const afterJudge = await this.store.readExtractionPipeline(request.task_id,context);
     if (afterJudge.state !== 'known' || afterJudge.relation_judge !== 'pending' || !afterJudge.judge) return afterJudge;
-    await this.judgeFactRelations(request.task_id,afterJudge.judge,context);
+    await this.judgeFactRelations(request.task_id,context);
     return this.store.readExtractionPipeline(request.task_id,context);
   }
 
   /** Relation verdicts for the validated claims of one pipeline (D53). The HTTP
    * call stays outside transactions; a verdict is accepted only when it echoes
    * the persisted premise digest and covers exactly the supplied candidates.
-   * Provider failures are recorded on the premise and leave the pipeline pending. */
-  private async judgeFactRelations(pipelineId: string, task: { model: string; model_incarnation: string }, context: InstallationContext) {
+   * Provider failures are recorded on the premise and leave the pipeline pending.
+   * The verdict names the provider that judged; work inherited from a previous
+   * daemon incarnation is judged by the current provider, never refused (#218). */
+  private async judgeFactRelations(pipelineId: string, context: InstallationContext) {
     const provider = this.extractionProvider;
     if (!provider) throw new ExtractionAuditError('extraction_not_configured');
     for (const input of await this.store.pendingFactRelationInputs(pipelineId, context)) {
       try {
-        if (provider.model !== task.model || provider.modelIncarnation !== task.model_incarnation) throw new ExtractionProviderError("provider_mismatch");
         const validated = validateModelOutput(await provider.extract({ text: input.context.fact.text, task: "judge_relations", relation_context: input.context }), "judge_relations");
         const output = ExtractionModelOutput.parse(JSON.parse(validated.output.canonical_body));
+        if (output.task !== "judge_relations") throw new ExtractionProviderError("provider_mismatch", "normalize");
+        if (output.relation_context_digest !== input.context.body_digest) throw new ExtractionProviderError("provider_mismatch", "digest");
         const ids = new Set(input.context.candidates.map(candidate => candidate.id));
-        if (output.task !== "judge_relations" || output.relation_context_digest !== input.context.body_digest || output.judgements.length !== ids.size
-          || new Set(output.judgements.map(judgement => judgement.candidate_id)).size !== ids.size || output.judgements.some(judgement => !ids.has(judgement.candidate_id)))
-          throw new ExtractionProviderError("provider_mismatch");
+        if (output.judgements.length !== ids.size || new Set(output.judgements.map(judgement => judgement.candidate_id)).size !== ids.size || output.judgements.some(judgement => !ids.has(judgement.candidate_id)))
+          throw new ExtractionProviderError("provider_mismatch", "judge_shape");
         await this.store.recordFactRelationVerdict({ key: input.key, judgements: output.judgements, model: provider.model, model_incarnation: provider.modelIncarnation }, context);
       } catch (error) {
         if (!(error instanceof ExtractionProviderError)) throw error;
-        await this.store.recordFactRelationVerdict({ key: input.key, failure: error.reason }, context);
+        await this.store.recordFactRelationVerdict({ key: input.key, failure: error.reason, ...(error.detail === undefined ? {} : { detail: error.detail }) }, context);
       }
     }
   }
 
   /** One explicitly requested model task, never an automatic graph/recall worker.
    * HTTP work stays outside retryable transactions; completion rechecks the lease,
-   * immutable Episode bytes and installation policy under the writer barrier. */
+   * immutable Episode bytes and installation policy under the writer barrier.
+   * The lease stamps the task with this provider's identity: a task created by a
+   * previous daemon incarnation (a prompt, base URL or model alias edited between
+   * boots) is run, not refused as provider_mismatch until its budget is gone (#218). */
   async runExtractionTask(input: LeaseModelTask, context: InstallationContext) {
     const provider = this.extractionProvider;
     if (!provider) throw new ExtractionAuditError('extraction_not_configured');
-    const task = await this.store.leaseModelTask(input, context);
+    const task = await this.store.leaseModelTask({ ...input, provider: { model: provider.model, model_incarnation: provider.modelIncarnation } }, context);
     const { text, claim_context } = await this.store.extractionTaskInput(task.id, task.lease!.epoch, context);
-    let outcome: Pick<CompleteExtractionAttempt, "state" | "reason" | "output" | "spans" | "disposition">;
+    let outcome: Pick<CompleteExtractionAttempt, "state" | "reason" | "output" | "spans" | "disposition" | "detail">;
     try {
-      if (provider.model !== task.model || provider.modelIncarnation !== task.model_incarnation) throw new ExtractionProviderError("provider_mismatch");
       if (Buffer.byteLength(text, "utf8") > 65536) throw new ExtractionProviderError("input_too_large");
       const validated = validateModelOutput(await provider.extract({ text, task: task.kind, ...(claim_context ? {claim_context} : {}) }), task.kind);
       try { validateSourceSpans(text, validated.spans); }
-      catch (error) { if (error instanceof Error && error.message === "span_mismatch") throw new ExtractionProviderError("provider_mismatch"); throw error; }
+      catch (error) { if (error instanceof Error && error.message === "span_mismatch") throw new ExtractionProviderError("provider_mismatch", "span"); throw error; }
       outcome = { ...validated, state: "succeeded", reason: null };
     } catch (error) {
       if (!(error instanceof ExtractionProviderError)) throw error;
-      outcome = { state: "failed", reason: error.reason, output: null, spans: [], disposition: null };
+      outcome = { state: "failed", reason: error.reason, output: null, spans: [], disposition: null, ...(error.detail === undefined ? {} : { detail: error.detail }) };
     }
     return this.store.recordExtractionAttempt({ ...outcome, id: task.attempt_id!, task_id: task.id, expected_version: task.version, lease_epoch: task.lease!.epoch }, context);
   }
