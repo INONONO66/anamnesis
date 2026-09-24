@@ -2978,7 +2978,7 @@ export class Store {
     const candidates = rows.records.map(record => ({ id: record.get("id"), text: record.get("text"), time: { value: record.get("value"), precision: record.get("precision") } }));
     const body = { fact: { text: validated.claim.content, time: validatedFactTime(validated, input.source) }, candidates };
     const context = FactRelationContext.parse({ body_digest: extractionBodyDigest(body), ...body });
-    await tx.run(`CREATE (:FactRelationInput {occurrence_key:$key,pipeline_id:$pipeline,source_episode_id:$source,generation:$generation,body_digest:$digest,context:$context,candidates:$count,last_failure:null})`,
+    await tx.run(`CREATE (:FactRelationInput {occurrence_key:$key,pipeline_id:$pipeline,source_episode_id:$source,generation:$generation,body_digest:$digest,context:$context,candidates:$count,last_failure:null,failures:0})`,
       { key: occurrence, pipeline: input.pipeline_id, source: input.source.id, generation, digest: context.body_digest, context: canonicalExtractionBody(context), count: neo4j.int(candidates.length) });
     return candidates.length ? "pending" : [];
   }
@@ -3047,6 +3047,16 @@ export class Store {
     });
   }
 
+  /** Highest recorded provider-failure count among the premises of one pipeline that still owe a verdict;
+   * the scheduler seals a source whose relation judge keeps failing as a terminal omission (D53). */
+  async factRelationFailures(pipelineId: string, context: InstallationContext): Promise<number> {
+    return this.extractionTx(context, async tx => {
+      const rows = await tx.run(`MATCH (i:FactRelationInput {pipeline_id:$pipeline}) WHERE i.candidates > 0 AND NOT EXISTS { MATCH (:FactRelationVerdict {occurrence_key:i.occurrence_key}) }
+        RETURN coalesce(max(i.failures), 0) AS failures`, { pipeline: z.uuidv7().parse(pipelineId) });
+      return Number(rows.records[0]?.get("failures") ?? 0);
+    });
+  }
+
   /** Records the provider's answer for one premise: a verdict bound to the premise
    * digest (written once), or the failure reason that keeps the pipeline pending. */
   async recordFactRelationVerdict(input: { key: string } & ({ judgements: FactRelationJudgement[]; model: string; model_incarnation: string } | { failure: string }), context: InstallationContext): Promise<void> {
@@ -3055,7 +3065,7 @@ export class Store {
       const row = premise.records[0];
       if (!row) throw new ExtractionAuditError("extraction_audit_conflict");
       await this.authorizeEpisodesTx(tx, [String(row.get("source"))], policy);
-      if ("failure" in input) { await tx.run(`MATCH (i:FactRelationInput {occurrence_key:$key}) SET i.last_failure=$failure`, { key: input.key, failure: input.failure }); return; }
+      if ("failure" in input) { await tx.run(`MATCH (i:FactRelationInput {occurrence_key:$key}) SET i.last_failure=$failure, i.failures=coalesce(i.failures,0)+1`, { key: input.key, failure: input.failure }); return; }
       await tx.run(`MATCH (i:FactRelationInput {occurrence_key:$key}) SET i.last_failure=null
         MERGE (v:FactRelationVerdict {occurrence_key:$key}) ON CREATE SET v.body_digest=$digest, v.judgements=$judgements, v.model=$model, v.model_incarnation=$incarnation`,
         { key: input.key, digest: String(row.get("digest")), judgements: canonicalExtractionBody(z.array(FactRelationJudgement).max(16).parse(input.judgements)), model: input.model, incarnation: input.model_incarnation });

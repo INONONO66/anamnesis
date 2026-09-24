@@ -60,6 +60,8 @@ export class ExtractionScheduler {
   private failed_total = 0;
   private last_error: string | null = null;
   private closed = false;
+  /** Earliest lease expiry the lane must revisit (a lease held by a lost writer or a previous incarnation). */
+  private deferred: { at: number; timer: ReturnType<typeof setTimeout> } | undefined;
 
   constructor(private readonly engine: Engine, options: ExtractionSchedulerOptions) {
     this.provider = options.provider; this.context = options.context; this.read = options.read; this.wake = options.wake;
@@ -82,6 +84,7 @@ export class ExtractionScheduler {
   /** Stops starting provider work and waits for in-flight pipelines to settle. */
   async close(): Promise<void> {
     this.closed = true;
+    if (this.deferred) { clearTimeout(this.deferred.timer); this.deferred = undefined; }
     await Promise.allSettled([...this.inFlight.values()]);
   }
 
@@ -166,14 +169,16 @@ export class ExtractionScheduler {
   private async drive(generation: Generation, episodeId: string, existing: ModelTask | null): Promise<{ outcome: Outcome; fresh: boolean } | null> {
     const claim = existing ?? await this.engine.createExtractionPipeline({ id: uuidv7(), generation_id: generation.id, source_id: episodeId }, this.context);
     let pipeline = await this.engine.store.readExtractionPipeline(claim.id, this.context);
-    let fresh = existing === null, relationRuns = 0;
+    let fresh = existing === null;
     for (let step = 0; step < this.maxAttempts * 4; step++) {
       if (pipeline.state === "unknown" || this.closed) return null;
       const action = this.classify(pipeline);
       if (action === "completed" || action === "failed") return { outcome: action, fresh };
-      if (action === "unresolved") return null;
-      // Validated claims still owe relation verdicts; one run asks for them, a second pending read means the provider failed it.
-      if (action === "pending" && relationRuns++ > 0) return null;
+      // A live lease belongs to another writer or a previous incarnation: nothing settles it now, its expiry re-arms the lane.
+      if (action === "unresolved") { this.deferWake(Math.min(...[pipeline.claim, pipeline.judge].map(task => task?.state === "leased" && task.lease ? task.lease.expires_at : Infinity))); return null; }
+      // Validated claims still owe relation verdicts. Every run asks the provider once per pending premise; a premise
+      // that has failed maxAttempts times seals the source as a terminal omission (D53) instead of parking the pipeline.
+      if (action === "pending" && await this.engine.store.factRelationFailures(claim.id, this.context) >= this.maxAttempts) return { outcome: "failed", fresh: true };
       fresh = true;
       if (action === "run" || action === "pending") {
         pipeline = await this.engine.runExtractionPipeline({ task_id: pipeline.claim.id, expected_version: pipeline.claim.version, worker_id: this.workerId, lease_ms: 30000 }, this.context);
@@ -183,8 +188,17 @@ export class ExtractionScheduler {
       else await this.settle(action.task);
       pipeline = await this.engine.store.readExtractionPipeline(claim.id, this.context);
     }
+    // The step budget is the last bound: a pipeline that never reaches a terminal task state is still a terminal omission.
     this.recordError(new Error(`pipeline ${claim.id} did not settle within ${this.maxAttempts * 4} steps`));
-    return null;
+    return { outcome: "failed", fresh: true };
+  }
+
+  private deferWake(at: number): void {
+    if (this.closed || !Number.isFinite(at) || (this.deferred && this.deferred.at <= at)) return;
+    if (this.deferred) clearTimeout(this.deferred.timer);
+    const timer = setTimeout(() => { this.deferred = undefined; if (!this.closed) this.wake(); }, Math.max(0, at - Date.now()) + 1);
+    timer.unref?.();
+    this.deferred = { at, timer };
   }
 
   private classify(pipeline: Known): Action {

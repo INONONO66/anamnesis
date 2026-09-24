@@ -47,19 +47,22 @@ async function embedder(): Promise<{ server: Server; endpoint: string; calls: ()
 }
 
 /** Deterministic HttpExtractionProvider peer: one retained claim per Episode with entity metadata (so Facts
- * materialize), retain-all judge verdicts, "unrelated" relation verdicts; Episodes mentioning "poison" are rejected. */
-async function extractor(): Promise<{ server: Server; endpoint: string; model: string; model_incarnation: string; rejected: () => number }> {
+ * materialize), retain-all judge verdicts, "unrelated" relation verdicts; Episodes mentioning "poison" are rejected at the claim
+ * stage, Episodes mentioning "venom" pass both claim stages and are rejected only at judge_relations. */
+async function extractor(): Promise<{ server: Server; endpoint: string; model: string; model_incarnation: string; rejected: () => number; relationRejected: () => number; calls: () => string[] }> {
   const model = "extraction-worker-fixture", model_incarnation = "f".repeat(64);
-  let rejected = 0;
+  let rejected = 0, relationRejected = 0; const calls: string[] = [];
   const server = createServer(async (request, response) => {
     const chunks: Buffer[] = []; for await (const chunk of request) chunks.push(chunk as Buffer);
     const input = JSON.parse(Buffer.concat(chunks).toString("utf8")) as { text: string; task: string;
-      claim_context?: { body_digest: string; claims: Array<{ evidence: unknown }> }; relation_context?: { body_digest: string; candidates: Array<{ id: string }> } };
+      claim_context?: { body_digest: string; claims: Array<{ evidence: unknown }> }; relation_context?: { body_digest: string; fact: { text: string }; candidates: Array<{ id: string }> } };
     response.setHeader("content-type", "application/json");
+    calls.push(`${input.task}:${(input.relation_context?.fact.text ?? input.text).slice(-12)}:${input.relation_context?.candidates.length ?? ""}`);
     if (input.task === "claim" && input.text.includes("poison")) { rejected++; response.statusCode = 400; response.end("{}"); return; }
+    if (input.task === "judge_relations" && input.relation_context!.fact.text.includes("venom")) { relationRejected++; response.statusCode = 400; response.end("{}"); return; }
     const output = input.task === "claim"
       ? { task: "claim", language: "en", modality: "text", claims: [{ text: input.text, evidence: { start: 0, end: Buffer.byteLength(input.text), text: input.text },
-          confidence: 0.9, entities: [{ mention: "fixture", normalized_name: "Fixture", entity_kind: "person" }] }] }
+          confidence: 0.9, entities: [{ mention: "worker", normalized_name: "worker", entity_kind: "person" }] }] } // Resolves against the Episode content, so later Facts of the same Entity are relation candidates.
       : input.task === "judge_claims"
         ? { task: "judge_claims", language: "en", modality: "text", claim_body_digest: input.claim_context!.body_digest,
             decisions: input.claim_context!.claims.map((claim, claim_index) => ({ claim_index, disposition: "retain", evidence: claim.evidence, confidence: 0.8 })) }
@@ -70,7 +73,7 @@ async function extractor(): Promise<{ server: Server; endpoint: string; model: s
   const listening = once(server, "listening", { signal: deadline(5000) });
   server.listen(0, "127.0.0.1");
   await listening;
-  return { server, endpoint: `http://127.0.0.1:${(server.address() as AddressInfo).port}/extract`, model, model_incarnation, rejected: () => rejected };
+  return { server, endpoint: `http://127.0.0.1:${(server.address() as AddressInfo).port}/extract`, model, model_incarnation, rejected: () => rejected, relationRejected: () => relationRejected, calls: () => calls.slice() };
 }
 
 /** Buffered stdout subscription: lines are kept from the moment of attachment, so an await never misses an earlier event. */
@@ -213,6 +216,17 @@ test.skipIf(!URI || !PASSWORD)("the extraction scheduler catches a fresh generat
         const sealed = await settled(5);
         expect(sealed).toMatchObject({ generation_id: caught.generation_id, covered_ingest_seq: 5, live_ingest_seq: 5, completed_total: 4, failed_total: 1 });
         expect(provider.rejected()).toBe(4);
+        // A relation judge that keeps failing must not park the source: both claim stages succeed, the relation premise
+        // (same-Entity candidates exist from the Facts above) is retried inside the same drive until maxAttempts, then the
+        // source is sealed as a terminal omission with no further remember, status read or manual pipeline call.
+        const failedBefore = (await driver.executeQuery("MATCH (f:Element:Fact {generation:$generation}) RETURN count(f) AS n", { generation: caught.generation_id })).records[0]!.get("n") as number;
+        expect((await client.request("remember", admitted(daemon.root, "venom"))).state).toBe("committed");
+        await daemon.lines.until("workers_idle");
+        const relationSealed = (await client.request("status", {})).workers.extraction;
+        expect({ relation_rejected: provider.relationRejected(), calls: provider.calls() }).toEqual({ relation_rejected: 4, calls: provider.calls() });
+        expect(relationSealed).toMatchObject({ generation_id: caught.generation_id, state: "active", covered_ingest_seq: 6, live_ingest_seq: 6, in_flight: 0, completed_total: 4, failed_total: 2 });
+        expect(provider.relationRejected()).toBe(4);
+        expect(await facts(caught.generation_id)).toBe(failedBefore); // No Fact of the sealed source was written.
         const exited = once(daemon.child, "exit", { signal: deadline() });
         expect((await client.request("shutdown", {})).state).toBe("stopping");
         expect((await exited)[0]).toBe(0);

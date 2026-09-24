@@ -60,8 +60,10 @@ quoted from memory.
   `docs/09-roadmap.md` "Not doing" for multi-tenancy).
 - Cost: the dossier counts roughly 5 LLM calls per episode for Graphiti with
   per-entity and per-edge fan-out (dossier §2; §8 UNVERIFIED). Anamnesis's
-  automatic pipeline is 3 calls per Episode at most (claim, judge_claims,
-  judge_relations when candidates exist) with deterministic Entity resolution
+  automatic pipeline is 2 base calls per Episode (claim, judge_claims) plus one
+  judge_relations call per validated claim that has same-Entity candidates, so
+  an Episode with six candidate-bearing claims costs 8 calls before retries,
+  with deterministic Entity resolution
   (`packages/core/src/engine.ts` L176-186; D52; D53;
   `app/anamnesis/prompts/judge-relations.v1.md`).
 
@@ -436,9 +438,9 @@ duration and no concurrency figure; neither is stated here.
 
 | Quantity | Anamnesis (G7) | Graphiti (dossier) |
 |---|---|---|
-| LLM calls per Episode | 3 on the automatic path when the claim has same-Entity candidates: `claim`, `judge_claims`, `judge_relations` (`engine.ts` L176-186; `extract-claims.v2.md`; `judge-relations.v1.md`; D53). 2 when the candidate list is empty. Entity resolution and Fact write are deterministic (D52) | "~5" per episode: extract_nodes, dedupe_nodes, extract_edges, dedupe_edges, attributes (dossier §8, UNVERIFIED). Expanded: 1 extract_nodes + 1 resolve_node per entity + 1 extract_edges + 1 resolve_edge per edge + 1 extract_timestamps per edge missing times + attribute calls per typed node/edge (dossier §2) |
-| Calls for 200 Episodes | Between 400 and 600 depending on how many Episodes had relation candidates; the artifact doesn't count calls, so this is a bound from the call shape, retries excluded | At least 1000 by the dossier's rough figure; §9.3 predictions run 5 to 15 per Episode on this corpus. No seconds are given in the dossier and none are invented here |
-| Wall time per Episode | 987,029 ms / 200 = about 4.9 s per Episode across the worker lanes (arithmetic on `durations.workers_ms`). The 3000 ms pacing floor per provider call means 2 to 3 paced calls alone account for 6 to 9 s if serialized, so the lanes overlapped calls across sources; the artifact doesn't expose the per-lane split | Dossier §7 cites "typical 1-5 s per episode with OpenAI API"; that section is UNVERIFIED and not a measurement |
+| LLM calls per Episode | 2 base calls (`claim`, `judge_claims`) plus 1 `judge_relations` call per validated claim whose same-Entity candidate list is non-empty: `judgeFactRelations` loops over every pending premise of the pipeline and calls the provider once each (`engine.ts` L199-215; `extract-claims.v2.md`; `judge-relations.v1.md`; D53). 2 when no claim has candidates; 2 + N for N candidate-bearing claims (an Episode with six such claims costs 8). Retries on provider failure are extra. Entity resolution and Fact write are deterministic (D52) | "~5" per episode: extract_nodes, dedupe_nodes, extract_edges, dedupe_edges, attributes (dossier §8, UNVERIFIED). Expanded: 1 extract_nodes + 1 resolve_node per entity + 1 extract_edges + 1 resolve_edge per edge + 1 extract_timestamps per edge missing times + attribute calls per typed node/edge (dossier §2) |
+| Calls for 200 Episodes | Not measured: the artifact records no provider call count. The lower bound is 400 (2 per Episode); there is no fixed upper bound from the call shape because relation calls scale with candidate-bearing validated claims (421 active Facts across 200 Episodes means about 2.1 validated claims per Episode on average, so a rough expectation is 400 plus a few hundred relation calls, plus retries) | At least 1000 by the dossier's rough figure; §9.3 predictions run 5 to 15 per Episode on this corpus. No seconds are given in the dossier and none are invented here |
+| Wall time per Episode | 987,029 ms / 200 = about 4.9 s per Episode across the worker lanes (arithmetic on `durations.workers_ms`). The 3000 ms pacing floor per provider call means 2 or more paced calls per Episode account for at least 6 s if serialized, so the lanes overlapped calls across sources; the artifact doesn't expose the per-lane split | Dossier §7 cites "typical 1-5 s per episode with OpenAI API"; that section is UNVERIFIED and not a measurement |
 | Embedding | 200 Episode vectors drained, `quarantined_total` 0, inside the same 987 s worker window; no separate timing in the artifact | Per-node name embedding and per-edge fact embedding (dossier §1); no timing in the dossier |
 | Concurrency | Not recorded in the artifact; design is a strict sequencer per generation (`docs/02-daemon-and-pipelines.md` §5) | `SEMAPHORE_LIMIT=20` (dossier §2) |
 | Recall LLM cost | Zero by design (`docs/02-daemon-and-pipelines.md` §8) | Zero for RRF/MMR/node-distance; about 1 LLM call per candidate for cross-encoder (dossier §7, UNVERIFIED) |

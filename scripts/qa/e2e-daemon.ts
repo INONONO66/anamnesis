@@ -25,10 +25,32 @@ const image = "neo4j@sha256:037cf5756f0135cbfd66b739b6df7c7c4bb100f9ce11602f6f95
 const sha = (text: string) => createHash("sha256").update(text).digest("hex");
 /** The daemon owns every worker; this bounds how long the run waits for its lanes to cover the ingest watermark. */
 const WORKERS_DEADLINE_MS = 90 * 60 * 1000;
-async function waitForReady(attempt: () => Promise<unknown>, timeoutMs: number, code: string): Promise<void> {
-  const signal = AbortSignal.timeout(timeoutMs);
-  while (!signal.aborted) { try { await attempt(); return; } catch { await new Promise(resolve => setImmediate(resolve)); } }
-  throw new Error(code);
+/** Event subscription, not polling: resolves on the Neo4j "Started." log line emitted after `since`, bounded by a deadline.
+ * A docker logs exit before that line rejects with its exit code, so a container that dies is reported, not waited on. */
+async function awaitNeo4jStarted(containerName: string, since: string, timeoutMs: number, code: string): Promise<void> {
+  const logs = spawn("docker", ["logs", "-f", "--since", since, containerName], { stdio: ["ignore", "pipe", "pipe"] });
+  const streams = [createInterface({ input: logs.stdout! }), createInterface({ input: logs.stderr! })];
+  try {
+    await new Promise<void>((resolveStarted, reject) => {
+      const timer = setTimeout(() => reject(new Error(code)), timeoutMs);
+      const onLine = (line: string) => { if (line.includes("Started.")) { clearTimeout(timer); resolveStarted(); } };
+      for (const stream of streams) stream.on("line", onLine);
+      logs.once("exit", exitCode => { clearTimeout(timer); reject(new Error(`${code}:docker_logs_exit_${exitCode}`)); });
+    });
+  } finally { for (const stream of streams) stream.close(); logs.kill(); }
+}
+/** The ssh master is started in the foreground (no -f) with ExitOnForwardFailure; its stdout line, written by a remote
+ * echo once the forwards are bound, is the readiness event. An exit before that line is the failure, with its code. */
+async function startTunnel(args: string[], timeoutMs: number): Promise<ChildProcess> {
+  const child = spawn("ssh", [...args, "echo TUNNEL_READY && exec sleep infinity"], { stdio: ["ignore", "pipe", "ignore"] });
+  const lines = createInterface({ input: child.stdout! });
+  await new Promise<void>((resolveReady, reject) => {
+    const timer = setTimeout(() => reject(new Error("tunnel_readiness_failed")), timeoutMs);
+    lines.on("line", line => { if (line === "TUNNEL_READY") { clearTimeout(timer); resolveReady(); } });
+    child.once("exit", exitCode => { clearTimeout(timer); reject(new Error(`tunnel_readiness_failed:ssh_exit_${exitCode}`)); });
+    child.once("error", error => { clearTimeout(timer); reject(error); });
+  });
+  return child;
 }
 async function freePort() {
   const server = createServer();
@@ -147,7 +169,8 @@ export async function runE2eDaemon(evidence = resolve(".omo/evidence/auto-pipeli
     });
   };
   const connect = async () => RpcClient.connect(join(root, "anamnesis.sock"), (await readFile(join(root, "token"), "utf8")).trim());
-  const ready = async () => waitForReady(() => driver!.verifyConnectivity(), 120000, "bolt_readiness_timeout");
+  /** Readiness is the container's own "Started." line after the given moment; one connectivity check then confirms the mapped port. */
+  const ready = async (since: string) => { await awaitNeo4jStarted(name, since, 120000, "bolt_readiness_timeout"); await driver!.verifyConnectivity(); };
   const snapshot = async () => {
     const result = await driver!.executeQuery(`MATCH (s:Meta {key:'extraction_selector'})
       OPTIONAL MATCH (g:ExtractionGeneration {id:s.generation_id})
@@ -171,9 +194,8 @@ export async function runE2eDaemon(evidence = resolve(".omo/evidence/auto-pipeli
     await chmod(key, 0o600); assert.equal((await stat(key)).mode & 0o777, 0o600);
     const tunnelPort = await freePort(), embedPort = await freePort();
     const control = join(secretRoot, "ssh.sock");
-    tunnel = spawn("ssh", ["-N", "-M", "-S", control, "-o", "ForkAfterAuthentication=no", "-o", "ControlPersist=no", "-o", "BatchMode=yes", "-o", "ExitOnForwardFailure=yes",
-      "-L", `${tunnelPort}:127.0.0.1:19080`, "-L", `${embedPort}:127.0.0.1:18081`, "inonono"], { stdio: "ignore" });
-    await waitForReady(() => execute("ssh", ["-S", control, "-O", "check", "inonono"], { timeout: 3000 }).then(() => undefined), 30000, "tunnel_readiness_failed");
+    tunnel = await startTunnel(["-M", "-S", control, "-o", "ForkAfterAuthentication=no", "-o", "ControlPersist=no", "-o", "BatchMode=yes", "-o", "ExitOnForwardFailure=yes",
+      "-L", `${tunnelPort}:127.0.0.1:19080`, "-L", `${embedPort}:127.0.0.1:18081`, "inonono"], 30000);
     env.ANAMNESIS_LLM_BASE_URL = `http://127.0.0.1:${tunnelPort}`;
     env.ANAMNESIS_EMBEDDING_BASE_URL = `http://127.0.0.1:${embedPort}`; env.ANAMNESIS_EMBEDDING_MODEL = "qwen3-embedding-0.6b"; env.ANAMNESIS_EMBEDDING_DIMENSIONS = "1024";
     await log("resources", { owner, tunnel_pid: tunnel.pid, local_port: tunnelPort, embed_port: embedPort, credential_mode: "0600" });
@@ -186,9 +208,9 @@ export async function runE2eDaemon(evidence = resolve(".omo/evidence/auto-pipeli
     // Reserve an explicit port so docker start keeps the same Bolt endpoint.
     await command("docker", ["create", "--name", name, "--label", `anamnesis.qa.owner=${owner}`, "-p", `127.0.0.1:${port}:7687`,
       "-e", `NEO4J_AUTH=neo4j/${password}`, "-e", "NEO4J_server_memory_heap_initial__size=256m", "-e", "NEO4J_server_memory_heap_max__size=512m", "-e", "NEO4J_server_memory_pagecache_size=128m", image]);
-    containerCreated = true; await command("docker", ["start", name]);
+    containerCreated = true; const startedAt = new Date().toISOString(); await command("docker", ["start", name]);
     driver = neo4j.driver(env.ANAMNESIS_NEO4J_URI, neo4j.auth.basic("neo4j", password), { disableLosslessIntegers: true, connectionTimeout: 1000, connectionAcquisitionTimeout: 1500, maxTransactionRetryTime: 0 });
-    await ready(); await startDaemon();
+    await ready(startedAt); await startDaemon();
     // Subscribed before the first remember: no idle transition emitted during or after ingest can be missed.
     const idle = lines!.subscribe("workers_idle");
     client = await connect();
@@ -363,7 +385,7 @@ export async function runE2eDaemon(evidence = resolve(".omo/evidence/auto-pipeli
     // Subscribe before restart/wake: the cursor starts now, so no earlier settle line can satisfy it and the next one cannot be missed.
     // Rejection is converted to a handled outcome so an earlier Docker failure cannot leave an unobserved promise.
     const settledLine = lines!.subscribe("drain_settled").next(AbortSignal.timeout(60000), "daemon_settle_timeout").then(arrival => ({ at: arrival.at }), (cause: Error) => ({ cause }));
-    await command("docker", ["start", name]); await ready();
+    const restartedAt = new Date().toISOString(); await command("docker", ["start", name]); await ready(restartedAt);
     const wakeAt = Date.now();
     const wake_status = await rpc.request("status", {}); await log("crash_wake_status", wake_status);
     const event = await settledLine; if ("cause" in event) throw event.cause;
