@@ -223,10 +223,10 @@ test.skipIf(!URI || !PASSWORD)("an RPC issued during an embedding backlog is ser
         for (const remembered of remembers) {
           const call = provider.started();
           const outcome = await Promise.race([remembered.then(() => "committed" as const), call.then(() => "held" as const)]);
-         
+
           if (outcome === "held") { provider.release(); expect((await remembered).state).toBe("committed"); }
           else expect((await remembered).state).toBe("committed");
-         
+
         }
         // The seed released at most three calls (one per turn between remembers); the rest of the outbox is still due
         // and every further call is held. A status queued now is answered after the call in flight, and at most one
