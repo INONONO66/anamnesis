@@ -359,8 +359,16 @@ export const RpcWorkersStatus = z.strictObject({
     quarantined_total: counter,
     last_error: z.string().max(512).nullable(),
   }),
-  // A union so the extraction scheduler can add configured states without reshaping the field.
-  extraction: z.discriminatedUnion("state", [z.strictObject({ state: z.literal("unconfigured") })]),
+  extraction: z.discriminatedUnion("state", [
+    z.strictObject({ state: z.literal("unconfigured") }),
+    /** Configured, but no turn has attached a generation yet (startup, or storage unavailable since startup). */
+    z.strictObject({ state: z.literal("starting") }),
+    /** The single writable generation the scheduler feeds. Watermarks are the last observed values; counters are per process lifetime. */
+    z.strictObject({
+      state: z.enum(["catching_up", "active"]), generation_id: z.uuidv7(), covered_ingest_seq: counter, live_ingest_seq: counter,
+      in_flight: counter.max(4), completed_total: counter, failed_total: counter, last_error: z.string().max(512).nullable(),
+    }),
+  ]),
 });
 export type RpcWorkersStatus = z.infer<typeof RpcWorkersStatus>;
 export const RpcStatusResult = z.strictObject({
