@@ -1,0 +1,8 @@
+[Unit]
+Description=anamnesis ingest of source %i into the PVE daemon over the tailnet
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=%h/.config/anamnesis/ingest.env
+ExecStart=%h/.local/bin/anamnesis-ingest-source %i

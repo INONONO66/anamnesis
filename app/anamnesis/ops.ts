@@ -24,7 +24,28 @@ const usage = "usage: anamnesis-ops up|down|backup <destination-dir>|restore <ar
 const uuidv7 = () => { const value = randomUUID(); return `${value.slice(0, 14)}7${value.slice(15, 19)}8${value.slice(20)}`; };
 const fail = (code: string, exit = 1): never => { console.log(JSON.stringify({ error: code })); process.exit(exit); };
 
+/** Remote client mode: ANAMNESIS_RPC_TCP="host:port" targets a daemon's TCP listener
+ * (docs/deploy.md, "Optional TCP listener"). The listener bearer is read from
+ * ANAMNESIS_RPC_TCP_TOKEN_FILE and the installation token from ANAMNESIS_RUNTIME_TOKEN_FILE,
+ * both regular 0600 files owned by the caller (same rule as ANAMNESIS_LISTEN_TOKEN_FILE).
+ * Unset = local socket under the runtime root, unchanged. */
+async function readTokenFile(variable: string): Promise<string> {
+  const file = process.env[variable];
+  if (!file) throw new Error(`${variable} is required with ANAMNESIS_RPC_TCP`);
+  const info = await lstat(file).catch(() => { throw new Error(`unable to read ${variable}`); });
+  if (!info.isFile() || info.isSymbolicLink() || info.uid !== process.getuid?.() || (info.mode & 0o777) !== 0o600) throw new Error(`${variable} must be a regular file owned by the current user with mode 0600`);
+  const token = (await readFile(file, "utf8")).trim();
+  if (!token || /[\r\n]/.test(token) || Buffer.byteLength(token) > 1024) throw new Error(`${variable} must hold one token of at most 1024 bytes`);
+  return token;
+}
 async function connectClient(root: string): Promise<RpcClient> {
+  const remote = process.env["ANAMNESIS_RPC_TCP"];
+  if (remote) {
+    const at = remote.lastIndexOf(":"), host = remote.slice(0, at).replace(/^\[|\]$/g, ""), port = Number(remote.slice(at + 1));
+    if (at < 1 || !host || !Number.isInteger(port) || port < 1 || port > 65535) throw new Error("ANAMNESIS_RPC_TCP must be host:port");
+    const [bearer, installation] = await Promise.all([readTokenFile("ANAMNESIS_RPC_TCP_TOKEN_FILE"), readTokenFile("ANAMNESIS_RUNTIME_TOKEN_FILE")]);
+    return RpcClient.connect({ host, port, token: bearer }, installation);
+  }
   const token = (await readFile(join(root, "token"), "utf8")).trim();
   return RpcClient.connect(process.env["ANAMNESIS_RUNTIME_SOCKET"] ?? socketPath(root), token);
 }

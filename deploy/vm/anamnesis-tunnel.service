@@ -1,0 +1,13 @@
+[Unit]
+Description=anamnesis: ssh tunnel to inonono token-hub (19080) and llama-server (18081)
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+User=anamnesis
+ExecStart=/usr/bin/ssh -N -T -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o BatchMode=yes -o StrictHostKeyChecking=yes -i /etc/anamnesis/tunnel_ed25519 -L 127.0.0.1:19080:127.0.0.1:19080 -L 127.0.0.1:18081:127.0.0.1:18081 inonono@100.113.163.45
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

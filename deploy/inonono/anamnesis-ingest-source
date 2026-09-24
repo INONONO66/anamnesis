@@ -1,0 +1,31 @@
+#!/bin/sh
+# Usage: anamnesis-ingest-source <codex|claude|omo|agentlog|vault-codex|vault-claude-code|vault-opencode|vault-slack|vault-discord|vault-gjc|vault-pi>
+# Native sources use their raw adapters; vault-* sources go through vault-to-snapshots (newest-first)
+# and the generic 'ingest' adapter, one shard per run so a 30-minute timer drains the backlog gradually.
+set -eu
+src=$1
+: "${ANAMNESIS_REPO:?}" "${ANAMNESIS_INGEST_STATE:?}" "${VAULT_ROOT:?}"
+mkdir -p "$ANAMNESIS_INGEST_STATE/$src"
+ops="node $ANAMNESIS_REPO/dist/anamnesis-ops.mjs"
+export ANAMNESIS_RUNTIME_ROOT ANAMNESIS_RPC_TCP ANAMNESIS_RPC_TCP_TOKEN_FILE ANAMNESIS_RUNTIME_TOKEN_FILE
+case "$src" in
+  codex)    exec $ops ingest-codex-raw  "$HOME/.codex/sessions"        "$ANAMNESIS_INGEST_STATE/$src/checkpoint.json" ;;
+  claude)   exec $ops ingest-claude-raw "$HOME/.claude/projects"       "$ANAMNESIS_INGEST_STATE/$src/checkpoint.json" ;;
+  omo)      exec $ops ingest-omo-raw    "$HOME/.omo/agent/sessions"    "$ANAMNESIS_INGEST_STATE/$src/checkpoint.json" ;;
+  agentlog) exec $ops ingest-agentlog   "$HOME/.local/share/agentlog"  "$ANAMNESIS_INGEST_STATE/$src/checkpoint.json" ;;
+  vault-*)
+    name=${src#vault-}
+    shards="$ANAMNESIS_INGEST_STATE/$src/shards"
+    if [ ! -f "$shards/manifest.json" ]; then
+      bun "$ANAMNESIS_REPO/scripts/ops/vault-to-snapshots.ts" --root "$VAULT_ROOT/$name" --out "$shards"
+    fi
+    # Next shard = first snapshot without a completed checkpoint marker.
+    for shard in "$shards"/snapshot-*.jsonl; do
+      done_marker="$shard.done"
+      [ -f "$done_marker" ] && continue
+      $ops ingest "$shard" "$shard.checkpoint.json" && touch "$done_marker"
+      exit 0
+    done
+    echo '{"event":"backlog_drained","source":"'"$src"'"}' ;;
+  *) echo "unknown source: $src" >&2; exit 2 ;;
+esac

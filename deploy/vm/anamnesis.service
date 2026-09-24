@@ -1,0 +1,22 @@
+[Unit]
+Description=anamnesis daemon (foreground, supervised by systemd)
+After=network-online.target docker.service anamnesis-tunnel.service
+Requires=docker.service
+Wants=anamnesis-tunnel.service
+
+[Service]
+User=anamnesis
+Group=anamnesis
+WorkingDirectory=/opt/anamnesis
+EnvironmentFile=/etc/anamnesis/anamnesis.env
+ExecStartPre=/bin/sh -c 'until docker inspect -f "{{.State.Health.Status}}" anamnesis-neo4j-1 2>/dev/null | grep -q healthy; do sleep 2; done'
+ExecStart=/usr/bin/node /opt/anamnesis/dist/anamnesis-ops.mjs foreground
+Restart=always
+RestartSec=3
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/anamnesis
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
