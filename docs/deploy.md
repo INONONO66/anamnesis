@@ -52,6 +52,8 @@ The `ops` CLI (`dist/anamnesis-ops.mjs`, or `app/anamnesis/ops.ts`) talks to the
 | `ANAMNESIS_RPC_TCP_TOKEN_FILE` | Listener bearer (the daemon's `ANAMNESIS_LISTEN_TOKEN_FILE` contents). Regular file, owned by the caller, mode `0600`. |
 | `ANAMNESIS_RUNTIME_TOKEN_FILE` | Installation token (the daemon's `<runtime root>/token`) for `hello`. Same file rules. |
 
+`verify` over TCP skips the three filesystem checks (`root_private`, `token_private`, `socket_private`) because they describe the daemon host; its `scope` field says so.
+
 A missing or non-`0600` file is an error naming the variable; token values are never printed. `ANAMNESIS_RUNTIME_ROOT` still has to point at a writable directory for the client's own checkpoints, but nothing under it is read for authentication in this mode.
 
 ## Production layout: PVE guest + inonono sources
@@ -93,7 +95,7 @@ Reference layout used for the first production install (issue #213). Unit files 
 
 ### Backup
 
-`anamnesis-backup.timer` runs `deploy/vm/backup.sh` daily: `ops backup <dir>` over RPC (the daemon fences writers, stops Neo4j, dumps, restarts), then `rsync` of `/var/lib/anamnesis/backups/` to inonono `/mnt/data/anamnesis/backups/pve-vm/`, keeping 14 local copies. `systemctl list-timers anamnesis-backup.timer` and `journalctl -u anamnesis-backup` show the last run; a non-zero exit marks the unit failed. Restore follows [Restore a dump](#restore-a-dump) with the daemon stopped (`systemctl stop anamnesis`).
+`anamnesis-backup.timer` runs `deploy/vm/backup.sh` daily as root: `systemctl stop anamnesis`, offline `ops backup <dir>` as the `anamnesis` user (`ops backup` refuses a live daemon with `daemon_live`; the daemon is restarted even if the dump fails), then `rsync` of `/var/lib/anamnesis/backups/` to inonono `/mnt/data/anamnesis/backups/pve-vm/`, keeping 14 local copies. `systemctl list-timers anamnesis-backup.timer` and `journalctl -u anamnesis-backup` show the last run; a non-zero exit marks the unit failed. Restore follows [Restore a dump](#restore-a-dump) with the daemon stopped (`systemctl stop anamnesis`).
 
 ## Redeploy
 

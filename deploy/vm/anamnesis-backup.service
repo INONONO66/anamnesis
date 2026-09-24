@@ -3,7 +3,7 @@ Description=anamnesis: offline Neo4j dump via ops backup, then rsync to inonono
 
 [Service]
 Type=oneshot
-User=anamnesis
+# root: stops/starts anamnesis.service around the offline dump; the dump and rsync drop to the anamnesis user.
 WorkingDirectory=/opt/anamnesis
 EnvironmentFile=/etc/anamnesis/anamnesis.env
 ExecStart=/opt/anamnesis/deploy/vm/backup.sh

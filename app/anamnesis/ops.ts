@@ -104,8 +104,10 @@ async function main(): Promise<void> {
     const status = await client.request("status", {});
     if (command === "status") { console.log(JSON.stringify(status)); return; }
     if (command === "verify") {
-      const checks = { root_private: ((await lstat(root)).mode & 0o777) === 0o700, token_private: ((await lstat(join(root, "token"))).mode & 0o777) === 0o600, socket_private: ((await lstat(socket)).mode & 0o777) === 0o600, authenticated: true, database_writer_fence: status.capabilities.writer_fence === "database", storage_available: status.storage === "available", spool_clean: status.spool.quarantined === 0 && status.spool.blocked === 0 };
-      const ok = Object.values(checks).every(Boolean); console.log(JSON.stringify({ ok, scope: "runtime-admission-health; not a full database integrity audit", checks, status })); if (!ok) process.exitCode = 1;
+      // The three filesystem checks describe the daemon's own root; over ANAMNESIS_RPC_TCP the caller has no view of it.
+      const remote = process.env["ANAMNESIS_RPC_TCP"] !== undefined;
+      const checks = remote ? { authenticated: true, database_writer_fence: status.capabilities.writer_fence === "database", storage_available: status.storage === "available", spool_clean: status.spool.quarantined === 0 && status.spool.blocked === 0 } : { root_private: ((await lstat(root)).mode & 0o777) === 0o700, token_private: ((await lstat(join(root, "token"))).mode & 0o777) === 0o600, socket_private: ((await lstat(socket)).mode & 0o777) === 0o600, authenticated: true, database_writer_fence: status.capabilities.writer_fence === "database", storage_available: status.storage === "available", spool_clean: status.spool.quarantined === 0 && status.spool.blocked === 0 };
+      const ok = Object.values(checks).every(Boolean); console.log(JSON.stringify({ ok, scope: remote ? "remote runtime-admission-health (filesystem checks skipped over TCP); not a full database integrity audit" : "runtime-admission-health; not a full database integrity audit", checks, status })); if (!ok) process.exitCode = 1;
     }
   } finally { await client.close(); }
 }

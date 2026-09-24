@@ -124,7 +124,8 @@ async function loadSession(dir: string): Promise<SessionLoad> {
       const text = extract(record.raw);
       if (text === null || !text.trim()) { skipped.no_text++; continue; }
       const role = str(record.role);
-      if (!role || !role.trim()) { skipped.unsupported_role++; continue; }
+      // #215: tool and system records are never claim material (D49), even when they carry text.
+      if (!role || !role.trim() || role === "tool" || role === "system") { skipped.unsupported_role++; continue; }
       const content = truncateUtf8(text, RPC_LIMITS.content_bytes);
       const hex = record.content_hash.replace(/^[a-z0-9_-]+:/i, "");
       try {

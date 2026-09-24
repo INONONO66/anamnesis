@@ -28,13 +28,16 @@ const EXPECTED: Record<string, string[]> = {
   "sess-mid": ["Read the vault.", "Reading now.", "Vault has 900k records.", "é".repeat(32_768)],
   "sess-old": ["You are a converter.", "How do I shard JSONL?", "Split at session boundaries.\nNever mid-session."],
 };
-const SKIPPED = { no_text: 4, unsupported_role: 1, invalid: 2, duplicate: 1 };
-const FILES = 20;
+const SKIPPED = { no_text: 4, unsupported_role: 3, invalid: 2, duplicate: 1 };
+const FILES = 22;
 
 /** Three sessions, six vault sources, every skip class, one edited message, one exact duplicate, one oversized text. */
 async function buildVault(root: string): Promise<void> {
   const old = (over: Omit<Over, "source" | "session_id">) => put(root, "sess-old", vaultRecord({ source: "codex", session_id: "sess-old", ...over }));
   await old({ role: "developer", message_id: "msg-d1", occurred_at: "2026-01-01T00:00:00Z", raw: codexMessage("developer", "input_text", ["You are a converter."]) });
+  // Text-bearing tool/system records are skipped as unsupported_role (#215), not emitted without lineage.
+  await old({ role: "system", message_id: "msg-s1", occurred_at: "2026-01-01T00:00:00.500Z", raw: codexMessage("system", "input_text", ["System prompt text."]) });
+  await old({ role: "tool", message_id: "msg-t1", occurred_at: "2026-01-01T00:00:00.700Z", raw: codexMessage("tool", "output_text", ["tool output text"]) });
   await old({ role: "user", message_id: "msg-u1", occurred_at: "2026-01-01T00:00:01Z", raw: codexMessage("user", "input_text", ["How do I shard JSONL?"]) });
   await old({ role: "assistant", message_id: "msg-a1", occurred_at: "2026-01-01T00:00:02Z", raw: codexMessage("assistant", "output_text", ["Split at session boundaries.", "Never mid-session."]) });
   await old({ role: "assistant", message_id: "msg-f1", occurred_at: "2026-01-01T00:00:03Z", raw: { type: "response_item", timestamp: "t", payload: { type: "function_call", name: "shell", arguments: "{\"cmd\":\"ls\"}" } } });

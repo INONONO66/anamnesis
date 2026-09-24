@@ -7,22 +7,24 @@ set -eu
 src=$1
 : "${ANAMNESIS_REPO:?}" "${ANAMNESIS_INGEST_STATE:?}" "${VAULT_ROOT:?}"
 mkdir -p "$ANAMNESIS_INGEST_STATE/$src"
-ops="node $ANAMNESIS_REPO/dist/anamnesis-ops.mjs"
+ops="$ANAMNESIS_REPO/dist/anamnesis-ops.mjs"
 export ANAMNESIS_RUNTIME_ROOT ANAMNESIS_RPC_TCP ANAMNESIS_RPC_TCP_TOKEN_FILE ANAMNESIS_RUNTIME_TOKEN_FILE
 case "$src" in
-  codex)    exec $ops ingest-codex-raw  "$HOME/.codex/sessions"        "$ANAMNESIS_INGEST_STATE/$src/checkpoint.json" ;;
-  claude)   exec $ops ingest-claude-raw "$HOME/.claude/projects"       "$ANAMNESIS_INGEST_STATE/$src/checkpoint.json" ;;
+  codex)    exec node "$ops" ingest-codex-raw  "$HOME/.codex/sessions"  "$ANAMNESIS_INGEST_STATE/$src/checkpoint.json" ;;
+  claude)   exec node "$ops" ingest-claude-raw "$HOME/.claude/projects" "$ANAMNESIS_INGEST_STATE/$src/checkpoint.json" ;;
   vault-*)
     name=${src#vault-}
     shards="$ANAMNESIS_INGEST_STATE/$src/shards"
     if [ ! -f "$shards/manifest.json" ]; then
       node "$ANAMNESIS_REPO/dist/vault-to-snapshots.mjs" --root "$VAULT_ROOT/$name" --out "$shards"
     fi
-    # Next shard = first snapshot without a completed checkpoint marker.
+    # Next shard = first snapshot without a completed marker. A failed ingest leaves no marker and
+    # exits non-zero (the timer unit shows failed); the checkpoint makes the retry resume mid-shard.
     for shard in "$shards"/snapshot-*.jsonl; do
       done_marker="$shard.done"
       [ -f "$done_marker" ] && continue
-      $ops ingest "$shard" "$shard.checkpoint.json" && touch "$done_marker"
+      node "$ops" ingest "$shard" "$shard.checkpoint.json"
+      touch "$done_marker"
       exit 0
     done
     echo '{"event":"backlog_drained","source":"'"$src"'"}' ;;
