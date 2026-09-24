@@ -2496,18 +2496,22 @@ export class Store {
     return rows.map((r) => r.id);
   }
 
-  async drainEmbeddingOutbox(limit = 100, context: InstallationContext = { principal: "installation", commit_mode: "auto" }): Promise<{ drained: number; reason?: "embeddings_disabled" }> {
+  /** Deferred entries stay in the outbox (non-terminal attempt, e.g. provider_unavailable) for a later pass. */
+  async drainEmbeddingOutbox(limit = 100, context: InstallationContext = { principal: "installation", commit_mode: "auto" }):
+    Promise<{ drained: number; quarantined: number; deferred: number; deferral_reason: string | null } | { drained: 0; reason: "embeddings_disabled" }> {
     const bounded = z.number().int().min(1).max(1000).parse(limit);
     if (!this.embeddingProvider) return { drained: 0, reason: "embeddings_disabled" };
-    let drained = 0;
+    let drained = 0, quarantined = 0, deferred = 0;
+    let deferralReason: string | null = null;
     for (const episodeId of await this.pending(bounded)) {
       const attempt = await this.recoverEmbedding({ operation_id: uuidv7(), episode_id: z.uuidv7().parse(episodeId) }, context);
       if (attempt.state === "succeeded" || attempt.state === "quarantined") {
         await this.markProcessed([episodeId]);
         drained++;
-      }
+        if (attempt.state === "quarantined") quarantined++;
+      } else { deferred++; deferralReason = attempt.reason ?? attempt.state; }
     }
-    return { drained };
+    return { drained, quarantined, deferred, deferral_reason: deferralReason };
   }
 
   async markProcessed(elementIds: string[]): Promise<void> {
