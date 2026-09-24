@@ -35,7 +35,7 @@ import { bindGenerationProfile, type GenerationProfileInput, type GenerationIden
 import { CreateExtractionPipeline, RunExtractionPipeline, ExtractionAuditError } from '../../protocol/src/extraction-audit.ts';
 import { MaterializeRetainedClaim, ProposeRetainedClaim, ReviewRetainedClaim, SemanticResolution, SemanticReviewOutput, type SemanticReviewProvider } from "../../protocol/src/materialization.ts";
 import { validateSemanticClaim } from "../../protocol/src/semantic-claim.ts";
-import type { RpcEmbeddingRecoverParams } from "../../protocol/src/rpc.ts";
+import type { RpcEmbeddingRecoverParams, RpcEmbeddingRequeueParams } from "../../protocol/src/rpc.ts";
 import type { RpcPolicySetParams, RpcPolicyRevokeParams, RpcPolicyResult } from "../../protocol/src/rpc.ts";
 import type { DreamLeidenAdapter } from "./dream-leiden-adapter.ts";
 
@@ -269,6 +269,10 @@ export class Engine {
 
   async drainEmbeddingOutbox(limit = 100) {
     return this.store.drainEmbeddingOutbox(limit);
+  }
+
+  async requeueQuarantinedEmbeddings(input: RpcEmbeddingRequeueParams, context: InstallationContext) {
+    return this.store.requeueQuarantinedEmbeddings(input, context);
   }
 
   async embeddingStatus(operationId: string, context: InstallationContext) {

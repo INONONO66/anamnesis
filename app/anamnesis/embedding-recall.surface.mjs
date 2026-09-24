@@ -185,7 +185,32 @@ try {
   assert.equal((await client.request('commit', allowedFeedback)).applied, true);
   assert.equal((await client.request('commit', allowedFeedback)).applied, false);
   assert.deepEqual((await client.request('hit-cache.verify', {})).issues, []);
-  log('verified', { configured_provider: config.profile, recovery: ['quarantine','retry-idempotence','pending-restart'],
+  // A quarantined Episode returns to the outbox through embedding.requeue; the call itself wakes the lane.
+  const daemonEvent = name => new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { daemon.lines.off('line', onLine); reject(Error(`${name} deadline`)); }, 20000);
+    const onLine = line => { if (JSON.parse(line).event === name) { clearTimeout(timer); daemon.lines.off('line', onLine); resolve(); } };
+    daemon.lines.on('line', onLine);
+  });
+  const providerRequest = input => new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { signals.off('request', onRequest); reject(Error('provider request deadline')); }, 20000);
+    const onRequest = request => { if (request.input === input) { clearTimeout(timer); signals.off('request', onRequest); resolve(); } };
+    signals.on('request', onRequest);
+  });
+  mode = 'fail';
+  const candidateAsked = providerRequest('document: requeue candidate');
+  const c = await remember('c', 'requeue candidate', 'small');
+  await candidateAsked; await daemonEvent('workers_idle');
+  assert.deepEqual(await query('MATCH (a:EmbeddingAttempt {episode_id:$id}) RETURN a.state AS state, a.reason AS reason', { id: c.id }), [{ state: 'quarantined', reason: 'provider_rejected' }]);
+  assert.equal((await query('MATCH (v:EmbeddingVector {episode_id:$id}) RETURN count(v) AS n', { id: c.id }))[0].n, 0);
+  mode = 'ok';
+  const idleAfterRequeue = daemonEvent('workers_idle'), candidateRetried = providerRequest('document: requeue candidate');
+  const requeued = await client.request('embedding.requeue', { limit: 100 });
+  assert.ok(requeued.requeued >= 1, `requeued ${requeued.requeued}`);
+  await candidateRetried; await idleAfterRequeue;
+  assert.equal((await query('MATCH (v:EmbeddingVector {episode_id:$id}) RETURN count(v) AS n', { id: c.id }))[0].n, 1);
+  assert.deepEqual((await query('MATCH (a:EmbeddingAttempt {episode_id:$id}) RETURN a.state AS state ORDER BY a.operation_id', { id: c.id })).map(row => row.state), ['quarantined', 'succeeded']);
+  assert.deepEqual(await client.request('embedding.requeue', { limit: 100 }), { requeued: 0 });
+  log('verified', { configured_provider: config.profile, recovery: ['quarantine','retry-idempotence','pending-restart','requeue'],
     hybrid_ids: hybrid.results.map(item => item.id), byte_budget: hybrid.used_budget, scalar_budget: [...hybrid.context_text].length,
     oversized_included: oversized.results.length, oversized_skipped: oversized.diagnostics.skipped_bundles,
     receipt_persisted: true, feedback_duplicate_noop: true, semantic_quality_claimed: false });

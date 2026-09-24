@@ -11,7 +11,7 @@ import { elementDigest, verifyLineageRetry } from "../../packages/core/src/store
 import { EchoLineage, parseEpisodeLineage } from "../../packages/protocol/src/episode-lineage.ts";
 import type { CreateExtractionPipeline, RunExtractionPipeline } from '../../packages/protocol/src/extraction-audit.ts';
 import type { InstallationContext, CommitReceiptInput, RecallTransportInput } from "../../packages/core/src/store.ts";
-import type { RpcPolicySetParams, RpcPolicyRevokeParams, RpcRecallParams, RpcEmbeddingRecoverParams, RpcDreamAdmitParams, RpcDreamLeaseParams, RpcDreamExpireParams, RpcDreamExecuteParams } from "../../packages/protocol/src/rpc.ts";
+import type { RpcPolicySetParams, RpcPolicyRevokeParams, RpcRecallParams, RpcEmbeddingRecoverParams, RpcEmbeddingRequeueParams, RpcDreamAdmitParams, RpcDreamLeaseParams, RpcDreamExpireParams, RpcDreamExecuteParams } from "../../packages/protocol/src/rpc.ts";
 import { DurableSpool, type SpoolEntry } from "../../packages/core/src/spool.ts";
 import { RPC_LIMITS, RPC_METHODS, RpcRememberParams, type RpcCapabilities, type RpcCommittedResult, type RpcExtractionPacing, type RpcIngestStatusParams, type RpcIngestStatusResult, type RpcStatusResult, type RpcWorkersStatus } from "../../packages/protocol/src/rpc.ts";
 import { atomicJson, EXTRACTION_PACING_DEFAULTS, hasCode, loadProviderConfig, syncDirectory, type ExtractionPacingConfig, type Installation } from "./config.ts";
@@ -666,6 +666,13 @@ export class Runtime {
   async embeddingStatus(operationId: string, context: InstallationContext) {
     await this.requireStorage();
     return this.engine.embeddingStatus(operationId, context);
+  }
+  /** Operator requeue: quarantined Episodes rejoin the outbox and the lane wakes at once, which also retries any deferred entry whose backoff elapsed. */
+  async requeueQuarantinedEmbeddings(params: RpcEmbeddingRequeueParams, context: InstallationContext) {
+    await this.requireStorage();
+    const result = await this.engine.requeueQuarantinedEmbeddings(params, context);
+    this.wakeEmbedding();
+    return result;
   }
   async commit(params: CommitReceiptInput, context: InstallationContext) {
     await this.requireStorage();

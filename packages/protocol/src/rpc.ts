@@ -26,7 +26,7 @@ export const RPC_METHODS = [
   "hello", "status", "shutdown", "object.begin", "object.chunk",
   "extraction.audit.create", "extraction.audit.run", "extraction.audit.status",
   "dream.admit", "dream.status", "dream.lease", "dream.expire", "dream.execute",
-  "object.commit", "remember", "ingest.status", "commit", "graph.envelope", "hit-cache.verify", "hit-cache.rebuild", "backup", "restore", "backup.status", "restore.status", "policy.set", "policy.revoke", "recall", "embedding.recover", "embedding.status",
+  "object.commit", "remember", "ingest.status", "commit", "graph.envelope", "hit-cache.verify", "hit-cache.rebuild", "backup", "restore", "backup.status", "restore.status", "policy.set", "policy.revoke", "recall", "embedding.recover", "embedding.status", "embedding.requeue",
 ] as const;
 export const RPC_FUTURE_METHODS = [] as const;
 export const RpcMethod = z.enum(RPC_METHODS);
@@ -112,14 +112,26 @@ export type RpcRecallParams = z.infer<typeof RpcRecallParams>;
 export const RpcEmbeddingRecoverParams = z.strictObject({ operation_id: z.uuidv7(), episode_id: z.uuidv7() });
 export type RpcEmbeddingRecoverParams = z.infer<typeof RpcEmbeddingRecoverParams>;
 export const RpcEmbeddingStatusParams = z.strictObject({ operation_id: z.uuidv7() });
+/** provider_unavailable is transient: the attempt is `deferred` and the Episode stays queued until the outbox's
+ * retry budget is spent, which quarantines it as provider_unavailable_exhausted. Every other reason quarantines at once. */
+export const RpcEmbeddingAttemptReason = z.enum(["provider_unavailable", "provider_unavailable_exhausted", "provider_rejected", "profile_mismatch", "invalid_vector", "input_too_large", "stale_input"]);
 export const RpcEmbeddingAttempt = z.strictObject({
   operation_id: z.uuidv7(), episode_id: z.uuidv7(), profile_id: RpcHash,
   model: identifier, model_incarnation: RpcHash, dimensions: positiveCounter.max(4096),
   input_revision: RpcHash, input_digest: RpcHash, created_at: counter, completed_at: counter.nullable(),
-  state: z.enum(["pending", "succeeded", "quarantined"]),
-  reason: z.enum(["provider_unavailable", "provider_rejected", "profile_mismatch", "invalid_vector", "input_too_large", "stale_input"]).nullable(),
+  state: z.enum(["pending", "succeeded", "quarantined", "deferred"]),
+  reason: RpcEmbeddingAttemptReason.nullable(),
+  /** Evidence from the branch that failed (HTTP status, timeout budget, socket code); rows written before it existed read as null. */
+  detail: boundedString(256).nullable().default(null),
 });
 export type RpcEmbeddingAttempt = z.infer<typeof RpcEmbeddingAttempt>;
+export const RpcEmbeddingRequeueParams = z.strictObject({
+  limit: positiveCounter.max(1000).default(100),
+  reasons: z.array(RpcEmbeddingAttemptReason).min(1).max(7).optional(),
+});
+export type RpcEmbeddingRequeueParams = z.input<typeof RpcEmbeddingRequeueParams>;
+export const RpcEmbeddingRequeueResult = z.strictObject({ requeued: counter });
+export type RpcEmbeddingRequeueResult = z.infer<typeof RpcEmbeddingRequeueResult>;
 export const RpcRecallChannel = z.enum(["identity", "bm25", "vector", "session"]);
 export const RpcRecallItem = z.discriminatedUnion("kind", [
   z.strictObject({ id: z.uuidv7(), kind: z.literal("Episode"), schema: z.enum(["anamnesis.original-message/1", "anamnesis.original-document/1"]), epistemic: z.literal("observed"), content: boundedString(RPC_LIMITS.frame_bytes), time: TimePoint, score: z.number().nonnegative(), relevance: z.number().nonnegative(), mass: z.number().min(0).max(1), utility: z.number().min(-1).max(1), rank: counter.max(63).optional(), sources: z.array(z.uuidv7()).length(1), provenance: z.strictObject({ derived_from: z.array(z.strictObject({ id: z.uuidv7(), kind: z.enum(["Episode", "Fact"]), visible_at_T: z.boolean() })).length(1), supersedes: z.array(z.strictObject({ id: z.uuidv7(), content: boundedString(RPC_LIMITS.frame_bytes) })).max(8), supersedes_redacted: z.boolean(), contrasts: z.array(z.uuidv7()).max(4), warnings: z.array(z.strictObject({ code: z.enum(["supersedes_withheld", "supersedes_incomplete"]), content: boundedString(512) })).max(2) }), channels: z.array(RpcRecallChannel).max(4) }),
@@ -259,6 +271,7 @@ export const RpcRequest = z.discriminatedUnion("method", [
   request("graph.envelope", z.strictObject({ seed_ids: z.array(z.uuidv7()).min(1).max(128), T: counter.optional() })),
   request("embedding.recover", RpcEmbeddingRecoverParams),
   request("embedding.status", RpcEmbeddingStatusParams),
+  request("embedding.requeue", RpcEmbeddingRequeueParams),
   request("backup", z.strictObject({ operation_id: z.uuidv7(), destination: boundedString(1024) })),
   request("restore", z.strictObject({ operation_id: z.uuidv7(), archive: boundedString(1024) })),
   request("backup.status", z.strictObject({ operation_id: z.uuidv7() })),
@@ -451,6 +464,7 @@ export const RpcSuccessResponse = z.discriminatedUnion("method", [
   success("dream.execute", RpcDreamJob),
   success("embedding.recover", RpcEmbeddingAttempt),
   success("embedding.status", z.union([RpcEmbeddingAttempt, z.strictObject({ state: z.literal("unknown"), operation_id: z.uuidv7() })])),
+  success("embedding.requeue", RpcEmbeddingRequeueResult),
   success("backup", z.strictObject({ state: z.literal("complete"), operation_id: z.uuidv7() })),
   success("restore", z.strictObject({ state: z.literal("complete"), operation_id: z.uuidv7(), manifest: z.unknown() })),
   success("backup.status", z.union([z.strictObject({ state: z.enum(["running", "complete", "failed"]), operation_id: z.uuidv7(), error: boundedString(1024).optional() }), z.strictObject({ state: z.literal("unknown"), operation_id: z.uuidv7(), reason: z.enum(["not_found", "adapter_unavailable"]) })])),

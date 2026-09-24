@@ -39,9 +39,22 @@ Neither its retrieval accuracy nor a private model's efficacy is claimed.
 
 - `embedding.recover {operation_id, episode_id}` processes one original Episode
   with the configured profile. Input revision/digest and pending status commit
-  before the provider call. Completion persists `succeeded` or `quarantined`.
-- Reusing a completed operation is a durable no-op. Retry a quarantined attempt
-  with a new operation ID; reuse a pending ID after process interruption.
+  before the provider call. Completion persists `succeeded`, `quarantined` or
+  `deferred`. Only `provider_unavailable` (timeout, 5xx, refused socket) defers;
+  every other reason quarantines. The row's `detail` names the failing branch
+  (`http 503`, `timeout 30000ms`, a socket code, `8193 bytes > 8192`).
+- Reusing a completed operation is a durable no-op. Retry a quarantined or
+  deferred attempt with a new operation ID; reuse a pending ID after process
+  interruption.
+- The outbox drain keeps a deferred Episode queued with exponential backoff
+  (30 s doubling, capped at 1 h) for at most 8 deferrals; the next transient
+  failure quarantines it as `provider_unavailable_exhausted`. Never-deferred
+  entries are served before retries.
+- `embedding.requeue {limit?, reasons?}` returns quarantined Episodes of the
+  configured profile to the outbox as fresh entries (budget reset, earlier
+  attempt rows kept for audit), skipping Episodes that already hold a vector or
+  a queued entry, and wakes the embedding lane. `anamnesis-ops embed-requeue
+  [--limit N]` is the operator entry point.
 - `embedding.status {operation_id}` returns durable attempt state. Status and
   recovery revalidate current Episode/source policy. A denied Episode does not
   become visible through its status record.

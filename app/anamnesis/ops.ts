@@ -20,7 +20,7 @@ import { fileURLToPath } from "node:url";
 import { applyAuthorityEnvironment, offlineBackup, offlineRestore } from "./offline-ops.ts";
 
 const ingestCommands = ["ingest", "ingest-agentlog", "ingest-slack", "ingest-notion", "ingest-claude-raw", "ingest-codex-raw", "ingest-gjc-raw", "ingest-omo-raw", "ingest-misc-raw"];
-const usage = "usage: anamnesis-ops up|down|backup <destination-dir>|restore <archive-dir>|extract|embed|recall <query>|foreground|managed|status|verify|ingest <snapshot.jsonl> <checkpoint.json>";
+const usage = "usage: anamnesis-ops up|down|backup <destination-dir>|restore <archive-dir>|extract|embed|embed-requeue [--limit N]|recall <query>|foreground|managed|status|verify|ingest <snapshot.jsonl> <checkpoint.json>";
 const uuidv7 = () => { const value = randomUUID(); return `${value.slice(0, 14)}7${value.slice(15, 19)}8${value.slice(20)}`; };
 const fail = (code: string, exit = 1): never => { console.log(JSON.stringify({ error: code })); process.exit(exit); };
 
@@ -51,8 +51,11 @@ async function connectClient(root: string): Promise<RpcClient> {
 }
 async function main(): Promise<void> {
   const [command = "status", ...extra] = process.argv.slice(2);
-  const valid = ["up", "down", "backup", "restore", "extract", "embed", "recall", "foreground", "managed", "status", "verify", ...ingestCommands];
-  if (!valid.includes(command) || (ingestCommands.includes(command) ? extra.length !== 2 : command === "backup" || command === "restore" || command === "recall" ? extra.length !== 1 : extra.length)) throw new Error(usage);
+  const valid = ["up", "down", "backup", "restore", "extract", "embed", "embed-requeue", "recall", "foreground", "managed", "status", "verify", ...ingestCommands];
+  if (!valid.includes(command) || (ingestCommands.includes(command) ? extra.length !== 2 : command === "backup" || command === "restore" || command === "recall" ? extra.length !== 1 : command === "embed-requeue" ? !(extra.length === 0 || (extra.length === 2 && extra[0] === "--limit")) : extra.length)) throw new Error(usage);
+  // Quarantined Episodes return to the embedding outbox; the daemon wakes its embedding lane on the call.
+  const requeueLimit = command === "embed-requeue" ? (extra.length ? Number(extra[1]) : 100) : null;
+  if (requeueLimit !== null && (!Number.isInteger(requeueLimit) || requeueLimit < 1 || requeueLimit > 1000)) throw new Error(usage);
   if (command === "foreground") { await foreground(); return; }
   if (command === "managed") { await managed(fileURLToPath(import.meta.url)); return; }
   const root = runtimeRoot(), socket = process.env["ANAMNESIS_RUNTIME_SOCKET"] ?? socketPath(root);
@@ -99,6 +102,7 @@ async function main(): Promise<void> {
       if (!status.capabilities.embeddings) { console.log(JSON.stringify({ embeddings: "disabled", drained: 0 })); return; }
       console.log(JSON.stringify({ embeddings: "enabled", drained: 0 })); return;
     }
+    if (requeueLimit !== null) { console.log(JSON.stringify({ ...await client.request("embedding.requeue", { limit: requeueLimit }), limit: requeueLimit })); return; }
     if (command === "extract") { const status = await client.request("status", {}); if (!status.capabilities.extraction) fail("extraction_provider_required", 2); console.log(JSON.stringify({ extraction: "ready" })); return; }
     if (command === "recall") { console.log(JSON.stringify(await client.request("recall", { query: extra[0]!, limit: 10 }))); return; }
     const status = await client.request("status", {});

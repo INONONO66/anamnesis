@@ -23,14 +23,25 @@ export type EmbeddingConfig = z.infer<typeof EmbeddingConfig>;
 export const embeddingProfileId = (profile: EmbeddingProfile): string => createHash("sha256").update(JSON.stringify(
   Object.fromEntries(Object.entries(EmbeddingProfile.parse(profile)).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)),
 )).digest("hex");
+export type EmbeddingErrorReason = "provider_unavailable" | "provider_rejected" | "profile_mismatch" | "invalid_vector" | "input_too_large";
+/** provider_unavailable is the one transient reason (timeout, 5xx, refused socket); the other four repeat for the
+ * same input and profile. `detail` names the branch that threw so a durable attempt row can carry the evidence. */
 export class EmbeddingError extends Error {
-  constructor(readonly reason: "provider_unavailable" | "provider_rejected" | "profile_mismatch" | "invalid_vector" | "input_too_large") { super(reason); }
+  constructor(readonly reason: EmbeddingErrorReason, readonly detail: string | null = null) { super(reason); }
+}
+/** The transport branch behind a provider_unavailable: the timeout budget, or the socket error code when the runtime exposes one. */
+export function transportDetail(error: unknown, timeoutMs: number): string {
+  const name = error instanceof Error ? error.name : "";
+  if (name === "TimeoutError") return `timeout ${timeoutMs}ms`;
+  const code = error instanceof Error && "code" in error ? error.code
+    : error instanceof Error && error.cause instanceof Error && "code" in error.cause ? error.cause.code : undefined;
+  return (typeof code === "string" && code ? code : name || "transport_error").slice(0, 128);
 }
 export function validateVector(value: unknown, profile: EmbeddingProfile): number[] {
   const parsed = z.array(z.number().finite()).length(profile.dimensions).safeParse(value);
-  if (!parsed.success) throw new EmbeddingError("invalid_vector");
+  if (!parsed.success) throw new EmbeddingError("invalid_vector", "dimensions");
   const norm = Math.hypot(...parsed.data);
-  if (!Number.isFinite(norm) || Math.abs(norm - 1) > profile.norm_tolerance) throw new EmbeddingError("invalid_vector");
+  if (!Number.isFinite(norm) || Math.abs(norm - 1) > profile.norm_tolerance) throw new EmbeddingError("invalid_vector", "norm");
   return parsed.data; // Never truncate, pad or normalize a rejected vector.
 }
 export interface EmbeddingProvider {
@@ -49,34 +60,36 @@ export class HttpEmbeddingProvider implements EmbeddingProvider {
   }
   async embed(text: string, purpose: "document" | "query"): Promise<number[]> {
     const input = (purpose === "document" ? this.profile.document_prefix : this.profile.query_prefix) + text;
-    if (countBudget(input, "utf8_bytes") > this.profile.max_input_bytes) throw new EmbeddingError("input_too_large");
+    const bytes = countBudget(input, "utf8_bytes");
+    if (bytes > this.profile.max_input_bytes) throw new EmbeddingError("input_too_large", `${bytes} bytes > ${this.profile.max_input_bytes}`);
     let body: unknown;
     try {
       const response = await fetch(this.config.endpoint, { method: "POST", signal: AbortSignal.timeout(this.config.timeout_ms),
         headers: { "content-type": "application/json" }, body: JSON.stringify({ input, model: this.profile.model,
           model_incarnation: this.profile.model_incarnation, dimensions: this.profile.dimensions, truncate: false }) });
-      if (!response.ok) { await response.body?.cancel(); throw new EmbeddingError("provider_rejected"); }
-      if (!response.body) throw new EmbeddingError("provider_rejected");
+      if (!response.ok) { await response.body?.cancel(); throw new EmbeddingError("provider_rejected", `http ${response.status}`); }
+      if (!response.body) throw new EmbeddingError("provider_rejected", "empty body");
       const reader = response.body.getReader(), chunks: Uint8Array[] = [];
-      let bytes = 0;
+      let received = 0;
       try {
         for (;;) {
           const next = await reader.read(); if (next.done) break;
-          bytes += next.value.length;
-          if (bytes > 256 * 1024) { await reader.cancel(); throw new EmbeddingError("provider_rejected"); }
+          received += next.value.length;
+          if (received > 256 * 1024) { await reader.cancel(); throw new EmbeddingError("provider_rejected", "body over 256 KiB"); }
           chunks.push(next.value);
         }
       } finally { reader.releaseLock(); }
       body = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks)));
     } catch (error) {
       if (error instanceof EmbeddingError) throw error;
-      if (error instanceof SyntaxError) throw new EmbeddingError("provider_rejected");
-      throw new EmbeddingError("provider_unavailable");
+      if (error instanceof SyntaxError) throw new EmbeddingError("provider_rejected", "invalid json");
+      throw new EmbeddingError("provider_unavailable", transportDetail(error, this.config.timeout_ms));
     }
     const parsed = z.object({ model: z.string(), model_incarnation: hash,
       data: z.array(z.object({ index: z.literal(0), embedding: z.unknown() })).length(1) }).safeParse(body);
-    if (!parsed.success || parsed.data.model !== this.profile.model || parsed.data.model_incarnation !== this.profile.model_incarnation)
-      throw new EmbeddingError("profile_mismatch");
+    if (!parsed.success) throw new EmbeddingError("profile_mismatch", "envelope");
+    if (parsed.data.model !== this.profile.model || parsed.data.model_incarnation !== this.profile.model_incarnation)
+      throw new EmbeddingError("profile_mismatch", `${parsed.data.model}@${parsed.data.model_incarnation.slice(0, 12)}`.slice(0, 128));
     return validateVector(parsed.data.data[0]!.embedding, this.profile);
   }
 }

@@ -43,7 +43,7 @@ import { solvePpr } from "./dynamics/ppr.ts";
 import { ADOPTION_NUMERIC_VERSION } from "./dynamics/adoption-numeric.ts";
 import { attributeOutcome, normalizedRrf } from "./dynamics/ranking.ts";
 import { initialStability, retention } from "./dynamics/retention.ts";
-import { RpcEmbeddingRecoverParams, RpcEmbeddingAttempt, RpcRecallParams, RpcRecallResult, type RpcRecallItem, RpcDreamAdmitParams, RpcDreamJob, RpcDreamLeaseParams, RpcDreamExpireParams, RpcDreamExecuteParams } from "../../protocol/src/rpc.ts";
+import { RpcEmbeddingRecoverParams, RpcEmbeddingAttempt, RpcEmbeddingRequeueParams, type RpcEmbeddingRequeueResult, RpcRecallParams, RpcRecallResult, type RpcRecallItem, RpcDreamAdmitParams, RpcDreamJob, RpcDreamLeaseParams, RpcDreamExpireParams, RpcDreamExecuteParams } from "../../protocol/src/rpc.ts";
 import { EmbeddingError, embeddingProfileId, validateVector, type EmbeddingProvider } from "./embedding.ts";
 import { admittedBudget, packRecall, canonicalContext, RecallError, type Tokenizers, type RecallBundle } from "./recall.ts";
 import { receiptBodyDigestInput, canonicalReceiptJson } from "./receipt-digest.ts";
@@ -164,6 +164,11 @@ function arcIdentity(row: ConductingArcRow): string { return JSON.stringify([row
 function arcTuple(row: ConductingArcRow): string {
   return JSON.stringify([row.source_id, row.link_id, row.peer_id, row.role, row.generation, row.source_extraction_generation]);
 }
+
+/** Transient embedding failures keep an outbox entry queued this many times before it is quarantined as exhausted (#219). */
+const EMBEDDING_MAX_DEFERRALS = 8;
+/** Backoff before a deferred outbox entry is due again: 30 s doubling per deferral, capped at one hour. */
+const embeddingRetryDelay = (deferrals: number): number => Math.min(30_000 * 2 ** (deferrals - 1), 3_600_000);
 
 const SCHEMA_STATEMENTS = [
   `CREATE CONSTRAINT echo_lineage_episode IF NOT EXISTS FOR (l:EchoLineage) REQUIRE l.episode_id IS UNIQUE`,
@@ -1969,9 +1974,15 @@ export class Store {
   }
 
   /** One explicit retry operation per Episode. Reusing a completed operation is
-   * a no-op; retry a quarantined attempt with a new operation ID. Pending rows
-   * can resume after process loss. Provider work never runs in a retried DB tx. */
+   * a no-op; retry a quarantined or deferred attempt with a new operation ID. Pending
+   * rows can resume after process loss. Provider work never runs in a retried DB tx.
+   * An operator-driven recover never exhausts: transient failures always defer. */
   async recoverEmbedding(input: RpcEmbeddingRecoverParams, context: InstallationContext): Promise<RpcEmbeddingAttempt> {
+    return this.attemptEmbedding(input, context, true);
+  }
+
+  /** `deferrable` false turns a transient failure into the terminal provider_unavailable_exhausted quarantine (outbox budget spent). */
+  private async attemptEmbedding(input: RpcEmbeddingRecoverParams, context: InstallationContext, deferrable: boolean): Promise<RpcEmbeddingAttempt> {
     requireInstallation(context);
     const request = RpcEmbeddingRecoverParams.parse(input), provider = this.embeddingProvider;
     if (!provider) throw new RecallError("embedding_not_configured");
@@ -1988,15 +1999,17 @@ export class Store {
         throw new ReceiptError("idempotency_conflict");
       const attempt = old ?? RpcEmbeddingAttempt.parse({ ...request, profile_id: profileId, model: profile.model,
         model_incarnation: profile.model_incarnation, dimensions: profile.dimensions,
-        input_revision: row.get("revision"), input_digest: row.get("digest"), created_at: this.clock(), completed_at: null, state: "pending", reason: null });
+        input_revision: row.get("revision"), input_digest: row.get("digest"), created_at: this.clock(), completed_at: null, state: "pending", reason: null, detail: null });
       if (!old) await tx.run(`CREATE (:EmbeddingAttempt {operation_id:$id,episode_id:$episode,profile_id:$profile,state:'pending',body:$body})`,
         { id: request.operation_id, episode: request.episode_id, profile: profileId, body: canonicalJson(attempt) });
       return { attempt, content: row.get("content") };
     });
     if (prepared.attempt.state !== "pending") return prepared.attempt;
-    let vector: number[] | null = null, reason: RpcEmbeddingAttempt["reason"] = null;
+    let vector: number[] | null = null, reason: RpcEmbeddingAttempt["reason"] = null, detail: string | null = null;
     try { vector = validateVector(await provider.embed(prepared.content, "document"), profile); }
-    catch (error) { if (!(error instanceof EmbeddingError)) throw error; reason = error.reason; }
+    catch (error) { if (!(error instanceof EmbeddingError)) throw error; reason = error.reason; detail = error.detail?.slice(0, 256) ?? null; }
+    // provider_unavailable is the only transient reason: it defers (the Episode stays queued) until the caller's budget is spent.
+    if (reason === "provider_unavailable" && !deferrable) reason = "provider_unavailable_exhausted";
     return this.withWriteTx(async tx => {
       const policy = await this.receiptLockTx(tx);
       await this.authorizeEpisodesTx(tx, [request.episode_id], policy);
@@ -2006,7 +2019,8 @@ export class Store {
       const row = rows.records[0]!, prior = RpcEmbeddingAttempt.parse(JSON.parse(row.get("body")));
       if (prior.state !== "pending") return prior;
       if (row.get("revision") !== prior.input_revision || row.get("digest") !== prior.input_digest) reason = "stale_input";
-      const attempt = RpcEmbeddingAttempt.parse({ ...prior, state: reason ? "quarantined" : "succeeded", reason, completed_at: this.clock() });
+      const state = reason === null ? "succeeded" : reason === "provider_unavailable" ? "deferred" : "quarantined";
+      const attempt = RpcEmbeddingAttempt.parse({ ...prior, state, reason, detail, completed_at: this.clock() });
       if (!reason && vector) {
         const key = tupleHash([request.episode_id, profileId]);
         // First valid vector for this immutable input/model wins. Neither a
@@ -2018,9 +2032,36 @@ export class Store {
           SET m.structure_revision=coalesce(m.structure_revision,0)+CASE WHEN v.operation_id=$operation THEN 1 ELSE 0 END`,
           { key, episode: request.episode_id, profile: profileId, revision: prior.input_revision, digest: prior.input_digest, vector, operation: request.operation_id });
       }
-      await tx.run(`MATCH (a:EmbeddingAttempt {operation_id:$id}) SET a.body=$body,a.state=$state`,
-        { id: request.operation_id, body: canonicalJson(attempt), state: attempt.state });
+      await tx.run(`MATCH (a:EmbeddingAttempt {operation_id:$id}) SET a.body=$body,a.state=$state,a.reason=$reason`,
+        { id: request.operation_id, body: canonicalJson(attempt), state: attempt.state, reason: attempt.reason });
       return attempt;
+    });
+  }
+
+  /** Returns quarantined Episodes of the configured profile to the outbox as fresh entries (retry budget reset);
+   * their attempt rows stay for audit. Episodes that already hold a vector or an unprocessed entry are skipped. */
+  async requeueQuarantinedEmbeddings(input: RpcEmbeddingRequeueParams, context: InstallationContext): Promise<RpcEmbeddingRequeueResult> {
+    requireInstallation(context);
+    const request = RpcEmbeddingRequeueParams.parse(input), provider = this.embeddingProvider;
+    if (!provider) throw new RecallError("embedding_not_configured");
+    const profileId = embeddingProfileId(provider.profile);
+    return this.withWriteTx(async tx => {
+      // Rows written before a.reason existed carry the reason only in the body; lift it once so the filter sees it.
+      const legacy = await tx.run<{ id: string; body: string }>(
+        `MATCH (a:EmbeddingAttempt {state:'quarantined'}) WHERE a.reason IS NULL RETURN a.operation_id AS id,a.body AS body`);
+      if (legacy.records.length) await tx.run(`UNWIND $rows AS row MATCH (a:EmbeddingAttempt {operation_id:row.id}) SET a.reason=row.reason`,
+        { rows: legacy.records.map(row => ({ id: row.get("id"), reason: RpcEmbeddingAttempt.parse(JSON.parse(row.get("body"))).reason })) });
+      const rows = await tx.run<{ n: number }>(
+        `MATCH (a:EmbeddingAttempt {profile_id:$profile,state:'quarantined'}) WHERE $reasons IS NULL OR a.reason IN $reasons
+         WITH DISTINCT a.episode_id AS episode_id
+         MATCH (e:Element:Episode {id:episode_id})
+         WHERE NOT EXISTS { MATCH (v:EmbeddingVector {episode_id:episode_id,profile_id:$profile}) }
+           AND NOT EXISTS { MATCH (o:Outbox {element_id:episode_id}) WHERE o.processed_at IS NULL }
+         WITH e ORDER BY e.id LIMIT $limit
+         CREATE (o:Outbox {element_id:e.id,enqueued_at:$now,processed_at:null})-[:OF]->(e)
+         RETURN count(o) AS n`,
+        { profile: profileId, reasons: request.reasons ?? null, limit: neo4j.int(request.limit), now: new Date().toISOString() });
+      return { requeued: rows.records[0]!.get("n") };
     });
   }
 
@@ -2509,20 +2550,42 @@ export class Store {
     return rows.map((r) => r.id);
   }
 
-  /** Deferred entries stay in the outbox (non-terminal attempt, e.g. provider_unavailable) for a later pass. */
+  /** Unprocessed entries whose retry backoff has elapsed, never-deferred entries first so retries cannot starve fresh work. */
+  private async dueOutbox(limit: number, now: number): Promise<{ id: string; deferrals: number }[]> {
+    return this.run<{ id: string; deferrals: number }>(
+      `MATCH (o:Outbox) WHERE o.processed_at IS NULL AND (o.retry_after IS NULL OR o.retry_after <= $now)
+       RETURN o.element_id AS id, coalesce(o.deferrals, 0) AS deferrals ORDER BY deferrals, id LIMIT $limit`,
+      { now: neo4j.int(now), limit: neo4j.int(limit) },
+    );
+  }
+
+  private async deferOutbox(elementId: string, deferrals: number, retryAfter: number): Promise<void> {
+    await this.withWriteTx((tx) => tx.run(
+      `MATCH (o:Outbox {element_id:$id}) WHERE o.processed_at IS NULL SET o.deferrals=$deferrals, o.retry_after=$retry_after`,
+      { id: elementId, deferrals: neo4j.int(deferrals), retry_after: neo4j.int(retryAfter) },
+    ).then(() => undefined));
+  }
+
+  /** A transient provider failure defers the entry: it stays in the outbox with exponential backoff and a per-entry
+   * budget of EMBEDDING_MAX_DEFERRALS; the transient failure after that quarantines it as provider_unavailable_exhausted.
+   * Deterministic failures quarantine at once. Retries happen on later passes, never in a loop of their own. */
   async drainEmbeddingOutbox(limit = 100, context: InstallationContext = { principal: "installation", commit_mode: "auto" }):
     Promise<{ drained: number; quarantined: number; deferred: number; deferral_reason: string | null } | { drained: 0; reason: "embeddings_disabled" }> {
     const bounded = z.number().int().min(1).max(1000).parse(limit);
     if (!this.embeddingProvider) return { drained: 0, reason: "embeddings_disabled" };
     let drained = 0, quarantined = 0, deferred = 0;
     let deferralReason: string | null = null;
-    for (const episodeId of await this.pending(bounded)) {
-      const attempt = await this.recoverEmbedding({ operation_id: uuidv7(), episode_id: z.uuidv7().parse(episodeId) }, context);
+    for (const entry of await this.dueOutbox(bounded, this.clock())) {
+      const attempt = await this.attemptEmbedding({ operation_id: uuidv7(), episode_id: z.uuidv7().parse(entry.id) }, context, entry.deferrals < EMBEDDING_MAX_DEFERRALS);
       if (attempt.state === "succeeded" || attempt.state === "quarantined") {
-        await this.markProcessed([episodeId]);
+        await this.markProcessed([entry.id]);
         drained++;
         if (attempt.state === "quarantined") quarantined++;
-      } else { deferred++; deferralReason = attempt.reason ?? attempt.state; }
+      } else {
+        const deferrals = entry.deferrals + 1;
+        await this.deferOutbox(entry.id, deferrals, this.clock() + embeddingRetryDelay(deferrals));
+        deferred++; deferralReason = attempt.reason ?? attempt.state;
+      }
     }
     return { drained, quarantined, deferred, deferral_reason: deferralReason };
   }

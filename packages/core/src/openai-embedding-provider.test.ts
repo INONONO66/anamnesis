@@ -9,10 +9,11 @@ const options = { baseUrl: "http://embedding.test/", model: profile.model, profi
 const response = (embedding: unknown) => Response.json({ data: [{ index: 0, embedding }] });
 const provider = (fetch: Fetch) => new OpenAiEmbeddingProvider({ ...options, fetch });
 
-async function expectFailure(instance: OpenAiEmbeddingProvider, code: string, retryable: boolean, reason = code) {
+async function expectFailure(instance: OpenAiEmbeddingProvider, code: string, retryable: boolean, reason = code, detail?: string) {
   const error = await instance.embed("hello", "document").then(() => { throw new Error("expected provider rejection"); }, error => error);
   expect(error).toBeInstanceOf(EmbeddingError);
-  expect(error).toMatchObject({ code, retryable, reason });
+  expect(error).toMatchObject({ code, retryable, reason, ...(detail === undefined ? {} : { detail }) });
+  return error as EmbeddingError;
 }
 
 describe("OpenAiEmbeddingProvider", () => {
@@ -85,13 +86,14 @@ describe("OpenAiEmbeddingProvider", () => {
   });
 
   for (const status of [400, 401, 429, 500, 503]) {
-    test(`maps HTTP ${status} to retryable provider_unavailable`, async () => {
-      await expectFailure(provider(async () => new Response("failure", { status })), "provider_unavailable", true);
+    test(`maps HTTP ${status} to retryable provider_unavailable and records the status`, async () => {
+      await expectFailure(provider(async () => new Response("failure", { status })), "provider_unavailable", true, "provider_unavailable", `http ${status}`);
     });
   }
 
-  test("maps network failure to retryable provider_unavailable", async () => {
-    await expectFailure(provider(async () => { throw new TypeError("connection refused"); }), "provider_unavailable", true);
+  test("maps network failure to retryable provider_unavailable and records the socket code", async () => {
+    await expectFailure(provider(async () => { throw new TypeError("connection refused"); }), "provider_unavailable", true, "provider_unavailable", "TypeError");
+    await expectFailure(provider(async () => { throw new TypeError("fetch failed", { cause: Object.assign(new Error("refused"), { code: "ECONNREFUSED" }) }); }), "provider_unavailable", true, "provider_unavailable", "ECONNREFUSED");
   });
 
   test("maps an actual AbortSignal timeout to retryable provider_unavailable", async () => {
@@ -104,7 +106,7 @@ describe("OpenAiEmbeddingProvider", () => {
         if (signal.aborted) abort();
       });
     } });
-    await expectFailure(instance, "provider_unavailable", true);
+    await expectFailure(instance, "provider_unavailable", true, "provider_unavailable", "timeout 1ms");
     expect(observedAbort).toBe(true);
   }, 1000);
 

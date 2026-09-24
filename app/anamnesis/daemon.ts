@@ -321,6 +321,7 @@ export async function foreground(): Promise<void> {
       case "graph.envelope": return runtime.graphEnvelope(request.params as { seed_ids: string[]; T?: number }, connection.context!);
       case "embedding.recover": return runtime.recoverEmbedding(request.params, connection.context!);
       case "embedding.status": return runtime.embeddingStatus(request.params.operation_id, connection.context!);
+      case "embedding.requeue": return runtime.requeueQuarantinedEmbeddings(request.params, connection.context!);
       case "backup": return runtime.backup(connection.context!, request.params.destination, request.params.operation_id);
       case "restore": return runtime.restore(connection.context!, request.params.archive, request.params.operation_id);
       case "backup.status": return runtime.backupStatus(request.params.operation_id);
