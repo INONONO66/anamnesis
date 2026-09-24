@@ -1,9 +1,10 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import neo4j, { type Driver, type RecordShape } from "neo4j-driver";
 import { Engine, envConfig, type EngineOptions } from "../../packages/core/src/engine.ts";
 import { OpenAiChatExtractionProvider } from "../../packages/core/src/openai-extraction-provider.ts";
+import { ExtractionScheduler, type ExtractionTurn } from "../../packages/core/src/extraction-scheduler.ts";
 import { OpenAiEmbeddingProvider } from "../../packages/core/src/openai-embedding-provider.ts";
 import { elementDigest, verifyLineageRetry } from "../../packages/core/src/store.ts";
 import { EchoLineage, parseEpisodeLineage } from "../../packages/protocol/src/episode-lineage.ts";
@@ -67,7 +68,7 @@ export interface RuntimeAuthorityOptions {
   authorityAdapter?: TrustedAuthorityAdapter;
 }
 /** Background lanes the daemon's single writer interleaves with requests. */
-export type BackgroundLane = "spool" | "embedding";
+export type BackgroundLane = "spool" | "embedding" | "extraction";
 /** Outcome of one bounded embedding batch. "stalled" keeps the wake pending for the next storage recovery. */
 export type EmbeddingTurn = "more" | "idle" | "stalled";
 
@@ -113,6 +114,9 @@ export class Runtime {
   private drainRequested = false;
   private drainStopped = false;
   private readonly embedding = { requested: false, drained_total: 0, quarantined_total: 0, last_error: null as string | null };
+  /** Present only with an extraction provider; the lane is otherwise never scheduled and reports unconfigured. */
+  private readonly extraction: ExtractionScheduler | undefined;
+  private extractionRequested = false;
   constructor(readonly installation: Installation, private readonly scheduleDrain: (lane: BackgroundLane) => void = () => {}, uploadLifecycle: UploadLifecycle = {}, authorityOptions: RuntimeAuthorityOptions = {}, providers: EngineOptions = {}) {
     this.authorityAdapter = authorityOptions.authorityAdapter;
     const config = { ...envConfig(), ...providers, tokenizers: loadTokenizers(), objectsRoot: join(installation.root, "objects") };
@@ -120,6 +124,9 @@ export class Runtime {
     const rawDream = createDreamLeidenAdapter();
     const dreamLeidenAdapter = rawDream ? trustedDreamLeiden({ image_digest: DREAM_GDS_IMAGE, plugin_digest: 'sha256:246e3fbbbf733b4def1e7b0a9740a2309f6605ee8a7b46b29fe1de56d0a4b47c', algorithm: DREAM_ALGORITHM, gds_version: DREAM_GDS_VERSION, network: DREAM_NETWORK, adapter: rawDream }) : undefined;
     this.engine = new Engine({ ...config, ...(dreamLeidenAdapter ? { dreamLeidenAdapter } : {}) });
+    this.extraction = config.extractionProvider && new ExtractionScheduler(this.engine, { provider: config.extractionProvider,
+      context: Object.freeze({ principal: "installation", commit_mode: "auto", client_binding: randomUUID() }),
+      read: (query, params) => this.read(query, params), wake: () => this.wakeExtraction() });
     this.database = config.database ?? "neo4j";
     this.reader = neo4j.driver(config.uri, neo4j.auth.basic(config.user, config.password), {
       disableLosslessIntegers: true, connectionTimeout: 1000, connectionAcquisitionTimeout: 1500, maxTransactionRetryTime: 0,
@@ -152,7 +159,7 @@ export class Runtime {
       if (rows[0]?.epoch !== this.epoch) throw new RpcFault("ownership_lost", "database writer epoch changed");
       const recovered = !this.available;
       this.available = true;
-      if (recovered) { this.wakeDrain(); this.wakeEmbedding(); }
+      if (recovered) { this.wakeDrain(); this.wakeEmbedding(); this.wakeExtraction(); }
     } catch (error) {
       if (!storageUnavailable(error)) throw error;
       this.available = false;
@@ -264,7 +271,7 @@ export class Runtime {
       expected_previous_revision_key: params.expected_previous_revision_key, ...payload }, metadata ? { metadata, context: context! } : undefined));
     const committed = await this.committed(binding, result.created);
     if (!committed || committed.id !== result.id) throw new RpcFault("internal_error", "database did not expose the committed delivery");
-    if (committed.created) this.wakeEmbedding(); // Direct and spool-drained commits alike enqueue outbox work.
+    if (committed.created) { this.wakeEmbedding(); this.wakeExtraction(); } // Direct and spool-drained commits alike enqueue worker work.
     return committed;
   }
   async remember(params: RpcRememberParams, context?: InstallationContext) {
@@ -359,9 +366,33 @@ export class Runtime {
       throw error;
     }
   }
+  private wakeExtraction(): void {
+    if (!this.extraction) return;
+    this.extractionRequested = true;
+    if (this.available && !this.drainStopped) this.scheduleDrain("extraction");
+  }
+  /** One bounded scheduler turn: database work only, provider calls stay in tracked in-flight pipelines. */
+  async extractionTurn(): Promise<ExtractionTurn | "stalled"> {
+    if (this.drainStopped || !this.available || !this.extraction) return "stalled";
+    if (!this.extractionRequested) return this.extraction.inFlightCount ? "waiting" : "idle";
+    // Consume the request before working: a pipeline settling mid-turn re-arms the lane and that wake must survive.
+    this.extractionRequested = false;
+    try {
+      await this.installation.assertOwned();
+      const rows = await this.read<{ epoch: number }>("MATCH (m:Meta {key:'meta'}) RETURN m.writer_epoch AS epoch");
+      if (rows[0]?.epoch !== this.epoch) throw new RpcFault("ownership_lost", "database writer epoch changed");
+      const outcome = await runtimeTimed("engine.extractionTurn", () => this.extraction!.turn());
+      if (outcome === "more") this.extractionRequested = true;
+      return outcome;
+    } catch (error) {
+      if (storageUnavailable(error)) { this.available = false; this.extractionRequested = true; return "stalled"; } // Recovery re-schedules the pending wake.
+      this.extraction.recordError(error);
+      throw error;
+    }
+  }
   private workers(pendingOutbox: number | null): RpcWorkersStatus {
     const { drained_total, quarantined_total, last_error } = this.embedding;
-    return { embedding: { pending: pendingOutbox, drained_total, quarantined_total, last_error }, extraction: { state: "unconfigured" } };
+    return { embedding: { pending: pendingOutbox, drained_total, quarantined_total, last_error }, extraction: this.extraction?.status() ?? { state: "unconfigured" } };
   }
   /** Called only by the daemon's serial owner, never from a second writer. */
   async drainTurn(): Promise<boolean> {
@@ -643,6 +674,7 @@ export class Runtime {
   async close(): Promise<void> {
     this.cancelDrain();
     await this.drainJob?.return(); this.drainJob = undefined;
+    await this.extraction?.close(); // In-flight pipelines settle before the writer goes away.
     await this.uploads.close(); await this.engine.close(); await this.reader.close();
   }
 }

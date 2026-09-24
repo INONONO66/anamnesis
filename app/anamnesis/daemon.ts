@@ -24,8 +24,11 @@ export async function foreground(): Promise<void> {
   const budget = new RpcByteBudget();
   let serial: Promise<void> = Promise.resolve();
   const requests: Array<() => Promise<void>> = [];
-  let running = false, started = false, drainReady = false, embeddingReady = false, preferDrain = false, embeddingNext = false;
-  const backgroundReady = () => (drainReady || embeddingReady) && !stopping;
+  let running = false, started = false, drainReady = false, embeddingReady = false, extractionReady = false, preferDrain = false, nextLane = 0;
+  const backgroundReady = () => (drainReady || embeddingReady || extractionReady) && !stopping;
+  // Worker lanes start idle; an unconfigured lane is never woken, so it stays idle for the emitter.
+  let embeddingIdle = true, extractionIdle = true;
+  const reportIdle = () => { if (embeddingIdle && extractionIdle) console.log(JSON.stringify({ event: "workers_idle" })); };
   const lostOwnership = () => {
     ownershipLost = true; stopping = true;
     runtime!.cancelDrain();
@@ -44,7 +47,7 @@ export async function foreground(): Promise<void> {
       if (fault(error).code === "ownership_lost") lostOwnership();
     }
   };
-  /** One embedding outbox batch. Part B hooks the extraction scheduler as a third lane beside this one. */
+  /** One embedding outbox batch. */
   const embeddingTurn = async () => {
     embeddingReady = false;
     try {
@@ -53,16 +56,36 @@ export async function foreground(): Promise<void> {
       daemonTiming?.({ layer: "daemon", event: "embedding_complete" });
       embeddingReady = outcome === "more";
       // Busy -> nothing left. A stalled worker (storage gone) is not idle; recovery wakes it.
-      if (outcome === "idle") console.log(JSON.stringify({ event: "workers_idle" }));
+      if (outcome === "idle") { embeddingIdle = true; reportIdle(); }
     } catch (error) {
       logError(error);
       if (fault(error).code === "ownership_lost") lostOwnership();
     }
   };
+  /** One extraction scheduler turn. "waiting" leaves pipelines in flight; their settlement wakes the lane again. */
+  const extractionTurn = async () => {
+    extractionReady = false;
+    try {
+      daemonTiming?.({ layer: "daemon", event: "extraction_start" });
+      const outcome = await runtime!.extractionTurn();
+      daemonTiming?.({ layer: "daemon", event: "extraction_complete" });
+      // A pipeline that settled mid-turn already re-armed the lane; never overwrite that wake or call it idle.
+      if (outcome === "more") extractionReady = true;
+      if (outcome === "idle" && !extractionReady) { extractionIdle = true; reportIdle(); }
+    } catch (error) {
+      logError(error);
+      if (fault(error).code === "ownership_lost") lostOwnership();
+    }
+  };
+  const lanes = [
+    { ready: () => drainReady, turn: drainTurn },
+    { ready: () => embeddingReady, turn: embeddingTurn },
+    { ready: () => extractionReady, turn: extractionTurn },
+  ];
   // Background has its own coalesced admission slot. Alternate dispatch lanes
   // so neither a saturated foreground nor a large drain cohort can starve one.
-  // Inside the slot the spool and embedding lanes alternate as well, so a long
-  // spool cohort cannot starve vectors, nor a deep outbox the spool.
+  // Inside the slot the spool, embedding and extraction lanes take round-robin
+  // turns, so no single deep backlog can starve the others or stretch RPC latency.
   const kick = () => {
     if (running || !started) return;
     running = true;
@@ -73,9 +96,13 @@ export async function foreground(): Promise<void> {
           await new Promise<void>(resolve => setImmediate(resolve));
           if (backgroundReady() && (preferDrain || !requests.length)) {
             preferDrain = false;
-            const embedding = embeddingReady && (!drainReady || embeddingNext);
-            embeddingNext = !embedding;
-            if (embedding) await embeddingTurn(); else await drainTurn();
+            for (let offset = 0; offset < lanes.length; offset++) {
+              const index = (nextLane + offset) % lanes.length;
+              if (!lanes[index]!.ready()) continue;
+              nextLane = (index + 1) % lanes.length;
+              await lanes[index]!.turn();
+              break;
+            }
           } else {
             const request = requests.shift();
             if (request) { preferDrain = true; await request(); }
@@ -317,7 +344,7 @@ export async function foreground(): Promise<void> {
   }
   const stop = (): Promise<void> => shutdown ??= (async () => {
     stopping = true;
-    drainReady = false; embeddingReady = false;
+    drainReady = false; embeddingReady = false; extractionReady = false;
     runtime?.cancelDrain();
     const closed = Promise.all(listeners.map(listener => new Promise<void>((resolve, reject) => listener.close(error => error ? reject(error) : resolve()))));
     const deadline = setTimeout(() => {
@@ -345,7 +372,12 @@ export async function foreground(): Promise<void> {
   })();
   const signalStop = () => { void stop().catch(error => { logError(error); process.exitCode = 1; }); };
   try {
-    runtime = await Runtime.create(installation, lane => { if (lane === "embedding") embeddingReady = true; else drainReady = true; kick(); }, {
+    runtime = await Runtime.create(installation, lane => {
+      if (lane === "embedding") { embeddingReady = true; embeddingIdle = false; }
+      else if (lane === "extraction") { extractionReady = true; extractionIdle = false; }
+      else drainReady = true;
+      kick();
+    }, {
       enqueue: job => { if (!stopping) enqueue(async () => { if (!stopping) { await installation.assertOwned(); await job(); } }); },
     });
     await runtime.init();
