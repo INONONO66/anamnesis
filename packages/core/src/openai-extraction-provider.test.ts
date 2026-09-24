@@ -75,6 +75,11 @@ describe("OpenAiChatExtractionProvider", () => {
     expect(instance.reportedModelIncarnation).toBeUndefined();
     // A prefix without the alias boundary is another model, not a snapshot of this one.
     await expectFailure(new OpenAiChatExtractionProvider({ ...options, fetch: async () => response(JSON.stringify(output), { model: "gpt-tester" }) }), "provider_mismatch", false, "model");
+    // A dashed variant is a different model too; only a dated snapshot of the configured alias is accepted.
+    await expectFailure(new OpenAiChatExtractionProvider({ ...options, fetch: async () => response(JSON.stringify(output), { model: "gpt-test-mini" }) }), "provider_mismatch", false, "model");
+    const snapshot = new OpenAiChatExtractionProvider({ ...options, fetch: async () => response(JSON.stringify(output), { model: "gpt-test-2024-08-06", system_fingerprint: "fp-snap" }) });
+    await expect(snapshot.extract({ text: "The sky is blue.", task: "claim" })).resolves.toBeDefined();
+    expect(snapshot.reportedModelIncarnation).toBe("gpt-test-2024-08-06:fp-snap");
   });
 
   test("accepts a dated snapshot of the configured alias and records the reported identity", async () => {

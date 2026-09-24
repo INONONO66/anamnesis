@@ -15,11 +15,12 @@ export type ExtractionProviderInput = { text: string; task: "claim" | "judge" | 
  * reports none. */
 export interface ExtractionProvider { readonly model: string; readonly modelIncarnation: string; readonly reportedModelIncarnation?: string | undefined; extract(input: ExtractionProviderInput): Promise<unknown>; }
 /** The configured model names the reported one when they are equal or the configured name is an alias the upstream
- * resolved to a dated snapshot (`claude-haiku-4-5` -> `claude-haiku-4-5-20251001`, `gpt-4o` -> `gpt-4o-2024-08-06`).
- * The dash boundary keeps `gpt-4` from naming `gpt-4o`. */
+ * resolved to a dated snapshot of the same model (`claude-haiku-4-5` -> `claude-haiku-4-5-20251001`, `gpt-4o` ->
+ * `gpt-4o-2024-08-06`). Only a date suffix is a snapshot: `gpt-4o-mini` is a different model, not an alias of `gpt-4o`. */
 export function reportedModelMatches(configured: string, reported: string): boolean {
-  return reported === configured || reported.startsWith(configured + "-");
+  return reported === configured || (reported.startsWith(configured + "-") && SNAPSHOT_SUFFIX.test(reported.slice(configured.length)));
 }
+const SNAPSHOT_SUFFIX = /^-(\d{8}|\d{4}-\d{2}-\d{2})$/;
 /** `detail` names the check a `provider_mismatch` failed; it is recorded on the attempt (#218). */
 export class ExtractionProviderError extends Error {
   constructor(readonly reason: "provider_unavailable" | "provider_rejected" | "provider_mismatch" | "output_too_large" | "input_too_large", readonly detail?: ExtractionFailureDetail) { super(reason); }

@@ -218,10 +218,13 @@ try {
   assert.deepEqual((await client.request('hit-cache.verify', {})).issues, []);
   // A quarantined Episode returns to the outbox through embedding.requeue; the call itself wakes the lane.
   mode = 'fail';
-  let c;
-  const candidateSettled = idleWhen(async () => c !== undefined && (await query('MATCH (a:EmbeddingAttempt {episode_id:$id}) RETURN count(a) AS n', { id: c.id }))[0].n === 1);
+  // The idle that ends the candidate's quarantine can be printed before remember's reply carries its id, so the
+  // check waits for the identity instead of discarding that idle.
+  let candidateId; const candidateKnown = new Promise(resolve => { candidateId = resolve; });
+  const candidateSettled = idleWhen(async () => (await query('MATCH (a:EmbeddingAttempt {episode_id:$id}) RETURN count(a) AS n', { id: await candidateKnown }))[0].n === 1);
   const candidateAsked = providerRequest('document: requeue candidate');
-  c = await remember('c', 'requeue candidate', 'small');
+  const c = await remember('c', 'requeue candidate', 'small');
+  candidateId(c.id);
   await candidateAsked; await candidateSettled;
   assert.deepEqual(await query('MATCH (a:EmbeddingAttempt {episode_id:$id}) RETURN a.state AS state, a.reason AS reason', { id: c.id }), [{ state: 'quarantined', reason: 'provider_rejected' }]);
   assert.equal((await query('MATCH (v:EmbeddingVector {episode_id:$id}) RETURN count(v) AS n', { id: c.id }))[0].n, 0);
