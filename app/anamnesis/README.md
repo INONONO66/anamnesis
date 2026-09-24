@@ -162,6 +162,15 @@ No credential or evidence file belongs in a commit.
 `ANAMNESIS_QA_LLM_MIN_INTERVAL_MS` controls the minimum provider-call interval
 (default 3000 ms, range 0-60000). Pacing occurs before task leases and applies to
 claims, judges and retries; attempts remain bounded at four. Run live QA serially.
+That variable only affects `scripts/qa/e2e-real.ts`. The daemon paces its own
+extraction lane through three knobs read at startup with the LLM configuration:
+`ANAMNESIS_EXTRACTION_MAX_IN_FLIGHT` bounds concurrent pipelines (1-16, default 4);
+`ANAMNESIS_LLM_MIN_INTERVAL_MS` is the minimum spacing between consecutive provider
+calls (0-600000, default 0 = unpaced), enforced by one FIFO gate that every claim,
+judge and retry passes through; `ANAMNESIS_LLM_JITTER_FRACTION` (0-1, default 0.5)
+stretches each gap by up to that fraction so calls never line up into bursts on a
+shared token hub. `status` reports the effective values and per-process
+`calls_total` / `waited_total_ms` under `workers.extraction.pacing`.
 `ANAMNESIS_QA_KEEP_ON_FAILURE=1` retains the owned database and temporary runtime
 on failure for post-mortem inspection, recording custody in `kept-resources.json`.
 It still deletes the token-hub credential and stops the tunnel. Manually remove

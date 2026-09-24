@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtractionDialect } from "../../packages/core/src/openai-extraction-provider.ts";
-import { RpcEmbeddingAttempt, RpcIngestStatusParams } from "../../packages/protocol/src/rpc.ts";
+import { RpcEmbeddingAttempt, RpcExtractionPacing, RpcIngestStatusParams } from "../../packages/protocol/src/rpc.ts";
 
 // Reuse the protocol's Zod schemas; the app has no independent Zod dependency.
 const providerUrl = RpcEmbeddingAttempt.shape.model.refine(value => URL.canParse(value) && ["http:", "https:"].includes(new URL(value).protocol));
@@ -13,6 +13,11 @@ const providerSecret = RpcEmbeddingAttempt.shape.model.refine(value => !/[\r\n]/
 const providerPath = RpcEmbeddingAttempt.shape.model;
 export const DEFAULT_EXTRACTION_PROMPT_FILE = fileURLToPath(new URL("./prompts/extract-claims.v2.md", import.meta.url));
 export const DEFAULT_RELATION_PROMPT_FILE = fileURLToPath(new URL("./prompts/judge-relations.v1.md", import.meta.url));
+/** How the daemon meters its extraction provider: bounded in-flight pipelines plus a jittered minimum call interval. */
+export interface ExtractionPacingConfig { readonly maxInFlight: number; readonly minIntervalMs: number; readonly jitterFraction: number }
+export const EXTRACTION_PACING_DEFAULTS: ExtractionPacingConfig = Object.freeze({ maxInFlight: 4, minIntervalMs: 0, jitterFraction: 0.5 });
+/** Environment numbers arrive as strings; blank is a configuration error, not zero. */
+const numeric = (value: string | undefined) => value === undefined ? undefined : value.trim() === "" ? NaN : Number(value);
 const ProviderEnvironment = RpcEmbeddingAttempt.pick({}).strip().extend({
   ANAMNESIS_EMBEDDING_BASE_URL: providerUrl.optional(),
   ANAMNESIS_EMBEDDING_MODEL: providerName.default("Qwen3-Embedding-0.6B"),
@@ -24,6 +29,9 @@ const ProviderEnvironment = RpcEmbeddingAttempt.pick({}).strip().extend({
   ANAMNESIS_LLM_DIALECT: providerName.refine(value => value === "openai_chat" || value === "anthropic_messages").transform(value => value as ExtractionDialect).optional(),
   ANAMNESIS_EXTRACTION_PROMPT_FILE: providerPath.default(DEFAULT_EXTRACTION_PROMPT_FILE),
   ANAMNESIS_RELATION_PROMPT_FILE: providerPath.default(DEFAULT_RELATION_PROMPT_FILE),
+  ANAMNESIS_EXTRACTION_MAX_IN_FLIGHT: RpcExtractionPacing.shape.max_in_flight.default(EXTRACTION_PACING_DEFAULTS.maxInFlight),
+  ANAMNESIS_LLM_MIN_INTERVAL_MS: RpcExtractionPacing.shape.min_interval_ms.default(EXTRACTION_PACING_DEFAULTS.minIntervalMs),
+  ANAMNESIS_LLM_JITTER_FRACTION: RpcExtractionPacing.shape.jitter_fraction.default(EXTRACTION_PACING_DEFAULTS.jitterFraction),
 });
 
 /** Load once at provider startup. Absent base URLs leave legacy provider selection unchanged.
@@ -34,6 +42,9 @@ export async function loadProviderConfig(env: NodeJS.ProcessEnv = process.env) {
     ANAMNESIS_EMBEDDING_MODEL: embeddingEnabled ? env["ANAMNESIS_EMBEDDING_MODEL"] : undefined,
     ANAMNESIS_EMBEDDING_API_KEY: embeddingEnabled ? env["ANAMNESIS_EMBEDDING_API_KEY"] : undefined,
     ANAMNESIS_EMBEDDING_DIMENSIONS: !embeddingEnabled || env["ANAMNESIS_EMBEDDING_DIMENSIONS"] === undefined ? undefined : Number(env["ANAMNESIS_EMBEDDING_DIMENSIONS"]),
+    ANAMNESIS_EXTRACTION_MAX_IN_FLIGHT: numeric(env["ANAMNESIS_EXTRACTION_MAX_IN_FLIGHT"]),
+    ANAMNESIS_LLM_MIN_INTERVAL_MS: numeric(env["ANAMNESIS_LLM_MIN_INTERVAL_MS"]),
+    ANAMNESIS_LLM_JITTER_FRACTION: numeric(env["ANAMNESIS_LLM_JITTER_FRACTION"]),
   });
   if (!parsed.success) throw new Error(`invalid provider configuration: ${parsed.error.issues.map(issue => issue.path.join(".")).join(", ")}`);
   const config = parsed.data;
@@ -63,6 +74,7 @@ export async function loadProviderConfig(env: NodeJS.ProcessEnv = process.env) {
       dialect: config.ANAMNESIS_LLM_DIALECT ?? (config.ANAMNESIS_LLM_MODEL.startsWith("claude") ? "anthropic_messages" : "openai_chat"),
       ...(apiKey === undefined ? {} : { apiKey }) },
     promptFile, systemPrompt, relationPromptFile, relationPrompt,
+    extractionPacing: { maxInFlight: config.ANAMNESIS_EXTRACTION_MAX_IN_FLIGHT, minIntervalMs: config.ANAMNESIS_LLM_MIN_INTERVAL_MS, jitterFraction: config.ANAMNESIS_LLM_JITTER_FRACTION } satisfies ExtractionPacingConfig,
   };
 }
 
