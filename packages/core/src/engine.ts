@@ -1,3 +1,4 @@
+import type { Driver } from "neo4j-driver";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { v7 as uuidv7 } from "uuid";
@@ -57,7 +58,9 @@ export const RememberInput = z
   .superRefine(validateElementSemantics);
 export type RememberInput = z.input<typeof RememberInput>;
 
-export interface EngineOptions extends Partial<StoreOptions> { extractionProvider?: ExtractionProvider; semanticReviewProvider?: SemanticReviewProvider; dreamLeidenAdapter?: DreamLeidenAdapter }
+export interface EngineOptions extends Partial<StoreOptions> { extractionProvider?: ExtractionProvider; semanticReviewProvider?: SemanticReviewProvider; dreamLeidenAdapter?: DreamLeidenAdapter;
+  /** Trusted runtime injection: a driver whose connect/acquisition deadlines are bounded, so a background turn that meets a dead Bolt endpoint fails fast instead of holding the daemon's dispatch slot. */
+  driver?: Driver }
 
 /** A default password would silently ship an unauthenticated install. */
 function requiredPassword(): string {
@@ -93,11 +96,11 @@ export class Engine {
   private readonly semanticReviewProvider: SemanticReviewProvider | undefined;
 
   constructor(opts: EngineOptions = {}) {
-    const { extractionProvider, semanticReviewProvider, dreamLeidenAdapter, ...storeOptions } = { ...envConfig(), ...opts };
+    const { extractionProvider, semanticReviewProvider, dreamLeidenAdapter, driver, ...storeOptions } = { ...envConfig(), ...opts };
     this.extractionProvider = extractionProvider;
     this.semanticReviewProvider = semanticReviewProvider;
     // Every configured extraction provider answers `judge_relations` (D53), so validated claims wait for verdicts.
-    this.store = new Store({ ...storeOptions, relationJudge: extractionProvider !== undefined, ...(dreamLeidenAdapter ? { dreamLeidenAdapter } : {}) });
+    this.store = new Store({ ...storeOptions, relationJudge: extractionProvider !== undefined, ...(dreamLeidenAdapter ? { dreamLeidenAdapter } : {}) }, driver);
   }
 
   async materializeRetainedClaim(input: MaterializeRetainedClaim, context: InstallationContext) {

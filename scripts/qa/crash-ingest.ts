@@ -26,6 +26,7 @@ const env: NodeJS.ProcessEnv = { ...process.env, ANAMNESIS_RUNTIME_ROOT: root, A
 interface CrashSummary { status: string; accepted_before: number; spooled_during_outage: number; final_episodes: number; distinct_ids: number; spool_pending: number; error?: string }
 const summary: CrashSummary = { status: "running", accepted_before: 0, spooled_during_outage: 0, final_episodes: 0, distinct_ids: 0, spool_pending: -1 };
 let container = "", daemon: ChildProcess | undefined, lines: Interface | undefined, client: RpcClient | undefined;
+const daemonStderr: string[] = []; const allStdout: string[] = [];
 /** Event subscription, not polling: resolve on the Neo4j "Started." log line emitted after the given moment, bounded by a deadline. */
 async function awaitNeo4jStarted(containerId: string, since: string, timeoutMs: number, code: string): Promise<void> {
   const logs = spawn("docker", ["logs", "-f", "--since", since, containerId], { stdio: ["ignore", "pipe", "pipe"] });
@@ -54,7 +55,8 @@ try {
   env.ANAMNESIS_NEO4J_URI = uri;
   daemon = spawn(process.execPath, [resolve("dist/anamnesis-ops.mjs"), "foreground"], { env, stdio: ["ignore", "pipe", "pipe"] });
   lines = createInterface({ input: daemon.stdout! });
-  const daemonStderr: string[] = []; daemon.stderr!.on("data", (chunk: Buffer) => { daemonStderr.push(chunk.toString()); });
+  lines.on("line", (line) => { allStdout.push(`${new Date().toISOString()} ${line}`); });
+  daemon.stderr!.on("data", (chunk: Buffer) => { daemonStderr.push(chunk.toString()); });
   await new Promise<void>((resolveReady, reject) => { const timer = setTimeout(() => reject(new Error("daemon_readiness_timeout")), 90000); const onLine = (line: string) => { if (line.includes('"event":"listening"')) { clearTimeout(timer); lines?.off("line", onLine); resolveReady(); } }; lines?.on("line", onLine); daemon?.once("error", reject); daemon?.once("exit", (code) => { clearTimeout(timer); reject(new Error(`daemon_exited_${code}:${daemonStderr.join("").trim().slice(0, 200)}`)); }); });
   client = await RpcClient.connect(join(root, "anamnesis.sock"), (await readFile(join(root, "token"), "utf8")).trim());
   assert.ok(client);
@@ -86,6 +88,7 @@ try {
   summary.status = "failed"; summary.error = error instanceof Error && /^Command failed: docker/.test(error.message) ? "docker_unavailable" : error instanceof Error ? error.message.replace(/[^a-zA-Z0-9_.:-]/g, "_") : "unknown"; process.exitCode = 1;
 } finally {
   await writeFile(join(evidence, "crash-ingest-summary.json"), JSON.stringify(summary, null, 2) + "\n");
+  if (daemon) await writeFile(join(evidence, "crash-ingest-daemon-stderr.log"), daemonStderr.join("") + `\nexit_code=${daemon.exitCode}\n---stdout---\n` + allStdout.join("\n") + "\n");
   if (client) await client.close().catch(() => {}); if (daemon && daemon.exitCode === null) daemon.kill("SIGTERM");
   if (container) await execute("docker", ["rm", "-f", "-v", container]).catch(() => {});
   await rm(parent, { recursive: true, force: true });

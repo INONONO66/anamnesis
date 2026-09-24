@@ -123,7 +123,12 @@ export class Runtime {
     this.capabilities = { ...capabilities, extraction: !!config.extractionProvider, embeddings: !!config.embeddingProvider };
     const rawDream = createDreamLeidenAdapter();
     const dreamLeidenAdapter = rawDream ? trustedDreamLeiden({ image_digest: DREAM_GDS_IMAGE, plugin_digest: 'sha256:246e3fbbbf733b4def1e7b0a9740a2309f6605ee8a7b46b29fe1de56d0a4b47c', algorithm: DREAM_ALGORITHM, gds_version: DREAM_GDS_VERSION, network: DREAM_NETWORK, adapter: rawDream }) : undefined;
-    this.engine = new Engine({ ...config, ...(dreamLeidenAdapter ? { dreamLeidenAdapter } : {}) });
+    // Same bounded deadlines as the reader: with defaults (30 s connect, 60 s acquisition) a background lane meeting a
+    // dead Bolt endpoint held the serial dispatch slot past the 30 s socket idle deadline and dropped queued RPCs.
+    const writer = neo4j.driver(config.uri, neo4j.auth.basic(config.user, config.password), {
+      disableLosslessIntegers: true, connectionTimeout: 1000, connectionAcquisitionTimeout: 1500, maxTransactionRetryTime: 0,
+    });
+    this.engine = new Engine({ ...config, driver: writer, ...(dreamLeidenAdapter ? { dreamLeidenAdapter } : {}) });
     this.extraction = config.extractionProvider && new ExtractionScheduler(this.engine, { provider: config.extractionProvider,
       context: Object.freeze({ principal: "installation", commit_mode: "auto", client_binding: randomUUID() }),
       read: (query, params) => this.read(query, params), wake: () => this.wakeExtraction() });
