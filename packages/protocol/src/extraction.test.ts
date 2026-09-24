@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { ExtractionAttempt, Generation, LeaseModelTask, ModelTask, canonicalExtractionBody } from "./extraction.ts";
+import { ExtractionAttempt, Generation, LeaseModelTask, ModelTask, canonicalExtractionBody, extractionBodyDigest } from "./extraction.ts";
 
 describe("G004 extraction contract", () => {
   test("canonicalizes JSON domain with UTF-16 ordering and rejects invalid values", () => {
@@ -24,6 +24,36 @@ describe("G004 extraction contract", () => {
     expect(ExtractionAttempt.parse(mismatch).detail).toBeUndefined();
     expect(ExtractionAttempt.parse({ ...mismatch, detail: "incarnation" }).detail).toBe("incarnation");
     expect(() => ExtractionAttempt.parse({ ...mismatch, detail: "other" })).toThrow();
+    // Only an accepted answer can carry the upstream-reported model; a failure has no answer to attribute.
+    expect(() => ExtractionAttempt.parse({ ...mismatch, reported_model: "gpt-test-2026-01-01:fp" })).toThrow();
+    expect(() => ExtractionAttempt.parse({ ...attempt, reported_model: "" })).toThrow();
+  });
+
+  test("a succeeded attempt records the upstream-reported model beside the configured task identity", () => {
+    const body = canonicalExtractionBody({ task: "claim", claims: [], language: "en", modality: "text" });
+    const success = {
+      id: "018f5b5e-7b1e-7abc-8def-123456789012", generation_id: "018f5b5e-7b1e-7abc-8def-123456789013",
+      task_id: "018f5b5e-7b1e-7abc-8def-123456789015", source_ingest_seq: 1,
+      source_id: "018f5b5e-7b1e-7abc-8def-123456789014", source_revision: "b".repeat(64), body_digest: "a".repeat(64),
+      state: "succeeded", reason: null, disposition: "unknown", created_at: 1, updated_at: 1,
+      lease: { worker_id: "w", epoch: "018f5b5e-7b1e-7abc-8def-123456789016", writer_epoch: 1, expires_at: 2 },
+      output: { canonical_body: body, body_digest: extractionBodyDigest(JSON.parse(body)), spans: [], language: "en", modality: "text" },
+      policy_context: { revision: 1, authority: "installation" }, spans: [],
+    };
+    expect(ExtractionAttempt.parse(success).reported_model).toBeUndefined();
+    expect(ExtractionAttempt.parse({ ...success, reported_model: "claude-haiku-4-5-20251001" }).reported_model).toBe("claude-haiku-4-5-20251001");
+  });
+
+  test("a task counts lost leases apart from its attempt budget; older records carry no counter", () => {
+    const task = {
+      id: "018f5b5e-7b1e-7abc-8def-123456789012", generation_id: "018f5b5e-7b1e-7abc-8def-123456789013", source_id: "018f5b5e-7b1e-7abc-8def-123456789014",
+      source_revision: "b".repeat(64), body_digest: "a".repeat(64), source_ingest_seq: 1, attempt_id: "018f5b5e-7b1e-7abc-8def-123456789015",
+      kind: "claim", model: "fixture", model_incarnation: "a".repeat(64), state: "worker_lost", lease: null, policy_context: null,
+      version: 3, attempts: 0, created_at: 1, updated_at: 2,
+    };
+    expect(ModelTask.parse(task).lost_leases).toBeUndefined();
+    expect(ModelTask.parse({ ...task, lost_leases: 1 }).lost_leases).toBe(1);
+    expect(() => ModelTask.parse({ ...task, lost_leases: -1 })).toThrow();
   });
 
   test("rejects incomplete task and generation records", () => {

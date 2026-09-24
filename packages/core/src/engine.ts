@@ -210,7 +210,8 @@ export class Engine {
         const ids = new Set(input.context.candidates.map(candidate => candidate.id));
         if (output.judgements.length !== ids.size || new Set(output.judgements.map(judgement => judgement.candidate_id)).size !== ids.size || output.judgements.some(judgement => !ids.has(judgement.candidate_id)))
           throw new ExtractionProviderError("provider_mismatch", "judge_shape");
-        await this.store.recordFactRelationVerdict({ key: input.key, judgements: output.judgements, model: provider.model, model_incarnation: provider.modelIncarnation }, context);
+        await this.store.recordFactRelationVerdict({ key: input.key, judgements: output.judgements, model: provider.model, model_incarnation: provider.modelIncarnation,
+          ...(provider.reportedModelIncarnation === undefined ? {} : { reported_model: provider.reportedModelIncarnation }) }, context);
       } catch (error) {
         if (!(error instanceof ExtractionProviderError)) throw error;
         await this.store.recordFactRelationVerdict({ key: input.key, failure: error.reason, ...(error.detail === undefined ? {} : { detail: error.detail }) }, context);
@@ -229,13 +230,14 @@ export class Engine {
     if (!provider) throw new ExtractionAuditError('extraction_not_configured');
     const task = await this.store.leaseModelTask({ ...input, provider: { model: provider.model, model_incarnation: provider.modelIncarnation } }, context);
     const { text, claim_context } = await this.store.extractionTaskInput(task.id, task.lease!.epoch, context);
-    let outcome: Pick<CompleteExtractionAttempt, "state" | "reason" | "output" | "spans" | "disposition" | "detail">;
+    let outcome: Pick<CompleteExtractionAttempt, "state" | "reason" | "output" | "spans" | "disposition" | "detail" | "reported_model">;
     try {
       if (Buffer.byteLength(text, "utf8") > 65536) throw new ExtractionProviderError("input_too_large");
       const validated = validateModelOutput(await provider.extract({ text, task: task.kind, ...(claim_context ? {claim_context} : {}) }), task.kind);
       try { validateSourceSpans(text, validated.spans); }
       catch (error) { if (error instanceof Error && error.message === "span_mismatch") throw new ExtractionProviderError("provider_mismatch", "span"); throw error; }
-      outcome = { ...validated, state: "succeeded", reason: null };
+      // The attempt also names the model the upstream reported for this accepted answer, when the transport exposes one.
+      outcome = { ...validated, state: "succeeded", reason: null, ...(provider.reportedModelIncarnation === undefined ? {} : { reported_model: provider.reportedModelIncarnation }) };
     } catch (error) {
       if (!(error instanceof ExtractionProviderError)) throw error;
       outcome = { state: "failed", reason: error.reason, output: null, spans: [], disposition: null, ...(error.detail === undefined ? {} : { detail: error.detail }) };

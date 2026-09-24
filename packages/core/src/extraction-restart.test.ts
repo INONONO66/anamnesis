@@ -10,7 +10,7 @@ import neo4j from "neo4j-driver";
 import { v7 as uuidv7 } from "uuid";
 import { Engine } from "./engine.ts";
 import { ExtractionScheduler } from "./extraction-scheduler.ts";
-import type { ExtractionProvider, ExtractionProviderInput } from "./extraction.ts";
+import { ExtractionProviderError, type ExtractionProvider, type ExtractionProviderInput } from "./extraction.ts";
 import { extractionBodyDigest } from "../../protocol/src/extraction.ts";
 
 const context = { principal: "installation", commit_mode: "receipt", client_binding: uuidv7() } as const;
@@ -28,8 +28,12 @@ const answer = (input: ExtractionProviderInput): unknown => {
 type Row = Record<string, unknown>;
 const inFlight = (scheduler: ExtractionScheduler) => [...(scheduler as unknown as { inFlight: Map<string, Promise<void>> }).inFlight.values()];
 
-/** Daemon A runs until the call selected by `hangs` is in flight; `restart` brings up daemon B over the same database. */
-async function harness(hangs: (input: ExtractionProviderInput) => boolean) {
+/** The identity daemon B's provider reports for its accepted answers, as a Chat upstream would (`model:fingerprint`). */
+const reportedB = "qa-restart-20260901:fp-b";
+
+/** Daemon A runs until the call selected by `hangs` is in flight; `restart` brings up daemon B over the same database.
+ * `answerA` scripts daemon A's provider for the calls that do not hang (default: a valid answer). */
+async function harness(hangs: (input: ExtractionProviderInput) => boolean, answerA: (input: ExtractionProviderInput) => unknown = answer) {
   const parent = join(homedir(), ".cache/anamnesis-qa");
   await mkdir(parent, { recursive: true });
   const root = await mkdtemp(join(parent, "restart-"));
@@ -45,7 +49,7 @@ async function harness(hangs: (input: ExtractionProviderInput) => boolean) {
   const stopped = new Promise<never>((_, reject) => { release = reject; });
   const providerA: ExtractionProvider = { model, modelIncarnation: incarnationA, async extract(input) {
     if (hangs(input)) { hung(); return stopped; }
-    return answer(input);
+    return answerA(input);
   } };
   const engineA = new Engine({ uri, password, objectsRoot: root, extractionProvider: providerA, clock });
   await query("MATCH (n) DETACH DELETE n");
@@ -70,7 +74,7 @@ async function harness(hangs: (input: ExtractionProviderInput) => boolean) {
     },
     /** A fresh Engine claims the next writer epoch over the same database; its provider identity is `incarnation`. */
     async restart(incarnation: string) {
-      const provider: ExtractionProvider = { model, modelIncarnation: incarnation, async extract(input) { return answer(input); } };
+      const provider: ExtractionProvider = { model, modelIncarnation: incarnation, reportedModelIncarnation: reportedB, async extract(input) { return answer(input); } };
       const engine = new Engine({ uri, password, objectsRoot: root, extractionProvider: provider, clock });
       await engine.init(); await engine.claimWriterEpoch();
       const scheduler = new ExtractionScheduler(engine, { provider, context, clock, maxAttempts: 4, maxInFlight: 1, read, wake: () => {} });
@@ -138,6 +142,33 @@ test("a judge lease in flight across a restart is judged by the new daemon even 
     const [claim, judge] = await f.bodies("ModelTask");
     // The task records the provider that actually produced its attempt; the immutable claim keeps its own identity.
     expect([claim!.model_incarnation, judge!.model_incarnation, judge!.state]).toEqual([incarnationA, incarnationB, "succeeded"]);
+    // The accepted judge answer is attributed to the model daemon B's upstream reported, not only to the configured alias.
+    expect((await f.bodies("ExtractionAttempt")).map(attempt => attempt.reported_model)).toEqual([undefined, undefined, reportedB]);
+    expect(await f.query("MATCH (f:Fact) RETURN f.content AS content")).toEqual([{ content: "Alice likes dark mode" }]);
+  } finally { await f.close(); }
+}, 60000);
+
+test("a restart during the last budgeted judge lease is retried, not sealed: a lost lease never spends the provider-failure budget", async () => {
+  // Three provider failures spend attempts 1-3 of 4; the fourth lease (the last one the budget allows) is what the stop
+  // interrupts. Before the fix the settlement found attempts = maxAttempts and cancelled the task into a durable omission
+  // although no provider outcome had been received for that lease.
+  let judgeCalls = 0;
+  const f = await harness(input => input.task === "judge_claims" && judgeCalls === 3, input => {
+    if (input.task === "judge_claims") { judgeCalls++; throw new ExtractionProviderError("provider_unavailable"); }
+    return answer(input);
+  });
+  try {
+    await f.remember("Alice likes dark mode");
+    await f.runUntilHung();
+    const [, judge] = await f.bodies("ModelTask");
+    expect([judge!.state, judge!.attempts, judge!.lost_leases]).toEqual(["leased", 4, undefined]);
+    const schedulerB = await f.restart(incarnationA);
+    await f.expireLeases();
+    expect(await f.settle(schedulerB, 1)).toMatchObject({ state: "active", covered_ingest_seq: 1, live_ingest_seq: 1, in_flight: 0, completed_total: 1, failed_total: 0, last_error: null });
+    expect(attemptOutcomes(await f.bodies("ExtractionAttempt"))).toEqual([["succeeded", null], ["failed", "provider_unavailable"], ["failed", "provider_unavailable"], ["failed", "provider_unavailable"], ["worker_lost", "worker_lost"], ["succeeded", null]]);
+    // The lost lease returned its attempt to the budget and was counted on its own; the retry was the fourth provider outcome.
+    const [, settled] = await f.bodies("ModelTask");
+    expect([settled!.state, settled!.attempts, settled!.lost_leases]).toEqual(["succeeded", 4, 1]);
     expect(await f.query("MATCH (f:Fact) RETURN f.content AS content")).toEqual([{ content: "Alice likes dark mode" }]);
   } finally { await f.close(); }
 }, 60000);
@@ -155,7 +186,7 @@ test("a relation judge in flight across a restart is judged by the new daemon ev
     expect(await f.settle(schedulerB, 2)).toMatchObject({ state: "active", covered_ingest_seq: 2, live_ingest_seq: 2, in_flight: 0, completed_total: 1, failed_total: 0, last_error: null });
     expect(await f.query("MATCH (i:FactRelationInput) RETURN i.candidates AS candidates, i.failures AS failures, i.last_failure AS failure ORDER BY candidates"))
       .toEqual([{ candidates: 0, failures: 0, failure: null }, { candidates: 1, failures: 0, failure: null }]);
-    expect(await f.query("MATCH (v:FactRelationVerdict) RETURN v.model_incarnation AS incarnation")).toEqual([{ incarnation: incarnationB }]);
+    expect(await f.query("MATCH (v:FactRelationVerdict) RETURN v.model_incarnation AS incarnation, v.reported_model AS reported")).toEqual([{ incarnation: incarnationB, reported: reportedB }]);
     expect((await f.query("MATCH (f:Fact) RETURN f.content AS content ORDER BY content")).map(row => row.content)).toEqual(["Alice likes dark mode", "Alice likes light mode"]);
   } finally { await f.close(); }
 }, 60000);

@@ -36,6 +36,9 @@ describe("Anthropic Messages extraction dialect", () => {
     expect(await provider.extract(input)).toEqual(output);
     expect(provider.reportedModelIncarnation).toBe("claude-haiku-4-5-20251001");
   });
+  test("a Messages reply from an unrelated model is refused, naming the model check", async () => {
+    await failure(async () => Response.json({ id: "msg_fixture", model: "claude-sonnet-4-5-20250929", content: [{ type: "text", text: JSON.stringify(output) }] }), "provider_mismatch", 5000, "model");
+  });
   test("accepts fenced JSON without weakening output validation", async () => {
     const provider = new OpenAiChatExtractionProvider({ ...options, fetch: async () => response('```json\n' + JSON.stringify(output) + '\n```') });
     expect(await provider.extract(input)).toEqual(output);

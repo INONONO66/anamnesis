@@ -28,7 +28,7 @@ function mock(cp: string, loseReply = false) {
   const client = Object.assign(Object.create(RpcClient.prototype) as RpcClient, { request: async (method: string, input: unknown) => {
     calls.push(method);
     if (method === "status") return { data_incarnation: incarnation, storage: "available" };
-    if (method === "ingest.status") return committed.get(JSON.stringify(input)) ?? { ...input as object, state: "unknown" };
+    if (method === "ingest.status") return committed.get(JSON.stringify(input)) ?? { ...input as object, state: "unknown", storage: "available" };
     if (method === "remember") {
       const pending = await saved(cp + ".pending.json");
       expect(pending.params).toEqual(input);

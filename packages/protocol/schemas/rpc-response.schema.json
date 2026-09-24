@@ -1425,13 +1425,21 @@
                       "type": "string",
                       "format": "uuid",
                       "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
+                    "storage": {
+                      "type": "string",
+                      "enum": [
+                        "available",
+                        "unavailable"
+                      ]
                     }
                   },
                   "required": [
                     "state",
                     "revision_key",
                     "body_digest",
-                    "data_incarnation"
+                    "data_incarnation",
+                    "storage"
                   ],
                   "additionalProperties": false
                 },
@@ -3619,6 +3627,11 @@
                   "minimum": 0,
                   "maximum": 1000
                 },
+                "lost_leases": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 1000
+                },
                 "created_at": {
                   "type": "integer",
                   "minimum": 0,
@@ -3908,6 +3921,11 @@
                           "minimum": 0,
                           "maximum": 1000
                         },
+                        "lost_leases": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 1000
+                        },
                         "created_at": {
                           "type": "integer",
                           "minimum": 0,
@@ -4038,6 +4056,10 @@
                                 "judge_shape",
                                 "digest"
                               ]
+                            },
+                            "reported_model": {
+                              "type": "string",
+                              "maxLength": 256
                             },
                             "created_at": {
                               "type": "integer",
@@ -4382,6 +4404,11 @@
                               "minimum": 0,
                               "maximum": 1000
                             },
+                            "lost_leases": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 1000
+                            },
                             "created_at": {
                               "type": "integer",
                               "minimum": 0,
@@ -4517,6 +4544,10 @@
                                 "judge_shape",
                                 "digest"
                               ]
+                            },
+                            "reported_model": {
+                              "type": "string",
+                              "maxLength": 256
                             },
                             "created_at": {
                               "type": "integer",
@@ -5068,6 +5099,11 @@
                           "minimum": 0,
                           "maximum": 1000
                         },
+                        "lost_leases": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 1000
+                        },
                         "created_at": {
                           "type": "integer",
                           "minimum": 0,
@@ -5198,6 +5234,10 @@
                                 "judge_shape",
                                 "digest"
                               ]
+                            },
+                            "reported_model": {
+                              "type": "string",
+                              "maxLength": 256
                             },
                             "created_at": {
                               "type": "integer",
@@ -5542,6 +5582,11 @@
                               "minimum": 0,
                               "maximum": 1000
                             },
+                            "lost_leases": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 1000
+                            },
                             "created_at": {
                               "type": "integer",
                               "minimum": 0,
@@ -5677,6 +5722,10 @@
                                 "judge_shape",
                                 "digest"
                               ]
+                            },
+                            "reported_model": {
+                              "type": "string",
+                              "maxLength": 256
                             },
                             "created_at": {
                               "type": "integer",

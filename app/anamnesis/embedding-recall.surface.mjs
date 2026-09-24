@@ -31,7 +31,8 @@ const provider = createServer(async (req, res) => {
     assert.equal(request.dimensions, 3); assert.equal(request.truncate, false);
     signals.emit('request', request);
     if (mode === 'hold') return;
-    if (mode === 'fail') { res.writeHead(503); res.end(); return; }
+    // A deterministic rejection (400) is terminal; a 503 would be deferred within the transient budget instead.
+    if (mode === 'fail') { res.writeHead(400); res.end(); return; }
     const embedding = mode === 'dimension' ? [1, 0] : mode === 'norm' ? [0, 0, 0]
       : request.input.startsWith('query: ') || request.input.includes('needle') ? [1, 0, 0] : [0, 1, 0];
     res.setHeader('content-type', 'application/json');
@@ -83,6 +84,16 @@ const providerRequest = input => new Promise((resolve, reject) => {
   const onRequest = request => { if (request.input === input) { clearTimeout(timer); signals.off('request', onRequest); resolve(); } };
   signals.on('request', onRequest);
 });
+// Armed before the work is triggered: resolves at the first workers_idle the daemon prints from now on at which
+// `settled()` holds, so an idle printed while the trigger was still in flight is neither missed nor mistaken for the
+// one that ends the intended work. Idles are checked in order; a check never overlaps the next.
+const idleWhen = settled => new Promise((resolve, reject) => {
+  const timer = setTimeout(() => { daemon.lines.off('line', onLine); reject(Error('workers_idle deadline')); }, 20000);
+  const finish = (done, error) => { if (!done && !error) return; clearTimeout(timer); daemon.lines.off('line', onLine); error ? reject(error) : resolve(); };
+  let checks = Promise.resolve();
+  const onLine = line => { if (JSON.parse(line).event !== 'workers_idle') return; checks = checks.then(settled).then(done => finish(done), error => finish(false, error)); };
+  daemon.lines.on('line', onLine);
+});
 try {
   await start();
   assert.deepEqual((await client.request('status', {})).capabilities.recall, true);
@@ -90,9 +101,10 @@ try {
   // The daemon embeds every committed original on its own lane. A rejecting provider lets it quarantine both
   // originals first, so every later provider call is attributable and the explicit recovery starts from nothing.
   mode = 'fail';
+  const originalsSettled = idleWhen(async () => (await query('MATCH (x:EmbeddingAttempt) RETURN count(x) AS n'))[0].n === 2);
   const originalsAsked = Promise.all([providerRequest('document: needle A\né🙂'), providerRequest('document: unrelated original')]);
   const a = await remember('a', 'needle A\né🙂'), b = await remember('b', 'unrelated original');
-  await originalsAsked; await daemonEvent('workers_idle');
+  await originalsAsked; await originalsSettled;
   assert.deepEqual(await query('MATCH (x:EmbeddingAttempt) RETURN x.state AS state, x.reason AS reason ORDER BY x.episode_id'),
     [{ state: 'quarantined', reason: 'provider_rejected' }, { state: 'quarantined', reason: 'provider_rejected' }]);
   assert.equal((await query('MATCH (o:Outbox) WHERE o.processed_at IS NULL RETURN o')).length, 0);
@@ -206,9 +218,11 @@ try {
   assert.deepEqual((await client.request('hit-cache.verify', {})).issues, []);
   // A quarantined Episode returns to the outbox through embedding.requeue; the call itself wakes the lane.
   mode = 'fail';
+  let c;
+  const candidateSettled = idleWhen(async () => c !== undefined && (await query('MATCH (a:EmbeddingAttempt {episode_id:$id}) RETURN count(a) AS n', { id: c.id }))[0].n === 1);
   const candidateAsked = providerRequest('document: requeue candidate');
-  const c = await remember('c', 'requeue candidate', 'small');
-  await candidateAsked; await daemonEvent('workers_idle');
+  c = await remember('c', 'requeue candidate', 'small');
+  await candidateAsked; await candidateSettled;
   assert.deepEqual(await query('MATCH (a:EmbeddingAttempt {episode_id:$id}) RETURN a.state AS state, a.reason AS reason', { id: c.id }), [{ state: 'quarantined', reason: 'provider_rejected' }]);
   assert.equal((await query('MATCH (v:EmbeddingVector {episode_id:$id}) RETURN count(v) AS n', { id: c.id }))[0].n, 0);
   mode = 'ok';

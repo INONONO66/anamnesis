@@ -126,7 +126,7 @@ test("built Node misc snapshots: exact UDS identities/payload/outbox, UNKNOWN, r
     expect(unknownOutcome.request.params).toEqual(pa); unknown.drop(); const unknownExit = await unknownCli.done; expect(unknownExit.code).toBe(1); expect(unknownExit.output).toContain("outcome_unknown");
     const unknownCursor = await json(unknownCp), unknownPending = await json(unknownCp + ".pending.json");
     expect(unknownCursor.next).toBe(0); expect(unknownPending.identity).toEqual(identity(pa, status.data_incarnation));
-    expect(await client.request("ingest.status", unknownPending.identity)).toEqual({ state: "unknown", ...unknownPending.identity });
+    expect(await client.request("ingest.status", unknownPending.identity)).toEqual({ state: "unknown", ...unknownPending.identity, storage: "available" });
     expect((await driver.executeQuery("MATCH (e:Episode) RETURN count(e) AS n")).records[0]!.get("n")).toBe(0);
     const unknownObserve = await gate(root, false); gates.push(unknownObserve);
     const disowned = await run(unknownCp, unknownObserve.path).done;

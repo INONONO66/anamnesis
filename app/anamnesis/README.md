@@ -124,8 +124,9 @@ A lost response is `outcome_unknown` with `retryable: false`; no checkpoint
 advancement or in-process retry occurs. The next run resolves the pending
 identity with `ingest.status`: `committed` advances the checkpoint;
 `spooled`/`blocked`/`quarantined` exit `source_pending_<state>` and leave both
-files unchanged; `unknown` answered by the same `data_incarnation` while
-`status.storage` is `available` means the daemon never admitted that delivery,
+files unchanged; `unknown` answered by the same `data_incarnation` with
+`storage: available` in that same reply (the daemon's observation while it
+answered, never an earlier `status`) means the daemon never admitted that delivery,
 so the run prints `{"event":"pending_retired","reason":"daemon_unknown"}`,
 retires the pending file and resends the same checkpointed line as a first send
 (`remember` is idempotent on `revision_key`, so a commit that landed late

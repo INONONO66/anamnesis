@@ -57,6 +57,7 @@ export {
   RpcCommittedResult,
   RpcSpooledResult,
   RpcRememberResult,
+  RpcStorageState,
   RpcIngestStatusResult,
   RpcCapabilities,
   RpcStatusResult,

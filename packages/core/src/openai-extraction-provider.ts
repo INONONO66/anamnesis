@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import {
   ExtractionProviderError,
+  reportedModelMatches,
   type ExtractionProvider,
   type ExtractionProviderInput,
 } from "./extraction.ts";
@@ -46,6 +47,8 @@ const errorEnvelope = z.looseObject({ error: z.looseObject({ code: z.string() })
 export class OpenAiChatExtractionProvider implements ExtractionProvider {
   readonly model: string;
   readonly modelIncarnation: string;
+  /** Pinned by the first accepted response (`model:system_fingerprint` for Chat, the dated model for Messages); every
+   * later response must report the same identity, and the model must be the configured one or a snapshot of it. */
   reportedModelIncarnation: string | undefined;
   private readonly dialect: ExtractionDialect;
   private readonly endpoint: string;
@@ -136,6 +139,7 @@ export class OpenAiChatExtractionProvider implements ExtractionProvider {
     if (this.dialect === "anthropic_messages") {
       const parsed = anthropicEnvelope.safeParse(parsedBody);
       if (!parsed.success) throw new OpenAiChatExtractionError("provider_mismatch", "envelope");
+      if (!reportedModelMatches(this.model, parsed.data.model)) throw new OpenAiChatExtractionError("provider_mismatch", "model");
       content = parsed.data.content[0]!.text.trim();
       // Some Messages models append an explanation after their fenced JSON.
       // Only unwrap a leading, complete fence; the JSON object stays strict.
@@ -145,6 +149,7 @@ export class OpenAiChatExtractionProvider implements ExtractionProvider {
     } else {
       const parsed = responseEnvelope.safeParse(parsedBody);
       if (!parsed.success) throw new OpenAiChatExtractionError("provider_mismatch", "envelope");
+      if (!reportedModelMatches(this.model, parsed.data.model)) throw new OpenAiChatExtractionError("provider_mismatch", "model");
       content = parsed.data.choices[0]!.message.content;
       incarnation = `${parsed.data.model}:${parsed.data.system_fingerprint ?? "nofp"}`;
     }

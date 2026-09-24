@@ -178,6 +178,10 @@
         "judge_shape",
         "digest"
       ]
+    },
+    "reported_model": {
+      "type": "string",
+      "maxLength": 256
     }
   },
   "required": [

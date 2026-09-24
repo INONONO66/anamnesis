@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { countBudget } from "./dynamics/budget.ts";
-import { EmbeddingConfig, EmbeddingError, transportDetail, validateVector, type EmbeddingProfile, type EmbeddingProvider } from "./embedding.ts";
+import { EmbeddingConfig, EmbeddingError, httpStatusReason, transportDetail, validateVector, type EmbeddingProfile, type EmbeddingProvider } from "./embedding.ts";
 
 export type OpenAiEmbeddingProviderOptions = {
   baseUrl: string;
@@ -54,7 +54,7 @@ export class OpenAiEmbeddingProvider implements EmbeddingProvider {
         body: JSON.stringify({ model: this.profile.model, input: [input] }) });
       if (!response.ok) {
         await response.body?.cancel();
-        throw new OpenAiEmbeddingError("provider_unavailable", `http ${response.status}`);
+        throw new OpenAiEmbeddingError(httpStatusReason(response.status), `http ${response.status}`);
       }
       if (!response.body) throw new OpenAiEmbeddingError("provider_mismatch", "empty body");
       const reader = response.body.getReader();

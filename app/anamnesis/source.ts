@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { lstat, open, readFile, rm } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
-import { RPC_LIMITS, RpcHash, RpcIngestStatusParams, RpcRememberParams, type RpcIngestStatusResult, type RpcStatusResult } from "../../packages/protocol/src/rpc.ts";
+import { RPC_LIMITS, RpcHash, RpcIngestStatusParams, RpcRememberParams, type RpcIngestStatusResult } from "../../packages/protocol/src/rpc.ts";
 import { acquireInstallation, atomicJson, hasCode, syncDirectory } from "./config.ts";
 import { RpcClient } from "./client.ts";
 
@@ -58,10 +58,12 @@ const pendingFailure = (state: string) => Object.assign(new Error(`source_pendin
 /** The daemon disowns a pending identity when it answers UNKNOWN for its own
  * incarnation while storage is available: nothing was admitted, spooled or
  * committed for it, so the lost reply never became a delivery. With storage
- * unavailable UNKNOWN cannot rule out a drained commit, and a foreign
+ * unavailable UNKNOWN cannot rule out a drained commit, so the decision reads
+ * the storage state the daemon observed in that same `ingest.status` answer,
+ * never an earlier `status` that storage may have left behind. A foreign
  * incarnation is never resolved here (`incarnation_mismatch`). */
-function daemonDisowns(result: RpcIngestStatusResult, status: RpcStatusResult, identity: RpcIngestStatusParams): boolean {
-  return result.state === "unknown" && sameIdentity(result, identity) && status.data_incarnation === identity.data_incarnation && status.storage === "available";
+function daemonDisowns(result: RpcIngestStatusResult, identity: RpcIngestStatusParams): boolean {
+  return result.state === "unknown" && sameIdentity(result, identity) && result.storage === "available";
 }
 interface SourceFile { bytes: Buffer; fingerprint: string; }
 async function sourceFingerprint(path: string): Promise<string> {
@@ -166,7 +168,7 @@ export async function ingestSnapshot(checkpointPath: string, client: RpcClient, 
     // retired here and null is returned so the caller sends it as a first send.
     const reconcile = async (work: Pending, index: number): Promise<RpcIngestStatusResult | null> => {
       const result = await client.request("ingest.status", work.identity);
-      if (!daemonDisowns(result, status, work.identity)) return result;
+      if (!daemonDisowns(result, work.identity)) return result;
       await retire();
       console.log(JSON.stringify({ event: "pending_retired", reason: "daemon_unknown", index, identity: work.identity }));
       return null;

@@ -107,10 +107,14 @@ for (const state of ["spooled", "quarantined", "blocked"] as const) {
 }
 
 // UNKNOWN alone is not a licence to resend: the daemon must be the same
-// installation and able to rule out a committed delivery (storage available).
-for (const [name, status, failure, calls] of [
-  ["storage unavailable", { data_incarnation: incarnation, storage: "unavailable" }, "source_pending_unknown", ["status", "ingest.status"]],
-  ["foreign incarnation", { data_incarnation: foreign, storage: "available" }, "incarnation_mismatch", ["status"]],
+// installation and able to rule out a committed delivery (storage available)
+// in the very answer that says unknown. The storage state ships inside the
+// `ingest.status` reply: a `status` taken before storage went away (available,
+// then the database is lost, then unknown) must not license the resend.
+for (const [name, status, storage, failure, calls] of [
+  ["storage unavailable", { data_incarnation: incarnation, storage: "unavailable" }, "unavailable", "source_pending_unknown", ["status", "ingest.status"]],
+  ["storage lost after status", ready, "unavailable", "source_pending_unknown", ["status", "ingest.status"]],
+  ["foreign incarnation", { data_incarnation: foreign, storage: "available" }, "available", "incarnation_mismatch", ["status"]],
 ] as const) {
   test(`unknown pending with ${name} is neither retired nor resent`, () => fixture(async ({ source, cp, pending, records, sourceHash }) => {
     const work = { version: 1, source_hash: sourceHash, index: 0, params: records[0], identity: identity(records[0]!) };
@@ -123,7 +127,7 @@ for (const [name, status, failure, calls] of [
       if (method === "status") return status;
       if (method === "remember") throw new Error("unexpected retransmission");
       expect(params).toEqual(work.identity);
-      return { state: "unknown", ...work.identity };
+      return { state: "unknown", ...work.identity, storage };
     });
     const error = await ingestSource(source, cp, client).then(() => null, error => error);
     expect(error?.message).toBe(failure);
@@ -165,7 +169,7 @@ test("UNKNOWN reply retains pre-send identity/body; resume resends only once the
       return committed(records[0]!);
     }
     expect(params).toEqual(work.identity);
-    return { state: "unknown", ...work.identity };
+    return { state: "unknown", ...work.identity, storage: "available" };
   });
   await expect(ingestSource(source, cp, client)).rejects.toHaveProperty("code", "outcome_unknown");
   expect(await saved(cp)).toEqual(initial(sourceHash));

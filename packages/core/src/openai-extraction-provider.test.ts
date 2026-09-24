@@ -67,6 +67,23 @@ describe("OpenAiChatExtractionProvider", () => {
     expect(instance.reportedModelIncarnation).toBe("gpt-test:nofp");
   });
 
+  test("rejects an unrelated reported model on the first response instead of pinning it", async () => {
+    // The first valid answer used to establish the reported identity unchecked: a proxy answering with another model
+    // was accepted and its output attributed to the configured one.
+    const instance = new OpenAiChatExtractionProvider({ ...options, fetch: async () => response(JSON.stringify(output), { model: "wrong-model", system_fingerprint: "wrong-weights" }) });
+    await expectFailure(instance, "provider_mismatch", false, "model");
+    expect(instance.reportedModelIncarnation).toBeUndefined();
+    // A prefix without the alias boundary is another model, not a snapshot of this one.
+    await expectFailure(new OpenAiChatExtractionProvider({ ...options, fetch: async () => response(JSON.stringify(output), { model: "gpt-tester" }) }), "provider_mismatch", false, "model");
+  });
+
+  test("accepts a dated snapshot of the configured alias and records the reported identity", async () => {
+    const instance = new OpenAiChatExtractionProvider({ ...options, fetch: async () => response(JSON.stringify(output), { model: "gpt-test-2026-01-01", system_fingerprint: "fp-snapshot" }) });
+    await expect(instance.extract({ text: "The sky is blue.", task: "claim" })).resolves.toEqual(output);
+    expect(instance.reportedModelIncarnation).toBe("gpt-test-2026-01-01:fp-snapshot");
+    expect(instance.model).toBe("gpt-test");
+  });
+
   test("rejects upstream identity drift instead of changing admitted task identity", async () => {
     let call = 0;
     const instance = new OpenAiChatExtractionProvider({ ...options, fetch: async () => response(JSON.stringify(output), { system_fingerprint: ++call === 1 ? "first" : "changed" }) });

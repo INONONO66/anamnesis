@@ -9,7 +9,17 @@ export type ExtractionProviderConfig = z.infer<typeof ExtractionProviderConfig>;
 export type ExtractionProviderInput = { text: string; task: "claim" | "judge" | "judge_claims" | "judge_relations";
   claim_context?: import('../../protocol/src/extraction-audit.ts').ExtractionClaimContext;
   relation_context?: import('../../protocol/src/extraction-audit.ts').FactRelationContext };
-export interface ExtractionProvider { readonly model: string; readonly modelIncarnation: string; extract(input: ExtractionProviderInput): Promise<unknown>; }
+/** `reportedModelIncarnation` is the identity the upstream reported on its accepted responses (a dated snapshot and
+ * fingerprint); a provider that checks and pins it exposes it so accepted results can be attributed to the model that
+ * actually answered, not only to the configured alias. Undefined until a response was accepted or when the transport
+ * reports none. */
+export interface ExtractionProvider { readonly model: string; readonly modelIncarnation: string; readonly reportedModelIncarnation?: string | undefined; extract(input: ExtractionProviderInput): Promise<unknown>; }
+/** The configured model names the reported one when they are equal or the configured name is an alias the upstream
+ * resolved to a dated snapshot (`claude-haiku-4-5` -> `claude-haiku-4-5-20251001`, `gpt-4o` -> `gpt-4o-2024-08-06`).
+ * The dash boundary keeps `gpt-4` from naming `gpt-4o`. */
+export function reportedModelMatches(configured: string, reported: string): boolean {
+  return reported === configured || reported.startsWith(configured + "-");
+}
 /** `detail` names the check a `provider_mismatch` failed; it is recorded on the attempt (#218). */
 export class ExtractionProviderError extends Error {
   constructor(readonly reason: "provider_unavailable" | "provider_rejected" | "provider_mismatch" | "output_too_large" | "input_too_large", readonly detail?: ExtractionFailureDetail) { super(reason); }

@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { Store } from "./store.ts";
-import { EmbeddingError, EmbeddingProfile, HttpEmbeddingProvider, embeddingProfileId, validateVector } from "./embedding.ts";
+import { EmbeddingError, EmbeddingProfile, HttpEmbeddingProvider, embeddingProfileId, httpStatusReason, validateVector } from "./embedding.ts";
 import { admittedBudget, packRecall, renderContext, recallResponseBytes, canonicalContext } from "./recall.ts";
 import { createHash } from "node:crypto";
 import { receiptBodyDigestInput, canonicalReceiptJson } from "./receipt-digest.ts";
@@ -63,13 +63,18 @@ test("attempt rows carry the deferred state, the exhausted reason and transport 
   expect(RpcEmbeddingAttempt.safeParse({ ...base, state: "quarantined", reason: "provider_unavailable", detail: "x".repeat(257) }).success).toBe(false);
 });
 
-test("the HTTP provider names the failing branch: status for a rejection, socket state for an unavailable endpoint", async () => {
-  const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("busy", { status: 503 }) });
-  try {
-    const rejected = await new HttpEmbeddingProvider({ endpoint: `http://127.0.0.1:${server.port}/v1/embeddings`, profile, timeout_ms: 5000 }).embed("hello", "document").then(() => null, error => error);
-    expect(rejected).toBeInstanceOf(EmbeddingError);
-    expect(rejected).toMatchObject({ reason: "provider_rejected", detail: "http 503" });
-  } finally { await server.stop(true); }
+test("the HTTP provider classifies by the failing condition: a 503 is deferred, a 400 is terminal, a dead socket is unavailable", async () => {
+  // A temporary outage (503) must defer within the transient budget, never quarantine; a deterministic 400 is terminal.
+  for (const [status, reason] of [[503, "provider_unavailable"], [429, "provider_unavailable"], [400, "provider_rejected"], [404, "provider_rejected"]] as const) {
+    const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("nope", { status }) });
+    try {
+      const error = await new HttpEmbeddingProvider({ endpoint: `http://127.0.0.1:${server.port}/v1/embeddings`, profile, timeout_ms: 5000 }).embed("hello", "document").then(() => null, error => error);
+      expect(error).toBeInstanceOf(EmbeddingError);
+      expect(error).toMatchObject({ reason, detail: `http ${status}` });
+    } finally { await server.stop(true); }
+  }
+  expect([408, 425, 429, 500, 502, 503, 504].map(httpStatusReason)).toEqual(Array<"provider_unavailable">(7).fill("provider_unavailable"));
+  expect([400, 401, 403, 404, 413, 422].map(httpStatusReason)).toEqual(Array<"provider_rejected">(6).fill("provider_rejected"));
   const closed = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("unused") }), port = closed.port;
   await closed.stop(true);
   const unavailable = await new HttpEmbeddingProvider({ endpoint: `http://127.0.0.1:${port}/v1/embeddings`, profile, timeout_ms: 5000 }).embed("hello", "document").then(() => null, error => error);

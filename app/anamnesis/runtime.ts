@@ -535,8 +535,11 @@ export class Runtime {
   async ingestStatus(identity: RpcIngestStatusParams): Promise<RpcIngestStatusResult> {
     if (identity.data_incarnation !== this.installation.incarnation) throw new RpcFault("incarnation_mismatch", "delivery belongs to another incarnation");
     await this.refresh();
+    // `unknown` carries the storage state this very call observed: without storage a committed delivery whose spool
+    // entry is gone looks unknown too, and only the daemon can say which observation the verdict rests on.
+    const unknown = () => ({ state: "unknown" as const, ...identity, storage: this.available ? "available" as const : "unavailable" as const });
     const binding = await this.binding(identity.revision_key);
-    if (!binding || binding.body_digest !== identity.body_digest) return { state: "unknown", ...identity };
+    if (!binding || binding.body_digest !== identity.body_digest) return unknown();
     if (this.available) {
       const committed = await this.committed(binding);
       if (committed) return committed;
@@ -544,7 +547,7 @@ export class Runtime {
     const spoolStatus = await this.spool.status();
     if (spoolStatus.quarantined) return { state: "quarantined", ...identity, reason: "spool_corrupt" };
     const entry = await this.pendingEntry(identity.revision_key);
-    if (!entry) return { state: "unknown", ...identity };
+    if (!entry) return unknown();
     const quarantined = this.quarantined.get(entry.sequence);
     if (quarantined) return { state: "quarantined", ...identity, reason: quarantined };
     const reason = this.blocked.get(entry.sequence);

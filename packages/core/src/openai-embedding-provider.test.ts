@@ -85,9 +85,16 @@ describe("OpenAiEmbeddingProvider", () => {
     await expectFailure(provider(async () => new Response("not json")), "provider_mismatch", false, "profile_mismatch");
   });
 
-  for (const status of [400, 401, 429, 500, 503]) {
+  for (const status of [408, 425, 429, 500, 503]) {
     test(`maps HTTP ${status} to retryable provider_unavailable and records the status`, async () => {
       await expectFailure(provider(async () => new Response("failure", { status })), "provider_unavailable", true, "provider_unavailable", `http ${status}`);
+    });
+  }
+
+  // A deterministic rejection repeats for the same input: it is terminal, not deferred within the transient budget.
+  for (const status of [400, 401, 404, 422]) {
+    test(`maps HTTP ${status} to terminal provider_rejected and records the status`, async () => {
+      await expectFailure(provider(async () => new Response("failure", { status })), "provider_rejected", false, "provider_rejected", `http ${status}`);
     });
   }
 

@@ -28,7 +28,7 @@ const answer: Behaviour = (input) => {
 
 /** Owned harness Neo4j, an Engine and a scheduler that share one injected clock, and a scripted provider. The
  * scheduler creates its own catching_up generation, so every test exercises initial catch-up and cutover. No timers. */
-async function setup(behaviour: Behaviour, options: { maxAttempts?: number } = {}) {
+async function setup(behaviour: Behaviour, options: { maxAttempts?: number; maxLostLeases?: number } = {}) {
   const parent = join(homedir(), ".cache/anamnesis-qa");
   await mkdir(parent, { recursive: true });
   const root = await mkdtemp(join(parent, "scheduler-"));
@@ -48,6 +48,7 @@ async function setup(behaviour: Behaviour, options: { maxAttempts?: number } = {
   await engine.init(); await engine.claimWriterEpoch();
   const wakes: number[] = [];
   const scheduler = new ExtractionScheduler(engine, { provider, context, clock, maxAttempts: options.maxAttempts ?? 2, maxInFlight: 1,
+    ...(options.maxLostLeases === undefined ? {} : { maxLostLeases: options.maxLostLeases }),
     read: async (cypher, params) => (await driver.executeQuery(cypher, params)).records.map(row => row.toObject()) as never,
     wake: () => { wakes.push(clock()); } });
   let record = 0;
@@ -70,21 +71,22 @@ async function setup(behaviour: Behaviour, options: { maxAttempts?: number } = {
     async close() { await scheduler.close(); await engine.close(); await driver.close(); await rm(root, { recursive: true, force: true }); } };
 }
 
-test("a claim whose lease keeps expiring is sealed as a durable omission after the attempt budget, and coverage advances past it", async () => {
-  // Every provider round trip outlives the lease: the answer is valid, the lease is not.
-  const f = await setup((input, calls, clock) => { clock.advance(10 * 60 * 1000); return answer(input, calls, clock); });
+test("a claim whose lease keeps expiring is sealed as a durable omission after the lost-lease budget, and coverage advances past it", async () => {
+  // Every provider round trip outlives the lease: the answer is valid, the lease is not. A lost lease is not a provider
+  // outcome, so it is bounded by its own budget (3) rather than by the two provider attempts.
+  const f = await setup((input, calls, clock) => { clock.advance(10 * 60 * 1000); return answer(input, calls, clock); }, { maxLostLeases: 3 });
   try {
     await f.remember("the lease of this claim always expires");
     const status = await f.settle(1);
     expect(status).toMatchObject({ state: "active", covered_ingest_seq: 1, live_ingest_seq: 1, in_flight: 0, completed_total: 0, failed_total: 1 });
-    expect(f.calls()).toBe(2); // maxAttempts leases, each answered after its lease ran out
+    expect(f.calls()).toBe(3); // maxLostLeases leases, each answered after its lease ran out
     const tasks = await f.query("MATCH (t:ModelTask) RETURN t.state AS state, t.body AS body");
     expect(tasks).toHaveLength(1);
-    const task = JSON.parse(String(tasks[0]!.body)) as { state: string; attempts: number; attempt_id: string };
+    const task = JSON.parse(String(tasks[0]!.body)) as { state: string; attempts: number; lost_leases: number; attempt_id: string };
     expect(task.state).toBe("cancelled");
-    expect(task.attempts).toBe(2);
+    expect([task.attempts, task.lost_leases]).toEqual([0, 3]); // no provider outcome was ever recorded against the budget
     const attempts = await f.query("MATCH (a:ExtractionAttempt) RETURN a.state AS state ORDER BY a.id");
-    expect(attempts.map(row => row.state)).toEqual(["expired", "expired", "cancelled"]);
+    expect(attempts.map(row => row.state)).toEqual(["expired", "expired", "expired", "cancelled"]);
     const coverage = await f.query("MATCH (c:ExtractionCoverage) RETURN c.covered_ingest_seq AS covered ORDER BY c.key");
     expect(coverage).toEqual([{ covered: 1 }, { covered: 1 }]);
     expect(await f.query("MATCH (f:Fact) RETURN count(f) AS n")).toEqual([{ n: 0 }]);

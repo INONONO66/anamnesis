@@ -335,10 +335,14 @@ export const RpcSpooledResult = z.strictObject({
 export type RpcSpooledResult = z.infer<typeof RpcSpooledResult>;
 export const RpcRememberResult = z.discriminatedUnion("state", [RpcCommittedResult, RpcSpooledResult]);
 export type RpcRememberResult = z.infer<typeof RpcRememberResult>;
+export const RpcStorageState = z.enum(["available", "unavailable"]);
+export type RpcStorageState = z.infer<typeof RpcStorageState>;
 export const RpcIngestStatusResult = z.discriminatedUnion("state", [
   RpcCommittedResult,
   RpcSpooledResult,
-  z.strictObject({ state: z.literal("unknown"), ...deliveryIdentity }),
+  /** `storage` is the daemon's observation while it answered: `unknown` rules out a committed delivery only while
+   * storage was available, so a client never combines this verdict with an earlier, possibly stale `status`. */
+  z.strictObject({ state: z.literal("unknown"), ...deliveryIdentity, storage: RpcStorageState }),
   z.strictObject({
     state: z.literal("blocked"), ...deliveryIdentity,
     fs_epoch: z.uuid(), spool_seq: positiveCounter,
@@ -399,7 +403,7 @@ export type RpcWorkersStatus = z.infer<typeof RpcWorkersStatus>;
 export const RpcStatusResult = z.strictObject({
   version: z.literal(RPC_VERSION),
   state: z.enum(["starting", "ready", "degraded", "stopping"]),
-  storage: z.enum(["available", "unavailable"]),
+  storage: RpcStorageState,
   data_incarnation: z.uuid(),
   fs_epoch: z.uuid(),
   queue: z.strictObject({ pending: counter.max(RPC_LIMITS.queued_requests), capacity: z.literal(RPC_LIMITS.queued_requests) }),

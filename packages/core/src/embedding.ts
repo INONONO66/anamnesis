@@ -24,10 +24,15 @@ export const embeddingProfileId = (profile: EmbeddingProfile): string => createH
   Object.fromEntries(Object.entries(EmbeddingProfile.parse(profile)).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)),
 )).digest("hex");
 export type EmbeddingErrorReason = "provider_unavailable" | "provider_rejected" | "profile_mismatch" | "invalid_vector" | "input_too_large";
-/** provider_unavailable is the one transient reason (timeout, 5xx, refused socket); the other four repeat for the
- * same input and profile. `detail` names the branch that threw so a durable attempt row can carry the evidence. */
+/** provider_unavailable is the one transient reason (timeout, 408/425/429/5xx, refused socket); the other four repeat
+ * for the same input and profile. `detail` names the branch that threw so a durable attempt row can carry the evidence. */
 export class EmbeddingError extends Error {
   constructor(readonly reason: EmbeddingErrorReason, readonly detail: string | null = null) { super(reason); }
+}
+/** Classifies a non-2xx status by the failing condition, not the adapter dialect: a timeout, too-early, rate limit or
+ * server error is transient (deferred within the bounded budget); any other 4xx is a deterministic rejection. */
+export function httpStatusReason(status: number): "provider_unavailable" | "provider_rejected" {
+  return status === 408 || status === 425 || status === 429 || status >= 500 ? "provider_unavailable" : "provider_rejected";
 }
 /** The transport branch behind a provider_unavailable: the timeout budget, or the socket error code when the runtime exposes one. */
 export function transportDetail(error: unknown, timeoutMs: number): string {
@@ -67,7 +72,7 @@ export class HttpEmbeddingProvider implements EmbeddingProvider {
       const response = await fetch(this.config.endpoint, { method: "POST", signal: AbortSignal.timeout(this.config.timeout_ms),
         headers: { "content-type": "application/json" }, body: JSON.stringify({ input, model: this.profile.model,
           model_incarnation: this.profile.model_incarnation, dimensions: this.profile.dimensions, truncate: false }) });
-      if (!response.ok) { await response.body?.cancel(); throw new EmbeddingError("provider_rejected", `http ${response.status}`); }
+      if (!response.ok) { await response.body?.cancel(); throw new EmbeddingError(httpStatusReason(response.status), `http ${response.status}`); }
       if (!response.body) throw new EmbeddingError("provider_rejected", "empty body");
       const reader = response.body.getReader(), chunks: Uint8Array[] = [];
       let received = 0;

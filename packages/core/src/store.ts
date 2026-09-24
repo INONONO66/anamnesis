@@ -3162,7 +3162,7 @@ export class Store {
 
   /** Records the provider's answer for one premise: a verdict bound to the premise
    * digest (written once), or the failure reason that keeps the pipeline pending. */
-  async recordFactRelationVerdict(input: { key: string } & ({ judgements: FactRelationJudgement[]; model: string; model_incarnation: string } | { failure: string; detail?: ExtractionFailureDetail }), context: InstallationContext): Promise<void> {
+  async recordFactRelationVerdict(input: { key: string } & ({ judgements: FactRelationJudgement[]; model: string; model_incarnation: string; reported_model?: string } | { failure: string; detail?: ExtractionFailureDetail }), context: InstallationContext): Promise<void> {
     await this.extractionTx(context, async (tx, policy) => {
       const premise = await tx.run(`MATCH (i:FactRelationInput {occurrence_key:$key}) RETURN i.source_episode_id AS source, i.body_digest AS digest`, { key: input.key });
       const row = premise.records[0];
@@ -3174,8 +3174,8 @@ export class Store {
         return;
       }
       await tx.run(`MATCH (i:FactRelationInput {occurrence_key:$key}) SET i.last_failure=null, i.last_failure_detail=null
-        MERGE (v:FactRelationVerdict {occurrence_key:$key}) ON CREATE SET v.body_digest=$digest, v.judgements=$judgements, v.model=$model, v.model_incarnation=$incarnation`,
-        { key: input.key, digest: String(row.get("digest")), judgements: canonicalExtractionBody(z.array(FactRelationJudgement).max(16).parse(input.judgements)), model: input.model, incarnation: input.model_incarnation });
+        MERGE (v:FactRelationVerdict {occurrence_key:$key}) ON CREATE SET v.body_digest=$digest, v.judgements=$judgements, v.model=$model, v.model_incarnation=$incarnation, v.reported_model=$reported`,
+        { key: input.key, digest: String(row.get("digest")), judgements: canonicalExtractionBody(z.array(FactRelationJudgement).max(16).parse(input.judgements)), model: input.model, incarnation: input.model_incarnation, reported: input.reported_model ?? null });
     });
   }
 
@@ -3204,7 +3204,7 @@ export class Store {
     return this.extractionTx(context, async (tx, policy) => {
       const task = await this.extractionRecordTx(tx, "ModelTask", request.task_id, ModelTask);
       this.checkExtractionCAS(task, request.expected_version);
-      if (task.state !== "queued" || task.attempts >= 1000) throw new Error("invalid_transition");
+      if (task.state !== "queued" || task.attempts >= 1000 || (task.lost_leases ?? 0) >= 1000) throw new Error("invalid_transition");
       await this.writableExtractionGenerationTx(tx, task.generation_id);
       await this.authorizeEpisodesTx(tx, [task.source_id], policy);
       await this.validateExtractionSourceTx(tx, task);
@@ -3243,10 +3243,11 @@ export class Store {
   }
 
   private async finishExtractionTx(tx: ManagedTransaction, task: ModelTask, policy: PolicyState,
-    outcome: Pick<ExtractionAttempt, "state" | "reason" | "disposition" | "output" | "spans" | "detail">, requestDigest: string): Promise<ExtractionAttempt> {
+    outcome: Pick<ExtractionAttempt, "state" | "reason" | "disposition" | "output" | "spans" | "detail" | "reported_model">, requestDigest: string): Promise<ExtractionAttempt> {
     const now = Math.max(task.updated_at, receiptTime.parse(this.clock()));
     const attempt = ExtractionAttempt.parse({ state: outcome.state, reason: outcome.reason, disposition: outcome.disposition, output: outcome.output, spans: outcome.spans,
       ...(outcome.detail === undefined ? {} : { detail: outcome.detail }),
+      ...(outcome.reported_model === undefined ? {} : { reported_model: outcome.reported_model }),
       id: task.attempt_id ?? uuidv7(), task_id: task.id,
       generation_id: task.generation_id, source_id: task.source_id, source_revision: task.source_revision, source_ingest_seq: task.source_ingest_seq, body_digest: task.body_digest,
       created_at: task.updated_at, updated_at: now, lease: task.lease, policy_context: { revision: policy.policy_revision, authority: "installation" } });
@@ -3338,7 +3339,10 @@ export class Store {
       if (task.state !== "leased" || task.lease?.epoch !== request.lease_epoch) throw new Error("lease_conflict");
       if (request.reason === "expired" && this.clock() < task.lease.expires_at) throw new Error("lease_not_expired");
       if (request.reason === "worker_lost" && task.lease.writer_epoch === this.writerEpoch) throw new Error("worker_still_owned");
-      await this.finishExtractionTx(tx, task, policy, { state: request.reason, reason: request.reason, output: null, disposition: null, spans: [] }, extractionBodyDigest(request));
+      // No provider outcome was received: the lease returns its attempt to the provider-failure budget and counts as a
+      // lost lease instead, so a restart or an overrun on the last budgeted lease never becomes a terminal omission.
+      const lost = { ...task, attempts: task.attempts - 1, lost_leases: (task.lost_leases ?? 0) + 1 };
+      await this.finishExtractionTx(tx, lost, policy, { state: request.reason, reason: request.reason, output: null, disposition: null, spans: [] }, extractionBodyDigest(request));
       return this.extractionRecordTx(tx, "ModelTask", task.id, ModelTask);
     });
   }
