@@ -107,6 +107,13 @@ test("relation judge gates validated Facts: invalidates, chain refusal, duplicat
     expect(f.relationInputs[2]!.fact).toEqual({ text: "Alice prefers light mode", time: { value: "2026-09-02T00:00:00.000Z", precision: "day" as const } });
     expect(f.relationInputs[2]!.candidates).toEqual([{ id: dark.id as string, text: "Alice prefers dark mode", time: { value: "2026-09-01T00:00:00.000Z", precision: "day" } }]);
     const light = await f.factByContent("Alice prefers light mode");
+    // Backup must accept the judge's committed authority, not demand fields no writer persists.
+    const snapshot = await f.engine.store.authoritySnapshot({}, context);
+    expect(snapshot.invalidation_evidence).toEqual([{ id: expect.any(String), source_hash: light.digest as string,
+      outcome_hash: extractionBodyDigest({ id: snapshot.invalidation_evidence[0]!.id, from: light.id, to: dark.id,
+        target_id: dark.id, effective_time_utc: "2026-09-02T00:00:00.000Z", generation: f.generation.id }) }]);
+    expect(snapshot.source_hashes).toEqual((await f.query("MATCH (e:Episode) RETURN e.digest AS digest ORDER BY digest")).map(row => row.digest as string));
+    expect(snapshot.source_hashes).toHaveLength(2);
     const invalidations = await f.query("MATCH (a:Fact)-[l:INVALIDATES]->(b:Fact) RETURN a.id AS from, b.id AS to, l.target_id AS target, l.effective_time_utc AS effective, l.generation AS generation, l.id AS id");
     expect(invalidations).toEqual([{ from: light.id, to: dark.id, target: dark.id, effective: "2026-09-02T00:00:00.000Z", generation: f.generation.id, id: expect.any(String) }]);
     const secondOps = await f.operations(second.source.id);
@@ -117,6 +124,7 @@ test("relation judge gates validated Facts: invalidates, chain refusal, duplicat
 
     // Retrying a finished pipeline changes nothing: no new verdicts, calls, links or operations.
     expect(await second.run()).toEqual(completed);
+    expect(await f.engine.store.authoritySnapshot({}, context)).toEqual(snapshot);
     expect(f.relationInputs).toHaveLength(3);
     expect(await f.query("MATCH (v:FactRelationVerdict) RETURN count(v) AS count")).toEqual([{ count: 1 }]);
     expect(await f.query("MATCH ()-[l:INVALIDATES]->() RETURN count(l) AS count")).toEqual([{ count: 1 }]);
@@ -160,5 +168,44 @@ test("relation judge gates validated Facts: invalidates, chain refusal, duplicat
     await f.engine.store.cutoverExtractionGeneration({ generation_id: f.generation.id, expected_generation_id: null, expected_selector_version: 0 }, context);
     expect(await f.query("MATCH (g:ExtractionGeneration) RETURN g.state AS state")).toEqual([{ state: "active" }]);
     expect((await f.engine.checkConductingArcs()).issues).toEqual([]);
+  } finally { await f.close(); }
+}, 180000);
+
+test("backup evidence covers originals without mutating history and refuses incomplete authority", async () => {
+  const f = await setup();
+  try {
+    const input = { content: "Original statement", time: { value: "2026-09-01T00:00:00Z", precision: "day" as const },
+      origin: { source: "backup-test", session: "revision", actor: "user", record: "1" } };
+    const first = await f.engine.remember({ ...input, source_revision: "v1" });
+    const initial = await f.engine.store.authoritySnapshot({}, context);
+    expect(initial.invalidation_evidence).toEqual([]);
+    expect(initial.source_hashes).toHaveLength(1);
+    const second = await f.engine.remember({ ...input, content: "Revised statement", source_revision: "v2" });
+    const history = () => f.query("MATCH (e:Episode) RETURN properties(e) AS p ORDER BY e.id");
+    const before = await history();
+    const edge = (await f.query("MATCH ()-[l:INVALIDATES]->() RETURN properties(l) AS p"))[0]!.p as Record<string, unknown>;
+    const snapshot = await f.engine.store.authoritySnapshot({}, context);
+    const sourceDigest = (await f.query("MATCH (e:Episode {id:$id}) RETURN e.digest AS digest", { id: second.id }))[0]!.digest;
+    expect(snapshot.source_hashes).toHaveLength(2);
+    expect(snapshot.invalidation_evidence).toEqual([{ id: edge.id as string, source_hash: sourceDigest,
+      outcome_hash: extractionBodyDigest({ id: edge.id, from: second.id, to: first.id, target_id: first.id,
+        effective_time_utc: "2026-09-01T00:00:00.000Z", generation: null }) }]);
+    expect(await history()).toEqual(before);
+    expect(await f.query("MATCH ()-[l:INVALIDATES]->() RETURN properties(l) AS p")).toEqual([{ p: edge }]);
+    await expect(f.engine.store.authoritySnapshot({ maxItems: 1 }, context)).rejects.toThrow("authority_snapshot_limit_exceeded");
+
+    // Deliberately corrupt only the isolated test DB. Null digest rows must not disappear in collect().
+    await f.query("MATCH (e:Episode {id:$id}) REMOVE e.digest", { id: second.id });
+    await expect(f.engine.store.authoritySnapshot({}, context)).rejects.toThrow("source hash evidence is incomplete");
+    await f.query("MATCH (e:Episode {id:$id}) SET e.digest=$digest", { id: second.id, digest: sourceDigest });
+    for (const field of ["id", "target_id", "effective_time_utc"]) {
+      await f.query(`MATCH ()-[l:INVALIDATES]->() REMOVE l.${field}`);
+      await expect(f.engine.store.authoritySnapshot({}, context)).rejects.toThrow("invalidation hash evidence is incomplete");
+      await f.query(`MATCH ()-[l:INVALIDATES]->() SET l.${field}=$value`, { value: edge[field] });
+    }
+    await f.query("MATCH ()-[l:INVALIDATES]->() SET l.target_id=$wrong", { wrong: second.id });
+    await expect(f.engine.store.authoritySnapshot({}, context)).rejects.toThrow("invalidation hash evidence is incomplete");
+    await f.query("MATCH ()-[l:INVALIDATES]->() SET l.target_id=$target", { target: first.id });
+    expect(await f.engine.store.authoritySnapshot({}, context)).toEqual(snapshot);
   } finally { await f.close(); }
 }, 180000);
