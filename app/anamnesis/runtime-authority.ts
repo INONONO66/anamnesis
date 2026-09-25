@@ -27,7 +27,8 @@ export async function createRuntimeAuthority(engine: Engine, installation: Insta
   const authority = {
     revokeWriters: async () => {
       const epoch = String(await engine.claimWriterEpoch());
-      const snapshot = await engine.store.authoritySnapshot({ maxItems: 10000 }, context);
+      // Bridge for #229: schema maximum. The inventory design itself does not scale; see the issue.
+      const snapshot = await engine.store.authoritySnapshot({ maxItems: 20000 }, context);
       cutoff = snapshot.coverage;
       authorityEvidence = snapshot;
       const running = await dockerOutput(["inspect", "--format", "{{.State.Running}}", container]);

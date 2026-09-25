@@ -8,12 +8,18 @@ set -eu
 stamp=$(date -u +%Y-%m-%dT%H-%M-%SZ)
 dest=/var/lib/anamnesis/backups/$stamp
 result=/var/lib/anamnesis/backups/$stamp.result.json
+# Ingest oneshots carry Requires=anamnesis.service: a queued ingest job re-pulls the daemon and turns
+# "systemctl stop anamnesis" into "Job canceled". Quiesce the timers and any running ingest first.
+timers=$(systemctl list-units --type=timer --state=active --plain --no-legend 'anamnesis-ingest@*' | awk '{print $1}')
+for t in $timers; do systemctl stop "$t"; done
+systemctl stop 'anamnesis-ingest@*.service'
+restore() { systemctl start anamnesis; for t in $timers; do systemctl start "$t"; done; }
 systemctl stop anamnesis
-trap 'systemctl start anamnesis' EXIT
+trap restore EXIT
 runuser -u anamnesis -- node /opt/anamnesis/dist/anamnesis-ops.mjs backup "$dest" > "$result"
 cat "$result"
 grep -q '"state":"complete"' "$result" || { echo "backup did not report state=complete" >&2; exit 1; }
-systemctl start anamnesis
+restore
 trap - EXIT
 mirror=${ANAMNESIS_BACKUP_MIRROR:-/mnt/data/anamnesis/backups/pve-vm}
 case "$mirror" in
