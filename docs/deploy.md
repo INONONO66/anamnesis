@@ -144,7 +144,7 @@ Lost replies: a run that ends in `outcome_unknown` (the daemon or its TCP path w
 
 ### First-production verification and troubleshooting
 
-The secret-free first-ingest evidence at revision `2525ea4` recorded **32 episodes, 80 active Facts, and 32 vectors**, with workers idle and vectors equal to episodes. These are the acceptance-sample counts before the continuing backlog, not a live total. The local `.omo/evidence/deploy/first-ingest.json` is not committed; summarize its numbers in the deployment PR.
+The secret-free first-ingest evidence at revision `2525ea4` recorded **32 episodes, 80 active Facts, and 32 vectors**, with workers idle and vectors equal to episodes. These are the acceptance-sample counts before the continuing backlog, not a live total. The local is not committed; summarize its numbers in the deployment PR.
 
 | Symptom | Meaning / action |
 |---|---|
