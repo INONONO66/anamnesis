@@ -58,42 +58,102 @@ A missing or non-`0600` file is an error naming the variable; token values are n
 
 ## Production layout: PVE guest + inonono sources
 
-Reference layout used for the first production install (issue #213). Unit files and scripts live under `deploy/`; copy them, do not symlink into the checkout.
+Reference layout used for the first production install (issue #213). Unit files and scripts live under `deploy/`; copy them, do not symlink into the checkout. Production is the Debian 13 LXC at `10.10.10.20`; it reaches the tailnet through the PVE subnet router, not a guest tailscaled instance.
 
 ```
- inonono (tailnet)                              PVE guest "anamnesis" (tailnet)
+ inonono (tailnet)                              PVE guest "anamnesis" (routed)
  ┌────────────────────────────┐  ssh -N -L      ┌──────────────────────────────┐
  │ token-hub    127.0.0.1:19080├──────────────┐ │ anamnesis-tunnel.service      │
  │ llama-server 127.0.0.1:18081├────────────┐ │ │  127.0.0.1:19080 / :18081     │
  │                            │            └─┴─┤ anamnesis.service (foreground)│
- │ anamnesis-ingest@*.timer   │  RPC/TCP bearer│  ANAMNESIS_LISTEN=<tailnet>:4400│
+ │ anamnesis-ingest@*.timer   │  RPC/TCP bearer│  LISTEN=10.10.10.20:4400      │
  │  ops ingest-* over tailnet ├───────────────►│ Neo4j 5.26 (docker compose)   │
  │ /mnt/data/anamnesis/backups│◄── rsync ──────┤ anamnesis-backup.timer        │
  └────────────────────────────┘                └──────────────────────────────┘
 ```
 
+### PVE LXC creation and routing
+
+Create the guest through `POST /api2/json/nodes/<node>/lxc`, supplying the allocated VMID, Debian template, storage, bridge/IP configuration and SSH public key. For the API-token provisioning path used here, **privilege separation must be off (`privsep=0`)** on the provisioning token; its owning user still needs the relevant PVE permissions. Keep the token in a private credential file, never inline in recorded commands, shell tracing, or the provisioning log. Wait for the returned PVE task to succeed before starting the guest.
+
+Set `features=nesting=1`. Do not request `keyctl`: PVE will not let an API token set that feature, even with privilege separation off. Nesting alone sufficed for this guest's Docker/Neo4j deployment.
+
+The guest's default gateway is not the tailnet subnet router. Add the return route and persist it in the guest's `eth0` stanza in `/etc/network/interfaces`:
+
+```text
+    post-up ip route replace 100.64.0.0/10 via <tsgw internal IP>
+```
+
+On this install `<tsgw internal IP>` is `10.10.10.2`; apply `ip route replace 100.64.0.0/10 via 10.10.10.2` immediately as well. On inonono run `sudo tailscale set --accept-routes` so it can reach the advertised guest subnet. Verify both directions, not just an SSH handshake. Administrative access is `ssh -J admin@100.64.240.3 root@10.10.10.20`.
+
 ### Guest
 
-1. Debian 12 guest with docker, node 22 (for the built bundles) and tailscale joined to the tailnet. Create user `anamnesis` (member of `docker`), `/opt/anamnesis` (checkout + `bun run build:runtime` output in `dist/`), `/var/lib/anamnesis/{runtime,objects,backups}` owned by that user, `/etc/anamnesis` mode `0700`.
+1. Debian guest with docker and node 22 (for the built bundles); the production LXC uses Debian 13 and the routing above. Create user `anamnesis` (member of `docker`), `/opt/anamnesis` (checkout + `bun run build:runtime` output in `dist/`), `/var/lib/anamnesis/{runtime,objects,backups}` owned by that user, `/etc/anamnesis` mode `0700`.
 2. Neo4j: follow [First deploy](#first-deploy) inside `/opt/anamnesis` (`gen-password`, `db:up`, `migrate`). Keep the compose bind on `127.0.0.1`. The compose file labels the container `anamnesis.qa.owner=${ANAMNESIS_QA_OWNER}` (default `production`, from `.env`); the daemon env must carry the same `ANAMNESIS_QA_OWNER` and `ANAMNESIS_NEO4J_CONTAINER=anamnesis-neo4j-1`, otherwise backup/restore fail with `backup_adapter_unavailable` or `owned_container_required`.
    inonono only needs node 22 and the `dist/` bundles (no bun); copy `dist/` from a `bun run build:runtime` output.
 3. Secrets, all `0600`, owned by `anamnesis`, never committed or logged:
-   - `/etc/anamnesis/anamnesis.env` from `deploy/vm/anamnesis.env.example` (Neo4j password from `.env`, tailnet IP in `ANAMNESIS_LISTEN`).
+   - `/etc/anamnesis/anamnesis.env` from `deploy/vm/anamnesis.env.example` (Neo4j password from `.env`, `ANAMNESIS_LISTEN=10.10.10.20:4400`).
    - `/etc/anamnesis/listen-token` (`openssl rand -base64 32`).
    - `/etc/anamnesis/token-hub-haiku.json` — copy of the token-hub client key (`{"bearer":"..."}`) from inonono `~/.config/anamnesis/token-hub-haiku.json`.
-   - `/etc/anamnesis/tunnel_ed25519` — key pair for the tunnel; add the public key to inonono `~/.ssh/authorized_keys` restricted with `restrict,port-forwarding,permitopen="127.0.0.1:19080",permitopen="127.0.0.1:18081"`.
+   - `/etc/anamnesis/tunnel_ed25519` — key pair for the tunnel; add the public key to inonono `~/.ssh/authorized_keys` restricted with `restrict,port-forwarding,permitopen="127.0.0.1:19080",permitopen="127.0.0.1:18081"`. The unit runs locally as `anamnesis`, connects as `inonono@100.113.163.45`, and forwards only loopback listeners using `ssh -N -T`, `BatchMode=yes` and `StrictHostKeyChecking=yes`. Provision the verified host key for the `anamnesis` account before starting it. `restrict` disables PTY/agent/X11 forwarding, but does not itself prohibit remote commands: the shipped backup script also uses this key for rsync. Do not add a forced `/bin/false` command to a shared backup key; a dedicated backup key can instead be restricted to the exact rsync receiver command and destination.
 4. Units: `install -m 644 deploy/vm/*.service deploy/vm/*.timer /etc/systemd/system/`, then `systemctl enable --now anamnesis-tunnel anamnesis anamnesis-backup.timer`. `anamnesis.service` waits for the Neo4j container to report healthy and runs `ops foreground`, so systemd is the supervisor; do not also run `ops up` (the `managed` supervisor) on the same root.
 5. Pacing: the example env sets `ANAMNESIS_EXTRACTION_MAX_IN_FLIGHT=2`, `ANAMNESIS_LLM_MIN_INTERVAL_MS=4000`, `ANAMNESIS_LLM_JITTER_FRACTION=0.5` (about 0.25 haiku requests/s with jitter) so anamnesis stays a small share of the shared token-hub load. `ops status` reports the active values under `workers.extraction.pacing`.
 6. Health: `deploy/vm/healthcheck.sh` prints `status.workers` and exits 1 when a lane reports `last_error` or extraction is `unconfigured`. Wire it into whatever probes the host.
 
 ### Sources on inonono
 
-1. Client files: `~/.config/anamnesis/ingest.env` from `deploy/inonono/ingest.env.example`, `~/.config/anamnesis/listen-token` and `~/.config/anamnesis/pve-runtime-token` copied from the guest (`0600`).
+1. Client files: `~/.config/anamnesis/ingest.env` from `deploy/inonono/ingest.env.example`, with `ANAMNESIS_RPC_TCP=10.10.10.20:4400`, plus `~/.config/anamnesis/listen-token` and `~/.config/anamnesis/pve-runtime-token` copied from the guest (`0600`).
 2. `install -m 755 deploy/inonono/anamnesis-ingest-source ~/.local/bin/`; `install -m 644 deploy/inonono/anamnesis-ingest@.* ~/.config/systemd/user/`; `systemctl --user daemon-reload`; `loginctl enable-linger $USER`.
-3. Enable one timer per source: `systemctl --user enable --now anamnesis-ingest@{codex,claude}.timer` for the live sources present on inonono (omo and agentlog originals live on the workstation, not on inonono), and `anamnesis-ingest@vault-{codex,claude-code,opencode,slack,discord,gjc,pi}.timer` for the hub-vault backlog. Each run of a `vault-*` unit converts the vault once (`dist/vault-to-snapshots.mjs`, built by `build:runtime`; newest session first) and then ingests one shard per run, so the backlog drains gradually under the pacing above. `{"event":"backlog_drained"}` marks completion.
-4. Checkpoints live under `~/.local/state/anamnesis-ingest/<source>/`; the adapters are idempotent by revision key, so re-running after a failed run is safe.
+3. Enable live-source timers: `systemctl --user enable --now anamnesis-ingest@{codex,claude}.timer`, then trigger `systemctl --user start anamnesis-ingest@{codex,claude}.service` and check `Result=success`, `ExecMainStatus=0`, and `source_checkpoint` / `source_complete` output. The adapters read sealed snapshots, not live tails. `loginctl show-user "$USER" -p Linger` must report `yes`.
+4. Use a new `ANAMNESIS_INGEST_STATE` when moving to a new daemon incarnation; do not delete old pending/checkpoint files. This deployment preserves the old state and uses `~/.local/state/anamnesis-ingest/pve-51ca02ca/<source>/`. Re-running against the same installation is idempotent by revision key.
+
+The Claude adapter needs a recognized `projects/` component **inside** its export root. Passing `~/.claude/projects` directly produced `source_no_export_files`; passing all of `~/.claude` encountered an unrelated `CLAUDE.md` symlink and was correctly rejected. The deployed `~/.config/systemd/user/anamnesis-ingest@claude.service.d/source-root.conf` stages only projects, retaining their directory structure:
+
+```ini
+[Service]
+ExecStart=
+ExecStartPre=/usr/bin/mkdir -p ${ANAMNESIS_INGEST_STATE}/claude-export/projects
+ExecStartPre=/usr/bin/rsync -a --delete %h/.claude/projects/ ${ANAMNESIS_INGEST_STATE}/claude-export/projects/
+ExecStart=/usr/bin/node %h/.local/lib/anamnesis/dist/anamnesis-ops.mjs ingest-claude-raw ${ANAMNESIS_INGEST_STATE}/claude-export ${ANAMNESIS_INGEST_STATE}/claude/checkpoint.json
+```
+
+Run `systemctl --user daemon-reload` after installing the drop-in. Keep the original source quiescent while taking the snapshot; the adapter still rejects symlinks inside the staged tree. The initial live-source runs completed at checkpoint `next=27` (Codex) and `next=6` (Claude).
+
+### Vault backlog
+
+Only `vault-codex` and `vault-claude-code` are enabled for this rollout. Each `vault-*` service converts once with `dist/vault-to-snapshots.mjs`, orders sessions newest-first (records ascending within each session), and ingests one shard per run. The timer repeats every 30 minutes with up to 5 minutes of randomized delay; extraction remains throttled by the daemon's verified `2 / 4000 ms / 0.5` pacing, not a client sleep loop.
+
+```sh
+systemctl --user enable --now anamnesis-ingest@{vault-codex,vault-claude-code}.timer
+systemctl --user start --no-block anamnesis-ingest@{vault-codex,vault-claude-code}.service
+```
+
+The production services have per-instance logging drop-ins, for example:
+
+```ini
+[Service]
+StandardOutput=append:%h/.local/state/anamnesis-ingest/pve-51ca02ca/logs/vault-codex.log
+StandardError=inherit
+```
+
+Create the log directory first and use `vault-claude-code.log` for the other instance. `{"event":"backlog_drained"}` marks completion; starting the units is not evidence of full backlog coverage. Inspect `systemctl --user show <unit> -p Result -p ExecMainStatus` and the logs. On inonono the useful journal is also available through `sudo journalctl _SYSTEMD_USER_UNIT=<unit>` when `journalctl --user` is empty.
+
+Slack, Notion, Discord, OpenCode, GJC, Pi, and workstation-side omo/agentlog original-export coverage are deferred in [#224](https://github.com/INONONO66/anamnesis/issues/224). Slack/Discord/OpenCode/GJC/Pi vault envelopes with `raw` fields do exist; that is not proof that upstream originals are complete. Do not discard those records or blindly enable every source. The old `vault-opencode` and `vault-slack` timers are disabled pending that review.
 
 Lost replies: a run that ends in `outcome_unknown` (the daemon or its TCP path went away under a `remember`, e.g. during a backup restart) leaves `<checkpoint>.pending.json` behind and the next timer run asks the daemon `ingest.status` for that identity. `committed` advances the checkpoint; `spooled`/`blocked` exit 1 as `source_pending_<state>` until the spool drains (`quarantined` needs the usual spool recovery first); `unknown` from the same `data_incarnation` whose own reply reports `storage: available` (the daemon observes storage in the same call, so an earlier `ops status` cannot go stale) means the daemon never admitted the delivery, so the run logs `{"event":"pending_retired","reason":"daemon_unknown"}`, retires the pending file and resends that line from the checkpoint. No operator step is needed for any of these. Only two outcomes still need a hand: `source_pending_unknown` repeating while `storage` is `unavailable` (restore the graph/DB connection; the resend happens on the next run), and `incarnation_mismatch` (the checkpoint belongs to another daemon installation: point the unit at the right daemon or start that source from a new checkpoint directory). Moving a pending file aside by hand skips that daemon check and is a blind resend; leave the file to the next run.
+
+### First-production verification and troubleshooting
+
+The secret-free first-ingest evidence at revision `2525ea4` recorded **32 episodes, 80 active Facts, and 32 vectors**, with workers idle and vectors equal to episodes. These are the acceptance-sample counts before the continuing backlog, not a live total. The local `.omo/evidence/deploy/first-ingest.json` is not committed; summarize its numbers in the deployment PR.
+
+| Symptom | Meaning / action |
+|---|---|
+| Tunnel appears to connect but forwards do not work | Check the missing tailnet return route (`100.64.0.0/10 via 10.10.10.2`) and inonono route acceptance; an SSH/listener state alone is insufficient. |
+| Unauthenticated hub `/v1/models` returns HTTP 401 | The forwarded hub is reachable; authentication is required. This is not proof that the configured client credential works. |
+| Claude `source_no_export_files` or unrelated `source_symlink` | Use the staged `projects/` export root above, not the projects directory itself or the entire Claude configuration tree. |
+| `incarnation_mismatch` after moving the daemon | Preserve old checkpoints and select a fresh state directory for the new installation. |
+| Healthcheck immediately after backup says socket `ENOENT` | The daemon may still be starting. Confirm its `listening` event, then run the healthcheck; persistent absence is a failure. |
+| Backup `authority_snapshot_unavailable: invalidation hash evidence is incomplete` | The 2026-09-25 production backup hit this blocker before creating a dump. Preserve the graph and error evidence; repair the authority/invalidation evidence path before declaring backup acceptance. Do not bypass validation or present an older dump as this run's backup. |
 
 ### Running on inonono instead of a PVE guest
 
