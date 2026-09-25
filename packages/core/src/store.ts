@@ -1830,8 +1830,8 @@ export class Store {
         CALL () { MATCH (m:Meta {key:'meta'}) RETURN m.ingest_seq AS ingest_seq,coalesce(m.structure_revision,0) AS structure_revision }
         CALL () { MATCH (p:PolicyAuthority {key:'installation'}) RETURN p.revision AS policy_revision }
         CALL () { MATCH (a)-[l]->(b) WHERE type(l) IN $roles WITH a,l,b ORDER BY l.id LIMIT $limit RETURN collect({id:l.id,from:a.id,to:b.id,role:CASE WHEN type(l)='DERIVED_FROM' THEN 'DERIVED_FROM' ELSE 'ConductingArc' END}) AS links }
-        CALL () { MATCH (a:Element)-[l:INVALIDATES]->(b:Element) WITH a,l,b ORDER BY l.id LIMIT $limit RETURN collect({id:l.id,source_hash:l.source_hash,outcome_hash:l.outcome_hash}) AS invalidation }
-        CALL () { MATCH (e:Element:Episode) WITH e ORDER BY e.id LIMIT $limit RETURN collect(e.source_hash) AS sources }
+        CALL () { MATCH (a:Element)-[l:INVALIDATES]->(b:Element) WITH a,l,b ORDER BY l.id LIMIT $limit RETURN collect({id:l.id,source_hash:a.digest,from:a.id,to:b.id,target_id:l.target_id,effective_time_utc:l.effective_time_utc,generation:l.generation}) AS invalidation }
+        CALL () { MATCH (e:Element:Episode) WITH e ORDER BY e.id LIMIT $limit RETURN collect({hash:e.digest}) AS sources }
         RETURN members,generations,ingest_seq,structure_revision,policy_revision,links,invalidation,sources`, { roles: [...CONDUCTING_ROLES], limit: neo4j.int(maxItems + 1) });
       const row = result.records[0]; if (!row) throw new AuthoritySnapshotError("authority_snapshot_unavailable", "snapshot query returned no record");
       const count = (name: string) => (row.get(name) as unknown[]).length;
@@ -1839,13 +1839,19 @@ export class Store {
       const members = (row.get("members") as string[]).filter((v): v is string => typeof v === "string").sort();
       const generations = (row.get("generations") as unknown[]).filter((v): v is number => typeof v === "number").sort((a,b) => a-b);
       const links = row.get("links") as AuthoritySnapshot["physical_links"];
-      const invalidation = row.get("invalidation") as unknown[];
-      const rawSources = row.get("sources") as unknown[];
+      // Archive hashes summarize persisted authority; they are not graph properties.
+      // Collect source maps so Cypher cannot silently discard a missing digest.
+      const rawSources = (row.get("sources") as { hash: unknown }[]).map(v => v.hash);
+      const evidence = z.array(z.object({ id: z.string().min(1), source_hash: z.string().regex(/^[0-9a-f]{64}$/),
+        from: z.string().min(1), to: z.string().min(1), target_id: z.string().min(1), effective_time_utc: z.iso.datetime(),
+        generation: z.union([z.string().min(1), z.number().int().nonnegative()]).nullable(),
+      }).refine(v => v.target_id === v.to)).safeParse(row.get("invalidation"));
       if (!members.length || !members.every((v,i) => i === 0 || v > members[i-1]!)) throw new AuthoritySnapshotError("authority_snapshot_unavailable", "member identity inventory is incomplete");
       if (!rawSources.every(v => typeof v === "string" && /^[0-9a-f]{64}$/.test(v))) throw new AuthoritySnapshotError("authority_snapshot_unavailable", "source hash evidence is incomplete");
-      if (!invalidation.every(v => v && typeof v === "object" && typeof (v as Record<string, unknown>).id === "string" && typeof (v as Record<string, unknown>).source_hash === "string" && /^[0-9a-f]{64}$/.test((v as Record<string, unknown>).source_hash as string) && typeof (v as Record<string, unknown>).outcome_hash === "string" && /^[0-9a-f]{64}$/.test((v as Record<string, unknown>).outcome_hash as string))) throw new AuthoritySnapshotError("authority_snapshot_unavailable", "invalidation hash evidence is incomplete");
+      if (!evidence.success) throw new AuthoritySnapshotError("authority_snapshot_unavailable", "invalidation hash evidence is incomplete");
+      const invalidation = evidence.data.map(({ source_hash, ...outcome }) => ({ id: outcome.id, source_hash, outcome_hash: extractionBodyDigest(outcome) }));
       const sources = [...rawSources as string[]].sort();
-      return { members, retained_generations: generations, coverage: { ingest_seq: Number(row.get("ingest_seq")), structure_revision: Number(row.get("structure_revision")), policy_revision: policy.policy_revision }, physical_links: links, invalidation_evidence: invalidation as AuthoritySnapshot["invalidation_evidence"], source_hashes: sources };
+      return { members, retained_generations: generations, coverage: { ingest_seq: Number(row.get("ingest_seq")), structure_revision: Number(row.get("structure_revision")), policy_revision: policy.policy_revision }, physical_links: links, invalidation_evidence: invalidation, source_hashes: sources };
     });
   }
 
