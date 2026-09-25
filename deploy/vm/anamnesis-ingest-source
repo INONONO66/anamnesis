@@ -1,0 +1,28 @@
+#!/bin/sh
+# Usage: anamnesis-ingest-source <codex|claude|vault-codex|vault-claude-code|vault-opencode|vault-slack|...>
+# Runs on the anamnesis LXC as user anamnesis over the daemon UDS (ANAMNESIS_RUNTIME_ROOT).
+# vault-* sources: vault-to-snapshots (newest-first) then one shard per run; codex/claude: raw adapters.
+set -eu
+src=$1
+: "${ANAMNESIS_DIST:?}" "${ANAMNESIS_INGEST_STATE:?}" "${VAULT_ROOT:?}" "${ANAMNESIS_RUNTIME_ROOT:?}"
+mkdir -p "$ANAMNESIS_INGEST_STATE/$src"
+ops="$ANAMNESIS_DIST/anamnesis-ops.mjs"
+case "$src" in
+  codex)  exec node "$ops" ingest-codex-raw  "${CODEX_SESSIONS:?}"  "$ANAMNESIS_INGEST_STATE/$src/checkpoint.json" ;;
+  claude) exec node "$ops" ingest-claude-raw "${CLAUDE_PROJECTS:?}" "$ANAMNESIS_INGEST_STATE/$src/checkpoint.json" ;;
+  vault-*)
+    name=${src#vault-}
+    shards="$ANAMNESIS_INGEST_STATE/$src/shards"
+    if [ ! -f "$shards/manifest.json" ]; then
+      node "$ANAMNESIS_DIST/vault-to-snapshots.mjs" --root "$VAULT_ROOT/$name" --out "$shards"
+    fi
+    for shard in "$shards"/snapshot-*.jsonl; do
+      done_marker="$shard.done"
+      [ -f "$done_marker" ] && continue
+      node "$ops" ingest "$shard" "$shard.checkpoint.json"
+      touch "$done_marker"
+      exit 0
+    done
+    echo '{"event":"backlog_drained","source":"'"$src"'"}' ;;
+  *) echo "unknown source: $src" >&2; exit 2 ;;
+esac

@@ -56,7 +56,32 @@ The `ops` CLI (`dist/anamnesis-ops.mjs`, or `app/anamnesis/ops.ts`) talks to the
 
 A missing or non-`0600` file is an error naming the variable; token values are never printed. `ANAMNESIS_RUNTIME_ROOT` still has to point at a writable directory for the client's own checkpoints, but nothing under it is read for authentication in this mode.
 
-## Production layout: PVE guest + inonono sources
+## Standalone layout (2026-09-25 onward): everything on the LXC
+
+The reference layout in the next section is kept for history; since 2026-09-25 the guest no longer depends on inonono at all (goal: decommission inonono). What changed:
+
+```
+ platform VM 10.10.10.10                        PVE LXC 102 "anamnesis" 8c/16G (routed)
+ ┌────────────────────────────┐   https 443     ┌──────────────────────────────────────────┐
+ │ token-hub (llm-gateway)    │◄────────────────┤ anamnesis.service   LLM_BASE_URL=        │
+ │  token-hub.ino.internal    │  own client key │   https://token-hub.ino.internal         │
+ └────────────────────────────┘                 │ anamnesis-embed.service  127.0.0.1:18081 │
+                                                │   llama-server + bge-m3 gguf (local)     │
+                                                │ anamnesis-ingest@*.timer (User=anamnesis)│
+                                                │   UDS, state on /mnt/data (300G bulk)    │
+                                                │ anamnesis-backup.timer → /mnt/data mirror│
+                                                └──────────────────────────────────────────┘
+```
+
+- **LLM**: a dedicated client key (label `anamnesis-production`, allowed model `claude-haiku-4-5-20251001`) issued through the platform hub admin API (`POST /admin/client-keys` on `127.0.0.1:19081`, admin token at `/run/token-hub-production-hub/token-hub-admin`, root only). The LXC trusts the hub's self-signed cert via `/etc/anamnesis/platform-ca.crt` (`0644`) and `/etc/systemd/system/anamnesis.service.d/platform-ca.conf` (`Environment=NODE_EXTRA_CA_CERTS=/etc/anamnesis/platform-ca.crt`); `/etc/hosts` maps `token-hub.ino.internal` to `10.10.10.10`. Usage per key is visible in the hub's `/admin/client-keys` `usage` block.
+- **Embeddings**: `/opt/llama/bin/llama-server` (same build as inonono, `0.4.1-dev b11063`) with the identical gguf (verify sha256), unit `/etc/systemd/system/anamnesis-embed.service` running as `anamnesis` on `127.0.0.1:18081`, `-t 6`. Compatibility check: cosine of the same text against the old server was 0.9998, dims 1024.
+- **Tunnel**: `anamnesis-tunnel.service` is disabled and `anamnesis.service` no longer lists it in `After=`/`Wants=`. The tunnel key stays only for the optional remote backup mirror.
+- **Data on `/mnt/data`** (PVE `bulk` zfs subvol mounted as `mp0`): `hub/vault-files` (883,240 files, the sealed vault originals), `anamnesis-ingest/pve-51ca02ca` (the ingest state and checkpoints copied from inonono, so shards resume mid-file), `anamnesis/backups` (old inonono mirror), `sources/{codex-sessions,claude-projects}`. Everything owned by `anamnesis`. Copy with `rsync -aH --partial` and compare `find -type f | wc -l` per dataset before cutting over.
+- **Ingest on the guest**: `install -m 755 deploy/vm/anamnesis-ingest-source /usr/local/bin/`, `install -m 644 deploy/vm/anamnesis-ingest@.service deploy/vm/anamnesis-ingest@.timer /etc/systemd/system/`, `/etc/anamnesis/ingest.env` from `deploy/vm/ingest.env.example`, then `systemctl enable --now anamnesis-ingest@{codex,claude,vault-codex,vault-claude-code}.timer`. The service talks over the UDS under `ANAMNESIS_RUNTIME_ROOT` (no TCP token needed) and `Requires=anamnesis.service`. Disable the inonono user timers first (`systemctl --user disable --now 'anamnesis-ingest@*.timer'`) so two writers never share a checkpoint.
+- **Backup**: `backup.sh` mirrors to `ANAMNESIS_BACKUP_MIRROR` (default `/mnt/data/anamnesis/backups/pve-vm`, local rsync). Set it to `user@host:/path` to keep the old ssh mirror. Wait for running `anamnesis-ingest@*` oneshots before a manual backup: the daemon stop otherwise fails the in-flight shard with `outcome_unknown` (it resumes on the next timer run).
+- **Ops helper**: `/usr/local/bin/anamnesis-ops-status` sources the env, sets `ANAMNESIS_RUNTIME_TOKEN_FILE`, and runs `ops status` as `anamnesis`.
+
+## Production layout: PVE guest + inonono sources (historical)
 
 Reference layout used for the first production install (issue #213). Unit files and scripts live under `deploy/`; copy them, do not symlink into the checkout. Production is the Debian 13 LXC at `10.10.10.20`; it reaches the tailnet through the PVE subnet router, not a guest tailscaled instance.
 
