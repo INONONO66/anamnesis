@@ -58,7 +58,7 @@ A missing or non-`0600` file is an error naming the variable; token values are n
 
 ## Standalone layout (2026-09-25 onward): everything on the LXC
 
-The reference layout above is kept for history; since 2026-09-25 the guest no longer depends on inonono at all (goal: decommission inonono). What changed:
+The reference layout in the next section is kept for history; since 2026-09-25 the guest no longer depends on inonono at all (goal: decommission inonono). What changed:
 
 ```
  platform VM 10.10.10.10                        PVE LXC 102 "anamnesis" 8c/16G (routed)
