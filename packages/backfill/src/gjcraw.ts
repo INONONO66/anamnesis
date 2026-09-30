@@ -1,14 +1,10 @@
-import { SCHEMA_ID } from "@anamnesis/protocol";
-import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
-import type { RememberInput } from "@anamnesis/core";
-import { maskSecrets } from "./secrets.ts";
+import { createSessionParser, isRecord, optionalText, parseEvent, toEpisode, type RawSessionEpisode, type SessionEvent } from "./pi-session.ts";
 
 /** Beyond this the transcript turn lives in the object store, not the node. */
-const CONTENT_LIMIT = 4000;
 
 /**
  * The raw store keeps one session per file under a per-workspace directory,
@@ -17,171 +13,13 @@ const CONTENT_LIMIT = 4000;
  */
 const SESSIONS = join("home", ".gjc", "agent", "sessions");
 
-/**
- * A transcript event as the agent wrote it. The outer `id` and `timestamp` are
- * the session-level identity the normalized export was built from; the inner
- * `message.timestamp` records when the provider call was issued and drifts
- * from it by the request duration, so it cannot key the same records.
- */
-interface RawEvent {
-  type: string;
-  id: string;
-  timestamp: string;
-  role?: string;
-  text: string;
-}
-
-export interface GjcRawEpisode {
-  input: RememberInput;
-  redactions: number;
-}
-
-function optionalText(value: unknown): string | undefined {
-  return typeof value === "string" && value !== "" ? value : undefined;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-/**
- * Only `text` parts carry the turn. `thinking` is provider scratch space the
- * export never published, and `toolCall` / `toolResult` parts hold arguments
- * and command output rather than conversation.
- */
-function messageText(content: unknown): string | undefined {
-  if (!Array.isArray(content)) return undefined;
-  const parts: string[] = [];
-  for (const part of content) {
-    if (!isRecord(part) || part["type"] !== "text") continue;
-    const text = optionalText(part["text"]);
-    if (text !== undefined && text.trim() !== "") parts.push(text);
-  }
-  return parts.length === 0 ? undefined : parts.join("\n");
-}
-
-/**
- * `user` and `assistant` are the conversation roles. `toolResult` and
- * `fileMention` reach the transcript as plumbing for the turn that follows
- * them, and the normalized export rejected both.
- */
-const CONVERSATION_ROLES = new Set(["user", "assistant"]);
-
-/**
- * Returns the event when it carries conversation content, `undefined` when the
- * line is runtime bookkeeping: model and mode changes, workspace reminders,
- * session headers and tool plumbing all reach the transcript without a turn.
- */
-function parseEvent(line: string): RawEvent | undefined {
-  const raw: unknown = JSON.parse(line);
-  if (!isRecord(raw)) return undefined;
-  const type = optionalText(raw["type"]);
-  const id = optionalText(raw["id"]);
-  const timestamp = optionalText(raw["timestamp"]);
-  if (type === undefined || id === undefined || timestamp === undefined) {
-    return undefined;
-  }
-  /**
-   * A compaction replaces the history it summarizes, so the summary is the
-   * only surviving record of those turns. It has no author of its own.
-   */
-  if (type === "compaction") {
-    const summary = optionalText(raw["summary"]);
-    return summary === undefined || summary.trim() === ""
-      ? undefined
-      : { type, id, timestamp, text: summary };
-  }
-  if (type !== "message") return undefined;
-  const message = raw["message"];
-  if (!isRecord(message)) return undefined;
-  const role = optionalText(message["role"]);
-  if (role === undefined || !CONVERSATION_ROLES.has(role)) return undefined;
-  const text = messageText(message["content"]);
-  return text === undefined ? undefined : { type, id, timestamp, role, text };
-}
-
-/** Every field the originals contract requires, resolved against its session. */
-interface SessionEvent extends RawEvent {
-  session: string;
-}
-
-function toEpisode(event: SessionEvent): GjcRawEpisode {
-  const occurredAt = new Date(event.timestamp).toISOString();
-  /**
-   * Keyed exactly as the normalized export keyed it, on the raw event time and
-   * raw text: the same turn reached from either side has to produce the same
-   * revision, or re-reading the raw store would open a false revision of every
-   * event the export already carries.
-   */
-  const revision = createHash("sha256")
-    .update(`${occurredAt}\n${event.text}`, "utf8")
-    .digest("hex");
-  const { text, redactions } = maskSecrets(event.text);
-  /**
-   * The same shape the normalized export wrote for this turn. A `revision_key`
-   * carries exactly one element body, and the digest that guards it covers
-   * `properties` (docs/01 §1), so agreeing on the revision token is not enough
-   * on its own: a turn reached from the export and again from raw has to build
-   * the same properties or the second pass is rejected as a
-   * `revision_conflict` instead of resolving to the stored revision.
-   *
-   * The author is already carried by `origin.actor`, which is the field the
-   * export keyed it on too, so publishing it a second time under `role` only
-   * adds the disagreement.
-   */
-  const properties: Record<string, string> = {
-    canonical_kind: event.role === undefined ? "compaction" : "agent_message",
-    kind: event.type,
-  };
-  const oversized = text.length > CONTENT_LIMIT;
-  return {
-    redactions,
-    input: {
-      schema: SCHEMA_ID.ORIGINAL_MESSAGE,
-      content: oversized ? text.slice(0, CONTENT_LIMIT) : text,
-      /**
-       * The tuple the normalized export wrote for the same turn, so an overlap
-       * between the two backfills is a record-level no-op rather than a second
-       * copy of every session already ingested.
-       */
-      origin: {
-        source: "gjc",
-        session: event.session,
-        actor: event.role ?? "unknown",
-        record: event.id,
-      },
-      source_revision: revision,
-      time: { value: occurredAt, precision: "second" },
-      ...(oversized
-        ? {
-            payload: new TextEncoder().encode(text),
-            payload_media_type: "text/plain",
-          }
-        : {}),
-      properties,
-    },
-  };
-}
-
-/**
- * The session header opens every transcript and names the id the export
- * partitioned on. A file whose header never arrives cannot be attributed to a
- * session, so its events are left out rather than given a synthetic partition.
- */
-export function createGjcRawParser(): (line: string) => GjcRawEpisode[] {
-  let session: string | undefined;
-  return (line: string): GjcRawEpisode[] => {
-    const raw: unknown = JSON.parse(line);
-    if (isRecord(raw) && raw["type"] === "session") {
-      session = optionalText(raw["id"]);
-      return [];
-    }
-    if (session === undefined) return [];
-    const event = parseEvent(line);
-    return event === undefined ? [] : [toEpisode({ ...event, session })];
-  };
-}
-
+export type GjcRawEpisode = RawSessionEpisode;
+/** The same properties the normalized export wrote for this turn: a revision_key carries one element body
+ * and its digest covers properties, so the raw pass must build them identically or be rejected as a
+ * revision_conflict. The author is already carried by origin.actor. */
+const gjcEpisode = (event: SessionEvent): GjcRawEpisode =>
+  toEpisode(event, "gjc", { canonical_kind: event.role === undefined ? "compaction" : "agent_message", kind: event.type });
+export const createGjcRawParser = (): ((line: string) => GjcRawEpisode[]) => createSessionParser(gjcEpisode);
 async function readSession(path: string): Promise<SessionEvent[]> {
   const events: SessionEvent[] = [];
   let session: string | undefined;
@@ -236,7 +74,7 @@ export async function collectGjcRaw(root: string): Promise<GjcRawEpisode[]> {
   const episodes: GjcRawEpisode[] = [];
   for (const path of await transcripts(root)) {
     for (const event of await readSession(path)) {
-      episodes.push(toEpisode(event));
+      episodes.push(gjcEpisode(event));
     }
   }
   return episodes.sort((a, b) => {
