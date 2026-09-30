@@ -176,7 +176,7 @@ export class Uploads {
       try {
         await upload.file.truncate(upload.received);
         const info = await upload.file.stat();
-        if (info.size !== upload.received) throw new Error("upload rollback length mismatch");
+        if (info.size !== upload.received) throw new Error("upload rollback length mismatch", { cause: error });
         await upload.file.sync();
         upload.actual = upload.received;
       } catch (rollback) {

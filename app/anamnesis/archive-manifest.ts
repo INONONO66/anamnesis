@@ -10,6 +10,7 @@ import { dirname, join, resolve } from "node:path";
  * Nothing returned authorizes activation, proves fsync/publication ordering,
  * authenticates the producer, or verifies the contents of the opaque dump.
  */
+/** @public consumed by the .mjs harnesses through dynamic import */
 export const ARCHIVE_LIMITS = Object.freeze({
   manifest_bytes: 8 * 1024 ** 2,
   completion_bytes: 4096,
@@ -28,18 +29,18 @@ export const ARCHIVE_LIMITS = Object.freeze({
   hash_chunk_bytes: 1024 ** 2,
   json_depth: 16,
 });
-export type ArchiveAdmissionCode = "invalid_manifest" | "invalid_completion" | "completion_mismatch" |
+type ArchiveAdmissionCode = "invalid_manifest" | "invalid_completion" | "completion_mismatch" |
   "incompatible_archive" | "archive_layout" | "archive_limit" | "member_mismatch" |
   "invalid_sidecar" | "invalid_dump_metadata" | "archive_changed";
-export class ArchiveAdmissionError extends Error {
+class ArchiveAdmissionError extends Error {
   readonly code: ArchiveAdmissionCode;
   constructor(code: ArchiveAdmissionCode, detail: string, options?: ErrorOptions) {
     super(`${code}: ${detail}`, options); this.name = "ArchiveAdmissionError"; this.code = code;
   }
 }
 type Role = "database_dump" | "dump_metadata" | "config" | "auth" | "object_data" | "object_sidecar";
-export interface ArchiveMember { path: string; role: Role; bytes: number; sha256: string }
-export interface ArchiveObject { hash: string; size: number; media_type: string }
+interface ArchiveMember { path: string; role: Role; bytes: number; sha256: string }
+interface ArchiveObject { hash: string; size: number; media_type: string }
 /** Cutoff authority evidence. This is deliberately separate from the opaque
  * dump: a dump without this set cannot establish what was backed up. */
 export interface AuthoritySnapshot {
@@ -50,9 +51,9 @@ export interface AuthoritySnapshot {
   invalidation_evidence: { id: string; source_hash: string; outcome_hash: string }[];
   source_hashes: string[];
 }
-export type AuthoritySnapshotRefusal = "authority_members_missing" | "authority_generations_missing" |
+type AuthoritySnapshotRefusal = "authority_members_missing" | "authority_generations_missing" |
   "authority_coverage_missing" | "authority_links_missing" | "authority_invalidation_missing" | "authority_sources_missing";
-export class AuthoritySnapshotError extends Error {
+class AuthoritySnapshotError extends Error {
   readonly code: AuthoritySnapshotRefusal;
   constructor(code: AuthoritySnapshotRefusal, detail: string) { super(`${code}: ${detail}`); this.name = "AuthoritySnapshotError"; this.code = code; }
 }
@@ -77,8 +78,8 @@ export function verifyAuthoritySnapshot(value: unknown): AuthoritySnapshot {
   authoritySorted(sources as string[], "authority_sources_missing");
   return { members: members as string[], retained_generations: generations as number[], coverage: coverage as AuthoritySnapshot["coverage"], physical_links: links as AuthoritySnapshot["physical_links"], invalidation_evidence: invalidation as AuthoritySnapshot["invalidation_evidence"], source_hashes: sources as string[] };
 }
-export interface ArchiveEmbeddingProfile { embedding_profile_id: string; embedding_model_id: string; vector_index_id: string }
-export interface ArchiveEmbeddingCoverage {
+interface ArchiveEmbeddingProfile { embedding_profile_id: string; embedding_model_id: string; vector_index_id: string }
+interface ArchiveEmbeddingCoverage {
   embedding_model_id: string; stream: "episode" | "extraction"; generation: number;
   covered_ingest_seq: number; health: "HEALTHY" | "BLOCKED"; resolved_no_vector_count: number; omission_digest: string;
 }
@@ -98,7 +99,7 @@ export interface ArchiveManifest {
   members: ArchiveMember[];
   authority?: AuthoritySnapshot;
 }
-export interface ArchiveCompletion {
+interface ArchiveCompletion {
   format: "anamnesis.archive-complete/1"; operation_id: string; manifest_sha256: string; manifest_bytes: number;
 }
 /** Explicit supported exact patches/images, never inferred from the archive.
@@ -195,6 +196,7 @@ function sortedUnique(keys: string[], code: ArchiveAdmissionCode): void {
  * canonical JSON numbers/strings, sorted identity arrays; ASCII schema fields.
  * The completion hash binds these exact UTF-8 bytes, not a reserialized input.
  */
+/** @public consumed by the .mjs harnesses through dynamic import */
 export function parseArchiveManifest(bytes: string | Uint8Array): ArchiveManifest {
   const code = "invalid_manifest";
   const decoded = decode(bytes, ARCHIVE_LIMITS.manifest_bytes, code, true);
@@ -279,6 +281,7 @@ export function parseArchiveManifest(bytes: string | Uint8Array): ArchiveManifes
   if (Object.hasOwn(m, "authority")) manifest.authority = verifyAuthoritySnapshot(m.authority);
   return manifest;
 }
+/** @public consumed by the .mjs harnesses through dynamic import */
 export function parseArchiveCompletion(bytes: string | Uint8Array): ArchiveCompletion {
   const code = "invalid_completion", marker = record(decode(bytes, ARCHIVE_LIMITS.completion_bytes, code, true), ["format", "operation_id", "manifest_sha256", "manifest_bytes"], code);
   need(marker.format === "anamnesis.archive-complete/1" && text(marker.operation_id, UUID7) && text(marker.manifest_sha256, HEX) && integer(marker.manifest_bytes, ARCHIVE_LIMITS.manifest_bytes, 1), code, "invalid completion contract");

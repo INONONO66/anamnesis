@@ -85,7 +85,7 @@ export interface ListenConfig { host: string; port: number; token: string; }
 export async function loadListenConfig(env: NodeJS.ProcessEnv = process.env): Promise<ListenConfig | undefined> {
   const listen = env["ANAMNESIS_LISTEN"];
   if (listen === undefined) return undefined;
-  const address = /^(?:\[([^\]]+)\]|([^:\[\]]+)):(\d{1,5})$/.exec(listen);
+  const address = /^(?:\[([^\]]+)\]|([^:[\]]+)):(\d{1,5})$/.exec(listen);
   const host = address?.[1] ?? address?.[2];
   const port = address ? Number(address[3]) : NaN;
   if (!host || port > 65535) throw new Error("ANAMNESIS_LISTEN must be host:port");
@@ -173,7 +173,7 @@ export async function acquireInstallation(root: string): Promise<Installation> {
       let dead = false;
       try { process.kill(owner.pid, 0); }
       catch (cause) { if (hasCode(cause, "ESRCH")) dead = true; else throw cause; }
-      if (!dead) throw new Error(`runtime root is owned by live pid ${owner.pid}`);
+      if (!dead) throw new Error(`runtime root is owned by live pid ${owner.pid}`, { cause: error });
       await fs.rm(lease, { recursive: true });
       await claim();
     } finally { await fs.rm(recovery, { recursive: true }); }

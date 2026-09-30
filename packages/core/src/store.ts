@@ -30,9 +30,8 @@ import { luceneQuery, receiptTime, receiptHash, IssueReceiptInput, RecallReceipt
 import { type InstallationContext, PolicyEvent, policySelector, policyBody, type PolicyState, requireInstallation } from "./store/policy.ts";
 import { type CacheEvidence, CACHE_EVIDENCE, cacheExpectations, cacheMatches } from "./store/hit-cache.ts";
 import { type ElementProperties, type ElementNode, type LinkRelationship, type QueryParameters, type ElementWriteOptions, recordsToObjects, nodeProps, relProps, StoredHash, decodeHistoricalElement, toElement } from "./store/records.ts";
-export { type ConductingArcRow, type ConductingArcProbe, type GraphEnvelope, GraphAccessError, type ConductingArcVerification } from "./store/conducting.ts";
-export { elementDigest, verifyLineageRetry } from "./store/digest.ts";
-export { luceneQuery, IssueReceiptInput, RecallReceipt, RecallTransportInput, CommitReceiptInput, type CommitReceiptResult, type ReceiptStatus, type HitCacheIssue, type HitCacheVerification, type HitCacheRebuild, type HitCache, ReceiptHit, ReceiptError } from "./store/receipts.ts";
+export { type ConductingArcRow, type ConductingArcProbe, type GraphEnvelope, type ConductingArcVerification } from "./store/conducting.ts";
+export { luceneQuery, IssueReceiptInput, RecallReceipt, RecallTransportInput, CommitReceiptInput, type CommitReceiptResult, type ReceiptStatus, type HitCacheVerification, type HitCacheRebuild, type HitCache, ReceiptHit } from "./store/receipts.ts";
 export { type InstallationContext } from "./store/policy.ts";
 
 /** Internal lease request: the engine names the provider that will run the task (never an RPC caller). */
@@ -46,7 +45,7 @@ export type AuthoritySnapshot = {
   invalidation_evidence: { id: string; source_hash: string; outcome_hash: string }[];
   source_hashes: string[];
 };
-export class AuthoritySnapshotError extends Error {
+class AuthoritySnapshotError extends Error {
   constructor(readonly code: "authority_snapshot_unavailable" | "authority_snapshot_limit_exceeded", detail: string = code) { super(`${code}: ${detail}`); }
 }
 export class GenerationReadinessError extends Error {

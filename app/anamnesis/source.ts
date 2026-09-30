@@ -148,7 +148,7 @@ export async function ingestSnapshot(checkpointPath: string, client: RpcClient, 
     try { checkpoint = parseCheckpoint(JSON.parse(await readFile(checkpointPath, "utf8"))); }
     catch (error) {
       if (!hasCode(error, "ENOENT")) throw error;
-      if (pending) throw new Error("source_checkpoint_missing");
+      if (pending) throw new Error("source_checkpoint_missing", { cause: error });
       checkpoint = { version: 1, source_hash: sourceHash, data_incarnation: status.data_incarnation, next: 0, last: null };
       await atomicJson(checkpointPath, checkpoint);
     }

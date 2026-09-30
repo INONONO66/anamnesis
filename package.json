@@ -16,7 +16,15 @@
     "build:runtime": "bun build app/anamnesis/main.ts --target=node --outfile=dist/anamnesis-daemon.mjs && bun build app/anamnesis/ops.ts --target=node --outfile=dist/anamnesis-ops.mjs && bun build app/anamnesis/client.ts --target=node --outfile=dist/anamnesis-client.mjs && bun build scripts/ops/vault-to-snapshots.ts --target=node --outfile=dist/vault-to-snapshots.mjs && mkdir -p dist/prompts && cp app/anamnesis/prompts/extract-claims.v2.md dist/prompts/extract-claims.v2.md && cp app/anamnesis/prompts/judge-relations.v1.md dist/prompts/judge-relations.v1.md",
     "test:runtime": "bun run build:runtime && node --test app/anamnesis/process.test.mjs",
     "test:runtime:surface": "node app/anamnesis/surface.mjs",
-    "qa:e2e-daemon": "bun scripts/qa/e2e-daemon.ts"
+    "qa:e2e-daemon": "bun scripts/qa/e2e-daemon.ts",
+    "gate": "bun run gate:lint && bun run gate:dup && bun run gate:dead && bun run gate:cycles && bun run gate:types",
+    "gate:lint": "eslint .",
+    "gate:dup": "jscpd app packages",
+    "gate:dead": "knip --no-progress",
+    "gate:cycles": "madge --circular --extensions ts app/anamnesis/main.ts app/anamnesis/ops.ts packages/core/src/index.ts packages/backfill/src/index.ts",
+    "gate:types": "bun scripts/gate/any-unknown.ts",
+    "gate:halstead": "fta app packages --json --score-cap 100000",
+    "gate:mutation": "stryker run"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
@@ -30,7 +38,8 @@
     "madge": "^8.0.0",
     "neo4j-driver": "^6.2.0",
     "typescript": "^5.9.2",
-    "typescript-eslint": "^8.71.0"
+    "typescript-eslint": "^8.71.0",
+    "uuid": "^11.1.0"
   },
   "dependencies": {
     "@anamnesis/backfill": "workspace:*",

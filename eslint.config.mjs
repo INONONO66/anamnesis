@@ -14,7 +14,8 @@ export default tseslint.config(
       complexity: ["error", { max: 21 }],
       "sonarjs/cognitive-complexity": ["error", 21],
       "@typescript-eslint/no-explicit-any": "error",
-      "@typescript-eslint/no-unused-vars": ["error", { argsIgnorePattern: "^_", caughtErrors: "none" }],
+      "@typescript-eslint/no-unused-vars": ["error", { argsIgnorePattern: "^_", varsIgnorePattern: "^_", caughtErrors: "none", ignoreRestSiblings: true }],
+      "@typescript-eslint/no-this-alias": ["error", { allowedNames: ["runtime"] }],
       "no-restricted-imports": ["error", { patterns: [
         { group: ["**/packages/*/src/*", "**/protocol/src/*", "**/core/src/*"], message: "Import the package entry (@anamnesis/protocol, @anamnesis/core) instead of a deep relative path." },
       ] }],

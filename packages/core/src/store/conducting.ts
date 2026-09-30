@@ -1,6 +1,4 @@
 import { z } from "zod";
-import { sessionKey } from "./digest.ts";
-import { CONDUCTING_ROLES } from "./schema.ts";
 
 export type ConductingArcRow = {
   source_id: string; link_id: string; peer_id: string; role: string;

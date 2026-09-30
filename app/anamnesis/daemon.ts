@@ -207,7 +207,7 @@ export async function foreground(): Promise<void> {
       if (!connection.authorized) {
         // The first TCP frame must be the bearer. Anything else, malformed or
         // mismatched, is one uniform unauthorized fault; the peer learns nothing.
-        let admitted = false;
+        let admitted: boolean;
         try { admitted = timingSafeEqual(createHash("sha256").update(RpcTcpAuth.parse(JSON.parse(bytes.toString("utf8"))).auth.bearer).digest(), bearer!); }
         catch { admitted = false; }
         if (admitted) { connection.authorized = true; budget.release(reservation); return true; }

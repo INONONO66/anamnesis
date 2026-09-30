@@ -6,7 +6,7 @@ import { RpcRecallResult } from "@anamnesis/protocol";
 
 export function luceneQuery(raw: string): string {
   return raw
-    .replace(/[+\-&|!(){}\[\]^"~*?:\\\/]/g, " ")
+    .replace(/[+\-&|!(){}[\]^"~*?:\\/]/g, " ")
     .split(/\s/)
     .filter(Boolean)
     .join(" ");

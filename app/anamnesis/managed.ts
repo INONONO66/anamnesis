@@ -11,8 +11,8 @@ export type ManagedIntent = "start" | "status" | "stop" | "restart";
 export interface ManagedTarget { pid: number; identity: string; }
 export interface ManagedState extends ManagedTarget { version: 1; intent: ManagedIntent; sequence: number; updated_at: string; }
 
-export function managedStatePath(root: string): string { return join(root, "managed.state.json"); }
-export function managedLockPath(root: string): string { return join(root, "managed.lock"); }
+function managedStatePath(root: string): string { return join(root, "managed.state.json"); }
+function managedLockPath(root: string): string { return join(root, "managed.lock"); }
 
 /** A repeatable fingerprint of the process identity observed by the OS.
  * PID alone is deliberately insufficient: a reused PID has different command metadata. */
@@ -29,7 +29,7 @@ async function withManagedLock<T>(root: string, action: () => Promise<T>): Promi
   await mkdir(root, { recursive: true, mode: 0o700 }); await chmod(root, 0o700);
   const lock = managedLockPath(root);
   try { await mkdir(lock, { mode: 0o700 }); }
-  catch (error) { if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new Error("managed operation already in progress"); throw error; }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new Error("managed operation already in progress", { cause: error }); throw error; }
   try { return await action(); } finally { await rm(lock, { recursive: true, force: true }); }
 }
 

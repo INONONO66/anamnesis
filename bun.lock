@@ -22,6 +22,7 @@
         "neo4j-driver": "^6.2.0",
         "typescript": "^5.9.2",
         "typescript-eslint": "^8.71.0",
+        "uuid": "^11.1.0",
       },
     },
     "packages/backfill": {
@@ -31,7 +32,6 @@
         "@anamnesis/core": "workspace:*",
         "@anamnesis/protocol": "workspace:*",
         "@noble/hashes": "2.4.0",
-        "zod": "^4.1.5",
       },
     },
     "packages/core": {

@@ -22,8 +22,7 @@ import { fault, RpcFault, storageUnavailable } from "./wire.ts";
 import { RECOVERY_PROBE_MS, RecoveryProbe, nodeTimers } from "./recovery-probe.ts";
 import type { TrustedAuthorityAdapter } from "./backup-restore-orchestrator.ts";
 import { backupOwned, restoreOwned } from "./backup-restore-orchestrator.ts";
-import { createRuntimeAuthority, manifestTemplate, objectInventory } from "./runtime-authority.ts";
-import { NEO4J_IMAGE, NEO4J_VERSION } from "./owned-neo4j-adapter.ts";
+import { manifestTemplate, objectInventory } from "./runtime-authority.ts";
 
 export const capabilities: RpcCapabilities = { methods: [...RPC_METHODS], recall: true, commit: true, policy: true, extraction: false, embeddings: false, writer_fence: "database" };
 function canonical(value: unknown): string {
@@ -496,43 +495,42 @@ export class Runtime {
     while (progress) {
       progress = false;
       yield* this.eachPendingPage(cohort, async function* (entry) {
-        const self = runtime;
-        let binding: Binding;
-        try { binding = self.validated(entry); }
+                let binding: Binding;
+        try { binding = runtime.validated(entry); }
         catch (error) {
           const reason = fault(error).code;
           if (reason !== "spool_corrupt" && reason !== "incarnation_mismatch") throw error;
-          self.quarantined.set(entry.sequence, reason); return;
+          runtime.quarantined.set(entry.sequence, reason); return;
         }
         try {
-          const existing = await self.committed(binding);
+          const existing = await runtime.committed(binding);
           yield;
           if (!existing && entry.predecessor) {
-            const predecessor = await self.read<{ found: number }>("MATCH (e:Episode {revision_key:$key}) RETURN count(e) AS found", { key: entry.predecessor });
+            const predecessor = await runtime.read<{ found: number }>("MATCH (e:Episode {revision_key:$key}) RETURN count(e) AS found", { key: entry.predecessor });
             yield;
             // Retained suffix visibility is not evidence that a predecessor
             // still needs execution. Check the DB before deferring to it.
             if (!predecessor[0]?.found) {
-              if (!(yield* self.findPending(entry.predecessor, cohort))) self.blocked.set(entry.sequence, "missing_predecessor");
+              if (!(yield* runtime.findPending(entry.predecessor, cohort))) runtime.blocked.set(entry.sequence, "missing_predecessor");
               return;
             }
           }
-          const before = await self.spool.status();
+          const before = await runtime.spool.status();
           yield;
-          const result = existing ?? await self.write(binding);
+          const result = existing ?? await runtime.write(binding);
           yield;
-          await self.installation.assertOwned();
-          await self.spool.complete(entry.sequence);
-          await syncDirectory(self.spoolRoot);
+          await runtime.installation.assertOwned();
+          await runtime.spool.complete(entry.sequence);
+          await syncDirectory(runtime.spoolRoot);
           yield;
-          const after = await self.spool.status();
+          const after = await runtime.spool.status();
           // Completing an already-committed suffix behind a blocked head is
           // idempotent, not progress. Preserve advancement earlier in the pass.
           progress = progress || result.created || after.pending < before.pending;
-          self.blocked.delete(entry.sequence);
+          runtime.blocked.delete(entry.sequence);
         } catch (error) {
           const reason = fault(error).code;
-          if (reason === "revision_conflict" || reason === "stale_revision") self.blocked.set(entry.sequence, reason);
+          if (reason === "revision_conflict" || reason === "stale_revision") runtime.blocked.set(entry.sequence, reason);
           else throw error;
         }
       });

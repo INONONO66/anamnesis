@@ -113,7 +113,7 @@ export type RpcEmbeddingRecoverParams = z.infer<typeof RpcEmbeddingRecoverParams
 export const RpcEmbeddingStatusParams = z.strictObject({ operation_id: z.uuidv7() });
 /** provider_unavailable is transient: the attempt is `deferred` and the Episode stays queued until the outbox's
  * retry budget is spent, which quarantines it as provider_unavailable_exhausted. Every other reason quarantines at once. */
-export const RpcEmbeddingAttemptReason = z.enum(["provider_unavailable", "provider_unavailable_exhausted", "provider_rejected", "profile_mismatch", "invalid_vector", "input_too_large", "stale_input"]);
+const RpcEmbeddingAttemptReason = z.enum(["provider_unavailable", "provider_unavailable_exhausted", "provider_rejected", "profile_mismatch", "invalid_vector", "input_too_large", "stale_input"]);
 export const RpcEmbeddingAttempt = z.strictObject({
   operation_id: z.uuidv7(), episode_id: z.uuidv7(), profile_id: RpcHash,
   model: identifier, model_incarnation: RpcHash, dimensions: positiveCounter.max(4096),
@@ -152,17 +152,17 @@ export const RpcRecallResult = z.strictObject({
 });
 export type RpcRecallResult = z.infer<typeof RpcRecallResult>;
 
-export const ConductingArcRow = z.strictObject({
+const ConductingArcRow = z.strictObject({
   source_id: z.uuidv7(), link_id: z.uuidv7(), peer_id: z.uuidv7(),
   role: z.enum(["NEXT_EPISODE", "MENTIONS", "RELATES_TO", "HAS_MEMBER", "DERIVED_FROM"]),
   generation: z.number().int().nonnegative().nullable(),
   source_extraction_generation: z.number().int().nonnegative().nullable(),
 });
-export const ConductingArcProbeResult = z.strictObject({
+const ConductingArcProbeResult = z.strictObject({
   source_id: z.uuidv7(), count: z.number().int().min(0).max(256),
   saturated: z.boolean(), coverage: z.literal("complete"),
 });
-export type ConductingArcProbeResult = z.infer<typeof ConductingArcProbeResult>;
+type ConductingArcProbeResult = z.infer<typeof ConductingArcProbeResult>;
 
 // The last sextet's unused bits must be zero, not merely decodable by Buffer.
 const canonicalBase64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/][AQgw]==|[A-Za-z0-9+/]{2}[AEIMQUYcgkosw048]=)?$/;
@@ -207,7 +207,7 @@ export type RpcHitCacheParams = z.infer<typeof RpcHitCacheParams>;
 
 /** Deliberately narrow authority: exact durable Episode/source selectors, ANDed.
  * No derived/entity/literal inference or payload scanning is advertised. */
-export const RpcPolicySelector = z.strictObject({
+const RpcPolicySelector = z.strictObject({
   episode_id: z.uuidv7().optional(), source: identifier.optional(),
 }).refine(value => value.episode_id !== undefined || value.source !== undefined, "selector is required");
 export const RpcPolicySetParams = z.strictObject({

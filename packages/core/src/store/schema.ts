@@ -1,6 +1,6 @@
 import { LINK_LATTICE, SCHEMA_LABELS, TIME_BEARING, type Celestial, type KnownSchema, type LinkRole } from "@anamnesis/protocol";
 
-export const LINK_ROLES = Object.keys(LINK_LATTICE) as LinkRole[];
+const LINK_ROLES = Object.keys(LINK_LATTICE) as LinkRole[];
 export const CONDUCTING_ROLES = ["NEXT_EPISODE", "MENTIONS", "RELATES_TO", "HAS_MEMBER", "DERIVED_FROM"] as const;
 
 export const SCHEMA_STATEMENTS = [

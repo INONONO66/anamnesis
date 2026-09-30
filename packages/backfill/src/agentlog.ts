@@ -131,7 +131,7 @@ function toEpisode(event: RecallableEvent): AgentLogEpisode {
  * Manifests describe the export, AppleDouble sidecars mirror it, and a
  * provider with no captured session leaves an empty file behind.
  */
-export async function agentLogFiles(root: string): Promise<string[]> {
+async function agentLogFiles(root: string): Promise<string[]> {
   const entries = await readdir(root, { withFileTypes: true });
   return entries
     .filter(

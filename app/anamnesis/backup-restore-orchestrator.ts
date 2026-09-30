@@ -23,7 +23,7 @@ export interface TrustedAuthorityAdapter {
 
 export interface BackupInput { root: string; destination: string; operationId: string; compatibility: ArchiveCompatibility; manifest: ArchiveManifest; objectRoot?: string; }
 export interface RestoreInput { archive: string; liveRoot: string; stagingRoot: string; rollbackRoot: string; operationId: string; compatibility: ArchiveCompatibility; expectedSourceId: string; }
-export class AuthorityOrchestrationError extends Error { constructor(public readonly code: string, message: string) { super(`${code}: ${message}`); } }
+class AuthorityOrchestrationError extends Error { constructor(public readonly code: string, message: string) { super(`${code}: ${message}`); } }
 const hash = (b: Uint8Array | string) => createHash("sha256").update(b).digest("hex");
 const canonical = (v: unknown): string => Array.isArray(v) ? `[${v.map(canonical).join(",")}]` : v !== null && typeof v === "object" ? `{${Object.keys(v as object).sort().map(k => `${JSON.stringify(k)}:${canonical((v as Record<string, unknown>)[k])}`).join(",")}}` : JSON.stringify(v);
 const ownedDir = async (p: string) => { const s = await lstat(p, { bigint: true }); if (!s.isDirectory() || s.isSymbolicLink() || s.uid !== BigInt(process.getuid!()) || (s.mode & 0o022n)) throw new AuthorityOrchestrationError("unsafe_path", "owned private directory required"); return s; };
@@ -35,7 +35,7 @@ const OBJECT_LIMIT = 10_000, OBJECT_BYTES = 256 * 1024 ** 2, TOTAL_OBJECT_BYTES 
 /** Enumerates and copies committed ObjectStore pairs without buffering payloads.
  * The source is fenced by owner/device/inode/stat checks; every destination is
  * exclusive and published only after a streamed hash and fsync. */
-export async function snapshotObjectStore(sourceRoot: string, destinationRoot: string): Promise<ArchiveManifest["objects"]> {
+async function snapshotObjectStore(sourceRoot: string, destinationRoot: string): Promise<ArchiveManifest["objects"]> {
   const source = resolve(sourceRoot), destination = resolve(destinationRoot);
   const root = await ownedDir(source), destinationParent = await ownedDir(dirname(destination));
   void destinationParent;

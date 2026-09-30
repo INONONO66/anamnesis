@@ -29,7 +29,7 @@ export function cacheExpectations(evidence: CacheEvidence): { expected: HitCache
   const ids = new Set<string>();
   const keys = new Set<string>();
   for (const row of evidence.hits) {
-    let decoded: unknown = null;
+    let decoded: unknown;
     try { decoded = typeof row.props["body"] === "string" ? JSON.parse(row.props["body"]) : null; }
     catch (error) {
       if (!(error instanceof SyntaxError)) throw error;

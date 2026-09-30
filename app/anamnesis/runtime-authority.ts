@@ -14,7 +14,6 @@ import type { Installation } from "./config.ts";
 const sha256 = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).digest("hex");
 const dockerExec = promisify(execFile);
 const dockerOutput = async (args: string[]) => (await dockerExec("docker", args)).stdout.trim();
-const canonical = (value: unknown): string => Array.isArray(value) ? `[${value.map(canonical).join(",")}]` : value !== null && typeof value === "object" ? `{${Object.keys(value as object).sort().map(k => `${JSON.stringify(k)}:${canonical((value as Record<string, unknown>)[k])}`).join(",")}}` : JSON.stringify(value);
 
 /** The lifecycle-owned adapter used by the runtime. It is intentionally built
  * per authenticated operation so the Store authority context cannot be lost. */
