@@ -297,6 +297,38 @@ async function supersedesTx(tx: ManagedTransaction, primary: RpcRecallItem, deni
   if (supersedes.records.length > 8) primary.provenance.warnings.push({ code: "supersedes_incomplete", content: "Prior revision provenance exceeds the bounded eight-entry view." });
 }
 
+/** Only model-reported confidence admits a claim to semantic writes. Audit-only
+ * output (no confidence) stays an auditable decision and never becomes a Fact. */
+function admittedClaims(decisions: ExtractionDisposition[], claimOutput: Extract<ExtractionModelOutput, { task: "claim" }>) {
+  return decisions.flatMap(decision => {
+    if (decision.disposition !== "retain" && decision.disposition !== "correct") return [];
+    const extracted = claimOutput.claims[decision.claim_index];
+    if (!extracted) throw new ExtractionAuditError("extraction_audit_conflict");
+    const confidence = decision.confidence ?? extracted.confidence;
+    return confidence === undefined ? [] : [{ decision, extracted, confidence }];
+  });
+}
+type AdmittedClaim = ReturnType<typeof admittedClaims>[number];
+
+/** What one materialization pass over a source shares between its claims. Entities first seen in the pass keep one
+ * allocated id per entity_key, so two claims of one source share a single new Entity whichever is written first. */
+interface MaterializationPass {
+  judge: ExtractionAttempt; pipelineId: string; source: Omit<SemanticSourceContext["episode"], "content_language">;
+  language: string; profile: string; allocatedEntities: Map<string, string>;
+}
+
+/** Per-source custody is written exactly once; readiness requires every covered source to carry custody even when the
+ * judge admitted nothing or every claim was refused. Returns whether any Fact was created. */
+async function custodyRecordTx(tx: ManagedTransaction, custody: string, pass: MaterializationPass, written: { factIds: string[]; refused: string[]; duplicates: string[] }): Promise<boolean> {
+  const { judge, source, profile } = pass, { factIds, refused, duplicates } = written;
+  const created = factIds.length > 0;
+  await tx.run(`CREATE (:MaterializationOperation {id:$id,digest:$digest,result:$result,occurrence_key:$key,source_episode_id:$source,generation:$generation,semantic_profile_id:$profile,fact_id:$fact,link_id:$link})`,
+    { id: uuidv7(), digest: extractionBodyDigest({ generation: judge.generation_id, source: source.id, judge: judge.id, facts: factIds, refused, duplicates }),
+      result: canonicalExtractionBody({ created, facts: factIds.length, refused, ...(duplicates.length ? { duplicates } : {}) }), key: custody, source: source.id, generation: judge.generation_id, profile,
+      fact: created ? `custody:${source.id}` : `suppressed:${source.id}`, link: created ? `custody:${source.id}` : `suppressed:${source.id}` });
+  return created;
+}
+
 export class Store {
   private readonly driver: Driver;
   private readonly database: string;
@@ -2467,101 +2499,73 @@ export class Store {
    * binds to a fixed digest, and no Fact of the source is written while a verdict
    * is still owed. Verdicts are applied mechanically: CONTRASTS and INVALIDATES
    * new->candidate (never onto an invalidator), a duplicate suppresses the write. */
-  private async materializeExtractionPipelineTx(tx: ManagedTransaction, pipeline: {
-    claim: ModelTask; claim_attempt: ExtractionAttempt | null; judge: ModelTask | null; judge_attempt: ExtractionAttempt | null; decisions: ExtractionDisposition[];
-  }, policy: PolicyState): Promise<{ semantic_writes: boolean; relation_judge?: "disabled" | "pending" | "complete" | "omitted" }> {
-    const judge = pipeline.judge_attempt, claim = pipeline.claim_attempt;
-    if (!judge || judge.state !== "succeeded" || !judge.output || !claim || claim.state !== "succeeded" || !claim.output || !pipeline.judge) return { semantic_writes: false };
-    const relationJudge = this.relationJudge ? "complete" as const : "disabled" as const;
-    const claimOutput = ExtractionModelOutput.parse(JSON.parse(claim.output.canonical_body));
-    if (claimOutput.task !== "claim") throw new ExtractionAuditError("extraction_audit_conflict");
-    const judgeOutput = ExtractionModelOutput.parse(JSON.parse(judge.output.canonical_body));
-    if (judgeOutput.task !== "judge_claims") throw new ExtractionAuditError("extraction_audit_conflict");
-    // Only model-reported confidence admits a claim to semantic writes. Audit-only
-    // output (no confidence) stays an auditable decision and never becomes a Fact.
-    const admitted = pipeline.decisions.flatMap(decision => {
-      if (decision.disposition !== "retain" && decision.disposition !== "correct") return [];
-      const extracted = claimOutput.claims[decision.claim_index];
-      if (!extracted) throw new ExtractionAuditError("extraction_audit_conflict");
-      const confidence = decision.confidence ?? extracted.confidence;
-      return confidence === undefined ? [] : [{ decision, extracted, confidence }];
-    });
-    // Per-source custody is written exactly once; readiness requires every covered
-    // source to carry custody even when the judge admitted nothing or every claim was refused.
-    const custody = extractionBodyDigest([judge.generation_id, judge.source_id]);
-    const priorCustody = await tx.run(`MATCH (o:MaterializationOperation {occurrence_key:$key}) RETURN o.result AS result`, { key: custody });
-    if (priorCustody.records[0]) {
-      const result = JSON.parse(priorCustody.records[0].get("result")) as { created?: boolean; omitted?: string };
-      return { semantic_writes: result.created === true, relation_judge: result.omitted === "relation_judge_exhausted" ? "omitted" : relationJudge };
+  private premiseTx(tx: ManagedTransaction, occurrence: string, validated: ValidatedSemanticClaim, pass: MaterializationPass) {
+    return this.factRelationVerdictTx(tx, { occurrence, pipeline_id: pass.pipelineId, source: pass.source, generation: pass.judge.generation_id, validated });
+  }
+
+  /** One admitted claim resolved against the source: entity mentions (existing, new with an id allocated once per key, or
+   * unresolved), the claim's time, and the semantic-claim validation verdict. */
+  private async prepareClaimTx(tx: ManagedTransaction, { decision, extracted, confidence }: AdmittedClaim, pass: MaterializationPass) {
+    const { judge, source, language, allocatedEntities } = pass;
+    const occurrence = extractionBodyDigest([judge.generation_id, judge.source_id, judge.id, decision.claim_index]);
+    const resolutions: SemanticResolution["entity_resolutions"] = [], references: { mention: string; entity_id: string | null }[] = [];
+    for (const entity of extracted.entities ?? []) {
+      if (references.some(reference => reference.mention === entity.mention)) continue;
+      const key = extractionBodyDigest({ generation: judge.generation_id, normalized_name: entity.normalized_name, entity_kind: entity.entity_kind });
+      const existing = await tx.run(`MATCH (e:Entity {generation:$generation,entity_key:$key}) RETURN e.id AS id LIMIT 1`, { generation: judge.generation_id, key });
+      const known = existing.records[0]?.get("id");
+      if (typeof known === "string") { resolutions.push({ status: "existing", mention: entity.mention, entity_id: known }); references.push({ mention: entity.mention, entity_id: known }); }
+      else if (!source.content.includes(entity.normalized_name)) { resolutions.push({ status: "unresolved", mention: entity.mention }); references.push({ mention: entity.mention, entity_id: null }); }
+      else {
+        const entity_id = allocatedEntities.get(key) ?? uuidv7();
+        allocatedEntities.set(key, entity_id);
+        resolutions.push({ status: "new", mention: entity.mention, entity_id, normalized_name: entity.normalized_name, entity_kind: entity.entity_kind, entity_key: key }); references.push({ mention: entity.mention, entity_id });
+      }
     }
-    const source = await this.semanticEpisodeTx(tx, judge.source_id, policy);
-    if (judge.source_revision !== source.revision_key || judge.body_digest !== source.content_digest || judge.source_ingest_seq !== source.ingest_seq)
-      throw new ExtractionAuditError("extraction_audit_stale");
-    const reported = claimOutput.language.toLowerCase();
-    const language = /^[a-z]{2,8}(?:-[a-z0-9]{1,8})*$/.test(reported) ? reported : "und";
-    const profile = pipeline.judge.model;
-    // Entities first seen in this pass keep one allocated id per entity_key, so two
-    // claims of one source share a single new Entity whichever of them is written first.
-    const allocatedEntities = new Map<string, string>();
-    const prepare = async ({ decision, extracted, confidence }: (typeof admitted)[number]) => {
-      const occurrence = extractionBodyDigest([judge.generation_id, judge.source_id, judge.id, decision.claim_index]);
-      const resolutions: SemanticResolution["entity_resolutions"] = [], references: { mention: string; entity_id: string | null }[] = [];
-      for (const entity of extracted.entities ?? []) {
-        if (references.some(reference => reference.mention === entity.mention)) continue;
-        const key = extractionBodyDigest({ generation: judge.generation_id, normalized_name: entity.normalized_name, entity_kind: entity.entity_kind });
-        const existing = await tx.run(`MATCH (e:Entity {generation:$generation,entity_key:$key}) RETURN e.id AS id LIMIT 1`, { generation: judge.generation_id, key });
-        const known = existing.records[0]?.get("id");
-        if (typeof known === "string") { resolutions.push({ status: "existing", mention: entity.mention, entity_id: known }); references.push({ mention: entity.mention, entity_id: known }); }
-        else if (!source.content.includes(entity.normalized_name)) { resolutions.push({ status: "unresolved", mention: entity.mention }); references.push({ mention: entity.mention, entity_id: null }); }
-        else {
-          const entity_id = allocatedEntities.get(key) ?? uuidv7();
-          allocatedEntities.set(key, entity_id);
-          resolutions.push({ status: "new", mention: entity.mention, entity_id, normalized_name: entity.normalized_name, entity_kind: entity.entity_kind, entity_key: key }); references.push({ mention: entity.mention, entity_id });
-        }
-      }
-      const time = extracted.time ? semanticClaimTime(extracted.time) : { time_value: source.time.time_value, time_utc: source.time.time_utc, time_precision: "inherited" as const, resolution: "inherited" as const, anchor_time_utc: source.time.time_utc };
-      const semantic = { content: extracted.text, content_language: language, sub_kind: extracted.sub_kind ?? "fact", modality: extracted.speech_act ?? "asserted",
-        confidence, time, entities: references, subject_keys: null, predicate_text: [...extracted.text.normalize("NFC")].slice(0, 256).join(""),
-        scope: { object_keys: [], location_keys: [], quantities: [], condition: null, attribution_speaker_keys: [] }, scope_complete: false,
-        evidence: { kind: "source_locus" as const, span: { start: decision.evidence.start, end: decision.evidence.end } } };
-      const digest = extractionBodyDigest(semantic);
-      const resolution = SemanticResolution.parse({ entity_resolutions: resolutions, attribution_speakers: [], allow_no_single_locus: false, content_language: language });
-      try {
-        const validated = validateSemanticClaim(semantic, { generation: judge.generation_id, fact_language_policy: "source", allow_no_single_locus: false,
-          episode: { ...source, content_language: language }, entity_resolutions: resolutions, attribution_speakers: [] });
-        return { occurrence, digest, resolution, validated, refused: null };
-      } catch (error) {
-        if (!(error instanceof SemanticClaimValidationError)) throw error;
-        return { occurrence, digest, resolution, validated: null, refused: error.code };
-      }
-    };
-    const premise = (claim: { occurrence: string; validated: ValidatedSemanticClaim }) =>
-      this.factRelationVerdictTx(tx, { occurrence: claim.occurrence, pipeline_id: pipeline.claim.id, source, generation: judge.generation_id, validated: claim.validated });
-    // Phase 1 (relation judge on): bind every validated claim's premise; write nothing while a verdict is owed.
-    if (this.relationJudge) {
-      let pending = false;
-      for (const candidate of admitted) {
-        const claim = await prepare(candidate);
-        if (claim.validated && await premise({ occurrence: claim.occurrence, validated: claim.validated }) === "pending") pending = true;
-      }
-      if (pending) return { semantic_writes: false, relation_judge: "pending" };
+    const time = extracted.time ? semanticClaimTime(extracted.time) : { time_value: source.time.time_value, time_utc: source.time.time_utc, time_precision: "inherited" as const, resolution: "inherited" as const, anchor_time_utc: source.time.time_utc };
+    const semantic = { content: extracted.text, content_language: language, sub_kind: extracted.sub_kind ?? "fact", modality: extracted.speech_act ?? "asserted",
+      confidence, time, entities: references, subject_keys: null, predicate_text: [...extracted.text.normalize("NFC")].slice(0, 256).join(""),
+      scope: { object_keys: [], location_keys: [], quantities: [], condition: null, attribution_speaker_keys: [] }, scope_complete: false,
+      evidence: { kind: "source_locus" as const, span: { start: decision.evidence.start, end: decision.evidence.end } } };
+    const digest = extractionBodyDigest(semantic);
+    const resolution = SemanticResolution.parse({ entity_resolutions: resolutions, attribution_speakers: [], allow_no_single_locus: false, content_language: language });
+    try {
+      const validated = validateSemanticClaim(semantic, { generation: judge.generation_id, fact_language_policy: "source", allow_no_single_locus: false,
+        episode: { ...source, content_language: language }, entity_resolutions: resolutions, attribution_speakers: [] });
+      return { occurrence, digest, resolution, validated, refused: null };
+    } catch (error) {
+      if (!(error instanceof SemanticClaimValidationError)) throw error;
+      return { occurrence, digest, resolution, validated: null, refused: error.code };
     }
-    // Phase 2: one transaction writes every operation of the source, so a retry either
-    // sees custody or repeats all of it. Claims are re-resolved in order, so an Entity
-    // created by an earlier claim of this source is reused rather than duplicated.
+  }
+
+  /** Phase 1 (relation judge on): bind every validated claim's premise; true while any verdict is still owed. */
+  private async bindVerdictsTx(tx: ManagedTransaction, admitted: AdmittedClaim[], pass: MaterializationPass): Promise<boolean> {
+    let pending = false;
+    for (const candidate of admitted) {
+      const claim = await this.prepareClaimTx(tx, candidate, pass);
+      if (claim.validated && await this.premiseTx(tx, claim.occurrence, claim.validated, pass) === "pending") pending = true;
+    }
+    return pending;
+  }
+
+  /** Phase 2: every operation of the source in this transaction, so a retry either sees custody or repeats all of it.
+   * Claims are re-resolved in order, so an Entity created by an earlier claim of this source is reused rather than duplicated. */
+  private async writeAdmittedClaimsTx(tx: ManagedTransaction, admitted: AdmittedClaim[], pass: MaterializationPass, policy: PolicyState) {
+    const { judge, source, profile } = pass;
     const factIds: string[] = [], refused: string[] = [], duplicates: string[] = [];
     const contentFree = (fact: string, digest: string, result: object) =>
       tx.run(`CREATE (:MaterializationOperation {id:$id,digest:$digest,result:$result,occurrence_key:$key,source_episode_id:$source,generation:$generation,semantic_profile_id:$profile,fact_id:$fact,link_id:$link})`,
         { id: uuidv7(), digest, result: canonicalExtractionBody(result), key: fact, source: source.id, generation: judge.generation_id, profile, fact, link: fact });
     for (const candidate of admitted) {
-      const { occurrence, digest, resolution, validated, refused: refusal } = await prepare(candidate);
+      const { occurrence, digest, resolution, validated, refused: refusal } = await this.prepareClaimTx(tx, candidate, pass);
       if (!validated) {
         // A refused claim is retained as a content-free operation so the pipeline stays idempotent and auditable.
         await contentFree(`refused:${occurrence}`, digest, { created: false, refused: refusal });
         refused.push(refusal);
         continue;
       }
-      const judgements = this.relationJudge ? await premise({ occurrence, validated }) : null;
+      const judgements = this.relationJudge ? await this.premiseTx(tx, occurrence, validated, pass) : null;
       if (judgements === "pending") throw new ExtractionAuditError("extraction_audit_conflict");
       const judged = judgements ? await this.decideFactRelationsTx(tx, judge.generation_id, judgements) : null;
       if (judged?.duplicate_of) {
@@ -2576,11 +2580,38 @@ export class Store {
         await this.mergeLinkTx(tx, MemoryLink.parse({ id: link.id, from: allocated.fact_id, to: link.to, role: link.role, content: link.content, weight: link.weight }));
       factIds.push(allocated.fact_id);
     }
-    const created = factIds.length > 0;
-    await tx.run(`CREATE (:MaterializationOperation {id:$id,digest:$digest,result:$result,occurrence_key:$key,source_episode_id:$source,generation:$generation,semantic_profile_id:$profile,fact_id:$fact,link_id:$link})`,
-      { id: uuidv7(), digest: extractionBodyDigest({ generation: judge.generation_id, source: source.id, judge: judge.id, facts: factIds, refused, duplicates }),
-        result: canonicalExtractionBody({ created, facts: factIds.length, refused, ...(duplicates.length ? { duplicates } : {}) }), key: custody, source: source.id, generation: judge.generation_id, profile,
-        fact: created ? `custody:${source.id}` : `suppressed:${source.id}`, link: created ? `custody:${source.id}` : `suppressed:${source.id}` });
+    return { factIds, refused, duplicates };
+  }
+
+  private async materializeExtractionPipelineTx(tx: ManagedTransaction, pipeline: {
+    claim: ModelTask; claim_attempt: ExtractionAttempt | null; judge: ModelTask | null; judge_attempt: ExtractionAttempt | null; decisions: ExtractionDisposition[];
+  }, policy: PolicyState): Promise<{ semantic_writes: boolean; relation_judge?: "disabled" | "pending" | "complete" | "omitted" }> {
+    const judge = pipeline.judge_attempt, claim = pipeline.claim_attempt;
+    if (!judge || judge.state !== "succeeded" || !judge.output || !claim || claim.state !== "succeeded" || !claim.output || !pipeline.judge) return { semantic_writes: false };
+    const relationJudge = this.relationJudge ? "complete" as const : "disabled" as const;
+    const claimOutput = ExtractionModelOutput.parse(JSON.parse(claim.output.canonical_body));
+    if (claimOutput.task !== "claim") throw new ExtractionAuditError("extraction_audit_conflict");
+    const judgeOutput = ExtractionModelOutput.parse(JSON.parse(judge.output.canonical_body));
+    if (judgeOutput.task !== "judge_claims") throw new ExtractionAuditError("extraction_audit_conflict");
+    const admitted = admittedClaims(pipeline.decisions, claimOutput);
+    // Per-source custody is written exactly once; readiness requires every covered
+    // source to carry custody even when the judge admitted nothing or every claim was refused.
+    const custody = extractionBodyDigest([judge.generation_id, judge.source_id]);
+    const priorCustody = await tx.run(`MATCH (o:MaterializationOperation {occurrence_key:$key}) RETURN o.result AS result`, { key: custody });
+    if (priorCustody.records[0]) {
+      const result = JSON.parse(priorCustody.records[0].get("result")) as { created?: boolean; omitted?: string };
+      return { semantic_writes: result.created === true, relation_judge: result.omitted === "relation_judge_exhausted" ? "omitted" : relationJudge };
+    }
+    const source = await this.semanticEpisodeTx(tx, judge.source_id, policy);
+    if (judge.source_revision !== source.revision_key || judge.body_digest !== source.content_digest || judge.source_ingest_seq !== source.ingest_seq)
+      throw new ExtractionAuditError("extraction_audit_stale");
+    const reported = claimOutput.language.toLowerCase();
+    const language = /^[a-z]{2,8}(?:-[a-z0-9]{1,8})*$/.test(reported) ? reported : "und";
+    const profile = pipeline.judge.model;
+    const pass: MaterializationPass = { judge, pipelineId: pipeline.claim.id, source, language, profile, allocatedEntities: new Map() };
+    if (this.relationJudge && await this.bindVerdictsTx(tx, admitted, pass)) return { semantic_writes: false, relation_judge: "pending" };
+    const { factIds, refused, duplicates } = await this.writeAdmittedClaimsTx(tx, admitted, pass, policy);
+    const created = await custodyRecordTx(tx, custody, pass, { factIds, refused, duplicates });
     return { semantic_writes: created, relation_judge: relationJudge };
   }
 
