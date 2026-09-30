@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { ClaimSubKind, EPISODE_SCHEMAS, SCHEMA_ID } from "./element.ts";
+import { lineageInvariants } from "./episode-lineage.ts";
 import { canonicalExtractionBody, extractionBodyDigest } from "./extraction.ts";
 
 const id = z.uuidv7();
@@ -98,14 +99,7 @@ const lineage = z.strictObject({
   episode_id: id, lineage_mode: z.enum(["direct", "receipts"]),
   parent_recall_ids: ordered(id, 4), context_digests: z.array(hash).max(4),
   root_episode_ids: ordered(id, 16), echo_depth: count.max(8), complete: z.boolean(),
-}).superRefine((v, ctx) => {
-  if (v.parent_recall_ids.length !== v.context_digests.length
-    || (v.lineage_mode === "direct" && (v.parent_recall_ids.length !== 0 || v.echo_depth !== 0 || !v.complete
-      || v.root_episode_ids.length !== 1 || v.root_episode_ids[0] !== v.episode_id))
-    || (v.lineage_mode === "receipts" && (v.parent_recall_ids.length === 0 || v.echo_depth === 0))
-    || (v.complete && v.root_episode_ids.length === 0))
-    ctx.addIssue({ code: "custom", message: "invalid retained lineage" });
-});
+}).superRefine(lineageInvariants);
 const provenance = z.discriminatedUnion("episode_digest_version", [
   z.strictObject({ episode_digest_version: z.literal(1), origin_role: role.nullable(), lineage: z.null(), lineage_digest: z.null() }),
   z.strictObject({ episode_digest_version: z.literal(2), origin_role: role, lineage, lineage_digest: hash }),

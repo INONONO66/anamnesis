@@ -1,6 +1,5 @@
 import { createReadStream } from "node:fs";
-import { readdir } from "node:fs/promises";
-import { join } from "node:path";
+import { walkSorted } from "./walk.ts";
 import { createInterface } from "node:readline";
 import { Database } from "bun:sqlite";
 import { CONVERSATION_ROLES, SESSION_HEADER, byEpisodeTime, createSessionParser, isRecord, messageText, optionalText, parseEvent, toEpisode, type RawSessionEpisode, type SessionEvent } from "./pi-session.ts";
@@ -171,24 +170,11 @@ interface Sources {
 async function sources(root: string): Promise<Sources> {
   const transcripts: string[] = [];
   const databases: string[] = [];
-  const walk = async (directory: string): Promise<void> => {
-    const entries = await readdir(directory, { withFileTypes: true }).catch(
-      () => [],
-    );
-    for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
-      if (entry.name.startsWith("._")) continue;
-      const path = join(directory, entry.name);
-      if (entry.isDirectory()) {
-        await walk(path);
-        continue;
-      }
-      if (!entry.isFile()) continue;
-      if (entry.name === DERIVED_TRANSCRIPT) continue;
-      if (entry.name.endsWith(".jsonl")) transcripts.push(path);
-      else if (entry.name.endsWith(".db")) databases.push(path);
-    }
-  };
-  await walk(root);
+  await walkSorted(root, (entry, path) => {
+    if (!entry.isFile() || entry.name === DERIVED_TRANSCRIPT) return;
+    if (entry.name.endsWith(".jsonl")) transcripts.push(path);
+    else if (entry.name.endsWith(".db")) databases.push(path);
+  });
   return { transcripts, databases };
 }
 

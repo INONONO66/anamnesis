@@ -1,5 +1,5 @@
 import { createReadStream } from "node:fs";
-import { readdir } from "node:fs/promises";
+import { walkSorted } from "./walk.ts";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { byEpisodeTime, createSessionParser, isRecord, optionalText, parseEvent, toEpisode, type RawSessionEpisode, type SessionEvent } from "./pi-session.ts";
@@ -49,18 +49,9 @@ async function readSession(path: string): Promise<SessionEvent[]> {
  */
 async function transcripts(root: string): Promise<string[]> {
   const found: string[] = [];
-  const walk = async (directory: string): Promise<void> => {
-    const entries = await readdir(directory, { withFileTypes: true }).catch(
-      () => [],
-    );
-    for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
-      if (entry.name.startsWith("._")) continue;
-      const path = join(directory, entry.name);
-      if (entry.isDirectory()) await walk(path);
-      else if (entry.isFile() && entry.name.endsWith(".jsonl")) found.push(path);
-    }
-  };
-  await walk(join(root, SESSIONS));
+  await walkSorted(join(root, SESSIONS), (entry, path) => {
+    if (entry.isFile() && entry.name.endsWith(".jsonl")) found.push(path);
+  });
   return found;
 }
 

@@ -82,3 +82,20 @@ export async function walkTree(root: string, bounds: WalkBounds, fingerprints: M
   }
   await walk(root, 0);
 }
+
+export interface TreeLimits { maxFiles: number; maxSnapshotBytes: number }
+/** A bounded walk that admits files through `admit` (bytes accepted, undefined to skip) into a fingerprinted snapshot tree. */
+export async function snapshotTree(root: string, bounds: WalkBounds, limits: TreeLimits, admit: (path: string, local: string, info: FileInfo, name: string) => number | undefined): Promise<{ files: string[]; fingerprints: Map<string, string> }> {
+  const files: string[] = [], fingerprints = new Map<string, string>();
+  let bytes = 0;
+  await walkTree(root, bounds, fingerprints, (path, local, info, name) => {
+    const size = admit(path, local, info, name);
+    if (size === undefined) return;
+    bytes += size;
+    if (bytes > limits.maxSnapshotBytes) throw new Error("source_snapshot_too_large");
+    if (files.length >= limits.maxFiles) throw new Error("source_file_limit");
+    files.push(local); fingerprints.set(local, fingerprint(info));
+  });
+  if (!files.length) throw new Error("source_no_export_files");
+  return { files, fingerprints };
+}

@@ -5,7 +5,7 @@ import type { RememberInput } from "@anamnesis/core";
 import { RpcRememberParams } from "@anamnesis/protocol";
 import { RpcClient } from "./client.ts";
 import { ingestSnapshot, sourceRevisionKey, type SourceRecord } from "./source.ts";
-import { fingerprint, lines, sha, walkTree, type FileInfo } from "./source-files.ts";
+import { lines, sha, snapshotTree, type FileInfo } from "./source-files.ts";
 
 const MAX_FILES = 16_384;
 const MAX_ENTRIES = 65_536;
@@ -47,16 +47,9 @@ function admitFile(path: string, info: FileInfo): number {
   if (info.size > BigInt(MAX_FILE_BYTES)) throw new Error(`source_file_too_large: ${path}`);
   return Number(info.size);
 }
-async function tree(root: string, lane: RawLane): Promise<Tree> {
-  const files: string[] = [], fingerprints = new Map<string, string>();
-  let bytes = 0;
+function tree(root: string, lane: RawLane): Promise<Tree> {
   // Bounded depth-first code-unit file order; no export-wide episode sort.
-  await walkTree(root, { maxDepth: MAX_DEPTH, maxEntries: MAX_ENTRIES }, fingerprints, (path, local, info) => {
-    if (!lane.selects(local)) return;
-    bytes += admitFile(path, info); if (bytes > MAX_SNAPSHOT_BYTES) throw new Error("source_snapshot_too_large"); if (files.length >= MAX_FILES) throw new Error("source_file_limit"); files.push(local); fingerprints.set(local, fingerprint(info));
-  });
-  if (!files.length) throw new Error("source_no_export_files");
-  return { files, fingerprints };
+  return snapshotTree(root, { maxDepth: MAX_DEPTH, maxEntries: MAX_ENTRIES }, { maxFiles: MAX_FILES, maxSnapshotBytes: MAX_SNAPSHOT_BYTES }, (path, local, info) => lane.selects(local) ? admitFile(path, info) : undefined);
 }
 
 interface Head { native: string; revision: string; key: string; previous: string | null; signature: string }

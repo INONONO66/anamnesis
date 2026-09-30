@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { AuthoritySnapshot } from "@anamnesis/core";
 import { constants, type BigIntStats } from "node:fs";
 import { lstat, open, opendir, realpath } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
@@ -43,14 +44,7 @@ interface ArchiveMember { path: string; role: Role; bytes: number; sha256: strin
 interface ArchiveObject { hash: string; size: number; media_type: string }
 /** Cutoff authority evidence. This is deliberately separate from the opaque
  * dump: a dump without this set cannot establish what was backed up. */
-export interface AuthoritySnapshot {
-  members: string[];
-  retained_generations: number[];
-  coverage: { ingest_seq: number; structure_revision: number; policy_revision: number };
-  physical_links: { id: string; from: string; to: string; role: "DERIVED_FROM" | "ConductingArc" }[];
-  invalidation_evidence: { id: string; source_hash: string; outcome_hash: string }[];
-  source_hashes: string[];
-}
+export type { AuthoritySnapshot };
 type AuthoritySnapshotRefusal = "authority_members_missing" | "authority_generations_missing" |
   "authority_coverage_missing" | "authority_links_missing" | "authority_invalidation_missing" | "authority_sources_missing";
 class AuthoritySnapshotError extends Error {
@@ -149,7 +143,7 @@ function text(value: unknown, pattern: RegExp, max = 256): value is string {
 function array(value: unknown, max: number, code: ArchiveAdmissionCode): unknown[] {
   need(Array.isArray(value) && value.length <= max, code, "array exceeds admission limit or is absent"); return value;
 }
-function canonical(value: unknown): string {
+export function canonical(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
   if (value !== null && typeof value === "object") {
     const obj = value as Record<string, unknown>;
@@ -157,7 +151,7 @@ function canonical(value: unknown): string {
   }
   return JSON.stringify(value);
 }
-function sha256(bytes: string | Uint8Array): string { return createHash("sha256").update(bytes).digest("hex"); }
+export function sha256(bytes: string | Uint8Array): string { return createHash("sha256").update(bytes).digest("hex"); }
 /** Index of the quote closing the string opened at `open`, honouring backslash escapes (raw.length when unterminated). */
 function stringEnd(raw: string, open: number): number {
   let i = open + 1;

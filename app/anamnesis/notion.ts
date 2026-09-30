@@ -5,7 +5,7 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { notionEpisode } from "@anamnesis/backfill";
 import { RpcRememberParams } from "@anamnesis/protocol";
 import { RpcClient } from "./client.ts";
-import { fingerprint, sha, walkTree } from "./source-files.ts";
+import { fingerprint, sha, snapshotTree } from "./source-files.ts";
 import { ingestSnapshot, type SourceRecord } from "./source.ts";
 
 const MAX_FILES = 1024;
@@ -14,21 +14,14 @@ const MAX_DEPTH = 32;
 const MAX_PAGE_BYTES = 8 * 1024 * 1024;
 const MAX_SNAPSHOT_BYTES = 256 * 1024 * 1024;
 interface Tree { files: string[]; fingerprints: Map<string, string>; }
-async function tree(root: string): Promise<Tree> {
-  const files: string[] = [], fingerprints = new Map<string, string>();
-  let bytes = 0;
+function tree(root: string): Promise<Tree> {
   // Only one bounded directory is sorted, never the export's episodes/time.
-  await walkTree(root, { maxDepth: MAX_DEPTH, maxEntries: MAX_ENTRIES }, fingerprints, (path, local, info, name) => {
-    if (!name.endsWith(".md")) return;
+  return snapshotTree(root, { maxDepth: MAX_DEPTH, maxEntries: MAX_ENTRIES }, { maxFiles: MAX_FILES, maxSnapshotBytes: MAX_SNAPSHOT_BYTES }, (path, _local, info, name) => {
+    if (!name.endsWith(".md")) return undefined;
     if (!info.isFile()) throw new Error(`source_not_regular_file: ${path}`);
     if (info.size > BigInt(MAX_PAGE_BYTES)) throw new Error(`source_record_too_large: ${path}`);
-    bytes += Number(info.size);
-    if (bytes > MAX_SNAPSHOT_BYTES) throw new Error("source_snapshot_too_large");
-    if (files.length >= MAX_FILES) throw new Error("source_file_limit");
-    files.push(local); fingerprints.set(local, fingerprint(info));
+    return Number(info.size);
   });
-  if (!files.length) throw new Error("source_no_export_files");
-  return { files, fingerprints };
 }
 async function page(root: string, name: string, expected: string): Promise<{ record: SourceRecord; rawHash: string }> {
   const path = join(root, name);
