@@ -193,8 +193,6 @@ Recall records full-text/top-20 query results, one-based minimum Fact ranks and
 Fact-hit coverage; contrast companions are included under the same policy and
 output budget as their primary Facts. Since `verify` reports admission health rather
 than graph counts, read-only database snapshots supplement its RPC output.
-`scripts/qa/dream-leiden-real.test.ts` requires a Docker VM with at least 3 GiB;
-its isolated GDS fixture uses an explicit hostname mapping and JVM heap caps.
 
 ## Verification and limits
 

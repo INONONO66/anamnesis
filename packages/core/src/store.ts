@@ -45,11 +45,10 @@ import { solvePpr } from "./dynamics/ppr.ts";
 import { ADOPTION_NUMERIC_VERSION } from "./dynamics/adoption-numeric.ts";
 import { attributeOutcome, normalizedRrf } from "./dynamics/ranking.ts";
 import { initialStability, retention } from "./dynamics/retention.ts";
-import { RpcEmbeddingRecoverParams, RpcEmbeddingAttempt, RpcEmbeddingRequeueParams, type RpcEmbeddingRequeueResult, RpcRecallParams, RpcRecallResult, type RpcRecallItem, RpcDreamAdmitParams, RpcDreamJob, RpcDreamLeaseParams, RpcDreamExpireParams, RpcDreamExecuteParams } from "../../protocol/src/rpc.ts";
+import { RpcEmbeddingRecoverParams, RpcEmbeddingAttempt, RpcEmbeddingRequeueParams, type RpcEmbeddingRequeueResult, RpcRecallParams, RpcRecallResult, type RpcRecallItem } from "../../protocol/src/rpc.ts";
 import { EmbeddingError, embeddingProfileId, validateVector, type EmbeddingProvider } from "./embedding.ts";
 import { admittedBudget, packRecall, canonicalContext, RecallError, type Tokenizers, type RecallBundle } from "./recall.ts";
 import { receiptBodyDigestInput, canonicalReceiptJson } from "./receipt-digest.ts";
-import { DreamAdapterError, type DreamLeidenAdapter } from "./dream-leiden-adapter.ts";
 
 /** Internal lease request: the engine names the provider that will run the task (never an RPC caller). */
 const LeaseModelTaskWithProvider = LeaseModelTask.extend({ provider: z.strictObject({ model: ModelTask.shape.model, model_incarnation: ModelTask.shape.model_incarnation }).optional() });
@@ -99,7 +98,6 @@ export interface StoreOptions {
   tokenizers?: Tokenizers;
   recallDefaultBytes?: number;
   /** Trusted runtime injection only; never loaded from an RPC or arbitrary command. */
-  dreamLeidenAdapter?: DreamLeidenAdapter;
   /** True when the extraction provider answers `judge_relations`: validated claims
    * then wait for Fact->Fact verdicts before any Fact of their source is written (D53). */
   relationJudge?: boolean;
@@ -637,7 +635,6 @@ export class Store {
   private readonly embeddingProvider: EmbeddingProvider | undefined;
   private readonly tokenizers: Tokenizers;
   private readonly recallDefaultBytes: number;
-  private readonly dreamLeidenAdapter: DreamLeidenAdapter | undefined;
   private readonly relationJudge: boolean;
 
   constructor(opts: StoreOptions, driver?: Driver) {
@@ -646,7 +643,6 @@ export class Store {
     this.embeddingProvider = opts.embeddingProvider;
     this.tokenizers = opts.tokenizers ?? new Map();
     this.recallDefaultBytes = z.number().int().min(0).max(1024 * 1024).parse(opts.recallDefaultBytes ?? 65536);
-    this.dreamLeidenAdapter = opts.dreamLeidenAdapter;
     this.driver =
       driver ??
       neo4j.driver(opts.uri, neo4j.auth.basic(opts.user, opts.password), {
@@ -3617,75 +3613,6 @@ export class Store {
         required_ingest_seq: required, covered_ingest_seq: covered,
         omission_digest: extractionBodyDigest(values.map(value => [value.partition, value.omission_digest])),
         policy_revision: policy.policy_revision, read_at: this.clock() });
-    });
-  }
-
-  async admitDream(input: RpcDreamAdmitParams, context: InstallationContext): Promise<RpcDreamJob> {
-    requireInstallation(context);
-    const request = RpcDreamAdmitParams.parse(input);
-    return this.extractionTx(context, async (tx, policy) => {
-      if (policy.policy_revision !== request.policy_revision) throw new Error("dream_fence_stale");
-      const meta = await tx.run(`MATCH (m:Meta {key:'meta'}) RETURN m.structure_revision AS structure,m.policy_revision AS policy,m.ingest_seq AS ingest`);
-      const m = meta.records[0];
-      if ((m?.get("structure") ?? 0) !== request.structure_revision || (m?.get("ingest") ?? 0) < request.covered_ingest_seq) throw new Error("dream_fence_stale");
-      await this.authorizeEpisodesTx(tx, request.source_ids, policy);
-      const rows = await tx.run(`MATCH (e:Element:Episode) WHERE e.id IN $ids RETURN e.id AS id,e.revision_key AS revision,e.content AS content,e.ingest_seq AS seq`, { ids: request.source_ids });
-      if (rows.records.length !== request.source_ids.length) throw new Error("dream_source_missing");
-      const receipts = rows.records.map(r => ({ id:r.get("id"), revision:r.get("revision"), body_digest:sha256(Buffer.from(r.get("content"), "utf8")), ingest_seq:r.get("seq"), allowed:true }));
-      const body = canonicalExtractionBody({ ...request, source_receipts: receipts });
-      const jobId = `dream-${sha256(Buffer.from(body))}`;
-      const old = await tx.run<{ body:string }>(`MATCH (j:DreamJob {id:$id}) RETURN j.body AS body`, {id:jobId});
-      if (old.records[0]) return RpcDreamJob.parse(JSON.parse(old.records[0].get("body")));
-      const job = RpcDreamJob.parse({ ...request, job_id:jobId, source_receipts:receipts, state:"queued", version:0, lease:null, semantic_writes:false, authority:"none" });
-      await tx.run(`CREATE (:DreamJob {id:$id,body:$body,state:'queued',version:0})`, {id:jobId,body:canonicalExtractionBody(job)});
-      return job;
-    });
-  }
-  async dreamStatus(id: string, context: InstallationContext): Promise<RpcDreamJob> {
-    requireInstallation(context);
-    return this.extractionTx(context, async tx => { const rows = await tx.run<{body:string}>(`MATCH (j:DreamJob {id:$id}) RETURN j.body AS body`,{id}); if (!rows.records[0]) throw new Error("dream_job_missing"); return RpcDreamJob.parse(JSON.parse(rows.records[0].get("body"))); });
-  }
-  async leaseDream(input: RpcDreamLeaseParams, context: InstallationContext): Promise<RpcDreamJob> { return this.mutateDream(input, context, false); }
-  async expireDream(input: RpcDreamExpireParams, context: InstallationContext): Promise<RpcDreamJob> { return this.mutateDream(input, context, true); }
-  async executeDream(input: RpcDreamExecuteParams, context: InstallationContext): Promise<RpcDreamJob> {
-    requireInstallation(context);
-    return this.extractionTx(context, async tx => {
-      const rows = await tx.run<{body:string}>(`MATCH (j:DreamJob {id:$id}) RETURN j.body AS body`, { id: input.job_id });
-      if (!rows.records[0]) throw new Error("dream_job_missing");
-      const job = RpcDreamJob.parse(JSON.parse(rows.records[0].get("body")));
-      if (job.version !== input.expected_version) throw new Error("dream_version_conflict");
-      if (job.state !== "queued") throw new Error("dream_not_queued");
-      const exportBytes = canonicalExtractionBody({ phase: job.phase, fence: { extraction_generation: job.extraction_generation, covered_ingest_seq: job.covered_ingest_seq, structure_revision: job.structure_revision, policy_revision: job.policy_revision }, source_receipts: job.source_receipts });
-      const exportDigest = sha256(Buffer.from(exportBytes));
-      const sourceIds = job.source_receipts.map(receipt => receipt.id);
-      const arcRows = await tx.run<{ from: string; to: string; weight: number }>(`MATCH (a:Element)-[l]->(b:Element)
-        WHERE a.id IN $ids AND b.id IN $ids AND type(l) IN ['MENTIONS','RELATES_TO']
-        RETURN a.id AS from,b.id AS to,toFloat(coalesce(l.weight,1.0)) AS weight ORDER BY from,to,l.id LIMIT 500000`, { ids: sourceIds });
-      const arcs = arcRows.records.map(row => ({ from: row.get('from'), to: row.get('to'), weight: row.get('weight') }));
-      const adapterInput = { operation_id: job.job_id, export_bytes: exportBytes, export_digest: exportDigest, source_receipts: job.source_receipts, graph: { node_count: sourceIds.length, arc_count: arcs.length, byte_count: Buffer.byteLength(exportBytes), nodes: sourceIds, arcs } };
-      try {
-        if (!this.dreamLeidenAdapter) throw new Error("dream_adapter_unavailable");
-        const result = await this.dreamLeidenAdapter.execute(adapterInput);
-        job.state = "succeeded"; job.version++;
-        job.execution = { state: "succeeded", attempt: 1, result, retryable: false };
-        await tx.run(`MATCH (j:DreamJob {id:$id}) SET j.body=$body,j.state=$state,j.version=$version`, { id:job.job_id, body:canonicalExtractionBody(job), state:job.state, version:job.version });
-        return job;
-      } catch (error) {
-        if (!(error instanceof DreamAdapterError) && (error as Error).message !== "dream_adapter_unavailable") throw error;
-        job.state = "unknown"; job.version++;
-        job.execution = { state: "unknown", attempt: 1, error: error instanceof Error ? error.message : "dream_adapter_unavailable", retryable: false };
-        await tx.run(`MATCH (j:DreamJob {id:$id}) SET j.body=$body,j.state=$state,j.version=$version`, { id:job.job_id, body:canonicalExtractionBody(job), state:job.state, version:job.version });
-        return job;
-      }
-    });
-  }
-  private async mutateDream(input: RpcDreamLeaseParams | RpcDreamExpireParams, context: InstallationContext, expire: boolean): Promise<RpcDreamJob> {
-    requireInstallation(context); return this.extractionTx(context, async tx => {
-      const rows = await tx.run<{body:string}>(`MATCH (j:DreamJob {id:$id}) RETURN j.body AS body`,{id:input.job_id}); if (!rows.records[0]) throw new Error("dream_job_missing");
-      const job = RpcDreamJob.parse(JSON.parse(rows.records[0].get("body"))); if (job.version !== input.expected_version) throw new Error("dream_version_conflict");
-      if (expire) { const request = input as RpcDreamExpireParams; if (job.state !== "leased" || !job.lease || job.lease.epoch !== request.lease_epoch) throw new Error("dream_lease_fenced"); job.state="queued"; job.lease=null; }
-      else { const request = input as RpcDreamLeaseParams; if (job.state !== "queued") throw new Error("dream_not_queued"); job.state="leased"; job.lease={worker_id:request.worker_id,epoch:`${job.job_id}:${job.version+1}`,expires_at:Date.now()+request.lease_ms}; }
-      job.version++; await tx.run(`MATCH (j:DreamJob {id:$id}) SET j.body=$body,j.state=$state,j.version=$version`,{id:job.job_id,body:canonicalExtractionBody(job),state:job.state,version:job.version}); return job;
     });
   }
 

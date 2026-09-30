@@ -25,7 +25,6 @@ export const RPC_LIMITS = {
 export const RPC_METHODS = [
   "hello", "status", "shutdown", "object.begin", "object.chunk",
   "extraction.audit.create", "extraction.audit.run", "extraction.audit.status",
-  "dream.admit", "dream.status", "dream.lease", "dream.expire", "dream.execute",
   "object.commit", "remember", "ingest.status", "commit", "graph.envelope", "hit-cache.verify", "hit-cache.rebuild", "backup", "restore", "backup.status", "restore.status", "policy.set", "policy.revoke", "recall", "embedding.recover", "embedding.status", "embedding.requeue",
 ] as const;
 export const RPC_FUTURE_METHODS = [] as const;
@@ -203,17 +202,6 @@ export const RpcCommitParams = z.strictObject({
   if (value.adopted && new Set(value.adopted).size !== value.adopted.length) context.addIssue({ code: "custom", message: "adopted IDs must be distinct" });
 });
 export type RpcCommitParams = z.infer<typeof RpcCommitParams>;
-export const RpcDreamFence = z.strictObject({ extraction_generation: counter, covered_ingest_seq: counter, structure_revision: counter, policy_revision: counter });
-export const RpcDreamAdmitParams = RpcDreamFence.extend({ phase: z.enum(["community", "synthesis", "profile"]), source_ids: z.array(z.uuidv7()).min(1).max(256) });
-export const RpcDreamLeaseParams = z.strictObject({ job_id: boundedString(256), expected_version: counter, worker_id: boundedString(256), lease_ms: counter.min(1).max(30000) });
-export type RpcDreamLeaseParams = z.infer<typeof RpcDreamLeaseParams>;
-export const RpcDreamExpireParams = z.strictObject({ job_id: boundedString(256), expected_version: counter, lease_epoch: boundedString(512) });
-export type RpcDreamExpireParams = z.infer<typeof RpcDreamExpireParams>;
-export const RpcDreamExecuteParams = z.strictObject({ job_id: boundedString(256), expected_version: counter });
-export type RpcDreamExecuteParams = z.infer<typeof RpcDreamExecuteParams>;
-export const RpcDreamJob = RpcDreamAdmitParams.extend({ job_id: boundedString(256), source_receipts: z.array(z.strictObject({ id: z.uuidv7(), revision: RpcHash, body_digest: RpcHash, ingest_seq: positiveCounter, allowed: z.literal(true) })).max(256), state: z.enum(["queued", "leased", "unknown", "succeeded"]), version: counter, lease: z.strictObject({ worker_id: boundedString(256), epoch: boundedString(512), expires_at: counter }).nullable(), semantic_writes: z.literal(false), authority: z.literal("none"), execution: z.strictObject({ state: z.enum(["attempted", "unknown", "succeeded"]), attempt: z.number().int().positive(), error: z.string().max(1024).optional(), result: z.unknown().optional(), retryable: z.literal(false) }).optional() });
-export type RpcDreamAdmitParams = z.infer<typeof RpcDreamAdmitParams>;
-export type RpcDreamJob = z.infer<typeof RpcDreamJob>;
 export const RpcHitCacheParams = z.strictObject({});
 export type RpcHitCacheParams = z.infer<typeof RpcHitCacheParams>;
 
@@ -262,11 +250,6 @@ export const RpcRequest = z.discriminatedUnion("method", [
   request("extraction.audit.create", CreateExtractionPipeline),
   request("extraction.audit.run", RunExtractionPipeline),
   request("extraction.audit.status", ExtractionPipelineStatus),
-  request("dream.admit", RpcDreamAdmitParams),
-  request("dream.status", z.strictObject({ job_id: boundedString(256) })),
-  request("dream.lease", RpcDreamLeaseParams),
-  request("dream.expire", RpcDreamExpireParams),
-  request("dream.execute", RpcDreamExecuteParams),
   request("recall", RpcRecallParams),
   request("graph.envelope", z.strictObject({ seed_ids: z.array(z.uuidv7()).min(1).max(128), T: counter.optional() })),
   request("embedding.recover", RpcEmbeddingRecoverParams),
@@ -300,7 +283,6 @@ export const RpcErrorCode = z.enum([
   "spool_corrupt", "unsupported_digest_version", "unknown_recall", "receipt_expired", "empty_commit", "invalid_selection", "unsupported_policy", "internal_error",
   "commit_mode_mismatch", "policy_denied", "policy_unavailable", "unknown_policy", "invalid_hit_evidence",
   "extraction_not_configured", "extraction_audit_conflict", "extraction_audit_incomplete", "extraction_audit_stale", "backup_adapter_unavailable", "restore_adapter_unavailable", "daemon_live", "member_mismatch", "archive_layout", "invalid_completion", "completion_mismatch", "incompatible_archive", "object_digest_mismatch", "invalid_dump",
-  "dream_input_invalid", "dream_fence_stale", "dream_source_missing", "dream_source_denied", "dream_source_stale", "dream_job_missing", "dream_version_conflict", "dream_lease_invalid", "dream_lease_expired", "dream_not_queued", "dream_lease_fenced", "dream_adapter_unavailable",
   "embedding_not_configured", "invalid_budget", "receipt_unavailable", "degree_probe_unavailable", "ordered_probe_unavailable",
 ]);
 export type RpcErrorCode = z.infer<typeof RpcErrorCode>;
@@ -461,11 +443,6 @@ export const RpcSuccessResponse = z.discriminatedUnion("method", [
   success("extraction.audit.create", ModelTask),
   success("extraction.audit.run", ExtractionPipeline),
   success("extraction.audit.status", ExtractionPipeline),
-  success("dream.admit", RpcDreamJob),
-  success("dream.status", RpcDreamJob),
-  success("dream.lease", RpcDreamJob),
-  success("dream.expire", RpcDreamJob),
-  success("dream.execute", RpcDreamJob),
   success("embedding.recover", RpcEmbeddingAttempt),
   success("embedding.status", z.union([RpcEmbeddingAttempt, z.strictObject({ state: z.literal("unknown"), operation_id: z.uuidv7() })])),
   success("embedding.requeue", RpcEmbeddingRequeueResult),

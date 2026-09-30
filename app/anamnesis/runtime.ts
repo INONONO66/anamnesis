@@ -11,7 +11,7 @@ import { elementDigest, verifyLineageRetry } from "../../packages/core/src/store
 import { EchoLineage, parseEpisodeLineage } from "../../packages/protocol/src/episode-lineage.ts";
 import type { CreateExtractionPipeline, RunExtractionPipeline } from '../../packages/protocol/src/extraction-audit.ts';
 import type { InstallationContext, CommitReceiptInput, RecallTransportInput } from "../../packages/core/src/store.ts";
-import type { RpcPolicySetParams, RpcPolicyRevokeParams, RpcRecallParams, RpcEmbeddingRecoverParams, RpcEmbeddingRequeueParams, RpcDreamAdmitParams, RpcDreamLeaseParams, RpcDreamExpireParams, RpcDreamExecuteParams } from "../../packages/protocol/src/rpc.ts";
+import type { RpcPolicySetParams, RpcPolicyRevokeParams, RpcRecallParams, RpcEmbeddingRecoverParams, RpcEmbeddingRequeueParams } from "../../packages/protocol/src/rpc.ts";
 import { DurableSpool, type SpoolEntry } from "../../packages/core/src/spool.ts";
 import { RPC_LIMITS, RPC_METHODS, RpcRememberParams, type RpcCapabilities, type RpcCommittedResult, type RpcExtractionPacing, type RpcIngestStatusParams, type RpcIngestStatusResult, type RpcStatusResult, type RpcWorkersStatus } from "../../packages/protocol/src/rpc.ts";
 import { atomicJson, EXTRACTION_PACING_DEFAULTS, hasCode, loadProviderConfig, syncDirectory, type ExtractionPacingConfig, type Installation } from "./config.ts";
@@ -24,8 +24,6 @@ import type { TrustedAuthorityAdapter } from "./backup-restore-orchestrator.ts";
 import { backupOwned, restoreOwned } from "./backup-restore-orchestrator.ts";
 import { createRuntimeAuthority, manifestTemplate, objectInventory } from "./runtime-authority.ts";
 import { NEO4J_IMAGE, NEO4J_VERSION } from "./owned-neo4j-adapter.ts";
-import { createDreamLeidenAdapter } from './dream-leiden-runtime.ts';
-import { trustedDreamLeiden, DREAM_GDS_IMAGE, DREAM_GDS_VERSION, DREAM_ALGORITHM, DREAM_NETWORK } from '../../packages/core/src/dream-leiden-adapter.ts';
 
 export const capabilities: RpcCapabilities = { methods: [...RPC_METHODS], recall: true, commit: true, policy: true, extraction: false, embeddings: false, writer_fence: "database" };
 function canonical(value: unknown): string {
@@ -131,14 +129,12 @@ export class Runtime {
     this.pacer = unpaced.extractionProvider && new PacedExtractionProvider(unpaced.extractionProvider, { minIntervalMs: pacing.minIntervalMs, jitterFraction: pacing.jitterFraction });
     const config = this.pacer ? { ...unpaced, extractionProvider: this.pacer } : unpaced;
     this.capabilities = { ...capabilities, extraction: !!config.extractionProvider, embeddings: !!config.embeddingProvider };
-    const rawDream = createDreamLeidenAdapter();
-    const dreamLeidenAdapter = rawDream ? trustedDreamLeiden({ image_digest: DREAM_GDS_IMAGE, plugin_digest: 'sha256:246e3fbbbf733b4def1e7b0a9740a2309f6605ee8a7b46b29fe1de56d0a4b47c', algorithm: DREAM_ALGORITHM, gds_version: DREAM_GDS_VERSION, network: DREAM_NETWORK, adapter: rawDream }) : undefined;
     // Same bounded deadlines as the reader: with defaults (30 s connect, 60 s acquisition) a background lane meeting a
     // dead Bolt endpoint held the serial dispatch slot past the 30 s socket idle deadline and dropped queued RPCs.
     const writer = neo4j.driver(config.uri, neo4j.auth.basic(config.user, config.password), {
       disableLosslessIntegers: true, connectionTimeout: 1000, connectionAcquisitionTimeout: 1500, maxTransactionRetryTime: 0,
     });
-    this.engine = new Engine({ ...config, driver: writer, ...(dreamLeidenAdapter ? { dreamLeidenAdapter } : {}) });
+    this.engine = new Engine({ ...config, driver: writer });
     this.extraction = config.extractionProvider && new ExtractionScheduler(this.engine, { provider: config.extractionProvider, maxInFlight: pacing.maxInFlight,
       context: Object.freeze({ principal: "installation", commit_mode: "auto", client_binding: randomUUID() }),
       read: (query, params) => this.read(query, params), wake: () => this.wakeExtraction() });
@@ -647,11 +643,6 @@ export class Runtime {
     return this.engine.graphEnvelope(params.seed_ids, params.T === undefined ? {} : { T: params.T }, context);
   }
 
-  async admitDream(params: RpcDreamAdmitParams, context: InstallationContext) { await this.requireStorage(); return this.engine.store.admitDream(params, context); }
-  async dreamStatus(id: string, context: InstallationContext) { await this.requireStorage(); return this.engine.store.dreamStatus(id, context); }
-  async leaseDream(params: RpcDreamLeaseParams, context: InstallationContext) { await this.requireStorage(); return this.engine.store.leaseDream(params, context); }
-  async expireDream(params: RpcDreamExpireParams, context: InstallationContext) { await this.requireStorage(); return this.engine.store.expireDream(params, context); }
-  async executeDream(params: RpcDreamExecuteParams, context: InstallationContext) { await this.requireStorage(); return this.engine.store.executeDream(params, context); }
 
   async createExtractionPipeline(params: CreateExtractionPipeline, context: InstallationContext) {
     await this.requireStorage();

@@ -313,11 +313,6 @@ export async function foreground(): Promise<void> {
       case "extraction.audit.create": return runtime.createExtractionPipeline(request.params,connection.context!);
       case "extraction.audit.run": return runtime.runExtractionPipeline(request.params,connection.context!);
       case "extraction.audit.status": return runtime.extractionPipelineStatus(request.params.pipeline_id,connection.context!);
-      case "dream.admit": return runtime.admitDream(request.params, connection.context!);
-      case "dream.status": return runtime.dreamStatus(request.params.job_id, connection.context!);
-      case "dream.lease": return runtime.leaseDream(request.params, connection.context!);
-      case "dream.expire": return runtime.expireDream(request.params, connection.context!);
-      case "dream.execute": return runtime.executeDream(request.params, connection.context!);
       case "graph.envelope": return runtime.graphEnvelope(request.params as { seed_ids: string[]; T?: number }, connection.context!);
       case "embedding.recover": return runtime.recoverEmbedding(request.params, connection.context!);
       case "embedding.status": return runtime.embeddingStatus(request.params.operation_id, connection.context!);

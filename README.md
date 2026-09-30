@@ -7,10 +7,9 @@ connect to it, send it what happened, and ask it what it knows. The graph and
 its indexes live in a single local Neo4j; raw payload bytes live next to it on
 disk. The repeated numeric work of remembering — spreading activation,
 forgetting, fusion — runs in TypeScript inside the daemon, strictly bounded
-per request. Neo4j GDS runs outside that request path: the dream lane's
-community detection (Leiden) uses it through a pinned, digest-verified
-adapter, and offline validation uses it to measure how much the bounding
-costs.
+per request. Neo4j GDS is used offline only, to measure how much that
+bounding costs; the dreaming lane that would use it at runtime is a v0.3
+design (docs/02 §7) and is not part of this daemon.
 
 - **Three layers, three write disciplines** — originals (episodes, payload
   metadata, hit ledger) are CREATE-only; derived structure (facts, entities,
