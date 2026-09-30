@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { constants } from "node:fs";
+import { type BigIntStats, constants } from "node:fs";
 import { createReadStream, createWriteStream } from "node:fs";
 import { mkdir, open, rename, rm, lstat, readdir, readFile, writeFile } from "node:fs/promises";
 import { Transform } from "node:stream";
@@ -35,6 +35,35 @@ const OBJECT_LIMIT = 10_000, OBJECT_BYTES = 256 * 1024 ** 2, TOTAL_OBJECT_BYTES 
 /** Enumerates and copies committed ObjectStore pairs without buffering payloads.
  * The source is fenced by owner/device/inode/stat checks; every destination is
  * exclusive and published only after a streamed hash and fsync. */
+/** One object prefix directory: owned, unshared, and every sidecar paired with its object; returns its stat and sorted names. */
+async function admitPrefix(dir: string): Promise<{ ds: BigIntStats; names: string[] }> {
+  const ds = await lstat(dir, { bigint: true });
+  if (!ds.isDirectory() || ds.isSymbolicLink() || ds.uid !== BigInt(process.getuid!()) || (ds.mode & 0o022n) !== 0n) throw new AuthorityOrchestrationError("unsafe_path", "object prefix is not owned/private");
+  const names = (await readdir(dir)).sort();
+  if (names.some(name => name.endsWith(".json") && (!HASH.test(name.slice(0, -5)) || !names.includes(name.slice(0, -5))))) throw new AuthorityOrchestrationError("invalid_object_store", "orphan object sidecar");
+  return { ds, names };
+}
+/** One named object: a regular file with a single link, owned and unshared, whose sidecar agrees with it. */
+async function admitObject(dir: string, name: string): Promise<{ data: string; before: BigIntStats; mediaType: string }> {
+  const data = join(dir, name), sidecar = `${data}.json`, before = await lstat(data, { bigint: true });
+  if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1n || before.uid !== BigInt(process.getuid!()) || (before.mode & 0o022n) !== 0n || before.size > BigInt(OBJECT_BYTES)) throw new AuthorityOrchestrationError("unsafe_path", "object is not a bounded owned regular file");
+  const raw = JSON.parse(await readFile(sidecar, "utf8")) as Record<string, unknown>;
+  if (raw.hash !== name || raw.size !== Number(before.size) || typeof raw.mediaType !== "string") throw new AuthorityOrchestrationError("object_corrupt", "object sidecar disagrees with data");
+  return { data, before, mediaType: raw.mediaType };
+}
+/** Copy one admitted object under a fresh temp name while hashing it, verify the source did not move, then publish data and sidecar. */
+async function copyObject(object: Awaited<ReturnType<typeof admitObject>>, prefix: string, name: string, destination: string): Promise<ArchiveManifest["objects"][number]> {
+  const { data, before, mediaType } = object;
+  const targetDir = join(destination, prefix); await mkdir(targetDir, { recursive: true, mode: 0o700 });
+  const target = join(targetDir, name), temp = `${target}.${inputTemp()}.tmp`; await fresh(target); await fresh(`${target}.json`);
+  const digest = createHash("sha256");
+  await pipeline(createReadStream(data, { flags: "r" }), new Transform({ transform(chunk, _encoding, callback) { digest.update(chunk); callback(null, chunk); } }), createWriteStream(temp, { flags: "wx", mode: 0o600 }));
+  const after = await lstat(data, { bigint: true }); if (after.ino !== before.ino || after.dev !== before.dev || after.size !== before.size || after.mtimeNs !== before.mtimeNs) throw new AuthorityOrchestrationError("source_changed", "object changed during snapshot");
+  if (digest.digest("hex") !== name) throw new AuthorityOrchestrationError("object_corrupt", "object hash mismatch");
+  await fsync(temp); await rename(temp, target); await fsync(targetDir);
+  await writeFile(`${target}.json`, JSON.stringify({ hash: name, size: Number(before.size), mediaType: mediaType }), { flag: "wx", mode: 0o600 }); await fsync(`${target}.json`); await fsync(targetDir);
+  return { hash: name, size: Number(before.size), media_type: mediaType };
+}
 async function snapshotObjectStore(sourceRoot: string, destinationRoot: string): Promise<ArchiveManifest["objects"]> {
   const source = resolve(sourceRoot), destination = resolve(destinationRoot);
   const root = await ownedDir(source), destinationParent = await ownedDir(dirname(destination));
@@ -45,28 +74,14 @@ async function snapshotObjectStore(sourceRoot: string, destinationRoot: string):
     const prefixes = (await readdir(source)).sort();
     if (prefixes.some(p => !/^[0-9a-f]{2}$/.test(p))) throw new AuthorityOrchestrationError("invalid_object_store", "unexpected object-store entry");
     for (const prefix of prefixes) {
-      const dir = join(source, prefix), ds = await lstat(dir, { bigint: true });
-      if (!ds.isDirectory() || ds.isSymbolicLink() || ds.uid !== BigInt(process.getuid!()) || (ds.mode & 0o022n) !== 0n) throw new AuthorityOrchestrationError("unsafe_path", "object prefix is not owned/private");
-      const names = (await readdir(dir)).sort();
-      if (names.some(name => name.endsWith(".json") && (!HASH.test(name.slice(0, -5)) || !names.includes(name.slice(0, -5))))) throw new AuthorityOrchestrationError("invalid_object_store", "orphan object sidecar");
+      const dir = join(source, prefix), { ds, names } = await admitPrefix(dir);
       for (const name of names) {
         if (name.endsWith(".json")) continue;
         if (!HASH.test(name) || !name.startsWith(prefix) || !names.includes(`${name}.json`)) throw new AuthorityOrchestrationError("invalid_object_store", "object inventory contains an invalid path");
         if (entries.length >= OBJECT_LIMIT) throw new AuthorityOrchestrationError("object_limit", "object count limit");
-        const data = join(dir, name), sidecar = `${data}.json`, before = await lstat(data, { bigint: true });
-        if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1n || before.uid !== BigInt(process.getuid!()) || (before.mode & 0o022n) !== 0n || before.size > BigInt(OBJECT_BYTES)) throw new AuthorityOrchestrationError("unsafe_path", "object is not a bounded owned regular file");
-        const raw = JSON.parse(await readFile(sidecar, "utf8")) as Record<string, unknown>;
-        if (raw.hash !== name || raw.size !== Number(before.size) || typeof raw.mediaType !== "string") throw new AuthorityOrchestrationError("object_corrupt", "object sidecar disagrees with data");
-        total += Number(before.size); if (total > TOTAL_OBJECT_BYTES) throw new AuthorityOrchestrationError("object_limit", "total object bytes limit");
-        const targetDir = join(destination, prefix); await mkdir(targetDir, { recursive: true, mode: 0o700 });
-        const target = join(targetDir, name), temp = `${target}.${inputTemp()}.tmp`; await fresh(target); await fresh(`${target}.json`);
-        const digest = createHash("sha256");
-        await pipeline(createReadStream(data, { flags: "r" }), new Transform({ transform(chunk, _encoding, callback) { digest.update(chunk); callback(null, chunk); } }), createWriteStream(temp, { flags: "wx", mode: 0o600 }));
-        const after = await lstat(data, { bigint: true }); if (after.ino !== before.ino || after.dev !== before.dev || after.size !== before.size || after.mtimeNs !== before.mtimeNs) throw new AuthorityOrchestrationError("source_changed", "object changed during snapshot");
-        if (digest.digest("hex") !== name) throw new AuthorityOrchestrationError("object_corrupt", "object hash mismatch");
-        await fsync(temp); await rename(temp, target); await fsync(targetDir);
-        await writeFile(`${target}.json`, JSON.stringify({ hash: name, size: Number(before.size), mediaType: raw.mediaType }), { flag: "wx", mode: 0o600 }); await fsync(`${target}.json`); await fsync(targetDir);
-        entries.push({ hash: name, size: Number(before.size), media_type: raw.mediaType });
+        const object = await admitObject(dir, name);
+        total += Number(object.before.size); if (total > TOTAL_OBJECT_BYTES) throw new AuthorityOrchestrationError("object_limit", "total object bytes limit");
+        entries.push(await copyObject(object, prefix, name, destination));
       }
       const finalDir = await lstat(dir, { bigint: true }); if (finalDir.ino !== ds.ino || finalDir.dev !== ds.dev || finalDir.mtimeNs !== ds.mtimeNs) throw new AuthorityOrchestrationError("source_changed", "object prefix changed");
     }
