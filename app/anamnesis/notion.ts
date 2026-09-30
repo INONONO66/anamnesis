@@ -1,3 +1,4 @@
+import { logEvent } from "./log.ts";
 import { constants } from "node:fs";
 import { lstat, open, opendir } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -119,5 +120,5 @@ export async function ingestNotion(root: string, checkpoint: string, client: Rpc
     }
     return { sourceHash, records: records(), assertUnchanged };
   });
-  console.log(JSON.stringify({ event: "source_scope", source: "notion", snapshot: "complete", live_tail: "unsupported", rotation: "unsupported", producer_sealed: "required" }));
+  logEvent("info", "source_scope", { source: "notion", snapshot: "complete", live_tail: "unsupported", rotation: "unsupported", producer_sealed: "required" });
 }

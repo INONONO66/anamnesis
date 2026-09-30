@@ -1,3 +1,4 @@
+import { logEvent } from "./log.ts";
 import { managedRestartDelayMs } from "@anamnesis/core";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -84,13 +85,13 @@ export async function managed(entry: string, delay: (ms: number) => Promise<void
         child = spawn(process.execPath, [entry, "foreground"], { env: process.env, stdio: ["ignore", "inherit", "inherit"] });
         child.once("error", reject);
         child.once("close", (code, signal) => resolve({ code, signal }));
-        console.log(JSON.stringify({ event: "managed_child", pid: child.pid, restarts }));
+        logEvent("info", "managed_child", { pid: child.pid, restarts });
       });
       child = undefined;
       if (stopping || result.code === 0) break;
       if (restarts === 3) throw new Error("managed_restart_budget_exhausted");
       const wait_ms = managedRestartDelayMs(restarts + 1);
-      console.error(JSON.stringify({ event: "managed_restart", ...result, wait_ms }));
+      logEvent("error", "managed_restart", { ...result, wait_ms });
       await delay(wait_ms);
     }
   } finally {

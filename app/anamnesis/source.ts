@@ -1,3 +1,4 @@
+import { logEvent } from "./log.ts";
 import { createHash } from "node:crypto";
 import { lstat, open, readFile, rm } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
@@ -170,7 +171,7 @@ export async function ingestSnapshot(checkpointPath: string, client: RpcClient, 
       const result = await client.request("ingest.status", work.identity);
       if (!daemonDisowns(result, work.identity)) return result;
       await retire();
-      console.log(JSON.stringify({ event: "pending_retired", reason: "daemon_unknown", index, identity: work.identity }));
+      logEvent("info", "pending_retired", { reason: "daemon_unknown", index, identity: work.identity });
       return null;
     };
     const resumeNext = checkpoint.next;
@@ -198,17 +199,17 @@ export async function ingestSnapshot(checkpointPath: string, client: RpcClient, 
       const result = resolved ?? await client.request("remember", pending.params);
       if (!sameIdentity(result, pending.identity)) throw pendingFailure("identity_mismatch");
       if (result.state !== "committed") throw pendingFailure(result.state);
-      if (resolved) console.log(JSON.stringify({ event: "source_reconciled", index: next, state: result.state, identity: pending.identity }));
+      if (resolved) logEvent("info", "source_reconciled", { index: next, state: result.state, identity: pending.identity });
       await snapshot.assertUnchanged();
       checkpoint = { ...checkpoint, next: next + 1, last: pending.identity };
       await lease.assertOwned();
       await atomicJson(checkpointPath, checkpoint);
       await retire();
-      console.log(JSON.stringify({ event: "source_checkpoint", next: checkpoint.next, state: result.state }));
+      logEvent("info", "source_checkpoint", { next: checkpoint.next, state: result.state });
     }
     if (count < resumeNext) throw new Error("source_checkpoint_invalid");
     if (pending) throw pendingFailure("invalid");
     await snapshot.assertUnchanged();
-    console.log(JSON.stringify({ event: "source_complete", next: checkpoint.next, source_hash: sourceHash }));
+    logEvent("info", "source_complete", { next: checkpoint.next, source_hash: sourceHash });
   } finally { await lease.release(); }
 }

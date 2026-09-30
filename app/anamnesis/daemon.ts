@@ -1,3 +1,4 @@
+import { logEvent } from "./log.ts";
 import { createHash, timingSafeEqual, randomUUID } from "node:crypto";
 import { chmod, rm } from "node:fs/promises";
 import { createServer, type AddressInfo, type Socket } from "node:net";
@@ -28,7 +29,7 @@ export async function foreground(): Promise<void> {
   const backgroundReady = () => (drainReady || embeddingReady || extractionReady) && !stopping;
   // Worker lanes start idle; an unconfigured lane is never woken, so it stays idle for the emitter.
   let embeddingIdle = true, extractionIdle = true;
-  const reportIdle = () => { if (embeddingIdle && extractionIdle) console.log(JSON.stringify({ event: "workers_idle" })); };
+  const reportIdle = () => { if (embeddingIdle && extractionIdle) logEvent("info", "workers_idle"); };
   const lostOwnership = () => {
     ownershipLost = true; stopping = true;
     runtime!.cancelDrain();
@@ -41,7 +42,7 @@ export async function foreground(): Promise<void> {
       daemonTiming?.({ layer: "daemon", event: "drain_start" });
       drainReady = await runtime!.drainTurn();
       daemonTiming?.({ layer: "daemon", event: "drain_complete" });
-      if (!drainReady) console.log(JSON.stringify({ event: "drain_settled" }));
+      if (!drainReady) logEvent("info", "drain_settled");
     } catch (error) {
       logError(error);
       if (fault(error).code === "ownership_lost") lostOwnership();
@@ -121,7 +122,7 @@ export async function foreground(): Promise<void> {
   let shutdown: Promise<void> | undefined;
   const logError = (error: unknown) => {
     daemonTiming?.({ layer: "daemon", event: "error", hash: timingHash(String(error)) });
-    console.error(JSON.stringify({ event: "error", error: String(error) }));
+    logEvent("error", "error", { error: String(error) });
   };
   // Unfinished local publications, not receipts or client consumption. Policy
   // cancels these before acknowledging; it never waits for a non-reading peer.
@@ -143,7 +144,7 @@ export async function foreground(): Promise<void> {
         }
       } catch (error) {
         // Bytes cannot be unsent. Never emit a second RPC reply or feedback.
-        console.error(JSON.stringify({ event: "recall_publication_error", recall_id, stage, code: fault(error).code, error: String(error) }));
+        logEvent("error", "recall_publication_error", { recall_id, stage, code: fault(error).code, error: String(error) });
       }
     });
   };
@@ -213,7 +214,7 @@ export async function foreground(): Promise<void> {
         if (admitted) { connection.authorized = true; budget.release(reservation); return true; }
         failed = true;
         daemonTiming?.({ layer: "daemon", event: "unauthorized", connection: connectionId });
-        console.error(JSON.stringify({ event: "unauthorized", connection: connectionId }));
+        logEvent("error", "unauthorized", { connection: connectionId });
         send(connection, errorResponse(null, new RpcFault("unauthorized", "bearer authorization is required on this listener")), reservation);
         socket.end();
         return false;
@@ -359,7 +360,7 @@ export async function foreground(): Promise<void> {
       await rm(path, { force: true });
       await installation.release();
       daemonTiming?.({ layer: "daemon", event: "stopped" });
-      console.log(JSON.stringify({ event: "stopped" }));
+      logEvent("info", "stopped");
     } finally {
       clearTimeout(deadline);
       process.off("SIGINT", signalStop);
@@ -393,7 +394,7 @@ export async function foreground(): Promise<void> {
     process.on("SIGINT", signalStop);
     process.on("SIGTERM", signalStop);
     daemonTiming?.({ layer: "daemon", event: "listening" });
-    console.log(JSON.stringify({ event: "listening", socket: path, ...(tcp ? { tcp } : {}), data_incarnation: installation.incarnation, fs_epoch: installation.epoch }));
+    logEvent("info", "listening", { socket: path, ...(tcp ? { tcp } : {}), data_incarnation: installation.incarnation, fs_epoch: installation.epoch });
     started = true; kick();
   } catch (error) {
     for (const listener of listeners) if (listener.listening) listener.close(); // A failed second bind must not keep the process alive.

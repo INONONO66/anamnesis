@@ -1,3 +1,4 @@
+import { logEvent } from "./log.ts";
 import { createHash } from "node:crypto";
 import { opendir } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -151,5 +152,5 @@ export async function ingestRawLane(root: string, checkpoint: string, client: Rp
     const sourceHash = sha(JSON.stringify({ format: lane.format, manifest, fingerprints: [...initial.fingerprints] }));
     return { sourceHash, records: laneRecords(root, lane, initial, manifest, false), assertUnchanged };
   });
-  console.log(JSON.stringify({ event: "source_scope", source: lane.source, snapshot: "complete", live_tail: "unsupported", rotation: "unsupported", producer_sealed: "required" }));
+  logEvent("info", "source_scope", { source: lane.source, snapshot: "complete", live_tail: "unsupported", rotation: "unsupported", producer_sealed: "required" });
 }

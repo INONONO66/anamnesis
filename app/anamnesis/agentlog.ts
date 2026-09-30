@@ -1,3 +1,4 @@
+import { logEvent } from "./log.ts";
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { lstat, readdir } from "node:fs/promises";
@@ -89,5 +90,5 @@ export async function ingestAgentLog(root: string, checkpointPath: string, clien
     }
     return { sourceHash, records: records(), assertUnchanged };
   });
-  console.log(JSON.stringify({ event: "source_scope", format: "normalized-agentlog", snapshot: "complete", tail: "incomplete", rotation: "incomplete" }));
+  logEvent("info", "source_scope", { format: "normalized-agentlog", snapshot: "complete", tail: "incomplete", rotation: "incomplete" });
 }

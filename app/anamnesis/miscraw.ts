@@ -1,3 +1,4 @@
+import { logEvent } from "./log.ts";
 import { createHash } from "node:crypto";
 import { opendir } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -147,5 +148,5 @@ export async function ingestMiscRaw(root: string, checkpoint: string, client: Rp
     await assertUnchanged();
     return { sourceHash: sha(JSON.stringify({ format: "misc-raw-snapshot/1", seal: sealHash.digest("hex"), fingerprints: [...initial.fingerprints] })), records: records(), assertUnchanged };
   });
-  console.log(JSON.stringify({ event: "source_scope", source: "misc-raw", snapshot: "producer-sealed", sqlite: "unsupported", live_tail: "unsupported", rotation: "unsupported" }));
+  logEvent("info", "source_scope", { source: "misc-raw", snapshot: "producer-sealed", sqlite: "unsupported", live_tail: "unsupported", rotation: "unsupported" });
 }

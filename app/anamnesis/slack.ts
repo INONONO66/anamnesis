@@ -1,3 +1,4 @@
+import { logEvent } from "./log.ts";
 import { createHash } from "node:crypto";
 import { lstat, opendir } from "node:fs/promises";
 import { basename, join, relative, resolve } from "node:path";
@@ -136,5 +137,5 @@ export async function ingestSlack(root: string, checkpoint: string, client: RpcC
     const sourceHash = sha(JSON.stringify({ format: "slack-export-snapshot/1", manifest }));
     return { sourceHash, records: records(), assertUnchanged };
   });
-  console.log(JSON.stringify({ event: "source_scope", source: "slack", snapshot: "complete", tail: "incomplete", rotation: "incomplete" }));
+  logEvent("info", "source_scope", { source: "slack", snapshot: "complete", tail: "incomplete", rotation: "incomplete" });
 }
