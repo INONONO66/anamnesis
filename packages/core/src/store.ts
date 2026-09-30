@@ -1,6 +1,6 @@
 import { planSchemaMigration } from "./schema-migrations.ts";
 import { EPISODE_SCHEMAS, SCHEMA_ID, isEpisodeSchema } from "@anamnesis/protocol";
-import neo4j, { Driver, type ManagedTransaction, type RecordShape } from "neo4j-driver";
+import neo4j, { Driver, type ManagedTransaction, type Record as Neo4jRecord, type RecordShape } from "neo4j-driver";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { v7 as uuidv7 } from "uuid";
@@ -327,6 +327,27 @@ async function custodyRecordTx(tx: ManagedTransaction, custody: string, pass: Ma
       result: canonicalExtractionBody({ created, facts: factIds.length, refused, ...(duplicates.length ? { duplicates } : {}) }), key: custody, source: source.id, generation: judge.generation_id, profile,
       fact: created ? `custody:${source.id}` : `suppressed:${source.id}`, link: created ? `custody:${source.id}` : `suppressed:${source.id}` });
   return created;
+}
+
+/** An advance must start at the cursor the caller saw and move forward by at most 256. */
+function checkCoverageAdvance(request: AdvanceExtractionCoverage, covered: number): void {
+  if (covered !== request.expected_covered_ingest_seq) throw new Error("coverage_conflict");
+  if (request.covered_ingest_seq < covered) throw new Error("coverage_regression");
+  if (request.covered_ingest_seq - covered > 256) throw new Error("coverage_batch_too_large");
+}
+
+type CoveredRow = Neo4jRecord<{ source: string; seq: number; task: string | null; attempt: string | null }>;
+
+/** The task and attempt a covered Episode row must carry: the expected sequence, a terminal task, and an attempt that is the task's own. */
+function coveredRow(row: CoveredRow, seq: number, generationId: string): { task: ModelTask; attempt: ExtractionAttempt } {
+  if (row.get("seq") !== seq || !row.get("task")) throw new Error("coverage_hole");
+  const task = ModelTask.parse(JSON.parse(row.get("task")!));
+  if (task.pipeline && (task.state === "queued" || task.state === "leased" || !row.get("attempt"))) throw new ExtractionAuditError("extraction_audit_incomplete");
+  if (!row.get("attempt")) throw new Error("coverage_hole");
+  const attempt = ExtractionAttempt.parse(JSON.parse(row.get("attempt")!));
+  if (task.state === "queued" || task.state === "leased" || attempt.state !== task.state || attempt.id !== task.attempt_id
+    || attempt.task_id !== task.id || attempt.source_id !== row.get("source") || attempt.source_ingest_seq !== row.get("seq") || attempt.generation_id !== generationId) throw new Error("coverage_hole");
+  return { task, attempt };
 }
 
 export class Store {
@@ -2985,6 +3006,21 @@ export class Store {
    * content-free omissions. Retry is then forbidden for that sealed work.
    * The shared generation cursor is the minimum of the two partition cursors;
    * these are audit coverage partitions, not embedding/recall readiness gates. */
+  /** A covered source's contribution to the omission digest: a pipeline's omission or its sealed decisions, a plain
+   * attempt's terminal failure or refusal; a retained successful attempt leaves the digest as it was. */
+  private async coverageOmissionTx(tx: ManagedTransaction, task: ModelTask, attempt: ExtractionAttempt, prior: string): Promise<string> {
+    if (task.pipeline) {
+      const pipeline = await this.readExtractionPipelineTx(tx,task.id);
+      const omission = this.extractionPipelineOmission(pipeline);
+      if (omission) return extractionBodyDigest({ prior, ...omission });
+      if (pipeline.state !== 'known' || pipeline.claim.state !== 'succeeded' || pipeline.judge?.state !== 'succeeded') throw new ExtractionAuditError('extraction_audit_incomplete');
+      // These rows seal audit work only, never materialization/embedding readiness.
+      return extractionBodyDigest({prior,pipeline_id:task.id,judge_attempt_id:pipeline.judge_attempt!.id,decisions:pipeline.decisions.map(d=>d.disposition)});
+    }
+    if (attempt.state !== "succeeded" || !["retain", "correct"].includes(attempt.disposition ?? "")) return extractionBodyDigest({ prior, id: attempt.id, seq: attempt.source_ingest_seq, state: attempt.state, reason: attempt.reason, disposition: attempt.disposition });
+    return prior;
+  }
+
   async recordExtractionCoverage(input: AdvanceExtractionCoverage, context: InstallationContext): Promise<Coverage> {
     requireInstallation(context);
     const request = AdvanceExtractionCoverage.parse(input);
@@ -2994,9 +3030,7 @@ export class Store {
       const rows = await tx.run<{ body: string }>(`MATCH (c:ExtractionCoverage {key:$key}) RETURN c.body AS body`, { key });
       const prior = rows.records[0] ? Coverage.parse(JSON.parse(rows.records[0].get("body"))) : null;
       const covered = prior?.covered_ingest_seq ?? 0;
-      if (covered !== request.expected_covered_ingest_seq) throw new Error("coverage_conflict");
-      if (request.covered_ingest_seq < covered) throw new Error("coverage_regression");
-      if (request.covered_ingest_seq - covered > 256) throw new Error("coverage_batch_too_large");
+      checkCoverageAdvance(request, covered);
       const meta = await tx.run<{ seq: number }>(`MATCH (m:Meta {key:'meta'}) RETURN m.ingest_seq AS seq`);
       const required = receiptTime.parse(meta.records[0]?.get("seq"));
       if (request.covered_ingest_seq > required) throw new Error("coverage_exceeds_required");
@@ -3009,23 +3043,8 @@ export class Store {
       if (prefix.records.length !== request.covered_ingest_seq - covered) throw new Error("coverage_hole");
       let omissionDigest = prior?.omission_digest ?? extractionBodyDigest([]);
       for (const [index, row] of prefix.records.entries()) {
-        if (row.get("seq") !== covered + index + 1 || !row.get("task")) throw new Error("coverage_hole");
-        const task = ModelTask.parse(JSON.parse(row.get("task")!));
-        if (task.pipeline && (task.state === "queued" || task.state === "leased" || !row.get("attempt"))) throw new ExtractionAuditError("extraction_audit_incomplete");
-        if (!row.get("attempt")) throw new Error("coverage_hole");
-        const attempt = ExtractionAttempt.parse(JSON.parse(row.get("attempt")!));
-        if (task.state === "queued" || task.state === "leased" || attempt.state !== task.state || attempt.id !== task.attempt_id
-          || attempt.task_id !== task.id || attempt.source_id !== row.get("source") || attempt.source_ingest_seq !== row.get("seq") || attempt.generation_id !== generation.id) throw new Error("coverage_hole");
-        if (task.pipeline) {
-          const pipeline = await this.readExtractionPipelineTx(tx,task.id);
-          const omission = this.extractionPipelineOmission(pipeline);
-          if (omission) omissionDigest = extractionBodyDigest({ prior: omissionDigest, ...omission });
-          else {
-            if (pipeline.state !== 'known' || pipeline.claim.state !== 'succeeded' || pipeline.judge?.state !== 'succeeded') throw new ExtractionAuditError('extraction_audit_incomplete');
-            // These rows seal audit work only, never materialization/embedding readiness.
-            omissionDigest = extractionBodyDigest({prior:omissionDigest,pipeline_id:task.id,judge_attempt_id:pipeline.judge_attempt!.id,decisions:pipeline.decisions.map(d=>d.disposition)});
-          }
-        } else if (attempt.state !== "succeeded" || !["retain", "correct"].includes(attempt.disposition ?? "")) omissionDigest = extractionBodyDigest({ prior: omissionDigest, id: attempt.id, seq: attempt.source_ingest_seq, state: attempt.state, reason: attempt.reason, disposition: attempt.disposition });
+        const { task, attempt } = coveredRow(row, covered + index + 1, generation.id);
+        omissionDigest = await this.coverageOmissionTx(tx, task, attempt, omissionDigest);
       }
       const now = Math.max(generation.updated_at, prior?.updated_at ?? 0, receiptTime.parse(this.clock()));
       const value = Coverage.parse({ generation_id: generation.id, partition: request.partition, required_ingest_seq: required, covered_ingest_seq: request.covered_ingest_seq, omission_digest: omissionDigest, updated_at: now });
