@@ -1,3 +1,4 @@
+import { planSchemaMigration } from "./schema-migrations.ts";
 import { EPISODE_SCHEMAS, SCHEMA_ID, isEpisodeSchema } from "../../protocol/src/element.ts";
 import neo4j, {
   Driver,
@@ -694,15 +695,18 @@ export class Store {
     }
     await this.run(`CALL db.awaitIndexes(60)`);
     await this.withWriteTx(async (tx) => {
-      const state = await tx.run<{ revision: number | null; format: string | null; events: number; legacy: number; elements: number }>(
+      const state = await tx.run<{ revision: number | null; format: string | null; events: number; legacy: number; elements: number; schema_version: number | null }>(
         `MERGE (m:Meta {key:'meta'}) ON CREATE SET m.ingest_seq=0, m.conducting_arc_ready=false
          SET m.ingest_seq=m.ingest_seq
          WITH m OPTIONAL MATCH (p:PolicyAuthority {key:'installation'})
          CALL () { MATCH (e:PolicyEvent) RETURN count(e) AS events }
          CALL () { MATCH (e:Element {schema:'anamnesis.memory-policy/1'}) RETURN count(e) AS legacy }
          CALL () { MATCH (e:Element) RETURN count(e) AS elements }
-         RETURN m.policy_revision AS revision,p.format AS format,events,legacy,elements`);
+         RETURN m.policy_revision AS revision,p.format AS format,events,legacy,elements,m.schema_version AS schema_version`);
       const row = state.records[0]!;
+      const migration = planSchemaMigration(row.get("schema_version"), row.get("elements") > 0);
+      for (const step of migration.steps) for (const statement of step.statements) await tx.run(statement);
+      if (row.get("schema_version") !== migration.target) await tx.run(`MATCH (m:Meta {key:'meta'}) SET m.schema_version=$version`, { version: migration.target });
       // Only a genuinely policy-empty database may bootstrap revision zero.
       // Missing/incompatible authority never overwrites an existing revision.
       const preserveLegacy = row.get("elements") > 0 && row.get("revision") === null && row.get("format") === null && row.get("events") === 0 && row.get("legacy") === 0;
