@@ -42,6 +42,69 @@ async function tree(root: string): Promise<Tree> {
 
 function object(value: unknown): value is Record<string, unknown> { return value !== null && typeof value === "object" && !Array.isArray(value); }
 
+/** One seal entry as [path, sha256]; the path must be a listed non-seal file, unique, and carry the opencode mtime. */
+function sealEntry(entry: unknown, initial: Tree, manifest: Map<string, string>): [string, string] {
+  if (!object(entry) || typeof entry["path"] !== "string" || typeof entry["sha256"] !== "string" || !/^[a-f0-9]{64}$/.test(entry["sha256"]) || Object.keys(entry).some(key => !["path", "sha256", "mtime_ms"].includes(key))) throw new Error("source_invalid_seal");
+  const name = entry["path"];
+  if (manifest.has(name) || name === SEAL || !initial.files.includes(name)) throw new Error("source_invalid_seal");
+  if ((name === OPENCODE || entry["mtime_ms"] !== undefined) && entry["mtime_ms"] !== initial.mtimes.get(name)) throw new Error("source_mtime_mismatch");
+  return [name, entry["sha256"]];
+}
+function laneContext(name: string, initial: Tree, index: Map<string, Record<string, string>>): MiscRawContext {
+  const aside = ASIDE.exec(name), antigravity = ANTIGRAVITY.exec(name);
+  if (aside) return { source: "aside", session: asideSessionId(aside[2]!), properties: index.get(JSON.stringify([aside[1], asideSessionId(aside[2]!)])) ?? {} };
+  if (antigravity) return { source: "gemini-antigravity", session: antigravity[1]! };
+  return { source: "opencode", occurredAt: initial.mtimes.get(name)! };
+}
+
+/** The producer seal: one JSON line naming every export file with its sha256 (and mtime for opencode); returns the manifest and the seal's own digest. */
+async function readSeal(root: string, initial: Tree): Promise<{ manifest: Map<string, string>; sealHash: ReturnType<typeof createHash> }> {
+  const sealHash = createHash("sha256"); let seal: unknown, sealLines = 0;
+  for await (const { text } of textLines(root, SEAL, initial.fingerprints.get(SEAL)!, sealHash)) {
+    if (++sealLines !== 1) throw new Error("source_invalid_seal");
+    try { seal = JSON.parse(text); } catch (cause) { throw new Error("source_invalid_seal", { cause }); }
+  }
+  if (!object(seal) || seal["format"] !== "misc-raw-snapshot/1" || seal["sealed"] !== true || !Array.isArray(seal["files"]) || Object.keys(seal).some(key => !["format", "sealed", "files"].includes(key))) throw new Error("source_invalid_seal");
+  const manifest = new Map<string, string>();
+  for (const entry of seal["files"]) manifest.set(...sealEntry(entry, initial, manifest));
+  if (manifest.size !== initial.files.length - 1) throw new Error("source_invalid_seal");
+  for (const name of initial.files) {
+    const aside = ASIDE.exec(name);
+    if (aside && !manifest.has(`aside/home/.aside/u/${aside[1]}/sessions.jsonl`)) throw new Error("source_aside_index_required");
+  }
+  return { manifest, sealHash };
+}
+/** One sessions.jsonl row as [user+id key, session properties]; anything but id/title/cwd strings is invalid. */
+function indexRow(text: string, user: string, at: string): [string, Record<string, string>] {
+  let row: unknown;
+  try { row = JSON.parse(text); } catch (cause) { throw new Error(`source_invalid_index: ${at}`, { cause }); }
+  if (!object(row) || typeof row["id"] !== "string" || !row["id"] || Object.keys(row).some(key => !["id", "title", "cwd"].includes(key)) || [row["title"], row["cwd"]].some(value => value !== undefined && value !== null && typeof value !== "string")) throw new Error(`source_invalid_index: ${at}`);
+  return [JSON.stringify([user, row["id"]]), { ...(row["title"] ? { session_title: row["title"] as string } : {}), ...(row["cwd"] ? { cwd: row["cwd"] as string } : {}) }];
+}
+type ParsedEpisode = ReturnType<ReturnType<typeof createMiscRawParser>>[number]["input"];
+function episodeRecord(input: ParsedEpisode, at: string): { base: RpcRememberParams; body: Buffer | undefined } {
+  const body = input.payload === undefined ? undefined : Buffer.from(input.payload);
+  try { return { base: RpcRememberParams.parse({ episode: { schema: input.schema, time: input.time, content: input.content, origin: input.origin, properties: input.properties }, source_revision: input.source_revision, expected_previous_revision_key: null, ...(body ? { payload_hash: sha(body) } : {}) }), body }; }
+  catch (cause) { throw new Error(`source_invalid_record: ${at}`, { cause }); }
+}
+
+/** Aside's per-user sessions index joined by user and session id, verified against the seal. */
+async function readIndex(root: string, initial: Tree, manifest: Map<string, string>): Promise<Map<string, Record<string, string>>> {
+  const index = new Map<string, Record<string, string>>();
+  for (const name of initial.files.filter(name => INDEX.test(name))) {
+    const hash = createHash("sha256"), user = INDEX.exec(name)![1]!;
+    for await (const { text, line } of textLines(root, name, initial.fingerprints.get(name)!, hash)) {
+      if (text.trim() === "") continue;
+      const [key, properties] = indexRow(text, user, `${name}:${line}`);
+      if (index.has(key)) throw new Error(`source_index_conflict: ${name}:${line}`);
+      if (index.size >= MAX_REVISIONS) throw new Error("source_index_limit");
+      index.set(key, properties);
+    }
+    if (hash.digest("hex") !== manifest.get(name)) throw new Error("source_seal_mismatch");
+  }
+  return index;
+}
+
 /** Offline subset only. Seal: one LF-terminated JSON object with format
  * misc-raw-snapshot/1, sealed:true, files:[{path,sha256,mtime_ms?}]. paths exactly
  * cover supported source/index files. OpenCode requires its producer mtime_ms.
@@ -58,56 +121,19 @@ export async function ingestMiscRaw(root: string, checkpoint: string, client: Rp
       const now = await tree(root);
       if (JSON.stringify([...now.fingerprints]) !== JSON.stringify([...initial.fingerprints])) throw new Error("source_changed");
     };
-    const sealHash = createHash("sha256"); let seal: unknown, sealLines = 0;
-    for await (const { text } of textLines(root, SEAL, initial.fingerprints.get(SEAL)!, sealHash)) {
-      if (++sealLines !== 1) throw new Error("source_invalid_seal");
-      try { seal = JSON.parse(text); } catch (cause) { throw new Error("source_invalid_seal", { cause }); }
-    }
-    if (!object(seal) || seal["format"] !== "misc-raw-snapshot/1" || seal["sealed"] !== true || !Array.isArray(seal["files"]) || Object.keys(seal).some(key => !["format", "sealed", "files"].includes(key))) throw new Error("source_invalid_seal");
-    const manifest = new Map<string, string>();
-    for (const entry of seal["files"]) {
-      if (!object(entry) || typeof entry["path"] !== "string" || typeof entry["sha256"] !== "string" || !/^[a-f0-9]{64}$/.test(entry["sha256"]) || Object.keys(entry).some(key => !["path", "sha256", "mtime_ms"].includes(key))) throw new Error("source_invalid_seal");
-      const name = entry["path"];
-      if (manifest.has(name) || name === SEAL || !initial.files.includes(name)) throw new Error("source_invalid_seal");
-      if ((name === OPENCODE || entry["mtime_ms"] !== undefined) && entry["mtime_ms"] !== initial.mtimes.get(name)) throw new Error("source_mtime_mismatch");
-      manifest.set(name, entry["sha256"]);
-    }
-    if (manifest.size !== initial.files.length - 1) throw new Error("source_invalid_seal");
-    for (const name of initial.files) {
-      const aside = ASIDE.exec(name);
-      if (aside && !manifest.has(`aside/home/.aside/u/${aside[1]}/sessions.jsonl`)) throw new Error("source_aside_index_required");
-    }
-    const index = new Map<string, Record<string, string>>();
-    for (const name of initial.files.filter(name => INDEX.test(name))) {
-      const hash = createHash("sha256"), user = INDEX.exec(name)![1]!;
-      for await (const { text, line } of textLines(root, name, initial.fingerprints.get(name)!, hash)) {
-        if (text.trim() === "") continue;
-        let row: unknown;
-        try { row = JSON.parse(text); } catch (cause) { throw new Error(`source_invalid_index: ${name}:${line}`, { cause }); }
-        if (!object(row) || typeof row["id"] !== "string" || !row["id"] || Object.keys(row).some(key => !["id", "title", "cwd"].includes(key)) || [row["title"], row["cwd"]].some(value => value !== undefined && value !== null && typeof value !== "string")) throw new Error(`source_invalid_index: ${name}:${line}`);
-        const key = JSON.stringify([user, row["id"]]);
-        if (index.has(key)) throw new Error(`source_index_conflict: ${name}:${line}`);
-        if (index.size >= MAX_REVISIONS) throw new Error("source_index_limit");
-        index.set(key, { ...(row["title"] ? { session_title: row["title"] as string } : {}), ...(row["cwd"] ? { cwd: row["cwd"] as string } : {}) });
-      }
-      if (hash.digest("hex") !== manifest.get(name)) throw new Error("source_seal_mismatch");
-    }
+    const { manifest, sealHash } = await readSeal(root, initial);
+    const index = await readIndex(root, initial, manifest);
     async function* records(): AsyncGenerator<SourceRecord> {
       const revisions = new Revisions();
       for (const name of initial.files) {
         if (name === SEAL || INDEX.test(name)) continue;
-        const aside = ASIDE.exec(name), antigravity = ANTIGRAVITY.exec(name);
-        const context: MiscRawContext = aside ? { source: "aside", session: asideSessionId(aside[2]!), properties: index.get(JSON.stringify([aside[1], asideSessionId(aside[2]!)])) ?? {} }
-          : antigravity ? { source: "gemini-antigravity", session: antigravity[1]! } : { source: "opencode", occurredAt: initial.mtimes.get(name)! };
+        const context = laneContext(name, initial, index);
         const parse = createMiscRawParser(context, true), hash = createHash("sha256");
         for await (const { text, line } of textLines(root, name, initial.fingerprints.get(name)!, hash)) {
           let episodes;
           try { episodes = parse(text); } catch (cause) { throw new Error(`source_invalid_record: ${name}:${line}`, { cause }); }
           for (const { input } of episodes) {
-            const body = input.payload === undefined ? undefined : Buffer.from(input.payload);
-            let base: RpcRememberParams;
-            try { base = RpcRememberParams.parse({ episode: { schema: input.schema, time: input.time, content: input.content, origin: input.origin, properties: input.properties }, source_revision: input.source_revision, expected_previous_revision_key: null, ...(body ? { payload_hash: sha(body) } : {}) }); }
-            catch (cause) { throw new Error(`source_invalid_record: ${name}:${line}`, { cause }); }
+            const { base, body } = episodeRecord(input, `${name}:${line}`);
             const { params, native } = revisions.admit(base, false, `${name}:${line}`);
             yield { params, context: { file: name, line, native_source_revision: native }, ...(body ? { payload: { bytes_b64: body.toString("base64"), media_type: input.payload_media_type! } } : {}) };
           }
