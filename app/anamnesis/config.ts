@@ -145,6 +145,20 @@ export interface Installation {
   release(): Promise<void>;
 }
 
+/** A held lease is taken over only when its owner pid is gone; the recovery directory serialises concurrent takeovers. */
+async function recoverLease(root: string, lease: string, ownerPath: string, claim: () => Promise<void>, error: unknown): Promise<void> {
+  const recovery = join(root, "owner-recovery");
+  await fs.mkdir(recovery, { mode: 0o700 });
+  try {
+    const owner = Owner.parse(JSON.parse(await fs.readFile(ownerPath, "utf8")));
+    let dead = false;
+    try { process.kill(owner.pid, 0); }
+    catch (cause) { if (hasCode(cause, "ESRCH")) dead = true; else throw cause; }
+    if (!dead) throw new Error(`runtime root is owned by live pid ${owner.pid}`, { cause: error });
+    await fs.rm(lease, { recursive: true });
+    await claim();
+  } finally { await fs.rm(recovery, { recursive: true }); }
+}
 /** A live PID is conservatively protected, including PID reuse. No timed lease theft. */
 export async function acquireInstallation(root: string): Promise<Installation> {
   await fs.mkdir(root, { recursive: true, mode: 0o700 });
@@ -164,19 +178,7 @@ export async function acquireInstallation(root: string): Promise<Installation> {
   try { await claim(); }
   catch (error) {
     if (!hasCode(error, "EEXIST")) throw error;
-    // Serialize dead-owner reclamation. An incomplete claim/reclamation is an
-    // explicit ops error, never permission to steal a potentially live owner.
-    const recovery = join(root, "owner-recovery");
-    await fs.mkdir(recovery, { mode: 0o700 });
-    try {
-      const owner = Owner.parse(JSON.parse(await fs.readFile(ownerPath, "utf8")));
-      let dead = false;
-      try { process.kill(owner.pid, 0); }
-      catch (cause) { if (hasCode(cause, "ESRCH")) dead = true; else throw cause; }
-      if (!dead) throw new Error(`runtime root is owned by live pid ${owner.pid}`, { cause: error });
-      await fs.rm(lease, { recursive: true });
-      await claim();
-    } finally { await fs.rm(recovery, { recursive: true }); }
+    await recoverLease(root, lease, ownerPath, claim, error);
   }
   const assertOwned = async () => {
     const owner = Owner.parse(JSON.parse(await fs.readFile(ownerPath, "utf8")));

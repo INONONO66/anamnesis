@@ -147,6 +147,15 @@ async function agentLogFiles(root: string): Promise<string[]> {
  * retains its historical final-line and ordering behavior; runtime snapshots
  * require a newline seal and keep physical order (Engine handles chronology).
  * Non-recallable records still expose their absolute line for replay context. */
+/** One log line as its recallable episode, null for blank or non-recallable lines; invalid UTF-8 or JSON is a parse error. */
+function lineEpisode(bytes: Uint8Array, at: string): AgentLogEpisode | null {
+  try {
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    if (text.trim() === "") return null;
+    const event = parseEvent(text);
+    return isRecallable(event) ? toEpisode(event) : null;
+  } catch { throw new Error(`source_parse_error: ${at}`); }
+}
 export async function* streamAgentLogFile(path: string, maxRecordBytes = 1024 * 1024): AsyncGenerator<{ line: number; episode: AgentLogEpisode | null }> {
   if (!Number.isSafeInteger(maxRecordBytes) || maxRecordBytes < 1) throw new Error("source_record_limit_invalid");
   const file = await open(path, "r");
@@ -165,15 +174,7 @@ export async function* streamAgentLogFile(path: string, maxRecordBytes = 1024 * 
         if (length + size > maxRecordBytes) throw new Error(`source_record_too_large: ${path}:${line + 1}`);
         chunk.copy(record, length, start, end); length += size;
         line++;
-        let episode: AgentLogEpisode | null = null;
-        try {
-          const text = new TextDecoder("utf-8", { fatal: true }).decode(record.subarray(0, length));
-          if (text.trim() !== "") {
-            const event = parseEvent(text);
-            if (isRecallable(event)) episode = toEpisode(event);
-          }
-        } catch { throw new Error(`source_parse_error: ${path}:${line}`); }
-        yield { line, episode };
+        yield { line, episode: lineEpisode(record.subarray(0, length), `${path}:${line}`) };
         length = 0; start = end + 1;
       }
       const size = bytesRead - start;
