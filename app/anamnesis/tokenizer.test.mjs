@@ -5,7 +5,7 @@ import { pathToFileURL } from 'node:url';
 import { resolve } from 'node:path';
 const { loadTokenizers } = await import(process.env.TOKENIZER_MODULE
   ? pathToFileURL(resolve(process.env.TOKENIZER_MODULE)).href
-  : new URL('../../dist/anamnesis-tokenizer.mjs', import.meta.url).href);
+  : new URL('./tokenizer.ts', import.meta.url).href);
 import { install, sha } from './tokenizer-install.fixture.mjs';
 import fixture from './tokenizer.fixture.cjs';
 

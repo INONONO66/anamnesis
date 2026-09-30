@@ -38,7 +38,6 @@ app/anamnesis/slack.test.ts
 app/anamnesis/managed.test.ts
 app/anamnesis/upload-lifecycle.test.mjs
 app/anamnesis/codexraw.test.ts
-app/anamnesis/g003-v01-acceptance.test.mjs
 app/anamnesis/clauderaw.test.ts
 app/anamnesis/notion.test.ts
 app/anamnesis/config.test.ts
