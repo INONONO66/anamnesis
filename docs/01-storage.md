@@ -1024,26 +1024,25 @@ separately replayable (docs/05 §9).
 
 #### Operator recovery
 
-Recovery is authenticated and append-only. Every command writes
-`EmbeddingResolution {operation_id, action: retry | skip | cancel,
-embedding_profile_id?, embedding_model_id?, stream?, generation?, ingest_seq?,
-item_ordinal?, source_id?, input_digest?, failure_digest?, reason, actor,
-accepted_at}`; all IDs are server-validated and `reason` is 1..512 Unicode
-scalars. `embedding.retry` moves the exact BLOCKED head to PENDING and cannot
-alter source text or profile identity. `embedding.skip` moves one BLOCKED head
-to `RESOLVED_NO_VECTOR`: it permits contiguous coverage but permanently
-excludes that source from this model and every dependent profile's vector
-channel, while BM25 and session paths remain. The default activation policy
-permits zero skips; any nonzero bound is a new explicit qualification value,
-never inferred from ONLINE status, and a skip that would exceed an ACTIVE
-dependent profile's cumulative bound is rejected with the head left BLOCKED.
+Recovery is authenticated and runs only through the daemon's three shipped
+RPCs; there is no skip, cancel or free-form resolution record in v0.1.
+
+- `embedding.recover {operation_id, episode_id}` is one explicit retry of one
+  Episode under a fresh UUIDv7 operation. Reusing a completed operation is a
+  no-op; a quarantined or deferred attempt is retried with a new operation ID.
+  Provider work never runs inside the retried transaction, an operator retry
+  never exhausts (transient failure defers again), and a terminal outcome
+  retires the Episode's queued outbox entry. It cannot alter source text or
+  profile identity.
+- `embedding.requeue {limit<=1000, reasons?}` returns quarantined Episodes
+  (optionally filtered by attempt reason) to the outbox and wakes the lane at
+  once, which also retries any deferred entry whose backoff has elapsed.
+- `embedding.status {operation_id}` reports one operation's attempt.
+
 Input transformation, meaning a larger context, deterministic chunking, a
 changed prefix, tokenizer or pooling, or a corrected artifact, requires a
 **new model ID and profile** and a complete build; it is never an operator
-mutation of one job. `embedding.cancel` marks a non-active target build
-CANCELLED and detaches it from model work under the write-queue barrier:
-shared model work continues for any other live profile, otherwise remaining
-jobs become CANCELLED and an in-flight result loses its compare-and-swap.
+mutation of one job.
 Later GC removes only unreferenced property and index state. The active
 profile cannot be cancelled.
 
