@@ -84,7 +84,7 @@ async function backup({ root, extra }: Context): Promise<void> {
   await assertNoLiveOwner(root);
   let client: RpcClient;
   try { client = await connectClient(root); }
-  catch (error) { if (!offline(error)) throw error; const result = await offlineBackup(root, extra[0]!); console.log(JSON.stringify({ state: "complete", operation_id: result.operation_id, manifest: { format: result.manifest.format, members: result.manifest.members.length, objects: result.manifest.objects.length } })); return;; return; }
+  catch (error) { if (!offline(error)) throw error; const result = await offlineBackup(root, extra[0]!); console.log(JSON.stringify({ state: "complete", operation_id: result.operation_id, manifest: { format: result.manifest.format, members: result.manifest.members.length, objects: result.manifest.objects.length } })); return; }
   try { print(await client.request("backup", { operation_id: uuidv7(), destination: extra[0]! })); } finally { await client.close(); }
 }
 async function restore({ root, socket, extra }: Context): Promise<void> {
@@ -104,7 +104,6 @@ async function embed({ root }: Context): Promise<void> {
 /** Quarantined Episodes return to the embedding outbox; the daemon wakes its embedding lane on the call. */
 async function embedRequeue({ root, extra }: Context): Promise<void> {
   const limit = extra.length ? Number(extra[1]) : 100;
-  if (!Number.isInteger(limit) || limit < 1 || limit > 1000) throw new Error(usage);
   await withClient(root, async client => print({ ...await client.request("embedding.requeue", { limit }), limit }));
 }
 async function extract({ root }: Context): Promise<void> {
@@ -127,7 +126,7 @@ const commands: Record<string, Command> = {
   restore: { arity: one, run: restore },
   extract: { arity: none, run: extract },
   embed: { arity: none, run: embed },
-  "embed-requeue": { arity: extra => extra.length === 0 || (extra.length === 2 && extra[0] === "--limit"), run: embedRequeue },
+  "embed-requeue": { arity: extra => extra.length === 0 || (extra.length === 2 && extra[0] === "--limit" && Number.isInteger(Number(extra[1])) && Number(extra[1]) >= 1 && Number(extra[1]) <= 1000), run: embedRequeue },
   recall: { arity: one, run: ({ root, extra }) => withClient(root, async client => print(await client.request("recall", { query: extra[0]!, limit: 10 }))) },
   status: { arity: none, run: ({ root }) => withClient(root, async client => print(await client.request("status", {}))) },
   verify: { arity: none, run: verify },
