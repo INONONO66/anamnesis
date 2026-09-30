@@ -246,20 +246,40 @@ function compaction(
  * export already ingested, which is the one thing widening the set must not
  * do.
  */
+/** Sidechain, API-error and error-message records are never accepted (sidechain records only under a sidechain origin). */
+function skipped(value: ClaudeRecord, sidechain: SidechainOrigin | undefined): boolean {
+  return (
+    (sidechain === undefined &&
+      (value.isSidechain === true || value.agentId !== undefined)) ||
+    value.isApiErrorMessage === true ||
+    value.message?.isError === true
+  );
+}
+/** A message whose every content block is accepted text and whose keys are exactly the plain agent-message shape is ingested as one record. */
+function wholeMessage(value: ClaudeRecord, nested: boolean, blocks: readonly ReturnType<typeof parseBlock>[], accepted: readonly number[]): boolean {
+  return (
+    accepted.length === blocks.length &&
+    hasOnlyKeys(value.keys, [
+      "type",
+      "uuid",
+      "eventId",
+      "timestamp",
+      "sessionId",
+      "cwd",
+      nested ? "message" : "content",
+    ]) &&
+    (!nested ||
+      hasOnlyKeys(value.message?.keys ?? [], ["role", "model", "content"])) &&
+    blocks.every((block) => hasOnlyKeys(block?.keys ?? [], ["type", "text"]))
+  );
+}
 function acceptedRecords(
   value: ClaudeRecord,
   bytes: Uint8Array,
   lineIndex: number,
   sidechain: SidechainOrigin | undefined,
 ): readonly AcceptedRecord[] {
-  if (
-    (sidechain === undefined &&
-      (value.isSidechain === true || value.agentId !== undefined)) ||
-    value.isApiErrorMessage === true ||
-    value.message?.isError === true
-  ) {
-    return [];
-  }
+  if (skipped(value, sidechain)) return [];
   const occurredAt = eventTime(value.timestamp);
   if (occurredAt === undefined) return [];
   const compacted = compaction(value, bytes, lineIndex, occurredAt);
@@ -290,21 +310,7 @@ function acceptedRecords(
    * on the whole message, not on the block, which is why the shape is decided
    * before any block is turned into a record.
    */
-  const whole =
-    accepted.length === content.length &&
-    hasOnlyKeys(value.keys, [
-      "type",
-      "uuid",
-      "eventId",
-      "timestamp",
-      "sessionId",
-      "cwd",
-      nested ? "message" : "content",
-    ]) &&
-    (!nested ||
-      hasOnlyKeys(value.message?.keys ?? [], ["role", "model", "content"])) &&
-    blocks.every((block) => hasOnlyKeys(block?.keys ?? [], ["type", "text"]));
-  if (whole) {
+  if (wholeMessage(value, nested, blocks, accepted)) {
     const record = recordId(value, bytes, lineIndex);
     if (record === undefined) return [];
     const text = accepted
